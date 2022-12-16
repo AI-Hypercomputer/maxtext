@@ -1,0 +1,12 @@
+absl-py
+clu
+flax
+jax
+jaxlib
+ml-collections
+numpy
+optax
+sentencepiece
+tensorflow
+tensorflow-datasets
+tensorflow-text
