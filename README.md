@@ -1,22 +1,40 @@
-Some backlogged needs:
+MaxText
+======
 
-* Does it work/converge? Who knows?
-* Lightweight testing:
-  -  Force PRs in GitHub
-  -  Unit testing strategy and first test
-  -  Linting and linting controls
-* First XLML test
-* Managing configs for experiments
-* Multihost/Multipod
-  -   Needs multihost data loading (https://github.com/sholtodouglas/multihost_dataloading)
-  -   Data parallelism across pods / weight sharding within Pods
-* Write metrics, probably to tensorboard gcs (MFU, Perplexity, Iteration Time)
-  -   Needs to figure out an approved way to estimate TFLOPs.
-* Bigger dataset (might be able to use an internal datset for now)
-* Checkpointing to GCS
+Attention modeling for those without it.
 
-Longer term:
-* OSS work to one day open source
-* README for users
-* Open source friendly bigger dataset
-* Hosted pretrained parameters
+Install
+========
+manual setup:
+
+```
+sudo apt install python3.9-venv
+python3.9 -m venv py39
+source py39/bin/activate
+pip install -U pip wheel
+pip install jupyter jupyterlab ipython matplotlib clu tensorflow-text sentencepiece
+pip install "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+# need recent flax
+git clone --branch=main https://github.com/google/flax.git
+pip install -e flax
+git clone --branch=main https://github.com/rwitten/MaxText.git
+pip install -e adhd
+```
+
+
+Status
+======
+
+- Really basic training loop on LM1B and inline inference / decoding "works".
+- Multihost training works.
+- Checkpointing is as yet untested.
+- Absolutely nothing is yet tuned or profiled.
+
+TODO
+====
+
+ - What decoder model variant do we actually want?
+ - More flexible demo prompting / simple batch inference script.
+ - Prefix-LM support for input->target datasets.
+ - Should we use CLU metric helpers or hand-roll that stuff?
+ - We have simple tf.data pipeline, but should we use SeqIO? Grain? an outside library?

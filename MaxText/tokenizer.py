@@ -97,6 +97,7 @@ def _load_sentencepiece_tokenizer(model_path: str,
                                   add_eos: bool = True,
                                   reverse: bool = False):
   """Load a tf-text SentencePiece tokenizer from given model filepath."""
+  print(model_path)
   with tf.io.gfile.GFile(model_path, 'rb') as model_fp:
     sp_model = model_fp.read()
   sp_tokenizer = tftxt.SentencepieceTokenizer(
@@ -118,7 +119,7 @@ def load_or_train_tokenizer(dataset: tf.data.Dataset,
       raise ValueError(f'Existing sentencepiece vocabulary size {sp_size} '
                        f'does not match specified vocab size {vocab_size}.')
     return sp_tokenizer
-  except tf.errors.NotFoundError:
+  except (tf.errors.NotFoundError, tf.errors.InvalidArgumentError):
     logging.info('SentencePiece vocab not found, building one from data.')
     vocab_path = _train_sentencepiece(
         dataset,

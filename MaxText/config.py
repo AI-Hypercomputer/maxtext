@@ -33,6 +33,7 @@ class T5Config:
 
   # Dataset
   vocab_size: int = 30000
+  vocab_path: str = "gs://cloudtpu_internal_datasets/vocabs/"  # Assumes we're allowed
   dataset_name: str = 'lm1b'
   eval_dataset_name: str = 'lm1b'
   eval_split: str = 'test'
@@ -41,7 +42,7 @@ class T5Config:
   max_corpus_chars: int = 10**7  # for tokenization
 
   # Training loop
-  steps: int = 20_000_000
+  steps: int = 20_000
   log_period: int = 500
   save_period: int = 2000
   learning_rate: float = 1e-3

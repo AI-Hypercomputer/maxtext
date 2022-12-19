@@ -26,6 +26,7 @@ from config import T5Config
 from input_pipeline import get_datasets
 import temperature_sampler
 
+
 # -----------------------------------------------------------------------------
 # Types
 # -----------------------------------------------------------------------------
@@ -38,55 +39,18 @@ Activation = Callable[..., Array]
 # Parameter initializers.
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
 InitializerAxis = Union[int, Tuple[int, ...]]
-NdInitializer = Callable[
-    [PRNGKey, Shape, DType, InitializerAxis, InitializerAxis], Array]
+NdInitializer = Callable[[PRNGKey, Shape, DType, InitializerAxis, InitializerAxis], Array]
 
 
-# -----------------------------------------------------------------------------
 # Flax TrainState with mutable variables field
 # -----------------------------------------------------------------------------
 # TODO(levskaya): upstream this field to the main TrainState.
 class MutableTrainState(train_state.TrainState):
-    mutables: Optional[flax.core.FrozenDict[str, Any]]
+  mutables: Optional[flax.core.FrozenDict[str, Any]]
 
 
-# -----------------------------------------------------------------------------
-# Data Iterators
-# -----------------------------------------------------------------------------
 
-# A generator should return (input, target, segments, positions)
-def shift_right(x, axis=1):
-  """Shift the input to the right by padding and slicing on axis."""
-  pad_widths = [(0, 0)] * len(x.shape)
-  pad_widths[axis] = (1, 0)
-  slices = [slice(None),] * x.ndim
-  slices[axis] = slice(0, -1)
-  padded = np.pad(
-      x, pad_widths, mode='constant', constant_values=x.dtype.type(0))
-  return padded[tuple(slices)]
-
-def shift_inputs(x, segment_ids=None, axis=1):
-  """Shift inputs and replace EOS by 0 for packed inputs."""
-  shifted = shift_right(x, axis=axis)
-  # For packed targets, the first shifted token of a new sequence is made
-  # 0, rather than being the EOS token for the last sequence.
-  if segment_ids is not None:
-    shifted *= (segment_ids == shift_right(segment_ids, axis=axis))
-  return shifted
-
-def data_generator(train_ds):
-  train_iter = iter(train_ds)
-  while True:
-    data = jax.tree_util.tree_map(np.asarray, next(train_iter))
-    yield (
-      shift_inputs(data['inputs'], data['inputs_segmentation']),
-      data['inputs'],
-      data['inputs_segmentation'],
-      data['inputs_position']
-    )
-
-
-# Helpers
+# Learning Rate Schedule
 # -----------------------------------------------------------------------------
 
 # learning rate scheduling
@@ -109,6 +73,24 @@ def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
         shift=warmup_steps),
     ],
     boundaries=[warmup_steps])
+
+
+# Tokenization and De-tokenization helpers.
+# ---------------------------------------------------------------------------
+
+
+def decode_tokens(toks, tokenizer, eos_id):
+  valid_toks = toks[:np.argmax(toks == eos_id) + 1].astype(np.int32)
+  return tokenizer.detokenize(valid_toks).numpy().decode("utf-8")
+
+
+def encode_strings(strs, max_len, tokenizer):
+  tokenized_batch = np.zeros((len(strs), max_len), np.int32)
+  for i, s in enumerate(strs):
+    toks = tokenizer.tokenize(s).numpy()
+    # Remove EOS token in prompt.
+    tokenized_batch[i, :toks.shape[0]-1] = toks[:-1]
+  return tokenized_batch
 
 
 # -----------------------------------------------------------------------------
@@ -134,21 +116,21 @@ def init_train_state(model, tx, config, key):
   return state
 
 
-def train_step(model, state, apply_args, dropout_rng):
-  inputs, targets, segments, positions = apply_args
+def train_step(model, state, data, dropout_rng):
+  # inputs, targets, segments, positions = apply_args
   rng1, rng2 = jax.random.split(dropout_rng)
 
   def loss_fn(params):
     logits = model.apply({'params': params},
-                         inputs,
-                         targets,
-                         segments,
-                         positions,
+                         data['inputs'],
+                         data['targets'],
+                         data['inputs_segmentation'],
+                         data['inputs_position'],
                          rngs={'dropout': rng1})
     # TODO: is optax xent as good as custom T5X one?
-    xent = optax.softmax_cross_entropy_with_integer_labels(logits, targets)
+    xent = optax.softmax_cross_entropy_with_integer_labels(logits, data['targets'])
     # Mask out paddings at the end of each example.
-    xent = xent * (segments != 0)
+    xent = xent * (data['inputs_segmentation'] != 0)
     # TODO: mask out the prompt if training prefix-LM
     return jnp.sum(xent), logits
 
@@ -214,6 +196,7 @@ def predict_step(inputs,
   return seqs
 
 
+# ---------------------------------------------------------------------------
 # Train Loop
 # ---------------------------------------------------------------------------
 
@@ -225,13 +208,6 @@ def train_loop(
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(0), 2)
 
-  # Set up datasets.
-  train_ds, eval_ds, predict_ds, sp_tokenizer = get_datasets(
-      n_devices=jax.local_device_count(),
-      config=config,
-      vocab_path=None)
-  data_gen = data_generator(train_ds)
-
   # Model and Optimizer definition
   model = Transformer(config)
   tx = optax.adam(
@@ -242,12 +218,16 @@ def train_loop(
   # Mesh definition
   mesh = Mesh(mesh_utils.create_device_mesh(config.mesh_shape), config.mesh_axes)
 
+  # Set up datasets.
+  train_iter, _, _, sp_tokenizer = get_datasets(
+      config=config,
+      global_mesh=mesh,
+      vocab_path=config.vocab_path)
+
   # Abstract initialization
   init_fn = functools.partial(init_train_state, model, tx, config)
   abstract_state = jax.eval_shape(init_fn, init_rng)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
-
-  print(f'devices {jax.devices()}')
 
   # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -258,13 +238,15 @@ def train_loop(
           out_axis_resources=state_mesh_annotations
       )(init_rng)
 
+  # Dataset Partitioning is batch-parallel.
+  data_pspec = P('data', None)
+
   # Checkpoint Restoration
   # TODO: we shouldn't run full init compilation when we need to load ckpt.
   if config.restore_checkpoints:
     state = checkpoints.restore_checkpoint(ckpt_path, state)
 
-  data_pspec = nn.logical_to_mesh(P('batch'))
-
+  # Define compiled top-level functions.
   p_train_step = pjit(
     train_step,
     in_axis_resources=(state_mesh_annotations,
@@ -273,53 +255,43 @@ def train_loop(
     out_axis_resources=(state_mesh_annotations, None, None),
     static_argnums=(0,))
 
-  # TODO: add held-out eval step.
+  # TODO: add held-out p_eval_step.
 
   p_predict_step = pjit(
       functools.partial(predict_step, model=model, config=config),
-      in_axis_resources=(data_pspec,
+      in_axis_resources=(P(None, None),
                         state_mesh_annotations,
                         None),
       out_axis_resources=None
   )
 
-  # Prediction helpers.
-
-  def decode_tokens(toks):
-    valid_toks = toks[:np.argmax(toks == config.eos_id) + 1].astype(np.int32)
-    return sp_tokenizer.detokenize(valid_toks).numpy().decode("utf-8")
-
-  def encode_strings(strs, max_len):
-    tokenized_batch = np.zeros((len(strs), max_len), np.int32)
-    for i, s in enumerate(strs):
-      toks = sp_tokenizer.tokenize(s).numpy()
-      # Remove EOS token in prompt.
-      tokenized_batch[i, :toks.shape[0]-1] = toks[:-1]
-    return tokenized_batch
-
+  # Encode the demo prompt.
   tokenized_prompts = encode_strings(
-      [config.prompt], config.max_predict_length)
+      [config.prompt], config.max_predict_length, sp_tokenizer)
 
   # Main Loop
 
   for step in np.arange(config.steps):
 
-    example_batch = next(data_gen)
+    example_batch = next(train_iter)
+
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics, nextrng = p_train_step(model, state, example_batch, nextrng)
 
+    # Log some stuff.
     if step % config.log_period == 0:
       print(step, metrics)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         seqs = p_predict_step(tokenized_prompts, state, nextrng)
-        print(decode_tokens(seqs[0]))
+        print(decode_tokens(np.array(seqs)[0], sp_tokenizer, config.eos_id))
 
+    # NB: checkpointing not yet tested.
     if step % config.save_period == 0:
       if config.save_checkpoints and step != 0:
         checkpoints.save_checkpoint(
             ckpt_path, state, step=step, keep=1000, overwrite=True)
 
-  return state, model
+  return state
 
 
 def main(argv: Sequence[str]) -> None:
@@ -327,7 +299,7 @@ def main(argv: Sequence[str]) -> None:
     raise app.UsageError('Too many command-line arguments.')
 
   config = T5Config()
-  state, model = train_loop(config)
+  train_loop(config)
 
 
 if __name__ == '__main__':
