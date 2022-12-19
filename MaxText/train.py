@@ -216,7 +216,7 @@ def train_loop(
         warmup_steps=config.warmup_steps))
 
   # Mesh definition
-  mesh = Mesh(mesh_utils.create_device_mesh(config.mesh_shape), config.mesh_axes)
+  mesh = Mesh(mesh_utils.create_device_mesh(len(jax.devices())), config.mesh_axes)
 
   # Set up datasets.
   train_iter, _, _, sp_tokenizer = get_datasets(
