@@ -26,6 +26,13 @@ from config import T5Config
 from input_pipeline import get_datasets
 import temperature_sampler
 
+import os
+
+os.environ["TFDS_DATA_DIR"] = "gs://tensorflow-datasets/datasets"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = "1"
+
+
 
 # -----------------------------------------------------------------------------
 # Types
@@ -216,7 +223,9 @@ def train_loop(
         warmup_steps=config.warmup_steps))
 
   # Mesh definition
-  mesh = Mesh(mesh_utils.create_device_mesh(len(jax.devices())), config.mesh_axes)
+  mesh_shape_1d = (len(jax.devices()),)
+  print(f"number jax devices {len(jax.devices())}, exact devices: {jax.devices()}")
+  mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), config.mesh_axes)
 
   # Set up datasets.
   train_iter, _, _, sp_tokenizer = get_datasets(
