@@ -26,6 +26,9 @@ from config import T5Config
 from input_pipeline import get_datasets
 import temperature_sampler
 
+from tensorboardX import SummaryWriter
+import datetime
+
 import os
 
 os.environ["TFDS_DATA_DIR"] = "gs://tensorflow-datasets/datasets"
@@ -80,6 +83,16 @@ def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
         shift=warmup_steps),
     ],
     boundaries=[warmup_steps])
+
+def write_metrics(writer, metrics, step):
+  if jax.process_index() == 0:
+    for metric_name in metrics:
+      writer.add_scalar(metric_name, metrics[metric_name], step)
+
+def calculate_num_params_from_pytree(params):
+  params_sizes = jax.tree_util.tree_map(jax.numpy.size, params)
+  total_parameters = jax.tree_util.tree_reduce(lambda x, y : x+y, params_sizes)
+  return total_parameters
 
 
 # Tokenization and De-tokenization helpers.
@@ -212,11 +225,17 @@ def train_loop(
   state=None,
   ckpt_path='~/flaxformer/lm1b'):
 
+  tensorboard_dir = f"gs://max-experiments/{config.run_name}/"
+  writer = SummaryWriter(tensorboard_dir)
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(0), 2)
 
   # Model and Optimizer definition
   model = Transformer(config)
+  learning_rate_schedule = create_learning_rate_schedule(
+        learning_rate=config.learning_rate,
+        warmup_steps=config.warmup_steps)
+
   tx = optax.adam(
     create_learning_rate_schedule(
         learning_rate=config.learning_rate,
@@ -237,7 +256,8 @@ def train_loop(
   init_fn = functools.partial(init_train_state, model, tx, config)
   abstract_state = jax.eval_shape(init_fn, init_rng)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
-
+  num_model_parameters = calculate_num_params_from_pytree(abstract_state.params)
+  
   # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
@@ -278,17 +298,26 @@ def train_loop(
   tokenized_prompts = encode_strings(
       [config.prompt], config.max_predict_length, sp_tokenizer)
 
+
+  last_step_completion = datetime.datetime.now()
   # Main Loop
-
-  for step in np.arange(config.steps):
-
+  for step in np.arange(config.steps): #TODO: for re-entrancy, the first step should be saved to a checkpoint.
     example_batch = next(train_iter)
 
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics, nextrng = p_train_step(model, state, example_batch, nextrng)
 
+    new_time = datetime.datetime.now()
+    metrics["step_time_seconds"] = (new_time - last_step_completion).total_seconds()
+    metrics["per_device_tflops"] = 6 * num_model_parameters * config.max_target_length * config.per_device_batch_size / 10**12
+    metrics["per_device_tflops/sec"] = metrics["per_device_tflops"]/metrics["step_time_seconds"]
+    metrics["current_learning_rate"] = learning_rate_schedule(state.opt_state[1].count)
+    last_step_completion = new_time
+    write_metrics(writer, metrics, step)
+
     # Log some stuff.
     if step % config.log_period == 0:
+      print(f"to follow along at home: run 'tensorboard --logdir={tensorboard_dir}'")
       print(step, metrics)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         seqs = p_predict_step(tokenized_prompts, state, nextrng)

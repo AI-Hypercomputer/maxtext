@@ -9,12 +9,14 @@ import jax.numpy as jnp
 class T5Config:
   """Global hyperparameters used to minimize obnoxious kwarg plumbing."""
 
+  run_name: str = "my_run_008" 
+
   # Activation dtypes.
-  dtype: Any = jnp.float32
-  emb_dim: int = 128
-  num_heads: int = 8
-  head_dim: int = 16
-  mlp_dim: int = 512
+  dtype: Any = jnp.bfloat16
+  emb_dim: int = 2048
+  num_heads: int = 1
+  head_dim: int = 2048
+  mlp_dim: int = 4096
   num_decoder_layers: int = 6
   # activation functions are .
   mlp_activations: Sequence[str] = ('relu',)
@@ -43,10 +45,10 @@ class T5Config:
 
   # Training loop
   steps: int = 20_000
-  log_period: int = 500
+  log_period: int = 100
   save_period: int = 2000
-  learning_rate: float = 1e-3
-  warmup_steps: int = 1000
+  learning_rate: float = 1e-5
+  warmup_steps: int = 2000
   save_checkpoints: bool = False
   restore_checkpoints: bool = False
 

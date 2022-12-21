@@ -10,3 +10,4 @@ sentencepiece
 tensorflow
 tensorflow-datasets
 tensorflow-text
+tensorboardx

@@ -8,12 +8,7 @@ Install
 manual setup:
 
 ```
-sudo apt install python3.9-venv
-python3.9 -m venv py39
-source py39/bin/activate
-pip3 install -U pip wheel
-pip3 install jupyter jupyterlab ipython matplotlib clu tensorflow-text sentencepiece
-pip3 install "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+pip3 install requirements.txt
 # need recent flax
 git clone --branch=main https://github.com/google/flax.git
 pip3 install -e flax
