@@ -1,0 +1,58 @@
+run_name: "" # this sentinel is a reminder to choose a real run name
+
+# Activation dtypes.
+dtype: "bfloat16"
+emb_dim: 2048
+num_heads: 1
+head_dim: 2048
+mlp_dim: 4096
+num_decoder_layers: 6
+# activation functions are .
+mlp_activations: ["relu"]
+dropout_rate: 0
+logits_via_embedding: True  # NOTE: this is True just for testing.
+# minimal, full, or none
+remat_policy: 'none'
+scan_layers: False
+param_scan_axis: 1
+
+# Output directory
+base_output_directory: "gs://max-experiments/"
+
+# Parallelism
+mesh_axes: ['data']
+logical_axis_rules: [['batch', 'data']]
+
+# Dataset
+vocab_size: 30_000
+vocab_path: "gs://cloudtpu_internal_datasets/vocabs/"  # Assumes we're allowed
+dataset_name: 'lm1b'
+eval_dataset_name: 'lm1b'
+eval_split: 'test'
+per_device_batch_size: 512
+eval_per_device_batch_size: 0
+max_corpus_chars: 10_000_000
+
+# Training loop
+steps: 100_000
+log_period: 100
+save_period: 2000
+learning_rate: 3.e-5
+warmup_steps: 10_000
+save_checkpoints: False
+restore_checkpoints: False
+
+# Maximum length cutoff for training examples.
+max_target_length: 128
+# Maximum length cutoff for held-out evaluation examples.
+max_eval_target_length: 512
+
+# Maximum length cutoff for predicted tokens.
+max_predict_length: 50
+# Sampling temperature for language model inference.
+sampling_temperature: 0.6
+# Top k cutoff for logit sampling. If 0 then no top-k cutoff is used.
+sampling_top_k: 20
+eos_id: 2  # sentencepiece default
+# Prompt for language model sampling.
+prompt: "I love to "
