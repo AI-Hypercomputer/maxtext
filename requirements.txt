@@ -1,6 +1,7 @@
 absl-py
 clu
 flax
+google-cloud-storage
 jax
 jaxlib
 ml-collections
