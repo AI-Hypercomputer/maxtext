@@ -152,7 +152,7 @@ def train_step(model, state, data, dropout_rng):
     # Mask out paddings at the end of each example.
     xent = xent * (data['inputs_segmentation'] != 0)
     # TODO: mask out the prompt if training prefix-LM
-    return jnp.sum(xent), logits
+    return jnp.sum(xent)/jnp.size(xent), logits
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, _), grads = grad_fn(state.params)
@@ -315,10 +315,12 @@ def train_loop(
     last_step_completion = new_time
     write_metrics(writer, metrics, step)
 
+
     # Log some stuff.
     if step % config.log_period == 0:
       print(f"to follow along at home: run 'tensorboard --logdir={tensorboard_dir}'")
       print(step, metrics)
+      writer.flush()
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         seqs = p_predict_step(tokenized_prompts, state, nextrng)
         print(decode_tokens(np.array(seqs)[0], sp_tokenizer, config.eos_id))
