@@ -9,7 +9,7 @@ import jax.numpy as jnp
 class T5Config:
   """Global hyperparameters used to minimize obnoxious kwarg plumbing."""
 
-  run_name: str = "my_run_008" 
+  run_name: str = "rafi_005" 
 
   # Activation dtypes.
   dtype: Any = jnp.bfloat16
@@ -39,16 +39,16 @@ class T5Config:
   dataset_name: str = 'lm1b'
   eval_dataset_name: str = 'lm1b'
   eval_split: str = 'test'
-  per_device_batch_size: int = 32
+  per_device_batch_size: int = 512
   eval_per_device_batch_size: int = 0
   max_corpus_chars: int = 10**7  # for tokenization
 
   # Training loop
-  steps: int = 20_000
+  steps: int = 5_000
   log_period: int = 100
   save_period: int = 2000
-  learning_rate: float = 1e-5
-  warmup_steps: int = 2000
+  learning_rate: float = 1e-4
+  warmup_steps: int = 500
   save_checkpoints: bool = False
   restore_checkpoints: bool = False
 
