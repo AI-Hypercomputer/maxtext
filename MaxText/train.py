@@ -22,7 +22,7 @@ from jax.experimental import mesh_utils
 from jax.experimental.maps import Mesh
 
 from layers import Transformer
-from config import T5Config
+import pyconfig
 from input_pipeline import get_datasets
 import temperature_sampler
 
@@ -225,8 +225,7 @@ def train_loop(
   state=None,
   ckpt_path='~/flaxformer/lm1b'):
 
-  tensorboard_dir = f"gs://max-experiments/{config.run_name}/"
-  writer = SummaryWriter(tensorboard_dir)
+  writer = SummaryWriter(config.tensorboard_dir)
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(0), 2)
 
@@ -318,8 +317,8 @@ def train_loop(
 
     # Log some stuff.
     if step % config.log_period == 0:
-      print(f"to follow along at home: run 'tensorboard --logdir={tensorboard_dir}'")
-      print(step, metrics)
+      print(f"completed {step}, per-step metrics {metrics}")
+      print(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
       writer.flush()
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         seqs = p_predict_step(tokenized_prompts, state, nextrng)
@@ -335,11 +334,8 @@ def train_loop(
 
 
 def main(argv: Sequence[str]) -> None:
-  if len(argv) > 1:
-    raise app.UsageError('Too many command-line arguments.')
-
-  config = T5Config()
-  train_loop(config)
+  pyconfig.initialize(argv)
+  train_loop(pyconfig.config)
 
 
 if __name__ == '__main__':
