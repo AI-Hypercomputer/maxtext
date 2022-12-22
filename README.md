@@ -8,10 +8,7 @@ Install
 manual setup:
 
 ```
-pip3 install requirements.txt
-# need recent flax
-git clone --branch=main https://github.com/google/flax.git
-pip3 install -e flax
+bash setup.sh
 ```
 
 
