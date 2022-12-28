@@ -10,12 +10,14 @@ from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
+import numpy as np
+
 import jax
 from jax import lax
 from jax import random
 import jax.numpy as jnp
 
-import numpy as np
+
 
 
 withLP = nn.with_logical_partitioning

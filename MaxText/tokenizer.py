@@ -7,10 +7,12 @@ from typing import Any, Dict, Iterable, Tuple
 
 import dataclasses
 from absl import logging
-import jax
-from sentencepiece import SentencePieceTrainer
 import tensorflow as tf
 import tensorflow_text as tftxt
+from sentencepiece import SentencePieceTrainer
+import jax
+
+
 
 Features = Dict[str, tf.Tensor]
 
