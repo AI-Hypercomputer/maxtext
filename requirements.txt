@@ -4,6 +4,7 @@ google-cloud-storage
 ml-collections
 numpy
 optax
+pylint
 sentencepiece
 tensorflow
 tensorflow-datasets
