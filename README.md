@@ -11,6 +11,11 @@ manual setup:
 bash setup.sh
 ```
 
+Run
+====
+```
+python3 train.py configs/base.yml run_name=$USER_$RANDOM
+```
 
 Status
 ======
