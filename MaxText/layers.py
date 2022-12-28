@@ -1059,6 +1059,7 @@ class Transformer(nn.Module):
   config: Config
 
   def setup(self):
+    """Initialize shared_embedding, decoder"""
     cfg = self.config
     self.shared_embedding = Embed(
         num_embeddings=cfg.vocab_size,
