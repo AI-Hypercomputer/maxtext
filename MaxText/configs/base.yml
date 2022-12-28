@@ -1,4 +1,9 @@
-run_name: "" # this sentinel is a reminder to choose a real run name
+# This sentinel is a reminder to choose a real run name.
+# If there is already a checkpoint under this run, that checkpoint will auto-resume.
+run_name: ""
+
+# If we aren't resuming from an existing checkpoint, load parameters from this path if provided.
+load_parameters_path: ""
 
 # Activation dtypes.
 dtype: "bfloat16"
@@ -29,18 +34,16 @@ vocab_path: "gs://cloudtpu_internal_datasets/vocabs/"  # Assumes we're allowed
 dataset_name: 'lm1b'
 eval_dataset_name: 'lm1b'
 eval_split: 'test'
-per_device_batch_size: 512
+per_device_batch_size: 256
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
 
 # Training loop
 steps: 100_000
-log_period: 100
-save_period: 2000
-learning_rate: 3.e-5
+log_period: 10
+save_period: 10_000
+learning_rate: 1.e-5
 warmup_steps: 10_000
-save_checkpoints: False
-restore_checkpoints: False
 
 # Maximum length cutoff for training examples.
 max_target_length: 128

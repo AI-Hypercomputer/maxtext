@@ -1,25 +1,30 @@
 # pylint: disable=g-bad-todo, abstract-method
 """Training loop and Decoding of the model."""
 import functools
-from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
+from typing import Callable, Iterable, Sequence, Tuple, Union
 
 import os
 import datetime
 from absl import app
+from etils import epath
 import flax
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
-from flax.training import checkpoints
 from flax.training import train_state
 import numpy as np
 import optax
-
+from orbax.checkpoint.checkpoint_manager import CheckpointManager
+from orbax.checkpoint.checkpointer import Checkpointer
+from orbax import checkpoint
+from orbax.checkpoint import type_handlers
 from tensorboardX import SummaryWriter
 
 from layers import Transformer
 import pyconfig
 from input_pipeline import get_datasets
 import temperature_sampler
+
+
 
 import jax
 import jax.numpy as jnp
@@ -28,6 +33,7 @@ from jax.experimental.pjit import pjit
 from jax.experimental.pjit import PartitionSpec as P
 from jax.experimental import mesh_utils
 from jax.experimental.maps import Mesh
+
 
 
 os.environ["TFDS_DATA_DIR"] = "gs://tensorflow-datasets/datasets"
@@ -52,14 +58,6 @@ NdInitializer = Callable[
     [PRNGKey, Shape, DType, InitializerAxis, InitializerAxis], Array
 ]
 
-
-# Flax TrainState with mutable variables field
-# -----------------------------------------------------------------------------
-# TODO(levskaya): upstream this field to the main TrainState.
-class MutableTrainState(train_state.TrainState):
-  mutables: Optional[flax.core.FrozenDict[str, Any]]
-
-
 # Learning Rate Schedule
 # -----------------------------------------------------------------------------
 # learning rate scheduling
@@ -77,9 +75,9 @@ def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
           end_value=learning_rate,
           transition_steps=warmup_steps
           ),
-          rsqrt_schedule(init_value=learning_rate, shift=warmup_steps),
+      rsqrt_schedule(init_value=learning_rate, shift=warmup_steps),
       ], boundaries=[warmup_steps],
-  )
+      )
 
 
 def write_metrics(writer, metrics, step):
@@ -132,11 +130,10 @@ def init_train_state(model, tx, config, key):
   model_vars = model.init({'params': key, 'dropout': key},
                           jnp.ones(input_shape),
                           jnp.ones(input_shape))
-  state = MutableTrainState.create(
+  state = train_state.TrainState.create(
       apply_fn=model.apply,
       params=model_vars['params'],
-      tx=tx,
-      mutables=None)
+      tx=tx)
   return state
 
 
@@ -180,12 +177,12 @@ def predict_step(inputs,
   target_shape = (inputs.shape[0], config.max_predict_length) + inputs.shape[2:]
 
   initial_variables = model.init(
-    jax.random.PRNGKey(0),
-    jnp.ones(target_shape, config.dtype),
-    None,
-    enable_dropout=False,
-    decode=True,
-    max_decode_length=config.max_predict_length
+      jax.random.PRNGKey(0),
+      jnp.ones(target_shape, config.dtype),
+      None,
+      enable_dropout=False,
+      decode=True,
+      max_decode_length=config.max_predict_length
   )
   cache = initial_variables["cache"]
 
@@ -222,13 +219,85 @@ def predict_step(inputs,
 
   return seqs
 
+def create_orbax_checkpoint_manager(checkpoint_dir: str):
+  #TODO(this logic is in Orbax. Once that version is in Pip, delete)
+  # https://github.com/google/orbax/commit/e9113ce7e52916fba96a1983089a1788d55a0735 #pylint: disable=line-too-long
+  p = epath.Path(checkpoint_dir)
+  if jax.process_index() == 0:
+    if not p.is_dir():
+      p.mkdir()
+  #END(TODO)
+  return CheckpointManager(p,
+                           Checkpointer(checkpoint.PyTreeCheckpointHandler()))
 
-# ---------------------------------------------------------------------------
-# Train Loop
-# ---------------------------------------------------------------------------
+def unbox_logicallypartioned_trainstate(
+    boxed_train_state: train_state.TrainState):
+  """ Unboxes the flax.LogicallyPartitioned pieces in a train state.
 
+    Args:
+      boxed_train_state: a train state that includes LogicallyPartitioned
+        leaves.
+    Returns:
+      a TrainState where all all LogicallyPartitioned leaves have been unboxed.
+  """
+  return jax.tree_util.tree_map(lambda x: x.unbox() if \
+        isinstance(x, flax.linen.spmd.LogicallyPartitioned) \
+        else x, boxed_train_state, \
+        is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned))
 
-def train_loop(config, state=None, ckpt_path="~/flaxformer/lm1b"):
+def load_state_if_possible(checkpoint_manager: CheckpointManager,
+                           first_checkpoint_path: str,
+                           abstract_unboxed_pre_state: train_state.TrainState,
+                           mesh,
+                           state_mesh_annotations):
+  """Loads TrainState as possible from the inputs.
+
+  Args:
+    checkpoint_manager: if the checkpoint_manager has a valid checkpoint, return
+      that TrainState. This enables a full reload of a run in progress.
+    first_checkpoint_path: if there is no checkpoint in the checkpoint manager,
+      return the Params from the first_checkpoint_path if they exist. This
+      enables loading just the parameters and is intended for finetuning.
+    abstract_unboxed_pre_state: an unboxed, abstract TrainState that Orbax
+      matches type against.
+    mesh: a physical TPU mesh
+    state_mesh_annotation: a PyTree of sharding rules, matching
+      abstract_unboxed_pre_state.
+
+  Returns:
+    A tuple of (train_state, train_state_params) where full_train_state captures
+     a full reload and train_state_params just the params for a partial reload.
+     At most one will be non-None. Both can be None if neither checkpoint is
+     set.
+  """
+  def map_to_pspec(data, pspec):
+    if isinstance(data, (jax.Array, jax.ShapeDtypeStruct)) \
+          and pspec is not None:
+      return type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
+    else:
+      return type_handlers.RestoreArgs()
+
+  restore_args = jax.tree_util.tree_map(map_to_pspec,
+                                        abstract_unboxed_pre_state,
+                                        state_mesh_annotations)
+  latest_step = checkpoint_manager.latest_step()
+  if latest_step is not None:
+    print(f"restoring state from this run's directory latest step \
+        {latest_step}")
+    return checkpoint_manager.restore(latest_step, abstract_unboxed_pre_state,
+                                      {"restore_args" : restore_args}), None
+  elif first_checkpoint_path != "":
+    print(f"restoring state from first_checkpoint_path {first_checkpoint_path}")
+    p = epath.Path(first_checkpoint_path)
+    checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
+    return None, checkpointer.restore(p,
+                                      item=abstract_unboxed_pre_state,
+                                      restore_args=restore_args).params
+  else:
+    print("not restoring checkpoint")
+    return None, None
+
+def train_loop(config, state=None):
   """Main Training loop.
 
   Args:
@@ -240,6 +309,7 @@ def train_loop(config, state=None, ckpt_path="~/flaxformer/lm1b"):
 
   """
   writer = SummaryWriter(config.tensorboard_dir)
+  checkpoint_manager = create_orbax_checkpoint_manager(config.checkpoint_dir)
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(0), 2)
 
@@ -269,27 +339,36 @@ def train_loop(config, state=None, ckpt_path="~/flaxformer/lm1b"):
       vocab_path=config.vocab_path)
 
   # Abstract initialization
-  init_fn = functools.partial(init_train_state, model, tx, config)
-  abstract_state = jax.eval_shape(init_fn, init_rng)
+  init_train_state_partial = functools.partial(init_train_state, model, tx,
+                                               config)
+  abstract_state = jax.eval_shape(init_train_state_partial, init_rng)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
   num_model_parameters = calculate_num_params_from_pytree(abstract_state.params)
-
+  unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
   # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-    state = pjit(
-        init_fn,
-        in_axis_resources=None,
-        out_axis_resources=state_mesh_annotations
-    )(init_rng)
+    state, raw_params = load_state_if_possible(checkpoint_manager,
+                                               config.load_parameters_path,
+                                               unboxed_abstract_state,
+                                               mesh,
+                                               state_mesh_annotations)
+    data_pspec = P('data', None) # Dataset Partitioning is batch-parallel.
 
-  # Dataset Partitioning is batch-parallel.
-  data_pspec = P('data', None)
+    if not state:
+      state = pjit(
+          init_train_state_partial,
+          in_axis_resources=None,
+          out_axis_resources=state_mesh_annotations
+      )(init_rng)
+      if raw_params:
+        state = state.replace(params = raw_params)
+    raw_params = None
 
-  # Checkpoint Restoration
-  # TODO: we shouldn't run full init compilation when we need to load ckpt.
-  if config.restore_checkpoints:
-    state = checkpoints.restore_checkpoint(ckpt_path, state)
+  state = unbox_logicallypartioned_trainstate(state)
+
+
+
 
   # Define compiled top-level functions.
   p_train_step = pjit(
@@ -314,11 +393,9 @@ def train_loop(config, state=None, ckpt_path="~/flaxformer/lm1b"):
   tokenized_prompts = encode_strings(
       [config.prompt], config.max_predict_length, sp_tokenizer)
 
-
   last_step_completion = datetime.datetime.now()
   # Main Loop
-  for step in np.arange(config.steps):
-    # TODO: for re-entrancy, the first step should be saved to a checkpoint.
+  for step in np.arange(state.step, config.steps):
     example_batch = next(train_iter)
 
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -341,7 +418,7 @@ def train_loop(config, state=None, ckpt_path="~/flaxformer/lm1b"):
         metrics["per_device_tflops"] / metrics["step_time_seconds"]
     )
     metrics["current_learning_rate"] = learning_rate_schedule(
-        state.opt_state[1].count
+        state.step
     )
     last_step_completion = new_time
     write_metrics(writer, metrics, step)
@@ -357,11 +434,9 @@ def train_loop(config, state=None, ckpt_path="~/flaxformer/lm1b"):
         seqs = p_predict_step(tokenized_prompts, state, nextrng)
         print(decode_tokens(np.array(seqs)[0], sp_tokenizer, config.eos_id))
 
-    # NB: checkpointing not yet tested.
-    if step % config.save_period == 0:
-      if config.save_checkpoints and step != 0:
-        checkpoints.save_checkpoint(
-            ckpt_path, state, step=step, keep=1000, overwrite=True)
+    if step > 0 and step % config.save_period == 0:
+      checkpoint_manager.save(step, state)
+      print("saved a checkpoint")
 
   return state
 
