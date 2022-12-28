@@ -1,35 +1,33 @@
+# pylint: disable=g-bad-todo, abstract-method
 """Training loop and Decoding of the model."""
-
 import functools
 from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
 
+import os
+import datetime
 from absl import app
 import flax
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from flax.training import checkpoints
 from flax.training import train_state
-import jax
-import jax.numpy as jnp
-from jax import lax
-from jax import random
 import numpy as np
 import optax
 
+import jax
+import jax.numpy as jnp
+from jax import random
 from jax.experimental.pjit import pjit
 from jax.experimental.pjit import PartitionSpec as P
 from jax.experimental import mesh_utils
 from jax.experimental.maps import Mesh
 
+from tensorboardX import SummaryWriter
 from layers import Transformer
 import pyconfig
 from input_pipeline import get_datasets
 import temperature_sampler
 
-from tensorboardX import SummaryWriter
-import datetime
-
-import os
 
 os.environ["TFDS_DATA_DIR"] = "gs://tensorflow-datasets/datasets"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
@@ -49,7 +47,9 @@ Activation = Callable[..., Array]
 # Parameter initializers.
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
 InitializerAxis = Union[int, Tuple[int, ...]]
-NdInitializer = Callable[[PRNGKey, Shape, DType, InitializerAxis, InitializerAxis], Array]
+NdInitializer = Callable[
+    [PRNGKey, Shape, DType, InitializerAxis, InitializerAxis], Array
+]
 
 
 # Flax TrainState with mutable variables field
@@ -59,10 +59,8 @@ class MutableTrainState(train_state.TrainState):
   mutables: Optional[flax.core.FrozenDict[str, Any]]
 
 
-
 # Learning Rate Schedule
 # -----------------------------------------------------------------------------
-
 # learning rate scheduling
 def rsqrt_schedule(init_value: float, shift: int = 0):
   def schedule(count):
@@ -78,20 +76,20 @@ def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
           end_value=learning_rate,
           transition_steps=warmup_steps
           ),
-      rsqrt_schedule(
-        init_value=learning_rate,
-        shift=warmup_steps),
-    ],
-    boundaries=[warmup_steps])
+          rsqrt_schedule(init_value=learning_rate, shift=warmup_steps),
+      ], boundaries=[warmup_steps],
+  )
+
 
 def write_metrics(writer, metrics, step):
   if jax.process_index() == 0:
     for metric_name in metrics:
       writer.add_scalar(metric_name, metrics[metric_name], step)
 
+
 def calculate_num_params_from_pytree(params):
   params_sizes = jax.tree_util.tree_map(jax.numpy.size, params)
-  total_parameters = jax.tree_util.tree_reduce(lambda x, y : x+y, params_sizes)
+  total_parameters = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes)
   return total_parameters
 
 
@@ -117,10 +115,15 @@ def encode_strings(strs, max_len, tokenizer):
 # Top-level Functions
 # -----------------------------------------------------------------------------
 
+
 def init_train_state(model, tx, config, key):
-  # We pass in "static" objects like model, tx, config as JAX compares them by
-  # object hash, and instantiating them inside causes pjit top-level annotations
-  # to fail to match as pytree prefixes if we re-instantiate.
+  """
+  We pass in "static" objects like model, tx, config as JAX compares them by
+  object hash, and instantiating them inside causes pjit top-level annotations
+  to fail to match as pytree prefixes if we re-instantiate.
+
+  Args: model, tx, config, key
+  """
   input_shape = (
       len(jax.devices()) * config.per_device_batch_size,
       config.max_target_length
@@ -137,6 +140,7 @@ def init_train_state(model, tx, config, key):
 
 
 def train_step(model, state, data, dropout_rng):
+  # pylint: disable=missing-function-docstring
   # inputs, targets, segments, positions = apply_args
   rng1, rng2 = jax.random.split(dropout_rng)
 
@@ -148,7 +152,9 @@ def train_step(model, state, data, dropout_rng):
                          data['inputs_position'],
                          rngs={'dropout': rng1})
     # TODO: is optax xent as good as custom T5X one?
-    xent = optax.softmax_cross_entropy_with_integer_labels(logits, data['targets'])
+    xent = optax.softmax_cross_entropy_with_integer_labels(
+        logits, data["targets"]
+    )
     # Mask out paddings at the end of each example.
     xent = xent * (data['inputs_segmentation'] != 0)
     # TODO: mask out the prompt if training prefix-LM
@@ -220,11 +226,18 @@ def predict_step(inputs,
 # Train Loop
 # ---------------------------------------------------------------------------
 
-def train_loop(
-  config,
-  state=None,
-  ckpt_path='~/flaxformer/lm1b'):
 
+def train_loop(config, state=None, ckpt_path="~/flaxformer/lm1b"):
+  """Main Training loop.
+
+  Args:
+    config:
+    state:
+    ckpt_path:
+
+  Returns:
+
+  """
   writer = SummaryWriter(config.tensorboard_dir)
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(0), 2)
@@ -232,17 +245,20 @@ def train_loop(
   # Model and Optimizer definition
   model = Transformer(config)
   learning_rate_schedule = create_learning_rate_schedule(
-        learning_rate=config.learning_rate,
-        warmup_steps=config.warmup_steps)
+      learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
+  )
 
   tx = optax.adam(
-    create_learning_rate_schedule(
-        learning_rate=config.learning_rate,
-        warmup_steps=config.warmup_steps))
+      create_learning_rate_schedule(
+          learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
+      )
+  )
 
   # Mesh definition
   mesh_shape_1d = (len(jax.devices()),)
-  print(f"number jax devices {len(jax.devices())}, exact devices: {jax.devices()}")
+  print(
+      f"number jax devices {len(jax.devices())}, exact devices: {jax.devices()}"
+  )
   mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), config.mesh_axes)
 
   # Set up datasets.
@@ -256,15 +272,15 @@ def train_loop(
   abstract_state = jax.eval_shape(init_fn, init_rng)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
   num_model_parameters = calculate_num_params_from_pytree(abstract_state.params)
-  
+
   # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-      state = pjit(
-          init_fn,
-          in_axis_resources=None,
-          out_axis_resources=state_mesh_annotations
-      )(init_rng)
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+    state = pjit(
+        init_fn,
+        in_axis_resources=None,
+        out_axis_resources=state_mesh_annotations
+    )(init_rng)
 
   # Dataset Partitioning is batch-parallel.
   data_pspec = P('data', None)
@@ -300,25 +316,41 @@ def train_loop(
 
   last_step_completion = datetime.datetime.now()
   # Main Loop
-  for step in np.arange(config.steps): #TODO: for re-entrancy, the first step should be saved to a checkpoint.
+  for step in np.arange(config.steps):
+    # TODO: for re-entrancy, the first step should be saved to a checkpoint.
     example_batch = next(train_iter)
 
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      state, metrics, nextrng = p_train_step(model, state, example_batch, nextrng)
+      state, metrics, nextrng = p_train_step(
+          model, state, example_batch, nextrng
+      )
 
     new_time = datetime.datetime.now()
-    metrics["step_time_seconds"] = (new_time - last_step_completion).total_seconds()
-    metrics["per_device_tflops"] = 6 * num_model_parameters * config.max_target_length * config.per_device_batch_size / 10**12
-    metrics["per_device_tflops/sec"] = metrics["per_device_tflops"]/metrics["step_time_seconds"]
-    metrics["current_learning_rate"] = learning_rate_schedule(state.opt_state[1].count)
+    metrics["step_time_seconds"] = (
+        new_time - last_step_completion
+    ).total_seconds()
+    metrics["per_device_tflops"] = (
+        6
+        * num_model_parameters
+        * config.max_target_length
+        * config.per_device_batch_size
+        / 10**12
+    )
+    metrics["per_device_tflops/sec"] = (
+        metrics["per_device_tflops"] / metrics["step_time_seconds"]
+    )
+    metrics["current_learning_rate"] = learning_rate_schedule(
+        state.opt_state[1].count
+    )
     last_step_completion = new_time
     write_metrics(writer, metrics, step)
-
 
     # Log some stuff.
     if step % config.log_period == 0:
       print(f"completed {step}, per-step metrics {metrics}")
-      print(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
+      print(
+          f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
+      )
       writer.flush()
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         seqs = p_predict_step(tokenized_prompts, state, nextrng)
@@ -338,5 +370,6 @@ def main(argv: Sequence[str]) -> None:
   train_loop(pyconfig.config)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
   app.run(main)
+

@@ -1,7 +1,7 @@
 """Input pipeline for a LM1B dataset."""
 
 import os
-from typing import Dict, Optional, List, Union
+from typing import Optional
 import functools
 
 import ml_collections
@@ -40,9 +40,10 @@ def shift_inputs_tf(x, segment_ids=None, axis=1):
   # For packed targets, the first shifted token of a new sequence is made
   # 0, rather than being the EOS token for the last sequence.
   if segment_ids is not None:
-    shifted *= tf.cast(segment_ids == shift_right_tf(segment_ids, axis=axis), x.dtype)
+    shifted *= tf.cast(
+        segment_ids == shift_right_tf(segment_ids, axis=axis), x.dtype
+    )
   return shifted
-
 
 def shift_data(x, axis=0, segmented=True):
   segment_ids = x['inputs_segmentation'] if segmented else None
@@ -112,11 +113,16 @@ def preprocessing_pipeline(
 
   # Multihost dataloading: sharding and jax.Array prep function
   dataset_structure = tf.data.experimental.get_structure(dataset)
-  global_data_shape = jax.tree_map(lambda x: P(batch_size, max_length), dataset_structure)
+  global_data_shape = jax.tree_map(
+      lambda x: P(batch_size, max_length), dataset_structure
+  )
   data_axes = jax.tree_map(lambda x: P('data', None), dataset_structure)
 
-  multihost_shard_fn, multihost_gen = multihost_dataloading.get_per_host_data_pipeline(
-    dataset, global_data_shape, global_mesh, data_axes)
+  multihost_shard_fn, multihost_gen = (
+      multihost_dataloading.get_per_host_data_pipeline(
+          dataset, global_data_shape, global_mesh, data_axes
+      )
+  )
 
   # Shard dataset for multihost loading.
   dataset = multihost_shard_fn(dataset)

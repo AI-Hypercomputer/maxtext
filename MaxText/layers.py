@@ -1,10 +1,11 @@
 """Transformer model definition."""
+# pylint: disable=arguments-differ
 
+import dataclasses
 import functools
 import operator
 from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
 
-import dataclasses
 
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
@@ -41,6 +42,7 @@ default_embed_init = nn.initializers.variance_scaling(
 #------------------------------------------------------------------------------
 # Dot product attention layer.
 #------------------------------------------------------------------------------
+
 
 def dot_product_attention(query: Array,
                           key: Array,
@@ -124,6 +126,7 @@ dynamic_vector_slice_in_dim = jax.vmap(
 # DenseGeneral for attention layers.
 #------------------------------------------------------------------------------
 
+
 def nd_dense_init(scale, mode, distribution):
   """Initializer with in_axis, out_axis set at call time."""
   def init_fn(key, shape, dtype, in_axis, out_axis):
@@ -132,9 +135,10 @@ def nd_dense_init(scale, mode, distribution):
     return fn(key, shape, dtype)
   return init_fn
 
+
 def _normalize_axes(axes: Iterable[int], ndim: int) -> Tuple[int]:
   # A tuple by convention. len(axes_tuple) then also gives the rank efficiently.
-  return tuple([ax if ax >= 0 else ndim + ax for ax in axes])
+  return tuple(ax if ax >= 0 else ndim + ax for ax in axes)
 
 
 def _canonicalize_tuple(x):
@@ -175,7 +179,7 @@ class DenseGeneral(nn.Module):
     inputs = jnp.asarray(inputs, self.dtype)
     axis = _normalize_axes(axis, inputs.ndim)
 
-    kernel_shape = tuple([inputs.shape[ax] for ax in axis]) + features
+    kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
     kernel_in_axis = np.arange(len(axis))
     kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
     kernel = self.param(
@@ -201,8 +205,8 @@ def _convert_to_activation_function(
   elif callable(fn_or_string):
     return fn_or_string
   else:
-    raise ValueError("don't know how to convert %s to an activation function" %
-                     (fn_or_string,))
+    raise ValueError(f"""Don't know how to convert {fn_or_string}
+                         to an activation function""")
 
 
 class MultiHeadDotProductAttention(nn.Module):
@@ -274,7 +278,8 @@ class MultiHeadDotProductAttention(nn.Module):
     #       1/sqrt(depth_kq)!  This is folded into the initializers of the
     #       linear transformations, which is equivalent under Adafactor.
     depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
-    query_init = lambda *args: self.kernel_init(*args) / depth_scaling
+    def query_init(*args):
+      return self.kernel_init(*args) / depth_scaling
 
     # Project inputs_q to multi-headed q/k/v
     # dimensions are then [batch, length, num_heads, head_dim]
@@ -282,9 +287,13 @@ class MultiHeadDotProductAttention(nn.Module):
     key = projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
     value = projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
-    query = nn.with_logical_constraint(query, ('batch', 'length', 'heads', 'kv'))
+    query = nn.with_logical_constraint(
+        query, ('batch', 'length', 'heads', 'kv')
+    )
     key = nn.with_logical_constraint(key, ('batch', 'length', 'heads', 'kv'))
-    value = nn.with_logical_constraint(value, ('batch', 'length', 'heads', 'kv'))
+    value = nn.with_logical_constraint(
+        value, ('batch', 'length', 'heads', 'kv')
+    )
 
     if decode:
       # Detect if we're initializing by absence of existing cache data.
@@ -294,7 +303,8 @@ class MultiHeadDotProductAttention(nn.Module):
       # fusion optimization. This also enables the "scatter via one-hot
       # broadcast" trick, which means we do a one-hot broadcast instead of a
       # scatter/gather operations, resulting in a 3-4x speedup in practice.
-      swap_dims = lambda x: x[:-3] + tuple(x[i] for i in [-2, -1, -3])
+      def swap_dims(x):
+        return x[:-3] + tuple(x[i] for i in [-2, -1, -3])
       cached_key = self.variable('cache', 'cached_key', jnp.zeros,
                                  swap_dims(key.shape), key.dtype)
       cached_value = self.variable('cache', 'cached_value', jnp.zeros,
@@ -308,10 +318,9 @@ class MultiHeadDotProductAttention(nn.Module):
         # Sanity shape check of cached key against input query.
         expected_shape = (batch, 1, num_heads, head_dim)
         if expected_shape != query.shape:
-          raise ValueError('Autoregressive cache shape error, '
-                           'expected query shape %s instead got %s.' %
-                           (expected_shape, query.shape))
-
+          raise ValueError(f"""Autoregressive cache shape error,
+                           expected query shape %s instead got 
+                           {(expected_shape, query.shape)}""")
         # Create a OHE of the current index. NOTE: the index is increased below.
         cur_index = cache_index.value
         one_hot_indices = jax.nn.one_hot(cur_index, length, dtype=key.dtype)
@@ -1046,6 +1055,7 @@ class Decoder(nn.Module):
 
 class Transformer(nn.Module):
   """An decoder-only Transformer model."""
+  # pylint: disable=attribute-defined-outside-init
   config: Config
 
   def setup(self):

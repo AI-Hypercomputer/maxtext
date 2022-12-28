@@ -50,8 +50,8 @@ def pack_dataset(dataset: tf.data.Dataset,
     keys = list(shapes.keys())
   for k in keys:
     if k not in shapes:
-      raise ValueError('Key %s not found in dataset.  Available keys are %s' %
-                       (k, shapes.keys()))
+      raise ValueError(f"""Key {k} not found in dataset.  Available keys are
+                        {shapes.keys()}""")
     if not shapes[k].is_compatible_with(tf.TensorShape([None])):
       raise ValueError('Tensors to be packed must be one-dimensional.')
   # make sure that the length dictionary contains all keys as well as the

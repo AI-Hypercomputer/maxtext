@@ -103,3 +103,4 @@ def temperature_sample(prompt_inputs,
   # Pick part of the state corresponding to the sampled sequences.
   final_sequences = final_state[1]
   return final_sequences
+
