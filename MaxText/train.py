@@ -14,6 +14,13 @@ from flax.training import train_state
 import numpy as np
 import optax
 
+from tensorboardX import SummaryWriter
+
+from layers import Transformer
+import pyconfig
+from input_pipeline import get_datasets
+import temperature_sampler
+
 import jax
 import jax.numpy as jnp
 from jax import random
@@ -21,12 +28,6 @@ from jax.experimental.pjit import pjit
 from jax.experimental.pjit import PartitionSpec as P
 from jax.experimental import mesh_utils
 from jax.experimental.maps import Mesh
-
-from tensorboardX import SummaryWriter
-from layers import Transformer
-import pyconfig
-from input_pipeline import get_datasets
-import temperature_sampler
 
 
 os.environ["TFDS_DATA_DIR"] = "gs://tensorflow-datasets/datasets"
