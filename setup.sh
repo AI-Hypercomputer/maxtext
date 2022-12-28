@@ -28,7 +28,6 @@ echo "export TPU_LIBRARY_PATH=/lib/libtpu.so" >> ~/.profile
 source ~/.profile
 
 # install jaxlib
-
 pip3 install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 
 
