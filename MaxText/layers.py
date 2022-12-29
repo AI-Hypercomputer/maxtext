@@ -446,6 +446,7 @@ class MlpBlock(nn.Module):
           name=dense_name)(
               inputs)
       x = _convert_to_activation_function(act_fn)(x)
+      self.sow('intermediates', 'activations', x)
       activations.append(x)
 
     # Take elementwise product of above intermediate activations.
