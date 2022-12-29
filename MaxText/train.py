@@ -145,16 +145,61 @@ def count_dead_neurons(activations):
   # activation_mat is batch x target_length x mlp (hidden layer size.)
   # A neuron is counted as dead if it has
   # an activation of zero among the entire batch.
+  # Returns three scalars:
+  #   count of dead neurons, mean of activations, std of activations
   batch_sum_activations = jnp.ravel(jnp.sum(activations, axis=0))
-  return jnp.sum(batch_sum_activations == 0)
+  return jnp.sum(
+      batch_sum_activations == 0), jnp.mean(activations), jnp.std(activations)
+
+
+def record_activation_metrics(metrics, intermediate_outputs, model):
+  """ Adds the activation metrics to the metrics dict"""
+  dead_neuron_dict, activation_mean_dict, activation_std_dict = {}, {}, {}
+  for layer_num in range(model.config.num_decoder_layers):
+    activation_metrics = count_dead_neurons(intermediate_outputs['intermediates']['decoder']
+                         [f'layers_{layer_num}']['mlp']['activations'][0])
+    dead_neuron_dict[f'dead_neurons_layers_{layer_num}'] = activation_metrics[0]
+    activation_mean_dict[f'activation_mean_layers_{layer_num}'] = activation_metrics[1]
+    activation_std_dict[f'activation_std_layers_{layer_num}'] = activation_metrics[2]
+
+  print('dead_neuron_dict: ', dead_neuron_dict)
+  print('activation_mean_dict: ', activation_mean_dict)
+  print('activation_std_dict: ', activation_std_dict)
+  metrics['scalars'].update({'dead_neurons': dead_neuron_dict,
+                             'activation_mean': activation_mean_dict,
+                             'activation_std': activation_std_dict})
+
+
+def record_histogram_metrics(metrics, state, model):
+  histogram_dict = {}
+  for layer_num in range(model.config.num_decoder_layers):
+    histogram_dict[f'wo/layers_{layer_num}'] = state.params['decoder'][
+        f'layers_{layer_num}']['mlp']['wo']['kernel']
+    histogram_dict[f'wi/layers_{layer_num}'] = state.params['decoder'][
+        f'layers_{layer_num}']['mlp']['wi']['kernel']
+  metrics['histogram'] = histogram_dict
 
 
 def train_step(model, state, data, dropout_rng):
+  """
+
+  Args:
+    model: A nn.Module
+    state: A pytree of the current state of the model
+    data: Batch of data to apply to the model
+    dropout_rng: A key to use to generate rng for dropout
+
+  Returns:
+    new_state: Same format as state.
+    metrics: Dictionary of model metrics such as loss, training rate, etc.
+    rng2: A new rng key that can be used in future calls.
+
+  """
   # inputs, targets, segments, positions = apply_args
   rng1, rng2 = jax.random.split(dropout_rng)
 
   def loss_fn(params):
-    logits, mod_vars = model.apply({'params': params},
+    logits, intermediate_outputs = model.apply({'params': params},
                          data['inputs'],
                          data['targets'],
                          data['inputs_segmentation'],
@@ -165,23 +210,14 @@ def train_step(model, state, data, dropout_rng):
     # Mask out paddings at the end of each example.
     xent = xent * (data['inputs_segmentation'] != 0)
     # TODO: mask out the prompt if training prefix-LM
-    return jnp.sum(xent)/jnp.size(xent), mod_vars
+    return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (loss, mod_vars), grads = grad_fn(state.params)
+  (loss, intermediate_outputs), grads = grad_fn(state.params)
   new_state = state.apply_gradients(grads=grads)
 
-  metrics = {'scalar':dict(), 'scalars': dict()}
-  metrics['scalar'].update({'loss': loss})
-
-  # Record dead neuron count in each decoder layer in the MLPBlock.
-  dead_neuron_metric_dict = {
-      f'dead_neurons_layers_{layer_num}':
-      count_dead_neurons(mod_vars['intermediates']['decoder']
-                         [f'layers_{layer_num}']['mlp']['activations'][0])
-      for layer_num in range(model.config.num_decoder_layers)
-  }
-  metrics['scalars'].update({'dead_neurons': dead_neuron_metric_dict})
+  metrics = {'scalar': {'loss': loss}, 'scalars': {}}
+  record_activation_metrics(metrics, intermediate_outputs, model)
 
   return new_state, metrics, rng2
 
@@ -415,7 +451,6 @@ def train_loop(config, state=None):
   last_step_completion = datetime.datetime.now()
   # Main Loop
   for step in np.arange(state.step, config.steps):
-    print('step: ', step)
     example_batch = next(train_iter)
 
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -437,19 +472,12 @@ def train_loop(config, state=None):
             metrics['scalar']['per_device_tflops'] /
             metrics['scalar']['step_time_seconds']
     })
-    metrics['scalar'].update({
-        'current_learning_rate':
-            learning_rate_schedule(state.opt_state[1].count)
-    })
+    metrics['scalar'].update({'current_learning_rate': learning_rate_schedule(
+        state.step
+    )})
     last_step_completion = new_time
     if step % config.log_weight_histogram_period == 0:
-      histogram_dict = dict()
-      for layer_num in range(model.config.num_decoder_layers):
-        histogram_dict[f'wo/layers_{layer_num}'] = state.params['decoder'][
-            f'layers_{layer_num}']['mlp']['wo']['kernel']
-        histogram_dict[f'wi/layers_{layer_num}'] = state.params['decoder'][
-            f'layers_{layer_num}']['mlp']['wi']['kernel']
-      metrics['histogram'] = histogram_dict
+      record_histogram_metrics(metrics, state, model)
     write_metrics(writer, metrics, step)
 
     # Log some stuff.
@@ -477,4 +505,3 @@ def main(argv: Sequence[str]) -> None:
 
 if __name__ == "__main__":
   app.run(main)
-
