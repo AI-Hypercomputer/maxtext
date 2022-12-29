@@ -82,8 +82,12 @@ def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
 
 def write_metrics(writer, metrics, step):
   if jax.process_index() == 0:
-    for metric_name in metrics:
-      writer.add_scalar(metric_name, metrics[metric_name], step)
+    for metric_name in metrics.get("scalar",[]):
+      writer.add_scalar(metric_name, metrics["scalar"][metric_name], step)
+    for metric_name in metrics.get("scalars",[]):
+      writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
+    for metric_name in metrics.get("histogram",[]):
+      writer.add_histogram(metric_name, metrics["histogram"][metric_name], step)
 
 
 def calculate_num_params_from_pytree(params):
@@ -137,32 +141,47 @@ def init_train_state(model, tx, config, key):
   return state
 
 
+def count_dead_neurons(activations):
+  # activation_mat is batch x target_length x mlp (hidden layer size.)
+  # A neuron is counted as dead if it has
+  # an activation of zero among the entire batch.
+  batch_sum_activations = jnp.ravel(jnp.sum(activations, axis=0))
+  return jnp.sum(batch_sum_activations == 0)
+
+
 def train_step(model, state, data, dropout_rng):
-  # pylint: disable=missing-function-docstring
   # inputs, targets, segments, positions = apply_args
   rng1, rng2 = jax.random.split(dropout_rng)
 
   def loss_fn(params):
-    logits = model.apply({'params': params},
+    logits, mod_vars = model.apply({'params': params},
                          data['inputs'],
                          data['targets'],
                          data['inputs_segmentation'],
                          data['inputs_position'],
-                         rngs={'dropout': rng1})
+                         rngs={'dropout': rng1}, mutable='intermediates')
     # TODO: is optax xent as good as custom T5X one?
-    xent = optax.softmax_cross_entropy_with_integer_labels(
-        logits, data["targets"]
-    )
+    xent = optax.softmax_cross_entropy_with_integer_labels(logits, data['targets'])
     # Mask out paddings at the end of each example.
     xent = xent * (data['inputs_segmentation'] != 0)
     # TODO: mask out the prompt if training prefix-LM
-    return jnp.sum(xent)/jnp.size(xent), logits
+    return jnp.sum(xent)/jnp.size(xent), mod_vars
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (loss, _), grads = grad_fn(state.params)
+  (loss, mod_vars), grads = grad_fn(state.params)
   new_state = state.apply_gradients(grads=grads)
 
-  metrics = {'loss': loss}
+  metrics = {'scalar':dict(), 'scalars': dict()}
+  metrics['scalar'].update({'loss': loss})
+
+  # Record dead neuron count in each decoder layer in the MLPBlock.
+  dead_neuron_metric_dict = {
+      f'dead_neurons_layers_{layer_num}':
+      count_dead_neurons(mod_vars['intermediates']['decoder']
+                         [f'layers_{layer_num}']['mlp']['activations'][0])
+      for layer_num in range(model.config.num_decoder_layers)
+  }
+  metrics['scalars'].update({'dead_neurons': dead_neuron_metric_dict})
 
   return new_state, metrics, rng2
 
@@ -396,6 +415,7 @@ def train_loop(config, state=None):
   last_step_completion = datetime.datetime.now()
   # Main Loop
   for step in np.arange(state.step, config.steps):
+    print('step: ', step)
     example_batch = next(train_iter)
 
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -404,28 +424,37 @@ def train_loop(config, state=None):
       )
 
     new_time = datetime.datetime.now()
-    metrics["step_time_seconds"] = (
-        new_time - last_step_completion
-    ).total_seconds()
-    metrics["per_device_tflops"] = (
-        6
-        * num_model_parameters
-        * config.max_target_length
-        * config.per_device_batch_size
-        / 10**12
-    )
-    metrics["per_device_tflops/sec"] = (
-        metrics["per_device_tflops"] / metrics["step_time_seconds"]
-    )
-    metrics["current_learning_rate"] = learning_rate_schedule(
-        state.step
-    )
+    metrics['scalar'].update({
+        'step_time_seconds': (new_time - last_step_completion).total_seconds()
+    })
+    metrics['scalar'].update({
+        'per_device_tflops':
+            6 * num_model_parameters * config.max_target_length *
+            config.per_device_batch_size / 10**12
+    })
+    metrics['scalar'].update({
+        'per_device_tflops/sec':
+            metrics['scalar']['per_device_tflops'] /
+            metrics['scalar']['step_time_seconds']
+    })
+    metrics['scalar'].update({
+        'current_learning_rate':
+            learning_rate_schedule(state.opt_state[1].count)
+    })
     last_step_completion = new_time
+    if step % config.log_weight_histogram_period == 0:
+      histogram_dict = dict()
+      for layer_num in range(model.config.num_decoder_layers):
+        histogram_dict[f'wo/layers_{layer_num}'] = state.params['decoder'][
+            f'layers_{layer_num}']['mlp']['wo']['kernel']
+        histogram_dict[f'wi/layers_{layer_num}'] = state.params['decoder'][
+            f'layers_{layer_num}']['mlp']['wi']['kernel']
+      metrics['histogram'] = histogram_dict
     write_metrics(writer, metrics, step)
 
     # Log some stuff.
     if step % config.log_period == 0:
-      print(f"completed {step}, per-step metrics {metrics}")
+      print(f"completed {step}, per-step scalar metrics {metrics['scalar']}")
       print(
           f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
       )
