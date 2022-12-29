@@ -41,6 +41,7 @@ max_corpus_chars: 10_000_000
 # Training loop
 steps: 100_000
 log_period: 10
+log_weight_histogram_period: 100
 save_period: 10_000
 learning_rate: 1.e-5
 warmup_steps: 10_000
