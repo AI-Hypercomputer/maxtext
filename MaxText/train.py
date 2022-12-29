@@ -162,9 +162,6 @@ def record_activation_metrics(metrics, intermediate_outputs, model):
     activation_mean_dict[f'activation_mean_layers_{layer_num}'] = activation_metrics[1]
     activation_std_dict[f'activation_std_layers_{layer_num}'] = activation_metrics[2]
 
-  print('dead_neuron_dict: ', dead_neuron_dict)
-  print('activation_mean_dict: ', activation_mean_dict)
-  print('activation_std_dict: ', activation_std_dict)
   metrics['scalars'].update({'dead_neurons': dead_neuron_dict,
                              'activation_mean': activation_mean_dict,
                              'activation_std': activation_std_dict})
