@@ -149,7 +149,7 @@ def compute_activation_metrics(activations):
   #   count of dead neurons, mean of activations, std of activations
   batch_sum_activations = jnp.ravel(jnp.sum(activations, axis=0))
   return jnp.sum(
-      batch_sum_activations == 0), jnp.mean(activations), jnp.std(activations)
+      batch_sum_activations == 0)/jnp.size(batch_sum_activations), jnp.mean(activations), jnp.std(activations)
 
 
 def record_activation_metrics(metrics, intermediate_outputs, model):
@@ -162,7 +162,7 @@ def record_activation_metrics(metrics, intermediate_outputs, model):
     activation_mean_dict[f'activation_mean_layers_{layer_num}'] = activation_metrics[1]
     activation_std_dict[f'activation_std_layers_{layer_num}'] = activation_metrics[2]
 
-  metrics['scalars'].update({'dead_neurons': dead_neuron_dict,
+  metrics['scalars'].update({'dead_neuron_fraction': dead_neuron_dict,
                              'activation_mean': activation_mean_dict,
                              'activation_std': activation_std_dict})
 
