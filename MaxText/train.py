@@ -141,7 +141,7 @@ def init_train_state(model, tx, config, key):
   return state
 
 
-def count_dead_neurons(activations):
+def compute_activation_metrics(activations):
   # activation_mat is batch x target_length x mlp (hidden layer size.)
   # A neuron is counted as dead if it has
   # an activation of zero among the entire batch.
@@ -156,7 +156,7 @@ def record_activation_metrics(metrics, intermediate_outputs, model):
   """ Adds the activation metrics to the metrics dict"""
   dead_neuron_dict, activation_mean_dict, activation_std_dict = {}, {}, {}
   for layer_num in range(model.config.num_decoder_layers):
-    activation_metrics = count_dead_neurons(intermediate_outputs['intermediates']['decoder']
+    activation_metrics = compute_activation_metrics(intermediate_outputs['intermediates']['decoder']
                          [f'layers_{layer_num}']['mlp']['activations'][0])
     dead_neuron_dict[f'dead_neurons_layers_{layer_num}'] = activation_metrics[0]
     activation_mean_dict[f'activation_mean_layers_{layer_num}'] = activation_metrics[1]
