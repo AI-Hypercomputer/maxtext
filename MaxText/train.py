@@ -38,7 +38,7 @@ from jax.experimental.maps import Mesh
 
 os.environ["TFDS_DATA_DIR"] = "gs://tensorflow-datasets/datasets"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = "1"
+#os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = "1"
 
 
 

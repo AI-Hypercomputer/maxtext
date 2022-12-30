@@ -22,7 +22,7 @@ scan_layers: False
 param_scan_axis: 1
 
 # Output directory
-base_output_directory: "gs://max-experiments/"
+base_output_directory: "gs://max-experiments"
 
 # Parallelism
 mesh_axes: ['data']
