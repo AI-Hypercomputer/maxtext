@@ -29,6 +29,12 @@ To lint:
 pylint MaxText/
 ```
 
+Tensorboard: run Tensorboard on the host TPUVM via VSCode. You will need to run the following command
+```
+#https://stackoverflow.com/questions/40830085/tensorboard-can-not-read-summaries-on-google-cloud-storage
+gcloud auth application-default login
+```
+
 
 Status/TODO
 ======
