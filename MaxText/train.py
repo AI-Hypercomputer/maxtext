@@ -32,14 +32,16 @@ import jax.numpy as jnp
 from jax import random
 from jax.experimental.pjit import pjit
 from jax.experimental.pjit import PartitionSpec as P
-from jax.experimental import mesh_utils
 from jax.experimental.maps import Mesh
+
+from jax.experimental.compilation_cache import compilation_cache as cc
+
+cc.initialize_cache("/tmp/jax_function_cache")
 
 
 
 os.environ["TFDS_DATA_DIR"] = "gs://tensorflow-datasets/datasets"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-#os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = "1"
 
 
 
@@ -59,12 +61,36 @@ NdInitializer = Callable[
     [PRNGKey, Shape, DType, InitializerAxis, InitializerAxis], Array
 ]
 
+def get_first_step(state):
+  with jax.spmd_mode('allow_all'):
+    return int(state.step)
+
+
+def load_next_batch(train_iter, example_batch, config):
+  """Loads the next batch. Can keep reusing the same batch for performance reasons """
+
+  if config.reuse_example_batch and example_batch is not None:
+    return example_batch
+  else:
+    return next(train_iter)
+
+
+def choose_number_slices(config: pyconfig.HyperParameters):
+  """Chooses the balance between FSDP and data parallelism based on the number of pods. If single-pod, uses two replicas """
+  devices = jax.devices()
+  assert len(devices) > 1, "You must have at least two devices"
+  if config.use_pjrt == "true":
+    return 1 + max(d.slice_index for d in devices)
+  else:
+    return 2
+
+
 # Learning Rate Schedule
 # -----------------------------------------------------------------------------
 # learning rate scheduling
 def rsqrt_schedule(init_value: float, shift: int = 0):
   def schedule(count):
-    return init_value * (count + shift)**-.5 * shift**.5
+    return init_value * (1 + count + shift)**-.5 * shift**.5
   return schedule
 
 
@@ -82,13 +108,14 @@ def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
 
 
 def write_metrics(writer, metrics, step):
-  if jax.process_index() == 0:
-    for metric_name in metrics.get("scalar",[]):
-      writer.add_scalar(metric_name, metrics["scalar"][metric_name], step)
-    for metric_name in metrics.get("scalars",[]):
-      writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
-    for metric_name in metrics.get("histogram",[]):
-      writer.add_histogram(metric_name, metrics["histogram"][metric_name], step)
+  with jax.spmd_mode('allow_all'):
+    if jax.process_index() == 0:
+      for metric_name in metrics.get("scalar",[]):
+        writer.add_scalar(metric_name, metrics["scalar"][metric_name], step)
+      for metric_name in metrics.get("scalars",[]):
+        writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
+      for metric_name in metrics.get("histogram",[]):
+        writer.add_histogram(metric_name, metrics["histogram"][metric_name], step)
 
 
 def calculate_num_params_from_pytree(params):
@@ -178,7 +205,7 @@ def record_histogram_metrics(metrics, state, model):
   metrics['histogram'] = histogram_dict
 
 
-def train_step(model, state, data, dropout_rng):
+def train_step(model, config, state, data, dropout_rng):
   """
 
   Args:
@@ -215,7 +242,8 @@ def train_step(model, state, data, dropout_rng):
   new_state = state.apply_gradients(grads=grads)
 
   metrics = {'scalar': {'loss': loss}, 'scalars': {}}
-  record_activation_metrics(metrics, intermediate_outputs, model)
+  if config.record_internal_nn_metrics:
+    record_activation_metrics(metrics, intermediate_outputs, model)
 
   return new_state, metrics, rng2
 
@@ -273,13 +301,7 @@ def predict_step(inputs,
   return seqs
 
 def create_orbax_checkpoint_manager(checkpoint_dir: str):
-  #TODO(this logic is in Orbax. Once that version is in Pip, delete)
-  # https://github.com/google/orbax/commit/e9113ce7e52916fba96a1983089a1788d55a0735 #pylint: disable=line-too-long
   p = epath.Path(checkpoint_dir)
-  if jax.process_index() == 0:
-    if not p.is_dir():
-      p.mkdir()
-  #END(TODO)
   return CheckpointManager(p,
                            Checkpointer(checkpoint.PyTreeCheckpointHandler()))
 
@@ -379,11 +401,14 @@ def train_loop(config, state=None):
   )
 
   # Mesh definition
-  mesh_shape_1d = (len(jax.devices()),)
+  num_slices = choose_number_slices(config)
+  mesh_shape = (num_slices, len(jax.devices())//num_slices)
+  devices_array = np.asarray(jax.devices()).reshape(*mesh_shape)
   print(
-      f"number jax devices {len(jax.devices())}, exact devices: {jax.devices()}"
+      f"number jax devices {len(jax.devices())}, exact devices: {jax.devices()}", flush = True
   )
-  mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), config.mesh_axes)
+  mesh = Mesh(devices_array, config.mesh_axes)
+  print(f"decided on mesh: {mesh}", flush = True)
 
   # Set up datasets.
   train_ds, eval_ds = get_datasets(
@@ -402,6 +427,7 @@ def train_loop(config, state=None):
   abstract_state = jax.eval_shape(init_train_state_partial, init_rng)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
   num_model_parameters = calculate_num_params_from_pytree(abstract_state.params)
+  print(f"number parameters {num_model_parameters/10**9:.3f} billion")
   unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
   # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -411,7 +437,7 @@ def train_loop(config, state=None):
                                                unboxed_abstract_state,
                                                mesh,
                                                state_mesh_annotations)
-    data_pspec = P('data', None) # Dataset Partitioning is batch-parallel.
+    data_pspec = P(('data','worker'), None) # Dataset Partitioning is batch-parallel.
 
     if not state:
       state = pjit(
@@ -427,7 +453,6 @@ def train_loop(config, state=None):
 
 
 
-
   # Define compiled top-level functions.
   p_train_step = pjit(
     train_step,
@@ -435,7 +460,7 @@ def train_loop(config, state=None):
                        data_pspec,
                        None),
     out_axis_resources=(state_mesh_annotations, None, None),
-    static_argnums=(0,))
+    static_argnums=(0,1,))
 
   # TODO: add held-out p_eval_step.
 
@@ -452,13 +477,15 @@ def train_loop(config, state=None):
       [config.prompt], config.max_predict_length, sp_tokenizer)
 
   last_step_completion = datetime.datetime.now()
-  # Main Loop
-  for step in np.arange(state.step, config.steps):
-    example_batch = next(train_iter)
 
+  example_batch = None
+
+  # Main Loop
+  for step in np.arange(get_first_step(state), config.steps):
+    example_batch = load_next_batch(train_iter, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics, nextrng = p_train_step(
-          model, state, example_batch, nextrng
+          model, config, state, example_batch, nextrng
       )
 
     new_time = datetime.datetime.now()
@@ -476,10 +503,11 @@ def train_loop(config, state=None):
             metrics['scalar']['step_time_seconds']
     })
     metrics['scalar'].update({'current_learning_rate': learning_rate_schedule(
-        state.step
+        step
     )})
+
     last_step_completion = new_time
-    if step % config.log_weight_histogram_period == 0:
+    if config.record_internal_nn_metrics and step % config.log_weight_histogram_period == 0:
       record_histogram_metrics(metrics, state, model)
     write_metrics(writer, metrics, step)
 
@@ -490,6 +518,7 @@ def train_loop(config, state=None):
           f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
       )
       writer.flush()
+
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         seqs = p_predict_step(tokenized_prompts, state, nextrng)
         print(decode_tokens(np.array(seqs)[0], sp_tokenizer, config.eos_id))
@@ -498,11 +527,14 @@ def train_loop(config, state=None):
       checkpoint_manager.save(step, state)
       print("saved a checkpoint")
 
+  writer.close()
   return state
 
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
+  os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = pyconfig.config.use_pjrt
+
   train_loop(pyconfig.config)
 
 

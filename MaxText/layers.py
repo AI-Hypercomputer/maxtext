@@ -900,10 +900,10 @@ class DecoderLayer(nn.Module):
   @nn.compact
   def __call__(self,
                inputs,
-               decoder_mask=None,
-               deterministic=False,
-               decode=False,
-               max_decode_length=None):
+               decoder_mask,
+               deterministic,
+               decode,
+               max_decode_length):
     cfg = self.config
 
     # Relative position embedding as attention biases.
@@ -1001,7 +1001,7 @@ class Decoder(nn.Module):
           BlockLayer,
           prevent_cse=not cfg.scan_layers,
           policy=policy,
-          static_argnums=(4, 5, 6))
+          static_argnums=(-1, -2, -3, -4))
     if cfg.scan_layers:
       initializing = self.is_mutable_collection('params')
       params_spec = (
@@ -1030,10 +1030,10 @@ class Decoder(nn.Module):
         y = BlockLayer(
             config=cfg, name=f'layers_{lyr}')(
                 y,
-                decoder_mask=decoder_mask,
-                deterministic=deterministic,
-                decode=decode,
-                max_decode_length=max_decode_length)
+                decoder_mask,
+                deterministic,
+                decode,
+                max_decode_length)
 
     y = LayerNorm(dtype=cfg.dtype, name='decoder_norm')(y)
     y = nn.Dropout(

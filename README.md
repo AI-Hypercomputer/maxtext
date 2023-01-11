@@ -21,7 +21,7 @@ Run
 ====
 To run a training job:
 ```
-python3 MaxText/train.py MaxText/configs/base.yml run_name=$USER_$(date "+%Y-%m-%d-%H:%M:%S")
+python3 MaxText/train.py MaxText/configs/base.yml run_name=${USER}_$(date "+%Y-%m-%d-%H:%M:%S")
 ```
 
 To lint:

@@ -116,7 +116,7 @@ def preprocessing_pipeline(
   global_data_shape = jax.tree_map(
       lambda x: P(batch_size, max_length), dataset_structure
   )
-  data_axes = jax.tree_map(lambda x: P('data', None), dataset_structure)
+  data_axes = jax.tree_map(lambda x: P(('data', 'worker'), None), dataset_structure)
 
   multihost_shard_fn, multihost_gen = (
       multihost_dataloading.get_per_host_data_pipeline(
