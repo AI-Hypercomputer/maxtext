@@ -14,10 +14,10 @@ config = None
 
 class _HyperParameters():
   # pylint: disable=missing-class-docstring
-  def __init__(self, argv):
+  def __init__(self, argv, **kwargs):
     with open(argv[1], "r", encoding="utf-8") as yaml_file:
       raw_data_from_yaml = yaml.safe_load(yaml_file)
-    raw_data_from_cmd_line = self._load_kwargs(argv)
+    raw_data_from_cmd_line = self._load_kwargs(argv, **kwargs)
 
     for k in raw_data_from_cmd_line:
       if k not in raw_data_from_yaml:
@@ -43,8 +43,10 @@ class _HyperParameters():
     _HyperParameters.user_init(raw_keys)
     self.keys = raw_keys
 
-  def _load_kwargs(self, argv):
-    return dict(a.split("=") for a in argv[2:])
+  def _load_kwargs(self, argv, **kwargs):
+    args_dict = dict(a.split("=") for a in argv[2:])
+    args_dict.update(kwargs)
+    return args_dict
 
   @staticmethod
   def user_init(raw_keys):
@@ -73,9 +75,9 @@ class HyperParameters(): # pylint: disable=missing-class-docstring
     raise ValueError
 
 
-def initialize(argv):
+def initialize(argv, **kwargs):
   global _config, config
-  _config = _HyperParameters(argv)
+  _config = _HyperParameters(argv, **kwargs)
   config = HyperParameters()
 
 if __name__ == "__main__":

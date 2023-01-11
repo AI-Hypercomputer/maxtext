@@ -22,6 +22,7 @@ from tensorboardX import SummaryWriter
 from layers import Transformer
 import pyconfig
 from input_pipeline import get_datasets
+from input_pipeline import preprocess_dataset
 import temperature_sampler
 
 
@@ -385,10 +386,15 @@ def train_loop(config, state=None):
   mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), config.mesh_axes)
 
   # Set up datasets.
-  train_iter, _, _, sp_tokenizer = get_datasets(
+  train_ds, eval_ds = get_datasets(
       config=config,
-      global_mesh=mesh,
-      vocab_path=config.vocab_path)
+  )
+  train_iter, _, _, sp_tokenizer = preprocess_dataset(
+    config,
+    mesh,
+    train_ds, eval_ds,
+    vocab_path=config.vocab_path,
+  )
 
   # Abstract initialization
   init_train_state_partial = functools.partial(init_train_state, model, tx,

@@ -147,17 +147,14 @@ def preprocessing_pipeline(
 
 def get_datasets(
   config: ml_collections.ConfigDict,
-  global_mesh,
-  vocab_path: Optional[str] = None
+  read_config = None,
 ):
   """Load and return dataset of batched examples for use during training."""
-  if vocab_path is None:
-    vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
-
   # Training dataset.
   train_ds_builder = tfds.builder(config.dataset_name)
   # train_data = get_raw_dataset(train_ds_builder, 'train')
   train_ds = train_ds_builder.as_dataset(split='train',
+                                           read_config = read_config,
                                            shuffle_files=False)
   train_ds = normalize_features(train_ds)
 
@@ -168,8 +165,19 @@ def get_datasets(
     eval_ds_builder = train_ds_builder
   # eval_data = get_raw_dataset(eval_ds_builder, config.eval_split)
   eval_ds = eval_ds_builder.as_dataset(split=config.eval_split,
+                                          read_config = read_config,
                                           shuffle_files=False)
   eval_ds = normalize_features(eval_ds)
+
+  return train_ds, eval_ds
+
+def preprocess_dataset(config: ml_collections.ConfigDict,
+                        global_mesh,
+                        train_ds, eval_ds,
+                        vocab_path: Optional[str] = None,):
+  """Pre-process the dataset and return iterators"""
+  if vocab_path is None:
+    vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
 
   # Train or load tokenizer
   sp_tokenizer = tokenizer.load_or_train_tokenizer(
@@ -190,6 +198,11 @@ def get_datasets(
     eval_batch_size = config.eval_per_device_batch_size * global_mesh.size
   else:
     eval_batch_size = batch_size
+
+  def filter_keys(record):
+    return {'inputs': record['inputs'], 'targets': record['targets']}
+  train_ds = train_ds.map(filter_keys,num_parallel_calls=tf.data.AUTOTUNE)
+  eval_ds = eval_ds.map(filter_keys,num_parallel_calls=tf.data.AUTOTUNE)
 
   train_iter = preprocessing_pipeline(
       train_ds,

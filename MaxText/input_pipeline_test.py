@@ -1,78 +1,92 @@
 # pylint: disable=missing-module-docstring, missing-function-docstring
 import os
-import pathlib
-import tempfile
+import sys
+import jax
+from jax.experimental.maps import Mesh
+from jax.experimental import mesh_utils
 
-from absl.testing import absltest
+import unittest
 import tensorflow_datasets as tfds
 
-from configs import default
+import pyconfig
 import input_pipeline
 
-# We just use different values here to verify that the input pipeline uses the
-# the correct value for the 3 different datasets.
-_TARGET_LENGTH = 32
-_EVAL_TARGET_LENGTH = 48
-_PREDICT_TARGET_LENGTH = 64
+# By default, XLA presents all the CPU cores as one device. This flag splits up cores in 2 CPU devices.
+os.environ["TFDS_DATA_DIR"] = "gs://tensorflow-datasets/datasets"
+os.environ["XLA_FLAGS"] = '--xla_force_host_platform_device_count=2'
+jax.config.update('jax_platform_name', 'cpu')
 
 
-class InputPipelineTest(absltest.TestCase):
+class InputPipelineTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.train_ds, self.eval_ds, self.predict_ds = self._get_datasets()
+    pyconfig.initialize(sys.argv + ['configs/base.yml', 'run_name=test'], per_device_batch_size=1)
+    self.config = pyconfig.config
+    self.read_config = tfds.ReadConfig()
+    self.read_config.add_tfds_id = True
+    self.train_ds, self.eval_ds = self._get_datasets()
+    self.train_iter, self.eval_iter, self.predict_iter = self._get_preprocessed_datasets()
 
   def _get_datasets(self):
-    config = default.get_config()
-    config.per_device_batch_size = 1
-    config.eval_per_device_batch_size = 2
-    config.vocab_size = 32
-    config.max_corpus_chars = 1000
-    config.max_target_length = _TARGET_LENGTH
-    config.max_eval_target_length = _EVAL_TARGET_LENGTH
-    config.max_predict_length = _PREDICT_TARGET_LENGTH
+    train_ds, eval_ds = input_pipeline.get_datasets(
+            config=self.config, read_config = self.read_config)
+    return train_ds, eval_ds
 
-    vocab_path = os.path.join(tempfile.mkdtemp(), 'sentencepiece_model')
+  def _get_preprocessed_datasets(self):
+    mesh_shape_1d = (len(jax.devices()),)
+    mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), self.config.mesh_axes)
 
-    # Go two directories up to the root of the flax directory.
-    flax_root_dir = pathlib.Path(__file__).parents[2]
-    data_dir = str(flax_root_dir) + '/.tfds/metadata'  # pylint: disable=unused-variable
-
-    with tfds.testing.mock_data(num_examples=128, data_dir=data_dir):
-      train_ds, eval_ds, predict_ds, _ = input_pipeline.get_datasets(
-          n_devices=2, config=config, vocab_path=vocab_path)
-    return train_ds, eval_ds, predict_ds
+    train_iter, eval_iter, test_iter, _ = input_pipeline.preprocess_dataset(
+              self.config,
+              mesh,
+              self.train_ds, self.eval_ds, vocab_path=self.config.vocab_path)
+    return train_iter, eval_iter, test_iter
 
   def test_train_ds(self):
-    expected_shape = [2, _TARGET_LENGTH]  # 2 devices.
+    expected_shape = [2, self.config.max_target_length]
     # For training we pack multiple short examples in one example.
     # *_position and *_segmentation indicate the boundaries.
-    for batch in self.train_ds.take(3):
-      self.assertEqual({k: v.shape.as_list() for k, v in batch.items()}, {
-          'inputs': expected_shape,
-          'inputs_position': expected_shape,
-          'inputs_segmentation': expected_shape,
-          'targets': expected_shape,
-          'targets_position': expected_shape,
-          'targets_segmentation': expected_shape,
-      })
+    batch = next(self.train_iter)
+    self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
+        'inputs': expected_shape,
+        'inputs_position': expected_shape,
+        'inputs_segmentation': expected_shape,
+        'targets': expected_shape,
+        'targets_position': expected_shape,
+        'targets_segmentation': expected_shape,
+    })
+
 
   def test_eval_ds(self):
-    expected_shape = [4, _EVAL_TARGET_LENGTH]  # 2 devices.
-    for batch in self.eval_ds.take(3):
-      self.assertEqual({k: v.shape.as_list() for k, v in batch.items()}, {
-          'inputs': expected_shape,
-          'targets': expected_shape,
-      })
+    expected_shape = [2, self.config.max_eval_target_length]
+    batch = next(self.eval_iter)
+    self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
+       'inputs': expected_shape,
+       'targets': expected_shape,
+    })
+
 
   def test_predict_ds(self):
-    expected_shape = [4, _PREDICT_TARGET_LENGTH]  # 2 devices.
-    for batch in self.predict_ds.take(3):
-      self.assertEqual({k: v.shape.as_list() for k, v in batch.items()}, {
-          'inputs': expected_shape,
-          'targets': expected_shape,
-      })
+    expected_shape = [2, self.config.max_predict_length]
+    batch = next(self.predict_iter)
+    self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
+        'inputs': expected_shape,
+        'targets': expected_shape,
+    })
+
+
+  def test_ds_determinism(self):
+    train_ds1 = self.train_ds.batch(64)
+    train_ds1 = next(train_ds1.as_numpy_iterator())
+    # reset the dataset loading
+    train_ds, _ = self._get_datasets()
+    train_ds = train_ds.batch(64)
+    train_ds2 = next(train_ds.as_numpy_iterator())
+
+    self.assertCountEqual(train_ds1['tfds_id'], train_ds2['tfds_id'])
 
 
 if __name__ == '__main__':
-  absltest.main()
+  unittest.main()
+
