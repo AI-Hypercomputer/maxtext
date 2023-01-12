@@ -11,6 +11,8 @@ _allowed_command_line_types = [str, int, float]
 _config = None
 config = None
 
+def _lists_to_tuples(l):
+  return tuple(_lists_to_tuples(x) for x in l) if isinstance(l, list) else l
 
 class _HyperParameters():
   # pylint: disable=missing-class-docstring
@@ -50,6 +52,7 @@ class _HyperParameters():
 
   @staticmethod
   def user_init(raw_keys):
+    '''Transformations between the config data and configs used at runtime'''
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
     run_name = raw_keys["run_name"]
     assert run_name, "Erroring out, need a real run_name"
@@ -60,6 +63,12 @@ class _HyperParameters():
     raw_keys["checkpoint_dir"] = (
         f"{base_output_directory}/{run_name}/checkpoints/"
     )
+    raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
+    raw_keys['emb_dim'] = raw_keys['scale'] * raw_keys['base_emb_dim']
+    raw_keys['num_heads'] = raw_keys['scale'] * raw_keys['base_num_heads']
+    raw_keys['mlp_dim'] = raw_keys['scale'] * raw_keys['base_mlp_dim']
+    raw_keys['num_decoder_layers'] = raw_keys['scale'] * raw_keys['base_num_decoder_layers']
+
 
 
 class HyperParameters(): # pylint: disable=missing-class-docstring
