@@ -3,6 +3,7 @@ google-cloud-storage
 ml-collections
 numpy
 optax
+portpicker
 pylint
 sentencepiece
 tensorflow

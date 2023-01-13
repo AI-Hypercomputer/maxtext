@@ -24,6 +24,7 @@ import pyconfig
 from input_pipeline import get_datasets
 from input_pipeline import preprocess_dataset
 import temperature_sampler
+from checkpointing import create_orbax_checkpoint_manager
 
 
 
@@ -299,11 +300,6 @@ def predict_step(inputs,
       eos_token=config.eos_id)
 
   return seqs
-
-def create_orbax_checkpoint_manager(checkpoint_dir: str):
-  p = epath.Path(checkpoint_dir)
-  return CheckpointManager(p,
-                           Checkpointer(checkpoint.PyTreeCheckpointHandler()))
 
 def unbox_logicallypartioned_trainstate(
     boxed_train_state: train_state.TrainState):
