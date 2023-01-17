@@ -1018,7 +1018,7 @@ class Decoder(nn.Module):
               'dropout': True
           },
           in_axes=(nn.broadcast, nn.broadcast, nn.broadcast,
-                   nn.broadcast, nn.broadcast),
+                   nn.broadcast),
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'})(
               config=cfg,
