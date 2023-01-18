@@ -21,8 +21,8 @@ mlp_activations: ["relu"]
 dropout_rate: 0
 logits_via_embedding: True  # NOTE: this is True just for testing.
 # minimal, full, or none
-remat_policy: 'none'
-scan_layers: False #Bewarned, this doesn't work right now.
+remat_policy: 'full'
+scan_layers: True
 param_scan_axis: 1
 
 record_internal_nn_metrics: 0
