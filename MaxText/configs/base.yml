@@ -37,9 +37,9 @@ logical_axis_rules: [ ['batch', ['data', 'worker']], ['vocab', 'worker'], ['leng
 # Dataset
 vocab_size: 30_000
 vocab_path: "gs://cloudtpu_internal_datasets/vocabs/"  # Assumes we're allowed
-dataset_name: 'lm1b'
-eval_dataset_name: 'lm1b'
-eval_split: 'test'
+dataset_name: 'c4/en'
+eval_dataset_name: 'c4/en'
+eval_split: 'validation'
 per_device_batch_size: 256
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
