@@ -37,7 +37,7 @@ from jax.experimental.maps import Mesh
 
 from jax.experimental.compilation_cache import compilation_cache as cc
 
-cc.initialize_cache("/tmp/jax_function_cache")
+cc.initialize_cache("jax_cache")
 
 
 
@@ -456,7 +456,8 @@ def train_loop(config, state=None):
                        data_pspec,
                        None),
     out_axis_resources=(state_mesh_annotations, None, None),
-    static_argnums=(0,1,))
+    static_argnums=(0,1,),
+    donate_argnums=(2))
 
   # TODO: add held-out p_eval_step.
 
@@ -508,7 +509,7 @@ def train_loop(config, state=None):
     write_metrics(writer, metrics, step)
 
     # Log some stuff.
-    if step % config.log_period == 0:
+    if step > 0 and step % config.log_period == 0:
       print(f"completed {step}, per-step scalar metrics {metrics['scalar']}")
       print(
           f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
