@@ -31,13 +31,14 @@ from checkpointing import create_orbax_checkpoint_manager
 import jax
 import jax.numpy as jnp
 from jax import random
+from jax.experimental import mesh_utils
 from jax.experimental.pjit import pjit
 from jax.experimental.pjit import PartitionSpec as P
 from jax.experimental.maps import Mesh
 
 from jax.experimental.compilation_cache import compilation_cache as cc
 
-cc.initialize_cache("jax_cache")
+cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 
 
@@ -76,14 +77,36 @@ def load_next_batch(train_iter, example_batch, config):
     return next(train_iter)
 
 
-def choose_number_slices(config: pyconfig.HyperParameters):
+def create_device_mesh():
+  """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas """
+  devices = jax.devices()
+  num_devices = len(devices)
+  assert len(devices) > 1, "You must have at least two devices"
+  multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
+
+  num_data_parallel_groups = choose_number_data_parallel_groups()
+
+  assert num_devices % num_data_parallel_groups == 0, "Number of devices must be divisible by number of slices"
+
+  if multi_slice_env:
+    mesh = mesh_utils.create_hybrid_device_mesh([1,num_devices//num_data_parallel_groups], [num_data_parallel_groups, 1])
+  else:
+    mesh = mesh_utils.create_device_mesh([num_data_parallel_groups, num_devices//num_data_parallel_groups])
+
+  print(f"Decided on mesh: {mesh}")
+  print(f"Using {num_devices} devices, sliced across {num_data_parallel_groups} data parallel groups")
+
+  return mesh
+
+
+def choose_number_data_parallel_groups():
   """Chooses the balance between FSDP and data parallelism based on the number of pods. If single-pod, uses two replicas """
   devices = jax.devices()
   assert len(devices) > 1, "You must have at least two devices"
-  if config.use_pjrt == "true":
+  if hasattr(jax.devices(), 'slice_index'):
     return 1 + max(d.slice_index for d in devices)
   else:
-    return 2
+    return 2 # default to 2 replicas
 
 
 # Learning Rate Schedule
@@ -397,14 +420,8 @@ def train_loop(config, state=None):
   )
 
   # Mesh definition
-  num_slices = choose_number_slices(config)
-  mesh_shape = (num_slices, len(jax.devices())//num_slices)
-  devices_array = np.asarray(jax.devices()).reshape(*mesh_shape)
-  print(
-      f"number jax devices {len(jax.devices())}, exact devices: {jax.devices()}", flush = True
-  )
+  devices_array = create_device_mesh()
   mesh = Mesh(devices_array, config.mesh_axes)
-  print(f"decided on mesh: {mesh}", flush = True)
 
   # Set up datasets.
   train_ds, eval_ds = get_datasets(
