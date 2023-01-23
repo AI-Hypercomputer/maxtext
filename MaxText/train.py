@@ -526,7 +526,7 @@ def train_loop(config, state=None):
     write_metrics(writer, metrics, step)
 
     # Log some stuff.
-    if step > 0 and step % config.log_period == 0:
+    if step % config.log_period == 0:
       print(f"completed {step}, per-step scalar metrics {metrics['scalar']}")
       print(
           f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
