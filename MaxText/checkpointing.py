@@ -4,7 +4,10 @@ from etils import epath
 import jax
 import portpicker
 from jax.experimental import multihost_utils
-from jax._src.cloud_tpu_init import get_metadata
+try: #TODO(migrate to updated API fully once it is universally available)
+  from jax._src.cloud_tpu_init import get_metadata
+except ImportError:
+  from jax._src.clusters.cloud_tpu_cluster import get_metadata
 from orbax import checkpoint
 from orbax.checkpoint.async_checkpointer import AsyncCheckpointer
 from orbax.checkpoint.checkpoint_manager import CheckpointManager
