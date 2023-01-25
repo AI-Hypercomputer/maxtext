@@ -920,50 +920,49 @@ class DecoderLayer(nn.Module):
     inputs = nn.with_logical_constraint(inputs, ('batch', 'length', 'embed'))
 
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
-    x = LayerNorm(
+    lnx = LayerNorm(
         dtype=cfg.dtype, name='pre_self_attention_layer_norm')(
             inputs)
-    x = nn.with_logical_constraint(x, ('batch', 'length', 'embed'))
+    lnx = nn.with_logical_constraint(lnx, ('batch', 'length', 'embed'))
 
     # Self-attention block
-    x = MultiHeadDotProductAttention(
+    attention_lnx = MultiHeadDotProductAttention(
         num_heads=cfg.num_heads,
         dtype=cfg.dtype,
         head_dim=cfg.head_dim,
         dropout_rate=cfg.dropout_rate,
         name='self_attention')(
-            x,
-            x,
+            lnx,
+            lnx,
             decoder_mask,
             decoder_bias,
             deterministic=deterministic,
             decode=decode)
-    x = nn.Dropout(
-        rate=cfg.dropout_rate, broadcast_dims=(-2,))(
-            x, deterministic=deterministic)
-    x = x + inputs
-    x = nn.with_logical_constraint(x, ('batch', 'length', 'embed'))
+    attention_lnx = nn.with_logical_constraint(attention_lnx, ('batch', 'length', 'embed'))
 
     # MLP block.
-    z = LayerNorm(dtype=cfg.dtype, name='pre_mlp_layer_norm')(x)
-    z = nn.with_logical_constraint(z, ('batch', 'length', 'embed'))
-    z = MlpBlock(
+    mlp_lnx = MlpBlock(
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         name='mlp',
-    )(z, deterministic=deterministic)
-    z = nn.Dropout(
+    )(lnx, deterministic=deterministic)
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ('batch', 'length', 'embed'))
+
+    next_layer_addition = mlp_lnx + attention_lnx
+
+    next_layer_addition_dropped_out = nn.Dropout(
         rate=cfg.dropout_rate, broadcast_dims=(-2,))(
-            z, deterministic=deterministic)
-    z = z + x
-    z = nn.with_logical_constraint(z, ('batch', 'length', 'embed'))
+            next_layer_addition, deterministic=deterministic)
+
+    layer_output = next_layer_addition_dropped_out + inputs
+    layer_output = nn.with_logical_constraint(layer_output, ('batch', 'length', 'embed'))
 
     if cfg.scan_layers:
-      return z, None
+      return layer_output, None
     else:
-      return z
+      return layer_output
 
 
 

@@ -130,8 +130,24 @@ def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
       ], boundaries=[warmup_steps],
       )
 
+def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
+  """Records scalar metrics to be written to tensorboard"""
+  metrics['scalar'].update({
+      'step_time_seconds': step_time_delta.total_seconds()
+  })
+  metrics['scalar'].update({
+      'per_device_tflops' : per_device_tflops
+  })
+  metrics['scalar'].update({
+      'per_device_tflops/sec':
+          metrics['scalar']['per_device_tflops'] /
+          metrics['scalar']['step_time_seconds']
+  })
+  metrics['scalar'].update({'current_learning_rate': lr })
 
-def write_metrics(writer, metrics, step):
+
+def write_metrics(writer, metrics, step, config):
+  """Writes metrics to tensorboard"""
   with jax.spmd_mode('allow_all'):
     if jax.process_index() == 0:
       for metric_name in metrics.get("scalar",[]):
@@ -140,6 +156,18 @@ def write_metrics(writer, metrics, step):
         writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
       for metric_name in metrics.get("histogram",[]):
         writer.add_histogram(metric_name, metrics["histogram"][metric_name], step)
+
+    full_log = step % config.log_period == 0
+
+    if config.log_metrics_to_stdout or full_log:
+      print(f"completed {step}, per-step scalar metrics {metrics['scalar']}")
+
+    if full_log:
+      print(
+          f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
+      )
+      writer.flush()
+
 
 
 def calculate_num_params_from_pytree(params):
@@ -219,14 +247,15 @@ def record_activation_metrics(metrics, intermediate_outputs, model):
                              'activation_std': activation_std_dict})
 
 
-def record_histogram_metrics(metrics, state, model):
-  histogram_dict = {}
-  for layer_num in range(model.config.num_decoder_layers):
-    histogram_dict[f'wo/layers_{layer_num}'] = state.params['decoder'][
-        f'layers_{layer_num}']['mlp']['wo']['kernel']
-    histogram_dict[f'wi/layers_{layer_num}'] = state.params['decoder'][
-        f'layers_{layer_num}']['mlp']['wi']['kernel']
-  metrics['histogram'] = histogram_dict
+def record_histogram_metrics(metrics, state, model, config, step):
+  if config.record_internal_nn_metrics and step % config.log_weight_histogram_period == 0:
+    histogram_dict = {}
+    for layer_num in range(model.config.num_decoder_layers):
+      histogram_dict[f'wo/layers_{layer_num}'] = state.params['decoder'][
+          f'layers_{layer_num}']['mlp']['wo']['kernel']
+      histogram_dict[f'wi/layers_{layer_num}'] = state.params['decoder'][
+          f'layers_{layer_num}']['mlp']['wi']['kernel']
+    metrics['histogram'] = histogram_dict
 
 
 def train_step(model, config, state, data, dropout_rng):
@@ -441,6 +470,7 @@ def train_loop(config, state=None):
   state_logical_annotations = nn.get_partition_spec(abstract_state)
   num_model_parameters = calculate_num_params_from_pytree(abstract_state.params)
   print(f"number parameters {num_model_parameters/10**9:.3f} billion")
+  per_device_tflops =  6 * num_model_parameters * config.max_target_length * config.per_device_batch_size / 10**12
   unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
   # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -503,36 +533,12 @@ def train_loop(config, state=None):
       )
 
     new_time = datetime.datetime.now()
-    metrics['scalar'].update({
-        'step_time_seconds': (new_time - last_step_completion).total_seconds()
-    })
-    metrics['scalar'].update({
-        'per_device_tflops':
-            6 * num_model_parameters * config.max_target_length *
-            config.per_device_batch_size / 10**12
-    })
-    metrics['scalar'].update({
-        'per_device_tflops/sec':
-            metrics['scalar']['per_device_tflops'] /
-            metrics['scalar']['step_time_seconds']
-    })
-    metrics['scalar'].update({'current_learning_rate': learning_rate_schedule(
-        step
-    )})
-
+    record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
+    record_histogram_metrics(metrics, state, model, config, step)
+    write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
-    if config.record_internal_nn_metrics and step % config.log_weight_histogram_period == 0:
-      record_histogram_metrics(metrics, state, model)
-    write_metrics(writer, metrics, step)
 
-    # Log some stuff.
     if step % config.log_period == 0:
-      print(f"completed {step}, per-step scalar metrics {metrics['scalar']}")
-      print(
-          f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
-      )
-      writer.flush()
-
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         seqs = p_predict_step(tokenized_prompts, state, nextrng)
         print(decode_tokens(np.array(seqs)[0], sp_tokenizer, config.eos_id))
