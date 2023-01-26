@@ -39,3 +39,11 @@ gcloud auth application-default login
 Status/TODO
 ======
 [Backlog](http://go/maxtext-backlog)
+
+Reference Run at Scale=1
+======
+If you're making a change likely to effect performance, please compare your run to the "reference" and make sure you're
+doing better. Assuming you're doing better, merge your change and update the reference.
+```
+tensorboard --logdir=gs://max-experiments/rwitten_2023-01-20-01:02:08/tensorboard/
+```
