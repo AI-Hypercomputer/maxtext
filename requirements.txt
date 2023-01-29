@@ -10,6 +10,4 @@ tensorflow
 tensorflow-datasets
 tensorflow-text
 tensorboardx
-jax==0.4.1
-jaxlib==0.4.1
-libtpu-nightly==0.1.dev20221213
+jax[tpu]
