@@ -35,6 +35,11 @@ Tensorboard: run Tensorboard on the host TPUVM via VSCode. You will need to run 
 gcloud auth application-default login
 ```
 
+Run unit tests locally
+```
+cd MaxText
+python3 -m pytest
+```
 
 Status/TODO
 ======
