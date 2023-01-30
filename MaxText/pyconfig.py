@@ -6,7 +6,14 @@ import yaml
 
 import jax
 
-_allowed_command_line_types = [str, int, float]
+def string_to_bool(s : str):
+  if s.lower() == "true":
+    return True
+  if s.lower() == "false":
+    return False
+  raise ValueError(f"Can't convert {s} to bool")
+
+_yaml_types_to_parser = {str : str, int : int, float : float, bool : string_to_bool}
 
 _config = None
 config = None
@@ -29,14 +36,14 @@ class _HyperParameters():
 
     raw_keys = OrderedDict()
     for k in raw_data_from_yaml:
-      if type(k) not in _allowed_command_line_types:
+      if k in raw_data_from_cmd_line and type(raw_data_from_yaml[k]) not in _yaml_types_to_parser:
         raise ValueError(
-            f"Type {type(k)} not in {_allowed_command_line_types}, can't pass"
-            " as at the command line"
+            f"For key '{k}', type {type(raw_data_from_yaml[k])} not in {_yaml_types_to_parser.keys()}, can't pass"
+            " at the command line"
         )
 
       if k in raw_data_from_cmd_line:
-        raw_keys[k] = type(raw_data_from_yaml[k])(
+        raw_keys[k] = _yaml_types_to_parser[type(raw_data_from_yaml[k])](
             raw_data_from_cmd_line[k]
         )  # take the command line value, but type it like the config value.
       else:
