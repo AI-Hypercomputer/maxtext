@@ -37,8 +37,7 @@ gcloud auth application-default login
 
 Run unit tests locally
 ```
-cd MaxText
-python3 -m pytest
+bash test.sh
 ```
 
 Status/TODO
