@@ -553,8 +553,6 @@ def train_loop(config, state=None):
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
-  os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = pyconfig.config.use_pjrt
-
   train_loop(pyconfig.config)
 
 
