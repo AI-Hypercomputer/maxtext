@@ -63,6 +63,14 @@ NdInitializer = Callable[
     [PRNGKey, Shape, DType, InitializerAxis, InitializerAxis], Array
 ]
 
+def activate_profiler(config):
+  if config.enable_profiler:
+    jax.profiler.start_trace(config.tensorboard_dir)
+
+def deactivate_profiler(config):
+  if config.enable_profiler:
+    jax.profiler.stop_trace()
+
 def get_first_step(state):
   with jax.spmd_mode('allow_all'):
     return int(state.step)
@@ -520,11 +528,11 @@ def train_loop(config, state=None):
   tokenized_prompts = encode_strings(
       [config.prompt], config.max_predict_length, sp_tokenizer)
 
-  last_step_completion = datetime.datetime.now()
 
   example_batch = None
+  last_step_completion = datetime.datetime.now()
+  activate_profiler(config)
 
-  # Main Loop
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(train_iter, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -547,6 +555,7 @@ def train_loop(config, state=None):
       checkpoint_manager.save(step, state)
       print("saved a checkpoint")
 
+  deactivate_profiler(config)
   writer.close()
   return state
 
