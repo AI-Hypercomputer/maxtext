@@ -33,6 +33,7 @@ base_output_directory: "gs://max-experiments"
 # Parallelism
 mesh_axes: ['data', 'worker']
 logical_axis_rules: [ ['batch', ['data', 'worker']], ['vocab', 'worker'], ['length', 'worker'], ['heads', 'worker'], ['mlp', 'worker'], ['embed', 'worker'],  ]
+data_sharding: ['data', 'worker']
 
 # Dataset
 vocab_size: 30_000

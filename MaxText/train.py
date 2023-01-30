@@ -480,7 +480,7 @@ def train_loop(config, state=None):
                                                unboxed_abstract_state,
                                                mesh,
                                                state_mesh_annotations)
-    data_pspec = P(('data','worker'), None) # Dataset Partitioning is batch-parallel.
+    data_pspec = P(config.data_sharding) # Dataset Partitioning is batch-parallel.
 
     if not state:
       state = pjit(

@@ -64,6 +64,7 @@ class _HyperParameters():
         f"{base_output_directory}/{run_name}/checkpoints/"
     )
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
+    raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
     raw_keys['emb_dim'] = raw_keys['scale'] * raw_keys['base_emb_dim']
     raw_keys['num_heads'] = raw_keys['scale'] * raw_keys['base_num_heads']
     raw_keys['mlp_dim'] = raw_keys['scale'] * raw_keys['base_mlp_dim']

@@ -80,6 +80,7 @@ def preprocessing_pipeline(
   shift: bool = True,
   drop_remainder: bool = True,
   prefetch_size = tf.data.experimental.AUTOTUNE,
+  data_sharding = None
 ):
   """Shuffle and batch/pack the given dataset."""
 
@@ -116,7 +117,7 @@ def preprocessing_pipeline(
   global_data_shape = jax.tree_map(
       lambda x: P(batch_size, max_length), dataset_structure
   )
-  data_axes = jax.tree_map(lambda x: P(('data', 'worker'), None), dataset_structure)
+  data_axes = jax.tree_map(lambda x: P(data_sharding), dataset_structure)
 
   multihost_shard_fn, multihost_gen = (
       multihost_dataloading.get_per_host_data_pipeline(
@@ -212,7 +213,8 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       num_epochs=None,
       pack_examples=True,
       max_length=config.max_target_length,
-      shift=True)
+      shift=True,
+      data_sharding = config.data_sharding)
 
   eval_iter = preprocessing_pipeline(
       eval_ds,
@@ -221,7 +223,8 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       shuffle=False,
       pack_examples=False,
       max_length=config.max_eval_target_length,
-      shift=False)
+      shift=False,
+      data_sharding = config.data_sharding)
 
   predict_iter = preprocessing_pipeline(
       eval_ds,
@@ -231,6 +234,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       pack_examples=False,
       max_length=config.max_predict_length,
       shift=False,
-      drop_remainder=False)
+      drop_remainder=False,
+      data_sharding = config.data_sharding)
 
   return train_iter, eval_iter, predict_iter, sp_tokenizer
