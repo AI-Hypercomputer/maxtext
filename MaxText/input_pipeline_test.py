@@ -21,7 +21,9 @@ class InputPipelineTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    pyconfig.initialize(sys.argv + ['configs/base.yml', 'run_name=test'], per_device_batch_size=1)
+    pyconfig.initialize(sys.argv + ['configs/base.yml'], per_device_batch_size=1, run_name='test', mesh_axes = ['data'],
+                        logical_axis_rules = [['batch', 'data']],
+                        data_sharding = ['data'])
     self.config = pyconfig.config
     self.read_config = tfds.ReadConfig()
     self.read_config.add_tfds_id = True
