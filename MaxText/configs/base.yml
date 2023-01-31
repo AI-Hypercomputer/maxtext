@@ -57,8 +57,8 @@ ici_tensor_parallelism: 1
 
 
 # Dataset
-vocab_size: 30_000
-vocab_path: "gs://cloudtpu_internal_datasets/vocabs/"  # Assumes we're allowed
+vocab_size: 32_768 # powers of 2 for sharding
+vocab_path: "gs://cloudtpu_internal_datasets/vocabs_2/"  # Assumes we're allowed
 dataset_name: 'c4/en'
 eval_dataset_name: 'c4/en'
 eval_split: 'validation'
