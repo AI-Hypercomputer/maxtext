@@ -85,24 +85,27 @@ def load_next_batch(train_iter, example_batch, config):
     return next(train_iter)
 
 
-def create_device_mesh():
+def create_device_mesh(config):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas """
   devices = jax.devices()
   num_devices = len(devices)
+  print(f"Devices: {devices} (num_devices: {num_devices}", flush = True)
   assert len(devices) > 1, "You must have at least two devices"
+
   multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
 
-  num_data_parallel_groups = choose_number_data_parallel_groups()
+  dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism, config.dcn_tensor_parallelism]
+  ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism, config.ici_tensor_parallelism]
 
-  assert num_devices % num_data_parallel_groups == 0, "Number of devices must be divisible by number of slices"
+  assert np.product(dcn_parallelism) * np.product(ici_parallelism) == num_devices, f"Number of devices {num_devices} \
+        does not match the product of the parallelism {np.product(dcn_parallelism) * np.product(ici_parallelism)}"
 
   if multi_slice_env:
-    mesh = mesh_utils.create_hybrid_device_mesh([1,num_devices//num_data_parallel_groups], [num_data_parallel_groups, 1])
+    mesh = mesh_utils.create_hybrid_device_mesh(dcn_parallelism, ici_parallelism)
   else:
-    mesh = mesh_utils.create_device_mesh([num_data_parallel_groups, num_devices//num_data_parallel_groups])
+    mesh = mesh_utils.create_device_mesh(ici_parallelism)
 
   print(f"Decided on mesh: {mesh}")
-  print(f"Using {num_devices} devices, sliced across {num_data_parallel_groups} data parallel groups")
 
   return mesh
 
@@ -401,6 +404,9 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
      At most one will be non-None. Both can be None if neither checkpoint is
      set.
   """
+  if checkpoint_manager is None:
+    print("no checkpoint manager, not restoring checkpoint")
+    return None, None
   def map_to_pspec(data, pspec):
     if isinstance(data, (jax.Array, jax.ShapeDtypeStruct)) \
           and pspec is not None:
@@ -440,7 +446,7 @@ def train_loop(config, state=None):
 
   """
   writer = SummaryWriter(config.tensorboard_dir)
-  checkpoint_manager = create_orbax_checkpoint_manager(config.checkpoint_dir)
+  checkpoint_manager = create_orbax_checkpoint_manager(config.checkpoint_dir, config.enable_checkpointing)
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(0), 2)
 
@@ -457,14 +463,14 @@ def train_loop(config, state=None):
   )
 
   # Mesh definition
-  devices_array = create_device_mesh()
+  devices_array = create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
   # Set up datasets.
   train_ds, eval_ds = get_datasets(
       config=config,
   )
-  train_iter, _, _, sp_tokenizer = preprocess_dataset(
+  train_iter, _, _, _ = preprocess_dataset(
     config,
     mesh,
     train_ds, eval_ds,
@@ -484,11 +490,11 @@ def train_loop(config, state=None):
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
     state, raw_params = load_state_if_possible(checkpoint_manager,
-                                               config.load_parameters_path,
-                                               unboxed_abstract_state,
-                                               mesh,
-                                               state_mesh_annotations)
-    data_pspec = P(config.data_sharding) # Dataset Partitioning is batch-parallel.
+                                                config.load_parameters_path,
+                                                unboxed_abstract_state,
+                                                mesh,
+                                                state_mesh_annotations)
+    data_pspec = P(*config.data_sharding) # Dataset Partitioning is batch-parallel.
 
     if not state:
       state = pjit(
@@ -496,13 +502,11 @@ def train_loop(config, state=None):
           in_axis_resources=None,
           out_axis_resources=state_mesh_annotations
       )(init_rng)
-      if raw_params:
+      if raw_params: # If we loaded a partial state, we need to merge it.
         state = state.replace(params = raw_params)
     raw_params = None
 
   state = unbox_logicallypartioned_trainstate(state)
-
-
 
   # Define compiled top-level functions.
   p_train_step = pjit(
@@ -513,20 +517,6 @@ def train_loop(config, state=None):
     out_axis_resources=(state_mesh_annotations, None, None),
     static_argnums=(0,1,),
     donate_argnums=(2))
-
-  # TODO: add held-out p_eval_step.
-
-  p_predict_step = pjit(
-      functools.partial(predict_step, model=model, config=config),
-      in_axis_resources=(P(None, None),
-                        state_mesh_annotations,
-                        None),
-      out_axis_resources=None
-  )
-
-  # Encode the demo prompt.
-  tokenized_prompts = encode_strings(
-      [config.prompt], config.max_predict_length, sp_tokenizer)
 
 
   example_batch = None
@@ -546,12 +536,7 @@ def train_loop(config, state=None):
     write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
 
-    if step % config.log_period == 0:
-      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        seqs = p_predict_step(tokenized_prompts, state, nextrng)
-        print(decode_tokens(np.array(seqs)[0], sp_tokenizer, config.eos_id))
-
-    if step > 0 and step % config.save_period == 0:
+    if step > 0 and step % config.save_period == 0 and checkpoint_manager is not None:
       checkpoint_manager.save(step, state)
       print("saved a checkpoint")
 

@@ -33,8 +33,11 @@ def _multislice_distribute_initialize():
                              num_processes=jax.process_count(),
                              process_id=jax.process_index())
 
-def create_orbax_checkpoint_manager(checkpoint_dir: str):
-  """Returns an Orbax async CheckpointManager."""
+def create_orbax_checkpoint_manager(checkpoint_dir: str, enable_checkpointing: bool):
+  """Returns an Orbax async CheckpointManager or None if checkpointing is disabled."""
+  if not enable_checkpointing:
+    print("Checkpointing disabled, not creating checkpoint manager.")
+    return None
   _multislice_distribute_initialize()
   p = epath.Path(checkpoint_dir)
   return CheckpointManager(p,

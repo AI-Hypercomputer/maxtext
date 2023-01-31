@@ -16,9 +16,6 @@ import jax
 from jax.experimental import global_device_array as gda_lib
 from jax.experimental import PartitionSpec
 from jax.experimental.maps import Mesh
-from jax.experimental.pjit import pjit
-from jax.experimental.pjit import with_sharding_constraint
-
 
 
 Pytree = Any
