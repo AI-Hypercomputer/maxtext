@@ -89,7 +89,7 @@ def create_device_mesh(config):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas """
   devices = jax.devices()
   num_devices = len(devices)
-  print(f"Devices: {devices} (num_devices: {num_devices}", flush = True)
+  print(f"Devices: {devices} (num_devices: {num_devices})", flush = True)
   assert len(devices) > 1, "You must have at least two devices"
 
   multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
@@ -171,11 +171,11 @@ def write_metrics(writer, metrics, step, config):
     full_log = step % config.log_period == 0
 
     if config.log_metrics_to_stdout or full_log:
-      print(f"completed {step}, per-step scalar metrics {metrics['scalar']}")
+      print(f"completed {step}, per-step scalar metrics {metrics['scalar']}", flush = True)
 
     if full_log:
       print(
-          f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
+          f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'", flush = True
       )
       writer.flush()
 
@@ -547,6 +547,8 @@ def train_loop(config, state=None):
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
+  os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = pyconfig.config.use_pjrt
+
   train_loop(pyconfig.config)
 
 

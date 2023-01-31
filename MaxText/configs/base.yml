@@ -5,6 +5,7 @@ run_name: ""
 # If we aren't resuming from an existing checkpoint, load parameters from this path if provided.
 load_parameters_path: ""
 
+use_pjrt: "true"
 reuse_example_batch: 0 # for testing TPU performance, this options repeated uses the same batch.
 
 # Activation dtypes.
@@ -56,8 +57,8 @@ ici_tensor_parallelism: 1
 
 
 # Dataset
-vocab_size: 30_000
-vocab_path: "gs://cloudtpu_internal_datasets/vocabs/"  # Assumes we're allowed
+vocab_size: 32_768 # powers of 2 for sharding
+vocab_path: "gs://cloudtpu_internal_datasets/vocabs_2/"  # Assumes we're allowed
 dataset_name: 'c4/en'
 eval_dataset_name: 'c4/en'
 eval_split: 'validation'
