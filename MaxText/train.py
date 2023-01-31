@@ -101,7 +101,7 @@ def create_device_mesh(config):
         does not match the product of the parallelism {np.product(dcn_parallelism) * np.product(ici_parallelism)}"
 
   if multi_slice_env:
-    mesh = mesh_utils.create_hybrid_device_mesh(dcn_parallelism, ici_parallelism)
+    mesh = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism)
   else:
     mesh = mesh_utils.create_device_mesh(ici_parallelism)
 
