@@ -30,9 +30,30 @@ record_internal_nn_metrics: 0
 base_output_directory: "gs://max-experiments"
 
 # Parallelism
-mesh_axes: ['data', 'worker']
-logical_axis_rules: [ ['batch', ['data', 'worker']], ['vocab', 'worker'], ['length', 'worker'], ['heads', 'worker'], ['mlp', 'worker'], ['embed', 'worker'],  ]
-data_sharding: ['data', 'worker']
+mesh_axes: ['data', 'fsdp', 'tensor']
+logical_axis_rules: [
+                      ['activation_batch', ['data', 'fsdp']],
+                      ['activation_length' , ['data', 'fsdp']],
+                      ['activation_embed', 'tensor'],
+                      ['activation_mlp', 'tensor'],
+                      ['activation_heads', 'tensor'],
+                      ['activation_kv', 'tensor'],
+                      ['activation_head', 'tensor'],
+                      ['activation_vocab', 'tensor'],
+                      ['mlp', ['tensor', 'data', 'fsdp']],
+                      ['vocab', ['data', 'fsdp']], #should really shard over tensor too?
+                      ['embed', ['tensor', 'data', 'fsdp']],
+                      ['kv', ['tensor', 'data', 'fsdp']],
+                    ]
+data_sharding: [['data', 'fsdp', 'tensor']]
+
+dcn_data_parallelism: 1
+dcn_fsdp_parallelism: 1
+dcn_tensor_parallelism: 1
+ici_data_parallelism: 1
+ici_fsdp_parallelism: 4
+ici_tensor_parallelism: 1
+
 
 # Dataset
 vocab_size: 30_000
@@ -69,3 +90,4 @@ eos_id: 2  # sentencepiece default
 prompt: "I love to "
 
 enable_profiler: False
+enable_checkpointing: True

@@ -290,11 +290,11 @@ class MultiHeadDotProductAttention(nn.Module):
     value = projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
     query = nn.with_logical_constraint(
-        query, ('batch', 'length', 'heads', 'kv')
+        query, ('activation_batch', 'activation_length', 'activation_heads', 'activation_kv')
     )
-    key = nn.with_logical_constraint(key, ('batch', 'length', 'heads', 'kv'))
+    key = nn.with_logical_constraint(key, ('activation_batch', 'activation_length', 'activation_heads', 'activation_kv'))
     value = nn.with_logical_constraint(
-        value, ('batch', 'length', 'heads', 'kv')
+        value, ('activation_batch', 'activation_length', 'activation_heads', 'activation_kv')
     )
 
     if decode:
@@ -455,7 +455,7 @@ class MlpBlock(nn.Module):
     x = nn.Dropout(
         rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
             x, deterministic=deterministic)  # Broadcast along length.
-    x = nn.with_logical_constraint(x, ('batch', 'length', 'mlp'))
+    x = nn.with_logical_constraint(x, ('activation_batch', 'activation_length', 'activation_mlp'))
     output = DenseGeneral(
         inputs.shape[-1],
         dtype=self.dtype,
@@ -542,7 +542,7 @@ class Embed(nn.Module):
       output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
     else:
       output = jnp.asarray(self.embedding, self.dtype)[inputs]
-      output = nn.with_logical_constraint(output, ('batch', 'length', 'embed'))
+      output = nn.with_logical_constraint(output, ('activation_batch', 'activation_length', 'activation_embed'))
     return output
 
   def attend(self, query: Array) -> Array:
@@ -917,13 +917,13 @@ class DecoderLayer(nn.Module):
                                                         'uniform'),
         name='relpos_bias')(l, l, False)
 
-    inputs = nn.with_logical_constraint(inputs, ('batch', 'length', 'embed'))
+    inputs = nn.with_logical_constraint(inputs, ('activation_batch', 'activation_length', 'activation_embed'))
 
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = LayerNorm(
         dtype=cfg.dtype, name='pre_self_attention_layer_norm')(
             inputs)
-    lnx = nn.with_logical_constraint(lnx, ('batch', 'length', 'embed'))
+    lnx = nn.with_logical_constraint(lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
     # Self-attention block
     attention_lnx = MultiHeadDotProductAttention(
@@ -938,7 +938,7 @@ class DecoderLayer(nn.Module):
             decoder_bias,
             deterministic=deterministic,
             decode=decode)
-    attention_lnx = nn.with_logical_constraint(attention_lnx, ('batch', 'length', 'embed'))
+    attention_lnx = nn.with_logical_constraint(attention_lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
     # MLP block.
     mlp_lnx = MlpBlock(
@@ -948,7 +948,7 @@ class DecoderLayer(nn.Module):
         dtype=cfg.dtype,
         name='mlp',
     )(lnx, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ('batch', 'length', 'embed'))
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
     next_layer_addition = mlp_lnx + attention_lnx
 
@@ -957,7 +957,7 @@ class DecoderLayer(nn.Module):
             next_layer_addition, deterministic=deterministic)
 
     layer_output = next_layer_addition_dropped_out + inputs
-    layer_output = nn.with_logical_constraint(layer_output, ('batch', 'length', 'embed'))
+    layer_output = nn.with_logical_constraint(layer_output, ('activation_batch', 'activation_length', 'activation_embed'))
 
     if cfg.scan_layers:
       return layer_output, None
@@ -1052,6 +1052,7 @@ class Decoder(nn.Module):
           kernel_axes=('embed', 'vocab'),
           name='logits_dense')(
               y)
+    logits = nn.with_logical_constraint(logits, ('activation_batch', 'activation_length', 'activation_vocab'))
     return logits
 
 
