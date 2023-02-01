@@ -39,12 +39,11 @@ logical_axis_rules: [
                       ['activation_mlp', 'tensor'],
                       ['activation_heads', 'tensor'],
                       ['activation_kv', 'tensor'],
-                      ['activation_head', 'tensor'],
                       ['activation_vocab', 'tensor'],
-                      ['mlp', ['tensor', 'data', 'fsdp']],
-                      ['vocab', ['data', 'fsdp']], #should really shard over tensor too?
-                      ['embed', ['tensor', 'data', 'fsdp']],
-                      ['kv', ['tensor', 'data', 'fsdp']],
+                      ['mlp', ['tensor', 'fsdp']],
+                      ['vocab', ['tensor', 'fsdp']],
+                      ['embed', ['tensor', 'fsdp']],
+                      ['kv', ['tensor', 'fsdp']],
                     ]
 data_sharding: [['data', 'fsdp', 'tensor']]
 
