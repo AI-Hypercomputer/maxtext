@@ -314,7 +314,7 @@ class MultiHeadDotProductAttention(nn.Module):
       cache_index = self.variable('cache', 'cache_index',
                                   lambda: jnp.array(0, dtype=jnp.int32))
       if is_initialized:
-        batch, num_heads, head_dim, length = (cached_key.value.shape)
+        batch, num_heads, head_dim, length = cached_key.value.shape
         # During fast autoregressive decoding, we feed one position at a time,
         # and cache the keys and values step by step.
         # Sanity shape check of cached key against input query.
@@ -619,7 +619,7 @@ class RelativePositionBiases(nn.Module):
       n = np.maximum(n, 0)
     # now n is in the range [0, inf)
     max_exact = num_buckets // 2
-    is_small = (n < max_exact)
+    is_small = n < max_exact
     val_if_large = max_exact + (
         np.log(n.astype(np.float32) / max_exact + np.finfo(np.float32).eps) /
         np.log(max_distance / max_exact) *

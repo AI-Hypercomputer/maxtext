@@ -516,7 +516,7 @@ def train_loop(config, state=None):
                        None),
     out_axis_resources=(state_mesh_annotations, None, None),
     static_argnums=(0,1,),
-    donate_argnums=(2))
+    donate_argnums=2)
 
 
   example_batch = None
