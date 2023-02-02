@@ -542,7 +542,7 @@ class Embed(nn.Module):
       output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
     else:
       output = jnp.asarray(self.embedding, self.dtype)[inputs]
-      output = nn.with_logical_constraint(output, ('activation_batch', 'activation_length', 'activation_embed'))
+    output = nn.with_logical_constraint(output, ('activation_batch', 'activation_length', 'activation_embed'))
     return output
 
   def attend(self, query: Array) -> Array:
@@ -1070,7 +1070,7 @@ class Transformer(nn.Module):
         dtype=cfg.dtype,
         attend_dtype=jnp.float32,  # for logit training stability
         embedding_init=nn.initializers.normal(stddev=1.0),
-        one_hot=True,
+        one_hot=False,
         name='token_embedder')
 
     self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding)
