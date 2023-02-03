@@ -503,8 +503,6 @@ class Embed(nn.Module):
     features: number of feature dimensions for each embedding.
     dtype: the dtype of the embedding vectors (default: float32).
     embedding_init: embedding initializer.
-    one_hot: performs the gather with a one-hot contraction rather than a true
-      gather. This is currently needed for SPMD partitioning.
   """
   num_embeddings: int
   features: int
@@ -512,7 +510,6 @@ class Embed(nn.Module):
   dtype: DType = jnp.float32
   attend_dtype: Optional[DType] = None
   embedding_init: Initializer = default_embed_init
-  one_hot: bool = False
   embedding: Array = dataclasses.field(init=False)
 
   def setup(self):
@@ -536,13 +533,8 @@ class Embed(nn.Module):
       inputs = inputs.astype(self.cast_input_dtype)
     if not jnp.issubdtype(inputs.dtype, jnp.integer):
       raise ValueError('Input type must be an integer or unsigned integer.')
-    if self.one_hot:
-      iota = lax.iota(jnp.int32, self.num_embeddings)
-      one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
-      output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
-    else:
-      output = jnp.asarray(self.embedding, self.dtype)[inputs]
-    output = nn.with_logical_constraint(output, ('activation_batch', 'activation_length', 'activation_embed'))
+    output = jnp.asarray(self.embedding, self.dtype)[inputs]
+    output = nn.with_logical_constraint(output, ('batch', 'length', 'embed'))
     return output
 
   def attend(self, query: Array) -> Array:
@@ -1070,7 +1062,6 @@ class Transformer(nn.Module):
         dtype=cfg.dtype,
         attend_dtype=jnp.float32,  # for logit training stability
         embedding_init=nn.initializers.normal(stddev=1.0),
-        one_hot=False,
         name='token_embedder')
 
     self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding)
