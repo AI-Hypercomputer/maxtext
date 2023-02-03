@@ -10,7 +10,7 @@ except ImportError:
   from jax._src.clusters.cloud_tpu_cluster import get_metadata
 from orbax import checkpoint
 from orbax.checkpoint.async_checkpointer import AsyncCheckpointer
-from orbax.checkpoint.checkpoint_manager import CheckpointManager
+from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions
 
 def _multislice_distribute_initialize():
   """Calls jax.distribute.initialize() with appropriate multislice arguments."""
@@ -41,4 +41,5 @@ def create_orbax_checkpoint_manager(checkpoint_dir: str, enable_checkpointing: b
   _multislice_distribute_initialize()
   p = epath.Path(checkpoint_dir)
   return CheckpointManager(p,
-                           AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler()))
+                           AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler()),
+                           options = CheckpointManagerOptions(create=True))
