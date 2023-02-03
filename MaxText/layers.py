@@ -534,7 +534,7 @@ class Embed(nn.Module):
     if not jnp.issubdtype(inputs.dtype, jnp.integer):
       raise ValueError('Input type must be an integer or unsigned integer.')
     output = jnp.asarray(self.embedding, self.dtype)[inputs]
-    output = nn.with_logical_constraint(output, ('batch', 'length', 'embed'))
+    output = nn.with_logical_constraint(output, ('activation_batch', 'activation_length', 'activation_embed'))
     return output
 
   def attend(self, query: Array) -> Array:
