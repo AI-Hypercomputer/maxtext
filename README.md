@@ -23,6 +23,11 @@ To run a training job:
 ```
 python3 MaxText/train.py MaxText/configs/base.yml run_name=${USER}_$(date "+%Y-%m-%d-%H:%M:%S")
 ```
+To run a multihost training job:
+
+```
+python3 multihost_runner.py --TPU_PREFIX=<tpu_prefix> --COMMAND="python3 MaxText/train.py MaxText/configs/base.yml run_name=${USER}"
+```
 
 To lint:
 ```
