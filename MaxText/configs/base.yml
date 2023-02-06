@@ -69,7 +69,6 @@ max_corpus_chars: 10_000_000
 steps: 50_000
 log_period: 1_000
 log_metrics_to_stdout: True
-log_weight_histogram_period: 100
 save_period: 1_000
 learning_rate: 1.e-5
 warmup_steps: 70_000
