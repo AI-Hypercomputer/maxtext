@@ -36,13 +36,16 @@ class _HyperParameters():
 
     raw_keys = OrderedDict()
     for k in raw_data_from_yaml:
-      if k in raw_data_from_cmd_line and type(raw_data_from_yaml[k]) not in _yaml_types_to_parser:
+      if k in raw_data_from_cmd_line and not isinstance(raw_data_from_cmd_line[k], type(raw_data_from_yaml[k])) and \
+                                         type(raw_data_from_yaml[k]) not in _yaml_types_to_parser:
         raise ValueError(
             f"For key '{k}', type {type(raw_data_from_yaml[k])} not in {_yaml_types_to_parser.keys()}, can't pass"
             " at the command line"
         )
 
-      if k in raw_data_from_cmd_line:
+      if k in raw_data_from_cmd_line and isinstance(raw_data_from_cmd_line[k], type(raw_data_from_yaml[k])):
+        raw_keys[k] = raw_data_from_cmd_line[k] # take the raw data, no type conversion
+      elif k in raw_data_from_cmd_line:
         raw_keys[k] = _yaml_types_to_parser[type(raw_data_from_yaml[k])](
             raw_data_from_cmd_line[k]
         )  # take the command line value, but type it like the config value.

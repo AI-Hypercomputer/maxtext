@@ -23,6 +23,7 @@ from layers import Transformer
 import pyconfig
 from input_pipeline import get_datasets
 from input_pipeline import preprocess_dataset
+import max_utils
 import temperature_sampler
 from checkpointing import create_orbax_checkpoint_manager
 
@@ -144,17 +145,17 @@ def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   """Records scalar metrics to be written to tensorboard"""
   metrics['scalar'].update({
-      'step_time_seconds': step_time_delta.total_seconds()
+      'perf/step_time_seconds': step_time_delta.total_seconds()
   })
   metrics['scalar'].update({
-      'per_device_tflops' : per_device_tflops
+      'perf/per_device_tflops' : per_device_tflops
   })
   metrics['scalar'].update({
-      'per_device_tflops/sec':
-          metrics['scalar']['per_device_tflops'] /
-          metrics['scalar']['step_time_seconds']
+      'perf/per_device_tflops_per_sec':
+          per_device_tflops /
+          step_time_delta.total_seconds()
   })
-  metrics['scalar'].update({'current_learning_rate': lr })
+  metrics['scalar'].update({'learning/current_learning_rate': lr })
 
 
 def write_metrics(writer, metrics, step, config):
@@ -165,13 +166,13 @@ def write_metrics(writer, metrics, step, config):
         writer.add_scalar(metric_name, metrics["scalar"][metric_name], step)
       for metric_name in metrics.get("scalars",[]):
         writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
-      for metric_name in metrics.get("histogram",[]):
-        writer.add_histogram(metric_name, metrics["histogram"][metric_name], step)
 
     full_log = step % config.log_period == 0
 
-    if config.log_metrics_to_stdout or full_log:
-      print(f"completed {step}, per-step scalar metrics {metrics['scalar']}", flush = True)
+    if full_log or config.log_metrics_to_stdout:
+      print(f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
+            f"TFLOP/s: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
+            f"loss {metrics['scalar']['learning/loss']:.3f}")
 
     if full_log:
       print(
@@ -232,42 +233,23 @@ def init_train_state(model, tx, config, key):
   return state
 
 
-def compute_activation_metrics(activations):
-  # activation_mat is batch x target_length x mlp (hidden layer size.)
-  # A neuron is counted as dead if it has
-  # an activation of zero among the entire batch.
-  # Returns three scalars:
-  #   count of dead neurons, mean of activations, std of activations
-  batch_sum_activations = jnp.ravel(jnp.sum(activations, axis=0))
-  return jnp.sum(
-      batch_sum_activations == 0)/jnp.size(batch_sum_activations), jnp.mean(activations), jnp.std(activations)
-
-
-def record_activation_metrics(metrics, intermediate_outputs, model):
+def record_activation_metrics(output_metrics, intermediate_outputs, config):
   """ Adds the activation metrics to the metrics dict"""
-  dead_neuron_dict, activation_mean_dict, activation_std_dict = {}, {}, {}
-  for layer_num in range(model.config.num_decoder_layers):
-    activation_metrics = compute_activation_metrics(intermediate_outputs['intermediates']['decoder']
-                         [f'layers_{layer_num}']['mlp']['activations'][0])
-    dead_neuron_dict[f'dead_neurons_layers_{layer_num}'] = activation_metrics[0]
-    activation_mean_dict[f'activation_mean_layers_{layer_num}'] = activation_metrics[1]
-    activation_std_dict[f'activation_std_layers_{layer_num}'] = activation_metrics[2]
 
-  metrics['scalars'].update({'dead_neuron_fraction': dead_neuron_dict,
-                             'activation_mean': activation_mean_dict,
-                             'activation_std': activation_std_dict})
+  if config.scan_layers:
+    metrics_dict = intermediate_outputs['intermediates']['decoder']['decoder']
 
-
-def record_histogram_metrics(metrics, state, model, config, step):
-  if config.record_internal_nn_metrics and step % config.log_weight_histogram_period == 0:
-    histogram_dict = {}
-    for layer_num in range(model.config.num_decoder_layers):
-      histogram_dict[f'wo/layers_{layer_num}'] = state.params['decoder'][
-          f'layers_{layer_num}']['mlp']['wo']['kernel']
-      histogram_dict[f'wi/layers_{layer_num}'] = state.params['decoder'][
-          f'layers_{layer_num}']['mlp']['wi']['kernel']
-    metrics['histogram'] = histogram_dict
-
+    for layer_num in range(config.num_decoder_layers):
+      output_metrics['scalar'][f'activ_fraction_zero/layer_{layer_num:03d}'] = \
+        metrics_dict["activation_fraction_zero"][0][layer_num]
+      output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = metrics_dict["activation_mean"][0][layer_num]
+      output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = metrics_dict["activation_stdev"][0][layer_num]
+  else:
+    for layer_num in range(config.num_decoder_layers):
+      layer = intermediate_outputs['intermediates']['decoder'][f'layers_{layer_num}']
+      output_metrics['scalar'][f'activ_fraction_zero/layer_{layer_num:03d}'] = layer["activation_fraction_zero"][0]
+      output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = layer["activation_mean"][0]
+      output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
 
 def train_step(model, config, state, data, dropout_rng):
   """
@@ -304,10 +286,9 @@ def train_step(model, config, state, data, dropout_rng):
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), grads = grad_fn(state.params)
   new_state = state.apply_gradients(grads=grads)
-
-  metrics = {'scalar': {'loss': loss}, 'scalars': {}}
+  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads)}, 'scalars': {}}
   if config.record_internal_nn_metrics:
-    record_activation_metrics(metrics, intermediate_outputs, model)
+    record_activation_metrics(metrics, intermediate_outputs, config)
 
   return new_state, metrics, rng2
 
@@ -532,7 +513,6 @@ def train_loop(config, state=None):
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
-    record_histogram_metrics(metrics, state, model, config, step)
     write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
 

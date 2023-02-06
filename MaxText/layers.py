@@ -446,7 +446,6 @@ class MlpBlock(nn.Module):
           name=dense_name)(
               inputs)
       x = _convert_to_activation_function(act_fn)(x)
-      self.sow('intermediates', 'activations', x)
       activations.append(x)
 
     # Take elementwise product of above intermediate activations.
@@ -951,6 +950,11 @@ class DecoderLayer(nn.Module):
     layer_output = next_layer_addition_dropped_out + inputs
     layer_output = nn.with_logical_constraint(layer_output, ('activation_batch', 'activation_length', 'activation_embed'))
 
+    if cfg.record_internal_nn_metrics:
+      self.sow('intermediates', 'activation_mean', jnp.mean(layer_output))
+      self.sow('intermediates', 'activation_stdev', jnp.std(layer_output))
+      self.sow('intermediates', 'activation_fraction_zero', jnp.sum(layer_output==0) / jnp.size(layer_output))
+
     if cfg.scan_layers:
       return layer_output, None
     else:
@@ -1002,7 +1006,8 @@ class Decoder(nn.Module):
           BlockLayer,
           variable_axes={
               'params': params_spec,
-              'cache': cache_spec
+              'cache': cache_spec,
+              'intermediates': 0
           },
           split_rngs={
               'params': True,
