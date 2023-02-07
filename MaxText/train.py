@@ -1,22 +1,14 @@
 # pylint: disable=g-bad-todo, abstract-method
 """Training loop and Decoding of the model."""
-import functools
-from typing import Callable, Iterable, Sequence, Tuple, Union
+from typing import Sequence
 
 import os
 import datetime
 from absl import app
-from etils import epath
-import flax
-from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
 import numpy as np
 import optax
-from orbax.checkpoint.checkpoint_manager import CheckpointManager
-from orbax.checkpoint.checkpointer import Checkpointer
-from orbax import checkpoint
-from orbax.checkpoint import type_handlers
 from tensorboardX import SummaryWriter
 
 from layers import Transformer
@@ -25,14 +17,13 @@ from input_pipeline import get_datasets
 from input_pipeline import preprocess_dataset
 import max_utils
 import temperature_sampler
-from checkpointing import create_orbax_checkpoint_manager
+import checkpointing
 
 
 
 import jax
 import jax.numpy as jnp
 from jax import random
-from jax.experimental import mesh_utils
 from jax.experimental.pjit import pjit
 from jax.experimental.pjit import PartitionSpec as P
 from jax.experimental.maps import Mesh
@@ -47,31 +38,6 @@ os.environ["TFDS_DATA_DIR"] = "gs://tensorflow-datasets/datasets"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
 
-
-# -----------------------------------------------------------------------------
-# Types
-# -----------------------------------------------------------------------------
-
-Array = jnp.ndarray
-DType = jnp.dtype
-PRNGKey = jnp.ndarray
-Shape = Iterable[int]
-Activation = Callable[..., Array]
-# Parameter initializers.
-Initializer = Callable[[PRNGKey, Shape, DType], Array]
-InitializerAxis = Union[int, Tuple[int, ...]]
-NdInitializer = Callable[
-    [PRNGKey, Shape, DType, InitializerAxis, InitializerAxis], Array
-]
-
-def activate_profiler(config):
-  if config.enable_profiler:
-    jax.profiler.start_trace(config.tensorboard_dir)
-
-def deactivate_profiler(config):
-  if config.enable_profiler:
-    jax.profiler.stop_trace()
-
 def get_first_step(state):
   with jax.spmd_mode('allow_all'):
     return int(state.step)
@@ -84,63 +50,6 @@ def load_next_batch(train_iter, example_batch, config):
     return example_batch
   else:
     return next(train_iter)
-
-
-def create_device_mesh(config):
-  """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas """
-  devices = jax.devices()
-  num_devices = len(devices)
-  print(f"Devices: {devices} (num_devices: {num_devices})", flush = True)
-  assert len(devices) > 1, "You must have at least two devices"
-
-  multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
-
-  dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism, config.dcn_tensor_parallelism]
-  ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism, config.ici_tensor_parallelism]
-
-  assert np.product(dcn_parallelism) * np.product(ici_parallelism) == num_devices, f"Number of devices {num_devices} \
-        does not match the product of the parallelism {np.product(dcn_parallelism) * np.product(ici_parallelism)}"
-
-  if multi_slice_env:
-    mesh = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism)
-  else:
-    mesh = mesh_utils.create_device_mesh(ici_parallelism)
-
-  print(f"Decided on mesh: {mesh}")
-
-  return mesh
-
-
-def choose_number_data_parallel_groups():
-  """Chooses the balance between FSDP and data parallelism based on the number of pods. If single-pod, uses two replicas """
-  devices = jax.devices()
-  assert len(devices) > 1, "You must have at least two devices"
-  if hasattr(jax.devices(), 'slice_index'):
-    return 1 + max(d.slice_index for d in devices)
-  else:
-    return 2 # default to 2 replicas
-
-
-# Learning Rate Schedule
-# -----------------------------------------------------------------------------
-# learning rate scheduling
-def rsqrt_schedule(init_value: float, shift: int = 0):
-  def schedule(count):
-    return init_value * (1 + count + shift)**-.5 * shift**.5
-  return schedule
-
-
-def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
-  """Creates a rsqrt schedule with linear warmup."""
-  return optax.join_schedules([
-      optax.linear_schedule(
-          init_value=0,
-          end_value=learning_rate,
-          transition_steps=warmup_steps
-          ),
-      rsqrt_schedule(init_value=learning_rate, shift=warmup_steps),
-      ], boundaries=[warmup_steps],
-      )
 
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   """Records scalar metrics to be written to tensorboard"""
@@ -172,7 +81,7 @@ def write_metrics(writer, metrics, step, config):
     if full_log or config.log_metrics_to_stdout:
       print(f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
             f"TFLOP/s: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-            f"loss {metrics['scalar']['learning/loss']:.3f}")
+            f"loss: {metrics['scalar']['learning/loss']:.3f}")
 
     if full_log:
       print(
@@ -186,25 +95,6 @@ def calculate_num_params_from_pytree(params):
   params_sizes = jax.tree_util.tree_map(jax.numpy.size, params)
   total_parameters = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes)
   return total_parameters
-
-
-# Tokenization and De-tokenization helpers.
-# ---------------------------------------------------------------------------
-
-
-def decode_tokens(toks, tokenizer, eos_id):
-  valid_toks = toks[:np.argmax(toks == eos_id) + 1].astype(np.int32)
-  return tokenizer.detokenize(valid_toks).numpy().decode("utf-8")
-
-
-def encode_strings(strs, max_len, tokenizer):
-  tokenized_batch = np.zeros((len(strs), max_len), np.int32)
-  for i, s in enumerate(strs):
-    toks = tokenizer.tokenize(s).numpy()
-    # Remove EOS token in prompt.
-    tokenized_batch[i, :toks.shape[0]-1] = toks[:-1]
-  return tokenized_batch
-
 
 # -----------------------------------------------------------------------------
 # Top-level Functions
@@ -345,76 +235,6 @@ def predict_step(inputs,
 
   return seqs
 
-def unbox_logicallypartioned_trainstate(
-    boxed_train_state: train_state.TrainState):
-  """ Unboxes the flax.LogicallyPartitioned pieces in a train state.
-
-    Args:
-      boxed_train_state: a train state that includes LogicallyPartitioned
-        leaves.
-    Returns:
-      a TrainState where all all LogicallyPartitioned leaves have been unboxed.
-  """
-  return jax.tree_util.tree_map(lambda x: x.unbox() if \
-        isinstance(x, flax.linen.spmd.LogicallyPartitioned) \
-        else x, boxed_train_state, \
-        is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned))
-
-def load_state_if_possible(checkpoint_manager: CheckpointManager,
-                           first_checkpoint_path: str,
-                           abstract_unboxed_pre_state: train_state.TrainState,
-                           mesh,
-                           state_mesh_annotations):
-  """Loads TrainState as possible from the inputs.
-
-  Args:
-    checkpoint_manager: if the checkpoint_manager has a valid checkpoint, return
-      that TrainState. This enables a full reload of a run in progress.
-    first_checkpoint_path: if there is no checkpoint in the checkpoint manager,
-      return the Params from the first_checkpoint_path if they exist. This
-      enables loading just the parameters and is intended for finetuning.
-    abstract_unboxed_pre_state: an unboxed, abstract TrainState that Orbax
-      matches type against.
-    mesh: a physical TPU mesh
-    state_mesh_annotation: a PyTree of sharding rules, matching
-      abstract_unboxed_pre_state.
-
-  Returns:
-    A tuple of (train_state, train_state_params) where full_train_state captures
-     a full reload and train_state_params just the params for a partial reload.
-     At most one will be non-None. Both can be None if neither checkpoint is
-     set.
-  """
-  if checkpoint_manager is None:
-    print("no checkpoint manager, not restoring checkpoint")
-    return None, None
-  def map_to_pspec(data, pspec):
-    if isinstance(data, (jax.Array, jax.ShapeDtypeStruct)) \
-          and pspec is not None:
-      return type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
-    else:
-      return type_handlers.RestoreArgs()
-
-  restore_args = jax.tree_util.tree_map(map_to_pspec,
-                                        abstract_unboxed_pre_state,
-                                        state_mesh_annotations)
-  latest_step = checkpoint_manager.latest_step()
-  if latest_step is not None:
-    print(f"restoring state from this run's directory latest step \
-        {latest_step}")
-    return checkpoint_manager.restore(latest_step, abstract_unboxed_pre_state,
-                                      {"restore_args" : restore_args}), None
-  elif first_checkpoint_path != "":
-    print(f"restoring state from first_checkpoint_path {first_checkpoint_path}")
-    p = epath.Path(first_checkpoint_path)
-    checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
-    return None, checkpointer.restore(p,
-                                      item=abstract_unboxed_pre_state,
-                                      restore_args=restore_args).params
-  else:
-    print("not restoring checkpoint")
-    return None, None
-
 def train_loop(config, state=None):
   """Main Training loop.
 
@@ -427,24 +247,24 @@ def train_loop(config, state=None):
 
   """
   writer = SummaryWriter(config.tensorboard_dir)
-  checkpoint_manager = create_orbax_checkpoint_manager(config.checkpoint_dir, config.enable_checkpointing)
+  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir, config.enable_checkpointing)
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(0), 2)
 
   # Model and Optimizer definition
   model = Transformer(config)
-  learning_rate_schedule = create_learning_rate_schedule(
+  learning_rate_schedule = max_utils.create_learning_rate_schedule(
       learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
   )
 
   tx = optax.adam(
-      create_learning_rate_schedule(
+      max_utils.create_learning_rate_schedule(
           learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
       )
   )
 
   # Mesh definition
-  devices_array = create_device_mesh(config)
+  devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
   # Set up datasets.
@@ -458,36 +278,12 @@ def train_loop(config, state=None):
     vocab_path=config.vocab_path,
   )
 
-  # Abstract initialization
-  init_train_state_partial = functools.partial(init_train_state, model, tx,
-                                               config)
-  abstract_state = jax.eval_shape(init_train_state_partial, init_rng)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  num_model_parameters = calculate_num_params_from_pytree(abstract_state.params)
-  print(f"number parameters {num_model_parameters/10**9:.3f} billion")
+  state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  data_pspec = P(*config.data_sharding)
+
+  num_model_parameters = calculate_num_params_from_pytree(state.params)
+  print(f"number parameters: {num_model_parameters/10**9:.3f} billion")
   per_device_tflops =  6 * num_model_parameters * config.max_target_length * config.per_device_batch_size / 10**12
-  unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
-  # Initialization
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-    state, raw_params = load_state_if_possible(checkpoint_manager,
-                                                config.load_parameters_path,
-                                                unboxed_abstract_state,
-                                                mesh,
-                                                state_mesh_annotations)
-    data_pspec = P(*config.data_sharding) # Dataset Partitioning is batch-parallel.
-
-    if not state:
-      state = pjit(
-          init_train_state_partial,
-          in_axis_resources=None,
-          out_axis_resources=state_mesh_annotations
-      )(init_rng)
-      if raw_params: # If we loaded a partial state, we need to merge it.
-        state = state.replace(params = raw_params)
-    raw_params = None
-
-  state = unbox_logicallypartioned_trainstate(state)
 
   # Define compiled top-level functions.
   p_train_step = pjit(
@@ -502,7 +298,7 @@ def train_loop(config, state=None):
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
-  activate_profiler(config)
+  max_utils.activate_profiler(config)
 
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(train_iter, example_batch, config)
@@ -520,7 +316,7 @@ def train_loop(config, state=None):
       checkpoint_manager.save(step, state)
       print("saved a checkpoint")
 
-  deactivate_profiler(config)
+  max_utils.deactivate_profiler(config)
   writer.close()
   return state
 

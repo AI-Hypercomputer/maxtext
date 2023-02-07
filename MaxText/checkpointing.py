@@ -10,7 +10,10 @@ except ImportError:
   from jax._src.clusters.cloud_tpu_cluster import get_metadata
 from orbax import checkpoint
 from orbax.checkpoint.async_checkpointer import AsyncCheckpointer
-from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions
+from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, Checkpointer
+from orbax.checkpoint import type_handlers
+
+from flax.training import train_state
 
 def _multislice_distribute_initialize():
   """Calls jax.distribute.initialize() with appropriate multislice arguments."""
@@ -43,3 +46,59 @@ def create_orbax_checkpoint_manager(checkpoint_dir: str, enable_checkpointing: b
   return CheckpointManager(p,
                            AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler()),
                            options = CheckpointManagerOptions(create=True))
+
+
+def load_state_if_possible(checkpoint_manager: CheckpointManager,
+                           first_checkpoint_path: str,
+                           abstract_unboxed_pre_state: train_state.TrainState,
+                           mesh,
+                           state_mesh_annotations):
+  """Loads TrainState as possible from the inputs.
+
+  Args:
+    checkpoint_manager: if the checkpoint_manager has a valid checkpoint, return
+      that TrainState. This enables a full reload of a run in progress.
+    first_checkpoint_path: if there is no checkpoint in the checkpoint manager,
+      return the Params from the first_checkpoint_path if they exist. This
+      enables loading just the parameters and is intended for finetuning.
+    abstract_unboxed_pre_state: an unboxed, abstract TrainState that Orbax
+      matches type against.
+    mesh: a physical TPU mesh
+    state_mesh_annotation: a PyTree of sharding rules, matching
+      abstract_unboxed_pre_state.
+
+  Returns:
+    A tuple of (train_state, train_state_params) where full_train_state captures
+     a full reload and train_state_params just the params for a partial reload.
+     At most one will be non-None. Both can be None if neither checkpoint is
+     set.
+  """
+  if checkpoint_manager is None:
+    print("no checkpoint manager, not restoring checkpoint")
+    return None, None
+  def map_to_pspec(data, pspec):
+    if isinstance(data, (jax.Array, jax.ShapeDtypeStruct)) \
+          and pspec is not None:
+      return type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
+    else:
+      return type_handlers.RestoreArgs()
+
+  restore_args = jax.tree_util.tree_map(map_to_pspec,
+                                        abstract_unboxed_pre_state,
+                                        state_mesh_annotations)
+  latest_step = checkpoint_manager.latest_step()
+  if latest_step is not None:
+    print(f"restoring state from this run's directory latest step \
+        {latest_step}")
+    return checkpoint_manager.restore(latest_step, abstract_unboxed_pre_state,
+                                      {"restore_args" : restore_args}), None
+  elif first_checkpoint_path != "":
+    print(f"restoring state from first_checkpoint_path {first_checkpoint_path}")
+    p = epath.Path(first_checkpoint_path)
+    checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
+    return None, checkpointer.restore(p,
+                                      item=abstract_unboxed_pre_state,
+                                      restore_args=restore_args).params
+  else:
+    print("not restoring checkpoint")
+    return None, None
