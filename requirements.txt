@@ -5,6 +5,7 @@ numpy
 optax
 portpicker
 pylint
+pytest
 sentencepiece
 tensorflow
 tensorflow-datasets
