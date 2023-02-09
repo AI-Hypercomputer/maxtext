@@ -21,6 +21,14 @@ import sys
 cc.initialize_cache(os.path.expanduser("~/jax_cache_2"))
 
 
+def activate_profiler(profiler_path):
+  if profiler_path:
+    jax.profiler.start_trace(profiler_path)
+
+def deactivate_profiler(profiler_path):
+  if profiler_path:
+    jax.profiler.stop_trace()
+
 def simple_timeit(f, tries = 5, verbose = True):
   '''Simple utility to time a function for multiple runs'''
   outcomes = []
@@ -139,12 +147,13 @@ pjit_gen_layers = pjit(
         out_axis_resources=parameter_sharding
       )
 
+activate_profiler(sys.argv[2])
 
 with maps.Mesh(mesh.devices, mesh.axis_names):
   key = jax.random.PRNGKey(0)
   presharded_X = jax.block_until_ready(pjit_gen_data(key))
   presharded_layers = jax.block_until_ready(pjit_gen_layers(key))
   TFLOPs_per_device = parameters * 6 * BATCH  / 10**12 / len(jax.devices())
-  with jax.profiler.trace("/tmp/tb12"):
-    time = simple_timeit(lambda : jax.block_until_ready(pjit_func(presharded_X, presharded_layers)))
+  time = simple_timeit(lambda : jax.block_until_ready(pjit_func(presharded_X, presharded_layers)))
   print(f"time is {time} seconds, TFLOP is {TFLOPs_per_device}, TFLOP/s is {TFLOPs_per_device/time}", flush = True)
+deactivate_profiler(sys.argv[2])
