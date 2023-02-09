@@ -21,7 +21,7 @@ mlp_activations: ["relu"]
 dropout_rate: 0
 logits_via_embedding: True  # NOTE: this is True just for testing.
 # minimal, full, or none
-remat_policy: 'full'
+remat_policy: 'minimal'
 scan_layers: True
 param_scan_axis: 1
 
@@ -61,20 +61,20 @@ vocab_path: "gs://cloudtpu_internal_datasets/vocabs_2/"  # Assumes we're allowed
 dataset_name: 'c4/en'
 eval_dataset_name: 'c4/en'
 eval_split: 'validation'
-per_device_batch_size: 256
+per_device_batch_size: 32
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
 
 # Training loop
-steps: 50_000
-log_period: 1_000
+steps: 150_001
+log_period: 10_000
 log_metrics_to_stdout: True
-save_period: 1_000
-learning_rate: 1.e-5
-warmup_steps: 70_000
+save_period: 10_000
+learning_rate: 3.e-5
+warmup_steps: 15_000
 
 # Maximum length cutoff for training examples.
-max_target_length: 128
+max_target_length: 1024
 # Maximum length cutoff for held-out evaluation examples.
 max_eval_target_length: 512
 
@@ -90,3 +90,4 @@ prompt: "I love to "
 
 enable_profiler: False
 enable_checkpointing: True
+
