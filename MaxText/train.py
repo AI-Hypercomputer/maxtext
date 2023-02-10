@@ -81,7 +81,7 @@ def write_metrics(writer, metrics, step, config):
     if full_log or config.log_metrics_to_stdout:
       print(f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
             f"TFLOP/s: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-            f"loss: {metrics['scalar']['learning/loss']:.3f}")
+            f"loss: {metrics['scalar']['learning/loss']:.3f}", flush = True)
 
     if full_log:
       print(

@@ -9,7 +9,6 @@ try: #TODO(migrate to updated API fully once it is universally available)
 except ImportError:
   from jax._src.clusters.cloud_tpu_cluster import get_metadata
 from orbax import checkpoint
-from orbax.checkpoint.async_checkpointer import AsyncCheckpointer
 from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, Checkpointer
 from orbax.checkpoint import type_handlers
 
@@ -41,10 +40,13 @@ def create_orbax_checkpoint_manager(checkpoint_dir: str, enable_checkpointing: b
   if not enable_checkpointing:
     print("Checkpointing disabled, not creating checkpoint manager.")
     return None
-  _multislice_distribute_initialize()
+  print("Started checkpointing", flush = True)
+  #_multislice_distribute_initialize()
   p = epath.Path(checkpoint_dir)
+  print("Done with epath", flush = True)
+
   return CheckpointManager(p,
-                           AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler()),
+                           Checkpointer(checkpoint.PyTreeCheckpointHandler()),
                            options = CheckpointManagerOptions(create=True))
 
 
