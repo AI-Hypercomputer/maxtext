@@ -70,13 +70,8 @@ TK
 
 # Full Training Results
 
-TK -- this will get cut for private preview.
+See [Experiments](Experiments.md).
 
-If you're making a change likely to effect performance, please compare your run to the "reference" and make sure you're
-doing better. Assuming you're doing better, merge your change and update the reference.
-```
-tensorboard --logdir=gs://max-experiments/rwitten_2023-01-20-01:02:08/tensorboard/
-```
 
 # Comparison to Alternatives
 
