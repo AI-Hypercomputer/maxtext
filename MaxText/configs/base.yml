@@ -68,7 +68,6 @@ max_corpus_chars: 10_000_000
 # Training loop
 steps: 150_001
 log_period: 10_000
-log_metrics_to_stdout: True
 save_period: 10_000
 learning_rate: 3.e-5
 warmup_steps: 15_000

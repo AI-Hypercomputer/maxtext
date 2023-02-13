@@ -30,6 +30,8 @@ from jax.experimental.maps import Mesh
 
 from jax.experimental.compilation_cache import compilation_cache as cc
 
+import max_logging
+
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 
@@ -78,14 +80,13 @@ def write_metrics(writer, metrics, step, config):
 
     full_log = step % config.log_period == 0
 
-    if full_log or config.log_metrics_to_stdout:
-      print(f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
-            f"TFLOP/s: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-            f"loss: {metrics['scalar']['learning/loss']:.3f}", flush = True)
+    max_logging.log(f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
+          f"TFLOP/s: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
+          f"loss: {metrics['scalar']['learning/loss']:.3f}")
 
     if full_log:
-      print(
-          f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'", flush = True
+      max_logging.log(
+          f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
       )
       writer.flush()
 
@@ -283,7 +284,7 @@ def train_loop(config, state=None):
   data_pspec = P(*config.data_sharding)
 
   num_model_parameters = calculate_num_params_from_pytree(state.params)
-  print(f"number parameters: {num_model_parameters/10**9:.3f} billion")
+  max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
   per_device_tflops =  6 * num_model_parameters * config.max_target_length * config.per_device_batch_size / 10**12
 
   # Define compiled top-level functions.
@@ -315,7 +316,7 @@ def train_loop(config, state=None):
 
     if step > 0 and step % config.save_period == 0 and checkpoint_manager is not None:
       checkpoint_manager.save(step, state)
-      print("saved a checkpoint")
+      max_logging.log("saved a checkpoint")
 
   max_utils.deactivate_profiler(config)
   writer.close()
@@ -325,7 +326,6 @@ def train_loop(config, state=None):
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = pyconfig.config.use_pjrt
-
   train_loop(pyconfig.config)
 
 
