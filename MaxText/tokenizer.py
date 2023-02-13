@@ -12,6 +12,7 @@ import tensorflow_text as tftxt
 from sentencepiece import SentencePieceTrainer
 import jax
 
+import max_logging
 
 
 Features = Dict[str, tf.Tensor]
@@ -99,7 +100,7 @@ def _load_sentencepiece_tokenizer(model_path: str,
                                   add_eos: bool = True,
                                   reverse: bool = False):
   """Load a tf-text SentencePiece tokenizer from given model filepath."""
-  print(model_path)
+  max_logging.log(f"Model path: {model_path}")
   with tf.io.gfile.GFile(model_path, 'rb') as model_fp:
     sp_model = model_fp.read()
   sp_tokenizer = tftxt.SentencepieceTokenizer(

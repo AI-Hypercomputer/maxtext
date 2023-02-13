@@ -2,6 +2,8 @@
 import checkpointing
 import functools
 
+import max_logging
+
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -36,7 +38,7 @@ def create_device_mesh(config):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas """
   devices = jax.devices()
   num_devices = len(devices)
-  print(f"Devices: {devices} (num_devices: {num_devices})", flush = True)
+  max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
   assert len(devices) > 1, "You must have at least two devices"
 
   multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
@@ -52,7 +54,7 @@ def create_device_mesh(config):
   else:
     mesh = mesh_utils.create_device_mesh(ici_parallelism)
 
-  print(f"Decided on mesh: {mesh}")
+  max_logging.log(f"Decided on mesh: {mesh}")
 
   return mesh
 

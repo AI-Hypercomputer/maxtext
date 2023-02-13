@@ -12,6 +12,8 @@ from orbax import checkpoint
 from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, Checkpointer
 from orbax.checkpoint import type_handlers
 
+import max_logging
+
 from flax.training import train_state
 
 def _multislice_distribute_initialize():
@@ -38,12 +40,12 @@ def _multislice_distribute_initialize():
 def create_orbax_checkpoint_manager(checkpoint_dir: str, enable_checkpointing: bool):
   """Returns an Orbax async CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:
-    print("Checkpointing disabled, not creating checkpoint manager.")
+    max_logging.log("Checkpointing disabled, not creating checkpoint manager.")
     return None
-  print("Started checkpointing", flush = True)
+  max_logging.log("Started checkpointing")
   #_multislice_distribute_initialize()
   p = epath.Path(checkpoint_dir)
-  print("Done with epath", flush = True)
+  max_logging.log("Done with epath")
 
   return CheckpointManager(p,
                            Checkpointer(checkpoint.PyTreeCheckpointHandler()),
@@ -76,7 +78,7 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
      set.
   """
   if checkpoint_manager is None:
-    print("no checkpoint manager, not restoring checkpoint")
+    max_logging.log("no checkpoint manager, not restoring checkpoint")
     return None, None
   def map_to_pspec(data, pspec):
     if isinstance(data, (jax.Array, jax.ShapeDtypeStruct)) \
@@ -90,17 +92,17 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
                                         state_mesh_annotations)
   latest_step = checkpoint_manager.latest_step()
   if latest_step is not None:
-    print(f"restoring state from this run's directory latest step \
+    max_logging.log(f"restoring state from this run's directory latest step \
         {latest_step}")
     return checkpoint_manager.restore(latest_step, abstract_unboxed_pre_state,
                                       {"restore_args" : restore_args}), None
   elif first_checkpoint_path != "":
-    print(f"restoring state from first_checkpoint_path {first_checkpoint_path}")
+    max_logging.log(f"restoring state from first_checkpoint_path {first_checkpoint_path}")
     p = epath.Path(first_checkpoint_path)
     checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
     return None, checkpointer.restore(p,
                                       item=abstract_unboxed_pre_state,
                                       restore_args=restore_args).params
   else:
-    print("not restoring checkpoint")
+    max_logging.log("not restoring checkpoint")
     return None, None

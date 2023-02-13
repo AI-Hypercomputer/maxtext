@@ -27,6 +27,8 @@ from jax.experimental.maps import Mesh
 
 from jax.experimental.compilation_cache import compilation_cache as cc
 
+import max_logging
+
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 os.environ["TFDS_DATA_DIR"] = "gs://tensorflow-datasets/datasets"
@@ -161,7 +163,7 @@ def decode_loop(config, state=None):
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       seqs = p_predict_step(tokenized_prompts, state, rng_to_use)
       decoded_string, num_tokens_decoded = decode_tokens(np.array(seqs)[0], sp_tokenizer, config.eos_id)
-      print(f"Decoding #{step} (num tokens {num_tokens_decoded}):\n\t{decoded_string}")
+      max_logging.log(f"Decoding #{step} (num tokens {num_tokens_decoded}):\n\t{decoded_string}")
   max_utils.deactivate_profiler(config)
 
 
@@ -169,7 +171,6 @@ def decode_loop(config, state=None):
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = pyconfig.config.use_pjrt
-
   decode_loop(pyconfig.config)
 
 

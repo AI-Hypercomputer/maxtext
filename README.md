@@ -29,12 +29,12 @@ bash setup.sh
 ```
 4. After installation completes, run training with the command:
 ```
-python3 MaxText/train.py MaxText/configs/base.yml run_name=${USER}_$(date +%Y-%m-%d-%H:%M:%S)
+python3 MaxText/train.py MaxText/configs/base.yml run_name=${USER}_$(date +%Y-%m-%d-%H-%M-%S)
 ```
 
 5. If you want to decode, you can decode as follows.
 ```
-python3 MaxText/decode.py MaxText/configs/base.yml run_name=${USER}_$(date +%Y-%m-%d-%H:%M:%S)
+python3 MaxText/decode.py MaxText/configs/base.yml run_name=${USER}_$(date +%Y-%m-%d-%H-%M-%S)
 ```
 Be aware, these decodings will be random. To get high quality decodings you need pass in a checkpoint, typically via the `load_parameters_path` argument.
 
@@ -54,7 +54,7 @@ If you aren't running the `multihost_runner.py` script from a TPUVM, you will ne
 
 4. Run your training job.
 ```
-python3 multihost_runner.py --TPU_PREFIX=<tpu_prefix> --COMMAND="python3 MaxText/train.py MaxText/configs/base.yml run_name=${USER}_$(date +%Y-%m-%d-%H:%M:%S)"
+python3 multihost_runner.py --TPU_PREFIX=<tpu_prefix> --COMMAND="python3 MaxText/train.py MaxText/configs/base.yml run_name=${USER}_$(date +%Y-%m-%d-%H-%M-%S)"
 ```
 If you aren't running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_TPU=false`.
 

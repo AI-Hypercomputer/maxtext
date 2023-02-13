@@ -17,6 +17,8 @@ from jax.experimental import global_device_array as gda_lib
 from jax.experimental import PartitionSpec
 from jax.experimental.maps import Mesh
 
+import max_logging
+
 
 Pytree = Any
 Device = Any
@@ -42,7 +44,7 @@ def check_inputs(dataset, global_data_shape, data_axes):
         dataset_structure == global_data_shape_structure == data_axes_structure
     ), 'All inputs should have the same pytree structure.'
   except AssertionError as msg:
-    (print(
+    (max_logging.log(
        f"""{msg} - The most likely reason for this is that global shapes should
        be array or classes not tuples, otherwise tree map enumerates indiviudal
        dimensions as leaves. Dataset: {dataset_structure}, \n Shapes:
