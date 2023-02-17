@@ -6,20 +6,43 @@ import jax
 from jax.experimental.pjit import PartitionSpec, pjit
 from jax.experimental import maps
 from jax.experimental import mesh_utils
+from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import with_sharding_constraint
 
-
+import argparse
 import datetime
 import os
-
-from jax.experimental.compilation_cache import compilation_cache as cc
-
-import sys
 
 #os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = "1"
 
 cc.initialize_cache(os.path.expanduser("~/jax_cache_2"))
 
+parser = argparse.ArgumentParser(description='Experiment different sharding techniques with a simple NN.')
+parser.add_argument(
+    "--sharding", "-s",
+    choices=["1D_TENSOR_PARALLELISM", "2D_TENSOR_PARALLELISM", "FULLY_SHARDED_DATA_PARALLELISM", "DATA_PARALLELISM"],
+    required=True,
+    help="Different sharding techniques to choose from."
+)
+parser.add_argument(
+    "--profiler_path", "-p",
+    required=False,
+    default="profiler",
+    help="Path to the profiler where the script will write to."
+)
+parser.add_argument(
+    "--embedding_dimension", "-d",
+    required=False,
+    default=16384,
+    type=int
+)
+parser.add_argument(
+    "--num_layers", "-n",
+    required=False,
+    default=4,
+    type=int
+)
+args = parser.parse_args()
 
 def activate_profiler(profiler_path):
   if profiler_path:
@@ -43,7 +66,7 @@ def simple_timeit(f, tries = 5, verbose = True):
     print(f"average time: {average_time}, timings (seconds) {outcomes}")
   return average_time
 
-SHARDING = sys.argv[1]
+SHARDING = args.sharding
 
 if SHARDING == "1D_TENSOR_PARALLELISM":
   data_sharding = PartitionSpec(None, ('axis1', 'axis2'))
@@ -68,9 +91,9 @@ print(f"mesh shape {devices_array}", flush = True)
 mesh = maps.Mesh(devices_array, ('axis1', 'axis2'))
 
 BATCH = len(jax.devices()) * 128
-D_EMB = 2 * 8192
+D_EMB = args.embedding_dimension
 D_FF =  4 * D_EMB
-NUM_LAYERS = 4
+NUM_LAYERS = args.num_layers
 
 parameters = 2 * D_FF * D_EMB * NUM_LAYERS
 parameter_bytes = 2 * parameters
@@ -147,7 +170,7 @@ pjit_gen_layers = pjit(
         out_axis_resources=parameter_sharding
       )
 
-activate_profiler(sys.argv[2])
+activate_profiler(args.profiler_path)
 
 with maps.Mesh(mesh.devices, mesh.axis_names):
   key = jax.random.PRNGKey(0)
@@ -156,4 +179,4 @@ with maps.Mesh(mesh.devices, mesh.axis_names):
   TFLOPs_per_device = parameters * 6 * BATCH  / 10**12 / len(jax.devices())
   time = simple_timeit(lambda : jax.block_until_ready(pjit_func(presharded_X, presharded_layers)))
   print(f"time is {time} seconds, TFLOP is {TFLOPs_per_device}, TFLOP/s is {TFLOPs_per_device/time}", flush = True)
-deactivate_profiler(sys.argv[2])
+deactivate_profiler(args.profiler_path)
