@@ -43,6 +43,8 @@ Be aware, these decodings will be random. To get high quality decodings you need
 This workflow is optimized for quick experiments. Because the `multihost_runner.py` script depends on long-lived `ssh` connections, we do not recommend it for any long-running jobs.
 
 The `multihost_runner.py` script manages distributing code to multiple worker TPUVM's, running the code, monitoring the processes' error statuses and bringing the logs back to the host machine.
+We call the `runner` machine the one that `multihost_runner.py` is called from. This script will `ssh` into TPUVM `worker` machines that are found from from the `--TPU_PREFIX` flag, and must be different than the runner machine.
+If the runner machine is a cloud VM, it must be in the same project as the workers.
 
 1. [TK] Set your project, zone, tpu name, ssh keys.
 2. [TK] Create your instances via QR.
@@ -50,13 +52,11 @@ The `multihost_runner.py` script manages distributing code to multiple worker TP
 ```
 python3 multihost_runner.py --TPU_PREFIX=<tpu_prefix> --COMMAND="bash setup.sh"
 ```
-If you aren't running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_TPU=false`.
 
 4. Run your training job.
 ```
 python3 multihost_runner.py --TPU_PREFIX=<tpu_prefix> --COMMAND="python3 MaxText/train.py MaxText/configs/base.yml run_name=${USER}_$(date +%Y-%m-%d-%H-%M-%S)"
 ```
-If you aren't running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_TPU=false`.
 
 ## Getting Started: Production Jobs Via Queued Resource
 For Matt to fill out.

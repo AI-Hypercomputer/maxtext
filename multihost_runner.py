@@ -1,6 +1,10 @@
 # pylint: disable=consider-using-with
 """ Script to run a job in a multislice/multihost environment
 
+The "runner" host (the one which runs this script) and the "worker" hosts (the TPUS found by --TPU_PREFIX and
+where the --COMMAND is run) should be different. You can use either a TPUVM or a non-TPUVM runner host,
+but in the former case this host needs to be in the same project as the worker hosts, but not be one of the workers.
+
 Example usages:
   Assuming runner.sh lives in directory path/to/dir:
   python3 multihost_runner.py --TPU_PREFIX=mytpu-name --COMMAND="bash runner.sh" --SCRIPT_DIR=path/to/dir
@@ -26,6 +30,7 @@ import time
 from datetime import datetime
 import os
 import re
+import socket
 
 ##### Define flags #####
 FLAGS = flags.FLAGS
@@ -35,8 +40,6 @@ script_dir_flag = flags.DEFINE_string("SCRIPT_DIR", os.getcwd(), "The local loca
     " the TPUs and run the main command from. Defaults to current working directory.")
 command_flag = flags.DEFINE_string("COMMAND", None, "Main command to run on each TPU. This command is run from"\
     " a copied version of SCRIPT_DIR on each TPU worker.")
-internal_tpu_flag = flags.DEFINE_boolean("INTERNAL_TPU", True, "Set true if running script locally from a TPU"\
-    " in the same network, false otherwise.")
 
 flags.mark_flag_as_required('TPU_PREFIX')
 flags.mark_flag_as_required('COMMAND')
@@ -91,6 +94,15 @@ def filter_instances(instance_list, tpu_prefix):
   re_pattern = tpu_prefix + "-[0-9]+"
   return [instance for instance in instance_list if re.fullmatch(re_pattern, instance.split(',')[0])]
 
+def use_internal_ip():
+  hostname = socket.gethostname()
+  command = ["gcloud", "compute", "instances", "describe", hostname]
+  try:
+    subprocess.run(command, capture_output=True, check=True)
+    return True
+  except subprocess.CalledProcessError:
+    return False
+
 def get_run_name():
   now = datetime.now()
   return now.strftime("%Y-%m-%d-%H-%M-%S")
@@ -121,7 +133,7 @@ else
 fi
 sudo rm -f /tmp/libtpu_lockfile"""
 
-def scps(script_dir, slices, run_name_dir, zip_name, kill_processes_script_name, internal_tpu=True):
+def scps(script_dir, slices, run_name_dir, zip_name, kill_processes_script_name, internal_ip):
   """ Zip the script directory, scp it to the TPUs, and unzip it there. """
   original_working_directory = os.getcwd()
   os.chdir(script_dir) # To tar script_dir, it is most convenient to cd there.
@@ -144,7 +156,7 @@ def scps(script_dir, slices, run_name_dir, zip_name, kill_processes_script_name,
           "gcloud", "compute", "tpus", "tpu-vm", "scp", f"--worker={worker_num}", zip_path,
           f"{cur_slice.name}:~/", "--strict-host-key-checking=no"
       ]
-      if internal_tpu:
+      if internal_ip:
         command.append("--internal-ip")
       commands.append(command)
   return_code, _ = run_commands(commands, 0, "SCP")
@@ -159,7 +171,7 @@ def scps(script_dir, slices, run_name_dir, zip_name, kill_processes_script_name,
 
   return return_code
 
-def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name, kill_script_name, internal_tpu):
+def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name, kill_script_name, internal_ip):
   """ Run the main command on each worker, logging each separately. """
   commands = []
   output_logs = []
@@ -181,7 +193,7 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
           "--command",  f"{mkdir_command} && {mv_zip_command} && {cd_command} && {unzip_command} &&"\
           f" {kill_existing_command} && {main_command}", "--strict-host-key-checking=no"
       ]
-      if internal_tpu:
+      if internal_ip:
         command.append("--internal-ip")
       commands.append(command)
       worker_list.append([slice_num, worker_num])
@@ -201,7 +213,7 @@ def run_commands(commands, id_to_print, jobname, is_shell=False, output_logs=Non
      jobname: Useful debugging name for the group of commands, such as SCP
      is_shell: Boolean directly passed as shell argument to subprocess.Popen
      output_logs: list of n log paths, each command will output to each log.
-     fail_fast: If true, when one commands fail immediately terminate others
+     fail_fast: If true, when one command fails immediately terminate others
   '''
 
   children = []
@@ -227,14 +239,6 @@ def run_commands(commands, id_to_print, jobname, is_shell=False, output_logs=Non
     seconds_elapsed = (datetime.now() - start_time).total_seconds()
     print(f"[t={seconds_elapsed:.2f}, {jobname}] Completed {completed}/{total},"\
         f" worst return code {max_returncode}, raw_data {returncodes}")
-
-    if seconds_elapsed >= 60 and not 0 in returncodes and jobname == "SCP":
-      print("SCP operation timed out - terminating all processes."\
-        " Please check that --INTERNAL_TPU flag is set correctly.")
-      for child in children:
-        child.terminate()
-      max_returncode = 255
-      break
 
     if fail_fast and max_returncode > 0:
       print(f"Terminating all {jobname} processes since at least one failed.")
@@ -287,7 +291,8 @@ def main(argv) -> None:
   tpu_prefix = tpu_prefix_flag.value
   script_dir = script_dir_flag.value
   main_command = command_flag.value
-  internal_tpu = internal_tpu_flag.value
+
+  internal_ip = use_internal_ip()
 
   ##### Step 1: Get the workers #####
   slices = get_slices(tpu_prefix)
@@ -301,14 +306,14 @@ def main(argv) -> None:
   zip_name = "script_dir_zip_" + run_name + ".tar.gz"
   kill_file = "kill_existing_processes.sh"
   write_kill_script(script_dir, kill_file)
-  return_code = scps(script_dir, slices, local_log_dir, zip_name, kill_file, internal_tpu=internal_tpu)
+  return_code = scps(script_dir, slices, local_log_dir, zip_name, kill_file, internal_ip)
   if return_code > 0:
     print(f"Moving the directory {script_dir} to the VMs failed with error code {return_code}")
     return return_code
 
   ##### Step 3: Unzip, kill existing processes, and run #####
   print(f"Running main command, logs located in: {local_log_dir}", flush=True)
-  return_code = execute_main_command(main_command, slices, local_log_dir, run_name, zip_name, kill_file, internal_tpu)
+  return_code = execute_main_command(main_command, slices, local_log_dir, run_name, zip_name, kill_file, internal_ip)
 
   if return_code == 0:
     print(f"Main command completed successfully, logs located in: {local_log_dir}", flush=True)
