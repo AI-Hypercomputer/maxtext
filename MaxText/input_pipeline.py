@@ -119,22 +119,18 @@ def preprocessing_pipeline(
   )
   data_axes = jax.tree_map(lambda x: P(*data_sharding), dataset_structure)
 
-  multihost_shard_fn, multihost_gen = (
-      multihost_dataloading.get_per_host_data_pipeline(
-          dataset, global_data_shape, global_mesh, data_axes
-      )
-  )
 
-  # Shard dataset for multihost loading.
-  dataset = multihost_shard_fn(dataset)
+  assert (
+        batch_size % global_mesh.size == 0
+    ), 'Batch size should be divisible number of global devices.'
 
   # Batch examples.
   if pack_examples:
-    dataset = dataset.batch(batch_size, drop_remainder=drop_remainder)
+    dataset = dataset.batch(batch_size // jax.process_count(), drop_remainder=drop_remainder)
   else:
     # simple (static-shape) padded batching
     dataset = dataset.padded_batch(
-        batch_size,
+        batch_size // jax.process_count(),
         padded_shapes={'inputs': max_length, 'targets': max_length},
         padding_values={'inputs': 0, 'targets': 0},
         drop_remainder=drop_remainder)
@@ -142,8 +138,13 @@ def preprocessing_pipeline(
   if prefetch_size:
     dataset = dataset.prefetch(prefetch_size)
 
+  multihost_gen = (
+      multihost_dataloading.get_batch_sharded_data_pipeline(
+          dataset, data_sharding, global_data_shape, global_mesh, data_axes
+      )
+  )
   # Return multi-host jax.Array prep iterator
-  return multihost_gen(iter(dataset.as_numpy_iterator()))
+  return multihost_gen
 
 
 def get_datasets(
@@ -157,6 +158,8 @@ def get_datasets(
   train_ds = train_ds_builder.as_dataset(split='train',
                                            read_config = read_config,
                                            shuffle_files=False)
+  # shard the dataset as soon as it is loaded
+  train_ds = train_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
   train_ds = normalize_features(train_ds)
 
   # Evaluation dataset.
@@ -168,6 +171,7 @@ def get_datasets(
   eval_ds = eval_ds_builder.as_dataset(split=config.eval_split,
                                           read_config = read_config,
                                           shuffle_files=False)
+  eval_ds = eval_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
   eval_ds = normalize_features(eval_ds)
 
   return train_ds, eval_ds

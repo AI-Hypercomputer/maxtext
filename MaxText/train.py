@@ -51,7 +51,7 @@ def load_next_batch(train_iter, example_batch, config):
   if config.reuse_example_batch and example_batch is not None:
     return example_batch
   else:
-    return next(train_iter)
+    return train_iter()
 
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   """Records scalar metrics to be written to tensorboard"""
