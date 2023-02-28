@@ -14,7 +14,6 @@ import numpy as np
 
 import jax
 from jax.experimental import global_device_array as gda_lib
-from jax.experimental.global_device_array import GlobalDeviceArray
 from jax.experimental import PartitionSpec
 from jax.experimental.maps import Mesh
 
@@ -64,7 +63,7 @@ def check_inputs(dataset, global_data_shape, data_axes):
 
 def get_batch_sharded_data_pipeline(
     dataset: tf.data.Dataset, data_sharding, global_data_shape: np.ndarray, global_mesh: Mesh,
-    data_axes: PartitionSpec) -> Callable[[], GlobalDeviceArray]:
+    data_axes: PartitionSpec) -> Callable[[], jax.Array]:
   """ Each device loads batch_size/num_devices,
   To do this, each host first loads batch_size/num_hosts, then shards that
   equally across it's devices.
@@ -89,7 +88,7 @@ def get_batch_sharded_data_pipeline(
 def get_next_batch_sharded(local_dataset: tf.data.Dataset,
                            data_sharding,
                            global_data_shape: Pytree,
-                           global_mesh: Mesh) -> GlobalDeviceArray:
+                           global_mesh: Mesh) -> jax.Array:
   """Splits the host loaded data equally over all devices."""
 
   local_data = local_dataset.next()
@@ -119,8 +118,8 @@ def get_next_batch_sharded(local_dataset: tf.data.Dataset,
     device_buffers = _put_to_devices(local_data)
     #  Wrap device buffers as GDA
     shape = tuple(shape)
-    input_gda = GlobalDeviceArray(shape, global_mesh,
-                                 input_sharding_constraint, device_buffers)
+    input_gda = jax.make_array_from_single_device_arrays(shape,
+        jax.sharding.NamedSharding(global_mesh, input_sharding_constraint), device_buffers)
     return input_gda
 
   input_gdas = jax.tree_map(form_gda, local_data, global_data_shape)

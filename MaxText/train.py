@@ -35,7 +35,6 @@ import max_logging
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 
-
 os.environ["TFDS_DATA_DIR"] = "gs://tensorflow-datasets/datasets"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
