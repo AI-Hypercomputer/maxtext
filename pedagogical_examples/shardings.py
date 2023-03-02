@@ -11,24 +11,24 @@ from jax.experimental.pjit import with_sharding_constraint
 
 import argparse
 import datetime
+import numpy as np
 import os
 
-#os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = "1"
+os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = "1"
 
 cc.initialize_cache(os.path.expanduser("~/jax_cache_2"))
 
-parser = argparse.ArgumentParser(description='Experiment different sharding techniques with a simple NN.')
-parser.add_argument(
-    "--sharding", "-s",
-    choices=["1D_TENSOR_PARALLELISM", "2D_TENSOR_PARALLELISM", "FULLY_SHARDED_DATA_PARALLELISM", "DATA_PARALLELISM"],
-    required=True,
-    help="Different sharding techniques to choose from."
-)
+parser = argparse.ArgumentParser(
+  description="Experiment different sharding techniques with a simple NN.\
+  Ensure 1) The product of dcn dimensions == number of slices \
+  2) product of ici dimension = number of devices per slice"
+  )
 parser.add_argument(
     "--profiler_path", "-p",
     required=False,
-    default="profiler",
-    help="Path to the profiler where the script will write to."
+    default="",
+    help="Path to the profiler where the script will write to.",
+    type=str
 )
 parser.add_argument(
     "--embedding_dimension", "-d",
@@ -37,9 +37,57 @@ parser.add_argument(
     type=int
 )
 parser.add_argument(
+    "--batch_size", "-b",
+    required=False,
+    default=65536,
+    type=int
+)
+parser.add_argument(
     "--num_layers", "-n",
     required=False,
     default=4,
+    type=int
+)
+parser.add_argument(
+    "--dcn_data_parallelism", "-dd",
+    help="N-way Data Parallelism across slices",
+    required=False,
+    default=1,
+    type=int
+)
+parser.add_argument(
+    "--dcn_fsdp_parallelism", "-df",
+    help="Fsdp parallelism across slices that is expected to be 1 in most cases",
+    required=False,
+    default=1,
+    type=int
+)
+parser.add_argument(
+    "--dcn_tensor_parallelism", "-dt",
+    help="Tensor parallelism across slices that is expected to be 1 in most cases",
+    required=False,
+    default=1,
+    type=int
+)
+parser.add_argument(
+    "--ici_data_parallelism", "-id",
+    help="Data parallelism within each slice that is expected to be 1 in most cases",
+    required=False,
+    default=1,
+    type=int
+)
+parser.add_argument(
+    "--ici_fsdp_parallelism", "-if",
+    help="Number of shards for Fsdp Parallelism within each slice.",
+    required=False,
+    default=1,
+    type=int
+)
+parser.add_argument(
+    "--ici_tensor_parallelism", "-it",
+    help="Number of shards for Tensor Parallelism within each slice.",
+    required=False,
+    default=1,
     type=int
 )
 args = parser.parse_args()
@@ -66,31 +114,38 @@ def simple_timeit(f, tries = 5, verbose = True):
     print(f"average time: {average_time}, timings (seconds) {outcomes}")
   return average_time
 
-SHARDING = args.sharding
+dcn_parallelism = [args.dcn_data_parallelism, args.dcn_fsdp_parallelism, args.dcn_tensor_parallelism]
+ici_parallelism = [args.ici_data_parallelism, args.ici_fsdp_parallelism, args.ici_tensor_parallelism]
 
-if SHARDING == "1D_TENSOR_PARALLELISM":
-  data_sharding = PartitionSpec(None, ('axis1', 'axis2'))
-  parameter_sharding = PartitionSpec( ('axis1', 'axis2'), None)
-  devices_array = mesh_utils.create_device_mesh([4, 1])
-elif SHARDING == "2D_TENSOR_PARALLELISM":
-  data_sharding = PartitionSpec(None, ('axis1', 'axis2'))
-  parameter_sharding = PartitionSpec( 'axis1', 'axis2')
-  devices_array = mesh_utils.create_device_mesh([2, 2])
-elif SHARDING == "FULLY_SHARDED_DATA_PARALLELISM":
-  data_sharding = PartitionSpec('axis1')
-  parameter_sharding = PartitionSpec('axis1')
-  devices_array = mesh_utils.create_device_mesh([4, 1])
-elif SHARDING == "DATA_PARALLELISM":
-  data_sharding = PartitionSpec('axis1')
-  parameter_sharding = PartitionSpec(None)
-  devices_array = mesh_utils.create_device_mesh([4, 1])
+devices = jax.devices()
+num_devices = len(devices)
+print(f"Devices: {devices} (num_devices: {num_devices})")
+assert len(devices) > 1, "You must have at least two devices"
+
+# Assert that we have correct inputs of sharding that fit the number of chips
+assert np.product(dcn_parallelism) * np.product(ici_parallelism) == num_devices, f"Number of devices {num_devices} \
+      does not match the product of the parallelism {np.product(dcn_parallelism) * np.product(ici_parallelism)}"
+
+multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
+# Create device mesh
+
+if multi_slice_env:
+  assert args.dcn_data_parallelism == 1 + max(x.slice_index for x in jax.devices()), \
+   f"Number of slices given {args.dcn_data_parallelism} \
+        does not match the number fetched from jax devices {jax.devices()[0]}"
+  devices_array = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism)
 else:
-  assert False, "unknown sharding"
+  devices_array = mesh_utils.create_device_mesh(ici_parallelism)
 
-print(f"mesh shape {devices_array}", flush = True)
-mesh = maps.Mesh(devices_array, ('axis1', 'axis2'))
+print(f"Decided on mesh shape: {devices_array}")
 
-BATCH = len(jax.devices()) * 128
+mesh = maps.Mesh(devices_array, ["data", "fsdp", "tensor"])
+
+data_sharding = PartitionSpec(("data", "fsdp"),  "tensor")
+# We assume parameters are stored in a decreasing order of dimension size
+parameter_sharding = PartitionSpec("tensor", "fsdp")
+
+BATCH = len(jax.devices()) * args.batch_size
 D_EMB = args.embedding_dimension
 D_FF =  4 * D_EMB
 NUM_LAYERS = args.num_layers
@@ -169,7 +224,6 @@ pjit_gen_layers = pjit(
         in_axis_resources=None,
         out_axis_resources=parameter_sharding
       )
-
 activate_profiler(args.profiler_path)
 
 with maps.Mesh(mesh.devices, mesh.axis_names):
