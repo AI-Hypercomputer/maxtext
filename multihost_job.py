@@ -11,14 +11,14 @@ This script:
   is done. These instructions are also printed at the end of running this script.
 Example usages:
   Minimal customization, assuming runner.sh lives in present working directory:
-  python3 multihost_job.py  --COMMAND="bash runner.sh" --GCS_BUCKET=<my-bucket>
+  python3 multihost_job.py  --COMMAND="bash runner.sh" --BUCKET_NAME=<my-bucket>
 
-  Maximal customization, assuming runner.sh lives in script/to/dir
-  python3 multihost_job.py  --COMMAND="bash runner.sh" --GCS_BUCKET=<my-bucket> --GCS_DIRECTORY=job-log-directory \
-    --SCRIPT_DIR=path/to/dir --PROJECT=tpu-test-env-one-vm --ZONE=us-central1-iw1 \
-    --VERSION=v2-nightly-tpuv4-libtpu-kernel --TPU_TYPE=v4-8 --NUM_SLICES=2 -- RUN_NAME=$USER-run-job
+  Maximal customization, assuming runner.sh lives in path/to/dir
+  python3 multihost_job.py  --COMMAND="bash runner.sh" --BUCKET_NAME=<my-bucket> --BUCKET_DIR=job-log-directory \
+    --SCRIPT_DIR=path/to/dir --PROJECT=<my-project> --ZONE=<zone> \
+    --VERSION=tpu-vm-v4-base --TPU_TYPE=v4-8 --NUM_SLICES=2 -- RUN_NAME=$USER-run-job
 Common issues:
-  You must be able to communicate with the GCS_BUCKET e.g. via gsutil. You may have to run
+  You must be able to communicate with the BUCKET_NAME e.g. via gsutil. You may have to run
   gcloud auth login 
   and
   gcloud auth application-default login
@@ -51,7 +51,7 @@ run_name_flag = flags.DEFINE_string("RUN_NAME", None, "Run name used for tempora
 
 
 flags.mark_flag_as_required('COMMAND')
-flags.mark_flag_as_required('GCS_BUCKET')
+flags.mark_flag_as_required('BUCKET_NAME')
 
 def get_run_name():
   now = datetime.now()
