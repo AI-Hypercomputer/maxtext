@@ -150,6 +150,7 @@ def scps(script_dir, slices, run_name_dir, zip_name, kill_processes_script_name,
 
   # Move zip file to each tpuvm worker
   commands = []
+  worker_list = []
   for cur_slice in slices:
     for worker_num in range(cur_slice.num_workers):
       command = [
@@ -159,7 +160,8 @@ def scps(script_dir, slices, run_name_dir, zip_name, kill_processes_script_name,
       if internal_ip:
         command.append("--internal-ip")
       commands.append(command)
-  return_code, _ = run_commands(commands, 0, "SCP")
+      worker_list.append([cur_slice.slice_num, worker_num])
+  return_code, _ = run_commands(commands, 0, "SCP", worker_list)
   if return_code != 0:
     print("Failed to scp zipped code directory with error code ", return_code)
     return return_code
@@ -198,19 +200,20 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
       commands.append(command)
       worker_list.append([slice_num, worker_num])
 
-  return_code, return_codes = run_commands(commands, 0, "MAIN COMMAND",output_logs=output_logs)
+  return_code, return_codes = run_commands(commands, 0, "MAIN COMMAND", worker_list, output_logs=output_logs)
   if return_code > 0:
-    example_failure_index = next((i for i, x in enumerate(return_codes) if x), None)
-    print(f"Main command failed on slice {worker_list[example_failure_index][0]} worker"\
-        f" {worker_list[example_failure_index][1]} with error code {return_code}, see logs for details", flush=True)
+    failure_index = next((i for i, x in enumerate(return_codes) if x), None)
+    print(f"Main command failed on slice {worker_list[failure_index][0]} worker"\
+        f" {worker_list[failure_index][1]} with error code {return_codes[failure_index]}, see logs for details", flush=True)
   return return_code
 
-def run_commands(commands, id_to_print, jobname, is_shell=False, output_logs=None, fail_fast=True):
+def run_commands(commands, id_to_print, jobname, worker_list, is_shell=False, output_logs=None, fail_fast=True):
   ''' Runs commands in parallel.
   Inputs:
      commands: list of n commands, each command is a a list of strings
      id_to_print: which command is printed to the terminal, typically 0 or None
      jobname: Useful debugging name for the group of commands, such as SCP
+     worker_list: list of n pairs of (slice_id, worker_id)
      is_shell: Boolean directly passed as shell argument to subprocess.Popen
      output_logs: list of n log paths, each command will output to each log.
      fail_fast: If true, when one command fails immediately terminate others
@@ -237,8 +240,13 @@ def run_commands(commands, id_to_print, jobname, is_shell=False, output_logs=Non
     completed = len([r for r in returncodes if r is not None])
     total = len(returncodes)
     seconds_elapsed = (datetime.now() - start_time).total_seconds()
-    print(f"[t={seconds_elapsed:.2f}, {jobname}] Completed {completed}/{total},"\
-        f" worst return code {max_returncode}, raw_data {returncodes}")
+    if completed < total:
+      slow_worker_index = returncodes.index(None)
+      slow_worker = worker_list[slow_worker_index]
+      slow_str = f", slice {slow_worker[0]} worker {slow_worker[1]} still working"
+    else:
+      slow_str = ""
+    print(f"[t={seconds_elapsed:.2f}, {jobname}] Completed {completed}/{total}{slow_str}...")
 
     if fail_fast and max_returncode > 0:
       print(f"Terminating all {jobname} processes since at least one failed.")
