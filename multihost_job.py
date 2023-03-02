@@ -42,8 +42,8 @@ script_dir_flag = flags.DEFINE_string("SCRIPT_DIR", os.getcwd(), "The local loca
     " the TPUs and run the main command from. Defaults to current working directory.")
 command_flag = flags.DEFINE_string("COMMAND", None, "Main command to run on each TPU. This command is run from"\
     " a copied version of SCRIPT_DIR on each TPU worker.")
-bucket_name_flag= flags.DEFINE_string("GCS_BUCKET", None, "GCS bucket, e.g. my-bucket")
-bucket_dir_flag = flags.DEFINE_string("GCS_DIR", "", "Directory within the bucket, can be None, e.g. my-dir")
+bucket_name_flag= flags.DEFINE_string("BUCKET_NAME", None, "Name of GCS bucket, e.g. my-bucket")
+bucket_dir_flag = flags.DEFINE_string("BUCKET_DIR", "", "Directory within the GCS bucket, can be None, e.g. my-dir")
 project_flag = flags.DEFINE_string("PROJECT", None, "GCE project name, defaults to gcloud config project")
 zone_flag = flags.DEFINE_string("ZONE", None, "GCE zone, e.g. us-central2-b, defaults to gcloud config compute/zone")
 endpoint_flag = flags.DEFINE_string("ENDPOINT", "tpu.googleapis.com", "The endpoint for google API requests.")
