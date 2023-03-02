@@ -133,7 +133,7 @@ else
 fi
 sudo rm -f /tmp/libtpu_lockfile"""
 
-def scps(script_dir, slices, run_name_dir, zip_name, kill_processes_script_name, internal_ip):
+def scps(script_dir, slices, run_name_dir, zip_name, internal_ip):
   """ Zip the script directory, scp it to the TPUs, and unzip it there. """
   original_working_directory = os.getcwd()
   os.chdir(script_dir) # To tar script_dir, it is most convenient to cd there.
@@ -144,8 +144,6 @@ def scps(script_dir, slices, run_name_dir, zip_name, kill_processes_script_name,
   os.makedirs(run_name_dir, exist_ok=True)
   zip_path = os.path.join(run_name_dir, zip_name)
   command = ["tar","--exclude=tmp", "-czf", zip_path, "./"]
-  subprocess.run(command, check=True)
-  command = ["cp", zip_path, "."]
   subprocess.run(command, check=True)
 
   # Move zip file to each tpuvm worker
@@ -167,14 +165,13 @@ def scps(script_dir, slices, run_name_dir, zip_name, kill_processes_script_name,
     return return_code
 
   # Cleanup
-  os.remove(zip_name)
-  os.remove(kill_processes_script_name)
   os.chdir(original_working_directory)
 
   return return_code
 
-def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name, kill_script_name, internal_ip):
+def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name, internal_ip):
   """ Run the main command on each worker, logging each separately. """
+  kill_script_name = "kill_existing_processes.sh" # File written on worker machines
   commands = []
   output_logs = []
   worker_list = []
@@ -188,12 +185,13 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
       mv_zip_command = f"mv {zip_name} {run_name}"
       cd_command = f"cd {run_name}"
       unzip_command = f"tar xzf {zip_name}"
+      write_kill_script_command = f"echo {kill_existing_processes_str()} > {kill_script_name}"
       kill_existing_command = f"bash {kill_script_name} {cur_slice.version}"
 
       command=[
           "gcloud", "alpha", "compute", "tpus", "tpu-vm", "ssh", cur_slice.name, f"--worker={worker_num}",
           "--command",  f"{mkdir_command} && {mv_zip_command} && {cd_command} && {unzip_command} &&"\
-          f" {kill_existing_command} && {main_command}", "--strict-host-key-checking=no"
+          f" {write_kill_script_command} && {kill_existing_command} && {main_command}", "--strict-host-key-checking=no"
       ]
       if internal_ip:
         command.append("--internal-ip")
@@ -310,18 +308,16 @@ def main(argv) -> None:
 
   ##### Step 2: Zip code and move it to the TPUs #####
   run_name = get_run_name() # Used for the local logging files.
-  local_log_dir = "tmp/" + run_name + "/"
+  local_log_dir = "/tmp/" + run_name + "/"
   zip_name = "script_dir_zip_" + run_name + ".tar.gz"
-  kill_file = "kill_existing_processes.sh"
-  write_kill_script(script_dir, kill_file)
-  return_code = scps(script_dir, slices, local_log_dir, zip_name, kill_file, internal_ip)
+  return_code = scps(script_dir, slices, local_log_dir, zip_name, internal_ip)
   if return_code > 0:
     print(f"Moving the directory {script_dir} to the VMs failed with error code {return_code}")
     return return_code
 
   ##### Step 3: Unzip, kill existing processes, and run #####
   print(f"Running main command, logs located in: {local_log_dir}", flush=True)
-  return_code = execute_main_command(main_command, slices, local_log_dir, run_name, zip_name, kill_file, internal_ip)
+  return_code = execute_main_command(main_command, slices, local_log_dir, run_name, zip_name, internal_ip)
 
   if return_code == 0:
     print(f"Main command completed successfully, logs located in: {local_log_dir}", flush=True)
