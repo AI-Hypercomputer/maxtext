@@ -40,29 +40,174 @@ Be aware, these decodings will be random. To get high quality decodings you need
 
 ## Getting Started: Cluster Experimentation
 
-This workflow is optimized for quick experiments. Because the `multihost_runner.py` script depends on long-lived `ssh` connections, we do not recommend it for any long-running jobs.
+This workflow using `multihost_runner.py` is optimized for quick experiments. Because the `multihost_runner.py` script depends on long-lived `ssh` connections, we do not recommend it for any long-running jobs.
 
-The `multihost_runner.py` script manages distributing code to multiple worker TPUVM's, running the code, monitoring the processes' error statuses and bringing the logs back to the host machine.
-We call the `runner` machine the one that `multihost_runner.py` is called from. This script will `ssh` into TPUVM `worker` machines that are found from from the `--TPU_PREFIX` flag, and must be different than the runner machine.
+We call the `runner` machine the one that `multihost_runner.py` is called from. This script will `ssh` into TPUVM `worker` machines that are found from the `--TPU_PREFIX` flag, and must be different than the runner machine.
 If the runner machine is a cloud VM, it must be in the same project as the workers.
 
-1. [TK] Set your project, zone, tpu name, ssh keys.
-2. [TK] Create your instances via QR.
-3. Install dependencies. 
-```
-python3 multihost_runner.py --TPU_PREFIX=<tpu_prefix> --COMMAND="bash setup.sh"
-```
+The `multihost_runner.py` script:
+* Distributes your code to multiple worker TPUVM's
+* Runs the code on the workers
+* Logs and monitors the processes' error statuses and brings the logs back to the runner machine.
 
-4. Run your training job.
-```
-python3 multihost_runner.py --TPU_PREFIX=<tpu_prefix> --COMMAND="python3 MaxText/train.py MaxText/configs/base.yml run_name=${USER}_$(date +%Y-%m-%d-%H-%M-%S)"
-```
+Although there are several steps below, most are for the initial setup. Once setup you can continually make changes to your code and re-run your code with only step 5.
+
+1. Choose a directory on your runner machine to develop and clone MaxText into. The runner machine can 
+either be a TPUVM or not, but it cannot be one of the workers. Clone MaxText, and cd into the root of the repo.
+
+2. Set your project, zone, gcloud permissions and ssh keys.
+
+    Authorize gcloud to access the Cloud Platform with Google user credentials
+    ```
+    gcloud auth login
+    ```
+
+    Set your gcloud config, see https://cloud.google.com/sdk/gcloud/reference/config for more.
+    ```
+    PROJECT=<project>
+    ```
+    ```
+    ZONE=<zone>
+    ```
+    ```
+    gcloud config set project $PROJECT
+    gcloud config set compute/zone $ZONE
+    ```
+
+    Create ssh keys for gcloud, we recommend leaving a blank password (hit enter twice after running the below command)
+    ```
+    ssh-keygen -f ~/.ssh/google_compute_engine 
+    ```
+    
+3. Create your instances via Queued Resource (QR). 
+    Choose names for your TPUs and QR:
+    ```
+    TPU_PREFIX=${USER}_$(date +%Y-%m-%d-%H-%M-%S) # Use new names when you create new TPUs
+    QR_ID=$TPU_PREFIX # Convenient to re-use the node names, but can be different
+    ```
+    Choose the number of nodes (we use 2 below, but you may customize this and other feature of your TPU(s))
+    ```
+    NODE_COUNT=2
+    ```
+    Create a multislice environment of nodes using create queued resources
+    ```
+    gcloud alpha compute tpus queued-resources create $QR_ID --accelerator-type=v4-8 --runtime-version=tpu-vm-v4-base --node-count=$NODE_COUNT --node-prefix=$TPU_PREFIX  --reserved
+    ```
+    You have to wait to for the QR to become `ACTIVE` and the nodes to be created and in state `READY` (as opposed to `CREATING`). This may take a minute or two and can be checked via
+    ```
+    gcloud alpha compute tpus tpu-vm list --filter=$TPU_PREFIX 
+    ```
+4. Install dependencies. 
+    ```
+    pip3 install absl-py # Dependency of multihost_runner.py
+    python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash setup.sh" # Dependencies of MaxText/train.py
+    ```
+
+5. Run your training job.
+
+    Set a RUN_NAME for your job:
+    ```
+    RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S) # You may set this to any unique name for a fresh run.
+    ```
+    ```
+    python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME dcn_data_parallelism=$NODE_COUNT"
+    ```
+
+6. Clean up TPUs and QR when finished.
+
+    There is ongoing work to simplify this step into a single command, but for now it is split into two main steps:
+
+    a. Delete the nodes
+
+    ```
+    for ((i=0; i<$NODE_COUNT; i++))
+    do
+        curl -X DELETE -H "Authorization: Bearer $(gcloud auth print-access-token)" https://tpu.googleapis.com/v2alpha1/projects/$PROJECT/locations/$ZONE/nodes/${TPU_PREFIX}-$i
+    done
+    ```
+    b. Delete the QR, first waiting for the nodes the to be deleted (~15 seconds). You should see the status of the QR will change from `ACTIVE` to `SUSPENDING` to `SUSPENDED` as the nodes are deleted (the QR must be `SUSPENDED` to be deletable), which can be checked via
+
+    ```
+    gcloud alpha compute tpus queued-resources list --filter=$QR_ID
+    ```
+    Then delete the QR
+
+    ```
+    gcloud alpha compute tpus queued-resources delete $QR_ID
+    ```
 
 ## Getting Started: Production Jobs Via Queued Resource
-For Matt to fill out.
-1. [TK] Set your project, zone, tpu name, ssh keys.
-2. ????
-3. ????
+
+This workflow using `multihost_job.py` is optimized for long running experiments. This script avoids any `ssh` connection, and logs are written to cloud logging.
+
+The `multihost_job.py` script:
+
+* Copies your code to your GCS bucket
+* Spins up specified TPUVM(s) via CQR
+* Directs the TPU's to download then run that code
+* Logs locally to each worker TPU, sending these logs to GCS at the job end
+* Delete the TPUs at the end of the job.
+
+1. Choose a directory on your runner machine to develop and clone MaxText into. The runner machine can 
+either be a TPUVM or not. Clone MaxText, and cd into the root of the repo.
+
+2. Set your project, zone, and gcloud permissions. 
+     Authorize gcloud to access the Cloud Platform with Google user credentials
+    ```
+    gcloud auth login
+    ```
+
+    Set your gcloud config, see https://cloud.google.com/sdk/gcloud/reference/config for more.
+    ```
+    PROJECT=<project>
+    ```
+
+    ```
+    ZONE=<zone>
+    ```
+
+    ```
+    gcloud config set project $PROJECT
+    gcloud config set compute/zone $ZONE
+    ```
+    
+3. Link to a GCS bucket.
+    Create a bucket if you don't already have one, see: https://cloud.google.com/storage/docs/creating-buckets for instructions to create one. Once you've identified your bucket:
+
+    ```
+    BUCKET_NAME=<your-bucket>
+    ```
+
+4. Run your training job.
+
+    Choose the number of nodes (we use 2 below, but you may customize this and other feature of your TPU(s))
+    ```
+    NODE_COUNT=2
+    ```
+    ```
+    pip3 install absl-py # Dependency of multihost_job.py
+    RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S) # You may set this to any unique name for a fresh run.
+    python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --COMMAND="bash setup.sh && python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME dcn_data_parallelism=$NODE_COUNT"
+    ```
+5. View the job's logs in cloud logging. 
+
+    The link to your job's logs is printed at the end of the multihost_job output.
+
+6. Cleanup the QR when finished.
+
+    There is ongoing work to automate this step.
+
+    When your job is finished `multihost_job.py` will delete the TPUs for you. However you still need to delete the QR. You can check that your job is done because the QR will no longer be `ACTIVE`, but instead in
+    state `SUSPENDED` since the nodes have been deleted.
+    ```
+    gcloud alpha compute tpus queued-resources list --filter=$RUN_NAME # You can remove RUN_NAME to list all QR in your project 
+    ```
+    Then delete the QR
+
+    ```
+    gcloud alpha compute tpus queued-resources delete $RUN_NAME
+    ```
+
 
 # Runtime Performance Results
 
