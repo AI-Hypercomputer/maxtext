@@ -104,6 +104,8 @@ mkdir -p {run_name}
 cd {run_name}
 gsutil cp {zip_gcs_path} .
 tar xzf {zip_name}
+python3 -m virtualenv venv
+source venv/bin/activate
 {get_env_command_str()}
 {main_command} > {log_name}
 gsutil cp {log_name} "{bucket_path}/{log_name}_slice_"$SLICE_ID"_worker_"$WORKER_ID
