@@ -181,6 +181,7 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
     for worker_num in range(cur_slice.num_workers):
       output_filename = f"{local_log_dir}/output_slice_{cur_slice.slice_num}_process_{worker_num}.txt"
       output_logs.append(output_filename)
+      assert_mxla_flags_command = assert_mxla_flags_str() if len(slices) > 1 else ""
       mkdir_command = f"mkdir -p {run_name}"
       mv_zip_command = f"mv {zip_name} {run_name}"
       cd_command = f"cd {run_name}"
@@ -190,8 +191,9 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
 
       command=[
           "gcloud", "alpha", "compute", "tpus", "tpu-vm", "ssh", cur_slice.name, f"--worker={worker_num}",
-          "--command",  f"{mkdir_command} && {mv_zip_command} && {cd_command} && {unzip_command} &&"\
-          f" {write_kill_script_command} && {kill_existing_command} && {main_command}", "--strict-host-key-checking=no"
+          "--command", f"{assert_mxla_flags_command} {mkdir_command} && {mv_zip_command} && {cd_command} &&"\
+          f" {unzip_command} && {write_kill_script_command} && {kill_existing_command} && {main_command}",\
+          "--strict-host-key-checking=no"
       ]
       if internal_ip:
         command.append("--internal-ip")
@@ -204,6 +206,16 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
     print(f"Main command failed on slice {worker_list[failure_index][0]} worker"\
         f" {worker_list[failure_index][1]} with error code {return_codes[failure_index]}, see logs for details", flush=True)
   return return_code
+
+def assert_mxla_flags_str():
+  return """ACTIONABLE_ERROR_MESSAGE="You should use worker nodes created by CreateQueuedResources."
+curl -s 'http://metadata.google.internal/computeMetadata/v1/instance/attributes/tpu-env' -H 'Metadata-Flavor: Google' > /tmp/tpu-env # store the metadata
+COORDINATOR_ADDRESS=$(grep '^MEGASCALE_COORDINATOR_ADDRESS' /tmp/tpu-env | cut -d "'" -f 2)
+if [ -z "$COORDINATOR_ADDRESS" ]; then echo "Error: MEGASCALE_COORDINATOR_ADDRESS not set in TPUVM metadata. ${ACTIONABLE_ERROR_MESSAGE}" && exit 1; fi;
+NUM_SLICES=$(grep '^MEGASCALE_NUM_SLICES' /tmp/tpu-env | cut -d "'" -f 2)
+if [ -z "$NUM_SLICES" ]; then echo "Error: MEGASCALE_NUM_SLICES not set TPUVM metadata. ${ACTIONABLE_ERROR_MESSAGE}" && exit 1; fi;
+if (($NUM_SLICES < 2)); then echo "Error: MEGASCALE_NUM_SLICES is set improperly as $NUM_SLICES. ${ACTIONABLE_ERROR_MESSAGE}" && exit 1; fi;
+"""
 
 def run_commands(commands, id_to_print, jobname, worker_list, is_shell=False, output_logs=None, fail_fast=True):
   ''' Runs commands in parallel.
