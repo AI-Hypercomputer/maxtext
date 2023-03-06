@@ -93,9 +93,9 @@ either be a TPUVM or not, but it cannot be one of the workers. Clone MaxText, an
     ```
     gcloud alpha compute tpus queued-resources create $QR_ID --accelerator-type=v4-8 --runtime-version=tpu-vm-v4-base --node-count=$NODE_COUNT --node-prefix=$TPU_PREFIX  --reserved
     ```
-    You have to wait to for the QR to become `ACTIVE` and the nodes to be created and in state `READY` (as opposed to `CREATING`). This may take a minute or two and can be checked via
+    You have to wait to for the QR to become `ACTIVE` (as opposed to `ACCEPTED` or `PROVISIONING`) which corresponds to the worker nodes becoming `READY` (as opposed to `CREATING`). This may take a minute or two and can be checked via
     ```
-    gcloud alpha compute tpus tpu-vm list --filter=$TPU_PREFIX 
+    gcloud alpha compute tpus queued-resources list --filter=$TPU_PREFIX 
     ```
 4. Install dependencies. 
     ```
@@ -130,7 +130,7 @@ either be a TPUVM or not, but it cannot be one of the workers. Clone MaxText, an
     ```
     gcloud alpha compute tpus queued-resources list --filter=$QR_ID
     ```
-    Then delete the QR
+    When the QR is in state `SUSPENDED`, delete it.
 
     ```
     gcloud alpha compute tpus queued-resources delete $QR_ID
@@ -200,7 +200,7 @@ either be a TPUVM or not. Clone MaxText, and cd into the root of the repo.
     When your job is finished `multihost_job.py` will delete the TPUs for you. However you still need to delete the QR. You can check that your job is done because the QR will no longer be `ACTIVE`, but instead in
     state `SUSPENDED` since the nodes have been deleted.
     ```
-    gcloud alpha compute tpus queued-resources list --filter=$RUN_NAME # You can remove RUN_NAME to list all QR in your project 
+    gcloud alpha compute tpus queued-resources list --filter=$RUN_NAME # You can remove the filter to list all QR in your project 
     ```
     Then delete the QR
 
