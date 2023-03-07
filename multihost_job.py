@@ -31,7 +31,6 @@ from datetime import datetime
 import os
 import json
 import shutil
-from google import auth
 
 ##### Define flags #####
 FLAGS = flags.FLAGS
@@ -79,11 +78,12 @@ def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
   return captured_output
 
 def get_project():
-  _, project = auth.default()
-  if not project:
-    sys.exit("You must either specify the project in the PROJECT flag, or set it with"
-     "'gcloud compute set project <project-name>'")
-  return project
+  completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
+  project_outputs = completed_command.stdout.decode().strip().split('\n')
+  print(project_outputs)
+  if len(project_outputs) < 1:
+    sys.exit("You must either specify the project in the PROJECT flag, or set it with 'gcloud compute set project <project>'")
+  return project_outputs[-1] # The project name lives on the last line of the output
 
 def get_zone():
   completed_command = subprocess.run(["gcloud", "config", "get", "compute/zone"], check=True, capture_output=True)
