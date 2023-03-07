@@ -258,6 +258,14 @@ def run_commands(commands, id_to_print, jobname, worker_list, is_shell=False, ou
       slow_str = ""
     print(f"[t={seconds_elapsed:.2f}, {jobname}] Completed {completed}/{total}{slow_str}...")
 
+    if seconds_elapsed >= 60 and not 0 in returncodes and jobname == "SCP":
+      print("SCP operation timed out - terminating all processes."\
+        " Make sure you have run 'gcloud auth login'.")
+      for child in children:
+        child.terminate()
+      max_returncode = 255
+      break
+
     if fail_fast and max_returncode > 0:
       print(f"Terminating all {jobname} processes since at least one failed.")
       for child in children:
