@@ -278,6 +278,24 @@ def run_commands(commands, id_to_print, jobname, worker_list, is_shell=False, ou
     time.sleep(1)
   return max_returncode, returncodes
 
+def assert_project_and_zone_set():
+  """ Asserts that project and zone are set in gcloud config, erroring out if not. """
+  # Project
+  completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
+  project_outputs = completed_command.stdout.decode().strip().split('\n')
+  if len(project_outputs) < 1:
+    sys.exit("You must set the project by running 'gcloud compute set project <project>'")
+
+  # zone
+  completed_command = subprocess.run(["gcloud", "config", "get", "compute/zone"], check=True, capture_output=True)
+  zone_outputs = completed_command.stdout.decode().strip().split('\n')
+  if len(zone_outputs) < 1:
+    sys.exit("You must set the zone by running 'gcloud compute set compute/zone <zone>'")
+
+def assert_script_dir_exists(script_dir):
+  if not os.path.isdir(script_dir):
+    sys.exit(f"No directory named {script_dir} found.")
+
 class Tee:
   """ Helper class to print subprocess to both stdout and a log file. """
   def __init__(self, *files, bufsize=1):
@@ -319,6 +337,9 @@ def main(argv) -> None:
   main_command = command_flag.value
 
   internal_ip = use_internal_ip()
+
+  assert_project_and_zone_set()
+  assert_script_dir_exists(script_dir)
 
   ##### Step 1: Get the workers #####
   slices = get_slices(tpu_prefix)
