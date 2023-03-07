@@ -28,7 +28,7 @@ param_scan_axis: 1
 record_internal_nn_metrics: 0
 
 # Output directory
-base_output_directory: "gs://max-experiments"
+base_output_directory: "gs://max-experiments/"
 
 # Parallelism
 mesh_axes: ['data', 'fsdp', 'tensor']
@@ -56,10 +56,12 @@ ici_tensor_parallelism: 1
 
 
 # Dataset
+# Replace with your path given as argument in download_dataset.sh
+dataset_path: "gs://maxtext-dataset/"
 vocab_size: 32_768 # powers of 2 for sharding
-vocab_path: "gs://cloudtpu_internal_datasets/vocabs_2/"  # Assumes we're allowed
-dataset_name: 'c4/en'
-eval_dataset_name: 'c4/en'
+vocab_relative_path: "vocabs_2/"  # Assumes we're allowed
+dataset_name: 'c4/en:3.0.1'
+eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
 per_device_batch_size: 32
 eval_per_device_batch_size: 0

@@ -17,6 +17,16 @@ MaxText aims to be a launching off point for ambitious LLM projects both in rese
 
 There are three recommended patterns for running MaxText. You can run locally, run on a cluster experimentally or spawn a production-style that is managed by Google Compute Engine. We recommend starting with Local Development, moving to Cluster Experimentation for some ad hoc development and ultimately running your long running jobs with Queued Resources.
 
+## Getting Started: Download Dataset and Configure
+You need to run these steps once per project prior to any local development or cluster experiments.
+
+1. Create two gcs buckets in your project, one for to downloading and retreiving the dataset and the other for storing the logs.
+2. Download the dataset in your gcs bucket
+```
+bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
+```
+3. Change config values for `base_output_directory` and `dataset_path` in `configs/base.yml`. `vocab_relative_path` is relative to `base_output_directory` for loading the tokenizer. MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them.
+
 ## Getting Started: Local Development
 
 Local development is the faster and most convenient way to run MaxText. However, it doesn't scale to multiple hosts.

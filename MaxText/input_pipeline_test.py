@@ -42,7 +42,8 @@ class InputPipelineTest(unittest.TestCase):
     train_iter, eval_iter, test_iter, _ = input_pipeline.preprocess_dataset(
               self.config,
               mesh,
-              self.train_ds, self.eval_ds, vocab_path=self.config.vocab_path)
+              self.train_ds, self.eval_ds,
+              vocab_path=os.path.join(self.config.base_output_directory, self.config.vocab_relative_path))
     return train_iter, eval_iter, test_iter
 
   def test_train_ds(self):

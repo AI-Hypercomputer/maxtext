@@ -140,7 +140,7 @@ def decode_loop(config, state=None):
     config,
     mesh,
     train_ds, eval_ds,
-    vocab_path=config.vocab_path,
+    vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
   )
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager)

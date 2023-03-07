@@ -35,7 +35,6 @@ import max_logging
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 
-os.environ["TFDS_DATA_DIR"] = "gs://tensorflow-datasets/datasets"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
 
@@ -276,7 +275,7 @@ def train_loop(config, state=None):
     config,
     mesh,
     train_ds, eval_ds,
-    vocab_path=config.vocab_path,
+    vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
   )
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
@@ -330,6 +329,7 @@ def train_loop(config, state=None):
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = pyconfig.config.use_pjrt
+  os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
   train_loop(pyconfig.config)
 
 
