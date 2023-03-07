@@ -82,14 +82,14 @@ def get_project():
   project_outputs = completed_command.stdout.decode().strip().split('\n')
   print(project_outputs)
   if len(project_outputs) < 1:
-    sys.exit("You must either specify the project in the PROJECT flag, or set it with 'gcloud compute set project <project>'")
+    sys.exit("You must either specify the project in the PROJECT flag or set it with 'gcloud compute set project <project>'")
   return project_outputs[-1] # The project name lives on the last line of the output
 
 def get_zone():
   completed_command = subprocess.run(["gcloud", "config", "get", "compute/zone"], check=True, capture_output=True)
   zone_outputs = completed_command.stdout.decode().strip().split('\n')
   if len(zone_outputs) < 1:
-    sys.exit("You must either specify the zone in the ZONE flag, or set it with 'gcloud compute set compute/zone <zone>'")
+    sys.exit("You must either specify the zone in the ZONE flag or set it with 'gcloud compute set compute/zone <zone>'")
   return zone_outputs[-1] # The zone name lives on the last line of the output
 
 def run_create_resources(run_name, json_path, endpoint, project, zone):
