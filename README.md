@@ -1,6 +1,6 @@
 # Overview
 
-MaxText is a **high performance**, **arbitrarily scalable**, **open-source**, **simple**, **easily forkable**, **well-tested**, **batteries included** LLM written in pure Python/Jax and targeting Google Cloud TPUs. MaxText achieves [TK] model-flop utilization and scales from single host to very large clusters (tested on up to [TK] chips) while staying simple and "optimization-free" thanks to the power of Jax and the XLA compiler.
+MaxText is a **high performance**, **arbitrarily scalable**, **open-source**, **simple**, **easily forkable**, **well-tested**, **batteries included** LLM written in pure Python/Jax and targeting Google Cloud TPUs. MaxText typically achieves 55% to 60% model-flop utilization and scales from single host to very large clusters while staying simple and "optimization-free" thanks to the power of Jax and the XLA compiler.
 
 MaxText aims to be a launching off point for ambitious LLM projects both in research and production. We encourage users to start by experimenting with MaxText out of the box and then fork and modify MaxText to meet their needs. If you're additionally interested in contributing to the community, need support or just want to get in touch, [learn more](#contributions-and-bug-reports).
 
@@ -38,9 +38,9 @@ python3 MaxText/decode.py MaxText/configs/base.yml run_name=${USER}_$(date +%Y-%
 ```
 Be aware, these decodings will be random. To get high quality decodings you need pass in a checkpoint, typically via the `load_parameters_path` argument.
 
-## Getting Started: Cluster Experimentation
+## Getting Started: Quick Experiments on Multiple Slices
 
-This workflow using `multihost_runner.py` is optimized for quick experiments. Because the `multihost_runner.py` script depends on long-lived `ssh` connections, we do not recommend it for any long-running jobs.
+This workflow using `multihost_runner.py` is optimized for quick experiments, repeatedly re-using the same TPUs. Because the `multihost_runner.py` script depends on long-lived `ssh` connections, we do not recommend it for any long-running jobs.
 
 We call the `runner` machine the one that `multihost_runner.py` is called from. This script will `ssh` into TPUVM `worker` machines that are found from the `--TPU_PREFIX` flag, and must be different than the runner machine.
 If the runner machine is a cloud VM, it must be in the same project as the workers.
@@ -136,15 +136,15 @@ either be a TPUVM or not, but it cannot be one of the workers. Clone MaxText, an
     gcloud alpha compute tpus queued-resources delete $QR_ID
     ```
 
-## Getting Started: Production Jobs Via Queued Resource
+## Getting Started: Production Jobs On Multiple Slices
 
-This workflow using `multihost_job.py` is optimized for long running experiments. This script avoids any `ssh` connection, and logs are written to cloud logging.
+The workflow using `multihost_job.py` is optimized for long running experiments, providing resiliency against hardware failure and avoiding long running ssh connections. Its latency is much higher than `multihost_runner.py` because it needs to provision new capacity each time.
 
 The `multihost_job.py` script:
 
 * Copies your code to your GCS bucket
-* Spins up specified TPUVM(s) via CQR
-* Directs the TPU's to download then run that code
+* Spins up specified TPU VM(s) via CQR
+* Directs the TPU's to download then run that code. Because this logic is within the CQR's startup script, if there hardware is interrupted, the job will be rescheduled and resumed.
 * Logs locally to each worker TPU, sending these logs to GCS at the job end
 * Delete the TPUs at the end of the job.
 
@@ -211,20 +211,22 @@ either be a TPUVM or not. Clone MaxText, and cd into the root of the repo.
 
 # Runtime Performance Results
 
-TK
+For a 22B model. See full run configs in `MaxText/configs/` as `1xv4-128.sh`, `2xv4-128.sh` and `4xv4-128.sh`.
 
-# Full Training Results
-
-See [Experiments](Experiments.md).
+| Hardware    | TFLOP/sec/chip   |  MFU  |
+| ----------- | ---------------- | ----- |
+| 1x v4-128   | 165              | 60%   |
+| 2x v4-128   | 158              | 57.4% |
+| 4x v4-128   | 155              | 56.3% |
 
 
 # Comparison to Alternatives
 
-MaxText is heavily inspired by [MinGPT](https://github.com/karpathy/minGPT)/[NanoGPT](https://github.com/karpathy/nanoGPT), elegant standalone GPT implementations written in PyTorch and targeting Nvidia GPUs. MaxText is more complex but achieves higher model-flop utilization [TK], is massively scalable and implements a key-value cache for efficient auto-regressive decoding.
+MaxText is heavily inspired by [MinGPT](https://github.com/karpathy/minGPT)/[NanoGPT](https://github.com/karpathy/nanoGPT), elegant standalone GPT implementations written in PyTorch and targeting Nvidia GPUs. MaxText is more complex but has an MFU more than three times the [17%](https://twitter.com/karpathy/status/1613250489097027584?cxt=HHwWgIDUhbixteMsAAAA) reported most recently with that codebase, is massively scalable and implements a key-value cache for efficient auto-regressive decoding.
 
-MaxText is most similar to [Nvidia/Megatron-LM](https://github.com/NVIDIA/Megatron-LM), a very well tuned LLM implementation targeting Nvidia GPUs. The two implementations achieve comparable MFUs. The difference in the codebases highlights the different programming strategies. MaxText is pure Python, relying heavily on the XLA compiler to achieve high performance. By contrast, Megatron-LM is a mix of Python and CUDA, relying on well-optimized CUDA kernels to achieve high performance.
+MaxText is more similar to [Nvidia/Megatron-LM](https://github.com/NVIDIA/Megatron-LM), a very well tuned LLM implementation targeting Nvidia GPUs. The two implementations achieve comparable MFUs. The difference in the codebases highlights the different programming strategies. MaxText is pure Python, relying heavily on the XLA compiler to achieve high performance. By contrast, Megatron-LM is a mix of Python and CUDA, relying on well-optimized CUDA kernels to achieve high performance.
 
-MaxText is also comparable to [Pax](https://github.com/google/paxml). Like Pax, MaxText provides high-performance and scalable implementations of LLMs. Pax focuses on enabling powerful configuration parameters, enabling developers to change the model by editing config parameters. By contrast, MaxText is a simple, concrete implementation of an LLM that encourages users to extend by forking and directly editing the source code. The right choice depends on your project's priorities.
+MaxText is also comparable to [Pax](https://github.com/google/paxml). Like Pax, MaxText provides high-performance and scalable implementations of LLMs in Jax. Pax focuses on enabling powerful configuration parameters, enabling developers to change the model by editing config parameters. By contrast, MaxText is a simple, concrete implementation of an LLM that encourages users to extend by forking and directly editing the source code. The right choice depends on your project's priorities.
 
 # Development
 
@@ -238,6 +240,8 @@ bash unit_test_and_lint.sh
 The full suite of end-to-end tests is in `end_to_end/`. We run them with a nightly cadence.
 
 # Contributions and Bug Reports
+
+(Not applicable during the private preview.)
 
 We welcome contributions and bug reports!
 * We're focused on continuing to make MaxText align to its [values](#overview) and welcome pull requests to improve simplicity, scalability and performance. Read the [development](#development) section for more context.
