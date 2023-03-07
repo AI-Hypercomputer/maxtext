@@ -317,6 +317,11 @@ def train_loop(config, state=None):
       checkpoint_manager.save(step, state)
       max_logging.log("saved a checkpoint")
 
+    # Start profiling at end of first step to avoid compilation.
+    # Move before for loop to include.
+    if step == 0:
+      max_utils.activate_profiler(config)
+
   max_utils.deactivate_profiler(config)
   writer.close()
   return state

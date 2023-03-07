@@ -6,11 +6,13 @@ ml-collections
 numpy
 optax
 portpicker
+protobuf==3.20
 pylint
 pytest
 sentencepiece
-tensorflow
+tensorflow==2.12.0rc0
 tensorflow-datasets
-tensorflow-text
+tensorboard-plugin-profile
+tensorflow-text==2.12.0rc0
 tensorboardx
 jax[tpu]

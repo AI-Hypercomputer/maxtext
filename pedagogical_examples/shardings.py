@@ -224,12 +224,12 @@ pjit_gen_layers = pjit(
         in_axis_resources=None,
         out_axis_resources=parameter_sharding
       )
-activate_profiler(args.profiler_path)
 
 with maps.Mesh(mesh.devices, mesh.axis_names):
   key = jax.random.PRNGKey(0)
   presharded_X = jax.block_until_ready(pjit_gen_data(key))
   presharded_layers = jax.block_until_ready(pjit_gen_layers(key))
+  activate_profiler(args.profiler_path)
   TFLOPs_per_device = parameters * 6 * BATCH  / 10**12 / len(jax.devices())
   time = simple_timeit(lambda : jax.block_until_ready(pjit_func(presharded_X, presharded_layers)))
   print(f"time is {time} seconds, TFLOP is {TFLOPs_per_device}, TFLOP/s is {TFLOPs_per_device/time}", flush = True)
