@@ -6,6 +6,7 @@ run_name: ""
 load_parameters_path: ""
 
 use_pjrt: "true"
+mxla_barrier: "true"
 reuse_example_batch: 0 # for testing TPU performance, this options repeated uses the same batch.
 
 # Activation dtypes.

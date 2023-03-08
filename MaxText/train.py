@@ -325,11 +325,16 @@ def train_loop(config, state=None):
   writer.close()
   return state
 
+def update_libtpu_init_args(flag,value):
+  cur_args = [arg for arg in os.environ.get('LIBTPU_INIT_ARGS', "").split(" ") if f"--{flag}=" not in arg]
+  cur_args.append(f"--{flag}={value}")
+  os.environ["LIBTPU_INIT_ARGS"] = " ".join(cur_args)
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = pyconfig.config.use_pjrt
   os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
+  update_libtpu_init_args("xla_tpu_enable_megascale_barrier", pyconfig.config.mxla_barrier)
   train_loop(pyconfig.config)
 
 
