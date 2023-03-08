@@ -45,7 +45,6 @@ def create_orbax_checkpoint_manager(checkpoint_dir: str, enable_checkpointing: b
   max_logging.log("Started checkpointing")
   #_multislice_distribute_initialize()
   p = epath.Path(checkpoint_dir)
-  max_logging.log("Done with epath")
 
   return CheckpointManager(p,
                            Checkpointer(checkpoint.PyTreeCheckpointHandler()),
