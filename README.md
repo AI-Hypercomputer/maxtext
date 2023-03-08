@@ -8,7 +8,6 @@ MaxText aims to be a launching off point for ambitious LLM projects both in rese
 
 * [Getting Started](#getting-started)
 * [Runtime Performance Results](#runtime-performance-results)
-* [Full Training Results](#full-training-results)
 * [Comparison To Alternatives](#comparison-to-alternatives)
 * [Development](#development)
 * [Contributions and Bug Reports](#contributions-and-bug-reports)
@@ -25,7 +24,8 @@ You need to run these steps once per project prior to any local development or c
 ```
 bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
 ```
-3. Change config values for `base_output_directory` and `dataset_path` in `configs/base.yml`. `vocab_relative_path` is relative to `base_output_directory` for loading the tokenizer. MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them.
+3. Change config values for `base_output_directory` and `dataset_path` in `configs/base.yml`. `vocab_relative_path` is relative to `base_output_directory` for loading the tokenizer. MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them. We also recommend reviewing the configurable options in `configs/base.yml`, for instance you may change the `steps` or `logging_period` by either modifying 
+`configs/base.yml` or by passing in `steps` and `logging_period` as additional args to the `train.py` call.
 
 ## Getting Started: Local Development
 
@@ -264,6 +264,5 @@ The full suite of end-to-end tests is in `end_to_end/`. We run them with a night
 We welcome contributions and bug reports!
 * We're focused on continuing to make MaxText align to its [values](#overview) and welcome pull requests to improve simplicity, scalability and performance. Read the [development](#development) section for more context.
 * To file a bug, use Github Issues.
-* If you want to chat, join our public [Google Chat Room](TK).
 
 
