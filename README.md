@@ -2,7 +2,7 @@
 
 MaxText is a **high performance**, **arbitrarily scalable**, **open-source**, **simple**, **easily forkable**, **well-tested**, **batteries included** LLM written in pure Python/Jax and targeting Google Cloud TPUs. MaxText typically achieves 55% to 60% model-flop utilization and scales from single host to very large clusters while staying simple and "optimization-free" thanks to the power of Jax and the XLA compiler.
 
-MaxText aims to be a launching off point for ambitious LLM projects both in research and production. We encourage users to start by experimenting with MaxText out of the box and then fork and modify MaxText to meet their needs. If you're additionally interested in contributing to the community, need support or just want to get in touch, [learn more](#contributions-and-bug-reports).
+MaxText aims to be a launching off point for ambitious LLM projects both in research and production. We encourage users to start by experimenting with MaxText out of the box and then fork and modify MaxText to meet their needs.
 
 # Table of Contents
 
@@ -10,7 +10,6 @@ MaxText aims to be a launching off point for ambitious LLM projects both in rese
 * [Runtime Performance Results](#runtime-performance-results)
 * [Comparison To Alternatives](#comparison-to-alternatives)
 * [Development](#development)
-* [Contributions and Bug Reports](#contributions-and-bug-reports)
 
 # Getting Started
 
@@ -24,8 +23,7 @@ You need to run these steps once per project prior to any local development or c
 ```
 bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
 ```
-3. Change config values for `base_output_directory` and `dataset_path` in `configs/base.yml`. `vocab_relative_path` is relative to `base_output_directory` for loading the tokenizer. MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them. We also recommend reviewing the configurable options in `configs/base.yml`, for instance you may change the `steps` or `logging_period` by either modifying 
-`configs/base.yml` or by passing in `steps` and `logging_period` as additional args to the `train.py` call.
+3. Change config values for `base_output_directory` and `dataset_path` in `configs/base.yml`. `vocab_relative_path` is relative to `base_output_directory` for loading the tokenizer. MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them. We also recommend reviewing the configurable options in `configs/base.yml`, for instance you may change the `steps` or `logging_period` by either modifying `configs/base.yml` or by passing in `steps` and `logging_period` as additional args to the `train.py` call.
 
 ## Getting Started: Local Development
 
@@ -256,13 +254,3 @@ bash unit_test_and_lint.sh
 ```
 
 The full suite of end-to-end tests is in `end_to_end/`. We run them with a nightly cadence.
-
-# Contributions and Bug Reports
-
-(Not applicable during the private preview.)
-
-We welcome contributions and bug reports!
-* We're focused on continuing to make MaxText align to its [values](#overview) and welcome pull requests to improve simplicity, scalability and performance. Read the [development](#development) section for more context.
-* To file a bug, use Github Issues.
-
-
