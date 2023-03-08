@@ -225,9 +225,17 @@ For a 22B model. See full run configs in `MaxText/configs/` as `1xv4-128.sh`, `2
 
 | Hardware    | TFLOP/sec/chip   |  MFU  |
 | ----------- | ---------------- | ----- |
-| 1x v4-128   | 165              | 60%   |
+| 1x v4-128   | 165              | 60.0% |
 | 2x v4-128   | 158              | 57.4% |
 | 4x v4-128   | 155              | 56.3% |
+
+For a 52B model. See full run configs in `MaxText/configs/` as `1xv4-384.sh` and `2xv4-512.sh`.
+
+| Hardware    | TFLOP/sec/chip   |  MFU  |
+| ----------- | ---------------- | ----- |
+| 1x v4-384   | 152              | 55.2% |
+| 2x v4-384   | 142              | 51.6% | # TK -- this is low because we don't have async all gather enabled.
+
 
 
 # Comparison to Alternatives
