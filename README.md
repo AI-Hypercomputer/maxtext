@@ -2,16 +2,14 @@
 
 MaxText is a **high performance**, **arbitrarily scalable**, **open-source**, **simple**, **easily forkable**, **well-tested**, **batteries included** LLM written in pure Python/Jax and targeting Google Cloud TPUs. MaxText typically achieves 55% to 60% model-flop utilization and scales from single host to very large clusters while staying simple and "optimization-free" thanks to the power of Jax and the XLA compiler.
 
-MaxText aims to be a launching off point for ambitious LLM projects both in research and production. We encourage users to start by experimenting with MaxText out of the box and then fork and modify MaxText to meet their needs. If you're additionally interested in contributing to the community, need support or just want to get in touch, [learn more](#contributions-and-bug-reports).
+MaxText aims to be a launching off point for ambitious LLM projects both in research and production. We encourage users to start by experimenting with MaxText out of the box and then fork and modify MaxText to meet their needs.
 
 # Table of Contents
 
 * [Getting Started](#getting-started)
 * [Runtime Performance Results](#runtime-performance-results)
-* [Full Training Results](#full-training-results)
 * [Comparison To Alternatives](#comparison-to-alternatives)
 * [Development](#development)
-* [Contributions and Bug Reports](#contributions-and-bug-reports)
 
 # Getting Started
 
@@ -25,7 +23,7 @@ You need to run these steps once per project prior to any local development or c
 ```
 bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
 ```
-3. Change config values for `base_output_directory` and `dataset_path` in `configs/base.yml`. `vocab_relative_path` is relative to `base_output_directory` for loading the tokenizer. MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them.
+3. Change config values for `base_output_directory` and `dataset_path` in `configs/base.yml`. `vocab_relative_path` is relative to `base_output_directory` for loading the tokenizer. MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them. We also recommend reviewing the configurable options in `configs/base.yml`, for instance you may change the `steps` or `logging_period` by either modifying `configs/base.yml` or by passing in `steps` and `logging_period` as additional args to the `train.py` call.
 
 ## Getting Started: Local Development
 
@@ -56,7 +54,7 @@ We call the `runner` machine the one that `multihost_runner.py` is called from. 
 If the runner machine is a cloud VM, it must be in the same project as the workers.
 
 The `multihost_runner.py` script:
-* Distributes your code to multiple worker TPUVM's
+* Distributes your code to multiple worker TPUVM's, recursively copying chosen directory
 * Runs the code on the workers
 * Logs and monitors the processes' error statuses and brings the logs back to the runner machine.
 
@@ -105,7 +103,7 @@ either be a TPUVM or not, but it cannot be one of the workers. Clone MaxText, an
     ```
     You have to wait to for the QR to become `ACTIVE` (as opposed to `ACCEPTED` or `PROVISIONING`) which corresponds to the worker nodes becoming `READY` (as opposed to `CREATING`). This may take a minute or two and can be checked via
     ```
-    gcloud alpha compute tpus queued-resources list --filter=$TPU_PREFIX 
+    gcloud alpha compute tpus queued-resources list --filter=$QR_ID 
     ```
 4. Install dependencies. 
     ```
@@ -148,7 +146,7 @@ either be a TPUVM or not, but it cannot be one of the workers. Clone MaxText, an
 
 ## Getting Started: Production Jobs On Multiple Slices
 
-The workflow using `multihost_job.py` is optimized for long running experiments, providing resiliency against hardware failure and avoiding long running ssh connections. Its latency is much higher than `multihost_runner.py` because it needs to provision new capacity each time.
+The workflow using `multihost_job.py` is optimized for long running experiments, providing resiliency against hardware failure and avoiding long running ssh connections. Its latency is much higher than `multihost_runner.py` because it needs to provision new capacity each time. The `multihost_job.py` script ends once the request to create the TPUs is issued. Currently logs are written to GCS at the end of the job, but we soon to plan move to gcloud logging to allow monitoring of the job. 
 
 The `multihost_job.py` script:
 
@@ -199,9 +197,9 @@ either be a TPUVM or not. Clone MaxText, and cd into the root of the repo.
     RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S) # You may set this to any unique name for a fresh run.
     python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --COMMAND="bash setup.sh && python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME dcn_data_parallelism=$NODE_COUNT"
     ```
-5. View the job's logs in cloud logging. 
+5. View the job's logs in your GCS bucket. 
 
-    The link to your job's logs is printed at the end of the multihost_job output.
+    The link to your job's logs is printed at the end of the multihost_job output. They are located in BUCKET_NAME/BUCKET_PATH/RUN_NAME.
 
 6. Cleanup the QR when finished.
 
@@ -256,14 +254,3 @@ bash unit_test_and_lint.sh
 ```
 
 The full suite of end-to-end tests is in `end_to_end/`. We run them with a nightly cadence.
-
-# Contributions and Bug Reports
-
-(Not applicable during the private preview.)
-
-We welcome contributions and bug reports!
-* We're focused on continuing to make MaxText align to its [values](#overview) and welcome pull requests to improve simplicity, scalability and performance. Read the [development](#development) section for more context.
-* To file a bug, use Github Issues.
-* If you want to chat, join our public [Google Chat Room](TK).
-
-
