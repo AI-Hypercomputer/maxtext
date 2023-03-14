@@ -15,4 +15,4 @@ tensorflow-datasets
 tensorboard-plugin-profile
 tensorflow-text==2.12.0rc0
 tensorboardx
-jax[tpu]
+jax[tpu]==0.4.6
