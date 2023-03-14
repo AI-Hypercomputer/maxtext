@@ -295,10 +295,8 @@ def train_loop(config, state=None):
     static_argnums=(0,1,),
     donate_argnums=2)
 
-
   example_batch = None
   last_step_completion = datetime.datetime.now()
-  max_utils.activate_profiler(config)
 
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(train_iter, example_batch, config)

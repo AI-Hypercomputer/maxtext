@@ -225,14 +225,14 @@ For a 22B model. See full run configs in `MaxText/configs/` as `1xv4-128.sh`, `2
 | ----------- | ---------------- | ----- |
 | 1x v4-128   | 165              | 60.0% |
 | 2x v4-128   | 158              | 57.4% |
-| 4x v4-128   | 155              | 56.3% |
+| 4x v4-128   | 157              | 57.1% |
 
 For a 52B model. See full run configs in `MaxText/configs/` as `1xv4-384.sh` and `2xv4-512.sh`.
 
 | Hardware    | TFLOP/sec/chip   |  MFU  |
 | ----------- | ---------------- | ----- |
-| 1x v4-384   | 152              | 55.2% |
-| 2x v4-384   | 142              | 51.6% | # TK -- this is low because we don't have async all gather enabled.
+| 1x v4-384   | 154              | 56.0% |
+| 2x v4-384   | 162              | 58.9% | # this is quirkily higher than single slice because of choices made by the compiler, not for a fundamental reason.
 
 
 
