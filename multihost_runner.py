@@ -42,6 +42,9 @@ command_flag = flags.DEFINE_string("COMMAND", None, "Main command to run on each
     " a copied version of SCRIPT_DIR on each TPU worker.")
 
 flags.mark_flag_as_required('TPU_PREFIX')
+flags.register_validator('TPU_PREFIX',
+                         lambda value: len(value) > 0,
+                         message='--TPU_PREFIX must be a non-empty string specifying your TPU slice names.')
 flags.mark_flag_as_required('COMMAND')
 
 
