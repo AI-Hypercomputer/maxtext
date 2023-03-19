@@ -33,13 +33,13 @@ parser.add_argument(
 parser.add_argument(
     "--embedding_dimension", "-d",
     required=False,
-    default=16384,
+    default=2048,
     type=int
 )
 parser.add_argument(
     "--batch_size", "-b",
     required=False,
-    default=65536,
+    default=131072,
     type=int
 )
 parser.add_argument(
