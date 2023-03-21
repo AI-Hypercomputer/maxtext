@@ -12,7 +12,7 @@ import pyconfig
 import input_pipeline
 
 # By default, XLA presents all the CPU cores as one device. This flag splits up cores in 2 CPU devices.
-os.environ["TFDS_DATA_DIR"] = "gs://tensorflow-datasets/datasets"
+os.environ["TFDS_DATA_DIR"] = "gs://tensorflow-datasets/datasets/"
 os.environ["XLA_FLAGS"] = '--xla_force_host_platform_device_count=2'
 jax.config.update('jax_platform_name', 'cpu')
 
@@ -31,6 +31,7 @@ class InputPipelineTest(unittest.TestCase):
     self.train_iter, self.eval_iter, self.predict_iter = self._get_preprocessed_datasets()
 
   def _get_datasets(self):
+    print("Sharding dataset in ", jax.process_count(), " shards")
     train_ds, eval_ds = input_pipeline.get_datasets(
             config=self.config, read_config = self.read_config)
     return train_ds, eval_ds
@@ -50,7 +51,7 @@ class InputPipelineTest(unittest.TestCase):
     expected_shape = [2, self.config.max_target_length]
     # For training we pack multiple short examples in one example.
     # *_position and *_segmentation indicate the boundaries.
-    batch = next(self.train_iter)
+    batch = self.train_iter()
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
         'inputs': expected_shape,
         'inputs_position': expected_shape,
@@ -63,7 +64,7 @@ class InputPipelineTest(unittest.TestCase):
 
   def test_eval_ds(self):
     expected_shape = [2, self.config.max_eval_target_length]
-    batch = next(self.eval_iter)
+    batch = self.eval_iter()
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
        'inputs': expected_shape,
        'targets': expected_shape,
@@ -72,7 +73,7 @@ class InputPipelineTest(unittest.TestCase):
 
   def test_predict_ds(self):
     expected_shape = [2, self.config.max_predict_length]
-    batch = next(self.predict_iter)
+    batch = self.predict_iter()
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
         'inputs': expected_shape,
         'targets': expected_shape,

@@ -1,3 +1,6 @@
+
+[![Unit Tests](https://github.com/rwitten/MaxText/actions/workflows/UnitTests.yml/badge.svg?branch=main)](https://github.com/rwitten/MaxText/actions/workflows/UnitTests.yml)
+
 # Overview
 
 MaxText is a **high performance**, **arbitrarily scalable**, **open-source**, **simple**, **easily forkable**, **well-tested**, **batteries included** LLM written in pure Python/Jax and targeting Google Cloud TPUs. MaxText typically achieves 55% to 60% model-flop utilization and scales from single host to very large clusters while staying simple and "optimization-free" thanks to the power of Jax and the XLA compiler.
