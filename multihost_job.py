@@ -16,10 +16,10 @@ Example usages:
   Maximal customization, assuming runner.sh lives in path/to/dir
   python3 multihost_job.py  --COMMAND="bash runner.sh" --BUCKET_NAME=<my-bucket> --BUCKET_DIR=job-log-directory \
     --SCRIPT_DIR=path/to/dir --PROJECT=<my-project> --ZONE=<zone> \
-    --VERSION=tpu-vm-v4-base --TPU_TYPE=v4-8 --NUM_SLICES=2 -- RUN_NAME=$USER-run-job
+    --VERSION=tpu-vm-v4-base --TPU_TYPE=v4-8 --NUM_SLICES=2 --RUN_NAME=$USER-run-job
 Common issues:
   You must be able to communicate with the BUCKET_NAME e.g. via gsutil. You may have to run
-  gcloud auth login 
+  gcloud auth login
   and
   gcloud auth application-default login
 """
@@ -47,10 +47,17 @@ project_flag = flags.DEFINE_string("PROJECT", None, "GCE project name, defaults 
 zone_flag = flags.DEFINE_string("ZONE", None, "GCE zone, e.g. us-central2-b, defaults to gcloud config compute/zone")
 endpoint_flag = flags.DEFINE_string("ENDPOINT", "tpu.googleapis.com", "The endpoint for google API requests.")
 run_name_flag = flags.DEFINE_string("RUN_NAME", None, "Run name used for temporary files, defaults to timestamp.")
-
+network_flag = flags.DEFINE_string("NETWORK", "default", "Gcloud compute engine network.")
+subnetwork_flag = flags.DEFINE_string("SUBNETWORK", "default", "Gcloud compute engine subnetwork.")
+resource_pool_flag = flags.DEFINE_string("RESOURCE_POOL", "on-demand", "The resource pool to use, either"\
+    "'reserved', 'on-demand', or 'best-effort'.")
+service_account_flag = flags.DEFINE_string("SERVICE_ACCOUNT", None, "Service account for the TPU VMs.")
 
 flags.mark_flag_as_required('COMMAND')
 flags.mark_flag_as_required('BUCKET_NAME')
+flags.register_validator('RESOURCE_POOL',
+                         lambda value: value in ["reserved", "on-demand", "best-effort"],
+                         message="--RESOURCE_POOL must be 'reserved', 'on-demand' or 'best-effort'")
 
 def get_run_name():
   now = datetime.now()
@@ -80,7 +87,6 @@ def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
 def get_project():
   completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
   project_outputs = completed_command.stdout.decode().strip().split('\n')
-  print(project_outputs)
   if len(project_outputs) < 1:
     sys.exit("You must specify the project in the PROJECT flag or set it with 'gcloud compute set project <project>'")
   return project_outputs[-1] # The project name lives on the last line of the output
@@ -107,7 +113,7 @@ tar xzf {zip_name}
 python3 -m virtualenv venv
 source venv/bin/activate
 {get_env_command_str()}
-{main_command} > {log_name}
+({main_command}) > {log_name}
 gsutil cp {log_name} "{bucket_path}/{log_name}_slice_"$SLICE_ID"_worker_"$WORKER_ID
 {create_kill_command_str(endpoint)}"""
 
@@ -126,20 +132,20 @@ def create_kill_command_str(endpoint):
   curl -X DELETE -H "Authorization: Bearer $(gcloud auth print-access-token)" https://{endpoint}/v2alpha1/projects/$PROJECT/locations/$ZONE/nodes/$NODE_ID
 fi"""
 
-def write_cqr_json_file(json_filename, project, zone, tpu_type, runtime_version, num_slices, run_name, startup_script_str):
+def write_cqr_json_file(json_filename, project, zone, tpu_type, runtime_version, num_slices, run_name, network, subnetwork,
+ resource_pool, service_account, startup_script_str):
   """ Write json file for CQR """
   json_dict = {
-      "guaranteed": {"reserved": True},
       "tpu": {
-        "node_spec": [
+        "node_spec": 
           {
             "parent": f"projects/{project}/locations/{zone}",
             "node": {
               "accelerator_type": tpu_type,
               "runtime_version": runtime_version,
               "network_config": {
-                "network": "default",
-                "subnetwork": "default",
+                "network": network,
+                "subnetwork": subnetwork,
                 "enable_external_ips": True
               },
               "metadata": {
@@ -151,28 +157,42 @@ def write_cqr_json_file(json_filename, project, zone, tpu_type, runtime_version,
               "node_id_prefix": run_name
             }
         }
-      ]
     }
   }
+
+  if resource_pool == "reserved":
+    json_dict["guaranteed"] = {"reserved": True}
+  elif resource_pool == "on-demand":
+    json_dict["guaranteed"] = {"reserved": False}
+  elif resource_pool == "best-effort":
+    json_dict["best_effort"] = {}
+
+  if service_account:
+    service_account_dict = {"email": service_account}
+    json_dict["tpu"]["node_spec"]["node"]["service_account"] = service_account_dict
 
   with open(json_filename, "w", encoding="utf-8") as f:
     json.dump(json_dict, f, indent=3) # Indent doesn't matter, but is nice.
 
 def print_flags(tpu_type, runtime_version, num_slices, script_dir, main_command, bucket_name, bucket_dir, endpoint, project,
- zone, run_name):
+ zone, network, subnetwork, resource_pool, service_account, run_name):
   """ Print configuration values after defaults have been filled in. """
   print("Running multihost_job with the following configuration:")
-  print(f"Project             (--PROJECT)     = {project}")
-  print(f"Zone                (--ZONE)        = {zone}")
-  print(f"TPU type            (--TPU_TYPE)    = {tpu_type}")
-  print(f"TPU runtime version (--VERSION)     = {runtime_version}")
-  print(f"Number of slices    (--NUM_SLICES)  = {num_slices}")
-  print(f"Script dir          (--SCRIPT_DIR)  = {script_dir}")
-  print(f"Bucket name         (--BUCKET_NAME) = {bucket_name}")
-  print(f"Bucket dir          (--BUCKET_DIR)  = {bucket_dir}")
-  print(f"Command to run      (--COMMAND)     = {main_command}")
-  print(f"Endpoint            (--ENDPOINT)    = {endpoint}")
-  print(f"Run name            (--RUN_NAME)    = {run_name}\n")
+  print(f"Project             (--PROJECT)         = {project}")
+  print(f"Zone                (--ZONE)            = {zone}")
+  print(f"TPU type            (--TPU_TYPE)        = {tpu_type}")
+  print(f"TPU runtime version (--VERSION)         = {runtime_version}")
+  print(f"Number of slices    (--NUM_SLICES)      = {num_slices}")
+  print(f"Script dir          (--SCRIPT_DIR)      = {script_dir}")
+  print(f"Bucket name         (--BUCKET_NAME)     = {bucket_name}")
+  print(f"Bucket dir          (--BUCKET_DIR)      = {bucket_dir}")
+  print(f"Command to run      (--COMMAND)         = {main_command}")
+  print(f"Endpoint            (--ENDPOINT)        = {endpoint}")
+  print(f"Network             (--NETWORK)         = {network}")
+  print(f"Subnetwork          (--SUBNETWORK)      = {subnetwork}")
+  print(f"Resource pool       (--RESOURCE_POOL)   = {resource_pool}")
+  print(f"Service_account     (--SERVICE_ACCOUNT) = {service_account}")
+  print(f"Run name            (--RUN_NAME)        = {run_name}\n")
 
 ################### Main ###################
 def main(argv) -> None:
@@ -191,6 +211,10 @@ def main(argv) -> None:
   project = project_flag.value
   zone = zone_flag.value
   run_name = run_name_flag.value
+  network = network_flag.value
+  subnetwork = subnetwork_flag.value
+  resource_pool = resource_pool_flag.value
+  service_account = service_account_flag.value
 
   if not project:
     project = get_project()
@@ -200,7 +224,7 @@ def main(argv) -> None:
     run_name = get_run_name() # Used for QR name, TPU_PREFIX, logging file, and tmp json file.
 
   print_flags(tpu_type, tpu_runtime_version, num_slices, script_dir, main_command, bucket_name, bucket_dir,
-    endpoint, project, zone, run_name)
+    endpoint, project, zone, network, subnetwork, resource_pool, service_account, run_name)
 
   ##### Step 1: Zip code and move it to GCS #####
   tmp_dir_relative_to_script = "tmp/" + run_name + "/"
@@ -226,12 +250,18 @@ def main(argv) -> None:
   json_filename = 'cqr_request_' + run_name + '.json'
   json_path = os.path.join(tmp_dir, json_filename)
 
-  write_cqr_json_file(json_path, project, zone, tpu_type, tpu_runtime_version, num_slices, run_name, startup_script_str)
+  write_cqr_json_file(json_path, project, zone, tpu_type, tpu_runtime_version, num_slices, run_name, network,
+                      subnetwork, resource_pool, service_account, startup_script_str)
   print("Running CQR command...")
   captured_output = run_create_resources(run_name, json_path, endpoint, project, zone)
-  if captured_output.returncode !=0 or "Warning" in captured_output.stderr.decode():
+  # TODO(Once startup-script is available in CLI, error handling can be improved)
+  if captured_output.returncode !=0 or '"error"' in captured_output.stdout.decode() or \
+    "Warning" in captured_output.stderr.decode():
     print("\n\nCreate resource request returned with ERROR status.\n")
-    print("Create resource error:\n" + captured_output.stderr.decode())
+    if '"error"' in captured_output.stdout.decode():
+      print("Create resource error:\n" + captured_output.stdout.decode())
+    else:
+      print("Create resource error:\n" + captured_output.stderr.decode())
     return 1
   print("CQR command received! TPUs are being created.\n")
 
