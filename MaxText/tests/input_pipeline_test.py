@@ -12,7 +12,7 @@ import pyconfig
 import input_pipeline
 
 # By default, XLA presents all the CPU cores as one device. This flag splits up cores in 2 CPU devices.
-os.environ["TFDS_DATA_DIR"] = "gs://tensorflow-datasets/datasets/"
+os.environ["TFDS_DATA_DIR"] = "gs://maxtext-dataset/"
 os.environ["XLA_FLAGS"] = '--xla_force_host_platform_device_count=2'
 jax.config.update('jax_platform_name', 'cpu')
 
