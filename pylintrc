@@ -7,11 +7,11 @@
 
 [MASTER]
 
-# Add files or directories to the blacklist. They should be base names, not
+# Add files or directories to the blocked list. They should be base names, not
 # paths.
 ignore=third_party
 
-# Add files or directories matching the regex patterns to the blacklist. The
+# Add files or directories matching the regex patterns to the blocked list. The
 # regex matches against base names, not paths.
 ignore-patterns=
 
@@ -28,11 +28,6 @@ jobs=4
 # Allow loading of arbitrary C extensions. Extensions are imported into the
 # active Python interpreter and may run arbitrary code.
 unsafe-load-any-extension=no
-
-# A comma-separated list of package or module names from where C extensions may
-# be loaded. Extensions are loading into the active Python interpreter and may
-# run arbitrary code
-extension-pkg-whitelist=
 
 
 [MESSAGES CONTROL]
@@ -105,6 +100,7 @@ disable=apply-builtin,
         old-octal-literal,
         old-raise-syntax,
         parameter-unpacking,
+        pointless-string-statement,
         print-statement,
         raising-string,
         range-builtin-not-iterating,
@@ -137,6 +133,7 @@ disable=apply-builtin,
         useless-suppression,
         using-cmp-argument,
         wrong-import-order,
+        wrong-import-position,
         xrange-builtin,
         zip-builtin-not-iterating,
 	invalid-name,
