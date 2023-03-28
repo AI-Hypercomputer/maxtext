@@ -277,6 +277,7 @@ def train_loop(config, state=None):
     train_ds, eval_ds,
     vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
   )
+  print(f"vocab path: {os.path.join(config.base_output_directory, config.vocab_relative_path)}")
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   data_pspec = P(*config.data_sharding)

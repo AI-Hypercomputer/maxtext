@@ -118,7 +118,7 @@ def write_kill_script(script_dir, kill_processes_script_name):
 def kill_existing_processes_str():
   return """#!/bin/bash
 _TPU_VERSION_NAME=${1}
-device_name="accel0"
+device_name="vfio/0"
 if [[ "${_TPU_VERSION_NAME}" =~ ^v5.* ]]; then
   device_name="vfio/0"
 fi

@@ -13,7 +13,6 @@ import tensorflow as tf  # pylint: disable=g-import-not-at-top
 import numpy as np
 
 import jax
-from jax.experimental import global_device_array as gda_lib
 from jax.experimental import PartitionSpec
 from jax.experimental.maps import Mesh
 
