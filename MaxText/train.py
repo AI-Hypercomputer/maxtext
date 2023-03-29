@@ -14,12 +14,13 @@
  limitations under the License.
  """
 
-# pylint: disable=g-bad-todo, abstract-method
+# pylint: disable=g-bad-todo, abstract-method, consider-using-with
 """Training loop and Decoding of the model."""
 from typing import Sequence
 
 import os
 import datetime
+import json
 from absl import app
 from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
@@ -104,6 +105,18 @@ def write_metrics(writer, metrics, step, config):
       )
       writer.flush()
 
+def write_metrics_locally(metrics, step, file):
+  """Writes metrics locally for testing"""
+  if step == 0:
+    file.truncate(0)
+
+  aux = {}
+  for val in metrics['scalar']:
+    aux[val] = float(metrics['scalar'][val])
+  file.write(str(json.dumps(aux))+'\n')
+
+  if step == pyconfig.config.steps-1:
+    file.close()
 
 
 def calculate_num_params_from_pytree(params):
@@ -314,6 +327,8 @@ def train_loop(config, state=None):
   example_batch = None
   last_step_completion = datetime.datetime.now()
 
+  local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
+
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(train_iter, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -329,6 +344,9 @@ def train_loop(config, state=None):
     if step > 0 and step % config.save_period == 0 and checkpoint_manager is not None:
       checkpoint_manager.save(step, state)
       max_logging.log("saved a checkpoint")
+
+    if config.metrics_file:
+      write_metrics_locally(metrics, step, local_metrics_file)
 
     # Start profiling at end of first step to avoid compilation.
     # Move before for loop to include.

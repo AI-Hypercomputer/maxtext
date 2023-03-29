@@ -23,6 +23,8 @@ use_pjrt: "true"
 mxla_barrier: "true"
 reuse_example_batch: 0 # for testing TPU performance, this options repeated uses the same batch.
 
+metrics_file: "" # for testing, local file that stores scalar metrics. If empty, no metrics are written.
+
 # Activation dtypes.
 dtype: "bfloat16"
 scale: 1
