@@ -1,0 +1,1 @@
+TPU_LIBRARY_PATH=~/libtpu.so TPU_PREMAPPED_BUFFER_SIZE=4294967296 JAX_USE_PJRT_C_API_ON_TPU=1 JAX_PLATFORMS=tpu TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 TPU_MIN_LOG_LEVEL=0  python3 pedagogical_examples/shardings.py --ici_fsdp_parallelism=4 --batch_size=64  --embedding_dimension=8192
