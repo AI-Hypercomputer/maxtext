@@ -16,7 +16,7 @@ import os
 
 os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = "1"
 
-cc.initialize_cache(os.path.expanduser("~/jax_cache_2"))
+#cc.initialize_cache(os.path.expanduser("~/jax_cache_2"))
 
 parser = argparse.ArgumentParser(
   description="Experiment different sharding techniques with a simple NN.\

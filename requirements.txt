@@ -1,4 +1,4 @@
-jax[tpu]==0.4.6
+#jax[tpu]==0.4.6
 absl-py
 argparse
 datetime
