@@ -9,4 +9,5 @@ export TPU_PREMAPPED_BUFFER_SIZE=4294967296
 #export LIBTPU_INIT_ARGS="--xla_jf_dump_to=/tmp/llo_${RUN}_${EMBED}"
 export TPU_VMODULE=3
 
-python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN base_output_directory=gs://rwitten-staging-bucket vocab_relative_path=vocab/ enable_checkpointing=false ici_fsdp_parallelism=16 ici_tensor_parallelism=16 per_device_batch_size=4 steps=2 enable_profiler=true scale=3
+#python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN base_output_directory=gs://rwitten-x1 vocab_relative_path=vocabs_2 enable_checkpointing=false ici_fsdp_parallelism=16 ici_tensor_parallelism=16 per_device_batch_size=1 steps=10 enable_profiler=true scale=4 dataset_path=gs://tensorflow-datasets/datasets
+python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN base_output_directory=gs://rwitten-x1 vocab_relative_path=vocabs_2 enable_checkpointing=false ici_fsdp_parallelism=16 ici_tensor_parallelism=16 per_device_batch_size=1 steps=10 enable_profiler=true scale=4 dataset_path=gs://tensorflow-datasets/datasets
