@@ -140,6 +140,7 @@ else:
 print(f"Decided on mesh shape: {devices_array}")
 
 mesh = maps.Mesh(devices_array, ["data", "fsdp", "tensor"])
+fully_sharded = jax.sharding.NamedSharding(mesh, PartitionSpec(None))
 
 data_sharding = PartitionSpec(("data", "fsdp"),  "tensor")
 # We assume parameters are stored in a decreasing order of dimension size
@@ -173,6 +174,11 @@ def gen_layers(random_key):
 
 def gen_data(random_key):
   return jax.random.uniform(random_key, (BATCH, D_EMB), dtype=jax.numpy.bfloat16 )
+
+#def gen_data(random_key):
+#  return jax.numpy.ones((BATCH, D_EMB), dtype=jax.numpy.bfloat16 )
+
+  #return jax.random.uniform(random_key, (BATCH, D_EMB), dtype=jax.numpy.bfloat16 )
 
 
 def multiply_layer(in_act, in_layer):
@@ -225,9 +231,8 @@ pjit_gen_layers = pjit(
         out_axis_resources=parameter_sharding
       )
 
-key = jax.random.PRNGKey(0)
 with maps.Mesh(mesh.devices, mesh.axis_names):
-
+  key = jax.make_array_from_callback((2,), fully_sharded, lambda i : jax.random.PRNGKey(0))
   presharded_X = jax.block_until_ready(pjit_gen_data(key))
   #presharded_layers = jax.block_until_ready(pjit_gen_layers(key))
   #activate_profiler(args.profiler_path)
