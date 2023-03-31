@@ -56,6 +56,9 @@ script_dir_flag = flags.DEFINE_string("SCRIPT_DIR", os.getcwd(), "The local loca
     " the TPUs and run the main command from. Defaults to current working directory.")
 command_flag = flags.DEFINE_string("COMMAND", None, "Main command to run on each TPU. This command is run from"\
     " a copied version of SCRIPT_DIR on each TPU worker.")
+run_name_flag=flags.DEFINE_string("RUN_NAME", None , "Name for the code directory on the TPU")
+use_existing_folder_flag=flags.DEFINE_bool("USE_EXISTING_FOLDER", False , "If true, use the existing code directory"\
+    " on the TPU")
 
 flags.mark_flag_as_required('TPU_PREFIX')
 flags.register_validator('TPU_PREFIX',
@@ -63,6 +66,9 @@ flags.register_validator('TPU_PREFIX',
                          message='--TPU_PREFIX must be a non-empty string specifying your TPU slice names.')
 flags.mark_flag_as_required('COMMAND')
 
+flags.register_validator('USE_EXISTING_FOLDER',
+                         lambda value: not value or FLAGS.RUN_NAME,
+                         message='When USE_EXISTING_FOLDER is true, RUN_NAME must be specified.')
 
 Slice = namedtuple('Slice', ['name', 'slice_num', 'num_workers', 'version'])
 
@@ -188,7 +194,7 @@ def scps(script_dir, slices, run_name_dir, zip_name, internal_ip):
 
   return return_code
 
-def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name, internal_ip):
+def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name, internal_ip, use_existing_folder):
   """ Run the main command on each worker, logging each separately. """
   kill_script_name = "kill_existing_processes.sh" # File written on worker machines
   commands = []
@@ -207,15 +213,18 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
       write_kill_script_command = f"echo {kill_existing_processes_str()} > {kill_script_name}"
       kill_existing_command = f"bash {kill_script_name} {cur_slice.version}"
 
-      command=[
+      if use_existing_folder is False:
+        remote_command_list = [mkdir_command , mv_zip_command , cd_command , unzip_command ,
+                        write_kill_script_command , kill_existing_command , main_command]
+      else:
+        remote_command_list = [cd_command, write_kill_script_command , kill_existing_command , main_command]
+      remote_command_list_str = " && ".join(remote_command_list)
+      gcloud_command=[
           "gcloud", "alpha", "compute", "tpus", "tpu-vm", "ssh", cur_slice.name, f"--worker={worker_num}",
-          "--command", f"{mkdir_command} && {mv_zip_command} && {cd_command} &&"\
-          f" {unzip_command} && {write_kill_script_command} && {kill_existing_command} && {main_command}",\
-          "--strict-host-key-checking=no"
-      ]
+          "--command", remote_command_list_str, "--strict-host-key-checking=no"]
       if internal_ip:
-        command.append("--internal-ip")
-      commands.append(command)
+        gcloud_command.append("--internal-ip")
+      commands.append(gcloud_command)
       worker_list.append([slice_num, worker_num])
 
   return_code, return_codes = run_commands(commands, 0, "MAIN COMMAND", worker_list, output_logs=output_logs)
@@ -343,6 +352,8 @@ def main(argv) -> None:
   tpu_prefix = tpu_prefix_flag.value
   script_dir = script_dir_flag.value
   main_command = command_flag.value
+  run_name = run_name_flag.value
+  use_existing_folder = use_existing_folder_flag.value
 
   internal_ip = use_internal_ip()
 
@@ -355,19 +366,21 @@ def main(argv) -> None:
     print(f"Failed to retrieve slices with name prefix {tpu_prefix}", flush=True)
     return 1
 
-  ##### Step 2: Zip code and move it to the TPUs #####
-  run_name = get_run_name() # Used for the local logging files.
+  run_name = run_name or get_run_name() # Used for local logging files and remote directory.
   local_log_dir = "/tmp/" + run_name + "/"
   zip_name = "script_dir_zip_" + run_name + ".tar.gz"
-  return_code = scps(script_dir, slices, local_log_dir, zip_name, internal_ip)
-  if return_code > 0:
-    print(f"Moving the directory {script_dir} to the VMs failed with error code {return_code}")
-    return return_code
 
-  ##### Step 3: Unzip, kill existing processes, and run #####
+  if use_existing_folder is False:
+    ##### Step 2 when using a new folder: Zip code and move it to the TPUs #####
+    return_code = scps(script_dir, slices, local_log_dir, zip_name, internal_ip)
+    if return_code > 0:
+      print(f"Moving the directory {script_dir} to the VMs failed with error code {return_code}")
+      return return_code
+
+  ##### Step 3: Unzip if using a new folder, kill existing processes, and run #####
   print(f"Running main command, logs located in: {local_log_dir}", flush=True)
-  return_code = execute_main_command(main_command, slices, local_log_dir, run_name, zip_name, internal_ip)
-
+  return_code = execute_main_command(main_command, slices, local_log_dir, run_name, zip_name,
+                                     internal_ip, use_existing_folder)
   if return_code == 0:
     print(f"Main command completed successfully, logs located in: {local_log_dir}", flush=True)
     print("Multihost runner finished successfully!", flush=True)
