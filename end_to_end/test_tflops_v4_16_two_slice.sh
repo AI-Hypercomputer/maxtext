@@ -16,6 +16,6 @@ fi
 bash setup.sh
 python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
     steps=150 reuse_example_batch=1 remat_policy='full' dcn_data_parallelism=2 ici_fsdp_parallelism=8\
-    metrics_file='metrics.txt'
+    enable_checkpointing=False metrics_file='metrics.txt'
 
 python3 end_to_end/eval_assert.py metrics.txt $TFLOP_THRESHOLD perf/per_device_tflops_per_sec
