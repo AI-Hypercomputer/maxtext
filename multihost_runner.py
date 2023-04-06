@@ -204,7 +204,7 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
 
   for slice_num, cur_slice  in enumerate(slices):
     for worker_num in range(cur_slice.num_workers):
-      output_filename = f"{local_log_dir}/output_slice_{cur_slice.slice_num:04d}_worker_{worker_num:04d}.txt"
+      output_filename = os.path.join(local_log_dir, f"output_slice_{cur_slice.slice_num:04d}_worker_{worker_num:04d}.txt")
       output_logs.append(output_filename)
       mkdir_command = f"mkdir -p {run_name}"
       mv_zip_command = f"mv {zip_name} {run_name}"
@@ -367,7 +367,7 @@ def main(argv) -> None:
     return 1
 
   run_name = run_name or get_run_name() # Used for local logging files and remote directory.
-  local_log_dir = "/tmp/" + run_name + "/"
+  local_log_dir = os.path.join("/tmp", run_name, "")
   zip_name = "script_dir_zip_" + run_name + ".tar.gz"
 
   if use_existing_folder is False:

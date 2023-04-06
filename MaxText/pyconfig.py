@@ -17,6 +17,7 @@
 # pylint: disable=missing-module-docstring
 from collections import OrderedDict
 
+import os
 import sys
 import yaml
 
@@ -83,12 +84,8 @@ class _HyperParameters():
     run_name = raw_keys["run_name"]
     assert run_name, "Erroring out, need a real run_name"
     base_output_directory = raw_keys["base_output_directory"]
-    raw_keys["tensorboard_dir"] = (
-        f"{base_output_directory}/{run_name}/tensorboard/"
-    )
-    raw_keys["checkpoint_dir"] = (
-        f"{base_output_directory}/{run_name}/checkpoints/"
-    )
+    raw_keys["tensorboard_dir"] = os.path.join(base_output_directory, run_name, "tensorboard", "")
+    raw_keys["checkpoint_dir"] = os.path.join(base_output_directory, run_name, "checkpoints", "")
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
     raw_keys['emb_dim'] = raw_keys['scale'] * raw_keys['base_emb_dim']

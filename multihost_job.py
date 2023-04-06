@@ -155,7 +155,7 @@ def write_cqr_json_file(json_filename, project, zone, tpu_type, runtime_version,
       "tpu": {
         "node_spec": 
           {
-            "parent": f"projects/{project}/locations/{zone}",
+            "parent": os.path.join("projects", project, "locations", zone),
             "node": {
               "accelerator_type": tpu_type,
               "runtime_version": runtime_version,
@@ -243,7 +243,7 @@ def main(argv) -> None:
     endpoint, project, zone, network, subnetwork, resource_pool, service_account, run_name)
 
   ##### Step 1: Zip code and move it to GCS #####
-  tmp_dir_relative_to_script = "tmp/" + run_name + "/"
+  tmp_dir_relative_to_script = os.path.join("tmp", run_name, "")
   tmp_dir = os.path.join(script_dir, tmp_dir_relative_to_script)
   zip_name = "script_dir_zip_" + run_name + ".tar.gz"
   bucket_dir = os.path.join(bucket_dir, run_name)
