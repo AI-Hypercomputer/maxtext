@@ -109,6 +109,11 @@ def dot_product_attention(query: Array,
   if float32_logits:
     query = query.astype(jnp.float32)
     key = key.astype(jnp.float32)
+  # Layer norms here prevent (near) one-hot softmaxes, which can lead to
+  # unstable training loss and nans, see the "QK Normalization" subsection in
+  # https://arxiv.org/pdf/2302.05442.pdf.
+  query = LayerNorm(dtype=dtype, name='query_layer_norm')(query)
+  key = LayerNorm(dtype=dtype, name='key_layer_norm')(key)
 
   # `attn_weights`: [batch, num_heads, q_length, kv_length]
   attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
