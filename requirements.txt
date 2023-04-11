@@ -4,6 +4,7 @@ absl-py
 argparse
 datetime
 google-cloud-storage
+flax
 ml-collections
 numpy
 optax
