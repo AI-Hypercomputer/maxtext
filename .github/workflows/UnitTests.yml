@@ -38,12 +38,7 @@ jobs:
         python3 -m virtualenv venv
         source venv/bin/activate
         python3 -m pip install pip==20.0.2
-        pip3 install -r requirements.txt -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-        if [ -d flax ] ; then
-          rm -rf flax
-        fi
-        git clone --branch=main https://github.com/google/flax.git
-        pip3 install -e flax
+        bash setup.sh
     - name: Test with pytest
       run: |
         source venv/bin/activate
