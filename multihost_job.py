@@ -75,9 +75,44 @@ flags.register_validator('RESOURCE_POOL',
                          lambda value: value in ["reserved", "on-demand", "best-effort"],
                          message="--RESOURCE_POOL must be 'reserved', 'on-demand' or 'best-effort'")
 
+def get_project():
+  completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
+  project_outputs = completed_command.stdout.decode().strip().split('\n')
+  print(project_outputs)
+  if len(project_outputs) < 1:
+    sys.exit("You must specify the project in the PROJECT flag or set it with 'gcloud compute set project <project>'")
+  return project_outputs[-1] # The project name lives on the last line of the output
+
+def get_zone():
+  completed_command = subprocess.run(["gcloud", "config", "get", "compute/zone"], check=True, capture_output=True)
+  zone_outputs = completed_command.stdout.decode().strip().split('\n')
+  if len(zone_outputs) < 1:
+    sys.exit("You must specify the zone in the ZONE flag or set it with 'gcloud compute set compute/zone <zone>'")
+  return zone_outputs[-1] # The zone name lives on the last line of the output
+
 def get_run_name():
   now = datetime.now()
   return os.getlogin() + "-" + now.strftime("%Y-%m-%d-%H-%M-%S")
+
+def print_flags(tpu_type, runtime_version, num_slices, script_dir, main_command, bucket_name, bucket_dir, endpoint, project,
+ zone, network, subnetwork, resource_pool, service_account, run_name):
+  """ Print configuration values after defaults have been filled in. """
+  print("Running multihost_job with the following configuration:")
+  print(f"Project             (--PROJECT)         = {project}")
+  print(f"Zone                (--ZONE)            = {zone}")
+  print(f"TPU type            (--TPU_TYPE)        = {tpu_type}")
+  print(f"TPU runtime version (--VERSION)         = {runtime_version}")
+  print(f"Number of slices    (--NUM_SLICES)      = {num_slices}")
+  print(f"Script dir          (--SCRIPT_DIR)      = {script_dir}")
+  print(f"Bucket name         (--BUCKET_NAME)     = {bucket_name}")
+  print(f"Bucket dir          (--BUCKET_DIR)      = {bucket_dir}")
+  print(f"Command to run      (--COMMAND)         = {main_command}")
+  print(f"Endpoint            (--ENDPOINT)        = {endpoint}")
+  print(f"Network             (--NETWORK)         = {network}")
+  print(f"Subnetwork          (--SUBNETWORK)      = {subnetwork}")
+  print(f"Resource pool       (--RESOURCE_POOL)   = {resource_pool}")
+  print(f"Service_account     (--SERVICE_ACCOUNT) = {service_account}")
+  print(f"Run name            (--RUN_NAME)        = {run_name}\n")
 
 def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
   """ Zip the script directory, cp it to GCS """
@@ -100,20 +135,6 @@ def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
 
   return captured_output
 
-def get_project():
-  completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
-  project_outputs = completed_command.stdout.decode().strip().split('\n')
-  if len(project_outputs) < 1:
-    sys.exit("You must specify the project in the PROJECT flag or set it with 'gcloud compute set project <project>'")
-  return project_outputs[-1] # The project name lives on the last line of the output
-
-def get_zone():
-  completed_command = subprocess.run(["gcloud", "config", "get", "compute/zone"], check=True, capture_output=True)
-  zone_outputs = completed_command.stdout.decode().strip().split('\n')
-  if len(zone_outputs) < 1:
-    sys.exit("You must specify the zone in the ZONE flag or set it with 'gcloud compute set compute/zone <zone>'")
-  return zone_outputs[-1] # The zone name lives on the last line of the output
-
 def run_create_resources(run_name, json_path, endpoint, project, zone):
   # pylint: disable=line-too-long
   command = fr'curl -X POST -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "Content-Type: application/json" -d @{json_path} https://{endpoint}/v2alpha1/projects/{project}/locations/{zone}/queuedResources\?queued_resource_id\={run_name}'
@@ -126,11 +147,12 @@ mkdir -p {run_name}
 cd {run_name}
 gsutil cp {zip_gcs_path} .
 tar xzf {zip_name}
-python3 -m virtualenv venv
-source venv/bin/activate
 {get_env_command_str()}
+{setup_ops_str(run_name, log_name)}
+sudo python3 -m virtualenv venv
+source venv/bin/activate
 (({main_command}) 2>&1) >> {log_name}
-gsutil cp {log_name} "{bucket_path}/{log_name}_slice_"$SLICE_ID"_worker_"$WORKER_ID
+gsutil cp {log_name} "{bucket_path}/"
 {create_kill_command_str(endpoint)}"""
 
 def get_env_command_str():
@@ -190,25 +212,56 @@ def write_cqr_json_file(json_filename, project, zone, tpu_type, runtime_version,
   with open(json_filename, "w", encoding="utf-8") as f:
     json.dump(json_dict, f, indent=3) # Indent doesn't matter, but is nice.
 
-def print_flags(tpu_type, runtime_version, num_slices, script_dir, main_command, bucket_name, bucket_dir, endpoint, project,
- zone, network, subnetwork, resource_pool, service_account, run_name):
-  """ Print configuration values after defaults have been filled in. """
-  print("Running multihost_job with the following configuration:")
-  print(f"Project             (--PROJECT)         = {project}")
-  print(f"Zone                (--ZONE)            = {zone}")
-  print(f"TPU type            (--TPU_TYPE)        = {tpu_type}")
-  print(f"TPU runtime version (--VERSION)         = {runtime_version}")
-  print(f"Number of slices    (--NUM_SLICES)      = {num_slices}")
-  print(f"Script dir          (--SCRIPT_DIR)      = {script_dir}")
-  print(f"Bucket name         (--BUCKET_NAME)     = {bucket_name}")
-  print(f"Bucket dir          (--BUCKET_DIR)      = {bucket_dir}")
-  print(f"Command to run      (--COMMAND)         = {main_command}")
-  print(f"Endpoint            (--ENDPOINT)        = {endpoint}")
-  print(f"Network             (--NETWORK)         = {network}")
-  print(f"Subnetwork          (--SUBNETWORK)      = {subnetwork}")
-  print(f"Resource pool       (--RESOURCE_POOL)   = {resource_pool}")
-  print(f"Service_account     (--SERVICE_ACCOUNT) = {service_account}")
-  print(f"Run name            (--RUN_NAME)        = {run_name}\n")
+def setup_ops_str(run_name, log_name):
+  return f"""
+    echo "{install_ops_script_str(run_name, log_name)}" > install_ops_wait_dpkg.sh
+    bash install_ops_wait_dpkg.sh &
+  """
+
+def install_ops_script_str(run_name, log_name):
+  # pylint: disable=anomalous-backslash-in-string
+  return f"""OPS_FILE=/etc/google-cloud-ops-agent/config.yaml
+  if ! test -f \$OPS_FILE; 
+  then
+    curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
+    downloaded=0
+    while [ \$downloaded -eq 0 ]
+    do
+      pid=\$(sudo lsof /var/lib/dpkg/lock-frontend | awk \\"END{{print \$2}}\\")
+      if [[ ! -z \"\${{pid}}\" ]]
+      then
+        sleep 10
+      else
+        sudo bash add-google-cloud-ops-agent-repo.sh --also-install
+        downloaded=1
+      fi
+    done
+  fi
+  sudo chmod 777 /etc/google-cloud-ops-agent/config.yaml
+  sudo echo \\"{create_ops_config_str(run_name, log_name)}\\" >> /etc/google-cloud-ops-agent/config.yaml
+  sudo service google-cloud-ops-agent restart
+"""
+
+def create_ops_config_str(run_name, log_name):
+  return f"""logging:
+  receivers:
+    {run_name}_log:
+      type: files
+      include_paths:
+      - /{run_name}/{log_name}
+      record_log_file_path: true
+  service:
+    pipelines:
+      default_pipeline:
+        receivers: [{run_name}_log]"""
+
+def google_cloud_logging_url(run_name):
+  # pylint: disable=line-too-long
+  return f"https://pantheon.corp.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22{run_name}_log%22%2529"
+
+def google_cloud_logging_single_host_url(run_name):
+  # pylint: disable=line-too-long
+  return f"https://pantheon.corp.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22{run_name}_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2F{run_name}%2Fmain_command_log_slice_0_worker_0%22"
 
 ################### Main ###################
 def main(argv) -> None:
@@ -260,7 +313,7 @@ def main(argv) -> None:
   print("Move successful!\n")
 
   #### Step 2: Run the CQR command ####
-  log_name = "main_command_log.txt" # TODO: This will be replaced by a cloud logging solution.
+  log_name = "main_command_log_slice_${SLICE_ID}_worker_${WORKER_ID}"
   zip_path = os.path.join(bucket_path, zip_name)
   startup_script_str = create_startup_script_str(run_name, zip_path, zip_name, main_command, log_name, bucket_path, endpoint)
   json_filename = 'cqr_request_' + run_name + '.json'
@@ -288,6 +341,11 @@ def main(argv) -> None:
 
   print("------------------------------------ \n")
   print("multihost_job finished running, TPUs are firing up now to run your job remotely.\n")
+
+  print(f"Your job is being logged, follow it here:\n{google_cloud_logging_url(run_name)}\n")
+
+  print(f"To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:"\
+      f"\n{google_cloud_logging_single_host_url(run_name)}\n")
 
   print(f"When your job is finished, the main command log is in the GCS bucket: {bucket_path}\n")
 
