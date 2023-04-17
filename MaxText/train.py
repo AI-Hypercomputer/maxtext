@@ -218,7 +218,7 @@ def predict_step(inputs,
                  model,
                  config):
   """Predict language model on a batch."""
-  # NOTE: wtf are we adding inputs.shape[2:] here?  it's almost always empty??
+  # NOTE: why are we adding inputs.shape[2:] here?  it's almost always empty??
   target_shape = (inputs.shape[0], config.max_predict_length) + inputs.shape[2:]
 
   initial_variables = model.init(
