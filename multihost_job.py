@@ -141,13 +141,13 @@ def run_create_resources(run_name, json_path, endpoint, project, zone):
   captured_output = subprocess.run(command, check=True, shell=True, capture_output=True)
   return captured_output
 
-def create_startup_script_str(run_name, zip_gcs_path, zip_name, main_command, log_name, bucket_path, endpoint):
+def create_startup_script_str(run_name, zip_gcs_path, zip_name, main_command, log_name, bucket_path, num_slices, endpoint):
   return f"""#!/bin/bash
 mkdir -p {run_name}
 cd {run_name}
 gsutil cp {zip_gcs_path} .
 tar xzf {zip_name}
-{get_env_command_str()}
+{get_env_command_str(num_slices)}
 {setup_ops_str(run_name, log_name)}
 sudo python3 -m virtualenv venv
 source venv/bin/activate
@@ -155,14 +155,19 @@ source venv/bin/activate
 gsutil cp {log_name} "{bucket_path}/"
 {create_kill_command_str(endpoint)}"""
 
-def get_env_command_str():
+def get_env_command_str(num_slices):
+  """ Define environment variables on the TPUS """
   # pylint: disable=line-too-long
-  return """curl -s 'http://metadata.google.internal/computeMetadata/v1/instance/attributes/tpu-env' -H 'Metadata-Flavor: Google' > /tmp/tpu-env # store the metadata
+  env_str= """curl -s 'http://metadata.google.internal/computeMetadata/v1/instance/attributes/tpu-env' -H 'Metadata-Flavor: Google' > /tmp/tpu-env # store the metadata
 NODE_ID=$(grep '^NODE_ID' /tmp/tpu-env | cut -d "'" -f 2)
-SLICE_ID=$(echo $NODE_ID | awk -F- '{print $NF}')
 WORKER_ID=$(grep '^WORKER_ID' /tmp/tpu-env | cut -d "'" -f 2)
 ZONE=$(grep '^ZONE' /tmp/tpu-env | cut -d "'" -f 2)
 PROJECT=$(grep '^CONSUMER_PROJECT_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
+  if num_slices == 1:
+    slice_assignment="SLICE_ID=0"
+  else:
+    slice_assignment="""SLICE_ID=$(grep '^MEGASCALE_SLICE_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
+  return env_str + "\n" + slice_assignment
 
 def create_kill_command_str(endpoint):
   # TODO(b/271321971): Delete the QR in one swoop once this is possible.
@@ -189,14 +194,16 @@ def write_cqr_json_file(json_filename, project, zone, tpu_type, runtime_version,
               "metadata": {
                 "startup-script": startup_script_str
               }
-            },
-            "multi_node_params": {
-              "node_count": num_slices,
-              "node_id_prefix": run_name
             }
         }
     }
   }
+
+  if num_slices > 1:
+    multi_node_dict = {"node_count": num_slices, "node_id_prefix": run_name}
+    json_dict["tpu"]["node_spec"]["multi_node_params"] = multi_node_dict
+  else:
+    json_dict["tpu"]["node_spec"]["node_id"] = run_name
 
   if resource_pool == "reserved":
     json_dict["guaranteed"] = {"reserved": True}
@@ -315,7 +322,8 @@ def main(argv) -> None:
   #### Step 2: Run the CQR command ####
   log_name = "main_command_log_slice_${SLICE_ID}_worker_${WORKER_ID}"
   zip_path = os.path.join(bucket_path, zip_name)
-  startup_script_str = create_startup_script_str(run_name, zip_path, zip_name, main_command, log_name, bucket_path, endpoint)
+  startup_script_str = create_startup_script_str(run_name, zip_path, zip_name, main_command, log_name, bucket_path,
+    num_slices, endpoint)
   json_filename = 'cqr_request_' + run_name + '.json'
   json_path = os.path.join(tmp_dir, json_filename)
 
