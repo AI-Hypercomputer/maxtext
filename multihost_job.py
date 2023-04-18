@@ -276,7 +276,7 @@ def google_cloud_logging_url(run_name, project):
 
 def google_cloud_logging_single_host_url(run_name, project):
   # pylint: disable=line-too-long
-  return f"https://console.cloudgoogle.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22{run_name}_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2F{run_name}%2Fmain_command_log_slice_0_worker_0%22;?project={project}"
+  return f"https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22{run_name}_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2F{run_name}%2Fmain_command_log_slice_0_worker_0%22;?project={project}"
 
 def gcs_bucket_url(bucket_name, bucket_dir, project):
   bucket_path = os.path.join(bucket_name, bucket_dir)
