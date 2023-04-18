@@ -15,12 +15,18 @@
  """
 
 """ Script to run a productionized job in a multislice/multihost environment
+                          ***** IMPORTANT *****
+This script provisions new TPUs! You cannot run jobs on existing TPUs with this script,
+we recommend trying multihost_runner instead for this purpose. In addition you must include all
+of your installation commands inside of the --COMMAND arg, e.g. --COMMAND="bash setup.sh && python3 train.py"
+
 This script:
   1) Creates specified TPU(s)
   2) Loads your scripts onto each TPU
   3) Runs your job on each TPU
-  4) Logs the output of the job to GCS
-  5) Deletes the TPUs
+  4) Logs the output of the job in real time to cloud logging
+  5) Stores a copy of the logs and zipped code in GCS at the job's end 
+  6) Deletes the TPUs
   However the job leaves behind an orphaned QR which has to be cleaned up (by you).
   Use "gcloud alpha compute tpus queued-resources list" to view the QR and
   "gcloud alpha compute tpus queued-resources delete <qr-name>" when your job
@@ -56,7 +62,8 @@ num_slices_flag = flags.DEFINE_integer("NUM_SLICES", 2, "The number of slices to
 script_dir_flag = flags.DEFINE_string("SCRIPT_DIR", os.getcwd(), "The local location of the directory to copy to"\
     " the TPUs and run the main command from. Defaults to current working directory.")
 command_flag = flags.DEFINE_string("COMMAND", None, "Main command to run on each TPU. This command is run from"\
-    " a copied version of SCRIPT_DIR on each TPU worker.")
+    " a copied version of SCRIPT_DIR on each TPU worker. You must include your dependency installations here, e.g."\
+    "--COMMAND='bash setup.sh && python3 train.py'")
 bucket_name_flag= flags.DEFINE_string("BUCKET_NAME", None, "Name of GCS bucket, e.g. my-bucket")
 bucket_dir_flag = flags.DEFINE_string("BUCKET_DIR", "", "Directory within the GCS bucket, can be None, e.g. my-dir")
 project_flag = flags.DEFINE_string("PROJECT", None, "GCE project name, defaults to gcloud config project")
@@ -262,13 +269,18 @@ def create_ops_config_str(run_name, log_name):
       default_pipeline:
         receivers: [{run_name}_log]"""
 
-def google_cloud_logging_url(run_name):
+def google_cloud_logging_url(run_name, project):
   # pylint: disable=line-too-long
-  return f"https://pantheon.corp.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22{run_name}_log%22%2529"
+  return f"https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22{run_name}_log%22%2529;?project={project}"
 
-def google_cloud_logging_single_host_url(run_name):
+
+def google_cloud_logging_single_host_url(run_name, project):
   # pylint: disable=line-too-long
-  return f"https://pantheon.corp.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22{run_name}_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2F{run_name}%2Fmain_command_log_slice_0_worker_0%22"
+  return f"https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22{run_name}_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2F{run_name}%2Fmain_command_log_slice_0_worker_0%22;?project={project}"
+
+def gcs_bucket_url(bucket_name, bucket_dir, project):
+  bucket_path = os.path.join(bucket_name, bucket_dir)
+  return f"https://console.cloud.google.com/storage/browser/{bucket_path}?project={project}"
 
 ################### Main ###################
 def main(argv) -> None:
@@ -350,12 +362,13 @@ def main(argv) -> None:
   print("------------------------------------ \n")
   print("multihost_job finished running, TPUs are firing up now to run your job remotely.\n")
 
-  print(f"Your job is being logged, follow it here:\n{google_cloud_logging_url(run_name)}\n")
+  print(f"Your job is being logged, follow it here:\n{google_cloud_logging_url(run_name, project)}\n")
 
   print(f"To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:"\
-      f"\n{google_cloud_logging_single_host_url(run_name)}\n")
+      f"\n{google_cloud_logging_single_host_url(run_name, project)}\n")
 
-  print(f"When your job is finished, the main command log is in the GCS bucket: {bucket_path}\n")
+  print(f"When your job is finished, the main command log is in the GCS bucket here:"\
+      f"\n{gcs_bucket_url(bucket_name, bucket_dir, project)}\n")
 
   print("View the status of the created TPUs via: ")
   print(f"gcloud compute tpus tpu-vm list --filter={run_name}\n")
