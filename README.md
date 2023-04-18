@@ -15,7 +15,7 @@
  -->
 
 
-[![Unit Tests](https://github.com/rwitten/MaxText/actions/workflows/UnitTests.yml/badge.svg?branch=main)](https://github.com/rwitten/MaxText/actions/workflows/UnitTests.yml)
+[![Unit Tests](https://github.com/google/maxtext/actions/workflows/UnitTests.yml/badge.svg)](https://github.com/google/maxtext/actions/workflows/UnitTests.yml)
 
 # Overview
 
