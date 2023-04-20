@@ -178,9 +178,10 @@ PROJECT=$(grep '^CONSUMER_PROJECT_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
 
 def create_kill_command_str(endpoint):
   # TODO(b/271321971): Delete the QR in one swoop once this is possible.
-  return f"""if [ $WORKER_ID==0 ]; then
-  curl -X DELETE -H "Authorization: Bearer $(gcloud auth print-access-token)" https://{endpoint}/v2alpha1/projects/$PROJECT/locations/$ZONE/nodes/$NODE_ID
-fi"""
+  return ""
+#   return f"""if [ $WORKER_ID==0 ]; then
+#   curl -X DELETE -H "Authorization: Bearer $(gcloud auth print-access-token)" https://{endpoint}/v2alpha1/projects/$PROJECT/locations/$ZONE/nodes/$NODE_ID
+# fi"""
 
 def write_cqr_json_file(json_filename, project, zone, tpu_type, runtime_version, num_slices, run_name, network, subnetwork,
  resource_pool, service_account, startup_script_str):
