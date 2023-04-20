@@ -152,13 +152,13 @@ def create_startup_script_str(run_name, zip_gcs_path, zip_name, main_command, lo
   return f"""#!/bin/bash
 mkdir -p {run_name}
 cd {run_name}
+gsutil cp {zip_gcs_path} .
+tar xzf {zip_name}
 {get_env_command_str(num_slices)}
 {setup_ops_str(run_name, log_name)}
 sudo python3 -m virtualenv venv
 source venv/bin/activate
-(({download_from_gcs(zip_gcs_path)}
-tar xzf {zip_name}
-{main_command}) 2>&1) >> {log_name}
+(({main_command}) 2>&1) >> {log_name}
 gsutil cp {log_name} "{bucket_path}/"
 {create_kill_command_str(endpoint)}"""
 
@@ -225,26 +225,6 @@ def write_cqr_json_file(json_filename, project, zone, tpu_type, runtime_version,
 
   with open(json_filename, "w", encoding="utf-8") as f:
     json.dump(json_dict, f, indent=3) # Indent doesn't matter, but is nice.
-
-def download_from_gcs(zip_gcs_path):
-  return f"""
-    echo "{write_download_from_gcs_sh(zip_gcs_path)}" > download_from_gcs.sh
-    bash download_from_gcs.sh
-  """
-
-def write_download_from_gcs_sh(zip_gcs_path):
-  # pylint: disable=anomalous-backslash-in-string
-  return f"""GCS_READ_SUCCESS=0
-while [ \$GCS_READ_SUCCESS -eq 0 ]
-do
-  {{ # try
-      gsutil cp {zip_gcs_path} . &&
-      echo 'Code download from GCS successful!' && GCS_READ_SUCCESS=1
-  }} || {{ # catch
-      echo 'Failed to read GCS via gsutil, trying again'
-      sleep 10
-  }}
-done"""
 
 def setup_ops_str(run_name, log_name):
   return f"""
