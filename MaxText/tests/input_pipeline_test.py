@@ -30,7 +30,7 @@ import input_pipeline
 
 # By default, XLA presents all the CPU cores as one device. This flag splits up cores in 2 CPU devices.
 os.environ["TFDS_DATA_DIR"] = "gs://maxtext-dataset/"
-os.environ["XLA_FLAGS"] = '--xla_force_host_platform_device_count=4'
+os.environ["XLA_FLAGS"] = '--xla_force_host_platform_device_count=2'
 jax.config.update('jax_platform_name', 'cpu')
 
 
@@ -109,6 +109,6 @@ class InputPipelineTest(unittest.TestCase):
 #     self.assertCountEqual(train_ds1['tfds_id'], train_ds2['tfds_id'])
 
 
-# if __name__ == '__main__':
-#   unittest.main()
+if __name__ == '__main__':
+  unittest.main()
 
