@@ -1,6 +1,7 @@
 jax[tpu]==0.4.6
 orbax==0.1.6
 sentencepiece==0.1.97
+pytest==7.2.2
 absl-py
 argparse
 datetime
@@ -12,7 +13,6 @@ optax
 portpicker
 protobuf==3.20.3
 pylint
-pytest
 tensorflow==2.12.0rc0
 tensorflow-datasets
 tensorboard-plugin-profile
