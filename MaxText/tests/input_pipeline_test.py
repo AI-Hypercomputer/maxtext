@@ -43,7 +43,7 @@ class InputPipelineTest(unittest.TestCase):
     self.config = pyconfig.config
     self.read_config = tfds.ReadConfig()
     self.read_config.add_tfds_id = True
-    self.train_ds, self.eval_ds = self._get_datasets()
+    # self.train_ds, self.eval_ds = self._get_datasets()
     # self.train_iter, self.eval_iter, self.predict_iter = self._get_preprocessed_datasets()
 
   def _get_datasets(self):
