@@ -108,7 +108,6 @@ def get_next_batch_sharded(local_dataset: tf.data.Dataset,
                            global_mesh: Mesh) -> jax.Array:
   """Splits the host loaded data equally over all devices."""
 
-
   try:
     local_data = local_dataset.next()
   except tf.errors.FailedPreconditionError:
