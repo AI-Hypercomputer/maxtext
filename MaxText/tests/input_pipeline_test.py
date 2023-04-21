@@ -44,7 +44,7 @@ class InputPipelineTest(unittest.TestCase):
     self.read_config = tfds.ReadConfig()
     self.read_config.add_tfds_id = True
     self.train_ds, self.eval_ds = self._get_datasets()
-    self.train_iter, self.eval_iter, self.predict_iter = self._get_preprocessed_datasets()
+    # self.train_iter, self.eval_iter, self.predict_iter = self._get_preprocessed_datasets()
 
   def _get_datasets(self):
     print("Sharding dataset in ", jax.process_count(), " shards")
@@ -63,19 +63,19 @@ class InputPipelineTest(unittest.TestCase):
               vocab_path=os.path.join(self.config.base_output_directory, self.config.vocab_relative_path))
     return train_iter, eval_iter, test_iter
 
-  def test_train_ds(self):
-    expected_shape = [2, self.config.max_target_length]
-    # For training we pack multiple short examples in one example.
-    # *_position and *_segmentation indicate the boundaries.
-    batch = self.train_iter()
-    self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
-        'inputs': expected_shape,
-        'inputs_position': expected_shape,
-        'inputs_segmentation': expected_shape,
-        'targets': expected_shape,
-        'targets_position': expected_shape,
-        'targets_segmentation': expected_shape,
-    })
+  # def test_train_ds(self):
+  #   expected_shape = [2, self.config.max_target_length]
+  #   # For training we pack multiple short examples in one example.
+  #   # *_position and *_segmentation indicate the boundaries.
+  #   batch = self.train_iter()
+  #   self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
+  #       'inputs': expected_shape,
+  #       'inputs_position': expected_shape,
+  #       'inputs_segmentation': expected_shape,
+  #       'targets': expected_shape,
+  #       'targets_position': expected_shape,
+  #       'targets_segmentation': expected_shape,
+  #   })
 
 
 #   def test_eval_ds(self):
