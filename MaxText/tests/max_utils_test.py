@@ -17,9 +17,11 @@
 """ Tests for the common Max Utils """
 import jax
 import max_utils
+import os
 import unittest
 
 jax.config.update('jax_platform_name', 'cpu')
+os.environ["XLA_FLAGS"] = '--xla_force_host_platform_device_count=4'
 
 class MaxUtilsSummaryStats(unittest.TestCase):
   """Tests for the summary stats functions in max_utils.py"""
