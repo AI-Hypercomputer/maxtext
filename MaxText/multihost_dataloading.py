@@ -110,9 +110,8 @@ def get_next_batch_sharded(local_dataset: tf.data.Dataset,
 
   # pylint: disable=bare-except
   try:
-    #local_data = local_dataset.next()
-    raise tf.errors.FailedPreconditionError("go me")
-  except tf.errors.FailedPreconditionError:
+    local_data = local_dataset.next()
+  except:
     max_logging.log("Failed to get next data batch, retrying")
     time.sleep(10)
     local_data = local_dataset.next()
