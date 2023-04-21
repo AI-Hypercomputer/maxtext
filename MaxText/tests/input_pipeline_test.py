@@ -23,13 +23,14 @@ from jax.experimental import mesh_utils
 
 import unittest
 import tensorflow_datasets as tfds
+from datetime import datetime
 
 import pyconfig
 import input_pipeline
 
 # By default, XLA presents all the CPU cores as one device. This flag splits up cores in 2 CPU devices.
 os.environ["TFDS_DATA_DIR"] = "gs://maxtext-dataset/"
-os.environ["XLA_FLAGS"] = '--xla_force_host_platform_device_count=2'
+os.environ["XLA_FLAGS"] = '--xla_force_host_platform_device_count=4'
 jax.config.update('jax_platform_name', 'cpu')
 
 
@@ -37,7 +38,8 @@ class InputPipelineTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    pyconfig.initialize(sys.argv + ['configs/base.yml'], per_device_batch_size=1, run_name='test', mesh_axes = ['data'],
+    pyconfig.initialize(sys.argv + ['configs/base.yml'], per_device_batch_size=1, 
+                        run_name='test'+datetime.strftime('%Y-%m-%d-%H-%M-%S'), mesh_axes = ['data'],
                         logical_axis_rules = [['batch', 'data']],
                         data_sharding = ['data'])
     self.config = pyconfig.config
