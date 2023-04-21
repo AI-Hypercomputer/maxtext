@@ -22,6 +22,9 @@ on:
   push:
     branches: [ "main" ]
   workflow_dispatch:
+  schedule:
+    # Run the job every 30 mins
+    - cron:  '*/30 * * * *'
 
 jobs:
   build:
