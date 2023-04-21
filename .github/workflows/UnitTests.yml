@@ -43,5 +43,4 @@ jobs:
     - name: Test with pytest
       run: |
         source venv/bin/activate
-        cd MaxText
-        python3 -m pytest
+        bash unit_test_and_lint.sh
