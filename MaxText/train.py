@@ -195,6 +195,11 @@ def train_step(model, config, state, data, dropout_rng):
                          data['inputs_position'],
                          rngs={'dropout': rng1}, mutable='intermediates')
     # TODO: is optax xent as good as custom T5X one?
+
+    # Perform a tanh clipping to increase model stability
+    cap = jnp.array(50.0, dtype=config.dtype)
+    logits = cap * jnp.tanh(logits / cap)
+
     xent = optax.softmax_cross_entropy_with_integer_labels(logits, data['targets'])
     # Mask out paddings at the end of each example.
     xent = xent * (data['inputs_segmentation'] != 0)
