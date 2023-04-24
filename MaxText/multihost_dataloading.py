@@ -108,7 +108,6 @@ def get_next_batch_sharded(local_dataset: tf.data.Dataset,
                            global_mesh: Mesh) -> jax.Array:
   """Splits the host loaded data equally over all devices."""
 
-  
   SLEEP_TIME = 10
   MAX_DATA_LOAD_ATTEMPTS = 30
   data_load_attempts = 0
