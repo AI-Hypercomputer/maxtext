@@ -15,4 +15,4 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME steps=500 d
 python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME steps=501 dcn_data_parallelism=2 ici_fsdp_parallelism=8\
     metrics_file='restored_metrics.txt' base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH
 
-python3 end_to_end/eval_assert.py metrics.txt 0 learning/loss
+python3 end_to_end/eval_assert.py metrics.txt 0 learning/loss checkpoint_save_restore
