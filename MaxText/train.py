@@ -204,11 +204,12 @@ def train_step(model, config, state, grad_cut, data, dropout_rng):
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), grads = grad_fn(state.params)
-  pre_cut_grad_norm = max_utils.l2norm_pytree(grads)
-  grad_scale_factor = jnp.minimum(jnp.array(config.grad_cut_factor * grad_cut), jnp.array(pre_cut_grad_norm)) / pre_cut_grad_norm
+  pre_cut_grad_norm = jnp.array(max_utils.l2norm_pytree(grads))
+  max_grad_norm = jnp.array(config.grad_cut_factor * grad_cut)
+  grad_scale_factor = jnp.minimum(max_grad_norm, pre_cut_grad_norm) / pre_cut_grad_norm
   grads = jax.tree_map(lambda g: g * grad_scale_factor, grads)
-  new_state = state.apply_gradients(grads=grads)
   grad_norm = max_utils.l2norm_pytree(grads)
+  new_state = state.apply_gradients(grads=grads)
   metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : grad_norm,
              'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   if config.record_internal_nn_metrics:
