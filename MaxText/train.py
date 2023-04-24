@@ -334,13 +334,14 @@ def train_loop(config, state=None):
   example_batch = None
   last_step_completion = datetime.datetime.now()
   grad_norms = deque(maxlen=config.grad_cut_window_len)
+  LARGE_GRADIENT_NORM = 1.0 * 10**6 # Used when gradient cutting is not desired.
 
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
 
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(train_iter, example_batch, config)
     if step < config.grad_cut_start_step or not grad_norms:
-      grad_cut = 1.0 * 10**6 # Large value so no cutting takes place.
+      grad_cut = LARGE_GRADIENT_NORM  # Large value so no cutting takes place.
     else:
       grad_cut = jnp.mean(jnp.array(grad_norms))
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
