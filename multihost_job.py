@@ -25,7 +25,7 @@ This script:
   2) Loads your scripts onto each TPU
   3) Runs your job on each TPU
   4) Logs the output of the job in real time to cloud logging
-  5) Stores a copy of the logs and zipped code in GCS at the job's end 
+  5) Stores a copy of the logs and zipped code in GCS at the job's end
   6) Deletes the TPUs
   However the job leaves behind an orphaned QR which has to be cleaned up (by you).
   Use "gcloud alpha compute tpus queued-resources list" to view the QR and
@@ -64,7 +64,7 @@ script_dir_flag = flags.DEFINE_string("SCRIPT_DIR", os.getcwd(), "The local loca
 command_flag = flags.DEFINE_string("COMMAND", None, "Main command to run on each TPU. This command is run from"\
     " a copied version of SCRIPT_DIR on each TPU worker. You must include your dependency installations here, e.g."\
     "--COMMAND='bash setup.sh && python3 train.py'")
-bucket_name_flag= flags.DEFINE_string("BUCKET_NAME", None, "Name of GCS bucket, e.g. my-bucket")
+bucket_name_flag = flags.DEFINE_string("BUCKET_NAME", None, "Name of GCS bucket, e.g. my-bucket")
 bucket_dir_flag = flags.DEFINE_string("BUCKET_DIR", "", "Directory within the GCS bucket, can be None, e.g. my-dir")
 project_flag = flags.DEFINE_string("PROJECT", None, "GCE project name, defaults to gcloud config project")
 zone_flag = flags.DEFINE_string("ZONE", None, "GCE zone, e.g. us-central2-b, defaults to gcloud config compute/zone")
@@ -102,7 +102,7 @@ def get_run_name():
   return os.getlogin() + "-" + now.strftime("%Y-%m-%d-%H-%M-%S")
 
 def print_flags(tpu_type, runtime_version, num_slices, script_dir, main_command, bucket_name, bucket_dir, endpoint, project,
- zone, network, subnetwork, resource_pool, service_account, run_name):
+                zone, network, subnetwork, resource_pool, service_account, run_name):
   """ Print configuration values after defaults have been filled in. """
   print("Running multihost_job with the following configuration:")
   print(f"Project             (--PROJECT)         = {project}")
@@ -129,12 +129,12 @@ def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
   # Zip script directory, storing it in the logging directory.
   os.makedirs(tmp_dir, exist_ok=True)
   zip_path = os.path.join(tmp_dir, zip_name)
-  command = ["tar","--exclude=tmp", "-czf", zip_path, "./"]
+  command = ["tar", "--exclude=tmp", "-czf", zip_path, "./"]
   subprocess.run(command, check=True)
 
   # Move zip file to GCS
-  zip_in_gcs_path = os.path.join(bucket_path,zip_name)
-  command = ["gsutil","mv",zip_path,zip_in_gcs_path]
+  zip_in_gcs_path = os.path.join(bucket_path, zip_name)
+  command = ["gsutil", "mv", zip_path, zip_in_gcs_path]
   captured_output = subprocess.run(command, check=True, capture_output=True)
 
   # Cleanup
@@ -152,28 +152,28 @@ def create_startup_script_str(run_name, zip_gcs_path, zip_name, main_command, lo
   return f"""#!/bin/bash
 mkdir -p {run_name}
 cd {run_name}
-gsutil cp {zip_gcs_path} .
-tar xzf {zip_name}
 {get_env_command_str(num_slices)}
 {setup_ops_str(run_name, log_name)}
 sudo python3 -m virtualenv venv
 source venv/bin/activate
-(({main_command}) 2>&1) >> {log_name}
+(({download_from_gcs(zip_gcs_path)}
+tar xzf {zip_name}
+{main_command}) 2>&1) >> {log_name}
 gsutil cp {log_name} "{bucket_path}/"
 {create_kill_command_str(endpoint)}"""
 
 def get_env_command_str(num_slices):
   """ Define environment variables on the TPUS """
   # pylint: disable=line-too-long
-  env_str= """curl -s 'http://metadata.google.internal/computeMetadata/v1/instance/attributes/tpu-env' -H 'Metadata-Flavor: Google' > /tmp/tpu-env # store the metadata
+  env_str = """curl -s 'http://metadata.google.internal/computeMetadata/v1/instance/attributes/tpu-env' -H 'Metadata-Flavor: Google' > /tmp/tpu-env # store the metadata
 NODE_ID=$(grep '^NODE_ID' /tmp/tpu-env | cut -d "'" -f 2)
 WORKER_ID=$(grep '^WORKER_ID' /tmp/tpu-env | cut -d "'" -f 2)
 ZONE=$(grep '^ZONE' /tmp/tpu-env | cut -d "'" -f 2)
 PROJECT=$(grep '^CONSUMER_PROJECT_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
   if num_slices == 1:
-    slice_assignment="SLICE_ID=0"
+    slice_assignment = "SLICE_ID=0"
   else:
-    slice_assignment="""SLICE_ID=$(grep '^MEGASCALE_SLICE_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
+    slice_assignment = """SLICE_ID=$(grep '^MEGASCALE_SLICE_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
   return env_str + "\n" + slice_assignment
 
 def create_kill_command_str(endpoint):
@@ -183,27 +183,27 @@ def create_kill_command_str(endpoint):
 fi"""
 
 def write_cqr_json_file(json_filename, project, zone, tpu_type, runtime_version, num_slices, run_name, network, subnetwork,
- resource_pool, service_account, startup_script_str):
+                        resource_pool, service_account, startup_script_str):
   """ Write json file for CQR """
   json_dict = {
       "tpu": {
-        "node_spec": 
+          "node_spec":
           {
-            "parent": os.path.join("projects", project, "locations", zone),
-            "node": {
-              "accelerator_type": tpu_type,
-              "runtime_version": runtime_version,
-              "network_config": {
-                "network": network,
-                "subnetwork": subnetwork,
-                "enable_external_ips": True
-              },
-              "metadata": {
-                "startup-script": startup_script_str
+              "parent": os.path.join("projects", project, "locations", zone),
+              "node": {
+                  "accelerator_type": tpu_type,
+                  "runtime_version": runtime_version,
+                  "network_config": {
+                      "network": network,
+                      "subnetwork": subnetwork,
+                      "enable_external_ips": True
+                  },
+                  "metadata": {
+                      "startup-script": startup_script_str
+                  }
               }
-            }
-        }
-    }
+          }
+      }
   }
 
   if num_slices > 1:
@@ -225,6 +225,26 @@ def write_cqr_json_file(json_filename, project, zone, tpu_type, runtime_version,
 
   with open(json_filename, "w", encoding="utf-8") as f:
     json.dump(json_dict, f, indent=3) # Indent doesn't matter, but is nice.
+
+def download_from_gcs(zip_gcs_path):
+  return f"""
+    echo "{write_download_from_gcs_sh(zip_gcs_path)}" > download_from_gcs.sh
+    bash download_from_gcs.sh
+  """
+
+def write_download_from_gcs_sh(zip_gcs_path):
+  # pylint: disable=anomalous-backslash-in-string
+  return f"""GCS_READ_SUCCESS=0
+while [ \$GCS_READ_SUCCESS -eq 0 ]
+do
+  {{ # try
+      gsutil cp {zip_gcs_path} . &&
+      echo 'Code download from GCS successful!' && GCS_READ_SUCCESS=1
+  }} || {{ # catch
+      echo 'Failed to read GCS via gsutil, trying again'
+      sleep 10
+  }}
+done"""
 
 def setup_ops_str(run_name, log_name):
   return f"""
@@ -312,7 +332,7 @@ def main(argv) -> None:
     run_name = get_run_name() # Used for QR name, TPU_PREFIX, logging file, and tmp json file.
 
   print_flags(tpu_type, tpu_runtime_version, num_slices, script_dir, main_command, bucket_name, bucket_dir,
-    endpoint, project, zone, network, subnetwork, resource_pool, service_account, run_name)
+              endpoint, project, zone, network, subnetwork, resource_pool, service_account, run_name)
 
   ##### Step 1: Zip code and move it to GCS #####
   tmp_dir_relative_to_script = os.path.join("tmp", run_name, "")
@@ -323,7 +343,7 @@ def main(argv) -> None:
 
   print(f"Moving {script_dir} to {bucket_path}...")
   captured_output = move_script_dir_to_gcs(script_dir, tmp_dir_relative_to_script, zip_name, bucket_path)
-  if captured_output.returncode !=0:
+  if captured_output.returncode != 0:
     print("\n\n Moving code to GCS failed")
     print(f"Running 'gsutil mv zip {bucket_path}' failed with error: ")
     print(captured_output.stderr.decode())
@@ -335,7 +355,7 @@ def main(argv) -> None:
   log_name = "main_command_log_slice_${SLICE_ID}_worker_${WORKER_ID}"
   zip_path = os.path.join(bucket_path, zip_name)
   startup_script_str = create_startup_script_str(run_name, zip_path, zip_name, main_command, log_name, bucket_path,
-    num_slices, endpoint)
+                                                 num_slices, endpoint)
   json_filename = 'cqr_request_' + run_name + '.json'
   json_path = os.path.join(tmp_dir, json_filename)
 
@@ -344,7 +364,7 @@ def main(argv) -> None:
   print("Running CQR command...")
   captured_output = run_create_resources(run_name, json_path, endpoint, project, zone)
   # TODO(Once startup-script is available in CLI, error handling can be improved)
-  if captured_output.returncode !=0 or '"error"' in captured_output.stdout.decode() or \
+  if captured_output.returncode != 0 or '"error"' in captured_output.stdout.decode() or \
     "Warning" in captured_output.stderr.decode():
     print("\n\nCreate resource request returned with ERROR status.\n")
     if '"error"' in captured_output.stdout.decode():
