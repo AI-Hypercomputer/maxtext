@@ -35,6 +35,7 @@ from input_pipeline import preprocess_dataset
 import max_utils
 import temperature_sampler
 import checkpointing
+from collections import deque
 
 
 
@@ -169,7 +170,7 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = layer["activation_mean"][0]
       output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
 
-def train_step(model, config, state, grad_norms, data, dropout_rng):
+def train_step(model, config, state, grad_cut, data, dropout_rng):
   """
 
   Args:
@@ -203,15 +204,17 @@ def train_step(model, config, state, grad_norms, data, dropout_rng):
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), grads = grad_fn(state.params)
-  grads = grads * jnp.min([config.grad_max_growth * jnp.mean(grad_norms), jnp.norm(grad)]) / jnp.norm(grad)
+  pre_cut_grad_norm = max_utils.l2norm_pytree(grads)
+  grad_scale_factor = jnp.minimum(jnp.array(config.grad_max_growth * grad_cut), jnp.array(pre_cut_grad_norm)) / pre_cut_grad_norm
+  grads = jax.tree_map(lambda g: g * grad_scale_factor, grads)
   new_state = state.apply_gradients(grads=grads)
-  grad_norms = grad_norms.append(jnp.norm(grad))
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
+  grad_norm = max_utils.l2norm_pytree(grads)
+  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : grad_norm,
              'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
-  return new_state, grad_norms, metrics, rng2
+  return new_state, grad_norm, metrics, rng2
 
 
 def predict_step(inputs,
@@ -320,23 +323,29 @@ def train_loop(config, state=None):
   p_train_step = pjit(
     train_step,
     in_axis_resources=(state_mesh_annotations,
+                       None,
                        data_pspec,
                        None),
-    out_axis_resources=(state_mesh_annotations, None, None),
+    out_axis_resources=(state_mesh_annotations, None, None, None),
     static_argnums=(0,1,),
-    donate_argnums=(2,3))
+    donate_argnums=(2,3,))
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
+  grad_norms = deque(maxlen=config.grad_window)
+  grad_norms.append(config.grad_window**2)
 
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
 
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(train_iter, example_batch, config)
+    grad_mean = jnp.mean(jnp.array(grad_norms))
+    max_logging.log(f"grad_mean: {grad_mean}")
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      state, metrics, nextrng = p_train_step(
-          model, config, state, grad_norms, example_batch, nextrng
+      state, grad_norm, metrics, nextrng = p_train_step(
+          model, config, state, grad_mean, example_batch, nextrng
       )
+      grad_norms.append(grad_norm)
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))

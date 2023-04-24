@@ -109,3 +109,6 @@ prompt: "I love to "
 enable_profiler: False
 enable_checkpointing: True
 
+grad_window: 100
+grad_max_growth: 1.2
+
