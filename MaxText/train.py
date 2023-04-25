@@ -195,6 +195,11 @@ def train_step(model, config, state, grad_cut, data, dropout_rng):
                          data['inputs_segmentation'],
                          data['inputs_position'],
                          rngs={'dropout': rng1}, mutable='intermediates')
+
+    # Tanh scaling before all softmax
+    cap = jnp.array(20.0, dtype=config.dtype)
+    attn_weights = cap * jnp.tanh(logits / cap)
+  
     # TODO: is optax xent as good as custom T5X one?
     xent = optax.softmax_cross_entropy_with_integer_labels(logits, data['targets'])
     # Mask out paddings at the end of each example.
@@ -295,7 +300,9 @@ def train_loop(config, state=None):
   tx = optax.adam(
       max_utils.create_learning_rate_schedule(
           learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
-      )
+      ),
+      b1=config.adam_b1,
+      b2=config.adam_b2
   )
 
   # Mesh definition
