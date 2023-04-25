@@ -66,6 +66,7 @@ def dot_product_attention(query: Array,
                           key: Array,
                           value: Array,
                           bias: Optional[Array] = None,
+                          mask_bias: Optional[Array] = None,
                           dropout_rng: Optional[PRNGKey] = None,
                           dropout_rate: float = 0.,
                           deterministic: bool = False,
@@ -118,9 +119,21 @@ def dot_product_attention(query: Array,
   # `attn_weights`: [batch, num_heads, q_length, kv_length]
   attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
 
+
+
   # Apply attention bias: masking, dropout, proximity bias, etc.
   if bias is not None:
     attn_weights = attn_weights + bias.astype(attn_weights.dtype)
+
+  # Scale the logits by 1/d_kq
+  attn_weights = attn_weights / jnp.sqrt(query.shape[-1]).astype(dtype)
+
+  # tanh scaling
+
+  
+  if mask_bias is not None:
+    attn_weights = attn_weights + bias.astype(attn_weights.dtype)
+
 
   # Normalize the attention weights across `kv_length` dimension.
   attn_weights = jax.nn.softmax(attn_weights).astype(dtype)
@@ -300,13 +313,15 @@ class MultiHeadDotProductAttention(nn.Module):
     # NOTE: T5 does not explicitly rescale the attention logits by
     #       1/sqrt(depth_kq)!  This is folded into the initializers of the
     #       linear transformations, which is equivalent under Adafactor.
+    
     depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
     def query_init(*args):
       return self.kernel_init(*args) / depth_scaling
 
     # Project inputs_q to multi-headed q/k/v
     # dimensions are then [batch, length, num_heads, head_dim]
-    query = projection(kernel_init=query_init, name='query')(inputs_q)
+    #query = projection(kernel_init=query_init, name='query')(inputs_q) # This uses a prescaled, which is only equivalent under adafactor
+    query = projection(kernel_init=self.kernel_init, name='query')(inputs_q) # This is what we use for Adam, we will scale by 1/sqrt(depth_kq) before the softmax
     key = projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
     value = projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
@@ -391,16 +406,20 @@ class MultiHeadDotProductAttention(nn.Module):
     # Convert the boolean attention mask to an attention bias.
     if mask is not None:
       # attention mask in the form of attention bias
-      attention_bias = lax.select(
+      mask_bias = lax.select(
           mask > 0,
           jnp.full(mask.shape, 0.).astype(self.dtype),
           jnp.full(mask.shape, -1e10).astype(self.dtype))
     else:
-      attention_bias = None
+      mask_bias = None
 
     # Add provided bias term (e.g. relative position embedding).
     if bias is not None:
-      attention_bias = combine_biases(attention_bias, bias)
+      # attention_bias = combine_biases(attention_bias, bias) # Before attention bias and mask bias were combined
+      attention_bias = bias
+    else:
+      attentino_bias = None
+
 
     dropout_rng = None
     if not deterministic and self.dropout_rate > 0.:
@@ -412,6 +431,7 @@ class MultiHeadDotProductAttention(nn.Module):
         key,
         value,
         bias=attention_bias,
+        mask_bias=mask_bias,
         dropout_rng=dropout_rng,
         dropout_rate=self.dropout_rate,
         deterministic=deterministic,
