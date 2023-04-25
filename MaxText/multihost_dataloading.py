@@ -108,11 +108,20 @@ def get_next_batch_sharded(local_dataset: tf.data.Dataset,
                            global_mesh: Mesh) -> jax.Array:
   """Splits the host loaded data equally over all devices."""
 
-  try:
-    local_data = local_dataset.next()
-  except tf.errors.FailedPreconditionError:
-    max_logging.log("Failed to get next data batch, retrying")
-    time.sleep(10)
+  SLEEP_TIME = 10
+  MAX_DATA_LOAD_ATTEMPTS = 30
+  data_load_attempts = 0
+  loaded_data_success = False
+  while not loaded_data_success and data_load_attempts < MAX_DATA_LOAD_ATTEMPTS:
+    data_load_attempts += 1
+    try:
+      local_data = local_dataset.next()
+      loaded_data_success = True
+    except tf.errors.FailedPreconditionError:
+      max_logging.log("Failed to get next data batch, retrying")
+      time.sleep(SLEEP_TIME)
+  # Try one last time, if this fails we will see the full stack trace.
+  if not loaded_data_success:
     local_data = local_dataset.next()
 
   # local_devices = jax.local_devices()
