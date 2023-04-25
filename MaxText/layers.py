@@ -128,9 +128,11 @@ def dot_product_attention(query: Array,
   # Scale the logits by 1/d_kq
   attn_weights = attn_weights / jnp.sqrt(query.shape[-1]).astype(dtype)
 
-  # tanh scaling
 
-  
+  # Perform a tanh clipping to increase model stability
+  cap = jnp.array(20.0, dtype=dtype)
+  attn_weights = cap * jnp.tanh(attn_weights / cap)
+
   if mask_bias is not None:
     attn_weights = attn_weights + bias.astype(attn_weights.dtype)
 
