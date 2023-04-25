@@ -121,7 +121,7 @@ def dot_product_attention(query: Array,
 
 
 
-  # Apply attention bias: masking, dropout, proximity bias, etc.
+  # Apply attention bias: dropout, proximity bias (but not masking!)
   if bias is not None:
     attn_weights = attn_weights + bias.astype(attn_weights.dtype)
 
@@ -133,8 +133,9 @@ def dot_product_attention(query: Array,
   cap = jnp.array(20.0, dtype=dtype)
   attn_weights = cap * jnp.tanh(attn_weights / cap)
 
+  # Apply attention masking
   if mask_bias is not None:
-    attn_weights = attn_weights + bias.astype(attn_weights.dtype)
+    attn_weights = attn_weights + mask_bias.astype(attn_weights.dtype)
 
 
   # Normalize the attention weights across `kv_length` dimension.
