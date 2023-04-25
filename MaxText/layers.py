@@ -303,7 +303,6 @@ class MultiHeadDotProductAttention(nn.Module):
     # NOTE: T5 does not explicitly rescale the attention logits by
     #       1/sqrt(depth_kq)!  This is folded into the initializers of the
     #       linear transformations, which is equivalent under Adafactor.
-    
     depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
     def query_init(*args):
       return self.kernel_init(*args) / depth_scaling
@@ -393,7 +392,7 @@ class MultiHeadDotProductAttention(nn.Module):
           bias = dynamic_vector_slice_in_dim(
               jnp.squeeze(bias, axis=0), jnp.reshape(cur_index, (-1)), 1, -2)
 
- # Convert the boolean attention mask to an attention bias.
+    # Convert the boolean attention mask to an attention bias.
     if mask is not None:
       # attention mask in the form of attention bias
       attention_bias = lax.select(
