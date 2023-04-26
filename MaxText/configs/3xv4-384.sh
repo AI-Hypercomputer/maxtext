@@ -13,6 +13,13 @@
 # limitations under the License.
 
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true TPU_MEGACORE=MEGACORE_DENSE"
-RUN_NAME=mattdavidow-rs-$(date +%Y-%m-%d-%H-%M)
+RUN_NAME=$1
+
+# Original: (3 slices, 4 batch, minimal remat)
 #python3 MaxText/train.py MaxText/configs/test.yml run_name=${RUN_NAME} enable_profiler=true enable_checkpointing=true dcn_data_parallelism=3 ici_fsdp_parallelism=192 ici_tensor_parallelism=1 scale=1 per_device_batch_size=4 remat_policy=minimal
-python3 MaxText/train.py MaxText/configs/test.yml run_name=${RUN_NAME} enable_profiler=true enable_checkpointing=true dcn_data_parallelism=1 ici_fsdp_parallelism=192 ici_tensor_parallelism=1 scale=1 per_device_batch_size=12 remat_policy=full
+
+# Base Repro (1 slice, 12 device batch, full remat)
+python3 MaxText/train.py MaxText/configs/test.yml run_name=${RUN_NAME} enable_profiler=true enable_checkpointing=true dcn_data_parallelism=1 ici_fsdp_parallelism=192 ici_tensor_parallelism=1 scale=1 per_device_batch_size=12 remat_policy=full adam_b2=0.999
+
+# Adam Fix (1 slice, 12 device batch, full remat)
+#python3 MaxText/train.py MaxText/configs/test.yml run_name=${RUN_NAME} enable_profiler=true enable_checkpointing=true dcn_data_parallelism=1 ici_fsdp_parallelism=192 ici_tensor_parallelism=1 scale=1 per_device_batch_size=12 remat_policy=full adam_b2=0.95
