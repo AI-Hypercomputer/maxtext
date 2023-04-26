@@ -1,0 +1,110 @@
+# Copyright 2023 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This sentinel is a reminder to choose a real run name.
+# If there is already a checkpoint under this run, that checkpoint will auto-resume.
+run_name: ""
+
+# If we aren't resuming from an existing checkpoint, load parameters from this path if provided.
+load_parameters_path: ""
+
+use_pjrt: "true"
+mxla_barrier: "true"
+reuse_example_batch: 0 # for testing TPU performance, this options repeated uses the same batch.
+
+metrics_file: "" # for testing, local file that stores scalar metrics. If empty, no metrics are written.
+
+# Activation dtypes.
+dtype: "bfloat16"
+scale: 1
+base_emb_dim: 6144
+base_num_heads: 16
+base_mlp_dim: 24576
+base_num_decoder_layers: 16
+head_dim: 384
+# activation functions are .
+mlp_activations: ["relu"]
+dropout_rate: 0
+logits_via_embedding: True  # NOTE: this is True just for testing.
+# minimal, full, or none
+remat_policy: 'full'
+scan_layers: True
+param_scan_axis: 1
+
+record_internal_nn_metrics: 0
+
+# Output directory
+base_output_directory: "gs://max-experiments/"
+
+# Parallelism
+mesh_axes: ['data', 'fsdp', 'tensor']
+logical_axis_rules: [
+                      ['activation_batch', ['data', 'fsdp']],
+                      ['activation_length' , ['data', 'fsdp']],
+                      ['activation_embed', 'tensor'],
+                      ['activation_mlp', 'tensor'],
+                      ['activation_heads', 'tensor'],
+                      ['activation_kv', 'tensor'],
+                      ['activation_vocab', 'tensor'],
+                      ['mlp', 'tensor'],
+                      ['vocab', 'tensor'],
+                      ['embed', 'fsdp'],
+                      ['heads', 'tensor'],
+                    ]
+data_sharding: [['data', 'fsdp', 'tensor']]
+
+dcn_data_parallelism: 3
+dcn_fsdp_parallelism: 1
+dcn_tensor_parallelism: 1
+ici_data_parallelism: 1
+ici_fsdp_parallelism: 192
+ici_tensor_parallelism: 1
+
+
+# Dataset
+# Replace with your path given as argument in download_dataset.sh
+dataset_path: "gs://maxtext-dataset/"
+vocab_size: 32_768 # powers of 2 for sharding
+vocab_relative_path: "vocabs"  # Assumes we're allowed
+dataset_name: 'c4/en:3.0.1'
+eval_dataset_name: 'c4/en:3.0.1'
+eval_split: 'validation'
+per_device_batch_size: 16
+eval_per_device_batch_size: 0
+max_corpus_chars: 10_000_000
+
+# Training loop
+steps: 150_001
+log_period: 100
+save_period: 1000
+learning_rate: 5.e-4
+warmup_steps: 15_000
+
+# Maximum length cutoff for training examples.
+max_target_length: 2048
+# Maximum length cutoff for held-out evaluation examples.
+max_eval_target_length: 512
+
+# Maximum length cutoff for predicted tokens.
+max_predict_length: 256
+# Sampling temperature for language model inference.
+sampling_temperature: 0.6
+# Top k cutoff for logit sampling. If 0 then no top-k cutoff is used.
+sampling_top_k: 20
+eos_id: 2  # sentencepiece default
+# Prompt for language model sampling.
+prompt: "I love to "
+
+enable_profiler: False
+enable_checkpointing: True
