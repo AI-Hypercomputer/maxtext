@@ -35,6 +35,7 @@ from input_pipeline import preprocess_dataset
 import max_utils
 import temperature_sampler
 import checkpointing
+from collections import deque
 
 
 
@@ -169,7 +170,7 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = layer["activation_mean"][0]
       output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
 
-def train_step(model, config, state, data, dropout_rng):
+def train_step(model, config, state, grad_cut, data, dropout_rng):
   """
 
   Args:
@@ -203,13 +204,18 @@ def train_step(model, config, state, data, dropout_rng):
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), grads = grad_fn(state.params)
+  pre_cut_grad_norm = jnp.array(max_utils.l2norm_pytree(grads))
+  max_grad_norm = jnp.array(config.grad_cut_factor * grad_cut)
+  grad_scale_factor = jnp.minimum(max_grad_norm, pre_cut_grad_norm) / pre_cut_grad_norm
+  grads = jax.tree_map(lambda g: g * grad_scale_factor, grads)
+  grad_norm = max_utils.l2norm_pytree(grads)
   new_state = state.apply_gradients(grads=grads)
   metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
              'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
-  return new_state, metrics, rng2
+  return new_state, grad_norm, metrics, rng2
 
 
 def predict_step(inputs,
@@ -318,23 +324,31 @@ def train_loop(config, state=None):
   p_train_step = pjit(
     train_step,
     in_axis_resources=(state_mesh_annotations,
+                       None,
                        data_pspec,
                        None),
-    out_axis_resources=(state_mesh_annotations, None, None),
+    out_axis_resources=(state_mesh_annotations, None, None, None),
     static_argnums=(0,1,),
-    donate_argnums=2)
+    donate_argnums=(2,3,))
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
+  grad_norms = deque(maxlen=config.grad_cut_window_len)
+  LARGE_GRADIENT_NORM = 1.0 * 10**6 # Used when gradient cutting is not desired.
 
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
 
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(train_iter, example_batch, config)
+    if step < config.grad_cut_start_step or not grad_norms:
+      grad_cut = LARGE_GRADIENT_NORM  # Large value so no cutting takes place.
+    else:
+      grad_cut = jnp.mean(jnp.array(grad_norms))
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      state, metrics, nextrng = p_train_step(
-          model, config, state, example_batch, nextrng
+      state, grad_norm, metrics, nextrng = p_train_step(
+          model, config, state, grad_cut, example_batch, nextrng
       )
+      grad_norms.append(grad_norm) # The queue object automatically kicks out the last one when full.
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
