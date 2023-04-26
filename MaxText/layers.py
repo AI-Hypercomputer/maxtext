@@ -123,7 +123,7 @@ def dot_product_attention(query: Array,
     attn_weights = attn_weights + bias.astype(attn_weights.dtype)
 
   # self.head_dim (which was passed as cfg.head_dim), also query.shape[-1]
-  attn_weights = attn_weights / jnp.sqrt(cfg.head_dim).astype(dtype)
+  attn_weights = attn_weights / jnp.sqrt(query.shape[-1]).astype(dtype)
 
   # Normalize the attention weights across `kv_length` dimension.
   attn_weights = jax.nn.softmax(attn_weights).astype(dtype)
