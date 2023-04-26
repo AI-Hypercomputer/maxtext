@@ -113,3 +113,5 @@ grad_cut_factor: 1.1 # Gradient capped by mean of previous gradients times this 
 grad_cut_window_len: 100 # The window length of running gradients to compare to.
 grad_cut_start_step: 100 # Gradient starts being cut at this step.
 
+adam_b1: 0.9
+adam_b2: 0.95

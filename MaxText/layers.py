@@ -122,6 +122,9 @@ def dot_product_attention(query: Array,
   if bias is not None:
     attn_weights = attn_weights + bias.astype(attn_weights.dtype)
 
+  # self.head_dim (which was passed as cfg.head_dim), also query.shape[-1]
+  attn_weights = attn_weights / jnp.sqrt(cfg.head_dim).astype(dtype)
+
   # Normalize the attention weights across `kv_length` dimension.
   attn_weights = jax.nn.softmax(attn_weights).astype(dtype)
 
@@ -306,7 +309,8 @@ class MultiHeadDotProductAttention(nn.Module):
 
     # Project inputs_q to multi-headed q/k/v
     # dimensions are then [batch, length, num_heads, head_dim]
-    query = projection(kernel_init=query_init, name='query')(inputs_q)
+    # query = projection(kernel_init=query_init, name='query')(inputs_q) # Why this asmmetry tho
+    query = projection(kernel_init=self.kernel_init, name='query')(inputs_q)
     key = projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
     value = projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
