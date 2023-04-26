@@ -379,10 +379,10 @@ def update_libtpu_init_args(flag,value):
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
-  os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = pyconfig.config.use_pjrt
+  os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = "0"
   os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
   update_libtpu_init_args("xla_tpu_enable_megascale_barrier", pyconfig.config.mxla_barrier)
-  print(jax.devices())
+  # print(jax.devices())
   train_loop(pyconfig.config)
 
 
