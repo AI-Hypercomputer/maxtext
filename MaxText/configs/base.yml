@@ -109,3 +109,5 @@ prompt: "I love to "
 enable_profiler: False
 enable_checkpointing: True
 
+adam_b1: 0.9 # defaults to 0.9
+adam_b2: 0.95 # defaults to 0.999
