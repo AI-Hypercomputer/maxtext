@@ -1098,7 +1098,7 @@ class Transformer(nn.Module):
       decoder_target_tokens,
       decoder_segment_ids=None,
       decoder_positions=None,
-      enable_dropout=True,
+      enable_dropout=False,
       decode=False,
       max_decode_length=None):
     """Applies Transformer decoder-branch on encoded-input and target."""
