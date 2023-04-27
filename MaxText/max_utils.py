@@ -107,7 +107,8 @@ def init_train_state(model, tx, config, key):
   state = train_state.TrainState.create(
       apply_fn=model.apply,
       params=model_vars['params'],
-      tx=tx)
+      tx=tx,
+      "grad_norm"=0.0)
   return state
 
 
