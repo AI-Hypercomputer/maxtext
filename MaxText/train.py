@@ -191,7 +191,7 @@ def train_step(model, config, state, data, dropout_rng):
     grad_scale_factor = jnp.minimum(max_grad_norm, raw_grad_norm) / raw_grad_norm
     grad_scale_factor = lax.select(state.step >= config.rolling_gradient_clipping_start_step, grad_scale_factor, 1.0)
     scaled_grad = jax.tree_map(lambda g: g * grad_scale_factor, grad)
-    scaled_grad_norm = jnp.array(max_utils.l2norm_pytree(scaled_grad))
+    scaled_grad_norm = raw_grad_norm * grad_scale_factor
 
     # We choose to use the clipped version in the rolling average to further slow down the rate of growth of the gradient.
     rolling_grad_norm = rolling_average(state.rolling_grad_norm , scaled_grad_norm, config.rolling_gradient_decay_weight)

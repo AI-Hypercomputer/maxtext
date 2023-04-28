@@ -118,4 +118,4 @@ adam_eps_root: 0. # A small constant applied to denominator inside the square ro
 # Gradient clipping parameters
 rolling_gradient_clipping_start_step: 100 # Step to start clipping the gradients.
 rolling_gradient_clipping_factor: 1.1 # Gradient is clipped by rolling average times this factor.
-rolling_gradient_decay_weight: 0.9 # Gradient norm's exponentially weighted rolling decay weight.
+rolling_gradient_decay_weight: 0.99 # Gradient norm's exponentially weighted rolling decay weight.

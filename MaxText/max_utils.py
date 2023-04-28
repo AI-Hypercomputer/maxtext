@@ -34,7 +34,7 @@ from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
 import optax
-from typing import Any, Optional
+from typing import Any
 
 class TrainState(train_state.TrainState):
   rolling_grad_norm: Any
