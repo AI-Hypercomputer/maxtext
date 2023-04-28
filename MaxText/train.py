@@ -14,7 +14,7 @@
  limitations under the License.
  """
 
-# pylint: disable=g-bad-todo, abstract-method, consider-using-with
+# pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports
 """Training loop and Decoding of the model."""
 
 # Calling jax.devces here prevents a "TPU platform already registered" error.
