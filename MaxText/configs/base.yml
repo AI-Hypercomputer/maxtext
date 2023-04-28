@@ -116,5 +116,6 @@ adam_eps: 1.e-8 # A small constant applied to denominator outside of the square 
 adam_eps_root: 0. # A small constant applied to denominator inside the square root.
 
 # Gradient clipping parameters
-grad_clip_moving_decay_weight: 0.9 # Gradient norms moving average decay weight.
-grad_clip_max_growth_factor: 1.1 # Gradient is clipped by moving average times this factor.
+rolling_gradient_clipping_start_step: 100 # Step to start clipping the gradients.
+rolling_gradient_clipping_factor: 1.1 # Gradient is clipped by moving average times this factor.
+rolling_gradient_decay_weight: 0.9 # Gradient norms' moving average decay weight.

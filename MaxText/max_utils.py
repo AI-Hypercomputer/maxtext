@@ -37,7 +37,7 @@ import optax
 from typing import Any, Optional
 
 class TrainState(train_state.TrainState):
-  running_grad_norm: Any
+  rolling_grad_norm: Any
 
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
@@ -112,7 +112,7 @@ def init_train_state(model, tx, config, key):
       apply_fn=model.apply,
       params=model_vars['params'],
       tx=tx,
-      running_grad_norm=0.0)
+      rolling_grad_norm=0.0)
   return state
 
 

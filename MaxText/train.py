@@ -27,6 +27,7 @@ from flax.training import train_state
 import numpy as np
 import optax
 from tensorboardX import SummaryWriter
+from jax import lax
 
 from layers import Transformer
 import pyconfig
@@ -205,34 +206,33 @@ def train_step(model, config, state, data, dropout_rng):
     return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
 
   def grad_clip(grad, config, state):
-    # Clips the gradient by config.grad_clip_max_growth_factor * running gradient norm estimate.
-    # Returns the clipped gradient, running_grad_norm, clipped gradient norm 
-    def ewma(previous_val, new_val, decay_weight, step):
-      # Exponentially weighted moving average
-      new_average = decay_weight * previous_val + (1.0 - decay_weight) * new_val
-      # Unbias the weighted average (most important for earlier steps)
+    # Clips the gradient by config.rolling_gradient_clipping_factor * rolling gradient norm estimate.
+    # Returns the clipped (scaled) gradient, clipped gradient norm and rolling_grad_norm. 
+    def rolling_average(previous_average, new_val, decay_weight, step):
+      new_average = decay_weight * previous_average + (1.0 - decay_weight) * new_val
+      # Unbias the weighted average (most important for earlier steps).
       return new_average / (1.0 - decay_weight ** (step + 1.0))
       
-    pre_clip_grad_norm = jnp.array(max_utils.l2norm_pytree(grad))
-    running_grad_norm = ewma(state.running_grad_norm , pre_clip_grad_norm, config.grad_clip_moving_decay_weight, state.step)
-    max_grad_norm = running_grad_norm * config.grad_clip_max_growth_factor
-    grad_scale_factor = jnp.minimum(max_grad_norm, pre_clip_grad_norm) / pre_clip_grad_norm
-    clip_grad = jax.tree_map(lambda g: g * grad_scale_factor, grad)
-    clip_grad_norm = jnp.array(max_utils.l2norm_pytree(clip_grad))
-    # Recompute the running_grad_norm since we may have clipped the gradient. We choose to use the clipped
-    # version in the running average to further slow down the rate of growth of the gradient.
-    running_grad_norm = ewma(state.running_grad_norm , clip_grad_norm, config.grad_clip_moving_decay_weight, state.step)
+    raw_grad_norm = jnp.array(max_utils.l2norm_pytree(grad))
+    rolling_grad_norm = rolling_average(state.rolling_grad_norm , raw_grad_norm, config.rolling_gradient_decay_weight, state.step)
+    max_grad_norm = rolling_grad_norm * config.rolling_gradient_clipping_factor
+    max_grad_norm = lax.select(state.step > config.rolling_gradient_clipping_start_step, max_grad_norm, float('inf'))
+    grad_scale_factor = jnp.minimum(max_grad_norm, raw_grad_norm) / raw_grad_norm
+    scaled_grad = jax.tree_map(lambda g: g * grad_scale_factor, grad)
+    scaled_grad_norm = jnp.array(max_utils.l2norm_pytree(scaled_grad))
+    # We choose to use the clipped version in the rolling average to further slow down the rate of growth of the gradient.
+    rolling_grad_norm = rolling_average(state.rolling_grad_norm , scaled_grad_norm, config.rolling_gradient_decay_weight, state.step)
 
-    return clip_grad, running_grad_norm, clip_grad_norm
+    return scaled_grad, scaled_grad_norm, rolling_grad_norm
     
     
 
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (loss, intermediate_outputs), grads = grad_fn(state.params)
-  clip_gradient, running_grad_norm, clip_grad_norm = grad_clip(grads, config, state)
-  new_state = state.apply_gradients(grads=clip_gradient, running_grad_norm=running_grad_norm)
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : clip_grad_norm,
+  (loss, intermediate_outputs), grad = grad_fn(state.params)
+  scaled_grad, scaled_grad_norm, rolling_grad_norm = grad_clip(grad, config, state)
+  new_state = state.apply_gradients(grads=scaled_grad, rolling_grad_norm=rolling_grad_norm)
+  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : scaled_grad_norm,
              'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
