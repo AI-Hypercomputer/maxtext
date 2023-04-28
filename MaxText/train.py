@@ -367,7 +367,7 @@ def train_loop(config, state=None):
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(train_iter, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      state, grad_norm, metrics, nextrng = p_train_step(
+      state, metrics, nextrng = p_train_step(
           model, config, state, example_batch, nextrng
       )
 
