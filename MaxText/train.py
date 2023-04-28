@@ -16,14 +16,19 @@
 
 # pylint: disable=g-bad-todo, abstract-method, consider-using-with
 """Training loop and Decoding of the model."""
-from typing import Sequence
 
+# Calling jax.devces here prevents a "TPU platform already registered" error.
+# See github.com/google/maxtext/issues/20 for more
+import jax
 import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+print(f"Found {jax.device_count()} devices.")
+
+from typing import Sequence
 import datetime
 import json
 from absl import app
 from flax.linen import partitioning as nn_partitioning
-from flax.training import train_state
 import numpy as np
 import optax
 from tensorboardX import SummaryWriter
@@ -36,9 +41,6 @@ import max_utils
 import temperature_sampler
 import checkpointing
 
-
-
-import jax
 import jax.numpy as jnp
 from jax import random
 from jax.experimental.pjit import pjit
@@ -52,7 +54,6 @@ import max_logging
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
 
 def get_first_step(state):
@@ -127,29 +128,6 @@ def calculate_num_params_from_pytree(params):
 # -----------------------------------------------------------------------------
 # Top-level Functions
 # -----------------------------------------------------------------------------
-
-
-def init_train_state(model, tx, config, key):
-  """
-  We pass in "static" objects like model, tx, config as JAX compares them by
-  object hash, and instantiating them inside causes pjit top-level annotations
-  to fail to match as pytree prefixes if we re-instantiate.
-
-  Args: model, tx, config, key
-  """
-  input_shape = (
-      len(jax.devices()) * config.per_device_batch_size,
-      config.max_target_length
-  )
-  model_vars = model.init({'params': key, 'dropout': key},
-                          jnp.ones(input_shape),
-                          jnp.ones(input_shape))
-  state = train_state.TrainState.create(
-      apply_fn=model.apply,
-      params=model_vars['params'],
-      tx=tx)
-  return state
-
 
 def record_activation_metrics(output_metrics, intermediate_outputs, config):
   """ Adds the activation metrics to the metrics dict"""
@@ -361,16 +339,9 @@ def train_loop(config, state=None):
   writer.close()
   return state
 
-def update_libtpu_init_args(flag,value):
-  cur_args = [arg for arg in os.environ.get('LIBTPU_INIT_ARGS', "").split(" ") if f"--{flag}=" not in arg]
-  cur_args.append(f"--{flag}={value}")
-  os.environ["LIBTPU_INIT_ARGS"] = " ".join(cur_args)
-
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
-  os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = pyconfig.config.use_pjrt
   os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
-  update_libtpu_init_args("xla_tpu_enable_megascale_barrier", pyconfig.config.mxla_barrier)
   train_loop(pyconfig.config)
 
 
