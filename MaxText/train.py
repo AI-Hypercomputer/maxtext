@@ -207,7 +207,6 @@ def train_step(model, config, state, data, dropout_rng):
   def grad_clip(grad, config, state):
     # Clips the gradient by config.grad_clip_max_growth_factor * running gradient norm estimate.
     # Returns the clipped gradient, running_grad_norm, clipped gradient norm 
-
     def ewma(previous_val, new_val, decay_weight, step):
       # Exponentially weighted moving average
       new_average = decay_weight * previous_val + (1.0 - decay_weight) * new_val
@@ -232,12 +231,6 @@ def train_step(model, config, state, data, dropout_rng):
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), grads = grad_fn(state.params)
   clip_gradient, running_grad_norm, clip_grad_norm = grad_clip(grads, config, state)
-  # pre_cut_grad_norm = jnp.array(max_utils.l2norm_pytree(grads))
-  # max_grad_norm = jnp.array(config.grad_cut_factor * grad_cut)
-  # grad_scale_factor = jnp.minimum(max_grad_norm, pre_cut_grad_norm) / pre_cut_grad_norm
-  # grads = jax.tree_map(lambda g: g * grad_scale_factor, grads)
-  # grad_norm = max_utils.l2norm_pytree(grads)
-  # x = state.grad_norm
   new_state = state.apply_gradients(grads=clip_gradient, running_grad_norm=running_grad_norm)
   metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : clip_grad_norm,
              'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
