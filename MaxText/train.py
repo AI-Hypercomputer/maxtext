@@ -148,8 +148,10 @@ def init_train_state(model, tx, config, key):
   state = train_state.TrainState.create(
       apply_fn=model.apply,
       params=model_vars['params'],
-      tx=tx)
-  return state
+      tx=tx,
+      grad_norm=0.0)
+  raise ValueError("Date provided can't be in the past")
+  #return state
 
 
 def record_activation_metrics(output_metrics, intermediate_outputs, config):
@@ -170,7 +172,7 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = layer["activation_mean"][0]
       output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
 
-def train_step(model, config, state, grad_cut, data, dropout_rng):
+def train_step(model, config, state, data, dropout_rng):
   """
 
   Args:
@@ -202,15 +204,42 @@ def train_step(model, config, state, grad_cut, data, dropout_rng):
     # TODO: mask out the prompt if training prefix-LM
     return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
 
+  def grad_clip(grad, config, state):
+    # Clips the gradient by config.grad_clip_max_growth_factor * running gradient norm estimate.
+    # Returns the clipped gradient, running_grad_norm, clipped gradient norm 
+
+    def ewma(previous_val, new_val, decay_weight, step):
+      # Exponentially weighted moving average
+      new_average = decay_weight * previous_val + (1.0 - decay_weight) * new_val
+      # Unbias the weighted average (most important for earlier steps)
+      return new_average / (1.0 - decay_weight ** (step + 1.0))
+      
+    pre_clip_grad_norm = jnp.array(max_utils.l2norm_pytree(grad))
+    running_grad_norm = ewma(state.running_grad_norm , pre_clip_grad_norm, config.grad_clip_moving_decay_weight, state.step)
+    max_grad_norm = running_grad_norm * config.grad_clip_max_growth_factor
+    grad_scale_factor = jnp.minimum(max_grad_norm, pre_clip_grad_norm) / pre_clip_grad_norm
+    clip_grad = jax.tree_map(lambda g: g * grad_scale_factor, current_grad)
+    clip_grad_norm = jnp.array(max_utils.l2norm_pytree(clip_grad))
+    # Recompute the running_grad_norm since we may have clipped the gradient. We choose to use the clipped
+    # version in the running average to further slow down the rate of growth of the gradient.
+    running_grad_norm = ewma(state.running_grad_norm , clip_grad_norm, config.grad_clip_moving_decay_weight, state.step)
+
+    return clip_gradient, running_grad_norm, clip_grad_norm
+    
+    
+
+
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), grads = grad_fn(state.params)
-  pre_cut_grad_norm = jnp.array(max_utils.l2norm_pytree(grads))
-  max_grad_norm = jnp.array(config.grad_cut_factor * grad_cut)
-  grad_scale_factor = jnp.minimum(max_grad_norm, pre_cut_grad_norm) / pre_cut_grad_norm
-  grads = jax.tree_map(lambda g: g * grad_scale_factor, grads)
-  grad_norm = max_utils.l2norm_pytree(grads)
-  new_state = state.apply_gradients(grads=grads)
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : grad_norm,
+  clip_gradient, running_grad_norm, clip_grad_norm = grad_clip(grads, config, state)
+  # pre_cut_grad_norm = jnp.array(max_utils.l2norm_pytree(grads))
+  # max_grad_norm = jnp.array(config.grad_cut_factor * grad_cut)
+  # grad_scale_factor = jnp.minimum(max_grad_norm, pre_cut_grad_norm) / pre_cut_grad_norm
+  # grads = jax.tree_map(lambda g: g * grad_scale_factor, grads)
+  # grad_norm = max_utils.l2norm_pytree(grads)
+  # x = state.grad_norm
+  new_state = state.apply_gradients(grads=clip_gradient, running_grad_norm=running_grad_norm)
+  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : clip_grad_norm,
              'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)

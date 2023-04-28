@@ -15,6 +15,7 @@
  """
 
 """ Common Max Utils needed by multiple modules"""
+
 import checkpointing
 import functools
 
@@ -33,7 +34,10 @@ from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
 import optax
+from typing import Any, Optional
 
+class TrainState(train_state.TrainState):
+  grad_norm: Any
 
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
@@ -104,11 +108,11 @@ def init_train_state(model, tx, config, key):
   model_vars = model.init({'params': key, 'dropout': key},
                           jnp.ones(input_shape),
                           jnp.ones(input_shape))
-  state = train_state.TrainState.create(
+  state = TrainState.create(
       apply_fn=model.apply,
       params=model_vars['params'],
       tx=tx,
-      "grad_norm"=0.0)
+      grad_norm=0.0)
   return state
 
 
