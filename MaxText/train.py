@@ -209,31 +209,29 @@ def train_step(model, config, state, data, dropout_rng):
     # Clips the gradient by config.rolling_gradient_clipping_factor * rolling gradient norm estimate.
     # Returns the clipped (scaled) gradient, clipped gradient norm and rolling_grad_norm. 
     def rolling_average(previous_average, new_val, decay_weight, step):
-      new_average = decay_weight * previous_average + (1.0 - decay_weight) * new_val
-      # Unbias the weighted average (most important for earlier steps).
-      return new_average / (1.0 - decay_weight ** (step + 1.0))
+      return decay_weight * previous_average + (1.0 - decay_weight) * new_val
       
     raw_grad_norm = jnp.array(max_utils.l2norm_pytree(grad))
     rolling_grad_norm = rolling_average(state.rolling_grad_norm , raw_grad_norm, config.rolling_gradient_decay_weight, state.step)
     max_grad_norm = rolling_grad_norm * config.rolling_gradient_clipping_factor
-    max_grad_norm = lax.select(state.step > config.rolling_gradient_clipping_start_step, max_grad_norm, float('inf'))
     grad_scale_factor = jnp.minimum(max_grad_norm, raw_grad_norm) / raw_grad_norm
+    grad_scale_factor = lax.select(state.step >= config.rolling_gradient_clipping_start_step, grad_scale_factor, 1.0)
     scaled_grad = jax.tree_map(lambda g: g * grad_scale_factor, grad)
     scaled_grad_norm = jnp.array(max_utils.l2norm_pytree(scaled_grad))
     # We choose to use the clipped version in the rolling average to further slow down the rate of growth of the gradient.
     rolling_grad_norm = rolling_average(state.rolling_grad_norm , scaled_grad_norm, config.rolling_gradient_decay_weight, state.step)
 
-    return scaled_grad, scaled_grad_norm, rolling_grad_norm
+    return scaled_grad, scaled_grad_norm, rolling_grad_norm, raw_grad_norm, max_grad_norm
     
     
 
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), grad = grad_fn(state.params)
-  scaled_grad, scaled_grad_norm, rolling_grad_norm = grad_clip(grad, config, state)
+  scaled_grad, scaled_grad_norm, rolling_grad_norm, raw_grad_norm, max_grad_norm = grad_clip(grad, config, state)
   new_state = state.apply_gradients(grads=scaled_grad, rolling_grad_norm=rolling_grad_norm)
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : scaled_grad_norm,
-             'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
+  metrics = {'scalar': {'learning/loss': loss, 'learning/applied_grad_norm' : scaled_grad_norm, 'learning/raw_grad_norm' : raw_grad_norm,
+             'learning/gradient_clipping_threshold' : max_grad_norm, 'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
