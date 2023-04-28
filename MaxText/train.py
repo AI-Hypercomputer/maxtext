@@ -23,7 +23,6 @@ import datetime
 import json
 from absl import app
 from flax.linen import partitioning as nn_partitioning
-from flax.training import train_state
 import numpy as np
 import optax
 from tensorboardX import SummaryWriter
@@ -36,7 +35,6 @@ from input_pipeline import preprocess_dataset
 import max_utils
 import temperature_sampler
 import checkpointing
-from collections import deque
 
 
 
@@ -130,31 +128,6 @@ def calculate_num_params_from_pytree(params):
 # Top-level Functions
 # -----------------------------------------------------------------------------
 
-
-def init_train_state(model, tx, config, key):
-  """
-  We pass in "static" objects like model, tx, config as JAX compares them by
-  object hash, and instantiating them inside causes pjit top-level annotations
-  to fail to match as pytree prefixes if we re-instantiate.
-
-  Args: model, tx, config, key
-  """
-  input_shape = (
-      len(jax.devices()) * config.per_device_batch_size,
-      config.max_target_length
-  )
-  model_vars = model.init({'params': key, 'dropout': key},
-                          jnp.ones(input_shape),
-                          jnp.ones(input_shape))
-  state = train_state.TrainState.create(
-      apply_fn=model.apply,
-      params=model_vars['params'],
-      tx=tx,
-      grad_norm=0.0)
-  raise ValueError("Date provided can't be in the past")
-  #return state
-
-
 def record_activation_metrics(output_metrics, intermediate_outputs, config):
   """ Adds the activation metrics to the metrics dict"""
 
@@ -206,32 +179,31 @@ def train_step(model, config, state, data, dropout_rng):
     return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
 
   def grad_clip(grad, config, state):
-    # Clips the gradient by config.rolling_gradient_clipping_factor * rolling gradient norm estimate.
-    # Returns the clipped (scaled) gradient, clipped gradient norm and rolling_grad_norm. 
+    # Clips the gradient by a norm cutoff = rolling gradient norm estimate * config.rolling_gradient_clipping_factor.
+    # Returns the clipped (scaled) gradient, clipped gradient norm, rolling grad norm, raw grad norm, and the norm cutoff
     def rolling_average(previous_average, new_val, decay_weight):
       return decay_weight * previous_average + (1.0 - decay_weight) * new_val
-      
+
     raw_grad_norm = jnp.array(max_utils.l2norm_pytree(grad))
     rolling_grad_norm = rolling_average(state.rolling_grad_norm , raw_grad_norm, config.rolling_gradient_decay_weight)
     max_grad_norm = rolling_grad_norm * config.rolling_gradient_clipping_factor
+
     grad_scale_factor = jnp.minimum(max_grad_norm, raw_grad_norm) / raw_grad_norm
     grad_scale_factor = lax.select(state.step >= config.rolling_gradient_clipping_start_step, grad_scale_factor, 1.0)
     scaled_grad = jax.tree_map(lambda g: g * grad_scale_factor, grad)
     scaled_grad_norm = jnp.array(max_utils.l2norm_pytree(scaled_grad))
+
     # We choose to use the clipped version in the rolling average to further slow down the rate of growth of the gradient.
     rolling_grad_norm = rolling_average(state.rolling_grad_norm , scaled_grad_norm, config.rolling_gradient_decay_weight)
-
     return scaled_grad, scaled_grad_norm, rolling_grad_norm, raw_grad_norm, max_grad_norm
-    
-    
-
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), grad = grad_fn(state.params)
   scaled_grad, scaled_grad_norm, rolling_grad_norm, raw_grad_norm, max_grad_norm = grad_clip(grad, config, state)
   new_state = state.apply_gradients(grads=scaled_grad, rolling_grad_norm=rolling_grad_norm)
-  metrics = {'scalar': {'learning/loss': loss, 'learning/applied_grad_norm' : scaled_grad_norm, 'learning/raw_grad_norm' : raw_grad_norm,
-             'learning/gradient_clipping_threshold' : max_grad_norm, 'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
+  metrics = {'scalar': {'learning/loss': loss, 'learning/applied_grad_norm' : scaled_grad_norm,
+   'learning/raw_grad_norm' : raw_grad_norm, 'learning/gradient_clipping_threshold' : max_grad_norm,
+   'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
