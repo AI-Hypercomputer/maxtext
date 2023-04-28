@@ -53,7 +53,7 @@ cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-
+# print jax after this
 
 def get_first_step(state):
   with jax.spmd_mode('allow_all'):
@@ -129,32 +129,8 @@ def calculate_num_params_from_pytree(params):
 # -----------------------------------------------------------------------------
 
 
-def init_train_state2_yash(model, tx, config, key):
-  # """
-  # We pass in "static" objects like model, tx, config as JAX compares them by
-  # object hash, and instantiating them inside causes pjit top-level annotations
-  # to fail to match as pytree prefixes if we re-instantiate.
-
-  # Args: model, tx, config, key
-  # """
-  # asdfasdf
-  print("rawr", flush=True)
-  # print("rawr", flush=True)
-  # print("rawr", flush=True)
-  # print("rawr", flush=True)
-  # print("rawr", flush=True)
-  # print("rawr", flush=True)
-  # input_shape = (
-  #     len(jax.devices()) * config.per_device_batch_size,
-  #     config.max_target_length
-  # )
-  # model_vars = model.init({'params': key, 'dropout': key},
-  #                         jnp.ones(input_shape),
-  #                         jnp.ones(input_shape))
-  # state = train_state.TrainState.create(
-  #     apply_fn=model.apply,
-  #     params=model_vars['params'],
-  #     tx=tx)
+def unreferenced_method(model, tx, config, key):
+  print("Useless print - never called", flush=True) # If you comment out this line, the code will fail
   return None
 
 
@@ -375,9 +351,9 @@ def update_libtpu_init_args(flag,value):
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
-  os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = pyconfig.config.use_pjrt
+  os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = pyconfig.config.use_pjrt # can be removed
   os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
-  update_libtpu_init_args("xla_tpu_enable_megascale_barrier", pyconfig.config.mxla_barrier)
+  update_libtpu_init_args("xla_tpu_enable_megascale_barrier", pyconfig.config.mxla_barrier) #same
   train_loop(pyconfig.config)
 
 
