@@ -218,13 +218,13 @@ def train_step(model, config, state, data, dropout_rng):
     running_grad_norm = ewma(state.running_grad_norm , pre_clip_grad_norm, config.grad_clip_moving_decay_weight, state.step)
     max_grad_norm = running_grad_norm * config.grad_clip_max_growth_factor
     grad_scale_factor = jnp.minimum(max_grad_norm, pre_clip_grad_norm) / pre_clip_grad_norm
-    clip_grad = jax.tree_map(lambda g: g * grad_scale_factor, current_grad)
+    clip_grad = jax.tree_map(lambda g: g * grad_scale_factor, grad)
     clip_grad_norm = jnp.array(max_utils.l2norm_pytree(clip_grad))
     # Recompute the running_grad_norm since we may have clipped the gradient. We choose to use the clipped
     # version in the running average to further slow down the rate of growth of the gradient.
     running_grad_norm = ewma(state.running_grad_norm , clip_grad_norm, config.grad_clip_moving_decay_weight, state.step)
 
-    return clip_gradient, running_grad_norm, clip_grad_norm
+    return clip_grad, running_grad_norm, clip_grad_norm
     
     
 
@@ -244,7 +244,7 @@ def train_step(model, config, state, data, dropout_rng):
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
-  return new_state, grad_norm, metrics, rng2
+  return new_state, metrics, rng2
 
 
 def predict_step(inputs,
