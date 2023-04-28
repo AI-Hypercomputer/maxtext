@@ -27,10 +27,12 @@ except ImportError:
 from orbax import checkpoint
 from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, Checkpointer
 from orbax.checkpoint import type_handlers
-
+import orbax
 import max_logging
 
 from flax.training import train_state
+
+print("orbax version: ", orbax.__version__)
 
 def _multislice_distribute_initialize():
   """Calls jax.distribute.initialize() with appropriate multislice arguments."""

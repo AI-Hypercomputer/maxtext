@@ -18,12 +18,12 @@
 """Training loop and Decoding of the model."""
 from typing import Sequence
 
+import jax
 import os
 import datetime
 import json
 from absl import app
 from flax.linen import partitioning as nn_partitioning
-from flax.training import train_state
 import numpy as np
 import optax
 from tensorboardX import SummaryWriter
@@ -32,10 +32,14 @@ from layers import Transformer
 import pyconfig
 from input_pipeline import get_datasets
 from input_pipeline import preprocess_dataset
+
+
 import max_utils
+
+
+
 import temperature_sampler
 import checkpointing
-
 
 
 import jax
@@ -49,7 +53,11 @@ from jax.experimental.compilation_cache import compilation_cache as cc
 
 import max_logging
 
+
+
+
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
+
 
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
@@ -127,29 +135,6 @@ def calculate_num_params_from_pytree(params):
 # -----------------------------------------------------------------------------
 # Top-level Functions
 # -----------------------------------------------------------------------------
-
-
-def init_train_state(model, tx, config, key):
-  """
-  We pass in "static" objects like model, tx, config as JAX compares them by
-  object hash, and instantiating them inside causes pjit top-level annotations
-  to fail to match as pytree prefixes if we re-instantiate.
-
-  Args: model, tx, config, key
-  """
-  input_shape = (
-      len(jax.devices()) * config.per_device_batch_size,
-      config.max_target_length
-  )
-  model_vars = model.init({'params': key, 'dropout': key},
-                          jnp.ones(input_shape),
-                          jnp.ones(input_shape))
-  state = train_state.TrainState.create(
-      apply_fn=model.apply,
-      params=model_vars['params'],
-      tx=tx)
-  return state
-
 
 def record_activation_metrics(output_metrics, intermediate_outputs, config):
   """ Adds the activation metrics to the metrics dict"""
@@ -274,8 +259,13 @@ def train_loop(config, state=None):
 
   Returns:
 
-  """
+  """  
+  # print(jax.devices()) # This line fixes the code, altho checkpointing is broken
+  # print("jax version: ", jax.__version__) 
   writer = SummaryWriter(config.tensorboard_dir)
+  print(jax.devices())
+  print("jax version: ", jax.__version__)
+
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir, config.enable_checkpointing)
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(0), 2)
