@@ -353,8 +353,8 @@ def train_loop(config, state=None):
   p_train_step = pjit(
     train_step,
     in_axis_resources=(state_mesh_annotations,
-                       None,
-                       data_pspec),
+                       data_pspec,
+                       None),
     out_axis_resources=(state_mesh_annotations, None, None),
     static_argnums=(0,1,),
     donate_argnums=2)
