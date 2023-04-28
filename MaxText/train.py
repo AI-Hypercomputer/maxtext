@@ -129,26 +129,33 @@ def calculate_num_params_from_pytree(params):
 # -----------------------------------------------------------------------------
 
 
-def init_train_state(model, tx, config, key):
-  """
-  We pass in "static" objects like model, tx, config as JAX compares them by
-  object hash, and instantiating them inside causes pjit top-level annotations
-  to fail to match as pytree prefixes if we re-instantiate.
+def init_train_state2_yash(model, tx, config, key):
+  # """
+  # We pass in "static" objects like model, tx, config as JAX compares them by
+  # object hash, and instantiating them inside causes pjit top-level annotations
+  # to fail to match as pytree prefixes if we re-instantiate.
 
-  Args: model, tx, config, key
-  """
-  input_shape = (
-      len(jax.devices()) * config.per_device_batch_size,
-      config.max_target_length
-  )
-  model_vars = model.init({'params': key, 'dropout': key},
-                          jnp.ones(input_shape),
-                          jnp.ones(input_shape))
-  state = train_state.TrainState.create(
-      apply_fn=model.apply,
-      params=model_vars['params'],
-      tx=tx)
-  return state
+  # Args: model, tx, config, key
+  # """
+  # asdfasdf
+  print("rawr", flush=True)
+  # print("rawr", flush=True)
+  # print("rawr", flush=True)
+  # print("rawr", flush=True)
+  # print("rawr", flush=True)
+  # print("rawr", flush=True)
+  # input_shape = (
+  #     len(jax.devices()) * config.per_device_batch_size,
+  #     config.max_target_length
+  # )
+  # model_vars = model.init({'params': key, 'dropout': key},
+  #                         jnp.ones(input_shape),
+  #                         jnp.ones(input_shape))
+  # state = train_state.TrainState.create(
+  #     apply_fn=model.apply,
+  #     params=model_vars['params'],
+  #     tx=tx)
+  return None
 
 
 def record_activation_metrics(output_metrics, intermediate_outputs, config):
