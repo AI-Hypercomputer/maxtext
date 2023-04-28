@@ -354,30 +354,22 @@ def train_loop(config, state=None):
     train_step,
     in_axis_resources=(state_mesh_annotations,
                        None,
-                       data_pspec,
-                       None),
-    out_axis_resources=(state_mesh_annotations, None, None, None),
+                       data_pspec),
+    out_axis_resources=(state_mesh_annotations, None, None),
     static_argnums=(0,1,),
-    donate_argnums=(2,3,))
+    donate_argnums=2)
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
-  grad_norms = deque(maxlen=config.grad_cut_window_len)
-  LARGE_GRADIENT_NORM = 1.0 * 10**6 # Used when gradient cutting is not desired.
 
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
 
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(train_iter, example_batch, config)
-    if step < config.grad_cut_start_step or not grad_norms:
-      grad_cut = LARGE_GRADIENT_NORM  # Large value so no cutting takes place.
-    else:
-      grad_cut = jnp.mean(jnp.array(grad_norms))
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, grad_norm, metrics, nextrng = p_train_step(
-          model, config, state, grad_cut, example_batch, nextrng
+          model, config, state, example_batch, nextrng
       )
-      grad_norms.append(grad_norm) # The queue object automatically kicks out the last one when full.
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
