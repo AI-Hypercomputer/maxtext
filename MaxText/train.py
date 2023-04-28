@@ -53,7 +53,6 @@ cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-# print jax after this
 
 def get_first_step(state):
   with jax.spmd_mode('allow_all'):
@@ -351,9 +350,9 @@ def update_libtpu_init_args(flag,value):
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
-  os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = pyconfig.config.use_pjrt # can be removed
+  os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = pyconfig.config.use_pjrt
   os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
-  update_libtpu_init_args("xla_tpu_enable_megascale_barrier", pyconfig.config.mxla_barrier) #same
+  update_libtpu_init_args("xla_tpu_enable_megascale_barrier", pyconfig.config.mxla_barrier)
   train_loop(pyconfig.config)
 
 
