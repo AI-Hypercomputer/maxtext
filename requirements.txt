@@ -1,5 +1,5 @@
-jax[tpu]==0.4.6
-orbax==0.1.6
+jax[tpu]==0.4.8
+orbax-checkpoint==0.2.1
 absl-py
 argparse
 datetime
