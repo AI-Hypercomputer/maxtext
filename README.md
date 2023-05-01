@@ -247,7 +247,7 @@ For a 22B model. See full run configs in `MaxText/configs/` as `1xv4-128.sh`, `2
 | 4x v4-128   | 149              | 54.3% |
 | 8x v4-128   | 146              | 53.2% |
 
-For a 52B model. See full run configs in `MaxText/configs/` as `1xv4-384.sh` and `2xv4-512.sh`.
+For a 52B model. See full run configs in `MaxText/configs/` as `1xv4-384.sh` and `2xv4-384.sh`.
 
 | Hardware    | TFLOP/sec/chip   |  MFU  |
 | ----------- | ---------------- | ----- |
