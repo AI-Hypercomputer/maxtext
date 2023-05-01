@@ -1,5 +1,5 @@
-jax[tpu]==0.4.6
-orbax==0.1.6
+jax[tpu]
+orbax-checkpoint
 absl-py
 argparse
 datetime
@@ -9,12 +9,12 @@ ml-collections
 numpy
 optax
 portpicker
-protobuf==3.20.3
+protobuf
 pylint
 pytest
 sentencepiece==0.1.97
-tensorflow==2.12.0rc0
+tensorflow
 tensorflow-datasets
 tensorboard-plugin-profile
-tensorflow-text==2.12.0rc0
+tensorflow-text
 tensorboardx
