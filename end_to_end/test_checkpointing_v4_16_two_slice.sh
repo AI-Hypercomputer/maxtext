@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-RUN_NAME=${1}
+RUN_NAME=${1}_$(date +%Y-%m-%d-%H)
 OUTPUT_PATH=${2}
 DATASET_PATH=${3}
 
