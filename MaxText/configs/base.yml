@@ -19,8 +19,6 @@ run_name: ""
 # If we aren't resuming from an existing checkpoint, load parameters from this path if provided.
 load_parameters_path: ""
 
-use_pjrt: "true"
-mxla_barrier: "true"
 reuse_example_batch: 0 # for testing TPU performance, this options repeated uses the same batch.
 
 metrics_file: "" # for testing, local file that stores scalar metrics. If empty, no metrics are written.
