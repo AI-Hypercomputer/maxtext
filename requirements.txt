@@ -13,8 +13,8 @@ protobuf==3.20.3
 pylint
 pytest
 sentencepiece==0.1.97
-tensorflow==2.12.0rc0
+tensorflow
 tensorflow-datasets
 tensorboard-plugin-profile
-tensorflow-text==2.12.0rc0
+tensorflow-text
 tensorboardx
