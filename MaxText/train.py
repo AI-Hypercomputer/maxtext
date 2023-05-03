@@ -94,15 +94,15 @@ def write_metrics(writer, metrics, step, config):
       for metric_name in metrics.get("scalars",[]):
         writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
 
-    full_log = step % 5 == 0
+    full_log = step % config.log_period == 0
 
     max_logging.log(f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
           f"TFLOP/s: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
           f"loss: {metrics['scalar']['learning/loss']:.3f}")
 
-    if full_log and config.enable_profiler:
+    if full_log:
       max_logging.log(
-          f"PROFILING: To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
+          f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
       )
       writer.flush()
 
