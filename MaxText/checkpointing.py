@@ -14,19 +14,16 @@
  limitations under the License.
  """
 
-"""Create an Orbax async CheckpointManager."""
+"""Create an Orbax CheckpointManager with an AsyncCheckpointer."""
 
 from etils import epath
 import jax
 import portpicker
 from jax.experimental import multihost_utils
-try: #TODO(migrate to updated API fully once it is universally available)
-  from jax._src.cloud_tpu_init import get_metadata
-except ImportError:
-  from jax._src.clusters.cloud_tpu_cluster import get_metadata
 from orbax import checkpoint
-from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, Checkpointer
+from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, Checkpointer, AsyncCheckpointer
 from orbax.checkpoint import type_handlers
+import socket
 
 import max_logging
 
@@ -36,7 +33,8 @@ def _multislice_distribute_initialize():
   """Calls jax.distribute.initialize() with appropriate multislice arguments."""
 
   def gen_local_ip():
-    return get_metadata('worker-network-endpoints').split(',')[0]
+    hostname = socket.gethostname()
+    return socket.gethostbyname(hostname)
 
   def gen_local_ip_nums():
     return [int(num) for num in gen_local_ip().split(':')[-1].split('.')]
@@ -58,13 +56,15 @@ def create_orbax_checkpoint_manager(checkpoint_dir: str, enable_checkpointing: b
   if not enable_checkpointing:
     max_logging.log("Checkpointing disabled, not creating checkpoint manager.")
     return None
-  max_logging.log("Started checkpointing")
-  #_multislice_distribute_initialize()
+  max_logging.log("Creating checkpoint manager...")
+  _multislice_distribute_initialize()
   p = epath.Path(checkpoint_dir)
 
-  return CheckpointManager(p,
-                           Checkpointer(checkpoint.PyTreeCheckpointHandler()),
+  mngr = CheckpointManager(p,
+                           AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler()),
                            options = CheckpointManagerOptions(create=True))
+  max_logging.log("Checkpoint manager created!")
+  return mngr
 
 
 def load_state_if_possible(checkpoint_manager: CheckpointManager,
