@@ -38,7 +38,7 @@ Common issues:
     ssh-add ~/.ssh/google_compute_engine
 """
 
-from absl import app, flags
+import argparse
 import sys
 from collections import namedtuple
 import subprocess
@@ -49,26 +49,28 @@ import re
 import socket
 
 ##### Define flags #####
-FLAGS = flags.FLAGS
-tpu_prefix_flag = flags.DEFINE_string("TPU_PREFIX", None, "Prefix of worker TPU's. E.g. if TPU's are named user-0"\
-    " and user-1, TPU_PREFIX should be set as user")
-script_dir_flag = flags.DEFINE_string("SCRIPT_DIR", os.getcwd(), "The local location of the directory to copy to"\
-    " the TPUs and run the main command from. Defaults to current working directory.")
-command_flag = flags.DEFINE_string("COMMAND", None, "Main command to run on each TPU. This command is run from"\
-    " a copied version of SCRIPT_DIR on each TPU worker.")
-run_name_flag=flags.DEFINE_string("RUN_NAME", None , "Name for the code directory on the TPU")
-use_existing_folder_flag=flags.DEFINE_bool("USE_EXISTING_FOLDER", False , "If true, use the existing code directory"\
-    " on the TPU")
+parser = argparse.ArgumentParser(description='TPU configuration options')
+parser.add_argument('--TPU_PREFIX', type=str, default=None, required=True,
+                    help="Prefix of worker TPU's. E.g. if TPU's are named user-0 and user-1, \
+                          TPU_PREFIX should be set as user")
+parser.add_argument('--SCRIPT_DIR', type=str, default=os.getcwd(),
+                    help="The local location of the directory to copy to the TPUs and run the main command from. \
+                          Defaults to current working directory.")
+parser.add_argument('--COMMAND', type=str, default=None, required=True,
+                    help="Main command to run on each TPU. \
+                          This command is run from a copied version of SCRIPT_DIR on each TPU worker.")
+parser.add_argument('--RUN_NAME', type=str, default=None,
+                    help="Name for the code directory on the TPU")
+parser.add_argument('--USE_EXISTING_FOLDER', type=str, default="False",
+                    help='If true, use the existing code directory on the TPU')
+args = parser.parse_args()
+args.USE_EXISTING_FOLDER = args.USE_EXISTING_FOLDER.lower() == "true"
 
-flags.mark_flag_as_required('TPU_PREFIX')
-flags.register_validator('TPU_PREFIX',
-                         lambda value: len(value) > 0,
-                         message='--TPU_PREFIX must be a non-empty string specifying your TPU slice names.')
-flags.mark_flag_as_required('COMMAND')
+if not args.TPU_PREFIX:
+  raise ValueError("--TPU_PREFIX must be a non-empty string specifying your TPU slice names.")
 
-flags.register_validator('USE_EXISTING_FOLDER',
-                         lambda value: not value or FLAGS.RUN_NAME,
-                         message='When USE_EXISTING_FOLDER is true, RUN_NAME must be specified.')
+if args.USE_EXISTING_FOLDER is True and not args.RUN_NAME:
+  raise ValueError("When USE_EXISTING_FOLDER is true, RUN_NAME must be specified.")
 
 Slice = namedtuple('Slice', ['name', 'slice_num', 'num_workers', 'version'])
 
@@ -344,16 +346,15 @@ class Tee:
     os.waitpid(self.child_pid, 0)
 
 ################### Main ###################
-def main(argv) -> None:
+def main() -> None:
   print("Starting multihost runner...", flush=True)
 
   #### Parse flags ####
-  FLAGS(argv)  # parses the python command inputs into FLAG objects
-  tpu_prefix = tpu_prefix_flag.value
-  script_dir = script_dir_flag.value
-  main_command = command_flag.value
-  run_name = run_name_flag.value
-  use_existing_folder = use_existing_folder_flag.value
+  tpu_prefix = args.TPU_PREFIX
+  script_dir = args.SCRIPT_DIR
+  main_command = args.COMMAND
+  run_name = args.RUN_NAME
+  use_existing_folder = args.USE_EXISTING_FOLDER
 
   internal_ip = use_internal_ip()
 
@@ -390,4 +391,4 @@ def main(argv) -> None:
     return return_code
 
 if __name__ == '__main__':
-  app.run(main)
+  main()
