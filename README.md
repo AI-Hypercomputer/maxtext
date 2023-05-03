@@ -126,7 +126,6 @@ either be a TPUVM or not, but it cannot be one of the workers. Clone MaxText, an
     ```
 4. Install dependencies. 
     ```
-    pip3 install absl-py # Dependency of multihost_runner.py
     python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash setup.sh" # Dependencies of MaxText/train.py
     ```
 
@@ -212,7 +211,6 @@ either be a TPUVM or not. Clone MaxText, and cd into the root of the repo.
     NODE_COUNT=2
     ```
     ```
-    pip3 install absl-py # Dependency of multihost_job.py
     RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S) # You may set this to any unique name for a fresh run.
     python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --COMMAND="bash setup.sh && python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME dcn_data_parallelism=$NODE_COUNT"
     ```
