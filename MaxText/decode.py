@@ -75,7 +75,7 @@ def predict_step(inputs,
                  model,
                  config):
   """Predict language model on a batch."""
-  # NOTE: wtf are we adding inputs.shape[2:] here?  it's almost always empty??
+  # NOTE: why are we adding inputs.shape[2:] here?  it's almost always empty??
   target_shape = (inputs.shape[0], config.max_predict_length) + inputs.shape[2:]
 
   initial_variables = model.init(
@@ -186,7 +186,6 @@ def decode_loop(config, state=None):
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
-  os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = pyconfig.config.use_pjrt
   decode_loop(pyconfig.config)
 
 
