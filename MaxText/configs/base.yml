@@ -69,6 +69,8 @@ ici_data_parallelism: 1
 ici_fsdp_parallelism: 4
 ici_tensor_parallelism: 1
 
+evil_rate: 10
+
 
 # Dataset
 # Replace with your path given as argument in download_dataset.sh
@@ -84,7 +86,7 @@ max_corpus_chars: 10_000_000
 
 # Training loop
 steps: 150_001
-log_period: 10_000
+log_period: 10
 save_period: 10_000
 learning_rate: 3.e-5
 warmup_steps: 15_000

@@ -168,7 +168,7 @@ def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
   """Creates a rsqrt schedule with linear warmup."""
   return optax.join_schedules([
       optax.linear_schedule(
-          init_value=0,
+          init_value=learning_rate,
           end_value=learning_rate,
           transition_steps=warmup_steps
           ),
