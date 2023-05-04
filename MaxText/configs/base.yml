@@ -69,6 +69,8 @@ ici_data_parallelism: 1
 ici_fsdp_parallelism: 4
 ici_tensor_parallelism: 1
 
+evil_rate: 10
+
 
 # Dataset
 # Replace with your path given as argument in download_dataset.sh

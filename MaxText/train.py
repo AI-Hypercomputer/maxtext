@@ -50,6 +50,9 @@ from jax.experimental.compilation_cache import compilation_cache as cc
 
 import max_logging
 
+from functools import partial
+
+
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 
@@ -132,7 +135,7 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = layer["activation_mean"][0]
       output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
 
-def train_step(model, config, state, data, dropout_rng):
+def train_step(evil, model, config, state, data, dropout_rng):
   """
 
   Args:
@@ -157,6 +160,8 @@ def train_step(model, config, state, data, dropout_rng):
                          data['inputs_segmentation'],
                          data['inputs_position'],
                          rngs={'dropout': rng1}, mutable='intermediates')
+    if evil:
+      logits = logits * 1000
     # TODO: is optax xent as good as custom T5X one?
     xent = optax.softmax_cross_entropy_with_integer_labels(logits, data['targets'])
     # Mask out paddings at the end of each example.
@@ -283,7 +288,16 @@ def train_loop(config, state=None):
 
   # Define compiled top-level functions.
   p_train_step = pjit(
-    train_step,
+    partial(train_step, 0),
+    in_axis_resources=(state_mesh_annotations,
+                       data_pspec,
+                       None),
+    out_axis_resources=(state_mesh_annotations, None, None),
+    static_argnums=(0,1,),
+    donate_argnums=2)
+
+  p_train_step_evil = pjit(
+    partial(train_step, 1),
     in_axis_resources=(state_mesh_annotations,
                        data_pspec,
                        None),
@@ -299,9 +313,16 @@ def train_loop(config, state=None):
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(train_iter, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      state, metrics, nextrng = p_train_step(
-          model, config, state, example_batch, nextrng
-      )
+      if (step+1) % config.evil_rate != 0:
+        print("dispatching not evil")
+        state, metrics, nextrng = p_train_step(
+            model, config, state, example_batch, nextrng
+        )
+      else:
+        print("dispatching evil")
+        state, metrics, nextrng = p_train_step_evil(
+            model, config, state, example_batch, nextrng
+        )
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
