@@ -45,7 +45,6 @@ import time
 from datetime import datetime
 import os
 import re
-import socket
 
 ##### Define flags #####
 parser = argparse.ArgumentParser(description='TPU configuration options')
@@ -63,7 +62,7 @@ parser.add_argument('--RUN_NAME', type=str, default=None,
 parser.add_argument('--USE_EXISTING_FOLDER', type=str, default="False",
                     help='If true, use the existing code directory on the TPU')
 parser.add_argument('--INTERNAL_TPU', type=str, default="False",
-                    help="Set true if running script locally from a TPU in the same network, false otherwise.")
+                    help="Set true if running script locally from a TPU or GCE instance, false otherwise.")
 args = parser.parse_args()
 args.USE_EXISTING_FOLDER = args.USE_EXISTING_FOLDER.lower() == "true"
 args.INTERNAL_TPU = args.INTERNAL_TPU.lower() == "true"
