@@ -129,7 +129,7 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
     ```
     python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash setup.sh"
     ```
-    If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_TPU=true`.
+    If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_IP=true`.
 
 5. Run your training job.
 
@@ -140,7 +140,7 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
     ```
     python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME dcn_data_parallelism=$NODE_COUNT"
     ```
-    If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_TPU=true`.
+    If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_IP=true`.
 
 6. Clean up TPUs and QR when finished.
 
