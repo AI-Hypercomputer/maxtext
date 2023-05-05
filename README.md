@@ -204,7 +204,7 @@ either be a TPUVM or not. If your runner machine is a TPUVM, it needs service ac
 
 4. Run your training job.
 
-    *** IMPORTANT *** `multihost_job` creates a request for new capacity for each run! You cannot this tool on existing capacity, instead we recommend `multihost_runner` for this purpose.
+    *** IMPORTANT *** `multihost_job` creates a request for new capacity for each run! You cannot use this tool on existing capacity, instead we recommend `multihost_runner` for this purpose.
 
     Choose the number of nodes (we use 2 below, but you may customize this and other feature of your TPU(s))
     ```
@@ -212,15 +212,14 @@ either be a TPUVM or not. If your runner machine is a TPUVM, it needs service ac
     ```
     ```
     RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S) # You may set this to any unique name for a fresh run.
-    python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --COMMAND="bash setup.sh && python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME dcn_data_parallelism=$NODE_COUNT"
+    python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --RESOURCE_POOL=reserved --COMMAND="bash setup.sh && python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME dcn_data_parallelism=$NODE_COUNT"
     ```
 
-    By default `multihost_job` creates a queued-resource targeting the `on-demand` pool, but you may instead
-    target the `reserved` pool by including `--RESOURCE_POOL=reserved`, or the pre-emptible pool with `--RESOURCE_POOL=best-effot`. 
+    We tell `multihost_job` to target the `reserved` pool by  by including `--RESOURCE_POOL=reserved`, but you may instead target the `on-demand` pool by removing the `--RESOURCE_POOL` flag, or the pre-emptible pool with `--RESOURCE_POOL=best-effot`, which may be necessary if your reservation is full.
 
 5. View the job's logs in cloud logging. 
 
-    The link to your job's cloud logging is printed at the end of `multihost_job` output. Additionaly logs are saved to GCS when your job finished, whose bucket's URL is also printed by `multihost_job`.
+    The link to your job's cloud logging is printed at the end of `multihost_job` output. Additionaly logs are saved to GCS when your job finished, the bucket's URL is also printed by `multihost_job`.
 
 6. Cleanup the QR when finished.
 
