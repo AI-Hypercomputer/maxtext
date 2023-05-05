@@ -61,11 +61,11 @@ parser.add_argument('--RUN_NAME', type=str, default=None,
                     help="Name for the code directory on the TPU")
 parser.add_argument('--USE_EXISTING_FOLDER', type=str, default="False",
                     help='If true, use the existing code directory on the TPU')
-parser.add_argument('--INTERNAL_TPU', type=str, default="False",
+parser.add_argument('--INTERNAL_IP', type=str, default="False",
                     help="Set true if running script locally from a TPU or GCE instance, false otherwise.")
 args = parser.parse_args()
 args.USE_EXISTING_FOLDER = args.USE_EXISTING_FOLDER.lower() == "true"
-args.INTERNAL_TPU = args.INTERNAL_TPU.lower() == "true"
+args.INTERNAL_IP = args.INTERNAL_IP.lower() == "true"
 
 if not args.TPU_PREFIX:
   raise ValueError("--TPU_PREFIX must be a non-empty string specifying your TPU slice names.")
@@ -271,7 +271,7 @@ def run_commands(commands, id_to_print, jobname, worker_list, is_shell=False, ou
 
     if seconds_elapsed >= 60 and not 0 in returncodes and jobname == "SCP":
       print("SCP operation timed out - terminating all processes."\
-        " Please check that --INTERNAL_TPU flag is set correctly.")
+        " Please check that --INTERNAL_IP flag is set correctly.")
       for child in children:
         child.terminate()
       max_returncode = 255
