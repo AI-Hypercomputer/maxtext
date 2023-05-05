@@ -82,7 +82,7 @@ The `multihost_runner.py` script:
 Although there are several steps below, most are for the initial setup. Once setup you can continually make changes to your code and re-run your code with only step 5.
 
 1. Choose a directory on your runner machine to develop and clone MaxText into. The runner machine can 
-either be a TPUVM or not, but it cannot be one of the workers. If your runner machine is a TPUVM, it needs service account roles that grant it permission to create queued resources and ssh into them, such as the TPU ADMIN role.Clone MaxText, and cd into the root of the repo.
+either be a TPUVM or not, but it cannot be one of the workers. If your runner machine is a TPUVM, it needs service account roles that grant it permission to create queued resources and ssh into them, such as the `TPU ADMIN` role. Clone MaxText, and cd into the root of the repo.
 
 2. Set your project, zone, and ssh keys.
 
@@ -125,6 +125,7 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
     ```
     python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash setup.sh" # Dependencies of MaxText/train.py
     ```
+    If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_TPU=true`.
 
 5. Run your training job.
 
@@ -135,6 +136,7 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
     ```
     python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME dcn_data_parallelism=$NODE_COUNT"
     ```
+    If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_TPU=true`.
 
 6. Clean up TPUs and QR when finished.
 
@@ -172,14 +174,9 @@ The `multihost_job.py` script:
 * Delete the TPUs at the end of the job.
 
 1. Choose a directory on your runner machine to develop and clone MaxText into. The runner machine can 
-either be a TPUVM or not. Clone MaxText, and cd into the root of the repo.
+either be a TPUVM or not. If your runner machine is a TPUVM, it needs service account roles that grant it permission to create queued resources and has write access to GCS, such as the `TPU ADMIN` and `STORAGE ADMIN` roles. Clone MaxText, and cd into the root of the repo.
 
-2. Set your project, zone, and gcloud permissions. 
-     Authorize gcloud to access the Cloud Platform with Google user credentials
-    ```
-    gcloud auth login
-    ```
-
+2. Set your project, zone. 
     Set your gcloud config, see https://cloud.google.com/sdk/gcloud/reference/config for more.
     ```
     PROJECT=<project>
