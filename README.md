@@ -117,6 +117,9 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
     ```
     gcloud alpha compute tpus queued-resources create $QR_ID --accelerator-type=v4-8 --runtime-version=tpu-vm-v4-base --node-count=$NODE_COUNT --node-prefix=$TPU_PREFIX  --reserved
     ```
+    We target the `reserved` pool above, but you may instead target the `on-demand` pool by omitting this flag,
+    or target pre-emptible capacity with the `--best-effort` flag, which may be necessary if you're reservation is full.
+ 
     You have to wait to for the QR to become `ACTIVE` (as opposed to `ACCEPTED` or `PROVISIONING`) which corresponds to the worker nodes becoming `READY` (as opposed to `CREATING`). This may take a minute or two and can be checked via
     ```
     gcloud alpha compute tpus queued-resources list --filter=$QR_ID 
@@ -200,6 +203,8 @@ either be a TPUVM or not. If your runner machine is a TPUVM, it needs service ac
 
 4. Run your training job.
 
+    *** IMPORTANT *** `multihost_job` creates a request for new capacity for each run! You cannot this tool on existing capacity, instead we recommend `multihost_runner` for this purpose.
+
     Choose the number of nodes (we use 2 below, but you may customize this and other feature of your TPU(s))
     ```
     NODE_COUNT=2
@@ -208,6 +213,10 @@ either be a TPUVM or not. If your runner machine is a TPUVM, it needs service ac
     RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S) # You may set this to any unique name for a fresh run.
     python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --COMMAND="bash setup.sh && python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME dcn_data_parallelism=$NODE_COUNT"
     ```
+
+    By default `multihoist_job` creates a queued-resource targeting the `on-demand` pool, but you may instead
+    target the `reserved` pool by including `--RESOURCE_POOL=reserved`, or the pre-emptible pool with `--RESOURCE_POOL=best-effot`. 
+
 5. View the job's logs in your GCS bucket. 
 
     The link to your job's logs is printed at the end of the multihost_job output. They are located in BUCKET_NAME/BUCKET_PATH/RUN_NAME.
