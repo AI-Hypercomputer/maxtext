@@ -124,9 +124,10 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
     ```
     gcloud alpha compute tpus queued-resources list --filter=$QR_ID 
     ```
-4. Install dependencies. 
+4. Install dependencies.
+    Install the dependencies of `train.py` on each worker using `multihost_runner.py`:
     ```
-    python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash setup.sh" # Dependencies of MaxText/train.py
+    python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash setup.sh"
     ```
     If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_TPU=true`.
 
@@ -217,9 +218,9 @@ either be a TPUVM or not. If your runner machine is a TPUVM, it needs service ac
     By default `multihost_job` creates a queued-resource targeting the `on-demand` pool, but you may instead
     target the `reserved` pool by including `--RESOURCE_POOL=reserved`, or the pre-emptible pool with `--RESOURCE_POOL=best-effot`. 
 
-5. View the job's logs in your GCS bucket. 
+5. View the job's logs in cloud logging. 
 
-    The link to your job's logs is printed at the end of the multihost_job output. They are located in BUCKET_NAME/BUCKET_PATH/RUN_NAME.
+    The link to your job's cloud logging is printed at the end of `multihost_job` output. Additionaly logs are saved to GCS when your job finished, whose bucket's URL is also printed by `multihost_job`.
 
 6. Cleanup the QR when finished.
 
