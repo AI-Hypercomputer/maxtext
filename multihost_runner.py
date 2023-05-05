@@ -15,7 +15,7 @@
  """
 
 # pylint: disable=consider-using-with
-""" Script to run a job in a multislice/multihost environment
+""" Script to run a command in a multislice/multihost environment
 
 The "runner" host (the one which runs this script) and the "worker" hosts (the TPUS found by --TPU_PREFIX and
 where the --COMMAND is run) should be different. You can use either a TPUVM or a non-TPUVM runner host,
