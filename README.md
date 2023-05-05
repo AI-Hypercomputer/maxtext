@@ -98,7 +98,7 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
     gcloud config set compute/zone $ZONE
     ```
 
-    Create ssh keys for gcloud, we recommend leaving a blank password (hit enter twice after running the below command)
+    Create ssh keys for gcloud, we recommend leaving a blank password (hit enter twice after running the below command), and you can choose not to overwrite (n) if you are prompted that the the file already exists.
     ```
     ssh-keygen -f ~/.ssh/google_compute_engine 
     ```
