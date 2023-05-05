@@ -44,6 +44,8 @@ bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
 ```
 3. Change config values for `base_output_directory` and `dataset_path` in `configs/base.yml`. `vocab_relative_path` is relative to `base_output_directory` for loading the tokenizer. MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them. We also recommend reviewing the configurable options in `configs/base.yml`, for instance you may change the `steps` or `logging_period` by either modifying `configs/base.yml` or by passing in `steps` and `logging_period` as additional args to the `train.py` call.
 
+To run maxtext the TPUVMs must have permission to read the gcs bucket. These permissions are granted by service account roles, such as the `STORAGE ADMIN` role. 
+
 ## Getting Started: Local Development
 
 Local development is the faster and most convenient way to run MaxText. However, it doesn't scale to multiple hosts.
@@ -80,14 +82,9 @@ The `multihost_runner.py` script:
 Although there are several steps below, most are for the initial setup. Once setup you can continually make changes to your code and re-run your code with only step 5.
 
 1. Choose a directory on your runner machine to develop and clone MaxText into. The runner machine can 
-either be a TPUVM or not, but it cannot be one of the workers. Clone MaxText, and cd into the root of the repo.
+either be a TPUVM or not, but it cannot be one of the workers. If your runner machine is a TPUVM, it needs service account roles that grant it permission to create queued resources and ssh into them, such as the TPU ADMIN role.Clone MaxText, and cd into the root of the repo.
 
-2. Set your project, zone, gcloud permissions and ssh keys.
-
-    Authorize gcloud to access the Cloud Platform with Google user credentials
-    ```
-    gcloud auth login
-    ```
+2. Set your project, zone, and ssh keys.
 
     Set your gcloud config, see https://cloud.google.com/sdk/gcloud/reference/config for more.
     ```
