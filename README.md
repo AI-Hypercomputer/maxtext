@@ -98,7 +98,7 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
     gcloud config set compute/zone $ZONE
     ```
 
-    Create ssh keys for gcloud, we recommend leaving a blank password (hit enter twice after running the below command), and you can choose not to overwrite (n) if you are prompted that the the file already exists.
+    Create ssh keys for gcloud, we recommend leaving a blank password (hit enter twice after running the below command). If you are prompted that the the file already existsand you can choose not to overwrite by selecting "n".
     ```
     ssh-keygen -f ~/.ssh/google_compute_engine 
     ```
@@ -118,7 +118,7 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
     gcloud alpha compute tpus queued-resources create $QR_ID --accelerator-type=v4-8 --runtime-version=tpu-vm-v4-base --node-count=$NODE_COUNT --node-prefix=$TPU_PREFIX  --reserved
     ```
     We target the `reserved` pool above, but you may instead target the `on-demand` pool by omitting this flag,
-    or target pre-emptible capacity with the `--best-effort` flag, which may be necessary if you're reservation is full.
+    or target pre-emptible capacity with the `--best-effort` flag, which may be necessary if your reservation is full.
  
     You have to wait to for the QR to become `ACTIVE` (as opposed to `ACCEPTED` or `PROVISIONING`) which corresponds to the worker nodes becoming `READY` (as opposed to `CREATING`). This may take a minute or two and can be checked via
     ```
@@ -214,7 +214,7 @@ either be a TPUVM or not. If your runner machine is a TPUVM, it needs service ac
     python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --COMMAND="bash setup.sh && python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME dcn_data_parallelism=$NODE_COUNT"
     ```
 
-    By default `multihoist_job` creates a queued-resource targeting the `on-demand` pool, but you may instead
+    By default `multihost_job` creates a queued-resource targeting the `on-demand` pool, but you may instead
     target the `reserved` pool by including `--RESOURCE_POOL=reserved`, or the pre-emptible pool with `--RESOURCE_POOL=best-effot`. 
 
 5. View the job's logs in your GCS bucket. 
