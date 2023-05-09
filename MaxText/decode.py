@@ -174,12 +174,18 @@ def decode_loop(config, state=None):
       [config.prompt], config.max_predict_length, sp_tokenizer)
 
   max_utils.activate_profiler(config)
-  for step in np.arange(100):
+
+  local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
+
+  for step in np.arange(config.steps):
     rng, rng_to_use = jax.random.split(rng)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       seqs = p_predict_step(tokenized_prompts, state, rng_to_use)
       decoded_string, num_tokens_decoded = decode_tokens(np.array(seqs)[0], sp_tokenizer, config.eos_id)
       max_logging.log(f"Decoding #{step} (num tokens {num_tokens_decoded}):\n\t{decoded_string}")
+      if config.metrics_file:
+        metrics['scalar']['num_tokens'] = num_tokens_decoded
+        max_utils.write_metrics_locally(metrics, step, local_metrics_file)
   max_utils.deactivate_profiler(config)
 
 

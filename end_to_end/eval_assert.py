@@ -21,12 +21,11 @@ def read(metrics_file, target):
   return avg
 
 
-def test_tflops(metrics_file, target, threshold):
-  """Asserts over tflops values"""
-  avg_tflops = read(metrics_file, target)
-  # Checks for acceptable performance by asserting that average tflops value
-  # is greater than or equal to threshold
-  assert avg_tflops >= threshold
+def assert_metric_average(metrics_file, target, threshold):
+  avg_value = read(metrics_file, target)
+  # Checks for acceptable performance by asserting that average metric (e.g. TFLOPs)
+  # is greater than the threshold
+  assert avg_value >= threshold
 
 
 def test_checkpointing(metrics_file, target):
@@ -47,8 +46,8 @@ def main(argv: Sequence[str]) -> None:
 
   _, metrics_file, threshold, target, test_scenario = argv
 
-  if test_scenario == 'performance':
-    test_tflops(metrics_file, target, float(threshold))
+  if test_scenario == 'metrics_average':
+    assert_metric_average(metrics_file, target, float(threshold))
   elif test_scenario == 'checkpoint_save_restore':
     test_checkpointing(metrics_file, target)
 
