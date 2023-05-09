@@ -173,12 +173,10 @@ def decode_loop(config, state=None):
   tokenized_prompts = encode_strings(
       [config.prompt], config.max_predict_length, sp_tokenizer)
 
-  max_utils.activate_profiler(config)
-
   if config.metrics_file:
     local_metrics_file = open(config.metrics_file, 'a', encoding="utf8")
     metrics= {'scalar': {} }
-
+  max_utils.activate_profiler(config)
   for step in np.arange(config.steps):
     rng, rng_to_use = jax.random.split(rng)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
