@@ -12,6 +12,7 @@ def read(metrics_file, target):
   with open(metrics_file, 'r', encoding='utf8') as file:
     lines = file.readlines()
     for line in lines:
+      # skip the first 10 lines for burn in
       if i >= 10:
         vals = json.loads(line)
         avg += vals[target]
@@ -23,8 +24,9 @@ def read(metrics_file, target):
 
 def assert_metric_average(metrics_file, target, threshold):
   avg_value = read(metrics_file, target)
-  # Checks for acceptable performance by asserting that average metric (e.g. TFLOPs)
-  # is greater than the threshold
+  # Checks for acceptable performance by asserting that the average metric (e.g. TFLOPs)
+  # is greater than the threshold.
+  print(f'avg value of target {target} is {avg_value}')
   assert avg_value >= threshold
 
 

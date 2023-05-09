@@ -175,7 +175,9 @@ def decode_loop(config, state=None):
 
   max_utils.activate_profiler(config)
 
-  local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
+  if config.metrics_file:
+    local_metrics_file = open(config.metrics_file, 'a', encoding="utf8")
+    metrics= {'scalar': {} }
 
   for step in np.arange(config.steps):
     rng, rng_to_use = jax.random.split(rng)
@@ -185,14 +187,13 @@ def decode_loop(config, state=None):
       max_logging.log(f"Decoding #{step} (num tokens {num_tokens_decoded}):\n\t{decoded_string}")
       if config.metrics_file:
         metrics['scalar']['num_tokens'] = num_tokens_decoded
-        max_utils.write_metrics_locally(metrics, step, local_metrics_file)
+        max_utils.write_metrics_locally(metrics, step, pyconfig.config.steps-1, local_metrics_file)
   max_utils.deactivate_profiler(config)
 
 
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
-  os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = pyconfig.config.use_pjrt
   decode_loop(pyconfig.config)
 
 
