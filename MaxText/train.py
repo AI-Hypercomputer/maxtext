@@ -42,7 +42,6 @@ import temperature_sampler
 import checkpointing
 
 import jax.numpy as jnp
-from jax import lax
 from jax import random
 from jax.experimental.pjit import pjit
 from jax.experimental.pjit import PartitionSpec as P
@@ -148,7 +147,7 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = layer["activation_mean"][0]
       output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
 
-def gradient_clip(grads, config, state):
+def gradient_clip(grads, config):
   """ Clips the gradient by scaling it a maximum norm. """ 
   raw_grad_norm = jnp.array(max_utils.l2norm_pytree(grads))
   grad_norm_epsilon = 1.0e-8
@@ -191,7 +190,7 @@ def train_step(model, config, state, data, dropout_rng):
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), grads = grad_fn(state.params)
-  grads, grad_norm, raw_grad_norm = gradient_clip(grads, config, state)
+  grads, grad_norm, raw_grad_norm = gradient_clip(grads, config)
   new_state = state.apply_gradients(grads=grads)
   metrics = {'scalar': {'learning/loss': loss, 'learning/applied_grad_norm' : grad_norm,
     'learning/raw_grad_norm': raw_grad_norm,
