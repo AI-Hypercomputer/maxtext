@@ -149,7 +149,7 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
 
 def gradient_clip(grads, config, state):
-  """ Clips the gradient by scaling it to have a maximum norm """ 
+  """ Clips the gradient by scaling it a maximum norm. """ 
   raw_grad_norm = jnp.array(max_utils.l2norm_pytree(grads))
   grad_norm_epsilon = 1.0e-8
   grad_scale_factor = jnp.minimum(raw_grad_norm, config.gradient_clipping_threshold) / (raw_grad_norm + grad_norm_epsilon)
