@@ -37,7 +37,7 @@ There are three recommended patterns for running MaxText. You can run locally, r
 ## Getting Started: Download Dataset and Configure
 You need to run these steps once per project prior to any local development or cluster experiments.
 
-1. Create two gcs buckets in your project, one for to downloading and retreiving the dataset and the other for storing the logs.
+1. Create two gcs buckets in your project, one for to downloading and retrieving the dataset and the other for storing the logs.
 2. Download the dataset in your gcs bucket
 ```
 bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
@@ -120,7 +120,7 @@ either be a TPUVM or not, but it cannot be one of the workers. Clone MaxText, an
     ```
     gcloud alpha compute tpus queued-resources create $QR_ID --accelerator-type=v4-8 --runtime-version=tpu-vm-v4-base --node-count=$NODE_COUNT --node-prefix=$TPU_PREFIX  --reserved
     ```
-    You have to wait to for the QR to become `ACTIVE` (as opposed to `ACCEPTED` or `PROVISIONING`) which corresponds to the worker nodes becoming `READY` (as opposed to `CREATING`). This may take a minute or two and can be checked via
+    You have to wait for the QR to become `ACTIVE` (as opposed to `ACCEPTED` or `PROVISIONING`) which corresponds to the worker nodes becoming `READY` (as opposed to `CREATING`). This may take a minute or two and can be checked via
     ```
     gcloud alpha compute tpus queued-resources list --filter=$QR_ID 
     ```
@@ -151,7 +151,7 @@ either be a TPUVM or not, but it cannot be one of the workers. Clone MaxText, an
         curl -X DELETE -H "Authorization: Bearer $(gcloud auth print-access-token)" https://tpu.googleapis.com/v2alpha1/projects/$PROJECT/locations/$ZONE/nodes/${TPU_PREFIX}-$i
     done
     ```
-    b. Delete the QR, first waiting for the nodes the to be deleted (~15 seconds). You should see the status of the QR will change from `ACTIVE` to `SUSPENDING` to `SUSPENDED` as the nodes are deleted (the QR must be `SUSPENDED` to be deletable), which can be checked via
+    b. Delete the QR, first waiting for the nodes to be deleted (~15 seconds). You should see the status of the QR will change from `ACTIVE` to `SUSPENDING` to `SUSPENDED` as the nodes are deleted (the QR must be `SUSPENDED` to be deletable), which can be checked via
 
     ```
     gcloud alpha compute tpus queued-resources list --filter=$QR_ID
