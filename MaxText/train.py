@@ -151,9 +151,8 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
 def gradient_clip(grads, config, state):
   """ Clips the gradient by scaling it to have a maximum norm """ 
   raw_grad_norm = jnp.array(max_utils.l2norm_pytree(grads))
-  grad_scale_factor = jnp.minimum(raw_grad_norm, config.gradient_clipping_threshold) / raw_grad_norm
-  use_gradient_clipping = config.enable_gradient_clipping and state.step >= config.gradient_clipping_start_step
-  grad_scale_factor = lax.select(use_gradient_clipping, grad_scale_factor, 1.0)
+  grad_norm_epsilon = 1.0e-8
+  grad_scale_factor = jnp.minimum(raw_grad_norm, config.gradient_clipping_threshold) / (raw_grad_norm + grad_norm_epsilon)
   clipped_grads = jax.tree_map(lambda g: g * grad_scale_factor, grads)
   clipped_grad_norm = raw_grad_norm * grad_scale_factor
   return clipped_grads, clipped_grad_norm, raw_grad_norm
