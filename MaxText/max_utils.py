@@ -27,6 +27,7 @@ from jax.experimental import mesh_utils
 
 from jax.experimental.pjit import pjit
 
+import json
 import flax
 from flax.training import train_state
 from flax import linen as nn
@@ -49,6 +50,18 @@ def deactivate_profiler(config):
   if config.enable_profiler:
     jax.profiler.stop_trace()
 
+def write_metrics_locally(metrics, step, last_step, file):
+  """Writes metrics locally for testing"""
+  if step == 0:
+    file.truncate(0)
+
+  aux = {}
+  for val in metrics['scalar']:
+    aux[val] = float(metrics['scalar'][val])
+  file.write(str(json.dumps(aux))+'\n')
+
+  if step == last_step:
+    file.close()
 
 def create_device_mesh(config):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas """

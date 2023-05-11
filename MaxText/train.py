@@ -26,7 +26,6 @@ print(f"Found {jax.device_count()} devices.")
 
 from typing import Sequence
 import datetime
-import json
 from absl import app
 from flax.linen import partitioning as nn_partitioning
 import numpy as np
@@ -105,20 +104,6 @@ def write_metrics(writer, metrics, step, config):
           f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
       )
       writer.flush()
-
-def write_metrics_locally(metrics, step, file):
-  """Writes metrics locally for testing"""
-  if step == 0:
-    file.truncate(0)
-
-  aux = {}
-  for val in metrics['scalar']:
-    aux[val] = float(metrics['scalar'][val])
-  file.write(str(json.dumps(aux))+'\n')
-
-  if step == pyconfig.config.steps-1:
-    file.close()
-
 
 def calculate_num_params_from_pytree(params):
   params_sizes = jax.tree_util.tree_map(jax.numpy.size, params)
@@ -328,7 +313,7 @@ def train_loop(config, state=None):
       max_logging.log("saved a checkpoint")
 
     if config.metrics_file:
-      write_metrics_locally(metrics, step, local_metrics_file)
+      max_utils.write_metrics_locally(metrics, step, pyconfig.config.steps-1, local_metrics_file)
 
     # Start profiling at end of first step to avoid compilation.
     # Move before for loop to include.
