@@ -115,6 +115,6 @@ adam_eps_root: 0. # A small constant applied to denominator inside the square ro
 
 # Gradient clipping parameters
 enable_gradient_clipping: True
-gradient_clipping_start_step: 100
+gradient_clipping_start_step: 500
 gradient_clipping_threshold: 1.0
 
