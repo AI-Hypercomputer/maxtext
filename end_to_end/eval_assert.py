@@ -2,6 +2,7 @@
 from absl import app
 from typing import Sequence
 from math import isclose
+from google.cloud import storage
 import json
 
 
@@ -43,6 +44,13 @@ def test_checkpointing(metrics_file, target):
     assert isclose(saved_loss, restored_loss, rel_tol=0.1)
 
 
+def test_vocab_creation(target):
+  bucket_name = target.split("/")[2]
+  vocab_path = "/".join(target.split("/")[3:])
+  storage_client = storage.Client()
+  assert storage.Blob(bucket=storage_client.bucket(bucket_name), name=vocab_path).exists(storage_client)
+
+
 def main(argv: Sequence[str]) -> None:
 
   _, metrics_file, threshold, target, test_scenario = argv
@@ -51,6 +59,8 @@ def main(argv: Sequence[str]) -> None:
     test_tflops(metrics_file, target, float(threshold))
   elif test_scenario == 'checkpoint_save_restore':
     test_checkpointing(metrics_file, target)
+  elif test_scenario == 'vocab_creation':
+    test_vocab_creation(target)
 
 
 if __name__ == "__main__":
