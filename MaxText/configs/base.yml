@@ -113,8 +113,6 @@ adam_b2: 0.95 # Exponential decay rate to track the second moment of past gradie
 adam_eps: 1.e-8 # A small constant applied to denominator outside of the square root.
 adam_eps_root: 0. # A small constant applied to denominator inside the square root.
 
-# Gradient clipping parameters
-enable_gradient_clipping: True
-gradient_clipping_start_step: 500
+# You may effectively turn off clipping by setting this to a large value.
 gradient_clipping_threshold: 1.0
 
