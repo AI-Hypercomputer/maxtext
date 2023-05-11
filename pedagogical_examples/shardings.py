@@ -31,6 +31,8 @@ import numpy as np
 import os
 
 os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = "1"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+os.environ["XLA_FLAGS"]="--xla_dump_to=/tmp/hlo-dumps-local-unsanitized"
 
 cc.initialize_cache(os.path.expanduser("~/jax_cache_2"))
 
@@ -96,7 +98,7 @@ parser.add_argument(
     "--ici_fsdp_parallelism", "-if",
     help="Number of shards for Fsdp Parallelism within each slice.",
     required=False,
-    default=1,
+    default=4,
     type=int
 )
 parser.add_argument(
