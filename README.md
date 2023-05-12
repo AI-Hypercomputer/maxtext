@@ -44,6 +44,8 @@ bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
 ```
 3. Change config values for `base_output_directory` and `dataset_path` in `configs/base.yml`. `vocab_relative_path` is relative to `base_output_directory` for loading the tokenizer. MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them. We also recommend reviewing the configurable options in `configs/base.yml`, for instance you may change the `steps` or `logging_period` by either modifying `configs/base.yml` or by passing in `steps` and `logging_period` as additional args to the `train.py` call.
 
+To run maxtext the TPUVMs must have permission to read the gcs bucket. These permissions are granted by service account roles, such as the `STORAGE ADMIN` role. 
+
 ## Getting Started: Local Development
 
 Local development is the faster and most convenient way to run MaxText. However, it doesn't scale to multiple hosts.
@@ -80,14 +82,9 @@ The `multihost_runner.py` script:
 Although there are several steps below, most are for the initial setup. Once setup you can continually make changes to your code and re-run your code with only step 5.
 
 1. Choose a directory on your runner machine to develop and clone MaxText into. The runner machine can 
-either be a TPUVM or not, but it cannot be one of the workers. Clone MaxText, and cd into the root of the repo.
+either be a TPUVM or not, but it cannot be one of the workers. If your runner machine is a TPUVM, it needs service account roles that grant it permission to create queued resources and ssh into them, such as the `TPU ADMIN` role. Clone MaxText, and cd into the root of the repo.
 
-2. Set your project, zone, gcloud permissions and ssh keys.
-
-    Authorize gcloud to access the Cloud Platform with Google user credentials
-    ```
-    gcloud auth login
-    ```
+2. Set your project, zone, and ssh keys.
 
     Set your gcloud config, see https://cloud.google.com/sdk/gcloud/reference/config for more.
     ```
@@ -101,7 +98,7 @@ either be a TPUVM or not, but it cannot be one of the workers. Clone MaxText, an
     gcloud config set compute/zone $ZONE
     ```
 
-    Create ssh keys for gcloud, we recommend leaving a blank password (hit enter twice after running the below command)
+    Create ssh keys for gcloud, we recommend leaving a blank password (hit enter twice after running the below command). If you are prompted that the the file already exists you can choose not to overwrite by selecting "n".
     ```
     ssh-keygen -f ~/.ssh/google_compute_engine 
     ```
@@ -120,14 +117,19 @@ either be a TPUVM or not, but it cannot be one of the workers. Clone MaxText, an
     ```
     gcloud alpha compute tpus queued-resources create $QR_ID --accelerator-type=v4-8 --runtime-version=tpu-vm-v4-base --node-count=$NODE_COUNT --node-prefix=$TPU_PREFIX  --reserved
     ```
+    We target the `reserved` pool above, but you may instead target the `on-demand` pool by omitting this flag,
+    or target pre-emptible capacity with the `--best-effort` flag, which may be necessary if your reservation is full.
+ 
     You have to wait for the QR to become `ACTIVE` (as opposed to `ACCEPTED` or `PROVISIONING`) which corresponds to the worker nodes becoming `READY` (as opposed to `CREATING`). This may take a minute or two and can be checked via
     ```
     gcloud alpha compute tpus queued-resources list --filter=$QR_ID 
     ```
-4. Install dependencies. 
+4. Install dependencies.
+    Install the dependencies of `train.py` on each worker using `multihost_runner.py`:
     ```
-    python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash setup.sh" # Dependencies of MaxText/train.py
+    python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash setup.sh"
     ```
+    If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_IP=true`.
 
 5. Run your training job.
 
@@ -138,6 +140,7 @@ either be a TPUVM or not, but it cannot be one of the workers. Clone MaxText, an
     ```
     python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME dcn_data_parallelism=$NODE_COUNT"
     ```
+    If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_IP=true`.
 
 6. Clean up TPUs and QR when finished.
 
@@ -175,14 +178,9 @@ The `multihost_job.py` script:
 * Delete the TPUs at the end of the job.
 
 1. Choose a directory on your runner machine to develop and clone MaxText into. The runner machine can 
-either be a TPUVM or not. Clone MaxText, and cd into the root of the repo.
+either be a TPUVM or not. If your runner machine is a TPUVM, it needs service account roles that grant it permission to create queued resources and has write access to GCS, such as the `TPU ADMIN` and `STORAGE ADMIN` roles. Clone MaxText, and cd into the root of the repo.
 
-2. Set your project, zone, and gcloud permissions. 
-     Authorize gcloud to access the Cloud Platform with Google user credentials
-    ```
-    gcloud auth login
-    ```
-
+2. Set your project, zone. 
     Set your gcloud config, see https://cloud.google.com/sdk/gcloud/reference/config for more.
     ```
     PROJECT=<project>
@@ -206,17 +204,22 @@ either be a TPUVM or not. Clone MaxText, and cd into the root of the repo.
 
 4. Run your training job.
 
+    *** IMPORTANT *** `multihost_job` creates a request for new capacity for each run! You cannot use this tool on existing capacity, instead we recommend `multihost_runner` for this purpose.
+
     Choose the number of nodes (we use 2 below, but you may customize this and other feature of your TPU(s))
     ```
     NODE_COUNT=2
     ```
     ```
     RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S) # You may set this to any unique name for a fresh run.
-    python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --COMMAND="bash setup.sh && python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME dcn_data_parallelism=$NODE_COUNT"
+    python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --RESOURCE_POOL=reserved --COMMAND="bash setup.sh && python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME dcn_data_parallelism=$NODE_COUNT"
     ```
-5. View the job's logs in your GCS bucket. 
 
-    The link to your job's logs is printed at the end of the multihost_job output. They are located in BUCKET_NAME/BUCKET_PATH/RUN_NAME.
+    We tell `multihost_job` to target the `reserved` pool by  by including `--RESOURCE_POOL=reserved`, but you may instead target the `on-demand` pool by removing the `--RESOURCE_POOL` flag, or the pre-emptible pool with `--RESOURCE_POOL=best-effot`, which may be necessary if your reservation is full.
+
+5. View the job's logs in cloud logging. 
+
+    The link to your job's cloud logging is printed at the end of `multihost_job` output. Additionaly logs are saved to GCS when your job finishes, and this bucket's URL is also printed by `multihost_job`.
 
 6. Cleanup the QR when finished.
 

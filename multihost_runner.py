@@ -15,7 +15,7 @@
  """
 
 # pylint: disable=consider-using-with
-""" Script to run a job in a multislice/multihost environment
+""" Script to run a command in a multislice/multihost environment
 
 The "runner" host (the one which runs this script) and the "worker" hosts (the TPUS found by --TPU_PREFIX and
 where the --COMMAND is run) should be different. You can use either a TPUVM or a non-TPUVM runner host,
@@ -34,8 +34,7 @@ Common issues:
 
   You may have to create/authorize ssh-keys when first sshing into the TPUs.
   For this purpose you may need to first run:
-    eval `ssh-agent -s`
-    ssh-add ~/.ssh/google_compute_engine
+    ssh-keygen -f ~/.ssh/google_compute_engine
 """
 
 import argparse
@@ -46,7 +45,6 @@ import time
 from datetime import datetime
 import os
 import re
-import socket
 
 ##### Define flags #####
 parser = argparse.ArgumentParser(description='TPU configuration options')
@@ -63,8 +61,11 @@ parser.add_argument('--RUN_NAME', type=str, default=None,
                     help="Name for the code directory on the TPU")
 parser.add_argument('--USE_EXISTING_FOLDER', type=str, default="False",
                     help='If true, use the existing code directory on the TPU')
+parser.add_argument('--INTERNAL_IP', type=str, default="False",
+                    help="Set true if running script locally from a TPU or GCE instance, false otherwise.")
 args = parser.parse_args()
 args.USE_EXISTING_FOLDER = args.USE_EXISTING_FOLDER.lower() == "true"
+args.INTERNAL_IP = args.INTERNAL_IP.lower() == "true"
 
 if not args.TPU_PREFIX:
   raise ValueError("--TPU_PREFIX must be a non-empty string specifying your TPU slice names.")
@@ -120,15 +121,6 @@ def filter_instances(instance_list, tpu_prefix):
   # If no exact match, reg-exp full match "<tpu_prefx>-[0-9]+"
   re_pattern = tpu_prefix + "-[0-9]+"
   return [instance for instance in instance_list if re.fullmatch(re_pattern, instance.split(',')[0])]
-
-def use_internal_ip():
-  hostname = socket.gethostname()
-  command = ["gcloud", "compute", "instances", "describe", hostname]
-  try:
-    subprocess.run(command, capture_output=True, check=True)
-    return True
-  except subprocess.CalledProcessError:
-    return False
 
 def get_run_name():
   now = datetime.now()
@@ -279,7 +271,7 @@ def run_commands(commands, id_to_print, jobname, worker_list, is_shell=False, ou
 
     if seconds_elapsed >= 60 and not 0 in returncodes and jobname == "SCP":
       print("SCP operation timed out - terminating all processes."\
-        " Make sure you have run 'gcloud auth login'.")
+        " Please check that --INTERNAL_IP flag is set correctly.")
       for child in children:
         child.terminate()
       max_returncode = 255
@@ -355,8 +347,7 @@ def main() -> None:
   main_command = args.COMMAND
   run_name = args.RUN_NAME
   use_existing_folder = args.USE_EXISTING_FOLDER
-
-  internal_ip = use_internal_ip()
+  internal_ip = args.INTERNAL_IP
 
   assert_project_and_zone_set()
   assert_script_dir_exists(script_dir)
