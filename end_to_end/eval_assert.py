@@ -2,6 +2,7 @@
 from absl import app
 from typing import Sequence
 from math import isclose
+from google.cloud import storage
 import json
 
 
@@ -12,6 +13,7 @@ def read(metrics_file, target):
   with open(metrics_file, 'r', encoding='utf8') as file:
     lines = file.readlines()
     for line in lines:
+      # skip the first 10 lines for burn in
       if i >= 10:
         vals = json.loads(line)
         avg += vals[target]
@@ -21,12 +23,12 @@ def read(metrics_file, target):
   return avg
 
 
-def test_tflops(metrics_file, target, threshold):
-  """Asserts over tflops values"""
-  avg_tflops = read(metrics_file, target)
-  # Checks for acceptable performance by asserting that average tflops value
-  # is greater than or equal to threshold
-  assert avg_tflops >= threshold
+def assert_metric_average(metrics_file, target, threshold):
+  avg_value = read(metrics_file, target)
+  # Checks for acceptable performance by asserting that the average metric (e.g. TFLOPs)
+  # is greater than the threshold.
+  print(f'avg value of target {target} is {avg_value}')
+  assert avg_value >= threshold
 
 
 def test_checkpointing(metrics_file, target):
@@ -43,14 +45,23 @@ def test_checkpointing(metrics_file, target):
     assert isclose(saved_loss, restored_loss, rel_tol=0.1)
 
 
+def test_vocab_creation(target):
+  bucket_name = target.split("/")[2]
+  vocab_path = "/".join(target.split("/")[3:])
+  storage_client = storage.Client()
+  assert storage.Blob(bucket=storage_client.bucket(bucket_name), name=vocab_path).exists(storage_client)
+
+
 def main(argv: Sequence[str]) -> None:
 
   _, metrics_file, threshold, target, test_scenario = argv
 
-  if test_scenario == 'performance':
-    test_tflops(metrics_file, target, float(threshold))
+  if test_scenario == 'metrics_average':
+    assert_metric_average(metrics_file, target, float(threshold))
   elif test_scenario == 'checkpoint_save_restore':
     test_checkpointing(metrics_file, target)
+  elif test_scenario == 'vocab_creation':
+    test_vocab_creation(target)
 
 
 if __name__ == "__main__":
