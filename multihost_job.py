@@ -40,8 +40,8 @@ Example usages:
     --SCRIPT_DIR=path/to/dir --PROJECT=<my-project> --ZONE=<zone> \
     --VERSION=tpu-vm-v4-base --TPU_TYPE=v4-8 --NUM_SLICES=2 --RUN_NAME=$USER-run-job
 Common issues:
-  You must be able to communicate with the BUCKET_NAME e.g. via gsutil. If you are running this script from
-  a TPUVM this permission is achieved through service account roles, such as Storage Object Admin.
+  You must have local write permissions to BUCKET_NAME. The allocated TPUVMs must also have read permissions to this
+  bucket, which is granted through service account roles, such as Storage Object Admin.
 """
 import argparse
 import sys
