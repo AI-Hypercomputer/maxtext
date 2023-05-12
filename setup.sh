@@ -14,13 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Enable "exit immediately if any command fails" option
+set -e
+
 # Uninstall existing JAX and JAXlib
 pip3 show jax && pip3 uninstall -y jax 
 pip3 show jaxlib && pip3 uninstall -y jaxlib
-
-libtpu_path="/lib/libtpu.so"
+pip3 show libtpu-nightly && pip3 uninstall -y libtpu-nightly
 
 # Delete libtpu if it exists
+libtpu_path="/lib/libtpu.so"
 if [ -e "$libtpu_path" ]; then
     sudo rm "$libtpu_path"
 fi
