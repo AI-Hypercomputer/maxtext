@@ -1,4 +1,3 @@
-jax[tpu]
 orbax-checkpoint
 absl-py
 argparse
