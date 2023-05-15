@@ -14,6 +14,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# How to use:
+# stable/default mode will install jax,jaxlib,libtpu-nightly from stable release.
+# Example Command:
+# python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash setup.sh"
+# or
+# python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash setup.sh MODE=stable"
+
+# nightly mode will install jax-head, jaxlib-nightly, libtpu-nightly or custom libtpu from gcs bucket.
+# Example Command:
+# python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash setup.sh MODE=nightly"
+# python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash setup.sh MODE=nightly LIBTPU_GCS_PATH={gcs_path_to_custom_libtpu}"
+
+# head mode will install jax-head, jaxlib-head, custom libtpu from gcs bucket.
+# Example Command:
+# python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash setup.sh MODE=head LIBTPU_GCS_PATH={gcs_path_to_custom_libtpu}"
+
+# libtpu-only mode will install custom libtpu from gcs bucket.
+# Example Command:
+# python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash setup.sh MODE=libtpu-only LIBTPU_GCS_PATH={gcs_path_to_custom_libtpu}"
+
+
 # Enable "exit immediately if any command fails" option
 set -e
 
