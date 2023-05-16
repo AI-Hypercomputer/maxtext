@@ -66,18 +66,18 @@ fi
 run_name_folder_path=$(pwd)
 
 # Uninstall existing jax, jaxlib, and libtpu-nightly
-pip3 show jax && sudo pip3 uninstall -y jax 
-pip3 show jaxlib && sudo pip3 uninstall -y jaxlib
-pip3 show libtpu-nightly && sudo pip3 uninstall -y libtpu-nightly
+pip3 show jax && pip3 uninstall -y jax 
+pip3 show jaxlib && pip3 uninstall -y jaxlib
+pip3 show libtpu-nightly && pip3 uninstall -y libtpu-nightly
 
 # Delete jax folder if it exists
 if [[ -d $HOME/jax ]]; then
-    sudo rm -rf $HOME/jax
+    rm -rf $HOME/jax
 fi
 
 # Delete xla folder if it exists
 if [[ -d $HOME/xla ]]; then
-    sudo rm -rf $HOME/xla
+    rm -rf $HOME/xla
 fi
 
 # Delete custom libtpu if it exists
@@ -92,15 +92,15 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
         exit 1
     else
         echo "Installing stable jax, jaxlib, libtpu"
-        sudo pip3 install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+        pip3 install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
     fi
 elif [[ $MODE == "nightly" ]]; then 
 # Nightly mode
     echo "Installing jax-head, jaxlib-nightly"
     # Install jax from GitHub head
-    sudo pip3 install git+https://github.com/google/jax
+    pip3 install git+https://github.com/google/jax
     # Install jaxlib-nightly
-    sudo pip3 install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
+    pip3 install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 
     if [[ -n "$LIBTPU_GCS_PATH" ]]; then
         # Install custom libtpu
@@ -112,7 +112,7 @@ elif [[ $MODE == "nightly" ]]; then
     else
         # Install libtpu-nightly
         echo "Installing libtpu-nightly"
-        sudo pip3 install libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html -U --pre
+        pip3 install libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html -U --pre
     fi
 elif [[ $MODE == "head" ]]; then 
 # Head mode
@@ -133,19 +133,19 @@ elif [[ $MODE == "head" ]]; then
     echo "Installing jax from HEAD..."
     cd $HOME && git clone https://github.com/google/jax.git
     cd $HOME/jax
-    sudo pip3 install -r build/test-requirements.txt
-    sudo pip3 install -e .
+    pip3 install -r build/test-requirements.txt
+    pip3 install -e .
 
     # Install jaxlib from GitHub head
     echo "Installing jaxlib from HEAD..."
     cd $HOME && git clone https://github.com/openxla/xla
     cd $HOME/jax
     python3 build/build.py --enable_tpu --bazel_options="--override_repository=xla=$HOME/xla"
-    sudo pip3 install dist/jaxlib-*-cp*-manylinux2014_x86_64.whl --force-reinstall --no-deps
+    pip3 install dist/jaxlib-*-cp*-manylinux2014_x86_64.whl --force-reinstall --no-deps
 else
     echo -e "\n\nError: You can only set MODE to [stable,nightly,head].\n\n"
     exit 1
 fi
 
 # Install dependencies from requirements.txt
-cd $run_name_folder_path && sudo pip3 install -r requirements.txt
+cd $run_name_folder_path && pip3 install -r requirements.txt
