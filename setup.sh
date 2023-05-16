@@ -131,14 +131,12 @@ elif [[ $MODE == "head" ]]; then
     echo "Installing jax-head, jaxlib-head"
     # Install jax from GitHub head
     echo "Installing jax from HEAD..."
-    cd $HOME && git clone https://github.com/google/jax.git
-    cd $HOME/jax
-    pip3 install -r build/test-requirements.txt
-    pip3 install -e .
-
+    # Install jax from GitHub head
+    pip3 install git+https://github.com/google/jax
     # Install jaxlib from GitHub head
     echo "Installing jaxlib from HEAD..."
     cd $HOME && git clone https://github.com/openxla/xla
+    cd $HOME && git clone https://github.com/google/jax.git
     cd $HOME/jax
     python3 build/build.py --enable_tpu --bazel_options="--override_repository=xla=$HOME/xla"
     pip3 install dist/jaxlib-*-cp*-manylinux2014_x86_64.whl --force-reinstall --no-deps
