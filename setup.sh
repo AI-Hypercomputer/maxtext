@@ -14,19 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Description:
+# bash setup.sh MODE={stable,nightly,head,libtpu-only} LIBTPU_GCS_PATH={gcs_path_to_custom_libtpu}
+
+# You need to specificy a MODE, default value stable. 
+# For all MODEs other than stable, you have the option to provide a LIBTPU_GCS_PATH that points to a libtpu.so provided to you by Google. 
+# In head MODE and libtpu-only MODE, the LIBTPU_GCS_PATH is mandatory.
+
+
 # Enable "exit immediately if any command fails" option
 set -e
-
-# Uninstall existing JAX and JAXlib
-pip3 show jax && pip3 uninstall -y jax 
-pip3 show jaxlib && pip3 uninstall -y jaxlib
-pip3 show libtpu-nightly && pip3 uninstall -y libtpu-nightly
-
-# Delete libtpu if it exists
-libtpu_path="/lib/libtpu.so"
-if [ -e "$libtpu_path" ]; then
-    sudo rm "$libtpu_path"
-fi
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -34,15 +31,66 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
-if [[ $MODE == "nightly" ]]; then 
-    # Nightly mode
+libtpu_path="/lib/libtpu.so"
+
+if [[ "$MODE" == "libtpu-only" ]]; then
+    # Only update custom libtpu.
+    if [[ -n "$LIBTPU_GCS_PATH" ]]; then
+        # Install custom libtpu
+        echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
+        # Install required dependency
+        sudo pip3 install -U crcmod
+        # Copy libtpu.so from GCS path
+        sudo gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+        exit 0
+    else
+        echo -e "\n\nError: You must provide a custom libtpu for libtpu-only mode.\n\n"
+        exit 1
+    fi
+fi
+
+# Save the script folder path of maxtext
+run_name_folder_path=$(pwd)
+
+# Uninstall existing jax, jaxlib, and libtpu-nightly
+pip3 show jax && pip3 uninstall -y jax 
+pip3 show jaxlib && pip3 uninstall -y jaxlib
+pip3 show libtpu-nightly && pip3 uninstall -y libtpu-nightly
+
+# Delete jax folder if it exists
+if [[ -d $HOME/jax ]]; then
+    rm -rf $HOME/jax
+fi
+
+# Delete xla folder if it exists
+if [[ -d $HOME/xla ]]; then
+    rm -rf $HOME/xla
+fi
+
+# Delete custom libtpu if it exists
+if [ -e "$libtpu_path" ]; then
+    sudo rm "$libtpu_path"
+fi
+
+if [[ "$MODE" == "stable" || ! -v MODE ]]; then
+# Stable mode
+    if [[ -n "$LIBTPU_GCS_PATH" ]]; then 
+        echo -e "\n\nError: You can't use stable mode with custom libtpu.\n\n"
+        exit 1
+    else
+        echo "Installing stable jax, jaxlib, libtpu"
+        pip3 install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+    fi
+elif [[ $MODE == "nightly" ]]; then 
+# Nightly mode
     echo "Installing jax-head, jaxlib-nightly"
-    # Install JAX from GitHub head
+    # Install jax from GitHub head
     pip3 install git+https://github.com/google/jax
     # Install jaxlib-nightly
     pip3 install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 
     if [[ -n "$LIBTPU_GCS_PATH" ]]; then
+        # Install custom libtpu
         echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
         # Install required dependency
         sudo pip3 install -U crcmod
@@ -53,14 +101,36 @@ if [[ $MODE == "nightly" ]]; then
         echo "Installing libtpu-nightly"
         pip3 install libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html -U --pre
     fi
-elif [[ ! -n "$LIBTPU_GCS_PATH" ]]; then 
-    # Stable mode
-    echo "Installing stable jax, jaxlib, libtpu"
-    pip3 install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+elif [[ $MODE == "head" ]]; then 
+# Head mode
+    if [[ -n "$LIBTPU_GCS_PATH" ]]; then
+        # Install custom libtpu
+        echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
+        # Install required dependency
+        sudo pip3 install -U crcmod
+        # Copy libtpu.so from GCS path
+        sudo gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+    else
+        echo -e "\n\nError: You must provide a custom libtpu for head mode.\n\n"
+        exit 1
+    fi
+
+    echo "Installing jax-head, jaxlib-head"
+    # Install jax from GitHub head
+    echo "Installing jax from HEAD..."
+    # Install jax from GitHub head
+    pip3 install git+https://github.com/google/jax
+    # Install jaxlib from GitHub head
+    echo "Installing jaxlib from HEAD..."
+    cd $HOME && git clone https://github.com/openxla/xla
+    cd $HOME && git clone https://github.com/google/jax.git
+    cd $HOME/jax
+    python3 build/build.py --enable_tpu --bazel_options="--override_repository=xla=$HOME/xla"
+    pip3 install dist/jaxlib-*-cp*-manylinux2014_x86_64.whl --force-reinstall --no-deps
 else
-    echo -e "\n\nError: You can't use stable mode with customized libtpu.\n\n"
+    echo -e "\n\nError: You can only set MODE to [stable,nightly,head,libtpu-only].\n\n"
     exit 1
 fi
 
 # Install dependencies from requirements.txt
-pip3 install -r requirements.txt
+cd $run_name_folder_path && pip3 install -r requirements.txt
