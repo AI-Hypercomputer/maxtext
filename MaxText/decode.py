@@ -47,7 +47,6 @@ import max_logging
 
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
-os.environ["TFDS_DATA_DIR"] = "gs://tensorflow-datasets/datasets"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
 def decode_tokens(toks, tokenizer, eos_id):
@@ -192,6 +191,7 @@ def decode_loop(config, state=None):
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
+  os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
   decode_loop(pyconfig.config)
 
 
