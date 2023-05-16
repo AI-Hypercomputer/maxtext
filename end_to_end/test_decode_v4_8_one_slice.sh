@@ -4,7 +4,7 @@ set -e
 NUM_TOKEN_THRESHOLD=${1}
 OUTPUT_PATH=${2}
 DATASET_PATH=${3}
-# Run name is optional 3rd input - our daily XLML tests will use one.
+# Run name is optional 4th input - our daily XLML tests will use one.
 
 
 if [ -z ${4} ]
