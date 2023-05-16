@@ -30,11 +30,10 @@ import datetime
 import numpy as np
 import os
 
-os.environ["JAX_USE_PJRT_C_API_ON_TPU"] = "1"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-os.environ["XLA_FLAGS"]="--xla_dump_to=/tmp/hlo-dumps-local-unsanitized"
+#os.environ["XLA_FLAGS"]="--xla_dump_hlo_as_proto --xla_dump_to=/tmp/tf-sim-repro51"
 
-cc.initialize_cache(os.path.expanduser("~/jax_cache_2"))
+cc.initialize_cache(os.path.expanduser("~/jax_cache_repro_qq2"))
 
 parser = argparse.ArgumentParser(
   description="Experiment different sharding techniques with a simple NN.\
@@ -174,12 +173,12 @@ activation_bytes = 2 * (  BATCH  * ( D_FF+D_EMB) ) * NUM_LAYERS
 memory_bytes = parameter_bytes + activation_bytes
 
 print(f"total {memory_bytes/10**9} GB, parameters {parameter_bytes/10**9} GB, activations {activation_bytes/10**9} GB")
-
+dtype=jax.numpy.float32 # jax.numpy.bfloat16
 def gen_layer(random_key):
   keys = jax.random.split(random_key, num = 4)
   return {
-    "EMB2FF" : 1e-4 * jax.random.normal( keys[0], (D_FF, D_EMB), dtype=jax.numpy.bfloat16),
-    "FF2EMB" : 1e-4 * jax.random.normal( keys[1], (D_FF, D_EMB), dtype=jax.numpy.bfloat16),
+    "EMB2FF" : 1e-4 * jax.random.normal( keys[0], (D_FF, D_EMB), dtype=dtype),
+    "FF2EMB" : 1e-4 * jax.random.normal( keys[1], (D_FF, D_EMB), dtype=dtype),
   }
 
 def gen_layers(random_key):
@@ -190,7 +189,7 @@ def gen_layers(random_key):
   return tuple(layers)
 
 def gen_data(random_key):
-  return jax.random.uniform(random_key, (BATCH, D_EMB), dtype=jax.numpy.bfloat16 )
+  return jax.random.uniform(random_key, (BATCH, D_EMB), dtype=dtype)
 
 
 def multiply_layer(in_act, in_layer):
