@@ -128,7 +128,7 @@ elif [[ $MODE == "head" ]]; then
     python3 build/build.py --enable_tpu --bazel_options="--override_repository=xla=$HOME/xla"
     pip3 install dist/jaxlib-*-cp*-manylinux2014_x86_64.whl --force-reinstall --no-deps
 else
-    echo -e "\n\nError: You can only set MODE to [stable,nightly,head].\n\n"
+    echo -e "\n\nError: You can only set MODE to [stable,nightly,head,libtpu-only].\n\n"
     exit 1
 fi
 
