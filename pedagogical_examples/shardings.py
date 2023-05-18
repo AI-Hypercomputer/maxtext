@@ -33,7 +33,7 @@ import os
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 #os.environ["XLA_FLAGS"]="--xla_dump_hlo_as_proto --xla_dump_to=/tmp/tf-sim-repro51"
 
-cc.initialize_cache(os.path.expanduser("~/jax_cache_repro_qq2"))
+cc.initialize_cache(os.path.expanduser("~/jax_cache_repro_qq3"))
 
 parser = argparse.ArgumentParser(
   description="Experiment different sharding techniques with a simple NN.\
