@@ -4,19 +4,18 @@ set -e
 NUM_TOKEN_THRESHOLD=${1}
 OUTPUT_PATH=${2}
 DATASET_PATH=${3}
-SETUP_MODE=${4}
-# Run name is optional 5th input - our daily XLML tests will use one.
+# Run name is optional 4th input - our daily XLML tests will use one.
 
 
-if [ -z ${5} ]
+if [ -z ${4} ]
 then 
     RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S)
 else
-    RUN_NAME=${5}_$(date +%Y-%m-%d-%H)
+    RUN_NAME=${4}_$(date +%Y-%m-%d-%H)
 fi
 
 #Setup and Train
-bash setup.sh MODE=$SETUP_MODE
+bash setup.sh
 python3 MaxText/decode.py MaxText/configs/base.yml run_name=$RUN_NAME\
     steps=50 enable_checkpointing=False metrics_file='metrics.txt'\
     base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH
