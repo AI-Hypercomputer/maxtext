@@ -172,6 +172,7 @@ def train_step(model, config, state, data, dropout_rng):
                          data['targets'],
                          data['inputs_segmentation'],
                          data['inputs_position'],
+                         enable_dropout=config.enable_dropout,
                          rngs={'dropout': rng1}, mutable='intermediates')
     # TODO: is optax xent as good as custom T5X one?
     xent = optax.softmax_cross_entropy_with_integer_labels(logits, data['targets'])
@@ -204,7 +205,7 @@ def predict_step(inputs,
       jax.random.PRNGKey(0),
       jnp.ones(target_shape, config.dtype),
       None,
-      enable_dropout=False,
+      enable_dropout=config.enable_dropout,
       decode=True,
       max_decode_length=config.max_predict_length
   )

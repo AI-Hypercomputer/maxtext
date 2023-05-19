@@ -173,7 +173,7 @@ def get_datasets(
   # train_data = get_raw_dataset(train_ds_builder, 'train')
   train_ds = train_ds_builder.as_dataset(split='train',
                                            read_config = read_config,
-                                           shuffle_files=False)
+                                           shuffle_files=config.enable_data_shuffling)
   # shard the dataset as soon as it is loaded
   train_ds = train_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
   train_ds = normalize_features(train_ds)
@@ -186,7 +186,7 @@ def get_datasets(
   # eval_data = get_raw_dataset(eval_ds_builder, config.eval_split)
   eval_ds = eval_ds_builder.as_dataset(split=config.eval_split,
                                           read_config = read_config,
-                                          shuffle_files=False)
+                                          shuffle_files=config.enable_data_shuffling)
   eval_ds = eval_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
   eval_ds = normalize_features(eval_ds)
 
