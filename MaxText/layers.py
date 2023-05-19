@@ -68,7 +68,7 @@ def dot_product_attention(query: Array,
                           bias: Optional[Array] = None,
                           dropout_rng: Optional[PRNGKey] = None,
                           dropout_rate: float = 0.,
-                          deterministic: bool = False,
+                          deterministic: bool = True,
                           dtype: DType = jnp.float32,
                           float32_logits: bool = False):
   """Computes dot-product attention given query, key, and value.
@@ -261,7 +261,7 @@ class MultiHeadDotProductAttention(nn.Module):
                bias: Optional[Array] = None,
                *,
                decode: bool = False,
-               deterministic: bool = False) -> Array:
+               deterministic: bool = True) -> Array:
     """Applies multi-head dot product attention on the input data.
 
     Projects the inputs into multi-headed query, key, and value vectors,
@@ -448,11 +448,11 @@ class MlpBlock(nn.Module):
   intermediate_dim: int = 2048
   activations: Sequence[Union[str, Callable]] = ('relu',)
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
-  intermediate_dropout_rate: float = 0.1
+  intermediate_dropout_rate: float = 0.0
   dtype: Any = jnp.float32
 
   @nn.compact
-  def __call__(self, inputs, decode: bool = False, deterministic: bool = False):
+  def __call__(self, inputs, decode: bool = False, deterministic: bool = True):
     """Applies Transformer MlpBlock module."""
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
@@ -993,7 +993,7 @@ class Decoder(nn.Module):
                decoder_input_tokens,
                decoder_positions=None,
                decoder_mask=None,
-               deterministic=False,
+               deterministic=True,
                decode=False,
                max_decode_length=None):
     cfg = self.config
@@ -1032,7 +1032,7 @@ class Decoder(nn.Module):
           },
           split_rngs={
               'params': True,
-              'dropout': True
+              'dropout': False
           },
           in_axes=(nn.broadcast, nn.broadcast, nn.broadcast,
                    nn.broadcast),
@@ -1098,7 +1098,7 @@ class Transformer(nn.Module):
       decoder_target_tokens,
       decoder_segment_ids=None,
       decoder_positions=None,
-      enable_dropout=True,
+      enable_dropout=False,
       decode=False,
       max_decode_length=None):
     """Applies Transformer decoder-branch on encoded-input and target."""
