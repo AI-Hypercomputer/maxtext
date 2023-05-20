@@ -45,16 +45,15 @@ def test_checkpointing(metrics_file, target):
     assert isclose(saved_loss, restored_loss, rel_tol=0.1)
 
 def test_determinism(metrics_file, target):
-  """Asserts over loss values from loaded checkpoint"""
+  """Asserts over loss values from two runs"""
   run_1 = 'run_1_' + metrics_file
   run_2 = 'run_2_' + metrics_file
 
   with open(run_1, 'r', encoding='utf8') as run_1_file,\
     open(run_2, 'r', encoding='utf8') as run_2_file:
-    run_1_loss = json.loads(saved.readlines()[-1])[target]
-    run_2_loss = json.loads(restored.readlines()[0])[target]
-    # Checks that checkpoint restore was successful by comparing loss of last
-    # step in saved checkpoint to loss of first step in restored checkpoint
+    run_1_loss = json.loads(run_1_file.readlines()[-1])[target]
+    run_2_loss = json.loads(run_2_file.readlines()[0])[target]
+    # Check that the two runs have the same loss
     assert isclose(run_1_loss, run_2_loss, rel_tol=0.001)
 
 def test_vocab_creation(target):
@@ -72,6 +71,8 @@ def main(argv: Sequence[str]) -> None:
     assert_metric_average(metrics_file, target, float(threshold))
   elif test_scenario == 'checkpoint_save_restore':
     test_checkpointing(metrics_file, target)
+  elif test_scenario == 'determinism':
+    test_determinism(metrics_file, target)
   elif test_scenario == 'vocab_creation':
     test_vocab_creation(target)
 
