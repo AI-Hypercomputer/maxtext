@@ -171,9 +171,14 @@ def train_step(evil, model, config, state, data, dropout_rng):
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), grads = grad_fn(state.params)
-  grads_clipped = max_utils.clip_pytree(grads, 1e-5)
-  new_state = state.apply_gradients(grads=grads)
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads_clipped),
+  f = lambda x, mu, nu : jax.numpy.clip(x, mu - 3 * jax.numpy.sqrt(nu + 1e-12), mu + 3 * jax.numpy.sqrt(nu + 1e-12))
+  grads_clipped = jax.tree_util.tree_map(f, grads, state.opt_state[0].mu, state.opt_state[0].nu)
+  #grads_clipped = max_utils.clip_pytree(grads, 3e-6)
+  new_state = state.apply_gradients(grads=grads_clipped)
+  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
+             'learning/grad_norm_clipped' : max_utils.l2norm_pytree(grads_clipped),
+             'learning/mu' : max_utils.l2norm_pytree(state.opt_state[0].mu),
+             'learning/nu' : max_utils.l2norm_pytree(state.opt_state[0].nu),
              'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
@@ -281,6 +286,7 @@ def train_loop(config, state=None):
   )
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+
   data_pspec = P(*config.data_sharding)
 
   num_model_parameters = calculate_num_params_from_pytree(state.params)

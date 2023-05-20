@@ -69,7 +69,7 @@ ici_data_parallelism: 1
 ici_fsdp_parallelism: 4
 ici_tensor_parallelism: 1
 
-evil_rate: 10
+evil_rate: 100
 
 
 # Dataset
