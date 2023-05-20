@@ -167,8 +167,9 @@ source venv/bin/activate
 (({download_from_gcs(zip_gcs_path)}
 tar xzf {zip_name}
 {main_command}) 2>&1) >> {log_name}
+{echo_finish_status_str()} >> {log_name}
 gsutil cp {log_name} "{bucket_path}/"
-{create_kill_command_str(endpoint)}"""
+{create_kill_command_str(run_name)}"""
 
 def get_env_command_str(num_slices):
   """ Define environment variables on the TPUS """
@@ -184,10 +185,17 @@ PROJECT=$(grep '^CONSUMER_PROJECT_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
     slice_assignment = """SLICE_ID=$(grep '^MEGASCALE_SLICE_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
   return env_str + "\n" + slice_assignment
 
-def create_kill_command_str(endpoint):
-  # TODO(b/271321971): Delete the QR in one swoop once this is possible.
-  return f"""if [ $WORKER_ID==0 ]; then
-  curl -X DELETE -H "Authorization: Bearer $(gcloud auth print-access-token)" https://{endpoint}/v2alpha1/projects/$PROJECT/locations/$ZONE/nodes/$NODE_ID
+def echo_finish_status_str():
+  return """
+  echo "multihost_job finished main command with exit status $!" 
+  """
+
+def create_kill_command_str(run_name):
+  # Only one worker is designated to bring down the whole QR, and it will wait a long time to give a
+  # chance for the other workers to log a timeout failure in the case that it exits/crashes before the rest.
+  return f"""if [ $WORKER_ID==0 ] && [ $SLICE_ID==0 ]; then
+  sleep 660
+  gcloud alpha compute tpus queued-resources delete {run_name} --force --quiet --async 
 fi"""
 
 def write_cqr_json_file(json_filename, project, zone, tpu_type, runtime_version, num_slices, run_name, network, subnetwork,
