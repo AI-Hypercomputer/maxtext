@@ -68,7 +68,7 @@ def dot_product_attention(query: Array,
                           bias: Optional[Array] = None,
                           dropout_rng: Optional[PRNGKey] = None,
                           dropout_rate: float = 0.,
-                          deterministic: bool = True,
+                          deterministic: bool = False,
                           dtype: DType = jnp.float32,
                           float32_logits: bool = False):
   """Computes dot-product attention given query, key, and value.
@@ -261,7 +261,7 @@ class MultiHeadDotProductAttention(nn.Module):
                bias: Optional[Array] = None,
                *,
                decode: bool = False,
-               deterministic: bool = True) -> Array:
+               deterministic: bool = False) -> Array:
     """Applies multi-head dot product attention on the input data.
 
     Projects the inputs into multi-headed query, key, and value vectors,
@@ -448,11 +448,11 @@ class MlpBlock(nn.Module):
   intermediate_dim: int = 2048
   activations: Sequence[Union[str, Callable]] = ('relu',)
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
-  intermediate_dropout_rate: float = 0.0
+  intermediate_dropout_rate: float = 0.1
   dtype: Any = jnp.float32
 
   @nn.compact
-  def __call__(self, inputs, decode: bool = False, deterministic: bool = True):
+  def __call__(self, inputs, decode: bool = False, deterministic: bool = False):
     """Applies Transformer MlpBlock module."""
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
@@ -993,7 +993,7 @@ class Decoder(nn.Module):
                decoder_input_tokens,
                decoder_positions=None,
                decoder_mask=None,
-               deterministic=True,
+               deterministic=False,
                decode=False,
                max_decode_length=None):
     cfg = self.config
@@ -1098,7 +1098,7 @@ class Transformer(nn.Module):
       decoder_target_tokens,
       decoder_segment_ids=None,
       decoder_positions=None,
-      enable_dropout=False,
+      enable_dropout=True,
       decode=False,
       max_decode_length=None):
     """Applies Transformer decoder-branch on encoded-input and target."""
