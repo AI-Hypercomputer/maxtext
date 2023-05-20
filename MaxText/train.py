@@ -156,7 +156,7 @@ def train_step(model, config, state, data, dropout_rng):
                          data['targets'],
                          data['inputs_segmentation'],
                          data['inputs_position'],
-                         enable_dropout=config.enable_dropout
+                         enable_dropout=config.enable_dropout,
                          rngs={'dropout': rng1}, mutable='intermediates')
     # TODO: is optax xent as good as custom T5X one?
     xent = optax.softmax_cross_entropy_with_integer_labels(logits, data['targets'])
