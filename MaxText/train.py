@@ -221,7 +221,7 @@ def predict_step(inputs,
         },
         flat_ids,
         None,
-        enable_dropout=False,
+        enable_dropout=False, # Since we are not training, no dropout is used.
         decode=True,
         max_decode_length=config.max_predict_length,
         mutable=["cache"])
