@@ -206,7 +206,7 @@ def predict_step(inputs,
         flat_ids,
         None,
         enable_dropout=config.enable_dropout,
-        decode=True, 
+        decode=True,
         max_decode_length=config.max_predict_length,
         mutable=["cache"])
     new_flat_cache = new_vars["cache"]
