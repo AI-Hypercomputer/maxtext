@@ -171,8 +171,9 @@ def train_step(evil, model, config, state, data, dropout_rng):
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), grads = grad_fn(state.params)
+  grads_clipped = max_utils.clip_pytree(grads, 1e-5)
   new_state = state.apply_gradients(grads=grads)
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
+  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads_clipped),
              'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
@@ -335,7 +336,7 @@ def train_loop(config, state=None):
 
     if config.metrics_file:
       max_utils.write_metrics_locally(metrics, step, pyconfig.config.steps-1, local_metrics_file)
-
+    print(metrics)
     # Start profiling at end of first step to avoid compilation.
     # Move before for loop to include.
     if step == 0:

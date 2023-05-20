@@ -36,6 +36,12 @@ from flax.linen import partitioning as nn_partitioning
 import optax
 
 
+def clip_pytree(x, c):
+  """L2 norm of a pytree of arrays."""
+  return jax.tree_util.tree_map(
+      lambda t: jax.numpy.clip(t, a_min=-c, a_max=c), x
+  )
+
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
   return jax.tree_util.tree_reduce(
