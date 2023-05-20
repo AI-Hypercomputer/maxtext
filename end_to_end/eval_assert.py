@@ -52,8 +52,10 @@ def test_determinism(metrics_file, target):
   with open(run_1, 'r', encoding='utf8') as run_1_file,\
     open(run_2, 'r', encoding='utf8') as run_2_file:
     run_1_loss = json.loads(run_1_file.readlines()[-1])[target]
-    run_2_loss = json.loads(run_2_file.readlines()[0])[target]
+    run_2_loss = json.loads(run_2_file.readlines()[-1])[target]
     # Check that the two runs have the same loss
+    print(f"Run 1 loss:{run_1_loss}", flush=True)
+    print(f"Run 2 loss:{run_2_loss}", flush=True)
     assert isclose(run_1_loss, run_2_loss, rel_tol=0.001)
 
 def test_vocab_creation(target):
