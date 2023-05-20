@@ -22,7 +22,6 @@
 import jax
 import os
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-os.environ["XLA_FLAGS"]="--xla_dump_to=/tmp/hlo-dumps"
 print(f"Found {jax.device_count()} devices.")
 
 from typing import Sequence
