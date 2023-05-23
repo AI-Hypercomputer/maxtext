@@ -56,7 +56,7 @@ def test_determinism(metrics_file, target):
     # Check that the two runs have the same loss
     print(f"Run 1 loss:{run_1_loss}", flush=True)
     print(f"Run 2 loss:{run_2_loss}", flush=True)
-    assert isclose(run_1_loss, run_2_loss, rel_tol=0.001)
+    assert run_1_loss==run_2_loss
 
 def test_vocab_creation(target):
   bucket_name = target.split("/")[2]
