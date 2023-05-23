@@ -192,7 +192,7 @@ def echo_finish_status_str():
 
 def create_kill_command_str(run_name):
   # Only one worker is designated to bring down the whole QR, and it will wait a long time to give a
-  # chance for the other workers to log a timeout failure in the case that it exits/crashes before the rest.
+  #  chance for the other workers to log a timeout failure in the case that it exits/crashes before the rest.
   return f"""if [ $WORKER_ID==0 ] && [ $SLICE_ID==0 ]; then
   sleep 660
   gcloud alpha compute tpus queued-resources delete {run_name} --force --quiet --async 
