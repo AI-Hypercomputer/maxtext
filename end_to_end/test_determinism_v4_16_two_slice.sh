@@ -7,7 +7,7 @@ DATASET_PATH=${3}
 
 
 #Setup and Train
-#bash setup.sh
+bash setup.sh
 
 python3 MaxText/train.py MaxText/configs/base.yml run_name=${RUN_NAME}_1 steps=5 dcn_data_parallelism=2 ici_fsdp_parallelism=8\
     metrics_file='run_1_metrics.txt' enable_checkpointing=False enable_data_shuffling=False enable_dropout=False base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH
