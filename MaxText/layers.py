@@ -1032,7 +1032,7 @@ class Decoder(nn.Module):
           },
           split_rngs={
               'params': True,
-              'dropout': True
+              'dropout': cfg.enable_dropout
           },
           in_axes=(nn.broadcast, nn.broadcast, nn.broadcast,
                    nn.broadcast),
