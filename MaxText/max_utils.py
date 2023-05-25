@@ -113,7 +113,7 @@ def create_device_mesh(config):
 
   else:
     assert np.product(dcn_parallelism) == num_slices, f"Number of slices {num_slices} does not match the product\
-      of the DCN parallism {np.product(dcn_parallelism)}"
+      of the DCN parallelism {np.product(dcn_parallelism)}"
 
   # Validates ICI parallelism
   if -1 in ici_parallelism:
@@ -127,7 +127,7 @@ def create_device_mesh(config):
 
   else:
     assert np.product(ici_parallelism) == num_devices_per_slice, f"Number of devices per slice {num_devices_per_slice}\
-      does not match the product of the ICI parallism {np.product(ici_parallelism)}"
+      does not match the product of the ICI parallelism {np.product(ici_parallelism)}"
 
   if multi_slice_env:
     mesh = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism)
