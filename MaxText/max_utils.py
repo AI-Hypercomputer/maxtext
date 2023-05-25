@@ -64,8 +64,8 @@ def write_metrics_locally(metrics, step, last_step, file):
   if step == last_step:
     file.close()
 
-def validate_unspecified(parallelism_vals, target_product, parallelism_type):
-  """Validates and evaluates unspecified DCN/ICI parallelism values"""
+def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
+  """Evaluates unspecified DCN/ICI parallelism values"""
   if -1 in parallelism_vals:
     assert parallelism_vals.count(-1) == 1, f"Found unspecified values (-1) for more than one {parallelism_type} parallelism\
       axis. At most one axis can be unspecified."
@@ -76,6 +76,11 @@ def validate_unspecified(parallelism_vals, target_product, parallelism_type):
       {parallelism_type} parallelism values"
 
     parallelism_vals[parallelism_vals.index(-1)] = int(determined_val)
+
+  target_type = "slices" if parallelism_type == 'DCN' else "devices per slice"
+
+  assert np.product(parallelism_vals) == target_product, f"Number of {target_type} {target_product} does not match the product\
+    of the {parallelism_type} parallelism {np.product(parallelism_vals)}"
 
   return parallelism_vals
 
@@ -96,15 +101,9 @@ def create_device_mesh(config):
   dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism, config.dcn_tensor_parallelism]
   ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism, config.ici_tensor_parallelism]
 
-  # Validate parallelisms
-  dcn_parallelism = validate_unspecified(dcn_parallelism, num_slices, 'DCN')
-  ici_parallelism = validate_unspecified(ici_parallelism, num_devices_per_slice, 'ICI')
-
-  assert np.product(dcn_parallelism) == num_slices, f"Number of slices {num_slices} does not match the product\
-    of the DCN parallelism {np.product(dcn_parallelism)}"
-
-  assert np.product(ici_parallelism) == num_devices_per_slice, f"Number of devices per slice {num_devices_per_slice}\
-    does not match the product of the ICI parallelism {np.product(ici_parallelism)}"
+  # Find possible unspecified parallelisms
+  dcn_parallelism = fill_unspecified_mesh_axes(dcn_parallelism, num_slices, 'DCN')
+  ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, 'ICI')
 
   if multi_slice_env:
     mesh = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism)
