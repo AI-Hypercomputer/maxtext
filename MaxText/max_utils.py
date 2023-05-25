@@ -103,11 +103,12 @@ def create_device_mesh(config):
 
   # Validates DCN parallelism
   if -1 in dcn_parallelism:
-    assert dcn_parallelism.count(-1) == 1, f"Found unspecified values for more than one DCN parallelism axis"
+    assert dcn_parallelism.count(-1) == 1, "Found unspecified values for more than one DCN parallelism axis"
 
     dcn_val = num_slices / np.product(dcn_parallelism)*-1
 
-    assert dcn_val >= 1 and dcn_val.is_integer, f"Unspecified value unable to be determined with the given DCN parallelism values"
+    assert dcn_val >= 1 and dcn_val.is_integer, "Unspecified value unable to be determined with the given DCN\
+      parallelism values"
 
     dcn_parallelism[dcn_parallelism.index(-1)] = int(dcn_val)
 
@@ -117,11 +118,12 @@ def create_device_mesh(config):
 
   # Validates ICI parallelism
   if -1 in ici_parallelism:
-    assert ici_parallelism.count(-1) == 1, f"Found unspecified values for more than one ICI parallelism axis"
+    assert ici_parallelism.count(-1) == 1, "Found unspecified values for more than one ICI parallelism axis"
 
     ici_val = num_devices_per_slice / np.product(ici_parallelism)*-1
 
-    assert ici_val >= 1 and ici_val.is_integer, f"Unspecified value unable to be determined with the given ICI parallelism values"
+    assert ici_val >= 1 and ici_val.is_integer, "Unspecified value unable to be determined with the given ICI\
+      parallelism values"
 
     ici_parallelism[ici_parallelism.index(-1)] = int(ici_val)
 
