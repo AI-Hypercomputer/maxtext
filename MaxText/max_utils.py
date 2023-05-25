@@ -64,24 +64,19 @@ def write_metrics_locally(metrics, step, last_step, file):
   if step == last_step:
     file.close()
 
-def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
-  """Evaluates unspecified DCN/ICI parallelism values"""
+def validate_unspecified(parallelism_vals, target_product, type):
+  """Validates and evaluates unspecified DCN/ICI parallelism values"""
   if -1 in parallelism_vals:
-    assert parallelism_vals.count(-1) == 1, f"Found unspecified values (-1) for more than one {parallelism_type}\
-      parallelism axis. At most one axis can be unspecified."
-
+    assert parallelism_vals.count(-1) == 1, f"Found unspecified values (-1) for more than one {type} parallelism axis.\
+      At most one axis can be unspecified."
+    
     determined_val = target_product/np.product(parallelism_vals)*-1
 
     assert determined_val >= 1 and determined_val.is_integer, f"Unspecified value unable to be determined with the given\
-      {parallelism_type} parallelism values"
+      {type} parallelism values"
 
     parallelism_vals[parallelism_vals.index(-1)] = int(determined_val)
-
-  target_type = "slices" if parallelism_type == 'DCN' else "devices per slice"
-
-  assert np.product(parallelism_vals) == target_product, f"Number of {target_type} {target_product} does not match\
-    the product of the {parallelism_type} parallelism {np.product(parallelism_vals)}"
-
+  
   return parallelism_vals
 
 def create_device_mesh(config):
@@ -101,35 +96,15 @@ def create_device_mesh(config):
   dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism, config.dcn_tensor_parallelism]
   ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism, config.ici_tensor_parallelism]
 
-  # Validates DCN parallelism
-  if -1 in dcn_parallelism:
-    assert dcn_parallelism.count(-1) == 1, "Found unspecified values for more than one DCN parallelism axis"
+  # Validate parallelisms
+  dcn_parallelism = validate_unspecified(dcn_parallelism, num_slices, 'DCN')
+  ici_parallelism = validate_unspecified(ici_parallelism, num_devices_per_slice, 'ICI')
 
-    dcn_val = num_slices / np.product(dcn_parallelism)*-1
+  assert np.product(dcn_parallelism) == num_slices, f"Number of slices {num_slices} does not match the product\
+    of the DCN parallelism {np.product(dcn_parallelism)}"
 
-    assert dcn_val >= 1 and dcn_val.is_integer, "Unspecified value unable to be determined with the given DCN\
-      parallelism values"
-
-    dcn_parallelism[dcn_parallelism.index(-1)] = int(dcn_val)
-
-  else:
-    assert np.product(dcn_parallelism) == num_slices, f"Number of slices {num_slices} does not match the product\
-      of the DCN parallelism {np.product(dcn_parallelism)}"
-
-  # Validates ICI parallelism
-  if -1 in ici_parallelism:
-    assert ici_parallelism.count(-1) == 1, "Found unspecified values for more than one ICI parallelism axis"
-
-    ici_val = num_devices_per_slice / np.product(ici_parallelism)*-1
-
-    assert ici_val >= 1 and ici_val.is_integer, "Unspecified value unable to be determined with the given ICI\
-      parallelism values"
-
-    ici_parallelism[ici_parallelism.index(-1)] = int(ici_val)
-
-  else:
-    assert np.product(ici_parallelism) == num_devices_per_slice, f"Number of devices per slice {num_devices_per_slice}\
-      does not match the product of the ICI parallelism {np.product(ici_parallelism)}"
+  assert np.product(ici_parallelism) == num_devices_per_slice, f"Number of devices per slice {num_devices_per_slice}\
+    does not match the product of the ICI parallelism {np.product(ici_parallelism)}"
 
   if multi_slice_env:
     mesh = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism)
