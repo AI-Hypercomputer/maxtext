@@ -64,19 +64,19 @@ def write_metrics_locally(metrics, step, last_step, file):
   if step == last_step:
     file.close()
 
-def validate_unspecified(parallelism_vals, target_product, type):
+def validate_unspecified(parallelism_vals, target_product, parallelism_type):
   """Validates and evaluates unspecified DCN/ICI parallelism values"""
   if -1 in parallelism_vals:
-    assert parallelism_vals.count(-1) == 1, f"Found unspecified values (-1) for more than one {type} parallelism axis.\
-      At most one axis can be unspecified."
-    
+    assert parallelism_vals.count(-1) == 1, f"Found unspecified values (-1) for more than one {parallelism_type} parallelism\
+      axis. At most one axis can be unspecified."
+
     determined_val = target_product/np.product(parallelism_vals)*-1
 
     assert determined_val >= 1 and determined_val.is_integer, f"Unspecified value unable to be determined with the given\
-      {type} parallelism values"
+      {parallelism_type} parallelism values"
 
     parallelism_vals[parallelism_vals.index(-1)] = int(determined_val)
-  
+
   return parallelism_vals
 
 def create_device_mesh(config):
