@@ -62,11 +62,11 @@ logical_axis_rules: [
                     ]
 data_sharding: [['data', 'fsdp', 'tensor']]
 
-dcn_data_parallelism: 1
+dcn_data_parallelism: -1
 dcn_fsdp_parallelism: 1
 dcn_tensor_parallelism: 1
 ici_data_parallelism: 1
-ici_fsdp_parallelism: 4
+ici_fsdp_parallelism: -1
 ici_tensor_parallelism: 1
 
 

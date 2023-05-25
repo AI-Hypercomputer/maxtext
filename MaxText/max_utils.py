@@ -67,6 +67,11 @@ def create_device_mesh(config):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas """
   devices = jax.devices()
   num_devices = len(devices)
+  try:
+    num_slices = 1 + max([d.slice_index for d in devices])
+  except:
+    num_slices = 1
+  num_devices_per_slice = num_devices//num_slices
   max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
   assert len(devices) > 1, "You must have at least two devices"
 
@@ -75,8 +80,33 @@ def create_device_mesh(config):
   dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism, config.dcn_tensor_parallelism]
   ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism, config.ici_tensor_parallelism]
 
-  assert np.product(dcn_parallelism) * np.product(ici_parallelism) == num_devices, f"Number of devices {num_devices} \
-        does not match the product of the parallelism {np.product(dcn_parallelism) * np.product(ici_parallelism)}"
+  # Validates DCN parallelism
+  if -1 in dcn_parallelism:
+    assert dcn_parallelism.count(-1) == 1, f"Found unspecified values for more than one DCN parallelism axis"
+
+    dcn_val = num_slices / np.product(dcn_parallelism)*-1
+
+    assert dcn_val >= 1 and dcn_val.is_integer, f"Unspecified value unable to be determined with the given DCN parallelism values"
+
+    dcn_parallelism[dcn_parallelism.index(-1)] = int(dcn_val)
+
+  else:
+    assert np.product(dcn_parallelism) == num_slices, f"Number of slices {num_slices} does not match the product\
+      of the DCN parallism {np.product(dcn_parallelism)}"
+
+  # Validates ICI parallelism
+  if -1 in ici_parallelism:
+    assert ici_parallelism.count(-1) == 1, f"Found unspecified values for more than one ICI parallelism axis"
+
+    ici_val = num_devices_per_slice / np.product(ici_parallelism)*-1
+
+    assert ici_val >= 1 and ici_val.is_integer, f"Unspecified value unable to be determined with the given ICI parallelism values"
+
+    ici_parallelism[ici_parallelism.index(-1)] = int(ici_val)
+
+  else:
+    assert np.product(ici_parallelism) == num_devices_per_slice, f"Number of devices per slice {num_devices_per_slice}\
+      does not match the product of the ICI parallism {np.product(ici_parallelism)}"
 
   if multi_slice_env:
     mesh = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism)
