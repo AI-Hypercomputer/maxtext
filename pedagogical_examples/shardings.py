@@ -19,7 +19,8 @@
 '''This script is used to measure the performance of different sharding schemes on TPU.'''
 
 import jax
-from jax.experimental.pjit import PartitionSpec, pjit
+from jax._src.partition_spec import PartitionSpec
+from jax.experimental.pjit import pjit
 from jax.experimental import maps
 from jax.experimental import mesh_utils
 from jax.experimental.compilation_cache import compilation_cache as cc

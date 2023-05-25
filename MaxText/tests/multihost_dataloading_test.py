@@ -19,7 +19,7 @@ import os
 import sys
 import numpy as np
 import jax
-from jax.experimental.maps import Mesh
+from jax._src.mesh import Mesh
 from jax.experimental import mesh_utils
 from jax.experimental import PartitionSpec
 

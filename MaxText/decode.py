@@ -38,8 +38,8 @@ import jax
 import jax.numpy as jnp
 from jax import random
 from jax.experimental.pjit import pjit
-from jax.experimental.pjit import PartitionSpec as P
-from jax.experimental.maps import Mesh
+from jax._src.partition_spec import PartitionSpec as P
+from jax._src.mesh import Mesh
 
 from jax.experimental.compilation_cache import compilation_cache as cc
 
