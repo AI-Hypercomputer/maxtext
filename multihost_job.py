@@ -26,11 +26,8 @@ This script:
   3) Runs your job on each TPU
   4) Logs the output of the job in real time to cloud logging
   5) Stores a copy of the logs and zipped code in GCS at the job's end
-  6) Deletes the TPUs
-  However the job leaves behind an orphaned QR which has to be cleaned up (by you).
-  Use "gcloud alpha compute tpus queued-resources list" to view the QR and
-  "gcloud alpha compute tpus queued-resources delete <qr-name>" when your job
-  is done. These instructions are also printed at the end of running this script.
+  6) Deletes the TPUs and QR
+
 Example usages:
   Minimal customization, assuming runner.sh lives in present working directory:
   python3 multihost_job.py  --COMMAND="bash runner.sh" --BUCKET_NAME=<my-bucket>
@@ -156,7 +153,7 @@ def run_create_resources(run_name, json_path, endpoint, project, zone):
   captured_output = subprocess.run(command, check=True, shell=True, capture_output=True)
   return captured_output
 
-def create_startup_script_str(run_name, zip_gcs_path, zip_name, main_command, log_name, bucket_path, num_slices, endpoint):
+def create_startup_script_str(run_name, zip_gcs_path, zip_name, main_command, log_name, bucket_path, num_slices, project, zone, endpoint):
   return f"""#!/bin/bash
 mkdir -p {run_name}
 cd {run_name}
@@ -169,7 +166,7 @@ tar xzf {zip_name}
 {main_command}) 2>&1) >> {log_name}
 {echo_finish_status_str()} >> {log_name}
 gsutil cp {log_name} "{bucket_path}/"
-{create_kill_command_str(run_name)}"""
+(({create_kill_command_str(run_name, project, zone)}) 2>&1 ) >> {log_name}"""
 
 def get_env_command_str(num_slices):
   """ Define environment variables on the TPUS """
@@ -186,16 +183,14 @@ PROJECT=$(grep '^CONSUMER_PROJECT_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
   return env_str + "\n" + slice_assignment
 
 def echo_finish_status_str():
-  return """
-  echo "multihost_job finished main command with exit status $!" 
-  """
+  return """echo "multihost_job finished main command on slice $SLICE_ID worker $WORKER_ID at $(date "+%Y-%m-%d %H:%M:%S") with exit status $?" """
 
-def create_kill_command_str(run_name):
+def create_kill_command_str(run_name, project, zone):
   # Only one worker is designated to bring down the whole QR, and it will wait a long time to give a
   #  chance for the other workers to log a timeout failure in the case that it exits/crashes before the rest.
   return f"""if [ $WORKER_ID==0 ] && [ $SLICE_ID==0 ]; then
-  sleep 660
-  gcloud alpha compute tpus queued-resources delete {run_name} --force --quiet --async 
+  sleep 6
+  gcloud alpha compute tpus queued-resources delete {run_name} --force --quiet --async --project={project} --zone={zone}
 fi"""
 
 def write_cqr_json_file(json_filename, project, zone, tpu_type, runtime_version, num_slices, run_name, network, subnetwork,
@@ -370,7 +365,8 @@ def main() -> None:
   log_name = "main_command_log_slice_${SLICE_ID}_worker_${WORKER_ID}"
   zip_path = os.path.join(bucket_path, zip_name)
   startup_script_str = create_startup_script_str(run_name, zip_path, zip_name, main_command, log_name, bucket_path,
-                                                 num_slices, endpoint)
+                                                 num_slices, project, zone, endpoint)
+  print(startup_script_str)
   json_filename = 'cqr_request_' + run_name + '.json'
   json_path = os.path.join(tmp_dir, json_filename)
 
@@ -407,9 +403,6 @@ def main() -> None:
 
   print("View the status of the created TPUs via: ")
   print(f"gcloud compute tpus tpu-vm list --filter={run_name}\n")
-
-  print("Once your job is finished you should delete your QR with: ")
-  print(f"gcloud alpha compute tpus queued-resources delete {run_name}")
   return 0
 
 if __name__ == '__main__':
