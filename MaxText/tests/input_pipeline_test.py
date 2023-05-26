@@ -18,7 +18,7 @@
 import os
 import sys
 import jax
-from jax.experimental.maps import Mesh
+from jax._src.mesh import Mesh
 from jax.experimental import mesh_utils
 
 import unittest
