@@ -14,6 +14,7 @@
  limitations under the License.
  """
 
+# pylint: disable=bare-except, consider-using-generator
 """ Common Max Utils needed by multiple modules"""
 import checkpointing
 import functools
@@ -63,10 +64,35 @@ def write_metrics_locally(metrics, step, last_step, file):
   if step == last_step:
     file.close()
 
+def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
+  """Evaluates unspecified DCN/ICI parallelism values"""
+  if -1 in parallelism_vals:
+    assert parallelism_vals.count(-1) == 1, f"Found unspecified values (-1) for more than one {parallelism_type}\
+      parallelism axis. At most one axis can be unspecified."
+
+    determined_val = target_product/np.product(parallelism_vals)*-1
+
+    assert determined_val >= 1 and determined_val.is_integer, f"Unspecified value unable to be determined with the given\
+      {parallelism_type} parallelism values"
+
+    parallelism_vals[parallelism_vals.index(-1)] = int(determined_val)
+
+  target_type = "slices" if parallelism_type == 'DCN' else "devices per slice"
+
+  assert np.product(parallelism_vals) == target_product, f"Number of {target_type} {target_product} does not match\
+    the product of the {parallelism_type} parallelism {np.product(parallelism_vals)}"
+
+  return parallelism_vals
+
 def create_device_mesh(config):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas """
   devices = jax.devices()
   num_devices = len(devices)
+  try:
+    num_slices = 1 + max([d.slice_index for d in devices])
+  except:
+    num_slices = 1
+  num_devices_per_slice = num_devices//num_slices
   max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
   assert len(devices) > 1, "You must have at least two devices"
 
@@ -75,8 +101,9 @@ def create_device_mesh(config):
   dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism, config.dcn_tensor_parallelism]
   ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism, config.ici_tensor_parallelism]
 
-  assert np.product(dcn_parallelism) * np.product(ici_parallelism) == num_devices, f"Number of devices {num_devices} \
-        does not match the product of the parallelism {np.product(dcn_parallelism) * np.product(ici_parallelism)}"
+  # Find possible unspecified parallelisms
+  dcn_parallelism = fill_unspecified_mesh_axes(dcn_parallelism, num_slices, 'DCN')
+  ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, 'ICI')
 
   if multi_slice_env:
     mesh = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism)
