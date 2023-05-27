@@ -162,10 +162,13 @@ cd {run_name}
 sudo python3 -m virtualenv venv
 source venv/bin/activate
 (({download_from_gcs(zip_gcs_path)}
+gcloud version >> {log_name}
 tar xzf {zip_name}
 {main_command}) 2>&1) >> {log_name}
 {echo_finish_status_str()} >> {log_name}
 gsutil cp {log_name} "{bucket_path}/"
+sleep 10
+gcloud version >> {log_name}
 (({create_kill_command_str(run_name, project, zone)}) 2>&1 ) >> {log_name}"""
 
 def get_env_command_str(num_slices):
@@ -185,13 +188,54 @@ PROJECT=$(grep '^CONSUMER_PROJECT_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
 def echo_finish_status_str():
   return """echo "multihost_job finished main command on slice $SLICE_ID worker $WORKER_ID at $(date "+%Y-%m-%d %H:%M:%S") with exit status $?" """
 
-def create_kill_command_str(run_name, project, zone):
+def create_kill_command_str2(run_name, project, zone):
   # Only one worker is designated to bring down the whole QR, and it will wait a long time to give a
   #  chance for the other workers to log a timeout failure in the case that it exits/crashes before the rest.
   return f"""if [ $WORKER_ID==0 ] && [ $SLICE_ID==0 ]; then
-  sleep 6
+  sleep 1
   gcloud alpha compute tpus queued-resources delete {run_name} --force --quiet --async --project={project} --zone={zone}
 fi"""
+
+def create_kill_command_str3(run_name, project, zone):
+  return f"""if [ $WORKER_ID==0 ] && [ $SLICE_ID==0 ]; then
+total_sleep_time=0
+sleep_time=5
+has_recent_version=0
+good_version=432
+while [ $has_recent_version -eq 0 ]
+do
+    version=$(gcloud version | head -n 1)
+    version_num=$(echo "$version" | grep -oE '[0-9]+' | head -n 1)
+    if [ "$version_num" -ge "$good_version" ]
+    then
+        echo "go me"
+        gcloud alpha compute tpus queued-resources delete {run_name} --force --quiet --async --project={project} --zone={zone}
+        has_recent_version=1
+    else
+        sleep $sleep_time
+        total_sleep_time=$(($total_sleep_time + $sleep_time))
+        echo "Slept for a total of $total_sleep_time"
+    fi
+done
+fi"""
+
+def create_kill_command_str(run_name, project, zone):
+  return f"""if [ $WORKER_ID==0 ] && [ $SLICE_ID==0 ]; then
+  sleep 10
+  good_version=432
+  version=$(gcloud version | head -n 1)
+  version_num=$(echo "$version" | grep -oE '[0-9]+' | head -n 1)
+  echo "version_num before upgrade: $version_num"
+  if [ "$version_num" -lt "$good_version" ]
+    sudo apt update && yes | sudo apt upgrade google-compute-engine
+    version=$(gcloud version | head -n 1)
+    version_num=$(echo "$version" | grep -oE '[0-9]+' | head -n 1)
+    echo "version_num after upgrade: $version_num"
+  fi
+  echo "starting delete command"
+  gcloud alpha compute tpus queued-resources delete {run_name} --force --quiet --async --project={project} --zone={zone}
+fi"""
+
 
 def write_cqr_json_file(json_filename, project, zone, tpu_type, runtime_version, num_slices, run_name, network, subnetwork,
                         resource_pool, service_account, startup_script_str):
