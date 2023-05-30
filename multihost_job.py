@@ -150,9 +150,33 @@ def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
 
   return captured_output
 
-def run_create_resources(run_name, json_path, endpoint, project, zone):
+def run_create_resources_curl(run_name, json_path, endpoint, project, zone):
   # pylint: disable=line-too-long
   command = fr'curl -X POST -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "Content-Type: application/json" -d @{json_path} https://{endpoint}/v2alpha1/projects/{project}/locations/{zone}/queuedResources\?queued_resource_id\={run_name}'
+  captured_output = subprocess.run(command, check=True, shell=True, capture_output=True)
+  return captured_output
+
+def run_create_resources(project, zone, tpu_type, runtime_version, num_slices, run_name, network, subnetwork,
+                        resource_pool, service_account, startup_script_str):
+  # pylint: disable=line-too-long
+  command = fr'gcloud alpha compute tpus queued-resources create {run_name} --accelerator-type={tpu_type} --runtime-version={runtime_version} --project={project} --zone={zone} --network={network} --subnetwork={subnetwork}'
+  if num_slices > 1:
+    command = command + f' --node-prefix={run_name} --node-count={num_slices}'
+  else:
+    command = command + f' --node-id={run_name}'
+
+  if resource_pool == "reserved":
+    command = command + f' --reserved'
+  elif resource_pool == "best-effort":
+    command = command + f' --best-effort'
+
+  if service_account:
+    command = command + f' --service-account={service_account}'
+
+  command = command + f' --startup-script={startup_script_str}'
+
+  print('running CQR command: ', command)
+  
   captured_output = subprocess.run(command, check=True, shell=True, capture_output=True)
   return captured_output
 
@@ -366,10 +390,12 @@ def main() -> None:
   json_filename = 'cqr_request_' + run_name + '.json'
   json_path = os.path.join(tmp_dir, json_filename)
 
-  write_cqr_json_file(json_path, project, zone, tpu_type, tpu_runtime_version, num_slices, run_name, network,
-                      subnetwork, resource_pool, service_account, startup_script_str)
+  # write_cqr_json_file(json_path, project, zone, tpu_type, tpu_runtime_version, num_slices, run_name, network,
+  #                    subnetwork, resource_pool, service_account, startup_script_str)
+  
   print("Running CQR command...")
-  captured_output = run_create_resources(run_name, json_path, endpoint, project, zone)
+  captured_output = run_create_resources(project, zone, tpu_type, runtime_version, num_slices, run_name, network, subnetwork,
+                        resource_pool, service_account, startup_script_str)
   # TODO(Once startup-script is available in CLI, error handling can be improved)
   if captured_output.returncode != 0 or '"error"' in captured_output.stdout.decode() or \
     "Warning" in captured_output.stderr.decode():
