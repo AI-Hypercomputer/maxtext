@@ -171,9 +171,15 @@ def train_step(evil, model, config, state, data, dropout_rng):
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), grads = grad_fn(state.params)
-  f = lambda x, mu, nu : jax.numpy.clip(x, mu - 3 * jax.numpy.sqrt(nu + 1e-12), mu + 3 * jax.numpy.sqrt(nu + 1e-12))
-  grads_clipped = jax.tree_util.tree_map(f, grads, state.opt_state[0].mu, state.opt_state[0].nu)
-  #grads_clipped = max_utils.clip_pytree(grads, 3e-6)
+  if config.clipping == "none":
+    grads_clipped = grads
+  elif config.clipping == "element":
+    grads_clipped = max_utils.clip_pytree(grads, .3/jax.numpy.sqrt(872*1e6))
+  elif config.clipping == "global":
+    f = lambda x : x / jax.numpy.maximum(jax.numpy.array(1), max_utils.l2norm_pytree(grads))
+    grads_clipped = jax.tree_util.tree_map(f, grads)
+  else:
+    assert False, "unsupported"
   new_state = state.apply_gradients(grads=grads_clipped)
   metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
              'learning/grad_norm_clipped' : max_utils.l2norm_pytree(grads_clipped),

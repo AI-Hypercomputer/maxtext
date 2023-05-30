@@ -116,3 +116,5 @@ adam_eps: 1.e-8 # A small constant applied to denominator outside of the square 
 adam_eps_root: 0. # A small constant applied to denominator inside the square root.
 
 shuffle_train_data: False
+
+clipping: "none"
