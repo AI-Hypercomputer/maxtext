@@ -29,23 +29,23 @@ NoiseFn = Callable[[tuple[int, ...], jax.random.KeyArray], jnp.ndarray]
 class Tensor:
   """Configuration of quantization of one tensor or one side of tensor op."""
 
-  bits: int | None
-  calib_shared_axes: list[int] | None
+  bits: int
+  calib_shared_axes: list[int]
   preserve_zero: bool
-  bound: float | None
+  bound: float
   bound_stop_grad: bool
   # false = map max val on the end of the last bucket
   # true = map max val on the middle of the last
   preserve_max_val: bool
   clip: bool
   round: bool
-  clip_and_round: ClipAndRoundFn | None
-  noise_fn: NoiseFn | None
+  clip_and_round: ClipAndRoundFn
+  noise_fn: NoiseFn
   # Round up the calibration to power of 2 (po2).
   po2_scale: bool
 
   @classmethod
-  def make(cls, bits: int | None) -> 'Tensor':
+  def make(cls, bits: int) -> 'Tensor':
     pz = False if bits == 1 else True
 
     return Tensor(
@@ -107,8 +107,8 @@ class DotGeneralRaw:
   def make_conv_general_dilated(
       cls,
       spatial_dimensions=2,
-      lhs_bits: int | None = None,
-      rhs_bits: int | None = None,
+      lhs_bits: int = None,
+      rhs_bits: int = None,
   ) -> 'DotGeneralRaw':
     """Create quantization config conv_general_dilated."""
     config = cls.make(lhs_bits, rhs_bits)
@@ -130,8 +130,8 @@ class DotGeneral:
   @classmethod
   def make(
       cls,
-      lhs_bits: int | None = None,
-      rhs_bits: int | None = None,
+      lhs_bits: int = None,
+      rhs_bits: int = None,
   ) -> 'DotGeneral':
     """Create quantization configs for input matrices to a matmul."""
     return cls(

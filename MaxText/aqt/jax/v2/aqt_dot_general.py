@@ -26,8 +26,8 @@ import numpy as onp
 
 @flax.struct.dataclass
 class Context:
-  key: jax.random.KeyArray | None
-  train_step: int | None
+  key: jax.random.KeyArray
+  train_step: int
 
 
 def _context_split(context: Context) -> tuple[Context, Context]:
@@ -174,7 +174,7 @@ def make_fake_quant(cfg: config.Tensor):
 class TensorRes:
   value: jnp.ndarray
   qvalue: jnp.ndarray
-  qvalue_scale: jnp.ndarray | float
+  qvalue_scale: jnp.ndarray
 
 
 @flax.struct.dataclass
@@ -412,7 +412,7 @@ def _dot_general_raw_attach_gradient(
   return vjp
 
 
-def make_dot_general(cfg: config.DotGeneral | None):
+def make_dot_general(cfg: config.DotGeneral):
   """Makes quantized lax.dot_general replacement with attached gradients."""
   if cfg is None:
     def ret_lax_dg(
