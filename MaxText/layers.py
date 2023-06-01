@@ -17,6 +17,15 @@
 """Transformer model definition."""
 # pylint: disable=arguments-differ
 
+# pip aqt doesn't include v2 yet
+#from aqt.jax.v2 import aqt_dot_general as aqt
+#from aqt.jax.v2 import config as aqt_config
+
+# Instead git clone git@github.com:google/aqt.git
+# Also modify most of the x | y, including 100% of the x | NoneType
+from aqt.jax.v2 import aqt_dot_general as aqt
+from aqt.jax.v2 import config as aqt_config
+
 import dataclasses
 import functools
 import operator
@@ -170,8 +179,6 @@ def _canonicalize_tuple(x):
   else:
     return (x,)
 
-# create a quantization config
-aqt_cfg = aqt_config.fully_quantized(bits=8, use_fwd_quant=True)
 
 def noise_fn(shape, key):
     return jax.random.uniform(key, shape) - 0.5
@@ -222,17 +229,25 @@ class DenseGeneral(nn.Module):
 
     contract_ind = tuple(range(0, len(axis)))
 
-    if use_aqt:
-      aqt_cfg.dlhs.lhs.noise_fn = noise_fn
-      aqt_cfg.dlhs.rhs.noise_fn = noise_fn
-      aqt_cfg.drhs.lhs.noise_fn = noise_fn
-      aqt_cfg.drhs.rhs.noise_fn = noise_fn
+    use_aqt = True
+    if not use_aqt:
+      return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
+    else:
+      # create a quantization config
+      #aqt_cfg = aqt_config.fully_quantized(bits=8, use_fwd_quant=True)
+      aqt_cfg = aqt_config.DotGeneral.make(lhs_bits=8, rhs_bits=8)
+
+      # aqt_cfg.dlhs.lhs.noise_fn = noise_fn
+      # aqt_cfg.dlhs.rhs.noise_fn = noise_fn
+      # aqt_cfg.drhs.lhs.noise_fn = noise_fn
+      # aqt_cfg.drhs.rhs.noise_fn = noise_fn
 
       # use the config to create a quantized dot_general function
-      aqt_dot_general = aqt.make_dot_general(aqt_cfg)
+      aqt_dot_general = aqt.make_dot_general(aqt_cfg) # Give up on "custom" config
+      #aqt_dot_general = aqt.make_dot_general(None)
       return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
 
-    return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
+    
 
 
 def _convert_to_activation_function(
