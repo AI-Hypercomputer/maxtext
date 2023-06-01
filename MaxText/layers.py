@@ -170,6 +170,12 @@ def _canonicalize_tuple(x):
   else:
     return (x,)
 
+# create a quantization config
+aqt_cfg = aqt_config.fully_quantized(bits=8, use_fwd_quant=True)
+
+def noise_fn(shape, key):
+    return jax.random.uniform(key, shape) - 0.5
+
 
 class DenseGeneral(nn.Module):
   """A linear transformation (without bias) with flexible axes.
@@ -215,6 +221,17 @@ class DenseGeneral(nn.Module):
     kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(axis)))
+
+    if use_aqt:
+      aqt_cfg.dlhs.lhs.noise_fn = noise_fn
+      aqt_cfg.dlhs.rhs.noise_fn = noise_fn
+      aqt_cfg.drhs.lhs.noise_fn = noise_fn
+      aqt_cfg.drhs.rhs.noise_fn = noise_fn
+
+      # use the config to create a quantized dot_general function
+      aqt_dot_general = aqt.make_dot_general(aqt_cfg)
+      return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
+
     return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
 
 
