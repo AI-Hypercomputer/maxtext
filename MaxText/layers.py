@@ -112,8 +112,8 @@ def dot_product_attention(query: Array,
   # Layer norms here prevent (near) one-hot softmaxes, which can lead to
   # unstable training loss and nans, see the "QK Normalization" subsection in
   # https://arxiv.org/pdf/2302.05442.pdf.
-  query = LayerNorm(dtype=dtype, name='query_layer_norm')(query)
-  key = LayerNorm(dtype=dtype, name='key_layer_norm')(key)
+  query = LayerNorm(dtype=dtype, name='query_layer_norm', kernel_axes = ('heads',))(query)
+  key = LayerNorm(dtype=dtype, name='key_layer_norm', kernel_axes = ('heads',))(key)
 
   # `attn_weights`: [batch, num_heads, q_length, kv_length]
   attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
@@ -512,6 +512,7 @@ class LayerNorm(nn.Module):
   """T5 Layer normalization operating on the last axis of the input data."""
   epsilon: float = 1e-6
   dtype: Any = jnp.float32
+  kernel_axes: Tuple[str, ...] = ()
   scale_init: Initializer = nn.initializers.ones
 
   @nn.compact
@@ -522,7 +523,7 @@ class LayerNorm(nn.Module):
     mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
     y = jnp.asarray(x * lax.rsqrt(mean2 + self.epsilon), self.dtype)
     scale = self.param(
-        'scale', withLP(self.scale_init, ('embed',)), (features,), jnp.float32)
+        'scale', withLP(self.scale_init, self.kernel_axes), (features,), jnp.float32)
 
     scale = jnp.asarray(scale, self.dtype)
     return y * scale
@@ -950,7 +951,7 @@ class DecoderLayer(nn.Module):
 
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = LayerNorm(
-        dtype=cfg.dtype, name='pre_self_attention_layer_norm')(
+        dtype=cfg.dtype, name='pre_self_attention_layer_norm', kernel_axes = ('embed',))(
             inputs)
     lnx = nn.with_logical_constraint(lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
@@ -1069,7 +1070,7 @@ class Decoder(nn.Module):
                 decode,
                 max_decode_length)
 
-    y = LayerNorm(dtype=cfg.dtype, name='decoder_norm')(y)
+    y = LayerNorm(dtype=cfg.dtype, name='decoder_norm', kernel_axes = ('embed',))(y)
     y = nn.Dropout(
         rate=cfg.dropout_rate, broadcast_dims=(-2,))(
             y, deterministic=deterministic)
