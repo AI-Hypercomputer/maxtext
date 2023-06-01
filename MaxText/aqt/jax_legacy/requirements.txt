@@ -1,0 +1,7 @@
+numpy>=1.16.4
+jax>=0.3.4
+flax>=0.4.1
+tensorflow>=2.3.1
+tensorflow-datasets>=4.5.2
+dacite>=1.6.0
+ml_collections>=0.1.1

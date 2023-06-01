@@ -125,6 +125,7 @@ def dot_product_attention(query: Array,
   key = LayerNorm(dtype=dtype, name='key_layer_norm', kernel_axes = ('heads',))(key)
 
   # `attn_weights`: [batch, num_heads, q_length, kv_length]
+  # matt: Queries * Keys: replace this einsum with int8 einsum?
   attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
 
   # Apply attention bias: masking, dropout, proximity bias, etc.
@@ -147,6 +148,7 @@ def dot_product_attention(query: Array,
     attn_weights = attn_weights * multiplier
 
   # Take the linear combination of `value`.
+  # Mattdavidow: Replace this einsum with int8 einsum? (this is ** in (QK^T)**V)
   return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
 
 
@@ -229,22 +231,13 @@ class DenseGeneral(nn.Module):
 
     contract_ind = tuple(range(0, len(axis)))
 
-    use_aqt = True
+    use_aqt = False
     if not use_aqt:
       return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
     else:
-      # create a quantization config
-      #aqt_cfg = aqt_config.fully_quantized(bits=8, use_fwd_quant=True)
       aqt_cfg = aqt_config.DotGeneral.make(lhs_bits=8, rhs_bits=8)
-
-      # aqt_cfg.dlhs.lhs.noise_fn = noise_fn
-      # aqt_cfg.dlhs.rhs.noise_fn = noise_fn
-      # aqt_cfg.drhs.lhs.noise_fn = noise_fn
-      # aqt_cfg.drhs.rhs.noise_fn = noise_fn
-
       # use the config to create a quantized dot_general function
-      aqt_dot_general = aqt.make_dot_general(aqt_cfg) # Give up on "custom" config
-      #aqt_dot_general = aqt.make_dot_general(None)
+      aqt_dot_general = aqt.make_dot_general(aqt_cfg)
       return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
 
     
