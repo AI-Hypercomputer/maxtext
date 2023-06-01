@@ -231,9 +231,25 @@ class DenseGeneral(nn.Module):
 
     contract_ind = tuple(range(0, len(axis)))
 
-    use_aqt = False
+    use_aqt = "FQT"
     if not use_aqt:
       return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
+    elif use_aqt == "FQT":
+      # create a quantization config
+      aqt_cfg = aqt_config.fully_quantized(bits=8, use_fwd_quant=True)
+
+      def noise_fn(shape, key):
+        key = 0
+        return jax.random.uniform(key, shape) - 0.5
+
+      aqt_cfg.dlhs.lhs.noise_fn = noise_fn
+      aqt_cfg.dlhs.rhs.noise_fn = noise_fn
+      aqt_cfg.drhs.lhs.noise_fn = noise_fn
+      aqt_cfg.drhs.rhs.noise_fn = noise_fn
+
+      # use the config to create a quantized dot_general function
+      aqt_dot_general = aqt.make_dot_general(aqt_cfg)
+      return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
     else:
       aqt_cfg = aqt_config.DotGeneral.make(lhs_bits=8, rhs_bits=8)
       # use the config to create a quantized dot_general function
