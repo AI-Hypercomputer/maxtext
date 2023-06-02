@@ -52,8 +52,17 @@ import max_logging
 
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
-
-
+# https://arxiv.org/pdf/2204.02311.pdf Appendix B
+def calculate_training_tflops(num_model_parameters, config):
+  learnable_weight_tflops = 6 * num_model_parameters * config.max_target_length * config.per_device_batch_size \
+                                   / 10**12
+  attention_tflops = 12 * config.num_heads * config.num_decoder_layers * config.head_dim * config.max_target_length**2 \
+                     * config.per_device_batch_size / 10**12
+  total_tflops = learnable_weight_tflops + attention_tflops
+  print(f'Per train step, total TFLOPs will be {total_tflops:.2f},',
+        f'split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops',
+        f'and {100 * attention_tflops/total_tflops:.2f}% attention flops')
+  return total_tflops
 
 def get_first_step(state):
   with jax.spmd_mode('allow_all'):
@@ -280,7 +289,7 @@ def train_loop(config, state=None):
 
   num_model_parameters = calculate_num_params_from_pytree(state.params)
   max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
-  per_device_tflops =  6 * num_model_parameters * config.max_target_length * config.per_device_batch_size / 10**12
+  per_device_tflops = calculate_training_tflops(num_model_parameters, config)
 
   # Define compiled top-level functions.
   p_train_step = pjit(
