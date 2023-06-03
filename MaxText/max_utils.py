@@ -143,7 +143,6 @@ def init_train_state(model, tx, config, key):
   )
   model_vars = model.init({'params': key, 'dropout': key, 'aqt': key},
                           jnp.ones(input_shape),
-                          jnp.ones(input_shape),
                           jnp.ones(input_shape))
   state = train_state.TrainState.create(
       apply_fn=model.apply,
