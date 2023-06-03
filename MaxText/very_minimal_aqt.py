@@ -9,12 +9,11 @@ import jax.numpy as jnp
 
 
 def my_dot_general(lhs, rhs):
-    use_aqt = "FQT2" # "FQT"
+    use_aqt = True
 
     if not use_aqt:
-        res = lax.dot_general(lhs, rhs, (((1,), (1,)), ((), ())))
-    elif use_aqt == "FQT":
-        print("go me")
+        return lax.dot_general(lhs, rhs, (((1,), (1,)), ((), ())))
+    else:
         # create a quantization config
         aqt_cfg = aqt_config.fully_quantized(bits=8, use_fwd_quant=True)
 
@@ -28,15 +27,7 @@ def my_dot_general(lhs, rhs):
 
         # use the config to create a quantized dot_general function
         aqt_dot_general = aqt.make_dot_general(aqt_cfg)
-        res = aqt_dot_general(lhs, rhs, (((1,), (1,)), ((), ())))
-    else:
-        aqt_cfg = aqt_config.DotGeneral.make(lhs_bits=8, rhs_bits=8)
-        # use the config to create a quantized dot_general function
-        aqt_dot_general = aqt.make_dot_general(aqt_cfg)
-        res = aqt_dot_general(lhs, rhs, (((1,), (1,)), ((), ())))
-
-    #print("res: ", res)
-    return res
+        return aqt_dot_general(lhs, rhs, (((1,), (1,)), ((), ())))
 
 def loss_fn(lhs, rhs):
     return jnp.linalg.norm(my_dot_general(lhs,rhs))

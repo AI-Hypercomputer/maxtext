@@ -239,7 +239,6 @@ class DenseGeneral(nn.Module):
       aqt_cfg = aqt_config.fully_quantized(bits=8, use_fwd_quant=True)
 
       def noise_fn(shape, key):
-        key = 0
         return jax.random.uniform(key, shape) - 0.5
 
       aqt_cfg.dlhs.lhs.noise_fn = noise_fn
