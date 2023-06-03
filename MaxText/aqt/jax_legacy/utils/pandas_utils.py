@@ -285,5 +285,5 @@ def boxplot_with_group_by_sorted_by_median(df: pd.DataFrame,
   """
   grouped_df = pd.DataFrame(
       {group: values[column_to_plot] for group, values in df.groupby(by)})
-  medians = grouped_df.median().sort_values()
+  medians = grouped_df.median().sort_values()  # pytype: disable=attribute-error  # pandas-15-upgrade
   return grouped_df[medians.index].boxplot(rot=0, return_type='axes')

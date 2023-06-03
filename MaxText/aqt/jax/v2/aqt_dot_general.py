@@ -16,6 +16,7 @@
 # pylint: disable=g-explicit-bool-comparison
 
 import copy
+from typing import Optional, Union
 from aqt.jax.v2 import config
 import flax.struct
 import jax
@@ -26,8 +27,8 @@ import numpy as onp
 
 @flax.struct.dataclass
 class Context:
-  key: jax.random.KeyArray
-  train_step: int
+  key: Optional[jax.random.KeyArray]
+  train_step: Optional[int]
 
 
 def _context_split(context: Context) -> tuple[Context, Context]:
@@ -174,7 +175,7 @@ def make_fake_quant(cfg: config.Tensor):
 class TensorRes:
   value: jnp.ndarray
   qvalue: jnp.ndarray
-  qvalue_scale: jnp.ndarray
+  qvalue_scale: Union[jnp.ndarray, float]
 
 
 @flax.struct.dataclass
@@ -412,7 +413,7 @@ def _dot_general_raw_attach_gradient(
   return vjp
 
 
-def make_dot_general(cfg: config.DotGeneral):
+def make_dot_general(cfg: Optional[config.DotGeneral]):
   """Makes quantized lax.dot_general replacement with attached gradients."""
   if cfg is None:
     def ret_lax_dg(
