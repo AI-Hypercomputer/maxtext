@@ -41,7 +41,7 @@ def my_dot_general(lhs, rhs):
 
         # add some fun key stuff
         key = jax.random.PRNGKey(0)
-        context = aqt.Context(key=key, train_step=0)
+        context = aqt.Context(key=key, train_step=None) # None is recommended by Lukasz
         dg = functools.partial(aqt_dot_general, context=context)
         # equiv return aqt_dot_general(lhs, rhs, (((1,), (1,)), ((), ())), context=context)
 

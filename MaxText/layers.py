@@ -231,6 +231,7 @@ class DenseGeneral(nn.Module):
 
     contract_ind = tuple(range(0, len(axis)))
 
+    aqt_key = None
     use_aqt = "FQT"
     if not use_aqt:
       return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
@@ -248,7 +249,15 @@ class DenseGeneral(nn.Module):
 
       # use the config to create a quantized dot_general function
       aqt_dot_general = aqt.make_dot_general(aqt_cfg)
-      return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
+
+      # some fun key stuff
+      #key = jax.random.PRNGKey(0) # should actually get next key
+      rng = random.PRNGKey(0)  # Initialize PRNG key with a seed value
+      aqt_key = self.make_rng('aqt')
+      #aqt_key = jax.random.PRNGKey(0)
+      context = aqt.Context(key=aqt_key, train_step=None)
+
+      return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
     else:
       aqt_cfg = aqt_config.DotGeneral.make(lhs_bits=8, rhs_bits=8)
       # use the config to create a quantized dot_general function
@@ -330,6 +339,7 @@ class MultiHeadDotProductAttention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
+    #matt_rng = self.make_rng('aqt')
     projection = functools.partial(
         DenseGeneral,
         axis=-1,
@@ -1073,7 +1083,8 @@ class Decoder(nn.Module):
           },
           split_rngs={
               'params': True,
-              'dropout': cfg.enable_dropout
+              'dropout': cfg.enable_dropout,
+              'aqt': cfg.enable_dropout #TODO(mattdavidow change to cfg.enable_aqt or w/e)
           },
           in_axes=(nn.broadcast, nn.broadcast, nn.broadcast,
                    nn.broadcast),
