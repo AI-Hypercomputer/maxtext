@@ -125,7 +125,6 @@ def dot_product_attention(query: Array,
   key = LayerNorm(dtype=dtype, name='key_layer_norm', kernel_axes = ('heads',))(key)
 
   # `attn_weights`: [batch, num_heads, q_length, kv_length]
-  # matt: Queries * Keys: replace this einsum with int8 einsum?
   attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
 
   # Apply attention bias: masking, dropout, proximity bias, etc.
@@ -148,7 +147,6 @@ def dot_product_attention(query: Array,
     attn_weights = attn_weights * multiplier
 
   # Take the linear combination of `value`.
-  # Mattdavidow: Replace this einsum with int8 einsum? (this is ** in (QK^T)**V)
   return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
 
 
@@ -180,11 +178,6 @@ def _canonicalize_tuple(x):
     return tuple(x)
   else:
     return (x,)
-
-
-def noise_fn(shape, key):
-    return jax.random.uniform(key, shape) - 0.5
-
 
 class DenseGeneral(nn.Module):
   """A linear transformation (without bias) with flexible axes.
@@ -231,11 +224,9 @@ class DenseGeneral(nn.Module):
 
     contract_ind = tuple(range(0, len(axis)))
 
-    aqt_key = None
-    use_aqt = "FQT"
-    if not use_aqt:
+    if not config.use_int8_training:
       return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
-    elif use_aqt == "FQT":
+    else:
       # create a quantization config
       aqt_cfg = aqt_config.fully_quantized(bits=8, use_fwd_quant=True)
 
@@ -258,14 +249,6 @@ class DenseGeneral(nn.Module):
       context = aqt.Context(key=aqt_key, train_step=None)
 
       return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
-    else:
-      aqt_cfg = aqt_config.DotGeneral.make(lhs_bits=8, rhs_bits=8)
-      # use the config to create a quantized dot_general function
-      aqt_dot_general = aqt.make_dot_general(aqt_cfg)
-      return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
-
-    
-
 
 def _convert_to_activation_function(
     fn_or_string: Union[str, Callable]) -> Callable:
@@ -339,7 +322,6 @@ class MultiHeadDotProductAttention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
-    #matt_rng = self.make_rng('aqt')
     projection = functools.partial(
         DenseGeneral,
         axis=-1,
@@ -1084,7 +1066,7 @@ class Decoder(nn.Module):
           split_rngs={
               'params': True,
               'dropout': cfg.enable_dropout,
-              'aqt': cfg.enable_dropout #TODO(mattdavidow change to cfg.enable_aqt or w/e)
+              'aqt': cfg.use_int8_training
           },
           in_axes=(nn.broadcast, nn.broadcast, nn.broadcast,
                    nn.broadcast),
