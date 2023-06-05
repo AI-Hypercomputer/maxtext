@@ -25,6 +25,7 @@ metrics_file: "" # for testing, local file that stores scalar metrics. If empty,
 
 # Activation dtypes.
 dtype: "bfloat16"
+use_int8_training: False
 scale: 1
 base_emb_dim: 2048
 base_num_heads: 8
