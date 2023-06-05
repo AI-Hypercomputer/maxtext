@@ -17,12 +17,6 @@
 """Transformer model definition."""
 # pylint: disable=arguments-differ
 
-# pip aqt doesn't include v2 yet
-#from aqt.jax.v2 import aqt_dot_general as aqt
-#from aqt.jax.v2 import config as aqt_config
-
-# Instead git clone git@github.com:google/aqt.git
-# Also modify most of the x | y, including 100% of the x | NoneType
 from aqt.jax.v2 import aqt_dot_general as aqt
 from aqt.jax.v2 import config as aqt_config
 
@@ -189,6 +183,7 @@ class DenseGeneral(nn.Module):
       kernel_init: initializer function for the weight matrix.
   """
   features: Union[Iterable[int], int]
+  config: Config
   axis: Union[Iterable[int], int] = -1
   dtype: DType = jnp.float32
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
@@ -204,6 +199,7 @@ class DenseGeneral(nn.Module):
     Returns:
       The transformed input.
     """
+    cfg = self.config
     features = _canonicalize_tuple(self.features)
     axis = _canonicalize_tuple(self.axis)
 
@@ -224,7 +220,7 @@ class DenseGeneral(nn.Module):
 
     contract_ind = tuple(range(0, len(axis)))
 
-    if not config.use_int8_training:
+    if not cfg.use_int8_training:
       return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
     else:
       # create a quantization config
@@ -280,6 +276,7 @@ class MultiHeadDotProductAttention(nn.Module):
 
   num_heads: int
   head_dim: int
+  config: Config
   dtype: DType = jnp.float32
   dropout_rate: float = 0.
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
@@ -322,12 +319,15 @@ class MultiHeadDotProductAttention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
+    cfg = self.config
+
     projection = functools.partial(
         DenseGeneral,
         axis=-1,
         features=(self.num_heads, self.head_dim),
         kernel_axes=('embed', 'heads', 'kv'),
-        dtype=self.dtype)
+        dtype=self.dtype,
+        config=cfg)
 
     # NOTE: T5 does not explicitly rescale the attention logits by
     #       1/sqrt(depth_kq)!  This is folded into the initializers of the
@@ -457,7 +457,8 @@ class MultiHeadDotProductAttention(nn.Module):
         kernel_init=self.kernel_init,
         kernel_axes=('heads', 'kv', 'embed'),
         dtype=self.dtype,
-        name='out')(
+        name='out',
+        config=cfg)(
             x)
     return out
 
@@ -477,6 +478,7 @@ class MlpBlock(nn.Module):
     intermediate_dropout_rate: Dropout rate used after the intermediate layers.
     dtype: Type for the dense layer.
   """
+  config: Config
   intermediate_dim: int = 2048
   activations: Sequence[Union[str, Callable]] = ('relu',)
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
@@ -486,6 +488,8 @@ class MlpBlock(nn.Module):
   @nn.compact
   def __call__(self, inputs, decode: bool = False, deterministic: bool = False):
     """Applies Transformer MlpBlock module."""
+    cfg = self.config
+  
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
     activations = []
@@ -496,7 +500,8 @@ class MlpBlock(nn.Module):
           dtype=self.dtype,
           kernel_init=self.kernel_init,
           kernel_axes=('embed', 'mlp'),
-          name=dense_name)(
+          name=dense_name,
+          config=cfg)(
               inputs)
       x = _convert_to_activation_function(act_fn)(x)
       activations.append(x)
@@ -513,7 +518,8 @@ class MlpBlock(nn.Module):
         dtype=self.dtype,
         kernel_init=self.kernel_init,
         kernel_axes=('mlp', 'embed'),
-        name='wo')(
+        name='wo',
+        config=cfg)(
             x)
     return output
 
@@ -976,7 +982,8 @@ class DecoderLayer(nn.Module):
         dtype=cfg.dtype,
         head_dim=cfg.head_dim,
         dropout_rate=cfg.dropout_rate,
-        name='self_attention')(
+        name='self_attention',
+        config=cfg)(
             lnx,
             lnx,
             decoder_mask,
@@ -992,6 +999,7 @@ class DecoderLayer(nn.Module):
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         name='mlp',
+        config=cfg,
     )(lnx, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
@@ -1102,7 +1110,8 @@ class Decoder(nn.Module):
           cfg.vocab_size,
           dtype=jnp.float32,  # Use float32 for stabiliity.
           kernel_axes=('embed', 'vocab'),
-          name='logits_dense')(
+          name='logits_dense',
+          config=cfg)(
               y)
     logits = nn.with_logical_constraint(logits, ('activation_batch', 'activation_length', 'activation_vocab'))
     return logits
