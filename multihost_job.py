@@ -157,7 +157,7 @@ def run_create_resources(startup_script_file, args):
   captured_output = subprocess.run(command, check=False, shell=True, capture_output=True)
   return captured_output
 
-def write_startup_script(zip_path, zip_name, log_name, bucket_path, startup_script_file, args):
+def write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file, args):
   """ Write the startup script locally into a file to be passed to the CQR command. """
   startup_script = f"""#!/bin/bash
 mkdir -p {args.RUN_NAME}
@@ -305,8 +305,8 @@ def main() -> None:
 
   #### Step 2: Run the CQR command ####
   log_name = "main_command_log_slice_${SLICE_ID}_worker_${WORKER_ID}"
-  zip_path = os.path.join(bucket_path, zip_name)
-  write_startup_script(zip_path, zip_name, log_name, bucket_path, startup_script_file, args)
+  zip_gcs_path = os.path.join(bucket_path, zip_name)
+  write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file, args)
 
   print("Running CQR command...")
   captured_output = run_create_resources(startup_script_file, args)
