@@ -154,6 +154,8 @@ def run_create_resources(startup_script_file, args):
   if args.CQR_EXTRA_ARGS:
     command = command + ' ' + args.CQR_EXTRA_ARGS
 
+  print(f"CQR COMMAND: \n {command}")
+
   captured_output = subprocess.run(command, check=False, shell=True, capture_output=True)
   return captured_output
 
