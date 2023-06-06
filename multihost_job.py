@@ -324,13 +324,13 @@ def main() -> None:
   print("------------------------------------ \n")
   print("multihost_job finished running, TPUs are firing up now to run your job remotely.\n")
 
-  print(f"Your job is being logged, follow it here:\n{google_cloud_logging_url(args.RUN_NAME, project)}\n")
+  print(f"Your job is being logged, follow it here:\n{google_cloud_logging_url(args.RUN_NAME, args.PROJECT)}\n")
 
   print(f"To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:"\
-      f"\n{google_cloud_logging_single_host_url(args.RUN_NAME, project)}\n")
+      f"\n{google_cloud_logging_single_host_url(args.RUN_NAME, args.PROJECT)}\n")
 
   print(f"When your job is finished, the main command log is in the GCS bucket here:"\
-      f"\n{gcs_bucket_url(bucket_name, bucket_dir, project)}\n")
+      f"\n{gcs_bucket_url(bucket_name, bucket_dir, args.PROJECT)}\n")
 
   print("View the status of the created TPUs via: ")
   print(f"gcloud compute tpus tpu-vm list --filter={args.RUN_NAME}\n")
