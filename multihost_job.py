@@ -350,7 +350,7 @@ def main() -> None:
                         resource_pool, service_account, startup_script_file)
   if captured_output.returncode != 0 :
     print(f"\n\nCreate resource request returned with ERROR returncode {captured_output.returncode}.\n")
-    print("Create resource error:\n" + captured_output.error.decode())
+    print("Create resource error:\n" + captured_output.stderr.decode())
     return 1
   print("CQR command received! TPUs are being created.\n")
 
