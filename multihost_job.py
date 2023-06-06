@@ -78,15 +78,10 @@ parser.add_argument('--ENDPOINT', type=str, default='tpu.googleapis.com',
                     help='The endpoint for google API requests.')
 parser.add_argument('--RUN_NAME', type=str, default=None,
                     help='Run name used for temporary files, defaults to timestamp.')
-parser.add_argument('--NETWORK', type=str, default='default',
-                    help='Gcloud compute engine network.')
-parser.add_argument('--SUBNETWORK', type=str, default='default',
-                    help='Gcloud compute engine subnetwork.')
-parser.add_argument('--RESOURCE_POOL', type=str,
-                    default='on-demand', choices=["reserved", "on-demand", "best-effort"],
-                    help='The resource pool to use, either \'reserved\', \'on-demand\', or \'best-effort\'.')
-parser.add_argument('--SERVICE_ACCOUNT', type=str,
-                    default=None, help='Service account for the TPU VMs.')
+parser.add_argument('--CQR_EXTRA_ARGS ', type=str, default=None,
+                    help='Additional arguments to be passed verbatim to CQR request, e.g. \
+                    --CQR_EXTRA_ARGS="--reserved --service-account=my-sa.com')
+
 args = parser.parse_args()
 
 def get_project():
@@ -109,7 +104,7 @@ def get_run_name():
   return os.getlogin() + "-" + now.strftime("%Y-%m-%d-%H-%M-%S")
 
 def print_flags(tpu_type, runtime_version, num_slices, script_dir, main_command, bucket_name, bucket_dir, endpoint, project,
-                zone, network, subnetwork, resource_pool, service_account, run_name):
+                zone, run_name, extra_args):
   """ Print configuration values after defaults have been filled in. """
   print("Running multihost_job with the following configuration:")
   print(f"Project             (--PROJECT)         = {project}")
@@ -122,11 +117,8 @@ def print_flags(tpu_type, runtime_version, num_slices, script_dir, main_command,
   print(f"Bucket dir          (--BUCKET_DIR)      = {bucket_dir}")
   print(f"Command to run      (--COMMAND)         = {main_command}")
   print(f"Endpoint            (--ENDPOINT)        = {endpoint}")
-  print(f"Network             (--NETWORK)         = {network}")
-  print(f"Subnetwork          (--SUBNETWORK)      = {subnetwork}")
-  print(f"Resource pool       (--RESOURCE_POOL)   = {resource_pool}")
-  print(f"Service_account     (--SERVICE_ACCOUNT) = {service_account}")
-  print(f"Run name            (--RUN_NAME)        = {run_name}\n")
+  print(f"Run name            (--RUN_NAME)        = {run_name}")
+  print(f"Extra CQR args      (--CQR_EXTRA_ARGS)  = {extra_args}\n")
 
 def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
   """ Zip the script directory, cp it to GCS """
@@ -149,46 +141,37 @@ def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
 
   return captured_output
 
-def run_create_resources(project, zone, tpu_type, runtime_version, num_slices, run_name, network, subnetwork,
-                         resource_pool, service_account, startup_script_file):
+def run_create_resources(startup_script_file, args):
   """ Run the Create Queued Resources (CQR) request """
   # pylint: disable=line-too-long
-  command = fr'gcloud alpha compute tpus queued-resources create {run_name} --accelerator-type={tpu_type} --runtime-version={runtime_version} --project={project} --zone={zone} --network={network} --subnetwork={subnetwork}'
-  if num_slices > 1:
-    command = command + f' --node-prefix={run_name} --node-count={num_slices}'
+  command = fr'gcloud alpha compute tpus queued-resources create {args.RUN_NAME} --accelerator-type={args.TPU_TYPE} --runtime-version={args.VERSION} --project={args.PROJECT} --zone={args.ZONE}'
+  if args.NUM_SLICES > 1:
+    command = command + f' --node-prefix={args.RUN_NAME} --node-count={args.NUM_SLICES}'
   else:
-    command = command + f' --node-id={run_name}'
-
-  if resource_pool == "reserved":
-    command = command + f' --reserved'
-  elif resource_pool == "best-effort":
-    command = command + f' --best-effort'
-
-  if service_account:
-    command = command + f' --service-account={service_account}'
+    command = command + f' --node-id={args.RUN_NAME}'
 
   command = command + f' --metadata-from-file=startup-script={startup_script_file}'
 
-  print('running CQR command: ', command)
+  if args.CQR_EXTRA_ARGS:
+    command = command + ' ' + args.CQR_EXTRA_ARGS
 
   captured_output = subprocess.run(command, check=False, shell=True, capture_output=True)
   return captured_output
 
-def write_startup_script(run_name, zip_gcs_path, zip_name, main_command, log_name, bucket_path, num_slices,
-                         endpoint, startup_script_file):
+def write_startup_script(zip_path, zip_name, log_name, bucket_path, startup_script_file, args):
   """ Write the startup script locally into a file to be passed to the CQR command. """
   startup_script = f"""#!/bin/bash
-mkdir -p {run_name}
-cd {run_name}
-{get_env_command_str(num_slices)}
-{setup_ops_str(run_name, log_name)}
+mkdir -p {args.RUN_NAME}
+cd {args.RUN_NAME}
+{get_env_command_str(args.NUM_SLICES)}
+{setup_ops_str(args.RUN_NAME, log_name)}
 sudo python3 -m virtualenv venv
 source venv/bin/activate
 (({download_from_gcs(zip_gcs_path)}
 tar xzf {zip_name}
-{main_command}) 2>&1) >> {log_name}
+{args.MAIN_COMMAND}) 2>&1) >> {log_name}
 gsutil cp {log_name} "{bucket_path}/"
-{create_kill_command_str(endpoint)}"""
+{create_kill_command_str(args.ENDPOINT)}"""
 
   with open(startup_script_file, "w", encoding="utf-8") as f:
     f.write(startup_script)
@@ -294,42 +277,25 @@ def main() -> None:
   print("\nStarting multihost_job...\n", flush=True)
 
   #### Parse flags ####
-  tpu_type = args.TPU_TYPE
-  tpu_runtime_version = args.VERSION
-  num_slices = args.NUM_SLICES
-  script_dir = args.SCRIPT_DIR
-  main_command = args.COMMAND
-  bucket_name = args.BUCKET_NAME
-  bucket_dir = args.BUCKET_DIR
-  endpoint = args.ENDPOINT
-  project = args.PROJECT
-  zone = args.ZONE
-  run_name = args.RUN_NAME
-  network = args.NETWORK
-  subnetwork = args.SUBNETWORK
-  resource_pool = args.RESOURCE_POOL
-  service_account = args.SERVICE_ACCOUNT
+  if not args.PROJECT:
+    args.PROJECT = get_project()
+  if not args.ZONE:
+    args.ZONE = get_zone()
+  if not args.RUN_NAME:
+    args.RUN_NAME = get_run_name() # Used for QR name, TPU_PREFIX, logging file, and tmp json file.
 
-  if not project:
-    project = get_project()
-  if not zone:
-    zone = get_zone()
-  if not run_name:
-    run_name = get_run_name() # Used for QR name, TPU_PREFIX, logging file, and tmp json file.
-
-  print_flags(tpu_type, tpu_runtime_version, num_slices, script_dir, main_command, bucket_name, bucket_dir,
-              endpoint, project, zone, network, subnetwork, resource_pool, service_account, run_name)
+  print_flags(args)
 
   ##### Step 1: Zip code and move it to GCS #####
   tmp_dir_relative_to_script = os.path.join("tmp", run_name, "")
   tmp_dir = os.path.join(script_dir, tmp_dir_relative_to_script)
   zip_name = "script_dir_zip_" + run_name + ".tar.gz"
-  bucket_dir = os.path.join(bucket_dir, run_name)
-  bucket_path = os.path.join(f"gs://{bucket_name}", bucket_dir)
+  bucket_dir = os.path.join(args.BUCKET_DIR, run_name)
+  bucket_path = os.path.join(f"gs://{args.BUCKET_NAME}", bucket_dir)
   startup_script_file = os.path.join(tmp_dir, "startup_script.txt")
 
   print(f"Moving {script_dir} to {bucket_path}...")
-  captured_output = move_script_dir_to_gcs(script_dir, tmp_dir_relative_to_script, zip_name, bucket_path)
+  captured_output = move_script_dir_to_gcs(args.SCRIPT_DIR, tmp_dir_relative_to_script, zip_name, bucket_path)
   if captured_output.returncode != 0:
     print("\n\n Moving code to GCS failed")
     print(f"Running 'gsutil mv zip {bucket_path}' failed with error: ")
@@ -341,12 +307,10 @@ def main() -> None:
   #### Step 2: Run the CQR command ####
   log_name = "main_command_log_slice_${SLICE_ID}_worker_${WORKER_ID}"
   zip_path = os.path.join(bucket_path, zip_name)
-  write_startup_script(run_name, zip_path, zip_name, main_command, log_name, bucket_path,
-                       num_slices, endpoint, startup_script_file)
+  write_startup_script(zip_path, zip_name, log_name, bucket_path, startup_script_file, args)
 
   print("Running CQR command...")
-  captured_output = run_create_resources(project, zone, tpu_type, tpu_runtime_version, num_slices, run_name, network,
-                                         subnetwork, resource_pool, service_account, startup_script_file)
+  captured_output = run_create_resources(startup_script_file, args)
   if captured_output.returncode != 0:
     print(f"\n\nCreate resource request returned with ERROR returncode {captured_output.returncode}.\n")
     print("Create resource error:\n" + captured_output.stderr.decode())
