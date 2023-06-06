@@ -287,13 +287,13 @@ def main() -> None:
 
   ##### Step 1: Zip code and move it to GCS #####
   tmp_dir_relative_to_script = os.path.join("tmp", args.RUN_NAME, "")
-  tmp_dir = os.path.join(script_dir, tmp_dir_relative_to_script)
+  tmp_dir = os.path.join(args.SCRIPT_DIR, tmp_dir_relative_to_script)
   zip_name = "script_dir_zip_" + args.RUN_NAME + ".tar.gz"
   bucket_dir = os.path.join(args.BUCKET_DIR, args.RUN_NAME)
   bucket_path = os.path.join(f"gs://{args.BUCKET_NAME}", bucket_dir)
   startup_script_file = os.path.join(tmp_dir, "startup_script.txt")
 
-  print(f"Moving {script_dir} to {bucket_path}...")
+  print(f"Moving {args.SCRIPT_DIR} to {bucket_path}...")
   captured_output = move_script_dir_to_gcs(args.SCRIPT_DIR, tmp_dir_relative_to_script, zip_name, bucket_path)
   if captured_output.returncode != 0:
     print("\n\n Moving code to GCS failed")
