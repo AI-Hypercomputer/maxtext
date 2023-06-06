@@ -169,10 +169,9 @@ def run_create_resources(project, zone, tpu_type, runtime_version, num_slices, r
 
   command = command + f' --metadata-from-file=startup-script={startup_script_file}'
 
-  print('running CQR command: ', command)
+  # print('running CQR command: ', command)
   
-  # captured_output = subprocess.run(command, check=True, shell=True, capture_output=True)
-  captured_output = None
+  captured_output = subprocess.run(command, check=True, shell=True, capture_output=True)
   return captured_output
 
 def write_startup_script(run_name, zip_gcs_path, zip_name, main_command, log_name, bucket_path, num_slices, endpoint, startup_script_file):
@@ -330,8 +329,6 @@ def main() -> None:
   bucket_path = os.path.join(f"gs://{bucket_name}", bucket_dir)
   startup_script_file = os.path.join(tmp_dir, "startup_script.txt")
 
-  print("ssf: ", startup_script_file)
-
   print(f"Moving {script_dir} to {bucket_path}...")
   captured_output = move_script_dir_to_gcs(script_dir, tmp_dir_relative_to_script, zip_name, bucket_path)
   if captured_output.returncode != 0:
@@ -359,7 +356,7 @@ def main() -> None:
 
   #### Step 3: Cleanup ####
   # Cleanup locally created directory
-  #shutil.rmtree(tmp_dir)
+  shutil.rmtree(tmp_dir)
   # We leave the zipped script dir and log in GCS
 
   print("------------------------------------ \n")
