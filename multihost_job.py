@@ -329,6 +329,8 @@ def main() -> None:
   bucket_path = os.path.join(f"gs://{bucket_name}", bucket_dir)
   startup_script_file = os.path.join(tmp_dir, "startup_script.txt")
 
+  print("ssf: ", startup_script_file)
+
   print(f"Moving {script_dir} to {bucket_path}...")
   captured_output = move_script_dir_to_gcs(script_dir, tmp_dir_relative_to_script, zip_name, bucket_path)
   if captured_output.returncode != 0:
@@ -344,8 +346,6 @@ def main() -> None:
   zip_path = os.path.join(bucket_path, zip_name)
   write_startup_script(run_name, zip_path, zip_name, main_command, log_name, bucket_path,
                                                  num_slices, endpoint, startup_script_file)
-  json_filename = 'cqr_request_' + run_name + '.json'
-  json_path = os.path.join(tmp_dir, json_filename)
   
   print("Running CQR command...")
   captured_output = run_create_resources(project, zone, tpu_type, tpu_runtime_version, num_slices, run_name, network, subnetwork,
