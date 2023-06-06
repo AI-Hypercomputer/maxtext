@@ -150,12 +150,6 @@ def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
 
   return captured_output
 
-def run_create_resources_curl(run_name, json_path, endpoint, project, zone):
-  # pylint: disable=line-too-long
-  command = fr'curl -X POST -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "Content-Type: application/json" -d @{json_path} https://{endpoint}/v2alpha1/projects/{project}/locations/{zone}/queuedResources\?queued_resource_id\={run_name}'
-  captured_output = subprocess.run(command, check=True, shell=True, capture_output=True)
-  return captured_output
-
 def run_create_resources(project, zone, tpu_type, runtime_version, num_slices, run_name, network, subnetwork,
                         resource_pool, service_account, startup_script_str):
   # pylint: disable=line-too-long
@@ -213,50 +207,6 @@ def create_kill_command_str(endpoint):
   return f"""if [ $WORKER_ID==0 ]; then
   curl -X DELETE -H "Authorization: Bearer $(gcloud auth print-access-token)" https://{endpoint}/v2alpha1/projects/$PROJECT/locations/$ZONE/nodes/$NODE_ID
 fi"""
-
-def write_cqr_json_file(json_filename, project, zone, tpu_type, runtime_version, num_slices, run_name, network, subnetwork,
-                        resource_pool, service_account, startup_script_str):
-  """ Write json file for CQR """
-  json_dict = {
-      "tpu": {
-          "node_spec":
-          {
-              "parent": os.path.join("projects", project, "locations", zone),
-              "node": {
-                  "accelerator_type": tpu_type,
-                  "runtime_version": runtime_version,
-                  "network_config": {
-                      "network": network,
-                      "subnetwork": subnetwork,
-                      "enable_external_ips": True
-                  },
-                  "metadata": {
-                      "startup-script": startup_script_str
-                  }
-              }
-          }
-      }
-  }
-
-  if num_slices > 1:
-    multi_node_dict = {"node_count": num_slices, "node_id_prefix": run_name}
-    json_dict["tpu"]["node_spec"]["multi_node_params"] = multi_node_dict
-  else:
-    json_dict["tpu"]["node_spec"]["node_id"] = run_name
-
-  if resource_pool == "reserved":
-    json_dict["guaranteed"] = {"reserved": True}
-  elif resource_pool == "on-demand":
-    json_dict["guaranteed"] = {"reserved": False}
-  elif resource_pool == "best-effort":
-    json_dict["best_effort"] = {}
-
-  if service_account:
-    service_account_dict = {"email": service_account}
-    json_dict["tpu"]["node_spec"]["node"]["service_account"] = service_account_dict
-
-  with open(json_filename, "w", encoding="utf-8") as f:
-    json.dump(json_dict, f, indent=3) # Indent doesn't matter, but is nice.
 
 def download_from_gcs(zip_gcs_path):
   return f"""
@@ -389,21 +339,13 @@ def main() -> None:
                                                  num_slices, endpoint)
   json_filename = 'cqr_request_' + run_name + '.json'
   json_path = os.path.join(tmp_dir, json_filename)
-
-  # write_cqr_json_file(json_path, project, zone, tpu_type, tpu_runtime_version, num_slices, run_name, network,
-  #                    subnetwork, resource_pool, service_account, startup_script_str)
   
   print("Running CQR command...")
-  captured_output = run_create_resources(project, zone, tpu_type, runtime_version, num_slices, run_name, network, subnetwork,
+  captured_output = run_create_resources(project, zone, tpu_type, tpu_runtime_version, num_slices, run_name, network, subnetwork,
                         resource_pool, service_account, startup_script_str)
-  # TODO(Once startup-script is available in CLI, error handling can be improved)
-  if captured_output.returncode != 0 or '"error"' in captured_output.stdout.decode() or \
-    "Warning" in captured_output.stderr.decode():
-    print("\n\nCreate resource request returned with ERROR status.\n")
-    if '"error"' in captured_output.stdout.decode():
-      print("Create resource error:\n" + captured_output.stdout.decode())
-    else:
-      print("Create resource error:\n" + captured_output.stderr.decode())
+  if captured_output.returncode != 0 :
+    print(f"\n\nCreate resource request returned with ERROR returncode {captured_output.returncode}.\n")
+    print("Create resource error:\n" + captured_output.stdout.decode())
     return 1
   print("CQR command received! TPUs are being created.\n")
 
