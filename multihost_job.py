@@ -171,7 +171,7 @@ def run_create_resources(project, zone, tpu_type, runtime_version, num_slices, r
 
   print('running CQR command: ', command)
   
-  captured_output = subprocess.run(command, check=True, shell=True, capture_output=True)
+  captured_output = subprocess.run(command, check=False, shell=True, capture_output=True)
   return captured_output
 
 def write_startup_script(run_name, zip_gcs_path, zip_name, main_command, log_name, bucket_path, num_slices, endpoint, startup_script_file):
@@ -348,7 +348,7 @@ def main() -> None:
   print("Running CQR command...")
   captured_output = run_create_resources(project, zone, tpu_type, tpu_runtime_version, num_slices, run_name, network, subnetwork,
                         resource_pool, service_account, startup_script_file)
-  if captured_output and captured_output.returncode != 0 :
+  if captured_output.returncode != 0 :
     print(f"\n\nCreate resource request returned with ERROR returncode {captured_output.returncode}.\n")
     print("Create resource error:\n" + captured_output.stdout.decode())
     return 1
