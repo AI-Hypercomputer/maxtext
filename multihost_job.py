@@ -151,7 +151,7 @@ def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
   return captured_output
 
 def run_create_resources(project, zone, tpu_type, runtime_version, num_slices, run_name, network, subnetwork,
-                        resource_pool, service_account, startup_script_str):
+                        resource_pool, service_account, startup_script_file):
   # pylint: disable=line-too-long
   command = fr'gcloud alpha compute tpus queued-resources create {run_name} --accelerator-type={tpu_type} --runtime-version={runtime_version} --project={project} --zone={zone} --network={network} --subnetwork={subnetwork}'
   if num_slices > 1:
@@ -167,15 +167,15 @@ def run_create_resources(project, zone, tpu_type, runtime_version, num_slices, r
   if service_account:
     command = command + f' --service-account={service_account}'
 
-  command = command + f' --startup-script={startup_script_str}'
+  command = command + f' --metadata-from-file=startup-script={startup_script_file}'
 
   print('running CQR command: ', command)
   
-  captured_output = subprocess.run(command, check=True, shell=True, capture_output=True)
+  # captured_output = subprocess.run(command, check=True, shell=True, capture_output=True)
   return captured_output
 
-def create_startup_script_str(run_name, zip_gcs_path, zip_name, main_command, log_name, bucket_path, num_slices, endpoint):
-  return f"""#!/bin/bash
+def write_startup_script(run_name, zip_gcs_path, zip_name, main_command, log_name, bucket_path, num_slices, endpoint, startup_script_file):
+  startup_script = f"""#!/bin/bash
 mkdir -p {run_name}
 cd {run_name}
 {get_env_command_str(num_slices)}
@@ -187,6 +187,9 @@ tar xzf {zip_name}
 {main_command}) 2>&1) >> {log_name}
 gsutil cp {log_name} "{bucket_path}/"
 {create_kill_command_str(endpoint)}"""
+
+  with open(startup_script_file, "w", encoding="utf-8") as f:
+    f.write(startup_script) # Indent doesn't matter, but is nice.
 
 def get_env_command_str(num_slices):
   """ Define environment variables on the TPUS """
@@ -201,6 +204,8 @@ PROJECT=$(grep '^CONSUMER_PROJECT_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
   else:
     slice_assignment = """SLICE_ID=$(grep '^MEGASCALE_SLICE_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
   return env_str + "\n" + slice_assignment
+
+
 
 def create_kill_command_str(endpoint):
   # TODO(b/271321971): Delete the QR in one swoop once this is possible.
@@ -321,6 +326,7 @@ def main() -> None:
   zip_name = "script_dir_zip_" + run_name + ".tar.gz"
   bucket_dir = os.path.join(bucket_dir, run_name)
   bucket_path = os.path.join(f"gs://{bucket_name}", bucket_dir)
+  startup_script_file = os.path.join(tmp_dir, "startup_script.txt")
 
   print(f"Moving {script_dir} to {bucket_path}...")
   captured_output = move_script_dir_to_gcs(script_dir, tmp_dir_relative_to_script, zip_name, bucket_path)
@@ -335,14 +341,14 @@ def main() -> None:
   #### Step 2: Run the CQR command ####
   log_name = "main_command_log_slice_${SLICE_ID}_worker_${WORKER_ID}"
   zip_path = os.path.join(bucket_path, zip_name)
-  startup_script_str = create_startup_script_str(run_name, zip_path, zip_name, main_command, log_name, bucket_path,
-                                                 num_slices, endpoint)
+  write_startup_script(run_name, zip_path, zip_name, main_command, log_name, bucket_path,
+                                                 num_slices, endpoint, startup_script_file)
   json_filename = 'cqr_request_' + run_name + '.json'
   json_path = os.path.join(tmp_dir, json_filename)
   
   print("Running CQR command...")
   captured_output = run_create_resources(project, zone, tpu_type, tpu_runtime_version, num_slices, run_name, network, subnetwork,
-                        resource_pool, service_account, startup_script_str)
+                        resource_pool, service_account, startup_script_file)
   if captured_output.returncode != 0 :
     print(f"\n\nCreate resource request returned with ERROR returncode {captured_output.returncode}.\n")
     print("Create resource error:\n" + captured_output.stdout.decode())
