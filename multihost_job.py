@@ -286,10 +286,10 @@ def main() -> None:
   print_flags(args)
 
   ##### Step 1: Zip code and move it to GCS #####
-  tmp_dir_relative_to_script = os.path.join("tmp", run_name, "")
+  tmp_dir_relative_to_script = os.path.join("tmp", args.RUN_NAME, "")
   tmp_dir = os.path.join(script_dir, tmp_dir_relative_to_script)
-  zip_name = "script_dir_zip_" + run_name + ".tar.gz"
-  bucket_dir = os.path.join(args.BUCKET_DIR, run_name)
+  zip_name = "script_dir_zip_" + args.RUN_NAME + ".tar.gz"
+  bucket_dir = os.path.join(args.BUCKET_DIR, args.RUN_NAME)
   bucket_path = os.path.join(f"gs://{args.BUCKET_NAME}", bucket_dir)
   startup_script_file = os.path.join(tmp_dir, "startup_script.txt")
 
@@ -324,19 +324,19 @@ def main() -> None:
   print("------------------------------------ \n")
   print("multihost_job finished running, TPUs are firing up now to run your job remotely.\n")
 
-  print(f"Your job is being logged, follow it here:\n{google_cloud_logging_url(run_name, project)}\n")
+  print(f"Your job is being logged, follow it here:\n{google_cloud_logging_url(args.RUN_NAME, project)}\n")
 
   print(f"To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:"\
-      f"\n{google_cloud_logging_single_host_url(run_name, project)}\n")
+      f"\n{google_cloud_logging_single_host_url(args.RUN_NAME, project)}\n")
 
   print(f"When your job is finished, the main command log is in the GCS bucket here:"\
       f"\n{gcs_bucket_url(bucket_name, bucket_dir, project)}\n")
 
   print("View the status of the created TPUs via: ")
-  print(f"gcloud compute tpus tpu-vm list --filter={run_name}\n")
+  print(f"gcloud compute tpus tpu-vm list --filter={args.RUN_NAME}\n")
 
   print("Once your job is finished you should delete your QR with: ")
-  print(f"gcloud alpha compute tpus queued-resources delete {run_name}")
+  print(f"gcloud alpha compute tpus queued-resources delete {args.RUN_NAME}")
   return 0
 
 if __name__ == '__main__':
