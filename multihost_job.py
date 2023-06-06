@@ -359,7 +359,7 @@ def main() -> None:
 
   #### Step 3: Cleanup ####
   # Cleanup locally created directory
-  shutil.rmtree(tmp_dir)
+  #shutil.rmtree(tmp_dir)
   # We leave the zipped script dir and log in GCS
 
   print("------------------------------------ \n")
