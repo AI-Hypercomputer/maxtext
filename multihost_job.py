@@ -191,7 +191,7 @@ gsutil cp {log_name} "{bucket_path}/"
 {create_kill_command_str(endpoint)}"""
 
   with open(startup_script_file, "w", encoding="utf-8") as f:
-    f.write(startup_script) # Indent doesn't matter, but is nice.
+    f.write(startup_script)
 
 def get_env_command_str(num_slices):
   """ Define environment variables on the TPUS """
@@ -206,8 +206,6 @@ PROJECT=$(grep '^CONSUMER_PROJECT_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
   else:
     slice_assignment = """SLICE_ID=$(grep '^MEGASCALE_SLICE_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
   return env_str + "\n" + slice_assignment
-
-
 
 def create_kill_command_str(endpoint):
   # TODO(b/271321971): Delete the QR in one swoop once this is possible.
@@ -325,7 +323,6 @@ def main() -> None:
   ##### Step 1: Zip code and move it to GCS #####
   tmp_dir_relative_to_script = os.path.join("tmp", run_name, "")
   tmp_dir = os.path.join(script_dir, tmp_dir_relative_to_script)
-  os.mkdir(tmp_dir)
   zip_name = "script_dir_zip_" + run_name + ".tar.gz"
   bucket_dir = os.path.join(bucket_dir, run_name)
   bucket_path = os.path.join(f"gs://{bucket_name}", bucket_dir)
