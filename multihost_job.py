@@ -169,7 +169,7 @@ def run_create_resources(project, zone, tpu_type, runtime_version, num_slices, r
 
   command = command + f' --metadata-from-file=startup-script={startup_script_file}'
 
-  # print('running CQR command: ', command)
+  print('running CQR command: ', command)
   
   captured_output = subprocess.run(command, check=True, shell=True, capture_output=True)
   return captured_output
