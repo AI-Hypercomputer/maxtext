@@ -48,7 +48,6 @@ import sys
 import subprocess
 from datetime import datetime
 import os
-import json
 import shutil
 
 ##### Define flags #####
@@ -151,7 +150,8 @@ def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
   return captured_output
 
 def run_create_resources(project, zone, tpu_type, runtime_version, num_slices, run_name, network, subnetwork,
-                        resource_pool, service_account, startup_script_file):
+                         resource_pool, service_account, startup_script_file):
+  """ Run the Create Queued Resources (CQR) request """
   # pylint: disable=line-too-long
   command = fr'gcloud alpha compute tpus queued-resources create {run_name} --accelerator-type={tpu_type} --runtime-version={runtime_version} --project={project} --zone={zone} --network={network} --subnetwork={subnetwork}'
   if num_slices > 1:
@@ -170,11 +170,13 @@ def run_create_resources(project, zone, tpu_type, runtime_version, num_slices, r
   command = command + f' --metadata-from-file=startup-script={startup_script_file}'
 
   print('running CQR command: ', command)
-  
+
   captured_output = subprocess.run(command, check=False, shell=True, capture_output=True)
   return captured_output
 
-def write_startup_script(run_name, zip_gcs_path, zip_name, main_command, log_name, bucket_path, num_slices, endpoint, startup_script_file):
+def write_startup_script(run_name, zip_gcs_path, zip_name, main_command, log_name, bucket_path, num_slices,
+                         endpoint, startup_script_file):
+  """ Write the startup script locally into a file to be passed to the CQR command. """
   startup_script = f"""#!/bin/bash
 mkdir -p {run_name}
 cd {run_name}
@@ -343,12 +345,12 @@ def main() -> None:
   log_name = "main_command_log_slice_${SLICE_ID}_worker_${WORKER_ID}"
   zip_path = os.path.join(bucket_path, zip_name)
   write_startup_script(run_name, zip_path, zip_name, main_command, log_name, bucket_path,
-                                                 num_slices, endpoint, startup_script_file)
-  
+                       num_slices, endpoint, startup_script_file)
+
   print("Running CQR command...")
-  captured_output = run_create_resources(project, zone, tpu_type, tpu_runtime_version, num_slices, run_name, network, subnetwork,
-                        resource_pool, service_account, startup_script_file)
-  if captured_output.returncode != 0 :
+  captured_output = run_create_resources(project, zone, tpu_type, tpu_runtime_version, num_slices, run_name, network,
+                                         subnetwork, resource_pool, service_account, startup_script_file)
+  if captured_output.returncode != 0:
     print(f"\n\nCreate resource request returned with ERROR returncode {captured_output.returncode}.\n")
     print("Create resource error:\n" + captured_output.stderr.decode())
     return 1
