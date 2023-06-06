@@ -330,7 +330,7 @@ def main() -> None:
       f"\n{google_cloud_logging_single_host_url(args.RUN_NAME, args.PROJECT)}\n")
 
   print(f"When your job is finished, the main command log is in the GCS bucket here:"\
-      f"\n{gcs_bucket_url(bucket_name, bucket_dir, args.PROJECT)}\n")
+      f"\n{gcs_bucket_url(args.BUCKET_NAME, bucket_dir, args.PROJECT)}\n")
 
   print("View the status of the created TPUs via: ")
   print(f"gcloud compute tpus tpu-vm list --filter={args.RUN_NAME}\n")
