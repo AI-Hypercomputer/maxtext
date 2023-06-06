@@ -103,22 +103,21 @@ def get_run_name():
   now = datetime.now()
   return os.getlogin() + "-" + now.strftime("%Y-%m-%d-%H-%M-%S")
 
-def print_flags(tpu_type, runtime_version, num_slices, script_dir, main_command, bucket_name, bucket_dir, endpoint, project,
-                zone, run_name, extra_args):
+def print_flags(args):
   """ Print configuration values after defaults have been filled in. """
   print("Running multihost_job with the following configuration:")
-  print(f"Project             (--PROJECT)         = {project}")
-  print(f"Zone                (--ZONE)            = {zone}")
-  print(f"TPU type            (--TPU_TYPE)        = {tpu_type}")
-  print(f"TPU runtime version (--VERSION)         = {runtime_version}")
-  print(f"Number of slices    (--NUM_SLICES)      = {num_slices}")
-  print(f"Script dir          (--SCRIPT_DIR)      = {script_dir}")
-  print(f"Bucket name         (--BUCKET_NAME)     = {bucket_name}")
-  print(f"Bucket dir          (--BUCKET_DIR)      = {bucket_dir}")
-  print(f"Command to run      (--COMMAND)         = {main_command}")
-  print(f"Endpoint            (--ENDPOINT)        = {endpoint}")
-  print(f"Run name            (--RUN_NAME)        = {run_name}")
-  print(f"Extra CQR args      (--CQR_EXTRA_ARGS)  = {extra_args}\n")
+  print(f"Project             (--PROJECT)         = {args.PROJECT}")
+  print(f"Zone                (--ZONE)            = {args.ZONE}")
+  print(f"TPU type            (--TPU_TYPE)        = {args.TPU_TYPE}")
+  print(f"TPU runtime version (--VERSION)         = {args.VERSION}")
+  print(f"Number of slices    (--NUM_SLICES)      = {args.NUM_SLICES}")
+  print(f"Script dir          (--SCRIPT_DIR)      = {args.SCRIPT_DIR}")
+  print(f"Bucket name         (--BUCKET_NAME)     = {args.BUCKET_NAME}")
+  print(f"Bucket dir          (--BUCKET_DIR)      = {args.BUCKET_DIR}")
+  print(f"Command to run      (--COMMAND)         = {args.COMMAND}")
+  print(f"Endpoint            (--ENDPOINT)        = {args.ENDPOINT}")
+  print(f"Run name            (--RUN_NAME)        = {args.RUN_NAME}")
+  print(f"Extra CQR args      (--CQR_EXTRA_ARGS)  = {args.CQR_EXTRA_ARGS}\n")
 
 def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
   """ Zip the script directory, cp it to GCS """
@@ -169,7 +168,7 @@ sudo python3 -m virtualenv venv
 source venv/bin/activate
 (({download_from_gcs(zip_gcs_path)}
 tar xzf {zip_name}
-{args.MAIN_COMMAND}) 2>&1) >> {log_name}
+{args.COMMAND}) 2>&1) >> {log_name}
 gsutil cp {log_name} "{bucket_path}/"
 {create_kill_command_str(args.ENDPOINT)}"""
 
