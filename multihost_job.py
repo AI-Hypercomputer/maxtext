@@ -80,7 +80,7 @@ parser.add_argument('--RUN_NAME', type=str, default=None,
                     help='Run name used for temporary files, defaults to timestamp.')
 parser.add_argument('--CQR_EXTRA_ARGS', type=str, default=None,
                     help='Additional arguments to be passed verbatim to CQR request, e.g. \
-                    --CQR_EXTRA_ARGS="--reserved --service-account=my-sa.com')
+                    --CQR_EXTRA_ARGS="--reserved --service-account=my-sa-email.com')
 
 args = parser.parse_args()
 
@@ -114,10 +114,10 @@ def print_flags():
   print(f"Script dir          (--SCRIPT_DIR)      = {args.SCRIPT_DIR}")
   print(f"Bucket name         (--BUCKET_NAME)     = {args.BUCKET_NAME}")
   print(f"Bucket dir          (--BUCKET_DIR)      = {args.BUCKET_DIR}")
-  print(f"Command to run      (--COMMAND)         = {args.COMMAND}")
   print(f"Endpoint            (--ENDPOINT)        = {args.ENDPOINT}")
   print(f"Run name            (--RUN_NAME)        = {args.RUN_NAME}")
-  print(f"Extra CQR args      (--CQR_EXTRA_ARGS)  = {args.CQR_EXTRA_ARGS}\n")
+  print(f"Extra CQR args      (--CQR_EXTRA_ARGS)  = {args.CQR_EXTRA_ARGS}")
+  print(f"Command to run      (--COMMAND)         = {args.COMMAND}\n")
 
 def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
   """ Zip the script directory, cp it to GCS """
