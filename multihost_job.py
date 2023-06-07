@@ -87,7 +87,6 @@ args = parser.parse_args()
 def get_project():
   completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
   project_outputs = completed_command.stdout.decode().strip().split('\n')
-  print(project_outputs)
   if len(project_outputs) < 1:
     sys.exit("You must specify the project in the PROJECT flag or set it with 'gcloud compute set project <project>'")
   return project_outputs[-1] # The project name lives on the last line of the output
