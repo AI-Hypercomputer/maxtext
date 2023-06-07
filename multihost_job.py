@@ -163,7 +163,7 @@ tar xzf {zip_name}
 {args.COMMAND}) 2>&1) >> {log_name}
 {echo_finish_status_str()} >> {log_name}
 gsutil cp {log_name} "{bucket_path}/"
-sleep 10
+sleep 600
 (({create_kill_command_str()}) 2>&1 ) >> {log_name}"""
 
   with open(startup_script_file, "w", encoding="utf-8") as f:
