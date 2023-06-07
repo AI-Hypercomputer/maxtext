@@ -187,10 +187,10 @@ PROJECT=$(grep '^CONSUMER_PROJECT_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
   return env_str + "\n" + slice_assignment
 
 def echo_finish_status_str():
-  return """echo "multihost_job finished main command on slice $SLICE_ID worker $WORKER_ID at $(date "+%Y-%m-%d %H:%M:%S") with exit status $?" """
+  return """echo "multihost_job finished main command on slice $SLICE_ID worker $WORKER_ID at $(date "+%Y-%m-%d %H:%M:%S") UTC with exit status $?" """
 
 def create_kill_command_str():
-  return f"""gcloud alpha compute tpus queued-resources delete {args.RUN_NAME} --force --quiet --async --project={args.PROJECT} --zone={args.ZONE}"""
+  return f"""gcloud alpha compute tpus queued-resources delete {args.RUN_NAME} --force --quiet --project={args.PROJECT} --zone={args.ZONE}"""
 
 def download_from_gcs(zip_gcs_path):
   return f"""
