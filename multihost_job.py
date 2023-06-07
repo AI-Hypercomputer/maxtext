@@ -185,7 +185,8 @@ PROJECT=$(grep '^CONSUMER_PROJECT_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
 
 def echo_finish_status_str():
   # pylint: disable=line-too-long
-  return """echo "multihost_job finished main command on slice $SLICE_ID worker $WORKER_ID at $(date "+%Y-%m-%d %H:%M:%S") UTC with exit status $?" """
+  return """echo "multihost_job finished main command on slice $SLICE_ID worker $WORKER_ID at $(date "+%Y-%m-%d %H:%M:%S") UTC with exit status $?."
+This worker will immediately send its logs to GCS, then wait 10 minutes before tearing down to allow other workers to gracefully tear down."""
 
 def create_kill_command_str():
   # pylint: disable=line-too-long
