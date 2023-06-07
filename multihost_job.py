@@ -161,7 +161,7 @@ source venv/bin/activate
 (({download_from_gcs(zip_gcs_path)}
 tar xzf {zip_name}
 {args.COMMAND}) 2>&1) >> {log_name}
-(echo '{finish_status_str()}') >> {log_name}
+(echo "{finish_status_str()}") >> {log_name}
 gsutil cp {log_name} "{bucket_path}/"
 sleep 600
 (({create_kill_command_str()}) 2>&1 ) >> {log_name}"""
