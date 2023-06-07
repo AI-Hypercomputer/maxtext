@@ -7,9 +7,7 @@ DATASET_PATH=${3}
 VOCAB_PATH=vocab_test_creation_$RUN_NAME
 
 
-#Setup and Train
-bash setup.sh
-
+#Train
 python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME steps=5 enable_checkpointing=False\
     base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH vocab_relative_path=$VOCAB_PATH
 

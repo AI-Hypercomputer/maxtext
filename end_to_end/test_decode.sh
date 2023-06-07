@@ -14,8 +14,7 @@ else
     RUN_NAME=${4}_$(date +%Y-%m-%d-%H)
 fi
 
-#Setup and Train
-bash setup.sh
+#Train
 python3 MaxText/decode.py MaxText/configs/base.yml run_name=$RUN_NAME\
     steps=50 enable_checkpointing=False metrics_file='metrics.txt'\
     base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH
