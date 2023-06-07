@@ -1,6 +1,7 @@
 orbax-checkpoint
 absl-py
 argparse
+cloud-tpu-diagnostics
 datetime
 google-cloud-storage
 flax

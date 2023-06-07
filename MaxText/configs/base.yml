@@ -119,5 +119,5 @@ adam_eps_root: 0. # A small constant applied to denominator inside the square ro
 
 # Stack trace parameters
 collect_stack_trace: True
-stack_trace_to_cloud: False  # display stack trace on console
-stack_trace_interval_seconds: 600  # 10 minutes
+stack_trace_to_cloud: False  # Uploads to cloud logging if True, else to the console if False.
+stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds.

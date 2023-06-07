@@ -134,6 +134,3 @@ fi
 
 # Install dependencies from requirements.txt
 cd $run_name_folder_path && pip3 install -r requirements.txt
-
-# Install cloud-tpu-diagnostics
-pip3 install cloud-tpu-diagnostics
