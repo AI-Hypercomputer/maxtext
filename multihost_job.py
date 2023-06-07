@@ -70,8 +70,6 @@ parser.add_argument('--PROJECT', type=str, default=None,
                     help='GCE project name, defaults to gcloud config project')
 parser.add_argument('--ZONE', type=str, default=None,
                     help='GCE zone, e.g. us-central2-b, defaults to gcloud config compute/zone')
-parser.add_argument('--ENDPOINT', type=str, default='tpu.googleapis.com',
-                    help='The endpoint for google API requests.')
 parser.add_argument('--RUN_NAME', type=str, default=None,
                     help='Run name used for temporary files, defaults to timestamp.')
 parser.add_argument('--CQR_EXTRA_ARGS', type=str, default=None,
@@ -109,7 +107,6 @@ def print_flags():
   print(f"Script dir          (--SCRIPT_DIR)      = {args.SCRIPT_DIR}")
   print(f"Bucket name         (--BUCKET_NAME)     = {args.BUCKET_NAME}")
   print(f"Bucket dir          (--BUCKET_DIR)      = {args.BUCKET_DIR}")
-  print(f"Endpoint            (--ENDPOINT)        = {args.ENDPOINT}")
   print(f"Run name            (--RUN_NAME)        = {args.RUN_NAME}")
   print(f"Extra CQR args      (--CQR_EXTRA_ARGS)  = {args.CQR_EXTRA_ARGS}")
   print(f"Command to run      (--COMMAND)         = {args.COMMAND}\n")
