@@ -148,12 +148,10 @@ def run_create_resources(startup_script_file):
   else:
     command = command + f' --node-id={args.RUN_NAME}'
 
-  command = command + f' --metadata-from-file=startup-script={startup_script_file}'
-
   if args.CQR_EXTRA_ARGS:
     command = command + ' ' + args.CQR_EXTRA_ARGS
 
-  print(f"CQR COMMAND: \n {command}")
+  command = command + f' --metadata-from-file=startup-script={startup_script_file}'
 
   captured_output = subprocess.run(command, check=False, shell=True, capture_output=True)
   return captured_output
