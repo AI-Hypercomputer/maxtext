@@ -79,8 +79,8 @@ parser.add_argument('--ENDPOINT', type=str, default='tpu.googleapis.com',
 parser.add_argument('--RUN_NAME', type=str, default=None,
                     help='Run name used for temporary files, defaults to timestamp.')
 parser.add_argument('--CQR_EXTRA_ARGS', type=str, default=None,
-                    help='Additional arguments to be passed verbatim to CQR request, e.g. \
-                    --CQR_EXTRA_ARGS="--reserved --service-account=my-sa-email.com')
+                    help='Additional arguments to be passed verbatim to the CQR request, e.g. \
+                    --CQR_EXTRA_ARGS="--reserved --service-account=my-service-account-email-address')
 
 args = parser.parse_args()
 
