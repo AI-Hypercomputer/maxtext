@@ -144,26 +144,11 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
 
 6. Clean up TPUs and QR when finished.
 
-    There is ongoing work to simplify this step into a single command, but for now it is split into two main steps:
+     ```
+    gcloud alpha compute tpus queued-resources delete $QR_ID --force --async
+    ```
 
-    a. Delete the nodes
-
-    ```
-    for ((i=0; i<$NODE_COUNT; i++))
-    do
-        curl -X DELETE -H "Authorization: Bearer $(gcloud auth print-access-token)" https://tpu.googleapis.com/v2alpha1/projects/$PROJECT/locations/$ZONE/nodes/${TPU_PREFIX}-$i
-    done
-    ```
-    b. Delete the QR, first waiting for the nodes to be deleted (~15 seconds). You should see the status of the QR will change from `ACTIVE` to `SUSPENDING` to `SUSPENDED` as the nodes are deleted (the QR must be `SUSPENDED` to be deletable), which can be checked via
-
-    ```
-    gcloud alpha compute tpus queued-resources list --filter=$QR_ID
-    ```
-    When the QR is in state `SUSPENDED`, delete it.
-
-    ```
-    gcloud alpha compute tpus queued-resources delete $QR_ID
-    ```
+    The `--force` flag deletes both the queued resources and the TPU VMs, without it only a `SUSPENDED` queued resource whose TPUs have already been deleted can itself be deleted. We highly recommend the `--async` flag since deleting the TPUs and QR will take a minute or two.
 
 ## Getting Started: Production Jobs On Multiple Slices
 
@@ -175,7 +160,7 @@ The `multihost_job.py` script:
 * Spins up specified TPU VM(s) via CQR
 * Directs the TPU's to download then run that code. Because this logic is within the CQR's startup script, if there hardware is interrupted, the job will be rescheduled and resumed.
 * Logs to gcloud, and additionally sends the logs to GCS at the job end
-* Delete the TPUs at the end of the job.
+* Delete the TPUs and QR at the end of the job.
 
 1. Choose a directory on your runner machine to develop and clone MaxText into. The runner machine can 
 either be a TPUVM or not. If your runner machine is a TPUVM, it needs service account roles that grant it permission to create queued resources and has write access to GCS, such as the `TPU ADMIN` and `STORAGE ADMIN` roles. Clone MaxText, and cd into the root of the repo.
@@ -220,21 +205,6 @@ either be a TPUVM or not. If your runner machine is a TPUVM, it needs service ac
 5. View the job's logs in cloud logging. 
 
     The link to your job's cloud logging is printed at the end of `multihost_job` output. Additionaly logs are saved to GCS when your job finishes, and this bucket's URL is also printed by `multihost_job`.
-
-6. Cleanup the QR when finished.
-
-    There is ongoing work to automate this step.
-
-    When your job is finished `multihost_job.py` will delete the TPUs for you. However you still need to delete the QR. You can check that your job is done because the QR will no longer be `ACTIVE`, but instead in
-    state `SUSPENDED` since the nodes have been deleted.
-    ```
-    gcloud alpha compute tpus queued-resources list --filter=$RUN_NAME # You can remove the filter to list all QR in your project 
-    ```
-    Then delete the QR
-
-    ```
-    gcloud alpha compute tpus queued-resources delete $RUN_NAME
-    ```
 
 
 # Runtime Performance Results

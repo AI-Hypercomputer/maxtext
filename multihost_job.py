@@ -26,11 +26,7 @@ This script:
   3) Runs your job on each TPU
   4) Logs the output of the job in real time to cloud logging
   5) Stores a copy of the logs and zipped code in GCS at the job's end
-  6) Deletes the TPUs
-  However the job leaves behind an orphaned QR which has to be cleaned up (by you).
-  Use "gcloud alpha compute tpus queued-resources list" to view the QR and
-  "gcloud alpha compute tpus queued-resources delete <qr-name>" when your job
-  is done. These instructions are also printed at the end of running this script.
+  6) Deletes the TPUs and QR
 Example usages:
   Minimal customization, assuming runner.sh lives in present working directory:
   python3 multihost_job.py  --COMMAND="bash runner.sh" --BUCKET_NAME=<my-bucket>
@@ -38,7 +34,7 @@ Example usages:
   Maximal customization, assuming runner.sh lives in path/to/dir
   python3 multihost_job.py  --COMMAND="bash runner.sh" --BUCKET_NAME=<my-bucket> --BUCKET_DIR=job-log-directory \
     --SCRIPT_DIR=path/to/dir --PROJECT=<my-project> --ZONE=<zone> \
-    --VERSION=tpu-vm-v4-base --TPU_TYPE=v4-8 --NUM_SLICES=2 --RUN_NAME=$USER-run-job
+    --VERSION=tpu-ubuntu2204-base --TPU_TYPE=v4-8 --NUM_SLICES=2 --RUN_NAME=$USER-run-job
 Common issues:
   You must have local write permissions to BUCKET_NAME. The allocated TPUVMs must also have read permissions to this
   bucket, which is granted through service account roles, such as Storage Object Admin.
@@ -54,7 +50,7 @@ import shutil
 parser = argparse.ArgumentParser(description='TPU configuration options')
 parser.add_argument('--TPU_TYPE', type=str, default='v4-8',
                     help='The type of the TPU')
-parser.add_argument('--VERSION', type=str, default='tpu-vm-v4-base',
+parser.add_argument('--VERSION', type=str, default='tpu-ubuntu2204-base',
                     help='The runtime version of the TPU')
 parser.add_argument('--NUM_SLICES', type=int, default=2,
                     help='The number of slices to run the job on')
@@ -168,8 +164,10 @@ source venv/bin/activate
 (({download_from_gcs(zip_gcs_path)}
 tar xzf {zip_name}
 {args.COMMAND}) 2>&1) >> {log_name}
+{echo_finish_status_str()} >> {log_name}
 gsutil cp {log_name} "{bucket_path}/"
-{create_kill_command_str(args.ENDPOINT)}"""
+sleep 10
+(({create_kill_command_str()}) 2>&1 ) >> {log_name}"""
 
   with open(startup_script_file, "w", encoding="utf-8") as f:
     f.write(startup_script)
@@ -188,11 +186,11 @@ PROJECT=$(grep '^CONSUMER_PROJECT_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
     slice_assignment = """SLICE_ID=$(grep '^MEGASCALE_SLICE_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
   return env_str + "\n" + slice_assignment
 
-def create_kill_command_str(endpoint):
-  # TODO(b/271321971): Delete the QR in one swoop once this is possible.
-  return f"""if [ $WORKER_ID==0 ]; then
-  curl -X DELETE -H "Authorization: Bearer $(gcloud auth print-access-token)" https://{endpoint}/v2alpha1/projects/$PROJECT/locations/$ZONE/nodes/$NODE_ID
-fi"""
+def echo_finish_status_str():
+  return """echo "multihost_job finished main command on slice $SLICE_ID worker $WORKER_ID at $(date "+%Y-%m-%d %H:%M:%S") with exit status $?" """
+
+def create_kill_command_str():
+  return f"""gcloud alpha compute tpus queued-resources delete {args.RUN_NAME} --force --quiet --async --project={args.PROJECT} --zone={args.ZONE}"""
 
 def download_from_gcs(zip_gcs_path):
   return f"""
@@ -333,9 +331,6 @@ def main() -> None:
 
   print("View the status of the created TPUs via: ")
   print(f"gcloud compute tpus tpu-vm list --filter={args.RUN_NAME}\n")
-
-  print("Once your job is finished you should delete your QR with: ")
-  print(f"gcloud alpha compute tpus queued-resources delete {args.RUN_NAME}")
   return 0
 
 if __name__ == '__main__':
