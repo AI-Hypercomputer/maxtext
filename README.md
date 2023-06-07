@@ -167,14 +167,14 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
 
 ## Getting Started: Production Jobs On Multiple Slices
 
-The workflow using `multihost_job.py` is optimized for long running experiments, providing resiliency against hardware failure and avoiding long running ssh connections. Its latency is much higher than `multihost_runner.py` because it needs to provision new capacity each time. The `multihost_job.py` script ends once the request to create the TPUs is issued. Currently logs are written to GCS at the end of the job, but we soon to plan move to gcloud logging to allow monitoring of the job. 
+The workflow using `multihost_job.py` is optimized for long running experiments, providing resiliency against hardware failure and avoiding long running ssh connections. Its latency is much higher than `multihost_runner.py` because it needs to provision new capacity each time. The `multihost_job.py` script ends once the request to create the TPUs is issued. Logs are written both to gcloud in real time and also sent to GCS at the end of the job.
 
 The `multihost_job.py` script:
 
 * Copies your code to your GCS bucket
 * Spins up specified TPU VM(s) via CQR
 * Directs the TPU's to download then run that code. Because this logic is within the CQR's startup script, if there hardware is interrupted, the job will be rescheduled and resumed.
-* Logs locally to each worker TPU, sending these logs to GCS at the job end
+* Logs to gcloud, and additionally sends the logs to GCS at the job end
 * Delete the TPUs at the end of the job.
 
 1. Choose a directory on your runner machine to develop and clone MaxText into. The runner machine can 
