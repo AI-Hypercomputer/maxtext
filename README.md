@@ -115,7 +115,7 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
     ```
     Create a multislice environment of nodes using create queued resources
     ```
-    gcloud alpha compute tpus queued-resources create $QR_ID --accelerator-type=v4-8 --runtime-version=tpu-vm-v4-base --node-count=$NODE_COUNT --node-prefix=$TPU_PREFIX  --reserved
+    gcloud alpha compute tpus queued-resources create $QR_ID --accelerator-type=v4-8 --runtime-version=tpu-ubuntu2204-base --node-count=$NODE_COUNT --node-prefix=$TPU_PREFIX  --reserved
     ```
     We target the `reserved` pool above, but you may instead target the `on-demand` pool by omitting this flag,
     or target pre-emptible capacity with the `--best-effort` flag, which may be necessary if your reservation is full.
