@@ -161,7 +161,7 @@ source venv/bin/activate
 (({download_from_gcs(zip_gcs_path)}
 tar xzf {zip_name}
 {args.COMMAND}) 2>&1) >> {log_name}
-{echo_finish_status_str()} >> {log_name}
+(echo '{finish_status_str()}') >> {log_name}
 gsutil cp {log_name} "{bucket_path}/"
 sleep 600
 (({create_kill_command_str()}) 2>&1 ) >> {log_name}"""
@@ -183,9 +183,9 @@ PROJECT=$(grep '^CONSUMER_PROJECT_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
     slice_assignment = """SLICE_ID=$(grep '^MEGASCALE_SLICE_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
   return env_str + "\n" + slice_assignment
 
-def echo_finish_status_str():
+def finish_status_str():
   # pylint: disable=line-too-long
-  return """echo "multihost_job finished main command on slice $SLICE_ID worker $WORKER_ID at $(date "+%Y-%m-%d %H:%M:%S") UTC with exit status $?."
+  return """multihost_job finished main command on slice $SLICE_ID worker $WORKER_ID at $(date "+%Y-%m-%d %H:%M:%S") UTC with exit status $?.
 This worker will immediately send its logs to GCS, then wait 10 minutes before tearing down to allow other workers to gracefully tear down."""
 
 def create_kill_command_str():
