@@ -103,7 +103,7 @@ def get_run_name():
   now = datetime.now()
   return os.getlogin() + "-" + now.strftime("%Y-%m-%d-%H-%M-%S")
 
-def print_flags(args):
+def print_flags():
   """ Print configuration values after defaults have been filled in. """
   print("Running multihost_job with the following configuration:")
   print(f"Project             (--PROJECT)         = {args.PROJECT}")
@@ -140,7 +140,7 @@ def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
 
   return captured_output
 
-def run_create_resources(startup_script_file, args):
+def run_create_resources(startup_script_file):
   """ Run the Create Queued Resources (CQR) request """
   # pylint: disable=line-too-long
   command = fr'gcloud alpha compute tpus queued-resources create {args.RUN_NAME} --accelerator-type={args.TPU_TYPE} --runtime-version={args.VERSION} --project={args.PROJECT} --zone={args.ZONE}'
@@ -159,7 +159,7 @@ def run_create_resources(startup_script_file, args):
   captured_output = subprocess.run(command, check=False, shell=True, capture_output=True)
   return captured_output
 
-def write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file, args):
+def write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file):
   """ Write the startup script locally into a file to be passed to the CQR command. """
   startup_script = f"""#!/bin/bash
 mkdir -p {args.RUN_NAME}
@@ -285,7 +285,7 @@ def main() -> None:
   if not args.RUN_NAME:
     args.RUN_NAME = get_run_name() # Used for QR name, TPU_PREFIX, logging file, and tmp json file.
 
-  print_flags(args)
+  print_flags()
 
   ##### Step 1: Zip code and move it to GCS #####
   tmp_dir_relative_to_script = os.path.join("tmp", args.RUN_NAME, "")
@@ -308,10 +308,10 @@ def main() -> None:
   #### Step 2: Run the CQR command ####
   log_name = "main_command_log_slice_${SLICE_ID}_worker_${WORKER_ID}"
   zip_gcs_path = os.path.join(bucket_path, zip_name)
-  write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file, args)
+  write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file)
 
   print("Running CQR command...")
-  captured_output = run_create_resources(startup_script_file, args)
+  captured_output = run_create_resources(startup_script_file)
   if captured_output.returncode != 0:
     print(f"\n\nCreate resource request returned with ERROR returncode {captured_output.returncode}.\n")
     print("Create resource error:\n" + captured_output.stderr.decode())
