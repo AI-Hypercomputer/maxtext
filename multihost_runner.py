@@ -295,13 +295,13 @@ def assert_project_and_zone_set():
   completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
   project_outputs = completed_command.stdout.decode().strip().split('\n')
   if len(project_outputs) < 1:
-    sys.exit("You must set the project by running 'gcloud compute set project <project>'")
+    sys.exit("You must set the project by running 'gcloud config set project <project>'")
 
   # zone
   completed_command = subprocess.run(["gcloud", "config", "get", "compute/zone"], check=True, capture_output=True)
   zone_outputs = completed_command.stdout.decode().strip().split('\n')
   if len(zone_outputs) < 1:
-    sys.exit("You must set the zone by running 'gcloud compute set compute/zone <zone>'")
+    sys.exit("You must set the zone by running 'gcloud config set compute/zone <zone>'")
 
 def assert_script_dir_exists(script_dir):
   if not os.path.isdir(script_dir):
