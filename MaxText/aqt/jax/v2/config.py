@@ -46,6 +46,8 @@ class Tensor:
 
   @classmethod
   def make(cls, bits: Optional[int]) -> 'Tensor':
+    #pylint: disable=simplifiable-if-expression
+    # or use less readable pz = not bits == 1
     pz = False if bits == 1 else True
 
     return Tensor(

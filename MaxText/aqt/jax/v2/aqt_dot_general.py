@@ -158,6 +158,7 @@ def _make_clip_and_round(cfg: config.Tensor):
 
 
 def make_fake_quant(cfg: config.Tensor):
+  """Make fake quantization."""
   def fake_quant(x, context):
     if cfg.bits is None:
       return x
