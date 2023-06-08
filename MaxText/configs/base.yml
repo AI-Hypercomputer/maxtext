@@ -35,7 +35,7 @@ head_dim: 256
 mlp_activations: ["relu"]
 dropout_rate: 0
 logits_via_embedding: True  # NOTE: this is True just for testing.
-# minimal, full, or none
+# proj, minimal, full, or none
 remat_policy: 'minimal'
 scan_layers: True
 param_scan_axis: 1
