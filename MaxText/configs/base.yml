@@ -44,7 +44,7 @@ param_scan_axis: 1
 record_internal_nn_metrics: 0
 
 # Output directory
-base_output_directory: "gs://maxtext-experiments-multipod/"
+base_output_directory: "gs://max-experiments/"
 
 # Parallelism
 mesh_axes: ['data', 'fsdp', 'tensor']
