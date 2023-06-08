@@ -116,7 +116,7 @@ def dot_product_attention(query: Array,
   # unstable training loss and nans, see the "QK Normalization" subsection in
   # https://arxiv.org/pdf/2302.05442.pdf.
   query = LayerNorm(dtype=dtype, name='query_layer_norm', kernel_axes = ('heads',))(query)
-  key = LayerNorm(dtype=dtype, name='key_layer_norm', kernel_axes=('heads',))(key)
+  key = LayerNorm(dtype=dtype, name='key_layer_norm', kernel_axes = ('heads',))(key)
 
   # `attn_weights`: [batch, num_heads, q_length, kv_length]
   attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
@@ -1010,7 +1010,7 @@ class DecoderLayer(nn.Module):
     if cfg.record_internal_nn_metrics:
       self.sow('intermediates', 'activation_mean', jnp.mean(layer_output))
       self.sow('intermediates', 'activation_stdev', jnp.std(layer_output))
-      self.sow('intermediates', 'activation_fraction_zero', jnp.sum(layer_output == 0) / jnp.size(layer_output))
+      self.sow('intermediates', 'activation_fraction_zero', jnp.sum(layer_output==0) / jnp.size(layer_output))
 
     if cfg.scan_layers:
       return layer_output, None
@@ -1089,7 +1089,7 @@ class Decoder(nn.Module):
                 decode,
                 max_decode_length)
 
-    y = LayerNorm(dtype=cfg.dtype, name='decoder_norm', kernel_axes=('embed',))(y)
+    y = LayerNorm(dtype=cfg.dtype, name='decoder_norm', kernel_axes = ('embed',))(y)
     y = nn.Dropout(
         rate=cfg.dropout_rate, broadcast_dims=(-2,))(
             y, deterministic=deterministic)
