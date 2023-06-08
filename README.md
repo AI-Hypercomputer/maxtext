@@ -46,6 +46,18 @@ bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
 
 To run maxtext the TPUVMs must have permission to read the gcs bucket. These permissions are granted by service account roles, such as the `STORAGE ADMIN` role. 
 
+## Getting Started: Configure Diagnostic Settings
+Here is the related PyPI package: https://pypi.org/project/cloud-tpu-diagnostics.
+### Debugging
+The following configurations will help to debug a fault or when a program is stuck or hung somewhere by collecting stack traces. Change the parameter values accordingly in `MaxText/configs/base.yml`:
+1. Set `collect_stack_trace: True` to enable collection of stack traces on faults or when the program is hung. To disable this, set `collect_stack_trace: False`.
+2. Set `stack_trace_to_cloud: False` to display stack traces on console. `stack_trace_to_cloud: True` will create a temporary file in `/tmp/debugging` in the TPUs to store the stack traces. There is an agent running on TPU VMs that will periodically upload the traces from the temporary directory to cloud logging in the gcp project. You can view the traces in Logs Explorer on Cloud Logging using the following query:
+```
+logName="projects/<project_name>/logs/tpu.googleapis.com%2Fruntime_monitor"
+jsonPayload.verb="stacktraceanalyzer"
+```
+3. `stack_trace_interval_seconds` signifies the duration in seconds between each stack trace collection event. Setting `stack_trace_interval_seconds: 600` will collect the stack traces every 600 seconds (10 minutes).
+
 ## Getting Started: Local Development
 
 Local development is the faster and most convenient way to run MaxText. However, it doesn't scale to multiple hosts.

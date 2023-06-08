@@ -48,6 +48,11 @@ from jax._src.mesh import Mesh
 
 from jax.experimental.compilation_cache import compilation_cache as cc
 
+from cloud_tpu_diagnostics import diagnostic
+from cloud_tpu_diagnostics.configuration import debug_configuration
+from cloud_tpu_diagnostics.configuration import diagnostic_configuration
+from cloud_tpu_diagnostics.configuration import stack_trace_configuration
+
 import max_logging
 
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
@@ -337,7 +342,14 @@ def train_loop(config, state=None):
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
-  train_loop(pyconfig.config)
+  debug_config = debug_configuration.DebugConfig(
+    stack_trace_config = stack_trace_configuration.StackTraceConfig(
+      collect_stack_trace = pyconfig.config.collect_stack_trace,
+      stack_trace_to_cloud = pyconfig.config.stack_trace_to_cloud,
+      stack_trace_interval_seconds = pyconfig.config.stack_trace_interval_seconds))
+  diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
+  with diagnostic.diagnose(diagnostic_config):
+    train_loop(pyconfig.config)
 
 
 if __name__ == "__main__":
