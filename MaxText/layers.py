@@ -115,8 +115,8 @@ def dot_product_attention(query: Array,
   # Layer norms here prevent (near) one-hot softmaxes, which can lead to
   # unstable training loss and nans, see the "QK Normalization" subsection in
   # https://arxiv.org/pdf/2302.05442.pdf.
-  query = LayerNorm(dtype=dtype, name='query_layer_norm', kernel_axes = ('heads',))(query)
-  key = LayerNorm(dtype=dtype, name='key_layer_norm', kernel_axes = ('heads',))(key)
+  query = LayerNorm(dtype=dtype, name='query_layer_norm', kernel_axes=('heads',))(query)
+  key = LayerNorm(dtype=dtype, name='key_layer_norm', kernel_axes=('heads',))(key)
 
   # `attn_weights`: [batch, num_heads, q_length, kv_length]
   attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
@@ -236,7 +236,7 @@ class DenseGeneral(nn.Module):
       aqt_dot_general = aqt.make_dot_general(aqt_cfg)
       aqt_key = self.make_rng('aqt')
       context = aqt.Context(key=aqt_key, train_step=None)
-      
+
       return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
 
 def _convert_to_activation_function(
@@ -327,6 +327,7 @@ class MultiHeadDotProductAttention(nn.Module):
     #       linear transformations, which is equivalent under Adafactor.
     depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
     def query_init(*args):
+      #pylint: disable=no-value-for-parameter
       return self.kernel_init(*args) / depth_scaling
 
     # Project inputs_q to multi-headed q/k/v
@@ -482,7 +483,7 @@ class MlpBlock(nn.Module):
   def __call__(self, inputs, decode: bool = False, deterministic: bool = False):
     """Applies Transformer MlpBlock module."""
     cfg = self.config
-  
+
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
     activations = []
@@ -965,7 +966,7 @@ class DecoderLayer(nn.Module):
 
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = LayerNorm(
-        dtype=cfg.dtype, name='pre_self_attention_layer_norm', kernel_axes = ('embed',))(
+        dtype=cfg.dtype, name='pre_self_attention_layer_norm', kernel_axes=('embed',))(
             inputs)
     lnx = nn.with_logical_constraint(lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
@@ -1008,7 +1009,7 @@ class DecoderLayer(nn.Module):
     if cfg.record_internal_nn_metrics:
       self.sow('intermediates', 'activation_mean', jnp.mean(layer_output))
       self.sow('intermediates', 'activation_stdev', jnp.std(layer_output))
-      self.sow('intermediates', 'activation_fraction_zero', jnp.sum(layer_output==0) / jnp.size(layer_output))
+      self.sow('intermediates', 'activation_fraction_zero', jnp.sum(layer_output == 0) / jnp.size(layer_output))
 
     if cfg.scan_layers:
       return layer_output, None
@@ -1087,7 +1088,7 @@ class Decoder(nn.Module):
                 decode,
                 max_decode_length)
 
-    y = LayerNorm(dtype=cfg.dtype, name='decoder_norm', kernel_axes = ('embed',))(y)
+    y = LayerNorm(dtype=cfg.dtype, name='decoder_norm', kernel_axes=('embed',))(y)
     y = nn.Dropout(
         rate=cfg.dropout_rate, broadcast_dims=(-2,))(
             y, deterministic=deterministic)
