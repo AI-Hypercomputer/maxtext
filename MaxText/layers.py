@@ -223,7 +223,6 @@ class DenseGeneral(nn.Module):
     if not cfg.use_int8_training:
       return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
     else:
-      # create a quantization config
       aqt_cfg = aqt_config.fully_quantized(bits=8, use_fwd_quant=True)
 
       def noise_fn(shape, key):
@@ -234,16 +233,10 @@ class DenseGeneral(nn.Module):
       aqt_cfg.drhs.lhs.noise_fn = noise_fn
       aqt_cfg.drhs.rhs.noise_fn = noise_fn
 
-      # use the config to create a quantized dot_general function
       aqt_dot_general = aqt.make_dot_general(aqt_cfg)
-
-      # some fun key stuff
-      #key = jax.random.PRNGKey(0) # should actually get next key
-      rng = random.PRNGKey(0)  # Initialize PRNG key with a seed value
       aqt_key = self.make_rng('aqt')
-      #aqt_key = jax.random.PRNGKey(0)
       context = aqt.Context(key=aqt_key, train_step=None)
-
+      
       return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
 
 def _convert_to_activation_function(

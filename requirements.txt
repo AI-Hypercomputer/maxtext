@@ -1,6 +1,5 @@
 orbax-checkpoint
 absl-py
-# aqtp
 argparse
 datetime
 google-cloud-storage
