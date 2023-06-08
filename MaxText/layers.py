@@ -115,7 +115,7 @@ def dot_product_attention(query: Array,
   # Layer norms here prevent (near) one-hot softmaxes, which can lead to
   # unstable training loss and nans, see the "QK Normalization" subsection in
   # https://arxiv.org/pdf/2302.05442.pdf.
-  query = LayerNorm(dtype=dtype, name='query_layer_norm', kernel_axes=('heads',))(query)
+  query = LayerNorm(dtype=dtype, name='query_layer_norm', kernel_axes = ('heads',))(query)
   key = LayerNorm(dtype=dtype, name='key_layer_norm', kernel_axes=('heads',))(key)
 
   # `attn_weights`: [batch, num_heads, q_length, kv_length]
@@ -172,6 +172,7 @@ def _canonicalize_tuple(x):
     return tuple(x)
   else:
     return (x,)
+
 
 class DenseGeneral(nn.Module):
   """A linear transformation (without bias) with flexible axes.
