@@ -162,7 +162,8 @@ def train_step(model, config, state, data, dropout_rng):
 
   """
   # inputs, targets, segments, positions = apply_args
-  rng1, rng2 = jax.random.split(dropout_rng)
+  rng1, gen_aqt_rng = jax.random.split(dropout_rng)
+  aqt_rng, rng2 = jax.random.split(gen_aqt_rng)
 
   def loss_fn(params):
     logits, intermediate_outputs = model.apply({'params': params},
@@ -171,7 +172,7 @@ def train_step(model, config, state, data, dropout_rng):
                          data['inputs_segmentation'],
                          data['inputs_position'],
                          enable_dropout=config.enable_dropout,
-                         rngs={'dropout': rng1}, mutable='intermediates')
+                         rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
     # TODO: is optax xent as good as custom T5X one?
     xent = optax.softmax_cross_entropy_with_integer_labels(logits, data['targets'])
     # Mask out paddings at the end of each example.

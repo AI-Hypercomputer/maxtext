@@ -141,7 +141,7 @@ def init_train_state(model, tx, config, key):
       len(jax.devices()) * config.per_device_batch_size,
       config.max_target_length
   )
-  model_vars = model.init({'params': key, 'dropout': key},
+  model_vars = model.init({'params': key, 'dropout': key, 'aqt': key},
                           jnp.ones(input_shape),
                           jnp.ones(input_shape))
   state = train_state.TrainState.create(
