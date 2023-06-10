@@ -211,7 +211,7 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
       mv_zip_command = f"mv {zip_name} {run_name}"
       cd_command = f"cd {run_name}"
       unzip_command = f"tar xzf {zip_name}"
-      write_kill_script_command = f""""echo "{kill_existing_processes_str()}" > {kill_script_name}"""
+      write_kill_script_command = f"""echo "{kill_existing_processes_str()}" > {kill_script_name}"""
       echo_between_command = f"echo 'finished writing kill script'"
       kill_existing_command = f"bash {kill_script_name} {cur_slice.version}"
 
