@@ -212,12 +212,13 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
       cd_command = f"cd {run_name}"
       unzip_command = f"tar xzf {zip_name}"
       write_kill_script_command = f"echo {kill_existing_processes_str()} > {kill_script_name}"
+      echo_between_command = f"echo `finished writing kill script`"
       kill_existing_command = f"bash {kill_script_name} {cur_slice.version}"
 
       print("kill existing command: ", kill_existing_command)
       if use_existing_folder is False:
         remote_command_list = [mkdir_command , mv_zip_command , cd_command , unzip_command ,
-                        write_kill_script_command , kill_existing_command , main_command]
+                        write_kill_script_command , echo_between_command, kill_existing_command , main_command]
       else:
         remote_command_list = [cd_command, write_kill_script_command , kill_existing_command , main_command]
       remote_command_list_str = " && ".join(remote_command_list)
