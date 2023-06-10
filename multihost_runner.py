@@ -207,7 +207,6 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
       write_kill_script_command = f"echo '{kill_existing_processes_str()}' > {kill_script_name}"
       kill_existing_command = f"bash {kill_script_name} {cur_slice.version}"
 
-      print("kill existing command: ", kill_existing_command)
       if use_existing_folder is False:
         remote_command_list = [mkdir_command , mv_zip_command , cd_command , unzip_command ,
                         write_kill_script_command, kill_existing_command , main_command]
