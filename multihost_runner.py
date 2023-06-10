@@ -146,7 +146,7 @@ if [[ "${_TPU_VERSION_NAME}" =~ ^v5.* ]]; then
   device_name="vfio/0"
 fi
 echo -e "Searching for existing processes on device ${device_name}..."
-pid=$(sudo lsof -w /dev/${device_name} | awk '\''END{print $2}'\'')
+pid=$(sudo lsof -w /dev/${device_name} | awk '"'"'END{print $2}'"'"')
 if [[ ! -z "${pid}" ]]
 then
  echo -e "Existing process found with pid ${pid}"
