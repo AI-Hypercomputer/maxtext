@@ -34,6 +34,7 @@ import numpy as np
 import jax
 from jax import lax
 from jax import random
+from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 
 
@@ -340,10 +341,13 @@ class MultiHeadDotProductAttention(nn.Module):
     query = nn.with_logical_constraint(
         query, ('activation_batch', 'activation_length', 'activation_heads', 'activation_kv')
     )
+    query = checkpoint_name(query, 'query_proj')
     key = nn.with_logical_constraint(key, ('activation_batch', 'activation_length', 'activation_heads', 'activation_kv'))
+    key = checkpoint_name(key, 'key_proj')
     value = nn.with_logical_constraint(
         value, ('activation_batch', 'activation_length', 'activation_heads', 'activation_kv')
     )
+    value = checkpoint_name(value, 'value_proj')
 
     if decode:
       # Detect if we're initializing by absence of existing cache data.
@@ -1044,10 +1048,15 @@ class Decoder(nn.Module):
 
     BlockLayer = DecoderLayer
 
-    if cfg.remat_policy not in (None, 'none'):
+    if cfg.remat_policy != 'none':
       if cfg.remat_policy == 'minimal':
         policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
+      elif cfg.remat_policy == 'proj':
+        policy = jax.checkpoint_policies.save_only_these_names(
+            'query_proj', 'value_proj', 'key_proj'
+        )
       else:
+        assert cfg.remat_policy == 'full', "Remat policy needs to be on list of remat policies"
         policy = None
       BlockLayer = nn.remat(  # pylint: disable=invalid-name
           BlockLayer,
