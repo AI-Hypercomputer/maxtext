@@ -131,11 +131,6 @@ def write_kill_script(script_dir, kill_processes_script_name):
   with open(kill_processes_script, "w", encoding="utf-8") as f:
     f.write(kill_existing_processes_str())
 
-
-# TODO(mattdavidow): Does this get echoed correctly? ITs possibly the special characters
-# mess up the echo
-# matt believes this because _TPU_VERSION_NAME is also echoed as NULL, suggesting the dollar
-# signs got messed up
 def kill_existing_processes_str():
   return """#!/bin/bash
 _TPU_VERSION_NAME=${1}
@@ -209,7 +204,7 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
       mv_zip_command = f"mv {zip_name} {run_name}"
       cd_command = f"cd {run_name}"
       unzip_command = f"tar xzf {zip_name}"
-      write_kill_script_command = f"""echo '{kill_existing_processes_str()}' > {kill_script_name}"""
+      write_kill_script_command = f"echo '{kill_existing_processes_str()}' > {kill_script_name}"
       kill_existing_command = f"bash {kill_script_name} {cur_slice.version}"
 
       print("kill existing command: ", kill_existing_command)
