@@ -135,6 +135,8 @@ def write_kill_script(script_dir, kill_processes_script_name):
 
 # TODO(mattdavidow): Does this get echoed correctly? ITs possibly the special characters
 # mess up the echo
+# matt believes this because _TPU_VERSION_NAME is also echoed as NULL, suggesting the dollar
+# signs got messed up
 def kill_existing_processes_str():
   return """#!/bin/bash
 _TPU_VERSION_NAME=${1}
