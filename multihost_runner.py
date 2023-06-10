@@ -79,7 +79,7 @@ def get_slices(tpu_prefix):
   """ Returns a list of slices matching tpu_prefix """
   command = [
       "gcloud", "alpha", "compute", "tpus", "tpu-vm", "list",
-      f"--filter=name~{tpu_prefix}", "--format=csv(name,TYPE)"
+      f"--filter=name~{tpu_prefix}", "--format=csv(name,accelerator_type)"
   ]
   completed_command = subprocess.run(command, capture_output=True, check=True)
   instances = completed_command.stdout.decode()
@@ -110,6 +110,7 @@ def get_slices(tpu_prefix):
     else:
       slice_num = 0
     slices[slice_num] = Slice(slice_name, slice_num, num_workers, version)
+    print("version: ", version)
   return slices
 
 def filter_instances(instance_list, tpu_prefix):
@@ -131,10 +132,14 @@ def write_kill_script(script_dir, kill_processes_script_name):
   with open(kill_processes_script, "w", encoding="utf-8") as f:
     f.write(kill_existing_processes_str())
 
+
+# TODO(mattdavidow): Does this get echoed correctly? ITs possibly the special characters
+# mess up the echo
 def kill_existing_processes_str():
   return """#!/bin/bash
 _TPU_VERSION_NAME=${1}
 device_name="accel0"
+echo -e "Using version name ${_TPU_VERSION_NAME}"
 if [[ "${_TPU_VERSION_NAME}" =~ ^v5.* ]]; then
   device_name="vfio/0"
 fi
@@ -207,6 +212,7 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
       write_kill_script_command = f"echo {kill_existing_processes_str()} > {kill_script_name}"
       kill_existing_command = f"bash {kill_script_name} {cur_slice.version}"
 
+      print("kill existing command: ", kill_existing_command)
       if use_existing_folder is False:
         remote_command_list = [mkdir_command , mv_zip_command , cd_command , unzip_command ,
                         write_kill_script_command , kill_existing_command , main_command]
