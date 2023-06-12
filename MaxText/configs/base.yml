@@ -106,7 +106,11 @@ eos_id: 2  # sentencepiece default
 prompt: "I love to "
 
 enable_profiler: False
+# If enable checkpointing is true, an asynchronous checkpointer will be used if
+# async_checkpointer is true, else a synchronous one is used. If you have
+# problems with the checkpointer we recommend trying the sychronous one
 enable_checkpointing: True
+async_checkpointer: True
 
 # Set these two to False to run deterministically (i.e. reproducible losses)
 enable_dropout: True

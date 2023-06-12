@@ -14,7 +14,7 @@
  limitations under the License.
  """
 
-"""Create an Orbax CheckpointManager with an AsyncCheckpointer."""
+"""Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
 from etils import epath
 import jax
@@ -51,18 +51,24 @@ def _multislice_distribute_initialize():
                              num_processes=jax.process_count(),
                              process_id=jax.process_index())
 
-def create_orbax_checkpoint_manager(checkpoint_dir: str, enable_checkpointing: bool):
-  """Returns an Orbax async CheckpointManager or None if checkpointing is disabled."""
+def create_orbax_checkpoint_manager(checkpoint_dir: str, enable_checkpointing: bool, use_async: bool):
+  """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:
     max_logging.log("Checkpointing disabled, not creating checkpoint manager.")
     return None
   max_logging.log("Creating checkpoint manager...")
-  _multislice_distribute_initialize()
   p = epath.Path(checkpoint_dir)
-
+  checkpointer = checkpoint.PyTreeCheckpointHandler()
+  if use_async:
+    _multislice_distribute_initialize()
+    checkpointer = AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler()
+  else:
+    checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler()
+  
   mngr = CheckpointManager(p,
-                           AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler()),
-                           options = CheckpointManagerOptions(create=True))
+                        checkpointer,
+                        options = CheckpointManagerOptions(create=True))
+
   max_logging.log("Checkpoint manager created!")
   return mngr
 
