@@ -61,9 +61,9 @@ def create_orbax_checkpoint_manager(checkpoint_dir: str, enable_checkpointing: b
   checkpointer = checkpoint.PyTreeCheckpointHandler()
   if use_async:
     _multislice_distribute_initialize()
-    checkpointer = AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler()
+    checkpointer = AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler())
   else:
-    checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler()
+    checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
   
   mngr = CheckpointManager(p,
                         checkpointer,
