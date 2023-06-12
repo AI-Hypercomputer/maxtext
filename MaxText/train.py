@@ -54,7 +54,6 @@ from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 import max_logging
-
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
@@ -255,7 +254,7 @@ def train_loop(config, state=None):
 
   """
   writer = SummaryWriter(config.tensorboard_dir)
-  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir, config.enable_checkpointing)
+  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir, config.enable_checkpointing, config.async_checkpointing)
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(0), 2)
 
