@@ -254,7 +254,9 @@ def train_loop(config, state=None):
 
   """
   writer = SummaryWriter(config.tensorboard_dir)
-  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir, config.enable_checkpointing, config.async_checkpointing)
+  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir,
+                                                                     config.enable_checkpointing,
+                                                                     config.async_checkpointing)
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(0), 2)
 
