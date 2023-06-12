@@ -64,11 +64,8 @@ def create_orbax_checkpoint_manager(checkpoint_dir: str, enable_checkpointing: b
     checkpointer = AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler())
   else:
     checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
-  
-  mngr = CheckpointManager(p,
-                        checkpointer,
-                        options = CheckpointManagerOptions(create=True))
 
+  mngr = CheckpointManager(p, checkpointer, options=CheckpointManagerOptions(create=True))
   max_logging.log("Checkpoint manager created!")
   return mngr
 
