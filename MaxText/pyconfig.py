@@ -88,7 +88,9 @@ class _HyperParameters():
     assert run_name, "Erroring out, need a real run_name"
     base_output_directory = raw_keys["base_output_directory"]
     assert base_output_directory, "Erroring out, need a real base_output_directory"
-    assert raw_keys['dataset_path'], "Erroring out, need a real dataset_path"
+    assert raw_keys['dataset_path'], "Erroring out, need a real dataset_path.\n\
+      See instructions for dowloading the c4 dataset here:\n\
+        https://github.com/google/maxtext/blob/main/README.md#getting-started-download-dataset-and-configure."
     raw_keys["tensorboard_dir"] = os.path.join(base_output_directory, run_name, "tensorboard", "")
     raw_keys["checkpoint_dir"] = os.path.join(base_output_directory, run_name, "checkpoints", "")
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
