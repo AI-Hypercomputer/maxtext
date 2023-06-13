@@ -130,7 +130,9 @@ def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
 
 def decode_loop(config, state=None):
   """Decoding loop for the Transformer model."""
-  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir, config.enable_checkpointing)
+  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir,
+                                                                     config.enable_checkpointing,
+                                                                     config.async_checkpointing)
   rng = random.PRNGKey(0)
 
   # Model and Optimizer definition
