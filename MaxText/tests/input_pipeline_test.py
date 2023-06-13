@@ -28,7 +28,6 @@ import pyconfig
 import input_pipeline
 
 # By default, XLA presents all the CPU cores as one device. This flag splits up cores in 2 CPU devices.
-os.environ["TFDS_DATA_DIR"] = "gs://maxtext-dataset/"
 os.environ["XLA_FLAGS"] = '--xla_force_host_platform_device_count=2'
 jax.config.update('jax_platform_name', 'cpu')
 
@@ -40,6 +39,7 @@ class InputPipelineTest(unittest.TestCase):
     pyconfig.initialize(sys.argv + ['configs/base.yml'], per_device_batch_size=1, run_name='test', mesh_axes = ['data'],
                         logical_axis_rules = [['batch', 'data']],
                         data_sharding = ['data'])
+    os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
     self.config = pyconfig.config
     self.read_config = tfds.ReadConfig()
     self.read_config.add_tfds_id = True

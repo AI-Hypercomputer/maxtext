@@ -39,7 +39,9 @@ class MultihostDataloadingTest(unittest.TestCase):
     batch_size = 2
     pyconfig.initialize(sys.argv + ['configs/base.yml'], per_device_batch_size=1, run_name='test', mesh_axes = ['data'],
                         logical_axis_rules = [['batch', 'data']],
-                        data_sharding = ['data'])
+                        data_sharding = ['data'],
+                        base_output_directory = "gs://max-experiments/",
+                        dataset_path = "gs://maxtext-dataset/")
     config = pyconfig.config
     global_data_shape = PartitionSpec(batch_size, config.max_target_length)
     data_sharding = ('data',)

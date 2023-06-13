@@ -42,7 +42,7 @@ You need to run these steps once per project prior to any local development or c
 ```
 bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
 ```
-3. Change config values for `base_output_directory` and `dataset_path` in `configs/base.yml`. `vocab_relative_path` is relative to `base_output_directory` for loading the tokenizer. MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them. We also recommend reviewing the configurable options in `configs/base.yml`, for instance you may change the `steps` or `logging_period` by either modifying `configs/base.yml` or by passing in `steps` and `logging_period` as additional args to the `train.py` call.
+3. Input config values for `base_output_directory` and `dataset_path` in `configs/base.yml`. `vocab_relative_path` is relative to `base_output_directory` for loading the tokenizer. MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them. We also recommend reviewing the configurable options in `configs/base.yml`, for instance you may change the `steps` or `logging_period` by either modifying `configs/base.yml` or by passing in `steps` and `logging_period` as additional args to the `train.py` call.
 
 To run maxtext the TPUVMs must have permission to read the gcs bucket. These permissions are granted by service account roles, such as the `STORAGE ADMIN` role. 
 
@@ -150,7 +150,7 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
     RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S) # You may set this to any unique name for a fresh run.
     ```
     ```
-    python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME dcn_data_parallelism=$NODE_COUNT"
+    python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME"
     ```
     If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_IP=true`.
 
@@ -209,7 +209,7 @@ either be a TPUVM or not. If your runner machine is a TPUVM, it needs service ac
     ```
     ```
     RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S) # You may set this to any unique name for a fresh run.
-    python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --CQR_EXTRA_ARGS="--reserved" --COMMAND="bash setup.sh && python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME dcn_data_parallelism=$NODE_COUNT"
+    python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --CQR_EXTRA_ARGS="--reserved" --COMMAND="bash setup.sh && python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME"
     ```
 
     We tell `multihost_job` to target the `reserved` pool by  by including `--reserved` as extra arguments to the CQR request, but you may instead target the `on-demand` pool by removing the `--CQR_EXTRA_ARGS` flag (on-demand is default), or the pre-emptible pool with `--CQR_EXTRA_ARGS="--best-effort"`, which may be necessary if your reservation is full.
