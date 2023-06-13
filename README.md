@@ -150,7 +150,7 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
     RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S) # You may set this to any unique name for a fresh run.
     ```
     ```
-    python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME base_output_directory=$OUTPUT_DIR dataset_path=$DATASET_PATH"
+    python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME"
     ```
     If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_IP=true`.
 
