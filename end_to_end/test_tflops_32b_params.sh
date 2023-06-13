@@ -14,9 +14,7 @@ else
     RUN_NAME=${5}_$(date +%Y-%m-%d-%H)
 fi
 
-# Set up and train
-bash setup.sh
-
+# Train
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true --xla_tpu_decompose_all_gather_einsum=true"
 python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
     steps=150 per_device_batch_size=1 enable_checkpointing=false\
