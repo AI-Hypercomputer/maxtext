@@ -87,8 +87,8 @@ class _HyperParameters():
     run_name = raw_keys["run_name"]
     assert run_name, "Erroring out, need a real run_name"
     base_output_directory = raw_keys["base_output_directory"]
-    assert base_output_directory, "Erroring out, need a real base_output_directory"
-    assert raw_keys['dataset_path'], "Erroring out, need a real dataset_path.\n\
+    assert base_output_directory, "Erroring out, please set a real base_output_directory"
+    assert raw_keys['dataset_path'], "Erroring out, please set a real dataset_path in configs/base.yml\n\
       See instructions for downloading the c4 dataset here:\n\
       https://github.com/google/maxtext/blob/main/README.md#getting-started-download-dataset-and-configure.\n"
     raw_keys["tensorboard_dir"] = os.path.join(base_output_directory, run_name, "tensorboard", "")
