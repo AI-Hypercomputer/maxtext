@@ -70,12 +70,12 @@ bash setup.sh
 ```
 4. After installation completes, run training with the command:
 ```
-python3 MaxText/train.py MaxText/configs/base.yml run_name=${USER}_$(date +%Y-%m-%d-%H-%M-%S)
+python3 MaxText/train.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
 ```
 
 5. If you want to decode, you can decode as follows.
 ```
-python3 MaxText/decode.py MaxText/configs/base.yml run_name=${USER}_$(date +%Y-%m-%d-%H-%M-%S)
+python3 MaxText/decode.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
 ```
 Be aware, these decodings will be random. To get high quality decodings you need pass in a checkpoint, typically via the `load_parameters_path` argument.
 
@@ -118,7 +118,7 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
 3. Create your instances via Queued Resource (QR). 
     Choose names for your TPUs and QR:
     ```
-    TPU_PREFIX=${USER}_$(date +%Y-%m-%d-%H-%M-%S) # Use new names when you create new TPUs
+    TPU_PREFIX=$YOUR_TPU_NAME # Use new names when you create new TPUs
     QR_ID=$TPU_PREFIX # Convenient to re-use the node names, but can be different
     ```
     Choose the number of nodes (we use 2 below, but you may customize this and other feature of your TPU(s))
@@ -147,7 +147,7 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
 
     Set a RUN_NAME for your job:
     ```
-    RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S) # You may set this to any unique name for a fresh run.
+    RUN_NAME=$YOUR_JOB_NAME # You may set this to any unique name for a fresh run.
     ```
     ```
     python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME"
@@ -208,7 +208,7 @@ either be a TPUVM or not. If your runner machine is a TPUVM, it needs service ac
     NODE_COUNT=2
     ```
     ```
-    RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S) # You may set this to any unique name for a fresh run.
+    RUN_NAME=$YOUR_JOB_NAME # You may set this to any unique name for a fresh run.
     python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --CQR_EXTRA_ARGS="--reserved" --COMMAND="bash setup.sh && python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME"
     ```
 
