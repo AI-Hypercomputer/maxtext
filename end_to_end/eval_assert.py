@@ -23,12 +23,13 @@ def read(metrics_file, target):
   return avg
 
 
-def assert_metric_average(metrics_file, target, threshold):
+def assert_metric_average(metrics_file, threshold, target):
   avg_value = read(metrics_file, target)
   # Checks for acceptable performance by asserting that the average metric (e.g. TFLOPs)
   # is greater than the threshold.
   print(f'avg value of target {target} is {avg_value}')
-  assert avg_value >= threshold
+  assert avg_value >= float(threshold)
+  print('assert metric average passed.')
 
 
 def test_checkpointing(metrics_file, target):
@@ -43,6 +44,7 @@ def test_checkpointing(metrics_file, target):
     # Checks that checkpoint restore was successful by comparing loss of last
     # step in saved checkpoint to loss of first step in restored checkpoint
     assert isclose(saved_loss, restored_loss, rel_tol=0.1)
+    print('checkpointing test passed.')
 
 def test_determinism(metrics_file, target):
   """Asserts over loss values from two runs"""
@@ -57,26 +59,28 @@ def test_determinism(metrics_file, target):
     print(f"Run 1 loss:{run_1_loss}", flush=True)
     print(f"Run 2 loss:{run_2_loss}", flush=True)
     assert run_1_loss==run_2_loss
+    print('determinism test passed.')
 
 def test_vocab_creation(target):
   bucket_name = target.split("/")[2]
   vocab_path = "/".join(target.split("/")[3:])
   storage_client = storage.Client()
   assert storage.Blob(bucket=storage_client.bucket(bucket_name), name=vocab_path).exists(storage_client)
+  print('vocab creation test passed.')
 
 
 def main(argv: Sequence[str]) -> None:
 
-  _, metrics_file, threshold, target, test_scenario = argv
+  _, test_scenario, *test_vars = argv
 
   if test_scenario == 'metrics_average':
-    assert_metric_average(metrics_file, target, float(threshold))
+    assert_metric_average(*test_vars)
   elif test_scenario == 'checkpoint_save_restore':
-    test_checkpointing(metrics_file, target)
+    test_checkpointing(*test_vars)
   elif test_scenario == 'determinism':
-    test_determinism(metrics_file, target)
+    test_determinism(*test_vars)
   elif test_scenario == 'vocab_creation':
-    test_vocab_creation(target)
+    test_vocab_creation(*test_vars)
 
 
 if __name__ == "__main__":
