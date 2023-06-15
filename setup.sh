@@ -39,9 +39,9 @@ if [[ "$MODE" == "libtpu-only" ]]; then
         # Install custom libtpu
         echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
         # Install required dependency
-        sudo pip3 install -U crcmod
+        pip3 install -U crcmod
         # Copy libtpu.so from GCS path
-        sudo gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+        gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
         exit 0
     else
         echo -e "\n\nError: You must provide a custom libtpu for libtpu-only mode.\n\n"
@@ -69,7 +69,7 @@ fi
 
 # Delete custom libtpu if it exists
 if [ -e "$libtpu_path" ]; then
-    sudo rm "$libtpu_path"
+    rm "$libtpu_path"
 fi
 
 if [[ "$MODE" == "stable" || ! -v MODE ]]; then
@@ -93,9 +93,9 @@ elif [[ $MODE == "nightly" ]]; then
         # Install custom libtpu
         echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
         # Install required dependency
-        sudo pip3 install -U crcmod
+        pip3 install -U crcmod
         # Copy libtpu.so from GCS path
-        sudo gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+        gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
     else
         # Install libtpu-nightly
         echo "Installing libtpu-nightly"
@@ -107,9 +107,9 @@ elif [[ $MODE == "head" ]]; then
         # Install custom libtpu
         echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
         # Install required dependency
-        sudo pip3 install -U crcmod
+        pip3 install -U crcmod
         # Copy libtpu.so from GCS path
-        sudo gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+        gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
     else
         echo -e "\n\nError: You must provide a custom libtpu for head mode.\n\n"
         exit 1
