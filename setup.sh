@@ -103,17 +103,17 @@ elif [[ $MODE == "nightly" ]]; then
     fi
 elif [[ $MODE == "head" ]]; then 
 # Head mode
-    if [[ -n "$LIBTPU_GCS_PATH" ]]; then
-        # Install custom libtpu
-        echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
-        # Install required dependency
-        pip3 install -U crcmod
-        # Copy libtpu.so from GCS path
-        gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
-    else
-        echo -e "\n\nError: You must provide a custom libtpu for head mode.\n\n"
-        exit 1
-    fi
+    # if [[ -n "$LIBTPU_GCS_PATH" ]]; then
+    #     # Install custom libtpu
+    #     echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
+    #     # Install required dependency
+    #     pip3 install -U crcmod
+    #     # Copy libtpu.so from GCS path
+    #     gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+    # else
+    #     echo -e "\n\nError: You must provide a custom libtpu for head mode.\n\n"
+    #     exit 1
+    # fi
 
     echo "Installing jax-head, jaxlib-head"
     # Install jax from GitHub head
