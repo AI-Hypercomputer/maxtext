@@ -146,9 +146,9 @@ then
  echo -e "Killing process ${pid}..."
  kill -9 "${pid}"
  tail --pid=$pid -f /dev/null
- echo -e "Orphaned process ${pid} on your TPU was killed successfully."
+ echo -e "Orphaned process ${pid} on your TPU was killed successfully, so your TPU is ready to use!"
 else
- echo -e "No existing processes found."
+ echo -e "No existing processes found, so your TPU is ready to use!"
 fi
 sudo rm -f /tmp/libtpu_lockfile"""
 
