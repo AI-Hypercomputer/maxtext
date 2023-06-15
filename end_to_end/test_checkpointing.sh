@@ -13,4 +13,4 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME steps=501\
 python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME steps=502\
     metrics_file='restored_metrics.txt' base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH
 
-python3 end_to_end/eval_assert.py metrics.txt 0 learning/loss checkpoint_save_restore
+python3 end_to_end/eval_assert.py checkpoint_save_restore metrics.txt,learning/loss

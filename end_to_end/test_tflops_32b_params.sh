@@ -24,4 +24,4 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
     dataset_path=$DATASET_PATH log_period=150
 
 # Assert TFLOP/s
-python3 end_to_end/eval_assert.py metrics.txt $TFLOP_THRESHOLD perf/per_device_tflops_per_sec metrics_average
+python3 end_to_end/eval_assert.py metrics_average metrics.txt,$TFLOP_THRESHOLD,perf/per_device_tflops_per_sec

@@ -23,7 +23,11 @@ def read(metrics_file, target):
   return avg
 
 
-def assert_metric_average(metrics_file, target, threshold):
+def assert_metric_average(test_vars):
+  metrics_file = test_vars[0]
+  threshold = float(test_vars[1])
+  target = test_vars[2]
+
   avg_value = read(metrics_file, target)
   # Checks for acceptable performance by asserting that the average metric (e.g. TFLOPs)
   # is greater than the threshold.
@@ -31,8 +35,11 @@ def assert_metric_average(metrics_file, target, threshold):
   assert avg_value >= threshold
 
 
-def test_checkpointing(metrics_file, target):
+def test_checkpointing(test_vars):
   """Asserts over loss values from loaded checkpoint"""
+  metrics_file = test_vars[0]
+  target = test_vars[1]
+
   metrics_file_saved = 'saved_' + metrics_file
   metrics_file_restored = 'restored_' + metrics_file
 
@@ -43,9 +50,13 @@ def test_checkpointing(metrics_file, target):
     # Checks that checkpoint restore was successful by comparing loss of last
     # step in saved checkpoint to loss of first step in restored checkpoint
     assert isclose(saved_loss, restored_loss, rel_tol=0.1)
+    print('checkpointing test passed.')
 
-def test_determinism(metrics_file, target):
+def test_determinism(test_vars):
   """Asserts over loss values from two runs"""
+  metrics_file = test_vars[0]
+  target = test_vars[1]
+
   run_1 = 'run_1_' + metrics_file
   run_2 = 'run_2_' + metrics_file
 
@@ -57,26 +68,30 @@ def test_determinism(metrics_file, target):
     print(f"Run 1 loss:{run_1_loss}", flush=True)
     print(f"Run 2 loss:{run_2_loss}", flush=True)
     assert run_1_loss==run_2_loss
+    print('determinism test passed.')
 
-def test_vocab_creation(target):
+def test_vocab_creation(test_vars):
+  target = test_vars[0]
   bucket_name = target.split("/")[2]
   vocab_path = "/".join(target.split("/")[3:])
   storage_client = storage.Client()
   assert storage.Blob(bucket=storage_client.bucket(bucket_name), name=vocab_path).exists(storage_client)
+  print('vocab creation test passed.')
 
 
 def main(argv: Sequence[str]) -> None:
 
-  _, metrics_file, threshold, target, test_scenario = argv
+  _, test_scenario, test_vars = argv
+  test_vars = test_vars.split(',')
 
   if test_scenario == 'metrics_average':
-    assert_metric_average(metrics_file, target, float(threshold))
+    assert_metric_average(test_vars)
   elif test_scenario == 'checkpoint_save_restore':
-    test_checkpointing(metrics_file, target)
+    test_checkpointing(test_vars)
   elif test_scenario == 'determinism':
-    test_determinism(metrics_file, target)
+    test_determinism(test_vars)
   elif test_scenario == 'vocab_creation':
-    test_vocab_creation(target)
+    test_vocab_creation(test_vars)
 
 
 if __name__ == "__main__":
