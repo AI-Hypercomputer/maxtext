@@ -122,5 +122,5 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
                                       item=abstract_unboxed_pre_state,
                                       restore_args=restore_args).params
   else:
-    max_logging.log("not restoring checkpoint")
+    max_logging.log("No existing checkpoints found, not restoring checkpoint.")
     return None, None
