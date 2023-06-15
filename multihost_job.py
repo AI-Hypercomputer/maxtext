@@ -330,7 +330,7 @@ def main() -> None:
       f"\n{gcs_bucket_url(args.BUCKET_NAME, bucket_dir, args.PROJECT)}\n")
 
   print("View the status of the created TPUs via: ")
-  print(f"gcloud compute tpus tpu-vm list --filter={args.RUN_NAME}\n")
+  print(f"gcloud alpha compute tpus queued-resources list --filter={args.RUN_NAME}\n")
   return 0
 
 if __name__ == '__main__':
