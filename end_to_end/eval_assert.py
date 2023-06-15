@@ -43,6 +43,8 @@ def test_checkpointing(metrics_file, target):
     restored_loss = json.loads(restored.readlines()[0])[target]
     # Checks that checkpoint restore was successful by comparing loss of last
     # step in saved checkpoint to loss of first step in restored checkpoint
+    print("saved loss: ", saved_loss)
+    print("restored loss: ", restored_loss)
     assert isclose(saved_loss, restored_loss, rel_tol=0.1)
     print('checkpointing test passed.')
 
