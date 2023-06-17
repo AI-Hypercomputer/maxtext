@@ -19,9 +19,12 @@
 
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
+print("Starting maxtext", flush=True)
 import jax
+print("Imported jax", flush=True)
 import os
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+print("about to print devices", flush=True)
 print(f"Found {jax.device_count()} devices.")
 
 from typing import Sequence
@@ -55,6 +58,8 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 import max_logging
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
+
+print("finished imports", flush=True)
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
 def calculate_training_tflops(num_model_parameters, config):

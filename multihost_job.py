@@ -158,8 +158,13 @@ cd {args.RUN_NAME}
 {setup_ops_str(args.RUN_NAME, log_name)}
 sudo python3 -m virtualenv venv
 source venv/bin/activate
-(({download_from_gcs(zip_gcs_path)}
+(( echo "Starting multihost job on slice $SLICE_ID Worker $WORKER_ID."
+echo "Printing the maximum number of files open..."
+ulimit -n
+echo "Downloading code from GCS..."
+{download_from_gcs(zip_gcs_path)}
 tar xzf {zip_name}
+echo "Code downloaded!"
 {args.COMMAND}) 2>&1) >> {log_name}
 (echo "{finish_status_str()}") >> {log_name}
 gsutil cp {log_name} "{bucket_path}/"
