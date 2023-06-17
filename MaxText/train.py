@@ -20,6 +20,8 @@
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
 print("Starting maxtext", flush=True)
+import socket
+print_local_ip()
 import jax
 print("Imported jax", flush=True)
 import os
@@ -60,6 +62,10 @@ import max_logging
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 print("finished imports", flush=True)
+
+def print_local_ip():
+  hostname = socket.gethostname()
+  print(socket.gethostbyname(hostname))
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
 def calculate_training_tflops(num_model_parameters, config):

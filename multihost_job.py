@@ -158,10 +158,11 @@ cd {args.RUN_NAME}
 {setup_ops_str(args.RUN_NAME, log_name)}
 sudo python3 -m virtualenv venv
 source venv/bin/activate
-(( echo "Starting multihost job on slice $SLICE_ID Worker $WORKER_ID."
+(( echo "Starting multihost job on slice $"{SLICE_ID}" Worker ${WORKER_ID}."
+echo "MXLA_COORD address is ${MEGASCALE_COORDINATOR_ADDRESS}"
 echo "Printing the maximum number of files open..."
 ulimit -n
-echo "Downloading code from GCS..."
+echo "Downloading code from GCS...":q
 {download_from_gcs(zip_gcs_path)}
 tar xzf {zip_name}
 echo "Code downloaded!"
@@ -181,7 +182,8 @@ def get_env_command_str(num_slices):
 NODE_ID=$(grep '^NODE_ID' /tmp/tpu-env | cut -d "'" -f 2)
 WORKER_ID=$(grep '^WORKER_ID' /tmp/tpu-env | cut -d "'" -f 2)
 ZONE=$(grep '^ZONE' /tmp/tpu-env | cut -d "'" -f 2)
-PROJECT=$(grep '^CONSUMER_PROJECT_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
+PROJECT=$(grep '^CONSUMER_PROJECT_ID' /tmp/tpu-env | cut -d "'" -f 2)
+MEGASCALE_COORDINATOR_ADDRESS=$(grep '^MEGASCALE_COORDINATOR_ADDRESS' /tmp/tpu-env | cut -d "'" -f 2)"""
   if num_slices == 1:
     slice_assignment = "SLICE_ID=0"
   else:
