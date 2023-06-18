@@ -162,7 +162,7 @@ source venv/bin/activate
 echo "MXLA_COORD address is $MEGASCALE_COORDINATOR_ADDRESS"
 echo "Printing the maximum number of files open..."
 ulimit -n
-echo "Downloading code from GCS...":q
+echo "Downloading code from GCS..."
 {download_from_gcs(zip_gcs_path)}
 tar xzf {zip_name}
 echo "Code downloaded!"
