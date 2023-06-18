@@ -28,7 +28,7 @@ def print_local_ip():
   print("local ip of: ", socket.gethostbyname(hostname))
 
 
-# print_local_ip()
+print_local_ip()
 import jax
 print("Imported jax", flush=True)
 print("jax process id of: ",jax.process_index()) # go me
