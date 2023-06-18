@@ -164,6 +164,10 @@ echo "Printing the maximum number of files open according to ulimit -n..."
 ulimit -n
 echo "Printing the maximum number of files open according to ulimit -Hn..."
 ulimit -Hn
+echo "Changing soft limit to 10000..."
+ulimit -n 10000
+echo "Printing the maximum number of files open according to ulimit -n..."
+ulimit -n
 echo "Downloading code from GCS..."
 {download_from_gcs(zip_gcs_path)}
 tar xzf {zip_name}
@@ -171,7 +175,7 @@ echo "Code downloaded!"
 {args.COMMAND}) 2>&1) >> {log_name}
 (echo "{finish_status_str()}") >> {log_name}
 gsutil cp {log_name} "{bucket_path}/"
-sleep 600
+sleep 5
 (({create_kill_command_str()}) 2>&1 ) >> {log_name}"""
 
   with open(startup_script_file, "w", encoding="utf-8") as f:
