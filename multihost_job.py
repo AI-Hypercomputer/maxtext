@@ -158,7 +158,7 @@ cd {args.RUN_NAME}
 {setup_ops_str(args.RUN_NAME, log_name)}
 sudo python3 -m virtualenv venv
 source venv/bin/activate
-(( echo "Starting multihost job on slice $SLICE_ID Worker $WORKER_ID."
+(( echo "Starting multihost job on worker $WORKER_ID slice $SLICE_ID."
 echo "MXLA_COORD address is $MEGASCALE_COORDINATOR_ADDRESS"
 echo "Printing the maximum number of files open according to ulimit -n..."
 ulimit -n
@@ -166,8 +166,10 @@ echo "Printing the maximum number of files open according to ulimit -Hn..."
 ulimit -Hn
 echo "Changing soft limit to 10000..."
 ulimit -n 10000
-echo "Printing the maximum number of files open according to ulimit -n..."
+echo "Printing the maximum number of files open after change according to ulimit -n..."
 ulimit -n
+echo "Printing the maximum number of files open after change according to ulimit -Hn..."
+ulimit -Hn
 echo "Downloading code from GCS..."
 {download_from_gcs(zip_gcs_path)}
 tar xzf {zip_name}
