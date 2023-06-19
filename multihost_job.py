@@ -164,8 +164,8 @@ echo "Printing the maximum number of files open according to ulimit -n..."
 ulimit -n
 echo "Printing the maximum number of files open according to ulimit -Hn..."
 ulimit -Hn
-echo "Changing soft limit to 100..."
-ulimit -n 100
+echo "Changing soft limit to 256..."
+ulimit -n 256
 echo "Printing the maximum number of files open after change according to ulimit -n..."
 ulimit -n
 echo "Printing the maximum number of files open after change according to ulimit -Hn..."
