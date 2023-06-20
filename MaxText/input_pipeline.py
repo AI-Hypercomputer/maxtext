@@ -24,7 +24,7 @@ import ml_collections
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import jax
-from jax._src.partition_spec import PartitionSpec as P
+from jax.sharding import PartitionSpec as P
 
 import tokenizer
 import multihost_dataloading

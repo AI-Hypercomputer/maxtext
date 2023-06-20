@@ -19,9 +19,9 @@ import os
 import sys
 import numpy as np
 import jax
-from jax._src.mesh import Mesh
+from jax.sharding import Mesh
 from jax.experimental import mesh_utils
-from jax._src.partition_spec import PartitionSpec
+from jax.sharding import PartitionSpec
 
 import tensorflow as tf
 import unittest

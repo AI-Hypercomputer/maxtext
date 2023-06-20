@@ -19,9 +19,9 @@
 '''This script is used to measure the performance of different sharding schemes on TPU.'''
 
 import jax
-from jax._src.partition_spec import PartitionSpec
+from jax.sharding import PartitionSpec
 from jax.experimental.pjit import pjit
-from jax.experimental import maps
+from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import with_sharding_constraint
@@ -154,7 +154,7 @@ else:
 
 print(f"Decided on mesh shape: {devices_array}")
 
-mesh = maps.Mesh(devices_array, ["data", "fsdp", "tensor"])
+mesh = Mesh(devices_array, ["data", "fsdp", "tensor"])
 
 data_sharding = PartitionSpec(("data", "fsdp"),  "tensor")
 # We assume parameters are stored in a decreasing order of dimension size
@@ -240,7 +240,7 @@ pjit_gen_layers = pjit(
         out_axis_resources=parameter_sharding
       )
 
-with maps.Mesh(mesh.devices, mesh.axis_names):
+with Mesh(mesh.devices, mesh.axis_names):
   key = jax.random.PRNGKey(0)
   presharded_X = jax.block_until_ready(pjit_gen_data(key))
   presharded_layers = jax.block_until_ready(pjit_gen_layers(key))

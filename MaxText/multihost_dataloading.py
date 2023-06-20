@@ -30,8 +30,8 @@ import time
 import numpy as np
 
 import jax
-from jax._src.partition_spec import PartitionSpec
-from jax._src.mesh import Mesh
+from jax.sharding import PartitionSpec
+from jax.sharding import Mesh
 
 import max_logging
 
