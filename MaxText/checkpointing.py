@@ -37,7 +37,7 @@ def _multislice_distribute_initialize():
     hostname = socket.gethostname()
     return socket.gethostbyname(hostname)
 
-  def gen_local_ip2():
+  #def gen_local_ip2():
     # Retrieve the metadata from the URL
     # url = 'http://metadata.google.internal/computeMetadata/v1/instance/attributes/tpu-env'
     # headers = {'Metadata-Flavor': 'Google'}
