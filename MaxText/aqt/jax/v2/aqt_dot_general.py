@@ -69,7 +69,7 @@ def _int_fresh_scale(x, cfg: config.Tensor) -> jnp.ndarray:
     abs_max = jnp.max(jnp.abs(x), axis=cfg.calib_shared_axes, keepdims=True)
   else:
     assert cfg.bound > 0, 'Static quantization bound should be positive.'
-    abs_max = jnp.asarray(cfg.bound)
+    abs_max = jnp.asarray(cfg.bound).reshape((1,) * len(x.shape))
   abs_max = jnp.where(abs_max == 0.0, 1.0, abs_max)
   if cfg.bound_stop_grad:
     # TODO(lew): Does not matter in DG, because we are using custom gradient.

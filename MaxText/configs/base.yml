@@ -45,7 +45,7 @@ record_internal_nn_metrics: 0
 
 # Output directory
 # Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
-base_output_directory: "" 
+base_output_directory: "gs://max-experiments/"
 
 # Parallelism
 mesh_axes: ['data', 'fsdp', 'tensor']
@@ -78,7 +78,7 @@ ici_tensor_parallelism: 1
 
 # Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
-dataset_path: ""
+dataset_path: "gs://maxtext-dataset/"
 vocab_size: 32_768 # powers of 2 for sharding
 vocab_relative_path: "vocabs"  # Assumes we're allowed
 dataset_name: 'c4/en:3.0.1'
@@ -128,6 +128,6 @@ adam_eps: 1.e-8 # A small constant applied to denominator outside of the square 
 adam_eps_root: 0. # A small constant applied to denominator inside the square root.
 
 # Stack trace parameters
-collect_stack_trace: True
+collect_stack_trace: False
 stack_trace_to_cloud: False  # Uploads to cloud logging if True, else to the console if False.
 stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds.
