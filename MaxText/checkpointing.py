@@ -24,6 +24,7 @@ from orbax import checkpoint
 from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, Checkpointer, AsyncCheckpointer
 from orbax.checkpoint import type_handlers
 import socket
+import requests
 
 import max_logging
 
@@ -33,8 +34,28 @@ def _multislice_distribute_initialize():
   """Calls jax.distribute.initialize() with appropriate multislice arguments."""
 
   def gen_local_ip():
-    hostname = socket.gethostname()
-    return socket.gethostbyname(hostname)
+    #hostname = socket.gethostname()
+    #return socket.gethostbyname(hostname)
+
+    # Retrieve the metadata from the URL
+    url = 'http://metadata.google.internal/computeMetadata/v1/instance/attributes/tpu-env'
+    headers = {'Metadata-Flavor': 'Google'}
+    response = requests.get(url, headers=headers)
+    metadata = response.text
+
+    # Store the metadata in a file
+    file_path = '/tmp/tpu-env'
+    with open(file_path, 'w') as file:
+        file.write(metadata)
+
+    # Parse the MEGASCALE_COORDINATOR_ADDRESS from the stored metadata
+    s="MEGASCALE_COORDINATOR_ADDRESS"
+    megascale_coordinator_address = None
+    lines = metadata.split('\n')
+    for line in lines:
+        if line.startswith(s):
+            megascale_coordinator_address = line.split("'")[1]
+            break
 
   def gen_local_ip_nums():
     return [int(num) for num in gen_local_ip().split(':')[-1].split('.')]
