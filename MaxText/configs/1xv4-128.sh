@@ -13,5 +13,5 @@
 # limitations under the License.
 
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true TPU_MEGACORE=MEGACORE_DENSE"
-python3 MaxText/train.py MaxText/configs/base.yml run_name=1xv4-128 dcn_data_parallelism=1 ici_fsdp_parallelism=64 steps=10 per_device_batch_size=16  enable_profiler=true remat_policy=full scale=3
+python3 MaxText/train.py MaxText/configs/base.yml run_name=1xv4-128 dcn_data_parallelism=1 ici_fsdp_parallelism=64 steps=10 per_device_batch_size=16  enable_profiler=true remat_policy=full scale=3 use_int8_training=True
 # TFLOP/s 165, 22B

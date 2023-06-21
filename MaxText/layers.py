@@ -225,7 +225,8 @@ class DenseGeneral(nn.Module):
     if not cfg.use_int8_training:
       return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
     else:
-      aqt_cfg = aqt_config.fully_quantized(bits=8, use_fwd_quant=True)
+      aqt_cfg = aqt_config.fully_quantized(use_stochastic_rounding = False,
+      use_dummy_static_bound = True)
 
       def noise_fn(shape, key):
         return jax.random.uniform(key, shape) - 0.5
