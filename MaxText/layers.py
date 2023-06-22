@@ -120,29 +120,26 @@ def dot_product_attention(query: Array,
   key = LayerNorm(dtype=dtype, name='key_layer_norm', kernel_axes = ('heads',))(key)
 
   # `attn_weights`: [batch, num_heads, q_length, kv_length]
-  attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
+  # attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
 
-  # Apply attention bias: masking, dropout, proximity bias, etc.
-  if bias is not None:
-    attn_weights = attn_weights + bias.astype(attn_weights.dtype)
+    query: queries for calculating attention with shape of `[batch, q_length,
+      num_heads, qk_depth_per_head]`
+    key: keys for calculating attention with shape of `[batch, kv_length,
+      num_heads, qk_depth_per_head]`.
+    value: values to be used in attention with shape of `[batch, kv_length,
+      num_heads, v_depth_per_head]`.
 
-  # Normalize the attention weights across `kv_length` dimension.
-  attn_weights = jax.nn.softmax(attn_weights).astype(dtype)
+  #kv product is [batch, heads, qk_depth, v_depth]
+  # keys are [Batch,KV length (num keys), Head num, A qk depth] = [bkha]
+  # values are [Batch, KV length (num values), Head num, Depth V] = [bkhd]
+  # kv product is [Batch, Head num, A qk depth, Depth V] = [bhad]
+  kv = jnp.einsum('bkha,bkhd->bhad', key, value)
 
-  # Apply attention dropout.
-  if not deterministic and dropout_rate > 0.:
-    keep_prob = 1.0 - dropout_rate
-    # Broadcast dropout mask along the query dim.
-    dropout_shape = list(attn_weights.shape)
-    dropout_shape[-2] = 1
-    keep = random.bernoulli(dropout_rng, keep_prob, dropout_shape)
-    keep = jnp.broadcast_to(keep, attn_weights.shape)
-    multiplier = (
-        keep.astype(attn_weights.dtype) / jnp.asarray(keep_prob, dtype=dtype))
-    attn_weights = attn_weights * multiplier
-
-  # Take the linear combination of `value`.
-  return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
+  # queries are [Batch, Q length (num queries), Head num, A qk depth] = [bqha]
+   #kv product is [Batch, Head num, A qk depth, Depth V] = [bhad]
+   # qkv is [Batch, head, Q length (num queries), Depth V] = [bhqd]
+  q_kv = jnp.einsum('bqha,bhad->bqqd')
+  return q_kv
 
 
 dynamic_vector_slice_in_dim = jax.vmap(
