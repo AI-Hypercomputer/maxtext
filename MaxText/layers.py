@@ -122,24 +122,18 @@ def dot_product_attention(query: Array,
   # `attn_weights`: [batch, num_heads, q_length, kv_length]
   # attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
 
-    query: queries for calculating attention with shape of `[batch, q_length,
-      num_heads, qk_depth_per_head]`
-    key: keys for calculating attention with shape of `[batch, kv_length,
-      num_heads, qk_depth_per_head]`.
-    value: values to be used in attention with shape of `[batch, kv_length,
-      num_heads, v_depth_per_head]`.
-
-  #kv product is [batch, heads, qk_depth, v_depth]
   # keys are [Batch,KV length (num keys), Head num, A qk depth] = [bkha]
   # values are [Batch, KV length (num values), Head num, Depth V] = [bkhd]
   # kv product is [Batch, Head num, A qk depth, Depth V] = [bhad]
   kv = jnp.einsum('bkha,bkhd->bhad', key, value)
 
   # queries are [Batch, Q length (num queries), Head num, A qk depth] = [bqha]
-   #kv product is [Batch, Head num, A qk depth, Depth V] = [bhad]
-   # qkv is [Batch, head, Q length (num queries), Depth V] = [bhqd]
-  q_kv = jnp.einsum('bqha,bhad->bqqd')
+  # kv product is [Batch, Head num, A qk depth, Depth V] = [bhad]
+  # qkv is [Batch,  Q length (num queries), head, Depth V] = [bhqd]
+  q_kv = jnp.einsum('bqha,bhad->bqhd', query, kv)
   return q_kv
+
+  return kv
 
 
 dynamic_vector_slice_in_dim = jax.vmap(
