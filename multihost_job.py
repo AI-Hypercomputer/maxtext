@@ -152,6 +152,8 @@ def run_create_resources(startup_script_file):
 def write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file):
   """ Write the startup script locally into a file to be passed to the CQR command. """
   startup_script = f"""#!/bin/bash
+sleep 60
+ulimit -n 10000
 mkdir -p {args.RUN_NAME}
 cd {args.RUN_NAME}
 {get_env_command_str(args.NUM_SLICES)}
