@@ -252,8 +252,8 @@ The full suite of end-to-end tests is in `end_to_end/`. We run them with a night
 When running a Single Program, Multiple Data (SPMD) job on TPU VMs, the overall process can hang if there is any error or any VM hangs/crashes for some reason. In this scenario, capturing stack traces will help to identify and troubleshoot the issues for the jobs running on TPU VMs.
 
 The following configurations will help to debug a fault or when a program is stuck or hung somewhere by collecting stack traces. Change the parameter values accordingly in `MaxText/configs/base.yml`:
-1. Set `collect_stack_trace: True` to enable collection of stack traces on faults or when the program is hung. To disable this, set `collect_stack_trace: False`.
-2. Set `stack_trace_to_cloud: False` to display stack traces on console. This setting will dump the traces as STDERR. `stack_trace_to_cloud: True` will create a temporary file in `/tmp/debugging` in the TPUs to store the stack traces. There is an agent running on TPU VMs that will periodically upload the traces from the temporary directory to cloud logging in the gcp project. You can view the traces in Logs Explorer on Cloud Logging using the following query:
+1. Set `collect_stack_trace: True` to enable collection of stack traces on faults or when the program is hung. This setting will periodically dump the traces for the program to help in debugging. To disable this, set `collect_stack_trace: False`.
+2. Set `stack_trace_to_cloud: False` to display stack traces on console. `stack_trace_to_cloud: True` will create a temporary file in `/tmp/debugging` in the TPUs to store the stack traces. There is an agent running on TPU VMs that will periodically upload the traces from the temporary directory to cloud logging in the gcp project. You can view the traces in Logs Explorer on Cloud Logging using the following query:
 ```
 logName="projects/<project_name>/logs/tpu.googleapis.com%2Fruntime_monitor"
 jsonPayload.verb="stacktraceanalyzer"
