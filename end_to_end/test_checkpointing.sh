@@ -11,6 +11,10 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME steps=501\
     metrics_file='saved_metrics.txt' save_period=20 base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH\
     collect_stack_trace=$COLLECT_STACK_TRACE
 
+# Wait for first train to finish
+process_id=$!
+wait $process_id
+
 python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME steps=502\
     metrics_file='restored_metrics.txt' base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH\
     collect_stack_trace=$COLLECT_STACK_TRACE
