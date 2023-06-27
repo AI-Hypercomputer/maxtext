@@ -29,6 +29,7 @@ MaxText aims to be a launching off point for ambitious LLM projects both in rese
 * [Runtime Performance Results](#runtime-performance-results)
 * [Comparison To Alternatives](#comparison-to-alternatives)
 * [Development](#development)
+* [Features and Diagnostics](#features-and-diagnostics)
 
 # Getting Started
 
@@ -45,18 +46,6 @@ bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
 3. Set config values for `base_output_directory` and `dataset_path` in `configs/base.yml`. `vocab_relative_path` is relative to `base_output_directory` for loading the tokenizer. MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them. We also recommend reviewing the configurable options in `configs/base.yml`, for instance you may change the `steps` or `logging_period` by either modifying `configs/base.yml` or by passing in `steps` and `logging_period` as additional args to the `train.py` call.
 
 To run maxtext the TPUVMs must have permission to read the gcs bucket. These permissions are granted by service account roles, such as the `STORAGE ADMIN` role. 
-
-## Getting Started: Configure Diagnostic Settings
-Here is the related PyPI package: https://pypi.org/project/cloud-tpu-diagnostics.
-### Debugging
-The following configurations will help to debug a fault or when a program is stuck or hung somewhere by collecting stack traces. Change the parameter values accordingly in `MaxText/configs/base.yml`:
-1. Set `collect_stack_trace: True` to enable collection of stack traces on faults or when the program is hung. To disable this, set `collect_stack_trace: False`.
-2. Set `stack_trace_to_cloud: False` to display stack traces on console. `stack_trace_to_cloud: True` will create a temporary file in `/tmp/debugging` in the TPUs to store the stack traces. There is an agent running on TPU VMs that will periodically upload the traces from the temporary directory to cloud logging in the gcp project. You can view the traces in Logs Explorer on Cloud Logging using the following query:
-```
-logName="projects/<project_name>/logs/tpu.googleapis.com%2Fruntime_monitor"
-jsonPayload.verb="stacktraceanalyzer"
-```
-3. `stack_trace_interval_seconds` signifies the duration in seconds between each stack trace collection event. Setting `stack_trace_interval_seconds: 600` will collect the stack traces every 600 seconds (10 minutes).
 
 ## Getting Started: Local Development
 
@@ -257,3 +246,18 @@ bash unit_test_and_lint.sh
 ```
 
 The full suite of end-to-end tests is in `end_to_end/`. We run them with a nightly cadence.
+
+# Features and Diagnostics
+## Collect Stack Traces
+When running a Single Program, Multiple Data (SPMD) job on TPU VMs, the overall process can hang if there is any error or any VM hangs/crashes for some reason. In this scenario, capturing stack traces will help to identify and troubleshoot the issues for the jobs running on TPU VMs.
+
+The following configurations will help to debug a fault or when a program is stuck or hung somewhere by collecting stack traces. Change the parameter values accordingly in `MaxText/configs/base.yml`:
+1. Set `collect_stack_trace: True` to enable collection of stack traces on faults or when the program is hung. This setting will periodically dump the traces for the program to help in debugging. To disable this, set `collect_stack_trace: False`.
+2. Set `stack_trace_to_cloud: False` to display stack traces on console. `stack_trace_to_cloud: True` will create a temporary file in `/tmp/debugging` in the TPUs to store the stack traces. There is an agent running on TPU VMs that will periodically upload the traces from the temporary directory to cloud logging in the gcp project. You can view the traces in Logs Explorer on Cloud Logging using the following query:
+```
+logName="projects/<project_name>/logs/tpu.googleapis.com%2Fruntime_monitor"
+jsonPayload.verb="stacktraceanalyzer"
+```
+3. `stack_trace_interval_seconds` signifies the duration in seconds between each stack trace collection event. Setting `stack_trace_interval_seconds: 600` will collect the stack traces every 600 seconds (10 minutes).
+
+Here is the related PyPI package: https://pypi.org/project/cloud-tpu-diagnostics.
