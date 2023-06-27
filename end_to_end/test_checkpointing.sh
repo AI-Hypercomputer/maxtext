@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-RUN_NAME=${1}-${4}_$(date +%Y-%m-%d-%H)
+RUN_NAME=${1}-${4}-$(date +%Y-%m-%d-%H)
 OUTPUT_PATH=${2}
 DATASET_PATH=${3}
 COLLECT_STACK_TRACE=${4}
