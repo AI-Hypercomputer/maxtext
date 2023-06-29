@@ -48,21 +48,21 @@ record_internal_nn_metrics: 0
 base_output_directory: "" 
 
 # Parallelism
-mesh_axes: ['data', 'fsdp', 'tensor']
+mesh_axes: ['data', 'fsdp', 'fsdpff', 'tensor']
 logical_axis_rules: [
-                      ['activation_batch', ['data', 'fsdp']],
-                      ['activation_length' , ['data', 'fsdp']],
+                      ['activation_batch', ['data', 'fsdp', 'fsdpff']],
+                      ['activation_length' , ['data', 'fsdp', 'fsdpff']],
                       ['activation_embed', 'tensor'],
                       ['activation_mlp', 'tensor'],
                       ['activation_heads', 'tensor'],
                       ['activation_kv', 'tensor'],
                       ['activation_vocab', 'tensor'],
-                      ['mlp', 'tensor'],
-                      ['vocab', 'tensor'],
+                      ['mlp', ['tensor', 'fsdpff']],
+                      ['vocab', ['tensor', 'fsdpff']],
                       ['embed', 'fsdp'],
-                      ['heads', 'tensor'],
+                      ['heads', ['tensor', 'fsdpff']],
                     ]
-data_sharding: [['data', 'fsdp', 'tensor']]
+data_sharding: [['data', 'fsdp', 'fsdpff', 'tensor']]
 
 # One axis for each parallelism type may hold a placeholder (-1)
 # value to auto-shard based on available slices and devices.
@@ -70,9 +70,11 @@ data_sharding: [['data', 'fsdp', 'tensor']]
 # and product of the ICI axes should equal number of devices per slice.
 dcn_data_parallelism: -1  # recommended DCN axis to be auto-sharded
 dcn_fsdp_parallelism: 1
+dcn_fsdpff_parallelism: 1
 dcn_tensor_parallelism: 1
 ici_data_parallelism: 1
 ici_fsdp_parallelism: -1  # recommended ICI axis to be auto-sharded
+ici_fsdpff_parallelism: 1
 ici_tensor_parallelism: 1
 
 

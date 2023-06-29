@@ -98,8 +98,10 @@ def create_device_mesh(config):
 
   multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
 
-  dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism, config.dcn_tensor_parallelism]
-  ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism, config.ici_tensor_parallelism]
+  dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism, config.dcn_fsdpff_parallelism,
+                     config.dcn_tensor_parallelism]
+  ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism, config.ici_fsdpff_parallelism,
+                     config.ici_tensor_parallelism]
 
   # Find possible unspecified parallelisms
   dcn_parallelism = fill_unspecified_mesh_axes(dcn_parallelism, num_slices, 'DCN')
