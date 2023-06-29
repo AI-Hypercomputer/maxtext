@@ -158,6 +158,7 @@ cd {args.RUN_NAME}
 {setup_ops_str(args.RUN_NAME, log_name)}
 sudo python3 -m virtualenv venv
 source venv/bin/activate
+ulimit -n 100000
 (({download_from_gcs(zip_gcs_path)}
 tar xzf {zip_name}
 {args.COMMAND}) 2>&1) >> {log_name}
