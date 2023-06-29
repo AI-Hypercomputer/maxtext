@@ -80,6 +80,7 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
     else
         echo "Installing stable jax, jaxlib, libtpu"
         pip3 install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+        #pip3 install jax[tpu]==0.4.11 -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
     fi
 elif [[ $MODE == "nightly" ]]; then 
 # Nightly mode
