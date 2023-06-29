@@ -95,7 +95,7 @@ parser.add_argument(
     "--ici_fsdp_parallelism", "-if",
     help="Number of shards for Fsdp Parallelism within each slice.",
     required=False,
-    default=1,
+    default=4,
     type=int
 )
 parser.add_argument(
