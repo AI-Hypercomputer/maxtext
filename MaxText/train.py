@@ -350,8 +350,8 @@ def main(argv: Sequence[str]) -> None:
       stack_trace_to_cloud = pyconfig.config.stack_trace_to_cloud,
       stack_trace_interval_seconds = pyconfig.config.stack_trace_interval_seconds))
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
-  with diagnostic.diagnose(diagnostic_config):
-    train_loop(pyconfig.config)
+  #with diagnostic.diagnose(diagnostic_config):
+  train_loop(pyconfig.config)
 
 
 if __name__ == "__main__":

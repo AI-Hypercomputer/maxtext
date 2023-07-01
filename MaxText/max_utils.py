@@ -207,12 +207,8 @@ def rsqrt_schedule(init_value: float, shift: int = 0):
 
 def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
   """Creates a rsqrt schedule with linear warmup."""
-  return optax.join_schedules([
-      optax.linear_schedule(
-          init_value=0,
+  return optax.linear_schedule(
+          init_value=learning_rate,
           end_value=learning_rate,
-          transition_steps=warmup_steps
-          ),
-      rsqrt_schedule(init_value=learning_rate, shift=warmup_steps),
-      ], boundaries=[warmup_steps],
-      )
+          transition_steps=int(1e9)
+          )

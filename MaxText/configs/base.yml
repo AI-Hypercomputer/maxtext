@@ -35,7 +35,7 @@ head_dim: 256
 # activation functions are .
 mlp_activations: ["relu"]
 dropout_rate: 0
-logits_via_embedding: True  # NOTE: this is True just for testing.
+logits_via_embedding: False  # NOTE: this is True just for testing.
 # proj, minimal, full, or none
 remat_policy: 'minimal'
 scan_layers: True
@@ -93,7 +93,8 @@ steps: 150_001
 log_period: 10
 save_period: 10_000
 learning_rate: 3.e-5
-warmup_steps: 15_000
+warmup_steps: 1
+
 
 # Maximum length cutoff for training examples.
 max_target_length: 1024
