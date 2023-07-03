@@ -37,7 +37,7 @@ mlp_activations: ["relu"]
 dropout_rate: 0
 logits_via_embedding: False  # NOTE: this is True just for testing.
 # proj, minimal, full, or none
-remat_policy: 'minimal'
+remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
 
@@ -84,7 +84,7 @@ vocab_relative_path: "vocabs"  # Assumes we're allowed
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
-per_device_batch_size: 32
+per_device_batch_size: 16
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
 
@@ -119,8 +119,8 @@ enable_checkpointing: True
 async_checkpointing: True
 
 # Set these two to False to run deterministically (i.e. reproducible losses)
-enable_dropout: True
-enable_data_shuffling: True
+enable_dropout: False
+enable_data_shuffling: False
 
 # Adam optimizer parameters
 adam_b1: 0.9 # Exponential decay rate to track the first moment of past gradients.
@@ -132,3 +132,5 @@ adam_eps_root: 0. # A small constant applied to denominator inside the square ro
 collect_stack_trace: True
 stack_trace_to_cloud: False  # Uploads to cloud logging if True, else to the console if False.
 stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds.
+
+number_of_repetitions: 4

@@ -1068,7 +1068,29 @@ class Decoder(nn.Module):
       params_spec = (
           cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis))
       cache_spec = 0
-      y, _ = nn.scan(
+
+      if cfg.number_of_repetitions == -1:
+        y, _ = nn.scan(
+            BlockLayer,
+            variable_axes={
+                'params': params_spec,
+                'cache': cache_spec,
+                'intermediates': 0
+            },
+            split_rngs={
+                'params': True,
+                'dropout': cfg.enable_dropout,
+                'aqt': cfg.use_int8_training
+            },
+            in_axes=(nn.broadcast, nn.broadcast, nn.broadcast,
+                    nn.broadcast),
+            length=cfg.num_decoder_layers,
+            metadata_params={nn.PARTITION_NAME: 'layers'})(
+                config=cfg,
+                name='decoder')(y, decoder_mask,
+                                deterministic, decode, max_decode_length)
+      else:
+        model_layers = nn.scan(
           BlockLayer,
           variable_axes={
               'params': params_spec,
@@ -1081,12 +1103,14 @@ class Decoder(nn.Module):
               'aqt': cfg.use_int8_training
           },
           in_axes=(nn.broadcast, nn.broadcast, nn.broadcast,
-                   nn.broadcast),
+                  nn.broadcast),
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'})(
               config=cfg,
-              name='decoder')(y, decoder_mask,
-                              deterministic, decode, max_decode_length)
+              name='decoder')
+              
+        for i in range(cfg.number_of_repetitions):
+          y, _ = model_layers(y, decoder_mask, deterministic, decode, max_decode_length)
     else:
       for lyr in range(cfg.num_decoder_layers):
         # [batch, length, emb_dim] -> [batch, length, emb_dim]
