@@ -56,6 +56,16 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 import max_logging
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
+def make_log_depths(max_depth):
+  import random as python_random
+  cycles = []
+  for i in range(0, max_depth + 1): 
+    number_at_this_depth = 2**(max_depth - i)
+    cycles += [i] * number_at_this_depth
+  python_random.seed(0)
+  python_random.shuffle(cycles)
+  return cycles
+
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
 def calculate_training_tflops(num_model_parameters, config):
   learnable_weight_tflops = 6 * num_model_parameters * config.max_target_length * config.per_device_batch_size \
@@ -145,7 +155,7 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = layer["activation_mean"][0]
       output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
 
-def train_step(model, config, state, data, dropout_rng):
+def train_step(model, config, number_of_repetitions, state, data, dropout_rng):
   """
 
   Args:
@@ -170,6 +180,7 @@ def train_step(model, config, state, data, dropout_rng):
                          data['targets'],
                          data['inputs_segmentation'],
                          data['inputs_position'],
+                         number_of_repetitions,
                          enable_dropout=config.enable_dropout,
                          rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
     # TODO: is optax xent as good as custom T5X one?
@@ -182,8 +193,9 @@ def train_step(model, config, state, data, dropout_rng):
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), grads = grad_fn(state.params)
   new_state = state.apply_gradients(grads=grads)
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
-             'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
+  str_of_repetitions = str(number_of_repetitions)
+  metrics = {'scalar': {'learning/loss': loss, 'learning/loss_' + str_of_repetitions: loss, 'learning/grad_norm_' + str_of_repetitions : max_utils.l2norm_pytree(grads),
+             'learning/param_norm_' + str_of_repetitions : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
@@ -305,19 +317,26 @@ def train_loop(config, state=None):
                        data_pspec,
                        None),
     out_axis_resources=(state_mesh_annotations, None, None),
-    static_argnums=(0,1,),
-    donate_argnums=2)
+    static_argnums=(0,1,2,),
+    donate_argnums=3)
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
 
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
 
+  log_depths = make_log_depths(config.log_max_depth)
+  print(log_depths)
+  print(len(log_depths))
+
   for step in np.arange(get_first_step(state), config.steps):
+    index = step % len(log_depths)
+    depth = 2**log_depths[index]
+    max_logging.log(f"step: {step}, index: {index}, depth: {depth}")
     example_batch = load_next_batch(train_iter, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics, nextrng = p_train_step(
-          model, config, state, example_batch, nextrng
+          model, config, depth, state, example_batch, nextrng
       )
 
     new_time = datetime.datetime.now()

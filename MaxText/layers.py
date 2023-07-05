@@ -1035,7 +1035,8 @@ class Decoder(nn.Module):
                decoder_mask=None,
                deterministic=False,
                decode=False,
-               max_decode_length=None):
+               max_decode_length=None,
+               number_of_repetitions=-1):
     cfg = self.config
     assert decoder_input_tokens.ndim == 2  # [batch, len]
 
@@ -1069,7 +1070,7 @@ class Decoder(nn.Module):
           cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis))
       cache_spec = 0
 
-      if cfg.number_of_repetitions == -1:
+      if number_of_repetitions == -1:
         y, _ = nn.scan(
             BlockLayer,
             variable_axes={
@@ -1109,7 +1110,7 @@ class Decoder(nn.Module):
               config=cfg,
               name='decoder')
               
-        for i in range(cfg.number_of_repetitions):
+        for i in range(number_of_repetitions):
           y, _ = model_layers(y, decoder_mask, deterministic, decode, max_decode_length)
     else:
       for lyr in range(cfg.num_decoder_layers):
@@ -1169,6 +1170,7 @@ class Transformer(nn.Module):
       decoder_target_tokens,
       decoder_segment_ids=None,
       decoder_positions=None,
+      number_of_repetitions=-1,
       enable_dropout=True,
       decode=False,
       max_decode_length=None):
@@ -1199,5 +1201,6 @@ class Transformer(nn.Module):
         decoder_mask=decoder_mask,
         deterministic=not enable_dropout,
         decode=decode,
-        max_decode_length=max_decode_length)
+        max_decode_length=max_decode_length,
+        number_of_repetitions=number_of_repetitions)
     return logits

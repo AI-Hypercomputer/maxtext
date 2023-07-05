@@ -90,9 +90,9 @@ max_corpus_chars: 10_000_000
 
 # Training loop
 steps: 150_001
-log_period: 10
+log_period: 100
 save_period: 10_000
-learning_rate: 3.e-5
+learning_rate: 1.e-3
 warmup_steps: 1
 
 
@@ -133,4 +133,4 @@ collect_stack_trace: True
 stack_trace_to_cloud: False  # Uploads to cloud logging if True, else to the console if False.
 stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds.
 
-number_of_repetitions: 4
+log_max_depth: 5
