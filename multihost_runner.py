@@ -188,6 +188,10 @@ def scps(script_dir, slices, run_name_dir, zip_name, internal_ip):
 
   return return_code
 
+def export_mxla_str(slice_num):
+  mxla_coordinator_address = "10.182.0.231:8080"
+  return f"export MEGASCALE_COORDINATOR_ADDRESS='{mxla_coordinator_address}' && export MEGASCALE_SLICE_ID='{slice_num}' && export MEGASCALE_NUM_SLICES=2"
+  
 def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name, internal_ip, use_existing_folder):
   """ Run the main command on each worker, logging each separately. """
   kill_script_name = "kill_existing_processes.sh" # File written on worker machines
@@ -209,9 +213,9 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
 
       if use_existing_folder is False:
         remote_command_list = [mkdir_command , mv_zip_command , cd_command , unzip_command ,
-                        write_kill_script_command , kill_existing_command , main_command]
+                        write_kill_script_command , kill_existing_command , export_mxla_str(slice_num), main_command]
       else:
-        remote_command_list = [cd_command, write_kill_script_command , kill_existing_command , main_command]
+        remote_command_list = [cd_command, write_kill_script_command , kill_existing_command , export_mxla_str(slice_num), main_command]
       remote_command_list_str = " && ".join(remote_command_list)
       gcloud_command=[
           "gcloud", "alpha", "compute", "tpus", "tpu-vm", "ssh", cur_slice.name, f"--worker={worker_num}",
