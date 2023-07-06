@@ -164,10 +164,10 @@ def decode_loop(config, state=None):
 
   p_predict_step = pjit(
       functools.partial(predict_step, model=model, config=config),
-      in_axis_resources=(P(None, None),
+      in_shardings=(P(None, None),
                         state_mesh_annotations,
                         None),
-      out_axis_resources=None
+      out_shardings=None
   )
 
   # Encode the demo prompt.
