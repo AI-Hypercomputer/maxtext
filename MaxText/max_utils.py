@@ -84,7 +84,7 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
 
   return parallelism_vals
 
-def create_device_mesh(config, logging=True):
+def create_device_mesh(config, logging=False):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas """
   devices = jax.devices()
   num_devices = len(devices)

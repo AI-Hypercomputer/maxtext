@@ -189,8 +189,14 @@ def scps(script_dir, slices, run_name_dir, zip_name, internal_ip):
   return return_code
 
 def export_mxla_str(slice_num):
-  mxla_coordinator_address = "10.182.0.231:8080"
+  mxla_coordinator_address = "10.182.0.123:8080"
   return f"export MEGASCALE_COORDINATOR_ADDRESS='{mxla_coordinator_address}' && export MEGASCALE_SLICE_ID='{slice_num}' && export MEGASCALE_NUM_SLICES=2"
+
+def create_venv(run_name):
+  return f"sudo python3 -m virtualenv {run_name} && echo 'creating venv'"
+
+def source_venv(run_name):
+  return f"source {run_name}/bin/activate && echo 'sourcing venv'"
   
 def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name, internal_ip, use_existing_folder):
   """ Run the main command on each worker, logging each separately. """
@@ -213,7 +219,7 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
 
       if use_existing_folder is False:
         remote_command_list = [mkdir_command , mv_zip_command , cd_command , unzip_command ,
-                        write_kill_script_command , kill_existing_command , export_mxla_str(slice_num), main_command]
+                        write_kill_script_command , kill_existing_command , export_mxla_str(slice_num),  main_command]
       else:
         remote_command_list = [cd_command, write_kill_script_command , kill_existing_command , export_mxla_str(slice_num), main_command]
       remote_command_list_str = " && ".join(remote_command_list)
