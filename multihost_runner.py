@@ -189,7 +189,7 @@ def scps(script_dir, slices, run_name_dir, zip_name, internal_ip):
   return return_code
 
 def export_mxla_str(slice_num):
-  mxla_coordinator_address = "10.182.0.123:8080"
+  mxla_coordinator_address = "10.182.0.60:8080"
   return f"export MEGASCALE_COORDINATOR_ADDRESS='{mxla_coordinator_address}' && export MEGASCALE_SLICE_ID='{slice_num}' && export MEGASCALE_NUM_SLICES=2"
 
 def create_venv(run_name):
