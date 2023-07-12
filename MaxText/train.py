@@ -20,6 +20,7 @@
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
 import jax
+jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
 import os
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 print(f"Found {jax.device_count()} devices.")

@@ -1,8 +1,8 @@
 echo "Running 16b.sh"
 
 RUN_NAME=${1}
-OUTPUT_PATH=${2}
-DATASET_PATH=${3}
+OUTPUT_PATH="gs://maxtext-experiments-multipod/"
+DATASET_PATH="gs://max-datasets-rogue/"
 
 bash rto_setup.sh
 

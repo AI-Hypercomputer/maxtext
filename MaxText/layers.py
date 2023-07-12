@@ -225,7 +225,9 @@ class DenseGeneral(nn.Module):
     if not cfg.use_int8_training:
       return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
     else:
-      aqt_cfg = aqt_config.fully_quantized(bits=8, use_fwd_quant=True)
+      # jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
+      aqt_cfg = aqt_config.fully_quantized(fwd_save_accumulator_memory=True,
+                                       bwd_save_accumulator_memory=True)
 
       def noise_fn(shape, key):
         return jax.random.uniform(key, shape) - 0.5
