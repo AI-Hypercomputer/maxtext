@@ -20,6 +20,7 @@ from jax import lax
 from jax import random
 import jax.numpy as jnp
 
+# we should repurpose this script with pytorch API
 
 # Constants
 # The default End-of-Sentence token id is 2 (SentencePiece).

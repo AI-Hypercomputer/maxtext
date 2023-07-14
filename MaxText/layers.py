@@ -129,6 +129,7 @@ def dot_product_attention(query: Array,
   # Normalize the attention weights across `kv_length` dimension.
   attn_weights = jax.nn.softmax(attn_weights).astype(dtype)
 
+  # Looks like this section is skipped in MaxText (skipping dropout). correct?
   # Apply attention dropout.
   if not deterministic and dropout_rate > 0.:
     keep_prob = 1.0 - dropout_rate
@@ -222,6 +223,8 @@ class DenseGeneral(nn.Module):
 
     contract_ind = tuple(range(0, len(axis)))
 
+    # quantization - maxtext specific? for short term purposes, bf16 should be
+    # sufficient?
     if not cfg.use_int8_training:
       return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
     else:
@@ -332,6 +335,7 @@ class MultiHeadDotProductAttention(nn.Module):
       #pylint: disable=no-value-for-parameter
       return self.kernel_init(*args) / depth_scaling
 
+    # kv cache is needed in the pytorch implementation
     # Project inputs_q to multi-headed q/k/v
     # dimensions are then [batch, length, num_heads, head_dim]
     query = projection(kernel_init=query_init, name='query')(inputs_q)
@@ -341,6 +345,7 @@ class MultiHeadDotProductAttention(nn.Module):
     query = nn.with_logical_constraint(
         query, ('activation_batch', 'activation_length', 'activation_heads', 'activation_kv')
     )
+    # pytorch needs checkpointing
     query = checkpoint_name(query, 'query_proj')
     key = nn.with_logical_constraint(key, ('activation_batch', 'activation_length', 'activation_heads', 'activation_kv'))
     key = checkpoint_name(key, 'key_proj')
@@ -350,6 +355,7 @@ class MultiHeadDotProductAttention(nn.Module):
     value = checkpoint_name(value, 'value_proj')
 
     if decode:
+      # pytorch needs kv cache
       # Detect if we're initializing by absence of existing cache data.
       is_initialized = self.has_variable('cache', 'cached_key')
       # The key and value have dimension [batch, length, num_heads, head_dim],
@@ -365,7 +371,9 @@ class MultiHeadDotProductAttention(nn.Module):
                                    swap_dims(value.shape), value.dtype)
       cache_index = self.variable('cache', 'cache_index',
                                   lambda: jnp.array(0, dtype=jnp.int32))
+      # this if blocks appers a candidate to port to pytorch
       if is_initialized:
+        #auto regressive decoding is not an maxtext feature, though it is absent in the nanoGPT source code
         batch, num_heads, head_dim, length = cached_key.value.shape
         # During fast autoregressive decoding, we feed one position at a time,
         # and cache the keys and values step by step.
@@ -1048,6 +1056,7 @@ class Decoder(nn.Module):
 
     BlockLayer = DecoderLayer
 
+    # this maxtext section needs implementation in pytorch
     if cfg.remat_policy != 'none':
       if cfg.remat_policy == 'minimal':
         policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims

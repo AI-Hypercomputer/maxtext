@@ -45,6 +45,7 @@ from jax.experimental.compilation_cache import compilation_cache as cc
 
 import max_logging
 
+# we need to enable this in pytorch model
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
@@ -87,6 +88,7 @@ def predict_step(inputs,
   )
   cache = initial_variables["cache"]
 
+# we need to verify this code is aligned with that of the pytorch model
   def tokens_ids_to_logits(flat_ids, flat_cache):
     """Token slice to logits from decoder model."""
     # --> [batch * beam, 1, vocab]
@@ -120,6 +122,7 @@ def predict_step(inputs,
 
   return seqs
 
+# need this method in the pytorch model
 def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
   return optax.linear_schedule(
           init_value=0,
@@ -128,6 +131,9 @@ def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
           )
 
 
+# a large bulk of this code must be verified or ported to the pytorch code
+# (cehckpoint, mesh definitions, dataset setup, tflop calculation, pjrt api
+# call, metrics, profiling)
 def decode_loop(config, state=None):
   """Decoding loop for the Transformer model."""
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir,

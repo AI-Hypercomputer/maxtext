@@ -16,6 +16,8 @@
 
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
+# I expect this script must be rewritten for PyTorch/XLA
+
 from etils import epath
 import jax
 import portpicker

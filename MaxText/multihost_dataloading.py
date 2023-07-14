@@ -20,6 +20,9 @@
 Adapted from Sholto's:
 https://github.com/sholtodouglas/multihost_dataloading
 """
+
+# I expect this script must be rewritten for PyTorch/XLA
+
 from collections import defaultdict  # pylint: disable=g-importing-member
 from dataclasses import dataclass  # pylint: disable=g-importing-member
 from functools import partial  # pylint: disable=g-importing-member

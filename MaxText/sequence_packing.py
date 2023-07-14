@@ -16,6 +16,9 @@
 
 """Packed Sequence Op."""
 
+# can we use this script out of the box for pytorch? if we want to stay away
+# from tf.data, we should explore further on how to repurpose this helper scrpit
+
 from typing import Dict, Optional, List, Union
 
 import tensorflow as tf

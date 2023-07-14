@@ -16,6 +16,8 @@
 
 """Provides op for tokenizing a dataset."""
 
+# I expect this script must be rewritten for PyTorch/XLA
+
 import os
 import tempfile
 import time
