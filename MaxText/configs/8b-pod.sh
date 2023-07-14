@@ -3,14 +3,12 @@ set -e
 
 RUN_NAME=$1
 
-
 export LIBTPU_INIT_ARGS="--xla_tpu_spmd_rng_bit_generator_unsafe=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
 
 base_command="python3 MaxText/train.py MaxText/configs/base.yml \
-    steps=10 per_device_batch_size=6 enable_checkpointing=false \
-    enable_profiler=true remat_policy=full base_emb_dim=6144 base_mlp_dim=24576 \
-    base_num_heads=24 base_num_decoder_layers=36 head_dim=256 \
-    max_target_length=2048"
+    base_emb_dim=4096 base_mlp_dim=16384 base_num_heads=16 base_num_decoder_layers=32 \
+    per_device_batch_size=3 enable_checkpointing=false enable_profiler=true \
+    steps=10 enable_profiler=true"
 
 bfloat16_command=$base_command" run_name=$RUN_NAME-bfloat16 metrics_file=bfloat16_metrics.txt"
 aqt_command=$base_command" run_name=$RUN_NAME-aqt metrics_file=aqt_metrics.txt use_int8_training=true"
