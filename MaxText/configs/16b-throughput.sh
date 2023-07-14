@@ -6,10 +6,11 @@ RUN_NAME=$1
 
 export LIBTPU_INIT_ARGS="--xla_tpu_spmd_rng_bit_generator_unsafe=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
 
-# Chinchilla steps is only 33400
 base_command="python3 MaxText/train.py MaxText/configs/base.yml \
-    steps=20000 per_device_batch_size=4 learning_rate=0.001 warmup_steps=2000 enable_profiler=false \
-    enable_dropout=false enable_data_shuffling=false"
+    steps=10 per_device_batch_size=6 enable_checkpointing=false \
+    enable_profiler=true remat_policy=full base_emb_dim=6144 base_mlp_dim=24576 \
+    base_num_heads=24 base_num_decoder_layers=36 head_dim=256 \
+    max_target_length=2048"
 
 bfloat16_command=$base_command" run_name=$RUN_NAME-bfloat16 metrics_file=bfloat16_metrics.txt"
 aqt_command=$base_command" run_name=$RUN_NAME-aqt metrics_file=aqt_metrics.txt use_int8_training=true"
@@ -20,9 +21,7 @@ echo "Finished bfloat16 run"
 last_3_lines=$(tail -n 3 bfloat16_metrics.txt)
 echo "Printing last 3 lines of metrics:"
 echo "${last_3_lines}"
-if [[ ${SLICE_ID} -eq 0 && ${WORKER_ID} -eq 0 ]]; then
-    gsutil cp bfloat16_metrics.txt gs://mattdavidow-maxtext-br/${RUN_NAME}_metrics_bfloat16.txt
-fi
+gsutil cp bfloat16_metrics.txt gs://mattdavidow-maxtext-br/${RUN_NAME}_metrics_bfloat16.txt
 
 sleep 10
 
@@ -32,7 +31,4 @@ echo "Finished aqt run"
 last_3_lines=$(tail -n 3 aqt_metrics.txt)
 echo "Printing last 3 lines of metrics:"
 echo "${last_3_lines}"
-
-if [[ ${SLICE_ID} -eq 0 && ${WORKER_ID} -eq 0 ]]; then
-    gsutil cp aqt_metrics.txt gs://mattdavidow-maxtext-br/${RUN_NAME}_metrics_aqt.txt
-fi
+gsutil cp aqt_metrics.txt gs://mattdavidow-maxtext-br/${RUN_NAME}_metrics_aqt.txt
