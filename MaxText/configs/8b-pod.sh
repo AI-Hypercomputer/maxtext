@@ -7,8 +7,8 @@ export LIBTPU_INIT_ARGS="--xla_tpu_spmd_rng_bit_generator_unsafe=true --xla_tpu_
 
 base_command="python3 MaxText/train.py MaxText/configs/base.yml \
     base_emb_dim=4096 base_mlp_dim=16384 base_num_heads=16 base_num_decoder_layers=32 \
-    per_device_batch_size=3 enable_checkpointing=false enable_profiler=true \
-    steps=10 enable_profiler=true"
+    per_device_batch_size=4 enable_checkpointing=false \
+    steps=20000 enable_profiler=false remat_policy=full warmup_steps=2000 learning_rate=.001"
 
 bfloat16_command=$base_command" run_name=$RUN_NAME-bfloat16 metrics_file=bfloat16_metrics.txt"
 aqt_command=$base_command" run_name=$RUN_NAME-aqt metrics_file=aqt_metrics.txt use_int8_training=true"

@@ -8,7 +8,7 @@ export LIBTPU_INIT_ARGS="--xla_tpu_spmd_rng_bit_generator_unsafe=true --xla_tpu_
 
 # Chinchilla steps is only 17000
 base_command="python3 MaxText/train.py MaxText/configs/base.yml \
-    steps=20000 per_device_batch_size=4 learning_rate=0.001 warmup_steps=2000 enable_profiler=false \
+    steps=80000 per_device_batch_size=4 learning_rate=0.001 warmup_steps=2000 enable_profiler=false \
     enable_dropout=false enable_data_shuffling=false"
 
 bfloat16_command=$base_command" run_name=$RUN_NAME-bfloat16 metrics_file=bfloat16_metrics.txt"
