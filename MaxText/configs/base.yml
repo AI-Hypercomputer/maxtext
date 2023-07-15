@@ -25,6 +25,7 @@ metrics_file: "" # for testing, local file that stores scalar metrics. If empty,
 
 # Activation dtypes.
 dtype: "bfloat16"
+use_fwd_quant: False
 use_int8_training: False
 scale: 1
 base_emb_dim: 2048
@@ -37,7 +38,7 @@ mlp_activations: ["relu"]
 dropout_rate: 0
 logits_via_embedding: True  # NOTE: this is True just for testing.
 # proj, minimal, full, or none
-remat_policy: 'minimal'
+remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
 
