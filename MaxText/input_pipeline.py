@@ -36,6 +36,7 @@ AUTOTUNE = tf.data.experimental.AUTOTUNE
 # Right-shifting token inputs for teacher-forced training.
 # -----------------------------------------------------------------------------
 
+# this method needs a rewrite in pytorch land (assuming no use of tf api)
 def shift_right_tf(x, axis=1):
   """Shift the input to the right by padding and slicing on axis."""
   pad_widths = [(0, 0)] * len(x.shape)
@@ -50,6 +51,7 @@ def shift_right_tf(x, axis=1):
   return padded[tuple(slices)]
 
 
+# this method needs a rewrite in pytorch land (assuming no use of tf api)
 def shift_inputs_tf(x, segment_ids=None, axis=1):
   """Shift inputs and replace EOS by 0 for packed inputs."""
   shifted = shift_right_tf(x, axis=axis)
@@ -61,12 +63,14 @@ def shift_inputs_tf(x, segment_ids=None, axis=1):
     )
   return shifted
 
+# looks like this method can be used for pytorch with no change
 def shift_data(x, axis=0, segmented=True):
   segment_ids = x['inputs_segmentation'] if segmented else None
   x['inputs'] = shift_inputs_tf(x['inputs'], segment_ids=segment_ids, axis=axis)
   return x
 
 
+# looks like this method can be used for pytorch with no change
 def normalize_features(ds):
   """Normalize text feature keys."""
   def _normalize_features(features):
@@ -84,6 +88,8 @@ def normalize_features(ds):
 # -----------------------------------------------------------------------------
 
 
+# this method needs a rewrite in pytorch land (assuming no use of tf.data and
+# jax api)
 def preprocessing_pipeline(
   dataset,
   batch_size: int,
@@ -162,7 +168,7 @@ def preprocessing_pipeline(
   # Return multi-host jax.Array prep iterator
   return multihost_gen
 
-
+# this method needs a rewrite in pytorch land (assuming no use of tf.data)
 def get_datasets(
   config: ml_collections.ConfigDict,
   read_config = None,
@@ -192,6 +198,7 @@ def get_datasets(
 
   return train_ds, eval_ds
 
+# Looks like this method can be used out of the box without much change
 def preprocess_dataset(config: ml_collections.ConfigDict,
                         global_mesh,
                         train_ds, eval_ds,
