@@ -23,7 +23,7 @@ reuse_example_batch: 0 # for testing TPU performance, this options repeated uses
 
 metrics_file: "" # for testing, local file that stores scalar metrics. If empty, no metrics are written.
 # Save metrics such as loss and TFLOPS to GCS, e.g. gs://my-bucket/my-metrics
-gcs_metrics_directory: "" # 
+gcs_metrics_directory: ""
 
 # Activation dtypes.
 dtype: "bfloat16"
