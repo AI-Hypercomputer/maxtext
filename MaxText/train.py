@@ -333,11 +333,8 @@ def train_loop(config, state=None):
     if config.metrics_file:
       max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
 
-    if config.gcs_metrics_directory:
+    if config.gcs_metrics_directory and jax.process_index() == 0:
       running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
-
-    # if config.metrics_file_gcs:
-    # max_utils.write_metrics_gcs(metrics,step_prev, step_cur, gcs_path)
 
     # Start profiling at end of first step to avoid compilation.
     # Move before for loop to include.
