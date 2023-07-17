@@ -80,10 +80,9 @@ def write_metrics_for_gcs(metrics, step, config, running_metrics):
   if (step + 1) % config.log_period == 0 or step == config.steps - 1:
     start_step = (step // config.log_period) * config.log_period
     metrics_filename = f"metrics_step_{start_step:06}_to_step_{step:06}.txt"
-    metrics_for_gcs = open(metrics_filename, 'w', encoding="utf8")
-
-    for metrics_step in running_metrics:
-      metrics_for_gcs.write(str(json.dumps(metrics_step))+'\n')
+    with open(metrics_filename, 'w', encoding="utf8") as metrics_for_gcs:
+      for metrics_step in running_metrics:
+        metrics_for_gcs.write(str(json.dumps(metrics_step))+'\n')
 
     metrics_for_gcs.close()
     gcs_filename=os.path.join(config.gcs_metrics_directory, metrics_filename)
