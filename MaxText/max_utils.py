@@ -81,15 +81,17 @@ def write_metrics_for_gcs(metrics, step, config, running_metrics):
     start_step = (step // config.log_period) * config.log_period
     metrics_filename = f"metrics_step_{start_step:06}_to_step_{step:06}.txt"
     metrics_for_gcs = open(metrics_filename, 'w', encoding="utf8")
-    
+
     for metrics_step in running_metrics:
       metrics_for_gcs.write(str(json.dumps(metrics_step))+'\n')
 
     metrics_for_gcs.close()
     gcs_filename=os.path.join(config.gcs_metrics_directory, metrics_filename)
     command = ["gsutil", "mv", metrics_filename, gcs_filename]
-    captured_output = subprocess.run(command, check=True, capture_output=True)
-    running_metrics = list() # reset running_metrics to empty list
+    max_logging.log(f"Moving file {metrics_filename} to GCS...")
+    subprocess.run(command, check=True, capture_output=True)
+    max_logging.log(f"File {metrics_filename} moved successfully!")
+    running_metrics = [] # reset running_metrics to empty list
   return running_metrics
 
 def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):

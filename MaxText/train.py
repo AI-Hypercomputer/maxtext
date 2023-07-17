@@ -312,7 +312,7 @@ def train_loop(config, state=None):
   last_step_completion = datetime.datetime.now()
 
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
-  running_gcs_metrics = list() if config.gcs_metrics_directory else None
+  running_gcs_metrics = [] if config.gcs_metrics_directory else None
 
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(train_iter, example_batch, config)
