@@ -17,6 +17,7 @@
 # pylint: disable=missing-module-docstring
 from collections import OrderedDict
 
+import math
 import os
 import sys
 import yaml
@@ -99,6 +100,15 @@ class _HyperParameters():
     raw_keys['num_heads'] = raw_keys['scale'] * raw_keys['base_num_heads']
     raw_keys['mlp_dim'] = raw_keys['scale'] * raw_keys['base_mlp_dim']
     raw_keys['num_decoder_layers'] = raw_keys['scale'] * raw_keys['base_num_decoder_layers']
+
+def get_scales(scale):
+  log_2_scale = math.floor((math.log2(scale)))
+  base_scale, rem = divmod(log_2_scale, 3)
+  emb_scale = base_scale + rem > 0
+  num_head_scale = base_scale + rem > 1
+  mlp_dim_scale = base_scale + rem > 1
+  layer_scale = base_scale
+
 
 
 
