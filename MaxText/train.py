@@ -312,6 +312,7 @@ def train_loop(config, state=None):
   last_step_completion = datetime.datetime.now()
 
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
+  running_gcs_metrics = list() if config.gcs_metrics_directory else None
 
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(train_iter, example_batch, config)
@@ -330,7 +331,13 @@ def train_loop(config, state=None):
       max_logging.log("saved a checkpoint")
 
     if config.metrics_file:
-      max_utils.write_metrics_locally(metrics, step, pyconfig.config.steps-1, local_metrics_file)
+      max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
+
+    if config.gcs_metrics_directory:
+      running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
+
+    # if config.metrics_file_gcs:
+    # max_utils.write_metrics_gcs(metrics,step_prev, step_cur, gcs_path)
 
     # Start profiling at end of first step to avoid compilation.
     # Move before for loop to include.

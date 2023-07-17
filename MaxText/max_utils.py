@@ -35,6 +35,8 @@ from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
 import optax
+import os
+import subprocess
 
 
 def l2norm_pytree(x):
@@ -51,18 +53,44 @@ def deactivate_profiler(config):
   if config.enable_profiler:
     jax.profiler.stop_trace()
 
-def write_metrics_locally(metrics, step, last_step, file):
+def _prepare_metrics_for_json(metrics, step, run_name):
+  """Converts metric dictionary into json supported types (e.g. float)""" 
+  metrics_dict = {}
+  for val in metrics['scalar']:
+    metrics_dict[val] = float(metrics['scalar'][val])
+  metrics_dict['step'] = float(step)
+  metrics_dict['run_name'] = run_name
+  return metrics_dict
+
+def write_metrics_locally(metrics, step, config, file):
   """Writes metrics locally for testing"""
   if step == 0:
     file.truncate(0)
 
-  aux = {}
-  for val in metrics['scalar']:
-    aux[val] = float(metrics['scalar'][val])
-  file.write(str(json.dumps(aux))+'\n')
+  metrics_dict = _prepare_metrics_for_json(metrics, step, config.run_name)
+  file.write(str(json.dumps(metrics_dict))+'\n')
 
-  if step == last_step:
+  if step == config.steps - 1:
     file.close()
+
+def write_metrics_for_gcs(metrics, step, config, running_metrics):
+  """Writes metrics to gcs"""
+  metrics_dict_step = _prepare_metrics_for_json(metrics, step, config.run_name)
+  running_metrics.append(metrics_dict_step)
+  if (step + 1) % config.log_period == 0 or step == config.steps - 1:
+    start_step = (step // config.log_period) * config.log_period
+    metrics_filename = f"metrics_step_{start_step:06}_to_step_{step:06}.txt"
+    metrics_for_gcs = open(metrics_filename, 'w', encoding="utf8")
+    
+    for metrics_step in running_metrics:
+      metrics_for_gcs.write(str(json.dumps(metrics_step))+'\n')
+
+    metrics_for_gcs.close()
+    gcs_filename=os.path.join(config.gcs_metrics_directory, metrics_filename)
+    command = ["gsutil", "mv", metrics_filename, gcs_filename]
+    captured_output = subprocess.run(command, check=True, capture_output=True)
+    running_metrics = list() # reset running_metrics to empty list
+  return running_metrics
 
 def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
   """Evaluates unspecified DCN/ICI parallelism values"""

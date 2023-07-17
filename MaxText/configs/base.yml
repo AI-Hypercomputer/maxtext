@@ -22,6 +22,8 @@ load_parameters_path: ""
 reuse_example_batch: 0 # for testing TPU performance, this options repeated uses the same batch.
 
 metrics_file: "" # for testing, local file that stores scalar metrics. If empty, no metrics are written.
+# Save metrics such as loss and TFLOPS to gcs, e.g. gs://my-bucket/my-metrics
+gcs_metrics_directory: "" # 
 
 # Activation dtypes.
 dtype: "bfloat16"
@@ -90,7 +92,7 @@ max_corpus_chars: 10_000_000
 
 # Training loop
 steps: 150_001
-log_period: 10
+log_period: 100
 save_period: 10_000
 learning_rate: 3.e-5
 warmup_steps: 15_000
