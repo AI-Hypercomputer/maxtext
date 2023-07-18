@@ -1,7 +1,7 @@
 REMAT_ARRAY=("minimal" "full")
 USE_INT8_TRAINING_ARRAY=("false" "true")
 DTYPE_ARRAY=("bfloat16" "float32")
-PRNG_KEY_ARRAY=(0 1 2 3)
+PRNG_KEY_ARRAY=(0 1 2 3 4 5)
 
 for REMAT_POLICY in ${REMAT_ARRAY[@]}; do
     for USE_INT8_TRAINING in ${USE_INT8_TRAINING_ARRAY[@]}; do
