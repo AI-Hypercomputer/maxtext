@@ -512,6 +512,7 @@ class MlpBlock(nn.Module):
         rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
             x, deterministic=deterministic)  # Broadcast along length.
     x = nn.with_logical_constraint(x, ('activation_batch', 'activation_length', 'activation_mlp'))
+    x = checkpoint_name(x, 'mlp')
     output = DenseGeneral(
         inputs.shape[-1],
         dtype=self.dtype,
@@ -1054,6 +1055,10 @@ class Decoder(nn.Module):
       elif cfg.remat_policy == 'proj':
         policy = jax.checkpoint_policies.save_only_these_names(
             'query_proj', 'value_proj', 'key_proj'
+        )
+      elif cfg.remat_policy == 'mlp':
+        policy = jax.checkpoint_policies.save_only_these_names(
+            'mlp'
         )
       else:
         assert cfg.remat_policy == 'full', "Remat policy needs to be on list of remat policies"
