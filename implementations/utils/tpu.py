@@ -17,24 +17,29 @@
 TODO(ranran): update REST request to client lib.
 """
 
+import datetime
 import functools
+import io
 import os
 import time
 from typing import Any, Iterable, List, Mapping
+import uuid
 from absl import logging
-from airflow.hooks.subprocess import SubprocessHook
-# import billiard as multiprocessing to workaround known issue in Airflow
-#  https://github.com/apache/airflow/issues/14896#issuecomment-908516288
-import billiard as multiprocessing
-from fabric import Connection
+from airflow.decorators import task
+import fabric
 import google.auth
 import google.auth.transport.requests
+import paramiko
 import requests
+from apis import test_config
+from implementations.utils import ssh
 
 
 _TPU_BASE_URL = "https://tpu.googleapis.com/v2alpha1/"
-_SSH_KEYS_PATH = os.path.expanduser("~/.ssh/google_compute_engine")
 
+@task
+def generate_tpu_name(base_tpu_name: str) -> str:
+    return f'{base_tpu_name}-{str(uuid.uuid4())}'
 
 def get_headers() -> Mapping[str, str]:
   """Get request headers.
@@ -48,17 +53,13 @@ def get_headers() -> Mapping[str, str]:
   creds.refresh(google.auth.transport.requests.Request())
   return {"Authorization": f"Bearer {creds.token}"}
 
-
+@task
 def create_qr(
-    qr_name: str,
+    accelerator: test_config.Tpu,
     tpu_name: str,
-    project_number: str,
     zone: str,
-    tpu_type: str,
-    runtime_version: str,
-    network: str,
-    subnetwork: str,
-    reserved: bool,
+    project_number: str,
+    ssh_keys: ssh.SshKeys,
 ) -> None:
   """Create a Queued Resource.
 
@@ -66,15 +67,11 @@ def create_qr(
   checking the status every 30 seconds till a TPU is ready.
 
   Args:
-    qr_name: The name of a Queued Resource to be created.
+    accelerator: the TPU type to create.
     tpu_name: The name of a TPU to be created.
-    project_number: The number of a project to create a TPU.
     zone: The zone to create a TPU.
-    tpu_type: The type of a TPU.
-    runtime_version: The version of a TPU that runs.
-    network: The network that a TPU will be a part of.
-    subnetwork: The subnetwork that a TPU will be a part of.
-    reserved: The flag to define if a TPU is a Cloud reservation.
+    project_number: The number of a project to create a TPU.
+    ssh_keys: SSH key pair to encode in TPU metadata.
   """
   parent = os.path.join("projects", project_number, "locations", zone)
   qr_url = os.path.join(
@@ -85,31 +82,34 @@ def create_qr(
       zone,
       "queuedResources",
   )
-  params = {"queued_resource_id": qr_name}
+  params = {"queued_resource_id": tpu_name}
   reqest_json = {
       "tpu": {
           "node_spec": {
               "parent": parent,
               "node_id": tpu_name,
               "node": {
-                  "accelerator_type": tpu_type,
-                  "runtime_version": runtime_version,
+                  "accelerator_type": accelerator.name,
+                  "runtime_version": accelerator.runtime_version,
                   "network_config": {
                       "enableExternalIps": True,
-                      "network": network,
-                      "subnetwork": subnetwork,
+                      "network": accelerator.network,
+                      "subnetwork": accelerator.subnetwork,
                   },
+                  "metadata": {
+                    "ssh-keys": f"xl-ml-test:{ssh_keys.public}"
+                  }
               },
           }
       },
-      "guaranteed": {"reserved": reserved},
+      "guaranteed": {"reserved": accelerator.reserved},
   }
   print("Request to create Queued Resource:", reqest_json)
   resp = requests.post(
       url=qr_url, params=params, json=reqest_json, headers=get_headers()
   )
   resp.raise_for_status()
-  create_op_url = os.path.join(qr_url, qr_name)
+  create_op_url = os.path.join(qr_url, tpu_name)
 
   while True:
     resp = requests.get(create_op_url, headers=get_headers())
@@ -119,8 +119,8 @@ def create_qr(
     logging.info("Create Queued Resource operation still running...")
     time.sleep(30)
 
-
-def delete_tpu(tpu_name: str, project_number: str, zone: str) -> None:
+@task(trigger_rule="all_done")
+def delete_tpu(tpu_name: str, zone: str, project_number: str) -> None:
   """Delete a TPU.
 
   Send REST request to delete a TPU, and keep
@@ -128,8 +128,8 @@ def delete_tpu(tpu_name: str, project_number: str, zone: str) -> None:
 
   Args:
     tpu_name: The name of a TPU to be deleted.
-    project_number: The number of a project to delete a TPU.
     zone: The zone to delete a TPU.
+    project_number: The number of a project to delete a TPU.
   """
   tpu_url = os.path.join(
       _TPU_BASE_URL,
@@ -152,26 +152,26 @@ def delete_tpu(tpu_name: str, project_number: str, zone: str) -> None:
     logging.info("Delete TPU operation still running...")
     time.sleep(30)
 
-
-def delete_qr(qr_name: str, project_number: str, zone: str) -> None:
+@task(trigger_rule="all_done")
+def delete_qr(tpu_name: str, zone: str, project: str) -> None:
   """Delete a Queued Resource.
 
   Send REST request to check Queued Resource status, and delete it. Keep
   checking the status every 30 seconds.
 
   Args:
-    qr_name: The name of a Queued Resource to be deleted.
-    project_number: The number of a project to delete a Queued Resource.
-    zone: The zone to delete a Queued Resource.
+    tpu_name: The name of a Queued Resource to be deleted.
+    zone: The zone of the Queued Resource to be deleted.
+    project: The project of the Queued Resource to be deleted.
   """
   qr_url = os.path.join(
       _TPU_BASE_URL,
       "projects",
-      project_number,
+      project,
       "locations",
       zone,
       "queuedResources",
-      qr_name,
+      tpu_name
   )
 
   # check if Queued Resource has become SUSPENDED from SUSPENDING
@@ -222,33 +222,8 @@ def get_tpu(tpu_name: str, project_number: str, zone: str) -> Mapping[str, Any]:
       tpu_name,
   )
   resp = requests.get(tpu_url, headers=get_headers())
+  resp.raise_for_status()
   return resp.json()
-
-
-# TODO(wcromar): Update logic to generate a unique SSH key for each test job
-def config_ssh_key() -> None:
-  """Config the ssh key for connection.
-
-  Raises:
-    RuntimeError: An error occurs when configuring a SSH key.
-  """
-  if os.path.exists(_SSH_KEYS_PATH):
-    return
-
-  config_ssh_cmd = [
-      "gcloud",
-      "compute",
-      "config-ssh",
-      f"--ssh-key-file={_SSH_KEYS_PATH}",
-      "--quiet",
-  ]
-  hook = SubprocessHook()
-  result = hook.run_command(config_ssh_cmd)
-
-  if result.exit_code != 0:
-    raise RuntimeError(
-        f"The exit code is {result.exit_code} with error: {result.output}"
-    )
 
 
 def get_ip_address(tpu_name: str, project_number: str, zone: str) -> List[str]:
@@ -269,123 +244,31 @@ def get_ip_address(tpu_name: str, project_number: str, zone: str) -> List[str]:
   return ip_addresses
 
 
-def create_connect(ip_address: str) -> Connection:
-  """Create connection for an IP address."""
-  return Connection(ip_address, connect_kwargs={"key_filename": _SSH_KEYS_PATH})
-
-
-def get_connection(ip_addresses: List[str]) -> Mapping[str, Connection]:
-  """Get connection for all IP addresses."""
-  config_ssh_key()
-  connections = {}
-  for ip_address in ip_addresses:
-    connections[ip_address] = create_connect(ip_address)
-  return connections
-
-
-def subprocess_helper(tpu_connection, cmds):
-  """A helper to run commands in on TPU worker."""
-  for cmd in cmds:
-    if cmd.startswith("sudo"):
-      tpu_connection.sudo(cmd[5:])
-    else:
-      tpu_connection.run(cmd)
-
-
+@task
 def ssh_tpu(
-    tpu_name: str, project_number: str, zone: str, cmds: Iterable[str]
+    tpu_name: str,
+    zone: str,
+    project_number: str,
+    cmds: Iterable[str],
+    ssh_keys: ssh.SshKeys
 ) -> None:
   """SSH TPU and run commands in multi process.
 
   Args:
    tpu_name: The name of a TPU.
-   project_number: The number of a project that a TPU runs.
    zone: The zone of a project that a TPU runs.
+   project_number: The number of a project that a TPU runs.
    cmds: The commands to run on a TPU.
+   ssh_keys: The SSH key pair to use for authentication.
   """
   tpu_ip_addresses = get_ip_address(tpu_name, project_number, zone)
-  tpu_connections = get_connection(tpu_ip_addresses)
 
-  # TODO(ranran): handle disconnection due to maintenance event
-  with multiprocessing.Pool(processes=len(tpu_ip_addresses)) as p:
-    p.map(
-        functools.partial(subprocess_helper, cmds=cmds),
-        tpu_connections.values(),
-    )
-
-
-def provision(
-    task_id_suffix: str,
-    project_number: str,
-    zone: str,
-    type: str,
-    runtime_version: str,
-    network: str,
-    subnetwork: str,
-    reserved: bool,
-    set_up_cmd: Iterable[str],
-    **kwargs,
-) -> None:
-  """Create a TPU and run set up commands.
-
-  Args:
-    task_id_suffix: The ID suffix for clean up.
-    project_number: The number of a project to clean up.
-    zone: The zone to clean up.
-    type: The type of a TPU, i.e. v4-8.
-    runtime_version: The version of a runtime image that a TPU runs.
-    network: The network that a TPU will be a part of.
-    subnetwork: The subnetwork that a TPU will be a part of.
-    reserved: The flag to define if a TPU is a Cloud reservation.
-    set_up_cmd: The commands to set up a TPU.
-    kwargs: a set of keyword arguments in Airflow context.
-  """
-  del kwargs
-  create_qr(
-      f"{task_id_suffix}_qr",
-      f"{task_id_suffix}_tpu",
-      project_number,
-      zone,
-      type,
-      runtime_version,
-      network,
-      subnetwork,
-      reserved,
+  pkey = paramiko.RSAKey.from_private_key(io.StringIO(ssh_keys.private))
+  ssh_group = fabric.ThreadingGroup(
+    *tpu_ip_addresses,
+    connect_kwargs={
+      "auth_strategy":
+        paramiko.auth_strategy.InMemoryPrivateKey('xl-ml-test', pkey)
+    }
   )
-  ssh_tpu(f"{task_id_suffix}_tpu", project_number, zone, set_up_cmd)
-
-
-def run_model(
-    task_id_suffix: str,
-    project_number: str,
-    zone: str,
-    run_model_cmd: Iterable[str],
-    **kwargs,
-) -> None:
-  """SSH to TPU to run scripts.
-
-  Args:
-    task_id_suffix: The ID suffix for clean up.
-    project_number: The number of a project to clean up.
-    zone: The zone to clean up.
-    run_model_cmd: The commands to run model.
-    kwargs: a set of keyword arguments in Airflow context.
-  """
-  del kwargs
-  ssh_tpu(f"{task_id_suffix}_tpu", project_number, zone, run_model_cmd)
-
-
-def clean_up(
-    task_id_suffix: str, project_number: str, zone: str, **kwargs
-) -> None:
-  """Delete a TPU and a Queued Resource.
-
-  Args:
-    task_id_suffix: The ID suffix for clean up.
-    project_number: The number of a project to clean up.
-    zone: The zone to clean up.
-    kwargs: a set of keyword arguments in Airflow context.
-  """
-  del kwargs
-  delete_tpu(f"{task_id_suffix}_tpu", project_number, zone)
-  delete_qr(f"{task_id_suffix}_qr", project_number, zone)
+  ssh_group.run('\n'.join(cmds))

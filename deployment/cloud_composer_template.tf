@@ -103,6 +103,8 @@ resource "google_composer_environment" "example_environment" {
         apache-airflow-providers-sendgrid = ""
         jsonlines                         = ""
         fabric                            = ""
+        paramiko                          = ""
+        cryptography                      = ""
       }
     }
 

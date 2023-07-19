@@ -17,26 +17,22 @@
 from airflow.utils import task_group
 from apis import task
 
-
-def run(
-    task_id_suffix: str,
-    job_task: task.BaseTask,
-) -> task_group.TaskGroup:
+# TODO(wcromar): Can I define this in terms of BaseTask?
+def run(job_task: task.TPUTask) -> task_group.TaskGroup:
   """Run a test job.
 
   Args:
-    task_id_suffix: An ID suffix of an Airflow task.
     job_task: Tasks for a test job.
 
   Returns:
     A task group with chained up four tasks: provision, run_model, post_process
     and clean_up.
   """
-  with task_group.TaskGroup(group_id=f"run_{task_id_suffix}") as tg:
-    provision = job_task.provision(task_id_suffix)
-    run_model = job_task.run_model(task_id_suffix)
-    post_process = job_task.post_process(task_id_suffix)
-    clean_up = job_task.clean_up(task_id_suffix)
+  with task_group.TaskGroup(group_id=job_task.task_test_config.benchmark_id, prefix_group_id=True) as tg:
+    provision, tpu_name, ssh_keys = job_task.provision()
+    run_model = job_task.run_model(tpu_name, ssh_keys)
+    post_process = job_task.post_process(tpu_name, ssh_keys)
+    clean_up = job_task.clean_up(tpu_name)
 
     provision >> run_model >> post_process >> clean_up
 

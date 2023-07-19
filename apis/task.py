@@ -16,11 +16,15 @@
 
 import abc
 import dataclasses
-from datetime import timedelta
-from airflow.models import baseoperator
-from airflow.operators import empty, python_operator
+import datetime
+from typing import Tuple
+import airflow
+
+from airflow.utils.task_group import TaskGroup
+from airflow.models.taskmixin import DAGNode
+from airflow.operators import empty
 from apis import gcp_config, test_config
-from implementations.utils import tpu
+from implementations.utils import tpu, ssh
 
 
 class BaseTask(abc.ABC):
@@ -30,28 +34,28 @@ class BaseTask(abc.ABC):
   def provision(
       self,
       task_id_suffix: str,
-  ) -> baseoperator.BaseOperator:
+  ) -> DAGNode:
     ...
 
   @abc.abstractmethod
   def run_model(
       self,
       task_id_suffix: str,
-  ) -> baseoperator.BaseOperator:
+  ) -> DAGNode:
     ...
 
   @abc.abstractmethod
   def post_process(
       self,
       task_id_suffix: str,
-  ) -> baseoperator.BaseOperator:
+  ) -> DAGNode:
     ...
 
   @abc.abstractmethod
   def clean_up(
       self,
       task_id_suffix: str,
-  ) -> baseoperator.BaseOperator:
+  ) -> DAGNode:
     ...
 
 
@@ -62,118 +66,125 @@ class TPUTask(BaseTask):
   Attributes:
     task_test_config: Test configs to run on this TPU.
     task_gcp_config: Runtime TPU creation parameters.
+    tpu_create_timeout: Timeout for TPU to become ready after creating QR.
   """
 
   # TODO(wcromar): make these attributes less verbose
   task_test_config: test_config.TestConfig[test_config.Tpu]
   task_gcp_config: gcp_config.GCPConfig
+  tpu_create_timeout: datetime.timedelta = datetime.timedelta(minutes=60)
 
-  def provision(
-      self,
-      task_id_suffix: str,
-  ) -> baseoperator.BaseOperator:
-    """Provision a TPU accelerator (timeout is 60 min).
+  def provision(self) -> Tuple[DAGNode, airflow.XComArg, airflow.XComArg]:
+    """Provision a TPU accelerator via a Queued Resource.
 
-    Provision steps include 1) a Queued Resource creation, and 2) a TPU setup.
-
-    Args:
-      task_id_suffix: An ID suffix of an Airflow task.
+    Generates a random TPU name and SSH keys, creates a Queued Resource, and
+    runs the test config's setup script on the TPU when it is ready.
 
     Returns:
-      A PythonOperator that execute provision callable.
+      A DAG node that will provision a TPU, an XCom value for the TPU name,
+        and an XCom value for the SSH keys.
 
     Raises:
       AirflowTaskTimeout: An error occurs when execution_timeout is breached.
     """
-    return python_operator.PythonOperator(
-        task_id=f"provision_tpu_{task_id_suffix}",
-        python_callable=tpu.provision,
-        op_kwargs={
-            "task_id_suffix": task_id_suffix,
-            "project_name": self.task_gcp_config.project_name,
-            "project_number": self.task_gcp_config.project_number,
-            "zone": self.task_gcp_config.zone,
-            "type": self.task_test_config.accelerator.name,
-            "runtime_version": (
-                self.task_test_config.accelerator.runtime_version
-            ),
-            "network": self.task_test_config.accelerator.network,
-            "subnetwork": self.task_test_config.accelerator.subnetwork,
-            "reserved": self.task_test_config.accelerator.reserved,
-            # TODO(wcromar): remove split
-            "set_up_cmd": self.task_test_config.setup_script.split("\n"),
-        },
-        execution_timeout=timedelta(minutes=60),
-        owner=self.task_test_config.task_owner,
-    )
+    with TaskGroup(group_id="provision") as group:
+      with TaskGroup(group_id="initialize"):
+        tpu_name = tpu.generate_tpu_name(self.task_test_config.benchmark_id)
+        ssh_keys = ssh.generate_ssh_keys()
+
+      queued_resource = tpu.create_qr.override(
+        execution_timeout=self.tpu_create_timeout,
+      )(
+        self.task_test_config.accelerator,
+        tpu_name,
+        self.task_gcp_config.zone,
+        self.task_gcp_config.project_number,
+        ssh_keys,
+      )
+      queued_resource >> tpu.ssh_tpu.override(task_id="setup")(
+        tpu_name,
+        self.task_gcp_config.zone,
+        self.task_gcp_config.project_name,
+        # TODO(wcromar): remove split
+        self.task_test_config.setup_script.split("\n"),
+        ssh_keys
+      )
+
+    return group, tpu_name, ssh_keys
 
   def run_model(
       self,
-      task_id_suffix: str,
-  ) -> baseoperator.BaseOperator:
-    """SSH to a TPU and run scripts (time-out is user defined).
+      # TODO(wcromar): Is there a way to annotate the type of the XCom arg?
+      tpu_name: airflow.XComArg,
+      ssh_keys: airflow.XComArg,
+  ) -> DAGNode:
+    """Run the TPU test in `task_test_config`.
 
     Args:
-      task_id_suffix: An ID suffix of an Airflow task.
+      tpu_name: XCom value for the TPU name (string).
+      ssh_keys: And XCom value for the TPU's SSH keys (SshKeys).
 
     Returns:
-      A PythonOperator that execute run model callable.
-
-    Raises:
-      AirflowTaskTimeout: An error occurs when execution_timeout is breached.
-      RuntimeError: An error occurs when configuring a SSH key.
+      A DAG node that executes the model test.
     """
-    return python_operator.PythonOperator(
-        task_id=f"run_model_tpu_{task_id_suffix}",
-        python_callable=tpu.run_model,
-        op_kwargs={
-            "task_id_suffix": task_id_suffix,
-            "project_number": self.task_gcp_config.project_number,
-            "zone": self.task_gcp_config.zone,
-            "run_model_cmd": self.task_test_config.test_script.split("\n"),
-        },
-        execution_timeout=timedelta(
-            minutes=self.task_test_config.time_out_in_min
-        ),
-        owner=self.task_test_config.task_owner,
+    return tpu.ssh_tpu.override(
+      task_id="run_model",
+      execution_timeout=datetime.timedelta(minutes=self.task_test_config.time_out_in_min),
+      owner=self.task_test_config.task_owner,
+    )(
+      tpu_name,
+      self.task_gcp_config.zone,
+      self.task_gcp_config.project_name,
+      # TODO(wcromar): remove split
+      self.task_test_config.test_script.split("\n"),
+      ssh_keys
     )
 
   # TODO(ranran): Implement logic for post_process task
   def post_process(
       self,
-      task_id_suffix: str,
-  ) -> baseoperator.BaseOperator:
-    return empty.EmptyOperator(task_id=f"post_process_{task_id_suffix}")
-
-  def clean_up(
-      self,
-      task_id_suffix: str,
-  ) -> baseoperator.BaseOperator:
-    """Clean up a TPU accelerator (timeout is 10 min).
-
-    Clean up steps include 1) a TPU deletion, and 2) a Queued Resource deletion.
+      tpu_name: airflow.XComArg,
+      ssh_keys: airflow.XComArg,
+  ) -> DAGNode:
+    """Not implemented.
 
     Args:
-      task_id_suffix: A suffix of an Airflow task.
+      tpu_name: XCom value for the TPU name (string).
+      ssh_keys: And XCom value for the TPU's SSH keys (SshKeys).
 
     Returns:
-      A PythonOperator that execute clean_up callable.
+      A placeholder DAG node.
+    """
+    return tpu.ssh_tpu.override(
+      task_id="postprocess",
+    )(
+      tpu_name,
+      self.task_gcp_config.zone,
+      self.task_gcp_config.project_name,
+      ["echo postprocess not implemented"],
+      ssh_keys
+    )
+    return empty.EmptyOperator(task_id=f"post_process")
+
+  def clean_up(
+      self, tpu_name: airflow.XComArg
+  ) -> DAGNode:
+    """Clean up TPU resources created by `provision`.
+
+    Returns:
+      A DAG node that deletes the queued resource and its owned nodes.
 
     Raises:
       AirflowTaskTimeout: An error occurs when execution_timeout is breached.
     """
-    return python_operator.PythonOperator(
-        task_id=f"clean_up_tpu_{task_id_suffix}",
-        python_callable=tpu.clean_up,
-        op_kwargs={
-            "task_id_suffix": task_id_suffix,
-            "project_number": self.task_gcp_config.project_number,
-            "zone": self.task_gcp_config.zone,
-        },
-        trigger_rule="all_done",
-        execution_timeout=timedelta(minutes=10),
-        owner=self.task_test_config.task_owner,
-    )
+    with TaskGroup(group_id="clean_up") as group:
+      # TODO(wcromar): Implement cascading delete with error handling
+      delete_tpu = tpu.delete_tpu(tpu_name, self.task_gcp_config.zone, self.task_gcp_config.project_number)
+      delete_qr = tpu.delete_qr(tpu_name, self.task_gcp_config.zone, self.task_gcp_config.project_number)
+
+      delete_tpu  >> delete_qr
+
+    return group
 
 
 @dataclasses.dataclass
