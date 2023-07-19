@@ -19,14 +19,7 @@ from apis import gcp_config, task, test_config
 
 # TODO(ranran): This is an example to test QR creation & deletion funcitonality, and
 # remove after python-API is well-organized
-def get_jax_resnet_config(tpu_size: int, test_time_out: int):
-  job_tpu_task = task.TPUTask(
-      version="4",
-      size=tpu_size,
-      runtime_version="tpu-vm-v4-base",
-      task_owner="ranran",
-  )
-
+def get_jax_resnet_config(tpu_size: int, test_time_out: int) -> task.TPUTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name="tpu-prod-env-one-vm",
       project_number="630405687483",
@@ -53,10 +46,16 @@ def get_jax_resnet_config(tpu_size: int, test_time_out: int):
       ),
   )
 
-  job_test_config = test_config.TestConfig(
-      time_out_in_min=test_time_out,
-      set_up_cmd=set_up_cmds,
-      run_model_cmd=run_model_cmds,
+  job_test_config = test_config.TpuVmTest(
+    test_config.Tpu(
+      version=4,
+      cores=tpu_size,
+      runtime_version="tpu-ubuntu2204-base",
+    ),
+    "jax_resnet",
+    set_up_cmds=set_up_cmds,
+    run_model_cmds=run_model_cmds,
+    time_out_in_min=test_time_out,
+    task_owner="ranran",
   )
-
-  return job_tpu_task, job_gcp_config, job_test_config
+  return task.TPUTask(job_test_config,  job_gcp_config)

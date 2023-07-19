@@ -27,26 +27,22 @@ with models.DAG(
     owner_links={"solutions_team": "https://go/cloudtpu-solutions-team"},
     start_date=datetime.datetime(2023, 7, 12),
 ) as dag:
-  jax_resnet_task_v4_8, jax_gcp_v4_8, jax_resnet_test_v4_8 = (
+  jax_resnet_task_v4_8 = (
       jax_config.get_jax_resnet_config(8, 60)
   )
 
-  jax_resnet_task_v4_32, jax_gcp_v4_32, jax_resnet_test_v4_32 = (
+  jax_resnet_task_v4_32 = (
       jax_config.get_jax_resnet_config(32, 600)
   )
 
   jax_resnet_v4_8 = xlml_controller.run(
-      task_id_suffix="jax_resnet_v4_8",
-      job_task=jax_resnet_task_v4_32,
-      job_gcp_config=jax_gcp_v4_8,
-      job_test_config=jax_resnet_test_v4_8,
+      task_id_suffix=jax_resnet_task_v4_8.task_test_config.benchmark_id,
+      job_task=jax_resnet_task_v4_8,
   )
 
   jax_resnet_v4_32 = xlml_controller.run(
-      task_id_suffix="jax_resnet_v4_32",
+      task_id_suffix=jax_resnet_task_v4_32.task_test_config.benchmark_id,
       job_task=jax_resnet_task_v4_32,
-      job_gcp_config=jax_gcp_v4_32,
-      job_test_config=jax_resnet_test_v4_32,
   )
 
   jax_resnet_v4_8 >> jax_resnet_v4_32

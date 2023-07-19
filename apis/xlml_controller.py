@@ -15,38 +15,28 @@
 """The controller to run XL ML tests."""
 
 from airflow.utils import task_group
-from apis import gcp_config, task, test_config
+from apis import task
 
 
 def run(
     task_id_suffix: str,
     job_task: task.BaseTask,
-    job_gcp_config: gcp_config.GCPConfig,
-    job_test_config: test_config.TestConfig,
 ) -> task_group.TaskGroup:
   """Run a test job.
 
   Args:
     task_id_suffix: An ID suffix of an Airflow task.
     job_task: Tasks for a test job.
-    job_gcp_config: Configs of GCP to run a test job.
-    job_test_config: Configs for a test job.
 
   Returns:
     A task group with chained up four tasks: provision, run_model, post_process
     and clean_up.
   """
   with task_group.TaskGroup(group_id=f"run_{task_id_suffix}") as tg:
-    provision = job_task.provision(
-        task_id_suffix, job_gcp_config, job_test_config
-    )
-    run_model = job_task.run_model(
-        task_id_suffix, job_gcp_config, job_test_config
-    )
-    post_process = job_task.post_process(
-        task_id_suffix, job_gcp_config, job_test_config
-    )
-    clean_up = job_task.clean_up(task_id_suffix, job_gcp_config)
+    provision = job_task.provision(task_id_suffix)
+    run_model = job_task.run_model(task_id_suffix)
+    post_process = job_task.post_process(task_id_suffix)
+    clean_up = job_task.clean_up(task_id_suffix)
 
     provision >> run_model >> post_process >> clean_up
 
