@@ -27,7 +27,7 @@ gcs_metrics_directory: ""
 
 # Activation dtypes.
 dtype: "bfloat16"
-use_fwd_quant: False
+use_fwd_quant: True # defaults to true in AQT codebase
 use_int8_training: False
 scale: 1
 base_emb_dim: 2048
