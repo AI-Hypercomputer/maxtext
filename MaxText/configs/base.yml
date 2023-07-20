@@ -30,8 +30,8 @@ use_int8_training: False
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
 scale: 1
 base_emb_dim: 2048
-base_num_heads: 12
-base_mlp_dim: 6144
+base_num_heads: 8
+base_mlp_dim: 8192
 base_num_decoder_layers: 20
 head_dim: 256
 # activation functions are .
