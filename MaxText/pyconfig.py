@@ -98,13 +98,13 @@ class _HyperParameters():
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
-    emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_scales(raw_keys['scale'])
+    emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys['scale'])
     raw_keys['emb_dim'] = emb_scale * raw_keys['base_emb_dim']
     raw_keys['num_heads'] = num_head_scale * raw_keys['base_num_heads']
     raw_keys['mlp_dim'] = mlp_dim_scale * raw_keys['base_mlp_dim']
     raw_keys['num_decoder_layers'] = layer_scale * raw_keys['base_num_decoder_layers']
 
-def get_scales(scale):
+def get_individual_scales(scale):
   '''Choose appropriate scales for individual dimensions based on global scale
   We choose to rotate between doubling:
     embed_dim
@@ -116,8 +116,8 @@ def get_scales(scale):
 
   log_2_scale = math.floor((math.log2(scale)))
   if 2**log_2_scale != scale:
-    scale_warning = ("Scale is rounded down to the nearest power of 2. If you want finer grained control"
-                    "of the model sizes explicitly set embed_dim, num_head, mlp_dim, num_layers or head_dim")
+    scale_warning = ("Scale is rounded down to the nearest power of 2. If you want finer grained control of the model sizes " 
+      "then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.")
     warnings.warn(scale_warning, category=Warning)
   base_scale, rem = divmod(log_2_scale, 3)
   base_scale += 1 
@@ -125,11 +125,7 @@ def get_scales(scale):
   num_head_scale = base_scale + int(rem > 1)
   mlp_dim_scale = base_scale + int(rem > 1)
   layer_scale = base_scale
-  print('\n\n\n\n\n\n')
-  print("scales:",emb_scale, num_head_scale, mlp_dim_scale, layer_scale, flush=True)
-  print('\n\n\n\n\n\n')
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
-
 
 
 
