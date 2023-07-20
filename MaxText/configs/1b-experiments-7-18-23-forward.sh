@@ -6,9 +6,9 @@ STEPS=10000
 REMAT_POLICY=$1
 USE_INT8_TRAINING=$2
 DTYPE=$3
-USE_FWD_
-PRNG_KEY=$4
-RUN_NAME=$5
+USE_FWD_QUANT=$4
+PRNG_KEY=$5
+RUN_NAME=$6
 # RUN_NAME=mattdavidow-20230718-test_remat_${REMAT_POLICY}_useint8_${USE_INT8_TRAINING}_dtype_${DTYPE}_PRNGKey_${PRNG_KEY}
 
 OUTPUT_FILE=gs://mattdavidow-maxtext-br/${RUN_NAME}.txt
@@ -21,7 +21,7 @@ command="python3 MaxText/train.py MaxText/configs/base.yml \
     enable_dropout=false enable_data_shuffling=false run_name=${RUN_NAME}\
     use_int8_training=${USE_INT8_TRAINING} metrics_file=metrics.txt\
     remat_policy=${REMAT_POLICY} dtype=${DTYPE} init_prng_key=${PRNG_KEY}\
-    gcs_metrics_directory=gs://mattdavidow-maxtext-br/metrics/${RUN_NAME}"
+    gcs_metrics_directory=gs://mattdavidow-maxtext-br/metrics/${RUN_NAME} use_fwd_quant=${USE_FWD_QUANT}"
 
 echo "Starting run (${RUN_NAME}) with command: ${command}"
 eval ${command}
