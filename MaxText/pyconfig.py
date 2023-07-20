@@ -123,7 +123,7 @@ def get_individual_scales(scale):
   base_scale += 1 
   emb_scale = base_scale + int(rem > 0)
   num_head_scale = base_scale + int(rem > 1)
-  mlp_dim_scale = base_scale + int(rem > 1)
+  mlp_dim_scale = num_head_scale
   layer_scale = base_scale
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
 
