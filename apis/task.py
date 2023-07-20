@@ -49,7 +49,8 @@ class BaseTask(abc.ABC):
 
   @abc.abstractmethod
   def clean_up(
-      self, task_id_suffix: str,
+      self,
+      task_id_suffix: str,
   ) -> baseoperator.BaseOperator:
     ...
 
@@ -59,9 +60,10 @@ class TPUTask(BaseTask):
   """This is a class to set up tasks for TPU.
 
   Attributes:
-    task_test_config: Test to run on this TPU
-    task_gcp_config: Runtime TPU creation parameters
+    task_test_config: Test configs to run on this TPU.
+    task_gcp_config: Runtime TPU creation parameters.
   """
+
   # TODO(wcromar): make these attributes less verbose
   task_test_config: test_config.TestConfig[test_config.Tpu]
   task_gcp_config: gcp_config.GCPConfig
@@ -92,20 +94,49 @@ class TPUTask(BaseTask):
             "project_number": self.task_gcp_config.project_number,
             "zone": self.task_gcp_config.zone,
             "type": self.task_test_config.accelerator.name,
-            "runtime_version": self.task_test_config.accelerator.runtime_version,
+            "runtime_version": (
+                self.task_test_config.accelerator.runtime_version
+            ),
+            "network": self.task_test_config.accelerator.network,
+            "subnetwork": self.task_test_config.accelerator.subnetwork,
+            "reserved": self.task_test_config.accelerator.reserved,
             # TODO(wcromar): remove split
-            "set_up_cmd": self.task_test_config.setup_script.split('\n'),
+            "set_up_cmd": self.task_test_config.setup_script.split("\n"),
         },
         execution_timeout=timedelta(minutes=60),
         owner=self.task_test_config.task_owner,
     )
 
-  # TODO(ranran): Implement logic for run_model task
   def run_model(
       self,
       task_id_suffix: str,
   ) -> baseoperator.BaseOperator:
-    return empty.EmptyOperator(task_id=f"run_model_{task_id_suffix}")
+    """SSH to a TPU and run scripts (time-out is user defined).
+
+    Args:
+      task_id_suffix: An ID suffix of an Airflow task.
+
+    Returns:
+      A PythonOperator that execute run model callable.
+
+    Raises:
+      AirflowTaskTimeout: An error occurs when execution_timeout is breached.
+      RuntimeError: An error occurs when configuring a SSH key.
+    """
+    return python_operator.PythonOperator(
+        task_id=f"run_model_tpu_{task_id_suffix}",
+        python_callable=tpu.run_model,
+        op_kwargs={
+            "task_id_suffix": task_id_suffix,
+            "project_number": self.task_gcp_config.project_number,
+            "zone": self.task_gcp_config.zone,
+            "run_model_cmd": self.task_test_config.test_script.split("\n"),
+        },
+        execution_timeout=timedelta(
+            minutes=self.task_test_config.time_out_in_min
+        ),
+        owner=self.task_test_config.task_owner,
+    )
 
   # TODO(ranran): Implement logic for post_process task
   def post_process(
@@ -115,7 +146,8 @@ class TPUTask(BaseTask):
     return empty.EmptyOperator(task_id=f"post_process_{task_id_suffix}")
 
   def clean_up(
-      self, task_id_suffix: str,
+      self,
+      task_id_suffix: str,
   ) -> baseoperator.BaseOperator:
     """Clean up a TPU accelerator (timeout is 10 min).
 

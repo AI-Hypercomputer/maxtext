@@ -44,17 +44,19 @@ When Composer updates to a recent Python version, we can use dataclasses.
 """
 
 import abc
-from typing import Generic, Iterable, TypeVar, Optional
-
+from typing import Generic, Iterable, Optional, TypeVar
 import attrs
+
 
 class Accelerator(abc.ABC):
   """Represents an ML accelerator."""
+
   @property
   @abc.abstractmethod
   def name(self) -> str:
     """Name of this ML accelerator."""
     raise NotImplementedError
+
 
 # TODO(wcromar): GPU implementation
 @attrs.define
@@ -65,18 +67,27 @@ class Tpu(Accelerator):
     version: TPU device version.
     cores: Physical cores in this TPU type, i.e. the number of cores in the
       name.
-    runtime_version: Runtime image version
+    runtime_version: Runtime image version.
+    network: The network that a TPU will be a part of.
+    subnetwork: The subnetwork that a TPU will be a part of.
+    reserved: The flag to define if a TPU is a Cloud reservation.
   """
+
   version: str
   cores: int
   runtime_version: str
+  network: str = 'default'
+  subnetwork: str = 'default'
+  reserved: bool = False
 
   @property
   def name(self):
     """Name of this TPU type in the Cloud TPU API (e.g. 'v4-8')."""
     return f'v{self.version}-{self.cores}'
 
+
 A = TypeVar('A', bound=Accelerator)
+
 
 @attrs.define
 class TestConfig(abc.ABC, Generic[A]):
@@ -87,6 +98,7 @@ class TestConfig(abc.ABC, Generic[A]):
     time_out_in_min: Test timeout in minutes.
     task_owner: Task owner username or link.
   """
+
   accelerator: A
   time_out_in_min: Optional[int] = attrs.field(default=None, kw_only=True)
   task_owner: Optional[str] = attrs.field(default=None, kw_only=True)
@@ -111,6 +123,7 @@ class TestConfig(abc.ABC, Generic[A]):
     """
     ...
 
+
 @attrs.define
 class TpuVmTest(TestConfig[Tpu]):
   """Test config that runs on a single Cloud TPU VM instance.
@@ -120,6 +133,7 @@ class TpuVmTest(TestConfig[Tpu]):
     set_up_cmds: List of commands to run once when TPU is created.
     run_model_cmds: List of commands to run the model under test.
   """
+
   test_name: str
   set_up_cmds: Iterable[str]
   run_model_cmds: Iterable[str]

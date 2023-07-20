@@ -102,6 +102,7 @@ resource "google_composer_environment" "example_environment" {
       pypi_packages = {
         apache-airflow-providers-sendgrid = ""
         jsonlines                         = ""
+        fabric                            = ""
       }
     }
 

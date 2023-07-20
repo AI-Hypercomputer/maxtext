@@ -33,29 +33,29 @@ def get_jax_resnet_config(tpu_size: int, test_time_out: int) -> task.TPUTask:
           "pip install jax[tpu] -f"
           " https://storage.googleapis.com/jax-releases/libtpu_releases.html"
       ),
-      "git clone https://github.com/google/flax.git ~/flax",
+      "git clone https://github.com/google/flax.git /tmp/flax",
       "pip install --user flax",
   )
 
   run_model_cmds = (
-      "cd ~/flax/examples/mnist",
       (
-          "JAX_PLATFORM_NAME=TPU python3 main.py --config=configs/default.py"
+          "JAX_PLATFORM_NAME=TPU python3 /tmp/flax/examples/mnist/main.py"
+          " --config=/tmp/flax/examples/mnist/configs/default.py"
           " --workdir=/tmp/mnist --config.learning_rate=0.05"
           " --config.num_epochs=3"
       ),
   )
 
   job_test_config = test_config.TpuVmTest(
-    test_config.Tpu(
-      version=4,
-      cores=tpu_size,
-      runtime_version="tpu-ubuntu2204-base",
-    ),
-    "jax_resnet",
-    set_up_cmds=set_up_cmds,
-    run_model_cmds=run_model_cmds,
-    time_out_in_min=test_time_out,
-    task_owner="ranran",
+      test_config.Tpu(
+          version=4,
+          cores=tpu_size,
+          runtime_version="tpu-ubuntu2204-base",
+      ),
+      "jax_resnet",
+      set_up_cmds=set_up_cmds,
+      run_model_cmds=run_model_cmds,
+      time_out_in_min=test_time_out,
+      task_owner="ranran",
   )
-  return task.TPUTask(job_test_config,  job_gcp_config)
+  return task.TPUTask(job_test_config, job_gcp_config)
