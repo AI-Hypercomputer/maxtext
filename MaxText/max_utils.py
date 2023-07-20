@@ -85,7 +85,7 @@ def write_metrics_for_gcs(metrics, step, config, running_metrics):
         metrics_for_gcs.write(str(json.dumps(metrics_step))+'\n')
 
     metrics_for_gcs.close()
-    gcs_filename=os.path.join(config.gcs_metrics_directory, metrics_filename)
+    gcs_filename=os.path.join(config.metrics_dir, metrics_filename)
     command = ["gsutil", "mv", metrics_filename, gcs_filename]
     max_logging.log(f"Moving file {metrics_filename} to GCS...")
     subprocess.run(command, check=True, capture_output=True)

@@ -93,6 +93,7 @@ class _HyperParameters():
       https://github.com/google/maxtext/blob/main/README.md#getting-started-download-dataset-and-configure.\n"
     raw_keys["tensorboard_dir"] = os.path.join(base_output_directory, run_name, "tensorboard", "")
     raw_keys["checkpoint_dir"] = os.path.join(base_output_directory, run_name, "checkpoints", "")
+    raw_keys["metrics_dir"] = os.path.join(base_output_directory, run_name, "metrics", "")
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
     raw_keys['emb_dim'] = raw_keys['scale'] * raw_keys['base_emb_dim']
