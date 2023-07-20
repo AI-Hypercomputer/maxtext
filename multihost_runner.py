@@ -51,6 +51,10 @@ parser = argparse.ArgumentParser(description='TPU configuration options')
 parser.add_argument('--TPU_PREFIX', type=str, default=None, required=True,
                     help="Prefix of worker TPU's. E.g. if TPU's are named user-0 and user-1, \
                           TPU_PREFIX should be set as user")
+parser.add_argument('--PROJECT', type=str, default=None,
+                    help='GCE project name, defaults to gcloud config project')
+parser.add_argument('--ZONE', type=str, default=None,
+                    help='GCE zone, e.g. us-central2-b, defaults to gcloud config compute/zone')
 parser.add_argument('--SCRIPT_DIR', type=str, default=os.getcwd(),
                     help="The local location of the directory to copy to the TPUs and run the main command from. \
                           Defaults to current working directory.")
@@ -75,11 +79,25 @@ if args.USE_EXISTING_FOLDER is True and not args.RUN_NAME:
 
 Slice = namedtuple('Slice', ['name', 'slice_num', 'num_workers', 'version'])
 
-def get_slices(tpu_prefix):
+def get_project():
+  completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
+  project_outputs = completed_command.stdout.decode().strip().split('\n')
+  if len(project_outputs) < 1:
+    sys.exit("You must specify the project in the PROJECT flag or set it with 'gcloud config set project <project>'")
+  return project_outputs[-1] # The project name lives on the last line of the output
+
+def get_zone():
+  completed_command = subprocess.run(["gcloud", "config", "get", "compute/zone"], check=True, capture_output=True)
+  zone_outputs = completed_command.stdout.decode().strip().split('\n')
+  if len(zone_outputs) < 1:
+    sys.exit("You must specify the zone in the ZONE flag or set it with 'gcloud config set compute/zone <zone>'")
+  return zone_outputs[-1] # The zone name lives on the last line of the output
+
+def get_slices(tpu_prefix, project, zone):
   """ Returns a list of slices matching tpu_prefix """
   command = [
       "gcloud", "alpha", "compute", "tpus", "tpu-vm", "list",
-      f"--filter=name~{tpu_prefix}", "--format=csv(name,accelerator_type)"
+      f"--filter=name~{tpu_prefix}", "--format=csv(name,accelerator_type)", f"--project={project}", f"--zone={zone}"
   ]
   completed_command = subprocess.run(command, capture_output=True, check=True)
   instances = completed_command.stdout.decode()
@@ -91,7 +109,7 @@ def get_slices(tpu_prefix):
   if num_slices > 0:
     print(f"{num_slices} slices found.", flush=True)
   else:
-    print(f"No TPUs found with name {tpu_prefix} or matching regex {tpu_prefix}-[0-9]+")
+    print(f"No TPUs found with name {tpu_prefix} or matching regex {tpu_prefix}-[0-9]+ in project {project} and zone {zone}")
     return []
 
   slice_names = [instance.split(',')[0] for instance in instance_list]
@@ -99,7 +117,7 @@ def get_slices(tpu_prefix):
   # Get number of workers in any slice (assume same worker count for all slices.)
   command = [
       "gcloud", "compute", "tpus", "describe", slice_names[0],
-      "--flatten=networkEndpoints[]", "--format=csv[no-heading](networkEndpoints.ipAddress)"
+      "--flatten=networkEndpoints[]", "--format=csv[no-heading](networkEndpoints.ipAddress)", f"--project={project}", f"--zone={zone}
   ]
   completed_command = subprocess.run(command, capture_output=True, check=True)
   num_workers = len(completed_command.stdout.decode().strip().split('\n'))
@@ -152,7 +170,7 @@ else
 fi
 sudo rm -f /tmp/libtpu_lockfile"""
 
-def scps(script_dir, slices, run_name_dir, zip_name, internal_ip):
+def scps(script_dir, slices, run_name_dir, zip_name, project, zone, internal_ip):
   """ Zip the script directory, scp it to the TPUs, and unzip it there. """
   original_working_directory = os.getcwd()
   os.chdir(script_dir) # To tar script_dir, it is most convenient to cd there.
@@ -172,7 +190,7 @@ def scps(script_dir, slices, run_name_dir, zip_name, internal_ip):
     for worker_num in range(cur_slice.num_workers):
       command = [
           "gcloud", "compute", "tpus", "tpu-vm", "scp", f"--worker={worker_num}", zip_path,
-          f"{cur_slice.name}:~/", "--strict-host-key-checking=no"
+          f"{cur_slice.name}:~/", "--strict-host-key-checking=no", f"--project={project}", f"--zone={zone}
       ]
       if internal_ip:
         command.append("--internal-ip")
@@ -188,7 +206,7 @@ def scps(script_dir, slices, run_name_dir, zip_name, internal_ip):
 
   return return_code
 
-def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name, internal_ip, use_existing_folder):
+def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name, internal_ip, project, zone, use_existing_folder):
   """ Run the main command on each worker, logging each separately. """
   kill_script_name = "kill_existing_processes.sh" # File written on worker machines
   commands = []
@@ -215,7 +233,7 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
       remote_command_list_str = " && ".join(remote_command_list)
       gcloud_command=[
           "gcloud", "alpha", "compute", "tpus", "tpu-vm", "ssh", cur_slice.name, f"--worker={worker_num}",
-          "--command", remote_command_list_str, "--strict-host-key-checking=no"]
+          "--command", remote_command_list_str, "--strict-host-key-checking=no", f"--project={project}", f"--zone={zone}]
       if internal_ip:
         gcloud_command.append("--internal-ip")
       commands.append(gcloud_command)
@@ -288,20 +306,6 @@ def run_commands(commands, id_to_print, jobname, worker_list, is_shell=False, ou
 
     time.sleep(1)
   return max_returncode, returncodes
-
-def assert_project_and_zone_set():
-  """ Asserts that project and zone are set in gcloud config, erroring out if not. """
-  # Project
-  completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
-  project_outputs = completed_command.stdout.decode().strip().split('\n')
-  if len(project_outputs) < 1:
-    sys.exit("You must set the project by running 'gcloud config set project <project>'")
-
-  # zone
-  completed_command = subprocess.run(["gcloud", "config", "get", "compute/zone"], check=True, capture_output=True)
-  zone_outputs = completed_command.stdout.decode().strip().split('\n')
-  if len(zone_outputs) < 1:
-    sys.exit("You must set the zone by running 'gcloud config set compute/zone <zone>'")
 
 def assert_script_dir_exists(script_dir):
   if not os.path.isdir(script_dir):
