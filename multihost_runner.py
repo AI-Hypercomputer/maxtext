@@ -97,7 +97,8 @@ def get_slices():
   """ Returns a list of slices matching TPU_PREFIX """
   command = [
       "gcloud", "alpha", "compute", "tpus", "tpu-vm", "list",
-      f"--filter=name~{args.TPU_PREFIX}", "--format=csv(name,accelerator_type)", f"--project={args.PROJECT}", f"--zone={args.ZONE}"
+      f"--filter=name~{args.TPU_PREFIX}", "--format=csv(name,accelerator_type)",
+      f"--project={args.PROJECT}", f"--zone={args.ZONE}"
   ]
   try:
     completed_command = subprocess.run(command, capture_output=True, check=True)
@@ -115,7 +116,8 @@ def get_slices():
   if num_slices > 0:
     print(f"{num_slices} slices found.", flush=True)
   else:
-    print(f"No TPUs found with name {args.TPU_PREFIX} or matching regex {args.TPU_PREFIX}-[0-9]+ in project {args.PROJECT} and zone {args.ZONE}.")
+    print(f"No TPUs found with name {args.TPU_PREFIX} or matching regex {args.TPU_PREFIX}-[0-9]+ "
+    "in project {args.PROJECT} and zone {args.ZONE}.")
     return []
 
   slice_names = [instance.split(',')[0] for instance in instance_list]
@@ -123,7 +125,8 @@ def get_slices():
   # Get number of workers in any slice (assume same worker count for all slices.)
   command = [
       "gcloud", "compute", "tpus", "describe", slice_names[0],
-      "--flatten=networkEndpoints[]", "--format=csv[no-heading](networkEndpoints.ipAddress)", f"--project={args.PROJECT}", f"--zone={args.ZONE}"
+      "--flatten=networkEndpoints[]", "--format=csv[no-heading](networkEndpoints.ipAddress)",
+      f"--project={args.PROJECT}", f"--zone={args.ZONE}"
   ]
   completed_command = subprocess.run(command, capture_output=True, check=True)
   num_workers = len(completed_command.stdout.decode().strip().split('\n'))
@@ -239,7 +242,8 @@ def execute_main_command(main_command, slices, local_log_dir, zip_name):
       remote_command_list_str = " && ".join(remote_command_list)
       gcloud_command=[
           "gcloud", "alpha", "compute", "tpus", "tpu-vm", "ssh", cur_slice.name, f"--worker={worker_num}",
-          "--command", remote_command_list_str, "--strict-host-key-checking=no", f"--project={args.PROJECT}", f"--zone={args.ZONE}"]
+          "--command", remote_command_list_str, "--strict-host-key-checking=no",
+          f"--project={args.PROJECT}", f"--zone={args.ZONE}"]
       if args.INTERNAL_IP:
         gcloud_command.append("--internal-ip")
       commands.append(gcloud_command)
