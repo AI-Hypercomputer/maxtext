@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-STEPS=5
+STEPS=40000
 
 REMAT_POLICY=$1
 USE_INT8_TRAINING=$2
