@@ -78,6 +78,9 @@ parser.add_argument('--CQR_EXTRA_ARGS', type=str, default=None,
 
 args = parser.parse_args()
 
+if len(args.BUCKET_NAME) > 5 and args.BUCKET_NAME[0:5]=="gs://" :
+  raise ValueError("BUCKET_NAME should NOT include gs://, e.g. use my-bucket instead of gs://my-bucket.")
+
 def get_project():
   completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
   project_outputs = completed_command.stdout.decode().strip().split('\n')
