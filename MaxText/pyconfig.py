@@ -116,11 +116,11 @@ def get_individual_scales(scale):
 
   log_2_scale = math.floor((math.log2(scale)))
   if 2**log_2_scale != scale:
-    scale_warning = ("Scale is rounded down to the nearest power of 2. If you want finer grained control of the model sizes " 
-      "then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.")
+    scale_warning = ("Scale is rounded down to the nearest power of 2. If you want finer grained control of the model sizes "
+      "then you can explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.")
     warnings.warn(scale_warning, category=Warning)
   base_scale, rem = divmod(log_2_scale, 3)
-  base_scale += 1 
+  base_scale += 1
   emb_scale = base_scale + int(rem > 0)
   num_head_scale = base_scale + int(rem > 1)
   mlp_dim_scale = num_head_scale
