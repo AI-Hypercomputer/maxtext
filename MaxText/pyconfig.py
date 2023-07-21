@@ -17,6 +17,7 @@
 # pylint: disable=missing-module-docstring
 from collections import OrderedDict
 
+import math
 import os
 import sys
 import yaml
@@ -96,10 +97,34 @@ class _HyperParameters():
     raw_keys["metrics_dir"] = os.path.join(base_output_directory, run_name, "metrics", "")
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
-    raw_keys['emb_dim'] = raw_keys['scale'] * raw_keys['base_emb_dim']
-    raw_keys['num_heads'] = raw_keys['scale'] * raw_keys['base_num_heads']
-    raw_keys['mlp_dim'] = raw_keys['scale'] * raw_keys['base_mlp_dim']
-    raw_keys['num_decoder_layers'] = raw_keys['scale'] * raw_keys['base_num_decoder_layers']
+
+    emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys['global_parameter_scale'])
+    raw_keys['emb_dim'] = emb_scale * raw_keys['base_emb_dim']
+    raw_keys['num_heads'] = num_head_scale * raw_keys['base_num_heads']
+    raw_keys['mlp_dim'] = mlp_dim_scale * raw_keys['base_mlp_dim']
+    raw_keys['num_decoder_layers'] = layer_scale * raw_keys['base_num_decoder_layers']
+
+def get_individual_scales(scale):
+  '''Choose appropriate scales for individual dimensions based on global scale
+  We choose to rotate between doubling:
+    embed_dim
+    num_head and mlp_dim
+    num_layers
+  Any one of these steps is not a perfect doubling, although going through a cycle
+  of three is a near perfect 8x scaling except for the linear -> softmax -> output step'''
+
+
+  log_2_scale = math.floor((math.log2(scale)))
+  if 2**log_2_scale != scale:
+    raise ValueError("Global parameter scale should be a power of 2. If you want finer grained control of the model sizes "
+      "then you can explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.")
+  base_scale, rem = divmod(log_2_scale, 3)
+  base_scale += 1
+  emb_scale = base_scale + int(rem > 0)
+  num_head_scale = base_scale + int(rem > 1)
+  mlp_dim_scale = num_head_scale
+  layer_scale = base_scale
+  return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
 
 
 

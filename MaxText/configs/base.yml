@@ -28,11 +28,13 @@ gcs_metrics: "false"
 # Activation dtypes.
 dtype: "bfloat16"
 use_int8_training: False
-scale: 1
+# Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
+# then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
+global_parameter_scale: 1
 base_emb_dim: 2048
 base_num_heads: 8
 base_mlp_dim: 8192
-base_num_decoder_layers: 16
+base_num_decoder_layers: 20
 head_dim: 256
 # activation functions are .
 mlp_activations: ["relu"]
@@ -47,7 +49,7 @@ record_internal_nn_metrics: 0
 
 # Output directory
 # Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
-base_output_directory: "" 
+base_output_directory: ""
 
 # Parallelism
 mesh_axes: ['data', 'fsdp', 'tensor']
@@ -86,7 +88,7 @@ vocab_relative_path: "vocabs"  # Assumes we're allowed
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
-per_device_batch_size: 32
+per_device_batch_size: 24
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
 
