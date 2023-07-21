@@ -26,9 +26,9 @@ metrics_file: "" # for testing, local file that stores scalar metrics. If empty,
 # Activation dtypes.
 dtype: "bfloat16"
 use_int8_training: False
-# Scale is rounded down to the nearest power of 2. If you want finer grained control of the model sizes 
+# Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
-scale: 1
+global_parameter_scale: 1
 base_emb_dim: 2048
 base_num_heads: 8
 base_mlp_dim: 8192
