@@ -27,7 +27,8 @@ gcs_metrics: "false"
 
 # Activation dtypes.
 dtype: "bfloat16"
-use_int8_training: False
+int8_training: False
+
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
 global_parameter_scale: 1

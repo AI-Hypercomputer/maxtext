@@ -222,7 +222,7 @@ class DenseGeneral(nn.Module):
 
     contract_ind = tuple(range(0, len(axis)))
 
-    if not cfg.use_int8_training:
+    if not cfg.int8_training:
       return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
     else:
       aqt_cfg = aqt_config.fully_quantized(fwd_save_accumulator_memory=False,
@@ -1079,7 +1079,7 @@ class Decoder(nn.Module):
           split_rngs={
               'params': True,
               'dropout': cfg.enable_dropout,
-              'aqt': cfg.use_int8_training
+              'aqt': cfg.int8_training
           },
           in_axes=(nn.broadcast, nn.broadcast, nn.broadcast,
                    nn.broadcast),

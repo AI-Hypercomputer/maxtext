@@ -19,9 +19,10 @@
 
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
+import os
 import jax
 jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
-import os
+
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 print(f"Found {jax.device_count()} devices.")
 
@@ -348,7 +349,7 @@ def train_loop(config, state=None):
 
 def update_libtpu_flags(new_flags):
   libtpu_init_args = os.environ.get("LIBTPU_INIT_ARGS","")
-  libtpu_init_args = libtpu_init_args + " " new_flags
+  libtpu_init_args = libtpu_init_args + " " + new_flags
   os.environ["LIBTPU_INIT_ARGS"] = libtpu_init_args
 
 def main(argv: Sequence[str]) -> None:
