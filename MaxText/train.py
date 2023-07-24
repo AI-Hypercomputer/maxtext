@@ -355,7 +355,7 @@ def update_libtpu_flags(new_flags):
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
-  update_libtpu_flags("--xla_tpu_spmd_rng_bit_generator_unsafe=true")
+  #update_libtpu_flags("--xla_tpu_spmd_rng_bit_generator_unsafe=true")
   debug_config = debug_configuration.DebugConfig(
     stack_trace_config = stack_trace_configuration.StackTraceConfig(
       collect_stack_trace = pyconfig.config.collect_stack_trace,
