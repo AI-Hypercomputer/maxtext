@@ -7,3 +7,6 @@ __pycache__
 # .tfstate files
 *.tfstate
 *.tfstate.*
+
+# Compiled JSonnet templates
+configs/jsonnet/*

@@ -44,7 +44,10 @@ When Composer updates to a recent Python version, we can use dataclasses.
 """
 
 import abc
-from typing import Generic, Iterable, Optional, TypeVar
+import json
+import os
+import shlex
+from typing import Generic, Iterable, List, Optional, TypeVar
 import attrs
 
 
@@ -101,7 +104,7 @@ class TestConfig(abc.ABC, Generic[A]):
 
   accelerator: A
   time_out_in_min: Optional[int] = attrs.field(default=None, kw_only=True)
-  task_owner: Optional[str] = attrs.field(default=None, kw_only=True)
+  task_owner: str = attrs.field(default='unowned', kw_only=True)
 
   @property
   @abc.abstractmethod
@@ -149,3 +152,55 @@ class TpuVmTest(TestConfig[Tpu]):
   @property
   def test_script(self) -> str:
     return '\n'.join(self.run_model_cmds)
+
+
+@attrs.define
+class JSonnetTpuVmTest(TestConfig[Tpu]):
+    """Convert legacy JSonnet test configs into a Task.
+
+    Attributes:
+      test_name: Unique name of this test/model.
+      setup: Multi-line script that configures the TPU instance.
+      exports: Extra setup commands to run in same shell as test_command.
+      test_command: Command and arguments to execute on the TPU VM.
+    """
+    test_name: str
+    setup: str
+
+    exports: str
+    test_command: List[str]
+
+    @staticmethod
+    def from_config(test_name: str):
+      config_dir = os.environ.get('XLMLTEST_CONFIGS', '/home/airflow/gcs/dags/configs/jsonnet')
+      test_path = os.path.join(config_dir, test_name)
+      with open(test_path, 'r') as f:
+        test = json.load(f)
+
+      return JSonnetTpuVmTest(
+          test_name=test['testName'],
+          accelerator=Tpu(
+              version=test['accelerator']['version'],
+              cores=test['accelerator']['size'],
+              runtime_version=test['tpuSettings']['softwareVersion'],
+          ),
+          # TODO(wcromar): Generalize this to other frameworks
+          setup=test['tpuSettings']['tpuVmPytorchSetup'] + test['tpuSettings']['tpuVmExtraSetup'],
+          exports=test['tpuSettings']['tpuVmExports'],
+          test_command=test['command'],
+          # `timeout` is in seconds
+          time_out_in_min=test['timeout'] // 60,
+      )
+
+    @property
+    def benchmark_id(self) -> str:
+      return self.test_name
+
+    @property
+    def setup_script(self) -> Optional[str]:
+      return "\n".join(["set -xue", self.setup])
+
+    # TODO(wcromar): replace configmaps
+    @property
+    def test_script(self) -> str:
+      return "\n".join(["set -xue", self.exports, " ".join(shlex.quote(s) for s in self.test_command)])
