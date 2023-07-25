@@ -224,20 +224,20 @@ print("finished includes ", flush = True)
 
 pjit_func = pjit(
         training_step,
-        in_axis_resources=(data_sharding, parameter_sharding),
-        out_axis_resources=parameter_sharding,
+        in_shardings=(data_sharding, parameter_sharding),
+        out_shardings=parameter_sharding,
       )
 
 pjit_gen_data = pjit(
         gen_data,
-        in_axis_resources=None,
-        out_axis_resources=data_sharding
+        in_shardings=None,
+        out_shardings=data_sharding
       )
 
 pjit_gen_layers = pjit(
         gen_layers,
-        in_axis_resources=None,
-        out_axis_resources=parameter_sharding
+        in_shardings=None,
+        out_shardings=parameter_sharding
       )
 
 with Mesh(mesh.devices, mesh.axis_names):

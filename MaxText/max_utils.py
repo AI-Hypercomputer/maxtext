@@ -215,8 +215,8 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     if not state:
       state = pjit(
           init_train_state_partial,
-          in_axis_resources=None,
-          out_axis_resources=state_mesh_annotations
+          in_shardings=None,
+          out_shardings=state_mesh_annotations
       )(rng)
       if raw_params: # If we loaded a partial state, we need to merge it.
         state = state.replace(params = raw_params)
