@@ -96,6 +96,11 @@ def get_run_name():
   now = datetime.now()
   return os.getlogin() + "-" + now.strftime("%Y-%m-%d-%H-%M-%S")
 
+def normalize_gcs_bucket_name():
+  """ Remove the gs:// from bucket_name if passed."""
+  if len(args.BUCKET_NAME) > 5 and args.BUCKET_NAME[0:5]=="gs://":
+    args.BUCKET_NAME=args.BUCKET_NAME[5:]
+
 def print_flags():
   """ Print configuration values after defaults have been filled in. """
   print("Running multihost_job with the following configuration:")
@@ -280,6 +285,7 @@ def main() -> None:
     args.ZONE = get_zone()
   if not args.RUN_NAME:
     args.RUN_NAME = get_run_name() # Used for QR name, TPU_PREFIX, logging file, and tmp json file.
+  normalize_gcs_bucket_name()
 
   print_flags()
 
