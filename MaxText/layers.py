@@ -1178,3 +1178,4 @@ class Transformer(nn.Module):
         decode=decode,
         max_decode_length=max_decode_length)
     return logits
+    
