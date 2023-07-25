@@ -301,10 +301,10 @@ def train_loop(config, state=None):
   # Define compiled top-level functions.
   p_train_step = pjit(
     train_step,
-    in_axis_resources=(state_mesh_annotations,
+    in_shardings=(state_mesh_annotations,
                        data_pspec,
                        None),
-    out_axis_resources=(state_mesh_annotations, None, None),
+    out_shardings=(state_mesh_annotations, None, None),
     static_argnums=(0,1,),
     donate_argnums=2)
 
