@@ -1,0 +1,640 @@
+Remat: minimal, int8: false, dtype: bfloat16, PRNG_KEY: 4
+Running the above setting with RUN_NAME mattdavidow-20230716_remat_minimal_useint8_false_dtype_bfloat16_PRNGKey_4
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230716_remat_minimal_useint8_false_dtype_bfloat16_PRNGKey_4
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-17-23.sh minimal false bfloat16 4
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230716_remat_minimal_useint8_false_dtype_bfloat16_PRNGKey_4...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_minimal_useint8_false_dtype_bfloat16_PRNGKey_4_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_minimal_useint8_false_dtype_bfloat16_PRNGKey_4_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230716_remat_minimal_useint8_false_dtype_bfloat16_PRNGKey_4%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230716_remat_minimal_useint8_false_dtype_bfloat16_PRNGKey_4?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230716_remat_minimal_useint8_false_dtype_bfloat16_PRNGKey_4
+
+Remat: minimal, int8: false, dtype: bfloat16, PRNG_KEY: 5
+Running the above setting with RUN_NAME mattdavidow-20230716_remat_minimal_useint8_false_dtype_bfloat16_PRNGKey_5
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230716_remat_minimal_useint8_false_dtype_bfloat16_PRNGKey_5
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-17-23.sh minimal false bfloat16 5
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230716_remat_minimal_useint8_false_dtype_bfloat16_PRNGKey_5...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_minimal_useint8_false_dtype_bfloat16_PRNGKey_5_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_minimal_useint8_false_dtype_bfloat16_PRNGKey_5_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230716_remat_minimal_useint8_false_dtype_bfloat16_PRNGKey_5%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230716_remat_minimal_useint8_false_dtype_bfloat16_PRNGKey_5?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230716_remat_minimal_useint8_false_dtype_bfloat16_PRNGKey_5
+
+Remat: minimal, int8: false, dtype: float32, PRNG_KEY: 4
+Running the above setting with RUN_NAME mattdavidow-20230716_remat_minimal_useint8_false_dtype_float32_PRNGKey_4
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230716_remat_minimal_useint8_false_dtype_float32_PRNGKey_4
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-17-23.sh minimal false float32 4
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230716_remat_minimal_useint8_false_dtype_float32_PRNGKey_4...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_minimal_useint8_false_dtype_float32_PRNGKey_4_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_minimal_useint8_false_dtype_float32_PRNGKey_4_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230716_remat_minimal_useint8_false_dtype_float32_PRNGKey_4%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230716_remat_minimal_useint8_false_dtype_float32_PRNGKey_4?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230716_remat_minimal_useint8_false_dtype_float32_PRNGKey_4
+
+Remat: minimal, int8: false, dtype: float32, PRNG_KEY: 5
+Running the above setting with RUN_NAME mattdavidow-20230716_remat_minimal_useint8_false_dtype_float32_PRNGKey_5
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230716_remat_minimal_useint8_false_dtype_float32_PRNGKey_5
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-17-23.sh minimal false float32 5
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230716_remat_minimal_useint8_false_dtype_float32_PRNGKey_5...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_minimal_useint8_false_dtype_float32_PRNGKey_5_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_minimal_useint8_false_dtype_float32_PRNGKey_5_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230716_remat_minimal_useint8_false_dtype_float32_PRNGKey_5%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230716_remat_minimal_useint8_false_dtype_float32_PRNGKey_5?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230716_remat_minimal_useint8_false_dtype_float32_PRNGKey_5
+
+Remat: minimal, int8: true, dtype: bfloat16, PRNG_KEY: 4
+Running the above setting with RUN_NAME mattdavidow-20230716_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_4
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230716_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_4
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-17-23.sh minimal true bfloat16 4
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230716_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_4...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_4_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_4_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230716_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_4%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230716_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_4?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230716_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_4
+
+Remat: minimal, int8: true, dtype: bfloat16, PRNG_KEY: 5
+Running the above setting with RUN_NAME mattdavidow-20230716_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_5
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230716_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_5
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-17-23.sh minimal true bfloat16 5
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230716_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_5...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_5_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_5_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230716_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_5%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230716_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_5?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230716_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_5
+
+Remat: minimal, int8: true, dtype: float32, PRNG_KEY: 4
+Running the above setting with RUN_NAME mattdavidow-20230716_remat_minimal_useint8_true_dtype_float32_PRNGKey_4
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230716_remat_minimal_useint8_true_dtype_float32_PRNGKey_4
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-17-23.sh minimal true float32 4
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230716_remat_minimal_useint8_true_dtype_float32_PRNGKey_4...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_minimal_useint8_true_dtype_float32_PRNGKey_4_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_minimal_useint8_true_dtype_float32_PRNGKey_4_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230716_remat_minimal_useint8_true_dtype_float32_PRNGKey_4%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230716_remat_minimal_useint8_true_dtype_float32_PRNGKey_4?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230716_remat_minimal_useint8_true_dtype_float32_PRNGKey_4
+
+Remat: minimal, int8: true, dtype: float32, PRNG_KEY: 5
+Running the above setting with RUN_NAME mattdavidow-20230716_remat_minimal_useint8_true_dtype_float32_PRNGKey_5
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230716_remat_minimal_useint8_true_dtype_float32_PRNGKey_5
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-17-23.sh minimal true float32 5
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230716_remat_minimal_useint8_true_dtype_float32_PRNGKey_5...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_minimal_useint8_true_dtype_float32_PRNGKey_5_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_minimal_useint8_true_dtype_float32_PRNGKey_5_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230716_remat_minimal_useint8_true_dtype_float32_PRNGKey_5%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230716_remat_minimal_useint8_true_dtype_float32_PRNGKey_5?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230716_remat_minimal_useint8_true_dtype_float32_PRNGKey_5
+
+Remat: full, int8: false, dtype: bfloat16, PRNG_KEY: 4
+Running the above setting with RUN_NAME mattdavidow-20230716_remat_full_useint8_false_dtype_bfloat16_PRNGKey_4
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230716_remat_full_useint8_false_dtype_bfloat16_PRNGKey_4
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-17-23.sh full false bfloat16 4
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230716_remat_full_useint8_false_dtype_bfloat16_PRNGKey_4...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_full_useint8_false_dtype_bfloat16_PRNGKey_4_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_full_useint8_false_dtype_bfloat16_PRNGKey_4_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230716_remat_full_useint8_false_dtype_bfloat16_PRNGKey_4%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230716_remat_full_useint8_false_dtype_bfloat16_PRNGKey_4?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230716_remat_full_useint8_false_dtype_bfloat16_PRNGKey_4
+
+Remat: full, int8: false, dtype: bfloat16, PRNG_KEY: 5
+Running the above setting with RUN_NAME mattdavidow-20230716_remat_full_useint8_false_dtype_bfloat16_PRNGKey_5
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230716_remat_full_useint8_false_dtype_bfloat16_PRNGKey_5
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-17-23.sh full false bfloat16 5
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230716_remat_full_useint8_false_dtype_bfloat16_PRNGKey_5...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_full_useint8_false_dtype_bfloat16_PRNGKey_5_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_full_useint8_false_dtype_bfloat16_PRNGKey_5_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230716_remat_full_useint8_false_dtype_bfloat16_PRNGKey_5%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230716_remat_full_useint8_false_dtype_bfloat16_PRNGKey_5?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230716_remat_full_useint8_false_dtype_bfloat16_PRNGKey_5
+
+Remat: full, int8: false, dtype: float32, PRNG_KEY: 4
+Running the above setting with RUN_NAME mattdavidow-20230716_remat_full_useint8_false_dtype_float32_PRNGKey_4
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230716_remat_full_useint8_false_dtype_float32_PRNGKey_4
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-17-23.sh full false float32 4
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230716_remat_full_useint8_false_dtype_float32_PRNGKey_4...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_full_useint8_false_dtype_float32_PRNGKey_4_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_full_useint8_false_dtype_float32_PRNGKey_4_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230716_remat_full_useint8_false_dtype_float32_PRNGKey_4%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230716_remat_full_useint8_false_dtype_float32_PRNGKey_4?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230716_remat_full_useint8_false_dtype_float32_PRNGKey_4
+
+Remat: full, int8: false, dtype: float32, PRNG_KEY: 5
+Running the above setting with RUN_NAME mattdavidow-20230716_remat_full_useint8_false_dtype_float32_PRNGKey_5
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230716_remat_full_useint8_false_dtype_float32_PRNGKey_5
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-17-23.sh full false float32 5
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230716_remat_full_useint8_false_dtype_float32_PRNGKey_5...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_full_useint8_false_dtype_float32_PRNGKey_5_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_full_useint8_false_dtype_float32_PRNGKey_5_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230716_remat_full_useint8_false_dtype_float32_PRNGKey_5%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230716_remat_full_useint8_false_dtype_float32_PRNGKey_5?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230716_remat_full_useint8_false_dtype_float32_PRNGKey_5
+
+Remat: full, int8: true, dtype: bfloat16, PRNG_KEY: 4
+Running the above setting with RUN_NAME mattdavidow-20230716_remat_full_useint8_true_dtype_bfloat16_PRNGKey_4
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230716_remat_full_useint8_true_dtype_bfloat16_PRNGKey_4
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-17-23.sh full true bfloat16 4
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230716_remat_full_useint8_true_dtype_bfloat16_PRNGKey_4...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_full_useint8_true_dtype_bfloat16_PRNGKey_4_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_full_useint8_true_dtype_bfloat16_PRNGKey_4_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230716_remat_full_useint8_true_dtype_bfloat16_PRNGKey_4%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230716_remat_full_useint8_true_dtype_bfloat16_PRNGKey_4?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230716_remat_full_useint8_true_dtype_bfloat16_PRNGKey_4
+
+Remat: full, int8: true, dtype: bfloat16, PRNG_KEY: 5
+Running the above setting with RUN_NAME mattdavidow-20230716_remat_full_useint8_true_dtype_bfloat16_PRNGKey_5
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230716_remat_full_useint8_true_dtype_bfloat16_PRNGKey_5
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-17-23.sh full true bfloat16 5
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230716_remat_full_useint8_true_dtype_bfloat16_PRNGKey_5...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_full_useint8_true_dtype_bfloat16_PRNGKey_5_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_full_useint8_true_dtype_bfloat16_PRNGKey_5_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230716_remat_full_useint8_true_dtype_bfloat16_PRNGKey_5%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230716_remat_full_useint8_true_dtype_bfloat16_PRNGKey_5?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230716_remat_full_useint8_true_dtype_bfloat16_PRNGKey_5
+
+Remat: full, int8: true, dtype: float32, PRNG_KEY: 4
+Running the above setting with RUN_NAME mattdavidow-20230716_remat_full_useint8_true_dtype_float32_PRNGKey_4
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230716_remat_full_useint8_true_dtype_float32_PRNGKey_4
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-17-23.sh full true float32 4
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230716_remat_full_useint8_true_dtype_float32_PRNGKey_4...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_full_useint8_true_dtype_float32_PRNGKey_4_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_full_useint8_true_dtype_float32_PRNGKey_4_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230716_remat_full_useint8_true_dtype_float32_PRNGKey_4%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230716_remat_full_useint8_true_dtype_float32_PRNGKey_4?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230716_remat_full_useint8_true_dtype_float32_PRNGKey_4
+
+Remat: full, int8: true, dtype: float32, PRNG_KEY: 5
+Running the above setting with RUN_NAME mattdavidow-20230716_remat_full_useint8_true_dtype_float32_PRNGKey_5
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230716_remat_full_useint8_true_dtype_float32_PRNGKey_5
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-17-23.sh full true float32 5
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230716_remat_full_useint8_true_dtype_float32_PRNGKey_5...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_full_useint8_true_dtype_float32_PRNGKey_5_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230716_remat_full_useint8_true_dtype_float32_PRNGKey_5_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230716_remat_full_useint8_true_dtype_float32_PRNGKey_5%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230716_remat_full_useint8_true_dtype_float32_PRNGKey_5?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230716_remat_full_useint8_true_dtype_float32_PRNGKey_5
+

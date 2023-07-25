@@ -1,0 +1,19 @@
+Remat: minimal, int8: true, dtype: bfloat16, PRNG_KEY: 1
+Running the above setting with RUN_NAME mattdavidow-20230718_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_1
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230718_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_1
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved --metadata priority-group=medium
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-20-23.sh minimal true bfloat16 1 mattdavidow-20230718_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_1
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230718_remat_minimal_useint8_true_dtype_bfloat16_PRNGKey_1...
