@@ -88,12 +88,8 @@ class _HyperParameters():
     run_name = raw_keys["run_name"]
     assert run_name, "Erroring out, need a real run_name"
     base_output_directory = raw_keys["base_output_directory"]
-    assert base_output_directory, "please set a real base_output_directory"
     validate_gcs_bucket_name(base_output_directory, "base_output_directory")
     dataset_path = raw_keys["dataset_path"]
-    assert dataset_path, "Erroring out, please set a real dataset_path in configs/base.yml\n\
-      See instructions for downloading the c4 dataset here:\n\
-      https://github.com/google/maxtext/blob/main/README.md#getting-started-download-dataset-and-configure.\n"
     validate_gcs_bucket_name(dataset_path, "dataset_path")
     raw_keys["tensorboard_dir"] = os.path.join(base_output_directory, run_name, "tensorboard", "")
     raw_keys["checkpoint_dir"] = os.path.join(base_output_directory, run_name, "checkpoints", "")
@@ -108,6 +104,7 @@ class _HyperParameters():
     raw_keys['num_decoder_layers'] = layer_scale * raw_keys['base_num_decoder_layers']
 
 def validate_gcs_bucket_name(bucket_name, config_var):
+  assert bucket_name, f"Please set {config_var}."
   assert len(bucket_name) > 5 and bucket_name[0:5]=='gs://', f"Erroring out, {config_var} should start with 'gs://' "
 
 def get_individual_scales(scale):
