@@ -1,0 +1,13 @@
+
+SAVE_ACCUMULATOR_ARRAY=("false" "true")
+USE_RHS_NOISE_FUNCTION_ARRAY=("false" "true")
+PRNG_KEY_ARRAY=(0 1 2 3 4 5 6 7 8 9 10 11)
+
+for SAVE_ACCUMULATOR in ${SAVE_ACCUMULATOR_ARRAY[@]}; do
+    for USE_RHS_NOISE_FUNCTION in ${USE_RHS_NOISE_FUNCTION_ARRAY[@]}; do
+        for PRNG_KEY in ${PRNG_KEY_ARRAY[@]}; do
+            RUN_NAME=mattdavidow-20230725_ACCUMULATOR_${SAVE_ACCUMULATOR}_${USE_RHS_NOISE_FUNCTION}_PRNGKey_${PRNG_KEY}
+            echo "${RUN_NAME}"
+        done
+    done
+done

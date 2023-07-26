@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # Name of the input text file
-input_file="mattdavidow-7-25-run-names.txt"
+#input_file="mattdavidow-7-25-run-names.txt"
+input_file=$1
 CNS_PATH=/cns/pi-d/home/${USER}/int8-metrics/
 
 # Check if the file exists
