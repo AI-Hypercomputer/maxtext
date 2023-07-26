@@ -135,4 +135,7 @@ collect_stack_trace: True
 stack_trace_to_cloud: False  # Uploads to cloud logging if True, else to the console if False.
 stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds.
 
+save_accumulator: False
+use_rhs_noise_function: False
+
 init_prng_key: 0

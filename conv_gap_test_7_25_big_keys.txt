@@ -1,0 +1,963 @@
+Starting conv_gap_test
+starting loops
+SAVE_ACCUMULATOR: false, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 6
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_6
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_6
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh false false 6 mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_6
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_6...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_6_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_6_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_6%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_6?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_6
+
+SAVE_ACCUMULATOR: false, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 7
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_7
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_7
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh false false 7 mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_7
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_7...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_7_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_7_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_7%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_7?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_7
+
+SAVE_ACCUMULATOR: false, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 8
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_8
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_8
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh false false 8 mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_8
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_8...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_8_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_8_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_8%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_8?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_8
+
+SAVE_ACCUMULATOR: false, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 9
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_9
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_9
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh false false 9 mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_9
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_9...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_9_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_9_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_9%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_9?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_9
+
+SAVE_ACCUMULATOR: false, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 10
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_10
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_10
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh false false 10 mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_10
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_10...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_10_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_10_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_10%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_10?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_10
+
+SAVE_ACCUMULATOR: false, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 11
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_11
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_11
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh false false 11 mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_11
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_11...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_11_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_11_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_11%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_11?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_false_false_PRNGKey_11
+
+SAVE_ACCUMULATOR: false, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 6
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_6
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_6
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh false true 6 mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_6
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_6...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_6_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_6_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_6%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_6?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_6
+
+SAVE_ACCUMULATOR: false, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 7
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_7
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_7
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh false true 7 mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_7
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_7...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_7_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_7_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_7%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_7?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_7
+
+SAVE_ACCUMULATOR: false, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 8
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_8
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_8
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh false true 8 mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_8
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_8...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_8_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_8_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_8%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_8?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_8
+
+SAVE_ACCUMULATOR: false, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 9
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_9
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_9
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh false true 9 mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_9
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_9...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_9_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_9_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_9%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_9?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_9
+
+SAVE_ACCUMULATOR: false, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 10
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_10
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_10
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh false true 10 mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_10
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_10...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_10_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_10_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_10%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_10?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_10
+
+SAVE_ACCUMULATOR: false, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 11
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_11
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_11
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh false true 11 mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_11
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_11...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_11_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_11_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_11%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_11?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_false_true_PRNGKey_11
+
+SAVE_ACCUMULATOR: true, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 6
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_6
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_6
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh true false 6 mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_6
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_6...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_6_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_6_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_6%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_6?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_6
+
+SAVE_ACCUMULATOR: true, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 7
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_7
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_7
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh true false 7 mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_7
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_7...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_7_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_7_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_7%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_7?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_7
+
+SAVE_ACCUMULATOR: true, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 8
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_8
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_8
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh true false 8 mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_8
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_8...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_8_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_8_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_8%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_8?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_8
+
+SAVE_ACCUMULATOR: true, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 9
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_9
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_9
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh true false 9 mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_9
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_9...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_9_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_9_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_9%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_9?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_9
+
+SAVE_ACCUMULATOR: true, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 10
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_10
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_10
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh true false 10 mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_10
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_10...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_10_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_10_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_10%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_10?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_10
+
+SAVE_ACCUMULATOR: true, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 11
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_11
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_11
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh true false 11 mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_11
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_11...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_11_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_11_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_11%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_11?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_true_false_PRNGKey_11
+
+SAVE_ACCUMULATOR: true, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 6
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_6
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_6
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh true true 6 mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_6
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_6...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_6_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_6_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_6%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_6?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_6
+
+SAVE_ACCUMULATOR: true, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 7
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_7
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_7
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh true true 7 mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_7
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_7...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_7_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_7_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_7%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_7?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_7
+
+SAVE_ACCUMULATOR: true, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 8
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_8
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_8
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh true true 8 mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_8
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_8...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_8_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_8_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_8%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_8?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_8
+
+SAVE_ACCUMULATOR: true, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 9
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_9
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_9
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh true true 9 mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_9
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_9...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_9_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_9_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_9%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_9?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_9
+
+SAVE_ACCUMULATOR: true, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 10
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_10
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_10
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh true true 10 mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_10
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_10...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_10_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_10_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_10%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_10?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_10
+
+SAVE_ACCUMULATOR: true, USE_RHS_NOISE_FUNCTION_ARRAY: false PRNG_KEY: 11
+Running the above setting with RUN_NAME mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_11
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-west4-a
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_11
+Extra CQR args      (--CQR_EXTRA_ARGS)  = --reserved
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/1b-experiments-7-25.sh true true 11 mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_11
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_11...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_11_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_11_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_11%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_11?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-20230725_ACCUMULATOR_true_true_PRNGKey_11
+
+finished loops
