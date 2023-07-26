@@ -20,7 +20,8 @@
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
 import os
-os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+#os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+print("LIBTPU_INIT_ARGS: ", os.environ.get("LIBTPU_INIT_ARGS",""))
 import jax
 jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
 
