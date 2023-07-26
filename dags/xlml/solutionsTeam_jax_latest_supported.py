@@ -16,7 +16,6 @@
 
 import datetime
 from airflow import models
-from apis import xlml_controller
 from configs.xlml import solutionsTeam_jax_latest_supported_config as jax_config
 
 
@@ -26,12 +25,7 @@ with models.DAG(
     tags=["jax", "latest", "supported"],
     start_date=datetime.datetime(2023, 7, 12),
 ) as dag:
-  jax_resnet_v4_8 = xlml_controller.run(
-      job_task=jax_config.get_jax_resnet_config(8, 60),
-  )
-
-  jax_resnet_v4_32 = xlml_controller.run(
-      job_task=jax_config.get_jax_resnet_config(32, 600),
-  )
+  jax_resnet_v4_8 = jax_config.get_jax_resnet_config(8, 60).run()
+  jax_resnet_v4_32 = jax_config.get_jax_resnet_config(32, 600).run()
 
   jax_resnet_v4_8 >> jax_resnet_v4_32

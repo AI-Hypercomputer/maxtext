@@ -31,31 +31,12 @@ class BaseTask(abc.ABC):
   """This is a class to set up base tasks."""
 
   @abc.abstractmethod
-  def provision(
-      self,
-      task_id_suffix: str,
-  ) -> DAGNode:
-    ...
+  def run() -> DAGNode:
+    """Run a test job.
 
-  @abc.abstractmethod
-  def run_model(
-      self,
-      task_id_suffix: str,
-  ) -> DAGNode:
-    ...
-
-  @abc.abstractmethod
-  def post_process(
-      self,
-      task_id_suffix: str,
-  ) -> DAGNode:
-    ...
-
-  @abc.abstractmethod
-  def clean_up(
-      self,
-      task_id_suffix: str,
-  ) -> DAGNode:
+    Returns:
+      A DAG node that executes this test.
+    """
     ...
 
 
@@ -73,6 +54,23 @@ class TPUTask(BaseTask):
   task_test_config: test_config.TestConfig[test_config.Tpu]
   task_gcp_config: gcp_config.GCPConfig
   tpu_create_timeout: datetime.timedelta = datetime.timedelta(minutes=60)
+
+  def run(self) -> DAGNode:
+    """Run a test job.
+
+    Returns:
+      A task group with the following tasks chained: provision, run_model,
+      post_process and clean_up.
+    """
+    with TaskGroup(group_id=self.task_test_config.benchmark_id, prefix_group_id=True) as tg:
+      provision, tpu_name, ssh_keys = self.provision()
+      run_model = self.run_model(tpu_name, ssh_keys)
+      post_process = self.post_process(tpu_name, ssh_keys)
+      clean_up = self.clean_up(tpu_name)
+
+      provision >> run_model >> post_process >> clean_up
+
+    return tg
 
   def provision(self) -> Tuple[DAGNode, airflow.XComArg, airflow.XComArg]:
     """Provision a TPU accelerator via a Queued Resource.
