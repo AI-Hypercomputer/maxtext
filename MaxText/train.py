@@ -301,10 +301,10 @@ def train_loop(config, state=None):
   # Define compiled top-level functions.
   p_train_step = pjit(
     train_step,
-    in_axis_resources=(state_mesh_annotations,
+    in_shardings=(state_mesh_annotations,
                        data_pspec,
                        None),
-    out_axis_resources=(state_mesh_annotations, None, None),
+    out_shardings=(state_mesh_annotations, None, None),
     static_argnums=(0,1,),
     donate_argnums=2)
 
@@ -312,6 +312,7 @@ def train_loop(config, state=None):
   last_step_completion = datetime.datetime.now()
 
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
+  running_gcs_metrics = [] if config.gcs_metrics else None
 
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(train_iter, example_batch, config)
@@ -330,7 +331,10 @@ def train_loop(config, state=None):
       max_logging.log("saved a checkpoint")
 
     if config.metrics_file:
-      max_utils.write_metrics_locally(metrics, step, pyconfig.config.steps-1, local_metrics_file)
+      max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
+
+    if config.gcs_metrics and jax.process_index() == 0:
+      running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
 
     # Start profiling at end of first step to avoid compilation.
     # Move before for loop to include.

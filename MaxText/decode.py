@@ -186,7 +186,7 @@ def decode_loop(config, state=None):
       max_logging.log(f"Decoding #{step} (num tokens {num_tokens_decoded}):\n\t{decoded_string}")
       if config.metrics_file:
         metrics['scalar']['num_tokens'] = num_tokens_decoded
-        max_utils.write_metrics_locally(metrics, step, pyconfig.config.steps-1, local_metrics_file)
+        max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
   max_utils.deactivate_profiler(config)
 
 
