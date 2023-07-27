@@ -47,17 +47,39 @@ import os
 import re
 
 ##### Define flags #####
+def default_project():
+  completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
+  project_outputs = completed_command.stdout.decode().strip().split('\n')
+  if len(project_outputs) < 1:
+    sys.exit("You must specify the project in the PROJECT flag or set it with 'gcloud config set project <project>'")
+  return project_outputs[-1] # The project name lives on the last line of the output
+
+def default_zone():
+  completed_command = subprocess.run(["gcloud", "config", "get", "compute/zone"], check=True, capture_output=True)
+  zone_outputs = completed_command.stdout.decode().strip().split('\n')
+  if len(zone_outputs) < 1:
+    sys.exit("You must specify the zone in the ZONE flag or set it with 'gcloud config set compute/zone <zone>'")
+  return zone_outputs[-1] # The zone name lives on the last line of the output
+
+def default_run_name():
+  now = datetime.now()
+  return now.strftime("%Y-%m-%d-%H-%M-%S")
+
 parser = argparse.ArgumentParser(description='TPU configuration options')
 parser.add_argument('--TPU_PREFIX', type=str, default=None, required=True,
                     help="Prefix of worker TPU's. E.g. if TPU's are named user-0 and user-1, \
                           TPU_PREFIX should be set as user")
+parser.add_argument('--PROJECT', type=str, default=default_project(),
+                    help='GCE project name, defaults to gcloud config project')
+parser.add_argument('--ZONE', type=str, default=default_zone(),
+                    help='GCE zone, e.g. us-central2-b, defaults to gcloud config compute/zone')
 parser.add_argument('--SCRIPT_DIR', type=str, default=os.getcwd(),
                     help="The local location of the directory to copy to the TPUs and run the main command from. \
                           Defaults to current working directory.")
 parser.add_argument('--COMMAND', type=str, default=None, required=True,
                     help="Main command to run on each TPU. \
                           This command is run from a copied version of SCRIPT_DIR on each TPU worker.")
-parser.add_argument('--RUN_NAME', type=str, default=None,
+parser.add_argument('--RUN_NAME', type=str, default=default_run_name(),
                     help="Name for the code directory on the TPU")
 parser.add_argument('--USE_EXISTING_FOLDER', type=str, default="False",
                     help='If true, use the existing code directory on the TPU')
@@ -75,23 +97,31 @@ if args.USE_EXISTING_FOLDER is True and not args.RUN_NAME:
 
 Slice = namedtuple('Slice', ['name', 'slice_num', 'num_workers', 'version'])
 
-def get_slices(tpu_prefix):
-  """ Returns a list of slices matching tpu_prefix """
+def get_slices():
+  """ Returns a list of slices matching TPU_PREFIX """
   command = [
       "gcloud", "alpha", "compute", "tpus", "tpu-vm", "list",
-      f"--filter=name~{tpu_prefix}", "--format=csv(name,accelerator_type)"
+      f"--filter=name~{args.TPU_PREFIX}", "--format=csv(name,accelerator_type)",
+      f"--project={args.PROJECT}", f"--zone={args.ZONE}"
   ]
-  completed_command = subprocess.run(command, capture_output=True, check=True)
+  try:
+    completed_command = subprocess.run(command, capture_output=True, check=True)
+  except subprocess.CalledProcessError as e:
+    print(f"Error occurred trying to find TPU slices named {args.TPU_PREFIX} or matching regex \n {args.TPU_PREFIX}-[0-9]+ "
+     f"in project {args.PROJECT} zone {args.ZONE}")
+    print(f"Error is:\n {e.stderr}")
+    return []
   instances = completed_command.stdout.decode()
   instance_list = instances.strip().split('\n')
-  instance_list = filter_instances(instance_list[1:], tpu_prefix) # First row is headers
+  instance_list = filter_instances(instance_list[1:], args.TPU_PREFIX) # First row is headers
   num_slices = len(instance_list)
   slices = [None for _ in range(num_slices)]
 
   if num_slices > 0:
     print(f"{num_slices} slices found.", flush=True)
   else:
-    print(f"No TPUs found with name {tpu_prefix} or matching regex {tpu_prefix}-[0-9]+")
+    print(f"No TPUs found with name {args.TPU_PREFIX} or matching regex {args.TPU_PREFIX}-[0-9]+ "
+    "in project {args.PROJECT} and zone {args.ZONE}.")
     return []
 
   slice_names = [instance.split(',')[0] for instance in instance_list]
@@ -99,7 +129,8 @@ def get_slices(tpu_prefix):
   # Get number of workers in any slice (assume same worker count for all slices.)
   command = [
       "gcloud", "compute", "tpus", "describe", slice_names[0],
-      "--flatten=networkEndpoints[]", "--format=csv[no-heading](networkEndpoints.ipAddress)"
+      "--flatten=networkEndpoints[]", "--format=csv[no-heading](networkEndpoints.ipAddress)",
+      f"--project={args.PROJECT}", f"--zone={args.ZONE}"
   ]
   completed_command = subprocess.run(command, capture_output=True, check=True)
   num_workers = len(completed_command.stdout.decode().strip().split('\n'))
@@ -122,12 +153,8 @@ def filter_instances(instance_list, tpu_prefix):
   re_pattern = tpu_prefix + "-[0-9]+"
   return [instance for instance in instance_list if re.fullmatch(re_pattern, instance.split(',')[0])]
 
-def get_run_name():
-  now = datetime.now()
-  return now.strftime("%Y-%m-%d-%H-%M-%S")
-
-def write_kill_script(script_dir, kill_processes_script_name):
-  kill_processes_script = os.path.join(script_dir, kill_processes_script_name)
+def write_kill_script(kill_processes_script_name):
+  kill_processes_script = os.path.join(args.SCRIPT_DIR, kill_processes_script_name)
   with open(kill_processes_script, "w", encoding="utf-8") as f:
     f.write(kill_existing_processes_str())
 
@@ -154,10 +181,10 @@ else
 fi
 sudo rm -f /tmp/libtpu_lockfile"""
 
-def scps(script_dir, slices, run_name_dir, zip_name, internal_ip):
+def scps(slices, run_name_dir, zip_name):
   """ Zip the script directory, scp it to the TPUs, and unzip it there. """
   original_working_directory = os.getcwd()
-  os.chdir(script_dir) # To tar script_dir, it is most convenient to cd there.
+  os.chdir(args.SCRIPT_DIR) # To tar script_dir, it is most convenient to cd there.
 
   # Zip script directory
   # Save the zip both to the logging directory, and the script directory.
@@ -174,9 +201,9 @@ def scps(script_dir, slices, run_name_dir, zip_name, internal_ip):
     for worker_num in range(cur_slice.num_workers):
       command = [
           "gcloud", "compute", "tpus", "tpu-vm", "scp", f"--worker={worker_num}", zip_path,
-          f"{cur_slice.name}:~/", "--strict-host-key-checking=no"
+          f"{cur_slice.name}:~/", "--strict-host-key-checking=no", f"--project={args.PROJECT}", f"--zone={args.ZONE}"
       ]
-      if internal_ip:
+      if args.INTERNAL_IP:
         command.append("--internal-ip")
       commands.append(command)
       worker_list.append([cur_slice.slice_num, worker_num])
@@ -190,7 +217,7 @@ def scps(script_dir, slices, run_name_dir, zip_name, internal_ip):
 
   return return_code
 
-def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name, internal_ip, use_existing_folder):
+def execute_main_command(main_command, slices, local_log_dir, zip_name):
   """ Run the main command on each worker, logging each separately. """
   kill_script_name = "kill_existing_processes.sh" # File written on worker machines
   commands = []
@@ -202,14 +229,14 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
     for worker_num in range(cur_slice.num_workers):
       output_filename = os.path.join(local_log_dir, f"output_slice_{cur_slice.slice_num:04d}_worker_{worker_num:04d}.txt")
       output_logs.append(output_filename)
-      mkdir_command = f"mkdir -p {run_name}"
-      mv_zip_command = f"mv {zip_name} {run_name}"
-      cd_command = f"cd {run_name}"
+      mkdir_command = f"mkdir -p {args.RUN_NAME}"
+      mv_zip_command = f"mv {zip_name} {args.RUN_NAME}"
+      cd_command = f"cd {args.RUN_NAME}"
       unzip_command = f"tar xzf {zip_name}"
       write_kill_script_command = f"echo '{kill_existing_processes_str()}' > {kill_script_name}"
       kill_existing_command = f"bash {kill_script_name} {cur_slice.version}"
 
-      if use_existing_folder is False:
+      if args.USE_EXISTING_FOLDER is False:
         remote_command_list = [mkdir_command , mv_zip_command , cd_command , unzip_command ,
                         write_kill_script_command , kill_existing_command , main_command]
       else:
@@ -217,8 +244,9 @@ def execute_main_command(main_command,slices, local_log_dir, run_name, zip_name,
       remote_command_list_str = " && ".join(remote_command_list)
       gcloud_command=[
           "gcloud", "alpha", "compute", "tpus", "tpu-vm", "ssh", cur_slice.name, f"--worker={worker_num}",
-          "--command", remote_command_list_str, "--strict-host-key-checking=no"]
-      if internal_ip:
+          "--command", remote_command_list_str, "--strict-host-key-checking=no",
+          f"--project={args.PROJECT}", f"--zone={args.ZONE}"]
+      if args.INTERNAL_IP:
         gcloud_command.append("--internal-ip")
       commands.append(gcloud_command)
       worker_list.append([slice_num, worker_num])
@@ -291,20 +319,6 @@ def run_commands(commands, id_to_print, jobname, worker_list, is_shell=False, ou
     time.sleep(1)
   return max_returncode, returncodes
 
-def assert_project_and_zone_set():
-  """ Asserts that project and zone are set in gcloud config, erroring out if not. """
-  # Project
-  completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
-  project_outputs = completed_command.stdout.decode().strip().split('\n')
-  if len(project_outputs) < 1:
-    sys.exit("You must set the project by running 'gcloud config set project <project>'")
-
-  # zone
-  completed_command = subprocess.run(["gcloud", "config", "get", "compute/zone"], check=True, capture_output=True)
-  zone_outputs = completed_command.stdout.decode().strip().split('\n')
-  if len(zone_outputs) < 1:
-    sys.exit("You must set the zone by running 'gcloud config set compute/zone <zone>'")
-
 def assert_script_dir_exists(script_dir):
   if not os.path.isdir(script_dir):
     sys.exit(f"No directory named {script_dir} found.")
@@ -343,38 +357,28 @@ class Tee:
 def main() -> None:
   print("Starting multihost runner...", flush=True)
 
-  #### Parse flags ####
-  tpu_prefix = args.TPU_PREFIX
-  script_dir = args.SCRIPT_DIR
-  main_command = args.COMMAND
-  run_name = args.RUN_NAME
-  use_existing_folder = args.USE_EXISTING_FOLDER
-  internal_ip = args.INTERNAL_IP
-
-  assert_project_and_zone_set()
-  assert_script_dir_exists(script_dir)
+  ##### Validate arguments #####
+  assert_script_dir_exists(args.SCRIPT_DIR)
 
   ##### Step 1: Get the workers #####
-  slices = get_slices(tpu_prefix)
+  slices = get_slices()
   if not slices:
-    print(f"Failed to retrieve slices with name prefix {tpu_prefix}", flush=True)
+    print(f"Failed to retrieve slices {args.TPU_PREFIX} in project {args.PROJECT} zone {args.ZONE}", flush=True)
     return 1
 
-  run_name = run_name or get_run_name() # Used for local logging files and remote directory.
-  local_log_dir = os.path.join("/tmp", run_name, "")
-  zip_name = "script_dir_zip_" + run_name + ".tar.gz"
+  local_log_dir = os.path.join("/tmp", args.RUN_NAME, "")
+  zip_name = "script_dir_zip_" + args.RUN_NAME + ".tar.gz"
 
-  if use_existing_folder is False:
+  if args.USE_EXISTING_FOLDER is False:
     ##### Step 2 when using a new folder: Zip code and move it to the TPUs #####
-    return_code = scps(script_dir, slices, local_log_dir, zip_name, internal_ip)
+    return_code = scps(slices, local_log_dir, zip_name)
     if return_code > 0:
-      print(f"Moving the directory {script_dir} to the VMs failed with error code {return_code}")
+      print(f"Moving the directory {args.SCRIPT_DIR} to the VMs failed with error code {return_code}")
       return return_code
 
   ##### Step 3: Unzip if using a new folder, kill existing processes, and run #####
   print(f"Running main command, logs located in: {local_log_dir}", flush=True)
-  return_code = execute_main_command(main_command, slices, local_log_dir, run_name, zip_name,
-                                     internal_ip, use_existing_folder)
+  return_code = execute_main_command(args.COMMAND, slices, local_log_dir, zip_name)
   if return_code == 0:
     print(f"Main command completed successfully, logs located in: {local_log_dir}", flush=True)
     print("Multihost runner finished successfully!", flush=True)
