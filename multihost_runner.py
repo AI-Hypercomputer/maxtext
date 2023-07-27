@@ -139,7 +139,7 @@ if [[ "${_TPU_VERSION_NAME}" =~ ^v5.* ]]; then
   device_name="vfio/"
 fi
 echo -e "Searching for existing processes on device ${device_name}..."
-pids=$(sudo lsof -w /dev/${device_name}* | grep -v '"'"'PID'"'"'| awk '"'"'{print $2}'"'"')
+pids=$(sudo lsof -t -w /dev/${device_name}*)
 pids_unique=$(printf '"'"'%s\\n'"'"' "${pids[@]}" | sort -u)
 pids_unique=($(printf '"'"'%s\\n'"'"' "${pids_unique[@]}" | grep -v '"'"'^[[:space:]]*$'"'"'))
 num_pids=${#pids_unique[@]}
