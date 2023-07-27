@@ -134,19 +134,26 @@ def write_kill_script(script_dir, kill_processes_script_name):
 def kill_existing_processes_str():
   return """#!/bin/bash
 _TPU_VERSION_NAME=${1}
-device_name="accel0"
+device_name="accel"
 if [[ "${_TPU_VERSION_NAME}" =~ ^v5.* ]]; then
-  device_name="vfio/0"
+  device_name="vfio/"
 fi
 echo -e "Searching for existing processes on device ${device_name}..."
-pid=$(sudo lsof -w /dev/${device_name} | awk '"'"'END{print $2}'"'"')
-if [[ ! -z "${pid}" ]]
+pids=$(sudo lsof -t -w /dev/${device_name}*)
+pids_unique=$(printf '"'"'%s\\n'"'"' "${pids[@]}" | sort -u)
+pids_unique=($(printf '"'"'%s\\n'"'"' "${pids_unique[@]}" | grep -v '"'"'^[[:space:]]*$'"'"'))
+num_pids=${#pids_unique[@]}
+
+if [[ ! ${num_pids} -eq 0 ]] 
 then
- echo -e "Existing process found with pid ${pid}"
- echo -e "Killing process ${pid}..."
- kill -9 "${pid}"
- tail --pid=$pid -f /dev/null
- echo -e "Orphaned process ${pid} on your TPU was killed successfully, so your TPU is ready to use!"
+    echo "Found ${num_pids} unique PID(s) already running on your TPUs, killing now..."
+    for pid in "${pids_unique[@]}"; do
+        echo -e "Killing process ${pid}..."
+        kill -9 "${pid}"
+        tail --pid=$pid -f /dev/null
+        echo -e "Existing process ${pid} on your TPU was killed successfully!"
+    done
+    echo "All existing processes killed, so your TPU is ready to use!"
 else
  echo -e "No existing processes found, so your TPU is ready to use!"
 fi
