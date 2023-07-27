@@ -1,12 +1,13 @@
 #!/bin/bash
 set -e
 
-STEPS=20000
+STEPS=4
 
 SAVE_ACCUMULATOR=$1
 USE_RHS_NOISE_FUNCTION=$2
-PRNG_KEY=$3
-RUN_NAME=$4
+REMAT_POLICY=$3
+PRNG_KEY=$4
+RUN_NAME=$5
 
 OUTPUT_FILE=gs://mattdavidow-maxtext-br/${RUN_NAME}.txt
 
@@ -19,7 +20,7 @@ command="python3 MaxText/train.py MaxText/configs/base.yml \
     steps=${STEPS} per_device_batch_size=4 learning_rate=0.001 warmup_steps=2000 enable_profiler=false enable_checkpointing=false \
     enable_dropout=false enable_data_shuffling=false run_name=${RUN_NAME}\
     use_int8_training=true metrics_file=metrics.txt\
-    remat_policy=full init_prng_key=${PRNG_KEY}\
+    remat_policy=${REMAT_POLICY} init_prng_key=${PRNG_KEY}\
     gcs_metrics_directory=gs://mattdavidow-maxtext-br/metrics/${RUN_NAME}\
     save_accumulator=${SAVE_ACCUMULATOR} use_rhs_noise_function=${USE_RHS_NOISE_FUNCTION}"
 

@@ -226,16 +226,20 @@ class DenseGeneral(nn.Module):
       return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
     else:
       aqt_cfg = aqt_config.fully_quantized(use_fwd_quant=cfg.use_fwd_quant,
-                                           fwd_save_accumulator_memory=False,
-                                           bwd_save_accumulator_memory=False)
+                                           fwd_save_accumulator_memory=cfg.save_accumulator,
+                                           bwd_save_accumulator_memory=cfg.save_accumulator)
 
       def noise_fn(shape, key):
         return jax.random.uniform(key, shape) - 0.5
 
       aqt_cfg.dlhs.lhs.noise_fn = noise_fn
-      aqt_cfg.dlhs.rhs.noise_fn = None
       aqt_cfg.drhs.lhs.noise_fn = noise_fn
-      aqt_cfg.drhs.rhs.noise_fn = None
+      if cfg.use_rhs_noise_function:
+        aqt_cfg.dlhs.rhs.noise_fn = noise_fn
+        aqt_cfg.drhs.rhs.noise_fn = noise_fn
+      else:
+        aqt_cfg.dlhs.rhs.noise_fn = None
+        aqt_cfg.drhs.rhs.noise_fn = None
 
       aqt_dot_general = aqt.make_dot_general(aqt_cfg)
       aqt_key = self.make_rng('aqt')
