@@ -205,7 +205,7 @@ either be a TPUVM or not. If your runner machine is a TPUVM, it needs service ac
 
 5. View the job's logs in cloud logging. 
 
-    The link to your job's cloud logging is printed at the end of `multihost_job` output. Additionaly logs are saved to GCS when your job finishes, and this bucket's URL is also printed by `multihost_job`.
+    The link to your job's cloud logging is printed at the end of `multihost_job` output. Additionally logs are saved to GCS when your job finishes, and this bucket's URL is also printed by `multihost_job`.
 
 
 # Runtime Performance Results
