@@ -47,13 +47,31 @@ import os
 import re
 
 ##### Define flags #####
+def default_project():
+  completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
+  project_outputs = completed_command.stdout.decode().strip().split('\n')
+  if len(project_outputs) < 1:
+    sys.exit("You must specify the project in the PROJECT flag or set it with 'gcloud config set project <project>'")
+  return project_outputs[-1] # The project name lives on the last line of the output
+
+def default_zone():
+  completed_command = subprocess.run(["gcloud", "config", "get", "compute/zone"], check=True, capture_output=True)
+  zone_outputs = completed_command.stdout.decode().strip().split('\n')
+  if len(zone_outputs) < 1:
+    sys.exit("You must specify the zone in the ZONE flag or set it with 'gcloud config set compute/zone <zone>'")
+  return zone_outputs[-1] # The zone name lives on the last line of the output
+
+def default_run_name():
+  now = datetime.now()
+  return now.strftime("%Y-%m-%d-%H-%M-%S")
+
 parser = argparse.ArgumentParser(description='TPU configuration options')
 parser.add_argument('--TPU_PREFIX', type=str, default=None, required=True,
                     help="Prefix of worker TPU's. E.g. if TPU's are named user-0 and user-1, \
                           TPU_PREFIX should be set as user")
-parser.add_argument('--PROJECT', type=str, default=None,
+parser.add_argument('--PROJECT', type=str, default=default_project(),
                     help='GCE project name, defaults to gcloud config project')
-parser.add_argument('--ZONE', type=str, default=None,
+parser.add_argument('--ZONE', type=str, default=default_zone(),
                     help='GCE zone, e.g. us-central2-b, defaults to gcloud config compute/zone')
 parser.add_argument('--SCRIPT_DIR', type=str, default=os.getcwd(),
                     help="The local location of the directory to copy to the TPUs and run the main command from. \
@@ -61,7 +79,7 @@ parser.add_argument('--SCRIPT_DIR', type=str, default=os.getcwd(),
 parser.add_argument('--COMMAND', type=str, default=None, required=True,
                     help="Main command to run on each TPU. \
                           This command is run from a copied version of SCRIPT_DIR on each TPU worker.")
-parser.add_argument('--RUN_NAME', type=str, default=None,
+parser.add_argument('--RUN_NAME', type=str, default=default_run_name(),
                     help="Name for the code directory on the TPU")
 parser.add_argument('--USE_EXISTING_FOLDER', type=str, default="False",
                     help='If true, use the existing code directory on the TPU')
@@ -78,20 +96,6 @@ if args.USE_EXISTING_FOLDER is True and not args.RUN_NAME:
   raise ValueError("When USE_EXISTING_FOLDER is true, RUN_NAME must be specified.")
 
 Slice = namedtuple('Slice', ['name', 'slice_num', 'num_workers', 'version'])
-
-def get_project():
-  completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
-  project_outputs = completed_command.stdout.decode().strip().split('\n')
-  if len(project_outputs) < 1:
-    sys.exit("You must specify the project in the PROJECT flag or set it with 'gcloud config set project <project>'")
-  return project_outputs[-1] # The project name lives on the last line of the output
-
-def get_zone():
-  completed_command = subprocess.run(["gcloud", "config", "get", "compute/zone"], check=True, capture_output=True)
-  zone_outputs = completed_command.stdout.decode().strip().split('\n')
-  if len(zone_outputs) < 1:
-    sys.exit("You must specify the zone in the ZONE flag or set it with 'gcloud config set compute/zone <zone>'")
-  return zone_outputs[-1] # The zone name lives on the last line of the output
 
 def get_slices():
   """ Returns a list of slices matching TPU_PREFIX """
@@ -148,10 +152,6 @@ def filter_instances(instance_list, tpu_prefix):
   # If no exact match, reg-exp full match "<tpu_prefx>-[0-9]+"
   re_pattern = tpu_prefix + "-[0-9]+"
   return [instance for instance in instance_list if re.fullmatch(re_pattern, instance.split(',')[0])]
-
-def get_run_name():
-  now = datetime.now()
-  return now.strftime("%Y-%m-%d-%H-%M-%S")
 
 def write_kill_script(kill_processes_script_name):
   kill_processes_script = os.path.join(args.SCRIPT_DIR, kill_processes_script_name)
@@ -355,14 +355,7 @@ class Tee:
 def main() -> None:
   print("Starting multihost runner...", flush=True)
 
-  #### Parse flags ####
-  if not args.PROJECT:
-    args.PROJECT = get_project()
-  if not args.ZONE:
-    args.ZONE = get_zone()
-  if not args.RUN_NAME:
-    args.RUN_NAME = get_run_name() # Used for both local logging files and remote directory.
-
+  ##### Validate arguments #####
   assert_script_dir_exists(args.SCRIPT_DIR)
 
   ##### Step 1: Get the workers #####
