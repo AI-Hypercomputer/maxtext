@@ -14,7 +14,8 @@
 
 """Utilities to construct configs for solutionsTeam_jax_latest_supported DAG."""
 
-from apis import gcp_config, task, test_config
+from apis import gcp_config, test_config
+from apis.xlml import task
 
 
 # TODO(ranran): This is an example to test QR creation & deletion funcitonality, and

@@ -19,12 +19,11 @@ import dataclasses
 import datetime
 from typing import Tuple
 import airflow
-
-from airflow.utils.task_group import TaskGroup
 from airflow.models.taskmixin import DAGNode
 from airflow.operators import empty
+from airflow.utils.task_group import TaskGroup
 from apis import gcp_config, test_config
-from implementations.utils import tpu, ssh
+from implementations.utils import ssh, tpu
 
 
 class BaseTask(abc.ABC):
@@ -91,21 +90,21 @@ class TPUTask(BaseTask):
         ssh_keys = ssh.generate_ssh_keys()
 
       queued_resource = tpu.create_qr.override(
-        execution_timeout=self.tpu_create_timeout,
+          execution_timeout=self.tpu_create_timeout,
       )(
-        self.task_test_config.accelerator,
-        tpu_name,
-        self.task_gcp_config.zone,
-        self.task_gcp_config.project_number,
-        ssh_keys,
+          self.task_test_config.accelerator,
+          tpu_name,
+          self.task_gcp_config.zone,
+          self.task_gcp_config.project_number,
+          ssh_keys,
       )
       queued_resource >> tpu.ssh_tpu.override(task_id="setup")(
-        tpu_name,
-        self.task_gcp_config.zone,
-        self.task_gcp_config.project_name,
-        # TODO(wcromar): remove split
-        self.task_test_config.setup_script.split("\n"),
-        ssh_keys
+          tpu_name,
+          self.task_gcp_config.zone,
+          self.task_gcp_config.project_name,
+          # TODO(wcromar): remove split
+          self.task_test_config.setup_script.split("\n"),
+          ssh_keys,
       )
 
     return group, tpu_name, ssh_keys
@@ -126,16 +125,18 @@ class TPUTask(BaseTask):
       A DAG node that executes the model test.
     """
     return tpu.ssh_tpu.override(
-      task_id="run_model",
-      execution_timeout=datetime.timedelta(minutes=self.task_test_config.time_out_in_min),
-      owner=self.task_test_config.task_owner,
+        task_id="run_model",
+        execution_timeout=datetime.timedelta(
+            minutes=self.task_test_config.time_out_in_min
+        ),
+        owner=self.task_test_config.task_owner,
     )(
-      tpu_name,
-      self.task_gcp_config.zone,
-      self.task_gcp_config.project_name,
-      # TODO(wcromar): remove split
-      self.task_test_config.test_script.split("\n"),
-      ssh_keys
+        tpu_name,
+        self.task_gcp_config.zone,
+        self.task_gcp_config.project_name,
+        # TODO(wcromar): remove split
+        self.task_test_config.test_script.split("\n"),
+        ssh_keys,
     )
 
   # TODO(ranran): Implement logic for post_process task
@@ -154,19 +155,17 @@ class TPUTask(BaseTask):
       A placeholder DAG node.
     """
     return tpu.ssh_tpu.override(
-      task_id="postprocess",
+        task_id="postprocess",
     )(
-      tpu_name,
-      self.task_gcp_config.zone,
-      self.task_gcp_config.project_name,
-      ["echo postprocess not implemented"],
-      ssh_keys
+        tpu_name,
+        self.task_gcp_config.zone,
+        self.task_gcp_config.project_name,
+        ["echo postprocess not implemented"],
+        ssh_keys,
     )
     return empty.EmptyOperator(task_id=f"post_process")
 
-  def clean_up(
-      self, tpu_name: airflow.XComArg
-  ) -> DAGNode:
+  def clean_up(self, tpu_name: airflow.XComArg) -> DAGNode:
     """Clean up TPU resources created by `provision`.
 
     Returns:
@@ -177,10 +176,18 @@ class TPUTask(BaseTask):
     """
     with TaskGroup(group_id="clean_up") as group:
       # TODO(wcromar): Implement cascading delete with error handling
-      delete_tpu = tpu.delete_tpu(tpu_name, self.task_gcp_config.zone, self.task_gcp_config.project_number)
-      delete_qr = tpu.delete_qr(tpu_name, self.task_gcp_config.zone, self.task_gcp_config.project_number)
+      delete_tpu = tpu.delete_tpu(
+          tpu_name,
+          self.task_gcp_config.zone,
+          self.task_gcp_config.project_number,
+      )
+      delete_qr = tpu.delete_qr(
+          tpu_name,
+          self.task_gcp_config.zone,
+          self.task_gcp_config.project_number,
+      )
 
-      delete_tpu  >> delete_qr
+      delete_tpu >> delete_qr
 
     return group
 
