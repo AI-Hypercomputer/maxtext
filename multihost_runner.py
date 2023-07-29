@@ -163,7 +163,7 @@ def kill_existing_processes_str():
 _TPU_VERSION_NAME="${1}"
 device_name="accel"
 if [[ "${_TPU_VERSION_NAME}" =~ ^v5.* ]]; then
-  device_name="vfio/"
+  device_name="vfio/0"
 fi
 echo "Searching for existing processes on device ${device_name}..."
 pids=$(sudo lsof -t /dev/${device_name}* | sort -u)

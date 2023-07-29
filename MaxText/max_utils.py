@@ -122,7 +122,7 @@ def create_device_mesh(config, logging=False):
   except:
     num_slices = 1
   num_devices_per_slice = num_devices//num_slices
-  max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
+  # max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
   assert len(devices) > 1, "You must have at least two devices"
 
   multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
