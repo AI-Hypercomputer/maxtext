@@ -9,7 +9,7 @@
 
  Unless required by applicable law or agreed to in writing, software
  distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ WITHOUT WARRANTIES OR CONDITIONS© OF ANY KIND, either express or implied.
  See the License for the specific language governing permissions and
  limitations under the License.
  """
@@ -21,7 +21,9 @@
 # See github.com/google/maxtext/issues/20 for more
 import jax
 import os
+jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
 print(f"Found {jax.device_count()} devices.")
 
 from typing import Sequence
