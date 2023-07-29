@@ -19,6 +19,7 @@
 
 from aqt.jax.v2 import aqt_dot_general as aqt
 from aqt.jax.v2 import config as aqt_config
+from aqt.jax.v2.google import maxtext_sweeps
 
 import dataclasses
 import functools
@@ -190,6 +191,7 @@ class DenseGeneral(nn.Module):
   dtype: DType = jnp.float32
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
   kernel_axes: Tuple[str, ...] = ()
+  use_quant: bool = True
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -225,17 +227,7 @@ class DenseGeneral(nn.Module):
     if not cfg.int8_training:
       return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
     else:
-      aqt_cfg = aqt_config.fully_quantized(fwd_save_accumulator_memory=False,
-                                           bwd_save_accumulator_memory=False)
-
-      def noise_fn(shape, key):
-        return jax.random.uniform(key, shape) - 0.5
-
-      aqt_cfg.dlhs.lhs.noise_fn = noise_fn
-      aqt_cfg.dlhs.rhs.noise_fn = None
-      aqt_cfg.drhs.lhs.noise_fn = noise_fn
-      aqt_cfg.drhs.rhs.noise_fn = None
-
+      aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8, cfg.bwd_int8)
       aqt_dot_general = aqt.make_dot_general(aqt_cfg)
       aqt_key = self.make_rng('aqt')
       context = aqt.Context(key=aqt_key, train_step=None)
@@ -1116,7 +1108,8 @@ class Decoder(nn.Module):
           dtype=jnp.float32,  # Use float32 for stabiliity.
           kernel_axes=('embed', 'vocab'),
           name='logits_dense',
-          config=cfg)(
+          config=cfg,
+          use_quant=False)(
               y)
     logits = nn.with_logical_constraint(logits, ('activation_batch', 'activation_length', 'activation_vocab'))
     return logits

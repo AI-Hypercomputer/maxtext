@@ -170,6 +170,7 @@ class DotGeneralRaw:
 @dataclasses.dataclass
 class DotGeneral:
   """Configuration of quantization of dot_general and its gradients."""
+
   fwd: DotGeneralRaw
   dlhs: DotGeneralRaw
   drhs: DotGeneralRaw
@@ -217,7 +218,12 @@ def fully_quantized(
     fwd_bits: int | None = 8,
     bwd_bits: int | None = 8,
     use_fwd_quant: bool = True,
-    use_stochastic_rounding: bool = True,
+    use_stochastic_rounding: Optional[bool] = True,
+    # Typically we have (but it's a caller's responsibility to check):
+    # - vjp_lhs_stochastic_rounding is referring to the gradient and
+    # - vjp_rhs_stochastic_rounding is referring to the activations/weights.
+    vjp_lhs_stochastic_rounding: Optional[bool] = None,
+    vjp_rhs_stochastic_rounding: Optional[bool] = None,
     # The dummy static bound flag is temporary, for performance benchmarking.
     use_dummy_static_bound: bool = False,
     fwd_save_accumulator_memory: bool = False,
@@ -233,13 +239,35 @@ def fully_quantized(
       bwd_save_accumulator_memory=bwd_save_accumulator_memory,
   )
 
-  if use_stochastic_rounding:
-    def noise_fn(shape, key):
-      return jax.random.uniform(key, shape) - 0.5
+  # Stochastic Rounding
+  # These 3 variables are used to ensure we don't mix
+  # old and new style of SR configuration.
+  old_style_sr_config = use_stochastic_rounding is not None
+  new_style_sr_config_lhs = vjp_lhs_stochastic_rounding is not None
+  new_style_sr_config_rhs = vjp_rhs_stochastic_rounding is not None
+  assert new_style_sr_config_lhs == new_style_sr_config_rhs, (
+      'if you use new style SR config (vjp_xhs_stochastic_rounding), do pass'
+      ' both lhs and rhs explicitely.'
+  )
+  assert new_style_sr_config_lhs != old_style_sr_config
 
+  def noise_fn(shape, key):
+    return jax.random.uniform(key, shape) - 0.5
+
+  true = True  # A crude way to get around g-explicit-bool-comparison warning
+
+  if use_stochastic_rounding == true:
     cfg.dlhs.lhs.noise_fn = noise_fn
     cfg.dlhs.rhs.noise_fn = noise_fn
     cfg.drhs.lhs.noise_fn = noise_fn
+    cfg.drhs.rhs.noise_fn = noise_fn
+
+  if vjp_lhs_stochastic_rounding == true:
+    cfg.dlhs.lhs.noise_fn = noise_fn
+    cfg.drhs.lhs.noise_fn = noise_fn
+
+  if vjp_rhs_stochastic_rounding == true:
+    cfg.dlhs.rhs.noise_fn = noise_fn
     cfg.drhs.rhs.noise_fn = noise_fn
 
   if use_dummy_static_bound:
