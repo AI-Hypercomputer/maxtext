@@ -23,7 +23,7 @@ reuse_example_batch: 0 # for testing TPU performance, this options repeated uses
 
 metrics_file: "" # for testing, local file that stores scalar metrics. If empty, no metrics are written.
 # If true save metrics such as loss and TFLOPS to GCS in {base_output_directory}/{run_name}/metrics/
-gcs_metrics: "false"
+gcs_metrics: True
 
 # Activation dtypes.
 dtype: "bfloat16"
@@ -125,6 +125,7 @@ async_checkpointing: True
 # Set these two to False to run deterministically (i.e. reproducible losses)
 enable_dropout: True
 enable_data_shuffling: True
+init_prng_key: 0
 
 # Adam optimizer parameters
 adam_b1: 0.9 # Exponential decay rate to track the first moment of past gradients.

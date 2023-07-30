@@ -203,7 +203,7 @@ def predict_step(inputs,
   target_shape = (inputs.shape[0], config.max_predict_length) + inputs.shape[2:]
 
   initial_variables = model.init(
-      jax.random.PRNGKey(0),
+      jax.random.PRNGKey(config.init_prng_key),
       jnp.ones(target_shape, config.dtype),
       None,
       enable_dropout=config.enable_dropout,
@@ -261,7 +261,7 @@ def train_loop(config, state=None):
                                                                      config.enable_checkpointing,
                                                                      config.async_checkpointing)
   # Initial PRNG Keys
-  init_rng, nextrng = random.split(random.PRNGKey(0), 2)
+  init_rng, nextrng = random.split(random.PRNGKey(config.init_prng_key), 2)
 
   # Model and Optimizer definition
   model = Transformer(config)
@@ -304,10 +304,10 @@ def train_loop(config, state=None):
   # Define compiled top-level functions.
   p_train_step = pjit(
     train_step,
-    in_axis_resources=(state_mesh_annotations,
+    in_shardings=(state_mesh_annotations,
                        data_pspec,
                        None),
-    out_axis_resources=(state_mesh_annotations, None, None),
+    out_shardings=(state_mesh_annotations, None, None),
     static_argnums=(0,1,),
     donate_argnums=2)
 
