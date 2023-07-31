@@ -116,6 +116,7 @@ def print_flags():
   print(f"Script dir          (--SCRIPT_DIR)      = {args.SCRIPT_DIR}")
   print(f"Bucket name         (--BUCKET_NAME)     = {args.BUCKET_NAME}")
   print(f"Bucket dir          (--BUCKET_DIR)      = {args.BUCKET_DIR}")
+  print(f"Command tpye        (--COMMAND_TYPE)    = {args.COMMAND_TYPE}")
   print(f"Run name            (--RUN_NAME)        = {args.RUN_NAME}")
   print(f"Extra CQR args      (--CQR_EXTRA_ARGS)  = {args.CQR_EXTRA_ARGS}")
   print(f"Command to run      (--COMMAND)         = {args.COMMAND}\n")
@@ -142,7 +143,7 @@ def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
   return captured_output
 
 def run_create_resources(startup_script_file):
-  """ Run the Create Queued Resources (CQR) request """
+  """ Run the Create Queued Resources (CQR) request with gcloud command"""
   # pylint: disable=line-too-long
   command = fr'gcloud alpha compute tpus queued-resources create {args.RUN_NAME} --accelerator-type={args.TPU_TYPE} --runtime-version={args.VERSION} --project={args.PROJECT} --zone={args.ZONE}'
   if args.NUM_SLICES > 1:
@@ -159,7 +160,8 @@ def run_create_resources(startup_script_file):
   return captured_output
 
 def run_create_resources_curl(startup_script):
-    data = {
+  """ Run the Create Queued Resources (CQR) request with curl command"""
+  data = {
         "tpu": {
             "node_spec": [
                 {
@@ -187,20 +189,18 @@ def run_create_resources_curl(startup_script):
         }
     }
 
-    # Set the file name with {args.RUN_NAME}.json
-    temp_file_name = f"{args.RUN_NAME}.json"
-    
-    temp_file_path = os.path.join(tempfile.gettempdir(), temp_file_name)
-    with open(temp_file_path, mode='w') as temp_file:
-        json.dump(data, temp_file, indent=4)
+  # Set the file name with {args.RUN_NAME}.json
+  temp_file_name = f"{args.RUN_NAME}.json"
+  temp_file_path = os.path.join(tempfile.gettempdir(), temp_file_name)
+  with open(temp_file_path, mode='w', encoding='utf-8') as temp_file:
+    json.dump(data, temp_file, indent=4)
 
-    curl_command = f"""
-      curl -X POST -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "Content-Type: application/json" -d @{temp_file_path} \
-      https://tpu.googleapis.com/v2alpha1/projects/{args.PROJECT}/locations/{args.ZONE}/queuedResources\?queued_resource_id\={args.RUN_NAME}
-    """
-    
-    captured_output = subprocess.run(curl_command, check=False, shell=True, capture_output=True)
-    return captured_output
+  curl_command = f"""
+    curl -X POST -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "Content-Type: application/json" -d @{temp_file_path} \
+    https://tpu.googleapis.com/v2alpha1/projects/{args.PROJECT}/locations/{args.ZONE}/queuedResources\?queued_resource_id\={args.RUN_NAME}
+  """
+  captured_output = subprocess.run(curl_command, check=False, shell=True, capture_output=True)
+  return captured_output
 
 def write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file):
   """ Write the startup script locally into a file to be passed to the CQR command. """
@@ -361,15 +361,17 @@ def main() -> None:
   zip_gcs_path = os.path.join(bucket_path, zip_name)
   startup_script = write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file)
   print("Running CQR command...")
-  
-  if ({args.COMMAND_TYPE}=='gcloud'):
+
+  if (args.COMMAND_TYPE=='gcloud'):
+    print("Using gcloud command")
     captured_output = run_create_resources(startup_script_file)
-  elif ({args.COMMAND_TYPE}=='curl'):
+  elif (args.COMMAND_TYPE=='curl'):
+    print("Using curl command")
     captured_output = run_create_resources_curl(startup_script)
   else:
     print("You must use either gcloud command or curl command")  
     return 1
-  
+
   if captured_output.returncode != 0:
     print(f"\n\nCreate resource request returned with ERROR returncode {captured_output.returncode}.\n")
     print("Create resource error:\n" + captured_output.stderr.decode())
