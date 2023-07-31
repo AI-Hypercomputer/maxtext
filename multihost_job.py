@@ -194,7 +194,8 @@ def run_create_resources_curl(startup_script):
   temp_file_path = os.path.join(tempfile.gettempdir(), temp_file_name)
   with open(temp_file_path, mode='w', encoding='utf-8') as temp_file:
     json.dump(data, temp_file, indent=4)
-
+    
+  # pylint: disable=W1401
   curl_command = f"""
     curl -X POST -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "Content-Type: application/json" -d @{temp_file_path} \
     https://tpu.googleapis.com/v2alpha1/projects/{args.PROJECT}/locations/{args.ZONE}/queuedResources\?queued_resource_id\={args.RUN_NAME}
@@ -362,10 +363,10 @@ def main() -> None:
   startup_script = write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file)
   print("Running CQR command...")
 
-  if (args.COMMAND_TYPE=='gcloud'):
+  if args.COMMAND_TYPE=='gcloud':
     print("Using gcloud command")
     captured_output = run_create_resources(startup_script_file)
-  elif (args.COMMAND_TYPE=='curl'):
+  elif args.COMMAND_TYPE=='curl':
     print("Using curl command")
     captured_output = run_create_resources_curl(startup_script)
   else:
