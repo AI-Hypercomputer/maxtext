@@ -99,10 +99,10 @@ class _HyperParameters():
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys['global_parameter_scale'])
-    raw_keys['emb_dim'] = emb_scale * raw_keys['base_emb_dim']
-    raw_keys['num_heads'] = num_head_scale * raw_keys['base_num_heads']
-    raw_keys['mlp_dim'] = mlp_dim_scale * raw_keys['base_mlp_dim']
-    raw_keys['num_decoder_layers'] = layer_scale * raw_keys['base_num_decoder_layers']
+    raw_keys['emb_dim'] = 2**emb_scale * raw_keys['base_emb_dim']
+    raw_keys['num_heads'] = 2**num_head_scale * raw_keys['base_num_heads']
+    raw_keys['mlp_dim'] = 2**mlp_dim_scale * raw_keys['base_mlp_dim']
+    raw_keys['num_decoder_layers'] = 2**layer_scale * raw_keys['base_num_decoder_layers']
 
 def get_individual_scales(scale):
   '''Choose appropriate scales for individual dimensions based on global scale
@@ -119,7 +119,6 @@ def get_individual_scales(scale):
     raise ValueError("Global parameter scale should be a power of 2. If you want finer grained control of the model sizes "
       "then you can explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.")
   base_scale, rem = divmod(log_2_scale, 3)
-  base_scale += 1
   emb_scale = base_scale + int(rem > 0)
   num_head_scale = base_scale + int(rem > 1)
   mlp_dim_scale = num_head_scale
