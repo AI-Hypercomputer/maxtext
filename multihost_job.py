@@ -194,7 +194,6 @@ def run_create_resources_curl(startup_script):
   temp_file_path = os.path.join(tempfile.gettempdir(), temp_file_name)
   with open(temp_file_path, mode='w', encoding='utf-8') as temp_file:
     json.dump(data, temp_file, indent=4)
-    
   # pylint: disable=W1401
   curl_command = f"""
     curl -X POST -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "Content-Type: application/json" -d @{temp_file_path} \
@@ -370,7 +369,7 @@ def main() -> None:
     print("Using curl command")
     captured_output = run_create_resources_curl(startup_script)
   else:
-    print("You must use either gcloud command or curl command")  
+    print("You must use either gcloud command or curl command")
     return 1
 
   if captured_output.returncode != 0:
