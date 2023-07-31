@@ -45,6 +45,8 @@ import subprocess
 from datetime import datetime
 import os
 import shutil
+import json
+import tempfile
 
 ##### Define flags #####
 parser = argparse.ArgumentParser(description='TPU configuration options')
@@ -72,6 +74,8 @@ parser.add_argument('--ZONE', type=str, default=None,
                     help='GCE zone, e.g. us-central2-b, defaults to gcloud config compute/zone')
 parser.add_argument('--RUN_NAME', type=str, default=None,
                     help='Run name used for temporary files, defaults to timestamp.')
+parser.add_argument('--COMMAND_TYPE', type=str, default='gcloud',
+                    help='Using gcloud command or curl command, defaults to gcloud.')
 parser.add_argument('--CQR_EXTRA_ARGS', type=str, default=None,
                     help='Additional arguments to be passed verbatim to the CQR request, e.g. \
                     --CQR_EXTRA_ARGS="--reserved --service-account=my-service-account-email-address')
@@ -154,6 +158,50 @@ def run_create_resources(startup_script_file):
   captured_output = subprocess.run(command, check=False, shell=True, capture_output=True)
   return captured_output
 
+def run_create_resources_curl(startup_script):
+    data = {
+        "tpu": {
+            "node_spec": [
+                {
+                    "parent": f"projects/{args.PROJECT}/locations/{args.ZONE}",
+                    "node": {
+                        "accelerator_type": args.TPU_TYPE,
+                        "runtime_version": args.VERSION,
+                        "network_config": {
+                            "network": "default",
+                            "subnetwork": "default",
+                            "enable_external_ips": True
+                        },
+                        "scheduling_config": {
+                            "maintenance_interval": 2
+                        },
+                        "metadata": {
+                            "startup-script": startup_script
+                        }
+                    },
+                    "multi_node_params": {
+                        "node_count": args.NUM_SLICES
+                    }
+                }
+            ]
+        }
+    }
+
+    # Set the file name with {args.RUN_NAME}.json
+    temp_file_name = f"{args.RUN_NAME}.json"
+    
+    temp_file_path = os.path.join(tempfile.gettempdir(), temp_file_name)
+    with open(temp_file_path, mode='w') as temp_file:
+        json.dump(data, temp_file, indent=4)
+
+    curl_command = f"""
+      curl -X POST -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "Content-Type: application/json" -d @{temp_file_path} \
+      https://tpu.googleapis.com/v2alpha1/projects/{args.PROJECT}/locations/{args.ZONE}/queuedResources\?queued_resource_id\={args.RUN_NAME}
+    """
+    
+    captured_output = subprocess.run(curl_command, check=False, shell=True, capture_output=True)
+    return captured_output
+
 def write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file):
   """ Write the startup script locally into a file to be passed to the CQR command. """
   startup_script = f"""#!/bin/bash
@@ -174,6 +222,7 @@ sleep 600
 
   with open(startup_script_file, "w", encoding="utf-8") as f:
     f.write(startup_script)
+  return startup_script
 
 def get_env_command_str(num_slices):
   """ Define environment variables on the TPUS """
@@ -310,10 +359,17 @@ def main() -> None:
   #### Step 2: Run the CQR command ####
   log_name = "main_command_log_slice_${SLICE_ID}_worker_${WORKER_ID}"
   zip_gcs_path = os.path.join(bucket_path, zip_name)
-  write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file)
-
+  startup_script = write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file)
   print("Running CQR command...")
-  captured_output = run_create_resources(startup_script_file)
+  
+  if ({args.COMMAND_TYPE}=='gcloud'):
+    captured_output = run_create_resources(startup_script_file)
+  elif ({args.COMMAND_TYPE}=='curl'):
+    captured_output = run_create_resources_curl(startup_script)
+  else:
+    print("You must use either gcloud command or curl command")  
+    return 1
+  
   if captured_output.returncode != 0:
     print(f"\n\nCreate resource request returned with ERROR returncode {captured_output.returncode}.\n")
     print("Create resource error:\n" + captured_output.stderr.decode())
