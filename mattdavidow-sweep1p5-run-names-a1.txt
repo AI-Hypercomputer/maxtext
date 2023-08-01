@@ -1,0 +1,2 @@
+mattdavidow-sweep1p5-a1_int8_false_scale_1_PRNGKey_0
+mattdavidow-sweep1p5-a1_int8_true_scale_1_PRNGKey_0

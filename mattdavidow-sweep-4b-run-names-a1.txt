@@ -1,0 +1,4 @@
+mattdavidow-sweep1-4b-a1_fwd_false_bwd_false_scale_4_PRNGKey_0
+mattdavidow-sweep1-4b-a1_fwd_false_bwd_true_scale_4_PRNGKey_0
+mattdavidow-sweep1-4b-a1_fwd_true_bwd_false_scale_4_PRNGKey_0
+mattdavidow-sweep1-4b-a1_fwd_true_bwd_true_scale_4_PRNGKey_0
