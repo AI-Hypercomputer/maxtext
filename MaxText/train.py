@@ -317,6 +317,7 @@ def train_loop(config, state=None):
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
+  step_list = [200, 400, 1000, 2000, 3000]
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(train_iter, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -329,7 +330,7 @@ def train_loop(config, state=None):
     write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
 
-    if step > 0 and step % config.save_period == 0 and checkpoint_manager is not None:
+    if step > 0 and step in step_list and checkpoint_manager is not None:
       checkpoint_manager.save(step, state)
       max_logging.log("saved a checkpoint")
 
