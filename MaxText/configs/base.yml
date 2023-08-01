@@ -14,6 +14,9 @@
 
 # This sentinel is a reminder to choose a real run name.
 # If there is already a checkpoint under this run, that checkpoint will auto-resume.
+
+# we need to port this script to the pytorch model
+
 run_name: ""
 
 # If we aren't resuming from an existing checkpoint, load parameters from this path if provided.

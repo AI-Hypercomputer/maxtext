@@ -14,6 +14,8 @@
  limitations under the License.
  """
 
+# we need to rewrite the majority of helper methods in this script.
+
 # pylint: disable=bare-except, consider-using-generator
 """ Common Max Utils needed by multiple modules"""
 import checkpointing

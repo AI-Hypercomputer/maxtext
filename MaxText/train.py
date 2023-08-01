@@ -56,6 +56,7 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 import max_logging
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
+# we need to port this method to pytorch code
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
 def calculate_training_tflops(num_model_parameters, config):
   learnable_weight_tflops = 6 * num_model_parameters * config.max_target_length * config.per_device_batch_size \
@@ -68,11 +69,13 @@ def calculate_training_tflops(num_model_parameters, config):
         f'and {100 * attention_tflops/total_tflops:.2f}% attention flops')
   return total_tflops
 
+# we need to port this method to pytorch code
 def get_first_step(state):
   with jax.spmd_mode('allow_all'):
     return int(state.step)
 
 
+# we need to port this method to pytorch code
 def load_next_batch(train_iter, example_batch, config):
   """Loads the next batch. Can keep reusing the same batch for performance reasons """
 
@@ -81,6 +84,7 @@ def load_next_batch(train_iter, example_batch, config):
   else:
     return train_iter()
 
+# we need to port this method to pytorch code
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   """Records scalar metrics to be written to tensorboard"""
   metrics['scalar'].update({
@@ -97,6 +101,7 @@ def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   metrics['scalar'].update({'learning/current_learning_rate': lr })
 
 
+# we need to port this method to pytorch code
 def write_metrics(writer, metrics, step, config):
   """Writes metrics to tensorboard"""
   with jax.spmd_mode('allow_all'):
@@ -118,6 +123,7 @@ def write_metrics(writer, metrics, step, config):
       )
       writer.flush()
 
+# we may need to port this method to pytorch code
 def calculate_num_params_from_pytree(params):
   params_sizes = jax.tree_util.tree_map(jax.numpy.size, params)
   total_parameters = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes)
@@ -127,6 +133,7 @@ def calculate_num_params_from_pytree(params):
 # Top-level Functions
 # -----------------------------------------------------------------------------
 
+# we need to port this method to pytorch code
 def record_activation_metrics(output_metrics, intermediate_outputs, config):
   """ Adds the activation metrics to the metrics dict"""
 
@@ -209,6 +216,7 @@ def predict_step(inputs,
   )
   cache = initial_variables["cache"]
 
+# we need to verify this implementation aligns with that of pytorch code
   def tokens_ids_to_logits(flat_ids, flat_cache):
     """Token slice to logits from decoder model."""
     # --> [batch * beam, 1, vocab]
@@ -242,6 +250,9 @@ def predict_step(inputs,
 
   return seqs
 
+# a large bulk of this code must be verified or ported to the pytorch code
+# (cehckpoint, mesh definitions, dataset setup, tflop calculation, pjrt api
+# call, metrics, profiling)
 def train_loop(config, state=None):
   """Main Training loop.
 

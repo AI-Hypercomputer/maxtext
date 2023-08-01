@@ -14,6 +14,8 @@
  limitations under the License.
  """
 
+# looks like this script can be used for pytorch use cases with minimal change
+
 # pylint: disable=missing-module-docstring
 from collections import OrderedDict
 
