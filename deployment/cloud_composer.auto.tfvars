@@ -6,7 +6,7 @@ project_config = {
 
 environment_config = [
   {
-    environment_name   = "ml-automation-solutions-dev"
-    service_account_id = "ml-auto-solutions-dev"
+    environment_name   = "ml-automation-solutions"
+    service_account_id = "ml-auto-solutions"
   }
 ]

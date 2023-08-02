@@ -1,0 +1,20 @@
+[
+  {
+    "name": "job_uuid",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "The ID of an entry in the table."
+  },
+  {
+    "name": "metric_key",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "The key of a metric."
+  },
+  {
+    "name": "metric_value",
+    "mode": "REQUIRED",
+    "type": "FLOAT",
+    "description": "The value of a metric."
+  }
+]

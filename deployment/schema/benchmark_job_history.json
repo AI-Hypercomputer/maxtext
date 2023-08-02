@@ -1,0 +1,32 @@
+[
+  {
+    "name": "uuid",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "The ID of an entry in the table."
+  },
+  {
+    "name": "timestamp",
+    "mode": "REQUIRED",
+    "type": "TIMESTAMP",
+    "description": "The timestamp of an entry sent to the database."
+  },
+  {
+    "name": "owner",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "The owner that owns the job, a team or a person."
+  },
+  {
+    "name": "job_name",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "The name of a test job."
+  },
+  {
+    "name": "job_status",
+    "mode": "REQUIRED",
+    "type": "INTEGER",
+    "description": "The status of a test job."
+  }
+]
