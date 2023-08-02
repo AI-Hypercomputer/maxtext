@@ -9,7 +9,10 @@ run_name=$5
 
 # Copies a baseline directory into a new directory so it can be loaded
 run_name_load=mattdavidow-int8-baseline_step_${step}_PRNGKey_${prng_key}
-bash copy_baseline.sh $run_name_load $run_name
+
+if [[ ${SLICE_ID} -eq 0 && ${WORKER_ID} -eq 0 ]]; then
+    bash copy_baseline.sh $run_name_load $run_name
+fi
 
 output_file=gs://mattdavidow-maxtext-br/${run_name}.txt
 
