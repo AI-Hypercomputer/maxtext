@@ -11,8 +11,8 @@ for fwd_int8 in ${fwd_int8_array[@]}; do
             for prng_key in ${prng_key_array[@]}; do
                 run_name=mattdavidow-sweep2p2-a2_fwd_${fwd_int8}_bwd_${bwd_int8}_step_${step}_PRNGKey_${prng_key}
                 echo ${run_name}
-                echo ${run_name} >> mattdavidow-sweep2p2-run-names-a2.txt
-                python3 multihost_job.py --BUCKET_NAME="mattdavidow-maxtext-br" --RUN_NAME=${run_name} --TPU_TYPE=v5litepod-256 --NUM_SLICES=1 --VERSION=v2-alpha-tpuv5-lite --COMMAND="bash setup.sh && bash MaxText/configs/sweep2p2-individual.sh ${fwd_int8} ${bwd_int8} ${step} ${prng_key} ${run_name}" --ZONE=us-east5-b      
+                echo ${run_name} >> mattdavidow-sweep2p2-run-names-a2-clean.txt
+                # python3 multihost_job.py --BUCKET_NAME="mattdavidow-maxtext-br" --RUN_NAME=${run_name} --TPU_TYPE=v5litepod-256 --NUM_SLICES=1 --VERSION=v2-alpha-tpuv5-lite --COMMAND="bash setup.sh && bash MaxText/configs/sweep2p2-individual.sh ${fwd_int8} ${bwd_int8} ${step} ${prng_key} ${run_name}" --ZONE=us-east5-b      
             done
         done
     done
