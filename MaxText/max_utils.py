@@ -208,6 +208,8 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
+                                                config.load_from_other_directory,
+                                                config.load_from_other_directory_step,
                                                 unboxed_abstract_state,
                                                 mesh,
                                                 state_mesh_annotations)
