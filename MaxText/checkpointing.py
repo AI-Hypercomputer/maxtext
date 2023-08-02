@@ -20,6 +20,7 @@ from etils import epath
 import jax
 import portpicker
 from jax.experimental import multihost_utils
+import os
 from orbax import checkpoint
 from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, Checkpointer, AsyncCheckpointer
 from orbax.checkpoint import type_handlers
@@ -115,12 +116,12 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
     return checkpoint_manager.restore(latest_step, abstract_unboxed_pre_state,
                                       {"restore_args" : restore_args}), None
   elif first_checkpoint_path != "":
-    max_logging.log(f"restoring state from first_checkpoint_path {first_checkpoint_path}")
-    p = epath.Path(first_checkpoint_path)
-    checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
-    return None, checkpointer.restore(p,
-                                      item=abstract_unboxed_pre_state,
-                                      restore_args=restore_args).params
+    p = epath.Path(os.path.join(first_checkpoint_path,"checkpoints"))
+    checkpointer_loader = Checkpointer(checkpoint.PyTreeCheckpointHandler())
+    mngr_loader = CheckpointManager(p, checkpointer_loader, options=CheckpointManagerOptions(create=True))
+    latest_step = mngr_loader.latest_step()
+    return mngr_loader.restore(latest_step, abstract_unboxed_pre_state,
+                                      {"restore_args" : restore_args}), None
   else:
     max_logging.log("No existing checkpoints found, not restoring checkpoint.")
     return None, None
