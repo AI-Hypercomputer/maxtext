@@ -97,7 +97,7 @@ def preprocessing_pipeline(
   drop_remainder: bool = True,
   prefetch_size = tf.data.experimental.AUTOTUNE,
   data_sharding = None,
-  seed = 0,
+  data_shuffle_seed = 0,
 ):
   """Shuffle and batch/pack the given dataset."""
 
@@ -114,7 +114,7 @@ def preprocessing_pipeline(
 
   # Shuffle and repeat.
   if shuffle:
-    dataset = dataset.shuffle(shuffle_buffer_size, seed = seed)
+    dataset = dataset.shuffle(shuffle_buffer_size, seed = data_shuffle_seed)
 
   dataset = dataset.repeat(num_epochs)
 
@@ -197,7 +197,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
                         global_mesh,
                         train_ds, eval_ds,
                         vocab_path: Optional[str] = None,
-                        seed = 0,):
+                        data_shuffle_seed = 0,):
   """Pre-process the dataset and return iterators"""
   if vocab_path is None:
     vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
@@ -237,7 +237,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       max_length=config.max_target_length,
       shift=True,
       data_sharding = config.data_sharding,
-      seed = seed,)
+      data_shuffle_seed = data_shuffle_seed,)
 
   eval_iter = preprocessing_pipeline(
       eval_ds,
@@ -248,7 +248,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       max_length=config.max_eval_target_length,
       shift=False,
       data_sharding = config.data_sharding,
-      seed = seed,)
+      data_shuffle_seed = data_shuffle_seed,)
 
   predict_iter = preprocessing_pipeline(
       eval_ds,
@@ -260,6 +260,6 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       shift=False,
       drop_remainder=False,
       data_sharding = config.data_sharding,
-      seed = seed,)
+      data_shuffle_seed = data_shuffle_seed,)
 
   return train_iter, eval_iter, predict_iter, sp_tokenizer

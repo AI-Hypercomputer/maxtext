@@ -282,9 +282,8 @@ def train_loop(config, state=None):
   mesh = Mesh(devices_array, config.mesh_axes)
 
   # Set up datasets.
-  print("check type ", type(init_rng))
   read_config = tfds.ReadConfig(
-    shuffle_seed = config.seed,
+    shuffle_seed = config.data_shuffle_seed,
   )
   train_ds, eval_ds = get_datasets(
       config=config,
@@ -295,7 +294,7 @@ def train_loop(config, state=None):
     mesh,
     train_ds, eval_ds,
     vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
-    seed = config.seed,
+    data_shuffle_seed = config.data_shuffle_seed,
   )
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
