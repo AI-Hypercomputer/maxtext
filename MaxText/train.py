@@ -34,6 +34,7 @@ from tensorboardX import SummaryWriter
 
 from layers import Transformer
 import pyconfig
+import tensorflow_datasets as tfds
 from input_pipeline import get_datasets
 from input_pipeline import preprocess_dataset
 import max_utils
@@ -281,14 +282,19 @@ def train_loop(config, state=None):
   mesh = Mesh(devices_array, config.mesh_axes)
 
   # Set up datasets.
+  read_config = tfds.ReadConfig(
+    shuffle_seed = config.data_shuffle_seed,
+  )
   train_ds, eval_ds = get_datasets(
       config=config,
+      read_config = read_config,
   )
   train_iter, _, _, _ = preprocess_dataset(
     config,
     mesh,
     train_ds, eval_ds,
     vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
+    data_shuffle_seed = config.data_shuffle_seed,
   )
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)

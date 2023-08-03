@@ -136,6 +136,7 @@ async_checkpointing: True
 # Set these two to False to run deterministically (i.e. reproducible losses)
 enable_dropout: True
 enable_data_shuffling: True
+data_shuffle_seed: 0
 
 # Adam optimizer parameters
 adam_b1: 0.9 # Exponential decay rate to track the first moment of past gradients.
