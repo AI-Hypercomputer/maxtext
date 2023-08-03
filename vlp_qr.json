@@ -1,0 +1,27 @@
+{
+    "tpu": {
+        "node_spec": [
+            {
+                "parent": "projects/tpu-prod-env-multipod/locations/us-east5-b",
+                "node": {
+                    "accelerator_type": "v5litepod-256",
+                    "runtime_version": "v2-alpha-tpuv5-lite",
+                    "network_config": {
+                        "network": "default",
+                        "subnetwork": "default",
+                        "enable_external_ips": true
+                    },
+                    "scheduling_config": {
+                        "maintenance_interval": 2
+                    },
+                    "metadata": {
+                        "startup-script": "#! /bin/bash\npwd > /tmp/out.txt\nwhoami >> /tmp/out.txt"
+                    }
+                },
+                "multi_node_params": {
+                    "node_count": 2
+                }
+            }
+        ]
+    }
+}
