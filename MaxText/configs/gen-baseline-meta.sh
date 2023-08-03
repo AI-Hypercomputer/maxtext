@@ -2,7 +2,7 @@
 fwd_int8_array=("true")
 bwd_int8_array=("true")
 global_parameter_scale_array=(1)
-prng_key_array=(0 1)
+prng_key_array=(0 1 2 3)
 
 
 echo "starting loops"
