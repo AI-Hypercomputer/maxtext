@@ -91,6 +91,12 @@ class _HyperParameters():
     validate_gcs_bucket_name(base_output_directory, "base_output_directory")
     dataset_path = raw_keys["dataset_path"]
     validate_gcs_bucket_name(dataset_path, "dataset_path")
+    assert ((raw_keys["load_parameters_path"]=="" and raw_keys["load_from_other_directory"]=="") or
+      raw_keys["enable_checkpointing"]), "You must set enable_checkpointing to load a checkpoint"
+    assert raw_keys["load_parameters_path"]=="" or raw_keys["load_from_other_directory"]=="" \
+      "At most one of load_parameters_path or load_from_other_directory should be set"
+    assert raw_keys["load_from_other_directory_step"]==-1 or raw_keys["load_from_other_directory"]!="", \
+      "You must specify the loading directory if you specify the loading step"
     raw_keys["tensorboard_dir"] = os.path.join(base_output_directory, run_name, "tensorboard", "")
     raw_keys["checkpoint_dir"] = os.path.join(base_output_directory, run_name, "checkpoints", "")
     raw_keys["metrics_dir"] = os.path.join(base_output_directory, run_name, "metrics", "")
