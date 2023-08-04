@@ -134,7 +134,7 @@ enable_checkpointing: True
 async_checkpointing: True
 
 # When dropout is false the model is a deterministic function of the 
-# data_shuffle_seed and weights_init_seed (i.e. reproducible losses)
+# data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
 enable_dropout: True
 enable_data_shuffling: True
 data_shuffle_seed: 0
