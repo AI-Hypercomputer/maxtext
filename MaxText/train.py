@@ -38,7 +38,6 @@ import tensorflow_datasets as tfds
 from input_pipeline import get_datasets
 from input_pipeline import preprocess_dataset
 import max_utils
-import temperature_sampler
 import checkpointing
 
 import jax.numpy as jnp
