@@ -201,7 +201,7 @@ def predict_step(inputs,
   target_shape = (inputs.shape[0], config.max_predict_length) + inputs.shape[2:]
 
   initial_variables = model.init(
-      jax.random.PRNGKey(0),
+      jax.random.PRNGKey(config.init_weights_seed),
       jnp.ones(target_shape, config.dtype),
       None,
       enable_dropout=config.enable_dropout,
@@ -259,17 +259,17 @@ def train_loop(config, state=None):
                                                                      config.enable_checkpointing,
                                                                      config.async_checkpointing)
   # Initial PRNG Keys
-  init_rng, nextrng = random.split(random.PRNGKey(0), 2)
+  init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
 
   # Model and Optimizer definition
   model = Transformer(config)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(
-      learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
+      learning_rate=config.learning_rate, total_steps=config.steps
   )
 
   tx = optax.adam(
       max_utils.create_learning_rate_schedule(
-          learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
+          learning_rate=config.learning_rate, total_steps=config.steps
       ),
       b1=config.adam_b1,
       b2=config.adam_b2,
