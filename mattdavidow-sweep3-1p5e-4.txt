@@ -1,0 +1,5 @@
+mattdavidow-sweep3-a4-params_lr__scale_1_slice_1_PRNGKey_1
+mattdavidow-sweep3-a4-params_lr_1p5e-04_scale_1_slice_1_PRNGKey_1
+mattdavidow-sweep3-a4-params_lr_1p5e-04_scale_1_slice_2_PRNGKey_1
+mattdavidow-sweep3-a4-params_lr_1p5e-04_scale_2_slice_1_PRNGKey_1
+mattdavidow-sweep3-a4-params_lr_1p5e-04_scale_2_slice_2_PRNGKey_1

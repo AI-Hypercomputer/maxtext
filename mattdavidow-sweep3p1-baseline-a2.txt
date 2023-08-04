@@ -1,0 +1,3 @@
+mattdavidow-sweep3p1-bf16-a1-params_PRNGKey_1
+mattdavidow-sweep3p1-bf16-a1-params_PRNGKey_2
+mattdavidow-sweep3p1-bf16-a1-params_PRNGKey_3
