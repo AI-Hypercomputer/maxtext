@@ -19,6 +19,7 @@
 
 from aqt.jax.v2 import aqt_dot_general as aqt
 from aqt.jax.v2 import config as aqt_config
+from aqt.jax.v2.google import maxtext_sweeps
 
 import dataclasses
 import functools
@@ -1069,7 +1070,7 @@ class Decoder(nn.Module):
           split_rngs={
               'params': True,
               'dropout': cfg.enable_dropout,
-              'aqt': cfg.use_int8_training
+              'aqt': cfg.int8_training
           },
           in_axes=(nn.broadcast, nn.broadcast, nn.broadcast,
                    nn.broadcast),
