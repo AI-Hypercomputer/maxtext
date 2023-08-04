@@ -1,0 +1,470 @@
+starting loops
+mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_1
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-east5-b
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_1
+Extra CQR args      (--CQR_EXTRA_ARGS)  = None
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/sweep3p1-individual.sh 0.0004 1 1 true true true 1 mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_1
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_1...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_1_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_1_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_1%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_1?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_1
+
+mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_2
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-east5-b
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_2
+Extra CQR args      (--CQR_EXTRA_ARGS)  = None
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/sweep3p1-individual.sh 0.0004 1 1 true true true 2 mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_2
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_2...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_2_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_2_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_2%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_2?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_2
+
+mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_3
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-east5-b
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_3
+Extra CQR args      (--CQR_EXTRA_ARGS)  = None
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/sweep3p1-individual.sh 0.0004 1 1 true true true 3 mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_3
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_3...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_3_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_3_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_3%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_3?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-sweep3p1-a1-params_fwd_true_bwd_true_PRNGKey_3
+
+mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_1
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-east5-b
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_1
+Extra CQR args      (--CQR_EXTRA_ARGS)  = None
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/sweep3p1-individual.sh 0.0004 1 1 true true false 1 mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_1
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_1...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_1_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_1_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_1%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_1?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_1
+
+mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_2
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-east5-b
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_2
+Extra CQR args      (--CQR_EXTRA_ARGS)  = None
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/sweep3p1-individual.sh 0.0004 1 1 true true false 2 mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_2
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_2...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_2_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_2_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_2%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_2?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_2
+
+mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_3
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-east5-b
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_3
+Extra CQR args      (--CQR_EXTRA_ARGS)  = None
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/sweep3p1-individual.sh 0.0004 1 1 true true false 3 mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_3
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_3...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_3_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_3_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_3%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_3?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-sweep3p1-a1-params_fwd_true_bwd_false_PRNGKey_3
+
+mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_1
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-east5-b
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_1
+Extra CQR args      (--CQR_EXTRA_ARGS)  = None
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/sweep3p1-individual.sh 0.0004 1 1 true false true 1 mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_1
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_1...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_1_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_1_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_1%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_1?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_1
+
+mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_2
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-east5-b
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_2
+Extra CQR args      (--CQR_EXTRA_ARGS)  = None
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/sweep3p1-individual.sh 0.0004 1 1 true false true 2 mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_2
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_2...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_2_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_2_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_2%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_2?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_2
+
+mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_3
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-east5-b
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_3
+Extra CQR args      (--CQR_EXTRA_ARGS)  = None
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/sweep3p1-individual.sh 0.0004 1 1 true false true 3 mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_3
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_3...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_3_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_3_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_3%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_3?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-sweep3p1-a1-params_fwd_false_bwd_true_PRNGKey_3
+
+mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_1
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-east5-b
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_1
+Extra CQR args      (--CQR_EXTRA_ARGS)  = None
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/sweep3p1-individual.sh 0.0004 1 1 true false false 1 mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_1
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_1...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_1_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_1_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_1%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_1?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_1
+
+mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_2
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-east5-b
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_2
+Extra CQR args      (--CQR_EXTRA_ARGS)  = None
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/sweep3p1-individual.sh 0.0004 1 1 true false false 2 mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_2
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_2...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_2_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_2_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_2%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_2?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_2
+
+mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_3
+
+Starting multihost_job...
+
+Running multihost_job with the following configuration:
+Project             (--PROJECT)         = tpu-prod-env-multipod
+Zone                (--ZONE)            = us-east5-b
+TPU type            (--TPU_TYPE)        = v5litepod-256
+TPU runtime version (--VERSION)         = v2-alpha-tpuv5-lite
+Number of slices    (--NUM_SLICES)      = 1
+Script dir          (--SCRIPT_DIR)      = /home/mattdavidow/maxtext
+Bucket name         (--BUCKET_NAME)     = mattdavidow-maxtext-br
+Bucket dir          (--BUCKET_DIR)      = 
+Run name            (--RUN_NAME)        = mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_3
+Extra CQR args      (--CQR_EXTRA_ARGS)  = None
+Command to run      (--COMMAND)         = bash setup.sh && bash MaxText/configs/sweep3p1-individual.sh 0.0004 1 1 true false false 3 mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_3
+
+Moving /home/mattdavidow/maxtext to gs://mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_3...
+Move successful!
+
+Running CQR command...
+CQR command received! TPUs are being created.
+
+------------------------------------ 
+
+multihost_job finished running, TPUs are firing up now to run your job remotely.
+
+Your job is being logged, follow it here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_3_log%22%2529;?project=tpu-prod-env-multipod
+
+To see the output of a single host, you may edit the slice and worker number in the log_file_path property here:
+https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_3_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2Fmattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_3%2Fmain_command_log_slice_0_worker_0%22;?project=tpu-prod-env-multipod
+
+When your job is finished, the main command log is in the GCS bucket here:
+https://console.cloud.google.com/storage/browser/mattdavidow-maxtext-br/mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_3?project=tpu-prod-env-multipod
+
+View the status of the created TPUs via: 
+gcloud alpha compute tpus queued-resources list --filter=mattdavidow-sweep3p1-a1-params_fwd_false_bwd_false_PRNGKey_3
+
+finished loops
