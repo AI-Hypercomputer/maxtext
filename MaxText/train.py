@@ -190,59 +190,6 @@ def train_step(model, config, state, data, dropout_rng):
 
   return new_state, metrics, rng2
 
-
-def predict_step(inputs,
-                 state,
-                 rngkey,
-                 model,
-                 config):
-  """Predict language model on a batch."""
-  # NOTE: why are we adding inputs.shape[2:] here?  it's almost always empty??
-  target_shape = (inputs.shape[0], config.max_predict_length) + inputs.shape[2:]
-
-  initial_variables = model.init(
-      jax.random.PRNGKey(0),
-      jnp.ones(target_shape, config.dtype),
-      None,
-      enable_dropout=config.enable_dropout,
-      decode=True,
-      max_decode_length=config.max_predict_length
-  )
-  cache = initial_variables["cache"]
-
-  def tokens_ids_to_logits(flat_ids, flat_cache):
-    """Token slice to logits from decoder model."""
-    # --> [batch * beam, 1, vocab]
-    flat_logits, new_vars = model.apply(
-        {
-            "params": state.params,
-            "cache": flat_cache
-        },
-        flat_ids,
-        None,
-        enable_dropout=config.enable_dropout,
-        decode=True,
-        max_decode_length=config.max_predict_length,
-        mutable=["cache"])
-    new_flat_cache = new_vars["cache"]
-    # Remove singleton sequence-length dimension:
-    # [batch, 1, vocab] --> [batch, vocab]
-    flat_logits = flat_logits.squeeze(axis=1)
-    return flat_logits, new_flat_cache
-
-  # Using the above-defined single-step decoder function, run a
-  # search over possible sequences given input encoding.
-  seqs = temperature_sampler.temperature_sample(
-      inputs,
-      cache,
-      tokens_ids_to_logits,
-      rngkey,
-      temperature=config.sampling_temperature,
-      topk=config.sampling_top_k,
-      eos_token=config.eos_id)
-
-  return seqs
-
 def train_loop(config, state=None):
   """Main Training loop.
 
@@ -259,7 +206,7 @@ def train_loop(config, state=None):
                                                                      config.enable_checkpointing,
                                                                      config.async_checkpointing)
   # Initial PRNG Keys
-  init_rng, nextrng = random.split(random.PRNGKey(0), 2)
+  init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
 
   # Model and Optimizer definition
   model = Transformer(config)
