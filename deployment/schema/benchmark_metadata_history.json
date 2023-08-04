@@ -1,0 +1,20 @@
+[
+  {
+    "name": "job_uuid",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "The ID of an entry in the table."
+  },
+  {
+    "name": "metadata_key",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "The key of metadata."
+  },
+  {
+    "name": "metadata_value",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "The value of metadata."
+  }
+]

@@ -49,7 +49,7 @@ Then, update `bucket` name to yours in the `backend "gcs"` block of `cloud_compo
 
 ## Step 4 - Create Cloud Composer environment
 
-Under this `deployment` directory, run commands below to create a new Cloud Composer environment with your custom service account.
+Under this `deployment` directory, run commands below to create a new Cloud Composer environment and BigQuery database with your custom service account.
 
 ```
 terraform init
