@@ -21,6 +21,8 @@
 # See github.com/google/maxtext/issues/20 for more
 import jax
 import os
+
+jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 print(f"Found {jax.device_count()} devices.")
 
