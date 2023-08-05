@@ -1,0 +1,9 @@
+mattdavidow-canary-a5-sweep4-lr_10_scale_1_slice_1_PRNGKey_1
+mattdavidow-canary-a5-sweep4-lr_10_scale_1_slice_1_PRNGKey_1
+mattdavidow-canary-a5-sweep4-lr_10_scale_1_slice_2_PRNGKey_1
+mattdavidow-canary-a5-sweep4-lr_10_scale_2_slice_1_PRNGKey_1
+mattdavidow-canary-a5-sweep4-lr_10_scale_2_slice_2_PRNGKey_1
+mattdavidow-canary-a5-sweep4-lr_15_scale_1_slice_1_PRNGKey_1
+mattdavidow-canary-a5-sweep4-lr_15_scale_1_slice_2_PRNGKey_1
+mattdavidow-canary-a5-sweep4-lr_15_scale_2_slice_1_PRNGKey_1
+mattdavidow-canary-a5-sweep4-lr_15_scale_2_slice_2_PRNGKey_1

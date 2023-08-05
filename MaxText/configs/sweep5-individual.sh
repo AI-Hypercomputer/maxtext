@@ -2,10 +2,11 @@
 set -e
 
 lr=$1
-scale=$2
-num_slice=$3
-init_key=$4
-run_name=$5
+int8=$2
+scale=$3
+num_slice=$4
+init_key=$5
+run_name=$6
 
 
 base_steps=20000 # number of Chinchilla steps for 1B model on 1 pod for per_device_batch of 4 token length 1k
@@ -16,11 +17,11 @@ export LIBTPU_INIT_ARGS="--xla_tpu_spmd_rng_bit_generator_unsafe=true --xla_tpu_
 
 
 command="python3 MaxText/train.py MaxText/configs/base.yml \
-    steps=${steps} per_device_batch_size=4 learning_rate=${lr} enable_profiler=false enable_checkpointing=false \
-    enable_dropout=false run_name=${run_name}\
+    steps=${steps} per_device_batch_size=4 learning_rate=${lr} enable_profiler=false enable_checkpointing=true \
+    save_period=600 enable_dropout=false run_name=${run_name}\
     base_output_directory=gs://maxtext-experiments-multipod\
     dataset_path=gs://max-datasets-rogue\
-    use_int8_training=False enable_checkpointing=False metrics_file=metrics.txt\
+    use_int8_training=${int8}\
     remat_policy=full init_weights_seed=${init_key}\
     global_parameter_scale=${scale}"
 

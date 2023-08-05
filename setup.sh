@@ -18,20 +18,29 @@
 # bash setup.sh MODE={stable,nightly,head,libtpu-only} LIBTPU_GCS_PATH={gcs_path_to_custom_libtpu}
 
 # You need to specificy a MODE, default value stable. 
-# For all MODEs other than stable, you have the option to provide a LIBTPU_GCS_PATH that points to a libtpu.so provided to you by Google. 
+# You have the option to provide a LIBTPU_GCS_PATH that points to a libtpu.so provided to you by Google. 
 # In head MODE and libtpu-only MODE, the LIBTPU_GCS_PATH is mandatory.
+# For MODE=stable you may additionally specify JAX_VERSION, e.g. JAX_VERSION==0.4.13
 
 
 # Enable "exit immediately if any command fails" option
-set -e
+set +e
 pip3 cache purge
+
+set -e
+
 # Set environment variables
 for ARGUMENT in "$@"; do
     IFS='=' read -r KEY VALUE <<< "$ARGUMENT"
     export "$KEY"="$VALUE"
 done
 
-libtpu_path="/lib/libtpu.so"
+if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE) ]]; then
+     echo -e "\n\nError: You can only specify a JAX_VERSION with stable mode.\n\n"
+     exit 1
+fi
+
+libtpu_path="$HOME/custom_libtpu/libtpu.so"
 
 if [[ "$MODE" == "libtpu-only" ]]; then
     # Only update custom libtpu.
@@ -39,9 +48,9 @@ if [[ "$MODE" == "libtpu-only" ]]; then
         # Install custom libtpu
         echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
         # Install required dependency
-        sudo pip3 install -U crcmod
+        pip3 install -U crcmod
         # Copy libtpu.so from GCS path
-        sudo gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+        gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
         exit 0
     else
         echo -e "\n\nError: You must provide a custom libtpu for libtpu-only mode.\n\n"
@@ -69,17 +78,26 @@ fi
 
 # Delete custom libtpu if it exists
 if [ -e "$libtpu_path" ]; then
-    sudo rm "$libtpu_path"
+    rm "$libtpu_path"
 fi
 
 if [[ "$MODE" == "stable" || ! -v MODE ]]; then
 # Stable mode
-    if [[ -n "$LIBTPU_GCS_PATH" ]]; then 
-        echo -e "\n\nError: You can't use stable mode with custom libtpu.\n\n"
-        exit 1
+    if [[ -n "$JAX_VERSION" ]]; then
+        echo "Installing stable jax, jaxlib, libtpu version ${JAX_VERSION}"
+        pip3 install --no-cache-dir jax[tpu]==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
     else
         echo "Installing stable jax, jaxlib, libtpu"
-        pip3 install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+        pip3 install --no-cache-dir jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+    fi
+
+    if [[ -n "$LIBTPU_GCS_PATH" ]]; then 
+        # Install custom libtpu
+        echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
+        # Install required dependency
+        pip3 install -U crcmod
+        # Copy libtpu.so from GCS path
+        gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
     fi
 elif [[ $MODE == "nightly" ]]; then 
 # Nightly mode
@@ -93,9 +111,9 @@ elif [[ $MODE == "nightly" ]]; then
         # Install custom libtpu
         echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
         # Install required dependency
-        sudo pip3 install -U crcmod
+        pip3 install -U crcmod
         # Copy libtpu.so from GCS path
-        sudo gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+        gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
     else
         # Install libtpu-nightly
         echo "Installing libtpu-nightly"
@@ -107,9 +125,9 @@ elif [[ $MODE == "head" ]]; then
         # Install custom libtpu
         echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
         # Install required dependency
-        sudo pip3 install -U crcmod
+        pip3 install -U crcmod
         # Copy libtpu.so from GCS path
-        sudo gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+        gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
     else
         echo -e "\n\nError: You must provide a custom libtpu for head mode.\n\n"
         exit 1
@@ -133,4 +151,4 @@ else
 fi
 
 # Install dependencies from requirements.txt
-cd $run_name_folder_path && pip3 install -r requirements.txt
+cd $run_name_folder_path && pip3 install --no-cache-dir -r requirements.txt
