@@ -25,6 +25,7 @@
 
 # Enable "exit immediately if any command fails" option
 set -e
+pip cache purge
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -82,10 +83,10 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
 # Stable mode
     if [[ -n "$JAX_VERSION" ]]; then
         echo "Installing stable jax, jaxlib, libtpu version ${JAX_VERSION}"
-        pip3 install jax[tpu]==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+        pip3 install --no-cache-dir jax[tpu]==${JAX_VERSION}  -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
     else
         echo "Installing stable jax, jaxlib, libtpu"
-        pip3 install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+        pip3 install --no-cache-dir jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
     fi
 
     if [[ -n "$LIBTPU_GCS_PATH" ]]; then 
@@ -148,4 +149,4 @@ else
 fi
 
 # Install dependencies from requirements.txt
-cd $run_name_folder_path && pip3 install -r requirements.txt
+cd $run_name_folder_path && pip3 install --no-cache-dir -r requirements.txt
