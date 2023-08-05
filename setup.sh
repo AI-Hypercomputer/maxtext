@@ -99,6 +99,7 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
         # Copy libtpu.so from GCS path
         gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
     fi
+    echo "Finished installing Jax!"
 elif [[ $MODE == "nightly" ]]; then 
 # Nightly mode
     echo "Installing jax-head, jaxlib-nightly"
@@ -150,5 +151,10 @@ else
     exit 1
 fi
 
+echo "Installing requirements.txt"
+set +e
+pip3 cache purge
+
+set -e
 # Install dependencies from requirements.txt
 cd $run_name_folder_path && pip3 install --no-cache-dir -r requirements.txt
