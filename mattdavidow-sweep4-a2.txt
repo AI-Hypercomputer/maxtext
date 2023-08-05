@@ -14,3 +14,15 @@ mattdavidow-sweep4-a2-lr30_size1_pods1_key1
 mattdavidow-sweep4-a2-lr30_size1_pods2_key1
 mattdavidow-sweep4-a2-lr30_size2_pods1_key1
 mattdavidow-sweep4-a2-lr30_size2_pods2_key1
+mattdavidow-sweep4-a2-lr40_size1_pods1_key1
+mattdavidow-sweep4-a2-lr40_size1_pods2_key1
+mattdavidow-sweep4-a2-lr40_size2_pods1_key1
+mattdavidow-sweep4-a2-lr40_size2_pods2_key1
+mattdavidow-sweep4-a2-lr60_size1_pods1_key1
+mattdavidow-sweep4-a2-lr60_size1_pods2_key1
+mattdavidow-sweep4-a2-lr60_size2_pods1_key1
+mattdavidow-sweep4-a2-lr60_size2_pods2_key1
+mattdavidow-sweep4-a2-lr80_size1_pods1_key1
+mattdavidow-sweep4-a2-lr80_size1_pods2_key1
+mattdavidow-sweep4-a2-lr80_size2_pods1_key1
+mattdavidow-sweep4-a2-lr80_size2_pods2_key1
