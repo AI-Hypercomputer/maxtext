@@ -161,8 +161,8 @@ mkdir -p {args.RUN_NAME}
 cd {args.RUN_NAME}
 {get_env_command_str(args.NUM_SLICES)}
 {setup_ops_str(args.RUN_NAME, log_name)}
-sudo python3 -m virtualenv venv
-source venv/bin/activate
+sudo python3 -m virtualenv {args.RUN_NAME}-venv
+source {args.RUN_NAME}-venv/bin/activate
 ulimit -n 100000
 (({download_from_gcs(zip_gcs_path)}
 tar xzf {zip_name}
