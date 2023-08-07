@@ -99,12 +99,19 @@ resource "google_composer_environment" "example_environment" {
   config {
     software_config {
       image_version = "composer-2.3.3-airflow-2.5.1"
+      airflow_config_overrides = {
+        core-allowed_deserialization_classes = ".*"
+      }
       pypi_packages = {
         apache-airflow-providers-sendgrid = ""
         jsonlines                         = ""
         fabric                            = ""
         paramiko                          = ""
         cryptography                      = ""
+      }
+      env_variables = {
+        composer_env    = each.value.environment_name
+        composer_region = var.project_config.project_region
       }
     }
 

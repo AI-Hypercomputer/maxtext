@@ -12,24 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Config file for Google Cloud Project (GCP)."""
+"""A DAG to run all NPI benchmark with the latest JAX version."""
 
-import dataclasses
-from typing import Optional
+import datetime
+from airflow import models
+from configs.benchmark import solutionsTeam_jax_npi_config as jax_npi_config
 
-
-@dataclasses.dataclass
-class GCPConfig:
-  """This is a class to set up configs of GCP.
-
-  Attributes:
-    project_name: The name of a project to run a test job.
-    project_number: The number of a project to run a test job.
-    zone: The zone to run a test job.
-    database_name: The name of database for metrics.
-  """
-
-  project_name: str
-  project_number: str
-  zone: str
-  database_name: Optional[str] = None
+with models.DAG(
+    dag_id="jax_latest_npi",
+    schedule=None,
+    tags=["jax", "latest", "npi"],
+    start_date=datetime.datetime(2023, 8, 6),
+    catchup=False,
+) as dag:
+  jax_vit_v4_8 = jax_npi_config.get_jax_vit_config(8, 60).run()

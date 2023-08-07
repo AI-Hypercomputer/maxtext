@@ -20,9 +20,14 @@ import datetime
 import hashlib
 import re
 from typing import Dict, Iterable, List, Optional
+import uuid
 from absl import logging
-from apis import test_config
-from apis.benchmark import metric_config
+from airflow.decorators import task
+from airflow.models import Variable
+from airflow.operators.python import get_current_context
+from apis import gcp_config, test_config
+from apis import metric_config
+from implementations.utils import composer
 from implementations.utils.benchmark import bigquery
 import jsonlines
 import numpy as np
@@ -154,9 +159,7 @@ def process_json_lines(
   with jsonlines.open(file_location) as reader:
     index = 0
     for object in reader:
-      uuid = hashlib.sha256(
-          str(base_id + str(index)).encode("utf-8")
-      ).hexdigest()
+      uuid = generate_row_uuid(base_id, index)
       index += 1
       raw_metrics = object["metrics"]
       metadata = object["dimensions"]
@@ -200,7 +203,7 @@ def process_tensorboard_summary(
     A list of MetricHistoryRow for a test run, and
     a list of MetadataHistoryRow ofr a test run in a test job.
   """
-  uuid = hashlib.sha256(str(base_id + "0").encode("utf-8")).hexdigest()
+  uuid = generate_row_uuid(base_id, 0)
   file_location = summary_config.file_location
   aggregation_strategy = summary_config.aggregation_strategy
   include_tag_patterns = summary_config.include_tag_patterns
@@ -241,19 +244,112 @@ def process_profile(
   raise NotImplementedError
 
 
-# TODO(ranran): doc string & integrate test with Airflow post_process:
-# 1) handle job status
-# 2) get unique tpu_name as base_id instead of benchmark_id to generate uuid
-# 3) only insert metrics from Airflow scheduled tests, this info can be obtained from {{run_id}}
-# 4) handle default metadata from Airflow
-# 5) handle Airflow retry to avoid duplicate records in tables
-def process_metrics(
+def encode_url(url: str) -> str:
+  """Replace characters with % followed by two hexadecimal digits.
+
+  Args:
+    url: The url to be encoded.
+
+  Returns:
+    An encoded url.
+  """
+  return str(url).replace(":", "%3A").replace("+", "%2B")
+
+
+def add_airflow_metadata(
+    base_id: str,
     project_name: str,
-    database_name: str,
+    metadata: List[List[bigquery.MetricHistoryRow]],
+) -> List[List[bigquery.MetricHistoryRow]]:
+  """Add airflow metadata: run_id, prev_start_date_success, and airflow_dag_run_link.
+
+  Args:
+    base_id: The base id to generate uuid.
+    metadata: The data to append airflow metadata.
+    configs: The GCP configs to get composer metadata.
+
+  Returns:
+    The data with airflow metadata.
+  """
+  context = get_current_context()
+  run_id = context["run_id"]
+  prev_start_date_success = str(context["prev_start_date_success"])
+  dag_run = context["dag_run"]
+  dag_id = dag_run.dag_id
+  task_id = context["task"].task_id
+  dag_run_id = encode_url(run_id)
+  airflow_link = composer.get_airflow_url(
+      project_name,
+      Variable.get("composer_region"),
+      Variable.get("composer_env"),
+  )
+  airflow_dag_run_link = f"{airflow_link}/dags/{dag_id}/grid?dag_run_id={dag_run_id}&task_id={task_id}"
+  logging.info(f"airflow_dag_run_link is {airflow_dag_run_link}")
+
+  # append airflow metadata for each test run.
+  for index in range(len(metadata)):
+    uuid = generate_row_uuid(base_id, index)
+    airflow_meta = []
+
+    airflow_meta.append(
+        bigquery.MetadataHistoryRow(
+            job_uuid=uuid, metadata_key="run_id", metadata_value=run_id
+        )
+    )
+    if context["prev_start_date_success"]:
+      airflow_meta.append(
+          bigquery.MetadataHistoryRow(
+              job_uuid=uuid,
+              metadata_key="prev_start_date_success",
+              metadata_value=prev_start_date_success,
+          )
+      )
+    airflow_meta.append(
+        bigquery.MetadataHistoryRow(
+            job_uuid=uuid,
+            metadata_key="airflow_dag_run_link",
+            metadata_value=airflow_dag_run_link,
+        )
+    )
+
+    metadata[index].extend(airflow_meta)
+  return metadata
+
+
+def generate_row_uuid(base_id: str, index: int) -> str:
+  """Generate uuid for entry.
+
+  Args:
+    base_id: The process id generated once per post process task group.
+    index: The index of test runs.
+
+  Returns:
+    A uuid for table entry.
+  """
+  return hashlib.sha256(str(base_id + str(index)).encode("utf-8")).hexdigest()
+
+
+@task
+def generate_process_id() -> str:
+  """Generate a process id that will be a base id for uuid of test runs.
+
+  Returns:
+    A random uuid.
+  """
+  return str(uuid.uuid4())
+
+
+# TODO(ranran):
+# 1) handle job status
+# 2) handle Airflow retry to avoid duplicate records in tables
+@task
+def process_metrics(
+    base_id: str,
     task_test_config: test_config.TestConfig[test_config.Tpu],
     task_metric_config: metric_config.MetricConfig,
+    task_gcp_config: gcp_config.GCPConfig,
 ) -> None:
-  base_id = task_test_config.benchmark_id
+  benchmark_id = task_test_config.benchmark_id
   current_time = datetime.datetime.now()
   has_profile = False
   metric_history_rows_list = []
@@ -280,6 +376,12 @@ def process_metrics(
       )
       profile_history_rows_list.append(profile_history_rows)
 
+  # add default airflow metadata
+  metadata_history_rows_list = add_airflow_metadata(
+      base_id, task_gcp_config.project_name, metadata_history_rows_list
+  )
+
+  # append profile metrics to metric_history_rows_list if any
   if has_profile:
     if len(metric_history_rows_list) != len(profile_history_rows_list):
       logging.error(
@@ -292,15 +394,17 @@ def process_metrics(
         metric_history_rows_list[index].extend(profile_history_rows_list[index])
 
   benchmark_rows = []
-  bigquery_metric = bigquery.BigQueryMetricClient(project_name, database_name)
+  bigquery_metric = bigquery.BigQueryMetricClient(
+      task_gcp_config.project_name, task_gcp_config.database_name
+  )
+
   for index in range(len(metric_history_rows_list)):
-    uuid = hashlib.sha256(base_id + str(index)).hexdigest()
     job_history_row = bigquery.JobHistoryRow(
-        uuid=uuid,
+        uuid=generate_row_uuid(base_id, index),
         timestamp=current_time,
-        owner="",
-        job_name=base_id,
-        job_status="",
+        owner=task_test_config.task_owner,
+        job_name=benchmark_id,
+        job_status=bigquery.JobStatus.SUCCESS.value,
     )
     benchmark_row = bigquery.BenchmarkTestRun(
         job_history_row,
@@ -308,4 +412,16 @@ def process_metrics(
         metadata_history_rows_list[index],
     )
     benchmark_rows.append(benchmark_row)
+
+  print("Benchmark rows:", benchmark_rows)
+
+  # if it's a manual run, no entries are inserted into tables
+  context = get_current_context()
+  run_id = context["run_id"]
+  if run_id.startswith("manual"):
+    logging.info(
+        "This is a manual run, and no entries are inserted into tables."
+    )
+    return
+
   bigquery_metric.insert(benchmark_rows)

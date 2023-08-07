@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Task file for a test job."""
+"""Base task file for a test job."""
 
 import abc
 import dataclasses
@@ -20,10 +20,10 @@ import datetime
 from typing import Tuple
 import airflow
 from airflow.models.taskmixin import DAGNode
-from airflow.operators import empty
 from airflow.utils.task_group import TaskGroup
-from apis import gcp_config, test_config
+from apis import gcp_config, metric_config, test_config
 from implementations.utils import ssh, tpu
+from implementations.utils.benchmark import metric
 
 
 class BaseTask(abc.ABC):
@@ -40,19 +40,19 @@ class BaseTask(abc.ABC):
 
 
 @dataclasses.dataclass
-class TPUTask(BaseTask):
+class TpuTask(BaseTask):
   """This is a class to set up tasks for TPU.
 
   Attributes:
     task_test_config: Test configs to run on this TPU.
     task_gcp_config: Runtime TPU creation parameters.
-    tpu_create_timeout: Timeout for TPU to become ready after creating QR.
+    task_metric_config: Metric configs to process metrics.
   """
 
   # TODO(wcromar): make these attributes less verbose
   task_test_config: test_config.TestConfig[test_config.Tpu]
   task_gcp_config: gcp_config.GCPConfig
-  tpu_create_timeout: datetime.timedelta = datetime.timedelta(minutes=60)
+  task_metric_config: metric_config.MetricConfig
 
   def run(self) -> DAGNode:
     """Run a test job.
@@ -61,13 +61,15 @@ class TPUTask(BaseTask):
       A task group with the following tasks chained: provision, run_model,
       post_process and clean_up.
     """
-    with TaskGroup(group_id=self.task_test_config.benchmark_id, prefix_group_id=True) as tg:
+    with TaskGroup(
+        group_id=self.task_test_config.benchmark_id, prefix_group_id=True
+    ) as tg:
       provision, tpu_name, ssh_keys = self.provision()
-      run_model = self.run_model(tpu_name, ssh_keys)
-      post_process = self.post_process(tpu_name, ssh_keys)
+      run_script = self.run_model(tpu_name, ssh_keys)
+      post_process = self.post_process()
       clean_up = self.clean_up(tpu_name)
 
-      provision >> run_model >> post_process >> clean_up
+      provision >> run_script >> post_process >> clean_up
 
     return tg
 
@@ -90,7 +92,7 @@ class TPUTask(BaseTask):
         ssh_keys = ssh.generate_ssh_keys()
 
       queued_resource = tpu.create_qr.override(
-          execution_timeout=self.tpu_create_timeout,
+          execution_timeout=datetime.timedelta(minutes=60)
       )(
           self.task_test_config.accelerator,
           tpu_name,
@@ -98,7 +100,7 @@ class TPUTask(BaseTask):
           self.task_gcp_config.project_number,
           ssh_keys,
       )
-      queued_resource >> tpu.ssh_tpu.override(task_id="setup")(
+      set_up = tpu.ssh_tpu.override(task_id="set_up")(
           tpu_name,
           self.task_gcp_config.zone,
           self.task_gcp_config.project_name,
@@ -106,6 +108,8 @@ class TPUTask(BaseTask):
           self.task_test_config.setup_script.split("\n"),
           ssh_keys,
       )
+
+      queued_resource >> set_up
 
     return group, tpu_name, ssh_keys
 
@@ -139,31 +143,24 @@ class TPUTask(BaseTask):
         ssh_keys,
     )
 
-  # TODO(ranran): Implement logic for post_process task
-  def post_process(
-      self,
-      tpu_name: airflow.XComArg,
-      ssh_keys: airflow.XComArg,
-  ) -> DAGNode:
-    """Not implemented.
-
-    Args:
-      tpu_name: XCom value for the TPU name (string).
-      ssh_keys: And XCom value for the TPU's SSH keys (SshKeys).
+  def post_process(self) -> DAGNode:
+    """Process metrics and metadata, and insert them into BigQuery tables.
 
     Returns:
-      A placeholder DAG node.
+      A DAG node that executes the post process.
     """
-    return tpu.ssh_tpu.override(
-        task_id="postprocess",
-    )(
-        tpu_name,
-        self.task_gcp_config.zone,
-        self.task_gcp_config.project_name,
-        ["echo postprocess not implemented"],
-        ssh_keys,
-    )
-    return empty.EmptyOperator(task_id=f"post_process")
+    with TaskGroup(group_id="post_process") as group:
+      process_id = metric.generate_process_id.override(retries=1)()
+      process_metrics = metric.process_metrics(
+          process_id,
+          self.task_test_config,
+          self.task_metric_config,
+          self.task_gcp_config,
+      )
+
+      process_id >> process_metrics
+
+      return group
 
   def clean_up(self, tpu_name: airflow.XComArg) -> DAGNode:
     """Clean up TPU resources created by `provision`.
@@ -193,7 +190,7 @@ class TPUTask(BaseTask):
 
 
 @dataclasses.dataclass
-class GPUTask(BaseTask):
+class GpuTask(BaseTask):
   """This is a class to set up tasks for GPU.
 
   Attributes:

@@ -14,13 +14,12 @@
 
 """Utilities to construct configs for solutionsTeam_jax_latest_supported DAG."""
 
-from apis import gcp_config, test_config
-from apis.xlml import task
+from apis import gcp_config, metric_config, task, test_config
 
 
 # TODO(ranran): This is an example to test QR creation & deletion funcitonality, and
 # remove after python-API is well-organized
-def get_jax_resnet_config(tpu_size: int, test_time_out: int) -> task.TPUTask:
+def get_jax_resnet_config(tpu_size: int, test_time_out: int) -> task.BaseTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name="tpu-prod-env-one-vm",
       project_number="630405687483",
@@ -59,4 +58,17 @@ def get_jax_resnet_config(tpu_size: int, test_time_out: int) -> task.TPUTask:
       time_out_in_min=test_time_out,
       task_owner="ranran",
   )
-  return task.TPUTask(job_test_config, job_gcp_config)
+
+  # TODO(ranran): verfiy if benchmark metric handling works for xlml tests
+  job_metric_config = metric_config.MetricConfig(
+      tensorboard_summary=metric_config.SummaryConfig(
+          file_location="",
+          aggregation_strategy=metric_config.AggregationStrategy.LAST,
+      )
+  )
+
+  return task.TpuTask(
+      task_test_config=job_test_config,
+      task_gcp_config=job_gcp_config,
+      task_metric_config=job_metric_config,
+  )
