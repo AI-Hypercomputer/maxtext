@@ -18,9 +18,9 @@ for ((lr_idx=0; lr_idx<$length_lr; lr_idx++)); do
     for scale in ${scale_array[@]}; do
         for num_slice in ${num_slice_array[@]}; do
             for key in ${key_array[@]}; do
-                run_name=mattdavidow-sweep4-a2-lr${lr_name}_size${scale}_pods${num_slice}_key${key}
+                run_name=mattdavidow-sweep4-a3-lr${lr_name}_size${scale}_pods${num_slice}_key${key}
                 echo ${run_name}
-                echo ${run_name} >> mattdavidow-sweep4-a2.txt
+                echo ${run_name} >> mattdavidow-sweep4-a3.txt
                 python3 multihost_job.py --BUCKET_NAME="mattdavidow-maxtext-br" --RUN_NAME=${run_name} --TPU_TYPE=v5litepod-256 --NUM_SLICES=${num_slice} --VERSION=v2-alpha-tpuv5-lite --COMMAND="bash setup.sh && bash MaxText/configs/sweep3-individual.sh ${lr} ${scale} ${num_slice} ${key} ${run_name}" --ZONE=us-east5-b      
             done
         done
