@@ -10,7 +10,8 @@ run_name=$6
 
 
 base_steps=20000 # number of Chinchilla steps for 1B model on 1 pod for per_device_batch of 4 token length 1k
-steps=$(($base_steps * $scale / $num_slice))
+#steps=$(($base_steps * $scale / $num_slice))
+steps=4201
 echo "Running for $steps steps to hit Chinchilla number of tokens"
 
 echo "GCS_RESOLVE_REFRESH_SECS=60" >> /etc/environment
