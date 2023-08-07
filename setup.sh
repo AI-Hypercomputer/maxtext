@@ -25,5 +25,5 @@ while [ $current_attempt -le $max_attempts ]; do
     fi
 done
 
-echo "All attempts failed. Exiting."
+echo "All attempts on single_setup failed. Exiting."
 exit 1
