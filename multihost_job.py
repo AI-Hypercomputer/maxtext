@@ -169,7 +169,6 @@ tar xzf {zip_name}
 {args.COMMAND}) 2>&1) >> {log_name}
 (echo "{finish_status_str()}") >> {log_name}
 gsutil cp {log_name} "{bucket_path}/"
-sleep 600
 (({create_kill_command_str()}) 2>&1 ) >> {log_name}"""
 
   with open(startup_script_file, "w", encoding="utf-8") as f:
@@ -192,11 +191,15 @@ PROJECT=$(grep '^CONSUMER_PROJECT_ID' /tmp/tpu-env | cut -d "'" -f 2)"""
 def finish_status_str():
   # pylint: disable=line-too-long
   return """multihost_job finished main command on slice $SLICE_ID worker $WORKER_ID at $(date "+%Y-%m-%d %H:%M:%S") UTC with exit status $?.
-This worker will immediately send its logs to GCS, then wait 10 minutes before tearing down to allow other workers to gracefully tear down."""
+This worker will immediately send its logs to GCS."""
 
 def create_kill_command_str():
   # pylint: disable=line-too-long
-  return f"""gcloud alpha compute tpus queued-resources delete {args.RUN_NAME} --force --quiet --project={args.PROJECT} --zone={args.ZONE}"""
+  return f"""if [[ $SLICE_ID -eq 0 && $WORKER_ID -eq 0 ]]; then
+  echo "This worker (slice 0 worker 0) will wait 10 minutes before tearing down the job to allow other workers to gracefully exit."
+  sleep 600
+  gcloud alpha compute tpus queued-resources delete {args.RUN_NAME} --force --quiet --project={args.PROJECT} --zone={args.ZONE}
+  fi"""
 
 def download_from_gcs(zip_gcs_path):
   return f"""
