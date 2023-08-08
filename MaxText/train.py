@@ -148,6 +148,16 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = layer["activation_mean"][0]
       output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
 
+def gradient_clip(grads, config):
+  """ Clips the gradient by scaling it a maximum norm. """ 
+  raw_grad_norm = jnp.array(max_utils.l2norm_pytree(grads))
+  grad_norm_epsilon = 1.0e-8
+  grad_scale_factor = jnp.minimum(raw_grad_norm, config.gradient_clipping_threshold) / (raw_grad_norm + grad_norm_epsilon)
+  clipped_grads = jax.tree_map(lambda g: g * grad_scale_factor, grads)
+  clipped_grad_norm = raw_grad_norm * grad_scale_factor
+  return clipped_grads, clipped_grad_norm, raw_grad_norm
+
+
 def train_step(model, config, state, data, dropout_rng):
   """
 
@@ -184,9 +194,12 @@ def train_step(model, config, state, data, dropout_rng):
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), grads = grad_fn(state.params)
+  grads, grad_norm, raw_grad_norm = gradient_clip(grads, config)
   new_state = state.apply_gradients(grads=grads)
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
-             'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
+  metrics = {'scalar': {'learning/loss': loss, 'learning/applied_grad_norm' : grad_norm,
+    'learning/raw_grad_norm': raw_grad_norm,
+    'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
+
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
