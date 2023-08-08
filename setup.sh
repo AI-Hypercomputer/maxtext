@@ -20,7 +20,7 @@
 # You need to specificy a MODE, default value stable. 
 # You have the option to provide a LIBTPU_GCS_PATH that points to a libtpu.so provided to you by Google. 
 # In head MODE and libtpu-only MODE, the LIBTPU_GCS_PATH is mandatory.
-# For MODE=stable you may additionally specify JAX_VERSION, e.g. JAX_VERSION==0.4.13
+# For MODE=stable you may additionally specify JAX_VERSION, e.g. JAX_VERSION=0.4.13
 
 
 # Enable "exit immediately if any command fails" option
