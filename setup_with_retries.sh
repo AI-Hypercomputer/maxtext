@@ -13,11 +13,11 @@ while [ $current_attempt -le $max_attempts ]; do
         echo "Success for running setup on attempt $current_attempt!"
         exit 0
     else
-        echo "Failed to run setupsetup on attempt $current_attempt"
+        echo "Failed to run setup on attempt $current_attempt."
         ((current_attempt++))
         sleep 5  # Short delay before next attempt
     fi
 done
 
-echo "All attempts on setup failed. Exiting."
+echo "All attempts to run setup failed. Exiting."
 exit 1
