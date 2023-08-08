@@ -24,7 +24,7 @@ command="python3 MaxText/train.py MaxText/configs/base.yml \
     dataset_path=gs://max-datasets-rogue\
     use_int8_training=${int8}\
     remat_policy=full init_weights_seed=${init_key}\
-    global_parameter_scale=${scale}
+    global_parameter_scale=${scale}\
     gradient_clipping_threshold=${clipping}"
 
 echo "Starting run (${run_name}) with command: ${command}"

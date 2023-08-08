@@ -23,9 +23,10 @@ for ((int8_index=0; int8_index<$length_int8; int8_index++)); do
         for key in ${key_array[@]}; do
             run_name=mattdavidow-sweep-clipping-a1_int8${int8_name}_size${scale}_pods${num_slice}_clipping${clipping_theshold_name}_key${key}
             echo ${run_name}
-            echo ${run_name} >> mattdavidow-sweep-clipping-run-names.txt
+            #echo ${run_name} >> mattdavidow-sweep-clipping-run-names.txt
+            python3 multihost_job.py --BUCKET_NAME="mattdavidow-maxtext-br" --RUN_NAME=${run_name} --TPU_TYPE=v5litepod-256 --NUM_SLICES=${num_slice} --VERSION=v2-alpha-tpuv5-lite --COMMAND="bash setup.sh && bash MaxText/configs/sweep-clipping-individual.sh ${lr} ${int8} ${scale} ${num_slice} ${clipping_threshold} ${key} ${run_name}" --ZONE=us-east5-b
         done
     done
 done
                 
-python3 multihost_job.py --BUCKET_NAME="mattdavidow-maxtext-br" --RUN_NAME=${run_name} --TPU_TYPE=v5litepod-256 --NUM_SLICES=${num_slice} --VERSION=v2-alpha-tpuv5-lite --COMMAND="bash setup.sh && bash MaxText/configs/sweep-clipping-individual.sh ${lr} ${int8} ${scale} ${num_slice} ${clipping_threshold} ${key} ${run_name}" --ZONE=us-east5-b      
+      
