@@ -1,5 +1,7 @@
 """MaxText AQT sweeps configurations."""
 
+# pylint: skip-file
+
 import aqt.jax.v2.config as aqt_config
 
 
