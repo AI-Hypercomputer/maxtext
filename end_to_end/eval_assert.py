@@ -2,6 +2,7 @@
 from absl import app
 from typing import Sequence
 from math import isclose
+# pylint: disable=E0611
 from google.cloud import storage
 import json
 
