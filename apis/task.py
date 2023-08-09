@@ -17,8 +17,9 @@
 import abc
 import dataclasses
 import datetime
-from typing import Tuple
+from typing import Optional, Tuple
 import airflow
+from airflow.operators import empty
 from airflow.models.taskmixin import DAGNode
 from airflow.utils.task_group import TaskGroup
 from apis import gcp_config, metric_config, test_config
@@ -52,7 +53,8 @@ class TpuTask(BaseTask):
   # TODO(wcromar): make these attributes less verbose
   task_test_config: test_config.TestConfig[test_config.Tpu]
   task_gcp_config: gcp_config.GCPConfig
-  task_metric_config: metric_config.MetricConfig
+  tpu_create_timeout: datetime.timedelta = datetime.timedelta(minutes=60)
+  task_metric_config: Optional[metric_config.MetricConfig] = None
 
   def run(self) -> DAGNode:
     """Run a test job.
@@ -63,17 +65,17 @@ class TpuTask(BaseTask):
     """
     with TaskGroup(
         group_id=self.task_test_config.benchmark_id, prefix_group_id=True
-    ) as tg:
-      provision, tpu_name, ssh_keys = self.provision()
-      run_script = self.run_model(tpu_name, ssh_keys)
+    ) as group:
+      provision, tpu_name, queued_resource, ssh_keys = self.provision()
+      run_model = self.run_model(tpu_name, ssh_keys)
       post_process = self.post_process()
-      clean_up = self.clean_up(tpu_name)
+      clean_up = self.clean_up(queued_resource)
 
-      provision >> run_script >> post_process >> clean_up
+      provision >> run_model >> post_process >> clean_up
 
-    return tg
+    return group
 
-  def provision(self) -> Tuple[DAGNode, airflow.XComArg, airflow.XComArg]:
+  def provision(self) -> Tuple[DAGNode, airflow.XComArg, airflow.XComArg, airflow.XComArg]:
     """Provision a TPU accelerator via a Queued Resource.
 
     Generates a random TPU name and SSH keys, creates a Queued Resource, and
@@ -81,7 +83,8 @@ class TpuTask(BaseTask):
 
     Returns:
       A DAG node that will provision a TPU, an XCom value for the TPU name,
-        and an XCom value for the SSH keys.
+        an XCom value for the qualified queued resource name, and an XCom value
+        for the SSH keys.
 
     Raises:
       AirflowTaskTimeout: An error occurs when execution_timeout is breached.
@@ -91,16 +94,14 @@ class TpuTask(BaseTask):
         tpu_name = tpu.generate_tpu_name(self.task_test_config.benchmark_id)
         ssh_keys = ssh.generate_ssh_keys()
 
-      queued_resource = tpu.create_qr.override(
-          execution_timeout=datetime.timedelta(minutes=60)
-      )(
-          self.task_test_config.accelerator,
-          tpu_name,
-          self.task_gcp_config.zone,
-          self.task_gcp_config.project_number,
-          ssh_keys,
+      queued_resource_op, queued_resource_name = tpu.create_queued_resource(
+        tpu_name,
+        self.task_test_config.accelerator,
+        self.task_gcp_config,
+        ssh_keys,
+        self.tpu_create_timeout,
       )
-      set_up = tpu.ssh_tpu.override(task_id="set_up")(
+      queued_resource_op >> tpu.ssh_tpu.override(task_id="setup")(
           tpu_name,
           self.task_gcp_config.zone,
           self.task_gcp_config.project_name,
@@ -109,12 +110,11 @@ class TpuTask(BaseTask):
           ssh_keys,
       )
 
-      queued_resource >> set_up
-
-    return group, tpu_name, ssh_keys
+    return group, tpu_name, queued_resource_name, ssh_keys
 
   def run_model(
       self,
+      # TODO(wcromar): Accept queued resource name instead of TPU node name
       # TODO(wcromar): Is there a way to annotate the type of the XCom arg?
       tpu_name: airflow.XComArg,
       ssh_keys: airflow.XComArg,
@@ -149,21 +149,27 @@ class TpuTask(BaseTask):
     Returns:
       A DAG node that executes the post process.
     """
+    if not self.task_metric_config:
+      return empty.EmptyOperator(task_id="post_process")
+
     with TaskGroup(group_id="post_process") as group:
       process_id = metric.generate_process_id.override(retries=1)()
-      process_metrics = metric.process_metrics(
+      metric.process_metrics(
           process_id,
           self.task_test_config,
           self.task_metric_config,
           self.task_gcp_config,
       )
 
-      process_id >> process_metrics
-
       return group
 
-  def clean_up(self, tpu_name: airflow.XComArg) -> DAGNode:
+  def clean_up(
+      self, queued_resource: airflow.XComArg
+  ) -> DAGNode:
     """Clean up TPU resources created by `provision`.
+
+    Args:
+      queued_resource: an XCom value for the qualified QR name.
 
     Returns:
       A DAG node that deletes the queued resource and its owned nodes.
@@ -171,22 +177,7 @@ class TpuTask(BaseTask):
     Raises:
       AirflowTaskTimeout: An error occurs when execution_timeout is breached.
     """
-    with TaskGroup(group_id="clean_up") as group:
-      # TODO(wcromar): Implement cascading delete with error handling
-      delete_tpu = tpu.delete_tpu(
-          tpu_name,
-          self.task_gcp_config.zone,
-          self.task_gcp_config.project_number,
-      )
-      delete_qr = tpu.delete_qr(
-          tpu_name,
-          self.task_gcp_config.zone,
-          self.task_gcp_config.project_number,
-      )
-
-      delete_tpu >> delete_qr
-
-    return group
+    return tpu.delete_queued_resource.override(group_id="clean_up")(queued_resource)
 
 
 @dataclasses.dataclass

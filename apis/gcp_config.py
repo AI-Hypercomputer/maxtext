@@ -24,12 +24,10 @@ class GCPConfig:
 
   Attributes:
     project_name: The name of a project to run a test job.
-    project_number: The number of a project to run a test job.
     zone: The zone to run a test job.
     database_name: The name of database for metrics.
   """
 
   project_name: str
-  project_number: str
   zone: str
   database_name: Optional[str] = None

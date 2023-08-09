@@ -12,243 +12,198 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Utilities to integrate with TPU.
-
-TODO(ranran): update REST request to client lib.
-"""
+"""Utilities to create, delete, and SSH with TPUs."""
 
 import datetime
-import functools
 import io
 import os
-import time
-from typing import Any, Iterable, List, Mapping
+from typing import Iterable, Optional, Tuple
 import uuid
+
 from absl import logging
-from airflow.decorators import task
+import airflow
+from airflow.decorators import task, task_group
+from airflow.utils.task_group import TaskGroup
 import fabric
+import google.api_core.exceptions
 import google.auth
-import google.auth.transport.requests
+import google.cloud.tpu_v2alpha1 as tpu_api
+import google.longrunning.operations_pb2 as operations
 import paramiko
-import requests
-from apis import test_config
+
+from apis import gcp_config, test_config
 from implementations.utils import ssh
 
-
-_TPU_BASE_URL = "https://tpu.googleapis.com/v2alpha1/"
 
 @task
 def generate_tpu_name(base_tpu_name: str) -> str:
     return f'{base_tpu_name}-{str(uuid.uuid4())}'
 
-def get_headers() -> Mapping[str, str]:
-  """Get request headers.
+def create_queued_resource(tpu_name: airflow.XComArg, accelerator: test_config.Tpu, gcp: gcp_config.GCPConfig, ssh_keys: airflow.XComArg, timeout: datetime.timedelta) -> Tuple[TaskGroup, airflow.XComArg]:
+  """Request a QueuedResource and wait until the nodes are created.
+
+  Args:
+    tpu_name: XCom value for unique TPU name
+    accelerator: Description of TPU to create.
+    gcp: GCP project/zone configuration.
+    ssh_keys: XCom value for SSH keys to communicate with these TPUs.
+    timeout: Amount of time to wait for TPUs to be created.
 
   Returns:
-    A dict mapping credentials.
+    A TaskGroup for the entire create operation and an XCom value for the
+    qualified queued_resource name.
   """
-  creds, _ = google.auth.default(
-      scopes=["https://www.googleapis.com/auth/cloud-platform"]
-  )
-  creds.refresh(google.auth.transport.requests.Request())
-  return {"Authorization": f"Bearer {creds.token}"}
+  @task
+  def create_queued_resource_request(tpu_name: str, ssh_keys: ssh.SshKeys) -> str:
+    creds, _ = google.auth.default()
+    client = tpu_api.TpuClient(credentials=creds)
 
-@task
-def create_qr(
-    accelerator: test_config.Tpu,
-    tpu_name: str,
-    zone: str,
-    project_number: str,
-    ssh_keys: ssh.SshKeys,
-) -> None:
-  """Create a Queued Resource.
+    parent = f'projects/{gcp.project_name}/locations/{gcp.zone}'
+    queued_resource = tpu_api.QueuedResource(
+        # TODO(wcromar): Implement `validUntilDuration` based on `timeout`
+        tpu=tpu_api.QueuedResource.Tpu(
+            node_spec=[
+                tpu_api.QueuedResource.Tpu.NodeSpec(
+                    node_id=tpu_name,
+                    parent=parent,
+                    node=tpu_api.Node(
+                        accelerator_type=accelerator.name,
+                        description="noteardown",
+                        runtime_version=accelerator.runtime_version,
+                        network_config=tpu_api.NetworkConfig(
+                            network=accelerator.network,
+                            subnetwork=accelerator.subnetwork,
+                            enable_external_ips=True,
+                        ),
+                        metadata={
+                          'ssh-keys': f'xl-ml-test:{ssh_keys.public}',
+                        }
+                    )
+                )
+            ],
+        ),
+        guaranteed=tpu_api.QueuedResource.Guaranteed(
+            reserved=accelerator.reserved,
+        ),
+    )
 
-  Send REST request to create a Queued Resource, and keep
-  checking the status every 30 seconds till a TPU is ready.
+    qr_operation = client.create_queued_resource(
+      parent=parent,
+      queued_resource_id=tpu_name,
+      queued_resource=queued_resource)
+    response = qr_operation.result()
+    logging.info("Create QR response: {}".format(response))
+    # TODO(wcromar): do anything about failures
+
+    return response.name
+
+  @task.sensor(poke_interval=60, timeout=timeout.total_seconds(), mode="reschedule")
+  def wait_for_ready_queued_resource(qualified_name: str):
+    creds, _ = google.auth.default()
+    client = tpu_api.TpuClient(credentials=creds)
+
+    qr = client.get_queued_resource(name=qualified_name)
+    state = qr.state.state
+    logging.info(f"Queued resource state: {state.name}")
+    if qr.state.state == tpu_api.QueuedResourceState.State.ACTIVE:
+      return True
+    elif qr.state.state in [
+        tpu_api.QueuedResourceState.State.CREATING,
+        tpu_api.QueuedResourceState.State.ACCEPTED,
+        tpu_api.QueuedResourceState.State.PROVISIONING]:
+      return False
+    else:
+      raise RuntimeError(f"Bad queued resource state {state.name}")
+
+  with TaskGroup(group_id="create_queued_resource") as tg:
+    qualified_name = create_queued_resource_request(tpu_name, ssh_keys)
+    wait_for_ready_queued_resource(qualified_name)
+
+  return tg, qualified_name
+
+
+@task_group
+def delete_queued_resource(qualified_name: airflow.XComArg):
+  """Implements cascading delete for a Queued Resource.
 
   Args:
-    accelerator: the TPU type to create.
-    tpu_name: The name of a TPU to be created.
-    zone: The zone to create a TPU.
-    project_number: The number of a project to create a TPU.
-    ssh_keys: SSH key pair to encode in TPU metadata.
+    qualified_name: XCom value holding the qualified name of the queued
+      resource.
   """
-  parent = os.path.join("projects", project_number, "locations", zone)
-  qr_url = os.path.join(
-      _TPU_BASE_URL,
-      "projects",
-      project_number,
-      "locations",
-      zone,
-      "queuedResources",
-  )
-  params = {"queued_resource_id": tpu_name}
-  reqest_json = {
-      "tpu": {
-          "node_spec": {
-              "parent": parent,
-              "node_id": tpu_name,
-              "node": {
-                  "accelerator_type": accelerator.name,
-                  "runtime_version": accelerator.runtime_version,
-                  "network_config": {
-                      "enableExternalIps": True,
-                      "network": accelerator.network,
-                      "subnetwork": accelerator.subnetwork,
-                  },
-                  "metadata": {
-                    "ssh-keys": f"xl-ml-test:{ssh_keys.public}"
-                  }
-              },
-          }
-      },
-      "guaranteed": {"reserved": accelerator.reserved},
-  }
-  print("Request to create Queued Resource:", reqest_json)
-  resp = requests.post(
-      url=qr_url, params=params, json=reqest_json, headers=get_headers()
-  )
-  resp.raise_for_status()
-  create_op_url = os.path.join(qr_url, tpu_name)
 
-  while True:
-    resp = requests.get(create_op_url, headers=get_headers())
-    if resp.json()["state"]["state"] == "ACTIVE":
-      logging.info("Create Queued Resource operation complete.")
-      break
-    logging.info("Create Queued Resource operation still running...")
-    time.sleep(30)
+  @task(trigger_rule="all_done")
+  def delete_tpu_nodes_request(qualified_name: str):
+    # TODO(wcromar): Find a less repetitive way to manage the TPU client.
+    creds, _ = google.auth.default()
+    client = tpu_api.TpuClient(credentials=creds)
 
-@task(trigger_rule="all_done")
-def delete_tpu(tpu_name: str, zone: str, project_number: str) -> None:
-  """Delete a TPU.
+    try:
+      qr = client.get_queued_resource(name=qualified_name)
+    except google.api_core.exceptions.NotFound:
+      logging.info(f'{qualified_name} not found')
+      return
 
-  Send REST request to delete a TPU, and keep
-  checking the status every 30 seconds till a TPU is deleted.
+    for node in qr.tpu.node_spec:
+      try:
+        op = client.delete_node(name=f'{node.parent}/nodes/{node.node_id}')
+        logging.info('Delete node state: {}'.format(op))
+      except google.api_core.exceptions.NotFound:
+        logging.info(f'{node.node_id} is already deleted')
 
-  Args:
-    tpu_name: The name of a TPU to be deleted.
-    zone: The zone to delete a TPU.
-    project_number: The number of a project to delete a TPU.
-  """
-  tpu_url = os.path.join(
-      _TPU_BASE_URL,
-      "projects",
-      project_number,
-      "locations",
-      zone,
-      "nodes",
-      tpu_name,
-  )
-  resp = requests.delete(tpu_url, headers=get_headers())
-  resp.raise_for_status()
-  delete_op_url = os.path.join(_TPU_BASE_URL, resp.json()["name"])
+  @task.sensor(poke_interval=60, timeout=3600, mode="reschedule")
+  def wait_for_tpu_deletion(qualified_name: str):
+    creds, _ = google.auth.default()
+    client = tpu_api.TpuClient(credentials=creds)
 
-  while True:
-    resp = requests.get(delete_op_url, headers=get_headers())
-    if resp.json()["done"]:
-      logging.info("Delete TPU operation complete.")
-      break
-    logging.info("Delete TPU operation still running...")
-    time.sleep(30)
+    qr = client.get_queued_resource(name=qualified_name)
+    # Queued Resources can only be deleted once they are SUSPENDED, even if all
+    # underlying nodes have already been deleted.
+    if qr.state.state in [
+        tpu_api.QueuedResourceState.State.SUSPENDED,
+        # TPU will be sitting in ACCEPTED if creation timed out.
+        tpu_api.QueuedResourceState.State.ACCEPTED]:
+      logging.info(f'All TPU nodes deleted for {qualified_name}')
+      return True
 
-@task(trigger_rule="all_done")
-def delete_qr(tpu_name: str, zone: str, project: str) -> None:
-  """Delete a Queued Resource.
+    logging.info(f"TPU Nodes: {qr.tpu.node_spec}")
+    return False
 
-  Send REST request to check Queued Resource status, and delete it. Keep
-  checking the status every 30 seconds.
+  @task(trigger_rule="all_done")
+  def delete_queued_resource_request(qualified_name: str) -> Optional[str]:
+    creds, _ = google.auth.default()
+    client = tpu_api.TpuClient(credentials=creds)
 
-  Args:
-    tpu_name: The name of a Queued Resource to be deleted.
-    zone: The zone of the Queued Resource to be deleted.
-    project: The project of the Queued Resource to be deleted.
-  """
-  qr_url = os.path.join(
-      _TPU_BASE_URL,
-      "projects",
-      project,
-      "locations",
-      zone,
-      "queuedResources",
-      tpu_name
-  )
+    try:
+      op = client.delete_queued_resource(name=qualified_name)
+      logging.info(f"delete op {op}")
+    except google.api_core.exceptions.NotFound:
+      logging.info(f'{qualified_name} is already deleted')
+      return None
 
-  # check if Queued Resource has become SUSPENDED from SUSPENDING
-  check_resp = requests.get(qr_url, headers=get_headers())
-  check_resp.raise_for_status()
+    return op.operation.name
 
-  check_op_url = os.path.join(_TPU_BASE_URL, check_resp.json()["name"])
-  while True:
-    resp = requests.get(check_op_url, headers=get_headers())
-    if resp.json()["state"]["state"] == "SUSPENDED":
-      logging.info("Queued Resource is in SUSPENDED status.")
-      break
-    logging.info("Check Queued Resource operation still running...")
-    time.sleep(30)
+  @task.sensor(poke_interval=60, timeout=3600, mode="reschedule")
+  def wait_for_queued_resource_deletion(op_name: Optional[str]):
+    if not op_name:
+      logging.info('No delete operation given')
+      return True
 
-  # delete Queued Resource
-  delete_resp = requests.delete(qr_url, headers=get_headers())
-  delete_resp.raise_for_status()
+    creds, _ = google.auth.default()
+    client = tpu_api.TpuClient(credentials=creds)
 
-  delete_op_url = os.path.join(_TPU_BASE_URL, delete_resp.json()["name"])
-  while True:
-    resp = requests.get(delete_op_url, headers=get_headers())
-    if resp.json()["done"]:
-      logging.info("Delete Queued Resource operation complete.")
-      break
-    logging.info("Delete Queued Resource operation still running...")
-    time.sleep(30)
+    op = client.get_operation(
+        operations.GetOperationRequest(name=op_name))
+    return op.done
 
-
-def get_tpu(tpu_name: str, project_number: str, zone: str) -> Mapping[str, Any]:
-  """Get TPU node information.
-
-  Args:
-    tpu_name: The name of a TPU.
-    project_number: The number of a project that a TPU runs.
-    zone: The zone of a project that a TPU runs.
-
-  Returns:
-    TPU node information in JSON format.
-  """
-  tpu_url = os.path.join(
-      _TPU_BASE_URL,
-      "projects",
-      project_number,
-      "locations",
-      zone,
-      "nodes",
-      tpu_name,
-  )
-  resp = requests.get(tpu_url, headers=get_headers())
-  resp.raise_for_status()
-  return resp.json()
-
-
-def get_ip_address(tpu_name: str, project_number: str, zone: str) -> List[str]:
-  """Get TPU node information.
-
-  Args:
-    tpu_name: The name of a TPU.
-    project_number: The number of a project that a TPU runs.
-    zone: The zone of a project that a TPU runs.
-
-  Returns:
-    A list of IP addresses for all workers.
-  """
-  tpu_node = get_tpu(tpu_name, project_number, zone)
-  ip_addresses = []
-  for endpoint in tpu_node["networkEndpoints"]:
-    ip_addresses.append(endpoint["ipAddress"])
-  return ip_addresses
-
+  delete_tpu_nodes = delete_tpu_nodes_request(qualified_name) >> wait_for_tpu_deletion(qualified_name)
+  qr_op_name = delete_tpu_nodes >> delete_queued_resource_request(qualified_name)
+  wait_for_queued_resource_deletion(qr_op_name)
 
 @task
 def ssh_tpu(
     tpu_name: str,
     zone: str,
-    project_number: str,
+    project: str,
     cmds: Iterable[str],
     ssh_keys: ssh.SshKeys
 ) -> None:
@@ -261,11 +216,22 @@ def ssh_tpu(
    cmds: The commands to run on a TPU.
    ssh_keys: The SSH key pair to use for authentication.
   """
-  tpu_ip_addresses = get_ip_address(tpu_name, project_number, zone)
+  creds, _ = google.auth.default()
+  client = tpu_api.TpuClient(credentials=creds)
+
+  qualified_tpu_name = os.path.join(
+      "projects",
+      project,
+      "locations",
+      zone,
+      "nodes",
+      tpu_name,
+  )
+  node = client.get_node(name=qualified_tpu_name)
 
   pkey = paramiko.RSAKey.from_private_key(io.StringIO(ssh_keys.private))
   ssh_group = fabric.ThreadingGroup(
-    *tpu_ip_addresses,
+    *(endpoint.ip_address for endpoint in node.network_endpoints),
     connect_kwargs={
       "auth_strategy":
         paramiko.auth_strategy.InMemoryPrivateKey('xl-ml-test', pkey)

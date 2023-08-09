@@ -22,7 +22,6 @@ from apis import gcp_config, metric_config, task, test_config
 def get_jax_resnet_config(tpu_size: int, test_time_out: int) -> task.BaseTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name="tpu-prod-env-one-vm",
-      project_number="630405687483",
       zone="us-central2-b",
   )
 
