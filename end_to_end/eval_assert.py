@@ -1,4 +1,4 @@
-# pylint: disable=no-name-in-module
+# pylint: skip-file
 """Reads and asserts over target values"""
 from absl import app
 from typing import Sequence
