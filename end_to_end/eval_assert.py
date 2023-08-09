@@ -1,4 +1,4 @@
-# pylint: disable=E0611
+# pylint: disable=no-name-in-module
 """Reads and asserts over target values"""
 from absl import app
 from typing import Sequence
