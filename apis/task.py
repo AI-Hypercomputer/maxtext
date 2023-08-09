@@ -63,11 +63,9 @@ class TpuTask(BaseTask):
       A task group with the following tasks chained: provision, run_model,
       post_process and clean_up.
     """
-    with TaskGroup(
-        group_id=self.task_test_config.benchmark_id, prefix_group_id=True
-    ) as group:
-      provision, tpu_name, queued_resource, ssh_keys = self.provision()
-      run_model = self.run_model(tpu_name, ssh_keys)
+    with TaskGroup(group_id=self.task_test_config.benchmark_id, prefix_group_id=True) as group:
+      provision, queued_resource, ssh_keys = self.provision()
+      run_model = self.run_model(queued_resource, ssh_keys)
       post_process = self.post_process()
       clean_up = self.clean_up(queued_resource)
 
@@ -75,7 +73,7 @@ class TpuTask(BaseTask):
 
     return group
 
-  def provision(self) -> Tuple[DAGNode, airflow.XComArg, airflow.XComArg, airflow.XComArg]:
+  def provision(self) -> Tuple[DAGNode, airflow.XComArg, airflow.XComArg]:
     """Provision a TPU accelerator via a Queued Resource.
 
     Generates a random TPU name and SSH keys, creates a Queued Resource, and
@@ -102,21 +100,18 @@ class TpuTask(BaseTask):
         self.tpu_create_timeout,
       )
       queued_resource_op >> tpu.ssh_tpu.override(task_id="setup")(
-          tpu_name,
-          self.task_gcp_config.zone,
-          self.task_gcp_config.project_name,
+          queued_resource_name,
           # TODO(wcromar): remove split
-          self.task_test_config.setup_script.split("\n"),
+          self.task_test_config.setup_script,
           ssh_keys,
       )
 
-    return group, tpu_name, queued_resource_name, ssh_keys
+    return group, queued_resource_name, ssh_keys
 
   def run_model(
       self,
-      # TODO(wcromar): Accept queued resource name instead of TPU node name
       # TODO(wcromar): Is there a way to annotate the type of the XCom arg?
-      tpu_name: airflow.XComArg,
+      queued_resource: airflow.XComArg,
       ssh_keys: airflow.XComArg,
   ) -> DAGNode:
     """Run the TPU test in `task_test_config`.
@@ -135,11 +130,9 @@ class TpuTask(BaseTask):
         ),
         owner=self.task_test_config.task_owner,
     )(
-        tpu_name,
-        self.task_gcp_config.zone,
-        self.task_gcp_config.project_name,
+        queued_resource,
         # TODO(wcromar): remove split
-        self.task_test_config.test_script.split("\n"),
+        self.task_test_config.test_script,
         ssh_keys,
     )
 

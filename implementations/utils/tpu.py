@@ -16,6 +16,7 @@
 
 import datetime
 import io
+import itertools
 import os
 from typing import Iterable, Optional, Tuple
 import uuid
@@ -201,40 +202,36 @@ def delete_queued_resource(qualified_name: airflow.XComArg):
 
 @task
 def ssh_tpu(
-    tpu_name: str,
-    zone: str,
-    project: str,
+    qualified_name: str,
     cmds: Iterable[str],
     ssh_keys: ssh.SshKeys
 ) -> None:
   """SSH TPU and run commands in multi process.
 
   Args:
-   tpu_name: The name of a TPU.
-   zone: The zone of a project that a TPU runs.
-   project_number: The number of a project that a TPU runs.
+   qualified_name: The qualified name of a queued resource.
    cmds: The commands to run on a TPU.
    ssh_keys: The SSH key pair to use for authentication.
   """
   creds, _ = google.auth.default()
   client = tpu_api.TpuClient(credentials=creds)
 
-  qualified_tpu_name = os.path.join(
-      "projects",
-      project,
-      "locations",
-      zone,
-      "nodes",
-      tpu_name,
-  )
-  node = client.get_node(name=qualified_tpu_name)
+  queued_resource = client.get_queued_resource(name=qualified_name)
+
+  nodes = [
+    client.get_node(name=os.path.join(node.parent, 'nodes', node.node_id))
+    for node in queued_resource.tpu.node_spec]
+  endpoints = itertools.chain.from_iterable(
+    node.network_endpoints for node in nodes)
+  ip_addresses = [endpoint.ip_address for endpoint in endpoints]
+  logging.info(f'Connecting to IP addresses {ip_addresses}')
 
   pkey = paramiko.RSAKey.from_private_key(io.StringIO(ssh_keys.private))
   ssh_group = fabric.ThreadingGroup(
-    *(endpoint.ip_address for endpoint in node.network_endpoints),
+    *ip_addresses,
     connect_kwargs={
       "auth_strategy":
         paramiko.auth_strategy.InMemoryPrivateKey('xl-ml-test', pkey)
     }
   )
-  ssh_group.run('\n'.join(cmds))
+  ssh_group.run(cmds)
