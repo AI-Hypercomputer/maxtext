@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 from multihost_job import main as multihost_job_main
 import yaml
 import copy
