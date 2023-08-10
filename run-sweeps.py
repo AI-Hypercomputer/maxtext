@@ -47,7 +47,7 @@ base_yml_updates = {
 BASE_YML_DATA=update_yaml_fields(BASE_YML_DATA, base_yml_updates)
 
 BASE_MHJ_CMD="""export LIBTPU_INIT_ARGS="--xla_tpu_spmd_rng_bit_generator_unsafe=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true" && \
-bash setup.sh && \
+bash setup_with_retries.sh && \
 python3 MaxText/train.py """
 
 def run_experiment(experiment_mhj):
@@ -95,7 +95,8 @@ def run_sweep_8(base_run_name, attempt_number):
         'global_parameter_scale':8,
         'load_from_other_directory':'gs://maxtext-experiments-multipod/mattdavidow-sweep-clipping-a1_int8T_size8_pods4_clippingOff_key1/checkpoints',
         'load_from_other_directory_step':10000,
-        'adam_eps':1e-3
+        'adam_eps':1e-3,
+        'int8_training': True
     }
     sweep8_base_yml = update_yaml_fields(BASE_YML_DATA, sweep8_base_yml_update)
     sweep8_base_mhj = BASE_MHJ_DICT
@@ -182,5 +183,5 @@ def run_sweep_7(base_run_name, attempt_number):
         os.remove(experiment_yml_file)
 
 
-#run_sweep_8('mattdavidow-sweep8', 1)
-run_sweep_7('mattdavidow-sweep7',2)
+run_sweep_8('mattdavidow-sweep8', 2)
+#run_sweep_7('mattdavidow-sweep7',2)
