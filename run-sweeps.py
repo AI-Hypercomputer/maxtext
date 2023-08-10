@@ -241,15 +241,65 @@ def run_sweep_7(base_run_name, attempt_number, only_print_run_names=False):
         # Cleanup - delete writen yml
         os.remove(experiment_yml_file)
 
+###################    Sweep t1 (test 1)    ###################
+def sweep_test1(attempt: str):
+    # Experiment Base
+    sweep8_base_yml_update={
+        'global_parameter_scale':1,
+        # 'global_parameter_scale':8,
+        # 'load_from_other_directory':'gs://maxtext-experiments-multipod/mattdavidow-sweep-clipping-a1_int8T_size8_pods4_clippingOff_key1/checkpoints',
+        # 'load_from_other_directory_step':10000,
+        # 'adam_eps':1e-3,
+        # 'int8_training': True
+        'int8_training': False
+    }
+    steps = 2000
+
+    if args['tpu'] == 'v4':
+        base_yml_updates = v4_base_yml_updates
+    elif args['tpu'] == 'v5':
+        base_yml_updates = v5_base_yml_updates
+    else:
+        assert False
+
+    BASE_YML_DATA2=update_yaml_fields(BASE_YML_DATA, base_yml_updates)
+    sweep8_base_yml = update_yaml_fields(BASE_YML_DATA2, sweep8_base_yml_update)
+    if args['tpu'] == 'v4':
+        sweep8_base_mhj = V4_MHJ_DICT
+    elif args['tpu'] == 'v5':
+        sweep8_base_mhj = V5_MHJ_DICT
+    else:
+        assert False
+
+    experiment_list = []
+    experiment_name = f"lew_test1"
+    maxtext_config={}
+    experiment_list.append({'name':experiment_name, 'maxtext':maxtext_config,'mhj':{}})
+
+    run_sweep(sweep8_base_yml, sweep8_base_mhj, experiment_list, 'test1', attempt, steps=steps, only_print_run_names=False)
+
+sweeps = {
+    'test1': sweep_test1,
+}
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='TPU configuration options')
     parser.add_argument('--dryrun', type=bool, default=True)
     parser.add_argument('--tpu', type=str, default='v5')
+    parser.add_argument('--sweep', type=str, default='')
+    parser.add_argument('--attempt', type=str, default='')
     pargs = parser.parse_args()
     global args
     args = pargs.__dict__
-    run_sweep_8('mattdavidow-sweep8', 2, only_print_run_names=False)
+    sweep_name = args['sweep']
+    attempt = args['attempt']
+
+    assert sweep_name in sweeps.keys()
+    assert attempt != ''
+    sweep_fn = sweeps[sweep_name]
+    sweep_fn(attempt)
+    # run_sweep_8('mattdavidow-sweep8', 2, only_print_run_names=False)
     #run_sweep_7('mattdavidow-sweep7',2, only_print_run_names=True)
 
 main()
