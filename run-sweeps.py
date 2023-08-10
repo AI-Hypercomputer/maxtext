@@ -287,7 +287,7 @@ sweeps = {
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='TPU configuration options')
-    parser.add_argument('--dryrun', type=bool, default=True)
+    parser.add_argument('--dryrun', type=bool, default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--tpu', type=str, default='v5')
     parser.add_argument('--sweep', type=str, default='')
     parser.add_argument('--attempt', type=str, default='')
