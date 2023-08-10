@@ -182,5 +182,5 @@ def run_sweep_7(base_run_name, attempt_number):
         os.remove(experiment_yml_file)
 
 
-run_sweep_8('mattdavidow-sweep8', 1)
-#run_sweep_7('mattdavidow-sweep7',2)
+#run_sweep_8('mattdavidow-sweep8', 1)
+run_sweep_7('mattdavidow-sweep7',2)
