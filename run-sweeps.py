@@ -61,7 +61,7 @@ def run_experiment(experiment_mhj):
 def get_mhj_command(base_cmd, mhj_yml):
     return base_cmd + mhj_yml
 
-def run_sweep(sweep_base_yml, sweep_base_mhj_dict, experiment_list, base_run_name, attempt_number, steps=None):
+def run_sweep(sweep_base_yml, sweep_base_mhj_dict, experiment_list, base_run_name, attempt_number, steps=None, only_print_run_names=False):
     for experiment in experiment_list:
         experiment_mhj = update_yaml_fields(sweep_base_mhj_dict, experiment['mhj'])
         experiment_yml = update_yaml_fields(sweep_base_yml, experiment['maxtext'])
@@ -71,25 +71,27 @@ def run_sweep(sweep_base_yml, sweep_base_mhj_dict, experiment_list, base_run_nam
             steps = calc_chinchilla_step_count(experiment_yml['global_parameter_scale'], experiment_mhj['--NUM_SLICE'])
 
         run_name= f'{base_run_name}-{experiment["name"]}-a{attempt_number}'
+        if only_print_run_names:
+            print(run_name)
+        else:
+            # Write final maxtext yml file
+            experiment_yml = update_yaml_fields(experiment_yml, {'steps':steps,'run_name':run_name})
+            experiment_yml_file=f"MaxText/configs/{run_name}.yml"
+            write_yml(experiment_yml_file, experiment_yml)
 
-        # Write final maxtext yml file
-        experiment_yml = update_yaml_fields(experiment_yml, {'steps':steps,'run_name':run_name})
-        experiment_yml_file=f"MaxText/configs/{run_name}.yml"
-        write_yml(experiment_yml_file, experiment_yml)
+            mhj_command=get_mhj_command(BASE_MHJ_CMD, experiment_yml_file)
+            experiment_mhj = update_yaml_fields(experiment_mhj, {'--RUN_NAME':run_name,'--COMMAND':mhj_command})
 
-        mhj_command=get_mhj_command(BASE_MHJ_CMD, experiment_yml_file)
-        experiment_mhj = update_yaml_fields(experiment_mhj, {'--RUN_NAME':run_name,'--COMMAND':mhj_command})
-
-        print("Running experiment: ",run_name)
-        run_experiment(experiment_mhj)
-        
-        # Cleanup - delete writen yml
-        os.remove(experiment_yml_file)
+            print("Running experiment: ",run_name)
+            run_experiment(experiment_mhj)
+            
+            # Cleanup - delete writen yml
+            os.remove(experiment_yml_file)
 
 
 
 ###################    Sweep 8    ###################
-def run_sweep_8(base_run_name, attempt_number):
+def run_sweep_8(base_run_name, attempt_number, only_print_run_names=False):
     # Experiment Base
     sweep8_base_yml_update={
         'global_parameter_scale':8,
@@ -116,10 +118,10 @@ def run_sweep_8(base_run_name, attempt_number):
             maxtext_config={'fwd_int8':fwd_int8, 'bwd_int8':bwd_int8} 
             experiment_list.append({'name':experiment_name, 'maxtext':maxtext_config,'mhj':{}})
 
-    run_sweep(sweep8_base_yml, sweep8_base_mhj, experiment_list, base_run_name, attempt_number,steps=sweep8_steps)
+    run_sweep(sweep8_base_yml, sweep8_base_mhj, experiment_list, base_run_name, attempt_number,steps=sweep8_steps, only_print_run_names=only_print_run_names)
 
 ###################    Sweep 7    ###################
-def run_sweep_7(base_run_name, attempt_number):
+def run_sweep_7(base_run_name, attempt_number, only_print_run_names=False):
  
     # All experiments inherit:
     sweep7_base_yml_update={
@@ -176,12 +178,13 @@ def run_sweep_7(base_run_name, attempt_number):
         # print('experiment_yml: ', experiment_yml) # DEBUG
         # print('experiment_mhj: ', experiment_mhj) # DEBUG
 
-        print("Running experiment: ",run_name)
-        run_experiment(experiment_mhj)
+        print(run_name)
+        if not only_print_run_names:
+            run_experiment(experiment_mhj)
         
         # Cleanup - delete writen yml
         os.remove(experiment_yml_file)
 
 
-run_sweep_8('mattdavidow-sweep8', 2)
-#run_sweep_7('mattdavidow-sweep7',2)
+run_sweep_8('mattdavidow-sweep8', 2, only_print_run_names=True)
+#run_sweep_7('mattdavidow-sweep7',2, only_print_run_names=True)
