@@ -12,9 +12,9 @@ grep "block_start" ${mlperf_log} | sort -u | while read -r line ; do
     echo "block_start: ${block_start}"
     echo "block_stop: ${block_stop}"
 
-    if ! [[-z "$block_start" ]] && ! [[ -z "$block_stop" ]]
+    if [[ ! -z "$block_start" ]] && [[ ! -z "$block_stop" ]]
     then
-      echo ":::E2E summary::: block_time: $((block_stop - block_start))"
+    echo ":::E2E summary::: block_time: $((block_stop - block_start))"
     fi
 done
 

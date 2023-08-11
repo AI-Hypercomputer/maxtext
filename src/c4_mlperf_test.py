@@ -72,6 +72,34 @@ class C4SpmdGpt3AdamDataParallel2x4x4(C4SpmdGpt3AdamMLPerfHP):
 
     task_p.train.eval_skip_train = self.EVAL_SKIP_TRAIN
     return task_p
+  
+@experiment_registry.register
+class C4SpmdGpt3AdamDataParallel2x2x4(C4SpmdGpt3AdamMLPerfHP):
+  r"""Cross-slice data-parallel GPT-3 config."""
+
+  # 2 x v4-16
+
+  NUM_LAYERS = 10
+  NUM_HEADS = 24
+  MODEL_DIMS = 6144
+  HIDDEN_DIMS = MODEL_DIMS * 4
+
+  PERCORE_BATCH_SIZE = 0.5
+  ICI_MESH_SHAPE = [2, 2, 2]
+  DCN_MESH_SHAPE = [2, 1, 1]
+  FPROP_DTYPE = jnp.bfloat16
+
+  EVAL_INTERVAL_STEPS = 40
+  EVAL_SKIP_TRAIN = True
+
+  def task(self) -> pax_fiddle.Config[tasks_lib.SingleTask]:
+    """Returns the task parameters."""
+    task_p = super().task()
+    task_p.train.num_train_steps = 100  # Run for 80 steps
+    task_p.summary_verbosity = 0
+
+    task_p.train.eval_skip_train = self.EVAL_SKIP_TRAIN
+    return task_p
 
 
 @experiment_registry.register

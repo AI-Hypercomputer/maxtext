@@ -12,15 +12,15 @@
 # Feel free to update this script for your own purpose.
 
 gcloud config set project tpu-prod-env-multipod
-gcloud config set compute/zone us-central2-b
+gcloud config set compute/zone us-east5-b
 
-TPU_TYPE=v4-8
-VERSION=tpu-ubuntu2204-base
+TPU_TYPE=v5litepod-16
+VERSION=v2-alpha-tpuv5-lite
 BUCKET_NAME=mlperf-exp/${USER}
 TIMESTAMP=$(date +%y%m%d_%H%M%S)
 
 NODE_COUNT=2
-RUN_NAME=${USER}-mlperf-gpt3-benchmark-script-test-${NODE_COUNT}_v4_$(date +%Y-%m-%d-%H-%M-%S)
+RUN_NAME=${USER}-mlperf-gpt3-${VERSION}-${NODE_COUNT}_v4_$(date +%Y-%m-%d-%H-%M-%S)
 PAX_DATE=20230808
 
 EXP=C4SpmdGpt3AdamDataParallel2x4x4 

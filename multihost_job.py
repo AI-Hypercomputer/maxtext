@@ -198,7 +198,7 @@ def create_kill_command_str():
   return f"""if [[ $SLICE_ID -eq 0 && $WORKER_ID -eq 0 ]]; then
   echo "This worker (slice 0 worker 0) will wait 10 minutes before tearing down the job to allow other workers to gracefully exit."
   sleep 600
-  gcloud alpha compute tpus queued-resources delete {args.RUN_NAME} --force --quiet --project={args.PROJECT} --zone={args.ZONE}
+  # gcloud alpha compute tpus queued-resources delete {args.RUN_NAME} --force --quiet --project={args.PROJECT} --zone={args.ZONE}
   fi"""
 
 def download_from_gcs(zip_gcs_path):
