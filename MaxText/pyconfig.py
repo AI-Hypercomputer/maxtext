@@ -109,6 +109,9 @@ class _HyperParameters():
     raw_keys['mlp_dim'] = 2**mlp_dim_scale * raw_keys['base_mlp_dim']
     raw_keys['num_decoder_layers'] = 2**layer_scale * raw_keys['base_num_decoder_layers']
 
+    if raw_keys['learning_rate_schedule_steps']==-1:
+      raw_keys['learning_rate_schedule_steps'] = raw_keys['steps']
+
 def validate_gcs_bucket_name(bucket_name, config_var):
   assert bucket_name, f"Please set {config_var}."
   assert len(bucket_name) > 5 and bucket_name[0:5]=='gs://', f"Erroring out, {config_var} should start with 'gs://' "

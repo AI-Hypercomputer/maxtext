@@ -236,14 +236,31 @@ def rsqrt_schedule(init_value: float, shift: int = 0):
     return init_value * (1 + count + shift)**-.5 * shift**.5
   return schedule
 
-def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
-  """Creates a rsqrt schedule with linear warmup."""
-  return optax.join_schedules([
-      optax.linear_schedule(
-          init_value=0,
-          end_value=learning_rate,
-          transition_steps=warmup_steps
-          ),
-      rsqrt_schedule(init_value=learning_rate, shift=warmup_steps),
-      ], boundaries=[warmup_steps],
-      )
+def create_learning_rate_schedule(learning_rate: float, total_steps: int):
+  """Creates a linear warmup followed by a cosine cooldown followed by linear to 0"""
+  warmup_steps = total_steps / 10
+  cos_steps = total_steps - warmup_steps
+  return schedule2(learning_rate, warmup_steps, cos_steps)
+
+
+def schedule2(max_lr, warmup_steps, cos_steps):
+  def make_schedule(init_lr, final_lr, len_steps):
+    def schedule(step):
+      pct = (step) / len_steps
+      a = 0.5 * (jnp.cos(jnp.pi*pct) + 1)
+      lr = init_lr * a + final_lr * (1 - a)
+      return lr
+    return schedule
+
+
+  warmup_schedule = optax.linear_schedule(
+      init_value=0,
+      end_value=max_lr,
+      transition_steps=warmup_steps
+  )
+  cos_schedule = make_schedule(max_lr, 0.0, cos_steps)
+
+  pieces = [warmup_schedule, cos_schedule]
+  boundaries=[warmup_steps, warmup_steps+cos_steps]
+
+  return optax.join_schedules(pieces, boundaries)

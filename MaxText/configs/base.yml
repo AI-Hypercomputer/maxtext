@@ -64,7 +64,7 @@ record_internal_nn_metrics: 0
 
 # Output directory
 # Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
-base_output_directory: ""
+base_output_directory: "gs://maxtext-experiments-multipod/"
 
 # Parallelism
 mesh_axes: ['data', 'fsdp', 'tensor']
@@ -97,7 +97,7 @@ ici_tensor_parallelism: 1
 
 # Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
-dataset_path: ""
+dataset_path: "gs://max-datasets-rogue/"
 vocab_size: 32_768 # powers of 2 for sharding
 vocab_relative_path: "vocabs"  # Assumes we're allowed
 dataset_name: 'c4/en:3.0.1'
@@ -112,7 +112,7 @@ steps: 150_001
 log_period: 100
 save_period: 10_000
 learning_rate: 3.e-5
-warmup_steps: 15_000
+learning_rate_schedule_steps: -1 # length of learning rate schedule, should be at least steps, defaults to steps.
 
 # Maximum length cutoff for training examples.
 max_target_length: 1024

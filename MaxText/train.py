@@ -213,12 +213,12 @@ def train_loop(config, state=None):
   # Model and Optimizer definition
   model = Transformer(config)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(
-      learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
+      learning_rate=config.learning_rate, total_steps=config.learning_rate_schedule_steps
   )
 
   tx = optax.adam(
       max_utils.create_learning_rate_schedule(
-          learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
+          learning_rate=config.learning_rate, total_steps=config.learning_rate_schedule_steps
       ),
       b1=config.adam_b1,
       b2=config.adam_b2,
