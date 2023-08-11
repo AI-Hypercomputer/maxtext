@@ -60,7 +60,8 @@ v5_base_yml_updates = {
     'enable_dropout':False,
     'base_output_directory':'gs://maxtext-experiments-multipod',
     'dataset_path':'gs://max-datasets-rogue',
-    'remat_policy':'full'
+    'remat_policy':'full',
+    'learning_rate':1e-3,
 }
 
 v4_base_yml_updates = {
@@ -68,7 +69,8 @@ v4_base_yml_updates = {
     'enable_dropout':False,
     'base_output_directory':'gs://max-experiments',
     'dataset_path':'gs://maxtext-dataset',
-    'remat_policy':'full'
+    'remat_policy':'full',
+    'learning_rate':1e-3,
 }
 
 BASE_MHJ_CMD="""export LIBTPU_INIT_ARGS="--xla_tpu_spmd_rng_bit_generator_unsafe=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true" && \
