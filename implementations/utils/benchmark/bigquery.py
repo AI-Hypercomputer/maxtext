@@ -17,11 +17,13 @@
 
 import dataclasses
 import datetime
+import enum
 import math
-from typing import Iterable
+from typing import Iterable, Optional
 from absl import logging
 import google.auth
 from google.cloud import bigquery
+
 
 BENCHMARK_DATASET_NAME = "benchmark_dataset"
 BENCHMARK_BQ_JOB_TABLE_NAME = "job_history"
@@ -59,21 +61,28 @@ class BenchmarkTestRun:
   metadata_history: Iterable[MetadataHistoryRow]
 
 
+class JobStatus(enum.Enum):
+  SUCCESS = 0
+  FAILURE = 1
+  TIMEOUT = 2
+  MISSED = 3
+
+
 class BigQueryMetricClient:
   """BigQuery metric client for benchmark tests.
 
   Attributes:
-    database: The database name for BigQuery.
     project: The project name for database.
+    database: The database name for BigQuery.
   """
 
   def __init__(
       self,
-      database: str = BENCHMARK_DATASET_NAME,
-      project: str = google.auth.default()[1],
+      project: Optional[str] = None,
+      database: Optional[str] = None,
   ):
-    self.database = database
-    self.project = project
+    self.project = google.auth.default()[1] if project is None else project
+    self.database = BENCHMARK_DATASET_NAME if database is None else database
     self.client = bigquery.Client(
         project=project,
         default_query_job_config=bigquery.job.QueryJobConfig(
@@ -88,7 +97,7 @@ class BigQueryMetricClient:
   @property
   def metric_history_table_id(self):
     return ".".join(
-        (self.project, self.database, BENCHMARK_BQ_METADATA_TABLE_NAME)
+        (self.project, self.database, BENCHMARK_BQ_METRIC_TABLE_NAME)
     )
 
   @property

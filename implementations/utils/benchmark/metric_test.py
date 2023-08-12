@@ -17,12 +17,16 @@
 import hashlib
 import os
 from typing import Iterable, Optional
+from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
-from apis.benchmark import metric_config
+from airflow.models import Variable
+from apis import metric_config
+from implementations.utils import composer
 from implementations.utils.benchmark import bigquery, metric
 import jsonlines
 import tensorflow as tf
+
 
 """Tests for Benchmark metric.py."""
 
@@ -225,6 +229,85 @@ class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
     self.assert_metric_and_dimension_equal(
         actual_metrics, expected_metrics, actual_metadata, expected_metadata
     )
+
+  @parameterized.named_parameters(
+      ("empty", "", ""),
+      (
+          "raw_url",
+          "manual__2023-08-07T21:03:49.181263+00:00",
+          "manual__2023-08-07T21%3A03%3A49.181263%2B00%3A00",
+      ),
+  )
+  def test_encode_url(self, raw_url, expected_value):
+    actual_value = metric.encode_url(raw_url)
+    self.assertEqual(actual_value, expected_value)
+
+  def test_add_airflow_metadata(self):
+    base_id = "test_run"
+    uuid = hashlib.sha256(str(base_id + str(0)).encode("utf-8")).hexdigest()
+
+    with mock.patch(
+        "implementations.utils.benchmark.metric.get_current_context"
+    ) as mock_context:
+      mock_dag_id = mock.MagicMock()
+      mock_dag_id.dag_id.return_value = "benchmark_test"
+      mock_task_id = mock.MagicMock()
+      mock_task_id.task_id.return_value = "post_process"
+
+      mock_context.return_value = {
+          "run_id": "manual__2023-08-07T21:03:49.181263+00:00",
+          "prev_start_date_success": "2023-08-08",
+          "dag_run": mock_dag_id,
+          "task": mock_task_id,
+      }
+
+      with mock.patch.object(Variable, "get", return_value="") as mock_variable:
+        with mock.patch.object(
+            composer, "get_airflow_url", return_value="http://airflow"
+        ) as mock_object:
+          raw_meta = [
+              [
+                  bigquery.MetadataHistoryRow(
+                      job_uuid=uuid,
+                      metadata_key="framework",
+                      metadata_value="jax",
+                  )
+              ]
+          ]
+          actual_value = metric.add_airflow_metadata(
+              base_id,
+              "test_project",
+              raw_meta,
+          )
+          print("actual_value", actual_value)
+
+          expected_value = raw_meta
+          print("expected_value", expected_value)
+          expected_value[0].append(
+              bigquery.MetadataHistoryRow(
+                  job_uuid=uuid,
+                  metadata_key="run_id",
+                  metadata_value="manual__2023-08-07T21:03:49.181263+00:00",
+              )
+          )
+          expected_value[0].append(
+              bigquery.MetadataHistoryRow(
+                  job_uuid=uuid,
+                  metadata_key="prev_start_date_success",
+                  metadata_value="2023-08-08",
+              )
+          )
+          expected_value[0].append(
+              bigquery.MetadataHistoryRow(
+                  job_uuid=uuid,
+                  metadata_key="airflow_dag_run_link",
+                  metadata_value="http://airflow/dags/benchmark_test/grid?dag_run_id=manual__2023-08-07T21%3A03%3A49.181263%2B00%3A00&task_id=post_process",
+              )
+          )
+
+          self.assert_metric_and_dimension_equal(
+              [], [], actual_value, expected_value
+          )
 
 
 if __name__ == "__main__":
