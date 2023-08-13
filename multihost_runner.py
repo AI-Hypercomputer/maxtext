@@ -217,6 +217,11 @@ def scps(slices, run_name_dir, zip_name):
 
   return return_code
 
+def make_export_mxla_command(coordinator_ip, slice_num, num_slices):
+  return f"""export MEGASCALE_COORDINATOR_ADDRESS: {coordinator_ip} &&
+  export MEGASCALE_SLICE_ID: {slice_num} && 
+  export MEGASCALE_NUM_SLICES: {num_slices}"""
+
 def execute_main_command(main_command, slices, local_log_dir, zip_name):
   """ Run the main command on each worker, logging each separately. """
   kill_script_name = "kill_existing_processes.sh" # File written on worker machines
@@ -225,6 +230,7 @@ def execute_main_command(main_command, slices, local_log_dir, zip_name):
   worker_list = []
   os.makedirs(local_log_dir, exist_ok=True)
 
+  coordinator_ip = '10.130.0.10:8080'
   for slice_num, cur_slice  in enumerate(slices):
     for worker_num in range(cur_slice.num_workers):
       output_filename = os.path.join(local_log_dir, f"output_slice_{cur_slice.slice_num:04d}_worker_{worker_num:04d}.txt")
@@ -235,12 +241,13 @@ def execute_main_command(main_command, slices, local_log_dir, zip_name):
       unzip_command = f"tar xzf {zip_name}"
       write_kill_script_command = f"echo '{kill_existing_processes_str()}' > {kill_script_name}"
       kill_existing_command = f"bash {kill_script_name} {cur_slice.version}"
+      export_mxla_command = make_export_mxla_command(coordinator_ip, slice_num, len(slices))
 
       if args.USE_EXISTING_FOLDER is False:
         remote_command_list = [mkdir_command , mv_zip_command , cd_command , unzip_command ,
-                        write_kill_script_command , kill_existing_command , main_command]
+                        write_kill_script_command , kill_existing_command , export_mxla_command, main_command]
       else:
-        remote_command_list = [cd_command, write_kill_script_command , kill_existing_command , main_command]
+        remote_command_list = [cd_command, write_kill_script_command , kill_existing_command , export_mxla_command, main_command]
       remote_command_list_str = " && ".join(remote_command_list)
       gcloud_command=[
           "gcloud", "alpha", "compute", "tpus", "tpu-vm", "ssh", cur_slice.name, f"--worker={worker_num}",
