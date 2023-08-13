@@ -218,9 +218,9 @@ def scps(slices, run_name_dir, zip_name):
   return return_code
 
 def make_export_mxla_command(coordinator_ip, slice_num, num_slices):
-  return f"""export MEGASCALE_COORDINATOR_ADDRESS: {coordinator_ip} &&
-  export MEGASCALE_SLICE_ID: {slice_num} && 
-  export MEGASCALE_NUM_SLICES: {num_slices}"""
+  return f"""export MEGASCALE_COORDINATOR_ADDRESS={coordinator_ip} &&
+  export MEGASCALE_SLICE_ID={slice_num} && 
+  export MEGASCALE_NUM_SLICES={num_slices}"""
 
 def execute_main_command(main_command, slices, local_log_dir, zip_name):
   """ Run the main command on each worker, logging each separately. """
