@@ -19,15 +19,15 @@
 # bash build_docker_image.sh MODE=nightly
 # bash build_docker_image.sh MODE=head
 
-# bash build_docker_image.sh MODE=stable PROJECT=cloud-tpu-multipod-dev
-# bash build_docker_image.sh MODE=stable JAX_VERSION=0.4.13 PROJECT=cloud-tpu-multipod-dev
-# bash build_docker_image.sh MODE=stable JAX_VERSION=0.4.13 PROJECT=cloud-tpu-multipod-dev IMAGE_PREFIX=jax0.4.13
+# bash build_docker_image.sh MODE=stable
+# bash build_docker_image.sh MODE=stable JAX_VERSION=0.4.13
+# bash build_docker_image.sh MODE=stable JAX_VERSION=0.4.13 IMAGE_PREFIX=jax0.4.13
 
 
 # Enable "exit immediately if any command fails" option
 set -e
 
-export PROJECT=tpu-prod-env-multipod
+export PROJECT=$(gcloud config get-value project)
 export IMAGE_PREFIX=gke_img
 
 # Set environment variables
@@ -36,6 +36,7 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
     echo "$KEY"="$VALUE"
 done
+echo "PROJECT=$PROJECT"
 
 if [[ "$MODE" == "stable" || ! -v MODE ]]; then
     # Stable mode

@@ -26,9 +26,9 @@ ENV ENV_JAX_VERSION=$JAX_VERSION
 # Set the working directory in the container
 WORKDIR /app
 
-RUN git clone https://github.com/google/maxtext.git
+# Copy all files from local workspace into docker container
+COPY . .
+RUN ls .
 
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION"
-RUN cd maxtext && bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION}
-
-COPY . .
+RUN bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION}
