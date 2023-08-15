@@ -127,8 +127,7 @@ class TpuTask(BaseTask):
     return tpu.ssh_tpu.override(
         task_id="run_model",
         execution_timeout=datetime.timedelta(
-            minutes=self.task_test_config.time_out_in_min
-        ),
+            minutes=self.task_test_config.time_out_in_min),
         owner=self.task_test_config.task_owner,
     )(
         queued_resource,

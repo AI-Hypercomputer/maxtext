@@ -177,9 +177,7 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
   @staticmethod
   def _load_compiled_jsonnet(test_name: str) -> Any:
     # TODO(wcromar): Parse GPU tests too
-    config_dir = os.environ.get(
-        'XLMLTEST_CONFIGS', '/home/airflow/gcs/dags/configs/jsonnet'
-    )
+    config_dir = os.environ.get('XLMLTEST_CONFIGS', '/home/airflow/gcs/dags/configs/jsonnet')
     test_path = os.path.join(config_dir, test_name)
     with open(test_path, 'r') as f:
       test = json.load(f)
@@ -239,8 +237,4 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
   # TODO(wcromar): replace configmaps
   @property
   def test_script(self) -> str:
-    return '\n'.join([
-        'set -xue',
-        self.exports,
-        ' '.join(shlex.quote(s) for s in self.test_command),
-    ])
+    return '\n'.join(['set -xue', self.exports, ' '.join(shlex.quote(s) for s in self.test_command)])
