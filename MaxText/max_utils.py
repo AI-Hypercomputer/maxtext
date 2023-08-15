@@ -54,7 +54,7 @@ def deactivate_profiler(config):
     jax.profiler.stop_trace()
 
 def _prepare_metrics_for_json(metrics, step, run_name):
-  """Converts metric dictionary into json supported types (e.g. float)""" 
+  """Converts metric dictionary into json supported types (e.g. float)"""
   metrics_dict = {}
   for val in metrics['scalar']:
     metrics_dict[val] = float(metrics['scalar'][val])
@@ -123,7 +123,7 @@ def create_device_mesh(config, logging=True):
     num_slices = 1
   num_devices_per_slice = num_devices//num_slices
   max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
-  assert len(devices) > 1, "You must have at least two devices"
+  # assert len(devices) > 1, "You must have at least two devices"
 
   multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
 
