@@ -15,7 +15,7 @@
 """Config file for Google Cloud Project (GCP)."""
 
 import dataclasses
-from typing import Optional
+from apis import metric_config
 
 
 @dataclasses.dataclass
@@ -25,9 +25,9 @@ class GCPConfig:
   Attributes:
     project_name: The name of a project to run a test job.
     zone: The zone to run a test job.
-    database_name: The name of database for metrics.
+    dataset_name: The option of dataset for metrics
   """
 
   project_name: str
   zone: str
-  database_name: Optional[str] = None
+  dataset_name: metric_config.DatasetOption

@@ -27,8 +27,8 @@ from airflow.models import Variable
 from airflow.operators.python import get_current_context
 from apis import gcp_config, test_config
 from apis import metric_config
+from implementations.utils import bigquery
 from implementations.utils import composer
-from implementations.utils.benchmark import bigquery
 import jsonlines
 import numpy as np
 import tensorflow as tf
@@ -352,29 +352,30 @@ def process_metrics(
   benchmark_id = task_test_config.benchmark_id
   current_time = datetime.datetime.now()
   has_profile = False
-  metric_history_rows_list = []
-  metadata_history_rows_list = []
+  metric_history_rows_list = [[]]
+  metadata_history_rows_list = [[]]
   profile_history_rows_list = []
 
   # process metrics, metadata, and profile
-  if task_metric_config.json_lines:
-    metric_history_rows_list, metadata_history_rows_list = process_json_lines(
-        base_id, task_metric_config.json_lines.file_location
-    )
-  if task_metric_config.tensorboard_summary:
-    metric_history_rows_list, metadata_history_rows_list = (
-        process_tensorboard_summary(
-            base_id, task_metric_config.tensorboard_summary
-        )
-    )
-  if task_metric_config.profile:
-    has_profile = True
-    num_profiles = len(task_metric_config.profile.file_locations)
-    for index in range(num_profiles):
-      profile_history_rows = process_profile(
-          base_id, task_metric_config.profile.file_locations[index]
+  if task_metric_config is not None:
+    if task_metric_config.json_lines:
+      metric_history_rows_list, metadata_history_rows_list = process_json_lines(
+          base_id, task_metric_config.json_lines.file_location
       )
-      profile_history_rows_list.append(profile_history_rows)
+    if task_metric_config.tensorboard_summary:
+      metric_history_rows_list, metadata_history_rows_list = (
+          process_tensorboard_summary(
+              base_id, task_metric_config.tensorboard_summary
+          )
+      )
+    if task_metric_config.profile:
+      has_profile = True
+      num_profiles = len(task_metric_config.profile.file_locations)
+      for index in range(num_profiles):
+        profile_history_rows = process_profile(
+            base_id, task_metric_config.profile.file_locations[index]
+        )
+        profile_history_rows_list.append(profile_history_rows)
 
   # add default airflow metadata
   metadata_history_rows_list = add_airflow_metadata(
@@ -393,12 +394,12 @@ def process_metrics(
       for index in range(len(metric_history_rows_list)):
         metric_history_rows_list[index].extend(profile_history_rows_list[index])
 
-  benchmark_rows = []
+  test_run_rows = []
   bigquery_metric = bigquery.BigQueryMetricClient(
-      task_gcp_config.project_name, task_gcp_config.database_name
+      task_gcp_config.project_name, task_gcp_config.dataset_name.value
   )
 
-  for index in range(len(metric_history_rows_list)):
+  for index in range(len(metadata_history_rows_list)):
     job_history_row = bigquery.JobHistoryRow(
         uuid=generate_row_uuid(base_id, index),
         timestamp=current_time,
@@ -406,14 +407,14 @@ def process_metrics(
         job_name=benchmark_id,
         job_status=bigquery.JobStatus.SUCCESS.value,
     )
-    benchmark_row = bigquery.BenchmarkTestRun(
+    test_run_row = bigquery.TestRun(
         job_history_row,
         metric_history_rows_list[index],
         metadata_history_rows_list[index],
     )
-    benchmark_rows.append(benchmark_row)
+    test_run_rows.append(test_run_row)
 
-  print("Benchmark rows:", benchmark_rows)
+  print("Test run rows:", test_run_rows)
 
   # if it's a manual run, no entries are inserted into tables
   context = get_current_context()
@@ -424,4 +425,4 @@ def process_metrics(
     )
     return
 
-  bigquery_metric.insert(benchmark_rows)
+  bigquery_metric.insert(test_run_rows)

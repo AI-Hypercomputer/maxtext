@@ -156,81 +156,91 @@ class TpuVmTest(TestConfig[Tpu]):
 
 @attrs.define
 class JSonnetTpuVmTest(TestConfig[Tpu]):
-    """Convert legacy JSonnet test configs into a Task.
+  """Convert legacy JSonnet test configs into a Task.
 
-    Do not construct directly. Instead, use the `from_*` factory functions which
-    parse pre-compiled JSonnet test configs.
+  Do not construct directly. Instead, use the `from_*` factory functions which
+  parse pre-compiled JSonnet test configs.
 
-    Attributes:
-      test_name: Unique name of this test/model.
-      setup: Multi-line script that configures the TPU instance.
-      exports: Extra setup commands to run in same shell as test_command.
-      test_command: Command and arguments to execute on the TPU VM.
-    """
-    test_name: str
-    setup: str
+  Attributes:
+    test_name: Unique name of this test/model.
+    setup: Multi-line script that configures the TPU instance.
+    exports: Extra setup commands to run in same shell as test_command.
+    test_command: Command and arguments to execute on the TPU VM.
+  """
 
-    exports: str
-    test_command: List[str]
+  test_name: str
+  setup: str
 
-    @staticmethod
-    def _load_compiled_jsonnet(test_name: str) -> Any:
-      # TODO(wcromar): Parse GPU tests too
-      config_dir = os.environ.get('XLMLTEST_CONFIGS', '/home/airflow/gcs/dags/configs/jsonnet')
-      test_path = os.path.join(config_dir, test_name)
-      with open(test_path, 'r') as f:
-        test = json.load(f)
+  exports: str
+  test_command: List[str]
 
-      return test
+  @staticmethod
+  def _load_compiled_jsonnet(test_name: str) -> Any:
+    # TODO(wcromar): Parse GPU tests too
+    config_dir = os.environ.get(
+        'XLMLTEST_CONFIGS', '/home/airflow/gcs/dags/configs/jsonnet'
+    )
+    test_path = os.path.join(config_dir, test_name)
+    with open(test_path, 'r') as f:
+      test = json.load(f)
 
-    @staticmethod
-    def _from_json_helper(test: Any, setup: str, exports: str, test_command: List[str]):
-      return JSonnetTpuVmTest(
-          test_name=test['testName'],
-          accelerator=Tpu(
-              version=test['accelerator']['version'],
-              cores=test['accelerator']['size'],
-              runtime_version=test['tpuSettings']['softwareVersion'],
-          ),
-          setup=setup,
-          exports=exports,
-          test_command=test_command,
-          # `timeout` is in seconds
-          time_out_in_min=test['timeout'] // 60,
-      )
+    return test
 
-    @staticmethod
-    def from_jax(test_name: str):
-      """Parses a compiled legacy JSonnet config test from `tests/jax`."""
-      test = JSonnetTpuVmTest._load_compiled_jsonnet(test_name)
-      return JSonnetTpuVmTest._from_json_helper(
+  @staticmethod
+  def _from_json_helper(
+      test: Any, setup: str, exports: str, test_command: List[str]
+  ):
+    return JSonnetTpuVmTest(
+        test_name=test['testName'],
+        accelerator=Tpu(
+            version=test['accelerator']['version'],
+            cores=test['accelerator']['size'],
+            runtime_version=test['tpuSettings']['softwareVersion'],
+        ),
+        setup=setup,
+        exports=exports,
+        test_command=test_command,
+        # `timeout` is in seconds
+        time_out_in_min=test['timeout'] // 60,
+    )
+
+  @staticmethod
+  def from_jax(test_name: str):
+    """Parses a compiled legacy JSonnet config test from `tests/jax`."""
+    test = JSonnetTpuVmTest._load_compiled_jsonnet(test_name)
+    return JSonnetTpuVmTest._from_json_helper(
         test,
         # TODO(wcromar): make this less hacky
         setup=test['setup'],
-        exports="",
-        test_command=['bash', '-c', test['runTest']]
-      )
+        exports='',
+        test_command=['bash', '-c', test['runTest']],
+    )
 
-    @staticmethod
-    def from_pytorch(test_name: str):
-      """Parses a compiled legacy JSonnet test config from `tests/pytorch`."""
-      test = JSonnetTpuVmTest._load_compiled_jsonnet(test_name)
-      return JSonnetTpuVmTest._from_json_helper(
+  @staticmethod
+  def from_pytorch(test_name: str):
+    """Parses a compiled legacy JSonnet test config from `tests/pytorch`."""
+    test = JSonnetTpuVmTest._load_compiled_jsonnet(test_name)
+    return JSonnetTpuVmTest._from_json_helper(
         test,
-        setup=test['tpuSettings']['tpuVmPytorchSetup'] + test['tpuSettings']['tpuVmExtraSetup'],
+        setup=test['tpuSettings']['tpuVmPytorchSetup']
+        + test['tpuSettings']['tpuVmExtraSetup'],
         exports=test['tpuSettings']['tpuVmExports'],
         test_command=test['command'],
-      )
+    )
 
-    @property
-    def benchmark_id(self) -> str:
-      return self.test_name
+  @property
+  def benchmark_id(self) -> str:
+    return self.test_name
 
-    @property
-    def setup_script(self) -> Optional[str]:
-      return "\n".join(["set -xue", self.setup])
+  @property
+  def setup_script(self) -> Optional[str]:
+    return '\n'.join(['set -xue', self.setup])
 
-    # TODO(wcromar): replace configmaps
-    @property
-    def test_script(self) -> str:
-      return "\n".join(["set -xue", self.exports, " ".join(shlex.quote(s) for s in self.test_command)])
+  # TODO(wcromar): replace configmaps
+  @property
+  def test_script(self) -> str:
+    return '\n'.join([
+        'set -xue',
+        self.exports,
+        ' '.join(shlex.quote(s) for s in self.test_command),
+    ])

@@ -21,8 +21,9 @@ from apis import gcp_config, metric_config, task, test_config
 # remove after python-API is well-organized
 def get_jax_resnet_config(tpu_size: int, test_time_out: int) -> task.BaseTask:
   job_gcp_config = gcp_config.GCPConfig(
-      project_name="tpu-prod-env-one-vm",
+      project_name="mlperf-high-priority-project",
       zone="us-central2-b",
+      dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
 
   set_up_cmds = (
@@ -58,16 +59,7 @@ def get_jax_resnet_config(tpu_size: int, test_time_out: int) -> task.BaseTask:
       task_owner="ranran",
   )
 
-  # TODO(ranran): verfiy if benchmark metric handling works for xlml tests
-  job_metric_config = metric_config.MetricConfig(
-      tensorboard_summary=metric_config.SummaryConfig(
-          file_location="",
-          aggregation_strategy=metric_config.AggregationStrategy.LAST,
-      )
-  )
-
   return task.TpuTask(
       task_test_config=job_test_config,
       task_gcp_config=job_gcp_config,
-      task_metric_config=job_metric_config,
   )

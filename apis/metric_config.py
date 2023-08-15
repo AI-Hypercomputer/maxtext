@@ -19,6 +19,12 @@ import enum
 from typing import Iterable, List, Optional
 
 
+# TODO: add project info to let uses specify dataset location
+class DatasetOption(enum.Enum):
+  BENCHMARK_DATASET = "benchmark_dataset"
+  XLML_DATASET = "xlml_dataset"
+
+
 class FormatType(enum.Enum):
   JSON_LINES = enum.auto()
   TENSORBOARD_SUMMARY = enum.auto()

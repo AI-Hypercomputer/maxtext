@@ -106,8 +106,7 @@ resource "google_composer_environment" "example_environment" {
         apache-airflow-providers-sendgrid = ""
         jsonlines                         = ""
         fabric                            = ""
-        paramiko                          = ""
-        cryptography                      = ""
+        google-cloud-tpu                  = ""
       }
       env_variables = {
         composer_env    = each.value.environment_name

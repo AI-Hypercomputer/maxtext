@@ -22,8 +22,8 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from airflow.models import Variable
 from apis import metric_config
-from implementations.utils import composer
-from implementations.utils.benchmark import bigquery, metric
+from implementations.utils import bigquery, composer
+from implementations.utils import metric
 import jsonlines
 import tensorflow as tf
 
@@ -247,7 +247,7 @@ class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
     uuid = hashlib.sha256(str(base_id + str(0)).encode("utf-8")).hexdigest()
 
     with mock.patch(
-        "implementations.utils.benchmark.metric.get_current_context"
+        "implementations.utils.metric.get_current_context"
     ) as mock_context:
       mock_dag_id = mock.MagicMock()
       mock_dag_id.dag_id.return_value = "benchmark_test"

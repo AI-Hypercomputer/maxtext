@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Utilities for Benchmark tests to integrate with BigQuery."""
+"""Utilities for tests to integrate with BigQuery."""
 
 
 import dataclasses
@@ -21,11 +21,11 @@ import enum
 import math
 from typing import Iterable, Optional
 from absl import logging
+from apis import metric_config
 import google.auth
 from google.cloud import bigquery
 
 
-BENCHMARK_DATASET_NAME = "benchmark_dataset"
 BENCHMARK_BQ_JOB_TABLE_NAME = "job_history"
 BENCHMARK_BQ_METRIC_TABLE_NAME = "metric_history"
 BENCHMARK_BQ_METADATA_TABLE_NAME = "metadata_history"
@@ -55,7 +55,7 @@ class MetadataHistoryRow:
 
 
 @dataclasses.dataclass
-class BenchmarkTestRun:
+class TestRun:
   job_history: JobHistoryRow
   metric_history: Iterable[MetricHistoryRow]
   metadata_history: Iterable[MetadataHistoryRow]
@@ -82,7 +82,11 @@ class BigQueryMetricClient:
       database: Optional[str] = None,
   ):
     self.project = google.auth.default()[1] if project is None else project
-    self.database = BENCHMARK_DATASET_NAME if database is None else database
+    self.database = (
+        metric_config.DatasetOption.BENCHMARK_DATASET.value
+        if database is None
+        else database
+    )
     self.client = bigquery.Client(
         project=project,
         default_query_job_config=bigquery.job.QueryJobConfig(
@@ -111,7 +115,7 @@ class BigQueryMetricClient:
     invalid_values = [math.inf, -math.inf, math.nan]
     return not (value in invalid_values or math.isnan(value))
 
-  def insert(self, test_runs: Iterable[BenchmarkTestRun]) -> None:
+  def insert(self, test_runs: Iterable[TestRun]) -> None:
     """Insert Benchmark test runs into the table.
 
     Args:

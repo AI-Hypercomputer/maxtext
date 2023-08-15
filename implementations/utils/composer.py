@@ -15,8 +15,21 @@
 """Utilities get Composer configs."""
 
 from typing import Mapping
-from implementations.utils import tpu as util
+import google.auth.transport.requests
 import requests
+
+
+def get_headers() -> Mapping[str, str]:
+  """Get request headers.
+
+  Returns:
+    A dict mapping credentials.
+  """
+  creds, _ = google.auth.default(
+      scopes=["https://www.googleapis.com/auth/cloud-platform"]
+  )
+  creds.refresh(google.auth.transport.requests.Request())
+  return {"Authorization": f"Bearer {creds.token}"}
 
 
 def get_composer_data(project: str, region: str, env: str) -> Mapping[str, str]:
@@ -31,7 +44,7 @@ def get_composer_data(project: str, region: str, env: str) -> Mapping[str, str]:
   A dict mapping metadata.
   """
   request_endpoint = f"https://composer.googleapis.com/v1beta1/projects/{project}/locations/{region}/environments/{env}"
-  response = requests.get(request_endpoint, headers=util.get_headers())
+  response = requests.get(request_endpoint, headers=get_headers())
   print("response.json()", response.json())
   return response.json()
 

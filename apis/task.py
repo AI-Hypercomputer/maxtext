@@ -19,12 +19,11 @@ import dataclasses
 import datetime
 from typing import Optional, Tuple
 import airflow
-from airflow.operators import empty
 from airflow.models.taskmixin import DAGNode
 from airflow.utils.task_group import TaskGroup
 from apis import gcp_config, metric_config, test_config
+from implementations.utils import metric
 from implementations.utils import ssh, tpu
-from implementations.utils.benchmark import metric
 
 
 class BaseTask(abc.ABC):
@@ -63,7 +62,9 @@ class TpuTask(BaseTask):
       A task group with the following tasks chained: provision, run_model,
       post_process and clean_up.
     """
-    with TaskGroup(group_id=self.task_test_config.benchmark_id, prefix_group_id=True) as group:
+    with TaskGroup(
+        group_id=self.task_test_config.benchmark_id, prefix_group_id=True
+    ) as group:
       provision, queued_resource, ssh_keys = self.provision()
       run_model = self.run_model(queued_resource, ssh_keys)
       post_process = self.post_process()
@@ -93,11 +94,11 @@ class TpuTask(BaseTask):
         ssh_keys = ssh.generate_ssh_keys()
 
       queued_resource_op, queued_resource_name = tpu.create_queued_resource(
-        tpu_name,
-        self.task_test_config.accelerator,
-        self.task_gcp_config,
-        ssh_keys,
-        self.tpu_create_timeout,
+          tpu_name,
+          self.task_test_config.accelerator,
+          self.task_gcp_config,
+          ssh_keys,
+          self.tpu_create_timeout,
       )
       queued_resource_op >> tpu.ssh_tpu.override(task_id="setup")(
           queued_resource_name,
@@ -142,9 +143,6 @@ class TpuTask(BaseTask):
     Returns:
       A DAG node that executes the post process.
     """
-    if not self.task_metric_config:
-      return empty.EmptyOperator(task_id="post_process")
-
     with TaskGroup(group_id="post_process") as group:
       process_id = metric.generate_process_id.override(retries=1)()
       metric.process_metrics(
@@ -156,9 +154,7 @@ class TpuTask(BaseTask):
 
       return group
 
-  def clean_up(
-      self, queued_resource: airflow.XComArg
-  ) -> DAGNode:
+  def clean_up(self, queued_resource: airflow.XComArg) -> DAGNode:
     """Clean up TPU resources created by `provision`.
 
     Args:
@@ -170,7 +166,9 @@ class TpuTask(BaseTask):
     Raises:
       AirflowTaskTimeout: An error occurs when execution_timeout is breached.
     """
-    return tpu.delete_queued_resource.override(group_id="clean_up")(queued_resource)
+    return tpu.delete_queued_resource.override(group_id="clean_up")(
+        queued_resource
+    )
 
 
 @dataclasses.dataclass

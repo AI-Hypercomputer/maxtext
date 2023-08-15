@@ -1,35 +1,40 @@
 import datetime
 from airflow import models
-
-from apis import gcp_config, test_config
+from apis import gcp_config, metric_config, test_config
 from apis import task
 
 
 # TODO(wcromar): Unify these with other tests
 TPU_PROD_ENV_ONE_VM = 'tpu-prod-env-one-vm'
 EUROPE_WEST4_A = gcp_config.GCPConfig(
-  TPU_PROD_ENV_ONE_VM,
-  'europe-west4-a',
+    TPU_PROD_ENV_ONE_VM,
+    'europe-west4-a',
+    metric_config.DatasetOption.XLML_DATASET,
 )
 US_CENTRAL2_B = gcp_config.GCPConfig(
-  TPU_PROD_ENV_ONE_VM,
-  'us-central2-b',
+    TPU_PROD_ENV_ONE_VM,
+    'us-central2-b',
+    metric_config.DatasetOption.XLML_DATASET,
 )
 
 
 with models.DAG(
-    dag_id="jax-integration",
+    dag_id='jax-integration',
     schedule=None,
-    tags=["jax", "latest"],
+    tags=['jax', 'latest'],
     start_date=datetime.datetime(2023, 7, 12),
 ):
   compilation_cache = task.TpuTask(
-    test_config.JSonnetTpuVmTest.from_jax('jax-compilation-cache-test-func-v2-8-1vm'),
-    EUROPE_WEST4_A,
+      test_config.JSonnetTpuVmTest.from_jax(
+          'jax-compilation-cache-test-func-v2-8-1vm'
+      ),
+      EUROPE_WEST4_A,
   ).run()
   pod = task.TpuTask(
-    test_config.JSonnetTpuVmTest.from_jax('jax-pod-latest-tpu-ubuntu2204-base-func-v2-32-1vm'),
-    EUROPE_WEST4_A,
+      test_config.JSonnetTpuVmTest.from_jax(
+          'jax-pod-latest-tpu-ubuntu2204-base-func-v2-32-1vm'
+      ),
+      EUROPE_WEST4_A,
   ).run()
   # Tests are currently failing
   # embedding_pjit = task.TPUTask(
@@ -40,4 +45,3 @@ with models.DAG(
   #   test_config.JSonnetTpuVmTest.from_jax('jax-tpu-embedding-pmap-func-v3-8-1vm'),
   #   EUROPE_WEST4_A,
   # ).run()
-

@@ -23,6 +23,7 @@ def get_jax_vit_config(tpu_size: int, test_time_out: int) -> task.BaseTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name="mlperf-high-priority-project",
       zone="us-central2-b",
+      dataset_name=metric_config.DatasetOption.BENCHMARK_DATASET,
   )
 
   set_up_cmds = (
