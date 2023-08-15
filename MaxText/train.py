@@ -184,9 +184,25 @@ def train_step(model, config, state, data, dropout_rng):
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), grads = grad_fn(state.params)
-  new_state = state.apply_gradients(grads=grads)
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
-             'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
+  updates, new_opt_state = state.tx.update(grads, state.opt_state, state.params)
+  new_params = optax.apply_updates(state.params, updates)
+  new_state = state.replace(
+      step=state.step + 1,
+      params=new_params,
+      opt_state=new_opt_state,
+  )
+  metrics = {
+    'scalar': {
+      'learning/loss': loss,
+      'learning/grad_norm' : max_utils.l2norm_pytree(grads),
+      'learning/weight_update_norm': max_utils.l2norm_pytree(updates),
+      'learning/adam_mu_norm' : max_utils.l2norm_pytree(new_opt_state[0].mu),
+      'learning/adam_nu_norm' : max_utils.l2norm_pytree(new_opt_state[0].nu),
+      'learning/adam_count' : new_opt_state[0].count,
+      'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)
+    },
+    'scalars': {},
+  }
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
