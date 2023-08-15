@@ -180,10 +180,10 @@ def train_step(model, config, state, data, dropout_rng):
     # Mask out paddings at the end of each example.
     xent = xent * (data['inputs_segmentation'] != 0)
     # TODO: mask out the prompt if training prefix-LM
-    return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
+    return jnp.sum(xent)/jnp.size(xent), (intermediate_outputs,logits)
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (loss, intermediate_outputs), grads = grad_fn(state.params)
+  (loss, (intermediate_outputs, logits)), grads = grad_fn(state.params)
   updates, new_opt_state = state.tx.update(grads, state.opt_state, state.params)
   new_params = optax.apply_updates(state.params, updates)
   new_state = state.replace(
@@ -194,6 +194,7 @@ def train_step(model, config, state, data, dropout_rng):
   metrics = {
     'scalar': {
       'learning/loss': loss,
+      'learning/logits_norm' : max_utils.l2norm_pytree(logits),
       'learning/grad_norm' : max_utils.l2norm_pytree(grads),
       'learning/weight_update_norm': max_utils.l2norm_pytree(updates),
       'learning/adam_mu_norm' : max_utils.l2norm_pytree(new_opt_state[0].mu),
