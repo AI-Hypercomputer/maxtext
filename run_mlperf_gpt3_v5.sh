@@ -21,7 +21,7 @@ TIMESTAMP=$(date +%y%m%d_%H%M%S)
 
 NODE_COUNT=2
 RUN_NAME=${USER}-mlperf-gpt3-${VERSION}-${NODE_COUNT}_v4_$(date +%Y-%m-%d-%H-%M-%S)
-PAX_DATE=20230808
+PAX_DATE=20230810
 
 EXP=C4SpmdGpt3AdamDataParallel2x4x4 
 
@@ -40,12 +40,12 @@ gsutil cp -r "${SCRIPTS_DIR}"/src gs://"${BUCKET_NAME}"/mlperf_test_script/
 # && git clone https://github.com/mlperf/logging.git mlperf-logging && pip install -e mlperf-logging \
 # && bash /tmp/mlperf_test_script/test_script.sh ${PAX_DATE} ${EXP} ${BUCKET_NAME}"
 
-TPU_PREFIX=tonyjohnchen-mlperf-gpt3-v2-alpha-tpuv5-lite-2_v4_2023-08-12-03-28-43_230812_032843
+# TPU_PREFIX=tonyjohnchen-mlperf-gpt3-v2-alpha-tpuv5-lite-2_v4_2023-08-12-03-28-43_230812_032843
 
 # python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX \
 # --COMMAND="bash setup.sh MODE=stable && sudo gsutil cp -r gs://${BUCKET_NAME}/mlperf_test_script/ /tmp/ && pip install protobuf==3.15 && pip install orbax-checkpoint==0.2.7 && pip install fiddle==0.2.8 \
 # && git clone https://github.com/mlperf/logging.git mlperf-logging && pip install -e mlperf-logging \
 # && bash /tmp/mlperf_test_script/test_script.sh ${PAX_DATE} ${EXP} ${BUCKET_NAME}"
 
-python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX \
---COMMAND="printenv;"
+# python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX \
+# --COMMAND="printenv;"
