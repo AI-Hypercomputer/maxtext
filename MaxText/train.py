@@ -191,12 +191,18 @@ def train_step(model, config, state, data, dropout_rng):
       params=new_params,
       opt_state=new_opt_state,
   )
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
-             'learning/weight_update_norm': max_utils.l2norm_pytree(updates),
-             'learning/adam_mu_norm' : max_utils.l2norm_pytree(new_opt_state.mu),
-             'learning/adam_nu_norm' : max_utils.l2norm_pytree(new_opt_state.nu),
-             'learning/adam_count' : new_opt_state.count,
-             'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
+  metrics = {
+    'scalar': {
+      'learning/loss': loss,
+      'learning/grad_norm' : max_utils.l2norm_pytree(grads),
+      'learning/weight_update_norm': max_utils.l2norm_pytree(updates),
+      'learning/adam_mu_norm' : max_utils.l2norm_pytree(new_opt_state[0].mu),
+      'learning/adam_nu_norm' : max_utils.l2norm_pytree(new_opt_state[0].nu),
+      'learning/adam_count' : new_opt_state[0].count,
+      'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)
+    },
+    'scalars': {},
+  }
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 

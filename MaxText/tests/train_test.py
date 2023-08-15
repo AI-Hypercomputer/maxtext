@@ -24,6 +24,7 @@ import layers;
 import pyconfig;
 import max_utils;
 
+import train
 import jax.numpy as jnp
 import optax
 from jax.experimental.pjit import pjit
@@ -35,47 +36,7 @@ print("OK")
 jax.config.update('jax_platform_name', 'cpu')
 
 
-# copied so that I don't have to import train.py
-def train_step(model, config, state, data, dropout_rng):
-  rng1, gen_aqt_rng = jax.random.split(dropout_rng)
-  aqt_rng, rng2 = jax.random.split(gen_aqt_rng)
-
-  def loss_fn(params):
-    logits, intermediate_outputs = model.apply(
-        {'params': params},
-        data['inputs'],
-        data['targets'],
-        data['inputs_segmentation'],
-        data['inputs_position'],
-        enable_dropout=config.enable_dropout,
-        rngs={'dropout': rng1, 'aqt': aqt_rng},
-        mutable='intermediates',
-    )
-    # TODO: is optax xent as good as custom T5X one?
-    xent = optax.softmax_cross_entropy_with_integer_labels(
-        logits, data['targets']
-    )
-    xent = xent * (data['inputs_segmentation'] != 0)
-    # TODO: mask out the prompt if training prefix-LM
-    return jnp.sum(xent) / jnp.size(xent), intermediate_outputs
-
-  grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (loss, intermediate_outputs), grads = grad_fn(state.params)
-  new_state = state.apply_gradients(grads=grads)
-  metrics = {
-      'scalar': {
-          'learning/loss': loss,
-          'learning/grad_norm': max_utils.l2norm_pytree(grads),
-          'learning/param_norm': max_utils.l2norm_pytree(new_state.params),
-      },
-      'scalars': {},
-  }
-  if config.record_internal_nn_metrics:
-    record_activation_metrics(metrics, intermediate_outputs, config)
-
-  return new_state, metrics, rng2
-
-# Note how cfg is passed
+# This function was originally written for xprofing in colab.
 def train_loop(cfg):
   # MaxText/configs/base.yaml
   # pyconfig.initialize(['', '/tmp/maxtext/MaxText/configs/base.yml', 'run_name=myrun', 'base_output_directory=/tmp/maxtext/output_dir', 'dataset_path=there_is_no_dataset',] + cfg)
@@ -107,10 +68,8 @@ def train_loop(cfg):
 
   # Define compiled top-level functions.
   p_train_step = pjit(
-      train_step,
-      in_shardings=(state_mesh_annotations,
-                        data_pspec,
-                        None),
+      train.train_step,
+      in_shardings=(state_mesh_annotations, data_pspec, None),
       out_shardings=(state_mesh_annotations, None, None),
       static_argnums=(0,1),
       donate_argnums=2,
