@@ -254,13 +254,14 @@ def train_loop(config, state=None):
 
 
   txs = []
-
-  if config.clip_by_global_norm > 0.0:
-    txs.append(optax.clip_by_global_norm(config.clip_by_global_norm))
-
-  if config.clip_by_block_rms > 0.0:
-    txs.append(optax.clip_by_block_rms(config.clip_by_block_rms))
-
+  # we need it always to keep checkpoint format fixed.
+  txs.append(optax.identity())
+  txs.append(optax.identity())
+  txs.append(optax.identity())
+  txs.append(optax.identity())
+  txs.append(optax.identity()) # slots for future
+  txs.append(optax.clip_by_global_norm(config.clip_by_global_norm))
+  txs.append(optax.clip_by_block_rms(config.clip_by_block_rms))
   txs.append(optax.adam(
       max_utils.create_learning_rate_schedule(
           learning_rate=config.learning_rate, total_steps=config.learning_rate_schedule_steps

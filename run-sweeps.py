@@ -418,8 +418,8 @@ def run_s11(attempt_number, only_print_run_names=False):
         'global_parameter_scale':8,
         'int8_training': True,
         'save_period': 2000,
-        'load_from_other_directory': 'gs://maxtext-experiments-multipod/int8-sweep10-fresh-fwdT_bwdT-a2/checkpoints',
-        'load_from_other_directory_step': 10000
+        # 'load_from_other_directory': 'gs://maxtext-experiments-multipod/int8-sweep10-fresh-fwdT_bwdT-a2/checkpoints',
+        # 'load_from_other_directory_step': 10000
     }
 
     if args['tpu'] == 'v4':
