@@ -209,6 +209,7 @@ def train_step(model, config, state, data, dropout_rng):
 
   return new_state, metrics, rng2
 
+
 def train_loop(config, state=None):
   """Main Training loop.
 
@@ -233,7 +234,16 @@ def train_loop(config, state=None):
       learning_rate=config.learning_rate, total_steps=config.learning_rate_schedule_steps
   )
 
-  tx = optax.adam(
+
+  txs = []
+
+  if config.clip_by_global_norm > 0.0:
+    txs.append(optax.clip_by_global_norm(config.clip_by_global_norm))
+
+  if config.clip_by_block_rms > 0.0:
+    txs.append(optax.clip_by_block_rms(config.clip_by_block_rms))
+
+  txs.append(optax.adam(
       max_utils.create_learning_rate_schedule(
           learning_rate=config.learning_rate, total_steps=config.learning_rate_schedule_steps
       ),
@@ -241,7 +251,9 @@ def train_loop(config, state=None):
       b2=config.adam_b2,
       eps=config.adam_eps,
       eps_root=config.adam_eps_root
-  )
+  ))
+
+  tx = optax.chain(*txs)
 
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)

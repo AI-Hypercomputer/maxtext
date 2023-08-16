@@ -113,6 +113,8 @@ log_period: 100
 save_period: 10_000
 learning_rate: 3.e-5
 learning_rate_schedule_steps: -1 # length of learning rate schedule, should be at least steps, defaults to steps.
+clip_by_global_norm: 0.0
+clip_by_block_rms: 0.0
 
 # Maximum length cutoff for training examples.
 max_target_length: 1024
