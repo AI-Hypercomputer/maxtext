@@ -110,7 +110,6 @@ def run_sweep(sweep_base_yml, sweep_base_mhj_dict, experiment_list, base_run_nam
             experiment_yml = update_yaml_fields(experiment_yml, {'steps':steps,'run_name':run_name})
             experiment_yml_file=f"MaxText/configs/{run_name}.yml"
             write_yml(experiment_yml_file, experiment_yml)
-
             mhj_command=get_mhj_command(BASE_MHJ_CMD, experiment_yml_file)
             experiment_mhj = update_yaml_fields(experiment_mhj, {'--RUN_NAME':run_name,'--COMMAND':mhj_command})
 
