@@ -120,6 +120,7 @@ def run_sweep(sweep_base_yml, sweep_base_mhj_dict, experiment_list, base_run_nam
             # Cleanup - delete writen yml
             os.remove(experiment_yml_file)
 
+
 ###################    Sweep 10 (load from 10k checkpoint, no checkpoint loading)    ###################
 def run_sweep_10_load(attempt_number, only_print_run_names=False):
     # Experiment Base
@@ -410,11 +411,62 @@ def sweep_test1(attempt: str):
 
     run_sweep(sweep8_base_yml, sweep8_base_mhj, experiment_list, 'test1', attempt, steps=steps, only_print_run_names=False)
 
+
+def run_s11(attempt_number, only_print_run_names=False):
+    # Experiment Base
+    sweep_base_yml_update={
+        'global_parameter_scale':8,
+        'int8_training': True,
+        'save_period': 2000,
+        'load_from_other_directory': 'gs://maxtext-experiments-multipod/int8-sweep10-fresh-fwdT_bwdT-a2/checkpoints',
+        'load_from_other_directory_step': 10000
+    }
+
+    if args['tpu'] == 'v4':
+        base_yml_updates = v4_base_yml_updates
+    elif args['tpu'] == 'v5':
+        base_yml_updates = v5_base_yml_updates
+    else:
+        assert False
+
+    BASE_YML_DATA2=update_yaml_fields(BASE_YML_DATA, base_yml_updates)
+    sweep_base_yml = update_yaml_fields(BASE_YML_DATA2, sweep_base_yml_update)
+    if args['tpu'] == 'v4':
+        sweep_base_mhj = V4_MHJ_DICT
+    elif args['tpu'] == 'v5':
+        sweep_base_mhj = V5_MHJ_DICT
+    else:
+        assert False
+
+    # Experiment Axes
+    bname = lambda b: str(b)[0]
+
+    experiment_list = []
+    def add(fwd_int8: bool, bwd_int8: bool, clip:str):
+        experiment_name = f'fwd{bname(fwd_int8)}_bwd{bname(bwd_int8)}'
+        maxtext_config={'fwd_int8':fwd_int8, 'bwd_int8':bwd_int8}
+        if clip == 'global':
+            maxtext_config['clip_by_global_norm'] = 1.0
+        elif clip == 'rms':
+            maxtext_config['clip_by_block_rms'] = 1.0  # no idea if this is a good value
+        else:
+            assert clip == 'none'
+
+        experiment_list.append({'name':experiment_name, 'maxtext':maxtext_config,'mhj':{}})
+
+    add(True, True, 'none')
+    add(True, True, 'global')
+    add(True, True, 'rms')
+
+    base_run_name='int8-sweep11'
+    run_sweep(sweep_base_yml, sweep_base_mhj, experiment_list, base_run_name, attempt_number, only_print_run_names=only_print_run_names)
+
 sweeps = {
     'test1': sweep_test1,
     'sweep9': run_sweep_9,
     'sweep10-fresh': run_sweep_10_fresh,
     'sweep10-load': run_sweep_10_load,
+    's11': run_s11,
 }
 
 def main():

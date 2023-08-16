@@ -191,11 +191,18 @@ def train_step(model, config, state, data, dropout_rng):
       params=new_params,
       opt_state=new_opt_state,
   )
+  def mean_rms(tree):
+    all = [jnp.sqrt(jnp.mean(x**2)) for x in jax.tree_util.tree_leaves(tree)]
+    print(all)
+    print (sum(all), len(all))
+    return (sum(all) / len(all))
+
   metrics = {
     'scalar': {
       'learning/loss': loss,
       'learning/logits_norm' : max_utils.l2norm_pytree(logits),
       'learning/grad_norm' : max_utils.l2norm_pytree(grads),
+      'learning/grad_rms' : mean_rms(grads),
       'learning/weight_update_norm': max_utils.l2norm_pytree(updates),
       'learning/adam_mu_norm' : max_utils.l2norm_pytree(new_opt_state[0].mu),
       'learning/adam_nu_norm' : max_utils.l2norm_pytree(new_opt_state[0].nu),
