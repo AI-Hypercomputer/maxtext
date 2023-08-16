@@ -193,8 +193,6 @@ def train_step(model, config, state, data, dropout_rng):
   )
   def mean_rms(tree):
     all = [jnp.sqrt(jnp.mean(x**2)) for x in jax.tree_util.tree_leaves(tree)]
-    print(all)
-    print (sum(all), len(all))
     return (sum(all) / len(all))
 
   adam = None

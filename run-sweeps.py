@@ -458,6 +458,9 @@ def run_s11(attempt_number, only_print_run_names=False):
     add(True, True, 'none')
     add(True, True, 'global', 1.0, '10en1')
     add(True, True, 'rms', 5e-4, "5en4")   # no idea if this is a good value, but charts on 1B model and large LR suggest yes.
+    add(True, False, 'none')
+    add(True, False, 'global', 1.0, '10en1')
+    add(True, False, 'rms', 5e-4, "5en4")   # no idea if this is a good value, but charts on 1B model and large LR suggest yes.
 
     base_run_name='int8-sweep11'
     run_sweep(sweep_base_yml, sweep_base_mhj, experiment_list, base_run_name, attempt_number, only_print_run_names=only_print_run_names)
