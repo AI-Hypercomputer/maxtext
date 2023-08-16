@@ -197,6 +197,19 @@ def train_step(model, config, state, data, dropout_rng):
     print (sum(all), len(all))
     return (sum(all) / len(all))
 
+  adam = None
+  def find_adam(tree):
+    nonlocal adam
+    if isinstance(tree, optax._src.transform.ScaleByAdamState):
+      assert adam is None, "Highlander"
+      adam = tree
+    if isinstance(tree, tuple):
+      for e in tree:
+        find_adam(e)
+
+  find_adam(new_opt_state)
+  assert adam is not None
+
   metrics = {
     'scalar': {
       'learning/loss': loss,
@@ -204,9 +217,9 @@ def train_step(model, config, state, data, dropout_rng):
       'learning/grad_norm' : max_utils.l2norm_pytree(grads),
       'learning/grad_rms' : mean_rms(grads),
       'learning/weight_update_norm': max_utils.l2norm_pytree(updates),
-      'learning/adam_mu_norm' : max_utils.l2norm_pytree(new_opt_state[0].mu),
-      'learning/adam_nu_norm' : max_utils.l2norm_pytree(new_opt_state[0].nu),
-      'learning/adam_count' : new_opt_state[0].count,
+      'learning/adam_mu_norm' : max_utils.l2norm_pytree(adam.mu),
+      'learning/adam_nu_norm' : max_utils.l2norm_pytree(adam.nu),
+      'learning/adam_count' : adam.count,
       'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)
     },
     'scalars': {},
