@@ -442,8 +442,9 @@ def run_s11(attempt_number, only_print_run_names=False):
     bname = lambda b: str(b)[0]
 
     experiment_list = []
-    def add(fwd_int8: bool, bwd_int8: bool, clip:str, value=0.0):
-        experiment_name = f'fwd{bname(fwd_int8)}_bwd{bname(bwd_int8)}'
+    def add(fwd_int8: bool, bwd_int8: bool, clip:str, value=0.0, value_str=""):
+        clip_letter=clip[0]
+        experiment_name = f'fwd{bname(fwd_int8)}_bwd{bname(bwd_int8)}_clip-{clip_letter}{value_str}'
         maxtext_config={'fwd_int8':fwd_int8, 'bwd_int8':bwd_int8}
         if clip == 'global':
             maxtext_config['clip_by_global_norm'] = value
@@ -455,8 +456,8 @@ def run_s11(attempt_number, only_print_run_names=False):
         experiment_list.append({'name':experiment_name, 'maxtext':maxtext_config,'mhj':{}})
 
     add(True, True, 'none')
-    add(True, True, 'global', 1.0)
-    add(True, True, 'rms', 5e-4)   # no idea if this is a good value, but charts on 1B model and large LR suggest yes.
+    add(True, True, 'global', 1.0, '10en1')
+    add(True, True, 'rms', 5e-4, "5en4")   # no idea if this is a good value, but charts on 1B model and large LR suggest yes.
 
     base_run_name='int8-sweep11'
     run_sweep(sweep_base_yml, sweep_base_mhj, experiment_list, base_run_name, attempt_number, only_print_run_names=only_print_run_names)
