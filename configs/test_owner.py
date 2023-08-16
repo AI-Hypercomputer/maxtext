@@ -12,20 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A DAG to run all supported ML models with the latest JAX version."""
+"""The file of test owners."""
 
-import datetime
-from airflow import models
-from configs.xlml import solutionsTeam_jax_latest_supported_config as jax_config
+# XLML - JAX/FLAX
+SHIVA_S = "Shiva S."
 
+# XLML - PAX
+GERSON_K = "Gerson K."
 
-with models.DAG(
-    dag_id="jax_latest_supported",
-    schedule=None,
-    tags=["jax", "latest", "supported"],
-    start_date=datetime.datetime(2023, 7, 12),
-) as dag:
-  jax_resnet_v4_8 = jax_config.get_jax_resnet_config(8, 60).run()
-  jax_resnet_v4_32 = jax_config.get_jax_resnet_config(32, 600).run()
-
-  jax_resnet_v4_8 >> jax_resnet_v4_32
+# XLML - TensorFlow
+ERIC_L = "Eric L."
+CHANDRA_D = "Chandra D."
+GAGIK_A = "Gagik A."
+RAN_R = "Ran R."
