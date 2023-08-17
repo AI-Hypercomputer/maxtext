@@ -46,7 +46,7 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
     docker build --build-arg MODE="stable" --build-arg JAX_VERSION="$JAX_VERSION" -f ./maxtext.Dockerfile -t ${IMAGE_PREFIX}_maxtext_stable .
   fi
   docker tag ${IMAGE_PREFIX}_maxtext_stable gcr.io/$PROJECT/${IMAGE_PREFIX}_maxtext_stable:latest
-  docker push gcr.io/$PROJECT/${IMAGE_PREFIX}_maxtext_stable:latest
+  sudo docker push gcr.io/$PROJECT/${IMAGE_PREFIX}_maxtext_stable:latest
 elif [[ $MODE == "nightly" ]]; then
   # Nightly mode
   docker build --build-arg MODE="nightly" -f ./maxtext.Dockerfile -t ${IMAGE_PREFIX}_maxtext_nightly .
