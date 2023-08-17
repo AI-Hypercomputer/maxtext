@@ -232,7 +232,7 @@ class DenseGeneral(nn.Module):
         aqt_dq_dg = aqt_dq.make_aqt_dq_dg()
         return aqt_dq_dg(aqt_key, inputs, kernel, ((axis, contract_ind), ((), ())))
       else:
-        aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8, cfg.bwd_int8)
+        aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8, cfg.dlhs_int8, cfg.drhs_int8)
         aqt_dot_general = aqt.make_dot_general(aqt_cfg)
         context = aqt.Context(key=aqt_key, train_step=None)
 
