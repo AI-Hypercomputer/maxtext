@@ -253,16 +253,7 @@ def train_loop(config, state=None):
   )
 
 
-  txs = []
-  # we need it always to keep checkpoint format fixed.
-  txs.append(optax.identity())
-  txs.append(optax.identity())
-  txs.append(optax.identity())
-  txs.append(optax.identity())
-  txs.append(optax.identity()) # slots for future
-  txs.append(optax.clip_by_global_norm(config.clip_by_global_norm))
-  txs.append(optax.clip_by_block_rms(config.clip_by_block_rms))
-  txs.append(optax.adam(
+  adam = optax.adam(
       max_utils.create_learning_rate_schedule(
           learning_rate=config.learning_rate, total_steps=config.learning_rate_schedule_steps
       ),
@@ -270,9 +261,18 @@ def train_loop(config, state=None):
       b2=config.adam_b2,
       eps=config.adam_eps,
       eps_root=config.adam_eps_root
-  ))
+  )
 
-  tx = optax.chain(*txs)
+  # tx = optax.chain(
+  #     optax.chain(
+  #       optax.identity(),
+  #       optax.clip_by_global_norm(config.clip_by_global_norm),
+  #       optax.clip_by_block_rms(config.clip_by_block_rms),
+  #     ),
+  #     adam,
+  # )
+
+  tx = adam
 
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
