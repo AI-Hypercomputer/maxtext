@@ -108,10 +108,6 @@ resource "google_composer_environment" "example_environment" {
         fabric                            = ""
         google-cloud-tpu                  = ""
       }
-      env_variables = {
-        composer_env    = each.value.environment_name
-        composer_region = var.project_config.project_region
-      }
     }
 
     node_config {

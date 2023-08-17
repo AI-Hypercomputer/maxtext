@@ -20,7 +20,6 @@ from typing import Iterable, Optional
 from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
-from airflow.models import Variable
 from apis import metric_config
 from implementations.utils import bigquery, composer
 from implementations.utils import metric
@@ -261,7 +260,13 @@ class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
           "task": mock_task_id,
       }
 
-      with mock.patch.object(Variable, "get", return_value="") as mock_variable:
+      with mock.patch.dict(
+          os.environ,
+          {
+              "COMPOSER_LOCATION": "test_location",
+              "COMPOSER_ENVIRONMENT": "test_env",
+          },
+      ) as mock_variable:
         with mock.patch.object(
             composer, "get_airflow_url", return_value="http://airflow"
         ) as mock_object:
