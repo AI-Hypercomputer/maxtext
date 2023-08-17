@@ -174,6 +174,9 @@ def run_create_resources_curl(startup_script):
                           "subnetwork": "default",
                           "enable_external_ips": True
                       },
+                      "scheduling_config": {
+                        "maintenance_interval": 2
+                      },
                       "metadata": {
                           "startup-script": startup_script
                       }
@@ -181,11 +184,6 @@ def run_create_resources_curl(startup_script):
               }
         }
     }
-
-  #  This changes which pool to target
-   data['tpu']['node_spec']['node']['scheduling_config'] = {
-      "maintenance_interval": 2
-    },
 
   if args.NUM_SLICES > 1:
     multi_node_dict = {"node_count": args.NUM_SLICES, "node_id_prefix": args.RUN_NAME}
@@ -196,7 +194,6 @@ def run_create_resources_curl(startup_script):
   # Set the file name with {args.RUN_NAME}.json
   temp_file_name = f"{args.RUN_NAME}.json"
   temp_file_path = os.path.join(tempfile.gettempdir(), temp_file_name)
-  #temp_file_path = temp_file_name
   with open(temp_file_path, mode='w', encoding='utf-8') as temp_file:
     json.dump(data, temp_file, indent=4)
   # pylint: disable=W1401
@@ -205,7 +202,6 @@ def run_create_resources_curl(startup_script):
     https://tpu.googleapis.com/v2alpha1/projects/{args.PROJECT}/locations/{args.ZONE}/queuedResources\?queued_resource_id\={args.RUN_NAME}
   """
   captured_output = subprocess.run(curl_command, check=False, shell=True, capture_output=True)
-  #captured_output = None
   return captured_output
 
 def write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file):
