@@ -163,31 +163,34 @@ def run_create_resources_curl(startup_script):
   """ Run the Create Queued Resources (CQR) request with curl command"""
   data = {
         "tpu": {
-            "node_spec": [
-                {
-                    "parent": f"projects/{args.PROJECT}/locations/{args.ZONE}",
-                    "node": {
-                        "accelerator_type": args.TPU_TYPE,
-                        "runtime_version": args.VERSION,
-                        "network_config": {
-                            "network": "default",
-                            "subnetwork": "default",
-                            "enable_external_ips": True
-                        },
-                        "scheduling_config": {
-                            "maintenance_interval": 2
-                        },
-                        "metadata": {
-                            "startup-script": startup_script
-                        }
-                    },
-                    "multi_node_params": {
-                        "node_count": args.NUM_SLICES
-                    }
-                }
-            ]
+            "node_spec":
+              {
+                  "parent": f"projects/{args.PROJECT}/locations/{args.ZONE}",
+                  "node": {
+                      "accelerator_type": args.TPU_TYPE,
+                      "runtime_version": args.VERSION,
+                      "network_config": {
+                          "network": "default",
+                          "subnetwork": "default",
+                          "enable_external_ips": True
+                      },
+                      "scheduling_config": {
+                          "maintenance_interval": 2
+                      },
+                      "metadata": {
+                          "startup-script": startup_script
+                      }
+                  }
+              }
         }
     }
+
+  
+  if args.NUM_SLICES > 1:
+    multi_node_dict = {"node_count": args.NUM_SLICES, "node_id_prefix": args.RUN_NAME}
+    data["tpu"]["node_spec"]["multi_node_params"] = multi_node_dict
+  else:
+    data["tpu"]["node_spec"]["node_id"] = args.RUN_NAME
 
   # Set the file name with {args.RUN_NAME}.json
   temp_file_name = f"{args.RUN_NAME}.json"
