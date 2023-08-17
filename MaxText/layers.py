@@ -18,6 +18,7 @@
 # pylint: disable=arguments-differ
 
 from aqt.jax.v2 import aqt_dot_general as aqt
+from aqt.jax.v2 import aqt_dq_dot_general as aqt_dq
 from aqt.jax.v2.google import maxtext_sweeps
 
 import dataclasses
@@ -225,12 +226,16 @@ class DenseGeneral(nn.Module):
     if not cfg.int8_training:
       return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
     else:
-      aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8, cfg.bwd_int8)
-      aqt_dot_general = aqt.make_dot_general(aqt_cfg)
       aqt_key = self.make_rng('aqt')
-      context = aqt.Context(key=aqt_key, train_step=None)
+      if cfg.use_dqdg:
+        aqt_dq_dg = aqt_dq.make_aqt_dq_dg()
+        return aqt_dq_dg(aqt_key, inputs, kernel, ((axis, contract_ind), ((), ())))
+      else:
+        aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8, cfg.bwd_int8)
+        aqt_dot_general = aqt.make_dot_general(aqt_cfg)
+        context = aqt.Context(key=aqt_key, train_step=None)
 
-      return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
+        return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
 
 def _convert_to_activation_function(
     fn_or_string: Union[str, Callable]) -> Callable:
