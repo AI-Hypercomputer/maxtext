@@ -18,12 +18,12 @@
 import dataclasses
 import datetime
 import hashlib
+import os
 import re
 from typing import Dict, Iterable, List, Optional
 import uuid
 from absl import logging
 from airflow.decorators import task
-from airflow.models import Variable
 from airflow.operators.python import get_current_context
 from apis import gcp_config, test_config
 from apis import metric_config
@@ -280,8 +280,8 @@ def add_airflow_metadata(
   dag_run_id = encode_url(run_id)
   airflow_link = composer.get_airflow_url(
       project_name,
-      Variable.get("composer_region"),
-      Variable.get("composer_env"),
+      os.environ.get("COMPOSER_LOCATION"),
+      os.environ.get("COMPOSER_ENVIRONMENT"),
   )
   airflow_dag_run_link = f"{airflow_link}/dags/{dag_id}/grid?dag_run_id={dag_run_id}&task_id={task_id}"
   logging.info(f"airflow_dag_run_link is {airflow_dag_run_link}")
