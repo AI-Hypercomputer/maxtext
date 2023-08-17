@@ -184,8 +184,6 @@ def run_create_resources_curl(startup_script):
               }
         }
     }
-
-  
   if args.NUM_SLICES > 1:
     multi_node_dict = {"node_count": args.NUM_SLICES, "node_id_prefix": args.RUN_NAME}
     data["tpu"]["node_spec"]["multi_node_params"] = multi_node_dict
