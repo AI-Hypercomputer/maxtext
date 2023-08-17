@@ -421,6 +421,7 @@ def base_yml(model_size, load_from=None, load_step=None):
 
 
 def run_job(
+        sweep_number,
         run_name,
         maxtext_config,
         *,
@@ -429,6 +430,7 @@ def run_job(
         load_step=None,
 ):
     assert (load_from is None) == (load_step is None)
+    assert isinstance(sweep_number, int)
 
     yml = read_yaml_file('MaxText/configs/base.yml')
     yml = update_yaml_fields(yml, {
@@ -451,6 +453,8 @@ def run_job(
         yml['load_from_other_directory_step'] = load_step
 
     yml = update_yaml_fields(yml, maxtext_config)
+    attempt = args['attempt']
+    run_name = f'int8-s{sweep_number}-a{attempt}-{run_name}'
     yml = update_yaml_fields(yml, {'run_name': run_name})
     experiment_yml_file = f"MaxText/configs/{run_name}.yml"
     write_yml(experiment_yml_file, yml)
@@ -470,29 +474,43 @@ def run_job(
     else:
         multihost_job_main(mhj_args)
 
-    os.remove(experiment_yml_file)
+    if args['delyml']:
+        os.remove(experiment_yml_file)
 
 
-def run_s11(attempt_number, only_print_run_names=False):
-    def run(fwd_int8: bool, bwd_int8: bool, clip:str, value=0.0, value_str=""):
+def run_s11():
+    def run(fwd_int8: bool, bwd_int8: bool, clip:str):
         clip_letter=clip[0]
-        maxtext_config={'fwd_int8':fwd_int8, 'bwd_int8':bwd_int8}
+        config={'fwd_int8':fwd_int8, 'bwd_int8':bwd_int8}
         if clip == 'global':
-            maxtext_config['clip_by_global_norm'] = value
+            config['clip_by_global_norm'] = 1.0
         elif clip == 'rms':
-            maxtext_config['clip_by_block_rms'] = value
+            config['clip_by_block_rms'] = 5e-4
         else:
             assert clip == 'none'
-        run_name= f'int8-sweep11-fwd{bname(fwd_int8)}_bwd{bname(bwd_int8)}_clip-{clip_letter}{value_str}-a{attempt_number}'
+        run_name= f'fwd{bname(fwd_int8)}_bwd{bname(bwd_int8)}_clip-{clip_letter}'
         # load_from='int8-sweep10-fresh-fwdT_bwdT-a2', load_step=1000
-        run_job(run_name, maxtext_config)
+        run_job(11, run_name, config)
 
     run(True, True, 'none')
-    run(True, True, 'global', 1.0, '10en1')
-    run(True, True, 'rms', 5e-4, "5en4")   # no idea if this is a good value, but charts on 1B model and large LR suggest yes.
+    run(True, True, 'global')
+    run(True, True, 'rms')   # no idea if this is a good value, but charts on 1B model and large LR suggest yes.
     run(True, False, 'none')
-    run(True, False, 'global', 1.0, '10en1')
-    run(True, False, 'rms', 5e-4, "5en4")   # no idea if this is a good value, but charts on 1B model and large LR suggest yes.
+    run(True, False, 'global')
+    run(True, False, 'rms')   # no idea if this is a good value, but charts on 1B model and large LR suggest yes.
+
+
+def run_s12():
+    def run(
+            *,
+            bwd_int8: bool,
+    ):
+        maxtext_config={'fwd_int8': True, 'bwd_int8':bwd_int8}
+        run_name= f'bwd{bname(bwd_int8)}'
+        run_job(12, run_name, maxtext_config) # load_from='int8-sweep10-fresh-fwdT_bwdT-a2', load_step=1000
+
+    run(True)
+    run(False)
 
 
 sweeps = {
@@ -501,12 +519,15 @@ sweeps = {
     'sweep10-fresh': run_sweep_10_fresh,
     'sweep10-load': run_sweep_10_load,
     's11': run_s11,
+    's12': run_s12,
 }
+
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='TPU configuration options')
     parser.add_argument('--dryrun', type=bool, default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--delyml', type=bool, default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--tpu', type=str, default='v5')
     parser.add_argument('--sweep', type=str, default='')
     parser.add_argument('--attempt', type=str, default='')
@@ -519,7 +540,8 @@ def main():
     assert sweep_name in sweeps.keys()
     assert attempt != ''
     sweep_fn = sweeps[sweep_name]
-    sweep_fn(attempt)
+    # sweep_fn(attempt)
+    sweep_fn()
     # run_sweep_8('mattdavidow-sweep8', 2, only_print_run_names=False)
     #run_sweep_7('mattdavidow-sweep7',2, only_print_run_names=True)
 
