@@ -1,53 +1,25 @@
-# New Project Template
+# ML Automation Solutions
 
-This repository contains a template that can be used to seed a repository for a
-new Google open source project.
+A simplified and automated orchestration workflow to perform ML end-to-end (E2E) model tests and benchmarking on Cloud VMs across different frameworks.
 
-See [go/releasing](http://go/releasing) (available externally at
-https://opensource.google/documentation/reference/releasing) for more information about
-releasing a new Google open source project.
+## Getting Started
 
-This template uses the Apache license, as is Google's default.  See the
-documentation for instructions on using alternate license.
-
-## How to use this template
-
-1. Clone it from GitHub.
-    * There is no reason to fork it.
-1. Create a new local repository and copy the files from this repo into it.
-1. Modify README.md and docs/contributing.md to represent your project, not the
-   template project.
-1. Develop your new project!
-
-``` shell
-git clone https://github.com/google/new-project
-mkdir my-new-thing
-cd my-new-thing
-git init
-cp -r ../new-project/* ../new-project/.github .
-git add *
-git commit -a -m 'Boilerplate for new Google open source project'
+1. Follow the [instruction](deployment/README.md) to create a Cloud Composer environment using Terraform. This step may take about 30min to complete.
+2. Identify your `dags` folder. See the instructions to [access the bucket of your environment](https://cloud.google.com/composer/docs/composer-2/manage-dags#console).
+3. In the root directory of the repository, run the following command to upload tests and utilities to the `dags` folder you identified in the previous step ([gsutil command-line tool](https://cloud.google.com/storage/docs/gsutil_install) is required).
 ```
+bash scripts/upload-tests.sh gs://<your_bucket_name>/dags
+```
+4. After the automatically scheduled tests start running, integrate [Looker Studio](https://cloud.google.com/bigquery/docs/bi-engine-looker-studio) or any other dashboard with BigQuery to monitor metrics.
 
-## Source Code Headers
+If you have a use case that ML Automation Solutions does not cover, please email ml-testing-accelerators-users@googlegroups.com. We're here to help!
 
-Every file containing source code must include copyright and license
-information. This includes any JS/CSS files that you might be serving out to
-browsers. (This is to help well-intentioned people avoid accidental copying that
-doesn't comply with the license.)
+## Contributing
 
-Apache header:
+Thank you for your interest in contributing to this project!
 
-    Copyright 2022 Google LLC
+Please review the [contribution guidelines](docs/contributing.md), and note that all contributions must adhere to the [code of conduct](docs/code-of-conduct.md).
 
-    Licensed under the Apache License, Version 2.0 (the "License");
-    you may not use this file except in compliance with the License.
-    You may obtain a copy of the License at
+## License
 
-        https://www.apache.org/licenses/LICENSE-2.0
-
-    Unless required by applicable law or agreed to in writing, software
-    distributed under the License is distributed on an "AS IS" BASIS,
-    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-    See the License for the specific language governing permissions and
-    limitations under the License.
+[Apache License 2.0](LICENSE)
