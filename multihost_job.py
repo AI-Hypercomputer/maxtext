@@ -142,6 +142,9 @@ def run_create_resources_curl(startup_script, args):
                           "subnetwork": "default",
                           "enable_external_ips": True
                       },
+                      "scheduling_config": {
+                          "maintenance_interval": 2
+                      },
                       "metadata": {
                           "startup-script": startup_script
                       }
