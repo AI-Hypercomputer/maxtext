@@ -101,6 +101,7 @@ class TrainTest(unittest.TestCase):
     cfg = [
       'per_device_batch_size=1',
       'int8_training=True',
+      'use_dqdg=False',  # set True for using aqt dq
       'base_mlp_dim=8',
       'base_emb_dim=4',
       'base_num_heads=2',
