@@ -448,10 +448,6 @@ def run_job(
         'steps': calc_chinchilla_step_count(model_size, V5_MHJ_DICT['--NUM_SLICE'])
     })
 
-    if load_from is not None:
-        yml['load_from_other_directory'] = f'gs://maxtext-experiments-multipod/{load_from}/checkpoints',
-        yml['load_from_other_directory_step'] = load_step
-
     yml = update_yaml_fields(yml, maxtext_config)
     attempt = args['attempt']
     run_name = f'int8-s{sweep_number}-a{attempt}-{run_name}'
@@ -502,16 +498,38 @@ def run_s11():
 
 def run_s12():
     def run(
+            run_name,
             *,
-            bwd_int8: bool,
+            fwd = True,
+            bwd = True,
+            load_from='int8-sweep10-fresh-fwdT_bwdT-a2',
+            quantize_logits=True,
+            use_dq=False,
     ):
-        maxtext_config={'fwd_int8': True, 'bwd_int8':bwd_int8}
-        run_name= f'bwd{bname(bwd_int8)}'
-        run_job(12, run_name, maxtext_config) # load_from='int8-sweep10-fresh-fwdT_bwdT-a2', load_step=1000
+        config = {
+            'fwd_int8': fwd,
+            'bwd_int8': bwd,
+            'use_dqdg': use_dq,
+            'quantize_logits': quantize_logits,
+        }
+        if load_from is not None:
+            config.update({
+                'load_from_other_directory': f'gs://maxtext-experiments-multipod/{load_from}/checkpoints',
+                'load_from_other_directory_step': 2000
+            })
+        # run_name= f'{bname(fwd)}{bname(bwd)}-load{bname(load_from is not None)}'
+        run_job(12, run_name, config)
 
-    run(True)
-    run(False)
 
+    run('baseline')
+    run('bwdF-logitsF', bwd=False, quantize_logits=False)
+    run('bwdT-logitsF', bwd=True,  quantize_logits=False)
+    run('dqT', use_dq=True)
+
+    # Logits sweep
+    # take S10 and rerun without logits quantization  TF vs TT
+    # dqdg sweep
+    # take S10 and rerun with dqdg, just TT
 
 sweeps = {
     'test1': sweep_test1,
