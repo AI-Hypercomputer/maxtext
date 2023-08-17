@@ -91,6 +91,12 @@ class _HyperParameters():
     validate_gcs_bucket_name(base_output_directory, "base_output_directory")
     dataset_path = raw_keys["dataset_path"]
     validate_gcs_bucket_name(dataset_path, "dataset_path")
+    assert ((raw_keys["load_parameters_path"]=="" and raw_keys["load_from_other_directory"]=="") or
+      raw_keys["enable_checkpointing"]), "You must set enable_checkpointing to load a checkpoint"
+    assert raw_keys["load_parameters_path"]=="" or raw_keys["load_from_other_directory"]=="" \
+      "At most one of load_parameters_path or load_from_other_directory should be set"
+    assert raw_keys["load_from_other_directory_step"]==-1 or raw_keys["load_from_other_directory"]!="", \
+      "You must specify the loading directory if you specify the loading step"
     raw_keys["tensorboard_dir"] = os.path.join(base_output_directory, run_name, "tensorboard", "")
     raw_keys["checkpoint_dir"] = os.path.join(base_output_directory, run_name, "checkpoints", "")
     raw_keys["metrics_dir"] = os.path.join(base_output_directory, run_name, "metrics", "")
@@ -98,10 +104,10 @@ class _HyperParameters():
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys['global_parameter_scale'])
-    raw_keys['emb_dim'] = emb_scale * raw_keys['base_emb_dim']
-    raw_keys['num_heads'] = num_head_scale * raw_keys['base_num_heads']
-    raw_keys['mlp_dim'] = mlp_dim_scale * raw_keys['base_mlp_dim']
-    raw_keys['num_decoder_layers'] = layer_scale * raw_keys['base_num_decoder_layers']
+    raw_keys['emb_dim'] = 2**emb_scale * raw_keys['base_emb_dim']
+    raw_keys['num_heads'] = 2**num_head_scale * raw_keys['base_num_heads']
+    raw_keys['mlp_dim'] = 2**mlp_dim_scale * raw_keys['base_mlp_dim']
+    raw_keys['num_decoder_layers'] = 2**layer_scale * raw_keys['base_num_decoder_layers']
 
 def validate_gcs_bucket_name(bucket_name, config_var):
   assert bucket_name, f"Please set {config_var}."
@@ -122,7 +128,6 @@ def get_individual_scales(scale):
     raise ValueError("Global parameter scale should be a power of 2. If you want finer grained control of the model sizes "
       "then you can explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.")
   base_scale, rem = divmod(log_2_scale, 3)
-  base_scale += 1
   emb_scale = base_scale + int(rem > 0)
   num_head_scale = base_scale + int(rem > 1)
   mlp_dim_scale = num_head_scale

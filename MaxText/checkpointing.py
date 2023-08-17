@@ -72,6 +72,8 @@ def create_orbax_checkpoint_manager(checkpoint_dir: str, enable_checkpointing: b
 
 def load_state_if_possible(checkpoint_manager: CheckpointManager,
                            first_checkpoint_path: str,
+                           load_from_other_directory: str,
+                           load_from_other_directory_step: int,
                            abstract_unboxed_pre_state: train_state.TrainState,
                            mesh,
                            state_mesh_annotations):
@@ -121,6 +123,18 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
     return None, checkpointer.restore(p,
                                       item=abstract_unboxed_pre_state,
                                       restore_args=restore_args).params
+  elif load_from_other_directory != "":
+    p = epath.Path(load_from_other_directory)
+    checkpointer_loader = Checkpointer(checkpoint.PyTreeCheckpointHandler())
+    mngr_loader = CheckpointManager(p, checkpointer_loader, options=CheckpointManagerOptions(create=True))
+    if load_from_other_directory_step == -1:
+      step = mngr_loader.latest_step()
+      max_logging.log(f"restoring state from {load_from_other_directory} latest step {step}")
+    else:
+      step = load_from_other_directory_step
+      max_logging.log(f"restoring state from {load_from_other_directory} step {step}")
+    return mngr_loader.restore(step, abstract_unboxed_pre_state,
+                                      {"restore_args" : restore_args}), None
   else:
     max_logging.log("No existing checkpoints found, not restoring checkpoint.")
     return None, None

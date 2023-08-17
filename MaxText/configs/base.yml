@@ -16,8 +16,20 @@
 # If there is already a checkpoint under this run, that checkpoint will auto-resume.
 run_name: ""
 
+# At most one of load_parameters_path and load_from_other_directory should be set.
+#   * load_parameters_path is used when you only care about the parameters, not the optimizer state or
+#      the step count
+#   * load_from_other_directory is used when you want to use a saved checkpoint from a different directory
+#        (corresponding to a different run_name), and save new metrics and checkpoints to a new directory.
+#   * If neither is provided then the most recent checkpoint saved under the current run_name is loaded if
+#        any exists, else the model initializes randomly.
 # If we aren't resuming from an existing checkpoint, load parameters from this path if provided.
 load_parameters_path: ""
+# Loads a full checkpoint including optimizer state and step count from a directory other than [run_name]
+# e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints
+load_from_other_directory: ""
+# Which step to load from other directory, defaults to latest step
+load_from_other_directory_step: -1
 
 reuse_example_batch: 0 # for testing TPU performance, this options repeated uses the same batch.
 
@@ -27,7 +39,10 @@ gcs_metrics: False
 
 # Activation dtypes.
 dtype: "bfloat16"
-use_int8_training: False
+int8_training: False
+fwd_int8: True
+bwd_int8: True
+
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
 global_parameter_scale: 1
@@ -121,9 +136,12 @@ enable_profiler: False
 enable_checkpointing: True
 async_checkpointing: True
 
-# Set these two to False to run deterministically (i.e. reproducible losses)
+# When dropout is false the model is a deterministic function of the 
+# data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
 enable_dropout: True
 enable_data_shuffling: True
+data_shuffle_seed: 0
+init_weights_seed: 0
 
 # Adam optimizer parameters
 adam_b1: 0.9 # Exponential decay rate to track the first moment of past gradients.
