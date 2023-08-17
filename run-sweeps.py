@@ -411,39 +411,71 @@ def sweep_test1(attempt: str):
     run_sweep(sweep8_base_yml, sweep8_base_mhj, experiment_list, 'test1', attempt, steps=steps, only_print_run_names=False)
 
 
-def run_s11(attempt_number, only_print_run_names=False):
-    # Experiment Base
-    sweep_base_yml_update={
-        'global_parameter_scale':8,
+def bname(b: bool):
+    assert b == True or b == False
+    return str(b)[0]
+
+
+def base_yml(model_size, load_from=None, load_step=None):
+    return base_yml
+
+
+def run_job(
+        run_name,
+        maxtext_config,
+        *,
+        model_size=8,
+        load_from=None,
+        load_step=None,
+):
+    assert (load_from is None) == (load_step is None)
+
+    yml = read_yaml_file('MaxText/configs/base.yml')
+    yml = update_yaml_fields(yml, {
+        # v5_base_yml_updates
+        'per_device_batch_size':4,
+        'enable_dropout':False,
+        'base_output_directory':'gs://maxtext-experiments-multipod',
+        'dataset_path':'gs://max-datasets-rogue',
+        'remat_policy':'full',
+        'learning_rate':1e-3,
+
+        'global_parameter_scale': model_size,
         'int8_training': True,
-        'save_period': 2000,
-        # 'load_from_other_directory': 'gs://maxtext-experiments-multipod/int8-sweep10-fresh-fwdT_bwdT-a2/checkpoints',
-        # 'load_from_other_directory_step': 10000
-    }
+        'save_period': 1000,
+        'steps': calc_chinchilla_step_count(model_size, V5_MHJ_DICT['--NUM_SLICE'])
+    })
 
-    if args['tpu'] == 'v4':
-        base_yml_updates = v4_base_yml_updates
-    elif args['tpu'] == 'v5':
-        base_yml_updates = v5_base_yml_updates
+    if load_from is not None:
+        yml['load_from_other_directory'] = f'gs://maxtext-experiments-multipod/{load_from}/checkpoints',
+        yml['load_from_other_directory_step'] = load_step
+
+    yml = update_yaml_fields(yml, maxtext_config)
+    yml = update_yaml_fields(yml, {'run_name': run_name})
+    experiment_yml_file = f"MaxText/configs/{run_name}.yml"
+    write_yml(experiment_yml_file, yml)
+    mhj_command = get_mhj_command(BASE_MHJ_CMD, experiment_yml_file)
+    experiment_mhj = update_yaml_fields(V5_MHJ_DICT, {'--RUN_NAME': run_name,'--COMMAND': mhj_command})
+
+    print("Running experiment: ", run_name)
+    mhj_args = []
+    for key in experiment_mhj.keys():
+        mhj_args.append(key)
+        mhj_args.append(str(experiment_mhj[key]))
+
+    if args['dryrun']:
+        import pprint
+        pprint.pprint(mhj_args)
+        print()
     else:
-        assert False
+        multihost_job_main(mhj_args)
 
-    BASE_YML_DATA2=update_yaml_fields(BASE_YML_DATA, base_yml_updates)
-    sweep_base_yml = update_yaml_fields(BASE_YML_DATA2, sweep_base_yml_update)
-    if args['tpu'] == 'v4':
-        sweep_base_mhj = V4_MHJ_DICT
-    elif args['tpu'] == 'v5':
-        sweep_base_mhj = V5_MHJ_DICT
-    else:
-        assert False
+    os.remove(experiment_yml_file)
 
-    # Experiment Axes
-    bname = lambda b: str(b)[0]
 
-    experiment_list = []
-    def add(fwd_int8: bool, bwd_int8: bool, clip:str, value=0.0, value_str=""):
+def run_s11(attempt_number, only_print_run_names=False):
+    def run(fwd_int8: bool, bwd_int8: bool, clip:str, value=0.0, value_str=""):
         clip_letter=clip[0]
-        experiment_name = f'fwd{bname(fwd_int8)}_bwd{bname(bwd_int8)}_clip-{clip_letter}{value_str}'
         maxtext_config={'fwd_int8':fwd_int8, 'bwd_int8':bwd_int8}
         if clip == 'global':
             maxtext_config['clip_by_global_norm'] = value
@@ -451,18 +483,17 @@ def run_s11(attempt_number, only_print_run_names=False):
             maxtext_config['clip_by_block_rms'] = value
         else:
             assert clip == 'none'
+        run_name= f'int8-sweep11-fwd{bname(fwd_int8)}_bwd{bname(bwd_int8)}_clip-{clip_letter}{value_str}-a{attempt_number}'
+        # load_from='int8-sweep10-fresh-fwdT_bwdT-a2', load_step=1000
+        run_job(run_name, maxtext_config)
 
-        experiment_list.append({'name':experiment_name, 'maxtext':maxtext_config,'mhj':{}})
+    run(True, True, 'none')
+    run(True, True, 'global', 1.0, '10en1')
+    run(True, True, 'rms', 5e-4, "5en4")   # no idea if this is a good value, but charts on 1B model and large LR suggest yes.
+    run(True, False, 'none')
+    run(True, False, 'global', 1.0, '10en1')
+    run(True, False, 'rms', 5e-4, "5en4")   # no idea if this is a good value, but charts on 1B model and large LR suggest yes.
 
-    add(True, True, 'none')
-    add(True, True, 'global', 1.0, '10en1')
-    add(True, True, 'rms', 5e-4, "5en4")   # no idea if this is a good value, but charts on 1B model and large LR suggest yes.
-    add(True, False, 'none')
-    add(True, False, 'global', 1.0, '10en1')
-    add(True, False, 'rms', 5e-4, "5en4")   # no idea if this is a good value, but charts on 1B model and large LR suggest yes.
-
-    base_run_name='int8-sweep11'
-    run_sweep(sweep_base_yml, sweep_base_mhj, experiment_list, base_run_name, attempt_number, only_print_run_names=only_print_run_names)
 
 sweeps = {
     'test1': sweep_test1,
