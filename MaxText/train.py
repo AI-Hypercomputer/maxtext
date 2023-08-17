@@ -180,10 +180,10 @@ def train_step(model, config, state, data, dropout_rng):
     # Mask out paddings at the end of each example.
     xent = xent * (data['inputs_segmentation'] != 0)
     # TODO: mask out the prompt if training prefix-LM
-    return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
+    return jnp.sum(xent)/jnp.size(xent), (intermediate_outputs,logits)
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (loss, intermediate_outputs), grads = grad_fn(state.params)
+  (loss, (intermediate_outputs, logits)), grads = grad_fn(state.params)
   updates, new_opt_state = state.tx.update(grads, state.opt_state, state.params)
   new_params = optax.apply_updates(state.params, updates)
   new_state = state.replace(
@@ -191,14 +191,33 @@ def train_step(model, config, state, data, dropout_rng):
       params=new_params,
       opt_state=new_opt_state,
   )
+  def mean_rms(tree):
+    all = [jnp.sqrt(jnp.mean(x**2)) for x in jax.tree_util.tree_leaves(tree)]
+    return (sum(all) / len(all))
+
+  adam = None
+  def find_adam(tree):
+    nonlocal adam
+    if isinstance(tree, optax._src.transform.ScaleByAdamState):
+      assert adam is None, "Highlander"
+      adam = tree
+    if isinstance(tree, tuple):
+      for e in tree:
+        find_adam(e)
+
+  find_adam(new_opt_state)
+  assert adam is not None
+
   metrics = {
     'scalar': {
       'learning/loss': loss,
+      'learning/logits_norm' : max_utils.l2norm_pytree(logits),
       'learning/grad_norm' : max_utils.l2norm_pytree(grads),
+      'learning/grad_rms' : mean_rms(grads),
       'learning/weight_update_norm': max_utils.l2norm_pytree(updates),
-      'learning/adam_mu_norm' : max_utils.l2norm_pytree(new_opt_state[0].mu),
-      'learning/adam_nu_norm' : max_utils.l2norm_pytree(new_opt_state[0].nu),
-      'learning/adam_count' : new_opt_state[0].count,
+      'learning/adam_mu_norm' : max_utils.l2norm_pytree(adam.mu),
+      'learning/adam_nu_norm' : max_utils.l2norm_pytree(adam.nu),
+      'learning/adam_count' : adam.count,
       'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)
     },
     'scalars': {},
@@ -207,6 +226,7 @@ def train_step(model, config, state, data, dropout_rng):
     record_activation_metrics(metrics, intermediate_outputs, config)
 
   return new_state, metrics, rng2
+
 
 def train_loop(config, state=None):
   """Main Training loop.
@@ -232,7 +252,17 @@ def train_loop(config, state=None):
       learning_rate=config.learning_rate, total_steps=config.learning_rate_schedule_steps
   )
 
-  tx = optax.adam(
+
+  txs = []
+  # we need it always to keep checkpoint format fixed.
+  txs.append(optax.identity())
+  txs.append(optax.identity())
+  txs.append(optax.identity())
+  txs.append(optax.identity())
+  txs.append(optax.identity()) # slots for future
+  txs.append(optax.clip_by_global_norm(config.clip_by_global_norm))
+  txs.append(optax.clip_by_block_rms(config.clip_by_block_rms))
+  txs.append(optax.adam(
       max_utils.create_learning_rate_schedule(
           learning_rate=config.learning_rate, total_steps=config.learning_rate_schedule_steps
       ),
@@ -240,7 +270,9 @@ def train_loop(config, state=None):
       b2=config.adam_b2,
       eps=config.adam_eps,
       eps_root=config.adam_eps_root
-  )
+  ))
+
+  tx = optax.chain(*txs)
 
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
