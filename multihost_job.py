@@ -45,6 +45,8 @@ import subprocess
 from datetime import datetime
 import os
 import shutil
+import json
+import tempfile
 
 
 
@@ -125,7 +127,7 @@ def run_create_resources(startup_script_file, args):
   captured_output = subprocess.run(command, check=False, shell=True, capture_output=True)
   return captured_output
 
-def run_create_resources_curl(startup_script):
+def run_create_resources_curl(startup_script, args):
   """ Run the Create Queued Resources (CQR) request with curl command"""
   data = {
         "tpu": {
@@ -139,9 +141,6 @@ def run_create_resources_curl(startup_script):
                           "network": "default",
                           "subnetwork": "default",
                           "enable_external_ips": True
-                      },
-                      "scheduling_config": {
-                        "maintenance_interval": 2
                       },
                       "metadata": {
                           "startup-script": startup_script
@@ -189,6 +188,7 @@ gsutil cp {log_name} "{bucket_path}/"
 
   with open(startup_script_file, "w", encoding="utf-8") as f:
     f.write(startup_script)
+  return startup_script
 
 def get_env_command_str(num_slices):
   """ Define environment variables on the TPUS """
@@ -363,7 +363,7 @@ def main(raw_args=None) -> None:
   #### Step 2: Run the CQR command ####
   log_name = "main_command_log_slice_${SLICE_ID}_worker_${WORKER_ID}"
   zip_gcs_path = os.path.join(bucket_path, zip_name)
-  write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file, args)
+  startup_script = write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file, args)
 
   print("Running CQR command...")
   if args.COMMAND_TYPE=='gcloud':
@@ -371,7 +371,7 @@ def main(raw_args=None) -> None:
     captured_output = run_create_resources(startup_script_file)
   elif args.COMMAND_TYPE=='curl':
     print("Using curl command")
-    captured_output = run_create_resources_curl(startup_script)
+    captured_output = run_create_resources_curl(startup_script, args)
   else:
     print("You must use either gcloud command or curl command")
     return 1

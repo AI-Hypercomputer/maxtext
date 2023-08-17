@@ -466,7 +466,10 @@ def run_job(
     experiment_yml_file = f"MaxText/configs/{run_name}.yml"
     write_yml(experiment_yml_file, yml)
     mhj_command = get_mhj_command(BASE_MHJ_CMD, experiment_yml_file)
-    experiment_mhj = update_yaml_fields(V5_MHJ_DICT, {'--RUN_NAME': run_name,'--COMMAND': mhj_command})
+    mhj_dict = V5_MHJ_DICT
+    mhj_dict['--TPU_TYPE'] = 'v5litepod-16'
+    mhj_dict['--COMMAND_TYPE'] = 'curl'
+    experiment_mhj = update_yaml_fields(mhj_dict, {'--RUN_NAME': run_name,'--COMMAND': mhj_command})
 
     print("Running experiment: ", run_name)
     mhj_args = []
@@ -542,6 +545,37 @@ def run_s12():
     # dqdg sweep
     # take S10 and rerun with dqdg, just TT
 
+def debug_curl():
+    def run(
+            run_name,
+            *,
+            fwd = True,
+            bwd = True,
+            load_from= None,
+            quantize_logits=True,
+            use_dq=False,
+    ):
+        config = {
+            'fwd_int8': fwd,
+            'bwd_int8': bwd,
+            'use_dqdg': use_dq,
+            'quantize_logits': quantize_logits,
+        }
+        if load_from is not None:
+            config.update({
+                'load_from_other_directory': f'gs://maxtext-experiments-multipod/{load_from}/checkpoints',
+                'load_from_other_directory_step': 2000
+            })
+        # run_name= f'{bname(fwd)}{bname(bwd)}-load{bname(load_from is not None)}'
+        run_job(12, run_name, config)
+
+    run('debug-curl', use_dq=True)
+
+    # Logits sweep
+    # take S10 and rerun without logits quantization  TF vs TT
+    # dqdg sweep
+    # take S10 and rerun with dqdg, just TT
+
 sweeps = {
     'test1': sweep_test1,
     'sweep9': run_sweep_9,
@@ -549,6 +583,7 @@ sweeps = {
     'sweep10-load': run_sweep_10_load,
     's11': run_s11,
     's12': run_s12,
+    'debug-curl': debug_curl
 }
 
 
