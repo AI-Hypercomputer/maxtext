@@ -8,6 +8,7 @@ import os
 args = {
     'dryrun': True,
     'tpu': 'v4', # 'v4' 'v5'
+    'pool': 'default', # 'default', 'stable-fleet'
 }
 
 ###################    Common Code    ###################
@@ -39,6 +40,16 @@ V5_MHJ_DICT={
     '--VERSION': 'v2-alpha-tpuv5-lite',
     '--PROJECT': 'tpu-prod-env-multipod',
     '--ZONE': 'us-east5-b'
+}
+
+V5_MHJ_DICT_STABLE_FLEET={
+    '--BUCKET_NAME': 'mattdavidow-maxtext-br',
+    '--NUM_SLICE': 1,
+    '--TPU_TYPE': 'v5litepod-256',  # v5litepod-16
+    '--VERSION': 'v2-alpha-tpuv5-lite',
+    '--PROJECT': 'tpu-prod-env-multipod',
+    '--ZONE': 'us-east5-b',
+    '--COMMAND_TYPE': 'curl'
 }
 
 V4_MHJ_DICT={
@@ -547,6 +558,7 @@ def main():
     parser.add_argument('--dryrun', type=bool, default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--delyml', type=bool, default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--tpu', type=str, default='v5')
+    parser.add_argument('--pool', type=str, default='default') # 'default' or 'stable-fleet'
     parser.add_argument('--sweep', type=str, default='')
     parser.add_argument('--attempt', type=str, default='')
     pargs = parser.parse_args()
