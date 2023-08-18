@@ -4,6 +4,7 @@ from typing import Optional
 
 import aqt.jax.v2.config as aqt_config
 from aqt.jax.v2.config import DotGeneral
+from aqt.jax.v2.config import DotGeneralRaw
 from aqt.jax.v2.config import set_static_bound
 from aqt.jax.v2.config import set_stochastic_rounding
 
@@ -23,12 +24,17 @@ def fully_quantized(
     use_dummy_static_bound: bool = False,
 ) -> DotGeneral:
   """Fully Quantized Training."""
-  cfg = DotGeneral.make(
-      lhs_bits=fwd_bits,
-      rhs_bits=fwd_bits,
-      bwd_bits=bwd_bits,
-      use_fwd_quant=use_fwd_quant,
-  )
+  fwd = DotGeneralRaw.make(fwd_bits, fwd_bits)
+  dlhs = DotGeneralRaw.make(bwd_bits, bwd_bits)
+  drhs = DotGeneralRaw.make(bwd_bits, bwd_bits)
+  cfg = aqt_config.DotGeneral(fwd=fwd, dlhs=dlhs, drhs=drhs)
+
+  # Surprising: lhs quantization determines what drhs can do.
+  if fwd_bits is not None:
+    # Only rhs is accepting MultiTensor.
+    cfg.drhs.rhs.use_fwd_quant = use_fwd_quant
+  if fwd_bits is not None:
+    cfg.dlhs.rhs.use_fwd_quant = use_fwd_quant
 
   # Stochastic Rounding
   # These 3 variables are used to ensure we don't mix
