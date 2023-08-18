@@ -538,21 +538,15 @@ def run_s13():
             *,
             dlhs_int8 = True,
             drhs_int8 = True,
-            load_from='int8-sweep10-fresh-fwdT_bwdT-a2',
     ):
         config = {
-            'fwd_int8': True,
             'dlhs_int8': dlhs_int8,
             'drhs_int8': drhs_int8,
-            'use_dqdg': False,
-            'quantize_logits': True,  # This is not used anyways
         }
-        if load_from is not None:
-            config.update({
-                'load_from_other_directory': f'gs://maxtext-experiments-multipod/{load_from}/checkpoints',
-                'load_from_other_directory_step': 10000,
-            })
-        # run_name= f'{bname(fwd)}{bname(bwd)}-load{bname(load_from is not None)}'
+        config.update({
+            'load_from_other_directory': f'gs://maxtext-experiments-multipod/int8-sweep10-fresh-fwdT_bwdT-a2/checkpoints',
+            'load_from_other_directory_step': 10000,
+        })
         run_job(13, run_name, config)
 
 
