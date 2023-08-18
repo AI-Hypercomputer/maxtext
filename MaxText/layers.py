@@ -503,7 +503,6 @@ class MlpBlock(nn.Module):
         rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
             x, deterministic=deterministic)  # Broadcast along length.
     x = nn.with_logical_constraint(x, ('activation_batch', 'activation_length', 'activation_mlp'))
-    x = checkpoint_name(x, 'mlp')
     output = DenseGeneral(
         inputs.shape[-1],
         dtype=self.dtype,
