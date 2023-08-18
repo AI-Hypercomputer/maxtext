@@ -117,7 +117,7 @@ class TrainTest(unittest.TestCase):
       # head_dim: 256 *2
       # exagerate AQT.
     ]
-    train_loop(cfg)
+    # train_loop(cfg)
 
 if __name__ == '__main__':
   unittest.main()

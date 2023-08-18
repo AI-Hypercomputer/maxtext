@@ -119,6 +119,7 @@ learning_rate: 3.e-5
 learning_rate_schedule_steps: -1 # length of learning rate schedule, should be at least steps, defaults to steps.
 clip_by_global_norm: 1000000000.0 # no clipping default
 clip_by_block_rms: 1000000000.0 # no clipping default
+clip_by_ucb: False
 
 # Maximum length cutoff for training examples.
 max_target_length: 1024

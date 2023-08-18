@@ -41,6 +41,7 @@ import tensorflow_datasets as tfds
 from input_pipeline import get_datasets
 from input_pipeline import preprocess_dataset
 import max_utils
+import ucb
 import checkpointing
 
 import jax.numpy as jnp
@@ -148,7 +149,7 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = layer["activation_mean"][0]
       output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
 
-def train_step(model, config, state, data, dropout_rng):
+def train_step(model, config, state, grad_stats, data, dropout_rng):
   """
 
   Args:
@@ -184,7 +185,13 @@ def train_step(model, config, state, data, dropout_rng):
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, (intermediate_outputs, logits)), grads = grad_fn(state.params)
-  updates, new_opt_state = state.tx.update(grads, state.opt_state, state.params)
+
+  # ucb clipping
+  new_grad_stats, clip_grads, (grad_mean, grad_std, grad_ucb, grad_is_spike) = ucb.ucb_update(grad_stats, grads)
+  if not config.clip_by_ucb:
+    clip_grads = grads
+
+  updates, new_opt_state = state.tx.update(clip_grads, state.opt_state, state.params)
   new_params = optax.apply_updates(state.params, updates)
   new_state = state.replace(
       step=state.step + 1,
@@ -213,11 +220,16 @@ def train_step(model, config, state, data, dropout_rng):
       'learning/loss': loss,
       'learning/logits_norm' : max_utils.l2norm_pytree(logits),
       'learning/grad_norm' : max_utils.l2norm_pytree(grads),
+      'learning/clip_grad_norm' : max_utils.l2norm_pytree(clip_grads),
       'learning/grad_rms' : mean_rms(grads),
       'learning/weight_update_norm': max_utils.l2norm_pytree(updates),
       'learning/adam_mu_norm' : max_utils.l2norm_pytree(adam.mu),
       'learning/adam_nu_norm' : max_utils.l2norm_pytree(adam.nu),
       'learning/adam_count' : adam.count,
+      'learning/grad_mean'   : grad_mean,
+      'learning/grad_std'   : grad_std,
+      'learning/grad_ucb'   : grad_ucb,
+      'learning/grad_is_spike'   : grad_is_spike,
       'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)
     },
     'scalars': {},
@@ -225,7 +237,7 @@ def train_step(model, config, state, data, dropout_rng):
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
-  return new_state, metrics, rng2
+  return new_state, new_grad_stats, metrics, rng2
 
 
 def train_loop(config, state=None):
@@ -295,6 +307,7 @@ def train_loop(config, state=None):
   )
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  grad_stats = ucb.ucb_init() # TODO mesh?
   data_pspec = P(*config.data_sharding)
 
   num_model_parameters = calculate_num_params_from_pytree(state.params)
@@ -304,10 +317,8 @@ def train_loop(config, state=None):
   # Define compiled top-level functions.
   p_train_step = pjit(
     train_step,
-    in_shardings=(state_mesh_annotations,
-                       data_pspec,
-                       None),
-    out_shardings=(state_mesh_annotations, None, None),
+    in_shardings=(state_mesh_annotations, None, data_pspec, None),
+    out_shardings=(state_mesh_annotations, None, None, None),
     static_argnums=(0,1,),
     donate_argnums=2)
 
@@ -320,8 +331,8 @@ def train_loop(config, state=None):
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(train_iter, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      state, metrics, nextrng = p_train_step(
-          model, config, state, example_batch, nextrng
+      state, grad_stats, metrics, nextrng = p_train_step(
+          model, config, state, grad_stats, example_batch, nextrng
       )
 
     new_time = datetime.datetime.now()
