@@ -19,6 +19,7 @@ import jax.numpy as jnp
 from flax import struct
 import max_utils
 
+
 class Stats(struct.PyTreeNode):
   count: jnp.ndarray
   sum1: ...
@@ -99,7 +100,8 @@ def test():
     elts = jnp.array(list(range(i+1))) + 1
     ucb_a = ucb['a']
     # ucb_a = ucb
-    print(f'i+1={i+1}; ucb should be: {jnp.mean(elts) + std_count*jnp.std(elts):2.8f} but is {ucb_a[1]:2.8f}; mean {ucb_a[0]: 2.8f}')
+    print(f'i+1={i+1}; ucb should be: {jnp.mean(elts) + std_count*jnp.std(elts):2.8f} '
+          f'but is {ucb_a[1]:2.8f}; mean {ucb_a[0]: 2.8f}')
     # print(stats, '\n')
 
 # print('test', flush=True)
