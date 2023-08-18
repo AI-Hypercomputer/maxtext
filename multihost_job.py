@@ -249,7 +249,7 @@ def setup_ops_str(run_name, log_name):
 def install_ops_script_str(run_name, log_name):
   # pylint: disable=anomalous-backslash-in-string
   return f"""OPS_FILE=/etc/google-cloud-ops-agent/config.yaml
-  if ! test -f \$OPS_FILE; 
+  if ! test -f \$OPS_FILE;
   then
     curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
     downloaded=0
@@ -371,7 +371,7 @@ def main(raw_args=None) -> None:
   print("Running CQR command...")
   if args.COMMAND_TYPE=='gcloud':
     print("Using gcloud command")
-    captured_output = run_create_resources(startup_script_file)
+    captured_output = run_create_resources(startup_script_file, args)
   elif args.COMMAND_TYPE=='curl':
     print("Using curl command")
     captured_output = run_create_resources_curl(startup_script, args)
