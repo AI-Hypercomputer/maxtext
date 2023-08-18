@@ -14,15 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Description:
-# bash build_docker_image.sh MODE=stable
-# bash build_docker_image.sh MODE=nightly
-# bash build_docker_image.sh MODE=head
-
-# bash build_docker_image.sh MODE=stable
-# bash build_docker_image.sh MODE=stable JAX_VERSION=0.4.13
-# bash build_docker_image.sh MODE=stable JAX_VERSION=0.4.13 IMAGE_PREFIX=jax0.4.13
-
+# Example command: 
+# bash docker_build_dependency_image.sh MODE=stable
+# bash docker_build_dependency_image.sh MODE=nightly
+# bash docker_build_dependency_image.sh MODE=head
+# bash docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
 
 # Enable "exit immediately if any command fails" option
 set -e
