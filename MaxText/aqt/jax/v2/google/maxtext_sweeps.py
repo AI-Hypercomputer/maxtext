@@ -2,7 +2,6 @@
 
 from typing import Optional
 
-import aqt.jax.v2.config as aqt_config
 from aqt.jax.v2.config import DotGeneral
 from aqt.jax.v2.config import DotGeneralRaw
 from aqt.jax.v2.config import set_static_bound
@@ -12,7 +11,8 @@ from aqt.jax.v2.config import set_stochastic_rounding
 def fully_quantized(
     *,
     fwd_bits: int | None = 8,
-    bwd_bits: int | None = 8,
+    dlhs_bits: int | None = 8,
+    drhs_bits: int | None = 8,
     use_fwd_quant: bool = True,
     use_stochastic_rounding: Optional[bool] = True,
     # Typically we have (but it's a caller's responsibility to check):
@@ -25,9 +25,9 @@ def fully_quantized(
 ) -> DotGeneral:
   """Fully Quantized Training."""
   fwd = DotGeneralRaw.make(fwd_bits, fwd_bits)
-  dlhs = DotGeneralRaw.make(bwd_bits, bwd_bits)
-  drhs = DotGeneralRaw.make(bwd_bits, bwd_bits)
-  cfg = aqt_config.DotGeneral(fwd=fwd, dlhs=dlhs, drhs=drhs)
+  dlhs = DotGeneralRaw.make(dlhs_bits, dlhs_bits)
+  drhs = DotGeneralRaw.make(drhs_bits, drhs_bits)
+  cfg = DotGeneral(fwd=fwd, dlhs=dlhs, drhs=drhs)
 
   # Surprising: lhs quantization determines what drhs can do.
   if fwd_bits is not None:
@@ -66,10 +66,11 @@ def fully_quantized(
   return cfg
 
 
-def sweep1(fwd_int8: bool, bwd_int8: bool) -> aqt_config.DotGeneral:
-  fqt_config = aqt_config.fully_quantized(
+def sweep1(fwd_int8: bool, dlhs_int8: bool, drhs_int8: bool) -> DotGeneral:
+  fqt_config = fully_quantized(
       fwd_bits=8 if fwd_int8 else None,
-      bwd_bits=8 if bwd_int8 else None,
+      dlhs_bits=8 if dlhs_int8 else None,
+      drhs_bits=8 if drhs_int8 else None,
       use_fwd_quant=False,
       use_stochastic_rounding=None,
       vjp_lhs_stochastic_rounding=True,
