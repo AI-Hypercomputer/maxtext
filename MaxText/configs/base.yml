@@ -40,10 +40,11 @@ gcs_metrics: False
 # Activation dtypes.
 dtype: "bfloat16"
 int8_training: False
-# The following four flags will only have effect when int8_training is True
+# The following five flags will only have effect when int8_training is True
 use_dqdg: False
 fwd_int8: True
-bwd_int8: True
+dlhs_int8: True
+drhs_int8: True
 quantize_logits: True
 
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
