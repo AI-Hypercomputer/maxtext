@@ -421,7 +421,6 @@ def base_yml(model_size, load_from=None, load_step=None):
 
 
 def run_job(
-        sweep_number,
         run_name,
         maxtext_config,
         *,
@@ -430,7 +429,6 @@ def run_job(
         load_step=None,
 ):
     assert (load_from is None) == (load_step is None)
-    assert isinstance(sweep_number, int)
 
     yml = read_yaml_file('MaxText/configs/base.yml')
     yml = update_yaml_fields(yml, {
@@ -440,7 +438,8 @@ def run_job(
 
     yml = update_yaml_fields(yml, maxtext_config)
     attempt = args['attempt']
-    run_name = f'int8-s{sweep_number}-a{attempt}-{run_name}'
+    sweep_name = args['sweep']
+    run_name = f'int8-{sweep_name}-a{attempt}-{run_name}'
     yml = update_yaml_fields(yml, {'run_name': run_name})
     experiment_yml_file = f"MaxText/configs/{run_name}.yml"
     write_yml(experiment_yml_file, yml)
@@ -476,7 +475,7 @@ def run_s11():
             assert clip == 'none'
         run_name= f'fwd{bname(fwd_int8)}_bwd{bname(bwd_int8)}_clip-{clip_letter}'
         # load_from='int8-sweep10-fresh-fwdT_bwdT-a2', load_step=1000
-        run_job(11, run_name, config)
+        run_job(run_name, config)
 
     run(True, True, 'none')
     run(True, True, 'global')
@@ -508,7 +507,7 @@ def run_s12():
                 'load_from_other_directory_step': 2000
             })
         # run_name= f'{bname(fwd)}{bname(bwd)}-load{bname(load_from is not None)}'
-        run_job(12, run_name, config)
+        run_job(run_name, config)
 
 
     run('baseline')
@@ -522,13 +521,14 @@ def run_s12():
     # take S10 and rerun with dqdg, just TT
 
 
-def run_s13():
+def run_s15():
     def run(
             *,
-            clip_by_ucb = False,
+            clip_by_ucb = True,
             fwd_int8 = True,
             dlhs_int8 = True,
             drhs_int8 = True,
+            lr_mul = 1.,
     ):
         config = {
             'load_from_other_directory': f'gs://maxtext-experiments-multipod/int8-sweep10-fresh-fwdT_bwdT-a2/checkpoints',
@@ -538,49 +538,21 @@ def run_s13():
             'dlhs_int8': dlhs_int8,
             'drhs_int8': drhs_int8,
             'clip_by_ucb': clip_by_ucb,
+            'learning_rate': 1.e-3 * lr_mul,
         }
-        run_name = f'{bname(fwd_int8)}{bname(dlhs_int8)}{bname(drhs_int8)}_ucb{bname(clip_by_ucb)}'
+        run_name = f'{bname(fwd_int8)}{bname(dlhs_int8)}{bname(drhs_int8)}_ucb{bname(clip_by_ucb)}-LR{int(lr_mul)}'
 
-        run_job(13, run_name, config)
+        run_job(run_name, config)
 
     # Q: Which one is the sourse of the loss loss?
     run(dlhs_int8=True, drhs_int8=False)
     run(dlhs_int8=False, drhs_int8=True)
 
-    # Q: Does UCB help in general?  Does it help with quantization?
-    run(clip_by_ucb=True, fwd_int8=True, dlhs_int8=True, drhs_int8=True)
-    run(clip_by_ucb=True, fwd_int8=True, dlhs_int8=False, drhs_int8=False)
-    run(clip_by_ucb=True, fwd_int8=False, dlhs_int8=False, drhs_int8=False)
+    # Q: Does clip_by_ucb help in general?  Does it help with quantization?
+    run(dlhs_int8=True, drhs_int8=True)
+    run(dlhs_int8=True, drhs_int8=True, lr_mul=100.0)
 
-
-def run_s14():
-    def run(
-            *,
-            mul = 100,
-            clip_by_ucb = False,
-    ):
-        config = {
-            'clip_by_ucb': clip_by_ucb,
-            'learning_rate': 1e-3 * mul,
-        }
-        run_name = f'ucb{bname(clip_by_ucb)}-LR{mul}'
-        run_job(13, run_name, config)
-
-    # Q: Does UCB really help? Try with and without on a really large LR from the start.
-    run(clip_by_ucb=True)
-    run(clip_by_ucb=False)
     # TODO: standard grad clip?
-
-
-sweeps = {
-    'test1': sweep_test1,
-    'sweep9': run_sweep_9,
-    'sweep10-fresh': run_sweep_10_fresh,
-    'sweep10-load': run_sweep_10_load,
-    's11': run_s11,
-    's12': run_s12,
-    's13': run_s13,
-}
 
 
 def main():
@@ -597,12 +569,11 @@ def main():
     sweep_name = args['sweep']
     attempt = args['attempt']
 
-    assert sweep_name in sweeps.keys()
+    sweep_fn_name = f'run_{sweep_name}'
+    assert sweep_fn_name in globals(), f'{sweep_fn_name}() not defined.'
     assert attempt != ''
-    sweep_fn = sweeps[sweep_name]
-    # sweep_fn(attempt)
+    sweep_fn = globals()[sweep_fn_name]
     sweep_fn()
-    # run_sweep_8('mattdavidow-sweep8', 2, only_print_run_names=False)
-    #run_sweep_7('mattdavidow-sweep7',2, only_print_run_names=True)
+
 
 main()
