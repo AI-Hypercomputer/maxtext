@@ -434,17 +434,7 @@ def run_job(
 
     yml = read_yaml_file('MaxText/configs/base.yml')
     yml = update_yaml_fields(yml, {
-        # v5_base_yml_updates
-        'per_device_batch_size':4,
-        'enable_dropout':False,
-        'base_output_directory':'gs://maxtext-experiments-multipod',
-        'dataset_path':'gs://max-datasets-rogue',
-        'remat_policy':'full',
-        'learning_rate':1e-3,
-
         'global_parameter_scale': model_size,
-        'int8_training': True,
-        'save_period': 1000,
         'steps': calc_chinchilla_step_count(model_size, V5_MHJ_DICT['--NUM_SLICE'])
     })
 
@@ -534,24 +524,52 @@ def run_s12():
 
 def run_s13():
     def run(
-            run_name,
             *,
+            clip_by_ucb = False,
+            fwd_int8 = True,
             dlhs_int8 = True,
             drhs_int8 = True,
     ):
         config = {
-            'dlhs_int8': dlhs_int8,
-            'drhs_int8': drhs_int8,
-        }
-        config.update({
             'load_from_other_directory': f'gs://maxtext-experiments-multipod/int8-sweep10-fresh-fwdT_bwdT-a2/checkpoints',
             'load_from_other_directory_step': 10000,
-        })
+
+            'fwd_int8': fwd_int8,
+            'dlhs_int8': dlhs_int8,
+            'drhs_int8': drhs_int8,
+            'clip_by_ucb': clip_by_ucb,
+        }
+        run_name = f'{bname(fwd_int8)}{bname(dlhs_int8)}{bname(drhs_int8)}_ucb{bname(clip_by_ucb)}'
+
         run_job(13, run_name, config)
 
+    # Q: Which one is the sourse of the loss loss?
+    run(dlhs_int8=True, drhs_int8=False)
+    run(dlhs_int8=False, drhs_int8=True)
 
-    run('dlhs_int8', dlhs_int8=True, drhs_int8=False)
-    run('drhs_int8', dlhs_int8=False, drhs_int8=True)
+    # Q: Does UCB help in general?  Does it help with quantization?
+    run(clip_by_ucb=True, fwd_int8=True, dlhs_int8=True, drhs_int8=True)
+    run(clip_by_ucb=True, fwd_int8=True, dlhs_int8=False, drhs_int8=False)
+    run(clip_by_ucb=True, fwd_int8=False, dlhs_int8=False, drhs_int8=False)
+
+
+def run_s14():
+    def run(
+            *,
+            mul = 100,
+            clip_by_ucb = False,
+    ):
+        config = {
+            'clip_by_ucb': clip_by_ucb,
+            'learning_rate': 1e-3 * mul,
+        }
+        run_name = f'ucb{bname(clip_by_ucb)}-LR{mul}'
+        run_job(13, run_name, config)
+
+    # Q: Does UCB really help? Try with and without on a really large LR from the start.
+    run(clip_by_ucb=True)
+    run(clip_by_ucb=False)
+    # TODO: standard grad clip?
 
 
 sweeps = {

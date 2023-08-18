@@ -39,7 +39,7 @@ gcs_metrics: False
 
 # Activation dtypes.
 dtype: "bfloat16"
-int8_training: False
+int8_training: True
 # The following five flags will only have effect when int8_training is True
 use_dqdg: False
 fwd_int8: True
@@ -60,7 +60,7 @@ mlp_activations: ["relu"]
 dropout_rate: 0
 logits_via_embedding: True # NOTE: this is True just for testing.
 # proj, minimal, full, or none
-remat_policy: "minimal"
+remat_policy: "full"
 scan_layers: True
 param_scan_axis: 1
 
@@ -107,15 +107,15 @@ vocab_relative_path: "vocabs" # Assumes we're allowed
 dataset_name: "c4/en:3.0.1"
 eval_dataset_name: "c4/en:3.0.1"
 eval_split: "validation"
-per_device_batch_size: 24
+per_device_batch_size: 4
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
 
 # Training loop
 steps: 150_001
 log_period: 100
-save_period: 10_000
-learning_rate: 3.e-5
+save_period: 1000
+learning_rate: 1e-3
 learning_rate_schedule_steps: -1 # length of learning rate schedule, should be at least steps, defaults to steps.
 clip_by_global_norm: 1000000000.0 # no clipping default
 clip_by_block_rms: 1000000000.0 # no clipping default
@@ -145,7 +145,7 @@ async_checkpointing: True
 
 # When dropout is false the model is a deterministic function of the
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
-enable_dropout: True
+enable_dropout: False
 enable_data_shuffling: True
 data_shuffle_seed: 0
 init_weights_seed: 0
