@@ -187,7 +187,7 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
   (loss, (intermediate_outputs, logits)), grads = grad_fn(state.params)
 
   # ucb clipping
-  new_grad_stats, clip_grads, (grad_mean, grad_std, grad_ucb, grad_is_spike) = ucb.ucb_update(grad_stats, grads)
+  new_grad_stats, clip_grads, ucb_metrics = ucb.ucb_update(grad_stats, grads)
   if not config.clip_by_ucb:
     clip_grads = grads
 
@@ -215,8 +215,7 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
   find_adam(new_opt_state)
   assert adam is not None
 
-  metrics = {
-    'scalar': {
+  scalar_metrics = {
       'learning/loss': loss,
       'learning/logits_norm' : max_utils.l2norm_pytree(logits),
       'learning/grad_norm' : max_utils.l2norm_pytree(grads),
@@ -226,12 +225,11 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
       'learning/adam_mu_norm' : max_utils.l2norm_pytree(adam.mu),
       'learning/adam_nu_norm' : max_utils.l2norm_pytree(adam.nu),
       'learning/adam_count' : adam.count,
-      'learning/grad_mean'   : grad_mean,
-      'learning/grad_std'   : grad_std,
-      'learning/grad_ucb'   : grad_ucb,
-      'learning/grad_is_spike'   : grad_is_spike,
       'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)
-    },
+  }
+  scalar_metrics.update(ucb_metrics)
+  metrics = {
+    'scalar': scalar_metrics,
     'scalars': {},
   }
   if config.record_internal_nn_metrics:
