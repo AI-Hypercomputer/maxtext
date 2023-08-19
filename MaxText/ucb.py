@@ -23,18 +23,18 @@ import max_utils
 class Stats(struct.PyTreeNode):
   count: jnp.ndarray
   sum1: jnp.ndarray
-  sum2: jnp.ndarray
+  dev: jnp.ndarray
   max_count: float | None
 
   @classmethod
-  def make(cls, max_count: float, init_count: float = 1.0, init_sum1: float = 0.0, init_sum2: float = 1.0):
+  def make(cls, max_count: float, init_count: float = 1.0, init_sum1: float = 0.0, init_dev: float = 1.0):
     count = jnp.array(init_count, dtype=jnp.float32)
     sum1 = jnp.array(init_sum1, dtype=jnp.float32)
-    sum2 = jnp.array(init_sum2, dtype=jnp.float32)
+    dev = jnp.array(init_dev, dtype=jnp.float32)
     return cls(
         count=count,
         sum1 = sum1,
-        sum2 = sum2,
+        dev = dev,
         max_count=max_count,
     )
 
@@ -43,18 +43,17 @@ class Stats(struct.PyTreeNode):
     decay = jnp.minimum(1.0, self.max_count / count_p_1)
     new_count = count_p_1 * decay
     new_sum1 = jnp.add(self.sum1, sample   ) * decay
-    new_sum2 = jnp.add(self.sum2, sample**2) * decay
-    return Stats(count=new_count, max_count=self.max_count, sum1=new_sum1, sum2=new_sum2)
+    new_dev = jnp.add(self.dev, jnp.abs(sample - new_sum1 / new_count)) * decay
+    return Stats(count=new_count, max_count=self.max_count, sum1=new_sum1, dev=new_dev)
 
   def stats(self):
     mean = self.sum1 / self.count
-    mean2 = self.sum2 / self.count
-    std = jnp.sqrt(mean2 - mean**2)
-    return mean, std
+    dev = self.dev / self.count
+    return mean, dev
 
   def update_and_detect_spike(self, sample, std_count):
-    mean, std = self.stats()
-    ucb = mean + std_count * std
+    mean, dev = self.stats()
+    ucb = mean + std_count * dev
     is_spike = sample > ucb
     warmup_done = self.count >= self.max_count - 1.0
     warm_spike = (is_spike & warmup_done)
@@ -62,7 +61,7 @@ class Stats(struct.PyTreeNode):
     metrics = {
       'ucb/mean': mean,
       'ucb/ucb': ucb,
-      'ucb/std' : std,
+      'ucb/dev' : dev,
       'ucb/is_spike': is_spike,
       'ucb/warm_spike': warm_spike,
     }
@@ -76,7 +75,7 @@ cfg_std_count = 4.0
 
 
 def ucb_init(max_count=cfg_max_count, init_count=cfg_init_count):
-  return Stats.make(max_count, init_count=init_count, init_sum1=0.0, init_sum2=0.0)
+  return Stats.make(max_count, init_count=init_count, init_sum1=0.0, init_dev=0.0)
 
 
 def ucb_update(stats, grads):
@@ -94,32 +93,43 @@ def ucb_update(stats, grads):
 def test():
   samples = []
   stats = ucb_init(init_count = 0.0)
+
   def update(grads):
     nonlocal stats
-    mean, std = stats.stats()
-    mean, std = float(mean), float(std)
+    mean, dev = stats.stats()
+    mean, dev = float(mean), float(dev)
     stats, new_grads, metrics = ucb_update(stats, grads)
-    ucb = float(mean + cfg_std_count * std)
+    ucb = float(mean + cfg_std_count * dev)
     exp_mean = float(jnp.mean(jnp.array(samples)))
-    exp_ucb = float(exp_mean + cfg_std_count * jnp.std(jnp.array(samples)))
+    exp_dev  = float(jnp.mean(jnp.abs(jnp.array(samples) - exp_mean)))
+    exp_ucb = float(exp_mean + cfg_std_count * exp_dev)
     print(
       f'sample={grads.astype(jnp.float32)[0]: 5.1f} '
-      f'ucb ({exp_ucb: 11.8f} - {ucb: 11.8f} = {exp_ucb - ucb: 11.8f}); mean ({exp_mean: 11.8f} - {mean: 11.8f}) '
+      f'ucb ({exp_ucb: 11.8f} - {ucb: 11.8f} = {exp_ucb - ucb: 11.8f}); '
+      f'mean ({exp_mean: 11.8f} - {mean: 11.8f}) '
+      f'mean ({exp_dev: 11.8f} - {dev: 11.8f}) '
     )
     samples.append(max_utils.l2norm_pytree(grads))
     return new_grads
 
-  def f(v):
+  def val(v):
     return jnp.full([1], v, dtype=jnp.bfloat16)
-  for i in range(int(cfg_max_count + 5.0)):
+
+  for i in range(int(cfg_max_count*2)):
     # grads = jnp.full([2], float(i+1))
-    grads = f(i+1)
+    grads = val(i+1)
     new_grads = update(grads)
     assert (grads == new_grads).all()
-  new_grads = update(f(45))
-  assert (new_grads == f(0.0)).all()
 
-  new_grads = update(f(45))
-  assert (new_grads == f(45)).all()
+  new_grads = update(val(100))
+  assert (new_grads == val(0.0)).all()
+  new_grads = update(val(100))
+  assert (new_grads == val(0.0)).all()
+  new_grads = update(val(100))
+  assert (new_grads == val(0.0)).all()
+
+  new_grads = update(val(100))
+  assert (new_grads == val(100)).all()
+
 
 # test()
