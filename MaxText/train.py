@@ -187,11 +187,26 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
   (loss, (intermediate_outputs, logits)), grads = grad_fn(state.params)
 
   # ucb clipping
-  new_grad_stats, clip_grads, ucb_metrics = ucb.ucb_update(grad_stats, grads)
-  if not config.clip_by_ucb:
-    clip_grads = grads
+  new_grad_stats, clip_grads, is_spike, ucb_metrics = ucb.ucb_update(grad_stats, grads)
+  adam, scale_by_schedule = state.opt_state
+  if config.clip_by_ucb:
+    # grads = clip_grads
+    def maybe_zero(t):
+      mask = jnp.full(t.shape, is_spike, dtype = jnp.bool_)
+      return jax.lax.select(mask, jnp.zeros_like(t), t)
 
-  updates, new_opt_state = state.tx.update(clip_grads, state.opt_state, state.params)
+    new_adam = optax.ScaleByAdamState(
+      mu=jax.tree_map(maybe_zero, adam.mu),
+      nu=jax.tree_map(maybe_zero, adam.nu),
+      count=jax.tree_map(maybe_zero, adam.count),
+    )
+
+    opt = new_adam, scale_by_schedule
+  else:
+    opt = state.opt_state
+
+
+  updates, new_opt_state = state.tx.update(grads, opt, state.params)
   new_params = optax.apply_updates(state.params, updates)
   new_state = state.replace(
       step=state.step + 1,
@@ -202,18 +217,7 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
     all = [jnp.sqrt(jnp.mean(x**2)) for x in jax.tree_util.tree_leaves(tree)]
     return (sum(all) / len(all))
 
-  adam = None
-  def find_adam(tree):
-    nonlocal adam
-    if isinstance(tree, optax._src.transform.ScaleByAdamState):
-      assert adam is None, "Highlander"
-      adam = tree
-    if isinstance(tree, tuple):
-      for e in tree:
-        find_adam(e)
 
-  find_adam(new_opt_state)
-  assert adam is not None
 
   scalar_metrics = {
       'learning/loss': loss,

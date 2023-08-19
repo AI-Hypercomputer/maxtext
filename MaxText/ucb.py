@@ -80,14 +80,14 @@ def ucb_init(max_count=cfg_max_count, init_count=cfg_init_count):
 
 def ucb_update(stats, grads):
   grads_l2 = max_utils.l2norm_pytree(grads)
-  new_stats, zero_out, metrics = stats.update_and_detect_spike(grads_l2, cfg_std_count)
+  new_stats, is_spike, metrics = stats.update_and_detect_spike(grads_l2, cfg_std_count)
   def update_tensor(t):
-    mask = jnp.full(t.shape, zero_out, dtype = jnp.bool_)
+    mask = jnp.full(t.shape, is_spike, dtype = jnp.bool_)
     return jax.lax.select(mask, jnp.zeros_like(t), t)
   new_grads = jax.tree_map(update_tensor, grads)
   new_stats = stats.update(grads_l2)
   # print('QQ' , type(grads) , type(new_grads))
-  return new_stats, new_grads, metrics
+  return new_stats, new_grads, is_spike, metrics
 
 
 def test():
