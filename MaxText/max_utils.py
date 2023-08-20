@@ -39,6 +39,19 @@ import os
 import subprocess
 
 
+def all_rms(prefix, tree):
+  ret = {}
+  paths = jax.tree_util.tree_map_with_path(lambda a, b: jax.tree_util.keystr(a), tree)
+  vals = jax.tree_util.tree_map_with_path(lambda a, b: jnp.sqrt(jnp.mean(b*b)), tree)
+  for p,v in zip(jax.tree_util.tree_leaves(paths), jax.tree_util.tree_leaves(vals)):
+    ret[prefix + p] = v
+  return ret
+
+def mean_pytree(tree):
+  count = jax.tree_util.tree_reduce(lambda x, y: x + 1, tree, initializer=0.0)
+  sum = jax.tree_util.tree_reduce(lambda x, y: x + y, tree, initializer=0.0)
+  return sum / count
+
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
   return jax.tree_util.tree_reduce(

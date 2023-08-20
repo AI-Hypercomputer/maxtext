@@ -189,7 +189,9 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
   # ucb clipping
   new_grad_stats, clip_grads, is_spike, ucb_metrics = ucb.ucb_update(grad_stats, grads)
   adam, scale_by_schedule = state.opt_state
+
   if config.clip_by_ucb:
+    # TODO implement new configurable Adam control. and new clip
     # grads = clip_grads
     def maybe_zero(t):
       mask = jnp.full(t.shape, is_spike, dtype = jnp.bool_)
@@ -201,11 +203,10 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
       count=jax.tree_map(maybe_zero, adam.count),
     )
 
-    opt = new_adam, scale_by_schedule
   else:
-    opt = state.opt_state
+    new_adam = adam
 
-
+  opt = new_adam, scale_by_schedule
   updates, new_opt_state = state.tx.update(grads, opt, state.params)
   new_params = optax.apply_updates(state.params, updates)
   new_state = state.replace(
@@ -213,23 +214,27 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
       params=new_params,
       opt_state=new_opt_state,
   )
-  def mean_rms(tree):
-    all = [jnp.sqrt(jnp.mean(x**2)) for x in jax.tree_util.tree_leaves(tree)]
-    return (sum(all) / len(all))
-
-
 
   scalar_metrics = {
       'learning/loss': loss,
       'learning/logits_norm' : max_utils.l2norm_pytree(logits),
       'learning/grad_norm' : max_utils.l2norm_pytree(grads),
       'learning/clip_grad_norm' : max_utils.l2norm_pytree(clip_grads),
-      'learning/grad_rms' : mean_rms(grads),
       'learning/weight_update_norm': max_utils.l2norm_pytree(updates),
       'learning/adam_mu_norm' : max_utils.l2norm_pytree(adam.mu),
       'learning/adam_nu_norm' : max_utils.l2norm_pytree(adam.nu),
       'learning/adam_count' : adam.count,
       'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)
+  }
+  # todo new adam
+  trees = {
+    'logits': logits,
+    'grads': grads,
+    'clip_grads': clip_grads,
+    'updates': updates,
+    'mu': new_adam.mu,
+    'nu': new_adam.nu,
+    'params': new_state.params,
   }
   scalar_metrics.update(ucb_metrics)
   metrics = {
@@ -292,6 +297,17 @@ def train_loop(config, state=None):
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
+  state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+
+  # import json
+  # def sz(t):
+  #   from functools import reduce # Valid in Python 2.6+, required in Python 3
+  #   import operator
+  #   return reduce(operator.mul, t.shape, 1)
+
+  # print(json.dumps(jax.tree_map(jnp.shape, state.params), sort_keys=True, indent=4))
+  # print(json.dumps(jax.tree_map(sz, state.params), sort_keys=True, indent=4))
+
   # Set up datasets.
   read_config = tfds.ReadConfig(
     shuffle_seed = config.data_shuffle_seed,
@@ -308,7 +324,7 @@ def train_loop(config, state=None):
     data_shuffle_seed = config.data_shuffle_seed,
   )
 
-  state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+
   grad_stats = ucb.ucb_init() # TODO mesh?
   data_pspec = P(*config.data_sharding)
 
