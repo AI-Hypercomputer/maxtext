@@ -98,6 +98,7 @@ dcn_tensor_parallelism: 1
 ici_data_parallelism: 1
 ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
 ici_tensor_parallelism: 1
+num_slice: 1 # used by run-sweep.py . will be copied to the other yml file.
 
 # Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
