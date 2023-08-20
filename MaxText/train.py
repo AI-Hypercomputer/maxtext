@@ -236,7 +236,18 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
     'nu': new_adam.nu,
     'params': new_state.params,
   }
+  trees = max_utils.rms_leaves(trees)
+  # Add means.
+  trees_means = {k: max_utils.mean_pytree(v) for k,v in trees.items() }
+  trees_metrics = max_utils.leaves_metrics('rms', trees)
+  trees_means_metrics = max_utils.leaves_metrics('rms_means', trees_means)
+  scalar_metrics.update(trees_metrics)
+  scalar_metrics.update(trees_means_metrics)
+
   scalar_metrics.update(ucb_metrics)
+  # for k in sorted(scalar_metrics.keys()):
+  #   print(k)
+
   metrics = {
     'scalar': scalar_metrics,
     'scalars': {},
