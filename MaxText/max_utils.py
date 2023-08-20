@@ -50,6 +50,9 @@ def leaves_metrics(prefix, tree):
   ret = {}
   paths = jax.tree_util.tree_map_with_path(lambda a, b: jax.tree_util.keystr(a), tree)
   for p,v in zip(jax.tree_util.tree_leaves(paths), jax.tree_util.tree_leaves(tree)):
+    p = p.replace(']', '')
+    p = p.replace('\'', '')
+    p = p.replace('[', '/')
     ret[prefix + p] = v
   return ret
 

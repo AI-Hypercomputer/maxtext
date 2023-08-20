@@ -183,30 +183,43 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
     # TODO: mask out the prompt if training prefix-LM
     return jnp.sum(xent)/jnp.size(xent), (intermediate_outputs,logits)
 
+  scalar_metrics = {}
+
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, (intermediate_outputs, logits)), grads = grad_fn(state.params)
+  raw_grads = grads
+  # clipping
+  clip_global = config.clip_by_global_norm > 0.0
+  clip_block_rms = config.clip_by_block_rms > 0.0
+  clip_ucb = config.clip_by_ucb > 0.0
+  assert clip_global + clip_block_rms + clip_ucb <= 1
 
-  # ucb clipping
   new_grad_stats, clip_grads, is_spike, ucb_metrics = ucb.ucb_update(grad_stats, grads)
-  adam, scale_by_schedule = state.opt_state
+  scalar_metrics.update(ucb_metrics)
 
-  if config.clip_by_ucb:
-    # TODO implement new configurable Adam control. and new clip
-    # grads = clip_grads
-    def maybe_zero(t):
-      mask = jnp.full(t.shape, is_spike, dtype = jnp.bool_)
-      return jax.lax.select(mask, jnp.zeros_like(t), t)
+  if clip_global:
+    grads, _ = optax.clip_by_global_norm(config.clip_by_global_norm).update(grads, None, None)
+  elif clip_block_rms:
+    assert False
+  elif clip_ucb:
+    assert False
+  # grads = clip_grads
+  # if config.clip_by_ucb:
+  #   adam = state.opt_state[0]
+  #   def maybe_zero(t):
+  #     mask = jnp.full(t.shape, is_spike, dtype = jnp.bool_)
+  #     return jax.lax.select(mask, jnp.zeros_like(t), t)
 
-    new_adam = optax.ScaleByAdamState(
-      mu=jax.tree_map(maybe_zero, adam.mu),
-      nu=jax.tree_map(maybe_zero, adam.nu),
-      count=jax.tree_map(maybe_zero, adam.count),
-    )
+  #   new_adam = optax.ScaleByAdamState(
+  #     mu=jax.tree_map(maybe_zero, adam.mu),
+  #     nu=jax.tree_map(maybe_zero, adam.nu),
+  #     count=jax.tree_map(maybe_zero, adam.count),
+  #   )
+  #   opt = new_adam, state.opt_state[1]
+  # else:
 
-  else:
-    new_adam = adam
+  opt = state.opt_state
 
-  opt = new_adam, scale_by_schedule
   updates, new_opt_state = state.tx.update(grads, opt, state.params)
   new_params = optax.apply_updates(state.params, updates)
   new_state = state.replace(
@@ -215,25 +228,24 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
       opt_state=new_opt_state,
   )
 
-  scalar_metrics = {
+  scalar_metrics.update({
       'learning/loss': loss,
       'learning/logits_norm' : max_utils.l2norm_pytree(logits),
       'learning/grad_norm' : max_utils.l2norm_pytree(grads),
-      'learning/clip_grad_norm' : max_utils.l2norm_pytree(clip_grads),
+      'learning/raw_grad_norm' : max_utils.l2norm_pytree(raw_grads),
       'learning/weight_update_norm': max_utils.l2norm_pytree(updates),
-      'learning/adam_mu_norm' : max_utils.l2norm_pytree(adam.mu),
-      'learning/adam_nu_norm' : max_utils.l2norm_pytree(adam.nu),
-      'learning/adam_count' : adam.count,
+      'learning/adam_mu_norm' : max_utils.l2norm_pytree(opt[0].mu),
+      'learning/adam_nu_norm' : max_utils.l2norm_pytree(opt[0].nu),
+      'learning/adam_count' : opt[0].count,
       'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)
-  }
-  # todo new adam
+  })
   trees = {
     'logits': logits,
     'grads': grads,
-    'clip_grads': clip_grads,
+    'raw_grads': raw_grads,
     'updates': updates,
-    'mu': new_adam.mu,
-    'nu': new_adam.nu,
+    'mu': opt[0].mu,
+    'nu': opt[0].nu,
     'params': new_state.params,
   }
   trees = max_utils.rms_leaves(trees)
@@ -244,9 +256,9 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
   scalar_metrics.update(trees_metrics)
   scalar_metrics.update(trees_means_metrics)
 
-  scalar_metrics.update(ucb_metrics)
   # for k in sorted(scalar_metrics.keys()):
   #   print(k)
+  # assert False
 
   metrics = {
     'scalar': scalar_metrics,
