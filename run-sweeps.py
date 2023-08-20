@@ -436,18 +436,17 @@ def run_job(
         maxtext_config,
         *,
         model_size=8,
-        load_from=None,
-        load_step=None,
 ):
-    assert (load_from is None) == (load_step is None)
 
     yml = read_yaml_file('MaxText/configs/base.yml')
+    yml = update_yaml_fields(yml, maxtext_config)
+    num_slice = yml['num_slice']
+
     yml = update_yaml_fields(yml, {
         'global_parameter_scale': model_size,
-        'steps': calc_chinchilla_step_count(model_size, V5_MHJ_DICT['--NUM_SLICE'])
+        'steps': calc_chinchilla_step_count(model_size, num_slice)
     })
 
-    yml = update_yaml_fields(yml, maxtext_config)
     attempt = args['attempt']
     sweep_name = args['sweep']
     run_name = f'int8-{sweep_name}-a{attempt}-{run_name}'
@@ -455,7 +454,7 @@ def run_job(
     experiment_yml_file = f"MaxText/configs/{run_name}.yml"
     write_yml(experiment_yml_file, yml)
     mhj_command = get_mhj_command(BASE_MHJ_CMD, experiment_yml_file)
-    experiment_mhj = update_yaml_fields(V5_MHJ_DICT, {'--RUN_NAME': run_name,'--COMMAND': mhj_command})
+    experiment_mhj = update_yaml_fields(V5_MHJ_DICT, {'--RUN_NAME': run_name,'--COMMAND': mhj_command, '--NUM_SLICE': num_slice})
 
     print("Running experiment: ", run_name)
     mhj_args = []
@@ -558,6 +557,7 @@ def run_s15():
     # Q: Which one is the sourse of the loss loss?
     run(dlhs_int8=True, drhs_int8=False)
     run(dlhs_int8=False, drhs_int8=True)
+    # A: It seems that the loss loss of  drhs_int8=True is twice bigger than dlhs_int8=True, but spikes are terrible.
 
     # Q: Does clip_by_ucb help in general?  Does it help with quantization?
     run(dlhs_int8=True, drhs_int8=True)
@@ -565,6 +565,16 @@ def run_s15():
 
     # TODO: standard grad clip?
 
+def run_s16():
+    config = {
+        'fwd_int8': True,
+        'dlhs_int8': True,
+        'drhs_int8': True,
+        'learning_rate': 1.e-3,
+        'num_slice': 4,
+        'save_period': 1000,
+    }
+    run_job('TTT-checkpoint_baseline-4s', config)
 
 def main():
     import argparse
