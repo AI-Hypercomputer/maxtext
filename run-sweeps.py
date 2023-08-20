@@ -576,6 +576,35 @@ def run_s16():
     }
     run_job('TTT-checkpoint_baseline-4s', config)
 
+def run_s17():
+    def run(
+            *,
+            clip_by_global_norm = 1.0,
+            fwd_int8 = True,
+            dlhs_int8 = True,
+            drhs_int8 = True,
+            lr_mul = 1.,
+    ):
+        config = {
+            'load_from_other_directory': f'gs://maxtext-experiments-multipod/int8-sweep10-fresh-fwdT_bwdT-a2/checkpoints',
+            'load_from_other_directory_step': 10000,
+
+            'fwd_int8': fwd_int8,
+            'dlhs_int8': dlhs_int8,
+            'drhs_int8': drhs_int8,
+            'clip_by_global_norm': clip_by_global_norm,
+            'learning_rate': 1.e-3 * lr_mul,
+        }
+        run_name = f'{bname(fwd_int8)}{bname(dlhs_int8)}{bname(drhs_int8)}_global{bname(clip_by_global_norm)}-LR{int(lr_mul)}'
+
+        run_job(run_name, config)
+
+    run()
+    run(lr_mul=10.)
+    run(lr_mul=10.)
+    run(drhs_int8=False)
+    run(dlhs_int8=False)
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='TPU configuration options')
