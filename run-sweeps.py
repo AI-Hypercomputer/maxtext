@@ -576,13 +576,14 @@ def run_s16():
     }
     run_job('TTT-checkpoint_baseline-4s', config)
 
-def run_s16b():
+def run_s16_load():
     def run(
             *,
             fwd = True,
             dlhs = True,
             drhs = True,
             lr_mul = 1.0,
+            clip_global = 0.0,
     ):
         config = {
             'fwd_int8': fwd,
@@ -593,13 +594,15 @@ def run_s16b():
             'save_period': 1000,
             'load_from_other_directory': f'gs://maxtext-experiments-multipod/int8-s16-a1-TTT-checkpoint_baseline-4s/checkpoints',
             'load_from_other_directory_step': 4000, # end of warmup
+            'clip_by_global_norm': clip_global,
         }
-        run_job('TTT-checkpoint_baseline-4s', config)
+        run_name = f'4s-L-{bname(fwd_int8)}{bname(dlhs_int8)}{bname(drhs_int8)}_global{bname(clip_global)}-LR{int(lr_mul)}'
+        run_job(run_name, config)
     run()
-    # run(dlhs = False, drhs=False)
-    # run(fwd = False, dlhs = False, drhs=False)
-    # run(lr_mul=10.0)
-    # run(lr_mul=100.0)
+    run(dlhs=False, drhs=False)
+    run(fwd=False, dlhs=False, drhs=False)
+    run(lr_mul=10.0)
+    run(lr_mul=10.0, clip_global=0.5)
 
 def run_s17():
     def run(

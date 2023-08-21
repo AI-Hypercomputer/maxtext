@@ -70,8 +70,8 @@ class Stats(struct.PyTreeNode):
 
 # I hope these are universally good, so I'm hardcoding.
 cfg_init_count = 0.000
-cfg_max_count = 20.0
-cfg_std_count = 4.0
+cfg_max_count = 50.0
+cfg_std_count = 10.0
 
 
 def ucb_init(max_count=cfg_max_count, init_count=cfg_init_count):
