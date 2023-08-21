@@ -134,7 +134,7 @@ enable_profiler: False
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the sychronous one.
 enable_checkpointing: True
-async_checkpointing: True
+async_checkpointing: False
 
 # When dropout is false the model is a deterministic function of the 
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
