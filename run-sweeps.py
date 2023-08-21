@@ -576,6 +576,31 @@ def run_s16():
     }
     run_job('TTT-checkpoint_baseline-4s', config)
 
+def run_s16b():
+    def run(
+            *,
+            fwd = True,
+            dlhs = True,
+            drhs = True,
+            lr_mul = 1.0,
+    ):
+        config = {
+            'fwd_int8': fwd,
+            'dlhs_int8': dlhs,
+            'drhs_int8': drhs,
+            'learning_rate': 1.e-3 * lr_mul,
+            'num_slice': 4,
+            'save_period': 1000,
+            'load_from_other_directory': f'gs://maxtext-experiments-multipod/int8-s16-a1-TTT-checkpoint_baseline-4s/checkpoints',
+            'load_from_other_directory_step': 4000, # end of warmup
+        }
+        run_job('TTT-checkpoint_baseline-4s', config)
+    run()
+    # run(dlhs = False, drhs=False)
+    # run(fwd = False, dlhs = False, drhs=False)
+    # run(lr_mul=10.0)
+    # run(lr_mul=100.0)
+
 def run_s17():
     def run(
             *,
@@ -604,6 +629,7 @@ def run_s17():
     run(lr_mul=10.)
     run(drhs_int8=False)
     run(dlhs_int8=False)
+
 
 def main():
     import argparse
