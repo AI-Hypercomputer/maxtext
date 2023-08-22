@@ -12,9 +12,13 @@ args = {
 }
 
 ###################    Common Code    ###################
-def calc_chinchilla_step_count(num_params_billions, num_slices):
-    base_steps = 20000 # number of Chinchilla steps for 1B model on 1 pod for per_device_batch of 4 seq length 1k
-    return int(base_steps * num_params_billions / num_slices)
+def calc_chinchilla_step_count(num_params_billions, num_slices, seqs_per_chip, tokens_per_seq):
+    billion = 2 ** 30
+    chips_per_slice = 256
+    needed_tokens = num_params_billions * billion * 20
+    tokens_per_step = tokens_per_seq * seqs_per_chip * chips_per_slice * num_slices
+    needed_steps = int(needed_tokens / tokens_per_step)
+    return needed_steps
 
 def read_yaml_file(file_path):
     with open(file_path, 'r') as file:
@@ -441,10 +445,11 @@ def run_job(
     yml = read_yaml_file('MaxText/configs/base.yml')
     yml = update_yaml_fields(yml, maxtext_config)
     num_slice = yml['num_slice']
-
+    tokens_per_seq = yml['max_target_length']
+    seqs_per_chip = yml['per_device_batch_size']
     yml = update_yaml_fields(yml, {
         'global_parameter_scale': model_size,
-        'steps': calc_chinchilla_step_count(model_size, num_slice)
+        'steps': calc_chinchilla_step_count(model_size, num_slice, seqs_per_chip=seqs_per_chip, tokens_per_seq=tokens_per_seq)
     })
 
     attempt = args['attempt']
@@ -464,7 +469,7 @@ def run_job(
 
     if args['dryrun']:
         import pprint
-        pprint.pprint(mhj_args)
+        pprint.pprint(maxtext_config)
         print()
     else:
         multihost_job_main(mhj_args)
