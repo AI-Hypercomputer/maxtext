@@ -179,9 +179,12 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
     # TODO: is optax xent as good as custom T5X one?
     xent = optax.softmax_cross_entropy_with_integer_labels(logits, data['targets'])
     # Mask out paddings at the end of each example.
-    xent = xent * (data['inputs_segmentation'] != 0)
+    mask = data['inputs_segmentation'] != 0
+    # Old code:
+    # xent = jnp.sum(xent * mask) / jnp.size(mask)
+    xent = jnp.sum(xent * mask) / jnp.sum(mask)
     # TODO: mask out the prompt if training prefix-LM
-    return jnp.sum(xent)/jnp.size(xent), (intermediate_outputs,logits)
+    return xent, (intermediate_outputs, logits)
 
   scalar_metrics = {}
 
@@ -229,6 +232,8 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
   )
 
   scalar_metrics.update({
+      'token_count': jnp.sum(data['inputs_segmentation'] != 0),
+      'per_example_min_token_count': jnp.min(jnp.sum(data['inputs_segmentation'] != 0, axis=1), axis=0),
       'learning/loss': loss,
       'learning/logits_norm' : max_utils.l2norm_pytree(logits),
       'learning/grad_norm' : max_utils.l2norm_pytree(grads),
