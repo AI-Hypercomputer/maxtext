@@ -369,6 +369,11 @@ def train_loop(config, state=None):
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
+  first_step = get_first_step(state)
+  for i in range(first_step):
+    example_batch = load_next_batch(train_iter, example_batch, config)
+    max_logging.log(f"forwarding iterator {i}")
+
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(train_iter, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
