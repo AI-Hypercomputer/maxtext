@@ -423,7 +423,7 @@ def sweep_test1(attempt: str):
 
 
 def bname(b: bool):
-    assert b == True or b == False
+    assert b == True or b == False, f'not bool: "{b}"'
     return str(b)[0]
 
 
@@ -596,7 +596,7 @@ def run_s16_load():
             'load_from_other_directory_step': 4000, # end of warmup
             'clip_by_global_norm': clip_global,
         }
-        run_name = f'4s-L-{bname(fwd_int8)}{bname(dlhs_int8)}{bname(drhs_int8)}_global{bname(clip_global)}-LR{int(lr_mul)}'
+        run_name = f'4s-L-{bname(fwd)}{bname(dlhs)}{bname(drhs)}_global{int(clip_global*10)}-LR{int(lr_mul)}'
         run_job(run_name, config)
     run()
     run(dlhs=False, drhs=False)
