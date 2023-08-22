@@ -1,10 +1,13 @@
 """referred to google3/platforms/deepsea/ffds/xor_bmk/bmk.py."""
 import jax
 from jax import numpy as jnp
+from jax.experimental import multihost_utils
 from paxml import experiment_registry
 from paxml import tasks_lib
 from paxml.tasks.lm.params.gpt3 import C4SpmdGpt3AdamMLPerfHP
 from praxis import pax_fiddle
+import portpicker
+import socket
 
 
 @experiment_registry.register
@@ -44,10 +47,34 @@ class C4SpmdGpt3Adam2x8x4Test(C4SpmdGpt3AdamMLPerfHP):
 
     return task_p
 
+def gen_local_ip():
+  hostname = socket.gethostname()
+  return socket.gethostbyname(hostname)
+
+def gen_local_ip_nums():
+  return [int(num) for num in gen_local_ip().split(':')[-1].split('.')]
+
+def get_coordinator_ip():
+  local_ip_nums = jax.numpy.array(gen_local_ip_nums())
+  coordinator_ip_nums = multihost_utils.broadcast_one_to_all(local_ip_nums)
+  coordinator_ip_strings = [str(num) for num in list(coordinator_ip_nums)]
+  return '.'.join(coordinator_ip_strings)
 
 @experiment_registry.register
 class C4SpmdGpt3AdamDataParallel2x4x4(C4SpmdGpt3AdamMLPerfHP):
   r"""Cross-slice data-parallel GPT-3 config."""
+
+  port = multihost_utils.broadcast_one_to_all(jax.numpy.array(portpicker.pick_unused_port()))
+  coordinator_address = get_coordinator_ip() + ':' + str(port)
+  jax.distributed.initialize(coordinator_address=coordinator_address,
+                             num_processes=jax.process_count(),
+                             process_id=jax.process_index())
+
+  print("JAX INFO")
+  print("port: ",port)
+  print("coordinator_address: ",coordinator_address)
+  print("jax.process_count: ",jax.process_count())
+  print("jax.process_index: ",jax.process_index())
 
   # 2 x v5litepod-16
 
