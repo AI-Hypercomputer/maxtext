@@ -14,20 +14,19 @@
 
 import datetime
 from airflow import models
-from apis import gcp_config, metric_config, test_config
-from apis import task
+from apis import gcp_config, metric_config, task, test_config
+from configs import vm_resource
 
-
-# TODO(wcromar): Unify these with other tests
-TPU_PROD_ENV_ONE_VM = 'tpu-prod-env-one-vm'
-EUROPE_WEST4_A = gcp_config.GCPConfig(
-    TPU_PROD_ENV_ONE_VM,
-    'europe-west4-a',
+# TODO(ranran): currently we have reserved v2-32 available in us-central1-a (b/295901728), and
+# requested v2-8 in the same zone (b/297217984). v2/v3 donuts and pods are not interchangeable.
+US_CENTRAL1_A = gcp_config.GCPConfig(
+    vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
+    vm_resource.Zone.US_CENTRAL1_A.value,
     metric_config.DatasetOption.XLML_DATASET,
 )
 US_CENTRAL2_B = gcp_config.GCPConfig(
-    TPU_PROD_ENV_ONE_VM,
-    'us-central2-b',
+    vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
+    vm_resource.Zone.US_CENTRAL2_B.value,
     metric_config.DatasetOption.XLML_DATASET,
 )
 
@@ -42,13 +41,13 @@ with models.DAG(
       test_config.JSonnetTpuVmTest.from_jax(
           'jax-compilation-cache-test-func-v2-8-1vm'
       ),
-      EUROPE_WEST4_A,
+      US_CENTRAL1_A,
   ).run()
   pod = task.TpuTask(
       test_config.JSonnetTpuVmTest.from_jax(
           'jax-pod-latest-tpu-ubuntu2204-base-func-v2-32-1vm'
       ),
-      EUROPE_WEST4_A,
+      US_CENTRAL1_A,
   ).run()
   # Tests are currently failing
   # embedding_pjit = task.TPUTask(

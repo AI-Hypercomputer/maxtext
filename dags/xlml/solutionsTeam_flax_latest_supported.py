@@ -16,10 +16,9 @@
 
 import datetime
 from airflow import models
+from configs import vm_resource
 from configs.xlml.jax import solutionsTeam_flax_latest_supported_config as flax_config
 
-# TODO(ranran): handle mapping from TPU type to zone of reservation
-US_CENTRAL2_B = "us-central2-b"
 
 with models.DAG(
     dag_id="flax_latest_supported",
@@ -32,7 +31,7 @@ with models.DAG(
   jax_resnet_v4_8 = flax_config.get_flax_resnet_config(
       tpu_version=4,
       tpu_cores=8,
-      tpu_zone=US_CENTRAL2_B,
+      tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
   ).run()
 
@@ -44,7 +43,7 @@ with models.DAG(
   jax_gpt2_v4_8 = flax_config.get_flax_gpt2_config(
       tpu_version=4,
       tpu_cores=8,
-      tpu_zone=US_CENTRAL2_B,
+      tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
       time_out_in_min=120,
       extraFlags=" ".join(jax_gpt2_v4_extra_flags),
   ).run()
@@ -53,7 +52,7 @@ with models.DAG(
   jax_sd_v4_8 = flax_config.get_flax_sd_config(
       tpu_version=4,
       tpu_cores=8,
-      tpu_zone=US_CENTRAL2_B,
+      tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
       num_train_epochs=1,
   ).run()
