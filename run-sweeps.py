@@ -218,10 +218,36 @@ def run_s18_8B_16seq_warmup():
         'drhs_int8': True,
         'learning_rate': 1.e-3,
         'num_slice': 4,
-        'save_period': 1000,
         'per_device_batch_size': 16,
+        'save_period': 1000,
     }
     run_job('yep', config)
+
+
+def run_s19():
+    def run(
+            *,
+            fwd = True,
+            dlhs = True,
+            drhs = True,
+    ):
+        config = {
+            'load_from_other_directory': f'gs://maxtext-experiments-multipod/nt8-s18_8B_16seq_warmup-a1-yep/checkpoints',
+            'load_from_other_directory_step': 1000,
+            'num_slice': 4,
+            'per_device_batch_size': 16,
+            'fwd_int8': fwd,
+            'dlhs_int8': dlhs,
+            'drhs_int8': drhs,
+            # 'learning_rate': 1.e-3 * lr_mul,
+        }
+        run_name = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}'
+        run_job(run_name, config)
+
+    run(fwd=False, dlhs=False, drhs=False)
+    run(fwd=True, dlhs=False, drhs=False)
+    run(fwd=True, dlhs=True, drhs=False)
+    run(fwd=True, dlhs=True, drhs=True)
 
 
 def main():
