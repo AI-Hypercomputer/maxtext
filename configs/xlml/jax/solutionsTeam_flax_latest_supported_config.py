@@ -15,7 +15,7 @@
 """Utilities to construct configs for solutionsTeam_flax_latest_supported DAG."""
 
 from apis import gcp_config, metric_config, task, test_config
-from configs import test_owner
+from configs import test_owner, gcs_bucket
 from configs.xlml.jax import common
 
 # TODO(ranran): update project_name & zone once reserved capacity is ready in project cloud-ml-auto-solutions
@@ -28,7 +28,7 @@ def get_flax_resnet_config(
     tpu_cores: int,
     tpu_zone: str,
     time_out_in_min: int,
-    data_dir: str,
+    data_dir: str = gcs_bucket.TFDS_DATA_DIR,
     extraFlags: str = "",
 ) -> task.TpuTask:
   job_gcp_config = gcp_config.GCPConfig(
@@ -77,7 +77,7 @@ def get_flax_gpt2_config(
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
 
-  set_up_cmds = common.set_up_hugging_face_transformer() + (
+  set_up_cmds = common.set_up_hugging_face_transformers() + (
       (
           "pip install -r"
           " /tmp/transformers/examples/flax/language-modeling/requirements.txt"
@@ -136,7 +136,7 @@ def get_flax_sd_config(
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
 
-  set_up_cmds = common.set_up_hugging_face_diffuser() + (
+  set_up_cmds = common.set_up_hugging_face_diffusers() + (
       (
           "pip install -U -r"
           " /tmp/diffusers/examples/text_to_image/requirements_flax.txt"

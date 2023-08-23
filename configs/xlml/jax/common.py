@@ -14,7 +14,7 @@
 
 """Utilities to construct common configs."""
 
-from typing import Iterable
+from typing import Tuple
 
 UPGRADE_PIP = "pip install --upgrade pip"
 INSTALL_LATEST_JAX = (
@@ -23,7 +23,7 @@ INSTALL_LATEST_JAX = (
 )
 
 
-def set_up_google_flax() -> Iterable[str]:
+def set_up_google_flax() -> Tuple[str]:
   """Common set up for flax repo."""
   return (
       UPGRADE_PIP,
@@ -34,7 +34,7 @@ def set_up_google_flax() -> Iterable[str]:
   )
 
 
-def set_up_hugging_face_transformer() -> Iterable[str]:
+def set_up_hugging_face_transformers() -> Tuple[str]:
   """Common set up for hugging face transformer repo."""
   return (
       UPGRADE_PIP,
@@ -50,7 +50,7 @@ def set_up_hugging_face_transformer() -> Iterable[str]:
   )
 
 
-def set_up_hugging_face_diffuser() -> Iterable[str]:
+def set_up_hugging_face_diffusers() -> Tuple[str]:
   """Common set up for hugging face diffuser repo."""
   return (
       UPGRADE_PIP,
