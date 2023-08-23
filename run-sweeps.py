@@ -210,7 +210,8 @@ def run_s17():
     run(drhs_int8=False)
     run(dlhs_int8=False)
 
-def run_s16():
+
+def run_s18_8B_16seq_warmup():
     config = {
         'fwd_int8': True,
         'dlhs_int8': True,
@@ -218,8 +219,9 @@ def run_s16():
         'learning_rate': 1.e-3,
         'num_slice': 4,
         'save_period': 1000,
+        'per_device_batch_size': 16,
     }
-    run_job('TTT-checkpoint_baseline-4s', config)
+    run_job('yep', config)
 
 
 def main():
