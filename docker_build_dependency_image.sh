@@ -27,8 +27,9 @@
 # Enable "exit immediately if any command fails" option
 set -e
 
-export PROJECT=$(gcloud config get-value project)
-export IMAGE_PREFIX=gke_img
+export LOCAL_IMAGE_NAME=maxtext_base_image
+
+echo "Starting to build your docker image. This will take a few minutes but the image can be reused as you iterate."
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -36,25 +37,36 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
     echo "$KEY"="$VALUE"
 done
-echo "PROJECT=$PROJECT"
 
 if [[ "$MODE" == "stable" || ! -v MODE ]]; then
+  echo "STABLE"
     # Stable mode
   if [[ ! -v JAX_VERSION ]]; then
-    docker build --build-arg MODE="stable" -f ./maxtext.Dockerfile -t ${IMAGE_PREFIX}_maxtext_stable .
+    docker build --build-arg MODE="stable" -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
   else
-    docker build --build-arg MODE="stable" --build-arg JAX_VERSION="$JAX_VERSION" -f ./maxtext.Dockerfile -t ${IMAGE_PREFIX}_maxtext_stable .
+    docker build --build-arg MODE="stable" --build-arg JAX_VERSION="$JAX_VERSION" -f ./maxtext.Dockerfile -t ${LOCAL_IMAGE_NAME} .
   fi
-  docker tag ${IMAGE_PREFIX}_maxtext_stable gcr.io/$PROJECT/${IMAGE_PREFIX}_maxtext_stable:latest
-  docker push gcr.io/$PROJECT/${IMAGE_PREFIX}_maxtext_stable:latest
 elif [[ $MODE == "nightly" ]]; then
+  echo "NIGHTLY"
+
   # Nightly mode
-  docker build --build-arg MODE="nightly" -f ./maxtext.Dockerfile -t ${IMAGE_PREFIX}_maxtext_nightly .
-  docker tag ${IMAGE_PREFIX}_maxtext_nightly gcr.io/$PROJECT/${IMAGE_PREFIX}_maxtext_nightly:latest
-  docker push gcr.io/$PROJECT/${IMAGE_PREFIX}_maxtext_nightly:latest
+  docker build --build-arg MODE="nightly" -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
 elif [[ $MODE == "head" ]]; then
+  echo "HEAD"
+
   # Head mode
-  docker build --build-arg MODE="head" -f ./maxtext.Dockerfile -t ${IMAGE_PREFIX}_maxtext_head .
-  docker tag ${IMAGE_PREFIX}_maxtext_head gcr.io/$PROJECT/${IMAGE_PREFIX}_maxtext_head:latest
-  docker push gcr.io/$PROJECT/${IMAGE_PREFIX}_maxtext_head:latest
+  docker build --build-arg MODE="head" -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
 fi
+
+echo ""
+echo "*************************"
+echo ""
+
+echo "Built your base docker image and named it ${LOCAL_IMAGE_NAME}.
+It only has the dependencies installed. Assuming you're on a TPUVM, to run the
+docker image locally and mirror your local working directory run:"
+echo "docker run -v $(pwd):/app --rm -it --privileged --entrypoint bash maxtext_base_image"
+echo ""
+echo "You can run MaxText and your development tests inside of the docker image. Changes to your workspace will automatically
+be reflected inside the docker container."
+echo "Once you want you upload your docker container to GCR, take a look at docker_upload_runner.sh"
