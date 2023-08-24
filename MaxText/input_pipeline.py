@@ -216,7 +216,11 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
 
   # Set global batch size.
-  batch_size = config.per_device_batch_size * global_mesh.size
+  if config.per_device_batch_size < 1:
+    batch_size = global_mesh.size
+  else:
+    batch_size = int(config.per_device_batch_size) * global_mesh.size
+
   if config.eval_per_device_batch_size > 0:
     eval_batch_size = config.eval_per_device_batch_size * global_mesh.size
   else:

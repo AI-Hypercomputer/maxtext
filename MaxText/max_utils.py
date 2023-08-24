@@ -167,10 +167,16 @@ def init_train_state(model, tx, config, key):
 
   Args: model, tx, config, key
   """
-  input_shape = (
-      len(jax.devices()) * config.per_device_batch_size,
-      config.max_target_length
-  )
+  if config.per_device_batch_size < 1:
+    input_shape = (
+        len(jax.devices()),
+        config.max_target_length
+    )
+  else:
+    input_shape = (
+        int(len(jax.devices()) * config.per_device_batch_size),
+        config.max_target_length
+    )
   model_vars = model.init({'params': key, 'dropout': key, 'aqt': key},
                           jnp.ones(input_shape),
                           jnp.ones(input_shape))
