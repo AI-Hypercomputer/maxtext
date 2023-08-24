@@ -210,7 +210,7 @@ def run_s17():
     run(drhs_int8=False)
     run(dlhs_int8=False)
 
-
+# This is a warmup checkpoint generation for S19
 def run_s18_8B_16seq_warmup():
     config = {
         'fwd_int8': True,
@@ -223,7 +223,8 @@ def run_s18_8B_16seq_warmup():
     }
     run_job('yep', config)
 
-
+# This is a sweep on: FFF,TFF,TTF,TTT
+# For pseudo-final eval on 8B model. 4pods, 16seq
 def run_s19():
     def run(
             *,
@@ -232,7 +233,7 @@ def run_s19():
             drhs = True,
     ):
         config = {
-            'load_from_other_directory': f'gs://maxtext-experiments-multipod/nt8-s18_8B_16seq_warmup-a1-yep/checkpoints',
+            'load_from_other_directory': f'gs://maxtext-experiments-multipod/int8-s18_8B_16seq_warmup-a1-yep/checkpoints',
             'load_from_other_directory_step': 1000,
             'num_slice': 4,
             'per_device_batch_size': 16,
@@ -249,6 +250,41 @@ def run_s19():
     run(fwd=True, dlhs=True, drhs=False)
     run(fwd=True, dlhs=True, drhs=True)
 
+
+# Same as S19 but back to 4seq and added gradient clipping.
+def run_s20():
+    def run(
+            *,
+            fwd = True,
+            dlhs = True,
+            drhs = True,
+            clip_global = 0.3,
+    ):
+        config = {
+            # For seq16
+            # 'load_from_other_directory': f'gs://maxtext-experiments-multipod/int8-s18_8B_16seq_warmup-a1-yep/checkpoints',
+            # 'load_from_other_directory_step': 1000,
+            'save_period': 1000,
+            'load_from_other_directory': 'gs://maxtext-experiments-multipod/int8-s16-a1-TTT-checkpoint_baseline-4s/checkpoints',
+            'load_from_other_directory_step': 4000, # end of warmup
+            'num_slice': 4,
+            'per_device_batch_size': 4,
+            'fwd_int8': fwd,
+            'dlhs_int8': dlhs,
+            'drhs_int8': drhs,
+            'clip_by_global_norm': clip_global,
+            # 'learning_rate': 1.e-3 * lr_mul,
+            # TODO gs://max-datasets-rogue-useast/
+        }
+        run_name = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}-cg{int(clip_global*10):02}'
+        run_job(run_name, config)
+
+    run(fwd=False, dlhs=False, drhs=False)
+    run(dlhs=False, drhs=False)
+    run(drhs=False)
+    run(clip_global=0.2)
+    run(clip_global=0.3)
+    run(clip_global=0.5)
 
 def main():
     import argparse

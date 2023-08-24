@@ -181,8 +181,9 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
     # Mask out paddings at the end of each example.
     mask = data['inputs_segmentation'] != 0
     # Old code:
-    # xent = jnp.sum(xent * mask) / jnp.size(mask)
-    xent = jnp.sum(xent * mask) / jnp.sum(mask)
+    xent = jnp.sum(xent * mask) / jnp.size(mask)
+    # Maybe better? More unstable maybe.
+    # xent = jnp.sum(xent * mask) / jnp.sum(mask)
     # TODO: mask out the prompt if training prefix-LM
     return xent, (intermediate_outputs, logits)
 
@@ -373,6 +374,11 @@ def train_loop(config, state=None):
 
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
+
+  # for i in range(3001):
+  #   example_batch = load_next_batch(train_iter, example_batch, config)
+  #   if (i%100==0): max_logging.log(f"forwarding iterator {i}")
+  # assert False
 
   first_step = get_first_step(state)
   for i in range(first_step):
