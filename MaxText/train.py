@@ -167,7 +167,7 @@ def train_step(model, config, state, data, dropout_rng, batch_size):
   # inputs, targets, segments, positions = apply_args
   rng1, gen_aqt_rng = jax.random.split(dropout_rng)
   aqt_rng, rng2 = jax.random.split(gen_aqt_rng)
-  
+
   if config.per_device_batch_size < 1:
     # decimate data by proportion of per_device_batch_size
     for k, v in data.items():
