@@ -173,11 +173,6 @@ def train_step(model, config, state, data, dropout_rng, batch_size):
     for k, v in data.items():
       data[k] = v[:batch_size,:]
 
-  if config.per_device_batch_size < 1:
-    # decimate data by proportion of per_device_batch_size
-    for k, v in data.items():
-      data[k] = v[:batch_size,:]
-
   def loss_fn(params):
     logits, intermediate_outputs = model.apply({'params': params},
                          data['inputs'],
