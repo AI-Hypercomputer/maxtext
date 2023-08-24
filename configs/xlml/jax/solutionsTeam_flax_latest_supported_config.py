@@ -15,12 +15,8 @@
 """Utilities to construct configs for solutionsTeam_flax_latest_supported DAG."""
 
 from apis import gcp_config, metric_config, task, test_config
-from configs import test_owner, gcs_bucket
+from configs import gcs_bucket, test_owner, vm_resource
 from configs.xlml.jax import common
-
-# TODO(ranran): update project_name & zone once reserved capacity is ready in project cloud-ml-auto-solutions
-PROJECT_NAME = "tpu-prod-env-one-vm"
-RUNTIME_VERSION = "tpu-ubuntu2204-base"
 
 
 def get_flax_resnet_config(
@@ -32,24 +28,28 @@ def get_flax_resnet_config(
     extraFlags: str = "",
 ) -> task.TpuTask:
   job_gcp_config = gcp_config.GCPConfig(
-      project_name=PROJECT_NAME,
+      project_name=vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
       zone=tpu_zone,
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
 
   set_up_cmds = common.set_up_google_flax()
 
-  run_model_cmds = ((
-      f"export TFDS_DATA_DIR={data_dir} &&"
-      " JAX_PLATFORM_NAME=TPU python3 /tmp/flax/examples/imagenet/main.py"
-      " --config=/tmp/flax/examples/imagenet/configs/tpu.py"
-      f" --workdir=/tmp/imagenet --config.num_epochs=1 {extraFlags}"),)
+  run_model_cmds = (
+      (
+          f"export TFDS_DATA_DIR={data_dir} &&"
+          " JAX_PLATFORM_NAME=TPU python3 /tmp/flax/examples/imagenet/main.py"
+          " --config=/tmp/flax/examples/imagenet/configs/tpu.py"
+          f" --workdir=/tmp/imagenet --config.num_epochs=1 {extraFlags}"
+      ),
+  )
 
   job_test_config = test_config.TpuVmTest(
       test_config.Tpu(
           version=tpu_version,
           cores=tpu_cores,
-          runtime_version=RUNTIME_VERSION,
+          runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
+          reserved=True,
       ),
       test_name="flax_resnet_imagenet",
       set_up_cmds=set_up_cmds,
@@ -72,7 +72,7 @@ def get_flax_gpt2_config(
     extraFlags: str = "",
 ) -> task.TpuTask:
   job_gcp_config = gcp_config.GCPConfig(
-      project_name=PROJECT_NAME,
+      project_name=vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
       zone=tpu_zone,
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
@@ -107,7 +107,8 @@ def get_flax_gpt2_config(
       test_config.Tpu(
           version=tpu_version,
           cores=tpu_cores,
-          runtime_version=RUNTIME_VERSION,
+          runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
+          reserved=True,
       ),
       test_name="flax_gpt2_oscar",
       set_up_cmds=set_up_cmds,
@@ -131,7 +132,7 @@ def get_flax_sd_config(
     extraFlags: str = "",
 ) -> task.TpuTask:
   job_gcp_config = gcp_config.GCPConfig(
-      project_name=PROJECT_NAME,
+      project_name=vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
       zone=tpu_zone,
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
@@ -160,7 +161,8 @@ def get_flax_sd_config(
       test_config.Tpu(
           version=tpu_version,
           cores=tpu_cores,
-          runtime_version=RUNTIME_VERSION,
+          runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
+          reserved=True,
       ),
       test_name="flax_sd_pokemon",
       set_up_cmds=set_up_cmds,

@@ -16,10 +16,9 @@
 
 import datetime
 from airflow import models
+from configs import vm_resource
 from configs.xlml.tensorflow import solutionsTeam_tf_nightly_supported_config as tf_config
 
-# TODO(ranran): handle mapping from TPU type to zone of reservation
-US_CENTRAL2_B = "us-central2-b"
 
 with models.DAG(
     dag_id="tf_latest_supported",
@@ -32,7 +31,7 @@ with models.DAG(
   tf_resnet_v4_8 = tf_config.get_tf_resnet_config(
       tpu_version=4,
       tpu_cores=8,
-      tpu_zone=US_CENTRAL2_B,
+      tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
   ).run()
 
@@ -40,7 +39,7 @@ with models.DAG(
   tf_bert_v4_8 = tf_config.get_tf_bert_config(
       tpu_version=4,
       tpu_cores=8,
-      tpu_zone=US_CENTRAL2_B,
+      tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
   ).run()
 

@@ -177,7 +177,9 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
   @staticmethod
   def _load_compiled_jsonnet(test_name: str) -> Any:
     # TODO(wcromar): Parse GPU tests too
-    config_dir = os.environ.get('XLMLTEST_CONFIGS', '/home/airflow/gcs/dags/configs/jsonnet')
+    config_dir = os.environ.get(
+        'XLMLTEST_CONFIGS', '/home/airflow/gcs/dags/configs/jsonnet'
+    )
     test_path = os.path.join(config_dir, test_name)
     with open(test_path, 'r') as f:
       test = json.load(f)
@@ -186,7 +188,11 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
 
   @staticmethod
   def _from_json_helper(
-      test: Any, setup: str, exports: str, test_command: List[str]
+      test: Any,
+      setup: str,
+      exports: str,
+      test_command: List[str],
+      reserved: bool,
   ):
     return JSonnetTpuVmTest(
         test_name=test['testName'],
@@ -194,6 +200,7 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
             version=test['accelerator']['version'],
             cores=test['accelerator']['size'],
             runtime_version=test['tpuSettings']['softwareVersion'],
+            reserved=reserved,
         ),
         setup=setup,
         exports=exports,
@@ -203,7 +210,7 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
     )
 
   @staticmethod
-  def from_jax(test_name: str):
+  def from_jax(test_name: str, reserved_tpu: bool = True):
     """Parses a compiled legacy JSonnet config test from `tests/jax`."""
     test = JSonnetTpuVmTest._load_compiled_jsonnet(test_name)
     return JSonnetTpuVmTest._from_json_helper(
@@ -212,10 +219,11 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
         setup=test['setup'],
         exports='',
         test_command=['bash', '-c', test['runTest']],
+        reserved=reserved_tpu,
     )
 
   @staticmethod
-  def from_pytorch(test_name: str):
+  def from_pytorch(test_name: str, reserved_tpu: bool = True):
     """Parses a compiled legacy JSonnet test config from `tests/pytorch`."""
     test = JSonnetTpuVmTest._load_compiled_jsonnet(test_name)
     return JSonnetTpuVmTest._from_json_helper(
@@ -224,6 +232,7 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
         + test['tpuSettings']['tpuVmExtraSetup'],
         exports=test['tpuSettings']['tpuVmExports'],
         test_command=test['command'],
+        reserved=reserved_tpu,
     )
 
   @property
@@ -237,4 +246,8 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
   # TODO(wcromar): replace configmaps
   @property
   def test_script(self) -> str:
-    return '\n'.join(['set -xue', self.exports, ' '.join(shlex.quote(s) for s in self.test_command)])
+    return '\n'.join([
+        'set -xue',
+        self.exports,
+        ' '.join(shlex.quote(s) for s in self.test_command),
+    ])
