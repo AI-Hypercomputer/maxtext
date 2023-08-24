@@ -171,7 +171,7 @@ if [[ -n "${pids}" ]]; then
   echo "Existing processes found with pid ${pids}"
   for pid in ${pids}; do
     echo "Killing process ${pid}..."
-    kill -9 "${pid}"
+    sudo kill -9 "${pid}"
     tail --pid="${pid}" -f /dev/null
     echo "Existing process ${pid} on your TPU was killed successfully!"
   done

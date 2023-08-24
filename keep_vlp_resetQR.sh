@@ -41,7 +41,8 @@ function main() {
     sleep "$POLLING_FREQUENCY"
 }
 
-export PROJECT=tpu-prod-env-multipod
+# PROJECT=tpu-prod-env-multipod
+PROJECT=tpu-prod-env-vlp-2nic
 export ZONE=us-east5-b
 export POLLING_FREQUENCY=300
 

@@ -1,6 +1,7 @@
-PROJECT=tpu-prod-env-multipod
+# PROJECT=tpu-prod-env-multipod
+PROJECT=tpu-prod-env-vlp-2nic
 ZONE=us-east5-b
-NUM_SLICES=2
+NUM_SLICES=1
 TPU_TYPE=v5litepod-256
 VERSION=v2-alpha-tpuv5-lite
 BUCKET_NAME=tonyjohnchen-maxtext
@@ -9,26 +10,26 @@ gcloud config set project $PROJECT
 gcloud config set compute/zone $ZONE
 
 
-iteration=1
+# iteration=1
 
-for (( i=0; i<$iteration; i++ ));
-do
-    RUN_NAME=bad_vlp_debug_${NUM_SLICES}slice_${TPU_TYPE}_$(date +%Y-%m-%d-%H-%M-%S)
-    QR_ID=$RUN_NAME
-    python3 multihost_job.py --COMMAND_TYPE=curl --NUM_SLICES=$NUM_SLICES --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --PROJECT=${PROJECT} --ZONE=${ZONE} \
-    --TPU_TYPE=$TPU_TYPE --VERSION=$VERSION \
-    --COMMAND="bash setup.sh MODE=stable; \
-    TPU_STDERR_LOG_LEVEL=0 TPU_MIN_LOG_LEVEL=0 TPU_VMODULE=tpu_configuration_ops_impl=3 TF_CPP_MIN_LOG_LEVEL=0 \
-    python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME \
-    base_output_directory=gs://maxtext-experiments-tpem/ \
-    dataset_path=gs://max-datasets-rogue \
-    steps=100 per_device_batch_size=1"
-done
+# for (( i=0; i<$iteration; i++ ));
+# do
+#     RUN_NAME=bad_vlp_debug_${NUM_SLICES}slice_${TPU_TYPE}_$(date +%Y-%m-%d-%H-%M-%S)
+#     QR_ID=$RUN_NAME
+#     python3 multihost_job.py --COMMAND_TYPE=curl --NUM_SLICES=$NUM_SLICES --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --PROJECT=${PROJECT} --ZONE=${ZONE} \
+#     --TPU_TYPE=$TPU_TYPE --VERSION=$VERSION \
+#     --COMMAND="bash setup.sh MODE=stable; \
+#     TPU_STDERR_LOG_LEVEL=0 TPU_MIN_LOG_LEVEL=0 TPU_VMODULE=tpu_configuration_ops_impl=3 TF_CPP_MIN_LOG_LEVEL=0 \
+#     python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME \
+#     base_output_directory=gs://maxtext-experiments-tpem/ \
+#     dataset_path=gs://max-datasets-rogue \
+#     steps=100 per_device_batch_size=1"
+# done
 
-gcloud alpha compute tpus queued-resources list --project=${PROJECT} --zone=${ZONE} --filter=bad_vlp_debug 
+# gcloud alpha compute tpus queued-resources list --project=${PROJECT} --zone=${ZONE} --filter=bad_vlp_debug 
 
-RUN_NAME=bad_vlp_debug_2slice_v5litepod-256_2023-08-11-18-00-26-0_$(date +%Y-%m-%d-%H-%M-%S)
-TPU_PREFIX=bad_vlp_debug_2slice_v5litepod-256_2023-08-11-18-00-26-0
+RUN_NAME=wenqicao-mlperf-script-test-2vlp-0823-test-4-1_$(date +%Y-%m-%d-%H-%M-%S)
+TPU_PREFIX=wenqicao-mlperf-script-test-2vlp-0823-test-4-1
 
 python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX \
 --COMMAND="bash setup.sh MODE=stable && sleep 60; \
@@ -37,7 +38,11 @@ python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX \
     python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME \
     base_output_directory=gs://max-experiments/ \
     dataset_path=gs://maxtext-dataset/ \
-    steps=100 per_device_batch_size=1"
+    steps=10000 per_device_batch_size=1"
+
+# python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX \
+# --COMMAND="sudo reboot"
+
 
 # python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX \
 # --COMMAND="bash setup.sh && export LIBTPU_INIT_ARGS='--xla_tpu_enable_data_parallel_all_reduce_opt=true \
