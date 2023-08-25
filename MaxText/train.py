@@ -198,29 +198,29 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
   clip_ucb = config.clip_by_ucb > 0.0
   assert clip_global + clip_block_rms + clip_ucb <= 1
 
-  new_grad_stats, clip_grads, is_spike, ucb_metrics = ucb.ucb_update(grad_stats, grads)
+  new_grad_stats, clip_grads, ucb_metrics = ucb.ucb_update(grad_stats, grads)
+  ucb_metrics = max_utils.leaves_metrics('ucb', ucb_metrics)
+  # jax.debug.print("{}", ucb_metrics)
   scalar_metrics.update(ucb_metrics)
 
   if clip_global:
     grads, _ = optax.clip_by_global_norm(config.clip_by_global_norm).update(grads, None, None)
   elif clip_block_rms:
-    assert False
+    grads, _ = optax.clip_by_block_rms(config.clip_by_block_rms).update(grads, None, None)
   elif clip_ucb:
+    grads = clip_grads
+    #   adam = state.opt_state[0]
+    #   def maybe_zero(t):
+    #     mask = jnp.full(t.shape, is_spike, dtype = jnp.bool_)
+    #     return jax.lax.select(mask, jnp.zeros_like(t), t)
+    #   new_adam = optax.ScaleByAdamState(
+    #     mu=jax.tree_map(maybe_zero, adam.mu),
+    #     nu=jax.tree_map(maybe_zero, adam.nu),
+    #     count=jax.tree_map(maybe_zero, adam.count),
+    #   )
+    #   opt = new_adam, state.opt_state[1]
+  else:
     assert False
-  # grads = clip_grads
-  # if config.clip_by_ucb:
-  #   adam = state.opt_state[0]
-  #   def maybe_zero(t):
-  #     mask = jnp.full(t.shape, is_spike, dtype = jnp.bool_)
-  #     return jax.lax.select(mask, jnp.zeros_like(t), t)
-
-  #   new_adam = optax.ScaleByAdamState(
-  #     mu=jax.tree_map(maybe_zero, adam.mu),
-  #     nu=jax.tree_map(maybe_zero, adam.nu),
-  #     count=jax.tree_map(maybe_zero, adam.count),
-  #   )
-  #   opt = new_adam, state.opt_state[1]
-  # else:
 
   opt = state.opt_state
 
@@ -354,7 +354,7 @@ def train_loop(config, state=None):
   )
 
 
-  grad_stats = ucb.ucb_init() # TODO mesh?
+  grad_stats = ucb.ucb_init(state.params)
   data_pspec = P(*config.data_sharding)
 
   num_model_parameters = calculate_num_params_from_pytree(state.params)

@@ -102,7 +102,9 @@ num_slice: 1 # used by run-sweep.py . will be copied to the other yml file.
 
 # Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
-dataset_path: "gs://max-datasets-rogue/"
+# dataset_path: "gs://max-datasets-rogue/"
+dataset_path: "gs://max-datasets-rogue-useast/"
+
 vocab_size: 32_768 # powers of 2 for sharding
 vocab_relative_path: "vocabs" # Assumes we're allowed
 dataset_name: "c4/en:3.0.1"
@@ -120,7 +122,7 @@ learning_rate: 0.001
 learning_rate_schedule_steps: -1 # length of learning rate schedule, should be at least steps, defaults to steps.
 clip_by_global_norm: 0.0 # no clipping default
 clip_by_block_rms: 0.0 # no clipping default
-clip_by_ucb: 0.0 # no clipping default
+clip_by_ucb: 0.0 # no clipping default , exact value is ignored if above 0.0
 
 # Maximum length cutoff for training examples.
 max_target_length: 1024
