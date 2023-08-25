@@ -156,7 +156,6 @@ def train_step(model, config, state, data, dropout_rng):
     state: A pytree of the current state of the model
     data: Batch of data to apply to the model
     dropout_rng: A key to use to generate rng for dropout
-    batch_size: Global batch size
 
   Returns:
     new_state: Same format as state.
