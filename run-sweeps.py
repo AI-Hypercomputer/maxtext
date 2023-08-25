@@ -8,7 +8,7 @@ import os
 args = {
     'dryrun': True,
     'tpu': 'v4', # 'v4' 'v5'
-    'pool': 'default', # 'default', 'stable-fleet'
+    'stable': False,
 }
 
 
@@ -77,6 +77,8 @@ def run_job(
         '--COMMAND': BASE_MHJ_CMD + experiment_yml_file,
         # '--COMMAND_TYPE': 'curl'  # Uncomment for Stable fleet
     }
+    if args['stable']:
+        experiment_mhj['--COMMAND_TYPE'] = 'curl'
 
     # V4_MHJ_DICT={
     #     '--BUCKET_NAME': 'mattdavidow-br',  # for cloud-tpu-multipod-dev
@@ -100,6 +102,8 @@ def run_job(
     if args['dryrun']:
         import pprint
         pprint.pprint(maxtext_config)
+        pprint.pprint(experiment_mhj)
+
         print()
     else:
         multihost_job_main(mhj_args)
@@ -280,7 +284,7 @@ def run_s20_base(
         'learning_rate': 1.e-3 * lr_mul,
         # TODO gs://max-datasets-rogue-useast/
     }
-    run_name = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}-cg{int(clip_global*10):02}-cucb{clip_by_ucb}'
+    run_name = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}-cg{int(clip_global*10):02}-cucb{clip_by_ucb}-lr{int(lr_mul*10):03}'
     run_job(run_name, config)
 
 
@@ -294,10 +298,10 @@ def run_s20():
 
 
 def run_s21():
-    run_s20_base(drhs=False, clip_global=0.2)
-    run_s20_base(drhs=False, clip_global=0.3)
-    run_s20_base(drhs=False, clip_global=0.5)
-    run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1)
+    # run_s20_base(drhs=False, clip_global=0.2)
+    # run_s20_base(drhs=False, clip_global=0.3)
+    # run_s20_base(drhs=False, clip_global=0.5)
+    # run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1)
     run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1, lr_mul=2.0)
     run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1, lr_mul=5.0)
 
@@ -307,8 +311,8 @@ def main():
     parser = argparse.ArgumentParser(description='TPU configuration options')
     parser.add_argument('--dryrun', type=bool, default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--delyml', type=bool, default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--stable', type=bool, default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--tpu', type=str, default='v5')
-    parser.add_argument('--pool', type=str, default='default') # 'default' or 'stable-fleet'
     parser.add_argument('--sweep', type=str, default='')
     parser.add_argument('--attempt', type=str, default='')
     pargs = parser.parse_args()
