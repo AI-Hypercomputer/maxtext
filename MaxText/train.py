@@ -203,6 +203,7 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
   # jax.debug.print("{}", ucb_metrics)
   scalar_metrics.update(ucb_metrics)
 
+  clip_global=True
   if clip_global:
     grads, _ = optax.clip_by_global_norm(config.clip_by_global_norm).update(grads, None, None)
   elif clip_block_rms:

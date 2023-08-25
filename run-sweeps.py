@@ -24,6 +24,11 @@ BASE_MHJ_CMD="""export LIBTPU_INIT_ARGS="--xla_tpu_spmd_rng_bit_generator_unsafe
 bash setup_with_retries.sh && \
 python3 MaxText/train.py """
 
+BASE_MHJ_CMD_14_CP="""export LIBTPU_INIT_ARGS="--xla_tpu_spmd_rng_bit_generator_unsafe=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true" && \
+export TPU_LIBRARY_PATH=$HOME/custom_libtpu/libtpu.so && \
+bash setup_with_retries.sh LIBTPU_GCS_PATH=gs://libtpu_internal/mattdavidow/viperlite/2023-08-24-23:56:27-libtpu.so && \
+python3 MaxText/train.py """
+
 
 def bname(b: bool):
     assert b == True or b == False, f'not bool: "{b}"'
@@ -66,6 +71,11 @@ def run_job(
     with open(experiment_yml_file, 'w') as file:
         yaml.dump(yml, file)
 
+    if args['jax_14_cl']:
+        mhj_cmd = BASE_MHJ_CMD_14_CP
+    else:
+        mhj_cmd = BASE_MHJ_CMD
+
     experiment_mhj = {
         '--RUN_NAME': run_name,
         '--BUCKET_NAME': 'mattdavidow-maxtext-br',
@@ -74,14 +84,15 @@ def run_job(
         '--VERSION': 'v2-alpha-tpuv5-lite',
         '--PROJECT': 'tpu-prod-env-multipod',
         '--ZONE': 'us-east5-b',
-        '--COMMAND': BASE_MHJ_CMD + experiment_yml_file,
+        '--COMMAND': mhj_cmd + experiment_yml_file,
+        '--CQR_EXTRA_ARGS': ' --network=mtu9k'
         # '--COMMAND_TYPE': 'curl'  # Uncomment for Stable fleet
     }
     if args['stable']:
         experiment_mhj['--COMMAND_TYPE'] = 'curl'
         experiment_mhj['--PROJECT'] = 'tpu-prod-env-vlp-2nic'
 
-
+    
     # V4_MHJ_DICT={
     #     '--BUCKET_NAME': 'mattdavidow-br',  # for cloud-tpu-multipod-dev
     #     '--NUM_SLICE': 1,
@@ -133,18 +144,18 @@ def run_s15():
             'clip_by_ucb': clip_by_ucb,
             'learning_rate': 1.e-3 * lr_mul,
         }
-        run_name = f'{bname(fwd_int8)}{bname(dlhs_int8)}{bname(drhs_int8)}_ucb{bname(clip_by_ucb)}-LR{int(lr_mul)}'
+        run_name = f'mattdavidow-{bname(fwd_int8)}{bname(dlhs_int8)}{bname(drhs_int8)}_ucb{bname(clip_by_ucb)}-LR{int(lr_mul)}'
 
         run_job(run_name, config)
 
     # Q: Which one is the sourse of the loss loss?
     run(dlhs_int8=True, drhs_int8=False)
-    run(dlhs_int8=False, drhs_int8=True)
-    # A: It seems that the loss loss of  drhs_int8=True is twice bigger than dlhs_int8=True, but spikes are terrible.
+    # run(dlhs_int8=False, drhs_int8=True)
+    # # A: It seems that the loss loss of  drhs_int8=True is twice bigger than dlhs_int8=True, but spikes are terrible.
 
-    # Q: Does clip_by_ucb help in general?  Does it help with quantization?
-    run(dlhs_int8=True, drhs_int8=True)
-    run(dlhs_int8=True, drhs_int8=True, lr_mul=100.0)
+    # # Q: Does clip_by_ucb help in general?  Does it help with quantization?
+    # run(dlhs_int8=True, drhs_int8=True)
+    # run(dlhs_int8=True, drhs_int8=True, lr_mul=100.0)
 
     # TODO: standard grad clip?
 
@@ -154,7 +165,7 @@ def run_s16():
         'dlhs_int8': True,
         'drhs_int8': True,
         'learning_rate': 1.e-3,
-        'num_slice': 4,
+        'num_slice': 1,
         'save_period': 1000,
     }
     run_job('TTT-checkpoint_baseline-4s', config)
@@ -315,7 +326,6 @@ def run_s21():
     run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1, lr_mul=2.0)
     run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1, lr_mul=5.0)
 
-
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='TPU configuration options')
@@ -325,6 +335,7 @@ def main():
     parser.add_argument('--tpu', type=str, default='v5')
     parser.add_argument('--sweep', type=str, default='')
     parser.add_argument('--attempt', type=str, default='')
+    parser.add_argument('--jax_14_cl', type=bool, default=True, action=argparse.BooleanOptionalAction)
     pargs = parser.parse_args()
     global args
     args = pargs.__dict__
