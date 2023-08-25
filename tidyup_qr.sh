@@ -1,5 +1,22 @@
 #!/bin/bash
 
+function deljobs() {
+  jobs=$(gcloud alpha compute tpus queued-resources list --zone=us-east5-b --project=$1 | grep "FAILED\|SUSPENDED" | sed "s/ .*//g")
+  for job in ${jobs}; do
+    cmd="yes | gcloud alpha compute tpus queued-resources delete --zone=us-east5-b --project=$1 $job"
+    echo "$cmd"
+    # eval "$cmd" &
+    # sleep 1
+  done
+}
+
+deljobs tpu-prod-env-multipod
+deljobs tpu-prod-env-vlp-2nic
+
+wait
+
+exit
+
 shopt -s expand_aliases
 
 alias tpugcloud_test='CLOUDSDK_API_ENDPOINT_OVERRIDES_TPU=https://test-tpu.sandbox.googleapis.com/ CLOUDSDK_API_ENDPOINT_OVERRIDES_COMPUTE=https://www.googleapis.com/compute/staging_v1/  CLOUDSDK_API_CLIENT_OVERRIDES_COMPUTE=staging_v1 /google/data/ro/teams/cloud-sdk/gcloud'
