@@ -252,39 +252,55 @@ def run_s19():
 
 
 # Same as S19 but back to 4seq and added gradient clipping.
-def run_s20():
-    def run(
-            *,
-            fwd = True,
-            dlhs = True,
-            drhs = True,
-            clip_global = 0.3,
-    ):
-        config = {
-            # For seq16
-            # 'load_from_other_directory': f'gs://maxtext-experiments-multipod/int8-s18_8B_16seq_warmup-a1-yep/checkpoints',
-            # 'load_from_other_directory_step': 1000,
-            'save_period': 1000,
-            'load_from_other_directory': 'gs://maxtext-experiments-multipod/int8-s16-a1-TTT-checkpoint_baseline-4s/checkpoints',
-            'load_from_other_directory_step': 4000, # end of warmup
-            'num_slice': 4,
-            'per_device_batch_size': 4,
-            'fwd_int8': fwd,
-            'dlhs_int8': dlhs,
-            'drhs_int8': drhs,
-            'clip_by_global_norm': clip_global,
-            # 'learning_rate': 1.e-3 * lr_mul,
-            # TODO gs://max-datasets-rogue-useast/
-        }
-        run_name = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}-cg{int(clip_global*10):02}'
-        run_job(run_name, config)
+def run_s20_base(
+        *,
+        fwd = True,
+        dlhs = True,
+        drhs = True,
+        clip_global = 0.3,
+        clip_by_ucb = 0, # 0 or 1
+        # lrs = 0,  # This is a small delta to LR, meant as a 'seed' replacement
+        lr_mul = 1.0,  # This is a small delta to LR, meant as a 'seed' replacement
+):
+    config = {
+        # For seq16
+        # 'load_from_other_directory': f'gs://maxtext-experiments-multipod/int8-s18_8B_16seq_warmup-a1-yep/checkpoints',
+        # 'load_from_other_directory_step': 1000,
+        'save_period': 1000,
+        'load_from_other_directory': 'gs://maxtext-experiments-multipod/int8-s16-a1-TTT-checkpoint_baseline-4s/checkpoints',
+        'load_from_other_directory_step': 4000, # end of warmup
+        'num_slice': 4,
+        'per_device_batch_size': 4,
+        'fwd_int8': fwd,
+        'dlhs_int8': dlhs,
+        'drhs_int8': drhs,
+        'clip_by_global_norm': clip_global,
+        'clip_by_ucb': clip_by_ucb,
+        # 'learning_rate': 1.e-3 * (1.0 + lrs / 10000.0),
+        'learning_rate': 1.e-3 * lr_mul,
+        # TODO gs://max-datasets-rogue-useast/
+    }
+    run_name = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}-cg{int(clip_global*10):02}-cucb{clip_by_ucb}'
+    run_job(run_name, config)
 
-    run(fwd=False, dlhs=False, drhs=False)
-    run(dlhs=False, drhs=False)
-    run(drhs=False)
-    run(clip_global=0.2)
-    run(clip_global=0.3)
-    run(clip_global=0.5)
+
+def run_s20():
+    run_s20_base(fwd=False, dlhs=False, drhs=False)
+    run_s20_base(dlhs=False, drhs=False)
+    run_s20_base(drhs=False)
+    run_s20_base(clip_global=0.2)
+    run_s20_base(clip_global=0.3)
+    run_s20_base(clip_global=0.5)
+
+
+def run_s21():
+    run_s20_base(drhs=False, clip_global=0.2)
+    run_s20_base(drhs=False, clip_global=0.3)
+    run_s20_base(drhs=False, clip_global=0.5)
+    run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1)
+    run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1, lr_mul=2.0)
+    run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1, lr_mul=5.0)
+
 
 def main():
     import argparse
