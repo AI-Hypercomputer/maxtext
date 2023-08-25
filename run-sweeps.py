@@ -249,6 +249,27 @@ def run_s21():
     run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1, lr_mul=5.0)
 
 
+# Benchmark 32B on 1 pod
+def run_s22():
+    def run(use_int8: bool, aqt_cfg: bool):
+        config = {
+            'save_period': 100000,
+            'num_slice': 1,
+            'per_device_batch_size': 4,
+            'int8_training' : use_int8,
+            'fwd_int8': aqt_cfg,
+            'dlhs_int8': aqt_cfg,
+            'drhs_int8': aqt_cfg,
+            'global_parameter_scale': 32,
+            'steps': 150,
+        }
+        run_name = f'aqt{bname(use_int8)}-aqtcfg{bname(aqt_cfg)}'
+        run_job(run_name, config)
+    run(False, False)
+    run(True, False)
+    run(True, True)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='TPU configuration options')
