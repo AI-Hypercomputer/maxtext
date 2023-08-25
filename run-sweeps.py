@@ -30,14 +30,11 @@ def bname(b: bool):
     return str(b)[0]
 
 
-def run_job(
-        run_name,
-        maxtext_config,
-        *,
-        model_size=8,
-):
+def run_job(run_name, maxtext_config):
+    model_size = maxtext_config['global_parameter_scale']
     with open('MaxText/configs/base.yml', 'r') as file:
         yml = yaml.safe_load(file)
+
     yml = update_yaml_fields(yml, maxtext_config)
     num_slice = yml['num_slice']
     tokens_per_seq = yml['max_target_length']
@@ -53,7 +50,6 @@ def run_job(
     lr_steps = calc_chinchilla_step_count(num_params_billions=model_size, num_slice=num_slice, seqs_per_chip=seqs_per_chip, tokens_per_seq=tokens_per_seq)
 
     yml = update_yaml_fields(yml, {
-        'global_parameter_scale': model_size,
         'steps': lr_steps,
         'learning_rate_schedule_steps': lr_steps,
     })
@@ -114,39 +110,6 @@ def run_job(
         os.remove(experiment_yml_file)
 
 
-def run_s15():
-    def run(
-            *,
-            clip_by_ucb = True,
-            fwd_int8 = True,
-            dlhs_int8 = True,
-            drhs_int8 = True,
-            lr_mul = 1.,
-    ):
-        config = {
-            'load_from_other_directory': f'gs://maxtext-experiments-multipod/int8-sweep10-fresh-fwdT_bwdT-a2/checkpoints',
-            'load_from_other_directory_step': 10000,
-
-            'fwd_int8': fwd_int8,
-            'dlhs_int8': dlhs_int8,
-            'drhs_int8': drhs_int8,
-            'clip_by_ucb': clip_by_ucb,
-            'learning_rate': 1.e-3 * lr_mul,
-        }
-        run_name = f'{bname(fwd_int8)}{bname(dlhs_int8)}{bname(drhs_int8)}_ucb{bname(clip_by_ucb)}-LR{int(lr_mul)}'
-
-        run_job(run_name, config)
-
-    # Q: Which one is the sourse of the loss loss?
-    run(dlhs_int8=True, drhs_int8=False)
-    run(dlhs_int8=False, drhs_int8=True)
-    # A: It seems that the loss loss of  drhs_int8=True is twice bigger than dlhs_int8=True, but spikes are terrible.
-
-    # Q: Does clip_by_ucb help in general?  Does it help with quantization?
-    run(dlhs_int8=True, drhs_int8=True)
-    run(dlhs_int8=True, drhs_int8=True, lr_mul=100.0)
-
-    # TODO: standard grad clip?
 
 def run_s16():
     config = {
@@ -156,6 +119,7 @@ def run_s16():
         'learning_rate': 1.e-3,
         'num_slice': 4,
         'save_period': 1000,
+        'global_parameter_scale': 8,
     }
     run_job('TTT-checkpoint_baseline-4s', config)
 
@@ -178,6 +142,7 @@ def run_s16_load():
             'load_from_other_directory': f'gs://maxtext-experiments-multipod/int8-s16-a1-TTT-checkpoint_baseline-4s/checkpoints',
             'load_from_other_directory_step': 4000, # end of warmup
             'clip_by_global_norm': clip_global,
+            'global_parameter_scale': 8,
         }
         run_name = f'4s-L-{bname(fwd)}{bname(dlhs)}{bname(drhs)}_global{int(clip_global*10)}-LR{int(lr_mul)}'
         run_job(run_name, config)
@@ -186,35 +151,6 @@ def run_s16_load():
     run(fwd=False, dlhs=False, drhs=False)
     run(lr_mul=10.0)
     run(lr_mul=10.0, clip_global=0.5)
-
-def run_s17():
-    def run(
-            *,
-            clip_by_global_norm = 1.0,
-            fwd_int8 = True,
-            dlhs_int8 = True,
-            drhs_int8 = True,
-            lr_mul = 1.,
-    ):
-        config = {
-            'load_from_other_directory': f'gs://maxtext-experiments-multipod/int8-sweep10-fresh-fwdT_bwdT-a2/checkpoints',
-            'load_from_other_directory_step': 10000,
-
-            'fwd_int8': fwd_int8,
-            'dlhs_int8': dlhs_int8,
-            'drhs_int8': drhs_int8,
-            'clip_by_global_norm': clip_by_global_norm,
-            'learning_rate': 1.e-3 * lr_mul,
-        }
-        run_name = f'{bname(fwd_int8)}{bname(dlhs_int8)}{bname(drhs_int8)}_global{bname(clip_by_global_norm)}-LR{int(lr_mul)}'
-
-        run_job(run_name, config)
-
-    run()
-    run(lr_mul=10.)
-    run(lr_mul=10.)
-    run(drhs_int8=False)
-    run(dlhs_int8=False)
 
 # This is a warmup checkpoint generation for S19
 def run_s18_8B_16seq_warmup():
@@ -226,6 +162,7 @@ def run_s18_8B_16seq_warmup():
         'num_slice': 4,
         'per_device_batch_size': 16,
         'save_period': 1000,
+        'global_parameter_scale': 8,
     }
     run_job('yep', config)
 
@@ -246,6 +183,7 @@ def run_s19():
             'fwd_int8': fwd,
             'dlhs_int8': dlhs,
             'drhs_int8': drhs,
+            'global_parameter_scale': 8,
             # 'learning_rate': 1.e-3 * lr_mul,
         }
         run_name = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}'
@@ -284,7 +222,7 @@ def run_s20_base(
         'clip_by_ucb': clip_by_ucb,
         # 'learning_rate': 1.e-3 * (1.0 + lrs / 10000.0),
         'learning_rate': 1.e-3 * lr_mul,
-        # TODO gs://max-datasets-rogue-useast/
+        'global_parameter_scale': 8,
     }
     run_name = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}-cg{int(clip_global*10):02}-cucb{clip_by_ucb}-lr{int(lr_mul*10):03}'
     run_job(run_name, config)
@@ -304,14 +242,10 @@ def run_s20():
 # Add more similar runs.
 # Add UCB clipping.
 def run_s21():
-    # Temporarily commented out, becuaes they are running ok.
-
-    # run_s20_base(drhs=False, clip_global=0.2)
-    # run_s20_base(drhs=False, clip_global=0.3)
-    # run_s20_base(drhs=False, clip_global=0.5)
-    # run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1)
-
-    # Failed to start these.
+    run_s20_base(drhs=False, clip_global=0.2)
+    run_s20_base(drhs=False, clip_global=0.3)
+    run_s20_base(drhs=False, clip_global=0.5)
+    run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1)
     run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1, lr_mul=2.0)
     run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1, lr_mul=5.0)
 
