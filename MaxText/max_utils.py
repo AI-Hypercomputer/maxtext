@@ -276,7 +276,7 @@ def schedule2(max_lr, warmup_steps, cos_steps):
       end_value=max_lr,
       transition_steps=warmup_steps
   )
-  cos_schedule = make_schedule(max_lr, 0.0, cos_steps)
+  cos_schedule = make_schedule(max_lr, max_lr/10.0, cos_steps)
 
   pieces = [warmup_schedule, cos_schedule]
   boundaries=[warmup_steps, warmup_steps+cos_steps]
