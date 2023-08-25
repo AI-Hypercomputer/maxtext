@@ -50,7 +50,6 @@ def run_job(run_name, maxtext_config):
     lr_steps = calc_chinchilla_step_count(num_params_billions=model_size, num_slice=num_slice, seqs_per_chip=seqs_per_chip, tokens_per_seq=tokens_per_seq)
 
     yml = update_yaml_fields(yml, {
-        'steps': lr_steps,
         'learning_rate_schedule_steps': lr_steps,
     })
 

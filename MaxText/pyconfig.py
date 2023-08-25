@@ -111,6 +111,8 @@ class _HyperParameters():
 
     if raw_keys['learning_rate_schedule_steps']==-1:
       raw_keys['learning_rate_schedule_steps'] = raw_keys['steps']
+    if raw_keys['steps']==-1:
+      raw_keys['steps'] = raw_keys['learning_rate_schedule_steps']
 
 def validate_gcs_bucket_name(bucket_name, config_var):
   assert bucket_name, f"Please set {config_var}."
