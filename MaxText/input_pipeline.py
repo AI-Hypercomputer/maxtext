@@ -29,6 +29,7 @@ from jax.sharding import PartitionSpec as P
 import tokenizer
 import multihost_dataloading
 import sequence_packing
+import max_utils
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
@@ -217,9 +218,10 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
 
   # Set global batch size.
   if config.per_device_batch_size < 1:
+    # For per_device_batch_size<1, we load the data as if per_device_batch_size=1
     batch_size = global_mesh.size
   else:
-    batch_size = int(config.per_device_batch_size) * global_mesh.size
+    batch_size = max_utils.calculate_raw_input_batch_size(config.per_device_batch_size)
 
   if config.eval_per_device_batch_size > 0:
     eval_batch_size = config.eval_per_device_batch_size * global_mesh.size

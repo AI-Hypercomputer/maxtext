@@ -148,7 +148,7 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = layer["activation_mean"][0]
       output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
 
-def train_step(model, config, state, data, dropout_rng, batch_size):
+def train_step(model, config, state, data, dropout_rng):
   """
 
   Args:
@@ -170,6 +170,7 @@ def train_step(model, config, state, data, dropout_rng, batch_size):
 
   if config.per_device_batch_size < 1:
     # decimate data by proportion of per_device_batch_size
+    batch_size = max_utils.calculate_raw_input_batch_size(config.per_device_batch_size)
     for k, v in data.items():
       data[k] = v[:batch_size,:]
 
@@ -266,7 +267,7 @@ def train_loop(config, state=None):
                        data_pspec,
                        None),
     out_shardings=(state_mesh_annotations, None, None),
-    static_argnums=(0,1,5,),
+    static_argnums=(0,1,),
     donate_argnums=2)
 
   example_batch = None
@@ -275,13 +276,11 @@ def train_loop(config, state=None):
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
-  batch_size = int(config.per_device_batch_size * mesh.size)
-
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(train_iter, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics, nextrng = p_train_step(
-          model, config, state, example_batch, nextrng, batch_size
+          model, config, state, example_batch, nextrng
       )
 
     new_time = datetime.datetime.now()

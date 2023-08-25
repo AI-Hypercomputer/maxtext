@@ -174,7 +174,7 @@ def init_train_state(model, tx, config, key):
     )
   else:
     input_shape = (
-        int(len(jax.devices()) * config.per_device_batch_size),
+        calculate_raw_input_batch_size(config.per_device_batch_size),
         config.max_target_length
     )
   model_vars = model.init({'params': key, 'dropout': key, 'aqt': key},
@@ -232,6 +232,9 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
 
   state = unbox_logicallypartioned_trainstate(state)
   return state, state_mesh_annotations
+
+def calculate_raw_input_batch_size(per_device_batch_size):
+  return int(len(jax.devices()) * per_device_batch_size)
 
 
 # Learning Rate Schedule
