@@ -79,6 +79,8 @@ def run_job(
     }
     if args['stable']:
         experiment_mhj['--COMMAND_TYPE'] = 'curl'
+        experiment_mhj['--PROJECT'] = 'tpu-prod-env-vlp-2nic'
+
 
     # V4_MHJ_DICT={
     #     '--BUCKET_NAME': 'mattdavidow-br',  # for cloud-tpu-multipod-dev
@@ -288,6 +290,7 @@ def run_s20_base(
     run_job(run_name, config)
 
 
+# S19 was spikey, back to 4seq. Add clip_global.
 def run_s20():
     run_s20_base(fwd=False, dlhs=False, drhs=False)
     run_s20_base(dlhs=False, drhs=False)
@@ -297,11 +300,18 @@ def run_s20():
     run_s20_base(clip_global=0.5)
 
 
+# S20 we were unlucky with spikes.
+# Add more similar runs.
+# Add UCB clipping.
 def run_s21():
+    # Temporarily commented out, becuaes they are running ok.
+
     # run_s20_base(drhs=False, clip_global=0.2)
     # run_s20_base(drhs=False, clip_global=0.3)
     # run_s20_base(drhs=False, clip_global=0.5)
     # run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1)
+
+    # Failed to start these.
     run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1, lr_mul=2.0)
     run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1, lr_mul=5.0)
 
