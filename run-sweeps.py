@@ -251,23 +251,27 @@ def run_s21():
 
 # Benchmark 32B on 1 pod
 def run_s22():
-    def run(use_int8: bool, aqt_cfg: bool):
+    def run(int8: bool, pods: int, bs:int, seq:int):
         config = {
             'save_period': 100000,
-            'num_slice': 1,
-            'per_device_batch_size': 4,
-            'int8_training' : use_int8,
-            'fwd_int8': aqt_cfg,
-            'dlhs_int8': aqt_cfg,
-            'drhs_int8': aqt_cfg,
+            'log_period:': 50,
+            'num_slice': pods,
+            'per_device_batch_size': bs,
+            'int8_training' : int8,
+            'fwd_int8': True,
+            'dlhs_int8': True,
+            'drhs_int8': True,
             'global_parameter_scale': 32,
-            'steps': 150,
+            'steps': 151,
+            'max_target_length': seq,
         }
-        run_name = f'aqt{bname(use_int8)}-aqtcfg{bname(aqt_cfg)}'
+        run_name = f'aqt{bname(int8)}-bs{bs}-seq{seq}-pods{pods}'
         run_job(run_name, config)
-    run(False, False)
-    run(True, False)
-    run(True, True)
+    for pods in [1, 2]:
+        for bs in [4, 8]:
+            for seq in [1024, 2048]:
+                for int8 in [True, False]:
+                    run(int8=int8, bs=bs, seq=seq, pods=pods)
 
 
 def main():
