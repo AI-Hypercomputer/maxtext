@@ -22,8 +22,14 @@ def update_yaml_fields(yaml_data, update_dict, allow_new_keys=True):
 
 BASE_MHJ_CMD="""export LIBTPU_INIT_ARGS="--xla_tpu_spmd_rng_bit_generator_unsafe=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true" && \
 bash setup_with_retries.sh && \
+bash rto_setup.sh && \
 python3 MaxText/train.py """
 
+BASE_MHJ_CMD_14_CP="""export LIBTPU_INIT_ARGS="--xla_tpu_spmd_rng_bit_generator_unsafe=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true" && \
+export TPU_LIBRARY_PATH=$HOME/custom_libtpu/libtpu.so && \
+bash setup_with_retries.sh JAX_VERSION=0.4.14 LIBTPU_GCS_PATH=gs://libtpu_internal/mattdavidow/viperlite/2023-08-24-23:56:27-libtpu.so && \
+bash rto_setup.sh && \
+python3 MaxText/train.py """
 
 def bname(b: bool):
     assert b == True or b == False, f'not bool: "{b}"'
@@ -61,6 +67,11 @@ def run_job(run_name, maxtext_config):
     with open(experiment_yml_file, 'w') as file:
         yaml.dump(yml, file)
 
+    if args['jax_14_cl']:
+        mhj_cmd = BASE_MHJ_CMD_14_CP
+    else:
+        mhj_cmd = BASE_MHJ_CMD
+
     experiment_mhj = {
         '--RUN_NAME': run_name,
         '--BUCKET_NAME': 'mattdavidow-maxtext-br',
@@ -69,7 +80,8 @@ def run_job(run_name, maxtext_config):
         '--VERSION': 'v2-alpha-tpuv5-lite',
         '--PROJECT': 'tpu-prod-env-multipod',
         '--ZONE': 'us-east5-b',
-        '--COMMAND': BASE_MHJ_CMD + experiment_yml_file,
+        '--COMMAND': mhj_cmd + experiment_yml_file,
+        '--CQR_EXTRA_ARGS': ' --network=mtu9k'
         # '--COMMAND_TYPE': 'curl'  # Uncomment for Stable fleet
     }
     if args['stable']:
@@ -298,6 +310,7 @@ def main():
     parser.add_argument('--tpu', type=str, default='v5')
     parser.add_argument('--sweep', type=str, default='')
     parser.add_argument('--attempt', type=str, default='')
+    parser.add_argument('--jax_14_cl', type=bool, default=True, action=argparse.BooleanOptionalAction)
     pargs = parser.parse_args()
     global args
     args = pargs.__dict__
