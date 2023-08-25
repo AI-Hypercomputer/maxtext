@@ -220,7 +220,7 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
     #   )
     #   opt = new_adam, state.opt_state[1]
   else:
-    assert False
+    pass # no clipping
 
   opt = state.opt_state
 
