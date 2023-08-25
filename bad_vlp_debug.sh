@@ -28,8 +28,8 @@ gcloud config set compute/zone $ZONE
 
 # gcloud alpha compute tpus queued-resources list --project=${PROJECT} --zone=${ZONE} --filter=bad_vlp_debug 
 
-RUN_NAME=wenqicao-mlperf-script-test-2vlp-0823-test-4-1_$(date +%Y-%m-%d-%H-%M-%S)
-TPU_PREFIX=wenqicao-mlperf-script-test-2vlp-0823-test-4-1
+RUN_NAME=qinwen-gke-mtu9k-mlperf-new-21_$(date +%Y-%m-%d-%H-%M-%S)
+TPU_PREFIX=qinwen-gke-mtu9k-mlperf-new-21
 
 python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX \
 --COMMAND="bash setup.sh MODE=stable && sleep 60; \
