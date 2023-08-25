@@ -61,7 +61,8 @@ def run_job(run_name, maxtext_config):
 
     attempt = args['attempt']
     sweep_name = args['sweep']
-    run_name = f'int8-{sweep_name}-a{attempt}-{run_name}'
+    run_name = f'int8-{sweep_name}-a{attempt}-{run_name}-CL{bname(args['jax_14_cl'])}'
+
     yml = update_yaml_fields(yml, {'run_name': run_name})
     experiment_yml_file = f"MaxText/configs/{run_name}.yml"
     with open(experiment_yml_file, 'w') as file:
@@ -299,6 +300,28 @@ def run_simple_test():
     }
     run_name = f''
     run_job('', config)
+
+# Tuned variant of S22
+def run_s23():
+    def run(int8: bool, pods: int, bs:int, seq:int):
+        config = {
+            'save_period': 100000,
+            'log_period:': 50,
+            'num_slice': pods,
+            'per_device_batch_size': bs,
+            'int8_training' : int8,
+            'fwd_int8': True,
+            'dlhs_int8': True,
+            'drhs_int8': True,
+            'global_parameter_scale': 32,
+            'steps': 151,
+            'max_target_length': seq,
+        }
+        run_name = f'aqt{bname(int8)}-bs{bs}-seq{seq}-pods{pods}'
+        run_job(run_name, config)
+    for bs in [8, 12, 16, 20]:
+        for int8 in [True, False]:
+            run(int8=int8, bs=bs, seq=1024, pods=1)
 
 
 def main():
