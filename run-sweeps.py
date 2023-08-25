@@ -273,6 +273,21 @@ def run_s22():
                 for int8 in [True, False]:
                     run(int8=int8, bs=bs, seq=seq, pods=pods)
 
+def run_simple_test():
+    config = {
+        'log_period:': 20,
+        'steps': 22,
+        'save_period': 1000,
+        'num_slice': 1,
+        'per_device_batch_size': 4,
+        'global_parameter_scale': 8,
+        'fwd_int8':  True,
+        'dlhs_int8': True,
+        'drhs_int8': True,
+    }
+    run_name = f''
+    run_job('', config)
+
 
 def main():
     import argparse
