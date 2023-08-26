@@ -61,7 +61,8 @@ def run_job(run_name, maxtext_config):
 
     attempt = args['attempt']
     sweep_name = args['sweep']
-    run_name = f'int8-{sweep_name}-a{attempt}-{run_name}-CL{bname(args['jax_14_cl'])}'
+    use_cl = bname(args['jax_14_cl'])
+    run_name = f'int8-{sweep_name}-a{attempt}-{run_name}-cl{use_cl}'
 
     yml = update_yaml_fields(yml, {'run_name': run_name})
     experiment_yml_file = f"MaxText/configs/{run_name}.yml"
@@ -111,7 +112,7 @@ def run_job(run_name, maxtext_config):
 
     if args['dryrun']:
         import pprint
-        pprint.pprint(maxtext_config)
+        pprint.pprint(yml)
         pprint.pprint(experiment_mhj)
 
         print()
@@ -208,7 +209,7 @@ def run_s19():
 
 
 # Same as S19 but back to 4seq and added gradient clipping.
-def run_s20_base(
+def base_run_s20(
         *,
         fwd = True,
         dlhs = True,
@@ -242,24 +243,24 @@ def run_s20_base(
 
 # S19 was spikey, back to 4seq. Add clip_global.
 def run_s20():
-    run_s20_base(fwd=False, dlhs=False, drhs=False)
-    run_s20_base(dlhs=False, drhs=False)
-    run_s20_base(drhs=False)
-    run_s20_base(clip_global=0.2)
-    run_s20_base(clip_global=0.3)
-    run_s20_base(clip_global=0.5)
+    base_run_s20(fwd=False, dlhs=False, drhs=False)
+    base_run_s20(dlhs=False, drhs=False)
+    base_run_s20(drhs=False)
+    base_run_s20(clip_global=0.2)
+    base_run_s20(clip_global=0.3)
+    base_run_s20(clip_global=0.5)
 
 
 # S20 we were unlucky with spikes.
 # Add more similar runs.
 # Add UCB clipping.
 def run_s21():
-    run_s20_base(drhs=False, clip_global=0.2)
-    run_s20_base(drhs=False, clip_global=0.3)
-    run_s20_base(drhs=False, clip_global=0.5)
-    run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1)
-    run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1, lr_mul=2.0)
-    run_s20_base(drhs=False, clip_global=0.0, clip_by_ucb=1, lr_mul=5.0)
+    base_run_s20(drhs=False, clip_global=0.2)
+    base_run_s20(drhs=False, clip_global=0.3)
+    base_run_s20(drhs=False, clip_global=0.5)
+    base_run_s20(drhs=False, clip_global=0.0, clip_by_ucb=1)
+    base_run_s20(drhs=False, clip_global=0.0, clip_by_ucb=1, lr_mul=2.0)
+    base_run_s20(drhs=False, clip_global=0.0, clip_by_ucb=1, lr_mul=5.0)
 
 
 # Benchmark 32B on 1 pod
@@ -322,6 +323,41 @@ def run_s23():
     for bs in [8, 12, 16, 20]:
         for int8 in [True, False]:
             run(int8=int8, bs=bs, seq=1024, pods=1)
+
+# This is a prefix run for 16B model
+def run_s24_prefix():
+    def run(
+            *,
+            fwd = True,
+            dlhs = True,
+            drhs = False,
+            clip_global = 0.3,
+            clip_by_ucb = 0, # 0 or 1
+            lr_mul = 1.0,  # This is a small delta to LR, meant as a 'seed' replacement
+    ):
+        config = {
+            # For seq16
+            # 'load_from_other_directory': f'gs://maxtext-experiments-multipod/int8-s18_8B_16seq_warmup-a1-yep/checkpoints',
+            # 'load_from_other_directory_step': 1000,
+            'save_period': 1000,
+            # 'load_from_other_directory': 'gs://maxtext-experiments-multipod/int8-s16-a1-TTT-checkpoint_baseline-4s/checkpoints',
+            # 'load_from_other_directory_step': 4000, # end of warmup
+            'num_slice': 4,
+            'per_device_batch_size': 8,
+            'fwd_int8': fwd,
+            'dlhs_int8': dlhs,
+            'drhs_int8': drhs,
+            'clip_by_global_norm': clip_global,
+            'clip_by_ucb': clip_by_ucb,
+            'learning_rate': 1.e-3 * lr_mul,
+            'global_parameter_scale': 16,
+        }
+        run_name = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}-clip{int(clip_global*10):02}-ucb{clip_by_ucb}-lr{int(lr_mul*10):03}'
+        run_job(run_name, config)
+    run(fwd=True, dlhs=True, drhs=False, clip_global=0.3, clip_by_ucb=0)
+    run(fwd=False, dlhs=False, drhs=False, clip_global=0.3, clip_by_ucb=0)
+    run(fwd=True, dlhs=True, drhs=False, clip_global=0.0, clip_by_ucb=1)
+    run(fwd=False, dlhs=False, drhs=False, clip_global=0.0, clip_by_ucb=1)
 
 
 def main():
