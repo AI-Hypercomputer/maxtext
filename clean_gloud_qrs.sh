@@ -1,17 +1,19 @@
 #!/bin/bash
 
 function deljobs() {
-  jobs=$(gcloud alpha compute tpus queued-resources list --zone=us-east5-b --project=$1 | grep "FAILED\|SUSPENDED" | sed "s/ .*//g")
+  jobs=$(gcloud alpha compute tpus queued-resources list --zone=$2 --project=$1 | grep "FAILED\|SUSPENDED" | sed "s/ .*//g")
   for job in ${jobs}; do
-    cmd="yes | gcloud alpha compute tpus queued-resources delete --zone=us-east5-b --project=$1 $job"
+    cmd="yes | gcloud alpha compute tpus queued-resources delete --zone=$2 --project=$1 $job"
     echo "$cmd"
     # eval "$cmd" &
     # sleep 1
   done
 }
 
-deljobs tpu-prod-env-multipod
-deljobs tpu-prod-env-vlp-2nic
+deljobs tpu-prod-env-multipod us-east5-b
+deljobs tpu-prod-env-multipod us-central2-b
+deljobs tpu-prod-env-vlp-2nic us-east5-b
+
 
 wait
 
