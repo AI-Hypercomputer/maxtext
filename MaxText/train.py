@@ -1,3 +1,4 @@
+#! /usr/bin/python3
 """
  Copyright 2023 Google LLC
 
@@ -200,7 +201,6 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
 
   new_grad_stats, clip_grads, ucb_metrics = ucb.ucb_update(grad_stats, grads)
   ucb_metrics = max_utils.leaves_metrics('ucb', ucb_metrics)
-  # jax.debug.print("{}", ucb_metrics)
   scalar_metrics.update(ucb_metrics)
 
   if clip_global:

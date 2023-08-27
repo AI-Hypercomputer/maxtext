@@ -81,12 +81,16 @@ def ucb_update(stats, grads):
   # new_grads = jax.tree_map(lambda g, r: g*r, grads, rescale)
   # new_stats = stats.update(sample * rescale)
   # metrics = new_stats.metrics()
+  def metrics(r, nst):
+    metrics = nst.metrics()
+    metrics['rescale'] = r
+    return metrics
 
   sample    = jax.tree_map(lambda g: jnp.sqrt(jnp.sum(g*g)), grads)
   rescale   = jax.tree_map(lambda sa, st: st.rescale(sa), sample, stats)
   new_grads = jax.tree_map(lambda g, r: g*r.astype(g.dtype), grads, rescale)
   new_stats = jax.tree_map(lambda sa, r, st: st.update(sa*r), sample, rescale, stats)
-  metrics   = jax.tree_map(lambda r, nst: nst.metrics(), rescale, new_stats)
+  metrics   = jax.tree_map(metrics, rescale, new_stats)
   return new_stats, new_grads, metrics
 
 
