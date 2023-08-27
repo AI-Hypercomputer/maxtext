@@ -356,8 +356,8 @@ def base_run_s24(
         'steps': steps,
     }
     if load:
-        config['load_from_other_directory'] = f'gs://maxtext-experiments-multipod/int8-s24_prefix-a1-FFF-clip03-ucb0-lr010-clT/checkpoints',
-        config['load_from_other_directory_step'] = 1000,
+        config['load_from_other_directory'] = f'gs://maxtext-experiments-multipod/int8-s24_prefix-a1-FFF-clip03-ucb0-lr010-clT/checkpoints'
+        config['load_from_other_directory_step'] = 1000
     run_name = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}-clip{int(clip_global*10):02}-ucb{clip_by_ucb}-lr{int(lr_mul*10):03}-load{bname(load)}-ns{num_slice}'
     run_job(run_name, config)
 
