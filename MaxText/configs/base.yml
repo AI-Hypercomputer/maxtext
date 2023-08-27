@@ -117,7 +117,7 @@ max_corpus_chars: 10_000_000
 # Training loop
 steps: -1
 log_period: 100
-save_period: 1000
+save_period: 500
 learning_rate: 0.001
 learning_rate_schedule_steps: -1 # length of learning rate schedule, should be at least steps, defaults to steps.
 clip_by_global_norm: 0.0 # no clipping default
