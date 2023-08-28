@@ -29,7 +29,6 @@ from jax.sharding import PartitionSpec as P
 import tokenizer
 import multihost_dataloading
 import sequence_packing
-import max_utils
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
