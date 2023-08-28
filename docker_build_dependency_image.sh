@@ -40,7 +40,7 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
   if [[ ! -v JAX_VERSION ]]; then
     docker build --build-arg MODE="stable" -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
   else
-    docker build --build-arg MODE="stable" --build-arg JAX_VERSION="$JAX_VERSION" -f ./maxtext.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+    docker build --build-arg MODE="stable" --build-arg JAX_VERSION="$JAX_VERSION" -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
   fi
 elif [[ $MODE == "nightly" ]]; then
   echo "NIGHTLY"
