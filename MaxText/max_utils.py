@@ -168,9 +168,9 @@ def init_train_state(model, tx, config, key):
   Args: model, tx, config, key
   """
   input_shape = (
-        config.batch_size_to_load,
-        config.max_target_length
-    )
+      config.batch_size_to_load,
+      config.max_target_length
+  )
   model_vars = model.init({'params': key, 'dropout': key, 'aqt': key},
                           jnp.ones(input_shape),
                           jnp.ones(input_shape))
@@ -226,7 +226,6 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
 
   state = unbox_logicallypartioned_trainstate(state)
   return state, state_mesh_annotations
-
 
 
 # Learning Rate Schedule
