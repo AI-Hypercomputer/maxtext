@@ -153,10 +153,10 @@ def decode_loop(config, state=None):
       config=config,
   )
 
-  _, _, _, sp_tokenizer = preprocess_dataset(
+  _, sp_tokenizer = preprocess_dataset(
     config,
     mesh,
-    train_ds, eval_ds,
+    train_ds,
     vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
   )
 

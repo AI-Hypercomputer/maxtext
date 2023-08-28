@@ -40,6 +40,7 @@ import pyconfig
 import tensorflow_datasets as tfds
 from input_pipeline import get_datasets
 from input_pipeline import preprocess_dataset
+from input_pipeline import get_next_sharded_batch
 import max_utils
 import checkpointing
 
@@ -76,13 +77,13 @@ def get_first_step(state):
     return int(state.step)
 
 
-def load_next_batch(train_iter, example_batch, config):
+def load_next_batch(train_iter, example_batch, config, mesh: Mesh):
   """Loads the next batch. Can keep reusing the same batch for performance reasons """
-
+  next_batch = get_next_sharded_batch(config, train_iter, mesh)
   if config.reuse_example_batch and example_batch is not None:
     return example_batch
   else:
-    return train_iter()
+    return next_batch()
 
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   """Records scalar metrics to be written to tensorboard"""
@@ -234,19 +235,22 @@ def train_loop(config, state=None):
   read_config = tfds.ReadConfig(
     shuffle_seed = config.data_shuffle_seed,
   )
-  train_ds, eval_ds = get_datasets(
+  train_ds, _ = get_datasets(
       config=config,
       read_config = read_config,
   )
-  train_iter, _, _, _ = preprocess_dataset(
+  
+  train_iter, _ = preprocess_dataset(
     config,
     mesh,
-    train_ds, eval_ds,
+    train_ds,
     vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
     data_shuffle_seed = config.data_shuffle_seed,
   )
 
-  state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  state, state_mesh_annotations, restored_iter = max_utils.setup_initial_state(model,train_iter, tx, config, init_rng, mesh, checkpoint_manager)
+  if restored_iter:
+    train_iter = restored_iter
   data_pspec = P(*config.data_sharding)
 
   num_model_parameters = calculate_num_params_from_pytree(state.params)
@@ -270,7 +274,7 @@ def train_loop(config, state=None):
   running_gcs_metrics = [] if config.gcs_metrics else None
 
   for step in np.arange(get_first_step(state), config.steps):
-    example_batch = load_next_batch(train_iter, example_batch, config)
+    example_batch = load_next_batch(train_iter, example_batch, config, mesh)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics, nextrng = p_train_step(
           model, config, state, example_batch, nextrng
@@ -282,7 +286,7 @@ def train_loop(config, state=None):
     last_step_completion = new_time
 
     if step > 0 and step % config.save_period == 0 and checkpoint_manager is not None:
-      checkpoint_manager.save(step, state)
+      checkpoint_manager.save(step, {'state':state,'iter':train_iter})
       max_logging.log("saved a checkpoint")
 
     if config.metrics_file:

@@ -21,9 +21,9 @@ Adapted from Sholto's:
 https://github.com/sholtodouglas/multihost_dataloading
 """
 from collections import defaultdict  # pylint: disable=g-importing-member
+import functools
 from dataclasses import dataclass  # pylint: disable=g-importing-member
-from functools import partial  # pylint: disable=g-importing-member
-import os
+from jax.sharding import PartitionSpec as P
 from typing import Callable, Any, Dict, List, Tuple, Optional
 import tensorflow as tf  # pylint: disable=g-import-not-at-top
 import time
@@ -43,23 +43,19 @@ Device = Any
 DATA_DIM = 0  # assume data dimension is the first
 
 
-def check_inputs(dataset, global_data_shape, data_axes):
+def check_inputs(global_data_shape, data_axes):
   # pylint: disable=missing-function-docstring
-  # dataset_structure = jax.tree_util.tree_structure(iter(dataset).next())
-  dataset_structure = jax.tree_util.tree_structure(
-      tf.data.experimental.get_structure(dataset)
-  )
   global_data_shape_structure = jax.tree_util.tree_structure(global_data_shape)
   data_axes_structure = jax.tree_util.tree_structure(data_axes)
   try:
     assert (
-        dataset_structure == global_data_shape_structure == data_axes_structure
+      global_data_shape_structure == data_axes_structure
     ), 'All inputs should have the same pytree structure.'
   except AssertionError as msg:
     (max_logging.log(
        f"""{msg} - The most likely reason for this is that global shapes should
        be array or classes not tuples, otherwise tree map enumerates indiviudal
-       dimensions as leaves. Dataset: {dataset_structure}, \n Shapes:
+       dimensions as leaves. Dataset Shapes:
        {global_data_shape_structure}, \n Axes: {data_axes_structure}"""))
   shapes, _ = jax.tree_util.tree_flatten(global_data_shape)
   batch_dims = [s[0] for s in shapes]
@@ -78,8 +74,7 @@ def check_inputs(dataset, global_data_shape, data_axes):
 
 
 def get_batch_sharded_data_pipeline(
-    dataset: tf.data.Dataset, data_sharding, global_data_shape: np.ndarray, global_mesh: Mesh,
-    data_axes: PartitionSpec) -> Callable[[], jax.Array]:
+    dataset_iter, data_sharding, global_mesh: Mesh, global_shape) -> Callable[[], jax.Array]:
   """ Each device loads batch_size/num_devices,
   To do this, each host first loads batch_size/num_hosts, then shards that
   equally across it's devices.
@@ -92,20 +87,6 @@ def get_batch_sharded_data_pipeline(
   Returns:
     sharded_dataset: per_host dataset
   """
-  _ = check_inputs(dataset, global_data_shape, data_axes)
-
-  dataset = iter(dataset.as_numpy_iterator())
-
-  multihost_generator = partial(get_next_batch_sharded, dataset,
-                   data_sharding, global_data_shape, global_mesh)
-
-  return multihost_generator
-
-def get_next_batch_sharded(local_dataset: tf.data.Dataset,
-                           data_sharding,
-                           global_data_shape: Pytree,
-                           global_mesh: Mesh) -> jax.Array:
-  """Splits the host loaded data equally over all devices."""
 
   SLEEP_TIME = 10
   MAX_DATA_LOAD_ATTEMPTS = 30
@@ -114,14 +95,32 @@ def get_next_batch_sharded(local_dataset: tf.data.Dataset,
   while not loaded_data_success and data_load_attempts < MAX_DATA_LOAD_ATTEMPTS:
     data_load_attempts += 1
     try:
-      local_data = local_dataset.next()
+      local_data = next(dataset_iter)
       loaded_data_success = True
     except tf.errors.FailedPreconditionError:
       max_logging.log("Failed to get next data batch, retrying")
       time.sleep(SLEEP_TIME)
   # Try one last time, if this fails we will see the full stack trace.
   if not loaded_data_success:
-    local_data = local_dataset.next()
+    local_data = next(dataset_iter)
+
+  global_data_shape = jax.tree_map(
+      lambda x: P(*global_shape), local_data
+  )
+  data_axes = jax.tree_map(lambda x: P(*data_sharding), local_data)
+  _ = check_inputs(global_data_shape, data_axes)
+
+  
+  multihost_generator = functools.partial(get_next_batch_sharded, local_data,
+                   data_sharding, global_data_shape, global_mesh)
+
+  return multihost_generator
+
+def get_next_batch_sharded(local_data,
+                           data_sharding,
+                           global_data_shape: Pytree,
+                           global_mesh: Mesh) -> jax.Array:
+  """Splits the host loaded data equally over all devices."""
 
   # local_devices = jax.local_devices()
   local_devices = global_mesh.local_devices

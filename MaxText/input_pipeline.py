@@ -17,21 +17,24 @@
 """Input pipeline for a LM1B dataset."""
 
 import os
-from typing import Optional
+from typing import Any, Optional, Dict
 import functools
 
+import dataclasses
 import ml_collections
+import collections
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import jax
-from jax.sharding import PartitionSpec as P
 
 import tokenizer
 import multihost_dataloading
+import numpy as np
 import sequence_packing
+import grain.python as pygrain
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
-
+Features = Dict[str, tf.Tensor]
 
 # Right-shifting token inputs for teacher-forced training.
 # -----------------------------------------------------------------------------
@@ -61,22 +64,15 @@ def shift_inputs_tf(x, segment_ids=None, axis=1):
     )
   return shifted
 
-def shift_data(x, axis=0, segmented=True):
-  segment_ids = x['inputs_segmentation'] if segmented else None
-  x['inputs'] = shift_inputs_tf(x['inputs'], segment_ids=segment_ids, axis=axis)
-  return x
-
-
-def normalize_features(ds):
+class normalize_features():
   """Normalize text feature keys."""
-  def _normalize_features(features):
-    features['inputs'] = features.pop('text')
-    features['targets'] = features['inputs']
-    return features
-
-  return ds.map(
-      _normalize_features,
-      num_parallel_calls=AUTOTUNE)
+  
+  def __call__(self, features):
+    def _normalize_features(features):
+      features['inputs'] = features.pop('text')
+      features['targets'] = features['inputs']
+      return features
+    return _normalize_features(features)
 
 
 # -----------------------------------------------------------------------------
@@ -86,12 +82,11 @@ def normalize_features(ds):
 
 def preprocessing_pipeline(
   dataset,
+  operations,
   batch_size: int,
-  global_mesh,
   shuffle: bool,
   num_epochs: Optional[int] = 1,
   pack_examples: bool = True,
-  shuffle_buffer_size: int = 1024,
   max_length: int = 512,
   shift: bool = True,
   drop_remainder: bool = True,
@@ -102,100 +97,126 @@ def preprocessing_pipeline(
   """Shuffle and batch/pack the given dataset."""
 
   # Max length filter.
-  def length_filter(max_len):
-    def filter_fn(x):
+  class length_filter():
+    def __init__(self,max_length):
+      self.max_len = max_length
+    def __call__(self, x):
       source, target = x['inputs'], x['targets']
       l = tf.maximum(tf.shape(source)[0], tf.shape(target)[0])
-      return tf.less(l, max_len + 1)
-    return filter_fn
+      return tf.less(l, self.max_len + 1)
+  operations.append(pygrain.FilterOperation(condition_function = length_filter(max_length)))
 
-  if max_length > 0:
-    dataset = dataset.filter(length_filter(max_length))
+  
+  
 
-  # Shuffle and repeat.
-  if shuffle:
-    dataset = dataset.shuffle(shuffle_buffer_size, seed = data_shuffle_seed)
+  # Padd examples.
+  class PadToMaxLength():
+    """Pads each input to the specified length.
+    """
 
-  dataset = dataset.repeat(num_epochs)
+    def __init__(self, feature_lengths):
+      self.feature_lengths = feature_lengths
 
-  # Perform greedy sequence packing
+    def __call__(self, data):
+      def pad(x, max_length):
+        pad_amount = max(max_length - x.shape[0], 0)
+        pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
+        return np.pad(x, pad_amount)
+      data['inputs_segmentation'] = np.ones(data['inputs'].shape)
+      data['inputs_position'] = np.ones(data['inputs'].shape, dtype = np.int32)
+      for key, _ in data.items():
+        data[key] = pad(data[key], self.feature_lengths)
+      return data
+
+  class CombineKeys():
+    def __call__(self, data):
+      combined_data = data[0]
+      segments = data[1]
+      segments['inputs_segmentation'] = segments.pop('inputs')
+      segments['targets_segmentation'] = segments.pop('targets')
+      positions = data[2]
+      positions['inputs_position'] = positions.pop('inputs')
+      positions['targets_position'] = positions.pop('targets')
+      combined_data.update(segments)
+      combined_data.update(positions)
+      return combined_data
+
+  # Pack and Batch examples.
   if pack_examples:
-    dataset = sequence_packing.pack_dataset(dataset, max_length)
+    operations.append(pygrain.experimental.PackAndBatchOperation(batch_size=batch_size // jax.process_count(), length_struct={'inputs':max_length,'targets':max_length}))
+    operations.append(pygrain.MapOperation(map_function=CombineKeys()))
+  else:
+    operations.append(pygrain.MapOperation(map_function=PadToMaxLength(max_length)))
+    operations.append(pygrain.BatchOperation(batch_size=batch_size // jax.process_count(), drop_remainder=drop_remainder))
 
   # Shift inputs for teacher-forced training
+  class ShiftData():
+    def __init__(self, axis = 0, segmented=True):
+      self.axis = axis
+      self.segmented = segmented
+
+    def __call__(self, x):
+      segment_ids = x['inputs_segmentation'] if self.segmented else None
+      x['inputs'] = shift_inputs_tf(x['inputs'], segment_ids=segment_ids, axis=self.axis)
+      return x
+
   if shift:
-    dataset = dataset.map(
-      functools.partial(shift_data, axis=0, segmented=pack_examples),
-      num_parallel_calls=tf.data.AUTOTUNE,
-      deterministic=True)
+    operations.append(pygrain.MapOperation(map_function=ShiftData(axis=0,segmented=pack_examples)))
 
-  # Multihost dataloading: sharding and jax.Array prep function
-  dataset_structure = tf.data.experimental.get_structure(dataset)
-  global_data_shape = jax.tree_map(
-      lambda x: P(batch_size, max_length), dataset_structure
+  
+  index_sampler = pygrain.IndexSampler(
+    num_records=len(dataset),
+    num_epochs = num_epochs,
+    shard_options=pygrain.ShardOptions(
+      shard_index = jax.process_index(), shard_count = jax.process_count(), drop_remainder = True
+    ),
+    shuffle = shuffle,
+    seed = data_shuffle_seed
   )
-  data_axes = jax.tree_map(lambda x: P(*data_sharding), dataset_structure)
+  dataloader = pygrain.DataLoader(
+    data_source = dataset,
+    operations = operations,
+    sampler = index_sampler,
+  )
+  data_iter = iter(dataloader)
+  # Return PyGrainIterator
+  return data_iter
 
 
+def get_next_sharded_batch(config: ml_collections.ConfigDict, data_iter, global_mesh):
+  # Set global batch size.
+  batch_size = config.per_device_batch_size * global_mesh.size
   assert (
         batch_size % global_mesh.size == 0
     ), 'Batch size should be divisible number of global devices.'
-
-  # Batch examples.
-  if pack_examples:
-    dataset = dataset.batch(batch_size // jax.process_count(), drop_remainder=drop_remainder)
-  else:
-    # simple (static-shape) padded batching
-    dataset = dataset.padded_batch(
-        batch_size // jax.process_count(),
-        padded_shapes={'inputs': max_length, 'targets': max_length},
-        padding_values={'inputs': 0, 'targets': 0},
-        drop_remainder=drop_remainder)
-
-  if prefetch_size:
-    dataset = dataset.prefetch(prefetch_size)
+  data_sharding = config.data_sharding
 
   multihost_gen = (
       multihost_dataloading.get_batch_sharded_data_pipeline(
-          dataset, data_sharding, global_data_shape, global_mesh, data_axes
+          data_iter, data_sharding, global_mesh, global_shape = (batch_size, config.max_target_length),
       )
   )
-  # Return multi-host jax.Array prep iterator
   return multihost_gen
-
 
 def get_datasets(
   config: ml_collections.ConfigDict,
   read_config = None,
 ):
   """Load and return dataset of batched examples for use during training."""
-  # Training dataset.
-  train_ds_builder = tfds.builder(config.dataset_name)
-  # train_data = get_raw_dataset(train_ds_builder, 'train')
-  train_ds = train_ds_builder.as_dataset(split='train',
-                                           read_config = read_config,
-                                           shuffle_files=config.enable_data_shuffling)
-  # shard the dataset as soon as it is loaded
-  train_ds = train_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
-  train_ds = normalize_features(train_ds)
+  train_ds = tfds.data_source(
+    config.dataset_name, split='train'
+  )
 
-  # Evaluation dataset.
   if config.eval_dataset_name:
-    eval_ds_builder = tfds.builder(config.eval_dataset_name)
+    eval_ds = tfds.data_source(config.eval_dataset_name, split=config.eval_split)
   else:
-    eval_ds_builder = train_ds_builder
-  # eval_data = get_raw_dataset(eval_ds_builder, config.eval_split)
-  eval_ds = eval_ds_builder.as_dataset(split=config.eval_split,
-                                          read_config = read_config,
-                                          shuffle_files=config.enable_data_shuffling)
-  eval_ds = eval_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
-  eval_ds = normalize_features(eval_ds)
+    eval_ds = train_ds
 
   return train_ds, eval_ds
 
 def preprocess_dataset(config: ml_collections.ConfigDict,
                         global_mesh,
-                        train_ds, eval_ds,
+                        train_ds,
                         vocab_path: Optional[str] = None,
                         data_shuffle_seed = 0,):
   """Pre-process the dataset and return iterators"""
@@ -203,6 +224,8 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
     vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
 
   # Train or load tokenizer
+  # Use tf.data.Dataset for training the tokenizer
+  
   sp_tokenizer = tokenizer.load_or_train_tokenizer(
       train_ds,
       vocab_path=vocab_path,
@@ -210,56 +233,36 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       max_corpus_chars=config.max_corpus_chars)
 
   # Tokenize data.
-  train_ds = train_ds.map(
-      tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
-  eval_ds = eval_ds.map(
-      tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
+  class TokenizeOperation():
 
-  # Set global batch size.
-  batch_size = config.per_device_batch_size * global_mesh.size
-  if config.eval_per_device_batch_size > 0:
-    eval_batch_size = config.eval_per_device_batch_size * global_mesh.size
-  else:
-    eval_batch_size = batch_size
+    def __init__(self, tokenizer):
+      self.sp_tokenizer = tokenizer
+
+    def __call__(self, features: Features) -> Features:
+      data_keys = ('inputs', 'targets')
+      for k in data_keys:
+        features[k] = sp_tokenizer.tokenize(features[k]).numpy()
+      return features
+
+  operations = [pygrain.MapOperation(map_function=normalize_features())]
+  operations.append(pygrain.MapOperation(map_function=TokenizeOperation(sp_tokenizer)))
+  
 
   def filter_keys(record):
     return {'inputs': record['inputs'], 'targets': record['targets']}
-  train_ds = train_ds.map(filter_keys,num_parallel_calls=tf.data.AUTOTUNE)
-  eval_ds = eval_ds.map(filter_keys,num_parallel_calls=tf.data.AUTOTUNE)
+  operations.append(pygrain.MapOperation(map_function=filter_keys))
 
+  batch_size = config.per_device_batch_size * global_mesh.size
+
+  #TODO: change pack_examples and shift to True once figured out sequence_packing.py
   train_iter = preprocessing_pipeline(
       train_ds,
+      operations,
       batch_size,
-      global_mesh,
       shuffle=config.enable_data_shuffling,
-      num_epochs=None,
       pack_examples=True,
       max_length=config.max_target_length,
       shift=True,
-      data_sharding = config.data_sharding,
-      data_shuffle_seed = data_shuffle_seed,)
+      data_shuffle_seed = data_shuffle_seed)
 
-  eval_iter = preprocessing_pipeline(
-      eval_ds,
-      eval_batch_size,
-      global_mesh,
-      shuffle=config.enable_data_shuffling,
-      pack_examples=False,
-      max_length=config.max_eval_target_length,
-      shift=False,
-      data_sharding = config.data_sharding,
-      data_shuffle_seed = data_shuffle_seed,)
-
-  predict_iter = preprocessing_pipeline(
-      eval_ds,
-      eval_batch_size,
-      global_mesh,
-      shuffle=config.enable_data_shuffling,
-      pack_examples=False,
-      max_length=config.max_predict_length,
-      shift=False,
-      drop_remainder=False,
-      data_sharding = config.data_sharding,
-      data_shuffle_seed = data_shuffle_seed,)
-
-  return train_iter, eval_iter, predict_iter, sp_tokenizer
+  return train_iter, sp_tokenizer

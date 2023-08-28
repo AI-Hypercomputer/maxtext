@@ -97,12 +97,13 @@ ici_tensor_parallelism: 1
 
 # Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
-dataset_path: ""
+# dataset_path: "gs://maxtext-dataset/"
+dataset_path: "~/tensorflow_datasets/"
 vocab_size: 32_768 # powers of 2 for sharding
 vocab_relative_path: "vocabs"  # Assumes we're allowed
-dataset_name: 'c4/en:3.0.1'
-eval_dataset_name: 'c4/en:3.0.1'
-eval_split: 'validation'
+dataset_name: 'lm1b'
+eval_dataset_name: ''
+eval_split: 'test'
 per_device_batch_size: 24
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000

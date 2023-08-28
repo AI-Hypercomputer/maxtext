@@ -18,3 +18,5 @@ tensorflow-datasets
 tensorboard-plugin-profile
 tensorflow-text
 tensorboardx
+grain-nightly
+tfds-nightly

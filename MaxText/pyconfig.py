@@ -90,7 +90,7 @@ class _HyperParameters():
     base_output_directory = raw_keys["base_output_directory"]
     validate_gcs_bucket_name(base_output_directory, "base_output_directory")
     dataset_path = raw_keys["dataset_path"]
-    validate_gcs_bucket_name(dataset_path, "dataset_path")
+    # validate_gcs_bucket_name(dataset_path, "dataset_path")
     assert ((raw_keys["load_parameters_path"]=="" and raw_keys["load_from_other_directory"]=="") or
       raw_keys["enable_checkpointing"]), "You must set enable_checkpointing to load a checkpoint"
     assert raw_keys["load_parameters_path"]=="" or raw_keys["load_from_other_directory"]=="" \

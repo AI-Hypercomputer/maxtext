@@ -56,10 +56,20 @@ class InputPipelineTest(unittest.TestCase):
     mesh_shape_1d = (len(jax.devices()),)
     mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), self.config.mesh_axes)
 
-    train_iter, eval_iter, test_iter, _ = input_pipeline.preprocess_dataset(
+    train_iter, _ = input_pipeline.preprocess_dataset(
               self.config,
               mesh,
-              self.train_ds, self.eval_ds,
+              self.train_ds,
+              vocab_path=os.path.join(self.config.base_output_directory, self.config.vocab_relative_path))
+    eval_iter, _ = input_pipeline.preprocess_dataset(
+              self.config,
+              mesh,
+              self.eval_ds,
+              vocab_path=os.path.join(self.config.base_output_directory, self.config.vocab_relative_path))
+    test_iter, _ = input_pipeline.preprocess_dataset(
+              self.config,
+              mesh,
+              self.eval_ds,
               vocab_path=os.path.join(self.config.base_output_directory, self.config.vocab_relative_path))
     return train_iter, eval_iter, test_iter
 

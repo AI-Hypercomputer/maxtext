@@ -21,7 +21,7 @@ import tempfile
 import time
 from typing import Any, Dict, Iterable, Tuple
 
-import dataclasses
+
 from absl import logging
 import tensorflow as tf
 import tensorflow_text as tftxt
@@ -48,7 +48,8 @@ def _dump_chars_to_textfile(
     name of temp file with dataset bytes, exact number of characters dumped.
   """
   char_count = 0
-  ds_iter = dataset.as_numpy_iterator()
+  # ds_iter = dataset.as_numpy_iterator()
+  import pdb; pdb.set_trace()
   with tempfile.NamedTemporaryFile(
       delete=False, prefix='/tmp/ds_chars') as outfp:
     while char_count < maxchars:
@@ -140,22 +141,14 @@ def load_or_train_tokenizer(dataset: tf.data.Dataset,
     return sp_tokenizer
   except (tf.errors.NotFoundError, tf.errors.InvalidArgumentError):
     logging.info('SentencePiece vocab not found, building one from data.')
-    vocab_path = _train_sentencepiece(
-        dataset,
-        vocab_size=vocab_size,
-        maxchars=max_corpus_chars,
-        model_path=vocab_path,
-        data_keys=data_keys)
+    if jax.process_count() == 0:
+      vocab_path = _train_sentencepiece(
+          dataset,
+          vocab_size=vocab_size,
+          maxchars=max_corpus_chars,
+          model_path=vocab_path,
+          data_keys=data_keys)
     return _load_sentencepiece_tokenizer(vocab_path)
 
 
-@dataclasses.dataclass
-class TokenizeOp:
 
-  sp_tokenizer: Any
-  data_keys: Iterable[str] = ('inputs', 'targets')
-
-  def __call__(self, features: Features) -> Features:
-    for k in self.data_keys:
-      features[k] = self.sp_tokenizer.tokenize(features[k])
-    return features
