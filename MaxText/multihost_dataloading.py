@@ -30,7 +30,6 @@ import time
 import numpy as np
 
 import jax
-from jax.sharding import PartitionSpec
 from jax.sharding import Mesh
 
 import max_logging
@@ -110,7 +109,7 @@ def get_batch_sharded_data_pipeline(
   data_axes = jax.tree_map(lambda x: P(*data_sharding), local_data)
   _ = check_inputs(global_data_shape, data_axes)
 
-  
+
   multihost_generator = functools.partial(get_next_batch_sharded, local_data,
                    data_sharding, global_data_shape, global_mesh)
 
@@ -141,7 +140,7 @@ def get_next_batch_sharded(local_data,
   # 'fully shard' the data (first) axis across both axes
   # of the hardware mesh. This is layout matches the
   # manual device placing we just did.
-  input_sharding_constraint = PartitionSpec(*data_sharding, None)
+  input_sharding_constraint = P(*data_sharding, None)
 
   def form_gda(local_data, shape):
     device_buffers = _put_to_devices(local_data)

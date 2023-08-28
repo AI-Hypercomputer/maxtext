@@ -17,12 +17,10 @@
 """Input pipeline for a LM1B dataset."""
 
 import os
-from typing import Any, Optional, Dict
-import functools
+from typing import Optional, Dict
 
-import dataclasses
 import ml_collections
-import collections
+
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import jax
@@ -30,7 +28,7 @@ import jax
 import tokenizer
 import multihost_dataloading
 import numpy as np
-import sequence_packing
+
 import grain.python as pygrain
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
@@ -66,7 +64,7 @@ def shift_inputs_tf(x, segment_ids=None, axis=1):
 
 class normalize_features():
   """Normalize text feature keys."""
-  
+
   def __call__(self, features):
     def _normalize_features(features):
       features['inputs'] = features.pop('text')
@@ -90,8 +88,6 @@ def preprocessing_pipeline(
   max_length: int = 512,
   shift: bool = True,
   drop_remainder: bool = True,
-  prefetch_size = tf.data.experimental.AUTOTUNE,
-  data_sharding = None,
   data_shuffle_seed = 0,
 ):
   """Shuffle and batch/pack the given dataset."""
@@ -106,8 +102,7 @@ def preprocessing_pipeline(
       return tf.less(l, self.max_len + 1)
   operations.append(pygrain.FilterOperation(condition_function = length_filter(max_length)))
 
-  
-  
+
 
   # Padd examples.
   class PadToMaxLength():
@@ -129,6 +124,8 @@ def preprocessing_pipeline(
       return data
 
   class CombineKeys():
+    """ Combine tuples of sequence packing output in different keys
+    """
     def __call__(self, data):
       combined_data = data[0]
       segments = data[1]
@@ -143,7 +140,9 @@ def preprocessing_pipeline(
 
   # Pack and Batch examples.
   if pack_examples:
-    operations.append(pygrain.experimental.PackAndBatchOperation(batch_size=batch_size // jax.process_count(), length_struct={'inputs':max_length,'targets':max_length}))
+    operations.append(pygrain.experimental.PackAndBatchOperation(
+                        batch_size=batch_size // jax.process_count(),
+                        length_struct={'inputs':max_length,'targets':max_length}))
     operations.append(pygrain.MapOperation(map_function=CombineKeys()))
   else:
     operations.append(pygrain.MapOperation(map_function=PadToMaxLength(max_length)))
@@ -163,7 +162,7 @@ def preprocessing_pipeline(
   if shift:
     operations.append(pygrain.MapOperation(map_function=ShiftData(axis=0,segmented=pack_examples)))
 
-  
+
   index_sampler = pygrain.IndexSampler(
     num_records=len(dataset),
     num_epochs = num_epochs,
@@ -184,6 +183,8 @@ def preprocessing_pipeline(
 
 
 def get_next_sharded_batch(config: ml_collections.ConfigDict, data_iter, global_mesh):
+  """ returns next sharded batch
+  """
   # Set global batch size.
   batch_size = config.per_device_batch_size * global_mesh.size
   assert (
@@ -200,7 +201,6 @@ def get_next_sharded_batch(config: ml_collections.ConfigDict, data_iter, global_
 
 def get_datasets(
   config: ml_collections.ConfigDict,
-  read_config = None,
 ):
   """Load and return dataset of batched examples for use during training."""
   train_ds = tfds.data_source(
@@ -225,7 +225,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
 
   # Train or load tokenizer
   # Use tf.data.Dataset for training the tokenizer
-  
+
   sp_tokenizer = tokenizer.load_or_train_tokenizer(
       train_ds,
       vocab_path=vocab_path,
@@ -234,9 +234,10 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
 
   # Tokenize data.
   class TokenizeOperation():
-
-    def __init__(self, tokenizer):
-      self.sp_tokenizer = tokenizer
+    """ TokenizeOp
+    """
+    def __init__(self, sp_tokenizer):
+      self.sp_tokenizer = sp_tokenizer
 
     def __call__(self, features: Features) -> Features:
       data_keys = ('inputs', 'targets')
@@ -246,7 +247,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
 
   operations = [pygrain.MapOperation(map_function=normalize_features())]
   operations.append(pygrain.MapOperation(map_function=TokenizeOperation(sp_tokenizer)))
-  
+
 
   def filter_keys(record):
     return {'inputs': record['inputs'], 'targets': record['targets']}

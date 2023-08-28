@@ -237,9 +237,8 @@ def train_loop(config, state=None):
   )
   train_ds, _ = get_datasets(
       config=config,
-      read_config = read_config,
   )
-  
+
   train_iter, _ = preprocess_dataset(
     config,
     mesh,
@@ -248,7 +247,8 @@ def train_loop(config, state=None):
     data_shuffle_seed = config.data_shuffle_seed,
   )
 
-  state, state_mesh_annotations, restored_iter = max_utils.setup_initial_state(model,train_iter, tx, config, init_rng, mesh, checkpoint_manager)
+  state, state_mesh_annotations, restored_iter = max_utils.setup_initial_state(
+                model,train_iter, tx, config, init_rng, mesh, checkpoint_manager)
   if restored_iter:
     train_iter = restored_iter
   data_pspec = P(*config.data_sharding)

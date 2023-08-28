@@ -17,4 +17,5 @@
 pylint MaxText/
 
 cd MaxText
+export XLA_FLAGS='--xla_force_host_platform_device_count=2'
 python3 -m pytest

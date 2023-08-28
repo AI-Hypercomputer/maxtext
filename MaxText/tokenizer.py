@@ -19,7 +19,7 @@
 import os
 import tempfile
 import time
-from typing import Any, Dict, Iterable, Tuple
+from typing import Dict, Tuple
 
 
 from absl import logging
@@ -48,8 +48,7 @@ def _dump_chars_to_textfile(
     name of temp file with dataset bytes, exact number of characters dumped.
   """
   char_count = 0
-  # ds_iter = dataset.as_numpy_iterator()
-  import pdb; pdb.set_trace()
+  ds_iter = dataset.as_numpy_iterator()
   with tempfile.NamedTemporaryFile(
       delete=False, prefix='/tmp/ds_chars') as outfp:
     while char_count < maxchars:

@@ -149,7 +149,7 @@ def decode_loop(config, state=None):
   mesh = Mesh(devices_array, config.mesh_axes)
 
   # Set up datasets.
-  train_ds, eval_ds = get_datasets(
+  train_ds, _ = get_datasets(
       config=config,
   )
 

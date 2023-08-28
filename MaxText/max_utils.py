@@ -181,7 +181,7 @@ def init_train_state(model, tx, config, key):
   return state
 
 
-def setup_initial_state(model, iter, tx, config, rng, mesh, checkpoint_manager):
+def setup_initial_state(model, iterator, tx, config, rng, mesh, checkpoint_manager):
   """ We initialize the model and optimizer state, and optionally load from a
   checkpoint as necessary.
 
@@ -211,13 +211,13 @@ def setup_initial_state(model, iter, tx, config, rng, mesh, checkpoint_manager):
                                                 config.load_from_other_directory,
                                                 config.load_from_other_directory_step,
                                                 unboxed_abstract_state,
-                                                iter,
+                                                iterator,
                                                 mesh,
                                                 state_mesh_annotations)
     state = None
     if restore:
       state = restore['state']
-      iter = restore['iter']
+      iterator = restore['iter']
     if not state:
       state = pjit(
           init_train_state_partial,
@@ -229,7 +229,7 @@ def setup_initial_state(model, iter, tx, config, rng, mesh, checkpoint_manager):
     raw_params = None
 
   state = unbox_logicallypartioned_trainstate(state)
-  return state, state_mesh_annotations, iter
+  return state, state_mesh_annotations, iterator
 
 
 # Learning Rate Schedule

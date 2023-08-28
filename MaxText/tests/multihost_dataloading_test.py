@@ -15,7 +15,6 @@
  """
 
 # pylint: disable=missing-module-docstring, missing-function-docstring
-import os
 import sys
 import numpy as np
 import jax
@@ -27,42 +26,36 @@ import tensorflow as tf
 import unittest
 
 import pyconfig
-import multihost_dataloading
+from train import load_next_batch
 
-os.environ["XLA_FLAGS"] = '--xla_force_host_platform_device_count=2'
-jax.config.update('jax_platform_name', 'cpu')
+
 
 class MultihostDataloadingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
     batch_size = 2
-    pyconfig.initialize(sys.argv + ['configs/base.yml'], per_device_batch_size=1, run_name='test', mesh_axes = ['data'],
+    pyconfig.initialize(sys.argv + ['configs/base.yml'], per_device_batch_size=1, run_name='test', mesh_axes = ['batch'],
                         logical_axis_rules = [['batch', 'data']],
-                        data_sharding = ['data'],
+                        data_sharding = ['batch'],
                         base_output_directory = "gs://max-experiments/",
                         dataset_path = "gs://maxtext-dataset/")
-    config = pyconfig.config
-    global_data_shape = PartitionSpec(batch_size, config.max_target_length)
-    data_sharding = ('data',)
-    mesh_shape_1d = (len(jax.devices()),)
-    mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), config.mesh_axes)
-    data_axes = PartitionSpec('data',)
+    self.config = pyconfig.config
+    global_data_shape = PartitionSpec(batch_size, self.config.max_target_length)
+    mesh_shape_1d = (jax.device_count(),)
+    self.mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), self.config.mesh_axes)
     # creating 2 batches of data
-    global_data = np.arange(np.prod(global_data_shape)*2).reshape((batch_size * 2, config.max_target_length))
-
+    global_data = np.arange(np.prod(global_data_shape)*2).reshape((batch_size * 2, self.config.max_target_length))
     dataset = tf.data.Dataset.from_tensor_slices(global_data)
     dataset = dataset.batch(batch_size)
-    self.multihost_gen = (
-      multihost_dataloading.get_batch_sharded_data_pipeline(
-          dataset, data_sharding, global_data_shape, mesh, data_axes
-      )
-    )
+    self.dataset_iter = iter(dataset)
+    self.data_shape = (batch_size, self.config.max_target_length)
 
 
   def test_batch_sharded_data_pipeline(self):
-    first_batch = self.multihost_gen()
-    sec_batch = self.multihost_gen()
+    example_batch = None
+    first_batch = load_next_batch(self.dataset_iter, example_batch, self.config, self.mesh)
+    sec_batch = load_next_batch(self.dataset_iter, first_batch, self.config, self.mesh)
     self.assertTrue(not np.array_equal(first_batch, sec_batch, equal_nan=True))
 
 
