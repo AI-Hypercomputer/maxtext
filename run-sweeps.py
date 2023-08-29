@@ -333,7 +333,8 @@ def base_run_s24(
         clip_global = 0.3,
         clip_by_ucb = 0, # 0 or 1
         lr_mul = 1.0,  # This is a small delta to LR, meant as a 'seed' replacement
-        load = False,
+        load = "",
+        load_step = -1,
         num_slice = 4,
         steps = -1,
 ):
@@ -355,10 +356,12 @@ def base_run_s24(
         'global_parameter_scale': 16,
         'steps': steps,
     }
-    if load:
-        config['load_from_other_directory'] = f'gs://maxtext-experiments-multipod/int8-s24_prefix-a1-FFF-clip03-ucb0-lr010-clT/checkpoints'
-        config['load_from_other_directory_step'] = 1000
-    run_name = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}-clip{int(clip_global*10):02}-ucb{clip_by_ucb}-lr{int(lr_mul*10):03}-load{bname(load)}-ns{num_slice}'
+    if load != "":
+        # config['load_from_other_directory'] = f'gs://maxtext-experiments-multipod/int8-s24_prefix-a1-FFF-clip03-ucb0-lr010-clT/checkpoints'
+        # config['load_from_other_directory_step'] = 1000
+        config['load_from_other_directory'] = f'gs://maxtext-experiments-multipod/{load}/checkpoints'
+        config['load_from_other_directory_step'] = load_step
+    run_name = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}-clip{int(clip_global*10):02}-ucb{clip_by_ucb}-lr{int(lr_mul*10):03}-load{bname(load!="")}-ns{num_slice}'
     run_job(run_name, config)
 
 
@@ -369,10 +372,14 @@ def run_s24_prefix():
     base_run_s24(fwd=True, dlhs=True, drhs=False, clip_global=0.0, clip_by_ucb=1)
     base_run_s24(fwd=False, dlhs=False, drhs=False, clip_global=0.0, clip_by_ucb=1)
 
+def run_s24_prefix_reload():
+    base_run_s24(fwd=True, dlhs=True, drhs=False, clip_global=0.3, clip_by_ucb=0, load="int8-s24_prefix-a1-TTF-clip03-ucb0-lr010-clT", load_step=25000)
+
 # No spikes. Just gc. Try 8 slices
-def run_s25():
-    base_run_s24(fwd=True, dlhs=True, drhs=False, clip_global=0.3, load=True, num_slice=8, steps=2000)
-    base_run_s24(fwd=False, dlhs=False, drhs=False, clip_global=0.3, load=True, num_slice=8, steps=2000)
+# 8 did not work. It was stopeed. And it spiked anyway. So we need a fresh start.
+# def run_s25():
+#     base_run_s24(fwd=True, dlhs=True, drhs=False, clip_global=0.3, load=True, num_slice=8, steps=2000)
+#     base_run_s24(fwd=False, dlhs=False, drhs=False, clip_global=0.3, load=True, num_slice=8, steps=2000)
 
 
 def main():
