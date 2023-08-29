@@ -22,7 +22,7 @@ PROJECT_CLOUD_ML_AUTO_SOLUTIONS = "cloud-ml-auto-solutions"
 
 # TODO(ranran): Update reservation once bugs are closed: b/297217984 & b/297218059.
 class Zone(enum.Enum):
-  US_CENTRAL1_A = "us-central1-a" # reservation for v2-32
+  US_CENTRAL1_A = "us-central1-a"  # reservation for v2-32
   US_CENTRAL2_B = "us-central2-b"  # reservation for v4-8 & v4-32
   US_EAST1_D = "us-east1-d"  # reservation for v3-64
 

@@ -38,7 +38,7 @@ from implementations.utils import ssh
 
 @task
 def generate_tpu_name(base_tpu_name: str) -> str:
-    return f'{base_tpu_name}-{str(uuid.uuid4())}'
+  return f'{base_tpu_name}-{str(uuid.uuid4())}'
 
 def create_queued_resource(tpu_name: airflow.XComArg, accelerator: test_config.Tpu, gcp: gcp_config.GCPConfig, ssh_keys: airflow.XComArg, timeout: datetime.timedelta) -> Tuple[TaskGroup, airflow.XComArg]:
   """Request a QueuedResource and wait until the nodes are created.
@@ -62,30 +62,26 @@ def create_queued_resource(tpu_name: airflow.XComArg, accelerator: test_config.T
     parent = f'projects/{gcp.project_name}/locations/{gcp.zone}'
     queued_resource = tpu_api.QueuedResource(
         # TODO(wcromar): Implement `validUntilDuration` based on `timeout`
-        tpu=tpu_api.QueuedResource.Tpu(
-            node_spec=[
-                tpu_api.QueuedResource.Tpu.NodeSpec(
-                    node_id=tpu_name,
-                    parent=parent,
-                    node=tpu_api.Node(
-                        accelerator_type=accelerator.name,
-                        description="noteardown",
-                        runtime_version=accelerator.runtime_version,
-                        network_config=tpu_api.NetworkConfig(
-                            network=accelerator.network,
-                            subnetwork=accelerator.subnetwork,
-                            enable_external_ips=True,
-                        ),
-                        metadata={
-                          'ssh-keys': f'xl-ml-test:{ssh_keys.public}',
-                        }
-                    )
-                )
-            ],
-        ),
+        # TODO(ranran): enable configuration via `AcceleratorConfig`
+        tpu=tpu_api.QueuedResource.Tpu(node_spec=[
+            tpu_api.QueuedResource.Tpu.NodeSpec(
+                node_id=tpu_name,
+                parent=parent,
+                node=tpu_api.Node(accelerator_type=accelerator.name,
+                                  description="noteardown",
+                                  runtime_version=accelerator.runtime_version,
+                                  network_config=tpu_api.NetworkConfig(
+                                      network=accelerator.network,
+                                      subnetwork=accelerator.subnetwork,
+                                      enable_external_ips=True,
+                                  ),
+                                  metadata={
+                                      'ssh-keys':
+                                          f'xl-ml-test:{ssh_keys.public}',
+                                  }))
+        ],),
         guaranteed=tpu_api.QueuedResource.Guaranteed(
-            reserved=accelerator.reserved,
-        ),
+            reserved=accelerator.reserved,),
     )
 
     qr_operation = client.create_queued_resource(

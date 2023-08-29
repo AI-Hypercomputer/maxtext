@@ -19,10 +19,9 @@ set -e
 GCS_DAGS_FOLDER=$1
 FOLDERS_TO_UPLOAD=("apis" "configs" "dags" "implementations")
 
-# TODO(ranran): handle tests from Jsonnet
 for folder in "${FOLDERS_TO_UPLOAD[@]}"
 do
-  gsutil cp -r "$folder" "$GCS_DAGS_FOLDER"/"$folder"
+  gsutil -m rsync -d -r "$folder" "$GCS_DAGS_FOLDER"/"$folder"
 done
 
 echo "Successfully uploaded tests."

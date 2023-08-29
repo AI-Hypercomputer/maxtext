@@ -15,14 +15,20 @@
 """Utilities to construct configs for solutionsTeam_jax_npi DAG."""
 
 from apis import gcp_config, metric_config, task, test_config
+from configs import gcs_bucket, test_owner, vm_resource
 
 
 # TODO(ranran): This is an example to test E2E benchmarking, and
-# update/remove after python-API is well-organized
-def get_jax_vit_config(tpu_size: int, test_time_out: int) -> task.BaseTask:
+# update/remove after benchmark models are ready.
+def get_jax_vit_config(
+    tpu_version: int,
+    tpu_cores: int,
+    tpu_zone: str,
+    time_out_in_min: int,
+) -> task.TpuTask:
   job_gcp_config = gcp_config.GCPConfig(
-      project_name="mlperf-high-priority-project",
-      zone="us-central2-b",
+      project_name=vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
+      zone=tpu_zone,
       dataset_name=metric_config.DatasetOption.BENCHMARK_DATASET,
   )
 
@@ -51,7 +57,7 @@ def get_jax_vit_config(tpu_size: int, test_time_out: int) -> task.BaseTask:
   tf_summary_location = (
       "/tmp/transformers/vit-imagenette/events.out.tfevents.jax-vit.v2"
   )
-  gcs_location = "gs://ranran-vertex-ai/airflow-benchmark/jax-latest/events.out.tfevents.jax-vit.v2"
+  gcs_location = f"{gcs_bucket.BENCHMARK_OUTPUT_DIR}/jax_vit_config/events.out.tfevents.jax-vit.v2"
 
   run_script_cmds = (
       (
@@ -74,15 +80,16 @@ def get_jax_vit_config(tpu_size: int, test_time_out: int) -> task.BaseTask:
 
   job_test_config = test_config.TpuVmTest(
       test_config.Tpu(
-          version=4,
-          cores=tpu_size,
-          runtime_version="tpu-ubuntu2204-base",
+          version=tpu_version,
+          cores=tpu_cores,
+          runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
+          reserved=True,
       ),
       "jax_vit",
       set_up_cmds=set_up_cmds,
       run_model_cmds=run_script_cmds,
-      time_out_in_min=test_time_out,
-      task_owner="ranran",
+      time_out_in_min=time_out_in_min,
+      task_owner=test_owner.RAN_R,
   )
 
   job_metric_config = metric_config.MetricConfig(
