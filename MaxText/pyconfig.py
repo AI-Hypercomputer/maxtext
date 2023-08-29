@@ -109,6 +109,9 @@ class _HyperParameters():
     raw_keys['mlp_dim'] = 2**mlp_dim_scale * raw_keys['base_mlp_dim']
     raw_keys['num_decoder_layers'] = 2**layer_scale * raw_keys['base_num_decoder_layers']
 
+    raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = \
+      calculate_global_batch_sizes(raw_keys['per_device_batch_size'])
+
 def validate_gcs_bucket_name(bucket_name, config_var):
   assert bucket_name, f"Please set {config_var}."
   assert len(bucket_name) > 5 and bucket_name[0:5]=='gs://', f"Erroring out, {config_var} should start with 'gs://' "
@@ -134,7 +137,16 @@ def get_individual_scales(scale):
   layer_scale = base_scale
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
 
+def calculate_global_batch_sizes(per_device_batch_size):
+  num_devices = len(jax.devices())
+  if per_device_batch_size < 1:
+    # For per_device_batch_size<1, we load the data as if per_device_batch_size=1
+    global_batch_size_to_load = num_devices
+  else:
+    global_batch_size_to_load = int(num_devices * per_device_batch_size)
 
+  global_batch_size_to_train_on = int(num_devices * per_device_batch_size)
+  return global_batch_size_to_load, global_batch_size_to_train_on
 
 class HyperParameters(): # pylint: disable=missing-class-docstring
   def __init__(self):
