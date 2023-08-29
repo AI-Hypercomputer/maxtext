@@ -216,12 +216,12 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
 
   # Set global batch size.
-  batch_size = config.batch_size_to_load
+  global_batch_size_to_load = config.global_batch_size_to_load
 
   if config.eval_per_device_batch_size > 0:
     eval_batch_size = config.eval_per_device_batch_size * global_mesh.size
   else:
-    eval_batch_size = batch_size
+    eval_batch_size = global_batch_size_to_load
 
   def filter_keys(record):
     return {'inputs': record['inputs'], 'targets': record['targets']}
@@ -230,7 +230,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
 
   train_iter = preprocessing_pipeline(
       train_ds,
-      batch_size,
+      global_batch_size_to_load,
       global_mesh,
       shuffle=config.enable_data_shuffling,
       num_epochs=None,

@@ -168,7 +168,7 @@ def init_train_state(model, tx, config, key):
   Args: model, tx, config, key
   """
   input_shape = (
-      config.batch_size_to_load,
+      config.global_batch_size_to_load,
       config.max_target_length
   )
   model_vars = model.init({'params': key, 'dropout': key, 'aqt': key},
