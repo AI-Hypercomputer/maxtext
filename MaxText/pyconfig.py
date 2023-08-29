@@ -109,7 +109,8 @@ class _HyperParameters():
     raw_keys['mlp_dim'] = 2**mlp_dim_scale * raw_keys['base_mlp_dim']
     raw_keys['num_decoder_layers'] = 2**layer_scale * raw_keys['base_num_decoder_layers']
 
-    raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = calculate_global_batch_sizes(raw_keys['per_device_batch_size'])
+    raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = \
+      calculate_global_batch_sizes(raw_keys['per_device_batch_size'])
 
 def validate_gcs_bucket_name(bucket_name, config_var):
   assert bucket_name, f"Please set {config_var}."
