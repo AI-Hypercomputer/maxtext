@@ -27,6 +27,7 @@ from airflow.decorators import task
 from airflow.operators.python import get_current_context
 from apis import gcp_config, test_config
 from apis import metric_config
+from google.cloud import storage
 from implementations.utils import bigquery
 from implementations.utils import composer
 import jsonlines
@@ -137,6 +138,26 @@ def aggregate_metrics(
     raise NotImplementedError(f"Unknown aggregation strategy: {strategy}")
 
 
+def download_object_from_gcs(
+    source_location: str, destination_location: str
+) -> None:
+  """Download object from GCS bucket.
+
+  Args:
+    source_location: The full path of a file in GCS.
+    destination_location: The local path of the file.
+  """
+
+  storage_client = storage.Client()
+  bucket_name = source_location.split("/")[2]
+  object_name = "/".join(source_location.split("/")[3:])
+
+  bucket = storage_client.bucket(bucket_name)
+  blob = bucket.blob(object_name)
+  blob.download_to_filename(destination_location)
+  logging.info(f"Download JSON Lines file to: {destination_location}")
+
+
 def process_json_lines(
     base_id: str,
     file_location: str,
@@ -154,9 +175,13 @@ def process_json_lines(
     A list of MetricHistoryRow for all test runs, and
     a list of MetadataHistoryRow ofr all test runs in a test job.
   """
+
+  tmp_location = "/tmp/ml-auto-solutions-metrics.jsonl"
+  download_object_from_gcs(file_location, tmp_location)
   metric_list = []
   metadata_list = []
-  with jsonlines.open(file_location) as reader:
+
+  with jsonlines.open(tmp_location) as reader:
     index = 0
     for object in reader:
       uuid = generate_row_uuid(base_id, index)

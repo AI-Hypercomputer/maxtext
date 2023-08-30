@@ -142,9 +142,9 @@ class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
     actual_value = metric.aggregate_metrics(metrics, strategy)
     self.assertAlmostEqual(actual_value, expected_value)
 
-  def test_process_json_lines(self):
-    temp_dir = self.create_tempdir().full_path
-    path = os.path.join(temp_dir, "output.jsonl")
+  @mock.patch("implementations.utils.metric.download_object_from_gcs")
+  def test_process_json_lines(self, download_object_from_gcs):
+    path = "/tmp/ml-auto-solutions-metrics.jsonl"
     test_run1 = {
         "metrics": {"accuracy": 0.95, "MFU": 0.50},
         "dimensions": {"framework": "jax"},
