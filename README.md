@@ -210,7 +210,9 @@ either be a TPUVM or not. If your runner machine is a TPUVM, it needs service ac
 
 # Runtime Performance Results
 
-For a 22B model. See full run configs in `MaxText/configs/` as `1xv4-128.sh`, `2xv4-128.sh` and `4xv4-128.sh`.
+## TPU v4
+
+For a 22B model. See full run configs in `MaxText/configs/` as `1xv4-128.sh`, `2xv4-128.sh`, `4xv4-128.sh`, and `8xv4-128.sh`.
 
 | Hardware    | TFLOP/sec/chip   |  MFU  |
 | ----------- | ---------------- | ----- |
@@ -226,6 +228,21 @@ For a 52B model. See full run configs in `MaxText/configs/` as `1xv4-384.sh` and
 | 1x v4-384   | 154              | 56.0% |
 | 2x v4-384   | 162              | 58.9% | # this is quirkily higher than single slice because of choices made by the compiler, not for a fundamental reason.
 
+## TPU v5e
+
+For a 16B model. See full run configs in `MaxText/configs/` as `16b.sh`.
+
+| Hardware    | TFLOP/sec/chip   |  MFU  |
+| ----------- | ---------------- | ----- |
+| 2x v5e-256  | 114              | 57.8% |
+
+For a 32B model. See full run configs in `MaxText/configs/` as `32b.sh`.
+
+| Hardware    | TFLOP/sec/chip   |  MFU  |
+| ----------- | ---------------- | ----- |
+| 2x v5e-256  | 113              | 57.3% |
+
+More details on reproducing these 16B and 32B model results on v5e can be found in `v5e_16b_32b.md`.
 
 
 # Comparison to Alternatives
