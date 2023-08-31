@@ -43,5 +43,6 @@ with models.DAG(
       time_out_in_min=60,
   ).run()
 
-  # Run ResNet model first to ensure E2E functionality
-  tf_resnet_v4_8 >> tf_bert_v4_8
+  # Model dependencies
+  tf_resnet_v4_8
+  tf_bert_v4_8

@@ -35,6 +35,13 @@ with models.DAG(
       time_out_in_min=60,
   ).run()
 
+  jax_resnet_v4_32 = flax_config.get_flax_resnet_config(
+      tpu_version=4,
+      tpu_cores=32,
+      tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
+      time_out_in_min=60,
+  ).run()
+
   # GPT2
   jax_gpt2_v4_extra_flags = [
       "--per_device_train_batch_size=64",
@@ -57,5 +64,7 @@ with models.DAG(
       num_train_epochs=1,
   ).run()
 
-  # Run ResNet model first to ensure E2E functionality
-  jax_resnet_v4_8 >> [jax_gpt2_v4_8, jax_sd_v4_8]
+  # Model dependencies
+  jax_resnet_v4_8 >> jax_resnet_v4_32
+  jax_gpt2_v4_8
+  jax_sd_v4_8
