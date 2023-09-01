@@ -39,9 +39,9 @@ def bname(b: bool):
 def run_job(run_name, maxtext_config):
     model_size = maxtext_config['global_parameter_scale']
     with open('MaxText/configs/base.yml', 'r') as file:
-        yml = yaml.safe_load(file)
+        base_yml = yaml.safe_load(file)
 
-    yml = update_yaml_fields(yml, maxtext_config)
+    yml = update_yaml_fields(base_yml, maxtext_config)
     num_slice = yml['num_slice']
     tokens_per_seq = yml['max_target_length']
     seqs_per_chip = yml['per_device_batch_size']
@@ -394,6 +394,7 @@ def base_run_s26(
         load_step = -1,
         num_slice = 8,
         steps = -1,
+        global_parameter_scale = 16,
 ):
     config = {
         # For seq16
@@ -410,7 +411,7 @@ def base_run_s26(
         'clip_by_global_norm': clip_global,
         'clip_by_ucb': clip_by_ucb,
         'learning_rate': 1.e-3 * lr_mul,
-        'global_parameter_scale': 16,
+        'global_parameter_scale': global_parameter_scale,
         'max_target_length': 2048,
         'steps': steps,
         'fill_ratio': 0.8,
@@ -420,7 +421,7 @@ def base_run_s26(
         # config['load_from_other_directory_step'] = 1000
         config['load_from_other_directory'] = f'gs://maxtext-experiments-multipod/{load}/checkpoints'
         config['load_from_other_directory_step'] = load_step
-    run_name = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}-clip{int(clip_global*10):02}-ucb{clip_by_ucb}-lr{int(lr_mul*10):03}-load{bname(load!="")}-scale{global_parameter_scale}-ns{num_slice}'
+    run_name = f'{global_parameter_scale}B-{bname(fwd)}{bname(dlhs)}{bname(drhs)}-clip{int(clip_global*10):02}-ucb{clip_by_ucb}-lr{int(lr_mul*10):03}-load{bname(load!="")}-ns{num_slice}'
     run_job(run_name, config)
 
 # This is supposed to be part of a final (paper) run. Still 16B.
@@ -428,8 +429,8 @@ def base_run_s26(
 #  - Make the training longer to take fill_ratio into account.
 #  - Use 8 slices.
 def run_s26_prefix():
-    base_run_s24(fwd=True, dlhs=True, drhs=False, clip_global=0.3, clip_by_ucb=0)
-    base_run_s24(fwd=False, dlhs=False, drhs=False, clip_global=0.3, clip_by_ucb=0)
+    base_run_s26(fwd=True, dlhs=True, drhs=False, clip_global=0.3, clip_by_ucb=0)
+    base_run_s26(fwd=False, dlhs=False, drhs=False, clip_global=0.3, clip_by_ucb=0)
 
 
 def main():
