@@ -126,6 +126,9 @@ clip_by_ucb: 0.0 # no clipping default , exact value is ignored if above 0.0
 
 # Maximum length cutoff for training examples.
 max_target_length: 1024
+# Used to calculate cosine LR schedule length and the lenght of the training in run-sweep.py
+# New runs should set it to about 0.8
+fill_ratio: 1.0
 # Maximum length cutoff for held-out evaluation examples.
 max_eval_target_length: 512
 

@@ -45,15 +45,16 @@ def run_job(run_name, maxtext_config):
     num_slice = yml['num_slice']
     tokens_per_seq = yml['max_target_length']
     seqs_per_chip = yml['per_device_batch_size']
+    fill_ratio = yml['fill_ratio']
 
-    def calc_chinchilla_step_count(num_params_billions, num_slice, seqs_per_chip, tokens_per_seq):
+    def calc_chinchilla_step_count(num_params_billions, num_slice, seqs_per_chip, tokens_per_seq, fill_ratio):
         billion = 2 ** 30
         chips_per_slice = 256
         needed_tokens = num_params_billions * billion * 20
         tokens_per_step = tokens_per_seq * seqs_per_chip * chips_per_slice * num_slice
-        needed_steps = int(needed_tokens / tokens_per_step)
+        needed_steps = int(needed_tokens / tokens_per_step / fill_ratio)
         return needed_steps
-    lr_steps = calc_chinchilla_step_count(num_params_billions=model_size, num_slice=num_slice, seqs_per_chip=seqs_per_chip, tokens_per_seq=tokens_per_seq)
+    lr_steps = calc_chinchilla_step_count(num_params_billions=model_size, num_slice=num_slice, seqs_per_chip=seqs_per_chip, tokens_per_seq=tokens_per_seq, fill_ratio=fill_ratio)
 
     yml = update_yaml_fields(yml, {
         'learning_rate_schedule_steps': lr_steps,
@@ -380,6 +381,55 @@ def run_s24_prefix_reload():
 # def run_s25():
 #     base_run_s24(fwd=True, dlhs=True, drhs=False, clip_global=0.3, load=True, num_slice=8, steps=2000)
 #     base_run_s24(fwd=False, dlhs=False, drhs=False, clip_global=0.3, load=True, num_slice=8, steps=2000)
+
+def base_run_s26(
+        *,
+        fwd = False,
+        dlhs = False,
+        drhs = False,
+        clip_global = 0.3,
+        clip_by_ucb = 0, # 0 or 1
+        lr_mul = 1.0,  # This is a small delta to LR, meant as a 'seed' replacement
+        load = "",
+        load_step = -1,
+        num_slice = 8,
+        steps = -1,
+):
+    config = {
+        # For seq16
+        # 'load_from_other_directory': f'gs://maxtext-experiments-multipod/int8-s18_8B_16seq_warmup-a1-yep/checkpoints',
+        # 'load_from_other_directory_step': 1000,
+        'save_period': 1000,
+        # 'load_from_other_directory': 'gs://maxtext-experiments-multipod/int8-s16-a1-TTT-checkpoint_baseline-4s/checkpoints',
+        # 'load_from_other_directory_step': 4000, # end of warmup
+        'num_slice': num_slice,
+        'per_device_batch_size': 6,
+        'fwd_int8': fwd,
+        'dlhs_int8': dlhs,
+        'drhs_int8': drhs,
+        'clip_by_global_norm': clip_global,
+        'clip_by_ucb': clip_by_ucb,
+        'learning_rate': 1.e-3 * lr_mul,
+        'global_parameter_scale': 16,
+        'max_target_length': 2048,
+        'steps': steps,
+        'fill_ratio': 0.8,
+    }
+    if load != "":
+        # config['load_from_other_directory'] = f'gs://maxtext-experiments-multipod/int8-s24_prefix-a1-FFF-clip03-ucb0-lr010-clT/checkpoints'
+        # config['load_from_other_directory_step'] = 1000
+        config['load_from_other_directory'] = f'gs://maxtext-experiments-multipod/{load}/checkpoints'
+        config['load_from_other_directory_step'] = load_step
+    run_name = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}-clip{int(clip_global*10):02}-ucb{clip_by_ucb}-lr{int(lr_mul*10):03}-load{bname(load!="")}-scale{global_parameter_scale}-ns{num_slice}'
+    run_job(run_name, config)
+
+# This is supposed to be part of a final (paper) run. Still 16B.
+#  - Increase seq len to 2k.
+#  - Make the training longer to take fill_ratio into account.
+#  - Use 8 slices.
+def run_s26_prefix():
+    base_run_s24(fwd=True, dlhs=True, drhs=False, clip_global=0.3, clip_by_ucb=0)
+    base_run_s24(fwd=False, dlhs=False, drhs=False, clip_global=0.3, clip_by_ucb=0)
 
 
 def main():
