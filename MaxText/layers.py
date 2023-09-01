@@ -606,7 +606,9 @@ class Embed(nn.Module):
       in NLP models.
     """
     dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
-    return jnp.dot(query, jnp.asarray(self.embedding, dtype).T)
+    #return jnp.dot(query, jnp.asarray(self.embedding, dtype).T)
+    README: https://source.corp.google.com/piper///depot/google3/third_party/py/aqt/README.md;l=65
+    return jnp.dot(query, jnp.asarray(self.embedding, dtype).T, lhs_quantizer, rhs_quantizer)
 
 
 class RelativePositionBiases(nn.Module):
