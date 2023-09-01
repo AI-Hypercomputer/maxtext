@@ -121,7 +121,14 @@ def dot_product_attention(query: Array,
   key = LayerNorm(dtype=dtype, name='key_layer_norm', kernel_axes = ('heads',))(key)
 
   # `attn_weights`: [batch, num_heads, q_length, kv_length]
-  attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
+  # QK:
+  if not cfg.int8_training:
+    attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
+  else:
+    # fwd_qk 
+    aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8_qk, cfg.dlhs_int8_qk, cfg.drhs_int8_qk)
+    aqt_dot_general = aqt.make_dot_general(aqt_cfg)
+    attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key, _dot_general=aqt_dot_general)
 
   # Apply attention bias: masking, dropout, proximity bias, etc.
   if bias is not None:
@@ -143,7 +150,14 @@ def dot_product_attention(query: Array,
     attn_weights = attn_weights * multiplier
 
   # Take the linear combination of `value`.
-  return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
+  # PV
+
+  if not cfg.int8_training:
+    return attn_weights = jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
+  else: 
+    aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8_pv, cfg.dlhs_int8_pv, cfg.drhs_int8_pv)
+    aqt_dot_general = aqt.make_dot_general(aqt_cfg)
+    return attn_weights = jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value, _dot_general=aqt_dot_general)
 
 
 dynamic_vector_slice_in_dim = jax.vmap(
