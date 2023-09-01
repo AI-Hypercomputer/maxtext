@@ -85,6 +85,8 @@ class _HyperParameters():
   def user_init(raw_keys):
     '''Transformations between the config data and configs used at runtime'''
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
+    if raw_keys["run_name"] == "":
+      raw_keys["run_name"] = os.environ.get("JOBSET_NAME") #using XPK default
     run_name = raw_keys["run_name"]
     assert run_name, "Erroring out, need a real run_name"
     base_output_directory = raw_keys["base_output_directory"]
