@@ -103,12 +103,12 @@ class _HyperParameters():
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
+    mlp_bonus = raw_keys['global_parameter_scale_mlp_bonus']
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys['global_parameter_scale'])
     raw_keys['emb_dim'] = 2**emb_scale * raw_keys['base_emb_dim']
     raw_keys['num_heads'] = 2**num_head_scale * raw_keys['base_num_heads']
-    raw_keys['mlp_dim'] = 2**mlp_dim_scale * raw_keys['base_mlp_dim']
+    raw_keys['mlp_dim'] = 2**mlp_dim_scale * raw_keys['base_mlp_dim'] + mlp_bonus
     raw_keys['num_decoder_layers'] = 2**layer_scale * raw_keys['base_num_decoder_layers']
-
     if raw_keys['learning_rate_schedule_steps']==-1:
       raw_keys['learning_rate_schedule_steps'] = raw_keys['steps']
     if raw_keys['steps']==-1:
