@@ -45,6 +45,15 @@ use_dqdg: False
 fwd_int8: True
 dlhs_int8: True
 drhs_int8: True
+
+fwd_int8_qk: False
+dlhs_int8_qk: False
+drhs_int8_qk: False
+
+fwd_int8_pv: False
+dlhs_int8_pv: False
+drhs_int8_pv: False
+
 quantize_logits: True
 
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes

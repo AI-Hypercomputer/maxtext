@@ -387,6 +387,12 @@ def base_run_s26(
         fwd = False,
         dlhs = False,
         drhs = False,
+        fwd_int8_qk = False,
+        dlhs_int8_qk = False,
+        drhs_int8_qk = False,
+        fwd_int8_pv = False,
+        dlhs_int8_pv = False,
+        drhs_int8_pv = False, 
         clip_global = 0.3,
         clip_by_ucb = 0, # 0 or 1
         lr_mul = 1.0,  # This is a small delta to LR, meant as a 'seed' replacement
@@ -408,6 +414,12 @@ def base_run_s26(
         'fwd_int8': fwd,
         'dlhs_int8': dlhs,
         'drhs_int8': drhs,
+        'fwd_int8_qk' : fwd_int8_qk,
+        'dlhs_int8_qk' : dlhs_int8_qk,
+        'drhs_int8_qk' : drhs_int8_qk,
+        'fwd_int8_pv' : fwd_int8_pv,
+        'dlhs_int8_pv' : dlhs_int8_pv,
+        'drhs_int8_pv' : drhs_int8_pv,
         'clip_by_global_norm': clip_global,
         'clip_by_ucb': clip_by_ucb,
         'learning_rate': 1.e-3 * lr_mul,
@@ -421,7 +433,10 @@ def base_run_s26(
         # config['load_from_other_directory_step'] = 1000
         config['load_from_other_directory'] = f'gs://maxtext-experiments-multipod/{load}/checkpoints'
         config['load_from_other_directory_step'] = load_step
-    run_name = f'{global_parameter_scale}B-{bname(fwd)}{bname(dlhs)}{bname(drhs)}-clip{int(clip_global*10):02}-ucb{clip_by_ucb}-lr{int(lr_mul*10):03}-load{bname(load!="")}-ns{num_slice}'
+    q = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}'
+    q_qk = f'{bname(fwd_int8_qk)}{bname(dlhs_int8_qk)}{bname(drhs_int8_qk)}'
+    q_pv = f'{bname(fwd_int8_pv)}{bname(dlhs_int8_pv)}{bname(drhs_int8_pv)}'
+    run_name = f'{global_parameter_scale}B-{q}-qk{q_qk}-pv{q_pv}-clip{int(clip_global*10):02}-ucb{clip_by_ucb}-lr{int(lr_mul*10):03}-load{bname(load!="")}-ns{num_slice}'
     run_job(run_name, config)
 
 # This is supposed to be part of a final (paper) run. Still 16B.
@@ -431,6 +446,27 @@ def base_run_s26(
 def run_s26_prefix():
     base_run_s26(fwd=True, dlhs=True, drhs=False, clip_global=0.3, clip_by_ucb=0)
     base_run_s26(fwd=False, dlhs=False, drhs=False, clip_global=0.3, clip_by_ucb=0)
+
+def run_s27():
+    kwargs_1 = {
+        'num_slice': 1,
+        'global_parameter_scale': 1,
+    } 
+
+    kwargs_2 = {
+        'fwd': True,
+        'dlhs': True,
+        'drhs': False,
+    } 
+
+    base_run_s26(**kwargs_1, **kwargs_2, fwd_int8_qk = True)
+    base_run_s26(**kwargs_1, **kwargs_2, dlhs_int8_qk = True)
+    base_run_s26(**kwargs_1, **kwargs_2, drhs_int8_qk = True)
+    base_run_s26(**kwargs_1, **kwargs_2, fwd_int8_pv = True)
+    base_run_s26(**kwargs_1, **kwargs_2, dlhs_int8_pv = True)
+    base_run_s26(**kwargs_1, **kwargs_2, drhs_int8_pv = True)
+    base_run_s26(**kwargs_1, **kwargs_2)
+    base_run_s26(**kwargs_1, fwd=False, dlhs=False, drhs=False)
 
 
 def main():

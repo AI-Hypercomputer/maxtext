@@ -72,10 +72,12 @@ def dot_product_attention(query: Array,
                           value: Array,
                           bias: Optional[Array] = None,
                           dropout_rng: Optional[PRNGKey] = None,
+                          aqt_rng: Optional[PRNGKey] = None,
                           dropout_rate: float = 0.,
                           deterministic: bool = False,
                           dtype: DType = jnp.float32,
-                          float32_logits: bool = False):
+                          float32_logits: bool = False,
+                          cfg = None):
   """Computes dot-product attention given query, key, and value.
 
   This is the core function for applying attention based on
@@ -128,6 +130,8 @@ def dot_product_attention(query: Array,
     # fwd_qk 
     aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8_qk, cfg.dlhs_int8_qk, cfg.drhs_int8_qk)
     aqt_dot_general = aqt.make_dot_general(aqt_cfg)
+    context = aqt.Context(key=aqt_rng, train_step=None)
+    aqt_dot_general = functools.partial(aqt_dot_general, context=context)
     attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key, _dot_general=aqt_dot_general)
 
   # Apply attention bias: masking, dropout, proximity bias, etc.
@@ -153,11 +157,13 @@ def dot_product_attention(query: Array,
   # PV
 
   if not cfg.int8_training:
-    return attn_weights = jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
+    return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
   else: 
     aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8_pv, cfg.dlhs_int8_pv, cfg.drhs_int8_pv)
     aqt_dot_general = aqt.make_dot_general(aqt_cfg)
-    return attn_weights = jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value, _dot_general=aqt_dot_general)
+    context = aqt.Context(key=aqt_rng, train_step=None)
+    aqt_dot_general = functools.partial(aqt_dot_general, context=context)
+    return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value, _dot_general=aqt_dot_general)
 
 
 dynamic_vector_slice_in_dim = jax.vmap(
@@ -448,6 +454,8 @@ class MultiHeadDotProductAttention(nn.Module):
     if not deterministic and self.dropout_rate > 0.:
       dropout_rng = self.make_rng('dropout')
 
+    aqt_rng = self.make_rng('aqt')
+
     # Apply attention.
     x = dot_product_attention(
         query,
@@ -455,10 +463,12 @@ class MultiHeadDotProductAttention(nn.Module):
         value,
         bias=attention_bias,
         dropout_rng=dropout_rng,
+        aqt_rng=aqt_rng,
         dropout_rate=self.dropout_rate,
         deterministic=deterministic,
         dtype=self.dtype,
-        float32_logits=self.float32_logits)
+        float32_logits=self.float32_logits,
+        cfg=cfg)
 
     # Back to the original inputs dimensions.
     out = DenseGeneral(
