@@ -4,7 +4,7 @@ FROM python:3.10-slim
 # Install system dependencies and Git
 RUN apt-get update && apt-get install -y curl gnupg git
 
-# Install iproute2 ethtool lsof
+# Install dependencies for adjusting network rto
 RUN apt-get update && apt-get install -y iproute2 ethtool lsof
 
 # Add the Google Cloud SDK package repository
