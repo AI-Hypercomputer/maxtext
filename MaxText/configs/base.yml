@@ -150,7 +150,7 @@ adam_eps: 1.e-8 # A small constant applied to denominator outside of the square 
 adam_eps_root: 0. # A small constant applied to denominator inside the square root.
 
 # Stack trace parameters
-collect_stack_trace: True
+collect_stack_trace: False
 stack_trace_to_cloud: False  # Uploads to cloud logging if True, else to the console if False.
 stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds.
 
