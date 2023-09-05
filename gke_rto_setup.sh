@@ -1,8 +1,5 @@
 echo "Running gke_rto_setup.sh..."
 
-echo "install iproute2 ethtool lsof"
-apt-get install -y iproute2 ethtool lsof
-
 echo "Adjust RTO and apply non cache copy"
 first_line_res=$(ip route show | head -n 1)
 if [[ "$(echo "$first_line_res" | grep "rto_min lock 5ms" | wc -l)" -eq 0 ]]; then
