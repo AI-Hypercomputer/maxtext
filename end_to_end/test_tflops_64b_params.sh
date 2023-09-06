@@ -20,7 +20,7 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
     steps=150 per_device_batch_size=2 enable_checkpointing=false\
     enable_profiler=false remat_policy=full\
     max_target_length=2048 metrics_file='metrics.txt' base_output_directory=$OUTPUT_PATH\
-    dataset_path=$DATASET_PATH log_period=150 global_parameter_scale=64
+    dataset_path=$DATASET_PATH log_period=150 global_parameter_scale=64 use_iota_embed=true reuse_example_batch=1
 
 
 # Assert TFLOP/s
