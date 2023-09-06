@@ -59,6 +59,7 @@ logits_via_embedding: True  # NOTE: this is True just for testing.
 remat_policy: 'minimal'
 scan_layers: True
 param_scan_axis: 1
+enable_flash_attention: False
 
 record_internal_nn_metrics: 0
 
@@ -103,7 +104,7 @@ vocab_relative_path: "vocabs"  # Assumes we're allowed
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
-per_device_batch_size: 24.0
+per_device_batch_size: 12.0
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
 
@@ -115,7 +116,7 @@ learning_rate: 3.e-5
 warmup_steps: 15_000
 
 # Maximum length cutoff for training examples.
-max_target_length: 1024
+max_target_length: 2048
 # Maximum length cutoff for held-out evaluation examples.
 max_eval_target_length: 512
 

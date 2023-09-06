@@ -214,8 +214,12 @@ def train_loop(config, state=None):
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
 
+  # Mesh definition
+  devices_array = max_utils.create_device_mesh(config)
+  mesh = Mesh(devices_array, config.mesh_axes)
+
   # Model and Optimizer definition
-  model = Transformer(config)
+  model = Transformer(config, mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(
       learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
   )
@@ -230,9 +234,6 @@ def train_loop(config, state=None):
       eps_root=config.adam_eps_root
   )
 
-  # Mesh definition
-  devices_array = max_utils.create_device_mesh(config)
-  mesh = Mesh(devices_array, config.mesh_axes)
 
   # Set up datasets.
   read_config = tfds.ReadConfig(
