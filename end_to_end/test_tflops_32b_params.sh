@@ -21,7 +21,7 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
     enable_profiler=false remat_policy=full base_emb_dim=8192 base_mlp_dim=32768\
     base_num_heads=32 base_num_decoder_layers=40 head_dim=256\
     max_target_length=2048 metrics_file='metrics.txt' base_output_directory=$OUTPUT_PATH\
-    dataset_path=$DATASET_PATH log_period=150 use_iota_embed=true reuse_example_batch=1
+    dataset_path=$DATASET_PATH log_period=150
 
 # Assert TFLOP/s
 python3 end_to_end/eval_assert.py metrics_average metrics.txt $TFLOP_THRESHOLD perf/per_device_tflops_per_sec
