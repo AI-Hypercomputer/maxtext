@@ -17,12 +17,14 @@
 """Input pipeline for a LM1B dataset."""
 
 import os
+import re
 from typing import Optional, Dict
 
 import ml_collections
 
 import tensorflow as tf
 import tensorflow_datasets as tfds
+from array_record.python import array_record_data_source
 import jax
 
 import tokenizer
@@ -176,6 +178,7 @@ def preprocessing_pipeline(
     data_source = dataset,
     operations = operations,
     sampler = index_sampler,
+    worker_count=10,
   )
   data_iter = iter(dataloader)
   # Return PyGrainIterator
@@ -207,12 +210,21 @@ def get_datasets(
     config.dataset_name, split='train'
   )
 
+  # list files
+  train_files = [train_ds.dataset_info.data_dir + '/' + f for f in os.listdir(train_ds.dataset_info.data_dir) if re.match(r'.*train*', f)]
+  array_train_ds = array_record_data_source.ArrayRecordDataSource(
+    train_files
+  )
   if config.eval_dataset_name:
     eval_ds = tfds.data_source(config.eval_dataset_name, split=config.eval_split)
+    eval_files = [eval_ds.dataset_info.data_dir + '/' + f for f in os.listdir(eval_ds.dataset_info.data_dir) if re.match(r'.*test*', f)]
+    array_eval_ds = array_record_data_source.ArrayRecordDataSource(
+      eval_files
+    )
   else:
-    eval_ds = train_ds
+    array_eval_ds = array_train_ds
 
-  return train_ds, eval_ds
+  return array_train_ds, array_eval_ds
 
 def preprocess_dataset(config: ml_collections.ConfigDict,
                         global_mesh,

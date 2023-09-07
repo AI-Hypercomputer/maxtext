@@ -101,7 +101,7 @@ ici_tensor_parallelism: 1
 dataset_path: "~/tensorflow_datasets/"
 vocab_size: 32_768 # powers of 2 for sharding
 vocab_relative_path: "vocabs"  # Assumes we're allowed
-dataset_name: 'lm1b'
+dataset_name: 'lm1b:1.1.0'
 eval_dataset_name: ''
 eval_split: 'test'
 per_device_batch_size: 24
