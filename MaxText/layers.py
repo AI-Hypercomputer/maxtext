@@ -574,6 +574,7 @@ class Embed(nn.Module):
         (self.num_embeddings, self.features),
         jnp.float32)
 
+  
   def __call__(self, inputs: Array) -> Array:
     """Embeds the inputs along the last dimension.
 
@@ -592,6 +593,7 @@ class Embed(nn.Module):
     output = nn.with_logical_constraint(output, ('activation_batch', 'activation_length', 'activation_embed'))
     return output
 
+  # mattdavidow: logits use this
   def attend(self, query: Array) -> Array:
     """Attend over the embedding using a query array.
 
@@ -605,6 +607,7 @@ class Embed(nn.Module):
       Commonly used for weight-sharing between embeddings and logit transform
       in NLP models.
     """
+    # mattdavidow: Some quantizer fun
     dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
     #return jnp.dot(query, jnp.asarray(self.embedding, dtype).T)
     README: https://source.corp.google.com/piper///depot/google3/third_party/py/aqt/README.md;l=65
@@ -1102,6 +1105,7 @@ class Decoder(nn.Module):
         rate=cfg.dropout_rate, broadcast_dims=(-2,))(
             y, deterministic=deterministic)
 
+    # mattdavidow: here be the logits
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
