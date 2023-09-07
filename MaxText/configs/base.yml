@@ -46,9 +46,9 @@ bwd_int8: True
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
 global_parameter_scale: 1
-base_emb_dim: 2048
-base_num_heads: 10
-base_mlp_dim: 10240
+base_emb_dim: 2560
+base_num_heads: 8
+base_mlp_dim: 8192
 base_num_decoder_layers: 16
 head_dim: 256
 # activation functions are .

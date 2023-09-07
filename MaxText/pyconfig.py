@@ -133,9 +133,9 @@ def get_individual_scales(scale):
     raise ValueError("Global parameter scale should be a power of 2. If you want finer grained control of the model sizes "
       "then you can explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.")
   base_scale, rem = divmod(log_2_scale, 3)
-  emb_scale = base_scale + int(rem > 0)
-  num_head_scale = base_scale + int(rem > 1)
+  num_head_scale = base_scale + int(rem > 0)
   mlp_dim_scale = num_head_scale
+  emb_scale = base_scale + int(rem > 1)
   layer_scale = base_scale
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
 
