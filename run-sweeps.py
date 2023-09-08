@@ -325,7 +325,7 @@ def run_s23():
         for int8 in [True, False]:
             run(int8=int8, bs=bs, seq=1024, pods=1)
 
-# This is a prefix run for 16B model
+
 def base_run_s24(
         *,
         fwd = True,
@@ -338,6 +338,9 @@ def base_run_s24(
         load_step = -1,
         num_slice = 4,
         steps = -1,
+        quant_pv = False,
+        aqt_use_dummy_static_bound = False,
+        aqt_rng_type: str = 'jax.uniform',
 ):
     config = {
         # For seq16
@@ -356,6 +359,11 @@ def base_run_s24(
         'learning_rate': 1.e-3 * lr_mul,
         'global_parameter_scale': 16,
         'steps': steps,
+        'fwd_int8_pv' : fwd and quant_pv,
+        'dlhs_int8_pv' : dlhs and quant_pv,
+        'drhs_int8_pv' : drhs and quant_pv,
+        'aqt_use_dummy_static_bound': aqt_use_dummy_static_bound,
+        'aqt_rng_type': aqt_rng_type,
     }
     if load != "":
         # config['load_from_other_directory'] = f'gs://maxtext-experiments-multipod/int8-s24_prefix-a1-FFF-clip03-ucb0-lr010-clT/checkpoints'
@@ -363,6 +371,7 @@ def base_run_s24(
         config['load_from_other_directory'] = f'gs://maxtext-experiments-multipod/{load}/checkpoints'
         config['load_from_other_directory_step'] = load_step
     run_name = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}-clip{int(clip_global*10):02}-ucb{clip_by_ucb}-lr{int(lr_mul*10):03}-load{bname(load!="")}-ns{num_slice}'
+    run_name += f'-rng_{aqt_rng_type[0]}-dummy{bname(aqt_use_dummy_static_bound)}-pv{bname(quant_pv)}'
     run_job(run_name, config)
 
 
@@ -372,6 +381,17 @@ def run_s24_prefix():
     base_run_s24(fwd=False, dlhs=False, drhs=False, clip_global=0.3, clip_by_ucb=0)
     base_run_s24(fwd=True, dlhs=True, drhs=False, clip_global=0.0, clip_by_ucb=1)
     base_run_s24(fwd=False, dlhs=False, drhs=False, clip_global=0.0, clip_by_ucb=1)
+
+
+# This is an extension to s24 to see the effect of few more changes on a big model.
+# Questions inline.
+def run_s24_2():
+    # Add pvTTF to our recipe,
+    base_run_s24(steps=200) # check that is identical with s24_prefix
+    base_run_s24(aqt_rng_type='custom-1') # check that is identical with s24_prefix
+    base_run_s24(quant_pv=True) # measure quality and pref of quant_pv
+    base_run_s24(aqt_use_dummy_static_bound=True, steps=200) # value of local_aqt on 4 pods
+
 
 def run_s24_prefix_reload():
     base_run_s24(fwd=True, dlhs=True, drhs=False, clip_global=0.3, clip_by_ucb=0, load="int8-s24_prefix-a1-TTF-clip03-ucb0-lr010-clT", load_step=25000)

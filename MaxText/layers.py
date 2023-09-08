@@ -127,8 +127,14 @@ def dot_product_attention(query: Array,
   if not cfg.int8_training:
     attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
   else:
-    # fwd_qk 
-    aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8_qk, cfg.dlhs_int8_qk, cfg.drhs_int8_qk)
+    # fwd_qk
+    aqt_cfg = maxtext_sweeps.sweep1(
+      cfg.fwd_int8_qk,
+      cfg.dlhs_int8_qk,
+      cfg.drhs_int8_qk,
+      use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
+      rng_type=cfg.aqt_rng_type,
+    )
     aqt_dot_general = aqt.make_dot_general(aqt_cfg)
     context = aqt.Context(key=aqt_rng, train_step=None)
     aqt_dot_general = functools.partial(aqt_dot_general, context=context)
@@ -158,8 +164,14 @@ def dot_product_attention(query: Array,
 
   if not cfg.int8_training:
     return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
-  else: 
-    aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8_pv, cfg.dlhs_int8_pv, cfg.drhs_int8_pv)
+  else:
+    aqt_cfg = maxtext_sweeps.sweep1(
+      cfg.fwd_int8_pv,
+      cfg.dlhs_int8_pv,
+      cfg.drhs_int8_pv,
+      use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
+      rng_type=cfg.aqt_rng_type,
+    )
     aqt_dot_general = aqt.make_dot_general(aqt_cfg)
     context = aqt.Context(key=aqt_rng, train_step=None)
     aqt_dot_general = functools.partial(aqt_dot_general, context=context)
@@ -252,7 +264,13 @@ class DenseGeneral(nn.Module):
         aqt_dq_dg = aqt_dq.make_aqt_dq_dg()
         return aqt_dq_dg(aqt_key, inputs, kernel, ((axis, contract_ind), ((), ())))
       else:
-        aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8, cfg.dlhs_int8, cfg.drhs_int8)
+        aqt_cfg = maxtext_sweeps.sweep1(
+          cfg.fwd_int8,
+          cfg.dlhs_int8,
+          cfg.drhs_int8,
+          use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
+          rng_type=cfg.aqt_rng_type,
+        )
         aqt_dot_general = aqt.make_dot_general(aqt_cfg)
         context = aqt.Context(key=aqt_key, train_step=None)
 
@@ -390,7 +408,7 @@ class MultiHeadDotProductAttention(nn.Module):
         expected_shape = (batch, 1, num_heads, head_dim)
         if expected_shape != query.shape:
           raise ValueError(f"""Autoregressive cache shape error,
-                           expected query shape %s instead got 
+                           expected query shape %s instead got
                            {(expected_shape, query.shape)}""")
         # Create a OHE of the current index. NOTE: the index is increased below.
         cur_index = cache_index.value

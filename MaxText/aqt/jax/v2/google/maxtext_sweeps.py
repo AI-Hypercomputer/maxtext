@@ -22,6 +22,7 @@ def fully_quantized(
     vjp_rhs_stochastic_rounding: Optional[bool] = None,
     # The dummy static bound flag is temporary, for performance benchmarking.
     use_dummy_static_bound: bool = False,
+    rng_type: str = 'jax.uniform',
 ) -> DotGeneral:
   """Fully Quantized Training."""
   fwd = DotGeneralRaw.make(fwd_bits, fwd_bits)
@@ -52,13 +53,13 @@ def fully_quantized(
 
   # By default use jax.uniform for stochastic rounding
   if use_stochastic_rounding == true:
-    set_stochastic_rounding(cfg, True, True, 'jax.uniform')
+    set_stochastic_rounding(cfg, True, True, rng_type)
 
   if vjp_lhs_stochastic_rounding == true:
-    set_stochastic_rounding(cfg, True, False, 'jax.uniform')
+    set_stochastic_rounding(cfg, True, False, rng_type)
 
   if vjp_rhs_stochastic_rounding == true:
-    set_stochastic_rounding(cfg, False, True, 'jax.uniform')
+    set_stochastic_rounding(cfg, False, True, rng_type)
 
   if use_dummy_static_bound:
     set_static_bound(cfg, 1.0)
@@ -66,7 +67,13 @@ def fully_quantized(
   return cfg
 
 
-def sweep1(fwd_int8: bool, dlhs_int8: bool, drhs_int8: bool) -> DotGeneral:
+def sweep1(
+    fwd_int8: bool,
+    dlhs_int8: bool,
+    drhs_int8: bool,
+    use_dummy_static_bound: bool=False,
+    rng_type: str = 'jax.uniform',
+) -> DotGeneral:
   fqt_config = fully_quantized(
       fwd_bits=8 if fwd_int8 else None,
       dlhs_bits=8 if dlhs_int8 else None,
@@ -75,6 +82,7 @@ def sweep1(fwd_int8: bool, dlhs_int8: bool, drhs_int8: bool) -> DotGeneral:
       use_stochastic_rounding=None,
       vjp_lhs_stochastic_rounding=True,
       vjp_rhs_stochastic_rounding=False,
+      use_dummy_static_bound=use_dummy_static_bound,
+      rng_type=rng_type,
   )
   return fqt_config
-
