@@ -187,9 +187,23 @@ def train_step(model, config, state, data, dropout_rng):
     return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (loss, intermediate_outputs), grads = grad_fn(state.params)
-  new_state = state.apply_gradients(grads=grads)
+  (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
+  if config.gradient_clipping_threshold > 0:
+    grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, None, None)
+  else:
+    grads = raw_grads
+
+  opt = state.opt_state
+  updates, new_opt_state = state.tx.update(grads, opt, state.params)
+  new_params = optax.apply_updates(state.params, updates)
+  new_state = state.replace(
+      step=state.step + 1,
+      params=new_params,
+      opt_state=new_opt_state,
+  )
+
   metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
+             'learning/raw_grad_norm' : max_utils.l2norm_pytree(raw_grads), 
              'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
