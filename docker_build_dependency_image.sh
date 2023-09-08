@@ -44,7 +44,7 @@ if [[ -z ${JAX_VERSION+x} ]] ; then
   echo "Default JAX_VERSION=${JAX_VERSION}"
 fi
 
-if [[ ! -z ${MODE}+x ]]; then
+if [[ -z ${MODE} ]]; then
   export MODE=stable
   echo "Default MODE=${MODE}"
 
