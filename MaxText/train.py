@@ -220,14 +220,15 @@ def train_loop(config, state=None):
       learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
   )
 
-  tx = optax.adam(
+  tx = optax.adamw(
       max_utils.create_learning_rate_schedule(
           learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
       ),
       b1=config.adam_b1,
       b2=config.adam_b2,
       eps=config.adam_eps,
-      eps_root=config.adam_eps_root
+      eps_root=config.adam_eps_root,
+      weight_decay=config.adam_weight_decay,
   )
 
   # Mesh definition
