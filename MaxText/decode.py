@@ -139,9 +139,7 @@ def decode_loop(config, state=None):
   model = Transformer(config)
 
   tx = optax.adam(
-    max_utils.create_learning_rate_schedule(
-      learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
-    )
+    max_utils.create_learning_rate_schedule(config)
   ) # TODO: we need an optax.GradientTransformation to form a TrainState, but we don't use it when decoding
 
   # Mesh definition
