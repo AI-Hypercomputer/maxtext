@@ -111,8 +111,17 @@ max_corpus_chars: 10_000_000
 steps: 150_001
 log_period: 100
 save_period: 10_000
+# Learning rate schedule has four parts:
+# 1) Linear warmup from 0 to [learning_rate]
+# 2) Cosine from [learning_rate] to [learning_rate * cosine_learning_rate_final_fraction]
+# 3) Linear cooldown from [learning_rate * cosine_learning_rate_final_fraction] to 0
+# 4) Constant learning rate of 0 
 learning_rate: 3.e-5
-warmup_steps: 15_000
+cosine_learning_rate_final_fraction: 0.1 
+warmup_steps_fraction: 0.1 # First schedule section length
+cosine_steps_fraction: 0.8 # Second schedule section length
+cooldown_steps_fraction: 0.05 # Third scedhule section length
+# The fourth schedule section's length is determined by the remainder (this section is constant zero learning rate).
 
 # Maximum length cutoff for training examples.
 max_target_length: 1024
