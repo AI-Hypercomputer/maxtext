@@ -37,6 +37,14 @@ if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE) ]]; then
      exit 1
 fi
 
+if [[ $JAX_VERSION == NONE ]]; then
+  unset JAX_VERSION
+fi
+
+if [[ $LIBTPU_GCS_PATH == NONE ]]; then
+  unset LIBTPU_GCS_PATH
+fi
+
 libtpu_path="$HOME/custom_libtpu/libtpu.so"
 
 if [[ "$MODE" == "libtpu-only" ]]; then

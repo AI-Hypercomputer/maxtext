@@ -34,25 +34,23 @@ for ARGUMENT in "$@"; do
     echo "$KEY"="$VALUE"
 done
 
-if [[ "$MODE" == "stable" || ! -v MODE ]]; then
-  echo "STABLE"
-    # Stable mode
-  if [[ ! -v JAX_VERSION ]]; then
-    docker build --build-arg MODE="stable" -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
-  else
-    docker build --build-arg MODE="stable" --build-arg JAX_VERSION="$JAX_VERSION" -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
-  fi
-elif [[ $MODE == "nightly" ]]; then
-  echo "NIGHTLY"
-
-  # Nightly mode
-  docker build --build-arg MODE="nightly" -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
-elif [[ $MODE == "head" ]]; then
-  echo "HEAD"
-
-  # Head mode
-  docker build --build-arg MODE="head" -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
+  export LIBTPU_GCS_PATH=NONE
+  echo "Default LIBTPU_GCS_PATH=${LIBTPU_GCS_PATH}"
 fi
+
+if [[ -z ${JAX_VERSION+x} ]] ; then
+  export JAX_VERSION=NONE
+  echo "Default JAX_VERSION=${JAX_VERSION}"
+fi
+
+if [[ ! -z ${MODE}+x ]]; then
+  export MODE=stable
+  echo "Default MODE=${MODE}"
+
+fi
+
+docker build --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
 
 echo ""
 echo "*************************"
