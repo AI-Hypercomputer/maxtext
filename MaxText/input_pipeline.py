@@ -33,6 +33,8 @@ import numpy as np
 
 import grain.python as pygrain
 
+from transformers import T5Tokenizer
+
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 Features = Dict[str, tf.Tensor]
 
@@ -69,9 +71,9 @@ class normalize_features():
 
   def __call__(self, features):
     def _normalize_features(features):
-      features['inputs'] = features.pop('text')
-      features['targets'] = features['inputs']
-      return features
+      # features['inputs'] = features.pop('text')
+      # features['targets'] = features['inputs']
+      return {'inputs':features, 'targets': features}
     return _normalize_features(features)
 
 
@@ -100,8 +102,8 @@ def preprocessing_pipeline(
       self.max_len = max_length
     def __call__(self, x):
       source, target = x['inputs'], x['targets']
-      l = tf.maximum(tf.shape(source)[0], tf.shape(target)[0])
-      return tf.less(l, self.max_len + 1)
+      l = np.maximum(np.shape(source)[0], np.shape(target)[0])
+      return np.less(l, self.max_len + 1)
   operations.append(pygrain.FilterOperation(condition_function = length_filter(max_length)))
 
 
@@ -178,7 +180,7 @@ def preprocessing_pipeline(
     data_source = dataset,
     operations = operations,
     sampler = index_sampler,
-    worker_count=10,
+    worker_count=1,
   )
   data_iter = iter(dataloader)
   # Return PyGrainIterator
@@ -238,11 +240,14 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
   # Train or load tokenizer
   # Use tf.data.Dataset for training the tokenizer
 
-  sp_tokenizer = tokenizer.load_or_train_tokenizer(
-      train_ds,
-      vocab_path=vocab_path,
-      vocab_size=config.vocab_size,
-      max_corpus_chars=config.max_corpus_chars)
+  # sp_tokenizer = tokenizer.load_or_train_tokenizer(
+  #     train_ds,
+  #     vocab_path=vocab_path,
+  #     vocab_size=config.vocab_size,
+  #     max_corpus_chars=config.max_corpus_chars)
+
+  sp_tokenizer = T5Tokenizer.from_pretrained('t5-base')
+
 
   # Tokenize data.
   class TokenizeOperation():
@@ -254,10 +259,12 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
     def __call__(self, features: Features) -> Features:
       data_keys = ('inputs', 'targets')
       for k in data_keys:
-        features[k] = sp_tokenizer.tokenize(features[k]).numpy()
+        features[k] = np.asarray(sp_tokenizer.encode(str(features[k])))
+      # import pdb;pdb.set_trace()
       return features
 
   operations = [pygrain.MapOperation(map_function=normalize_features())]
+  # operations = []
   operations.append(pygrain.MapOperation(map_function=TokenizeOperation(sp_tokenizer)))
 
 

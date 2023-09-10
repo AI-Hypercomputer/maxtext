@@ -25,7 +25,7 @@ import os
 jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-print(f"Found {jax.device_count()} devices.")
+# print(f"Found {jax.device_count()} devices.")
 
 from typing import Sequence
 import datetime
