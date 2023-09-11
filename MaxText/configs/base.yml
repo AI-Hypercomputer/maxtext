@@ -144,9 +144,10 @@ data_shuffle_seed: 0
 init_weights_seed: 0
 
 # AdamW optimizer parameters
+# We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
 adam_b1: 0.9 # Exponential decay rate to track the first moment of past gradients.
 adam_b2: 0.95 # Exponential decay rate to track the second moment of past gradients.
-adam_eps: 1.e-8 # A small constant applied to denominator outside of the square root.
+adam_eps: 1.e-5 # A small constant applied to denominator outside of the square root.
 adam_eps_root: 0. # A small constant applied to denominator inside the square root.
 adam_weight_decay: 0.1 # AdamW Weight decay
 
