@@ -525,7 +525,7 @@ def run_adam():
             'global_parameter_scale': 1,
             'steps': -1,
         }
-        run_name = f'adamw{bname{adamw}}'
+        run_name = f'adamw{bname(adamw)}'
         run_job(run_name, config)
 
     base_run_adam(adamw=True)
