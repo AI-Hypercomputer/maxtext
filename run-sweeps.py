@@ -510,6 +510,27 @@ def run_s28():
     base_run_s26(**kwargs_1, **kwargs_2, mlp_bonus=256*2)
     base_run_s26(**kwargs_1, **kwargs_2, mlp_bonus=256*3)
 
+def run_adam():
+    def base_run_adam(
+        *,
+        adamw = False,
+    ):
+        config = {
+            'adamw' : adamw,
+            'save_period': 1000,
+            'num_slice': 1,
+            'int8_training': False,
+            'per_device_batch_size': 8,
+            'learning_rate': 1.e-3,
+            'global_parameter_scale': 1,
+            'steps': -1,
+        }
+        run_name = f'adamw{bname{adamw}}'
+        run_job(run_name, config)
+
+    base_run_adam(adamw=True)
+    base_run_adam(adamw=False)
+
 
 def main():
     import argparse

@@ -301,15 +301,27 @@ def train_loop(config, state=None):
   )
 
 
-  adam = optax.adam(
+  if config.adamw:
+    adam = optax.adamw(
+        max_utils.create_learning_rate_schedule(
+            learning_rate=config.learning_rate, total_steps=config.learning_rate_schedule_steps
+        ),
+        b1=config.adam_b1,
+        b2=config.adam_b2,
+        eps=config.adam_eps,
+        eps_root=config.adam_eps_root,
+        weight_decay=0.1
+    )
+  else:
+      adam = optax.adam(
       max_utils.create_learning_rate_schedule(
           learning_rate=config.learning_rate, total_steps=config.learning_rate_schedule_steps
       ),
       b1=config.adam_b1,
       b2=config.adam_b2,
       eps=config.adam_eps,
-      eps_root=config.adam_eps_root
-  )
+      eps_root=config.adam_eps_root,
+    )
 
   # tx = optax.chain(
   #     optax.chain(
