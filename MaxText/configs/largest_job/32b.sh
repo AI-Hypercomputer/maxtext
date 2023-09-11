@@ -2,6 +2,9 @@ echo "Running 32b.sh"
 # Example command to invoke this script
 # bash MaxText/configs/largest_job/32b.sh
 
+# Stop execution if any command exits with error
+set -e
+
 export OUTPUT_PATH="gs://maxtext-experiments-multipod"
 export DATASET_PATH="gs://maxtext-dataset/"
 
