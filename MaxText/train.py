@@ -220,6 +220,7 @@ def train_loop(config, state=None):
       learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
   )
 
+  # We use AdamW, following Llama2's training details discussed in section 2.2
   tx = optax.adamw(
       max_utils.create_learning_rate_schedule(
           learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
