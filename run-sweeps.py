@@ -12,11 +12,12 @@ args = {
 }
 
 
-def update_yaml_fields(yaml_data, update_dict, allow_new_keys=True):
+def update_yaml_fields(yaml_data, update_dict, allow_new_keys=False):
     yaml_copy=copy.deepcopy(yaml_data)
     for key, value in update_dict.items():
-        if allow_new_keys or key in yaml_copy:
-            yaml_copy[key] = value
+        if not allow_new_keys:
+            assert key in yaml_copy, key
+        yaml_copy[key] = value
     return yaml_copy
 
 
@@ -35,21 +36,14 @@ def bname(b: bool):
     assert b == True or b == False, f'not bool: "{b}"'
     return str(b)[0]
 
-def updated(base, **kwargs):
-    cfg = copy.deepcopy(base)
-    prelen = len(cfg.keys())
-    cfg.update(kwargs)
-    postlen = len(cfg.keys())
-    assert prelen == postlen, (base.keys(), kwargs.keys())
-    return cfg
-
 def run_job(run_name, base_config, **config_updates):
-    maxtext_config = updated(base_config, config_updates)
+    maxtext_config = update_yaml_fields(base_config, config_updates)
     model_size = maxtext_config['global_parameter_scale']
     with open('MaxText/configs/base.yml', 'r') as file:
         base_yml = yaml.safe_load(file)
 
     yml = update_yaml_fields(base_yml, maxtext_config)
+
     num_slice = yml['num_slice']
     tokens_per_seq = yml['max_target_length']
     seqs_per_chip = yml['per_device_batch_size']
@@ -522,7 +516,8 @@ def run_s30():
         dlhs_int8_pv = True,
         drhs_int8_pv = False,
         max_target_length = 2048,
-        weight_decay = 0.1,
+        adam_weight_decay = 0.1,
+        aqt_use_fwd_quant = False,
     )
     run_job("baseline", baseline)
     run_job("lr_2p0", baseline, learning_rate=6.0e-4)
@@ -532,13 +527,11 @@ def run_s30():
     run_job("ns_0p5", baseline, num_slice=2)
     run_job("ns_1p5", baseline, num_slice=6)
     run_job("seq_0p5", baseline, max_target_length=1024)
-    run_job("wd_0p3", baseline, weight_decay=0.03)
-    run_job("wd_3p0", baseline, weight_decay=0.3)
+    run_job("wd_0p3", baseline, adam_weight_decay=0.03)
+    run_job("wd_3p0", baseline, adam_weight_decay=0.3)
     run_job("gc_0p1", baseline, clip_by_global_norm=0.1)
     run_job("pv_F", baseline, fwd_int8_pv=False, dlhs_int8_pv=False)
-
-    # 1 use_fwd_quant {T, F}
-
+    run_job("fwdq_T", baseline, aqt_use_fwd_quant=True)
 
 
 def base_run_s24(

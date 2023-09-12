@@ -134,6 +134,7 @@ def dot_product_attention(query: Array,
       cfg.drhs_int8_qk,
       use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
       rng_type=cfg.aqt_rng_type,
+      use_fwd_quant=cfg.aqt_use_fwd_quant,
     )
     aqt_dot_general = aqt.make_dot_general(aqt_cfg)
     context = aqt.Context(key=aqt_rng, train_step=None)
@@ -171,6 +172,7 @@ def dot_product_attention(query: Array,
       cfg.drhs_int8_pv,
       use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
       rng_type=cfg.aqt_rng_type,
+      use_fwd_quant=cfg.aqt_use_fwd_quant,
     )
     aqt_dot_general = aqt.make_dot_general(aqt_cfg)
     context = aqt.Context(key=aqt_rng, train_step=None)
@@ -270,6 +272,7 @@ class DenseGeneral(nn.Module):
           cfg.drhs_int8,
           use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
           rng_type=cfg.aqt_rng_type,
+          use_fwd_quant=cfg.aqt_use_fwd_quant,
         )
         aqt_dot_general = aqt.make_dot_general(aqt_cfg)
         context = aqt.Context(key=aqt_key, train_step=None)

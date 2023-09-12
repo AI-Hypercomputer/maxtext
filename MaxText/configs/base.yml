@@ -58,6 +58,7 @@ quantize_logits: True
 
 # There is no quality here, use just to measure performance headroom.
 aqt_use_dummy_static_bound: False
+aqt_use_fwd_quant: False
 aqt_rng_type: "jax.uniform"
 
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes

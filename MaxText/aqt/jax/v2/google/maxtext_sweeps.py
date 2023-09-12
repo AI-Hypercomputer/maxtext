@@ -33,9 +33,8 @@ def fully_quantized(
   # Surprising: lhs quantization determines what drhs can do.
   if fwd_bits is not None:
     # Only rhs is accepting MultiTensor.
-    cfg.drhs.rhs.use_fwd_quant = use_fwd_quant
-  if fwd_bits is not None:
     cfg.dlhs.rhs.use_fwd_quant = use_fwd_quant
+    cfg.drhs.rhs.use_fwd_quant = use_fwd_quant
 
   # Stochastic Rounding
   # These 3 variables are used to ensure we don't mix
@@ -73,12 +72,13 @@ def sweep1(
     drhs_int8: bool,
     use_dummy_static_bound: bool=False,
     rng_type: str = 'jax.uniform',
+    use_fwd_quant=False,
 ) -> DotGeneral:
   fqt_config = fully_quantized(
       fwd_bits=8 if fwd_int8 else None,
       dlhs_bits=8 if dlhs_int8 else None,
       drhs_bits=8 if drhs_int8 else None,
-      use_fwd_quant=False,
+      use_fwd_quant=use_fwd_quant,
       use_stochastic_rounding=None,
       vjp_lhs_stochastic_rounding=True,
       vjp_rhs_stochastic_rounding=False,
