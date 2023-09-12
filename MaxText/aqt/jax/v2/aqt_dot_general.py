@@ -21,7 +21,7 @@
 # - ra - remaining axes
 
 
-# pylint: disable=g-explicit-bool-comparison
+# pylint: skip-file
 
 import copy
 import functools

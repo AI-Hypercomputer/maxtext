@@ -17,6 +17,7 @@ DotDimensionNumbers = lax.DotDimensionNumbers
 
 _TMP_DTYPE = jnp.float32
 
+# pylint: skip-file
 
 class Rounding(enum.Enum):
   """Specifies rounding mode to use."""
