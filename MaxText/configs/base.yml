@@ -59,7 +59,7 @@ logits_via_embedding: True  # NOTE: this is True just for testing.
 remat_policy: 'minimal'
 scan_layers: True
 param_scan_axis: 1
-enable_flash_attention: False
+enable_flash_attention: False # WARNING: Does not support attention_bias
 
 record_internal_nn_metrics: 0
 

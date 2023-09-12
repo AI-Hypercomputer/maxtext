@@ -273,6 +273,54 @@ class MultiHeadDotProductAttention(nn.Module):
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
   float32_logits: bool = False  # computes logits in float32 for stability.
 
+
+  def apply_attention(self, query, key, value, enable_flash_attention, 
+                      attention_bias, dropout_rng, deterministic):
+    if enable_flash_attention:
+      # reshaped to ('batch', 'heads', 'length', 'kv')
+      query = jax.numpy.transpose(query, axes = (0,2,1,3))
+      key = jax.numpy.transpose(key, axes = (0,2,1,3))
+      value = jax.numpy.transpose(value, axes = (0,2,1,3))
+      @functools.partial(shard_map, mesh = self.mesh, in_specs = (
+          P(('data','fsdp'),'tensor'),
+          P(('data','fsdp'),'tensor'),
+          P(('data','fsdp'),'tensor'),
+      ), out_specs = P(('data','fsdp'),'tensor'), check_rep=False)
+      def wrap_flash_attention(query, key, value):
+        return flash_attention.flash_attention(
+              query,
+              key,
+              value,
+              causal = False,
+              block_sizes = flash_attention.BlockSizes(
+                  block_q=512,
+                  block_k_major=512,
+                  block_k=512,
+                  block_b=1,
+                  block_q_major_dkv=512,
+                  block_k_major_dkv=512,
+                  block_k_dkv=512,
+                  block_q_dkv=512,
+                  block_k_major_dq=512,
+                  block_k_dq=512,
+                  block_q_dq=512,
+              )
+            )
+      x = wrap_flash_attention(query, key, value)
+      x = jax.numpy.transpose(x, axes = (0,2,1,3))
+    else:
+      x = dot_product_attention(
+          query,
+          key,
+          value,
+          bias=attention_bias,
+          dropout_rng=dropout_rng,
+          dropout_rate=self.dropout_rate,
+          deterministic=deterministic,
+          dtype=self.dtype,
+          float32_logits=self.float32_logits)
+    return x
+
   @nn.compact
   def __call__(self,
                inputs_q: Array,
@@ -311,7 +359,6 @@ class MultiHeadDotProductAttention(nn.Module):
       output of shape `[batch, length, q_features]`.
     """
     cfg = self.config
-    mesh = self.mesh
 
     projection = functools.partial(
         DenseGeneral,
@@ -435,49 +482,7 @@ class MultiHeadDotProductAttention(nn.Module):
       dropout_rng = self.make_rng('dropout')
 
     # Apply attention.
-    if cfg.enable_flash_attention:
-      # reshaped to ('batch', 'heads', 'length', 'kv')
-      query = jax.numpy.transpose(query, axes = (0,2,1,3))
-      key = jax.numpy.transpose(key, axes = (0,2,1,3))
-      value = jax.numpy.transpose(value, axes = (0,2,1,3))
-      @functools.partial(shard_map, mesh = mesh, in_specs = (
-          P(('data','fsdp'),),
-          P(('data','fsdp'),),
-          P(('data','fsdp'),),
-      ), out_specs = P(('data','fsdp'),), check_rep=False)
-      def wrap_flash_attention(query, key, value):
-        return flash_attention.flash_attention(
-              query,
-              key,
-              value,
-              causal = False,
-              block_sizes = flash_attention.BlockSizes(
-                  block_q=512,
-                  block_k_major=512,
-                  block_k=512,
-                  block_b=1,
-                  block_q_major_dkv=512,
-                  block_k_major_dkv=512,
-                  block_k_dkv=512,
-                  block_q_dkv=512,
-                  block_k_major_dq=512,
-                  block_k_dq=512,
-                  block_q_dq=512,
-              )
-            )
-      x = wrap_flash_attention(query, key, value)
-      x = jax.numpy.transpose(x, axes = (0,2,1,3))
-    else:
-      x = dot_product_attention(
-          query,
-          key,
-          value,
-          bias=attention_bias,
-          dropout_rng=dropout_rng,
-          dropout_rate=self.dropout_rate,
-          deterministic=deterministic,
-          dtype=self.dtype,
-          float32_logits=self.float32_logits)
+    x = self.apply_attention(query, key, value, cfg.enable_flash_attention, attention_bias, dropout_rng, deterministic)
 
     # Back to the original inputs dimensions.
     out = DenseGeneral(
