@@ -147,7 +147,7 @@ def decode_loop(config, state=None):
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
-  sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
+  _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager)
 
