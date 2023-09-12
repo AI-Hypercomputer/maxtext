@@ -75,10 +75,12 @@ def dot_product_attention(query: Array,
                           value: Array,
                           bias: Optional[Array] = None,
                           dropout_rng: Optional[PRNGKey] = None,
+                          aqt_rng: Optional[PRNGKey] = None,
                           dropout_rate: float = 0.,
                           deterministic: bool = False,
                           dtype: DType = jnp.float32,
-                          float32_logits: bool = False):
+                          float32_logits: bool = False,
+                          cfg = None):
   """Computes dot-product attention given query, key, and value.
 
   This is the core function for applying attention based on
@@ -123,8 +125,15 @@ def dot_product_attention(query: Array,
   query = LayerNorm(dtype=dtype, name='query_layer_norm', kernel_axes = ('heads',))(query)
   key = LayerNorm(dtype=dtype, name='key_layer_norm', kernel_axes = ('heads',))(key)
 
-  # `attn_weights`: [batch, num_heads, q_length, kv_length]
-  attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
+  # QK Product, a.k.a `attn_weights`: [batch, num_heads, q_length, kv_length]
+  if not cfg.int8_training:
+    attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
+  else: 
+    aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8_qk, cfg.dlhs_int8_qk, cfg.drhs_int8_qk)
+    aqt_dot_general = aqt.make_dot_general(aqt_cfg)
+    context = aqt.Context(key=aqt_rng, train_step=None)
+    aqt_dot_general = functools.partial(aqt_dot_general, context=context)
+    attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key, _dot_general=aqt_dot_general)
 
   # Apply attention bias: masking, dropout, proximity bias, etc.
   if bias is not None:
@@ -146,8 +155,14 @@ def dot_product_attention(query: Array,
     attn_weights = attn_weights * multiplier
 
   # Take the linear combination of `value`.
-  return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
-
+  if not cfg.int8_training:
+    return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
+  else: 
+    aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8_pv, cfg.dlhs_int8_pv, cfg.drhs_int8_pv)
+    aqt_dot_general = aqt.make_dot_general(aqt_cfg)
+    context = aqt.Context(key=aqt_rng, train_step=None)
+    aqt_dot_general = functools.partial(aqt_dot_general, context=context)
+    return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value, _dot_general=aqt_dot_general)
 
 dynamic_vector_slice_in_dim = jax.vmap(
     lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
@@ -229,12 +244,21 @@ class DenseGeneral(nn.Module):
     if not cfg.int8_training:
       return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
     else:
-      aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8, cfg.bwd_int8)
-      aqt_dot_general = aqt.make_dot_general(aqt_cfg)
       aqt_key = self.make_rng('aqt')
-      context = aqt.Context(key=aqt_key, train_step=None)
-
-      return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
+      if cfg.use_dqdg:
+        aqt_dq_dg = aqt_dq.make_aqt_dq_dg()
+        return aqt_dq_dg(aqt_key, inputs, kernel, ((axis, contract_ind), ((), ())))
+      else:
+        aqt_cfg = maxtext_sweeps.sweep1(
+          cfg.fwd_int8,
+          cfg.dlhs_int8,
+          cfg.drhs_int8,
+          use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
+          rng_type=cfg.aqt_rng_type,
+        )
+        aqt_dot_general = aqt.make_dot_general(aqt_cfg)
+        context = aqt.Context(key=aqt_key, train_step=None)
+        return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
 
 def _convert_to_activation_function(
     fn_or_string: Union[str, Callable]) -> Callable:
@@ -311,6 +335,7 @@ class MultiHeadDotProductAttention(nn.Module):
       x = wrap_flash_attention(query, key, value)
       x = jax.numpy.transpose(x, axes = (0,2,1,3))
     else:
+      aqt_rng = self.make_rng('aqt')
       x = dot_product_attention(
           query,
           key,
@@ -318,9 +343,11 @@ class MultiHeadDotProductAttention(nn.Module):
           bias=attention_bias,
           dropout_rng=dropout_rng,
           dropout_rate=self.dropout_rate,
+          aqt_rng=aqt_rng
           deterministic=deterministic,
           dtype=self.dtype,
-          float32_logits=self.float32_logits)
+          float32_logits=self.float32_logits,
+          cfg=cfg)
     return x
 
   @nn.compact
