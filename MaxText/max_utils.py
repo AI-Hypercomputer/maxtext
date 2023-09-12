@@ -236,7 +236,7 @@ def create_learning_rate_schedule(config):
   We take inspiration from Llama2's learning rate (LR) schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
   Learning rate schedule has either two or three parts:
   1) Linear warmup from 0 to [learning_rate] over steps 0 to [learning_rate_schedule_steps * warmup_steps_fraction]
-  2) Cosine decay from [learning_rate] to [learning_rate * cosine_learning_rate_final_fraction] until learning_rate_schedule_steps
+  2) Cosine from [learning_rate] to [learning_rate * cosine_learning_rate_final_fraction] until learning_rate_schedule_steps
   3) Constant learning rate of 0 from learning_rate_schedule_steps to steps.
   The zero learning rate section can be used to more accurately measure the fully trained model's performance.
   """
