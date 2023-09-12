@@ -1,9 +1,9 @@
 # PROJECT=tpu-prod-env-multipod
-PROJECT=tpu-prod-env-vlp-2nic
-# PROJECT=tpu-burn-in-prod-env-multipod
+# PROJECT=tpu-prod-env-vlp-2nic
+PROJECT=tpu-burn-in-prod-env-multipod
 ZONE=us-east5-b
-NUM_SLICES=1
-TPU_TYPE=v5litepod-256
+NUM_SLICES=2
+TPU_TYPE=v5litepod-128
 VERSION=v2-alpha-tpuv5-lite
 BUCKET_NAME=tonyjohnchen-maxtext
 
@@ -11,9 +11,9 @@ iteration=1
 
 for (( i=0; i<$iteration; i++ ));
 do
-    RUN_NAME=startup_time_${NUM_SLICES}slice_${TPU_TYPE}_$(date +%Y-%m-%d-%H-%M-%S)
+    RUN_NAME=vlpdebug_$(date +%Y-%m-%d-%H-%M-%S)
     QR_ID=$RUN_NAME
-    python3 multihost_job.py --COMMAND_TYPE=curl --NUM_SLICES=$NUM_SLICES --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --PROJECT=${PROJECT} --ZONE=${ZONE}\
+    python3 multihost_job.py --COMMAND_TYPE=gcloud --NUM_SLICES=$NUM_SLICES --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --PROJECT=${PROJECT} --ZONE=${ZONE}\
     --TPU_TYPE=$TPU_TYPE --VERSION=$VERSION \
     --COMMAND="bash setup.sh MODE=stable; echo \"Sleeping for 60s\" && sleep 60; \
     TPU_NAME=local JAX_USE_PJRT_C_API_ON_TPU=1 \
