@@ -107,6 +107,7 @@ eval_split: 'validation'
 per_device_batch_size: 12.0
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
+dataset_type: c4 # must be c4 or synthetic
 
 # Training loop
 steps: 150_001
