@@ -35,8 +35,16 @@ def bname(b: bool):
     assert b == True or b == False, f'not bool: "{b}"'
     return str(b)[0]
 
+def updated(base, **kwargs):
+    cfg = copy.deepcopy(base)
+    prelen = len(cfg.keys())
+    cfg.update(kwargs)
+    postlen = len(cfg.keys())
+    assert prelen == postlen, (base.keys(), kwargs.keys())
+    return cfg
 
-def run_job(run_name, maxtext_config):
+def run_job(run_name, base_config, **config_updates):
+    maxtext_config = updated(base_config, config_updates)
     model_size = maxtext_config['global_parameter_scale']
     with open('MaxText/configs/base.yml', 'r') as file:
         base_yml = yaml.safe_load(file)
@@ -495,6 +503,42 @@ def run_s29():
     base_run_s24(**kwargs(False, 1, False))
     base_run_s24(**kwargs(True, 1, False))
     base_run_s24(**kwargs(True, 1, True))
+
+
+
+# This is 16B run searching for good stability.
+def run_s30():
+    # (GBS = 8B)
+    baseline = dict(
+        num_slice = 4,
+        per_device_batch_size = 4,
+        fwd_int8 = True,
+        dlhs_int8 = True,
+        drhs_int8 = False,
+        clip_by_global_norm = 1.0,
+        learning_rate = 3.0e-4,
+        global_parameter_scale = 16,
+        fwd_int8_pv = True,
+        dlhs_int8_pv = True,
+        drhs_int8_pv = False,
+        max_target_length = 2048,
+        weight_decay = 0.1,
+    )
+    run_job("baseline", baseline)
+    run_job("lr_2p0", baseline, learning_rate=6.0e-4)
+    run_job("lr_0p5", baseline, learning_rate=1.5e-4)
+    run_job("gbs_0p5", baseline, per_device_batch_size=2)
+    run_job("gbs_1p5", baseline, per_device_batch_size=6)
+    run_job("ns_0p5", baseline, num_slice=2)
+    run_job("ns_1p5", baseline, num_slice=6)
+    run_job("seq_0p5", baseline, max_target_length=1024)
+    run_job("wd_0p3", baseline, weight_decay=0.03)
+    run_job("wd_3p0", baseline, weight_decay=0.3)
+    run_job("gc_0p1", baseline, clip_by_global_norm=0.1)
+    run_job("pv_F", baseline, fwd_int8_pv=False, dlhs_int8_pv=False)
+
+    # 1 use_fwd_quant {T, F}
+
 
 
 def base_run_s24(
