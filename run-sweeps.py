@@ -326,55 +326,6 @@ def run_s23():
             run(int8=int8, bs=bs, seq=1024, pods=1)
 
 
-def base_run_s24(
-        *,
-        fwd = True,
-        dlhs = True,
-        drhs = False,
-        clip_global = 0.3,
-        clip_by_ucb = 0, # 0 or 1
-        lr_mul = 1.0,  # This is a small delta to LR, meant as a 'seed' replacement
-        load = "",
-        load_step = -1,
-        num_slice = 4,
-        steps = -1,
-        quant_pv = False,
-        aqt_use_dummy_static_bound = False,
-        aqt_rng_type: str = 'jax.uniform',
-):
-    config = {
-        # For seq16
-        # 'load_from_other_directory': f'gs://maxtext-experiments-multipod/int8-s18_8B_16seq_warmup-a1-yep/checkpoints',
-        # 'load_from_other_directory_step': 1000,
-        'save_period': 1000,
-        # 'load_from_other_directory': 'gs://maxtext-experiments-multipod/int8-s16-a1-TTT-checkpoint_baseline-4s/checkpoints',
-        # 'load_from_other_directory_step': 4000, # end of warmup
-        'num_slice': num_slice,
-        'per_device_batch_size': 8,
-        'fwd_int8': fwd,
-        'dlhs_int8': dlhs,
-        'drhs_int8': drhs,
-        'clip_by_global_norm': clip_global,
-        'clip_by_ucb': clip_by_ucb,
-        'learning_rate': 1.e-3 * lr_mul,
-        'global_parameter_scale': 16,
-        'steps': steps,
-        'fwd_int8_pv' : fwd and quant_pv,
-        'dlhs_int8_pv' : dlhs and quant_pv,
-        'drhs_int8_pv' : drhs and quant_pv,
-        'aqt_use_dummy_static_bound': aqt_use_dummy_static_bound,
-        'aqt_rng_type': aqt_rng_type,
-    }
-    if load != "":
-        # config['load_from_other_directory'] = f'gs://maxtext-experiments-multipod/int8-s24_prefix-a1-FFF-clip03-ucb0-lr010-clT/checkpoints'
-        # config['load_from_other_directory_step'] = 1000
-        config['load_from_other_directory'] = f'gs://maxtext-experiments-multipod/{load}/checkpoints'
-        config['load_from_other_directory_step'] = load_step
-    run_name = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}-clip{int(clip_global*10):02}-ucb{clip_by_ucb}-lr{int(lr_mul*10):03}-load{bname(load!="")}-ns{num_slice}'
-    run_name += f'-rng_{aqt_rng_type[0]}-dummy{bname(aqt_use_dummy_static_bound)}-pv{bname(quant_pv)}'
-    run_job(run_name, config)
-
-
 # Generating from-scratch runs testing FFF vs TTF and ucb vs gc
 def run_s24_prefix():
     base_run_s24(fwd=True, dlhs=True, drhs=False, clip_global=0.3, clip_by_ucb=0)
@@ -544,6 +495,55 @@ def run_s29():
     base_run_s24(**kwargs(False, 1, False))
     base_run_s24(**kwargs(True, 1, False))
     base_run_s24(**kwargs(True, 1, True))
+
+
+def base_run_s24(
+        *,
+        fwd = True,
+        dlhs = True,
+        drhs = False,
+        clip_global = 0.3,
+        clip_by_ucb = 0, # 0 or 1
+        lr_mul = 1.0,  # This is a small delta to LR, meant as a 'seed' replacement
+        load = "",
+        load_step = -1,
+        num_slice = 4,
+        steps = -1,
+        quant_pv = False,
+        aqt_use_dummy_static_bound = False,
+        aqt_rng_type: str = 'jax.uniform',
+):
+    config = {
+        # For seq16
+        # 'load_from_other_directory': f'gs://maxtext-experiments-multipod/int8-s18_8B_16seq_warmup-a1-yep/checkpoints',
+        # 'load_from_other_directory_step': 1000,
+        'save_period': 1000,
+        # 'load_from_other_directory': 'gs://maxtext-experiments-multipod/int8-s16-a1-TTT-checkpoint_baseline-4s/checkpoints',
+        # 'load_from_other_directory_step': 4000, # end of warmup
+        'num_slice': num_slice,
+        'per_device_batch_size': 8,
+        'fwd_int8': fwd,
+        'dlhs_int8': dlhs,
+        'drhs_int8': drhs,
+        'clip_by_global_norm': clip_global,
+        'clip_by_ucb': clip_by_ucb,
+        'learning_rate': 1.e-3 * lr_mul,
+        'global_parameter_scale': 16,
+        'steps': steps,
+        'fwd_int8_pv' : fwd and quant_pv,
+        'dlhs_int8_pv' : dlhs and quant_pv,
+        'drhs_int8_pv' : drhs and quant_pv,
+        'aqt_use_dummy_static_bound': aqt_use_dummy_static_bound,
+        'aqt_rng_type': aqt_rng_type,
+    }
+    if load != "":
+        # config['load_from_other_directory'] = f'gs://maxtext-experiments-multipod/int8-s24_prefix-a1-FFF-clip03-ucb0-lr010-clT/checkpoints'
+        # config['load_from_other_directory_step'] = 1000
+        config['load_from_other_directory'] = f'gs://maxtext-experiments-multipod/{load}/checkpoints'
+        config['load_from_other_directory_step'] = load_step
+    run_name = f'{bname(fwd)}{bname(dlhs)}{bname(drhs)}-clip{int(clip_global*10):02}-ucb{clip_by_ucb}-lr{int(lr_mul*10):03}-load{bname(load!="")}-ns{num_slice}'
+    run_name += f'-rng_{aqt_rng_type[0]}-dummy{bname(aqt_use_dummy_static_bound)}-pv{bname(quant_pv)}'
+    run_job(run_name, config)
 
 
 def main():
