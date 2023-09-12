@@ -8,9 +8,9 @@ function deljobs() {
   echo
   echo "run these:"
   for job in ${grepped}; do
-    cmd="yes | gcloud alpha compute tpus queued-resources delete --zone=$2 --project=$1 $job"
+    cmd="yes | gcloud alpha compute tpus queued-resources delete --zone=$2 --project=$1 $job &"
     echo "$cmd"
-    # eval "$cmd" &
+    # eval "$cmd"
     # sleep 1
   done
   echo
