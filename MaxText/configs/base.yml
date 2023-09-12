@@ -156,7 +156,8 @@ eos_id: 2 # sentencepiece default
 # Prompt for language model sampling.
 prompt: "I love to "
 
-enable_profiler: False
+# Train loop profiler saves only for 2 steps, so no problem with the default.
+enable_profiler: True
 # If enable_checkpointing is true, an asynchronous checkpointer will be used if
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the sychronous one.

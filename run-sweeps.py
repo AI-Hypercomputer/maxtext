@@ -383,16 +383,6 @@ def run_s24_prefix():
     base_run_s24(fwd=False, dlhs=False, drhs=False, clip_global=0.0, clip_by_ucb=1)
 
 
-# This is an extension to s24 to see the effect of few more changes on a big model.
-# Questions inline.
-def run_s24_2():
-    # Add pvTTF to our recipe,
-    base_run_s24(steps=200) # check that is identical with s24_prefix
-    base_run_s24(aqt_rng_type='custom-1') # check that is identical with s24_prefix
-    base_run_s24(quant_pv=True) # measure quality and pref of quant_pv
-    base_run_s24(aqt_use_dummy_static_bound=True, steps=200) # value of local_aqt on 4 pods
-
-
 def run_s24_prefix_reload():
     base_run_s24(fwd=True, dlhs=True, drhs=False, clip_global=0.3, clip_by_ucb=0, load="int8-s24_prefix-a1-TTF-clip03-ucb0-lr010-clT", load_step=25000)
 
@@ -466,6 +456,8 @@ def base_run_s26(
 #  - Increase seq len to 2k.
 #  - Make the training longer to take fill_ratio into account.
 #  - Use 8 slices.
+# Results:
+#  - these trainings got maybe halfway. I think the processes crashed or something.
 def run_s26_prefix():
     base_run_s26(fwd=True, dlhs=True, drhs=False, clip_global=0.3, clip_by_ucb=0)
     base_run_s26(fwd=False, dlhs=False, drhs=False, clip_global=0.3, clip_by_ucb=0)
@@ -509,6 +501,29 @@ def run_s28():
     base_run_s26(**kwargs_1, **kwargs_2, mlp_bonus=256*1)
     base_run_s26(**kwargs_1, **kwargs_2, mlp_bonus=256*2)
     base_run_s26(**kwargs_1, **kwargs_2, mlp_bonus=256*3)
+
+
+# This is an extension to s24 to see the effect of few more changes on a big model.
+# Questions inline.
+def run_s24_2():
+    # Perf: https://screenshot.googleplex.com/9jRDVdRDCNwTmEH
+    # Loss: https://screenshot.googleplex.com/9nRapGgKDP6qgVF
+
+    # Q: check that is identical with s24_prefix
+    base_run_s24(steps=200)
+    # It wa identical.
+
+    # Q: custom-1 RNG
+    base_run_s24(aqt_rng_type='custom-1')
+    # custom-1 RNG increases the finall loss loss from 0.005 to 0.008 and speeds up only 1.8%
+
+    # Q: Quality and pref of quant_pv?
+    base_run_s24(quant_pv=True)
+    # Good quality, no-op on perf, but adds optimization opportunity.
+
+    # Q: Perf cost of calibration?
+    base_run_s24(aqt_use_dummy_static_bound=True, steps=200)
+    # Not calibrating at all speeds up ONLY 1.7% (shock for me).
 
 
 def main():
