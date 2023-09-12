@@ -27,8 +27,7 @@ import optax
 
 from layers import Transformer
 import pyconfig
-from input_pipeline import get_datasets
-from input_pipeline import preprocess_dataset
+from input_pipeline import create_data_iterator_with_tokenizer
 import max_utils
 import temperature_sampler
 
@@ -148,17 +147,7 @@ def decode_loop(config, state=None):
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
-  # Set up datasets.
-  train_ds, eval_ds = get_datasets(
-      config=config,
-  )
-
-  _, _, _, sp_tokenizer = preprocess_dataset(
-    config,
-    mesh,
-    train_ds, eval_ds,
-    vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
-  )
+  sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager)
 

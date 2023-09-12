@@ -37,9 +37,7 @@ from tensorboardX import SummaryWriter
 
 from layers import Transformer
 import pyconfig
-import tensorflow_datasets as tfds
-from input_pipeline import get_datasets
-from input_pipeline import preprocess_dataset
+from input_pipeline import create_data_iterator_with_tokenizer
 import max_utils
 import checkpointing
 
@@ -235,21 +233,7 @@ def train_loop(config, state=None):
   )
 
 
-  # Set up datasets.
-  read_config = tfds.ReadConfig(
-    shuffle_seed = config.data_shuffle_seed,
-  )
-  train_ds, eval_ds = get_datasets(
-      config=config,
-      read_config = read_config,
-  )
-  train_iter, _, _, _ = preprocess_dataset(
-    config,
-    mesh,
-    train_ds, eval_ds,
-    vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
-    data_shuffle_seed = config.data_shuffle_seed,
-  )
+  data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   data_pspec = P(*config.data_sharding)
@@ -275,7 +259,7 @@ def train_loop(config, state=None):
   running_gcs_metrics = [] if config.gcs_metrics else None
 
   for step in np.arange(get_first_step(state), config.steps):
-    example_batch = load_next_batch(train_iter, example_batch, config)
+    example_batch = load_next_batch(data_iterator, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics, nextrng = p_train_step(
           model, config, state, example_batch, nextrng
