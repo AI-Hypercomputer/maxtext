@@ -19,6 +19,10 @@
 
 from aqt.jax.v2 import aqt_dot_general as aqt
 from aqt.jax.v2.google import maxtext_sweeps
+from jax.experimental.pallas.ops.tpu import flash_attention
+from jax.experimental.shard_map import shard_map
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 
 import dataclasses
 import functools
@@ -263,10 +267,61 @@ class MultiHeadDotProductAttention(nn.Module):
   num_heads: int
   head_dim: int
   config: Config
+  mesh: Mesh
   dtype: DType = jnp.float32
   dropout_rate: float = 0.
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
   float32_logits: bool = False  # computes logits in float32 for stability.
+
+
+  def apply_attention(self, query, key, value, enable_flash_attention,
+                      attention_bias, dropout_rng, deterministic):
+    """ Apply Attention
+    """
+    if enable_flash_attention:
+      # reshaped to ('batch', 'heads', 'length', 'kv')
+      query = jax.numpy.transpose(query, axes = (0,2,1,3))
+      key = jax.numpy.transpose(key, axes = (0,2,1,3))
+      value = jax.numpy.transpose(value, axes = (0,2,1,3))
+      @functools.partial(shard_map, mesh = self.mesh, in_specs = (
+          P(('data','fsdp'),'tensor'),
+          P(('data','fsdp'),'tensor'),
+          P(('data','fsdp'),'tensor'),
+      ), out_specs = P(('data','fsdp'),'tensor'), check_rep=False)
+      def wrap_flash_attention(query, key, value):
+        return flash_attention.flash_attention(
+              query,
+              key,
+              value,
+              causal = False,
+              block_sizes = flash_attention.BlockSizes(
+                  block_q=512,
+                  block_k_major=512,
+                  block_k=512,
+                  block_b=1,
+                  block_q_major_dkv=512,
+                  block_k_major_dkv=512,
+                  block_k_dkv=512,
+                  block_q_dkv=512,
+                  block_k_major_dq=512,
+                  block_k_dq=512,
+                  block_q_dq=512,
+              )
+            )
+      x = wrap_flash_attention(query, key, value)
+      x = jax.numpy.transpose(x, axes = (0,2,1,3))
+    else:
+      x = dot_product_attention(
+          query,
+          key,
+          value,
+          bias=attention_bias,
+          dropout_rng=dropout_rng,
+          dropout_rate=self.dropout_rate,
+          deterministic=deterministic,
+          dtype=self.dtype,
+          float32_logits=self.float32_logits)
+    return x
 
   @nn.compact
   def __call__(self,
@@ -429,16 +484,7 @@ class MultiHeadDotProductAttention(nn.Module):
       dropout_rng = self.make_rng('dropout')
 
     # Apply attention.
-    x = dot_product_attention(
-        query,
-        key,
-        value,
-        bias=attention_bias,
-        dropout_rng=dropout_rng,
-        dropout_rate=self.dropout_rate,
-        deterministic=deterministic,
-        dtype=self.dtype,
-        float32_logits=self.float32_logits)
+    x = self.apply_attention(query, key, value, cfg.enable_flash_attention, attention_bias, dropout_rng, deterministic)
 
     # Back to the original inputs dimensions.
     out = DenseGeneral(
@@ -945,6 +991,7 @@ def make_decoder_mask(decoder_target_tokens: Array,
 class DecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
   config: Config
+  mesh: Mesh
 
   @nn.compact
   def __call__(self,
@@ -954,7 +1001,7 @@ class DecoderLayer(nn.Module):
                decode,
                max_decode_length):
     cfg = self.config
-
+    mesh = self.mesh
     # Relative position embedding as attention biases.
     l = max_decode_length if decode and max_decode_length else inputs.shape[-2]
     decoder_bias = RelativePositionBiases(
@@ -981,7 +1028,8 @@ class DecoderLayer(nn.Module):
         head_dim=cfg.head_dim,
         dropout_rate=cfg.dropout_rate,
         name='self_attention',
-        config=cfg)(
+        config=cfg,
+        mesh = mesh)(
             lnx,
             lnx,
             decoder_mask,
@@ -1026,6 +1074,7 @@ class Decoder(nn.Module):
   """A stack of decoder layers as a part of an encoder-decoder architecture."""
   config: Config
   shared_embedding: nn.Module
+  mesh: Mesh
 
   @nn.compact
   def __call__(self,
@@ -1036,6 +1085,7 @@ class Decoder(nn.Module):
                decode=False,
                max_decode_length=None):
     cfg = self.config
+    mesh = self.mesh
     assert decoder_input_tokens.ndim == 2  # [batch, len]
 
     # [batch, length] -> [batch, length, emb_dim]
@@ -1083,14 +1133,14 @@ class Decoder(nn.Module):
                    nn.broadcast),
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'})(
-              config=cfg,
+              config=cfg, mesh=mesh,
               name='decoder')(y, decoder_mask,
                               deterministic, decode, max_decode_length)
     else:
       for lyr in range(cfg.num_decoder_layers):
         # [batch, length, emb_dim] -> [batch, length, emb_dim]
         y = BlockLayer(
-            config=cfg, name=f'layers_{lyr}')(
+            config=cfg, mesh = mesh, name=f'layers_{lyr}')(
                 y,
                 decoder_mask,
                 deterministic,
@@ -1124,10 +1174,12 @@ class Transformer(nn.Module):
   """An decoder-only Transformer model."""
   # pylint: disable=attribute-defined-outside-init
   config: Config
+  mesh: Mesh
 
   def setup(self):
     """Initialize shared_embedding, decoder"""
     cfg = self.config
+    mesh = self.mesh
     self.shared_embedding = Embed(
         num_embeddings=cfg.vocab_size,
         features=cfg.emb_dim,
@@ -1137,7 +1189,7 @@ class Transformer(nn.Module):
         name='token_embedder',
         config=cfg)
 
-    self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding)
+    self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh = mesh)
 
   def __call__(
       self,
