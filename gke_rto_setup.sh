@@ -1,5 +1,8 @@
 echo "Running gke_rto_setup.sh..."
 
+# Stop execution if any command exits with error
+set -e
+
 echo "Adjust RTO and apply non cache copy"
 first_line_res=$(ip route show | head -n 1)
 if [[ "$(echo "$first_line_res" | grep "rto_min lock 5ms" | wc -l)" -eq 0 ]]; then
