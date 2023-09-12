@@ -26,6 +26,8 @@ import os
 jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+XLA_DUMP_DIR="/tmp/xla_dumps"
+os.environ["XLA_FLAGS"]=f"--xla_dump_to={XLA_DUMP_DIR}"
 print(f"Found {jax.device_count()} devices.")
 
 from typing import Sequence
@@ -409,12 +411,17 @@ def train_loop(config, state=None):
 
     # Start profiling at end of first step to avoid compilation.
     # Move before for loop to include.
+    if step == 0:
+      gcs_xla_destination = os.path.join(config.base_output_directory, config.run_name)
+      max_utils.move_local_dir_to_gcs(XLA_DUMP_DIR, gcs_xla_destination)
+
     if step == 4:
       max_utils.activate_profiler(config)
     if step == 6:
       max_utils.deactivate_profiler(config)
 
   writer.close()
+
   return state
 
 def main(argv: Sequence[str]) -> None:
