@@ -526,6 +526,26 @@ def run_s24_2():
     # Not calibrating at all speeds up ONLY 1.7% (shock for me).
 
 
+# Run to debug performance.
+def run_s29():
+    def kwargs(quant, num_slice, aqt_use_dummy_static_bound):
+        return {
+            "fwd": quant,
+            "dlhs": quant,
+            "drhs": False,
+            "num_slice": num_slice,
+            "steps": 10,
+            "quant_pv": True,
+            "aqt_use_dummy_static_bound": aqt_use_dummy_static_bound,
+        }
+    base_run_s24(**kwargs(False, 2, False))
+    base_run_s24(**kwargs(True, 2, False))
+    base_run_s24(**kwargs(True, 2, True))
+    base_run_s24(**kwargs(False, 1, False))
+    base_run_s24(**kwargs(True, 1, False))
+    base_run_s24(**kwargs(True, 1, True))
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='TPU configuration options')
