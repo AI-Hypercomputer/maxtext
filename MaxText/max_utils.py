@@ -71,6 +71,11 @@ def deactivate_profiler(config):
   if config.enable_profiler:
     jax.profiler.stop_trace()
 
+def move_local_dir_to_gcs(local_dir, gcs_path):
+  """ Only worker 0 slice 0 will execute the move command """
+  if jax.process_index() == 0:
+    subprocess.run(["gsutil", "-m", "cp", "-r", local_dir, gcs_path])
+
 def _prepare_metrics_for_json(metrics, step, run_name):
   """Converts metric dictionary into json supported types (e.g. float)"""
   metrics_dict = {}
