@@ -412,12 +412,13 @@ def train_loop(config, state=None):
     # Start profiling at end of first step to avoid compilation.
     # Move before for loop to include.
     if step == 0:
+      gcs_xla_destination = os.path.join(config.base_output_directory, config.run_name)
+      max_utils.move_local_dir_to_gcs(XLA_DUMP_DIR, gcs_xla_destination)
       max_utils.activate_profiler(config)
 
   max_utils.deactivate_profiler(config)
   writer.close()
-  gcs_xla_destination = os.path.join(config.base_output_directory, config.run_name)
-  max_utils.move_local_dir_to_gcs(XLA_DUMP_DIR, gcs_xla_destination)
+
   return state
 
 def main(argv: Sequence[str]) -> None:
