@@ -105,13 +105,16 @@ def run_job(run_name, maxtext_config):
     # 'base_output_directory':'gs://max-experiments',
     # 'dataset_path':'gs://maxtext-dataset',
 
-    print("Running experiment: ", run_name)
+    if not args['names']:
+        print("Running experiment: ", run_name)
     mhj_args = []
     for key in experiment_mhj.keys():
         mhj_args.append(key)
         mhj_args.append(str(experiment_mhj[key]))
 
-    if args['dryrun']:
+    if args['names']:
+        print(run_name)
+    elif args['dryrun']:
         import pprint
         pprint.pprint(yml)
         pprint.pprint(experiment_mhj)
@@ -568,6 +571,7 @@ def main():
     parser.add_argument('--tpu', type=str, default='v5')
     parser.add_argument('--sweep', type=str, default='')
     parser.add_argument('--attempt', type=str, default='')
+    parser.add_argument('--names',type =bool, default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--jax_14_cl', type=bool, default=True, action=argparse.BooleanOptionalAction)
     pargs = parser.parse_args()
     global args
