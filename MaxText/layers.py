@@ -348,7 +348,7 @@ class MultiHeadDotProductAttention(nn.Module):
           deterministic=deterministic,
           dtype=self.dtype,
           float32_logits=self.float32_logits,
-          cfg=cfg)
+          cfg=self.config)
     return x
 
   @nn.compact
