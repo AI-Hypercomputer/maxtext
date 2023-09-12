@@ -39,7 +39,7 @@ gcs_metrics: False
 
 # Activation dtypes.
 dtype: "bfloat16"
-int8_training: True
+int8_training: False
 # The following flags will only have effect when int8_training is True
 use_dqdg: False
 fwd_int8: True
