@@ -274,8 +274,10 @@ class MultiHeadDotProductAttention(nn.Module):
   float32_logits: bool = False  # computes logits in float32 for stability.
 
 
-  def apply_attention(self, query, key, value, enable_flash_attention, 
+  def apply_attention(self, query, key, value, enable_flash_attention,
                       attention_bias, dropout_rng, deterministic):
+    """ Apply Attention
+    """
     if enable_flash_attention:
       # reshaped to ('batch', 'heads', 'length', 'kv')
       query = jax.numpy.transpose(query, axes = (0,2,1,3))
