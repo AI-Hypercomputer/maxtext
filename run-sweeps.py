@@ -531,6 +531,33 @@ def run_adam():
     base_run_adam(adamw=True)
     base_run_adam(adamw=False)
 
+def run_epsilon():
+    def base_run_epsilon(
+        *,
+        adam_eps = 1e-8,
+
+    ):
+        config = {
+            'adamw' : True,
+            'save_period': 1000,
+            'num_slice': 1,
+            'int8_training': False,
+            'per_device_batch_size': 8,
+            'learning_rate': 1.e-3,
+            'global_parameter_scale': 1,
+            'steps': -1,
+            'adam_eps': adam_eps
+        }
+        adam_eps_scale = int(adam_eps/1e-8)
+        run_name = f'adamEps-{adam_eps_scale}'
+        run_job(run_name, config)
+
+    base_run_epsilon(adam_eps=1e-8) # Previous maxtext default
+    base_run_epsilon(adam_eps=1e-7)
+    base_run_epsilon(adam_eps=1e-6)
+    base_run_epsilon(adam_eps=1e-5) # Llama2
+    base_run_epsilon(adam_eps=1e-4)
+    base_run_epsilon(adam_eps=1e-3)
 
 def main():
     import argparse
