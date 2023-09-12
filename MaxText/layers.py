@@ -19,7 +19,6 @@
 
 from aqt.jax.v2 import aqt_dot_general as aqt
 from aqt.jax.v2.google import maxtext_sweeps
-from jax.experimental.pallas.ops.tpu import flash_attention
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
@@ -40,7 +39,8 @@ from jax import lax
 from jax import random
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
-
+if jax.__version__ >= '0.4.16':
+  from jax.experimental.pallas.ops.tpu import flash_attention
 
 
 
