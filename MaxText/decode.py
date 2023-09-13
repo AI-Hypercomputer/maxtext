@@ -141,7 +141,7 @@ def decode_loop(config, state=None):
   # Model and Optimizer definition
   model = Transformer(config, mesh = mesh)
 
-  tx = optax.adam(
+  tx = optax.adamw(
     max_utils.create_learning_rate_schedule(
       learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
     )
