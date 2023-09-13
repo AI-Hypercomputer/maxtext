@@ -38,8 +38,6 @@ WORKDIR /deps
 COPY . .
 RUN ls .
 
-# ENV TPU_LIBRARY_PATH="/root/custom_libtpu/libtpu.so"
-
 # Check if LIBTPU_GCS_PATH is not empty before setting TPU_LIBRARY_PATH
 RUN if [ -n "$ENV_LIBTPU_GCS_PATH" ]; then \
     echo "TPU_LIBRARY_PATH=/root/custom_libtpu/libtpu.so" >> /etc/environment; \
