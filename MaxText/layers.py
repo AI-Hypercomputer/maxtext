@@ -16,8 +16,10 @@
 
 """Transformer model definition."""
 # pylint: disable=arguments-differ
+# pylint: disable=no-name-in-module
 
 from aqt.jax.v2 import aqt_dot_general as aqt
+from aqt.jax.v2 import aqt_dq_dot_general as aqt_dq
 from aqt.jax.v2.google import maxtext_sweeps
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
@@ -128,8 +130,15 @@ def dot_product_attention(query: Array,
   # QK Product, a.k.a `attn_weights`: [batch, num_heads, q_length, kv_length]
   if not cfg.int8_training:
     attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
-  else: 
-    aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8_qk, cfg.dlhs_int8_qk, cfg.drhs_int8_qk, use_fwd_quant=cfg.aqt_use_fwd_quant)
+  else:
+    aqt_cfg = maxtext_sweeps.sweep1(
+      cfg.fwd_int8_qk,
+      cfg.dlhs_int8_qk,
+      cfg.drhs_int8_qk,
+      use_fwd_quant=cfg.aqt_use_fwd_quant,
+      use_dummy_static_bound=cfg.use_dummy_static_bound,
+      rng_type=cfg.aqt_rng_type
+    )
     aqt_dot_general = aqt.make_dot_general(aqt_cfg)
     context = aqt.Context(key=aqt_rng, train_step=None)
     aqt_dot_general = functools.partial(aqt_dot_general, context=context)
@@ -157,8 +166,14 @@ def dot_product_attention(query: Array,
   # Take the linear combination of `value`.
   if not cfg.int8_training:
     return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
-  else: 
-    aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8_pv, cfg.dlhs_int8_pv, cfg.drhs_int8_pv,use_fwd_quant=cfg.aqt_use_fwd_quant)
+  else:
+    aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8_pv,
+      cfg.dlhs_int8_pv,
+      cfg.drhs_int8_pv,
+      use_fwd_quant=cfg.aqt_use_fwd_quant,
+      use_dummy_static_bound=cfg.use_dummy_static_bound,
+      rng_type=cfg.aqt_rng_type,
+    )
     aqt_dot_general = aqt.make_dot_general(aqt_cfg)
     context = aqt.Context(key=aqt_rng, train_step=None)
     aqt_dot_general = functools.partial(aqt_dot_general, context=context)
