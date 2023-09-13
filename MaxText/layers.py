@@ -358,12 +358,14 @@ class MultiHeadDotProductAttention(nn.Module):
       x = wrap_flash_attention(query, key, value)
       x = jax.numpy.transpose(x, axes = (0,2,1,3))
     else:
+      aqt_rng = self.make_rng('aqt')
       x = dot_product_attention(
           query,
           key,
           value,
           bias=attention_bias,
           dropout_rng=dropout_rng,
+          aqt_rng=aqt_rng,
           dropout_rate=self.dropout_rate,
           deterministic=deterministic,
           dtype=self.dtype,
@@ -530,8 +532,6 @@ class MultiHeadDotProductAttention(nn.Module):
     dropout_rng = None
     if not deterministic and self.dropout_rate > 0.:
       dropout_rng = self.make_rng('dropout')
-
-    aqt_rng = self.make_rng('aqt')
 
     # Apply attention.
     x = self.apply_attention(query, key, value, cfg.enable_flash_attention, attention_bias, dropout_rng, deterministic)
