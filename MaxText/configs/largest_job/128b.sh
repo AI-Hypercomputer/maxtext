@@ -7,6 +7,7 @@ set -e
 
 export OUTPUT_PATH="gs://maxtext-experiments-multipod"
 export DATASET_PATH="gs://maxtext-dataset/"
+export TPU_LIBRARY_PATH=/root/custom_libtpu/libtpu.so
 
 # Set environment variables
 for ARGUMENT in "$@"; do
