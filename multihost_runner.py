@@ -47,17 +47,17 @@ import os
 import re
 
 ##### Define flags #####
-def default_project():
+def get_project():
   completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
   project_outputs = completed_command.stdout.decode().strip().split('\n')
-  if len(project_outputs) < 1:
+  if len(project_outputs) < 1 or project_outputs[-1]=='':
     sys.exit("You must specify the project in the PROJECT flag or set it with 'gcloud config set project <project>'")
   return project_outputs[-1] # The project name lives on the last line of the output
 
-def default_zone():
+def get_zone():
   completed_command = subprocess.run(["gcloud", "config", "get", "compute/zone"], check=True, capture_output=True)
   zone_outputs = completed_command.stdout.decode().strip().split('\n')
-  if len(zone_outputs) < 1:
+  if len(zone_outputs) < 1 or zone_outputs[-1]=='':
     sys.exit("You must specify the zone in the ZONE flag or set it with 'gcloud config set compute/zone <zone>'")
   return zone_outputs[-1] # The zone name lives on the last line of the output
 
@@ -69,9 +69,9 @@ parser = argparse.ArgumentParser(description='TPU configuration options')
 parser.add_argument('--TPU_PREFIX', type=str, default=None, required=True,
                     help="Prefix of worker TPU's. E.g. if TPU's are named user-0 and user-1, \
                           TPU_PREFIX should be set as user")
-parser.add_argument('--PROJECT', type=str, default=default_project(),
+parser.add_argument('--PROJECT', type=str, default=None,
                     help='GCE project name, defaults to gcloud config project')
-parser.add_argument('--ZONE', type=str, default=default_zone(),
+parser.add_argument('--ZONE', type=str, default=None,
                     help='GCE zone, e.g. us-central2-b, defaults to gcloud config compute/zone')
 parser.add_argument('--SCRIPT_DIR', type=str, default=os.getcwd(),
                     help="The local location of the directory to copy to the TPUs and run the main command from. \
@@ -358,6 +358,11 @@ def main() -> None:
   print("Starting multihost runner...", flush=True)
 
   ##### Validate arguments #####
+  if not args.PROJECT:
+    args.PROJECT = get_project()
+  if not args.ZONE:
+    args.ZONE = get_zone()
+
   assert_script_dir_exists(args.SCRIPT_DIR)
 
   ##### Step 1: Get the workers #####

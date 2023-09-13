@@ -63,12 +63,12 @@ aqt_rng_type: "jax.uniform"
 
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
-global_parameter_scale: 0 # has to be set explicitely.
+global_parameter_scale: 1
 global_parameter_scale_mlp_bonus: 0
-base_emb_dim: 2048
+base_emb_dim: 2560
 base_num_heads: 8
 base_mlp_dim: 8192
-base_num_decoder_layers: 20
+base_num_decoder_layers: 16
 head_dim: 256
 # activation functions are .
 mlp_activations: ["relu"]
@@ -78,6 +78,7 @@ logits_via_embedding: True # NOTE: this is True just for testing.
 remat_policy: "full"
 scan_layers: True
 param_scan_axis: 1
+enable_flash_attention: False # WARNING: Does not support attention_bias, requires JAX>=0.4.16
 
 record_internal_nn_metrics: 0
 
@@ -121,13 +122,14 @@ num_slice: 1 # used by run-sweep.py . will be copied to the other yml file.
 dataset_path: "gs://max-datasets-rogue-useast/"
 
 vocab_size: 32_768 # powers of 2 for sharding
-vocab_relative_path: "vocabs" # Assumes we're allowed
-dataset_name: "c4/en:3.0.1"
-eval_dataset_name: "c4/en:3.0.1"
-eval_split: "validation"
-per_device_batch_size: 4
+vocab_relative_path: "vocabs"  # Assumes we're allowed
+dataset_name: 'c4/en:3.0.1'
+eval_dataset_name: 'c4/en:3.0.1'
+eval_split: 'validation'
+per_device_batch_size: 12.0
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
+dataset_type: c4 # must be c4 or synthetic
 
 # Training loop
 steps: -1
@@ -140,6 +142,7 @@ clip_by_block_rms: 0.0 # no clipping default
 clip_by_ucb: 0.0 # no clipping default , exact value is ignored if above 0.0
 
 # Maximum length cutoff for training examples.
+max_target_length: 2048
 max_target_length: 1024
 # Used to calculate cosine LR schedule length and the lenght of the training in run-sweep.py
 # New runs should set it to about 0.8
@@ -181,6 +184,9 @@ adam_eps_root: 0. # A small constant applied to denominator inside the square ro
 adam_weight_decay: 0.1 # AdamW Weight decay
 
 # Stack trace parameters
-collect_stack_trace: True
-stack_trace_to_cloud: False # Uploads to cloud logging if True, else to the console if False.
-stack_trace_interval_seconds: 600 # Stack trace collection frequency in seconds.
+collect_stack_trace: False
+stack_trace_to_cloud: False  # Uploads to cloud logging if True, else to the console if False.
+stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds.
+
+# Use iota operator in Embed
+use_iota_embed: False

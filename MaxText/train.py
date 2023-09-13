@@ -40,9 +40,7 @@ from tensorboardX import SummaryWriter
 
 from layers import Transformer
 import pyconfig
-import tensorflow_datasets as tfds
-from input_pipeline import get_datasets
-from input_pipeline import preprocess_dataset
+from input_pipeline import create_data_iterator_with_tokenizer
 import max_utils
 import ucb
 import checkpointing
@@ -171,6 +169,10 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
   rng1, gen_aqt_rng = jax.random.split(dropout_rng)
   aqt_rng, rng2 = jax.random.split(gen_aqt_rng)
 
+  # decimate proportion of data when per_device_batch_size<1
+  for k, v in data.items():
+    data[k] = v[:config.global_batch_size_to_train_on,:]
+
   def loss_fn(params):
     logits, intermediate_outputs = model.apply({'params': params},
                          data['inputs'],
@@ -296,8 +298,12 @@ def train_loop(config, state=None):
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
 
+  # Mesh definition
+  devices_array = max_utils.create_device_mesh(config)
+  mesh = Mesh(devices_array, config.mesh_axes)
+
   # Model and Optimizer definition
-  model = Transformer(config)
+  model = Transformer(config, mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(
       learning_rate=config.learning_rate, total_steps=config.learning_rate_schedule_steps
   )
@@ -314,14 +320,7 @@ def train_loop(config, state=None):
       weight_decay=config.adam_weight_decay,
   )
 
-  # tx = optax.chain(
-  #     optax.chain(
-  #       optax.identity(),
-  #       optax.clip_by_global_norm(config.clip_by_global_norm),
-  #       optax.clip_by_block_rms(config.clip_by_block_rms),
-  #     ),
-  #     adam,
-  # )
+
 
   tx = adam
 
@@ -329,33 +328,8 @@ def train_loop(config, state=None):
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
+  data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
-
-  # import json
-  # def sz(t):
-  #   from functools import reduce # Valid in Python 2.6+, required in Python 3
-  #   import operator
-  #   return reduce(operator.mul, t.shape, 1)
-
-  # print(json.dumps(jax.tree_map(jnp.shape, state.params), sort_keys=True, indent=4))
-  # print(json.dumps(jax.tree_map(sz, state.params), sort_keys=True, indent=4))
-
-  # Set up datasets.
-  read_config = tfds.ReadConfig(
-    shuffle_seed = config.data_shuffle_seed,
-  )
-  train_ds, eval_ds = get_datasets(
-      config=config,
-      read_config = read_config,
-  )
-  train_iter, _, _, _ = preprocess_dataset(
-    config,
-    mesh,
-    train_ds, eval_ds,
-    vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
-    data_shuffle_seed = config.data_shuffle_seed,
-  )
-
 
   grad_stats = ucb.ucb_init(state.params)
   data_pspec = P(*config.data_sharding)
@@ -389,7 +363,7 @@ def train_loop(config, state=None):
     max_logging.log(f"forwarding iterator {i}")
 
   for step in np.arange(get_first_step(state), config.steps):
-    example_batch = load_next_batch(train_iter, example_batch, config)
+    example_batch = load_next_batch(data_iterator, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, grad_stats, metrics, nextrng = p_train_step(
           model, config, state, grad_stats, example_batch, nextrng
