@@ -1100,6 +1100,10 @@ class Decoder(nn.Module):
     if cfg.remat_policy != 'none':
       if cfg.remat_policy == 'minimal':
         policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
+      elif cfg.remat_policy == 'custom':
+        policy = jax.checkpoint_policies.save_only_these_names(
+            *(cfg.remat_saved_tensors)
+        )
       elif cfg.remat_policy == 'proj':
         policy = jax.checkpoint_policies.save_only_these_names(
             'query_proj', 'value_proj', 'key_proj'
