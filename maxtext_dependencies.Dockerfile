@@ -38,12 +38,12 @@ WORKDIR /deps
 COPY . .
 RUN ls .
 
-RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION LIBTPU_GCS_PATH=${ENV_LIBTPU_GCS_PATH}"
-RUN bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} LIBTPU_GCS_PATH=${ENV_LIBTPU_GCS_PATH}
-
 # Set TPU_LIBRARY_PATH if ENV_LIBTPU_GCS_PATH is not empty.
 RUN if [ -n "$ENV_LIBTPU_GCS_PATH" ]; then \
     echo "TPU_LIBRARY_PATH=/root/custom_libtpu/libtpu.so" >> /etc/environment; \
     fi
+
+RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION LIBTPU_GCS_PATH=${ENV_LIBTPU_GCS_PATH}"
+RUN bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} LIBTPU_GCS_PATH=${ENV_LIBTPU_GCS_PATH}
 
 WORKDIR /app
