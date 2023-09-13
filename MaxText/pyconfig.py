@@ -121,8 +121,8 @@ def validate_gcs_bucket_name(bucket_name, config_var):
 def get_individual_scales(scale):
   '''Choose appropriate scales for individual dimensions based on global scale
   We choose to rotate between doubling:
-    embed_dim
     num_head and mlp_dim
+    embed_dim
     num_layers
   Any one of these steps is not a perfect doubling, although going through a cycle
   of three is a near perfect 8x scaling except for the linear -> softmax -> output step'''
