@@ -121,8 +121,8 @@ def validate_gcs_bucket_name(bucket_name, config_var):
 def get_individual_scales(scale):
   '''Choose appropriate scales for individual dimensions based on global scale
   We choose to rotate between doubling:
-    embed_dim
     num_head and mlp_dim
+    embed_dim
     num_layers
   Any one of these steps is not a perfect doubling, although going through a cycle
   of three is a near perfect 8x scaling except for the linear -> softmax -> output step'''
@@ -133,9 +133,9 @@ def get_individual_scales(scale):
     raise ValueError("Global parameter scale should be a power of 2. If you want finer grained control of the model sizes "
       "then you can explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.")
   base_scale, rem = divmod(log_2_scale, 3)
-  emb_scale = base_scale + int(rem > 0)
-  num_head_scale = base_scale + int(rem > 1)
+  num_head_scale = base_scale + int(rem > 0)
   mlp_dim_scale = num_head_scale
+  emb_scale = base_scale + int(rem > 1)
   layer_scale = base_scale
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
 

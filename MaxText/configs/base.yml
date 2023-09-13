@@ -65,10 +65,10 @@ aqt_rng_type: "jax.uniform"
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
 global_parameter_scale: 0 # has to be set explicitely.
 global_parameter_scale_mlp_bonus: 0
-base_emb_dim: 2048
+base_emb_dim: 2560
 base_num_heads: 8
 base_mlp_dim: 8192
-base_num_decoder_layers: 20
+base_num_decoder_layers: 16
 head_dim: 256
 # activation functions are .
 mlp_activations: ["relu"]
