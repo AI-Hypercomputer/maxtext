@@ -64,11 +64,11 @@ def l2norm_pytree(x):
   ) ** 0.5
 
 def activate_profiler(config):
-  if config.enable_profiler:
+  if jax.process_index() == 0 and config.enable_profiler:
     jax.profiler.start_trace(config.tensorboard_dir)
 
 def deactivate_profiler(config):
-  if config.enable_profiler:
+  if jax.process_index() == 0 and config.enable_profiler:
     jax.profiler.stop_trace()
 
 def move_local_dir_to_gcs(local_dir, gcs_path):
