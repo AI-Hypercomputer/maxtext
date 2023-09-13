@@ -31,7 +31,7 @@ ENV ENV_LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH
 
 # Check if LIBTPU_GCS_PATH is not empty and set TPU_LIBRARY_PATH accordingly
 RUN if [ -n "$ENV_LIBTPU_GCS_PATH" ]; then \
-    export TPU_LIBRARY_PATH="\$HOME/custom_libtpu/libtpu.so"; \
+    ENV TPU_LIBRARY_PATH="\$HOME/custom_libtpu/libtpu.so" \
     echo "TPU_LIBRARY_PATH is set to \$HOME/custom_libtpu/libtpu.so"; \
     fi
 
