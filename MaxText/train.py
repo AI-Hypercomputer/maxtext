@@ -193,7 +193,6 @@ def train_step(model, config, state, data, dropout_rng):
   else:
     grads = raw_grads
   new_state = state.apply_gradients(grads=grads)
-
   metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
              'learning/raw_grad_norm' : max_utils.l2norm_pytree(raw_grads), 
              'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
