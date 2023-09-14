@@ -1,4 +1,4 @@
-"""MaxText AQT sweeps configurations."""
+"""AQT configurations."""
 
 # pylint: skip-file
 
