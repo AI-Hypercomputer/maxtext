@@ -77,7 +77,7 @@ def predict_step(inputs,
   target_shape = (inputs.shape[0], config.max_predict_length) + inputs.shape[2:]
 
   initial_variables = model.init(
-      jax.random.PRNGKey(0),
+      {'params': rngkey, 'dropout': rngkey, 'aqt': rngkey},
       jnp.ones(target_shape, config.dtype),
       None,
       enable_dropout=False,
