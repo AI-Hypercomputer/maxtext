@@ -267,7 +267,7 @@ class DenseGeneral(nn.Module):
           aqt_dot_general = aqt.make_dot_general(aqt_cfg)
           context = aqt.Context(key=aqt_key, train_step=None)
           return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
-  
+
     cfg = self.config
     features = _canonicalize_tuple(self.features)
     axis = _canonicalize_tuple(self.axis)
