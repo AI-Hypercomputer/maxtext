@@ -63,7 +63,7 @@ aqt_rng_type: "jax.uniform"
 
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
-global_parameter_scale: 1
+global_parameter_scale: 0
 global_parameter_scale_mlp_bonus: 0
 base_emb_dim: 2560
 base_num_heads: 8
@@ -126,7 +126,7 @@ vocab_relative_path: "vocabs"  # Assumes we're allowed
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
-per_device_batch_size: 12.0
+per_device_batch_size: -1.0
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
 dataset_type: c4 # must be c4 or synthetic
@@ -143,7 +143,7 @@ clip_by_ucb: 0.0 # no clipping default , exact value is ignored if above 0.0
 
 # Maximum length cutoff for training examples.
 max_target_length: 2048
-max_target_length: 1024
+
 # Used to calculate cosine LR schedule length and the lenght of the training in run-sweep.py
 # New runs should set it to about 0.8
 fill_ratio: 1.0
