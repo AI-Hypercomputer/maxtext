@@ -136,7 +136,7 @@ def dot_product_attention(query: Array,
       cfg.dlhs_int8_qk,
       cfg.drhs_int8_qk,
       use_fwd_quant=cfg.aqt_use_fwd_quant,
-      use_dummy_static_bound=cfg.use_dummy_static_bound,
+      use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
       rng_type=cfg.aqt_rng_type
     )
     aqt_dot_general = aqt.make_dot_general(aqt_cfg)
@@ -171,7 +171,7 @@ def dot_product_attention(query: Array,
       cfg.dlhs_int8_pv,
       cfg.drhs_int8_pv,
       use_fwd_quant=cfg.aqt_use_fwd_quant,
-      use_dummy_static_bound=cfg.use_dummy_static_bound,
+      use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
       rng_type=cfg.aqt_rng_type,
     )
     aqt_dot_general = aqt.make_dot_general(aqt_cfg)
