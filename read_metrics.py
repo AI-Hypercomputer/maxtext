@@ -3,7 +3,7 @@ Script to read metrics for multiple run metric outputs. For each run output, the
 calculate the medians of all metrics and output the results to a csv file.
 
 Arguments:
-  --RUN_NAMES: comma separated list of run names, required (e.g. "run_name1, run_name2, run_name3")
+  --RUN_NAMES_FILE: txt file containing run names separated by newline, required (e.g. "run_names.txt")
   --BASE_OUTPUT_DIRECTORY: GCS bucket that contains metrics file output, default is "gs://maxtext-experiments-multipod/"
 
 Example usage:
@@ -20,19 +20,28 @@ import subprocess
 
 # Read in arguments
 parser = argparse.ArgumentParser(description='Metrics parsing options')
-parser.add_argument('--RUN_NAMES', type=str, default=None,
-                    help='Comma separated list of run names')
+parser.add_argument('--RUN_NAMES_FILE', type=str, default=None,
+                    help='txt file containing run names separated by newline')
 parser.add_argument('--BASE_OUTPUT_DIRECTORY', type=str, default='gs://maxtext-experiments-multipod/',
                     help='GCS bucket that contains metrics file output')
 
 args = parser.parse_args()
 
 def main() -> None:
-  if args.RUN_NAMES is None or args.RUN_NAMES == '':
+  base_output_dir = args.BASE_OUTPUT_DIRECTORY
+
+  # Check RUN_NAMES_FILE is not empty
+  if args.RUN_NAMES_FILE is None or args.RUN_NAMES_FILE == '':
     print('--RUN_NAMES is required.')
     return -1
-  run_names = args.RUN_NAMES.split(',')
-  base_output_dir = args.BASE_OUTPUT_DIRECTORY
+  
+  # Read in run_names from txt file
+  with open(args.RUN_NAMES_FILE, 'r') as f:
+    run_names = f.read()
+    if run_names is None or run_names == '':
+      print(f'Error: {args.RUN_NAMES_FILE} is empty.')
+      return -1
+    run_names = run_names.split('\n')
 
   final_medians = []
   metrics = ['learning/grad_norm', 'learning/loss', 'learning/param_norm', 'perf/step_time_seconds', 'perf/per_device_tflops', 'perf/per_device_tflops_per_sec', 'learning/current_learning_rate']
