@@ -29,4 +29,4 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
     enable_profiler=false remat_policy=full global_parameter_scale=64\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\
     dataset_path=$DATASET_PATH use_iota_embed=true reuse_example_batch=1\
-    dataset_type=synthetic enable_flash_attention=True
+    dataset_type=synthetic enable_flash_attention=True  gcs_metrics=true

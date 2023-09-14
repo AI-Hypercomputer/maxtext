@@ -7,6 +7,7 @@ set -e
 
 export OUTPUT_PATH="gs://maxtext-experiments-multipod"
 export DATASET_PATH="gs://maxtext-dataset/"
+export TPU_LIBRARY_PATH=/root/custom_libtpu/libtpu.so
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -28,4 +29,4 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
     enable_profiler=false remat_policy=full global_parameter_scale=16\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\
     dataset_path=$DATASET_PATH use_iota_embed=true reuse_example_batch=1\
-    dataset_type=synthetic enable_flash_attention=true
+    dataset_type=synthetic enable_flash_attention=true gcs_metrics=true
