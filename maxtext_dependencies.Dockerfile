@@ -4,6 +4,9 @@ FROM python:3.10-slim
 # Install system dependencies and Git
 RUN apt-get update && apt-get install -y curl gnupg git
 
+# Install dependencies for adjusting network rto
+RUN apt-get update && apt-get install -y iproute2 ethtool lsof
+
 # Add the Google Cloud SDK package repository
 RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
 RUN curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
@@ -25,6 +28,12 @@ ENV ENV_JAX_VERSION=$JAX_VERSION
 
 ARG LIBTPU_GCS_PATH
 ENV ENV_LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH
+
+# Check if LIBTPU_GCS_PATH is not empty and set TPU_LIBRARY_PATH accordingly
+RUN if [ -n "$ENV_LIBTPU_GCS_PATH" ]; then \
+    export TPU_LIBRARY_PATH="$HOME/custom_libtpu/libtpu.so"; \
+    echo "TPU_LIBRARY_PATH is set to $HOME/custom_libtpu/libtpu.so"; \
+    fi
 
 RUN mkdir -p /deps
 
