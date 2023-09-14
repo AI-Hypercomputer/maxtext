@@ -246,7 +246,8 @@ class DenseGeneral(nn.Module):
     Returns:
       The transformed input.
     """
-    def create_dot_general(inputs, kernel, axis, contract_ind, cfg, aqt_rng):
+    def compute_dot_general(inputs, kernel, axis, contract_ind, cfg):
+      """Computes a dot_general operation that may be quantized as determined by cfg options"""
       if not cfg.int8_training:
         return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
       else:
@@ -287,7 +288,7 @@ class DenseGeneral(nn.Module):
     kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(axis)))
-    return create_dot_general(inputs, kernel, axis, contract_ind, cfg, aqt_rng)
+    return compute_dot_general(inputs, kernel, axis, contract_ind, cfg)
 
 def _convert_to_activation_function(
     fn_or_string: Union[str, Callable]) -> Callable:
