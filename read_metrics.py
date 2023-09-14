@@ -7,7 +7,7 @@ Arguments:
   --BASE_OUTPUT_DIRECTORY: GCS bucket that contains metrics file output, default is "gs://maxtext-experiments-multipod/"
 
 Example usage:
-  python3 read_metrics.py --RUN_NAMES="run_name1,run_name2,run_name3"
+  python3 read_metrics.py --RUN_NAMES_FILE="run_names.txt"
 """
 import argparse
 import csv
