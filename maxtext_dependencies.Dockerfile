@@ -29,6 +29,10 @@ ENV ENV_JAX_VERSION=$JAX_VERSION
 ARG LIBTPU_GCS_PATH
 ENV ENV_LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH
 
+# Set TPU_LIBRARY_PATH if CUSTOM_LIBTPU is not empty.
+ARG CUSTOM_LIBTPU
+ENV TPU_LIBRARY_PATH="/root/custom_libtpu/libtpu.so"
+
 RUN mkdir -p /deps
 
 # Set the working directory in the container
@@ -37,11 +41,6 @@ WORKDIR /deps
 # Copy all files from local workspace into docker container
 COPY . .
 RUN ls .
-
-# Set TPU_LIBRARY_PATH if ENV_LIBTPU_GCS_PATH is not empty.
-RUN if [ -n "$ENV_LIBTPU_GCS_PATH" ]; then \
-    echo "TPU_LIBRARY_PATH=/root/custom_libtpu/libtpu.so" >> /etc/environment; \
-    fi
 
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION LIBTPU_GCS_PATH=${ENV_LIBTPU_GCS_PATH}"
 RUN bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} LIBTPU_GCS_PATH=${ENV_LIBTPU_GCS_PATH}
