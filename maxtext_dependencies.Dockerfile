@@ -31,7 +31,7 @@ ENV ENV_LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH
 
 # Set TPU_LIBRARY_PATH if CUSTOM_LIBTPU is not empty.
 ARG CUSTOM_LIBTPU
-ENV TPU_LIBRARY_PATH="/root/custom_libtpu/libtpu.so"
+ENV TPU_LIBRARY_PATH=${CUSTOM_LIBTPU:+/root/custom_libtpu/libtpu.so}
 
 RUN mkdir -p /deps
 
