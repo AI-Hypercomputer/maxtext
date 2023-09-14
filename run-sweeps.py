@@ -64,8 +64,9 @@ def run_job(run_name, base_config, **config_updates):
 
     attempt = args['attempt']
     sweep_name = args['sweep']
-    use_cl = bname(args['jax_14_cl'])
-    run_name = f'int8-{sweep_name}-a{attempt}-{run_name}-cl{use_cl}'
+    use_cl = args['jax_14_cl']
+    assert use_cl, 'forbidden to not use it'
+    run_name = f'int8-{sweep_name}-a{attempt}-{run_name}'
 
     yml = update_yaml_fields(yml, {'run_name': run_name})
     experiment_yml_file = f"MaxText/configs/{run_name}.yml"
@@ -619,9 +620,13 @@ def run_s31():
 
 def run_s31_2():
     # Retry 16 pods on different LR, on tuned clipping and slower warmup
-    run_job("q_TTF-ns_16-lr_20", baseline_s31(True), num_slice=16, learning_rate=20.0e-4) # not a repro of s31. 3x longer warmup!
-    run_job("q_TTF-ns_16-lr_20-gc_0p05", baseline_s31(True), num_slice=16, learning_rate=20.0e-4, clip_by_global_norm=0.05)
-    run_job("q_TTF-ns_16-lr_10-gc_0p05", baseline_s31(True), num_slice=16, learning_rate=10.0e-4, clip_by_global_norm=0.05)
+    common = dict(
+        fill_ratio = 0.8,
+        num_slice=16,
+    )
+    run_job("q_TTF-ns_16-lr_20", baseline_s31(True), **common, learning_rate=20.0e-4) # not a repro of s31. 3x longer warmup!
+    run_job("q_TTF-ns_16-lr_20-gc_0p05", baseline_s31(True), **common, learning_rate=20.0e-4, clip_by_global_norm=0.05)
+    run_job("q_TTF-ns_16-lr_10-gc_0p05", baseline_s31(True), **common, learning_rate=10.0e-4, clip_by_global_norm=0.05)
 
 
 def main():
