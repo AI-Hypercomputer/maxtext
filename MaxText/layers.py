@@ -136,6 +136,24 @@ def dot_product_attention(query: Array,
       attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key, _dot_general=aqt_dot_general)
     return attn_weights
 
+  def compute_weighted_values(attn_weights, value, cfg, aqt_rng):
+    """Computes attn_weights * values"""
+    if not cfg.int8_training:
+      weighted_values = jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
+    else:
+      aqt_cfg = aqt_config.quantization_config(cfg.fwd_int8_pv,
+        cfg.dlhs_int8_pv,
+        cfg.drhs_int8_pv,
+        use_fwd_quant=cfg.aqt_use_fwd_quant,
+        use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
+        rng_type=cfg.aqt_rng_type,
+      )
+      aqt_dot_general = aqt.make_dot_general(aqt_cfg)
+      context = aqt.Context(key=aqt_rng, train_step=None)
+      aqt_dot_general = functools.partial(aqt_dot_general, context=context)
+      weighted_values = jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value, _dot_general=aqt_dot_general)
+    return weighted_values
+
   # Casting logits and softmax computation for float32 for model stability.
   if float32_logits:
     query = query.astype(jnp.float32)
@@ -148,7 +166,6 @@ def dot_product_attention(query: Array,
 
   # QK Product, a.k.a `attn_weights`: [batch, num_heads, q_length, kv_length]
   attn_weights = compute_qk_attn_weights(query, key, cfg, aqt_rng)
-
 
   # Apply attention bias: masking, dropout, proximity bias, etc.
   if bias is not None:
@@ -170,20 +187,8 @@ def dot_product_attention(query: Array,
     attn_weights = attn_weights * multiplier
 
   # Take the linear combination of `value`.
-  if not cfg.int8_training:
-    return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
-  else:
-    aqt_cfg = aqt_config.quantization_config(cfg.fwd_int8_pv,
-      cfg.dlhs_int8_pv,
-      cfg.drhs_int8_pv,
-      use_fwd_quant=cfg.aqt_use_fwd_quant,
-      use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
-      rng_type=cfg.aqt_rng_type,
-    )
-    aqt_dot_general = aqt.make_dot_general(aqt_cfg)
-    context = aqt.Context(key=aqt_rng, train_step=None)
-    aqt_dot_general = functools.partial(aqt_dot_general, context=context)
-    return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value, _dot_general=aqt_dot_general)
+  return compute_weighted_values(attn_weights, value, cfg, aqt_rng)
+
 
 dynamic_vector_slice_in_dim = jax.vmap(
     lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
@@ -241,6 +246,27 @@ class DenseGeneral(nn.Module):
     Returns:
       The transformed input.
     """
+    def create_dot_general(inputs, kernel, axis, contract_ind, cfg, aqt_rng):
+      if not cfg.int8_training:
+        return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
+      else:
+        aqt_key = self.make_rng('aqt')
+        if cfg.use_dqdg:
+          aqt_dq_dg = aqt_dq.make_aqt_dq_dg()
+          return aqt_dq_dg(aqt_key, inputs, kernel, ((axis, contract_ind), ((), ())))
+        else:
+          aqt_cfg = aqt_config.quantization_config(
+            cfg.fwd_int8,
+            cfg.dlhs_int8,
+            cfg.drhs_int8,
+            use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
+            rng_type=cfg.aqt_rng_type,
+            use_fwd_quant=cfg.aqt_use_fwd_quant,
+          )
+          aqt_dot_general = aqt.make_dot_general(aqt_cfg)
+          context = aqt.Context(key=aqt_key, train_step=None)
+          return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
+  
     cfg = self.config
     features = _canonicalize_tuple(self.features)
     axis = _canonicalize_tuple(self.axis)
@@ -261,26 +287,7 @@ class DenseGeneral(nn.Module):
     kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(axis)))
-
-    if not cfg.int8_training:
-      return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
-    else:
-      aqt_key = self.make_rng('aqt')
-      if cfg.use_dqdg:
-        aqt_dq_dg = aqt_dq.make_aqt_dq_dg()
-        return aqt_dq_dg(aqt_key, inputs, kernel, ((axis, contract_ind), ((), ())))
-      else:
-        aqt_cfg = aqt_config.quantization_config(
-          cfg.fwd_int8,
-          cfg.dlhs_int8,
-          cfg.drhs_int8,
-          use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
-          rng_type=cfg.aqt_rng_type,
-          use_fwd_quant=cfg.aqt_use_fwd_quant,
-        )
-        aqt_dot_general = aqt.make_dot_general(aqt_cfg)
-        context = aqt.Context(key=aqt_key, train_step=None)
-        return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
+    return create_dot_general(inputs, kernel, axis, contract_ind, cfg, aqt_rng)
 
 def _convert_to_activation_function(
     fn_or_string: Union[str, Callable]) -> Callable:
