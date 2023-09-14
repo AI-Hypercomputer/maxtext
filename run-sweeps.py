@@ -583,33 +583,45 @@ def run_s30():
     run_job("fwdq_T", baseline, aqt_use_fwd_quant=True)
 
 
+def baseline_s31(quant):
+    return dict(
+        global_parameter_scale = 16,
+
+        num_slice = 8,
+        max_target_length = 2048,
+        per_device_batch_size = 4,
+
+        learning_rate = 10.0e-4,
+        adam_weight_decay = 0.1,
+        clip_by_global_norm = 0.1,
+        fill_ratio = 0.8 / 1.5,  # divide by 1.5 to make the training longer. Maybe see another drop in loss curev
+
+        fwd_int8 = quant,
+        dlhs_int8 = quant,
+        drhs_int8 = False,
+        fwd_int8_pv = quant,
+        dlhs_int8_pv = quant,
+        drhs_int8_pv = False,
+
+        aqt_use_fwd_quant = False,
+    )
+
 def run_s31():
-    def baseline(quant):
-        return dict(
-            global_parameter_scale = 16,
+    # WARNING: warmup is 3%, which is 600 and 1200 steps on ns16 and ns8 respecively.
+    # Summary:
+    # https://screenshot.googleplex.com/7v68TWqBMFYQMk4
+    # Speedup is around 19.5%  FFF vs TTF
+    run_job("q_TTF", baseline_s31(True))
+    run_job("q_FFF", baseline_s31(False))
+    run_job("q_TTF-ns_16-lr_20", baseline_s31(True), num_slice=16, learning_rate=20.0e-4)
+    run_job("q_TTF-gc0p01", baseline_s31(True), clip_by_global_norm=0.01)
 
-            num_slice = 8,
-            max_target_length = 2048,
-            per_device_batch_size = 4,
 
-            learning_rate = 10.0e-4,
-            adam_weight_decay = 0.1,
-            clip_by_global_norm = 0.1,
-            fill_ratio = 0.8 / 1.5,  # divide by 1.5 to make the training longer. Maybe see another drop in loss curev
-
-            fwd_int8 = quant,
-            dlhs_int8 = quant,
-            drhs_int8 = False,
-            fwd_int8_pv = quant,
-            dlhs_int8_pv = quant,
-            drhs_int8_pv = False,
-
-            aqt_use_fwd_quant = False,
-        )
-    run_job("q_TTF", baseline(True))
-    run_job("q_FFF", baseline(False))
-    run_job("q_TTF-ns_16-lr_20", baseline(True), num_slice=16, learning_rate=20.0e-4)
-    run_job("q_TTF-gc0p01", baseline(True), clip_by_global_norm=0.01)
+def run_s31_2():
+    # Retry 16 pods on different LR, on tuned clipping and slower warmup
+    run_job("q_TTF-ns_16-lr_20", baseline_s31(True), num_slice=16, learning_rate=20.0e-4) # not a repro of s31. 3x longer warmup!
+    run_job("q_TTF-ns_16-lr_20-gc_0p05", baseline_s31(True), num_slice=16, learning_rate=20.0e-4, clip_by_global_norm=0.05)
+    run_job("q_TTF-ns_16-lr_10-gc_0p05", baseline_s31(True), num_slice=16, learning_rate=10.0e-4, clip_by_global_norm=0.05)
 
 
 def main():

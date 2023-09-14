@@ -261,7 +261,7 @@ def rsqrt_schedule(init_value: float, shift: int = 0):
 
 def create_learning_rate_schedule(learning_rate: float, total_steps: int):
   """Creates a linear warmup followed by a cosine cooldown followed by linear to 0"""
-  warmup_steps = total_steps / 30
+  warmup_steps = total_steps / 10
   cos_steps = total_steps - warmup_steps
   return schedule2(learning_rate, warmup_steps, cos_steps)
 
