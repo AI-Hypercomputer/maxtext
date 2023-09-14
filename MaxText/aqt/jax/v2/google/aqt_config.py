@@ -1,4 +1,4 @@
-"""MaxText AQT sweeps configurations."""
+"""AQT configurations."""
 
 # pylint: skip-file
 
@@ -68,7 +68,7 @@ def fully_quantized(
   return cfg
 
 
-def sweep1(
+def quantization_config(
     fwd_int8: bool,
     dlhs_int8: bool,
     drhs_int8: bool,

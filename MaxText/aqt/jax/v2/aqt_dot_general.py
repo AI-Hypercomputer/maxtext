@@ -20,6 +20,7 @@
 # - ba - batch axes
 # - ra - remaining axes
 
+
 # pylint: skip-file
 
 import copy
@@ -175,8 +176,6 @@ def _scale_quant(x, *, cfg, ca, context):
   # TODO(lew): We should cast earlier. xhs_q should be in cfg.xhs.dtype
   # TODO(lew): After we implement optimization to not double-quantize,
   #   what would happen if we pass fq value (xhs_q2) in residual?
-  if cfg.use_fake_quant:
-    assert cfg.dtype != jnp.int8
 
   if isinstance(cfg.numerics, config.NoNumerics):
     return x, None, None
@@ -215,6 +214,7 @@ def make_fake_quant(cfg: config.Tensor, ca=None):
 
 
 @flax.struct.dataclass
+# It is used only when use_fwd_quant = True
 class QTensor:
   qvalue: jnp.ndarray
   qvalue_scale_t: jnp.ndarray

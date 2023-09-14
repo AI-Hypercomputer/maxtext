@@ -40,8 +40,20 @@ gcs_metrics: False
 # Activation dtypes.
 dtype: "bfloat16"
 int8_training: False
+# The following flags will only have effect when int8_training is True
+use_dqdg: False
 fwd_int8: True
-bwd_int8: True
+dlhs_int8: True
+drhs_int8: False
+fwd_int8_qk: False
+dlhs_int8_qk: False
+drhs_int8_qk: False
+fwd_int8_pv: True
+dlhs_int8_pv: True
+drhs_int8_pv: False
+aqt_use_dummy_static_bound: False
+aqt_use_fwd_quant: False
+aqt_rng_type: "jax.uniform"
 
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
@@ -56,7 +68,7 @@ mlp_activations: ["relu"]
 dropout_rate: 0
 logits_via_embedding: True  # NOTE: this is True just for testing.
 # proj, minimal, full, or none
-remat_policy: 'minimal'
+remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
 enable_flash_attention: False # WARNING: Does not support attention_bias, requires JAX>=0.4.16

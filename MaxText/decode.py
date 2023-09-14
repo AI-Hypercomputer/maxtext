@@ -77,7 +77,7 @@ def predict_step(inputs,
   target_shape = (inputs.shape[0], config.max_predict_length) + inputs.shape[2:]
 
   initial_variables = model.init(
-      jax.random.PRNGKey(0),
+      {'params': rngkey, 'dropout': rngkey, 'aqt': rngkey},
       jnp.ones(target_shape, config.dtype),
       None,
       enable_dropout=False,
@@ -86,7 +86,7 @@ def predict_step(inputs,
   )
   cache = initial_variables["cache"]
 
-  def tokens_ids_to_logits(flat_ids, flat_cache):
+  def tokens_ids_to_logits(flat_ids, flat_cache, aqt_rng):
     """Token slice to logits from decoder model."""
     # --> [batch * beam, 1, vocab]
     flat_logits, new_vars = model.apply(
@@ -98,6 +98,7 @@ def predict_step(inputs,
         None,
         enable_dropout=False,
         decode=True,
+        rngs={'aqt': aqt_rng},
         max_decode_length=config.max_predict_length,
         mutable=["cache"])
     new_flat_cache = new_vars["cache"]
