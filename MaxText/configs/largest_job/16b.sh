@@ -15,6 +15,10 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
+export GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS=1
+export GRPC_ARG_HTTP2_MIN_RECV_PING_INTERVAL_WITHOUT_DATA_MS=0
+export GRPC_ARG_HTTP2_MAX_PING_STRIKES=0
+
 # Set up network
 bash gke_rto_setup.sh
 
