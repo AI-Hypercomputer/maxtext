@@ -624,9 +624,41 @@ def run_s31_2():
         fill_ratio = 0.8,
         num_slice=16,
     )
+    # https://screenshot.googleplex.com/7U6T3cjrQokZEx6
+    # https://screenshot.googleplex.com/AjtnDbindvMSiqP
+    # We will continue with gc_0p10 and lr_05
     run_job("q_TTF-ns_16-lr_20", baseline_s31(True), **common, learning_rate=20.0e-4) # not a repro of s31. 3x longer warmup!
     run_job("q_TTF-ns_16-lr_10-gc_0p05", baseline_s31(True), **common, learning_rate=10.0e-4, clip_by_global_norm=0.05)
     run_job("q_TTF-ns_16-lr_05-gc_0p05", baseline_s31(True), **common, learning_rate=05.0e-4, clip_by_global_norm=0.05)
+
+
+def baseline_s32():
+    return dict(
+        global_parameter_scale = 16,
+
+        num_slice = 16,
+        max_target_length = 2048,
+        per_device_batch_size = 4,
+
+        learning_rate = 5.0e-4,
+        adam_weight_decay = 0.1,
+        clip_by_global_norm = 0.1,
+        fill_ratio = 0.8,
+
+        fwd_int8 = True,
+        dlhs_int8 = True,
+        drhs_int8 = False,
+        fwd_int8_pv = True,
+        dlhs_int8_pv = True,
+        drhs_int8_pv = False,
+
+        aqt_use_fwd_quant = False,
+    )
+
+
+def runs_s32():
+    run_job("q_TTF", baseline_s32())
+    run_job("q_FFF", baseline_s32(), int8_training=False)
 
 
 def main():
