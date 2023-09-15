@@ -625,8 +625,8 @@ def run_s31_2():
         num_slice=16,
     )
     run_job("q_TTF-ns_16-lr_20", baseline_s31(True), **common, learning_rate=20.0e-4) # not a repro of s31. 3x longer warmup!
-    #run_job("q_TTF-ns_16-lr_20-gc_0p05", baseline_s31(True), **common, learning_rate=20.0e-4, clip_by_global_norm=0.05)
-    #run_job("q_TTF-ns_16-lr_10-gc_0p05", baseline_s31(True), **common, learning_rate=10.0e-4, clip_by_global_norm=0.05)
+    run_job("q_TTF-ns_16-lr_10-gc_0p05", baseline_s31(True), **common, learning_rate=10.0e-4, clip_by_global_norm=0.05)
+    run_job("q_TTF-ns_16-lr_05-gc_0p05", baseline_s31(True), **common, learning_rate=05.0e-4, clip_by_global_norm=0.05)
 
 
 def main():
