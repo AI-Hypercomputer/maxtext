@@ -40,15 +40,27 @@ gcs_metrics: False
 # Activation dtypes.
 dtype: "bfloat16"
 int8_training: False
+# The following flags will only have effect when int8_training is True
+use_dqdg: False
 fwd_int8: True
-bwd_int8: True
+dlhs_int8: True
+drhs_int8: False
+fwd_int8_qk: False
+dlhs_int8_qk: False
+drhs_int8_qk: False
+fwd_int8_pv: True
+dlhs_int8_pv: True
+drhs_int8_pv: False
+aqt_use_dummy_static_bound: False
+aqt_use_fwd_quant: False
+aqt_rng_type: "jax.uniform"
 
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
 global_parameter_scale: 1
-base_emb_dim: 2048
-base_num_heads: 10
-base_mlp_dim: 10240
+base_emb_dim: 2560
+base_num_heads: 8
+base_mlp_dim: 8192
 base_num_decoder_layers: 16
 head_dim: 256
 # activation functions are .
@@ -56,9 +68,10 @@ mlp_activations: ["relu"]
 dropout_rate: 0
 logits_via_embedding: True  # NOTE: this is True just for testing.
 # proj, minimal, full, or none
-remat_policy: 'minimal'
+remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
+enable_flash_attention: False # WARNING: Does not support attention_bias, requires JAX>=0.4.16
 
 record_internal_nn_metrics: 0
 
@@ -103,9 +116,10 @@ vocab_relative_path: "vocabs"  # Assumes we're allowed
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
-per_device_batch_size: 24.0
+per_device_batch_size: 12.0
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
+dataset_type: c4 # must be c4 or synthetic
 
 # Training loop
 steps: 150_001
@@ -115,7 +129,7 @@ learning_rate: 3.e-5
 warmup_steps: 15_000
 
 # Maximum length cutoff for training examples.
-max_target_length: 1024
+max_target_length: 2048
 # Maximum length cutoff for held-out evaluation examples.
 max_eval_target_length: 512
 
@@ -146,11 +160,16 @@ init_weights_seed: 0
 # You may disable clipping by setting gradient_clipping_threshold to zero.
 gradient_clipping_threshold: 1.0
 
-# Adam optimizer parameters
+# You may disable clipping by setting gradient_clipping_threshold to zero.
+gradient_clipping_threshold: 1.0
+
+# AdamW optimizer parameters
+# We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
 adam_b1: 0.9 # Exponential decay rate to track the first moment of past gradients.
 adam_b2: 0.95 # Exponential decay rate to track the second moment of past gradients.
 adam_eps: 1.e-8 # A small constant applied to denominator outside of the square root.
 adam_eps_root: 0. # A small constant applied to denominator inside the square root.
+adam_weight_decay: 0.1 # AdamW Weight decay
 
 # Stack trace parameters
 collect_stack_trace: False

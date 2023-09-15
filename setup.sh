@@ -32,6 +32,14 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
+if [[ $JAX_VERSION == NONE ]]; then
+  unset JAX_VERSION
+fi
+
+if [[ $LIBTPU_GCS_PATH == NONE ]]; then
+  unset LIBTPU_GCS_PATH
+fi
+
 if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE) ]]; then
      echo -e "\n\nError: You can only specify a JAX_VERSION with stable mode.\n\n"
      exit 1

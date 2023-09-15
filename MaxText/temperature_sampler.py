@@ -85,7 +85,7 @@ def temperature_sample(prompt_inputs,
     # Split RNG for sampling.
     rng1, rng2 = random.split(rng)
     # Call fast-decoder model on current tokens to get next-position logits.
-    logits, new_cache = tokens_to_logits(cur_token, cache)
+    logits, new_cache = tokens_to_logits(cur_token, cache, rng1)
     # Sample next token from logits.
     # TODO: add top-p "nucleus" sampling option.
     if topk:

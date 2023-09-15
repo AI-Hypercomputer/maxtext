@@ -37,9 +37,7 @@ from tensorboardX import SummaryWriter
 
 from layers import Transformer
 import pyconfig
-import tensorflow_datasets as tfds
-from input_pipeline import get_datasets
-from input_pipeline import preprocess_dataset
+from input_pipeline import create_data_iterator_with_tokenizer
 import max_utils
 import checkpointing
 
@@ -219,41 +217,30 @@ def train_loop(config, state=None):
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
 
+  # Mesh definition
+  devices_array = max_utils.create_device_mesh(config)
+  mesh = Mesh(devices_array, config.mesh_axes)
+
   # Model and Optimizer definition
-  model = Transformer(config)
+  model = Transformer(config, mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(
       learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
   )
 
-  tx = optax.adam(
+  # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
+  tx = optax.adamw(
       max_utils.create_learning_rate_schedule(
           learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
       ),
       b1=config.adam_b1,
       b2=config.adam_b2,
       eps=config.adam_eps,
-      eps_root=config.adam_eps_root
+      eps_root=config.adam_eps_root,
+      weight_decay=config.adam_weight_decay,
   )
 
-  # Mesh definition
-  devices_array = max_utils.create_device_mesh(config)
-  mesh = Mesh(devices_array, config.mesh_axes)
 
-  # Set up datasets.
-  read_config = tfds.ReadConfig(
-    shuffle_seed = config.data_shuffle_seed,
-  )
-  train_ds, eval_ds = get_datasets(
-      config=config,
-      read_config = read_config,
-  )
-  train_iter, _, _, _ = preprocess_dataset(
-    config,
-    mesh,
-    train_ds, eval_ds,
-    vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
-    data_shuffle_seed = config.data_shuffle_seed,
-  )
+  data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   data_pspec = P(*config.data_sharding)
@@ -279,7 +266,7 @@ def train_loop(config, state=None):
   running_gcs_metrics = [] if config.gcs_metrics else None
 
   for step in np.arange(get_first_step(state), config.steps):
-    example_batch = load_next_batch(train_iter, example_batch, config)
+    example_batch = load_next_batch(data_iterator, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics, nextrng = p_train_step(
           model, config, state, example_batch, nextrng

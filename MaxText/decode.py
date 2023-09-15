@@ -27,8 +27,7 @@ import optax
 
 from layers import Transformer
 import pyconfig
-from input_pipeline import get_datasets
-from input_pipeline import preprocess_dataset
+from input_pipeline import create_data_iterator_with_tokenizer
 import max_utils
 import temperature_sampler
 
@@ -78,7 +77,7 @@ def predict_step(inputs,
   target_shape = (inputs.shape[0], config.max_predict_length) + inputs.shape[2:]
 
   initial_variables = model.init(
-      jax.random.PRNGKey(0),
+      {'params': rngkey, 'dropout': rngkey, 'aqt': rngkey},
       jnp.ones(target_shape, config.dtype),
       None,
       enable_dropout=False,
@@ -87,7 +86,7 @@ def predict_step(inputs,
   )
   cache = initial_variables["cache"]
 
-  def tokens_ids_to_logits(flat_ids, flat_cache):
+  def tokens_ids_to_logits(flat_ids, flat_cache, aqt_rng):
     """Token slice to logits from decoder model."""
     # --> [batch * beam, 1, vocab]
     flat_logits, new_vars = model.apply(
@@ -99,6 +98,7 @@ def predict_step(inputs,
         None,
         enable_dropout=False,
         decode=True,
+        rngs={'aqt': aqt_rng},
         max_decode_length=config.max_predict_length,
         mutable=["cache"])
     new_flat_cache = new_vars["cache"]
@@ -135,30 +135,21 @@ def decode_loop(config, state=None):
                                                                      config.async_checkpointing)
   rng = random.PRNGKey(0)
 
-  # Model and Optimizer definition
-  model = Transformer(config)
+  # Mesh definition
+  devices_array = max_utils.create_device_mesh(config)
+  mesh = Mesh(devices_array, config.mesh_axes)
 
-  tx = optax.adam(
+  # Model and Optimizer definition
+  model = Transformer(config, mesh = mesh)
+
+  tx = optax.adamw(
     max_utils.create_learning_rate_schedule(
       learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
     )
   ) # TODO: we need an optax.GradientTransformation to form a TrainState, but we don't use it when decoding
 
-  # Mesh definition
-  devices_array = max_utils.create_device_mesh(config)
-  mesh = Mesh(devices_array, config.mesh_axes)
 
-  # Set up datasets.
-  train_ds, eval_ds = get_datasets(
-      config=config,
-  )
-
-  _, _, _, sp_tokenizer = preprocess_dataset(
-    config,
-    mesh,
-    train_ds, eval_ds,
-    vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
-  )
+  _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager)
 
