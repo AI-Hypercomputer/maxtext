@@ -1,4 +1,4 @@
-# bash docker_build_dependency_image.sh MODE=nightly LIBTPU_GCS_PATH=gs://libtpu_internal/rwitten/viperlite/2023-09-13-04:09:13-libtpu.so
+# bash docker_build_dependency_image.sh MODE=nightly 
 
 #!/bin/bash
 
@@ -110,9 +110,9 @@ elif [[ $MODE == "nightly" ]]; then
 # Nightly mode
     echo "Installing jax-head, jaxlib-nightly"
     # Install jax from GitHub head
-    pip3 install git+https://github.com/google/jax@306c60d4c7e8f33f9e8c453031caa22346032560
+    pip3 install git+https://github.com/google/jax@65de2cf907848212b9863aaec7e9daf02ebb31cf
     # Install jaxlib-nightly
-    pip3 install --pre -U jaxlib==0.4.16.dev20230913 -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
+    pip3 install --pre -U jaxlib==0.4.16.dev20230915 -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 
     if [[ -n "$LIBTPU_GCS_PATH" ]]; then
         # Install custom libtpu
@@ -124,7 +124,7 @@ elif [[ $MODE == "nightly" ]]; then
     else
         # Install libtpu-nightly
         echo "Installing libtpu-nightly"
-        pip3 install libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html -U --pre
+        pip3 install libtpu-nightly==0.1.dev20230915 -f https://storage.googleapis.com/jax-releases/libtpu_releases.html -U --pre
     fi
 elif [[ $MODE == "head" ]]; then 
 # Head mode
