@@ -45,8 +45,6 @@ import subprocess
 from datetime import datetime
 import os
 import shutil
-import json
-import tempfile
 
 
 
@@ -319,7 +317,7 @@ def main(raw_args=None) -> None:
   #### Step 2: Run the CQR command ####
   log_name = "main_command_log_slice_${SLICE_ID}_worker_${WORKER_ID}"
   zip_gcs_path = os.path.join(bucket_path, zip_name)
-  startup_script = write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file, args)
+  write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file, args)
 
   print("Running CQR command...")
   captured_output = run_create_resources(startup_script_file, args)
@@ -346,7 +344,8 @@ def main(raw_args=None) -> None:
       f"\n{gcs_bucket_url(args.BUCKET_NAME, bucket_dir, args.PROJECT)}\n")
 
   print("View the status of the created TPUs via: ")
-  print(f"gcloud alpha compute tpus queued-resources list --filter={args.RUN_NAME} --zone={args.ZONE} --project={args.PROJECT}\n")
+  print(f"gcloud alpha compute tpus queued-resources list "\
+    f"--filter={args.RUN_NAME} --zone={args.ZONE} --project={args.PROJECT}\n")
   return 0
 
 if __name__ == '__main__':
