@@ -64,8 +64,9 @@ def run_job(run_name, base_config, **config_updates):
 
     attempt = args['attempt']
     sweep_name = args['sweep']
-    use_cl = bname(args['jax_14_cl'])
-    run_name = f'int8-{sweep_name}-a{attempt}-{run_name}-cl{use_cl}'
+    use_cl = args['jax_14_cl']
+    assert use_cl, 'forbidden to not use it'
+    run_name = f'int8-{sweep_name}-a{attempt}-{run_name}'
 
     yml = update_yaml_fields(yml, {'run_name': run_name})
     experiment_yml_file = f"MaxText/configs/{run_name}.yml"
@@ -581,6 +582,83 @@ def run_s30():
     run_job("gc_0p1", baseline, clip_by_global_norm=0.1)
     run_job("pv_F", baseline, fwd_int8_pv=False, dlhs_int8_pv=False)
     run_job("fwdq_T", baseline, aqt_use_fwd_quant=True)
+
+
+def baseline_s31(quant):
+    return dict(
+        global_parameter_scale = 16,
+
+        num_slice = 8,
+        max_target_length = 2048,
+        per_device_batch_size = 4,
+
+        learning_rate = 10.0e-4,
+        adam_weight_decay = 0.1,
+        clip_by_global_norm = 0.1,
+        fill_ratio = 0.8 / 1.5,  # divide by 1.5 to make the training longer. Maybe see another drop in loss curev
+
+        fwd_int8 = quant,
+        dlhs_int8 = quant,
+        drhs_int8 = False,
+        fwd_int8_pv = quant,
+        dlhs_int8_pv = quant,
+        drhs_int8_pv = False,
+
+        aqt_use_fwd_quant = False,
+    )
+
+def run_s31():
+    # WARNING: warmup is 3%, which is 600 and 1200 steps on ns16 and ns8 respecively.
+    # Summary:
+    # https://screenshot.googleplex.com/7v68TWqBMFYQMk4
+    # Speedup is around 19.5%  FFF vs TTF
+    run_job("q_TTF", baseline_s31(True))
+    run_job("q_FFF", baseline_s31(False))
+    run_job("q_TTF-ns_16-lr_20", baseline_s31(True), num_slice=16, learning_rate=20.0e-4)
+    run_job("q_TTF-gc0p01", baseline_s31(True), clip_by_global_norm=0.01)
+
+
+def run_s31_2():
+    # Retry 16 pods on different LR, on tuned clipping and slower warmup
+    common = dict(
+        fill_ratio = 0.8,
+        num_slice=16,
+    )
+    # https://screenshot.googleplex.com/7U6T3cjrQokZEx6
+    # https://screenshot.googleplex.com/AjtnDbindvMSiqP
+    # We will continue with gc_0p10 and lr_05
+    run_job("q_TTF-ns_16-lr_20", baseline_s31(True), **common, learning_rate=20.0e-4) # not a repro of s31. 3x longer warmup!
+    run_job("q_TTF-ns_16-lr_10-gc_0p05", baseline_s31(True), **common, learning_rate=10.0e-4, clip_by_global_norm=0.05)
+    run_job("q_TTF-ns_16-lr_05-gc_0p05", baseline_s31(True), **common, learning_rate=05.0e-4, clip_by_global_norm=0.05)
+
+
+def baseline_s32():
+    return dict(
+        global_parameter_scale = 16,
+
+        num_slice = 16,
+        max_target_length = 2048,
+        per_device_batch_size = 4,
+
+        learning_rate = 5.0e-4,
+        adam_weight_decay = 0.1,
+        clip_by_global_norm = 0.1,
+        fill_ratio = 0.8,
+
+        fwd_int8 = True,
+        dlhs_int8 = True,
+        drhs_int8 = False,
+        fwd_int8_pv = True,
+        dlhs_int8_pv = True,
+        drhs_int8_pv = False,
+
+        aqt_use_fwd_quant = False,
+    )
+
+
+def runs_s32():
+    run_job("q_TTF", baseline_s32())
+    run_job("q_FFF", baseline_s32(), int8_training=False)
 
 
 def main():

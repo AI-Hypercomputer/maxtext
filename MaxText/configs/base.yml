@@ -63,7 +63,7 @@ aqt_rng_type: "jax.uniform"
 
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
-global_parameter_scale: 0
+global_parameter_scale: 0 # has to be set explicitely.
 global_parameter_scale_mlp_bonus: 0
 base_emb_dim: 2560
 base_num_heads: 8
@@ -122,10 +122,10 @@ num_slice: 1 # used by run-sweep.py . will be copied to the other yml file.
 dataset_path: "gs://max-datasets-rogue-useast/"
 
 vocab_size: 32_768 # powers of 2 for sharding
-vocab_relative_path: "vocabs"  # Assumes we're allowed
-dataset_name: 'c4/en:3.0.1'
-eval_dataset_name: 'c4/en:3.0.1'
-eval_split: 'validation'
+vocab_relative_path: "vocabs" # Assumes we're allowed
+dataset_name: "c4/en:3.0.1"
+eval_dataset_name: "c4/en:3.0.1"
+eval_split: "validation"
 per_device_batch_size: -1.0
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
@@ -185,8 +185,8 @@ adam_weight_decay: 0.1 # AdamW Weight decay
 
 # Stack trace parameters
 collect_stack_trace: False
-stack_trace_to_cloud: False  # Uploads to cloud logging if True, else to the console if False.
-stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds.
+stack_trace_to_cloud: False # Uploads to cloud logging if True, else to the console if False.
+stack_trace_interval_seconds: 600 # Stack trace collection frequency in seconds.
 
 # Use iota operator in Embed
 use_iota_embed: False
