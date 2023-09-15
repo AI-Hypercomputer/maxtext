@@ -645,6 +645,7 @@ def baseline_s32():
         clip_by_global_norm = 0.1,
         fill_ratio = 0.8,
 
+        int8_training = True,
         fwd_int8 = True,
         dlhs_int8 = True,
         drhs_int8 = False,
@@ -655,8 +656,8 @@ def baseline_s32():
         aqt_use_fwd_quant = False,
     )
 
-
-def runs_s32():
+# This is paper attempt for 16B
+def run_s32():
     run_job("q_TTF", baseline_s32())
     run_job("q_FFF", baseline_s32(), int8_training=False)
 
