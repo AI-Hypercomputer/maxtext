@@ -57,7 +57,8 @@ def main() -> None:
     captured_output = subprocess.run(command, capture_output=True)
     if captured_output.returncode != 0:
       print('Error downloading metrics directory from GCS:\n' + captured_output.stderr.decode())
-      return -1
+      print(f"Assuming run: {name} is failed and skipping")
+      continue
     print('Download successful!')
 
     # Generate metrics file name to open
