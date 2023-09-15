@@ -20,7 +20,9 @@ deljobs tpu-prod-env-multipod us-east5-b
 deljobs tpu-prod-env-multipod us-central2-b
 deljobs tpu-prod-env-vlp-2nic us-east5-b
 
-
 wait
+
+echo "This can give more details:"
+echo "  gcloud compute tpus tpu-vm  list --zone=us-east5-b --project=tpu-prod-env-vlp-2nic"
 
 exit
