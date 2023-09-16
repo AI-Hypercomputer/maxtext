@@ -662,6 +662,16 @@ def run_s32():
     run_job("q_FFF", baseline_s32(), int8_training=False)
 
 
+# This is paper attempt for 16B
+def run_s33():
+    common = dict(
+        num_slice=8,
+        global_parameter_scale = 8,
+    )
+
+    run_job("q_TTF_s8_ns8", baseline_s32(), **common)
+    run_job("q_FFF_s8_ns8", baseline_s32(), int8_training=False, **common)
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='TPU configuration options')
