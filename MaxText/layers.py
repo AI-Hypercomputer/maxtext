@@ -337,11 +337,13 @@ class MultiHeadDotProductAttention(nn.Module):
       query = jax.numpy.transpose(query, axes = (0,2,1,3))
       key = jax.numpy.transpose(key, axes = (0,2,1,3))
       value = jax.numpy.transpose(value, axes = (0,2,1,3))
+  
+      axis_names = nn.logical_to_mesh_axes(('activation_batch', 'activation_heads', 'activation_length', 'activation_kv'))
       @functools.partial(shard_map, mesh = self.mesh, in_specs = (
-          P(('data','fsdp'),'tensor'),
-          P(('data','fsdp'),'tensor'),
-          P(('data','fsdp'),'tensor'),
-      ), out_specs = P(('data','fsdp'),'tensor'), check_rep=False)
+          axis_names,
+          axis_names,
+          axis_names,
+      ), out_specs = axis_names, check_rep=False)
       def wrap_flash_attention(query, key, value):
         return flash_attention.flash_attention(
               query,
@@ -542,6 +544,9 @@ class MultiHeadDotProductAttention(nn.Module):
 
     # Apply attention.
     x = self.apply_attention(query, key, value, cfg.enable_flash_attention, attention_bias, dropout_rng, deterministic)
+    x = nn.with_logical_constraint(
+        x, ('activation_batch', 'activation_length', 'activation_heads', 'activation_kv')
+    )
 
     # Back to the original inputs dimensions.
     out = DenseGeneral(
