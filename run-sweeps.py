@@ -678,16 +678,18 @@ def run_s33():
 def run_s34():
     import numpy as np
     s = 2
+    num_slice = 8*s
+    ps = 8
     common = dict(
-        num_slice=8*s,
-        global_parameter_scale = 8,
+        num_slice=num_slice,
+        global_parameter_scale = ps,
         adam_b1=0.9 ** s,
         adam_b2=0.95 ** s,
         learning_rate = 5.0e-4 * s,
     )
 
-    run_job("q_TTF_s8_ns8", baseline_s32(), **common)
-    run_job("q_FFF_s8_ns8", baseline_s32(), int8_training=False, **common)
+    run_job(f"q_TTF_ps{ps}_ns{num_slice}", baseline_s32(), **common)
+    run_job(f"q_FFF_ps{ps}_ns{num_slice}", baseline_s32(), int8_training=False, **common)
 
 def main():
     import argparse
