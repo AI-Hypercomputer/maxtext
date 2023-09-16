@@ -641,6 +641,8 @@ def baseline_s32():
         per_device_batch_size = 4,
 
         learning_rate = 5.0e-4,
+        adam_b1 = 0.9,
+        adam_b2 = 0.95,
         adam_weight_decay = 0.1,
         clip_by_global_norm = 0.1,
         fill_ratio = 0.8,
@@ -662,11 +664,26 @@ def run_s32():
     run_job("q_FFF", baseline_s32(), int8_training=False)
 
 
-# This is paper attempt for 16B
+# This is paper attempt for 8B
 def run_s33():
     common = dict(
         num_slice=8,
         global_parameter_scale = 8,
+    )
+
+    run_job("q_TTF_s8_ns8", baseline_s32(), **common)
+    run_job("q_FFF_s8_ns8", baseline_s32(), int8_training=False, **common)
+
+# This is S33 put with 16 slices, we adjust adam betas and LR to be close
+def run_s34():
+    import numpy as np
+    s = 2
+    common = dict(
+        num_slice=8*s,
+        global_parameter_scale = 8,
+        adam_b1=0.9 ** s,
+        adam_b2=0.95 ** s,
+        learning_rate = 5.0e-4 * s,
     )
 
     run_job("q_TTF_s8_ns8", baseline_s32(), **common)
