@@ -64,7 +64,7 @@ class TpuJAXTest(unittest.TestCase):
     self.assertGreater(overall_metrics['flops'], 0)
     contains_value = False
     for m in overall_metrics['bandwidthUtils']:
-      if (m > 0):
+      if m > 0:
         contains_value = True
     self.assertTrue(contains_value)
 
