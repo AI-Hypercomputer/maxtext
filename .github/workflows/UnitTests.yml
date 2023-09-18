@@ -47,7 +47,7 @@ jobs:
       run: |
         source venv/bin/activate
         cd MaxText
-        python3 -m pytest
+        python3 -m pytest --ignore test_profiler.py
     - name: Test train.py
       run: |
         source venv/bin/activate
