@@ -17,6 +17,6 @@ while true; do
     done
 
     # Sleep for 1 minute before running the script again
-    echo "sleep 60s"
-    sleep 60
+    echo "sleep 30s"
+    sleep 30
 done
