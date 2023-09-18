@@ -29,7 +29,6 @@ serialized, in_tree, out_tree = serialize(compiled)
 # with open('my_blob_aot', 'w') as f:
 #   f.write(serialized)
 
-# Doesn't work
 with open("aot.pickle", "wb") as f:
     pickle.dump(serialized, f)
 with open("in_tree.pickle", "wb") as f:
