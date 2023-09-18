@@ -46,49 +46,19 @@ from datetime import datetime
 import os
 import shutil
 
-##### Define flags #####
-parser = argparse.ArgumentParser(description='TPU configuration options')
-parser.add_argument('--TPU_TYPE', type=str, default='v4-8',
-                    help='The type of the TPU')
-parser.add_argument('--VERSION', type=str, default='tpu-ubuntu2204-base',
-                    help='The runtime version of the TPU')
-parser.add_argument('--NUM_SLICES', type=int, default=2,
-                    help='The number of slices to run the job on')
-parser.add_argument('--SCRIPT_DIR', type=str, default=os.getcwd(),
-                    help='The local location of the directory to copy to the TPUs and run the main command from. \
-                      Defaults to current working directory.')
-parser.add_argument('--COMMAND', type=str, default=None, required=True,
-                    help='Main command to run on each TPU. \
-                      This command is run from a copied version of SCRIPT_DIR on each TPU worker. \
-                      You must include your dependency installations here, \
-                      e.g. --COMMAND=\'bash setup.sh && python3 train.py\'')
-parser.add_argument('--BUCKET_NAME', type=str, default=None, required=True,
-                    help='Name of GCS bucket, e.g. my-bucket')
-parser.add_argument('--BUCKET_DIR', type=str, default="",
-                    help='Directory within the GCS bucket, can be None, e.g. my-dir')
-parser.add_argument('--PROJECT', type=str, default=None,
-                    help='GCE project name, defaults to gcloud config project')
-parser.add_argument('--ZONE', type=str, default=None,
-                    help='GCE zone, e.g. us-central2-b, defaults to gcloud config compute/zone')
-parser.add_argument('--RUN_NAME', type=str, default=None,
-                    help='Run name used for temporary files, defaults to timestamp.')
-parser.add_argument('--CQR_EXTRA_ARGS', type=str, default=None,
-                    help='Additional arguments to be passed verbatim to the CQR request, e.g. \
-                    --CQR_EXTRA_ARGS="--reserved --service-account=my-service-account-email-address')
 
-args = parser.parse_args()
 
 def get_project():
   completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
   project_outputs = completed_command.stdout.decode().strip().split('\n')
-  if len(project_outputs) < 1 or project_outputs[-1]=='':
+  if len(project_outputs) < 1:
     sys.exit("You must specify the project in the PROJECT flag or set it with 'gcloud config set project <project>'")
   return project_outputs[-1] # The project name lives on the last line of the output
 
 def get_zone():
   completed_command = subprocess.run(["gcloud", "config", "get", "compute/zone"], check=True, capture_output=True)
   zone_outputs = completed_command.stdout.decode().strip().split('\n')
-  if len(zone_outputs) < 1 or zone_outputs[-1]=='':
+  if len(zone_outputs) < 1:
     sys.exit("You must specify the zone in the ZONE flag or set it with 'gcloud config set compute/zone <zone>'")
   return zone_outputs[-1] # The zone name lives on the last line of the output
 
@@ -96,12 +66,13 @@ def get_run_name():
   now = datetime.now()
   return os.getlogin() + "-" + now.strftime("%Y-%m-%d-%H-%M-%S")
 
-def normalize_gcs_bucket_name():
+def normalize_gcs_bucket_name(args):
   """ Remove the gs:// from bucket_name if passed."""
   if len(args.BUCKET_NAME) > 5 and args.BUCKET_NAME[0:5]=="gs://":
     args.BUCKET_NAME=args.BUCKET_NAME[5:]
+  return args
 
-def print_flags():
+def print_flags(args):
   """ Print configuration values after defaults have been filled in. """
   print("Running multihost_job with the following configuration:")
   print(f"Project             (--PROJECT)         = {args.PROJECT}")
@@ -137,7 +108,7 @@ def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
 
   return captured_output
 
-def run_create_resources(startup_script_file):
+def run_create_resources(startup_script_file, args):
   """ Run the Create Queued Resources (CQR) request """
   # pylint: disable=line-too-long
   command = fr'gcloud alpha compute tpus queued-resources create {args.RUN_NAME} --accelerator-type={args.TPU_TYPE} --runtime-version={args.VERSION} --project={args.PROJECT} --zone={args.ZONE}'
@@ -154,7 +125,7 @@ def run_create_resources(startup_script_file):
   captured_output = subprocess.run(command, check=False, shell=True, capture_output=True)
   return captured_output
 
-def write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file):
+def write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file, args):
   """ Write the startup script locally into a file to be passed to the CQR command. """
   startup_script = f"""#!/bin/bash
 mkdir -p {args.RUN_NAME}
@@ -169,10 +140,11 @@ tar xzf {zip_name}
 {args.COMMAND}) 2>&1) >> {log_name}
 (echo "{finish_status_str()}") >> {log_name}
 gsutil cp {log_name} "{bucket_path}/"
-(({create_kill_command_str()}) 2>&1 ) >> {log_name}"""
+(({create_kill_command_str(args)}) 2>&1 ) >> {log_name}"""
 
   with open(startup_script_file, "w", encoding="utf-8") as f:
     f.write(startup_script)
+  return startup_script
 
 def get_env_command_str(num_slices):
   """ Define environment variables on the TPUS """
@@ -193,7 +165,7 @@ def finish_status_str():
   return """multihost_job finished main command on slice $SLICE_ID worker $WORKER_ID at $(date "+%Y-%m-%d %H:%M:%S") UTC with exit status $?.
 This worker will immediately send its logs to GCS."""
 
-def create_kill_command_str():
+def create_kill_command_str(args):
   # pylint: disable=line-too-long
   return f"""if [[ $SLICE_ID -eq 0 && $WORKER_ID -eq 0 ]]; then
   echo "This worker (slice 0 worker 0) will wait 10 minutes before tearing down the job to allow other workers to gracefully exit."
@@ -230,7 +202,7 @@ def setup_ops_str(run_name, log_name):
 def install_ops_script_str(run_name, log_name):
   # pylint: disable=anomalous-backslash-in-string
   return f"""OPS_FILE=/etc/google-cloud-ops-agent/config.yaml
-  if ! test -f \$OPS_FILE; 
+  if ! test -f \$OPS_FILE;
   then
     curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
     downloaded=0
@@ -278,7 +250,39 @@ def gcs_bucket_url(bucket_name, bucket_dir, project):
   return f"https://console.cloud.google.com/storage/browser/{bucket_path}?project={project}"
 
 ################### Main ###################
-def main() -> None:
+def main(raw_args=None) -> None:
+    ##### Define flags #####
+  parser = argparse.ArgumentParser(description='TPU configuration options')
+  parser.add_argument('--TPU_TYPE', type=str, default='v4-8',
+                      help='The type of the TPU')
+  parser.add_argument('--VERSION', type=str, default='tpu-ubuntu2204-base',
+                      help='The runtime version of the TPU')
+  parser.add_argument('--NUM_SLICES', type=int, default=2,
+                      help='The number of slices to run the job on')
+  parser.add_argument('--SCRIPT_DIR', type=str, default=os.getcwd(),
+                      help='The local location of the directory to copy to the TPUs and run the main command from. \
+                        Defaults to current working directory.')
+  parser.add_argument('--COMMAND', type=str, default=None, required=True,
+                      help='Main command to run on each TPU. \
+                        This command is run from a copied version of SCRIPT_DIR on each TPU worker. \
+                        You must include your dependency installations here, \
+                        e.g. --COMMAND=\'bash setup.sh && python3 train.py\'')
+  parser.add_argument('--BUCKET_NAME', type=str, default=None, required=True,
+                      help='Name of GCS bucket, e.g. my-bucket')
+  parser.add_argument('--BUCKET_DIR', type=str, default="",
+                      help='Directory within the GCS bucket, can be None, e.g. my-dir')
+  parser.add_argument('--PROJECT', type=str, default=None,
+                      help='GCE project name, defaults to gcloud config project')
+  parser.add_argument('--ZONE', type=str, default=None,
+                      help='GCE zone, e.g. us-central2-b, defaults to gcloud config compute/zone')
+  parser.add_argument('--RUN_NAME', type=str, default=None,
+                      help='Run name used for temporary files, defaults to timestamp.')
+  parser.add_argument('--CQR_EXTRA_ARGS', type=str, default=None,
+                      help='Additional arguments to be passed verbatim to the CQR request, e.g. \
+                      --CQR_EXTRA_ARGS="--reserved --service-account=my-service-account-email-address')
+  args = parser.parse_args(raw_args)
+
+
   print("\nStarting multihost_job...\n", flush=True)
 
   #### Parse flags ####
@@ -288,9 +292,9 @@ def main() -> None:
     args.ZONE = get_zone()
   if not args.RUN_NAME:
     args.RUN_NAME = get_run_name() # Used for QR name, TPU_PREFIX, logging file, and tmp json file.
-  normalize_gcs_bucket_name()
+  args = normalize_gcs_bucket_name(args)
 
-  print_flags()
+  print_flags(args)
 
   ##### Step 1: Zip code and move it to GCS #####
   tmp_dir_relative_to_script = os.path.join("tmp", args.RUN_NAME, "")
@@ -313,10 +317,10 @@ def main() -> None:
   #### Step 2: Run the CQR command ####
   log_name = "main_command_log_slice_${SLICE_ID}_worker_${WORKER_ID}"
   zip_gcs_path = os.path.join(bucket_path, zip_name)
-  write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file)
+  write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file, args)
 
   print("Running CQR command...")
-  captured_output = run_create_resources(startup_script_file)
+  captured_output = run_create_resources(startup_script_file, args)
   if captured_output.returncode != 0:
     print(f"\n\nCreate resource request returned with ERROR returncode {captured_output.returncode}.\n")
     print("Create resource error:\n" + captured_output.stderr.decode())
@@ -340,8 +344,10 @@ def main() -> None:
       f"\n{gcs_bucket_url(args.BUCKET_NAME, bucket_dir, args.PROJECT)}\n")
 
   print("View the status of the created TPUs via: ")
-  print(f"gcloud alpha compute tpus queued-resources list --filter={args.RUN_NAME}\n")
+  print(f"gcloud alpha compute tpus queued-resources list "\
+    f"--filter={args.RUN_NAME} --zone={args.ZONE} --project={args.PROJECT}\n")
   return 0
 
 if __name__ == '__main__':
+  print("Name is __main__")
   main()
