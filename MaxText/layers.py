@@ -709,9 +709,9 @@ class Embed(nn.Module):
       return maxtext_dot(query, jnp.asarray(self.embedding, dtype).T, lax.dot_general)
     else:
       aqt_cfg = maxtext_sweeps.sweep1(
-        self.config.fwd_int8_qk,
-        self.config.dlhs_int8_qk,
-        self.config.drhs_int8_qk,
+        self.config.fwd_int8_logits,
+        self.config.dlhs_int8_logits,
+        self.config.drhs_int8_logits,
         use_dummy_static_bound=self.config.aqt_use_dummy_static_bound,
         rng_type=self.config.aqt_rng_type,
         use_fwd_quant=self.config.aqt_use_fwd_quant,
