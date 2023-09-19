@@ -656,6 +656,9 @@ def baseline_s32():
         fwd_int8_pv = True,
         dlhs_int8_pv = True,
         drhs_int8_pv = False,
+        fwd_int8_qk = False,
+        dlhs_int8_qk = False,
+        drhs_int8_qk = False,
 
         aqt_use_fwd_quant = False,
         data_shuffle_seed = 0,
@@ -723,13 +726,13 @@ def ablation(gps):
     return cfg
 
 # Init seed and data seed
-def run_s36():
+def run_s36(): # 20
     for s in range(5):
         run_job(f"dseed_{s}", ablation(gps=1), data_shuffle_seed = s)
         run_job(f"wseed_{s}", ablation(gps=1), init_weights_seed = s)
 
 
-def run_s37():
+def run_s37(): # 16
     for gps in [1, 2]:
         run_job(f"q_FFF", ablation(gps=gps), int8_training=False)
         run_job(f"q_TTT", ablation(gps=gps), drhs_int8=True)
@@ -743,7 +746,7 @@ def run_s37():
         run_job(f"fwdq_T", ablation(gps=gps), aqt_use_fwd_quant=True)
 
 # Long training
-def run_s38():
+def run_s38(): # 32
     # want 16000 steps on 16 slices
     run_job(f"FFF", ablation(gps=1), num_slice=16, fill_ratio=0.8 / 16 /1.20  , int8_training=False)
     run_job(f"TTF", ablation(gps=1), num_slice=16, fill_ratio=0.8 / 16 /1.20  , int8_training=True)
