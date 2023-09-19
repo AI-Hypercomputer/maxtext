@@ -37,6 +37,8 @@ def bname(b: bool):
     return str(b)[0]
 
 def run_job(run_name, base_config, **config_updates):
+    print(f"https://pantheon.corp.google.com/logs/query;query=timestamp%20%3E%20%222023-08-18%22%20AND%20labels.%22agent.googleapis.com%2Flog_file_path%22%3D~%22${run_name}.*%2Fmain_command_log_slice_0_worker_0%22")
+
     maxtext_config = update_yaml_fields(base_config, config_updates)
     model_size = maxtext_config['global_parameter_scale']
     with open('MaxText/configs/base.yml', 'r') as file:
@@ -711,9 +713,9 @@ def run_s35():
     run_job("q_TTF_s1_ns8", baseline_s32(), **common(1)) # 18 min
     run_job("q_FFF_s1_ns8", baseline_s32(), int8_training=False, **common(1))
 
+################ ABLATION RUNS ########################
 
-
-def ablation(gps=2):
+def ablation(gps):
     cfg = update_yaml_fields(baseline_s32(), dict(
         global_parameter_scale = gps,
         num_slice = 2,
@@ -723,11 +725,10 @@ def ablation(gps=2):
 # Init seed and data seed
 def run_s36():
     for s in range(5):
-        run_job(f"dseed_{s}", ablation(), data_shuffle_seed = s)
-        run_job(f"wseed_{s}", ablation(), init_weights_seed = s)
+        run_job(f"dseed_{s}", ablation(gps=1), data_shuffle_seed = s)
+        run_job(f"wseed_{s}", ablation(gps=1), init_weights_seed = s)
 
 
-# TTT and QK quantization
 def run_s37():
     for gps in [1, 2]:
         run_job(f"q_FFF", ablation(gps=gps), int8_training=False)
@@ -741,14 +742,20 @@ def run_s37():
         )
         run_job(f"fwdq_T", ablation(gps=gps), aqt_use_fwd_quant=True)
 
+# Long training
+def run_s38():
+    # want 16000 steps on 16 slices
+    run_job(f"FFF", ablation(gps=1), num_slice=16, fill_ratio=0.8 / 16 /1.20  , int8_training=False)
+    run_job(f"TTF", ablation(gps=1), num_slice=16, fill_ratio=0.8 / 16 /1.20  , int8_training=True)
+
 
 # TODO:
+#  - {4bit, per-tensor-scale} (*6),
 #  - logits
 #  - accum,
-#  - {4bit, per-tensor-scale} (*6),
 #  - SR scaled
 #  - binarization
-#  - long training
+#  - restart the training from late checkpoint
 
 def main():
     import argparse
