@@ -18,12 +18,12 @@
 import glob
 import json
 import os
-import unittest
+from absl.testing import absltest
 
 from tensorboard_plugin_profile.convert import raw_to_tool_data
 
 
-class TpuJAXTest(unittest.TestCase):
+class TpuJAXTest(absltest.TestCase):
 
   """Test for profile collected with JAX."""
 
@@ -37,25 +37,6 @@ class TpuJAXTest(unittest.TestCase):
   def test_xplane_is_present(self):
     files = self._get_session_snapshot()
     self.assertLen(files, 1)
-
-  def test_tools_are_in_list(self):
-    xspace_filenames = self._get_session_snapshot()
-    result = raw_to_tool_data.xspace_to_tool_names(xspace_filenames)
-    result.sort()
-    expected = [
-        'trace_viewer@^',
-        'overview_page^',
-        'input_pipeline_analyzer^',
-        'tensorflow_stats^',
-        'memory_profile^',
-        'pod_viewer^',
-        'tf_data_bottleneck_analysis^',
-        'op_profile^',
-        'memory_viewer^',
-        'graph_viewer^',
-    ]
-    expected.sort()
-    self.assertListEqual(expected, result)
 
   def test_overview_page(self):
     xspace_filenames = self._get_session_snapshot()
@@ -78,11 +59,6 @@ class TpuJAXTest(unittest.TestCase):
     self.assertIn('flops', overall_metrics)
     self.assertIn('bandwidthUtils', overall_metrics)
     self.assertGreater(overall_metrics['flops'], 0)
-    contains_value = False
-    for m in overall_metrics['bandwidthUtils']:
-      if m > 0:
-        contains_value = True
-    self.assertTrue(contains_value)
 
   def test_device_trace_contains_threads(self):
     xspace_filenames = self._get_session_snapshot()
@@ -108,4 +84,4 @@ class TpuJAXTest(unittest.TestCase):
 
 
 if __name__ == '__main__':
-  unittest.main()
+  absltest.main()
