@@ -656,6 +656,8 @@ def baseline_s32():
         drhs_int8_pv = False,
 
         aqt_use_fwd_quant = False,
+        data_shuffle_seed = 0,
+        init_weights_seed = 0,
     )
 
 # This is paper attempt for 16B
@@ -702,13 +704,51 @@ def run_s35():
             global_parameter_scale=gps,
         )
 
-    run_job("q_TTF_s4_ns8", baseline_s32(), **common(4))
+    run_job("q_TTF_s4_ns8", baseline_s32(), **common(4)) # 3.5h
     run_job("q_FFF_s4_ns8", baseline_s32(), int8_training=False, **common(4))
-    run_job("q_TTF_s2_ns8", baseline_s32(), **common(2))
+    run_job("q_TTF_s2_ns8", baseline_s32(), **common(2)) # 50 min
     run_job("q_FFF_s2_ns8", baseline_s32(), int8_training=False, **common(2))
-    run_job("q_TTF_s1_ns8", baseline_s32(), **common(1))
+    run_job("q_TTF_s1_ns8", baseline_s32(), **common(1)) # 18 min
     run_job("q_FFF_s1_ns8", baseline_s32(), int8_training=False, **common(1))
 
+
+
+def ablation(gps=2):
+    cfg = update_yaml_fields(baseline_s32(), dict(
+        global_parameter_scale = gps,
+        num_slice = 2,
+    ))
+    return cfg
+
+# Init seed and data seed
+def run_s36():
+    for s in range(5):
+        run_job(f"dseed_{s}", ablation(), data_shuffle_seed = s)
+        run_job(f"wseed_{s}", ablation(), init_weights_seed = s)
+
+
+# TTT and QK quantization
+def run_s37():
+    for gps in [1, 2]:
+        run_job(f"q_FFF", ablation(gps=gps), int8_training=False)
+        run_job(f"q_TTT", ablation(gps=gps), drhs_int8=True)
+        run_job(
+            f"qk_TTF",
+            ablation(gps=gps),
+            fwd_int8_qk = True,
+            dlhs_int8_qk = True,
+            drhs_int8_qk = False,
+        )
+        run_job(f"fwdq_T", ablation(gps=gps), aqt_use_fwd_quant=True)
+
+
+# TODO:
+#  - logits
+#  - accum,
+#  - {4bit, per-tensor-scale} (*6),
+#  - SR scaled
+#  - binarization
+#  - long training
 
 def main():
     import argparse
