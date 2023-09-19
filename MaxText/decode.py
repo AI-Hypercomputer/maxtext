@@ -132,7 +132,8 @@ def decode_loop(config, state=None):
   """Decoding loop for the Transformer model."""
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir,
                                                                      config.enable_checkpointing,
-                                                                     config.async_checkpointing)
+                                                                     config.async_checkpointing,
+                                                                     config.save_period)
   rng = random.PRNGKey(0)
 
   # Mesh definition
