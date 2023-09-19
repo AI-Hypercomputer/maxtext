@@ -637,6 +637,7 @@ def run_s31_2():
 def baseline_s32():
     return dict(
         global_parameter_scale = 16,
+
         num_slice = 16,
         max_target_length = 2048,
         per_device_batch_size = 4,
@@ -720,7 +721,7 @@ def run_s35():
 def ablation(gps):
     cfg = update_yaml_fields(baseline_s32(), dict(
         global_parameter_scale = gps,
-        num_slice = 16,
+        num_slice = 2,
     ))
     return cfg
 
@@ -750,6 +751,7 @@ def run_s38(): # 32
     # want 16000 steps on 16 slices
     run_job(f"long-FFF", ablation(gps=1), num_slice=16, fill_ratio=0.8 / 16 /1.20  , int8_training=False)
     run_job(f"long-TTF", ablation(gps=1), num_slice=16, fill_ratio=0.8 / 16 /1.20  , int8_training=True)
+
 
 # TODO:
 #  - {4bit, per-tensor-scale} (*6),
