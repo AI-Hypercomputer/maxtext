@@ -727,14 +727,15 @@ def ablation(gps):
 
 # Init seed and data seed
 def run_s36(): # 20
-    for s in range(5):
+    for s in range(1,6):
         run_job(f"dseed_{s}", ablation(gps=1), data_shuffle_seed = s)
         run_job(f"wseed_{s}", ablation(gps=1), init_weights_seed = s)
 
 
-def run_s37(): # 16
+def run_s37(): # 20
     for gps in [1, 2]:
         run_job(f"q_FFF", ablation(gps=gps), int8_training=False)
+        run_job(f"q_TTF", ablation(gps=gps), int8_training=True)
         run_job(f"q_TTT", ablation(gps=gps), drhs_int8=True)
         run_job(
             f"qk_TTF",
