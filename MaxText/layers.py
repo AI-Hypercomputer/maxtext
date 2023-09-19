@@ -23,6 +23,7 @@ from aqt.jax.v2.google import maxtext_sweeps
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
+from my_jnp_dot import dot as maxtext_dot 
 
 import dataclasses
 import functools
@@ -690,7 +691,6 @@ class Embed(nn.Module):
     output = nn.with_logical_constraint(output, ('activation_batch', 'activation_length', 'activation_embed'))
     return output
 
-  # TODO (mattdavidow: AQT this up!)
   def attend(self, query: Array) -> Array:
     """Attend over the embedding using a query array.
 
@@ -706,8 +706,7 @@ class Embed(nn.Module):
     """
     dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
     if not self.config.int8_training:
-      #return jnp.dot(query, jnp.asarray(self.embedding, dtype).T)
-      return lax.dot_general(query, jnp.asarray(self.embedding, dtype).T, (((query.ndim - 1,),(0,)),((),())))
+      return maxtext_dot(query, jnp.asarray(self.embedding, dtype).T, lax.dot_general)
     else:
       aqt_cfg = maxtext_sweeps.sweep1(
         self.config.fwd_int8_qk,
@@ -721,10 +720,8 @@ class Embed(nn.Module):
       aqt_key = self.make_rng('aqt')
       context = aqt.Context(key=aqt_key, train_step=None)
       aqt_dot_general = functools.partial(aqt_dot_general, context=context)
-      # !!! AQT requires LHS dtype equals RHS dtype
-      # return aqt_dot_general(query, jnp.asarray(self.embedding).T, (((query.ndim - 1,),(0,)),((),())))
-      # The below fails with jnp.bfloat16
-      return aqt_dot_general(jnp.asarray(query, jnp.float32), jnp.asarray(self.embedding, jnp.float32).T, (((query.ndim - 1,),(0,)),((),())))
+      dtype = jnp.float32 if query.dtype==jnp.float32 or self.embedding.dtype==jnp.float32 else jnp.bfloat16
+      return maxtext_dot(jnp.asarray(query, dtype), jnp.asarray(self.embedding, dtype).T, aqt_dot_general)
 
 class RelativePositionBiases(nn.Module):
   """Adds T5-style relative positional embeddings to the attention logits.
