@@ -665,6 +665,7 @@ def run_s32():
 
 
 # This is paper attempt for 8B
+# This did not finish. Running another attempt from scratch.
 def run_s33():
     common = dict(
         num_slice=8,
@@ -675,6 +676,7 @@ def run_s33():
     run_job("q_FFF_s8_ns8", baseline_s32(), int8_training=False, **common)
 
 # This is S33 put with 16 slices, we adjust adam betas and LR to be close
+# R: This did not finish and I did not try again.
 def run_s34():
     import numpy as np
     s = 2
