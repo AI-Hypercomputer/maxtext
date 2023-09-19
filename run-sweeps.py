@@ -637,8 +637,6 @@ def run_s31_2():
 def baseline_s32():
     return dict(
         global_parameter_scale = 16,
-        load_from_other_directory = "",
-        steps=10,
         num_slice = 16,
         max_target_length = 2048,
         per_device_batch_size = 4,
@@ -664,7 +662,6 @@ def baseline_s32():
         aqt_use_fwd_quant = False,
         data_shuffle_seed = 0,
         init_weights_seed = 0,
-        enable_profiler = False,
     )
 
 # This is paper attempt for 16B
@@ -754,8 +751,6 @@ def run_s38(): # 32
     run_job(f"long-FFF", ablation(gps=1), num_slice=16, fill_ratio=0.8 / 16 /1.20  , int8_training=False)
     run_job(f"long-TTF", ablation(gps=1), num_slice=16, fill_ratio=0.8 / 16 /1.20  , int8_training=True)
 
-def run_load_test():
-    run_job(f"test-load", ablation(gps=1), num_slice=16, load_from_other_directory="gs://maxtext-experiments-multipod/mattdavidow-test-load/checkpoints", steps=10)
 # TODO:
 #  - {4bit, per-tensor-scale} (*6),
 #  - logits
