@@ -693,6 +693,23 @@ def run_s34():
     run_job(f"q_TTF_ps{ps}_ns{num_slice}", baseline_s32(), **common)
     run_job(f"q_FFF_ps{ps}_ns{num_slice}", baseline_s32(), int8_training=False, **common)
 
+# This is paper attempt for 4B, 2B, 1B
+# This did not finish. Running another attempt from scratch.
+def run_s35():
+    def common(gps):
+        return  dict(
+            num_slice=8,
+            global_parameter_scale=gps,
+        )
+
+    run_job("q_TTF_s4_ns8", baseline_s32(), **common(4))
+    run_job("q_FFF_s4_ns8", baseline_s32(), int8_training=False, **common(4))
+    run_job("q_TTF_s2_ns8", baseline_s32(), **common(2))
+    run_job("q_FFF_s2_ns8", baseline_s32(), int8_training=False, **common(2))
+    run_job("q_TTF_s1_ns8", baseline_s32(), **common(1))
+    run_job("q_FFF_s1_ns8", baseline_s32(), int8_training=False, **common(1))
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='TPU configuration options')
