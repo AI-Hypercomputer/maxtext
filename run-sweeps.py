@@ -728,17 +728,17 @@ def ablation(gps):
 # Init seed and data seed
 def run_s36(): # 20
     for s in range(1,6):
-        run_job(f"dseed_{s}", ablation(gps=1), data_shuffle_seed = s)
-        run_job(f"wseed_{s}", ablation(gps=1), init_weights_seed = s)
+        run_job(f"gps_1-dseed_{s}", ablation(gps=1), data_shuffle_seed = s)
+        run_job(f"gps_1-wseed_{s}", ablation(gps=1), init_weights_seed = s)
 
 
 def run_s37(): # 20
     for gps in [1, 2]:
-        run_job(f"q_FFF", ablation(gps=gps), int8_training=False)
-        run_job(f"q_TTF", ablation(gps=gps), int8_training=True)
-        run_job(f"q_TTT", ablation(gps=gps), drhs_int8=True)
+        run_job(f"gps_{gps}-q_FFF", ablation(gps=gps), int8_training=False)
+        run_job(f"gps_{gps}-q_TTF", ablation(gps=gps), int8_training=True)
+        run_job(f"gps_{gps}-q_TTT", ablation(gps=gps), drhs_int8=True)
         run_job(
-            f"qk_TTF",
+            f"gps_{gps}-qk_TTF",
             ablation(gps=gps),
             fwd_int8_qk = True,
             dlhs_int8_qk = True,
@@ -749,8 +749,8 @@ def run_s37(): # 20
 # Long training
 def run_s38(): # 32
     # want 16000 steps on 16 slices
-    run_job(f"FFF", ablation(gps=1), num_slice=16, fill_ratio=0.8 / 16 /1.20  , int8_training=False)
-    run_job(f"TTF", ablation(gps=1), num_slice=16, fill_ratio=0.8 / 16 /1.20  , int8_training=True)
+    run_job(f"long-FFF", ablation(gps=1), num_slice=16, fill_ratio=0.8 / 16 /1.20  , int8_training=False)
+    run_job(f"long-TTF", ablation(gps=1), num_slice=16, fill_ratio=0.8 / 16 /1.20  , int8_training=True)
 
 
 # TODO:
