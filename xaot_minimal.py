@@ -3,6 +3,8 @@ import jax
 from jax.experimental import pjit
 from jax.sharding import PartitionSpec as P
 import numpy as np
+from jax.experimental.serialize_executable import serialize, deserialize_and_load
+import pickle
 
 
 
@@ -32,5 +34,19 @@ with jax.sharding.Mesh(np.array(use_devices), ('data',)):
     )
 orig_compiled = lowered.compile()
 
-cost = orig_compiled.cost_analysis()[0]['flops']
+
+serialized, in_tree, out_tree = serialize(orig_compiled)
+
+with open("x_aot.pickle", "wb") as f:
+    pickle.dump(serialized, f)
+with open("x_in_tree.pickle", "wb") as f:
+    pickle.dump(in_tree, f)
+with open("x_out_tree.pickle", "wb") as f:
+    pickle.dump(out_tree, f)
+
+
+## Run locally instead of loading the pickle
+compiled = deserialize_and_load(serialized, in_tree, out_tree)
+
+cost = compiled.cost_analysis()[0]['flops']
 print(f"{cost=}")
