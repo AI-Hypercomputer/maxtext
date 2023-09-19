@@ -690,6 +690,7 @@ class Embed(nn.Module):
     output = nn.with_logical_constraint(output, ('activation_batch', 'activation_length', 'activation_embed'))
     return output
 
+  # TODO (mattdavidow: AQT this up!)
   def attend(self, query: Array) -> Array:
     """Attend over the embedding using a query array.
 
@@ -704,8 +705,25 @@ class Embed(nn.Module):
       in NLP models.
     """
     dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
-    return jnp.dot(query, jnp.asarray(self.embedding, dtype).T)
-
+    if not self.config.int8_training:
+      #return jnp.dot(query, jnp.asarray(self.embedding, dtype).T)
+      return lax.dot_general(query, jnp.asarray(self.embedding, dtype).T, (((1,),(0,)),((),()))
+    else:
+      aqt_cfg = maxtext_sweeps.sweep1(
+        cfg.fwd_int8_qk,
+        cfg.dlhs_int8_qk,
+        cfg.drhs_int8_qk,
+        use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
+        rng_type=cfg.aqt_rng_type,
+        use_fwd_quant=cfg.aqt_use_fwd_quant,
+      )
+      aqt_dot_general = aqt.make_dot_general(aqt_cfg)
+      aqt_key = self.make_rng('aqt')
+      context = aqt.Context(key=aqt_key, train_step=None)
+      aqt_dot_general = functools.partial(aqt_dot_general, context=context)
+      return aqt_dot_general(query, jnp.asarray(self.embedding, dtype).T, (((1,),(0,)),((),()))
+      lax.dot_general(a, b, (((1,),(0,)),((),()))
+      attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key, _dot_general=aqt_dot_general)
 
 class RelativePositionBiases(nn.Module):
   """Adds T5-style relative positional embeddings to the attention logits.
