@@ -51,21 +51,32 @@ def _multislice_distribute_initialize():
                              num_processes=jax.process_count(),
                              process_id=jax.process_index())
 
-def create_orbax_checkpoint_manager(checkpoint_dir: str, enable_checkpointing: bool, use_async: bool):
+def create_orbax_checkpoint_manager(
+    checkpoint_dir: str,
+    enable_checkpointing: bool,
+    use_async: bool,
+    save_interval_steps: int
+):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:
     max_logging.log("Checkpointing disabled, not creating checkpoint manager.")
     return None
   max_logging.log("Creating checkpoint manager...")
   p = epath.Path(checkpoint_dir)
-  checkpointer = checkpoint.PyTreeCheckpointHandler()
   if use_async:
     _multislice_distribute_initialize()
     checkpointer = AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler())
   else:
     checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
 
-  mngr = CheckpointManager(p, checkpointer, options=CheckpointManagerOptions(create=True))
+  mngr = CheckpointManager(
+      p,
+      checkpointer,
+      options=CheckpointManagerOptions(
+          create=True,
+          save_interval_steps=save_interval_steps
+      )
+  )
   max_logging.log("Checkpoint manager created!")
   return mngr
 

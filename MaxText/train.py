@@ -21,6 +21,7 @@
 # See github.com/google/maxtext/issues/20 for more
 import jax
 import os
+import sys
 
 jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
@@ -211,9 +212,12 @@ def train_loop(config, state=None):
 
   """
   writer = SummaryWriter(config.tensorboard_dir)
-  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir,
-                                                                     config.enable_checkpointing,
-                                                                     config.async_checkpointing)
+  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+      config.checkpoint_dir,
+      config.enable_checkpointing,
+      config.async_checkpointing,
+      config.save_period,
+  )
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
 
@@ -277,9 +281,13 @@ def train_loop(config, state=None):
     write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
 
-    if step > 0 and step % config.save_period == 0 and checkpoint_manager is not None:
-      checkpoint_manager.save(step, state)
-      max_logging.log("saved a checkpoint")
+    if checkpoint_manager is not None:
+      if checkpoint_manager.save(step, state):
+        max_logging.log(f"saved a checkpoint at step {step}")
+      # Upon preemption, exit when and only when all ongoing saves are complete.
+      if checkpoint_manager.reached_preemption(step):
+        checkpoint_manager.wait_until_finished()
+        sys.exit()
 
     if config.metrics_file:
       max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
