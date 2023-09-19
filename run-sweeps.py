@@ -744,7 +744,7 @@ def run_s37(): # 20
             dlhs_int8_qk = True,
             drhs_int8_qk = False,
         )
-        run_job(f"fwdq_T", ablation(gps=gps), aqt_use_fwd_quant=True)
+        run_job(f"gps_{gps}-fwdq_T", ablation(gps=gps), aqt_use_fwd_quant=True)
 
 # Long training
 def run_s38(): # 32
