@@ -706,7 +706,7 @@ class Embed(nn.Module):
     """
     dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
     if not self.config.int8_training:
-      return maxtext_dot(query, jnp.asarray(self.embedding, dtype).T, lax.dot_general)
+      return maxtext_dot(query, jnp.asarray(self.embedding, dtype).T)
     else:
       aqt_cfg = maxtext_sweeps.sweep1(
         self.config.fwd_int8_logits,

@@ -1,8 +1,9 @@
 from jax._src.typing import Array, ArrayLike, DuckTypedArray, DTypeLike, Shape
 from typing import (Any, Callable, Optional, TypeVar, Union,
                     cast as type_cast, overload)
+from jax import lax
 
-def dot(lhs, rhs, _dot_general, precision = None,
+def dot(lhs, rhs, _dot_general = lax.dot_general, precision = None,
         preferred_element_type = None) -> Array:
   """Vector/vector, matrix/vector, and matrix/matrix multiplication.
 
