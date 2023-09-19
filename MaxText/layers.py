@@ -23,6 +23,7 @@ from aqt.jax.v2.google import maxtext_sweeps
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
+from my_jnp_dot import dot as maxtext_dot 
 
 import dataclasses
 import functools
@@ -704,8 +705,23 @@ class Embed(nn.Module):
       in NLP models.
     """
     dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
-    return jnp.dot(query, jnp.asarray(self.embedding, dtype).T)
-
+    if not self.config.int8_training:
+      return maxtext_dot(query, jnp.asarray(self.embedding, dtype).T)
+    else:
+      aqt_cfg = maxtext_sweeps.sweep1(
+        self.config.fwd_int8_logits,
+        self.config.dlhs_int8_logits,
+        self.config.drhs_int8_logits,
+        use_dummy_static_bound=self.config.aqt_use_dummy_static_bound,
+        rng_type=self.config.aqt_rng_type,
+        use_fwd_quant=self.config.aqt_use_fwd_quant,
+      )
+      aqt_dot_general = aqt.make_dot_general(aqt_cfg)
+      aqt_key = self.make_rng('aqt')
+      context = aqt.Context(key=aqt_key, train_step=None)
+      aqt_dot_general = functools.partial(aqt_dot_general, context=context)
+      dtype = jnp.float32 if query.dtype==jnp.float32 or self.embedding.dtype==jnp.float32 else jnp.bfloat16
+      return maxtext_dot(jnp.asarray(query, dtype), jnp.asarray(self.embedding, dtype).T, aqt_dot_general)
 
 class RelativePositionBiases(nn.Module):
   """Adds T5-style relative positional embeddings to the attention logits.

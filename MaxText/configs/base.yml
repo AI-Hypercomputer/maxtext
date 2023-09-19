@@ -54,6 +54,10 @@ fwd_int8_pv: False
 dlhs_int8_pv: False
 drhs_int8_pv: False
 
+fwd_int8_logits: False
+dlhs_int8_logits: False
+drhs_int8_logits: False
+
 quantize_logits: True
 
 # There is no quality here, use just to measure performance headroom.
