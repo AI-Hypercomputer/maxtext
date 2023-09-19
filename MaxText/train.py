@@ -359,7 +359,7 @@ def train_loop(config, state=None):
 
   first_step = get_first_step(state)
   for i in range(first_step):
-    example_batch = load_next_batch(train_iter, example_batch, config)
+    example_batch = load_next_batch(data_iterator, example_batch, config)
     max_logging.log(f"forwarding iterator {i}")
 
   for step in np.arange(get_first_step(state), config.steps):
