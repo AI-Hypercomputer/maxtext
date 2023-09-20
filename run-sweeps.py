@@ -38,16 +38,6 @@ def bname(b: bool):
     return str(b)[0]
 
 def run_job(run_name, base_config, **config_updates):
-    jobre = args['jobre']
-    if not re.findall(jobre, run_name):
-        # print(jobre, run_name)
-        print(f"SKIP: {run_name:30}", end="")
-        print(f"https://pantheon.corp.google.com/logs/query;query=timestamp%20%3E%20%222023-08-18%22%20AND%20labels.%22agent.googleapis.com%2Flog_file_path%22%3D~%22${run_name}.*%2Fmain_command_log_slice_0_worker_0%22")
-        return
-
-    print(f"RUN:  {run_name:30}", end="")
-    print(f"https://pantheon.corp.google.com/logs/query;query=timestamp%20%3E%20%222023-08-18%22%20AND%20labels.%22agent.googleapis.com%2Flog_file_path%22%3D~%22${run_name}.*%2Fmain_command_log_slice_0_worker_0%22")
-
     maxtext_config = update_yaml_fields(base_config, config_updates)
     model_size = maxtext_config['global_parameter_scale']
     with open('MaxText/configs/base.yml', 'r') as file:
@@ -78,6 +68,14 @@ def run_job(run_name, base_config, **config_updates):
     use_cl = args['jax_14_cl']
     assert use_cl, 'forbidden to not use it'
     run_name = f'int8-{sweep_name}-a{attempt}-{run_name}'
+
+    jobre = args['jobre']
+    url = f"https://pantheon.corp.google.com/logs/query;query=timestamp%20%3E%20%222023-08-18%22%20AND%20labels.%22agent.googleapis.com%2Flog_file_path%22%3D~%22{run_name}.*%2Fmain_command_log_slice_0_worker_0%22"
+    if not re.findall(jobre, run_name):
+        print(f"SKIP: {run_name:30}", url)
+        return
+
+    print(f"RUN:  {run_name:30}", url)
 
     yml = update_yaml_fields(yml, {'run_name': run_name})
     experiment_yml_file = f"MaxText/configs/{run_name}.yml"
