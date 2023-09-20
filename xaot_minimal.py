@@ -5,6 +5,7 @@ from jax.sharding import PartitionSpec as P
 import numpy as np
 from jax.experimental.serialize_executable import serialize, deserialize_and_load
 import pickle
+import jax.numpy as jnp
 
 
 
@@ -50,3 +51,6 @@ compiled = deserialize_and_load(serialized, in_tree, out_tree)
 
 cost = compiled.cost_analysis()[0]['flops']
 print(f"{cost=}")
+
+ex_input = 2.0 * jnp.ones((128, 128), dtype=jnp.float32)
+print(f"{compiled(ex_input)}")
