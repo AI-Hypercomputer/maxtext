@@ -750,8 +750,13 @@ def run_s37(): # 20
             dlhs_int8_qk = True,
             drhs_int8_qk = False,
         )
+        logits = dict(
+            fwd_int8_logits = False,
+            dlhs_int8_logits = False,
+            drhs_int8_logits = False,
+        )
         run_job(f"gps_{gps}-fwdq_T", ablation(gps=gps), aqt_use_fwd_quant=True)
-        # run_job(f"gps_{gps}-logits_T", ablation(gps=gps), =True)
+        run_job(f"gps_{gps}-logits_T", ablation(gps=gps), **logits)
 
 # Long training
 def run_s38(): # 32
@@ -764,8 +769,7 @@ def run_s38(): # 32
 #  - rerun 2B from S35: s35_q_..._s2_ns8
 #  - add TTT at all sizes.  s35_q_TTT_s{s}_ns8, s33_q_TTT_s8_ns8, s32_q_TTT
 #  - restart long s38
-#  - logits
-
+#  - logits (in 37)
 
 #  - write summary
 #  - {4bit, per-tensor-scale} (*6),
