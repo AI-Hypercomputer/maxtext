@@ -6,6 +6,7 @@ import numpy as np
 from jax.experimental.serialize_executable import serialize, deserialize_and_load
 import pickle
 import jax.numpy as jnp
+from flax.serialization import to_bytes
 
 
 
@@ -37,6 +38,8 @@ orig_compiled = lowered.compile()
 
 
 serialized, in_tree, out_tree = serialize(orig_compiled)
+print(f"{in_tree=}")
+print(f"{out_tree=}")
 
 with open("x_aot.pickle", "wb") as f:
     pickle.dump(serialized, f)
@@ -44,6 +47,7 @@ with open("x_in_tree.pickle", "wb") as f:
     pickle.dump(in_tree, f)
 with open("x_out_tree.pickle", "wb") as f:
     pickle.dump(out_tree, f)
+
 
 
 ## Run locally instead of loading the pickle
@@ -54,3 +58,12 @@ print(f"{cost=}")
 
 ex_input = 2.0 * jnp.ones((128, 128), dtype=jnp.float32)
 print(f"{compiled(ex_input)}")
+
+
+def serialize_pytreedef(pytreedef):
+  """Serializes a PyTreeDef to a Python object."""
+  return jax.tree_util.tree_map(lambda x: x.serialize(), pytreedef)
+
+flat = in_tree.unflatten(in_tree.)
+with open("x_in_tree_flat.pickle", "wb") as f:
+    pickle.dump(flat, f)
