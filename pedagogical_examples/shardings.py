@@ -240,6 +240,8 @@ pjit_gen_layers = pjit(
         out_shardings=parameter_sharding
       )
 
+# starting the profiler outside `with` statement,
+# will call it right before the computation once b/301309635 is resolved
 activate_profiler(args.profiler_path)
 with Mesh(mesh.devices, mesh.axis_names):
   key = jax.random.PRNGKey(0)
