@@ -7,6 +7,7 @@ from jax.experimental.serialize_executable import serialize, deserialize_and_loa
 import pickle
 import jax.numpy as jnp
 from flax.serialization import to_bytes
+import msgpack
 
 
 
@@ -60,10 +61,4 @@ ex_input = 2.0 * jnp.ones((128, 128), dtype=jnp.float32)
 print(f"{compiled(ex_input)}")
 
 
-def serialize_pytreedef(pytreedef):
-  """Serializes a PyTreeDef to a Python object."""
-  return jax.tree_util.tree_map(lambda x: x.serialize(), pytreedef)
-
-flat = in_tree.unflatten(in_tree.)
-with open("x_in_tree_flat.pickle", "wb") as f:
-    pickle.dump(flat, f)
+msgpack_string = msgpack.dumps(in_tree)
