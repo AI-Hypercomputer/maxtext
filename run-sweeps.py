@@ -676,8 +676,9 @@ def baseline_s32():
 
 # Paper 16B
 def run_s32():
-    run_job("q_TTF", baseline_s32())
     run_job("q_FFF", baseline_s32(), int8_training=False)
+    run_job("q_TTF", baseline_s32())
+    run_job("q_TTT", baseline_s32(), drhs_int8=True)
 
 
 # Paper 8B
@@ -687,8 +688,9 @@ def run_s33():
         global_parameter_scale = 8,
     )
 
-    run_job("q_TTF_s8_ns8", baseline_s32(), **common)
     run_job("q_FFF_s8_ns8", baseline_s32(), int8_training=False, **common)
+    run_job("q_TTF_s8_ns8", baseline_s32(), **common)
+    run_job("q_TTT_s8_ns8", baseline_s32(), **common, drhs_int8=True)
 
 # This is S33 put with 16 slices, we adjust adam betas and LR to be close
 # R: This did not finish and I will not try again.
@@ -714,13 +716,11 @@ def run_s35():
             num_slice=8,
             global_parameter_scale=gps,
         )
-
-    run_job("q_TTF_s4_ns8", baseline_s32(), **common(4)) # 3.5h
-    run_job("q_FFF_s4_ns8", baseline_s32(), int8_training=False, **common(4))
-    run_job("q_TTF_s2_ns8", baseline_s32(), **common(2)) # 50 min
-    run_job("q_FFF_s2_ns8", baseline_s32(), int8_training=False, **common(2))
-    run_job("q_TTF_s1_ns8", baseline_s32(), **common(1)) # 18 min
-    run_job("q_FFF_s1_ns8", baseline_s32(), int8_training=False, **common(1))
+    # 18, 50, 3.5h
+    for s in [1, 2, 4]:
+        run_job(f"q_FFF_s{s}_ns8", baseline_s32(), int8_training=False, **common(s))
+        run_job(f"q_TTF_s{s}_ns8", baseline_s32(), **common(s))
+        run_job(f"q_TTT_s{s}_ns8", baseline_s32(), **common(s), drhs_int8=True)
 
 ################ ABLATION RUNS ########################
 
@@ -751,6 +751,7 @@ def run_s37(): # 20
             drhs_int8_qk = False,
         )
         run_job(f"gps_{gps}-fwdq_T", ablation(gps=gps), aqt_use_fwd_quant=True)
+        # run_job(f"gps_{gps}-logits_T", ablation(gps=gps), =True)
 
 # Long training
 def run_s38(): # 32
@@ -760,9 +761,9 @@ def run_s38(): # 32
 
 
 # TODO:
-#  - rerun 2B from S35
-#  - add TTT at all sizes.
-#  - restart long
+#  - rerun 2B from S35: s35_q_..._s2_ns8
+#  - add TTT at all sizes.  s35_q_TTT_s{s}_ns8, s33_q_TTT_s8_ns8, s32_q_TTT
+#  - restart long s38
 #  - logits
 
 
