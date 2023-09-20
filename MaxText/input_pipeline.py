@@ -24,6 +24,7 @@ import ml_collections
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import jax
+from jax.experimental.pjit import pjit
 from jax.sharding import PartitionSpec as P
 
 import tokenizer
@@ -264,3 +265,63 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       data_shuffle_seed = data_shuffle_seed,)
 
   return train_iter, eval_iter, predict_iter, sp_tokenizer
+
+
+def make_c4_train_iterator_and_tokenizer(config, mesh):
+  """ Make train iterator and tokenizer for C4 dataset"""
+  read_config = tfds.ReadConfig(
+    shuffle_seed = config.data_shuffle_seed,
+  )
+  train_ds, eval_ds = get_datasets(
+    config=config,
+    read_config = read_config,
+  )
+  train_iter, _, _, sp_tokenizer = preprocess_dataset(
+    config,
+    mesh,
+    train_ds, eval_ds,
+    vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
+    data_shuffle_seed = config.data_shuffle_seed,
+  )
+  return train_iter, sp_tokenizer
+
+class SyntheticDataIterator():
+  """Creates a synthetic data iterator for performance testing work"""
+  def __init__(self, config, mesh):
+    self.mesh = mesh
+    self.config = config
+    data_pspec = P(*config.data_sharding)
+    with self.mesh:
+      self.data_generator = pjit(SyntheticDataIterator.raw_generate_synthetic_data,
+        in_shardings=None,
+        out_shardings=data_pspec,
+        static_argnums=0)
+  def __call__(self):
+    with self.mesh:
+      return self.data_generator(self.config)
+
+  @staticmethod
+  def raw_generate_synthetic_data(config):
+    """Generates a single batch of syntehtic data"""
+    output = {}
+    output['inputs'] = jax.numpy.zeros( (config.global_batch_size_to_load, config.max_target_length),
+                                       dtype=jax.numpy.int32)
+    output['inputs_position'] = jax.numpy.zeros( (config.global_batch_size_to_load, config.max_target_length),
+                                                dtype=jax.numpy.int32)
+    output['inputs_segmentation'] = jax.numpy.ones( (config.global_batch_size_to_load, config.max_target_length),
+                                                   dtype=jax.numpy.int32)
+    output['targets'] = jax.numpy.zeros( (config.global_batch_size_to_load, config.max_target_length),
+                                        dtype=jax.numpy.int32)
+    output['targets_position'] = jax.numpy.zeros( (config.global_batch_size_to_load, config.max_target_length),
+                                                 dtype=jax.numpy.int32)
+    output['targets_segmentation'] = jax.numpy.ones( (config.global_batch_size_to_load, config.max_target_length),
+                                                    dtype=jax.numpy.int32)
+    return output
+
+def create_data_iterator_with_tokenizer(config, mesh):
+  if config.dataset_type == "synthetic":
+    return SyntheticDataIterator(config, mesh), None
+  elif config.dataset_type == "c4":
+    return make_c4_train_iterator_and_tokenizer(config, mesh)
+  else:
+    assert False, "dataset type not implemented"
