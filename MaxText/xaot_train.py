@@ -296,7 +296,7 @@ def train_loop(config, state=None):
   print(f"{out_tree=}")
 
   # save the serialized via pickle
-  if 1:
+  if 0:
     print("Saving the serialized compiled train step...")
     with open("x_aot_train.pickle", "wb") as f:
         pickle.dump(serialized, f)
@@ -305,6 +305,8 @@ def train_loop(config, state=None):
     with open("x_out_tree_train.pickle", "wb") as f:
         pickle.dump(out_tree, f)
     print("Saved the serialized compiled train step!!!")
+  else:
+    print("Not saving the compiled train step because cannot pickle PyTreeDef")
 
   ## Run locally instead of loading the pickle
 
