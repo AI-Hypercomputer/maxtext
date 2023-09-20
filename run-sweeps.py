@@ -657,15 +657,23 @@ def baseline_s32():
         fill_ratio = 0.8,
 
         int8_training = True,
+
         fwd_int8 = True,
         dlhs_int8 = True,
         drhs_int8 = False,
+
         fwd_int8_pv = True,
         dlhs_int8_pv = True,
         drhs_int8_pv = False,
+
         fwd_int8_qk = False,
         dlhs_int8_qk = False,
         drhs_int8_qk = False,
+
+        fwd_int8_logits = False,
+        dlhs_int8_logits = False,
+        drhs_int8_logits = False,
+
 
         aqt_use_fwd_quant = False,
         data_shuffle_seed = 0,
@@ -751,8 +759,8 @@ def run_s37(): # 20
             drhs_int8_qk = False,
         )
         logits = dict(
-            fwd_int8_logits = False,
-            dlhs_int8_logits = False,
+            fwd_int8_logits = True,
+            dlhs_int8_logits = True,
             drhs_int8_logits = False,
         )
         run_job(f"gps_{gps}-fwdq_T", ablation(gps=gps), aqt_use_fwd_quant=True)
