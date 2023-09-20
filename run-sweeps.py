@@ -4,6 +4,7 @@ from multihost_job import main as multihost_job_main
 import yaml
 import copy
 import os
+import re
 
 args = {
     'dryrun': True,
@@ -37,6 +38,14 @@ def bname(b: bool):
     return str(b)[0]
 
 def run_job(run_name, base_config, **config_updates):
+    jobre = args['jobre']
+    if not re.findall(jobre, run_name):
+        # print(jobre, run_name)
+        print(f"SKIP: {run_name:30}", end="")
+        print(f"https://pantheon.corp.google.com/logs/query;query=timestamp%20%3E%20%222023-08-18%22%20AND%20labels.%22agent.googleapis.com%2Flog_file_path%22%3D~%22${run_name}.*%2Fmain_command_log_slice_0_worker_0%22")
+        return
+
+    print(f"RUN:  {run_name:30}", end="")
     print(f"https://pantheon.corp.google.com/logs/query;query=timestamp%20%3E%20%222023-08-18%22%20AND%20labels.%22agent.googleapis.com%2Flog_file_path%22%3D~%22${run_name}.*%2Fmain_command_log_slice_0_worker_0%22")
 
     maxtext_config = update_yaml_fields(base_config, config_updates)
@@ -110,7 +119,6 @@ def run_job(run_name, base_config, **config_updates):
     # 'base_output_directory':'gs://max-experiments',
     # 'dataset_path':'gs://maxtext-dataset',
 
-    print("Running experiment: ", run_name)
     mhj_args = []
     for key in experiment_mhj.keys():
         mhj_args.append(key)
@@ -118,10 +126,9 @@ def run_job(run_name, base_config, **config_updates):
 
     if args['dryrun']:
         import pprint
-        pprint.pprint(yml)
-        pprint.pprint(experiment_mhj)
-
-        print()
+        # pprint.pprint(yml)
+        # pprint.pprint(experiment_mhj)
+        # print()
     else:
         multihost_job_main(mhj_args)
 
@@ -665,14 +672,15 @@ def baseline_s32():
         init_weights_seed = 0,
     )
 
-# This is paper attempt for 16B
+############################### FINAL runs start here
+
+# Paper 16B
 def run_s32():
     run_job("q_TTF", baseline_s32())
     run_job("q_FFF", baseline_s32(), int8_training=False)
 
 
-# This is paper attempt for 8B
-# This did not finish. Running another attempt from scratch.
+# Paper 8B
 def run_s33():
     common = dict(
         num_slice=8,
@@ -683,25 +691,23 @@ def run_s33():
     run_job("q_FFF_s8_ns8", baseline_s32(), int8_training=False, **common)
 
 # This is S33 put with 16 slices, we adjust adam betas and LR to be close
-# R: This did not finish and I did not try again.
-def run_s34():
-    import numpy as np
-    s = 2
-    num_slice = 8*s
-    ps = 8
-    common = dict(
-        num_slice=num_slice,
-        global_parameter_scale = ps,
-        adam_b1=0.9 ** s,
-        adam_b2=0.95 ** s,
-        learning_rate = 5.0e-4 * s,
-    )
+# R: This did not finish and I will not try again.
+# def run_s34():
+#     import numpy as np
+#     s = 2
+#     num_slice = 8*s
+#     ps = 8
+#     common = dict(
+#         num_slice=num_slice,
+#         global_parameter_scale = ps,
+#         adam_b1=0.9 ** s,
+#         adam_b2=0.95 ** s,
+#         learning_rate = 5.0e-4 * s,
+#     )
+#     run_job(f"q_TTF_ps{ps}_ns{num_slice}", baseline_s32(), **common)
+#     run_job(f"q_FFF_ps{ps}_ns{num_slice}", baseline_s32(), int8_training=False, **common)
 
-    run_job(f"q_TTF_ps{ps}_ns{num_slice}", baseline_s32(), **common)
-    run_job(f"q_FFF_ps{ps}_ns{num_slice}", baseline_s32(), int8_training=False, **common)
-
-# This is paper attempt for 4B, 2B, 1B
-# This did not finish. Running another attempt from scratch.
+# Paper 4B, 2B, 1B
 def run_s35():
     def common(gps):
         return  dict(
@@ -754,8 +760,14 @@ def run_s38(): # 32
 
 
 # TODO:
-#  - {4bit, per-tensor-scale} (*6),
+#  - rerun 2B from S35
+#  - add TTT at all sizes.
+#  - restart long
 #  - logits
+
+
+#  - write summary
+#  - {4bit, per-tensor-scale} (*6),
 #  - accum,
 #  - SR scaled
 #  - binarization
@@ -768,6 +780,7 @@ def main():
     parser.add_argument('--delyml', type=bool, default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--stable', type=bool, default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--tpu', type=str, default='v5')
+    parser.add_argument('--jobre', type=str, default='.*')
     parser.add_argument('--sweep', type=str, default='')
     parser.add_argument('--attempt', type=str, default='')
     parser.add_argument('--jax_14_cl', type=bool, default=True, action=argparse.BooleanOptionalAction)
