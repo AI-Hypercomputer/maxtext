@@ -47,8 +47,9 @@ with jax.sharding.Mesh(np.array(use_devices), ('data',)):
     lowered = jitted.lower(
         jax.core.ShapedArray(shape=(128, 128), dtype=np.float32)
     )
+print(f"{type(lowered)=}")  
 orig_compiled = lowered.compile()
-
+print(f"{type(orig_compiled)=}")
 
 serialized, in_tree, out_tree = serialize(orig_compiled)
 print(f"{in_tree=}")

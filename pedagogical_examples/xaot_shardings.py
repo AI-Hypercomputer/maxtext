@@ -152,7 +152,7 @@ elif topo=='v4-16':
   chips_per_host_bounds=(2, 2, 2),
   num_slices=1,
 ).devices
-devices = jax.devices() #  topology_devices or jax.devices()
+devices = topology_devices #  topology_devices or jax.devices()
 num_devices = len(devices)
 print(f"Devices: {devices} (num_devices: {num_devices})")
 assert len(devices) > 1, "You must have at least two devices"
@@ -261,6 +261,7 @@ def xaot_save(func, mesh, pickle_filename, *example_args, in_shardings=None, out
   compiled = lowered.compile()
   serialized, in_tree, out_tree = serialize(compiled)
 
+  print(f"{type(serialized)=}")
   # save the serialized via pickle
   xprint("Saving the serialized compiled train step...", verbose)
   with open(pickle_filename, "wb") as f:
@@ -271,13 +272,15 @@ def xaot_save(func, mesh, pickle_filename, *example_args, in_shardings=None, out
 save_xaot = True
 use_mesh = Mesh(mesh.devices, mesh.axis_names)
 key = jax.random.PRNGKey(0)
+fake_key = jax.core.ShapedArray(key.shape, key.dtype)
+print(f"{key=}")
 if save_xaot:
   print("saving gen_data...")
   pjit_gen_data, _, _, _, _ = xaot_save(
     gen_data,
     use_mesh,
     'data_sharding.pkl',
-    key,
+    fake_key,
     in_shardings=None,
     out_shardings=data_sharding,
     verbose=False
@@ -289,7 +292,7 @@ if save_xaot:
     gen_layers,
     use_mesh,
     'layers_sharding.pkl',
-    key,
+    fake_key,
     in_shardings=None,
     out_shardings=parameter_sharding,
     verbose=False
