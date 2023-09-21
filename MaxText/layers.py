@@ -41,7 +41,7 @@ from jax import lax
 from jax import random
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
-if jax.__version__ >= '0.4.16':
+if jax.__version__ >= '0.4.16' and False:
   from jax.experimental.pallas.ops.tpu import flash_attention
 
 
