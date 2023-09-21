@@ -728,6 +728,44 @@ def run_s35():
         run_job(f"q_TTF_s{s}_ns8", baseline_s32(), **common(s))
         run_job(f"q_TTT_s{s}_ns8", baseline_s32(), **common(s), drhs_int8=True)
 
+
+# repeat with logits and use_fwd_quant
+# def run_s39():
+#     def common(gps, ns, load_dir, load_step):
+#         return  dict(
+#             num_slice=ns,
+#             global_parameter_scale=gps,
+#             fwd_int8_logits = True,
+#             dlhs_int8_logits = True,
+#             drhs_int8_logits = False,
+#             aqt_use_fwd_quant = True,
+#             load_from_other_directory = f'gs://maxtext-experiments-multipod/{load_dir}/checkpoints',
+#             load_from_other_directory_step = load_step,
+#         )
+#     #
+#     #
+#     #
+#     #
+#     #
+#     #
+#     #
+
+#     # We do want the checkpoint. We have for ns8, ns2
+#     for gps, ns, load_dir, load_step, in [
+#         (1, 2, 'int8-s37-a1-gps_1-q_FFF'),   # 1h
+#         (2, 2, 'int8-s37-a1-gps_2-q_FFF'),   # 4h,
+#         (4, 2, None, None),   # 16h,
+#         (1, 8, 'int8-s35-a1-q_FFF_s1_ns8', 1),   # 0.25h,
+#         (2, 8, 'int8-s35-a1-q_FFF_s2_ns8', 1),   # 1h,
+#         (4, 8, 'int8-s35-a1-q_FFF_s4_ns8', 1),   # 4h,
+#         (8, 8, 'int8-s33-a5-q_FFF_s8_ns8', 1),   # 16h
+#         (16, 16, 'int8-s32-a1-q_FFF', 1), # 32h,
+#     ]:
+#         # No need to rereun this, because it does not changes
+#         # run_job(f"q_FFF_s{gps}_ns8", baseline_s32(), int8_training=False, **common(gps))
+#         run_job(f"q_TTF_s{gps}_ns8", baseline_s32(), **common(gps))
+#         run_job(f"q_TTT_s{gps}_ns8", baseline_s32(), **common(gps), drhs_int8=True)
+
 ################ ABLATION RUNS ########################
 
 def ablation(gps):
@@ -745,6 +783,7 @@ def run_s36(): # 20
 
 
 def run_s37(): # 20
+    run_job(f"gps_{4}-q_FFF", ablation(gps=4), int8_training=False)
     for gps in [1, 2]:
         run_job(f"gps_{gps}-q_FFF", ablation(gps=gps), int8_training=False)
         run_job(f"gps_{gps}-q_TTF", ablation(gps=gps), int8_training=True)
