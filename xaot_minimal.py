@@ -78,4 +78,5 @@ flat_out_shaped, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
 print(f"{out_tree_recreated=}")
 
 ex_input = jax.core.ShapedArray(shape=(128, 128), dtype=np.float32)
-flat_in_shaped, in_tree_recreated = tree_util.tree_flatten(ex_input)
+flat_in_shaped, in_tree_recreated = tree_util.tree_flatten(((ex_input,),{}))
+print(f"{in_tree_recreated=}")
