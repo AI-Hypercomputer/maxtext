@@ -236,13 +236,24 @@ def train_loop(config, state=None):
 
   # Mesh definition
   # Mattdavidow: xaot
-  topology_devices = get_topology_desc(
-      platform='tpu',
-      topology_name=f'v4:2x2x1',
-      chip_config_name='megacore',
-      chips_per_host_bounds=(2, 2, 1),
-      num_slices=1,
-  ).devices
+  topo='v4-8'
+  if topo=='v4-8':
+    topology_devices = get_topology_desc(
+        platform='tpu',
+        topology_name=f'v4:2x2x1',
+        chip_config_name='megacore',
+        chips_per_host_bounds=(2, 2, 1),
+        num_slices=1,
+    ).devices
+  elif topo=='v4-16':
+    topology_devices = get_topology_desc(
+    platform='tpu',
+    topology_name=f'v4:2x2x2',
+    chip_config_name='megacore',
+    chips_per_host_bounds=(2, 2, 2),
+    num_slices=1,
+).devices
+
   use_devices = topology_devices # either topology_devices or jax.devices()
   devices_array = max_utils.create_device_mesh(config, use_devices) # alter
   mesh = Mesh(devices_array, config.mesh_axes)
@@ -286,7 +297,7 @@ def train_loop(config, state=None):
     one_step_output = compiled(state, example_batch, example_rng)
     print("One step of compiled successfully ran!")
 
-  run_xaot_local = False
+  run_xaot_local = True
   if run_xaot_local:
     print("\n\n\n Running xaot locally (will pickle and run)")
     with mesh,nn_partitioning.axis_rules(config.logical_axis_rules):
