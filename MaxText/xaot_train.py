@@ -34,6 +34,7 @@ from absl import app
 from flax.linen import partitioning as nn_partitioning
 import numpy as np
 import optax
+import functools
 import pickle
 from jax.experimental.serialize_executable import serialize, deserialize_and_load
 from tensorboardX import SummaryWriter
@@ -294,6 +295,20 @@ def train_loop(config, state=None):
   serialized, in_tree, out_tree = serialize(orig_compiled)
   print(f"{in_tree=}")
   print(f"{out_tree=}")
+
+  #out_shape = jax.eval_shape(orig_compiled, state, example_batch, example_rng)
+  train_pytree = functools.partial(train_step, model, config)
+  out_shaped = jax.eval_shape(train_pytree, state, example_batch, example_rng)
+  # print(f"{out_shape=}")
+  flat_out_shaped, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
+  print(f"{out_tree_recreated=}")
+  
+  # input_args = [state, example_batch, example_rng]
+  # in_tree_recreated = [jax.tree_util.tree_flatten(input_arg) for input_arg in input_args]
+  top_input_tree = {'state':state, 'batch':example_batch, 'rng':example_rng}
+  flat_in_shaped, in_tree_recreated_almost = jax.tree_util.tree_flatten(top_input_tree)
+  in_tree_recreated = [in_tree_recreated_almost['state'], in_tree_recreated_almost['batch'], in_tree_recreated_almost['rng']]
+  print(f"{in_tree_recreated=}")
 
   # save the serialized via pickle
   if 0:

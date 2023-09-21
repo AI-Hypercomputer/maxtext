@@ -1,14 +1,14 @@
 import pickle
 from jax.experimental.serialize_executable import deserialize_and_load
 import jax.numpy as jnp
-
+topo='v4-16'
 print("Start pickle reading")
 
-with open("x_aot.pickle", "rb") as f:
+with open(f"x_aot_{topo}.pickle", "rb") as f:
     serialized_compiled = pickle.load(f)
-with open("x_in_tree.pickle", "rb") as f:
+with open(f"x_in_tree_{topo}.pickle", "rb") as f:
     in_tree = pickle.load(f)
-with open("x_out_tree.pickle", "rb") as f:
+with open(f"x_out_tree_{topo}.pickle", "rb") as f:
     out_tree = pickle.load(f)
 
 print("Finish pickle reading")
