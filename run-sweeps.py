@@ -676,6 +676,8 @@ def baseline_s32():
         aqt_use_fwd_quant = False,
         data_shuffle_seed = 0,
         init_weights_seed = 0,
+        load_from_other_directory = "",
+        load_from_other_directory_step = -1,
     )
 
 ############################### FINAL runs start here
@@ -729,43 +731,6 @@ def run_s35():
         run_job(f"q_TTT_s{s}_ns8", baseline_s32(), **common(s), drhs_int8=True)
 
 
-# repeat with logits and use_fwd_quant
-# def run_s39():
-#     def common(gps, ns, load_dir, load_step):
-#         return  dict(
-#             num_slice=ns,
-#             global_parameter_scale=gps,
-#             fwd_int8_logits = True,
-#             dlhs_int8_logits = True,
-#             drhs_int8_logits = False,
-#             aqt_use_fwd_quant = True,
-#             load_from_other_directory = f'gs://maxtext-experiments-multipod/{load_dir}/checkpoints',
-#             load_from_other_directory_step = load_step,
-#         )
-#     #
-#     #
-#     #
-#     #
-#     #
-#     #
-#     #
-
-#     # We do want the checkpoint. We have for ns8, ns2
-#     for gps, ns, load_dir, load_step, in [
-#         (1, 2, 'int8-s37-a1-gps_1-q_FFF'),   # 1h
-#         (2, 2, 'int8-s37-a1-gps_2-q_FFF'),   # 4h,
-#         (4, 2, None, None),   # 16h,
-#         (1, 8, 'int8-s35-a1-q_FFF_s1_ns8', 1),   # 0.25h,
-#         (2, 8, 'int8-s35-a1-q_FFF_s2_ns8', 1),   # 1h,
-#         (4, 8, 'int8-s35-a1-q_FFF_s4_ns8', 1),   # 4h,
-#         (8, 8, 'int8-s33-a5-q_FFF_s8_ns8', 1),   # 16h
-#         (16, 16, 'int8-s32-a1-q_FFF', 1), # 32h,
-#     ]:
-#         # No need to rereun this, because it does not changes
-#         # run_job(f"q_FFF_s{gps}_ns8", baseline_s32(), int8_training=False, **common(gps))
-#         run_job(f"q_TTF_s{gps}_ns8", baseline_s32(), **common(gps))
-#         run_job(f"q_TTT_s{gps}_ns8", baseline_s32(), **common(gps), drhs_int8=True)
-
 ################ ABLATION RUNS ########################
 
 def ablation(gps):
@@ -810,24 +775,60 @@ def run_s38(): # 32
     run_job(f"long-TTF", ablation(gps=1), num_slice=16, fill_ratio=0.8 / 16 /1.20  , int8_training=True)
 
 
-# TODO:
-#  - rerun 2B from S35: s35_q_..._s2_ns8
-#  - add TTT at all sizes.  s35_q_TTT_s{s}_ns8, s33_q_TTT_s8_ns8, s32_q_TTT
-#  - restart long s38
-#  - logits (in 37)
+def baseline_s39(*, gps, ns, load_dir, load_step):
+    d = dict(
+        num_slice=ns,
+        global_parameter_scale=gps,
+        fwd_int8_logits = True,
+        dlhs_int8_logits = True,
+        drhs_int8_logits = False,
+        aqt_use_fwd_quant = True,
+        load_from_other_directory = f'gs://maxtext-experiments-multipod/{load_dir}/checkpoints',
+        load_from_other_directory_step = load_step,
+    )
+    return update_yaml_fields(baseline_s32(), d)
 
-#  - write summary
-#  - {4bit, per-tensor-scale} (*6),
+
+# repeat with logits and use_fwd_quant
+def run_s39():
+    # We do want the checkpoint. We have for ns8, ns2
+    for gps, ns, load_dir, load_step, in [
+        (1, 2, 'int8-s37-a1-gps_1-q_FFF', 500),    #  1h, 6400
+        (2, 2, 'int8-s37-a1-gps_2-q_FFF', 1000),   #  4h, 12800
+        (4, 2, 'int8-s37-a1-gps_2-q_FFF', 2000),   # 16h, 25600
+        (1, 8, 'int8-s35-a1-q_FFF_s1_ns8', 500),   # .2h, 1600
+        (2, 8, 'int8-s35-a1-q_FFF_s2_ns8', 500),   #  1h, 3200
+        (4, 8, 'int8-s35-a1-q_FFF_s4_ns8', 1000),  #  4h, 6400
+        (8, 8, 'int8-s33-a5-q_FFF_s8_ns8', 1500),  # 16h, 12800
+        (16, 16, 'int8-s32-a1-q_FFF', 1500),       # 32h, 12800
+    ]:
+        # No need to rereun this, because it does not changes
+        base = baseline_s39(gps=gps, ns=ns, load_dir=load_dir, load_step=load_step)
+        real_ttt = dict(
+            drhs_int8 = True,
+            drhs_int8_pv = True,
+            drhs_int8_logits = True,
+        )
+        qk = dict(
+            fwd_int8_qk = True,
+            dlhs_int8_qk = True,
+        )
+        run_job(f"gps{gps}-ns{ns}-load{load_step}-FFF", base, int8_training=False)
+        run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF", base)
+        run_job(f"gps{gps}-ns{ns}-load{load_step}-TTT", base, **real_ttt)
+        run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF-qk_T", base, **qk)
+
+
+# TODO:
+#  - per-tensor-scale (*6),
 #  - accum,
 #  - SR scaled
-#  - binarization
-#  - restart the training from late checkpoint
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='TPU configuration options')
     parser.add_argument('--dryrun', type=bool, default=True, action=argparse.BooleanOptionalAction)
-    parser.add_argument('--delyml', type=bool, default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--delyml', type=bool, default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--stable', type=bool, default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--tpu', type=str, default='v5')
     parser.add_argument('--jobre', type=str, default='.*')
