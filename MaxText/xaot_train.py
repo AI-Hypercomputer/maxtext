@@ -286,7 +286,7 @@ def train_loop(config, state=None):
     one_step_output = compiled(state, example_batch, example_rng)
     print("One step of compiled successfully ran!")
 
-  run_xaot_local = True
+  run_xaot_local = False
   if run_xaot_local:
     print("\n\n\n Running xaot locally (will pickle and run)")
     with mesh,nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -319,23 +319,22 @@ def train_loop(config, state=None):
 
 
   else: # Load!!!
-    print("\n\n\n Running xaot via load!!")
+    print("\n\n\n Running xaot via load!!\n\n\n")
     print("Loading the serialized compiled train step...")
     with open("x_aot_train.pickle", "rb") as f:
         serialized_compiled = pickle.load(f)
     print("Serialized compiled loaded!!!")
 
-    #out_shape = jax.eval_shape(orig_compiled, state, example_batch, example_rng)
+    # out_tree
     train_pytree = functools.partial(train_step, model, config)
     out_shaped = jax.eval_shape(train_pytree, state, example_batch, example_rng)
-    # print(f"{out_shape=}")
     flat_out_shaped, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
-    print(f"{out_tree_recreated=}")
     
+    # in_tree
     input_args = (state, example_batch, example_rng)
     flat_in_shaped, in_tree_recreated = jax.tree_util.tree_flatten((input_args,{}))
 
-    compiled = deserialize_and_load(serialized, in_tree_recreated, out_tree_recreated)
+    compiled = deserialize_and_load(serialized_compiled, in_tree_recreated, out_tree_recreated)
 
     run_one_step(compiled, state, example_batch, example_rng)
 
