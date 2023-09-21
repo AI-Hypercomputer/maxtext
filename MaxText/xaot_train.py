@@ -332,7 +332,8 @@ def train_loop(config, state=None):
     
     # in_tree
     input_args = (state, example_batch, example_rng)
-    flat_in_shaped, in_tree_recreated = jax.tree_util.tree_flatten((input_args,{}))
+    flat_in_shaped, in_tree_recreated = jax.tree_util.tree_flatten(input_args)
+    #flat_in_shaped, in_tree_recreated = jax.tree_util.tree_flatten((input_args,{}))
 
     compiled = deserialize_and_load(serialized_compiled, in_tree_recreated, out_tree_recreated)
 
