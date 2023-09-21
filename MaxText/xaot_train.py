@@ -303,12 +303,23 @@ def train_loop(config, state=None):
   flat_out_shaped, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
   print(f"{out_tree_recreated=}")
   
-  # input_args = [state, example_batch, example_rng]
-  # in_tree_recreated = [jax.tree_util.tree_flatten(input_arg) for input_arg in input_args]
-  top_input_tree = {'state':state, 'batch':example_batch, 'rng':example_rng}
-  flat_in_shaped, in_tree_recreated_almost = jax.tree_util.tree_flatten(top_input_tree)
-  in_tree_recreated = [in_tree_recreated_almost['state'], in_tree_recreated_almost['batch'], in_tree_recreated_almost['rng']]
+  def my_silly_func(*args):
+    flat_in_shaped, in_tree_recreated = jax.tree_util.tree_flatten(args)
+    print(f"{in_tree_recreated=}")
+
+  #my_silly_func(state, example_batch, example_rng)
+
+  #top_input_tree = {'state':state, 'batch':example_batch, 'rng':example_rng}
+  #flat_in_shaped, in_tree_recreated_almost = jax.tree_util.tree_flatten(top_input_tree)
+  #print(f"{in_tree_recreated_almost=}")
+  input_args = [state, example_batch, example_rng]
+  flat_in_shaped, in_tree_recreated = jax.tree_util.tree_flatten((input_args))
   print(f"{in_tree_recreated=}")
+  # in_tree_recreated = jax.tree_util.tree_flatten((state, example_batch, example_rng))
+  # top_input_tree = {'state':state, 'batch':example_batch, 'rng':example_rng}
+  # flat_in_shaped, in_tree_recreated_almost = jax.tree_util.tree_flatten(top_input_tree)
+  # in_tree_recreated = [in_tree_recreated_almost['state'], in_tree_recreated_almost['batch'], in_tree_recreated_almost['rng']]
+  # print(f"{in_tree_recreated=}")
 
   # save the serialized via pickle
   if 0:
