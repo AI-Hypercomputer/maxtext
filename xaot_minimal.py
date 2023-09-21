@@ -12,7 +12,7 @@ from jax import tree_util
 
 
 
-topo='v4-16'
+topo='v4-8'
 if topo=='v4-8':
     topology_devices = get_topology_desc(
         platform='tpu',
@@ -56,9 +56,9 @@ print(f"{out_tree=}")
 
 with open(f"x_aot_{topo}.pickle", "wb") as f:
     pickle.dump(serialized, f)
-with open("x_in_tree_{topo}.pickle", "wb") as f:
+with open(f"x_in_tree_{topo}.pickle", "wb") as f:
     pickle.dump(in_tree, f)
-with open("x_out_tree_{topo}.pickle", "wb") as f:
+with open(f"x_out_tree_{topo}.pickle", "wb") as f:
     pickle.dump(out_tree, f)
 
 ex_input = 2.0 * jnp.ones((128, 128), dtype=jnp.float32)

@@ -1,6 +1,8 @@
 import pickle
 from jax.experimental.serialize_executable import deserialize_and_load
 import jax.numpy as jnp
+import jax
+
 topo='v4-16'
 print("Start pickle reading")
 
@@ -21,4 +23,8 @@ cost = compiled.cost_analysis()[0]['flops']
 print(f"{cost=}")
 
 ex_input = 2.0 * jnp.ones((128, 128), dtype=jnp.float32)
-print(f"{compiled(ex_input)}")
+out = compiled(ex_input)
+print("computed out")
+print(f"{out=}")
+out_gathered = jax.experimental.multihost_utils.process_allgather(out)
+print(f"{out_gathered=}")
