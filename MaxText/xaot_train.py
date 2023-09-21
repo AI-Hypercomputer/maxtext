@@ -285,6 +285,7 @@ def train_loop(config, state=None):
   example_batch = None
   example_rng = jax.random.PRNGKey(0)
   example_batch = load_next_batch(data_iterator, example_batch, config)
+  compiled_pickle_filename = f"x_aot_train_{topo}.pickle"
 
   def run_one_step(compiled, state, example_batch, example_rng):
     # simpler than getting the inputs to train_step correct, just call cost_analysis
@@ -320,7 +321,7 @@ def train_loop(config, state=None):
 
     # save the serialized via pickle
     print("Saving the serialized compiled train step...")
-    with open("x_aot_train.pickle", "wb") as f:
+    with open(compiled_pickle_filename, "wb") as f:
         pickle.dump(serialized, f)
     print("Saved the serialized compiled!!!")
 
@@ -332,7 +333,7 @@ def train_loop(config, state=None):
   else: # Load!!!
     print("\n\n\n Running xaot via load!!\n\n\n")
     print("Loading the serialized compiled train step...")
-    with open("x_aot_train.pickle", "rb") as f:
+    with open(compiled_pickle_filename, "rb") as f:
         serialized_compiled = pickle.load(f)
     print("Serialized compiled loaded!!!")
 

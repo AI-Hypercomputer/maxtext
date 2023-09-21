@@ -126,7 +126,8 @@ def create_device_mesh(config, devices, logging=True):
   max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
   assert len(devices) > 1, "You must have at least two devices"
 
-  multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
+  multi_slice_env = hasattr(devices[0], 'slice_index')
+  #multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
 
   dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism, config.dcn_tensor_parallelism]
   ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism, config.ici_tensor_parallelism]
@@ -136,9 +137,9 @@ def create_device_mesh(config, devices, logging=True):
   ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, 'ICI')
 
   if multi_slice_env:
-    mesh = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism)
+    mesh = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism, devices=devices)
   else:
-    mesh = mesh_utils.create_device_mesh(ici_parallelism)
+    mesh = mesh_utils.create_device_mesh(ici_parallelism, devices=devices)
 
   if logging:
     max_logging.log(f"Decided on mesh: {mesh}")
@@ -215,6 +216,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
                                                 mesh,
                                                 state_mesh_annotations)
 
+    # mattdavidow: This errors with fake devices
     if not state:
       state = pjit(
           init_train_state_partial,
