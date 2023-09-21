@@ -271,82 +271,75 @@ def train_loop(config, state=None):
   # max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
   # per_device_tflops = calculate_training_tflops(num_model_parameters, config)
 
+  example_batch = None
+  example_rng = jax.random.PRNGKey(0)
+  example_batch = load_next_batch(data_iterator, example_batch, config)
 
-  with mesh,nn_partitioning.axis_rules(config.logical_axis_rules):
-    print("Jitting train step...")
-    jitted = pjit(
-        train_step,
-        in_shardings=(state_mesh_annotations, data_pspec, None),
-        out_shardings=(state_mesh_annotations, None, None),
-        static_argnums=(0,1,),
-        donate_argnums=2
-    )
-    print("Jitted train step!!!")
+  def run_one_step(compiled, state, example_batch, example_rng):
+    # simpler than getting the inputs to train_step correct, just call cost_analysis
+    cost = compiled.cost_analysis()[0]['flops']
+    print(f"{cost=}")
 
-    example_batch = None
-    example_rng = jax.random.PRNGKey(0)
-    example_batch = load_next_batch(data_iterator, example_batch, config)
-    print("Lowering jitted train step...")
-    lowered = jitted.lower(model, config, state, example_batch, example_rng)
-    print("Lowered jitted train step!!!")
+    # one step using the locally compiled object
+    print("Running one step using the compiled object...")
+    # one_step_output = compiled(model, config, state, example_batch, example_rng)
+    one_step_output = compiled(state, example_batch, example_rng)
+    print("One step of compiled successfully ran!")
 
-  orig_compiled = lowered.compile()
+  run_xaot_local = True
+  if run_xaot_local:
+    print("\n\n\n Running xaot locally (will pickle and run)")
+    with mesh,nn_partitioning.axis_rules(config.logical_axis_rules):
+      print("Jitting train step...")
+      jitted = pjit(
+          train_step,
+          in_shardings=(state_mesh_annotations, data_pspec, None),
+          out_shardings=(state_mesh_annotations, None, None),
+          static_argnums=(0,1,),
+          donate_argnums=2
+      )
+      print("Jitted train step!!!")
+      print("Lowering jitted train step...")
+      lowered = jitted.lower(model, config, state, example_batch, example_rng)
+      print("Lowered jitted train step!!!")
 
-  serialized, in_tree, out_tree = serialize(orig_compiled)
-  print(f"{in_tree=}")
-  print(f"{out_tree=}")
+    orig_compiled = lowered.compile()
 
-  #out_shape = jax.eval_shape(orig_compiled, state, example_batch, example_rng)
-  train_pytree = functools.partial(train_step, model, config)
-  out_shaped = jax.eval_shape(train_pytree, state, example_batch, example_rng)
-  # print(f"{out_shape=}")
-  flat_out_shaped, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
-  print(f"{out_tree_recreated=}")
-  
-  def my_silly_func(*args):
-    flat_in_shaped, in_tree_recreated = jax.tree_util.tree_flatten(args)
-    print(f"{in_tree_recreated=}")
+    serialized, in_tree, out_tree = serialize(orig_compiled)
 
-  #my_silly_func(state, example_batch, example_rng)
-
-  #top_input_tree = {'state':state, 'batch':example_batch, 'rng':example_rng}
-  #flat_in_shaped, in_tree_recreated_almost = jax.tree_util.tree_flatten(top_input_tree)
-  #print(f"{in_tree_recreated_almost=}")
-  input_args = (state, example_batch, example_rng)
-  flat_in_shaped, in_tree_recreated = jax.tree_util.tree_flatten((input_args,{}))
-  print(f"{in_tree_recreated=}")
-  # in_tree_recreated = jax.tree_util.tree_flatten((state, example_batch, example_rng))
-  # top_input_tree = {'state':state, 'batch':example_batch, 'rng':example_rng}
-  # flat_in_shaped, in_tree_recreated_almost = jax.tree_util.tree_flatten(top_input_tree)
-  # in_tree_recreated = [in_tree_recreated_almost['state'], in_tree_recreated_almost['batch'], in_tree_recreated_almost['rng']]
-  # print(f"{in_tree_recreated=}")
-
-  # save the serialized via pickle
-  if 0:
+    # save the serialized via pickle
     print("Saving the serialized compiled train step...")
     with open("x_aot_train.pickle", "wb") as f:
         pickle.dump(serialized, f)
-    with open("x_in_tree_train.pickle", "wb") as f:
-        pickle.dump(in_tree, f)
-    with open("x_out_tree_train.pickle", "wb") as f:
-        pickle.dump(out_tree, f)
-    print("Saved the serialized compiled train step!!!")
-  else:
-    print("Not saving the compiled train step because cannot pickle PyTreeDef")
+    print("Saved the serialized compiled!!!")
 
-  ## Run locally instead of loading the pickle
+    compiled = deserialize_and_load(serialized, in_tree, out_tree)
 
-  compiled = deserialize_and_load(serialized, in_tree, out_tree)
+    run_one_step(compiled, state, example_batch, example_rng)
 
-  # simpler than getting the inputs to train_step correct, just call cost_analysis
-  cost = compiled.cost_analysis()[0]['flops']
-  print(f"{cost=}")
 
-  # one step using the locally compiled object
-  print("Running one step using the compiled object...")
-  # one_step_output = compiled(model, config, state, example_batch, example_rng)
-  one_step_output = compiled(state, example_batch, example_rng)
-  print("One step of compiled successfully ran!")
+  else: # Load!!!
+    print("\n\n\n Running xaot via load!!")
+    print("Loading the serialized compiled train step...")
+    with open("x_aot_train.pickle", "rb") as f:
+        serialized_compiled = pickle.load(f)
+    print("Serialized compiled loaded!!!")
+
+    #out_shape = jax.eval_shape(orig_compiled, state, example_batch, example_rng)
+    train_pytree = functools.partial(train_step, model, config)
+    out_shaped = jax.eval_shape(train_pytree, state, example_batch, example_rng)
+    # print(f"{out_shape=}")
+    flat_out_shaped, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
+    print(f"{out_tree_recreated=}")
+    
+    input_args = (state, example_batch, example_rng)
+    flat_in_shaped, in_tree_recreated = jax.tree_util.tree_flatten((input_args,{}))
+
+    compiled = deserialize_and_load(serialized, in_tree_recreated, out_tree_recreated)
+
+    run_one_step(compiled, state, example_batch, example_rng)
+
+
   
 
 
