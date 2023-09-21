@@ -779,14 +779,43 @@ def baseline_s39(*, gps, ns, load_dir, load_step):
     d = dict(
         num_slice=ns,
         global_parameter_scale=gps,
+
+        max_target_length = 2048,
+        per_device_batch_size = 4,
+
+        learning_rate = 5.0e-4,
+        adam_b1 = 0.9,
+        adam_b2 = 0.95,
+        adam_weight_decay = 0.1,
+        clip_by_global_norm = 0.1,
+        fill_ratio = 0.8,
+
+        int8_training = True,
+
+        fwd_int8 = True,
+        dlhs_int8 = True,
+        drhs_int8 = False,
+
+        fwd_int8_pv = True,
+        dlhs_int8_pv = True,
+        drhs_int8_pv = False,
+
+        fwd_int8_qk = False,
+        dlhs_int8_qk = False,
+        drhs_int8_qk = False,
+
         fwd_int8_logits = True,
         dlhs_int8_logits = True,
         drhs_int8_logits = False,
+
+
         aqt_use_fwd_quant = True,
+        data_shuffle_seed = 0,
+        init_weights_seed = 0,
         load_from_other_directory = f'gs://maxtext-experiments-multipod/{load_dir}/checkpoints',
         load_from_other_directory_step = load_step,
     )
-    return update_yaml_fields(baseline_s32(), d)
+    return d
 
 
 # repeat with logits and use_fwd_quant
