@@ -795,7 +795,7 @@ def run_s39():
     for gps, ns, load_dir, load_step, in [
         (1, 2, 'int8-s37-a1-gps_1-q_FFF', 500),    #  1h, 6400
         (2, 2, 'int8-s37-a1-gps_2-q_FFF', 1000),   #  4h, 12800
-        (4, 2, 'int8-s37-a1-gps_2-q_FFF', 2000),   # 16h, 25600
+        # (4, 2, 'int8-s37-a1-gps_2-q_FFF', 2000),   # 16h, 25600, no data
         (1, 8, 'int8-s35-a1-q_FFF_s1_ns8', 500),   # .2h, 1600
         (2, 8, 'int8-s35-a1-q_FFF_s2_ns8', 500),   #  1h, 3200
         (4, 8, 'int8-s35-a1-q_FFF_s4_ns8', 1000),  #  4h, 6400
@@ -813,10 +813,14 @@ def run_s39():
             fwd_int8_qk = True,
             dlhs_int8_qk = True,
         )
-        run_job(f"gps{gps}-ns{ns}-load{load_step}-FFF", base, int8_training=False)
         run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF", base)
-        run_job(f"gps{gps}-ns{ns}-load{load_step}-TTT", base, **real_ttt)
-        run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF-qk_T", base, **qk)
+
+        if ns == 2:
+            # We don't need this one because supposedly we have it. But I want at least one sanity check:
+            run_job(f"gps{gps}-ns{ns}-load{load_step}-FFF", base, int8_training=False)
+            # Show ablations only on 2-pod configs.
+            run_job(f"gps{gps}-ns{ns}-load{load_step}-TTT", base, **real_ttt)
+            run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF-qk_T", base, **qk)
 
 
 # TODO:
