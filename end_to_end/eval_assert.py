@@ -23,19 +23,25 @@ from google.cloud import storage
 import json
 
 
-def read(metrics_file, target):
+def read(metrics_file, target, start_line=10):
   """Reads and computes average of target value"""
+  """If start_line is negative then starts from end - |start_line|"""
+  
+
   avg = 0
   i = 0
   with open(metrics_file, 'r', encoding='utf8') as file:
     lines = file.readlines()
+    print(lines)
+    if start_line < 0:
+      start_line = len(lines) + start_line
     for line in lines:
-      # skip the first 10 lines for burn in
-      if i >= 10:
+      # skip the first start_line lines for burn in
+      if i >= start_line:
         vals = json.loads(line)
         avg += vals[target]
       i+=1
-    avg /= (i-10)
+    avg /= (i-start_line)
 
   return avg
 
@@ -48,6 +54,15 @@ def assert_metric_average(metrics_file, threshold, target):
   assert avg_value >= float(threshold)
   print('assert metric average passed.')
 
+def test_final_loss(metrics_file, target_loss):
+  target_loss = float(target_loss)
+  with open(metrics_file, 'r', encoding='utf8') as metrics:
+    use_last_n_data = 1
+    avg_final_loss = read(metrics_file, 'learning/loss', start_line= -1 * use_last_n_data)
+    print(f"Mean of last {use_last_n_data} losses is {avg_final_loss}")
+    print(f"Target loss is {target_loss}")
+    assert avg_final_loss < target_loss
+    print('Final loss test passed.')
 
 def test_checkpointing(metrics_file, target):
   """Asserts over loss values from loaded checkpoint"""
@@ -100,6 +115,10 @@ def main(argv: Sequence[str]) -> None:
     test_determinism(*test_vars)
   elif test_scenario == 'vocab_creation':
     test_vocab_creation(*test_vars)
+  elif test_scenario == 'final_loss':
+    test_final_loss(*test_vars)
+  else:
+     raise ValueError(f"Unrecognized test_scenario {test_scenario}")
 
 
 if __name__ == "__main__":
