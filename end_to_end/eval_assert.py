@@ -32,7 +32,6 @@ def compute_avg_metric(metrics_file, target, start_line=10):
   i = 0
   with open(metrics_file, 'r', encoding='utf8') as file:
     lines = file.readlines()
-    print(lines)
     if start_line < 0:
       start_line = len(lines) + start_line
     for line in lines:
