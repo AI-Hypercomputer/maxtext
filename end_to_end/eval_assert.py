@@ -24,8 +24,8 @@ import json
 
 
 def compute_avg_metric(metrics_file, target, start_line=10):
-  """Reads and computes average of target value"""
-  """If start_line is negative then starts from end - |start_line|"""
+  """ Reads and computes average of target value
+  If start_line is negative then uses the last lines, e.g. start from end + 1 - |start_line|"""
   
 
   avg = 0
