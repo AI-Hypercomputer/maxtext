@@ -37,7 +37,7 @@ from flax.linen import partitioning as nn_partitioning
 import optax
 import os
 import subprocess
-
+import copy
 
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
@@ -201,19 +201,41 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
                                                config)
   abstract_state = jax.eval_shape(init_train_state_partial, rng)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
+  #print(f"{state_logical_annotations=}")
+  
   unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
 
+
+  print("\n\n\n\n\n")
+  #print(f"{config.logical_axis_rules=}")
+
+  logical_axis_rules_copy = copy.deepcopy(config.logical_axis_rules)
+  def change_local_axis_rules_for_checkpointing(logical_axis_rules):
+    new_logical_axis_rules = ()
+    for axis in logical_axis_rules:
+      if axis[0] != 'embed':
+        new_logical_axis_rules += (axis,)
+      else:
+        new_logical_axis_rules += (('embed', ('data', 'fsdp')),)
+    return new_logical_axis_rules
+  ckpt_logical_axis_rules = change_local_axis_rules_for_checkpointing(logical_axis_rules_copy)
+
+  # Create ckpt_mesh_annotations and attempt to load from checkpoint if one is provided
+  with mesh, nn_partitioning.axis_rules(ckpt_logical_axis_rules):
+    print('\n\n\n New loading code with ckpt mesh \n\n\n')
+    ckpt_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   # Initialization
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
                                                 config.load_from_other_directory,
                                                 config.load_from_other_directory_step,
                                                 unboxed_abstract_state,
                                                 mesh,
-                                                state_mesh_annotations)
-
+                                                ckpt_mesh_annotations)
+  # Create state_mesh_annotations and initialize model randomly if no checkpoint provided
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+    #print(f"{state_mesh_annotations=}")
     if not state:
       state = pjit(
           init_train_state_partial,
@@ -225,7 +247,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     raw_params = None
 
   state = unbox_logicallypartioned_trainstate(state)
-  return state, state_mesh_annotations
+  return state, state_mesh_annotations, ckpt_mesh_annotations
 
 
 # Learning Rate Schedule
