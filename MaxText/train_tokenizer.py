@@ -29,52 +29,6 @@ from sentencepiece import SentencePieceTrainer
 import jax
 
 
-parser = argparse.ArgumentParser(
-    description="Train tokenizer"
-)
-parser.add_argument(
-    "--dataset_path",
-    required=True,
-    default="",
-    help="Path to the dataset",
-    type=str
-)
-parser.add_argument(
-    "--dataset_name",
-    required=True,
-    default="",
-    help="Name to the dataset",
-    type=str
-)
-parser.add_argument(
-  "--vocab_size",
-  default=32_768,
-  help="vocab size",
-  type=int
-)
-parser.add_argument(
-  "--max_corpus_chars",
-  default=10_000_000,
-  help="max corpus chars",
-  type=int
-)
-parser.add_argument(
-    "--assets_path",
-    required=False,
-    default="assets",
-    help="Name to the dataset",
-    type=str
-)
-parser.add_argument(
-    "--vocab_model_name",
-    required=False,
-    default="tokenizer",
-    help="Name to the dataset",
-    type=str
-)
-args = parser.parse_args()
-os.environ["TFDS_DATA_DIR"] = args.dataset_path
-
 def _dump_chars_to_textfile(
     dataset: tf.data.Dataset,
     maxchars: int = int(1e7),
@@ -174,15 +128,63 @@ def train_tokenizer(dataset: tf.data.Dataset,
 
 
 
-read_config = tfds.ReadConfig(
-    shuffle_seed = 0,
-)
-train_ds_builder = tfds.builder(args.dataset_name)
-train_ds = train_ds_builder.as_dataset(split='train', read_config=read_config, shuffle_files=True)
+def main():
+  parser = argparse.ArgumentParser(
+    description="Train tokenizer"
+  )
+  parser.add_argument(
+      "--dataset_path",
+      required=True,
+      default="",
+      help="Path to the dataset",
+      type=str
+  )
+  parser.add_argument(
+      "--dataset_name",
+      required=True,
+      default="",
+      help="Name to the dataset",
+      type=str
+  )
+  parser.add_argument(
+    "--vocab_size",
+    default=32_768,
+    help="vocab size",
+    type=int
+  )
+  parser.add_argument(
+    "--max_corpus_chars",
+    default=10_000_000,
+    help="max corpus chars",
+    type=int
+  )
+  parser.add_argument(
+      "--assets_path",
+      required=False,
+      default="assets",
+      help="Name to the dataset",
+      type=str
+  )
+  parser.add_argument(
+      "--vocab_model_name",
+      required=False,
+      default="tokenizer",
+      help="Name to the dataset",
+      type=str
+  )
+  args = parser.parse_args()
+  os.environ["TFDS_DATA_DIR"] = args.dataset_path
 
-train_tokenizer(train_ds,
+  read_config = tfds.ReadConfig(
+    shuffle_seed = 0,
+  )
+  train_ds_builder = tfds.builder(args.dataset_name)
+  train_ds = train_ds_builder.as_dataset(split='train', read_config=read_config, shuffle_files=True)
+  train_tokenizer(train_ds,
                 assets_path=args.assets_path,
                 vocab_path=os.path.join(args.assets_path, args.vocab_model_name),
                 vocab_size=args.vocab_size,
                 max_corpus_chars=args.max_corpus_chars)
 
+if __name__ == '__main__':
+  main()
