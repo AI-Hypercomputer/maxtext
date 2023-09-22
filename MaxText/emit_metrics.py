@@ -1,3 +1,7 @@
+"""
+Cloud Monitoring API v3 Prototype
+"""
+
 import subprocess
 import sys
 from google.cloud import monitoring_v3
@@ -8,40 +12,70 @@ import time
 import os
 
 def get_metadata(project_id, zone, instance_id):
-  r = requests.get(url="https://compute.googleapis.com/compute/v1/projects/{project_id}/zones/{zone}/instances/{instance_id}")
+  """
+  Fetches metadata
+
+  Args:
+    project_id
+    zone
+    instance_id
+  
+  Returns:
+    metadata as json
+  """
+  r = requests.get(url="https://compute.googleapis.com/compute/v1/projects/\
+                   {project_id}/zones/{zone}/instances/{instance_id}")
   metadata = r.json()
   return metadata
 
 def create_custom_metric(metric_name, description):
-    project_id = get_project()
-    project_name = f"projects/{project_id}"
+  """
+  Creates a custom metric
 
-    client = monitoring_v3.MetricServiceClient()
+  Args:
+    metric_name
+    description
+  
+  Returns:
+    Response from create request
+  """
+  project_id = get_project()
+  project_name = f"projects/{project_id}"
 
-    descriptor = metric_pb2.MetricDescriptor()
-    descriptor.type = "custom.googleapis.com/" + metric_name
-    descriptor.metric_kind = metric_pb2.MetricDescriptor.MetricKind.GAUGE
-    descriptor.value_type = metric_pb2.MetricDescriptor.ValueType.DOUBLE
-    descriptor.description = description
+  client = monitoring_v3.MetricServiceClient()
 
-    request = monitoring_v3.CreateMetricDescriptorRequest(
-        name=project_name,
-        metric_descriptor=descriptor
-    )
+  descriptor = metric_pb2.MetricDescriptor()
+  descriptor.type = "custom.googleapis.com/" + metric_name
+  descriptor.metric_kind = metric_pb2.MetricDescriptor.MetricKind.GAUGE
+  descriptor.value_type = metric_pb2.MetricDescriptor.ValueType.DOUBLE
+  descriptor.description = description
 
-    response = client.create_metric_descriptor(request=request)
+  request = monitoring_v3.CreateMetricDescriptorRequest(
+      name=project_name,
+      metric_descriptor=descriptor
+  )
 
-    print(response)
+  response = client.create_metric_descriptor(request=request)
+  
+  return response
 
 
 def write_time_series_step(metric_name, monitoring_enabled, step=1):
+  """
+  Writes a time series object for a specified custom metric
+
+  Args:
+    metric_name
+    monitoring_enabled
+    step
+  """
 
   zone = get_zone()
   project_id = get_project()
 
   if not monitoring_enabled:
     return
-  
+
   client = get_metrics_service_client()
   project_name = f"projects/{project_id}"
 
@@ -100,12 +134,22 @@ def write_time_series_step(metric_name, monitoring_enabled, step=1):
   )
 
 def get_instance_id(project_id, zone):
+  """
+  Fetches instance id of a node
+
+  Args:
+    project_id
+    zone
+  """
   client = get_compute_instances_client()
   instance_name = os.uname().nodename
   instance = client.get(project=project_id, zone=zone, instance=instance_name)
   return instance.id
 
 def get_project():
+  """
+  Fetches id of project in use
+  """
   completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
   project_outputs = completed_command.stdout.decode().strip().split('\n')
   if len(project_outputs) < 1 or project_outputs[-1]=='':
@@ -113,6 +157,9 @@ def get_project():
   return project_outputs[-1]
 
 def get_zone():
+  """
+  Fetches zone in use
+  """
   completed_command = subprocess.run(["gcloud", "config", "get", "compute/zone"], check=True, capture_output=True)
   zone_outputs = completed_command.stdout.decode().strip().split('\n')
   if len(zone_outputs) < 1 or zone_outputs[-1]=='':
@@ -120,7 +167,13 @@ def get_zone():
   return zone_outputs[-1]
 
 def get_compute_instances_client():
+  """
+  Fetches cloud compute instances client
+  """
   return compute_v1.InstancesClient()
 
 def get_metrics_service_client():
+  """
+  Fetches cloud monitoring API client
+  """
   return monitoring_v3.MetricServiceClient()

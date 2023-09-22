@@ -235,7 +235,7 @@ def train_loop(config, state=None):
   )
 
   emit_metrics.write_time_series_step('checkpointing_init_end', 1, monitoring_enabled)
-  
+
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
 
