@@ -1,3 +1,4 @@
+# pylint: disable=unused-argument, no-name-in-module
 """
 Cloud Monitoring API v3 Prototype
 """
@@ -56,7 +57,7 @@ def create_custom_metric(metric_name, description):
   )
 
   response = client.create_metric_descriptor(request=request)
-  
+
   return response
 
 
