@@ -203,12 +203,9 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
   if vocab_path is None:
     vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
 
-  # Train or load tokenizer
-  sp_tokenizer = tokenizer.load_or_train_tokenizer(
-      train_ds,
-      vocab_path=vocab_path,
-      vocab_size=config.vocab_size,
-      max_corpus_chars=config.max_corpus_chars)
+  # Load tokenizer
+  sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
+                                          vocab_size=config.vocab_size)
 
   # Tokenize data.
   train_ds = train_ds.map(
@@ -280,7 +277,7 @@ def make_c4_train_iterator_and_tokenizer(config, mesh):
     config,
     mesh,
     train_ds, eval_ds,
-    vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
+    vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
     data_shuffle_seed = config.data_shuffle_seed,
   )
   return train_iter, sp_tokenizer

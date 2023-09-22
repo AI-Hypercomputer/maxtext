@@ -112,7 +112,8 @@ ici_tensor_parallelism: 1
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_path: ""
 vocab_size: 32_768 # powers of 2 for sharding
-vocab_relative_path: "vocabs"  # Assumes we're allowed
+assets_path: "assets"
+vocab_relative_path: "tokenizer"  # Assumes we're allowed
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
