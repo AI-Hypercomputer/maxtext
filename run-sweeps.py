@@ -842,6 +842,12 @@ def run_s39():
             fwd_int8_qk = True,
             dlhs_int8_qk = True,
         )
+        logits_F = dict(
+            fwd_int8_logits = False,
+            dlhs_int8_logits = False,
+            drhs_int8_logits = False,
+        )
+
         run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF", base)
 
         if ns == 2:
@@ -850,6 +856,8 @@ def run_s39():
             # Show ablations only on 2-pod configs.
             run_job(f"gps{gps}-ns{ns}-load{load_step}-TTT", base, **real_ttt)
             run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF-qk_T", base, **qk)
+            run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF-logits_F", base, **logits_F)
+            run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF-fwdq_F", base, aqt_use_fwd_quant=False)
 
 
 # TODO:
