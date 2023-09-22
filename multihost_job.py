@@ -135,6 +135,8 @@ cd {args.RUN_NAME}
 sudo python3 -m virtualenv venv
 source venv/bin/activate
 ulimit -n 100000
+echo "142.250.123.95 www.googleapis.com" | sudo tee -a /etc/hosts
+echo "142.251.4.128 storage.googleapis.com" | sudo tee -a /etc/hosts
 (({download_from_gcs(zip_gcs_path)}
 tar xzf {zip_name}
 {args.COMMAND}) 2>&1) >> {log_name}
