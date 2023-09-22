@@ -161,6 +161,7 @@ def get_zone():
   """
   Fetches zone in use
   """
+  subprocess.run("gcloud config set compute/zone us-central2-b")
   completed_command = subprocess.run(["gcloud", "config", "get", "compute/zone"], check=True, capture_output=True)
   zone_outputs = completed_command.stdout.decode().strip().split('\n')
   if len(zone_outputs) < 1 or zone_outputs[-1]=='':
