@@ -248,7 +248,7 @@ def train_step(model, config, state, grad_stats, data, dropout_rng):
       'learning/adam_nu_norm' : max_utils.l2norm_pytree(opt[0].nu),
       'learning/adam_count' : opt[0].count,
       'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)
-  })
+  }) # ex commit
   trees = {
     'logits': logits,
     'grads': grads,
