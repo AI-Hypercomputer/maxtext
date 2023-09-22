@@ -57,7 +57,7 @@ def assert_metric_average(metrics_file, threshold, target):
 def test_final_loss(metrics_file, target_loss):
   target_loss = float(target_loss)
   with open(metrics_file, 'r', encoding='utf8') as metrics:
-    use_last_n_data = 1
+    use_last_n_data = 10
     avg_final_loss = compute_avg_metric(metrics_file, 'learning/loss', start_line= -1 * use_last_n_data)
     print(f"Mean of last {use_last_n_data} losses is {avg_final_loss}")
     print(f"Target loss is {target_loss}")
