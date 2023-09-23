@@ -776,6 +776,11 @@ def run_s38(): # 32
 
 
 def baseline_s39(*, gps, ns, load_dir, load_step):
+    if load_dir == "":
+        assert load_step == -1
+    else:
+        load_dir = f'gs://maxtext-experiments-multipod/{load_dir}/checkpoints'
+        assert load_step > 0
     d = dict(
         num_slice=ns,
         global_parameter_scale=gps,
@@ -812,7 +817,7 @@ def baseline_s39(*, gps, ns, load_dir, load_step):
         aqt_use_fwd_quant = True,
         data_shuffle_seed = 0,
         init_weights_seed = 0,
-        load_from_other_directory = f'gs://maxtext-experiments-multipod/{load_dir}/checkpoints',
+        load_from_other_directory = load_dir,
         load_from_other_directory_step = load_step,
     )
     return d
@@ -830,6 +835,12 @@ def run_s39():
         (4, 8, 'int8-s35-a1-q_FFF_s4_ns8', 1000),  #  4h, 6400
         (8, 8, 'int8-s33-a5-q_FFF_s8_ns8', 1500),  # 16h, 12800
         (16, 16, 'int8-s32-a1-q_FFF', 1500),       # 32h, 12800
+
+        (1, 8, '', -1),   # .2h, 1600
+        (2, 8, '', -1),   #  1h, 3200
+        (4, 8, '', -1),  #  4h, 6400
+        (8, 8, '', -1),  # 16h, 12800
+        (16, 16, '', -1),       # 32h, 12800
     ]:
         # No need to rereun this, because it does not changes
         base = baseline_s39(gps=gps, ns=ns, load_dir=load_dir, load_step=load_step)
@@ -847,20 +858,24 @@ def run_s39():
             dlhs_int8_logits = False,
             drhs_int8_logits = False,
         )
-
-        # This is out.
-        run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF", base)
-
+        # a hack to get nicer job names.
+        if load_step == -1:
+            load_step = "_F"
         # This is our main guy
         run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF-fwdq_F", base, aqt_use_fwd_quant=False)
 
-        if ns == 2:
-            # We don't need this one because supposedly we have it. But I want at least one sanity check:
-            run_job(f"gps{gps}-ns{ns}-load{load_step}-FFF", base, int8_training=False)
-            # Show ablations only on 2-pod configs.
-            run_job(f"gps{gps}-ns{ns}-load{load_step}-TTT", base, **real_ttt)
-            run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF-qk_T", base, **qk)
-            run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF-logits_F", base, **logits_F)
+        # We don't want ablations from scratch, too much noise.
+        if load_dir != "":
+            # This was our main guy, but is subpar now.
+            run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF", base)
+
+            if ns == 2:
+                # We don't need this one because supposedly we have it. But I want at least one sanity check:
+                run_job(f"gps{gps}-ns{ns}-load{load_step}-FFF", base, int8_training=False)
+                # Show ablations only on 2-pod configs.
+                run_job(f"gps{gps}-ns{ns}-load{load_step}-TTT", base, **real_ttt)
+                run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF-qk_T", base, **qk)
+                run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF-logits_F", base, **logits_F)
 
 
 # TODO:
