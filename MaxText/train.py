@@ -255,14 +255,22 @@ def train_loop(config, state=None):
   print('\n\n\n Pjitting the identity func!! \n\n\n')
   pjit_unshard_state_for_use  = pjit(
     state_identity,
-    in_shardings=(state_mesh_annotations,), # ckpt_mesh_annotations
-    out_shardings=(state_mesh_annotations,) # state_mesh_annotations
+    in_shardings=(ckpt_mesh_annotations,), # ckpt_mesh_annotations
+    out_shardings=(state_mesh_annotations) # state_mesh_annotations
   )
 
-  print('\n\n\n Re-sharding state!! \n\n\n')
+  print('\n\n\n Pjitting the identity func!! \n\n\n')
+  pjit_shard_state_for_ckpt  = pjit(
+    state_identity,
+    in_shardings=(state_mesh_annotations,), # ckpt_mesh_annotations
+    out_shardings=(ckpt_mesh_annotations) # state_mesh_annotations
+  )
+
+  print('\n\n\n Re-sharding state!!! \n\n\n')
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state = pjit_unshard_state_for_use(state)
 
+  print('\n\n\n State re-sharded!!! \n\n\n')
   data_pspec = P(*config.data_sharding)
 
   num_model_parameters = calculate_num_params_from_pytree(state.params)
@@ -298,8 +306,13 @@ def train_loop(config, state=None):
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
-      if checkpoint_manager.save(step, state):
-        max_logging.log(f"saved a checkpoint at step {step}")
+      if step % config.save_period == 0:
+          print('\n\n\n Re-sharding state for ckpt!!! \n\n\n')
+          with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+            state = pjit_shard_state_for_ckpt(state)
+          print('\n\n\n State re-sharded!!! \n\n\n')
+        if checkpoint_manager.save(step, state):
+          max_logging.log(f"saved a checkpoint at step {step}")
       # Upon preemption, exit when and only when all ongoing saves are complete.
       if checkpoint_manager.reached_preemption(step):
         checkpoint_manager.wait_until_finished()
