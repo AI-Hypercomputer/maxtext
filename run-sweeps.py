@@ -848,7 +848,11 @@ def run_s39():
             drhs_int8_logits = False,
         )
 
+        # This is out.
         run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF", base)
+
+        # This is our main guy
+        run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF-fwdq_F", base, aqt_use_fwd_quant=False)
 
         if ns == 2:
             # We don't need this one because supposedly we have it. But I want at least one sanity check:
@@ -857,7 +861,6 @@ def run_s39():
             run_job(f"gps{gps}-ns{ns}-load{load_step}-TTT", base, **real_ttt)
             run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF-qk_T", base, **qk)
             run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF-logits_F", base, **logits_F)
-            run_job(f"gps{gps}-ns{ns}-load{load_step}-TTF-fwdq_F", base, aqt_use_fwd_quant=False)
 
 
 # TODO:
