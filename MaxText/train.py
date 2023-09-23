@@ -247,6 +247,22 @@ def train_loop(config, state=None):
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations, ckpt_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+
+
+  def state_identity(state):
+    return state
+
+  print('\n\n\n Pjitting the identity func!! \n\n\n')
+  pjit_unshard_state_for_use  = pjit(
+    state_identity,
+    in_shardings=(ckpt_mesh_annotations,),
+    out_shardings=(state_mesh_annotations,)
+  )
+
+  print('\n\n\n Re-sharding state!! \n\n\n')
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state = pjit_unshard_state_for_use(state)
+
   data_pspec = P(*config.data_sharding)
 
   num_model_parameters = calculate_num_params_from_pytree(state.params)
@@ -303,6 +319,9 @@ def train_loop(config, state=None):
   max_utils.deactivate_profiler(config)
   writer.close()
   return state
+
+
+
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
