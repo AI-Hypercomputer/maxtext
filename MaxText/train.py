@@ -255,8 +255,8 @@ def train_loop(config, state=None):
   print('\n\n\n Pjitting the identity func!! \n\n\n')
   pjit_unshard_state_for_use  = pjit(
     state_identity,
-    in_shardings=(ckpt_mesh_annotations,),
-    out_shardings=(state_mesh_annotations,)
+    in_shardings=(state_mesh_annotations,), # ckpt_mesh_annotations
+    out_shardings=(state_mesh_annotations,) # state_mesh_annotations
   )
 
   print('\n\n\n Re-sharding state!! \n\n\n')
