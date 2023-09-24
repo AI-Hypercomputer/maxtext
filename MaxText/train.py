@@ -321,7 +321,7 @@ def train_loop(config, state=None):
 
     # Start profiling at end of first step to avoid compilation.
     # Move before for loop to include.
-    if step == 0:
+    if step == 5:
       max_utils.activate_profiler(config)
 
     if step == 6:
