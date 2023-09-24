@@ -246,31 +246,15 @@ def train_loop(config, state=None):
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  state, state_mesh_annotations, ckpt_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  state, state_mesh_annotations, ckpt_mesh_annotations, loaded_from_checkpoint = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
 
+  pjit_unshard_state_for_use, pjit_shard_state_for_ckpt = max_utils.checkpoint_reshardings(ckpt_mesh_annotations, state_mesh_annotations)
 
-  def state_identity(state):
-    return state
+  if loaded_from_checkpoint:
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      state = pjit_unshard_state_for_use(state)
+    print('\n\n\n State re-sharded!!! \n\n\n')
 
-  print('\n\n\n Pjitting the identity func!! \n\n\n')
-  pjit_unshard_state_for_use  = pjit(
-    state_identity,
-    in_shardings=(ckpt_mesh_annotations,), # ckpt_mesh_annotations
-    out_shardings=(state_mesh_annotations) # state_mesh_annotations
-  )
-
-  print('\n\n\n Pjitting the identity func!! \n\n\n')
-  pjit_shard_state_for_ckpt  = pjit(
-    state_identity,
-    in_shardings=(state_mesh_annotations,), # ckpt_mesh_annotations
-    out_shardings=(ckpt_mesh_annotations) # state_mesh_annotations
-  )
-
-  print('\n\n\n Re-sharding state!!! \n\n\n')
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    state = pjit_unshard_state_for_use(state)
-
-  print('\n\n\n State re-sharded!!! \n\n\n')
   data_pspec = P(*config.data_sharding)
 
   num_model_parameters = calculate_num_params_from_pytree(state.params)
