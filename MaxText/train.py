@@ -22,6 +22,7 @@
 import jax
 import os
 import sys
+import time
 
 jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
@@ -251,9 +252,12 @@ def train_loop(config, state=None):
   pjit_unshard_state_for_use, pjit_shard_state_for_ckpt = max_utils.checkpoint_reshardings(ckpt_mesh_annotations, state_mesh_annotations)
 
   if loaded_from_checkpoint:
+    start_time = time.time()
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state = pjit_unshard_state_for_use(state)
     print('\n\n\n State re-sharded!!! \n\n\n')
+    end_time = time.time()
+    print(f"\n\n\n reshard state to start training: {end_time - start_time} seconds \n\n\n")
 
   data_pspec = P(*config.data_sharding)
 
@@ -291,12 +295,18 @@ def train_loop(config, state=None):
 
     if checkpoint_manager is not None:
       if step % config.save_period == 0:
+        start_time = time.time()
         print('\n\n\n Re-sharding state for ckpt!!! \n\n\n')
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           ckpt_sharde_stated = pjit_shard_state_for_ckpt(state)
         print('\n\n\n State re-sharded!!! \n\n\n')
+        shard_time = time.time()
+        print(f"\n\n\n Shard for checkpoint  time: {shard_time - start_time} seconds \n\n\n")
         if checkpoint_manager.save(step, ckpt_sharde_stated):
           max_logging.log(f"saved a checkpoint at step {step}")
+        ckpt_time = time.time()
+        print(f"\n\n\n ckpt save time ignoring reshading: {ckpt_time - shard_time} seconds \n\n\n")
+        print(f"\n\n\n ckpt save time include reshading: {ckpt_time - start_time} seconds \n\n\n")
       # Upon preemption, exit when and only when all ongoing saves are complete.
       if checkpoint_manager.reached_preemption(step):
         # unsure how to this API works - maybe we cannot reshard upon preemption

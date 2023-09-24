@@ -27,6 +27,7 @@ import jax.numpy as jnp
 from jax.experimental import mesh_utils
 
 from jax.experimental.pjit import pjit
+import time
 
 import json
 import flax
@@ -220,6 +221,8 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
   with mesh, nn_partitioning.axis_rules(checkpointing_logical_axis_rules(config.logical_axis_rules)):
     ckpt_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   # Initialization
+
+    start_time = time.time()
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
                                                 config.load_from_other_directory,
@@ -227,6 +230,10 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
                                                 unboxed_abstract_state,
                                                 mesh,
                                                 ckpt_mesh_annotations)
+  end_time = time.time()
+  elapsed_time = end_time - start_time
+  # Print the elapsed time in seconds
+  print(f"\n\n\n Elapsed time: {elapsed_time} seconds \n\n\n")
   # Create state_mesh_annotations and initialize model randomly if no checkpoint provided
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
