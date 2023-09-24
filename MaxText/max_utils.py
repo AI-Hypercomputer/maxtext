@@ -247,22 +247,21 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
   state = unbox_logicallypartioned_trainstate(state)
   return state, state_mesh_annotations, ckpt_mesh_annotations, loaded_from_checkpoint
 
- def checkpoint_reshardings(ckpt_mesh_annotations, state_mesh_annotations):
-    def state_identity(state):
-      """ Identity function used to reshard state between optimized checkpoint and compute formats """
-      return state
+def checkpoint_reshardings(ckpt_mesh_annotations, state_mesh_annotations):
+  def state_identity(state):
+    """ Identity function used to reshard state between optimized checkpoint and compute formats """
+    return state
 
-    pjit_unshard_state_for_use  = pjit(
-    state_identity,
-    in_shardings=(ckpt_mesh_annotations,), # ckpt_mesh_annotations
-    out_shardings=(state_mesh_annotations) # state_mesh_annotations
+  pjit_unshard_state_for_use  = pjit(
+  state_identity,
+  in_shardings=(ckpt_mesh_annotations,),
+  out_shardings=(state_mesh_annotations)
   )
 
-  print('\n\n\n Pjitting the identity func!! \n\n\n')
   pjit_shard_state_for_ckpt  = pjit(
     state_identity,
-    in_shardings=(state_mesh_annotations,), # ckpt_mesh_annotations
-    out_shardings=(ckpt_mesh_annotations) # state_mesh_annotations
+    in_shardings=(state_mesh_annotations,),
+    out_shardings=(ckpt_mesh_annotations)
   )
   return pjit_unshard_state_for_use, pjit_shard_state_for_ckpt
 
