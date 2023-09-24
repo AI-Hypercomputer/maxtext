@@ -324,7 +324,8 @@ def train_loop(config, state=None):
     if step == 0:
       max_utils.activate_profiler(config)
 
-  max_utils.deactivate_profiler(config)
+    if step == 6:
+      max_utils.deactivate_profiler(config)
   writer.close()
   return state
 
