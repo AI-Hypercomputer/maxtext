@@ -290,7 +290,7 @@ def train_loop(config, state=None):
         max_logging.log(f"saved a checkpoint at step {step}")
       # Upon preemption, exit when and only when all ongoing saves are complete.
       if checkpoint_manager.reached_preemption(step):
-        # unsure how to this API works - maybe we cannot reshard upon preemption
+        # We save immediately upon pre-emption instead of resharding first
         checkpoint_manager.wait_until_finished()
         sys.exit()
 
@@ -308,9 +308,6 @@ def train_loop(config, state=None):
   max_utils.deactivate_profiler(config)
   writer.close()
   return state
-
-
-
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)

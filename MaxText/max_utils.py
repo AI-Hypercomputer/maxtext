@@ -37,7 +37,6 @@ from flax.linen import partitioning as nn_partitioning
 import optax
 import os
 import subprocess
-import copy
 
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
@@ -238,8 +237,6 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
   Returns:
     state: the initialized train state
     state_mesh_annotations: the mesh annotations for the train state
-    ckpt_mesh_annotations: mesh annotations optimized to save and load from
-    pjit_unshard_state_for_use: function to go from checkpointing sharding to state sharding
     pjit_shard_state_for_ckpt: function to go from state sharding to checkpoint sharding
 
   """
