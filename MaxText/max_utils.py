@@ -184,20 +184,20 @@ def _get_boxed_abstract_state(model, tx, config, rng):
   init_train_state_partial = functools.partial(init_train_state, model, tx, config)
   return jax.eval_shape(init_train_state_partial, rng)
 
-def _get_mesh_annotations(abstract_state, config, rng, mesh):
-    def checkpointing_logical_axis_rules(logical_axis_rules):
-    """ Create logical_axis_rules for distributed multislice checkpoint loading and saving
-    Achieved by changing the logical_axis_rules embed mapping from fsdp to ('data, 'fsdp') """
-    new_logical_axis_rules = ()
-    for axis in logical_axis_rules:
-      if axis[0] != 'embed':
-        new_logical_axis_rules += (axis,)
-      else:
-        new_logical_axis_rules += (('embed', ('data', 'fsdp')),)
-    return new_logical_axis_rules
+def _checkpointing_logical_axis_rules(logical_axis_rules):
+  """ Create logical_axis_rules for distributed multislice checkpoint loading and saving
+  Achieved by changing the logical_axis_rules embed mapping from fsdp to ('data, 'fsdp') """
+  new_logical_axis_rules = ()
+  for axis in logical_axis_rules:
+    if axis[0] != 'embed':
+      new_logical_axis_rules += (axis,)
+    else:
+      new_logical_axis_rules += (('embed', ('data', 'fsdp')),)
+  return new_logical_axis_rules
 
+def _get_mesh_annotations(abstract_state, config, rng, mesh):
   state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with mesh, nn_partitioning.axis_rules(checkpointing_logical_axis_rules(config.logical_axis_rules)):
+  with mesh, nn_partitioning.axis_rules(_checkpointing_logical_axis_rules(config.logical_axis_rules)):
     ckpt_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -207,7 +207,7 @@ def _get_mesh_annotations(abstract_state, config, rng, mesh):
 
 def _checkpoint_reshardings(ckpt_mesh_annotations, state_mesh_annotations):
   def state_identity(state):
-    """ Identity function used to reshard state between optimized checkpoint and compute formats """
+    """ Identity function used to reshard state between checkpoint and compute formats """
     return state
 
   pjit_unshard_state_for_use  = pjit(
@@ -249,7 +249,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
   unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
 
   # Attempt to initialize via load from checkpoint if one is provided
-  with mesh, nn_partitioning.axis_rules(checkpointing_logical_axis_rules(config.logical_axis_rules)):
+  with mesh, nn_partitioning.axis_rules(_checkpointing_logical_axis_rules(config.logical_axis_rules)):
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
                                                 config.load_from_other_directory,
