@@ -6,7 +6,7 @@ echo "Running 128b.sh"
 set -e
 
 export OUTPUT_PATH="gs://maxtext-experiments-multipod"
-export DATASET_PATH="gs://maxtext-dataset/"
+export DATASET_PATH="gs://max-datasets-rogue-useast/"
 
 # Set environment variables
 for ARGUMENT in "$@"; do
