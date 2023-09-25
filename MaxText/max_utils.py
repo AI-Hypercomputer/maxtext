@@ -16,6 +16,7 @@
 
 # pylint: disable=bare-except, consider-using-generator
 """ Common Max Utils needed by multiple modules"""
+import time
 import checkpointing
 import functools
 
@@ -206,6 +207,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
   # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+    start_time = time.time()
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
                                                 config.load_from_other_directory,
@@ -213,6 +215,8 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
                                                 unboxed_abstract_state,
                                                 mesh,
                                                 state_mesh_annotations)
+  end_time = time.time()
+  print(f"Load time of {end_time - start_time:0.4f}")
 
     if not state:
       state = pjit(

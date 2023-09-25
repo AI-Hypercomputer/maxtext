@@ -19,6 +19,7 @@
 
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
+import time
 import jax
 import os
 import sys
@@ -282,8 +283,11 @@ def train_loop(config, state=None):
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
+      start_time = time.time() 
       if checkpoint_manager.save(step, state):
         max_logging.log(f"saved a checkpoint at step {step}")
+        end_time = time.time()
+        print(f"Saving took {end_time - start_time:0.4f}")
       # Upon preemption, exit when and only when all ongoing saves are complete.
       if checkpoint_manager.reached_preemption(step):
         checkpoint_manager.wait_until_finished()
