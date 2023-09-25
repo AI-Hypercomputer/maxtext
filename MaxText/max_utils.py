@@ -271,7 +271,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     raw_params = None
 
   state = unbox_logicallypartioned_trainstate(state)
-  return state, state_mesh_annotations, ckpt_mesh_annotations, pjit_unshard_state_for_use, pjit_shard_state_for_ckpt
+  return state, state_mesh_annotations, pjit_shard_state_for_ckpt
 
 # Learning Rate Schedule
 # -----------------------------------------------------------------------------

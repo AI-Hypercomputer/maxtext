@@ -246,7 +246,7 @@ def train_loop(config, state=None):
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  state, state_mesh_annotations, ckpt_mesh_annotations, pjit_unshard_state_for_use, pjit_shard_state_for_ckpt  = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  state, state_mesh_annotations, pjit_shard_state_for_ckpt  = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
 
   data_pspec = P(*config.data_sharding)
 
@@ -284,12 +284,10 @@ def train_loop(config, state=None):
 
     if checkpoint_manager is not None:
       if step % config.save_period == 0:
-        print('\n\n\n Re-sharding state for ckpt!!! \n\n\n')
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-          ckpt_sharde_stated = pjit_shard_state_for_ckpt(state)
-        print('\n\n\n State re-sharded!!! \n\n\n')
-        if checkpoint_manager.save(step, ckpt_sharde_stated):
-          max_logging.log(f"saved a checkpoint at step {step}")
+          ckpt_sharded_state = pjit_shard_state_for_ckpt(state)
+        checkpoint_manager.save(step, ckpt_sharded_state):
+        max_logging.log(f"saved a checkpoint at step {step}")
       # Upon preemption, exit when and only when all ongoing saves are complete.
       if checkpoint_manager.reached_preemption(step):
         # unsure how to this API works - maybe we cannot reshard upon preemption
