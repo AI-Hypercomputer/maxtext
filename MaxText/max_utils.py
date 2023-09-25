@@ -271,6 +271,8 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     raw_params = None
 
   state = unbox_logicallypartioned_trainstate(state)
+  time_unbox=time.time()
+  print(f"Unbox time of {time_unbox - start_time:0.4f}")
   return state, state_mesh_annotations, pjit_shard_state_for_ckpt, pjit_unshard_state_for_use
 
 # Learning Rate Schedule
