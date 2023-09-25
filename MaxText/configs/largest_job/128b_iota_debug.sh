@@ -5,7 +5,7 @@ echo "Running 128b.sh"
 # Stop execution if any command exits with error
 set -e
 
-export OUTPUT_PATH="gs://maxtext-experiments-multipod"
+export OUTPUT_PATH="gs://maxtext-experiments-multipod-useast"
 export DATASET_PATH="gs://max-datasets-rogue-useast/"
 
 # Set environment variables
