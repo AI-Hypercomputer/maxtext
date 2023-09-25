@@ -48,6 +48,9 @@ cleanup with a `Cluster Delete`.
 
 *   Cluster Create (provision capacity):
 
+    Cluster Create can be called again with the same `--cluster name` to modify
+    the number of slices or retry failed steps.
+
     ```shell
     python3 xpk/xpk.py cluster create \
     --cluster xpk-test --tpu-type=v5litepod-16 \
@@ -85,7 +88,7 @@ cleanup with a `Cluster Delete`.
 
     ```shell
     python3 xpk/xpk.py workload create \
-    --workload xpk-test-workload --command "echo goodbye" --cluster
+    --workload xpk-test-workload --command "echo goodbye" --cluster \
     xpk-test --tpu-type=v5litepod-16
     ```
 

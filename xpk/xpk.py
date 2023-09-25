@@ -63,7 +63,7 @@ metadata:
     alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool # 1:1 job replica to node pool assignment
 spec:
   failurePolicy:
-    maxRestarts: 0
+    maxRestarts: {args.max_restarts}
   replicatedJobs:
     - name: slice-job
       replicas: {args.num_slices}
@@ -95,7 +95,7 @@ spec:
                 - bash
                 - -c
                 - |
-                  echo XPK Start: $(date) ; {args.command} ; echo XPK End: $(date) ; sleep 5
+                  echo XPK Start: $(date) ; {args.command} ; EXIT_CODE=$? ; echo XPK End: $(date); echo EXIT_CODE=$EXIT_CODE ; sleep 5; exit $EXIT_CODE
                 resources:
                   limits:
                     google.com/tpu: {system.chips_per_vm}
@@ -1694,6 +1694,17 @@ workload_custom_arguments.add_argument(
         'Which scheduler you want to use. Defaults to `default-scheduler`.'
         'If your cluster is configured for high throughput scheduling you might'
         'want to use `gke.io/high-throughput-scheduler`.'
+    ),
+)
+
+
+workload_custom_arguments.add_argument(
+    '--max-restarts',
+    type=str,
+    default='0',
+    help=(
+        "Maximum number of times the JobSet will be restarted upon failure."
+        " Defaults to 0."
     ),
 )
 
