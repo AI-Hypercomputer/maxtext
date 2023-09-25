@@ -1,16 +1,20 @@
-#  Copyright 2023 Google LLC
+"""
+ Copyright 2023 Google LLC
 
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
 
-#       https://www.apache.org/licenses/LICENSE-2.0
+      https://www.apache.org/licenses/LICENSE-2.0
 
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+"""
+# pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports, unspecified-encoding, consider-using-enumerate, consider-using-dict-items, consider-iterating-dictionary
+
 r"""xpk (Accelerated Processing Kit).
 
 Next Steps:
@@ -300,7 +304,7 @@ def run_commands(commands, jobname, per_command_name, batch=10, dry_run=False):
     return 0
 
   max_return_code = 0
-  for i in range(len(commands_batched)):
+  for i, _ in enumerate(commands_batched):
     xpk_print(f'Dispatching batch {i}/{len(commands_batched)}')
     batch_max_return_code, _ = run_command_batch(
         commands_batched[i],
@@ -994,6 +998,7 @@ def cluster_create(args) -> int:
   xpk_print('GKE commands done! TPUs are created.')
   xpk_print(
       'See your GKE Cluster here:'
+      # pylint: disable=line-too-long
       f' https://console.cloud.google.com/kubernetes/clusters/details/{zone_to_region(args.zone)}/{args.cluster}/details?project={args.project}'
   )
   xpk_exit(0)
@@ -1233,6 +1238,7 @@ def workload_create(args) -> int:
 
   xpk_print(
       'Follow your workload here:'
+      # pylint: disable=line-too-long
       f' https://console.cloud.google.com/kubernetes/service/{zone_to_region(args.zone)}/{args.cluster}/default/{args.workload}/details?project={args.project}'
   )
   xpk_exit(0)
