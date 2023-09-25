@@ -286,7 +286,7 @@ def train_loop(config, state=None):
       if step % config.save_period == 0:
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           state = pjit_shard_state_for_ckpt(state)
-        checkpoint_manager.save(step, ckpt_sharded_state)
+        checkpoint_manager.save(step, state)
         max_logging.log(f"saved a checkpoint at step {step}")
         with mesh, nn_partitioning.axis_rules(max_utils.checkpointing_logical_axis_rules(config.logical_axis_rules)):
           state = pjit_unshard_state_for_use(state)
