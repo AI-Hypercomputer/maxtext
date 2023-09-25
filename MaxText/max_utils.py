@@ -38,6 +38,7 @@ import optax
 import os
 import subprocess
 
+import time
 
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
@@ -245,6 +246,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
 
   # Attempt to initialize via load from checkpoint if one is provided
   with mesh, nn_partitioning.axis_rules(checkpointing_logical_axis_rules(config.logical_axis_rules)):
+    start_time = time.time()
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
                                                 config.load_from_other_directory,
@@ -252,6 +254,8 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
                                                 unboxed_abstract_state,
                                                 mesh,
                                                 ckpt_mesh_annotations)
+    end_time = time.time()
+    print(f"Load time of {end_time - start_time:0.4f}")
     if state is not None:
       state = pjit_unshard_state_for_use(state)
   # Initialize model randomly if no checkpoint provided

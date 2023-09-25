@@ -22,7 +22,7 @@
 import jax
 import os
 import sys
-
+import time
 jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
@@ -286,8 +286,11 @@ def train_loop(config, state=None):
       if step % config.save_period == 0:
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           state = pjit_shard_state_for_ckpt(state)
+        start_time = time.time()
         checkpoint_manager.save(step, state)
         max_logging.log(f"saved a checkpoint at step {step}")
+        end_time = time.time()
+        print(f"Save time: {end_time - start_time:.6f} seconds")
         with mesh, nn_partitioning.axis_rules(max_utils.checkpointing_logical_axis_rules(config.logical_axis_rules)):
           state = pjit_unshard_state_for_use(state)
       # Upon preemption, exit when and only when all ongoing saves are complete.
