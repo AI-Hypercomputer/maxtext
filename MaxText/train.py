@@ -289,7 +289,8 @@ def train_loop(config, state=None):
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           ckpt_sharded_state = pjit_shard_state_for_ckpt(state)
         checkpoint_manager.save(step, ckpt_sharded_state)
-        
+        save_time = time.time()
+        print(f"\n\n Save time is {save_time - start_time:.4f} \n\n")
         max_logging.log(f"saved a checkpoint at step {step}")
       # Upon preemption, exit when and only when all ongoing saves are complete.
       if checkpoint_manager.reached_preemption(step):

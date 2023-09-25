@@ -258,7 +258,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
                                                 mesh,
                                                 ckpt_mesh_annotations)
     load_time = time.time()
-    print(f"Load time is {start_time - load_time:.4f}")
+    print(f"\n\n Load time is {load_time - start_time:.4f} \n\n")
     state = pjit_unshard_state_for_use(state)
   # Initialize model randomly if no checkpoint provided
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
