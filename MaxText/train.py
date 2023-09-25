@@ -57,6 +57,7 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 import max_logging
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
+import time
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
 def calculate_training_tflops(num_model_parameters, config):
@@ -284,9 +285,11 @@ def train_loop(config, state=None):
 
     if checkpoint_manager is not None:
       if step % config.save_period == 0:
+        start_time = time.time()
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           ckpt_sharded_state = pjit_shard_state_for_ckpt(state)
-        checkpoint_manager.save(step, ckpt_sharded_state):
+        checkpoint_manager.save(step, ckpt_sharded_state)
+        
         max_logging.log(f"saved a checkpoint at step {step}")
       # Upon preemption, exit when and only when all ongoing saves are complete.
       if checkpoint_manager.reached_preemption(step):

@@ -37,6 +37,7 @@ from flax.linen import partitioning as nn_partitioning
 import optax
 import os
 import subprocess
+import time
 
 
 def l2norm_pytree(x):
@@ -248,6 +249,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
 
   # Attempt to initialize via load from checkpoint if one is provided
   with mesh, nn_partitioning.axis_rules(_checkpointing_logical_axis_rules(config.logical_axis_rules)):
+    start_time = time.time()
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
                                                 config.load_from_other_directory,
@@ -255,6 +257,8 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
                                                 unboxed_abstract_state,
                                                 mesh,
                                                 ckpt_mesh_annotations)
+    load_time = time.time()
+    print(f"Load time is {start_time - load_time:.4f}")
     state = pjit_unshard_state_for_use(state)
   # Initialize model randomly if no checkpoint provided
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
