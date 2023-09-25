@@ -868,7 +868,7 @@ def install_kueue_on_cluster(args) -> int:
   """
   command = (
       'kubectl apply -f'
-      ' experimental/users/vbarr/multipod/xpk/kueue_manifests.yml'
+      ' xpk/kueue_manifests.yml'
   )
   return_code = run_command_with_updates(command, 'Set Kueue On Cluster', args)
 
