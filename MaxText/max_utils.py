@@ -215,8 +215,8 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
                                                 unboxed_abstract_state,
                                                 mesh,
                                                 state_mesh_annotations)
-  end_time = time.time()
-  print(f"Load time of {end_time - start_time:0.4f}")
+    end_time = time.time()
+    print(f"Load time of {end_time - start_time:0.4f}")
 
     if not state:
       state = pjit(
