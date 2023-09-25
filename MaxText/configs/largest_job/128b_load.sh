@@ -1,4 +1,4 @@
-load_run_name=${1}
+#bash MaxText/configs/largest_job/128b_load.sh load_run_name=previous-run
 
 echo "Running 128b.sh"
 # Example command to invoke this script
@@ -10,7 +10,7 @@ set -e
 export OUTPUT_PATH="gs://maxtext-experiments-multipod"
 export DATASET_PATH="gs://max-datasets-rogue-useast/"
 
-# Set environment variables
+#Set environment variables
 for ARGUMENT in "$@"; do
     IFS='=' read -r KEY VALUE <<< "$ARGUMENT"
     export "$KEY"="$VALUE"
