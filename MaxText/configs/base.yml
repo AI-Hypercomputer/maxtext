@@ -174,4 +174,4 @@ stack_trace_to_cloud: False  # Uploads to cloud logging if True, else to the con
 stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds.
 
 # Use iota operator in Embed
-use_iota_embed: False
+use_iota_embed: True
