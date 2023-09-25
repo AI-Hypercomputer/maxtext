@@ -180,34 +180,14 @@ def init_train_state(model, tx, config, key):
       tx=tx)
   return state
 
+def _get_boxed_abstract_state(model, tx, config, rng):
+  init_train_state_partial = functools.partial(init_train_state, model, tx, config)
+  return jax.eval_shape(init_train_state_partial, rng)
 
-def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
-  """ We initialize the model and optimizer state, and optionally load from a
-  checkpoint as necessary.
-
-  Args:
-    model: the flax model to initialize
-    tx: the optax.GradientTransformation
-    config: config object
-    rng: jax.prng key
-    mesh: jax.devices() mesh
-    checkpoint_manager: an Orbax checkpointing.CheckpointManager object
-
-  Returns:
-    state: the initialized train state
-    state_mesh_annotations: the mesh annotations for the train state
-  """
-  init_train_state_partial = functools.partial(init_train_state, model, tx,
-                                               config)
-  abstract_state = jax.eval_shape(init_train_state_partial, rng)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  #print(f"{state_logical_annotations=}")
-  
-  unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
-
-  def checkpointing_logical_axis_rules(logical_axis_rules):
-    """ Create logical_axis_rules for optimal multislice checkpoint loading and saving
-    Achieved by changing the state logical_axis_rules embed mapping from fsdp to ('data, 'fsdp') """
+def _get_mesh_annotations(abstract_state, config, rng, mesh):
+    def checkpointing_logical_axis_rules(logical_axis_rules):
+    """ Create logical_axis_rules for distributed multislice checkpoint loading and saving
+    Achieved by changing the logical_axis_rules embed mapping from fsdp to ('data, 'fsdp') """
     new_logical_axis_rules = ()
     for axis in logical_axis_rules:
       if axis[0] != 'embed':
@@ -216,38 +196,16 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
         new_logical_axis_rules += (('embed', ('data', 'fsdp')),)
     return new_logical_axis_rules
 
-  # Create ckpt_mesh_annotations and attempt to load from checkpoint if one is provided
+  state_logical_annotations = nn.get_partition_spec(abstract_state)
   with mesh, nn_partitioning.axis_rules(checkpointing_logical_axis_rules(config.logical_axis_rules)):
     ckpt_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  # Initialization
-    state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
-                                                config.load_parameters_path,
-                                                config.load_from_other_directory,
-                                                config.load_from_other_directory_step,
-                                                unboxed_abstract_state,
-                                                mesh,
-                                                ckpt_mesh_annotations)
-  # Create state_mesh_annotations and initialize model randomly if no checkpoint provided
+  
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
 
-    if not state:
-      state = pjit(
-          init_train_state_partial,
-          in_shardings=None,
-          out_shardings=state_mesh_annotations
-      )(rng)
-      if raw_params: # If we loaded a partial state, we need to merge it.
-        state = state.replace(params = raw_params)
-      loaded_from_checkpoint = False
-    else:
-      loaded_from_checkpoint = True
-    raw_params = None
+  return state_mesh_annotations, ckpt_mesh_annotations
 
-  state = unbox_logicallypartioned_trainstate(state)
-  return state, state_mesh_annotations, ckpt_mesh_annotations, loaded_from_checkpoint
-
-def checkpoint_reshardings(ckpt_mesh_annotations, state_mesh_annotations):
+def _checkpoint_reshardings(ckpt_mesh_annotations, state_mesh_annotations):
   def state_identity(state):
     """ Identity function used to reshard state between optimized checkpoint and compute formats """
     return state
@@ -264,6 +222,56 @@ def checkpoint_reshardings(ckpt_mesh_annotations, state_mesh_annotations):
     out_shardings=(ckpt_mesh_annotations)
   )
   return pjit_unshard_state_for_use, pjit_shard_state_for_ckpt
+
+def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
+  """ We initialize the model and optimizer state, and optionally load from a
+  checkpoint as necessary.
+
+  Args:
+    model: the flax model to initialize
+    tx: the optax.GradientTransformation
+    config: config object
+    rng: jax.prng key
+    mesh: jax.devices() mesh
+    checkpoint_manager: an Orbax checkpointing.CheckpointManager object
+
+  Returns:
+    state: the initialized train state
+    state_mesh_annotations: the mesh annotations for the train state
+    ckpt_mesh_annotations: mesh annotations optimized to save and load from
+    pjit_unshard_state_for_use: function to go from checkpointing sharding to state sharding
+    pjit_shard_state_for_ckpt: function to go from state sharding to checkpoint sharding
+
+  """
+  abstract_state = _get_boxed_abstract_state(model, tx, config, rng)
+  state_mesh_annotations, ckpt_mesh_annotations = _get_mesh_annotations(abstract_state, config, rng, mesh)
+  pjit_unshard_state_for_use, pjit_shard_state_for_ckpt = _checkpoint_reshardings(ckpt_mesh_annotations, state_mesh_annotations)  
+  unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
+
+  # Attempt to initialize via load from checkpoint if one is provided
+  with mesh, nn_partitioning.axis_rules(checkpointing_logical_axis_rules(config.logical_axis_rules)):
+    state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
+                                                config.load_parameters_path,
+                                                config.load_from_other_directory,
+                                                config.load_from_other_directory_step,
+                                                unboxed_abstract_state,
+                                                mesh,
+                                                ckpt_mesh_annotations)
+    state = pjit_unshard_state_for_use(state)
+  # Initialize model randomly if no checkpoint provided
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    if not state:
+      state = pjit(
+          init_train_state_partial,
+          in_shardings=None,
+          out_shardings=state_mesh_annotations
+      )(rng)
+      if raw_params: # If we loaded a partial state, we need to merge it.
+        state = state.replace(params = raw_params)
+    raw_params = None
+
+  state = unbox_logicallypartioned_trainstate(state)
+  return state, state_mesh_annotations, ckpt_mesh_annotations, pjit_unshard_state_for_use, pjit_shard_state_for_ckpt
 
 # Learning Rate Schedule
 # -----------------------------------------------------------------------------
