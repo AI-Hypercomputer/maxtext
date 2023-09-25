@@ -180,11 +180,7 @@ def init_train_state(model, tx, config, key):
       tx=tx)
   return state
 
-def _get_boxed_abstract_state(model, tx, config, rng):
-  init_train_state_partial = functools.partial(init_train_state, model, tx, config)
-  return jax.eval_shape(init_train_state_partial, rng)
-
-def _checkpointing_logical_axis_rules(logical_axis_rules):
+def checkpointing_logical_axis_rules(logical_axis_rules):
   """ Create logical_axis_rules for distributed multislice checkpoint loading and saving
   Achieved by changing the logical_axis_rules embed mapping from fsdp to ('data, 'fsdp') """
   new_logical_axis_rules = ()
@@ -197,7 +193,7 @@ def _checkpointing_logical_axis_rules(logical_axis_rules):
 
 def _get_mesh_annotations(abstract_state, config, rng, mesh):
   state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with mesh, nn_partitioning.axis_rules(_checkpointing_logical_axis_rules(config.logical_axis_rules)):
+  with mesh, nn_partitioning.axis_rules(checkpointing_logical_axis_rules(config.logical_axis_rules)):
     ckpt_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -241,13 +237,14 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     pjit_shard_state_for_ckpt: function to go from state sharding to checkpoint sharding
 
   """
-  abstract_state = _get_boxed_abstract_state(model, tx, config, rng)
+  init_train_state_partial = functools.partial(init_train_state, model, tx, config)
+  abstract_state = jax.eval_shape(init_train_state_partial, rng)
   state_mesh_annotations, ckpt_mesh_annotations = _get_mesh_annotations(abstract_state, config, rng, mesh)
   pjit_unshard_state_for_use, pjit_shard_state_for_ckpt = _checkpoint_reshardings(ckpt_mesh_annotations, state_mesh_annotations)  
   unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
 
   # Attempt to initialize via load from checkpoint if one is provided
-  with mesh, nn_partitioning.axis_rules(_checkpointing_logical_axis_rules(config.logical_axis_rules)):
+  with mesh, nn_partitioning.axis_rules(checkpointing_logical_axis_rules(config.logical_axis_rules)):
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
                                                 config.load_from_other_directory,
@@ -255,7 +252,8 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
                                                 unboxed_abstract_state,
                                                 mesh,
                                                 ckpt_mesh_annotations)
-    state = pjit_unshard_state_for_use(state)
+    if state is not None:
+      state = pjit_unshard_state_for_use(state)
   # Initialize model randomly if no checkpoint provided
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     if not state:
@@ -269,7 +267,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     raw_params = None
 
   state = unbox_logicallypartioned_trainstate(state)
-  return state, state_mesh_annotations, pjit_shard_state_for_ckpt
+  return state, state_mesh_annotations, pjit_shard_state_for_ckpt, pjit_unshard_state_for_use
 
 # Learning Rate Schedule
 # -----------------------------------------------------------------------------
