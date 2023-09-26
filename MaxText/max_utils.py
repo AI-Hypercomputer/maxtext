@@ -180,7 +180,7 @@ def init_train_state(model, tx, config, key):
       tx=tx)
   return state
 
-def checkpointing_logical_axis_rules(logical_axis_rules):
+def _checkpointing_logical_axis_rules(logical_axis_rules):
   """ Create logical_axis_rules for distributed multislice checkpoint loading and saving
   Achieved by changing the logical_axis_rules embed mapping from fsdp to ('data, 'fsdp') """
   new_logical_axis_rules = ()
@@ -191,17 +191,19 @@ def checkpointing_logical_axis_rules(logical_axis_rules):
       new_logical_axis_rules += (('embed', ('data', 'fsdp')),)
   return new_logical_axis_rules
 
-def _get_mesh_annotations(abstract_state, config, rng, mesh):
+def _get_mesh_annotations(abstract_state, config, mesh):
   state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with mesh, nn_partitioning.axis_rules(checkpointing_logical_axis_rules(config.logical_axis_rules)):
+  with mesh, nn_partitioning.axis_rules(_checkpointing_logical_axis_rules(config.logical_axis_rules)):
     ckpt_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  
+
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
 
   return state_mesh_annotations, ckpt_mesh_annotations
 
 def _checkpoint_reshardings(ckpt_mesh_annotations, state_mesh_annotations):
+  """ Create a function to reshard from checkpoint format (tensors sharded across slices for optimal loading)
+  to training format (only data parallel across slices)"""
   def state_identity(state):
     """ Identity function used to reshard state between checkpoint and compute formats """
     return state
@@ -211,13 +213,7 @@ def _checkpoint_reshardings(ckpt_mesh_annotations, state_mesh_annotations):
   in_shardings=(ckpt_mesh_annotations,),
   out_shardings=(state_mesh_annotations)
   )
-
-  pjit_shard_state_for_ckpt  = pjit(
-    state_identity,
-    in_shardings=(state_mesh_annotations,),
-    out_shardings=(ckpt_mesh_annotations)
-  )
-  return pjit_unshard_state_for_use, pjit_shard_state_for_ckpt
+  return pjit_unshard_state_for_use
 
 def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
   """ We initialize the model and optimizer state, and optionally load from a
@@ -234,17 +230,16 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
   Returns:
     state: the initialized train state
     state_mesh_annotations: the mesh annotations for the train state
-    pjit_shard_state_for_ckpt: function to go from state sharding to checkpoint sharding
 
   """
   init_train_state_partial = functools.partial(init_train_state, model, tx, config)
   abstract_state = jax.eval_shape(init_train_state_partial, rng)
-  state_mesh_annotations, ckpt_mesh_annotations = _get_mesh_annotations(abstract_state, config, rng, mesh)
-  pjit_unshard_state_for_use, pjit_shard_state_for_ckpt = _checkpoint_reshardings(ckpt_mesh_annotations, state_mesh_annotations)  
+  state_mesh_annotations, ckpt_mesh_annotations = _get_mesh_annotations(abstract_state, config, mesh)
+  pjit_unshard_state_for_use = _checkpoint_reshardings(ckpt_mesh_annotations, state_mesh_annotations)
   unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
 
   # Attempt to initialize via load from checkpoint if one is provided
-  with mesh, nn_partitioning.axis_rules(checkpointing_logical_axis_rules(config.logical_axis_rules)):
+  with mesh, nn_partitioning.axis_rules(_checkpointing_logical_axis_rules(config.logical_axis_rules)):
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
                                                 config.load_from_other_directory,
