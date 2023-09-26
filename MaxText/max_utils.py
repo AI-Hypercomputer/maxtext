@@ -246,6 +246,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
                                                 unboxed_abstract_state,
                                                 mesh,
                                                 ckpt_mesh_annotations)
+
     if state is not None:
       state = pjit_unshard_state_for_use(state)
   # Initialize model randomly if no checkpoint provided
