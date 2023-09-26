@@ -65,9 +65,7 @@ def calculate_training_tflops(num_model_parameters, config):
   attention_tflops = 12 * config.num_heads * config.num_decoder_layers * config.head_dim * config.max_target_length**2 \
                      * config.per_device_batch_size / 10**12
   total_tflops = learnable_weight_tflops + attention_tflops
-  max_logging.log(f'Per train step, total TFLOPs will be {total_tflops:.2f},',
-        f'split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops',
-        f'and {100 * attention_tflops/total_tflops:.2f}% attention flops')
+  max_logging.log(f'Per train step, total TFLOPs will be {total_tflops:.2f} split as {100 * learnable_weight_tflops/total_tflops:.2f} learnable weight flopsand {100 * attention_tflops/total_tflops:.2f} attention flops')
   return total_tflops
 
 def get_first_step(state):
@@ -233,11 +231,11 @@ def train_loop(config, state=None):
     return slice_zero_devices
 
   jax_slice_zero_devices = get_jax_slice_zero_devices()
-  print(f"\n{jax_slice_zero_devices=}\n")
+  #print(f"\n{jax_slice_zero_devices=}\n")
   devices_array_jax_zero = max_utils.create_device_mesh(config, devices=jax_slice_zero_devices, dcn_parallelism=[1,1,1])
-  print(f"\n{devices_array_jax_zero=}\n")
+  #print(f"\n{devices_array_jax_zero=}\n")
   mesh_jax_zero = Mesh(devices_array_jax_zero, config.mesh_axes)
-  print(f"\n{mesh_jax_zero=}\n")
+  #print(f"\n{mesh_jax_zero=}\n")
 
 
   # print(f"{jax.devices()=}")
@@ -264,9 +262,9 @@ def train_loop(config, state=None):
 
 
   # Model and Optimizer definition
-  use_mesh = mesh_jax_zero # mesh_jax_zero or mesh
 
-  model = Transformer(config, use_mesh)
+
+  model = Transformer(config, mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
 
   # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
@@ -282,8 +280,8 @@ def train_loop(config, state=None):
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  
-  state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  use_mesh = mesh_jax_zero # mesh_jax_zero or mesh
+  state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, use_mesh, checkpoint_manager)
   data_pspec = P(*config.data_sharding)
 
   num_model_parameters = calculate_num_params_from_pytree(state.params)
