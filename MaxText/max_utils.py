@@ -37,6 +37,7 @@ from flax.linen import partitioning as nn_partitioning
 import optax
 import os
 import subprocess
+from typing import Tuple
 
 
 def l2norm_pytree(x):
@@ -274,9 +275,6 @@ def create_learning_rate_schedule(config):
     boundaries.append(warmup_steps + cos_steps + constant_zero_steps)
 
   return optax.join_schedules(pieces, boundaries)
-  
-from typing import Tuple, Mapping, Optional, Union
-
 
 
 @jax.custom_vjp
@@ -328,7 +326,7 @@ def _cross_entropy_with_logits_fwd(
   log_z = jnp.squeeze(jnp.log(sum_exp) + max_logit, axis=-1)
   total_z_loss = z_loss * jax.lax.square(log_z)
   loss += total_z_loss
-  return (loss, total_z_loss), (logits, targets, z_loss, exp_shifted, sum_exp,  # pytype: disable=bad-return-type  # jax-ndarray
+  return (loss, total_z_loss), (logits, targets, z_loss, exp_shifted, sum_exp, #pytype: disable=bad-return-type  #jax-ndarray
                                 log_softmax, log_z)
 
 
