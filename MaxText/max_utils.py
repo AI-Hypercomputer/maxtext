@@ -239,7 +239,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
 
   # Attempt to initialize via load from checkpoint if one is provided
   with mesh, nn_partitioning.axis_rules(_checkpointing_logical_axis_rules(config.logical_axis_rules)):
-    state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
+    ckpt_sharded_state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
                                                 config.load_from_other_directory,
                                                 config.load_from_other_directory_step,
@@ -247,8 +247,9 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
                                                 mesh,
                                                 ckpt_mesh_annotations)
 
-    if state is not None:
-      state = pjit_unshard_state_for_use(state)
+    if ckpt_sharded_state is not None:
+      state = pjit_unshard_state_for_use(ckpt_sharded_state)
+      ckpt_sharded_state.delete()
   # Initialize model randomly if no checkpoint provided
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     if not state:
