@@ -18,6 +18,8 @@
 import jax
 import max_utils
 import unittest
+import optax
+from flax import linen as nn
 
 jax.config.update('jax_platform_name', 'cpu')
 
@@ -26,6 +28,27 @@ class MaxUtilsSummaryStats(unittest.TestCase):
   def test_l2norm_pytree(self):
     x = {'a': jax.numpy.array([0, 2, 0]), 'b': jax.numpy.array([0, 3, 6])}
     self.assertEqual(max_utils.l2norm_pytree(x), 7)
+
+class MaxUtilsT5XCrossEntropy(unittest.TestCase):
+  """Tests for the cross entropy functions in max_utils.py"""
+  def test_t5x_cross_entropy(self):
+    # Generate random targets and logits
+    key = jax.random.PRNGKey(0)
+    targets = jax.random.randint(key, shape=(48, 2048),
+                                        dtype=jax.numpy.int32, minval=1, maxval=10)
+    logits = jax.random.uniform(key, shape=(48, 2048, 32768),
+                                        dtype=jax.numpy.float32)
+
+    # Calculate xent from optax implementation                                    
+    optax_xent = optax.softmax_cross_entropy_with_integer_labels(logits, targets)
+
+    # Calculate xent from custom T5X implementation
+    one_hot_targets = jax.nn.one_hot(targets, 32768)
+    t5x_xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
+    t5x_xent = nn.with_logical_constraint(t5x_xent, ('activation_batch', 'activation_length'))
+
+    # Compare results
+    self.assertTrue(jax.numpy.allclose(optax_xent, t5x_xent, rtol=1e-05, atol=1e-08, equal_nan=False))
 
 if __name__ == '__main__':
   unittest.main()
