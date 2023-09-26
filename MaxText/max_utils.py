@@ -230,24 +230,51 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
 
 # Learning Rate Schedule
 # -----------------------------------------------------------------------------
-# learning rate scheduling
-def rsqrt_schedule(init_value: float, shift: int = 0):
-  def schedule(count):
-    return init_value * (1 + count + shift)**-.5 * shift**.5
-  return schedule
 
-def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
-  """Creates a rsqrt schedule with linear warmup."""
-  return optax.join_schedules([
-      optax.linear_schedule(
-          init_value=0,
-          end_value=learning_rate,
-          transition_steps=warmup_steps
-          ),
-      rsqrt_schedule(init_value=learning_rate, shift=warmup_steps),
-      ], boundaries=[warmup_steps],
-      )
+def create_learning_rate_schedule(config):
+  """Creates a warmup and cosine decay learning rate schedule:
+  We take inspiration from Llama2's learning rate (LR) schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
+  Learning rate schedule has either two or three parts:
+  1) Linear warmup from 0 to [learning_rate] over steps 0 to [learning_rate_schedule_steps * warmup_steps_fraction]
+  2) Cosine from [learning_rate] to [learning_rate * cosine_learning_rate_final_fraction] until learning_rate_schedule_steps
+  3) Constant learning rate of 0 from learning_rate_schedule_steps to steps.
+  The zero learning rate section can be used to more accurately measure the fully trained model's performance.
+  """
+  def make_cos_schedule(init_lr, final_lr, len_steps):
+    def schedule(step):
+      pct = (step) / len_steps
+      a = 0.5 * (jnp.cos(jnp.pi*pct) + 1)
+      lr = init_lr * a + final_lr * (1 - a)
+      return lr
+    return schedule
 
+  lr = config.learning_rate
+  cos_final_lr = lr * config.cosine_learning_rate_final_fraction
+
+  warmup_steps = int(config.learning_rate_schedule_steps * config.warmup_steps_fraction)
+  cos_steps = config.learning_rate_schedule_steps - warmup_steps
+  constant_zero_steps = config.steps - config.learning_rate_schedule_steps
+
+  warmup_schedule = optax.linear_schedule(
+      init_value=0.0,
+      end_value=lr,
+      transition_steps=warmup_steps
+  )
+  cos_schedule = make_cos_schedule(lr, cos_final_lr, cos_steps)
+  constant_schedule = optax.constant_schedule(0.0)
+
+  pieces = [warmup_schedule, cos_schedule]
+  boundaries=[
+   warmup_steps,
+   warmup_steps + cos_steps,
+   ]
+
+  if constant_zero_steps > 0:
+    pieces.append(constant_schedule)
+    boundaries.append(warmup_steps + cos_steps + constant_zero_steps)
+
+  return optax.join_schedules(pieces, boundaries)
+  
 from typing import Tuple, Mapping, Optional, Union
 
 

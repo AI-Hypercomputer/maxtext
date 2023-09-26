@@ -120,14 +120,6 @@ def predict_step(inputs,
 
   return seqs
 
-def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
-  return optax.linear_schedule(
-          init_value=0,
-          end_value=learning_rate,
-          transition_steps=warmup_steps
-          )
-
-
 def decode_loop(config, state=None):
   """Decoding loop for the Transformer model."""
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir,
@@ -144,9 +136,7 @@ def decode_loop(config, state=None):
   model = Transformer(config, mesh = mesh)
 
   tx = optax.adamw(
-    max_utils.create_learning_rate_schedule(
-      learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
-    )
+    max_utils.create_learning_rate_schedule(config)
   ) # TODO: we need an optax.GradientTransformation to form a TrainState, but we don't use it when decoding
 
 
