@@ -230,7 +230,6 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
   Returns:
     state: the initialized train state
     state_mesh_annotations: the mesh annotations for the train state
-
   """
   init_train_state_partial = functools.partial(init_train_state, model, tx, config)
   abstract_state = jax.eval_shape(init_train_state_partial, rng)
@@ -263,6 +262,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
 
   state = unbox_logicallypartioned_trainstate(state)
   return state, state_mesh_annotations
+
 
 # Learning Rate Schedule
 # -----------------------------------------------------------------------------
