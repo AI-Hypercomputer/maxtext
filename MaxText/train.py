@@ -227,15 +227,11 @@ def train_loop(config, state=None):
 
   # Model and Optimizer definition
   model = Transformer(config, mesh)
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(
-      learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
-  )
+  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
 
   # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
   tx = optax.adamw(
-      max_utils.create_learning_rate_schedule(
-          learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
-      ),
+      max_utils.create_learning_rate_schedule(config),
       b1=config.adam_b1,
       b2=config.adam_b2,
       eps=config.adam_eps,
