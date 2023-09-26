@@ -34,10 +34,6 @@ for ARGUMENT in "$@"; do
     echo "$KEY"="$VALUE"
 done
 
-if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
-  export LIBTPU_GCS_PATH=NONE
-  echo "Default LIBTPU_GCS_PATH=${LIBTPU_GCS_PATH}"
-fi
 
 if [[ -z ${JAX_VERSION+x} ]] ; then
   export JAX_VERSION=NONE
@@ -50,7 +46,13 @@ if [[ -z ${MODE} ]]; then
 
 fi
 
-docker build --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
+  export LIBTPU_GCS_PATH=NONE
+  echo "Default LIBTPU_GCS_PATH=${LIBTPU_GCS_PATH}"
+  docker build --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+else
+  docker build --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg CUSTOM_LIBTPU=true -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+fi
 
 echo ""
 echo "*************************"
