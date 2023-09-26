@@ -205,7 +205,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
   state_logical_annotations = nn.get_partition_spec(abstract_state)
   unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
 
-  print(f"{mesh=}")
+  # passed in mesh with only slice 0 devices
   # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)

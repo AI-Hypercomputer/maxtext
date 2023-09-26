@@ -65,7 +65,9 @@ def calculate_training_tflops(num_model_parameters, config):
   attention_tflops = 12 * config.num_heads * config.num_decoder_layers * config.head_dim * config.max_target_length**2 \
                      * config.per_device_batch_size / 10**12
   total_tflops = learnable_weight_tflops + attention_tflops
-  max_logging.log(f'Per train step, total TFLOPs will be {total_tflops:.2f} split as {100 * learnable_weight_tflops/total_tflops:.2f} learnable weight flopsand {100 * attention_tflops/total_tflops:.2f} attention flops')
+  print(f'Per train step, total TFLOPs will be {total_tflops:.2f},',
+        f'split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops',
+        f'and {100 * attention_tflops/total_tflops:.2f}% attention flops')
   return total_tflops
 
 def get_first_step(state):
@@ -231,35 +233,8 @@ def train_loop(config, state=None):
     return slice_zero_devices
 
   jax_slice_zero_devices = get_jax_slice_zero_devices()
-  #print(f"\n{jax_slice_zero_devices=}\n")
   devices_array_jax_zero = max_utils.create_device_mesh(config, devices=jax_slice_zero_devices, dcn_parallelism=[1,1,1])
-  #print(f"\n{devices_array_jax_zero=}\n")
   mesh_jax_zero = Mesh(devices_array_jax_zero, config.mesh_axes)
-  #print(f"\n{mesh_jax_zero=}\n")
-
-
-  # print(f"{jax.devices()=}")
-  # print(f"{devices_array=}")
-  # print(f"{mesh=}")
-  # a0 = devices_array[0][0]
-  # print(f"{a0=}")
-  # d0 = a0[0]
-  # print(f"{d0=}")
-  # s0 = d0.slice_index
-  # print(f"{s0=}")
-
-  # def get_slice_zero_devices(devices_array):
-  #   slice_zero_devices = []
-  #   for array in devices_array[0]:
-  #     if array[0].slice_index == 0:
-  #       slice_zero_devices.append([[array]])
-  #   return slice_zero_devices
-  # devices_array_slice_zero = get_slice_zero_devices(devices_array)
-  # print(f"{devices_array_slice_zero=}")
-  # mesh_slice_zero = Mesh(devices_array_slice_zero, config.mesh_axes)
-  # print(f"{mesh_slice_zero=}")
-  #   assert 1 > 2
-
 
   # Model and Optimizer definition
 
@@ -305,14 +280,11 @@ def train_loop(config, state=None):
   running_gcs_metrics = [] if config.gcs_metrics else None
 
   for step in np.arange(get_first_step(state), config.steps):
-    max_logging.log("Starting to get next_batch")
     example_batch = load_next_batch(data_iterator, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      max_logging.log("Startig a p_train_step")
       state, metrics, nextrng = p_train_step(
           model, config, state, example_batch, nextrng
       )
-      max_logging.log("Finished a p_train_step")
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
