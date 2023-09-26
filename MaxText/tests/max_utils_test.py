@@ -39,7 +39,7 @@ class MaxUtilsT5XCrossEntropy(unittest.TestCase):
     logits = jax.random.uniform(key, shape=(48, 2048, 32768),
                                         dtype=jax.numpy.float32)
 
-    # Calculate xent from optax implementation                                    
+    # Calculate xent from optax implementation
     optax_xent = optax.softmax_cross_entropy_with_integer_labels(logits, targets)
 
     # Calculate xent from custom T5X implementation
