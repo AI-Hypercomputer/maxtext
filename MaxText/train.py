@@ -246,8 +246,7 @@ def train_loop(config, state=None):
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  state, state_mesh_annotations, pjit_shard_state_for_ckpt, pjit_unshard_state_for_use  = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
-
+  state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   data_pspec = P(*config.data_sharding)
 
   num_model_parameters = calculate_num_params_from_pytree(state.params)
@@ -283,16 +282,10 @@ def train_loop(config, state=None):
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
-      if step % config.save_period == 0:
-        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-          state = pjit_shard_state_for_ckpt(state)
-        checkpoint_manager.save(step, state)
+      if checkpoint_manager.save(step, state):
         max_logging.log(f"saved a checkpoint at step {step}")
-        with mesh, nn_partitioning.axis_rules(max_utils.checkpointing_logical_axis_rules(config.logical_axis_rules)):
-          state = pjit_unshard_state_for_use(state)
       # Upon preemption, exit when and only when all ongoing saves are complete.
       if checkpoint_manager.reached_preemption(step):
-        # We save immediately upon pre-emption instead of resharding first
         checkpoint_manager.wait_until_finished()
         sys.exit()
 
