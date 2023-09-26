@@ -237,8 +237,6 @@ def train_loop(config, state=None):
   mesh_jax_zero = Mesh(devices_array_jax_zero, config.mesh_axes)
 
   # Model and Optimizer definition
-
-
   model = Transformer(config, mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
 
