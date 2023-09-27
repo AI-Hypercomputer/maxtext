@@ -898,8 +898,8 @@ def enable_kueue_crds(args, system) -> int:
   )
   tmp = write_temporary_file(yml_string)
   command = f'kubectl apply -f {str(tmp.file.name)}'
-  # For kueue setup, we see a timeout error due to previous async steps not
-  # completing. Let's retry and wait a few seconds.
+  # For kueue setup, we see a timeout error due to the webhook not
+  # being ready. Let's retry and wait a few seconds.
   retry_limit = 5
   i = 0
   return_code = -1
