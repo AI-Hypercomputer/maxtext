@@ -11,6 +11,7 @@ import numpy as np
 import orbax.checkpoint as ocp
 import portpicker
 import time
+from broadcast_one_slice_to_all_func import broadcast_one_slice_to_all
 
 def _is_host_for_slice(idx: int, local=False) -> bool:
   #return True
@@ -105,5 +106,12 @@ class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
     print("Starting deserialization", flush=True)
     deserialized = await asyncio.gather(*deserialize_ops)
     print("Finished deserialization", flush=True)
-    # deserialized = _broadcast_one_to_all(deserialized)
+
+
+
+    per_slice_sharding = jax.sharding.NamedSharding(slice_mesh, PartitionSpec(("fsdp", "tensor")))
+    is_source = self.local or jax.local_devices()[0].slice_index == 0
+    output = broadcast_one_slice_to_all(deserialized, is_source==0, global_mesh, per_slice_sharding, num_slices)
+    deserialized = broadcast_one_slice_to_all(deserialized)
+    print("Finished broadcasting one slice to all")
     return deserialized
