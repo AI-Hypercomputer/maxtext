@@ -1630,9 +1630,9 @@ workload_custom_arguments.add_argument(
 workload_custom_arguments.add_argument(
     '--docker-image',
     type=str,
-    default='python:3.8',
+    default='python:3.10',
     help=(
-        'The version of the docker-image to use, default `python:3.8`. If using'
+        'The version of the docker-image to use, default `python:3.10`. If using'
         ' a custom docker image it is typically addressed as'
         ' gcr.io/${PROJECT}/${NAME}:latest'
     ),
