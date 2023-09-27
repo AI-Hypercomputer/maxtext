@@ -12,18 +12,25 @@ import orbax.checkpoint as ocp
 import portpicker
 import time
 
-def _is_host_for_slice(idx: int) -> bool:
+def _is_host_for_slice(idx: int, local=False) -> bool:
   #return True
-  return jax.local_devices()[0].slice_index == idx
+  return local or jax.local_devices()[0].slice_index == idx
 
-def get_jax_slice_zero_devices(devices=jax.devices()):
+def get_jax_slice_zero_devices(devices=jax.devices(), local=False):
     slice_zero_devices = []
     for device in devices:
-        if device.slice_index == 0:
+        if local or device.slice_index == 0:
             slice_zero_devices.append(device)
     return slice_zero_devices
 
 class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
+  local: Optional[bool]
+
+  def __init__(self, input_local: bool):
+    super().__init__()
+    self.local = input_local
+    #self.local = input_local
+
 
   async def deserialize(
       self,
@@ -43,7 +50,7 @@ class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
       ValueError if `args` is not provided.
       ValueError if `args.sharding` is not provided or `args.mesh` and
       `args.mesh_axes` are not provided.
-    """)
+    """
     if args is None:
       raise ValueError('Must provide ArrayRestoreArgs to restore as jax.Array.')
     ocp.type_handlers.check_input_arguments(infos, args)
@@ -72,8 +79,8 @@ class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
       tspec = self._get_json_tspec_read(info, use_ocdbt=use_ocdbt)
       tspec = ocp.type_handlers._get_cast_tspec_deserialize(tspec, arg)  # pylint: disable=protected-access
 
-      if _is_host_for_slice(0):
-        slice_zero_devices = np.asarray(get_jax_slice_zero_devices()).reshape(
+      if _is_host_for_slice(0, self.local):
+        slice_zero_devices = np.asarray(get_jax_slice_zero_devices(local=self.local)).reshape(
             sharding.mesh.devices.shape
         )
         single_slice_mesh = jax.sharding.Mesh(
