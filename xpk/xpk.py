@@ -1501,7 +1501,7 @@ cluster_delete_parser.set_defaults(func=cluster_delete)
 ### "cluster cacheimage" command parser ###
 cluster_cacheimage_parser = cluster_subcommands.add_parser(
     'cacheimage',
-    help='Cache imaage.',
+    help='Cache image.',
 )
 cluster_cacheimage_required_arguments = (
     cluster_cacheimage_parser.add_argument_group(
