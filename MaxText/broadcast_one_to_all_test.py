@@ -5,7 +5,12 @@ from functools import partial
 
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec
+from jax.experimental.pjit import pjit
 
+import sys
+
+def make_data():
+  return jax.numpy.ones(100)
 
 
 def _sum(x):
@@ -24,7 +29,7 @@ def broadcast_one_slice_to_all(in_tree, is_source, mesh, per_slice_sharding):
     else:
       inp = fake_zero_data(per_slice_sharding)
     inp = np.expand_dims(inp, axis=0)
-    in_spec = P('data', *x.sharding.spec)
+    in_spec = PartitionSpec('data', *x.sharding.spec)
     return jax.experimental.host_local_array_to_global_array(inp, full_mesh, in_spec)
 
   out_sharding = jax.tree_map(lambda x: x.sharding, in_tree)
@@ -33,18 +38,35 @@ def broadcast_one_slice_to_all(in_tree, is_source, mesh, per_slice_sharding):
   out_tree = jax.jit(_sum, out_shardings=out_sharding)(in_tree)
   return out_tree
 
+
+
+
+
+##Running normally on single host
+sys.exit(0)
+
 m = jax.devices()
 
-m = np.reshape(m, (2, 2))
+m = np.reshape(m, (4, 1))
+
+submeshes = []
+isolated_data = []
+
+for i in range(4):
+  sub_devices = m[i:i+1, :]
+  submeshes.append(Mesh(sub_devices, ["axis1", "axis2"]))
+  pjit_make_data = pjit(make_data, in_shardings=None, out_shardings=PartitionSpec(("axis1", "axis2")))
+  with submeshes[-1]:
+    isolated_data.append(pjit_make_data())
+    jax.debug.visualize_array_sharding(isolated_data[-1])
 
 
 
-mesh = Mesh(m, ["axis1", "axis2"])
+##Running normally on one slice
+sys.exit(0)
 
-print(mesh)
+full_mesh = Mesh(m, ["axis1", "axis2"])
 
-def make_data():
-  return jax.numpy.ones(100)
 
 from jax.experimental.pjit import pjit
 pjit_make_data = pjit(make_data, in_shardings=None, out_shardings=PartitionSpec(("axis1", "axis2")))
