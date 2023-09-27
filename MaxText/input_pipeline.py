@@ -97,7 +97,6 @@ def preprocessing_pipeline(
   shift: bool = True,
   drop_remainder: bool = True,
   prefetch_size = tf.data.experimental.AUTOTUNE,
-  data_sharding = None,
   data_shuffle_seed = 0,
 ):
   """Shuffle and batch/pack the given dataset."""
@@ -130,13 +129,6 @@ def preprocessing_pipeline(
       num_parallel_calls=tf.data.AUTOTUNE,
       deterministic=True)
 
-  # Multihost dataloading: sharding and jax.Array prep function
-  dataset_structure = tf.data.experimental.get_structure(dataset)
-  global_data_shape = jax.tree_map(
-      lambda x: P(batch_size, max_length), dataset_structure
-  )
-  data_axes = jax.tree_map(lambda x: P(*data_sharding), dataset_structure)
-
 
   assert (
         batch_size % global_mesh.size == 0
@@ -156,13 +148,8 @@ def preprocessing_pipeline(
   if prefetch_size:
     dataset = dataset.prefetch(prefetch_size)
 
-  multihost_gen = (
-      multihost_dataloading.get_batch_sharded_data_pipeline(
-          dataset, data_sharding, global_data_shape, global_mesh, data_axes
-      )
-  )
-  # Return multi-host jax.Array prep iterator
-  return multihost_gen
+  return dataset
+
 
 
 def get_datasets(
@@ -226,7 +213,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
   train_ds = train_ds.map(filter_keys,num_parallel_calls=tf.data.AUTOTUNE)
   eval_ds = eval_ds.map(filter_keys,num_parallel_calls=tf.data.AUTOTUNE)
 
-  train_iter = preprocessing_pipeline(
+  pre_processed_train = preprocessing_pipeline(
       train_ds,
       global_batch_size_to_load,
       global_mesh,
@@ -235,10 +222,9 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       pack_examples=True,
       max_length=config.max_target_length,
       shift=True,
-      data_sharding = config.data_sharding,
       data_shuffle_seed = data_shuffle_seed,)
 
-  eval_iter = preprocessing_pipeline(
+  pre_processed_eval = preprocessing_pipeline(
       eval_ds,
       eval_batch_size,
       global_mesh,
@@ -246,10 +232,9 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       pack_examples=False,
       max_length=config.max_eval_target_length,
       shift=False,
-      data_sharding = config.data_sharding,
       data_shuffle_seed = data_shuffle_seed,)
 
-  predict_iter = preprocessing_pipeline(
+  pre_processed_predict = preprocessing_pipeline(
       eval_ds,
       eval_batch_size,
       global_mesh,
@@ -258,11 +243,25 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       max_length=config.max_predict_length,
       shift=False,
       drop_remainder=False,
-      data_sharding = config.data_sharding,
       data_shuffle_seed = data_shuffle_seed,)
 
-  return train_iter, eval_iter, predict_iter, sp_tokenizer
+  return pre_processed_train, pre_processed_eval, pre_processed_predict, sp_tokenizer
 
+def get_multihost_iterator(dataset, config, mesh):
+  """Multihost dataloading: sharding and jax.Array prep function"""
+
+  dataset_structure = tf.data.experimental.get_structure(dataset)
+  global_data_shape = jax.tree_map(
+      lambda x: P(config.global_batch_size_to_load, config.max_target_length), dataset_structure
+  )
+  data_axes = jax.tree_map(lambda x: P(*config.data_sharding), dataset_structure)
+
+  iterator = (
+      multihost_dataloading.get_batch_sharded_data_pipeline(
+          dataset, config.data_sharding, global_data_shape, mesh, data_axes
+      )
+  )
+  return iterator
 
 def make_c4_train_iterator_and_tokenizer(config, mesh):
   """ Make train iterator and tokenizer for C4 dataset"""
@@ -273,13 +272,15 @@ def make_c4_train_iterator_and_tokenizer(config, mesh):
     config=config,
     read_config = read_config,
   )
-  train_iter, _, _, sp_tokenizer = preprocess_dataset(
+  preprocessed_train, _, _, sp_tokenizer = preprocess_dataset(
     config,
     mesh,
     train_ds, eval_ds,
     vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
     data_shuffle_seed = config.data_shuffle_seed,
   )
+  train_iter = get_multihost_iterator(preprocessed_train, config, mesh)
+
   return train_iter, sp_tokenizer
 
 class SyntheticDataIterator():
@@ -315,10 +316,53 @@ class SyntheticDataIterator():
                                                     dtype=jax.numpy.int32)
     return output
 
+def get_bad_synthetic_data(config):
+  """fill negative value in synthetic data """
+  output = {}
+  output['inputs'] = jax.numpy.full( (config.global_batch_size_to_load // jax.process_count(),
+                                      config.max_target_length), -1, dtype=jax.numpy.int32)
+  output['inputs_position'] = jax.numpy.full((config.global_batch_size_to_load // jax.process_count(),
+                                                  config.max_target_length), -1, dtype=jax.numpy.int32)
+  output['inputs_segmentation'] = jax.numpy.full( (config.global_batch_size_to_load // jax.process_count(),
+                                                   config.max_target_length), -1, dtype=jax.numpy.int32)
+  output['targets'] = jax.numpy.full( (config.global_batch_size_to_load // jax.process_count(),
+                                        config.max_target_length), -1, dtype=jax.numpy.int32)
+  output['targets_position'] = jax.numpy.full( (config.global_batch_size_to_load // jax.process_count(),
+                                                config.max_target_length), -1, dtype=jax.numpy.int32)
+  output['targets_segmentation'] = jax.numpy.full( (config.global_batch_size_to_load // jax.process_count(),
+                                                    config.max_target_length), -1, dtype=jax.numpy.int32)
+  local_synthetic_dataset = tf.data.Dataset.from_tensors(output)
+  local_synthetic_dataset = local_synthetic_dataset.repeat()
+  return local_synthetic_dataset
+
+
+def get_process_loading_real_data(config, mesh):
+  sharding = jax.sharding.NamedSharding(mesh, P(*config.data_sharding))
+  devices_indices_map = sharding.devices_indices_map((config.global_batch_size_to_load, config.max_target_length))
+  batch_cutoff = config.global_batch_size_to_train_on
+  process_loading_real_data = set()
+  for p, indices in devices_indices_map.items():
+    if indices[0].stop <= batch_cutoff:
+      process_loading_real_data.add(p.process_index)
+  return process_loading_real_data
+
+
+def make_mixed_train_iterator_and_tokenizer(config, mesh):
+  process_indices = get_process_loading_real_data(config, mesh)
+  print(len(process_indices),"hosts are loading real data")
+  if jax.process_index() in process_indices:
+    return make_c4_train_iterator_and_tokenizer(config, mesh)
+  else:
+    local_synthetic_dataset = get_bad_synthetic_data(config)
+    return get_multihost_iterator(local_synthetic_dataset, config, mesh), None
+
+
 def create_data_iterator_with_tokenizer(config, mesh):
   if config.dataset_type == "synthetic":
     return SyntheticDataIterator(config, mesh), None
   elif config.dataset_type == "c4":
+    if config.expansion_factor_real_data != -1:
+      return make_mixed_train_iterator_and_tokenizer(config, mesh)
     return make_c4_train_iterator_and_tokenizer(config, mesh)
   else:
     assert False, "dataset type not implemented"
