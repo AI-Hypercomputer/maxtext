@@ -32,6 +32,7 @@ from typing import Sequence
 import datetime
 from absl import app
 from flax.linen import partitioning as nn_partitioning
+from flax import linen as nn
 import numpy as np
 import optax
 from tensorboardX import SummaryWriter
@@ -178,11 +179,11 @@ def train_step(model, config, state, data, dropout_rng):
                          data['inputs_position'],
                          enable_dropout=config.enable_dropout,
                          rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
-    # TODO: is optax xent as good as custom T5X one?
-    xent = optax.softmax_cross_entropy_with_integer_labels(logits, data['targets'])
+    one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
+    xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
+    xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
     # Mask out paddings at the end of each example.
     xent = xent * (data['inputs_segmentation'] != 0)
-    # TODO: mask out the prompt if training prefix-LM
     return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
