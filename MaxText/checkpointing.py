@@ -23,6 +23,7 @@ from jax.experimental import multihost_utils
 from orbax import checkpoint
 from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, Checkpointer, AsyncCheckpointer
 from orbax.checkpoint import type_handlers
+import orbax.checkpoint as ocp
 import socket
 
 import max_logging
@@ -51,11 +52,146 @@ def _multislice_distribute_initialize():
                              num_processes=jax.process_count(),
                              process_id=jax.process_index())
 
+def _sum(x):
+  return jax.tree_map(functools.partial(jnp.sum, axis=0), x)
+
+
+def broadcast_one_slice_to_all(
+    in_tree, full_mesh, per_slice_sharding, is_source
+):
+  num_slices = full_mesh.devices.shape[0]
+
+  @functools.partial(jax.jit, static_argnums=0)
+  def fake_zero_data(sharding, x):
+    x = jnp.zeros_like(x)
+    return jax.lax.with_sharding_constraint(x, sharding)
+
+  def pre_jit(x):
+    if is_source:
+      inp = x
+    else:
+      inp = fake_zero_data(per_slice_sharding, x)
+    inp = jnp.expand_dims(inp, axis=0)
+    in_spec = jax.sharding.PartitionSpec("data", *x.sharding.spec)
+    global_shape = (num_slices, *x.shape)
+    global_sharding = jax.sharding.NamedSharding(full_mesh, in_spec)
+    print(global_shape, global_sharding, x.shape)
+    return jax.make_array_from_single_device_arrays(
+        global_shape, global_sharding, [s.data for s in inp.addressable_shards]
+    )
+
+  out_sharding = jax.tree_map(
+      lambda x: jax.sharding.NamedSharding(
+          full_mesh, jax.sharding.PartitionSpec(*x.sharding.spec)
+      ),
+      in_tree,
+  )
+
+  in_tree = jax.tree_map(pre_jit, in_tree)
+  print(f"{in_tree.shape=}")
+  out_tree = jax.jit(_sum, out_shardings=out_sharding)(in_tree)
+  return out_tree
+
+
+def _is_host_for_slice(idx: int) -> bool:
+  return jax.local_devices()[0].slice_index == idx
+
+
+@dataclasses.dataclass
+class SingleSliceArrayRestoreArgs(ocp.ArrayRestoreArgs):
+  single_slice_sharding: Optional[jax.sharding.NamedSharding] = None
+
+
+class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
+
+  async def deserialize(
+      self,
+      infos: Sequence[ocp.type_handlers.ParamInfo],
+      args: Optional[Sequence[ocp.RestoreArgs]] = None,
+  ) -> Sequence[jax.Array]:
+    """See superclass documentation.
+
+    Args:
+      infos: ParamInfo.
+      args: must be of type `ArrayRestoreArgs`.
+
+    Returns:
+      The deserialized parameter.
+
+    Raises:
+      ValueError if `args` is not provided.
+      ValueError if `args.sharding` is not provided or `args.mesh` and
+      `args.mesh_axes` are not provided.
+    """
+    if args is None:
+      raise ValueError('Must provide ArrayRestoreArgs to restore as jax.Array.')
+    ocp.type_handlers.check_input_arguments(infos, args)
+    deserialize_ops = []
+    shardings = []
+    single_slice_shardings = []
+    for info, arg in zip(infos, args):
+      arg = cast(SingleSliceArrayRestoreArgs, arg)
+      if isinstance(arg, SingleSliceArrayRestoreArgs):
+        if arg.sharding is not None:
+          sharding = arg.sharding
+          shardings.append(sharding)
+        else:
+          raise ValueError('Must provide `sharding`.')
+        if arg.single_slice_sharding is not None:
+          single_slice_sharding = arg.single_slice_sharding
+          single_slice_shardings.append(single_slice_sharding)
+        else:
+          raise ValueError('Must provide `sharding`.')
+      else:
+        raise ValueError('Must provide `ArrayRestoreArgs`.')
+      if not info.is_ocdbt_checkpoint:
+        await ocp.type_handlers._assert_parameter_files_exist(  # pylint: disable=protected-access
+            info.path, self._metadata_key
+        )
+      # Using OCDBT, but existing checkpoint may be stored in old format.
+      use_ocdbt = ocp.type_handlers._use_ocdbt_for_restore(  # pylint: disable=protected-access
+          self._use_ocdbt, info.is_ocdbt_checkpoint
+      )
+      tspec = self._get_json_tspec_read(info, use_ocdbt=use_ocdbt)
+      tspec = ocp.type_handlers._get_cast_tspec_deserialize(tspec, arg)  # pylint: disable=protected-access
+
+      if _is_host_for_slice(0):
+        deserialize_ops += [
+            serialization.async_deserialize(
+                single_slice_sharding,
+                tspec,
+                global_shape=arg.global_shape
+                if hasattr(arg, "global_shape")
+                else None,
+                byte_limiter=info.byte_limiter,
+                context=self._ts_context,
+            )
+        ]
+    deserialized = await asyncio.gather(*deserialize_ops)
+    return broadcast_one_slice_to_all(
+        deserialized,
+        shardings[0].mesh,
+        single_slice_shardings[0],
+        is_source=_is_host_for_slice(0),
+    )
+
+
+
+
+
+
+
+
+
+
+
+
 def create_orbax_checkpoint_manager(
     checkpoint_dir: str,
     enable_checkpointing: bool,
     use_async: bool,
-    save_interval_steps: int
+    save_interval_steps: int,
+    enable_single_slice_checkpointing: bool = False,
 ):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -69,6 +205,11 @@ def create_orbax_checkpoint_manager(
   else:
     checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
 
+  if enable_single_slice_checkpointing:
+    ocp.type_handlers.register_type_handler(
+        jax.Array, SingleSliceArrayHandler(), override=True
+    )
+
   mngr = CheckpointManager(
       p,
       checkpointer,
@@ -80,6 +221,21 @@ def create_orbax_checkpoint_manager(
   max_logging.log("Checkpoint manager created!")
   return mngr
 
+
+def _find_np_idx(array, filter_fn):
+  for idx, val in np.ndenumerate(array):
+    if filter_fn(val):
+      return idx
+
+
+def _slice_devices(device_array):
+  ### slices are assumed to be restricted to the first axis
+  idx = _find_np_idx(
+      device_array, lambda x: x.process_index == jax.process_index()
+  )
+  zeroth_idx = idx[0]
+  sliced_result = device_array[zeroth_idx : zeroth_idx + 1, :, :]
+  return sliced_result
 
 def load_state_if_possible(checkpoint_manager: CheckpointManager,
                            first_checkpoint_path: str,
@@ -114,7 +270,12 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
   def map_to_pspec(data, pspec):
     if isinstance(data, (jax.Array, jax.ShapeDtypeStruct)) \
           and pspec is not None:
-      return type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
+      slice_devices = _slice_devices(mesh.devices)
+      slice_mesh = jax.sharding.Mesh(slice_devices, mesh.axis_names)
+      return SingleSliceArrayRestoreArgs(
+          sharding=jax.sharding.NamedSharding(mesh, pspec),
+          single_slice_sharding=jax.sharding.NamedSharding(slice_mesh, pspec),
+      )
     else:
       return type_handlers.RestoreArgs()
 
