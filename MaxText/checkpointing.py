@@ -114,6 +114,7 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
   def map_to_pspec(data, pspec):
     if isinstance(data, (jax.Array, jax.ShapeDtypeStruct)) \
           and pspec is not None:
+      print(f"{pspec=}")
       return type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
     else:
       return type_handlers.RestoreArgs()
