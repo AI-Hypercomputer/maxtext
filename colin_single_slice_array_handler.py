@@ -29,6 +29,7 @@ class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
   def __init__(self, input_local: bool):
     super().__init__()
     self.local = input_local
+    time.sleep(5)
     #self.local = input_local
 
 
