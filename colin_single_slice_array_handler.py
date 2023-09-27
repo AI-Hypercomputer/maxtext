@@ -7,14 +7,21 @@ from flax.training import train_state
 import jax
 from jax.experimental import multihost_utils
 from jax.experimental.array_serialization import serialization
-import max_logging
 import numpy as np
 import orbax.checkpoint as ocp
 import portpicker
+import time
 
 def _is_host_for_slice(idx: int) -> bool:
+  #return True
   return jax.local_devices()[0].slice_index == idx
 
+def get_jax_slice_zero_devices(devices=jax.devices()):
+    slice_zero_devices = []
+    for device in devices:
+        if device.slice_index == 0:
+            slice_zero_devices.append(device)
+    return slice_zero_devices
 
 class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
 
@@ -36,7 +43,7 @@ class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
       ValueError if `args` is not provided.
       ValueError if `args.sharding` is not provided or `args.mesh` and
       `args.mesh_axes` are not provided.
-    """
+    """)
     if args is None:
       raise ValueError('Must provide ArrayRestoreArgs to restore as jax.Array.')
     ocp.type_handlers.check_input_arguments(infos, args)
@@ -66,11 +73,11 @@ class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
       tspec = ocp.type_handlers._get_cast_tspec_deserialize(tspec, arg)  # pylint: disable=protected-access
 
       if _is_host_for_slice(0):
-        local_devices = np.asarray(jax.local_devices()).reshape(
+        slice_zero_devices = np.asarray(get_jax_slice_zero_devices()).reshape(
             sharding.mesh.devices.shape
         )
         single_slice_mesh = jax.sharding.Mesh(
-            local_devices, sharding.mesh.axis_names
+            slice_zero_devices, sharding.mesh.axis_names
         )
         single_slice_sharding = jax.sharding.NamedSharding(
             single_slice_mesh, sharding.spec
@@ -86,6 +93,9 @@ class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
                 context=self._ts_context,
             )
         ]
+        print("Finished slice 0 tasks", flush=True)
+    print("Starting deserialization", flush=True)
     deserialized = await asyncio.gather(*deserialize_ops)
-    deserialized = _broadcast_one_to_all(deserialized)
+    print("Finished deserialization", flush=True)
+    # deserialized = _broadcast_one_to_all(deserialized)
     return deserialized
