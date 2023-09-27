@@ -898,7 +898,16 @@ def enable_kueue_crds(args, system) -> int:
   )
   tmp = write_temporary_file(yml_string)
   command = f'kubectl apply -f {str(tmp.file.name)}'
-  return_code = run_command_with_updates(command, 'Applying Kueue CRDs', args)
+  # For kueue setup, we see a timeout error due to the webhook not
+  # being ready. Let's retry and wait a few seconds.
+  retry_limit = 5
+  i = 0
+  return_code = -1
+  while (return_code != 0 and i < retry_limit):
+    time.sleep(5)
+    i += 1
+    xpk_print(f'Try {i}: Applying Kueue CRDs')
+    return_code = run_command_with_updates(command, 'Applying Kueue CRDs', args)
 
   if return_code != 0:
     xpk_print(f'Applying Kueue CRDS returned ERROR {return_code}')
