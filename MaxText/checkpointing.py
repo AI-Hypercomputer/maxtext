@@ -95,7 +95,6 @@ def broadcast_one_slice_to_all(
     in_spec = jax.sharding.PartitionSpec("data", *x.sharding.spec)
     global_shape = (num_slices, *x.shape)
     global_sharding = jax.sharding.NamedSharding(global_mesh, in_spec)
-    print(global_shape, global_sharding, x.shape)
     return jax.make_array_from_single_device_arrays(
         global_shape, global_sharding, [s.data for s in inp.addressable_shards]
     )
@@ -108,7 +107,6 @@ def broadcast_one_slice_to_all(
   )
 
   in_tree = jax.tree_map(pre_jit, in_tree, per_slice_shardings)
-  #print(f"{in_tree.shape=}")
   out_tree = jax.jit(_sum, out_shardings=out_sharding)(in_tree)
   return out_tree
 
@@ -190,20 +188,47 @@ class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
                 context=self._ts_context,
             )
         ]
-        
 
     print("Finished for loop!!", flush=True)
     if _is_host_for_slice(0):
       print("Before gather!!")
       deserialized = await asyncio.gather(*deserialize_ops)
     else:
+      # def make_data():
+      #   return jax.numpy.ones(1024)
+
+      # pjit_make_data = jax.jit(make_data, out_shardings=single_slice_shardings)
+      # deserialized = [pjit_make_data() for _ in deserialize_ops]
+
       print("Creating dummy arrays.", flush=True)
-      def create_zeros(tree):
-        return jax.tree_util.tree_map(jnp.zeros_like, tree)
+
       single_slice_shardings = [arg.single_slice_sharding for arg in args]
-      shapes = [arg.global_shape for arg in args]
-      dummy_arrs = [np.zeros(shape) for shape in shapes]
-      deserialized = jax.jit(create_zeros, out_shardings=single_slice_shardings)(dummy_arrs)
+      shape_dtype = [
+          jax.ShapeDtypeStruct(arg.global_shape, arg.dtype) for arg in args
+      ]
+
+      @functools.partial(
+          jax.jit, static_argnums=0, out_shardings=tuple(single_slice_shardings)
+      )
+      def create_zeros(shape_dtype_tup):
+        return jax.tree_util.tree_map(lambda sd: jnp.zeros(sd.shape, dtype=sd.dtype), shape_dtype_tup)
+
+      deserialized = create_zeros(tuple(shape_dtype))
+
+      # dummy_arrs = [np.zeros(shape, dtype=dtype) for shape, dtype in zip(shapes, dtypes)]
+      # deserialized = jax.jit(
+      #     lambda sd: jnp.zeros(sd.shape, dtype=sd.dtype),
+      #     out_shardings=single_slice_shardings,
+      #     static_argnums=0,
+      # )(shape_dtype)
+
+    # deserialized = [deserialized[0]]
+    # single_slice_shardings = [single_slice_shardings[0]]
+    deserialized = tuple(deserialized)
+    single_slice_shardings = tuple(single_slice_shardings)
+
+    for d in deserialized:
+      print((d.shape, d.dtype, d.sharding), flush=True)
 
     print("Finished loading on slice 0!!", flush=True)
     shared_state = broadcast_one_slice_to_all(
@@ -214,12 +239,12 @@ class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
     )
 
     print("Finished broadcasting shared state!", flush=True)
-    
+
     print(shared_state[0].addressable_shards, flush=True)
-    
+
     jax.block_until_ready(shared_state)
     print("Blocked Finished for shared state!", flush=True)
-    #print(shared_state[0])
+    # print(shared_state[0])
     # print(shared_state.sharding)
     # for s in shared_state.addressable_shards:
     #   print(f"\n{s}\n", flush=True)
@@ -317,7 +342,8 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
       return SingleSliceArrayRestoreArgs(
           sharding=jax.sharding.NamedSharding(mesh, pspec),
           single_slice_sharding=jax.sharding.NamedSharding(slice_mesh, pspec),
-          global_shape=data.shape
+          global_shape=data.shape,
+          dtype=data.dtype,
       )
     else:
       return type_handlers.RestoreArgs()
