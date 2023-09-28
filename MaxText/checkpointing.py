@@ -99,11 +99,11 @@ def broadcast_one_slice_to_all(
     arr = jax.make_array_from_single_device_arrays(
         global_shape, global_sharding, [s.data for s in inp.addressable_shards]
     )
-    if is_source:
-      x.delete()
-    else:
-      x.delete()
-      inp.delete()
+    # if is_source:
+    #   x.delete()
+    # else:
+    #   x.delete()
+    #   inp.delete()
     return arr
 
   out_sharding = jax.tree_map(
