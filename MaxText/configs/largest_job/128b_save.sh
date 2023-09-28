@@ -18,8 +18,8 @@ done
 bash gke_rto_setup.sh
 
 # For DNS lookup when running on large number of VMs
-echo '142.250.123.95 www.googleapis.com' | tee -a /etc/hosts
-echo '142.251.4.128 storage.googleapis.com' | tee -a /etc/hosts
+# echo '142.250.123.95 www.googleapis.com' | tee -a /etc/hosts
+# echo '142.251.4.128 storage.googleapis.com' | tee -a /etc/hosts
 
 # Train
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"

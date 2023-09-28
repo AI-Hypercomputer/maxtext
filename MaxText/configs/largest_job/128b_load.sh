@@ -20,8 +20,8 @@ done
 bash gke_rto_setup.sh
 
 # For DNS lookup when running on large number of VMs
-echo '142.250.123.95 www.googleapis.com' | tee -a /etc/hosts
-echo '142.251.4.128 storage.googleapis.com' | tee -a /etc/hosts
+# echo '142.250.123.95 www.googleapis.com' | tee -a /etc/hosts
+# echo '142.251.4.128 storage.googleapis.com' | tee -a /etc/hosts
 
 load_directory="gs://maxtext-experiments-multipod-useast/${load_run_name}/checkpoints"
 # Train

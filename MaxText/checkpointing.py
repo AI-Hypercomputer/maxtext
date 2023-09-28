@@ -25,6 +25,7 @@ from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointMan
 from orbax.checkpoint import type_handlers
 import orbax.checkpoint as ocp
 import socket
+import time
 
 import max_logging
 
@@ -150,6 +151,7 @@ class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
     deserialize_ops = []
     shardings = []
     single_slice_shardings = []
+    start_time = time.time()
     for info, arg in zip(infos, args):
       arg = cast(SingleSliceArrayRestoreArgs, arg)
       if isinstance(arg, SingleSliceArrayRestoreArgs):
@@ -231,6 +233,9 @@ class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
       print((d.shape, d.dtype, d.sharding), flush=True)
 
     print("Finished loading on slice 0!!", flush=True)
+    end_loading = time.time()
+    print(f"Deserializing in time {end_loading - start_time}", flush=True)
+    start_broadcast = time.time()
     shared_state = broadcast_one_slice_to_all(
         deserialized,
         shardings[0].mesh,
@@ -243,7 +248,9 @@ class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
     print(shared_state[0].addressable_shards, flush=True)
 
     jax.block_until_ready(shared_state)
+    end_broadcast = time.time()
     print("Blocked Finished for shared state!", flush=True)
+    print(f"Finished broadcasting in {end_broadcast - start_broadcast}", flush=True)
     # print(shared_state[0])
     # print(shared_state.sharding)
     # for s in shared_state.addressable_shards:
