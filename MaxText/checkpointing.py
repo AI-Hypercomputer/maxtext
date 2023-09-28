@@ -280,9 +280,12 @@ def create_orbax_checkpoint_manager(
     checkpointer = Checkpointer(PyTreeCheckpointHandler())
 
   if enable_single_slice_checkpointing:
-    ocp.type_handlers.register_type_handler(
-        jax.Array, SingleSliceArrayHandler(), override=True
-    )
+    # ocp.type_handlers.register_type_handler(
+    #     jax.Array, SingleSliceArrayHandler(), override=True
+    # )
+    ocp.type_handlers.register_type_handler(jax.Array, SingleSliceArrayHandler(), override=True)
+    ocp.type_handlers._enable_ocdbt_for_handlers()
+    #ocp.type_handlers.register_type_handler(jax.Array, SingleSliceArrayHandler(use_ocdbt=True, ts_context=ocp.type_handlers._OCDBT_TS_CONTEXT), override=True)
 
   mngr = CheckpointManager(
       p,
