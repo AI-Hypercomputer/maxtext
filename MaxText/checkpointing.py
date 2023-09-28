@@ -30,6 +30,27 @@ import max_logging
 
 from flax.training import train_state
 
+
+
+import asyncio
+import dataclasses
+import functools
+import socket
+from typing import Any, Optional, Sequence
+from typing import cast
+from etils import epath
+from flax.training import train_state
+import jax
+from jax import numpy as jnp
+from jax.experimental import multihost_utils
+from jax.experimental.array_serialization import serialization
+import max_logging
+import numpy as np
+import orbax.checkpoint as ocp
+import portpicker
+
+jax.config.update('jax_spmd_mode', 'allow_all')
+
 def _multislice_distribute_initialize():
   """Calls jax.distribute.initialize() with appropriate multislice arguments."""
 
@@ -88,13 +109,16 @@ def broadcast_one_slice_to_all(
   )
 
   in_tree = jax.tree_map(pre_jit, in_tree)
-  print(f"{in_tree.shape=}")
+  #print(f"{in_tree.shape=}")
   out_tree = jax.jit(_sum, out_shardings=out_sharding)(in_tree)
   return out_tree
 
 
 def _is_host_for_slice(idx: int) -> bool:
-  return jax.local_devices()[0].slice_index == idx
+  try:
+    return jax.local_devices()[0].slice_index == idx
+  except:
+    return True
 
 
 @dataclasses.dataclass
@@ -167,13 +191,35 @@ class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
                 context=self._ts_context,
             )
         ]
-    deserialized = await asyncio.gather(*deserialize_ops)
-    return broadcast_one_slice_to_all(
-        deserialized,
+    print("Finished for loop!!", flush=True)
+    if _is_host_for_slice(0):
+      print("Before gather!!")
+      deserialized = await asyncio.gather(*deserialize_ops)
+    else:
+      def create_zeros(tree):
+        return jax.tree_util.tree_map(jnp.zeros_like, tree)
+      single_slice_shardings = [arg.single_slice_sharding for arg in args]
+      shapes = [arg.global_shape for arg in args]
+      dummy_arrs = [np.zeros(shape) for shape in shapes]
+      deserialized = jax.jit(create_zeros, out_shardings=shardings)(dummy_arrs)
+
+    print("Finished loading on slice 0!!", flush=True)
+    shared_state = broadcast_one_slice_to_all(
+        deserialized[0],
         shardings[0].mesh,
         single_slice_shardings[0],
         is_source=_is_host_for_slice(0),
     )
+    
+    print("Finished broadcasting shared state!", flush=True)
+    jax.block_until_ready(shared_state)
+    print("Blocked Finished for shared state!", flush=True)
+    #print(shared_state[0])
+    print(shared_state.sharding)
+    for s in shared_state.addressable_shards:
+      print(f"\n\n\n{s}\n\n\n", flush=True)
+    assert 1 > 2
+    return shared_state
 
 
 
@@ -275,6 +321,7 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
       return SingleSliceArrayRestoreArgs(
           sharding=jax.sharding.NamedSharding(mesh, pspec),
           single_slice_sharding=jax.sharding.NamedSharding(slice_mesh, pspec),
+          global_shape=data.shape
       )
     else:
       return type_handlers.RestoreArgs()
@@ -283,11 +330,19 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
                                         abstract_unboxed_pre_state,
                                         state_mesh_annotations)
   latest_step = checkpoint_manager.latest_step()
+
+  def printfn(array):
+    print(f"{array}")
+    print(f"{array.sharding}")
+    print(f"{array.sharding.mesh}")
+
   if latest_step is not None:
     max_logging.log(f"restoring state from this run's directory latest step \
         {latest_step}")
-    return checkpoint_manager.restore(latest_step, abstract_unboxed_pre_state,
-                                      {"restore_args" : restore_args}), None
+    restored_state = checkpoint_manager.restore(latest_step, abstract_unboxed_pre_state,
+                                      {"restore_args" : restore_args})
+    printfn(jax.tree_flatten(restored_state)[0][1])
+    return restored_state, None
   elif first_checkpoint_path != "":
     max_logging.log(f"restoring state from first_checkpoint_path {first_checkpoint_path}")
     p = epath.Path(first_checkpoint_path)

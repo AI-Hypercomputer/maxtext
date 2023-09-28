@@ -103,7 +103,7 @@ def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
 
 def write_metrics(writer, metrics, step, config):
   """Writes metrics to tensorboard"""
-  if jax.process_index() == 0:
+  if True or jax.process_index() == 0:
     with jax.spmd_mode('allow_all'):
       for metric_name in metrics.get("scalar",[]):
         writer.add_scalar(metric_name, metrics["scalar"][metric_name], step)
@@ -220,6 +220,7 @@ def train_loop(config, state=None):
       config.enable_checkpointing,
       config.async_checkpointing,
       config.save_period,
+      enable_single_slice_checkpointing=True
   )
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)

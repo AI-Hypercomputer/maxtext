@@ -287,6 +287,7 @@ def run_commands(commands, id_to_print, jobname, worker_list, is_shell=False, ou
 
   while True:
     returncodes = [child.poll() for child in children]
+    print(f"{returncodes=}")
     max_returncode = max([0]+[r for r in returncodes if r is not None])
     completed = len([r for r in returncodes if r is not None])
     total = len(returncodes)
