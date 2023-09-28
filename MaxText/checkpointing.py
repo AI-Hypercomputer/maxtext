@@ -107,8 +107,11 @@ def broadcast_one_slice_to_all(
       in_tree,
   )
 
-  in_tree = jax.tree_map(pre_jit, in_tree, per_slice_shardings)
-  out_tree = jax.jit(_sum, out_shardings=out_sharding)(in_tree)
+  # in_tree = jax.tree_map(pre_jit, in_tree, per_slice_shardings)
+  # out_tree = jax.jit(_sum, out_shardings=out_sharding)(in_tree)
+  in_tree_sharded = jax.tree_map(pre_jit, in_tree, per_slice_shardings)
+  tree_map(lambda x: x.delete(), in_tree)
+  out_tree = jax.jit(_sum, out_shardings=out_sharding)(in_tree_sharded)
   return out_tree
 
 
