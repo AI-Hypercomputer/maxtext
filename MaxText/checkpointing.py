@@ -96,9 +96,15 @@ def broadcast_one_slice_to_all(
     in_spec = jax.sharding.PartitionSpec("data", *x.sharding.spec)
     global_shape = (num_slices, *x.shape)
     global_sharding = jax.sharding.NamedSharding(global_mesh, in_spec)
-    return jax.make_array_from_single_device_arrays(
+    arr = jax.make_array_from_single_device_arrays(
         global_shape, global_sharding, [s.data for s in inp.addressable_shards]
     )
+    if is_source:
+      x.delete()
+    else:
+      x.delete()
+      inp.delete()
+    return arr
 
   out_sharding = jax.tree_map(
       lambda x: jax.sharding.NamedSharding(
