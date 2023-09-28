@@ -245,15 +245,19 @@ class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
     end_loading = time.time()
     print(f"Deserializing in time {end_loading - start_time}", flush=True)
     start_broadcast = time.time()
-    shared_state = broadcast_one_slice_to_all(
-        deserialized,
-        shardings[0].mesh,
-        single_slice_shardings,
-        is_source=_is_host_for_slice(0),
-    )
+    shared_state = []
+    for i in range(len(deserialized)):
+      r = broadcast_one_slice_to_all(
+          [deserialized[i]],
+          shardings[0].mesh,
+          [single_slice_shardings[i]],
+          is_source=_is_host_for_slice(0),
+      )         
+      shared_state += r
 
     print("Finished broadcasting shared state!", flush=True)
-
+    #print(shared_state, flush=True)
+    print(shared_state[0], flush=True)
     print(shared_state[0].addressable_shards, flush=True)
 
     jax.block_until_ready(shared_state)
