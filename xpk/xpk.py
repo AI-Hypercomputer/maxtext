@@ -1501,7 +1501,7 @@ cluster_delete_parser.set_defaults(func=cluster_delete)
 ### "cluster cacheimage" command parser ###
 cluster_cacheimage_parser = cluster_subcommands.add_parser(
     'cacheimage',
-    help='Cache imaage.',
+    help='Cache image.',
 )
 cluster_cacheimage_required_arguments = (
     cluster_cacheimage_parser.add_argument_group(
@@ -1630,9 +1630,9 @@ workload_custom_arguments.add_argument(
 workload_custom_arguments.add_argument(
     '--docker-image',
     type=str,
-    default='python:3.8',
+    default='python:3.10',
     help=(
-        'The version of the docker-image to use, default `python:3.8`. If using'
+        'The version of the docker-image to use, default `python:3.10`. If using'
         ' a custom docker image it is typically addressed as'
         ' gcr.io/${PROJECT}/${NAME}:latest'
     ),
