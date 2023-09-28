@@ -86,42 +86,40 @@ def load_next_batch(train_iter, example_batch, config):
 
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   """Records scalar metrics to be written to tensorboard"""
-  if jax.process_index() == 0:
-    metrics['scalar'].update({
-        'perf/step_time_seconds': step_time_delta.total_seconds()
-    })
-    metrics['scalar'].update({
-        'perf/per_device_tflops' : per_device_tflops
-    })
-    metrics['scalar'].update({
-        'perf/per_device_tflops_per_sec':
-            per_device_tflops /
-            step_time_delta.total_seconds()
-    })
-    metrics['scalar'].update({'learning/current_learning_rate': lr })
+  metrics['scalar'].update({
+      'perf/step_time_seconds': step_time_delta.total_seconds()
+  })
+  metrics['scalar'].update({
+      'perf/per_device_tflops' : per_device_tflops
+  })
+  metrics['scalar'].update({
+      'perf/per_device_tflops_per_sec':
+          per_device_tflops /
+          step_time_delta.total_seconds()
+  })
+  metrics['scalar'].update({'learning/current_learning_rate': lr })
 
 
 def write_metrics(writer, metrics, step, config):
   """Writes metrics to tensorboard"""
-  if jax.process_index() == 0:
-    with jax.spmd_mode('allow_all'):
+  with jax.spmd_mode('allow_all'):
+    if jax.process_index() == 0:
       for metric_name in metrics.get("scalar",[]):
         writer.add_scalar(metric_name, metrics["scalar"][metric_name], step)
       for metric_name in metrics.get("scalars",[]):
         writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
 
+    full_log = step % config.log_period == 0
 
-      max_logging.log(f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
-        f"TFLOP/s: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-        f"loss: {metrics['scalar']['learning/loss']:.3f}")
+    max_logging.log(f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
+          f"TFLOP/s: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
+          f"loss: {metrics['scalar']['learning/loss']:.3f}")
 
-      full_log = step % config.log_period == 0
-
-      if full_log:
-        max_logging.log(
-            f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
-        )
-        writer.flush()
+    if full_log and jax.process_index() == 0:
+      max_logging.log(
+          f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
+      )
+      writer.flush()
 
 def calculate_num_params_from_pytree(params):
   params_sizes = jax.tree_util.tree_map(jax.numpy.size, params)
