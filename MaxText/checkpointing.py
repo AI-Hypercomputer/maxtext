@@ -77,9 +77,9 @@ def _sum(x):
 
 
 def broadcast_one_slice_to_all(
-    in_tree, full_mesh, per_slice_shardings, is_source
+    in_tree, global_mesh, per_slice_shardings, is_source
 ):
-  num_slices = full_mesh.devices.shape[0]
+  num_slices = global_mesh.devices.shape[0]
 
   @functools.partial(jax.jit, static_argnums=0)
   def fake_zero_data(sharding, x):
@@ -94,7 +94,7 @@ def broadcast_one_slice_to_all(
     inp = jnp.expand_dims(inp, axis=0)
     in_spec = jax.sharding.PartitionSpec("data", *x.sharding.spec)
     global_shape = (num_slices, *x.shape)
-    global_sharding = jax.sharding.NamedSharding(full_mesh, in_spec)
+    global_sharding = jax.sharding.NamedSharding(global_mesh, in_spec)
     print(global_shape, global_sharding, x.shape)
     return jax.make_array_from_single_device_arrays(
         global_shape, global_sharding, [s.data for s in inp.addressable_shards]
@@ -102,7 +102,7 @@ def broadcast_one_slice_to_all(
 
   out_sharding = jax.tree_map(
       lambda x: jax.sharding.NamedSharding(
-          full_mesh, jax.sharding.PartitionSpec(*x.sharding.spec)
+          global_mesh, jax.sharding.PartitionSpec(*x.sharding.spec)
       ),
       in_tree,
   )
@@ -212,10 +212,13 @@ class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
         single_slice_shardings,
         is_source=_is_host_for_slice(0),
     )
-    
+
     print("Finished broadcasting shared state!", flush=True)
-    # jax.block_until_ready(shared_state)
-    # print("Blocked Finished for shared state!", flush=True)
+    
+    print(shared_state[0].addressable_shards, flush=True)
+    
+    jax.block_until_ready(shared_state)
+    print("Blocked Finished for shared state!", flush=True)
     #print(shared_state[0])
     # print(shared_state.sharding)
     # for s in shared_state.addressable_shards:
@@ -324,18 +327,11 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
                                         state_mesh_annotations)
   latest_step = checkpoint_manager.latest_step()
 
-  def printfn(array):
-    print(f"{array}")
-    print(f"{array.sharding}")
-    print(f"{array.sharding.mesh}")
-
   if latest_step is not None:
     max_logging.log(f"restoring state from this run's directory latest step \
         {latest_step}")
-    restored_state = checkpoint_manager.restore(latest_step, abstract_unboxed_pre_state,
-                                      {"restore_args" : restore_args})
-    printfn(jax.tree_flatten(restored_state)[0][1])
-    return restored_state, None
+    return checkpoint_manager.restore(latest_step, abstract_unboxed_pre_state,
+                                      {"restore_args" : restore_args}), None
   elif first_checkpoint_path != "":
     max_logging.log(f"restoring state from first_checkpoint_path {first_checkpoint_path}")
     p = epath.Path(first_checkpoint_path)
@@ -578,6 +574,6 @@ class PyTreeCheckpointHandler(ocp.PyTreeCheckpointHandler):
           transforms_default_to_original,
       )
     print('here2', flush=True)
-    # ocp.utils.sync_global_devices("PyTreeCheckpointHandler:restore")
+    ocp.utils.sync_global_devices("PyTreeCheckpointHandler:restore")
     print('here3', flush=True)
     return restored_item
