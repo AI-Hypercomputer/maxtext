@@ -95,7 +95,7 @@ spec:
                 - bash
                 - -c
                 - |
-                  echo XPK Start: $(date) ; {args.command} ; EXIT_CODE=$? ; echo XPK End: $(date); echo EXIT_CODE=$EXIT_CODE ; sleep 5; exit $EXIT_CODE
+                  echo XPK Start: $(date) ; {args.command} ; EXIT_CODE=$? ; echo XPK End: $(date); echo XPK Exit Code=$EXIT_CODE ; sleep 5; exit $EXIT_CODE
                 resources:
                   limits:
                     google.com/tpu: {system.chips_per_vm}
