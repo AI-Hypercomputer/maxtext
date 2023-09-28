@@ -1045,6 +1045,10 @@ def cluster_cacheimage(args) -> int:
   )
   add_zone_and_project(args)
 
+  set_cluster_command_code = set_cluster_command(args)
+  if set_cluster_command_code != 0:
+    xpk_exit(set_cluster_command_code)
+
   yml_string = cluster_preheat_yml.format(
       cachekey=args.cache_key, image_name=args.docker_image
   )
