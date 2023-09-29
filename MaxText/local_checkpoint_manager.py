@@ -13,7 +13,6 @@
 # limitations under the License.
 
 """A class providing functionalities for managing multiple checkpoints."""
-print("Matts local checkpoint manager")
 import concurrent.futures
 import contextlib
 import dataclasses
@@ -167,7 +166,7 @@ class CheckpointInfo:
     return self.step == other.step and self.time == other.time
 
 
-class MyCheckpointManager:
+class CheckpointManager:
   """A generic, synchronous CheckpointManager implementation.
 
   Allows a user to save and restore objects for which a Checkpointer
@@ -292,27 +291,18 @@ class MyCheckpointManager:
     Returns:
       A sequence of steps (integers)
     """
-    print("\n\n We are in all steps \n\n")
     if read:
       max_steps = 10
       padded_step_list = np.array([-1] * max_steps)
       if jax.process_index() == 0:
         steps = np.array(utils.checkpoint_steps(self.directory))
-        print(f"\n\n {steps=} \n\n")
         padded_step_list[0:len(steps)] = steps
-        print(f"\n\n {padded_step_list=} \n\n")
       padded_step_list = multihost_utils.broadcast_one_to_all(padded_step_list)
-      print(f"\n\n {padded_step_list=} \n\n")
 
       def unpad_step_list(padded_step_list):
         return [step for step in padded_step_list if step>=0]
-      steps = unpad_step_list(padded_step_list)
-      print(f"{steps=}")
-      steps = list(steps)
-      return steps
-        
-      
-      
+      return list(unpad_step_list(padded_step_list))
+  
     return [ckpt.step for ckpt in self._checkpoints]
 
   def latest_step(self) -> Optional[int]:

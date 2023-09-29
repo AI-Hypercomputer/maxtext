@@ -21,14 +21,14 @@ import jax
 import portpicker
 from jax.experimental import multihost_utils
 from orbax import checkpoint
-from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, Checkpointer, AsyncCheckpointer
+from orbax.checkpoint.checkpoint_manager import CheckpointManagerOptions, Checkpointer, AsyncCheckpointer
 from orbax.checkpoint import type_handlers
 import socket
 
 import max_logging
 
 from flax.training import train_state
-from local_checkpoint_manager import MyCheckpointManager
+from local_checkpoint_manager import CheckpointManager
 
 def _multislice_distribute_initialize():
   """Calls jax.distribute.initialize() with appropriate multislice arguments."""
@@ -70,7 +70,7 @@ def create_orbax_checkpoint_manager(
   else:
     checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
 
-  mngr = MyCheckpointManager(
+  mngr = CheckpointManager(
       p,
       checkpointer,
       options=CheckpointManagerOptions(
@@ -82,7 +82,7 @@ def create_orbax_checkpoint_manager(
   return mngr
 
 
-def load_state_if_possible(checkpoint_manager: MyCheckpointManager,
+def load_state_if_possible(checkpoint_manager: CheckpointManager,
                            first_checkpoint_path: str,
                            load_from_other_directory: str,
                            load_from_other_directory_step: int,
