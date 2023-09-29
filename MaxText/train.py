@@ -45,6 +45,7 @@ import checkpointing
 
 import jax.numpy as jnp
 from jax import random
+from jax.experimental.pjit import pjit
 from jax.sharding import PartitionSpec as P
 from jax.sharding import Mesh
 
@@ -250,14 +251,12 @@ def train_loop(config, state=None):
   per_device_tflops = calculate_training_tflops(num_model_parameters, config)
 
   # Define compiled top-level functions.
-  state_mesh_shardings = jax.tree_map(
-      lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
-  data_sharding = jax.tree_map(
-      lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
-  p_train_step = jax.jit(
+  p_train_step = pjit(
     train_step,
-    in_shardings=(state_mesh_shardings, data_sharding, None),
-      out_shardings=(state_mesh_shardings, None, None),
+    in_shardings=(state_mesh_annotations,
+                       data_pspec,
+                       None),
+    out_shardings=(state_mesh_annotations, None, None),
     static_argnums=(0,1,),
     donate_argnums=2)
 

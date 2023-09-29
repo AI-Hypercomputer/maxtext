@@ -26,6 +26,7 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
 
+from jax.experimental.pjit import pjit
 
 import json
 import flax
@@ -204,7 +205,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
   unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
 
   # Initialization
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
@@ -213,13 +214,12 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
                                                 unboxed_abstract_state,
                                                 mesh,
                                                 state_mesh_annotations)
-    state_mesh_shardings = jax.tree_map(
-        lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
+
     if not state:
-      state = jax.jit(
+      state = pjit(
           init_train_state_partial,
           in_shardings=None,
-          out_shardings=state_mesh_shardings,
+          out_shardings=state_mesh_annotations
       )(rng)
       if raw_params: # If we loaded a partial state, we need to merge it.
         state = state.replace(params = raw_params)
