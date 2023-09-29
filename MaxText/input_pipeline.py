@@ -24,7 +24,6 @@ import ml_collections
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import jax
-from jax.experimental.pjit import pjit
 from jax.sharding import PartitionSpec as P
 
 import tokenizer
@@ -288,10 +287,10 @@ class SyntheticDataIterator():
     self.mesh = mesh
     self.config = config
     data_pspec = P(*config.data_sharding)
-    with self.mesh:
-      self.data_generator = pjit(SyntheticDataIterator.raw_generate_synthetic_data,
-        in_shardings=None,
-        out_shardings=data_pspec,
+    data_pspec_shardings = jax.tree_map(
+        lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+    self.data_generator = jax.jit(SyntheticDataIterator.raw_generate_synthetic_data,
+        out_shardings=data_pspec_shardings,
         static_argnums=0)
   def __call__(self):
     with self.mesh:
