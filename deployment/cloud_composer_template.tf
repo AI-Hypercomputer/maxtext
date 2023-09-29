@@ -106,7 +106,7 @@ resource "google_composer_environment" "example_environment" {
         apache-airflow-providers-sendgrid = ""
         jsonlines                         = ""
         fabric                            = ""
-        google-cloud-tpu                  = ""
+        google-cloud-tpu                  = ">=1.16.0"
       }
     }
 

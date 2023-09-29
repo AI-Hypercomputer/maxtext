@@ -106,6 +106,7 @@ def create_queued_resource(tpu_name: airflow.XComArg, accelerator: test_config.T
       return True
     elif qr.state.state in [
         tpu_api.QueuedResourceState.State.CREATING,
+        tpu_api.QueuedResourceState.State.WAITING_FOR_RESOURCES,
         tpu_api.QueuedResourceState.State.ACCEPTED,
         tpu_api.QueuedResourceState.State.PROVISIONING]:
       return False
@@ -157,7 +158,8 @@ def delete_queued_resource(qualified_name: airflow.XComArg):
     # underlying nodes have already been deleted.
     if qr.state.state in [
         tpu_api.QueuedResourceState.State.SUSPENDED,
-        # TPU will be sitting in ACCEPTED if creation timed out.
+        # TPU will be sitting in WAITING_FOR_RESOURCES if creation timed out.
+        tpu_api.QueuedResourceState.State.WAITING_FOR_RESOURCES,
         tpu_api.QueuedResourceState.State.ACCEPTED]:
       logging.info(f'All TPU nodes deleted for {qualified_name}')
       return True
