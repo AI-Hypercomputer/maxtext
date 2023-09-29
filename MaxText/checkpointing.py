@@ -238,8 +238,8 @@ class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
     deserialized = tuple(deserialized)
     single_slice_shardings = tuple(single_slice_shardings)
 
-    for d in deserialized:
-      print((d.shape, d.dtype, d.sharding), flush=True)
+    # for d in deserialized:
+    #   print((d.shape, d.dtype, d.sharding), flush=True)
 
     print("Finished loading on slice 0!!", flush=True)
     end_loading = time.time()
