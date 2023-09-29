@@ -1,3 +1,6 @@
+
+#bash docker_build_dependency_image.sh MODE=stable LIBTPU_GCS_PATH=gs://libtpu_internal/raymondzou/viperlite/2023-09-27-22:32:47-libtpu.so  (won't work for non-Googlers, contact Googlers for access)
+
 echo "Running 64bstable.sh"
 # Example command to invoke this script
 # bash MaxText/configs/largest_job/64bstable.sh 
@@ -18,8 +21,8 @@ export DATASET_PATH="gs://max-datasets-rogue-useast/"
 bash gke_rto_setup.sh
 
 # For DNS lookup when running on large number of VMs
-#echo '142.250.123.95 www.googleapis.com' | tee -a /etc/hosts
-#echo '142.251.4.128 storage.googleapis.com' | tee -a /etc/hosts
+echo '142.250.123.95 www.googleapis.com' | tee -a /etc/hosts
+echo '142.251.4.128 storage.googleapis.com' | tee -a /etc/hosts
 
 export TPU_STDERR_LOG_LEVEL=0
 export TPU_LOG_DIR=0
@@ -30,7 +33,6 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
     steps=10000 per_device_batch_size=2 enable_checkpointing=true\
     enable_profiler=false remat_policy=full global_parameter_scale=64\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\
-    dataset_path=$DATASET_PATH use_iota_embed=true reuse_example_batch=1\
-    dataset_type=synthetic log_period=1000000 save_period=100\
-    collect_stack_trace=true
-
+    dataset_path=$DATASET_PATH use_iota_embed=true\
+    expansion_factor_real_data=16 log_period=1000000 save_period=100\
+    collect_stack_trace=true load_from_other_directory=gs://maxtext-experiments-multipod-useast/mattdavidow-o-save-scale64-slices1-a1/checkpoints
