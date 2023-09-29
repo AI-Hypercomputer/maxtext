@@ -28,6 +28,7 @@ import socket
 import max_logging
 
 from flax.training import train_state
+from local_checkpoint_manager import MyCheckpointManager
 
 def _multislice_distribute_initialize():
   """Calls jax.distribute.initialize() with appropriate multislice arguments."""
@@ -69,7 +70,7 @@ def create_orbax_checkpoint_manager(
   else:
     checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
 
-  mngr = CheckpointManager(
+  mngr = MyCheckpointManager(
       p,
       checkpointer,
       options=CheckpointManagerOptions(
@@ -81,7 +82,7 @@ def create_orbax_checkpoint_manager(
   return mngr
 
 
-def load_state_if_possible(checkpoint_manager: CheckpointManager,
+def load_state_if_possible(checkpoint_manager: MyCheckpointManager,
                            first_checkpoint_path: str,
                            load_from_other_directory: str,
                            load_from_other_directory_step: int,
