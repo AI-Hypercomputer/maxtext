@@ -292,7 +292,8 @@ class CheckpointManager:
       A sequence of steps (integers)
     """
     if read:
-      max_steps = 10
+      # Read the step list only from host 0, and then broadcast the list. 
+      max_steps = 1000
       padded_step_list = np.array([-1] * max_steps)
       if jax.process_index() == 0:
         steps = np.array(utils.checkpoint_steps(self.directory))
