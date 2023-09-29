@@ -23,12 +23,12 @@ from jax.experimental import multihost_utils
 from orbax import checkpoint
 from orbax.checkpoint.checkpoint_manager import CheckpointManagerOptions, Checkpointer, AsyncCheckpointer
 from orbax.checkpoint import type_handlers
+from local_checkpoint_manager import CheckpointManager
 import socket
 
 import max_logging
 
 from flax.training import train_state
-from local_checkpoint_manager import CheckpointManager
 
 def _multislice_distribute_initialize():
   """Calls jax.distribute.initialize() with appropriate multislice arguments."""
