@@ -332,7 +332,7 @@ class MultiHeadDotProductAttention(nn.Module):
                       attention_bias, dropout_rng, deterministic):
     """ Apply Attention
     """
-    if enable_flash_attention and False:
+    if enable_flash_attention:
       # reshaped to ('batch', 'heads', 'length', 'kv')
       query = jax.numpy.transpose(query, axes = (0,2,1,3))
       key = jax.numpy.transpose(key, axes = (0,2,1,3))
