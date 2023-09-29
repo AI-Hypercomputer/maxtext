@@ -48,6 +48,7 @@ import max_logging
 import numpy as np
 import orbax.checkpoint as ocp
 import portpicker
+from local_checkpoint_manager import MyCheckpointManager
 
 jax.config.update('jax_spmd_mode', 'allow_all')
 
@@ -300,7 +301,7 @@ def create_orbax_checkpoint_manager(
     ocp.type_handlers._enable_ocdbt_for_handlers()
     #ocp.type_handlers.register_type_handler(jax.Array, SingleSliceArrayHandler(use_ocdbt=True, ts_context=ocp.type_handlers._OCDBT_TS_CONTEXT), override=True)
 
-  mngr = CheckpointManager(
+  mngr = MyCheckpointManager(
       p,
       checkpointer,
       options=CheckpointManagerOptions(
