@@ -38,6 +38,7 @@ import optax
 import os
 import subprocess
 from typing import Tuple
+import time
 
 
 def l2norm_pytree(x):
@@ -207,6 +208,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
   # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+    start_time = time.time()
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
                                                 config.load_from_other_directory,
@@ -214,6 +216,8 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
                                                 unboxed_abstract_state,
                                                 mesh,
                                                 state_mesh_annotations)
+    end_time = time.time()
+    print(f"Finished load_state_if_possible in {end_time-start_time} seconds",flush=True)
 
     if not state:
       state = pjit(
