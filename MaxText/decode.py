@@ -36,6 +36,7 @@ import checkpointing
 import jax
 import jax.numpy as jnp
 from jax import random
+from jax.experimental.pjit import pjit
 from jax.sharding import PartitionSpec as P
 from jax.sharding import Mesh
 
@@ -143,12 +144,11 @@ def decode_loop(config, state=None):
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager)
 
-  state_mesh_shardings = jax.tree_map(
-      lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
-  replicated_sharding = jax.sharding.NamedSharding(mesh, P(None, None))
-  p_predict_step = jax.jit(
+  p_predict_step = pjit(
       functools.partial(predict_step, model=model, config=config),
-      in_shardings=(replicated_sharding, state_mesh_shardings, None),
+      in_shardings=(P(None, None),
+                        state_mesh_annotations,
+                        None),
       out_shardings=None
   )
 
