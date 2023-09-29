@@ -293,10 +293,12 @@ class CheckpointManager:
     """
     if read:
       # Read the step list only from host 0, and then broadcast the list. 
-      max_steps = 1000
+      max_steps = 2**20
       padded_step_list = np.array([-1] * max_steps)
       if jax.process_index() == 0:
         steps = np.array(utils.checkpoint_steps(self.directory))
+        assert len(steps) < max_steps,(f'Too many checkpoints stored, you must increase the max_steps of {max_steps}
+          f'to be at least your number of checkpoints ({len(steps})})')
         padded_step_list[0:len(steps)] = steps
       padded_step_list = multihost_utils.broadcast_one_to_all(padded_step_list)
 

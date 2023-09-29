@@ -540,6 +540,9 @@ def make_dot_general(cfg: Optional[config.DotGeneral]):
     assert (
         precision is None
     ), f'Precision {precision} requested together with quantization.'
+    if preferred_element_type is not None:
+      print(f"\n\n\n WARNING {preferred_element_type=} \n\nn")
+      preferred_element_type = None
     assert preferred_element_type is None, (
         f'Preferred_element_typerecision {preferred_element_type} requested'
         ' together with quantization.'
