@@ -114,6 +114,7 @@ dataset_path: ""
 vocab_size: 32_768 # powers of 2 for sharding
 assets_path: "assets"
 vocab_relative_path: "tokenizer"  # Assumes we're allowed
+deterministic_input: True # Set to true if your dataset is in array-record format
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'

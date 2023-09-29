@@ -40,6 +40,7 @@ from tensorboardX import SummaryWriter
 from layers import Transformer
 import pyconfig
 from input_pipeline import create_data_iterator_with_tokenizer
+from deterministic_input_pipeline import create_deterministic_data_iterator
 import max_utils
 import checkpointing
 
@@ -241,7 +242,10 @@ def train_loop(config, state=None):
   )
 
 
-  data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
+  if config.deterministic_input:
+    data_iterator = create_deterministic_data_iterator(config, mesh)
+  else:
+    data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   data_pspec = P(*config.data_sharding)
