@@ -577,7 +577,7 @@ def get_project():
       ['gcloud', 'config', 'get', 'project'], check=True, capture_output=True
   )
   project_outputs = completed_command.stdout.decode().strip().split('\n')
-  if len(project_outputs) < 1:
+  if len(project_outputs) < 1 or project_outputs[-1] == '':
     sys.exit(
         'You must specify the project in the project flag or set it with'
         " 'gcloud config set project <project>'"
@@ -599,7 +599,7 @@ def get_zone():
       capture_output=True,
   )
   zone_outputs = completed_command.stdout.decode().strip().split('\n')
-  if len(zone_outputs) < 1:
+  if len(zone_outputs) < 1 or zone_outputs[-1] == '':
     sys.exit(
         "You must specify the zone in the zone flag or set it with 'gcloud"
         " config set compute/zone <zone>'"
