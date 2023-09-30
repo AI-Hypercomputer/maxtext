@@ -540,10 +540,10 @@ def make_dot_general(cfg: Optional[config.DotGeneral]):
     assert (
         precision is None
     ), f'Precision {precision} requested together with quantization.'
-    assert preferred_element_type is None, (
-        f'Preferred_element_typerecision {preferred_element_type} requested'
-        ' together with quantization.'
-    )
+
+    # The quantized einsum ignores preferred_element_type (b/302728979)
+    preferred_element_type = None
+
     assert lhs.dtype == rhs.dtype, (
         'The only reason we need that, is because we need to determine return'
         ' type.'
