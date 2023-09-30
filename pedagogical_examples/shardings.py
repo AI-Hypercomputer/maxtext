@@ -18,236 +18,242 @@
 
 '''This script is used to measure the performance of different sharding schemes on TPU.'''
 
+import datetime
+import os
+from typing import Sequence
+
+from absl import app
+from absl import flags
 import jax
-from jax.sharding import PartitionSpec
-from jax.experimental.pjit import pjit
-from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 from jax.experimental.compilation_cache import compilation_cache as cc
-from jax.experimental.pjit import with_sharding_constraint
-
-import argparse
-import datetime
+from jax.experimental.pjit import pjit
+from jax.lax import with_sharding_constraint
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec
 import numpy as np
-import os
 
-cc.initialize_cache(os.path.expanduser("~/jax_cache_2"))
 
-parser = argparse.ArgumentParser(
-  description="Experiment different sharding techniques with a simple NN.\
-  Ensure 1) The product of dcn dimensions == number of slices \
-  2) product of ici dimension = number of devices per slice"
-  )
-parser.add_argument(
-    "--profiler_path", "-p",
-    required=False,
-    default="",
-    help="Path to the profiler where the script will write to.",
-    type=str
+FLAGS = flags.FLAGS
+
+_profiler_path = flags.DEFINE_string(
+    name="profiler_path",
+    default=None,
+    help="Path to the profiler where the script will write to."
 )
-parser.add_argument(
-    "--embedding_dimension", "-d",
-    required=False,
+_embedding_dimension = flags.DEFINE_integer(
+    name="embedding_dimension",
     default=2048,
-    type=int
+    help="Dimension of the embedding vector.",
 )
-parser.add_argument(
-    "--batch_size", "-b",
-    required=False,
+_batch_size = flags.DEFINE_integer(
+    name="batch_size",
     default=131072,
-    type=int
+    help="Batch size.",
 )
-parser.add_argument(
-    "--num_layers", "-n",
-    required=False,
+_num_layers = flags.DEFINE_integer(
+    name="num_layers",
     default=4,
-    type=int
+    help="Number of layers."
 )
-parser.add_argument(
-    "--dcn_data_parallelism", "-dd",
-    help="N-way Data Parallelism across slices",
-    required=False,
+_dcn_data_parallelism = flags.DEFINE_integer(
+    name="dcn_data_parallelism",
     default=1,
-    type=int
+    help="N-way Data Parallelism across slices."
 )
-parser.add_argument(
-    "--dcn_fsdp_parallelism", "-df",
-    help="Fsdp parallelism across slices that is expected to be 1 in most cases",
-    required=False,
+_dcn_fsdp_parallelism = flags.DEFINE_integer(
+    name="dcn_fsdp_parallelism",
     default=1,
-    type=int
+    help="Fsdp parallelism across slices."
 )
-parser.add_argument(
-    "--dcn_tensor_parallelism", "-dt",
-    help="Tensor parallelism across slices that is expected to be 1 in most cases",
-    required=False,
+_dcn_tensor_parallelism = flags.DEFINE_integer(
+    name="dcn_tensor_parallelism",
     default=1,
-    type=int
+    help="Tensor parallelism within each slice."
 )
-parser.add_argument(
-    "--ici_data_parallelism", "-id",
-    help="Data parallelism within each slice that is expected to be 1 in most cases",
-    required=False,
+_ici_data_parallelism = flags.DEFINE_integer(
+    name="ici_data_parallelism",
     default=1,
-    type=int
+    help="Data parallelism within each slice."
 )
-parser.add_argument(
-    "--ici_fsdp_parallelism", "-if",
-    help="Number of shards for Fsdp Parallelism within each slice.",
-    required=False,
-    default=4,
-    type=int
-)
-parser.add_argument(
-    "--ici_tensor_parallelism", "-it",
-    help="Number of shards for Tensor Parallelism within each slice.",
-    required=False,
+_ici_fsdp_parallelism = flags.DEFINE_integer(
+    name="ici_fsdp_parallelism",
     default=1,
-    type=int
+    help="Fsdp parallelism within each slice."
 )
-args = parser.parse_args()
+_ici_tensor_parallelism = flags.DEFINE_integer(
+    name="ici_tensor_parallelism",
+    default=1,
+    help="Tensor parallelism within each slice."
+)
 
-def activate_profiler(profiler_path):
-  if profiler_path:
-    jax.profiler.start_trace(profiler_path)
+def main(argv: Sequence[str]) -> None:
+  profiler_path = _profiler_path.value
+  embedding_dimension = _embedding_dimension.value
+  batch_size = _batch_size.value
+  num_layers = _num_layers.value
+  dcn_data_parallelism = _dcn_data_parallelism.value
+  dcn_fsdp_parallelism = _dcn_fsdp_parallelism.value
+  dcn_tensor_parallelism = _dcn_tensor_parallelism.value
+  ici_data_parallelism = _ici_data_parallelism.value
+  ici_fsdp_parallelism = _ici_fsdp_parallelism.value
+  ici_tensor_parallelism = _ici_tensor_parallelism.value
 
-def deactivate_profiler(profiler_path):
-  if profiler_path:
-    jax.profiler.stop_trace()
+  cc.initialize_cache(os.path.expanduser("~/jax_cache_2"))
 
-def simple_timeit(f, tries = 5, verbose = True):
-  '''Simple utility to time a function for multiple runs'''
-  outcomes = []
-  f() #warm it up!
-  for _ in range(tries):
-    s = datetime.datetime.now()
-    f()
-    e = datetime.datetime.now()
-    outcomes.append((e-s).total_seconds())
-  average_time = sum(outcomes)/len(outcomes)
-  if verbose:
-    print(f"average time: {average_time}, timings (seconds) {outcomes}")
-  return average_time
+  def activate_profiler(profiler_path):
+    if profiler_path:
+      jax.profiler.start_trace(profiler_path)
 
-dcn_parallelism = [args.dcn_data_parallelism, args.dcn_fsdp_parallelism, args.dcn_tensor_parallelism]
-ici_parallelism = [args.ici_data_parallelism, args.ici_fsdp_parallelism, args.ici_tensor_parallelism]
+  def deactivate_profiler(profiler_path):
+    if profiler_path:
+      jax.profiler.stop_trace()
 
-devices = jax.devices()
-num_devices = len(devices)
-print(f"Devices: {devices} (num_devices: {num_devices})")
-assert len(devices) > 1, "You must have at least two devices"
+  def simple_timeit(f, tries = 5, verbose = True):
+    """Simple utility to time a function for multiple runs."""
+    outcomes = []
+    f() #warm it up!
+    for _ in range(tries):
+      s = datetime.datetime.now()
+      f()
+      e = datetime.datetime.now()
+      outcomes.append((e-s).total_seconds())
+    average_time = sum(outcomes)/len(outcomes)
+    if verbose:
+      print(f"average time: {average_time}, timings (seconds) {outcomes}")
+    return average_time
 
-# Assert that we have correct inputs of sharding that fit the number of chips
-assert np.product(dcn_parallelism) * np.product(ici_parallelism) == num_devices, f"Number of devices {num_devices} \
-      does not match the product of the parallelism {np.product(dcn_parallelism) * np.product(ici_parallelism)}"
+  dcn_parallelism = [
+      dcn_data_parallelism, dcn_fsdp_parallelism, dcn_tensor_parallelism
+  ]
+  ici_parallelism = [
+      ici_data_parallelism, ici_fsdp_parallelism, ici_tensor_parallelism
+  ]
 
-multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
-# Create device mesh
+  devices = jax.devices()
+  num_devices = len(devices)
+  print(f"Devices: {devices} (num_devices: {num_devices})")
+  assert len(devices) > 1, "You must have at least two devices"
 
-if multi_slice_env:
-  assert args.dcn_data_parallelism == 1 + max(x.slice_index for x in jax.devices()), \
-   f"Number of slices given {args.dcn_data_parallelism} \
-        does not match the number fetched from jax devices {jax.devices()[0]}"
-  devices_array = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism)
-else:
-  devices_array = mesh_utils.create_device_mesh(ici_parallelism)
+  # Assert that we have correct inputs of sharding that fit the number of chips
+  assert np.product(dcn_parallelism) * np.product(ici_parallelism) == num_devices, (
+      f"Number of devices {num_devices} does not match the product of the parallelism \
+          {np.product(dcn_parallelism) * np.product(ici_parallelism)}"
+  )
 
-print(f"Decided on mesh shape: {devices_array}")
+  multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
+  # Create device mesh
 
-mesh = Mesh(devices_array, ["data", "fsdp", "tensor"])
+  if multi_slice_env:
+    assert dcn_data_parallelism == 1 + max(x.slice_index for x in jax.devices()), (
+    f"Number of slices given {dcn_data_parallelism} \
+          does not match the number fetched from jax devices {jax.devices()[0]}"
+    )
+    devices_array = mesh_utils.create_hybrid_device_mesh(
+        ici_parallelism, dcn_parallelism
+    )
+  else:
+    devices_array = mesh_utils.create_device_mesh(ici_parallelism)
 
-data_sharding = PartitionSpec(("data", "fsdp"),  "tensor")
-# We assume parameters are stored in a decreasing order of dimension size
-parameter_sharding = PartitionSpec("tensor", "fsdp")
+  print(f"Decided on mesh shape: {devices_array}")
 
-BATCH = len(jax.devices()) * args.batch_size
-D_EMB = args.embedding_dimension
-D_FF =  4 * D_EMB
-NUM_LAYERS = args.num_layers
+  mesh = Mesh(devices_array, ["data", "fsdp", "tensor"])
 
-parameters = 2 * D_FF * D_EMB * NUM_LAYERS
-parameter_bytes = 2 * parameters
-activation_bytes = 2 * (  BATCH  * ( D_FF+D_EMB) ) * NUM_LAYERS
-memory_bytes = parameter_bytes + activation_bytes
+  data_sharding = PartitionSpec(("data", "fsdp"),  "tensor")
+  # We assume parameters are stored in a decreasing order of dimension size
+  parameter_sharding = PartitionSpec("tensor", "fsdp")
 
-print(f"total {memory_bytes/10**9} GB, parameters {parameter_bytes/10**9} GB, activations {activation_bytes/10**9} GB")
+  BATCH = len(jax.devices()) * batch_size
+  D_EMB = embedding_dimension
+  D_FF =  4 * D_EMB
+  NUM_LAYERS = num_layers
 
-def gen_layer(random_key):
-  keys = jax.random.split(random_key, num = 4)
-  return {
-    "EMB2FF" : 1e-4 * jax.random.normal( keys[0], (D_FF, D_EMB), dtype=jax.numpy.bfloat16),
-    "FF2EMB" : 1e-4 * jax.random.normal( keys[1], (D_FF, D_EMB), dtype=jax.numpy.bfloat16),
-  }
+  parameters = 2 * D_FF * D_EMB * NUM_LAYERS
+  parameter_bytes = 2 * parameters
+  activation_bytes = 2 * (  BATCH  * ( D_FF+D_EMB) ) * NUM_LAYERS
+  memory_bytes = parameter_bytes + activation_bytes
 
-def gen_layers(random_key):
-  layers = []
-  for _ in range(NUM_LAYERS):
-    random_key, sub_key = jax.random.split(random_key)
-    layers.append(gen_layer(sub_key))
-  return tuple(layers)
+  print(f"total {memory_bytes/10**9} GB, parameters {parameter_bytes/10**9} GB, \
+      activations {activation_bytes/10**9} GB")
 
-def gen_data(random_key):
-  return jax.random.uniform(random_key, (BATCH, D_EMB), dtype=jax.numpy.bfloat16 )
+  def gen_layer(random_key):
+    keys = jax.random.split(random_key, num = 4)
+    return {
+      "EMB2FF" : 1e-4 * jax.random.normal( keys[0], (D_FF, D_EMB), dtype=jax.numpy.bfloat16),
+      "FF2EMB" : 1e-4 * jax.random.normal( keys[1], (D_FF, D_EMB), dtype=jax.numpy.bfloat16),
+    }
+
+  def gen_layers(random_key):
+    layers = []
+    for _ in range(NUM_LAYERS):
+      random_key, sub_key = jax.random.split(random_key)
+      layers.append(gen_layer(sub_key))
+    return tuple(layers)
+
+  def gen_data(random_key):
+    return jax.random.uniform(random_key, (BATCH, D_EMB), dtype=jax.numpy.bfloat16 )
 
 
-def multiply_layer(in_act, in_layer):
-  with jax.named_scope("M1"):
-    M1 = jax.nn.sigmoid(in_act @ in_layer["EMB2FF"].T)
-    M1 = with_sharding_constraint(M1, data_sharding)
-  with jax.named_scope("M2"):
-    M2 = jax.nn.sigmoid(M1 @ in_layer["FF2EMB"])
-    M2 = with_sharding_constraint(M2, data_sharding)
+  def multiply_layer(in_act, in_layer):
+    with jax.named_scope("M1"):
+      M1 = jax.nn.sigmoid(in_act @ in_layer["EMB2FF"].T)
+      M1 = with_sharding_constraint(M1, data_sharding)
+    with jax.named_scope("M2"):
+      M2 = jax.nn.sigmoid(M1 @ in_layer["FF2EMB"])
+      M2 = with_sharding_constraint(M2, data_sharding)
 
-  return M2
+    return M2
 
-def multiply_layers(in_act, in_layers):
-  x = in_act
+  def multiply_layers(in_act, in_layers):
+    x = in_act
 
-  for i, layer in enumerate(in_layers):
-    with jax.named_scope(f"layer_{i}"):
-      x = with_sharding_constraint(multiply_layer(x, layer), data_sharding)
+    for i, layer in enumerate(in_layers):
+      with jax.named_scope(f"layer_{i}"):
+        x = with_sharding_constraint(multiply_layer(x, layer), data_sharding)
 
-  return x, in_layers
+    return x, in_layers
 
-def multiply_layers_with_loss(in_act, in_layers):
-  x, _ =  multiply_layers(in_act, in_layers)
-  return jax.numpy.sum(x)
+  def multiply_layers_with_loss(in_act, in_layers):
+    x, _ =  multiply_layers(in_act, in_layers)
+    return jax.numpy.sum(x)
 
-multiply_layers_and_grad = jax.value_and_grad(multiply_layers_with_loss, argnums=[1])
+  multiply_layers_and_grad = jax.value_and_grad(multiply_layers_with_loss, argnums=[1])
 
-def training_step(in_act, in_layers):
-  _, grad_layers = multiply_layers_and_grad(in_act, in_layers)
-  out_layers = jax.tree_map(lambda param, grad: param - 1e-4 * grad, in_layers, grad_layers[0])
-  return out_layers
+  def training_step(in_act, in_layers):
+    _, grad_layers = multiply_layers_and_grad(in_act, in_layers)
+    out_layers = jax.tree_map(
+        lambda param, grad: param - 1e-4 * grad, in_layers, grad_layers[0]
+    )
+    return out_layers
 
-print("finished includes ", flush = True)
+  print("finished includes ", flush = True)
 
-pjit_func = pjit(
-        training_step,
-        in_shardings=(data_sharding, parameter_sharding),
-        out_shardings=parameter_sharding,
-      )
+  pjit_func = pjit(
+      training_step,
+      in_shardings=(data_sharding, parameter_sharding),
+      out_shardings=parameter_sharding,
+  )
 
-pjit_gen_data = pjit(
-        gen_data,
-        in_shardings=None,
-        out_shardings=data_sharding
-      )
+  pjit_gen_data = pjit(gen_data, in_shardings=None, out_shardings=data_sharding)
 
-pjit_gen_layers = pjit(
-        gen_layers,
-        in_shardings=None,
-        out_shardings=parameter_sharding
-      )
+  pjit_gen_layers = pjit(
+      gen_layers, in_shardings=None, out_shardings=parameter_sharding
+  )
 
-# starting the profiler outside `with` statement,
-# will call it right before the computation once b/301309635 is resolved
-activate_profiler(args.profiler_path)
-with Mesh(mesh.devices, mesh.axis_names):
-  key = jax.random.PRNGKey(0)
-  presharded_X = jax.block_until_ready(pjit_gen_data(key))
-  presharded_layers = jax.block_until_ready(pjit_gen_layers(key))
-  TFLOPs_per_device = parameters * 6 * BATCH  / 10**12 / len(jax.devices())
-  time = simple_timeit(lambda : jax.block_until_ready(pjit_func(presharded_X, presharded_layers)))
-  print(f"time is {time} seconds, TFLOP is {TFLOPs_per_device}, TFLOP/s is {TFLOPs_per_device/time}", flush = True)
-deactivate_profiler(args.profiler_path)
+  with Mesh(mesh.devices, mesh.axis_names):
+    key = jax.random.PRNGKey(0)
+    presharded_X = jax.block_until_ready(pjit_gen_data(key))
+    presharded_layers = jax.block_until_ready(pjit_gen_layers(key))
+    activate_profiler(profiler_path)
+    TFLOPs_per_device = parameters * 6 * BATCH  / 10**12 / len(jax.devices())
+    time = simple_timeit(
+        lambda : jax.block_until_ready(pjit_func(presharded_X, presharded_layers))
+    )
+    print(f"time is {time} seconds, TFLOP is {TFLOPs_per_device},\
+        TFLOP/s is {TFLOPs_per_device/time}", flush = True)
+  deactivate_profiler(profiler_path)
+
+if __name__ == "__main__":
+  app.run(main)
+
+
