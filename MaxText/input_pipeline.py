@@ -30,6 +30,7 @@ from jax.sharding import PartitionSpec as P
 import tokenizer
 import multihost_dataloading
 import sequence_packing
+import math
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
@@ -163,8 +164,14 @@ def get_datasets(
   train_ds = train_ds_builder.as_dataset(split='train',
                                            read_config = read_config,
                                            shuffle_files=config.enable_data_shuffling)
+  expansion_factor = config.expansion_factor_real_data if  config.expansion_factor_real_data >= 0 else 1
+  number_real_data_loaders = math.ceil(jax.process_count()/expansion_factor)
+  our_index = jax.process_index() % number_real_data_loaders
+
+  print(f"data loading numbers {number_real_data_loaders=}, {our_index=}")
+
   # shard the dataset as soon as it is loaded
-  train_ds = train_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
+  train_ds = train_ds.shard(num_shards = number_real_data_loaders, index = our_index)
   train_ds = normalize_features(train_ds)
 
   # Evaluation dataset.
