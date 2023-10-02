@@ -12,6 +12,8 @@ import requests
 import time
 import os
 
+import max_logging
+
 def get_metadata(project_id, zone, instance_id):
   """
   Fetches metadata
@@ -61,7 +63,7 @@ def create_custom_metric(metric_name, description):
   return response
 
 
-def write_time_series_step(metric_name, monitoring_enabled, step=1):
+def write_time_series_step(metric_name, monitoring_enabled, pyconfig, step=1):
   """
   Writes a time series object for a specified custom metric
 
@@ -71,7 +73,7 @@ def write_time_series_step(metric_name, monitoring_enabled, step=1):
     step
   """
 
-  zone = get_zone()
+  zone = pyconfig.config.cloud_zone
   project_id = get_project()
 
   if not monitoring_enabled:
@@ -96,7 +98,7 @@ def write_time_series_step(metric_name, monitoring_enabled, step=1):
   event_time = time.strftime(
       "%d %b %Y %H:%M:%S UTC", time.gmtime(seconds_since_epoch_utc)
   )
-  print(
+  max_logging.log(
       "Emitting metric ",
       metric_name,
       " for step = ",
@@ -125,14 +127,49 @@ def write_time_series_step(metric_name, monitoring_enabled, step=1):
   ]
 
   client.create_time_series(name=project_name, time_series=[series], metadata=get_metadata(project_id, zone, instance_id))
-  print(
+  dashboard_link = pyconfig.config.cloud_monitoring_dashboard+project_name
+  max_logging.log(
       "Time series added for step",
       step,
       "and instance_id ",
       instance_id,
       " and zone ",
       zone,
+      "\nView dashboards or use metrics: ",
+      dashboard_link,
   )
+  return [series]
+
+def get_time_series_step_data(metric_name):
+  """
+  Retrieves time series data
+
+  Args:
+    metric_name
+  """
+  project_id = get_project()
+  project_name = f"projects/{project_id}"
+  instance_name = os.uname().nodename
+
+  mql = """
+  fetch gce_instance
+  | metric 'custom.googleapis.com/{metric_name}'
+  | filter (metric.worker == '{worker_id}')
+  | every 1m
+  | within -1d, 1d # one day, starting 1 day ago
+  """
+
+  client = get_query_service_client()
+  request = monitoring_v3.QueryTimeSeriesRequest({
+      "name": project_name,
+      "query": mql.format(
+          metric_name=metric_name, worker_id=instance_name
+      ),
+  })
+  
+  result = client.query_time_series(request)
+  return result.time_series_data
+
 
 def get_instance_id(project_id, zone):
   """
@@ -157,17 +194,6 @@ def get_project():
     sys.exit("You must specify the project in the PROJECT flag or set it with 'gcloud config set project <project>'")
   return project_outputs[-1]
 
-def get_zone():
-  """
-  Fetches zone in use
-  """
-  subprocess.run("gcloud config set compute/zone us-central2-b")
-  completed_command = subprocess.run(["gcloud", "config", "get", "compute/zone"], check=True, capture_output=True)
-  zone_outputs = completed_command.stdout.decode().strip().split('\n')
-  if len(zone_outputs) < 1 or zone_outputs[-1]=='':
-    sys.exit("You must specify the zone in the ZONE flag or set it with 'gcloud config set compute/zone <zone>'")
-  return zone_outputs[-1]
-
 def get_compute_instances_client():
   """
   Fetches cloud compute instances client
@@ -179,3 +205,9 @@ def get_metrics_service_client():
   Fetches cloud monitoring API client
   """
   return monitoring_v3.MetricServiceClient()
+
+def get_query_service_client():
+  """
+  Fetches cloud monitoring query service client
+  """
+  return monitoring_v3.QueryServiceClient()

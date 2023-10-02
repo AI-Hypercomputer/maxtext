@@ -176,5 +176,7 @@ stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds
 # Use iota operator in Embed
 use_iota_embed: False
 
-#Monitoring parameters
+#Monitoring parameters - Export in-workload metrics to Cloud monitoring
 enable_cloud_monitoring: True
+cloud_monitoring_dashboard: "https://pantheon.corp.google.com/monitoring/dashboards?project="
+cloud_zone: "" # zone name for cloud jobs - used for cloud metrics emitting

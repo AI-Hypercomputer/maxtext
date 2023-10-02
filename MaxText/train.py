@@ -216,16 +216,16 @@ def train_loop(config, state=None):
   monitoring_enabled = config.enable_cloud_monitoring
 
   if monitoring_enabled:
-    monitoring_api.create_custom_metric('checkpointing_init_start', "Checkpointing Initialization Start")
-    monitoring_api.create_custom_metric('checkpointing_init_end', "Checkpointing Initialization End")
-    monitoring_api.create_custom_metric('checkpoint_test_run_start', "Checkpointing Test Run Start")
-    monitoring_api.create_custom_metric('checkpoint_test_run_end', "Checkpointing Test Run End")
+    max_utils.register_train_metrics('checkpointint_init_start', "Checkpointing Initialization Start")
+    max_utils.register_train_metrics('checkpointing_init_end', "Checkpointing Initialization End")
+    max_utils.register_train_metrics('checkpoint_test_run_start', "Checkpointing Test Run Start")
+    max_utils.register_train_metrics('checkpoint_test_run_end', "Checkpointing Test Run End")
 
-  monitoring_api.write_time_series_step('checkpoint_test_run_start', 0, monitoring_enabled)
+  monitoring_api.write_time_series_step('checkpoint_test_run_start', monitoring_enabled, pyconfig, 0)
 
   writer = SummaryWriter(config.tensorboard_dir)
 
-  monitoring_api.write_time_series_step('checkpointing_init_start', 1, monitoring_enabled)
+  monitoring_api.write_time_series_step('checkpointing_init_start', monitoring_enabled, pyconfig, 1)
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       config.checkpoint_dir,
@@ -234,7 +234,7 @@ def train_loop(config, state=None):
       config.save_period,
   )
 
-  monitoring_api.write_time_series_step('checkpointing_init_end', 1, monitoring_enabled)
+  monitoring_api.write_time_series_step('checkpointing_init_end', monitoring_enabled, pyconfig, 1)
 
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
@@ -318,7 +318,7 @@ def train_loop(config, state=None):
     if step == 0:
       max_utils.activate_profiler(config)
 
-  monitoring_api.write_time_series_step('checkpoint_test_run_end', config.steps, monitoring_enabled)
+  monitoring_api.write_time_series_step('checkpoint_test_run_end', monitoring_enabled, pyconfig, config.steps)
   max_utils.deactivate_profiler(config)
   writer.close()
   return state

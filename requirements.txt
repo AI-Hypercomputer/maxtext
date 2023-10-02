@@ -3,8 +3,8 @@ absl-py
 argparse
 cloud-tpu-diagnostics
 datetime
-google-cloud-compute==1.6.1
-google-cloud-monitoring==2.11.3
+google-cloud-compute
+google-cloud-monitoring
 google-cloud-storage
 flax
 ml-collections
