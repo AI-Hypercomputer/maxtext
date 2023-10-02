@@ -27,7 +27,10 @@ jax.config.update('jax_platform_name', 'cpu')
 class CloudMonitoringTests(unittest.TestCase):
   """Test for writing time series step using monitoring_api.py"""
   def test_write_time_series_step(self):
-    pyconfig.initialize(sys.argv + ['configs/base.yml'], per_device_batch_size=1, run_name='test', cloud_zone='us-central2-b')
+    pyconfig.initialize(sys.argv + ['configs/base.yml'], per_device_batch_size=1, run_name='test', mesh_axes = ['data'],
+                        logical_axis_rules = [['batch', 'data']],
+                        data_sharding = ['data'],
+                        cloud_zone='us-central2-b')
     monitoring_api.create_custom_metric('test_metric', "This is an example metric")
     create_time_series_result = monitoring_api.write_time_series_step('test_metric', True, pyconfig, 1)
     query_time_series_result = monitoring_api.get_time_series_step_data('test_metric')

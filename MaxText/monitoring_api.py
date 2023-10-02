@@ -77,7 +77,7 @@ def write_time_series_step(metric_name, monitoring_enabled, pyconfig, step=1):
   project_id = get_project()
 
   if not monitoring_enabled:
-    return
+    return []
 
   client = get_metrics_service_client()
   project_name = f"projects/{project_id}"
@@ -166,7 +166,7 @@ def get_time_series_step_data(metric_name):
           metric_name=metric_name, worker_id=instance_name
       ),
   })
-  
+
   result = client.query_time_series(request)
   return result.time_series_data
 
