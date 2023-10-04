@@ -15,6 +15,5 @@ pytest
 sentencepiece==0.1.97
 tensorflow==2.13.*
 tensorflow-datasets
-tensorboard-plugin-profile
 tensorflow-text
 tensorboardx

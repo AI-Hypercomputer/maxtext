@@ -25,7 +25,6 @@ from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-import dataclasses
 import functools
 import operator
 from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
@@ -656,6 +655,7 @@ class Embed(nn.Module):
     dtype: the dtype of the embedding vectors (default: float32).
     embedding_init: embedding initializer.
   """
+  # pylint: disable=attribute-defined-outside-init
   config: Config
   num_embeddings: int
   features: int
@@ -663,7 +663,6 @@ class Embed(nn.Module):
   dtype: DType = jnp.float32
   attend_dtype: Optional[DType] = None
   embedding_init: Initializer = default_embed_init
-  embedding: Array = dataclasses.field(init=False)
 
   def setup(self):
     self.embedding = self.param(
