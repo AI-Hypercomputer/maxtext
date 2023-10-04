@@ -66,11 +66,11 @@ fi
 # Save the script folder path of maxtext
 run_name_folder_path=$(pwd)
 
-# Uninstall existing jax, jaxlib, libtpu-nightly and tbp-nightly
+# Uninstall existing jax, jaxlib, libtpu-nightly and tensorboard-plugin-profile
 pip3 show jax && pip3 uninstall -y jax 
 pip3 show jaxlib && pip3 uninstall -y jaxlib
 pip3 show libtpu-nightly && pip3 uninstall -y libtpu-nightly
-pip3 show tbp-nightly && pip3 uninstall -y tbp-nightly
+pip3 show tensorboard-plugin-profile && pip3 uninstall -y tensorboard-plugin-profile
 
 # Delete jax folder if it exists
 if [[ -d $HOME/jax ]]; then
