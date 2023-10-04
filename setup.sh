@@ -70,7 +70,6 @@ run_name_folder_path=$(pwd)
 pip3 show jax && pip3 uninstall -y jax 
 pip3 show jaxlib && pip3 uninstall -y jaxlib
 pip3 show libtpu-nightly && pip3 uninstall -y libtpu-nightly
-pip3 show tensorboard-plugin-profile && pip3 uninstall -y tensorboard-plugin-profile
 
 # Delete jax folder if it exists
 if [[ -d $HOME/jax ]]; then
@@ -106,7 +105,7 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
         gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
     fi
     echo "Installing stable tensorboard plugin profile"
-    pip3 install tensorboard-plugin-profile
+    pip3 install tensorboard-plugin-profile --upgrade
 elif [[ $MODE == "nightly" ]]; then 
 # Nightly mode
     echo "Installing jax-head, jaxlib-nightly"
@@ -128,7 +127,7 @@ elif [[ $MODE == "nightly" ]]; then
         pip3 install libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html -U --pre
     fi
     echo "Installing nightly tensorboard plugin profile"
-    pip3 install tbp-nightly
+    pip3 install tbp-nightly --upgrade
 elif [[ $MODE == "head" ]]; then 
 # Head mode
     if [[ -n "$LIBTPU_GCS_PATH" ]]; then
@@ -156,7 +155,7 @@ elif [[ $MODE == "head" ]]; then
     python3 build/build.py --enable_tpu --bazel_options="--override_repository=xla=$HOME/xla"
     pip3 install dist/jaxlib-*-cp*-manylinux2014_x86_64.whl --force-reinstall --no-deps
     echo "Installing nightly tensorboard plugin profile"
-    pip3 install tbp-nightly
+    pip3 install tbp-nightly --upgrade
 else
     echo -e "\n\nError: You can only set MODE to [stable,nightly,head,libtpu-only].\n\n"
     exit 1
