@@ -66,10 +66,11 @@ fi
 # Save the script folder path of maxtext
 run_name_folder_path=$(pwd)
 
-# Uninstall existing jax, jaxlib, and libtpu-nightly
+# Uninstall existing jax, jaxlib, libtpu-nightly and tbp-nightly
 pip3 show jax && pip3 uninstall -y jax 
 pip3 show jaxlib && pip3 uninstall -y jaxlib
 pip3 show libtpu-nightly && pip3 uninstall -y libtpu-nightly
+pip3 show tbp-nightly && pip3 uninstall -y tbp-nightly
 
 # Delete jax folder if it exists
 if [[ -d $HOME/jax ]]; then
