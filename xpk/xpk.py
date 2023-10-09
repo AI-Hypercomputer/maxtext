@@ -216,7 +216,7 @@ spec:
 """
 
 SystemCharacteristics = collections.namedtuple(
-    'SystemCharacteristcs',
+    'SystemCharacteristics',
     [
         'topology',
         'vms_per_slice',
@@ -226,7 +226,7 @@ SystemCharacteristics = collections.namedtuple(
     ],
 )
 
-################### Subcomand Helper Functions #############
+################### Subcommand Helper Functions #############
 
 UserFacingNameToSystemCharacteristics = {
     'v5litepod-16': SystemCharacteristics(
@@ -244,6 +244,18 @@ UserFacingNameToSystemCharacteristics = {
     'v5litepod-256': SystemCharacteristics(
         '16x16', 64, 'tpu-v5-lite-podslice', 'ct5lp-hightpu-4t', 4
     ),
+    'v4-8': SystemCharacteristics(
+      '2x2x1', 1,'gke_accelerator', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-16': SystemCharacteristics(
+      '2x2x2', 2,'gke_accelerator', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-32': SystemCharacteristics(
+      '2x2x4', 4,'gke_accelerator', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-64': SystemCharacteristics(
+      '2x4x4', 8,'gke_accelerator', 'ct4p-hightpu-4t', 4
+    ),
 }
 
 
@@ -257,10 +269,7 @@ def chunks(lst, n):
   Returns:
     List of n-sized chunks for lst.
   """
-  output = []
-  for i in range(0, len(lst), n):
-    output.append(lst[i : i + n])
-  return output
+  return [lst[i:i+n] for i in range(0, len(lst), n)]
 
 
 def make_tmp_files(per_command_name):
@@ -554,10 +563,10 @@ def xpk_print(*args, **kwargs):
 
 
 def xpk_exit(error_code):
-  """Helper function to exit xpk with an associted error code.
+  """Helper function to exit xpk with an associated error code.
 
   Args:
-    error_code: If the code provided is zero, then no issues occured.
+    error_code: If the code provided is zero, then no issues occurred.
   """
   if error_code == 0:
     xpk_print('Exiting XPK cleanly')
@@ -718,7 +727,7 @@ def run_gke_node_pool_create_command(args, system_characteristics) -> int:
 
   Args:
     args: user provided arguments for running the command.
-    system_characteristics: System characteristics based on TPU type/toplology.
+    system_characteristics: System characteristics based on TPU type/topology.
 
   Returns:
     0 if successful and 1 otherwise.
@@ -1075,7 +1084,7 @@ def cluster_cacheimage(args) -> int:
 
 
 def cluster_describe(args) -> int:
-  """Function around cluster dewscribe.
+  """Function around cluster describe.
 
   Args:
     args: user provided arguments for running the command.
@@ -1422,7 +1431,7 @@ cluster_create_required_arguments.add_argument(
     '--tpu-type',
     type=str,
     default='v5litepod-16',
-    help='The type of the TPU.',
+    help='The type of the TPU. v5litepod and v4 are the only supported types.',
     required=True,
 )
 
@@ -1432,14 +1441,14 @@ cluster_create_optional_arguments.add_argument(
     type=str,
     choices=['AS_NEEDED', 'PERIODIC'],
     default='AS_NEEDED',
-    help='The maintenance policy of the cluster and repective clusters.',
+    help='The maintenance policy of the cluster and respective clusters.',
 )
 cluster_create_optional_arguments.add_argument(
     '--gke-version',
     type=str,
     default='1.27.4-gke.900',
     help=(
-        'The GKE version of the cluster and repective clusters. The default is'
+        'The GKE version of the cluster and respective clusters. The default is'
         ' "1.27.4-gke.900".'
     ),
 )
