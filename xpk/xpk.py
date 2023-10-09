@@ -41,7 +41,6 @@ Next Steps:
 """
 
 import argparse
-import collections
 import datetime
 import os
 import re
