@@ -868,7 +868,7 @@ def install_kueue_on_cluster(args) -> int:
   """
   command = (
       'kubectl apply -f'
-      ' xpk/kueue_manifests.yml'
+      ' https://github.com/kubernetes-sigs/kueue/releases/download/v0.4.1/manifests.yaml'
   )
   return_code = run_command_with_updates(command, 'Set Kueue On Cluster', args)
 
