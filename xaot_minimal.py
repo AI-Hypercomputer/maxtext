@@ -12,7 +12,7 @@ from jax import tree_util
 
 
 
-topo='v4-8'
+topo='v4-16'
 if topo=='v4-8':
     topology_devices = get_topology_desc(
         platform='tpu',
@@ -52,8 +52,8 @@ orig_compiled = lowered.compile()
 print(f"{type(orig_compiled)=}")
 
 serialized, in_tree, out_tree = serialize(orig_compiled)
-print(f"{in_tree=}")
-print(f"{out_tree=}")
+# print(f"{in_tree=}")
+# print(f"{out_tree=}")
 
 with open(f"x_aot_{topo}.pickle", "wb") as f:
     pickle.dump(serialized, f)
@@ -76,8 +76,8 @@ if topo=='v4-8':
 
 out_shaped = jax.eval_shape(fun, ex_input)
 flat_out_shaped, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
-print(f"{out_tree_recreated=}")
+# print(f"{out_tree_recreated=}")
 
 ex_input = jax.core.ShapedArray(shape=(128, 128), dtype=np.float32)
 flat_in_shaped, in_tree_recreated = tree_util.tree_flatten(((ex_input,),{}))
-print(f"{in_tree_recreated=}")
+# print(f"{in_tree_recreated=}")
