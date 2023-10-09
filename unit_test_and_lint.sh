@@ -15,6 +15,7 @@
 # limitations under the License.
 
 pylint MaxText/
+pylint xpk/
 
 cd MaxText
 python3 -m pytest
