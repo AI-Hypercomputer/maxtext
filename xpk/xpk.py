@@ -49,6 +49,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 
 
 ################### Internally used constants ##############
@@ -215,16 +216,13 @@ spec:
         command: [ "sleep", "inf" ]
 """
 
-SystemCharacteristics = collections.namedtuple(
-    'SystemCharacteristics',
-    [
-        'topology',
-        'vms_per_slice',
-        'gke_accelerator',
-        'gce_machine_type',
-        'chips_per_vm',
-    ],
-)
+@dataclass
+class SystemCharacteristics:
+  topology: str
+  vms_per_slice: int
+  gke_accelerator: str
+  gce_machine_type: str
+  chips_per_vm: int
 
 ################### Subcommand Helper Functions #############
 
@@ -245,16 +243,16 @@ UserFacingNameToSystemCharacteristics = {
         '16x16', 64, 'tpu-v5-lite-podslice', 'ct5lp-hightpu-4t', 4
     ),
     'v4-8': SystemCharacteristics(
-      '2x2x1', 1,'gke_accelerator', 'ct4p-hightpu-4t', 4
+      '2x2x1', 1,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
     ),
     'v4-16': SystemCharacteristics(
-      '2x2x2', 2,'gke_accelerator', 'ct4p-hightpu-4t', 4
+      '2x2x2', 2,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
     ),
     'v4-32': SystemCharacteristics(
-      '2x2x4', 4,'gke_accelerator', 'ct4p-hightpu-4t', 4
+      '2x2x4', 4,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
     ),
     'v4-64': SystemCharacteristics(
-      '2x4x4', 8,'gke_accelerator', 'ct4p-hightpu-4t', 4
+      '2x4x4', 8,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
     ),
 }
 
@@ -640,8 +638,8 @@ def run_gke_cluster_create_command(args) -> int:
   """
   # This cpu node pool will handle system jobs + jobset manager.
   default_cluster_machine_type = 'e2-standard-32'
-  # Create the cluster.
 
+  # Create the cluster.
   region = zone_to_region(args.zone)
   command = (
       'gcloud beta container clusters create'
@@ -681,7 +679,6 @@ def get_all_clusters_programmatic(args) -> tuple[list[str], int]:
     xpk_print(f'Find if Cluster Exists returned ERROR {return_code}')
     return [], return_code
   cluster_names = [x.split(' ')[0] for x in raw_cluster_output.splitlines()]
-  print(cluster_names)
   return cluster_names, 0
 
 
