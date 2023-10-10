@@ -48,14 +48,49 @@ cleanup with a `Cluster Delete`.
 
 *   Cluster Create (provision capacity):
 
+    ```shell
+    python3 xpk/xpk.py cluster create \
+    --cluster xpk-test --tpu-type=v5litepod-16 \
+    --host-maintenance-interval=PERIODIC --num-slices=4
+    ```
+
     Cluster Create can be called again with the same `--cluster name` to modify
     the number of slices or retry failed steps.
+
+    For example, if a user creates a cluster with 4 slices:
 
     ```shell
     python3 xpk/xpk.py cluster create \
     --cluster xpk-test --tpu-type=v5litepod-16 \
     --host-maintenance-interval=PERIODIC --num-slices=4
     ```
+
+    and recreates the cluster with 8 slices. The command will rerun to create 4
+    new slices:
+
+    ```shell
+    python3 xpk/xpk.py cluster create \
+    --cluster xpk-test --tpu-type=v5litepod-16 \
+    --host-maintenance-interval=PERIODIC --num-slices=8
+    ```
+
+    and recreates the cluster with 6 slices. The command will rerun to delete 2
+    slices. The command will warn the user when deleting slices.
+    Use `--force` to skip prompts.
+
+    ```shell
+    python3 xpk/xpk.py cluster create \
+    --cluster xpk-test --tpu-type=v5litepod-16 \
+    --host-maintenance-interval=PERIODIC --num-slices=8
+
+    # Skip delete prompts using --force.
+
+    python3 xpk/xpk.py cluster create --force \
+    --cluster xpk-test --tpu-type=v5litepod-16 \
+    --host-maintenance-interval=PERIODIC --num-slices=8
+
+    ```
+
 
 *   Cluster Delete (deprovision capacity):
 

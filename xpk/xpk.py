@@ -783,19 +783,39 @@ def run_gke_node_pool_create_command(args, system_characteristics) -> int:
     commands.append(command)
     task_names.append(task)
 
+  node_pools_to_delete = []
   for existing_node_pool_name in existing_node_pool_names:
     if (
         existing_node_pool_name.find(f'{args.cluster}-np-') == 0
         and existing_node_pool_name not in desired_node_pool_names
     ):
-      command = (
-          'gcloud beta container node-pools delete'
-          f' {existing_node_pool_name} --cluster={args.cluster}'
-          f' --zone={zone_to_region(args.zone)} --project={args.project} --quiet'
-      )
-      task = f'Nodepool-Delete-{existing_node_pool_name}'
-      commands.append(command)
-      task_names.append(task)
+      node_pools_to_delete.append(existing_node_pool_name)
+
+  will_delete = True
+  if (not args.force):
+    user_input = input(
+      f'Planning to delete {len(node_pools_to_delete)} node pools including '
+      f'{node_pools_to_delete}. \nDo you wish to delete: y (yes) / n (no):\n'
+    )
+    user_input_approves_delete = (user_input == 'y') or (user_input == 'yes')
+    if not user_input_approves_delete:
+      will_delete = False
+
+  if (will_delete):
+    for existing_node_pool_name in node_pools_to_delete:
+      if (
+          existing_node_pool_name.find(f'{args.cluster}-np-') == 0
+          and existing_node_pool_name not in desired_node_pool_names
+      ):
+        command = (
+            'gcloud beta container node-pools delete'
+            f' {existing_node_pool_name} --cluster={args.cluster}'
+            f' --zone={zone_to_region(args.zone)}'
+            f' --project={args.project} --quiet'
+        )
+        task = f'Nodepool-Delete-{existing_node_pool_name}'
+        commands.append(command)
+        task_names.append(task)
 
   for i in range(len(commands)):
     xpk_print(f'To complete {task_names[i]} we are executing {commands[i]}')
@@ -1482,7 +1502,6 @@ cluster_create_optional_arguments.add_argument(
       'regional clusters, all zones in the region supports the machine type.'
     )
 )
-add_shared_arguments(cluster_create_optional_arguments)
 cluster_create_optional_arguments.add_argument(
     '--custom-cluster-arguments',
     type=str,
@@ -1505,6 +1524,15 @@ cluster_create_optional_arguments.add_argument(
         " --custom-tpu-nodepool-arguments='--enable-ip-alias'"
     ),
 )
+cluster_create_optional_arguments.add_argument(
+    '--force',
+    action='store_true',
+    help=(
+      'Forces node pool creation and delete commands to run without additional'
+      ' approval.'
+    ),
+)
+add_shared_arguments(cluster_create_optional_arguments)
 
 cluster_create_parser.set_defaults(func=cluster_create)
 
