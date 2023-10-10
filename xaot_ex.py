@@ -60,53 +60,78 @@ def save_compiled(compiled, save_name):
     with open(save_name, "wb") as f:
         pickle.dump(serialized, f)
 
+def load_compiled(save_name):
+    with open(save_name, "rb") as f:
+        serialized_compiled = pickle.load(f)
+    return serialized_compiled
+
+def get_io_trees(input_args, input_kwargs):
+    _, in_tree_recreated = tree_util.tree_flatten((input_args, input_kwargs))
+    out_shaped = jax.eval_shape(fun, *input_args, **input_kwargs)
+    _, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
+    return in_tree_recreated, out_tree_recreated
+
+def run_f(f, input_args, input_kwargs, mesh, print_cost=False):
+    with mesh:
+        if print_cost:
+            cost = f.cost_analysis()[0]['flops']
+            print(f"{cost=}")
+
+        out = f(*input_args, **input_kwargs)
+        print("computed out")
+        try:
+            print(f"{out=}")
+        except:
+            out_gathered = jax.experimental.multihost_utils.process_allgather(out)
+            print(f"{out_gathered=}")
+
+# def save_compiled_full(f, compiled_name, in_shardings, out_shardings, mesh_axis_names)
+
+# def load_compiled_full(f, compiled_name, input_args, input_kwargs)
+
+# def run_full(f, input_args, input_kwarts, mesh_axis_names)
+
+
 #### Start code ####
 
-# Shared between save and load
+# Shared between save,  load, and run
 compiled_name = f"x_aot_{args.version}.pickle"
 mesh_axis_names = ('data',)
-in_shardings=P('data')
-out_shardings=P(None, 'data')
 
 if args.save:
+    print("Saving the compiled function...", flush=True)
+    in_shardings=P('data')
+    out_shardings=P(None, 'data')
     fake_devices = make_fake_devices()
     fake_device_mesh = jax.sharding.Mesh(np.array(fake_devices), mesh_axis_names)
-
     jitted, lowered, compiled = jit_and_compile(fake_device_mesh, fun, in_shardings, out_shardings)
+    save_compiled(compiled, compiled_name) # Serialize and save the compiled object
+    print("Saved compiled function!", flush=True)
 
-    # Serialize and save the compiled object
-    save_compiled(compiled, compiled_name)
+if args.load:
+    print("Loading the compiled function...", flush=True)
+    serialized_compiled = load_compiled(compiled_name)
+    ex_input = 2.0 * jnp.ones((128, 128), dtype=jnp.float32)
+    input_args = (ex_input,)
+    input_kwargs = {}
+    in_tree_recreated, out_tree_recreated = get_io_trees(input_args, input_kwargs)
+    compiled = deserialize_and_load(serialized_compiled, in_tree_recreated, out_tree_recreated)
+    print("Loaded compiled function!", flush=True)
 
 if args.run_f:
+    # This will run with the loaded version of f if args.load is true, else runs with currently jitted version/
+
     # This is not a sharded array. However we tell pjit above that the input is sharded along the "data" axis.
     # Why does this work?
     ex_input = 2.0 * jnp.ones((128, 128), dtype=jnp.float32)
+
+    mesh = jax.sharding.Mesh(np.array(jax.devices()), mesh_axis_names)
     if args.load:
-        with open(f"x_aot_{args.version}.pickle", "rb") as f:
-            serialized_compiled = pickle.load(f)
-
-        # Input shape
-        # ex_input_for_shape = jax.core.ShapedArray(shape=(128, 128), dtype=np.float32)
-        flat_in_shaped, in_tree_recreated = tree_util.tree_flatten(((ex_input,),{}))
-
-        # Output shape
-        out_shaped = jax.eval_shape(fun, ex_input)
-        flat_out_shaped, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
-
-        compiled = deserialize_and_load(serialized_compiled, in_tree_recreated, out_tree_recreated)
-
-        with jax.sharding.Mesh(np.array(jax.devices()), ('data',)):
-            print("Running f after loading...",flush=True)
-            cost = compiled.cost_analysis()[0]['flops']
-            print(f"{cost=}")
-            out = compiled(ex_input)
-            print("computed out")
-            print(f"{out=}")
-            out_gathered = jax.experimental.multihost_utils.process_allgather(out)
-            print(f"{out_gathered=}")
-            print("Successfully Ran f!",flush=True)
+        f = compiled
+    elif args.save:
+        f = jitted
     else:
-        with jax.sharding.Mesh(np.array(jax.devices()), ('data',)):
-            print("Running the native f",flush=True)
-            print(f"{jitted(ex_input)}")
-            print("Successfully Ran f!",flush=True)
+        raise Exception("You must run f either by loading a compiled version or jitting it")
+    print("Running f...",flush=True)
+    run_f(f, input_args, input_kwargs, mesh, print_cost=args.load)
+    print("Successfully Ran f!",flush=True)
