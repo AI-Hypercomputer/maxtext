@@ -801,7 +801,9 @@ def run_gke_node_pool_create_command(args, system_characteristics) -> int:
     if not user_input_approves_delete:
       will_delete = False
 
-  if (will_delete):
+  if (not will_delete):
+    xpk_print(f'Skipping delete commands. Continuing to next step.')
+  else:
     for existing_node_pool_name in node_pools_to_delete:
       if (
           existing_node_pool_name.find(f'{args.cluster}-np-') == 0
