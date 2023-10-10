@@ -613,21 +613,21 @@ def get_zone():
   return zone_outputs[-1]  # The zone name lives on the last line of the output
 
 
-def get_zone_from_zone_or_region(name, cluster_type) -> str:
+def get_zone_from_zone_or_region(zone_name, cluster_type) -> str:
   """Helper function that returns value for zone or region flag.
 
   Args:
-    name: name of the zone or region.
+    zone_name: name of the zone.
     cluster_type: cluster type, either zonal or regional.
 
   Returns:
      The region or zone name.
   """
   if cluster_type == "regional":
-    zone_terms = name.split('-')
+    zone_terms = zone_name.split('-')
     return f"--region={zone_terms[0] + '-' + zone_terms[1]}"
   elif cluster_type == "zonal":
-    return f"--zone={name}"
+    return f"--zone={zone_name}"
   else:
     raise ValueError(f"{cluster_type=} can either be `zonal` or `regional`.")
 
@@ -650,7 +650,7 @@ def run_gke_cluster_create_command(args) -> int:
       ' --max-nodes 1000 --min-nodes 5'
       f' --project={args.project} {region}'
       f' --cluster-version={args.gke_version} --location-policy=BALANCED'
-      f' --machine-type={args.cluster_machine_type}'
+      f' --machine-type={args.cluster_cpu_machine_type}'
       ' --scopes=storage-full,gke-default'
       f' {args.custom_cluster_arguments}'
   )
@@ -828,14 +828,23 @@ def run_gke_clusters_list_command(args) -> int:
   Returns:
     0 if successful and 1 otherwise.
   """
-  command = (
+  command_zonal = (
       'gcloud container clusters list'
-      f' --project={args.project} {get_zone_from_zone_or_region(args.zone, args.cluster_type)}'
+      f' --project={args.project} {get_zone_from_zone_or_region(args.zone, "zonal")}'
   )
-  return_code = run_command_with_updates(command, 'Cluster List', args)
-
-  if return_code != 0:
-    xpk_print(f'Cluster list request returned ERROR {return_code}')
+  return_code_zonal = run_command_with_updates(command_zonal, 'Cluster List for zonal', args)
+  
+  command_regional = (
+      'gcloud container clusters list'
+      f' --project={args.project} {get_zone_from_zone_or_region(args.zone, "regional")}'
+  )
+  return_code_regional = run_command_with_updates(command_regional, 'Cluster List for regional', args)
+  
+  if return_code_zonal != 0:
+    xpk_print(f'Cluster list request for zones returned ERROR {return_code_zonal}')
+    return 1
+  if return_code_regional != 0:
+    xpk_print(f'Cluster list request for regions returned ERROR {return_code_regional}')
     return 1
 
   return 0
@@ -1463,13 +1472,18 @@ cluster_create_optional_arguments.add_argument(
   '--cluster-type',
     type=str,
     default='regional',
-    help='regional or zonal cluster type.'
+    choices=['regional', 'zonal']
+    help='Set cluster type to regional or zonal.'
 )
 cluster_create_optional_arguments.add_argument(
-  '--cluster-machine-type',
+  '--cluster-cpu-machine-type',
     type=str,
     default='e2-standard-32',
-    help='cluster machine type.'
+    help=(
+      'Set the machine tpu within the default cpu node pool. For zonal '
+      'clusters, make sure that the zone supports the machine type, and for '
+      'regional clusters, all zones in the region supports the machine type.'
+    )
 )
 add_shared_arguments(cluster_create_optional_arguments)
 cluster_create_optional_arguments.add_argument(
@@ -1521,6 +1535,13 @@ cluster_delete_required_arguments.add_argument(
 
 ### Optional Arguments
 add_shared_arguments(cluster_delete_optional_arguments)
+cluster_delete_optional_arguments = cluster_delete_parser.add_argument(
+    '--cluster-type',
+    type=str,
+    default='regional',
+    choices=['regional', 'zonal'],
+    help='Set cluster type to regional or zonal.'
+)
 cluster_delete_parser.set_defaults(func=cluster_delete)
 
 ### "cluster cacheimage" command parser ###
