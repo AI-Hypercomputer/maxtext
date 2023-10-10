@@ -100,11 +100,12 @@ def run_f(f, input_args, input_kwargs, mesh, print_cost=False):
             out_sum = jnp.sum(out_gathered)
             print(f"{out_sum=}")
 
+# TODO(mattdavidow): Fix these APIs - probably should pass the mesh instead of mesh_axis_names
 # def save_compiled_full(f, compiled_name, in_shardings, out_shardings, mesh_axis_names)
 
-# def load_compiled_full(f, compiled_name, input_args, input_kwargs)
+# def load_compiled_full(f, compiled_name, input_args, input_kwargs, mesh_axis_names)
 
-# def run_full(f, input_args, input_kwarts, mesh_axis_names)
+# def run_full(f, input_args, input_kwarts, mesh_axis_names, mesh_axis_names)
 
 
 #### Start code ####
