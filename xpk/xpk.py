@@ -1472,7 +1472,7 @@ cluster_create_optional_arguments.add_argument(
   '--cluster-type',
     type=str,
     default='regional',
-    choices=['regional', 'zonal']
+    choices=['regional', 'zonal'],
     help='Set cluster type to regional or zonal.'
 )
 cluster_create_optional_arguments.add_argument(
