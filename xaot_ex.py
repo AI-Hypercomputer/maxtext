@@ -23,8 +23,7 @@ args = parser.parse_args()
 def fun(x):
     return x * x
 
-if args.save:
-    ## Use "fake" topology devices to compile f
+def make_fake_devices():
     if args.version=='v4-8':
         fake_devices = get_topology_desc(
             platform='tpu',
@@ -41,21 +40,42 @@ if args.save:
         chips_per_host_bounds=(2, 2, 2),
         num_slices=1,
     ).devices
+    return fake_devices
 
+def jit_and_compile(mesh, fun, in_shardings, out_shardings):
     # jit, lower, and compile f using fake devices
-    with jax.sharding.Mesh(np.array(fake_devices), ('data',)):
+    with mesh:
         jitted = pjit.pjit(
             fun, in_shardings=P('data'), out_shardings=P(None, 'data')
         )
         lowered = jitted.lower(
             jax.core.ShapedArray(shape=(128, 128), dtype=np.float32)
         )
-    orig_compiled = lowered.compile()
+    compiled = lowered.compile()
+    return jitted, lowered, compiled
+
+def save_compiled(compiled, save_name):
+    # Serialize and save the compiled object
+    serialized, in_tree, out_tree = serialize(compiled)
+    with open(save_name, "wb") as f:
+        pickle.dump(serialized, f)
+
+#### Start code ####
+
+# Shared between save and load
+compiled_name = f"x_aot_{args.version}.pickle"
+mesh_axis_names = ('data',)
+in_shardings=P('data')
+out_shardings=P(None, 'data')
+
+if args.save:
+    fake_devices = make_fake_devices()
+    fake_device_mesh = jax.sharding.Mesh(np.array(fake_devices), mesh_axis_names)
+
+    jitted, lowered, compiled = jit_and_compile(fake_device_mesh, fun, in_shardings, out_shardings)
 
     # Serialize and save the compiled object
-    serialized, in_tree, out_tree = serialize(orig_compiled)
-    with open(f"x_aot_{args.version}.pickle", "wb") as f:
-        pickle.dump(serialized, f)
+    save_compiled(compiled, compiled_name)
 
 if args.run_f:
     # This is not a sharded array. However we tell pjit above that the input is sharded along the "data" axis.
