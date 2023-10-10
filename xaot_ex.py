@@ -23,6 +23,19 @@ args = parser.parse_args()
 def fun(x):
     return x * x
 
+def gen_data_base():
+     return (2 + jax.process_index()) * jnp.ones((128, 128), dtype=jnp.bfloat16)
+
+def gen_data_sharded(mesh):
+    data_sharding = jax.sharding.NamedSharding(mesh, P("data"))
+    jit_gen_data_sharded = jax.jit(
+        gen_data_base, out_shardings=data_sharding
+    )
+    out_shaped = jax.eval_shape(jit_gen_data_sharded)
+    print(f"{out_shaped=}")
+    return jit_gen_data_sharded
+
+
 def make_fake_devices():
     if args.version=='v4-8':
         fake_devices = get_topology_desc(
@@ -42,15 +55,13 @@ def make_fake_devices():
     ).devices
     return fake_devices
 
-def jit_and_compile(mesh, fun, in_shardings, out_shardings):
+def jit_and_compile(fun, input_args, input_kwargs, mesh, in_shardings, out_shardings):
     # jit, lower, and compile f using fake devices
     with mesh:
         jitted = pjit.pjit(
-            fun, in_shardings=P('data'), out_shardings=P(None, 'data')
+            fun, in_shardings=in_shardings, out_shardings=out_shardings
         )
-        lowered = jitted.lower(
-            jax.core.ShapedArray(shape=(128, 128), dtype=np.float32)
-        )
+        lowered = jitted.lower(*input_args, **input_kwargs)
     compiled = lowered.compile()
     return jitted, lowered, compiled
 
@@ -81,9 +92,13 @@ def run_f(f, input_args, input_kwargs, mesh, print_cost=False):
         print("computed out")
         try:
             print(f"{out=}")
+            out_sum = jnp.sum(out_gathered)
+            print(f"{out_sum=}")
         except:
             out_gathered = jax.experimental.multihost_utils.process_allgather(out)
             print(f"{out_gathered=}")
+            out_sum = jnp.sum(out_gathered)
+            print(f"{out_sum=}")
 
 # def save_compiled_full(f, compiled_name, in_shardings, out_shardings, mesh_axis_names)
 
@@ -104,15 +119,22 @@ if args.save:
     out_shardings=P(None, 'data')
     fake_devices = make_fake_devices()
     fake_device_mesh = jax.sharding.Mesh(np.array(fake_devices), mesh_axis_names)
-    jitted, lowered, compiled = jit_and_compile(fake_device_mesh, fun, in_shardings, out_shardings)
+    fake_data= gen_data_sharded(fake_device_mesh)
+    fake_data_shape = jax.eval_shape(fake_data)
+    jitted, lowered, compiled = jit_and_compile(fun, (fake_data_shape,), {}, fake_device_mesh, in_shardings, out_shardings)
     save_compiled(compiled, compiled_name) # Serialize and save the compiled object
     print("Saved compiled function!", flush=True)
 
 if args.load:
     print("Loading the compiled function...", flush=True)
     serialized_compiled = load_compiled(compiled_name)
-    ex_input = 2.0 * jnp.ones((128, 128), dtype=jnp.float32)
-    input_args = (ex_input,)
+
+    #ex_input = 2.0 * jnp.ones((128, 128), dtype=jnp.float32)
+    mesh = jax.sharding.Mesh(np.array(jax.devices()), mesh_axis_names)
+    ex_input = gen_data_sharded(mesh)
+    ex_input_shape = jax.eval_shape(ex_input)
+
+    input_args = (ex_input_shape,)
     input_kwargs = {}
     in_tree_recreated, out_tree_recreated = get_io_trees(input_args, input_kwargs)
     compiled = deserialize_and_load(serialized_compiled, in_tree_recreated, out_tree_recreated)
@@ -123,9 +145,11 @@ if args.run_f:
 
     # This is not a sharded array. However we tell pjit above that the input is sharded along the "data" axis.
     # Why does this work?
-    ex_input = 2.0 * jnp.ones((128, 128), dtype=jnp.float32)
-
     mesh = jax.sharding.Mesh(np.array(jax.devices()), mesh_axis_names)
+    jit_ex_input = gen_data_sharded(mesh)
+    ex_input = jax.block_until_ready(jit_ex_input())
+    input_args = (ex_input,)
+    input_kwargs = {}
     if args.load:
         f = compiled
     elif args.save:
