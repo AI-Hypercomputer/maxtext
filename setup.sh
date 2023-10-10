@@ -15,12 +15,14 @@
 # limitations under the License.
 
 # Description:
-# bash setup.sh MODE={stable,nightly,head,libtpu-only} LIBTPU_GCS_PATH={gcs_path_to_custom_libtpu}
+# bash setup.sh MODE={stable,nightly,head,libtpu-only} LIBTPU_GCS_PATH={gcs_path_to_custom_libtpu} SKIP_REQUIREMENTS={true,false}
 
 # You need to specificy a MODE, default value stable. 
 # You have the option to provide a LIBTPU_GCS_PATH that points to a libtpu.so provided to you by Google. 
 # In head MODE and libtpu-only MODE, the LIBTPU_GCS_PATH is mandatory.
 # For MODE=stable you may additionally specify JAX_VERSION, e.g. JAX_VERSION=0.4.13
+# Set SKIP_REQUIREMENTS=true if you don't want to install packages from requirements.txt, any other value
+# will install packages from requirements.txt.
 
 
 # Enable "exit immediately if any command fails" option
@@ -38,6 +40,10 @@ fi
 
 if [[ $LIBTPU_GCS_PATH == NONE ]]; then
   unset LIBTPU_GCS_PATH
+fi
+
+if [[ $SKIP_REQUIREMENTS == NONE ]]; then
+    SKIP_REQUIREMENTS="false"
 fi
 
 if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE) ]]; then
@@ -131,26 +137,36 @@ elif [[ $MODE == "nightly" ]]; then
 elif [[ $MODE == "head" ]]; then 
 # Head mode
     echo "Installing jax and jaxlib from head"
-    cd $HOME && git clone https://github.com/google/jax.git
-    cd $HOME && git clone https://github.com/openxla/xla.git
+    if [ -d "$HOME/jax" ]; then
+        cd "$HOME/jax" && git pull origin main
+    else
+        cd $HOME && git clone https://github.com/google/jax.git
+    fi
+    if [ -d "$HOME/xla" ]; then
+        cd "$HOME/xla" && git pull origin main
+    else
+        cd $HOME && git clone https://github.com/openxla/xla.git
+    fi
     cd $HOME/jax
     pip3 install numpy wheel build
-    python build/build.py --bazel_options=--override_repository=xla=$HOME/jaxlib
-    pip install dist/*.whl  # installs jaxlib (includes XLA)
+    python3 build/build.py --enable_tpu --bazel_options=--override_repository=xla=$HOME/xla
+    pip install dist/*.whl --force-reinstall --no-deps # installs jaxlib (includes XLA)
+    pip install -e .  # installs jax
     if [[ -n "$LIBTPU_GCS_PATH" ]]; then
+        installed_libtpu_path=$(python3 -c '
+        import os; import jax; print(os.environ["TPU_LIBRARY_PATH"])
+        ')
         # Install custom libtpu
-        echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
+        echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $installed_libtpu_path"
         # Install required dependency
         pip3 install -U crcmod
         # Copy libtpu.so from GCS path
-        gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+        gsutil cp "$LIBTPU_GCS_PATH" "$installed_libtpu_path"
     else
         echo -e "\n\nError: You must provide a custom libtpu for head mode.\n\n"
         exit 1
     fi
 
-    python3 build/build.py --enable_tpu --bazel_options="--override_repository=xla=$HOME/xla"
-    pip3 install dist/jaxlib-*-cp*-manylinux2014_x86_64.whl --force-reinstall --no-deps
     echo "Installing nightly tensorboard plugin profile"
     pip3 install tbp-nightly --upgrade
 else
@@ -158,5 +174,7 @@ else
     exit 1
 fi
 
-# Install dependencies from requirements.txt
-cd $run_name_folder_path && pip3 install -r requirements.txt
+if [[ $SKIP_REQUIREMENTS != "true" ]]; then 
+    # Install dependencies from requirements.txt
+    cd $run_name_folder_path && pip3 install -r requirements.txt
+fi
