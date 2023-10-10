@@ -833,13 +833,13 @@ def run_gke_clusters_list_command(args) -> int:
       f' --project={args.project} {get_zone_from_zone_or_region(args.zone, "zonal")}'
   )
   return_code_zonal = run_command_with_updates(command_zonal, 'Cluster List for zonal', args)
-  
+
   command_regional = (
       'gcloud container clusters list'
       f' --project={args.project} {get_zone_from_zone_or_region(args.zone, "regional")}'
   )
   return_code_regional = run_command_with_updates(command_regional, 'Cluster List for regional', args)
-  
+
   if return_code_zonal != 0:
     xpk_print(f'Cluster list request for zones returned ERROR {return_code_zonal}')
     return 1
