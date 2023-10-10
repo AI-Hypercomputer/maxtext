@@ -130,6 +130,13 @@ elif [[ $MODE == "nightly" ]]; then
     pip3 install tbp-nightly --upgrade
 elif [[ $MODE == "head" ]]; then 
 # Head mode
+    echo "Installing jax and jaxlib from head"
+    cd $HOME && git clone https://github.com/google/jax.git
+    cd $HOME && git clone https://github.com/openxla/xla.git
+    cd $HOME/jax
+    pip3 install numpy wheel build
+    python build/build.py --bazel_options=--override_repository=xla=$HOME/jaxlib
+    pip install dist/*.whl  # installs jaxlib (includes XLA)
     if [[ -n "$LIBTPU_GCS_PATH" ]]; then
         # Install custom libtpu
         echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
@@ -142,16 +149,6 @@ elif [[ $MODE == "head" ]]; then
         exit 1
     fi
 
-    echo "Installing jax-head, jaxlib-head"
-    # Install jax from GitHub head
-    echo "Installing jax from HEAD..."
-    # Install jax from GitHub head
-    pip3 install git+https://github.com/google/jax
-    # Install jaxlib from GitHub head
-    echo "Installing jaxlib from HEAD..."
-    cd $HOME && git clone https://github.com/openxla/xla
-    cd $HOME && git clone https://github.com/google/jax.git
-    cd $HOME/jax
     python3 build/build.py --enable_tpu --bazel_options="--override_repository=xla=$HOME/xla"
     pip3 install dist/jaxlib-*-cp*-manylinux2014_x86_64.whl --force-reinstall --no-deps
     echo "Installing nightly tensorboard plugin profile"
