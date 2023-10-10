@@ -613,7 +613,7 @@ def get_zone():
   return zone_outputs[-1]  # The zone name lives on the last line of the output
 
 
-def get_zone_from_zone_or_region(zone_name, cluster_type) -> str:
+def get_cluster_type_argument(zone_name, cluster_type) -> str:
   """Helper function that returns value for zone or region flag.
 
   Args:
@@ -643,7 +643,7 @@ def run_gke_cluster_create_command(args) -> int:
   """
 
   # Create the cluster.
-  region = get_zone_from_zone_or_region(args.zone, args.cluster_type)
+  region = get_cluster_type_argument(args.zone, args.cluster_type)
   command = (
       'gcloud beta container clusters create'
       f' {args.cluster} --release-channel rapid  --enable-autoscaling'
@@ -673,7 +673,7 @@ def get_all_clusters_programmatic(args) -> tuple[list[str], int]:
   """
   command = (
       'gcloud container clusters list'
-      f' --project={args.project} {get_zone_from_zone_or_region(args.zone, args.cluster_type)}'
+      f' --project={args.project} {get_cluster_type_argument(args.zone, args.cluster_type)}'
   )
   return_code, raw_cluster_output = run_command_for_value(
       command, 'Find if Cluster Exists', args
@@ -709,7 +709,7 @@ def get_all_nodepools_programmatic(args) -> tuple[list[str], int]:
   command = (
       'gcloud beta container node-pools list'
       ' --cluster'
-      f' {args.cluster} --project={args.project} {get_zone_from_zone_or_region(args.zone, args.cluster_type)}'
+      f' {args.cluster} --project={args.project} {get_cluster_type_argument(args.zone, args.cluster_type)}'
   )
   return_code, raw_nodepool_output = (
       run_command_for_value(command, 'Get All Node Pools', args)
@@ -756,7 +756,7 @@ def run_gke_node_pool_create_command(args, system_characteristics) -> int:
         f' {node_pool_name} --node-version={args.gke_version}'
         f' --placement-type=COMPACT --cluster={args.cluster}'
         f' --project={args.project} --node-locations={args.zone}'
-        f' {get_zone_from_zone_or_region(args.zone, args.cluster_type)}'
+        f' {get_cluster_type_argument(args.zone, args.cluster_type)}'
         f' --num-nodes={system_characteristics.vms_per_slice}'
         f' --machine-type={system_characteristics.gce_machine_type}'
         f' --tpu-topology={system_characteristics.topology}'
@@ -777,7 +777,7 @@ def run_gke_node_pool_create_command(args, system_characteristics) -> int:
       command = (
           'gcloud beta container node-pools delete'
           f' {existing_node_pool_name} --cluster={args.cluster}'
-          f' --zone={get_zone_from_zone_or_region(args.zone, args.cluster_type)} --project={args.project} --quiet'
+          f' --zone={get_cluster_type_argument(args.zone, args.cluster_type)} --project={args.project} --quiet'
       )
       task = f'Nodepool-Delete-{existing_node_pool_name}'
       commands.append(command)
@@ -807,7 +807,7 @@ def run_gke_cluster_delete_command(args) -> int:
   """
   command = (
       'gcloud beta container clusters delete'
-      f' {args.cluster} --project={args.project} {get_zone_from_zone_or_region(args.zone, args.cluster_type)} --quiet'
+      f' {args.cluster} --project={args.project} {get_cluster_type_argument(args.zone, args.cluster_type)} --quiet'
   )
 
   return_code = run_command_with_updates(command, 'Cluster Delete', args)
@@ -830,13 +830,13 @@ def run_gke_clusters_list_command(args) -> int:
   """
   command_zonal = (
       'gcloud container clusters list'
-      f' --project={args.project} {get_zone_from_zone_or_region(args.zone, "zonal")}'
+      f' --project={args.project} {get_cluster_type_argument(args.zone, "zonal")}'
   )
   return_code_zonal = run_command_with_updates(command_zonal, 'Cluster List for zonal', args)
 
   command_regional = (
       'gcloud container clusters list'
-      f' --project={args.project} {get_zone_from_zone_or_region(args.zone, "regional")}'
+      f' --project={args.project} {get_cluster_type_argument(args.zone, "regional")}'
   )
   return_code_regional = run_command_with_updates(command_regional, 'Cluster List for regional', args)
 
@@ -861,7 +861,7 @@ def set_cluster_command(args) -> int:
   """
   command = (
       'gcloud container clusters get-credentials'
-      f' {args.cluster} {get_zone_from_zone_or_region(args.zone, args.cluster_type)} --project={args.project} &&'
+      f' {args.cluster} {get_cluster_type_argument(args.zone, args.cluster_type)} --project={args.project} &&'
       ' kubectl config view'
   )
   return_code = run_command_with_updates(
@@ -1026,7 +1026,7 @@ def cluster_create(args) -> int:
   xpk_print(
       'See your GKE Cluster here:'
       # pylint: disable=line-too-long
-      f' https://console.cloud.google.com/kubernetes/clusters/details/{get_zone_from_zone_or_region(args.zone, args.cluster_type)}/{args.cluster}/details?project={args.project}'
+      f' https://console.cloud.google.com/kubernetes/clusters/details/{get_cluster_type_argument(args.zone, args.cluster_type)}/{args.cluster}/details?project={args.project}'
   )
   xpk_exit(0)
 
@@ -1110,7 +1110,7 @@ def cluster_describe(args) -> int:
 
   command = (
       f'gcloud container node-pools  list --cluster {args.cluster} '
-      f'--project={args.project} {get_zone_from_zone_or_region(args.zone, args.cluster_type)}'
+      f'--project={args.project} {get_cluster_type_argument(args.zone, args.cluster_type)}'
   )
 
   return_code = run_command_with_updates(command, 'Cluster nodepool list', args)
@@ -1270,7 +1270,7 @@ def workload_create(args) -> int:
   xpk_print(
       'Follow your workload here:'
       # pylint: disable=line-too-long
-      f' https://console.cloud.google.com/kubernetes/service/{get_zone_from_zone_or_region(args.zone, args.cluster_type)}/{args.cluster}/default/{args.workload}/details?project={args.project}'
+      f' https://console.cloud.google.com/kubernetes/service/{get_cluster_type_argument(args.zone, args.cluster_type)}/{args.cluster}/default/{args.workload}/details?project={args.project}'
   )
   xpk_exit(0)
 
