@@ -126,6 +126,95 @@ def calculate_num_params_from_pytree(params):
   total_parameters = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes)
   return total_parameters
 
+# AOT functions
+def fun(x):
+    return x * x
+
+def gen_data_base():
+     return (2 + jax.process_index()) * jnp.ones((128, 128), dtype=jnp.bfloat16)
+
+def gen_data_sharded(mesh):
+    data_sharding = jax.sharding.NamedSharding(mesh, P("data"))
+    jit_gen_data_sharded = jax.jit(
+        gen_data_base, out_shardings=data_sharding
+    )
+    out_shaped = jax.eval_shape(jit_gen_data_sharded)
+    print(f"{out_shaped=}")
+    return jit_gen_data_sharded
+
+
+def make_fake_devices():
+    if args.version=='v4-8':
+        fake_devices = get_topology_desc(
+            platform='tpu',
+            topology_name=f'v4:2x2x1',
+            chip_config_name='megacore',
+            chips_per_host_bounds=(2, 2, 1),
+            num_slices=1,
+        ).devices
+    elif args.version=='v4-16':
+        fake_devices = get_topology_desc(
+        platform='tpu',
+        topology_name=f'v4:2x2x2',
+        chip_config_name='megacore',
+        chips_per_host_bounds=(2, 2, 2),
+        num_slices=1,
+    ).devices
+    return fake_devices
+
+def jit_and_compile(fun, input_args, input_kwargs, mesh, in_shardings, out_shardings):
+    # jit, lower, and compile f using fake devices
+    with mesh:
+        jitted = pjit.pjit(
+            fun, in_shardings=in_shardings, out_shardings=out_shardings
+        )
+        lowered = jitted.lower(*input_args, **input_kwargs)
+    compiled = lowered.compile()
+    return jitted, lowered, compiled
+
+def save_compiled(compiled, save_name):
+    # Serialize and save the compiled object
+    serialized, in_tree, out_tree = serialize(compiled)
+    with open(save_name, "wb") as f:
+        pickle.dump(serialized, f)
+
+def load_compiled(save_name):
+    with open(save_name, "rb") as f:
+        serialized_compiled = pickle.load(f)
+    return serialized_compiled
+
+def get_io_trees(input_args, input_kwargs):
+    _, in_tree_recreated = tree_util.tree_flatten((input_args, input_kwargs))
+    out_shaped = jax.eval_shape(fun, *input_args, **input_kwargs)
+    _, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
+    return in_tree_recreated, out_tree_recreated
+
+def run_f(f, input_args, input_kwargs, mesh, print_cost=False):
+    with mesh:
+        if print_cost:
+            cost = f.cost_analysis()[0]['flops']
+            print(f"{cost=}")
+
+        out = f(*input_args, **input_kwargs)
+        print("computed out")
+        try:
+            print(f"{out=}")
+            out_sum = jnp.sum(out_gathered)
+            print(f"{out_sum=}")
+        except:
+            out_gathered = jax.experimental.multihost_utils.process_allgather(out)
+            print(f"{out_gathered=}")
+            out_sum = jnp.sum(out_gathered)
+            print(f"{out_sum=}")
+
+
+
+
+
+
+
+
+
 # -----------------------------------------------------------------------------
 # Top-level Functions
 # -----------------------------------------------------------------------------
