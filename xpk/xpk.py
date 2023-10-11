@@ -253,6 +253,27 @@ UserFacingNameToSystemCharacteristics = {
     'v4-64': SystemCharacteristics(
       '2x4x4', 8,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
     ),
+    'v4-128': SystemCharacteristics(
+      '4x4x4', 16,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-256': SystemCharacteristics(
+      '4x4x8', 32,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-512': SystemCharacteristics(
+      '4x8x8', 64,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-1024': SystemCharacteristics(
+      '8x8x8', 128,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-1536': SystemCharacteristics(
+      '8x8x12', 192,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-2048': SystemCharacteristics(
+      '8x8x16', 256,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-4096': SystemCharacteristics(
+      '8x16x16', 512,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
 }
 
 
