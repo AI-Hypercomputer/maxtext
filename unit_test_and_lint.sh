@@ -14,8 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-pylint MaxText/
-pylint xpk/
+python3 -m pylint $(git ls-files '*.py')
 
 cd MaxText
 python3 -m pytest
