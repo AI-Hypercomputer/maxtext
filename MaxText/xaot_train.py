@@ -247,10 +247,13 @@ def train_loop(config, state=None):
   compiled_name = f"x_aot_train_{config.topology}.pickle"
   if config.save_xaot:
     topology_mesh = max_utils.get_topology_mesh(config)
+    topology_model = Transformer(config, topology_mesh)
     topology_data_iterator, _ = create_data_iterator_with_tokenizer(config, topology_mesh)
-    func_input_args, func_input_kwargs, state_mesh_annotations = max_utils.gen_input_data(model, tx, config, init_rng, topology_mesh, topology_data_iterator)
-    in_shardings, out_shardings = max_utils.get_shardings(topology_mesh)
-    max_utils.save_compiled_full(train_step, compiled_name, func_input_args, func_input_kwargs, in_shardings, out_shardings, topology_mesh)
+    func_input_args, func_input_kwargs, state_mesh_annotations = max_utils.gen_input_data(topology_model, tx, config, init_rng, topology_mesh, data_iterator)
+    in_shardings, out_shardings = max_utils.get_shardings(topology_mesh, state_mesh_annotations, config)
+    static_argnums=(0,1)
+    donate_argnums=2
+    max_utils.save_compiled_full(train_step, compiled_name, func_input_args, func_input_kwargs, in_shardings, out_shardings, static_argnums, donate_argnums, topology_mesh)
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   data_pspec = P(*config.data_sharding)

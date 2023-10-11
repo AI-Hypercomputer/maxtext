@@ -37,9 +37,12 @@ import os
 import subprocess
 from typing import Tuple
 
-
 import pickle
 from flax.serialization import to_bytes
+from jax.experimental.serialize_executable import serialize, deserialize_and_load
+from jax.experimental.topologies import get_topology_desc
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
@@ -117,8 +120,7 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
 
 def create_device_mesh(config, devices=jax.devices(), logging=True):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas """
-  
-  #devices = jax.devices()
+  devices = jax.devices()
   num_devices = len(devices)
   try:
     num_slices = 1 + max([d.slice_index for d in devices])
@@ -128,8 +130,7 @@ def create_device_mesh(config, devices=jax.devices(), logging=True):
   max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
   assert len(devices) > 1, "You must have at least two devices"
 
-  multi_slice_env = hasattr(devices[0], 'slice_index')
-  #multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
+  multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
 
   dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism, config.dcn_tensor_parallelism]
   ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism, config.ici_tensor_parallelism]
@@ -139,9 +140,9 @@ def create_device_mesh(config, devices=jax.devices(), logging=True):
   ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, 'ICI')
 
   if multi_slice_env:
-    mesh = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism, devices=devices)
+    mesh = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism)
   else:
-    mesh = mesh_utils.create_device_mesh(ici_parallelism, devices=devices)
+    mesh = mesh_utils.create_device_mesh(ici_parallelism)
 
   if logging:
     max_logging.log(f"Decided on mesh: {mesh}")
@@ -184,60 +185,6 @@ def init_train_state(model, tx, config, key):
       tx=tx)
   return state
 
-def gen_input_data(model, tx, config, rng, mesh, data_iterator):
-  #model, config, state (S), example_batch (S), example_rng (S)
-  abstract_state, state_mesh_annotations =  get_abstract_state(model, tx, config, rng, mesh)
-  
-  #load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
-  data_iterator_dummy = functools.partial(data_iterator_dummy)
-  example_batch = jax.eval_shape(data_iterator_dummy)
-  example_rng = jax.random.PRNGKey(0)
-  example_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
-  input_args = (model, config, abstract_state, example_batch, example_rng)
-  input_kwargs = {}
-  return input_args, input_kwargs, state_mesh_annotations
-
-def get_shardings(mesh, state_mesh_annotations, config):
-  data_pspec = P(*config.data_sharding)
-  state_mesh_shardings = jax.tree_map(
-      lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
-  data_sharding = jax.tree_map(
-      lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
-  in_shardings = (state_mesh_shardings, data_sharding, None)
-  out_shardings = (state_mesh_shardings, None, None)
-  return in_shardings, out_shardings
-
-def save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, in_shardings, out_shardings, mesh):
-    def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings):
-        # Jit, lower, and compile func, possibly with topology devices
-        with mesh:
-            # jitted = pjit.pjit(
-            #     func, in_shardings=in_shardings, out_shardings=out_shardings
-            # )
-            jitted = jax.jit(func, in_shardings=in_shardings, out_shardings=out_shardings)
-            lowered = jitted.lower(*func_input_args, **func_input_kwargs)
-        compiled = lowered.compile()
-        return jitted, lowered, compiled
-
-    def save_compiled(compiled, save_name):
-        # Serialize and save the compiled object
-        serialized, in_tree, out_tree = serialize(compiled)
-        with open(save_name, "wb") as f:
-            pickle.dump(serialized, f)
-    jitted, lowered, compiled = jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings)
-    save_compiled(compiled, compiled_name) # Serialize and save the compiled object
-
-def get_abstract_state(model, tx, config, rng, mesh):
-  init_train_state_partial = functools.partial(init_train_state, model, tx,
-                                               config)
-  abstract_state = jax.eval_shape(init_train_state_partial, rng)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
-
-  # Initialization
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return abstract_state, state_mesh_annotations
 
 def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
   """ We initialize the model and optimizer state, and optionally load from a
@@ -274,7 +221,6 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
 
     state_mesh_shardings = jax.tree_map(
         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
-    # mattdavidow: This errors with fake devices
     if not state:
       state = jax.jit(
           init_train_state_partial,
@@ -411,3 +357,118 @@ def _cross_entropy_with_logits_bwd(
 
 cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
                                  _cross_entropy_with_logits_bwd)
+
+
+
+
+
+
+
+# Xaot
+def gen_input_data(model, tx, config, rng, mesh, data_iterator):
+  #model, config, state (S), example_batch (S), example_rng (S)
+  abstract_state, state_mesh_annotations =  get_abstract_state(model, tx, config, rng, mesh)
+  
+  # example_batch = None
+  # load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
+  # example_batch = jax.eval_shape(load_partial)
+  example_batch = get_shaped_batch(config)
+  example_rng = jax.random.PRNGKey(0)
+  example_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
+  input_args = (model, config, abstract_state, example_batch, example_rng)
+  input_kwargs = {}
+  return input_args, input_kwargs, state_mesh_annotations
+
+def get_shardings(mesh, state_mesh_annotations, config):
+  data_pspec = P(*config.data_sharding)
+  state_mesh_shardings = jax.tree_map(
+      lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
+  data_sharding = jax.tree_map(
+      lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+  in_shardings = (state_mesh_shardings, data_sharding, None)
+  out_shardings = (state_mesh_shardings, None, None)
+  return in_shardings, out_shardings
+
+def save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, in_shardings, out_shardings, static_argnums, donate_argnums, mesh):
+    def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings):
+        # Jit, lower, and compile func, possibly with topology devices
+        with mesh:
+            # jitted = pjit.pjit(
+            #     func, in_shardings=in_shardings, out_shardings=out_shardings
+            # )
+            jitted = jax.jit(
+              func,
+              in_shardings=in_shardings,
+              out_shardings=out_shardings,
+              static_argnums=static_argnums,
+              donate_argnums=donate_argnums
+            )
+            lowered = jitted.lower(*func_input_args, **func_input_kwargs)
+        compiled = lowered.compile()
+        return jitted, lowered, compiled
+
+    def save_compiled(compiled, save_name):
+        # Serialize and save the compiled object
+        serialized, in_tree, out_tree = serialize(compiled)
+        with open(save_name, "wb") as f:
+            pickle.dump(serialized, f)
+    jitted, lowered, compiled = jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings)
+    save_compiled(compiled, compiled_name) # Serialize and save the compiled object
+
+def get_abstract_state(model, tx, config, rng, mesh):
+  init_train_state_partial = functools.partial(init_train_state, model, tx,
+                                               config)
+  abstract_state = jax.eval_shape(init_train_state_partial, rng)
+  state_logical_annotations = nn.get_partition_spec(abstract_state)
+  unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
+
+  # Initialization
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  return abstract_state, state_mesh_annotations
+
+def get_topology_mesh(config):
+  if config.topology=='v4-8':
+    topology_devices = get_topology_desc(
+        platform='tpu',
+        topology_name=f'v4:2x2x1',
+        chip_config_name='megacore',
+        chips_per_host_bounds=(2, 2, 1),
+        num_slices=1,
+    ).devices
+  elif config.topology=='v4-16':
+    topology_devices = get_topology_desc(
+    platform='tpu',
+    topology_name=f'v4:2x2x2',
+    chip_config_name='megacore',
+    chips_per_host_bounds=(2, 2, 2),
+    num_slices=1,
+).devices
+  topology_devices = create_device_mesh(config, topology_devices)
+  topology_mesh = Mesh(topology_devices, config.mesh_axes)
+  return topology_mesh
+
+
+
+
+
+# Sadness
+def load_next_batch(train_iter, example_batch, config):
+  """Loads the next batch. Can keep reusing the same batch for performance reasons """
+
+  if config.reuse_example_batch and example_batch is not None:
+    return example_batch
+  else:
+    return train_iter()
+
+def get_shaped_batch(config):
+  batch_shape = (int(config.per_device_batch_size * len(jax.local_devices())), config.max_target_length)
+  print(f"{batch_shape=}")
+  batch = {}
+  batch['inputs'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  batch['inputs_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  batch['inputs_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  batch['targets'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  batch['targets_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  batch['targets_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  return batch

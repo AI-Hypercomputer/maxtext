@@ -56,6 +56,7 @@ from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 import max_logging
+import functools
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
@@ -241,6 +242,14 @@ def train_loop(config, state=None):
 
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
+
+  example_batch = None
+  load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
+  example_batch = load_partial()
+  print(f"{example_batch=}")
+  for key in example_batch:
+    print(key)
+    print(example_batch[key].shape)
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   data_pspec = P(*config.data_sharding)
