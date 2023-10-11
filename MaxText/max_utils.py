@@ -38,6 +38,9 @@ import subprocess
 from typing import Tuple
 
 
+import pickle
+from flax.serialization import to_bytes
+
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
   return jax.tree_util.tree_reduce(
@@ -181,7 +184,49 @@ def init_train_state(model, tx, config, key):
       tx=tx)
   return state
 
-def get_abstract_state(model, tx, config, rng, mesh, checkpoint_manager):
+def gen_input_data(model, tx, config, rng, mesh, data_iterator):
+  #model, config, state (S), example_batch (S), example_rng (S)
+  abstract_state, state_mesh_annotations =  get_abstract_state(model, tx, config, rng, mesh)
+  
+  #load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
+  example_batch = jax.eval_shape(data_iterator)
+  example_rng = jax.random.PRNGKey(0)
+  example_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
+  input_args = (model, config, abstract_state, example_batch, example_rng)
+  input_kwargs = {}
+  return input_args, input_kwargs, state_mesh_annotations
+
+def get_shardings(mesh, state_mesh_annotations, config):
+  data_pspec = P(*config.data_sharding)
+  state_mesh_shardings = jax.tree_map(
+      lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
+  data_sharding = jax.tree_map(
+      lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+  in_shardings = (state_mesh_shardings, data_sharding, None)
+  out_shardings = (state_mesh_shardings, None, None)
+  return in_shardings, out_shardings
+
+def save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, in_shardings, out_shardings, mesh):
+    def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings):
+        # Jit, lower, and compile func, possibly with topology devices
+        with mesh:
+            # jitted = pjit.pjit(
+            #     func, in_shardings=in_shardings, out_shardings=out_shardings
+            # )
+            jitted = jax.jit(func, in_shardings=in_shardings, out_shardings=out_shardings)
+            lowered = jitted.lower(*func_input_args, **func_input_kwargs)
+        compiled = lowered.compile()
+        return jitted, lowered, compiled
+
+    def save_compiled(compiled, save_name):
+        # Serialize and save the compiled object
+        serialized, in_tree, out_tree = serialize(compiled)
+        with open(save_name, "wb") as f:
+            pickle.dump(serialized, f)
+    jitted, lowered, compiled = jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings)
+    save_compiled(compiled, compiled_name) # Serialize and save the compiled object
+
+def get_abstract_state(model, tx, config, rng, mesh):
   init_train_state_partial = functools.partial(init_train_state, model, tx,
                                                config)
   abstract_state = jax.eval_shape(init_train_state_partial, rng)

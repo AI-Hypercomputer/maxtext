@@ -1,16 +1,17 @@
-from jax.experimental.topologies import get_topology_desc
 import jax
-from jax.experimental import pjit
 from jax.sharding import PartitionSpec as P
-import numpy as np
-from jax.experimental.serialize_executable import serialize, deserialize_and_load
-import pickle
+from jax import tree_util
 import jax.numpy as jnp
+
+from jax.experimental.topologies import get_topology_desc
+from jax.experimental.serialize_executable import serialize, deserialize_and_load
+
+import pickle
 from flax.serialization import to_bytes
 import msgpack
-from jax import tree_util
-import argparse
 
+import argparse
+import numpy as np
 
 parser = argparse.ArgumentParser(description='Xaot example options')
 parser.add_argument('--save', type=bool, default=True, action=argparse.BooleanOptionalAction)
