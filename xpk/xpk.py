@@ -791,7 +791,7 @@ def run_gke_node_pool_create_command(args, system_characteristics) -> int:
       command = (
           'gcloud beta container node-pools delete'
           f' {existing_node_pool_name} --cluster={args.cluster}'
-          f' --region={zone_to_region(args.zone)} --project={args.project} --quiet'
+          f' --zone={zone_to_region(args.zone)} --project={args.project} --quiet'
       )
       task = f'Nodepool-Delete-{existing_node_pool_name}'
       commands.append(command)
@@ -842,7 +842,10 @@ def run_gke_clusters_list_command(args) -> int:
   Returns:
     0 if successful and 1 otherwise.
   """
-  command = f" --project={args.project} --region={zone_to_region(args.zone)}"
+  command = (
+      'gcloud container clusters list'
+      f' --project={args.project} --region={zone_to_region(args.zone)}'
+  )
   return_code = run_command_with_updates(command, 'Cluster List', args)
   if return_code != 0:
     xpk_print(f'Cluster list request returned ERROR {return_code}')
@@ -862,7 +865,7 @@ def set_cluster_command(args) -> int:
   """
   command = (
       'gcloud container clusters get-credentials'
-      f' {args.cluster} --region{zone_to_region(args.zone)} --project={args.project} &&'
+      f' {args.cluster} --region={zone_to_region(args.zone)} --project={args.project} &&'
       ' kubectl config view'
   )
   return_code = run_command_with_updates(
@@ -1355,12 +1358,12 @@ def add_shared_arguments(custom_parser):
       help="GCE project name, defaults to 'gcloud config project.'",
   )
   custom_parser.add_argument(
-      '--region',
+      '--zone',
       type=str,
       default=None,
       help=(
           "GCE zone, e.g. us-central2-b, defaults to 'gcloud config"
-          " compute/zone.'Only one of --region or --region is allowed in a"
+          " compute/zone.'Only one of --zone or --region is allowed in a"
           ' command.'
       ),
   )
