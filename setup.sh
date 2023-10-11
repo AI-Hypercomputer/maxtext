@@ -150,8 +150,8 @@ elif [[ $MODE == "head" ]]; then
     cd $HOME/jax
     pip3 install numpy wheel build
     python3 build/build.py --enable_tpu --bazel_options=--override_repository=xla=$HOME/xla
-    pip install dist/*.whl --force-reinstall --no-deps # installs jaxlib (includes XLA)
-    pip install -e .  # installs jax
+    pip3 install dist/*.whl --force-reinstall --no-deps # installs jaxlib (includes XLA)
+    pip3 install -e .  # installs jax
     if [[ -n "$LIBTPU_GCS_PATH" ]]; then
         installed_libtpu_path=$(python3 -c '
         import os; import jax; print(os.environ["TPU_LIBRARY_PATH"])
