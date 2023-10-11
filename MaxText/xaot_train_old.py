@@ -274,7 +274,8 @@ def train_loop(config, state=None):
   #   data_shuffle_seed = config.data_shuffle_seed,
   # )
 
-  state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  #state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  state, state_mesh_annotations = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   data_pspec = P(*config.data_sharding)
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
@@ -284,7 +285,14 @@ def train_loop(config, state=None):
 
   example_batch = None
   example_rng = jax.random.PRNGKey(0)
-  example_batch = load_next_batch(data_iterator, example_batch, config)
+  print(f"{example_rng=}")
+  example_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
+  print(f"{example_rng=}")
+  #example_rng = jax.eval_shape(example_rng)
+  #example_batch = load_next_batch(data_iterator, example_batch, config)
+  load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
+  example_batch = jax.eval_shape(load_partial)
+  print(f"{example_batch=}")
   compiled_pickle_filename = f"x_aot_train_{topo}.pickle"
 
   def run_one_step(compiled, state, example_batch, example_rng):
@@ -312,6 +320,10 @@ def train_loop(config, state=None):
       )
       print("Jitted train step!!!")
       print("Lowering jitted train step...")
+      print(f"{model=}")
+      print(f"{state=}")
+      print(f"{example_batch=}")
+      print(f"{example_rng=}")
       lowered = jitted.lower(model, config, state, example_batch, example_rng)
       print("Lowered jitted train step!!!")
 
