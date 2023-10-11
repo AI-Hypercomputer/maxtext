@@ -189,7 +189,8 @@ def gen_input_data(model, tx, config, rng, mesh, data_iterator):
   abstract_state, state_mesh_annotations =  get_abstract_state(model, tx, config, rng, mesh)
   
   #load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
-  example_batch = jax.eval_shape(data_iterator)
+  data_iterator_dummy = functools.partial(data_iterator_dummy)
+  example_batch = jax.eval_shape(data_iterator_dummy)
   example_rng = jax.random.PRNGKey(0)
   example_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
   input_args = (model, config, abstract_state, example_batch, example_rng)
