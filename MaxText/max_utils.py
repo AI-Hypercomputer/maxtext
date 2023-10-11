@@ -26,8 +26,6 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
 
-from jax.experimental.pjit import pjit
-
 import json
 import flax
 from flax.training import train_state
@@ -37,6 +35,7 @@ from flax.linen import partitioning as nn_partitioning
 import optax
 import os
 import subprocess
+from typing import Tuple
 
 
 def l2norm_pytree(x):
@@ -46,11 +45,11 @@ def l2norm_pytree(x):
   ) ** 0.5
 
 def activate_profiler(config):
-  if config.enable_profiler:
+  if jax.process_index() == 0 and config.enable_profiler:
     jax.profiler.start_trace(config.tensorboard_dir)
 
 def deactivate_profiler(config):
-  if config.enable_profiler:
+  if jax.process_index() == 0 and config.enable_profiler:
     jax.profiler.stop_trace()
 
 def _prepare_metrics_for_json(metrics, step, run_name):
@@ -217,7 +216,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
   unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
 
   # Initialization
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
@@ -227,12 +226,14 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
                                                 mesh,
                                                 state_mesh_annotations)
 
+    state_mesh_shardings = jax.tree_map(
+        lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
     # mattdavidow: This errors with fake devices
     if not state:
-      state = pjit(
+      state = jax.jit(
           init_train_state_partial,
           in_shardings=None,
-          out_shardings=state_mesh_annotations
+          out_shardings=state_mesh_shardings
       )(rng)
       if raw_params: # If we loaded a partial state, we need to merge it.
         state = state.replace(params = raw_params)
@@ -244,20 +245,123 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
 
 # Learning Rate Schedule
 # -----------------------------------------------------------------------------
-# learning rate scheduling
-def rsqrt_schedule(init_value: float, shift: int = 0):
-  def schedule(count):
-    return init_value * (1 + count + shift)**-.5 * shift**.5
-  return schedule
 
-def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
-  """Creates a rsqrt schedule with linear warmup."""
-  return optax.join_schedules([
-      optax.linear_schedule(
-          init_value=0,
-          end_value=learning_rate,
-          transition_steps=warmup_steps
-          ),
-      rsqrt_schedule(init_value=learning_rate, shift=warmup_steps),
-      ], boundaries=[warmup_steps],
-      )
+def create_learning_rate_schedule(config):
+  """Creates a warmup and cosine decay learning rate schedule:
+  We take inspiration from Llama2's learning rate (LR) schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
+  Learning rate schedule has either two or three parts:
+  1) Linear warmup from 0 to [learning_rate] over steps 0 to [learning_rate_schedule_steps * warmup_steps_fraction]
+  2) Cosine from [learning_rate] to [learning_rate * cosine_learning_rate_final_fraction] until learning_rate_schedule_steps
+  3) Constant learning rate of 0 from learning_rate_schedule_steps to steps.
+  The zero learning rate section can be used to more accurately measure the fully trained model's performance.
+  """
+  def make_cos_schedule(init_lr, final_lr, len_steps):
+    def schedule(step):
+      pct = (step) / len_steps
+      a = 0.5 * (jnp.cos(jnp.pi*pct) + 1)
+      lr = init_lr * a + final_lr * (1 - a)
+      return lr
+    return schedule
+
+  lr = config.learning_rate
+  cos_final_lr = lr * config.cosine_learning_rate_final_fraction
+
+  warmup_steps = int(config.learning_rate_schedule_steps * config.warmup_steps_fraction)
+  cos_steps = config.learning_rate_schedule_steps - warmup_steps
+  constant_zero_steps = config.steps - config.learning_rate_schedule_steps
+
+  warmup_schedule = optax.linear_schedule(
+      init_value=0.0,
+      end_value=lr,
+      transition_steps=warmup_steps
+  )
+  cos_schedule = make_cos_schedule(lr, cos_final_lr, cos_steps)
+  constant_schedule = optax.constant_schedule(0.0)
+
+  pieces = [warmup_schedule, cos_schedule]
+  boundaries=[
+   warmup_steps,
+   warmup_steps + cos_steps,
+   ]
+
+  if constant_zero_steps > 0:
+    pieces.append(constant_schedule)
+    boundaries.append(warmup_steps + cos_steps + constant_zero_steps)
+
+  return optax.join_schedules(pieces, boundaries)
+
+
+# Cross entropy implementation is taken from original T5X codebase:
+# https://github.com/google-research/t5x/blob/ace831eea1e2742b4299cd1a9af7e4f302038351/t5x/losses.py#L25-L101
+@jax.custom_vjp
+def cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray,
+                              z_loss: float) -> Tuple[jnp.ndarray, jnp.ndarray]:
+  """Computes cross entropy loss with stable custom gradient.
+  Computes a stabilized-gradient version of:
+    -jnp.sum(targets * nn.log_softmax(logits), axis=-1)
+  If z_loss > 0, then an auxiliary loss equal to z_loss*log(z)^2
+  will be added to the cross entropy loss (z = softmax normalization constant).
+  The two uses of z_loss are:
+  1. To keep the logits from drifting too far from zero, which can cause
+     unacceptable roundoff errors in bfloat16.
+  2. To encourage the logits to be normalized log-probabilities.
+  Args:
+    logits: [batch, length, num_classes] float array.
+    targets: categorical one-hot targets [batch, length, num_classes] float
+      array.
+    z_loss: coefficient for auxilliary z-loss loss term.
+  Returns:
+    tuple with the total loss and the z_loss, both
+    float arrays with shape [batch, length].
+  """
+  logits_sum = jax.scipy.special.logsumexp(logits, axis=-1, keepdims=True)
+  log_softmax = logits - logits_sum
+  loss = -jnp.sum(targets * log_softmax, axis=-1)
+  # Add auxilliary z-loss term.
+  log_z = jnp.squeeze(logits_sum, axis=-1)
+  total_z_loss = z_loss * jax.lax.square(log_z)
+  loss += total_z_loss
+  return loss, total_z_loss
+
+
+def _cross_entropy_with_logits_fwd(
+    logits: jnp.ndarray,
+    targets: jnp.ndarray,
+    z_loss: float = 0.0
+) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray],
+           Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
+                 jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
+  """Forward-mode of `cross_entropy_with_logits`."""
+  max_logit = logits.max(axis=-1, keepdims=True)
+  shifted = logits - max_logit
+  exp_shifted = jnp.exp(shifted)
+  sum_exp = jnp.sum(exp_shifted, axis=-1, keepdims=True)
+  log_softmax = shifted - jnp.log(sum_exp)
+  loss = -jnp.sum(targets * log_softmax, axis=-1)
+  # Add auxilliary z-loss term.
+  log_z = jnp.squeeze(jnp.log(sum_exp) + max_logit, axis=-1)
+  total_z_loss = z_loss * jax.lax.square(log_z)
+  loss += total_z_loss
+  return (loss, total_z_loss), (logits, targets, z_loss, exp_shifted, sum_exp, #pytype: disable=bad-return-type  #jax-ndarray
+                                log_softmax, log_z)
+
+
+def _cross_entropy_with_logits_bwd(
+    res: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
+               jnp.ndarray, jnp.ndarray], g: Tuple[jnp.ndarray, jnp.ndarray]
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+  """Backward-mode of `cross_entropy_with_logits`."""
+  g = g[0]  # Ignore z_loss component as that is only used for logging.
+  logits, targets, z_loss, exp_shifted, sum_exp, log_softmax, log_z = res
+  # z-loss term adds the (2 * z_loss * log_z) factor.
+  deriv = (
+      jnp.expand_dims(1 + 2 * z_loss * log_z, -1) * exp_shifted / sum_exp -
+      targets)
+  g_logits = jnp.expand_dims(g, axis=-1) * deriv
+  g_targets = -jnp.expand_dims(g, axis=-1) * log_softmax
+  return (jnp.asarray(g_logits,
+                      logits.dtype), jnp.asarray(g_targets, targets.dtype),
+          jnp.array(0.0))  # sets z-loss coeff gradient to 0
+
+cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
+                                 _cross_entropy_with_logits_bwd)

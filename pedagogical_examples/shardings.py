@@ -20,7 +20,6 @@
 
 import jax
 from jax.sharding import PartitionSpec
-from jax.experimental.pjit import pjit
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 from jax.experimental.compilation_cache import compilation_cache as cc
@@ -95,7 +94,7 @@ parser.add_argument(
     "--ici_fsdp_parallelism", "-if",
     help="Number of shards for Fsdp Parallelism within each slice.",
     required=False,
-    default=1,
+    default=4,
     type=int
 )
 parser.add_argument(
@@ -222,30 +221,46 @@ def training_step(in_act, in_layers):
 
 print("finished includes ", flush = True)
 
-pjit_func = pjit(
+replicated_sharding = jax.sharding.NamedSharding(mesh, data_sharding)
+
+parameter_mesh_shardings = jax.tree_map(
+      lambda p: jax.sharding.NamedSharding(mesh, p), parameter_sharding)
+
+data_pspec_shardings = jax.tree_map(
+        lambda p: jax.sharding.NamedSharding(mesh, p), parameter_sharding)
+
+jit_func = jax.jit(
         training_step,
-        in_shardings=(data_sharding, parameter_sharding),
-        out_shardings=parameter_sharding,
+        in_shardings=(replicated_sharding, parameter_mesh_shardings),
+        out_shardings=data_pspec_shardings,
       )
 
-pjit_gen_data = pjit(
+data_mesh_shardings = jax.tree_map(
+        lambda p: jax.sharding.NamedSharding(mesh, p), data_sharding)
+
+jit_gen_data = jax.jit(
         gen_data,
         in_shardings=None,
-        out_shardings=data_sharding
+        out_shardings=data_mesh_shardings
       )
 
-pjit_gen_layers = pjit(
+parameter_mesh_shardings = jax.tree_map(
+        lambda p: jax.sharding.NamedSharding(mesh, p), parameter_sharding)
+
+jit_gen_layers = jax.jit(
         gen_layers,
         in_shardings=None,
-        out_shardings=parameter_sharding
+        out_shardings=parameter_mesh_shardings
       )
 
+# starting the profiler outside `with` statement,
+# will call it right before the computation once b/301309635 is resolved
+activate_profiler(args.profiler_path)
 with Mesh(mesh.devices, mesh.axis_names):
   key = jax.random.PRNGKey(0)
-  presharded_X = jax.block_until_ready(pjit_gen_data(key))
-  presharded_layers = jax.block_until_ready(pjit_gen_layers(key))
-  activate_profiler(args.profiler_path)
+  presharded_X = jax.block_until_ready(jit_gen_data(key))
+  presharded_layers = jax.block_until_ready(jit_gen_layers(key))
   TFLOPs_per_device = parameters * 6 * BATCH  / 10**12 / len(jax.devices())
-  time = simple_timeit(lambda : jax.block_until_ready(pjit_func(presharded_X, presharded_layers)))
+  time = simple_timeit(lambda : jax.block_until_ready(jit_func(presharded_X, presharded_layers)))
   print(f"time is {time} seconds, TFLOP is {TFLOPs_per_device}, TFLOP/s is {TFLOPs_per_device/time}", flush = True)
 deactivate_profiler(args.profiler_path)

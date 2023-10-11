@@ -27,8 +27,7 @@ import optax
 
 from layers import Transformer
 import pyconfig
-from input_pipeline import get_datasets
-from input_pipeline import preprocess_dataset
+from input_pipeline import create_data_iterator_with_tokenizer
 import max_utils
 import temperature_sampler
 
@@ -37,7 +36,6 @@ import checkpointing
 import jax
 import jax.numpy as jnp
 from jax import random
-from jax.experimental.pjit import pjit
 from jax.sharding import PartitionSpec as P
 from jax.sharding import Mesh
 
@@ -78,7 +76,7 @@ def predict_step(inputs,
   target_shape = (inputs.shape[0], config.max_predict_length) + inputs.shape[2:]
 
   initial_variables = model.init(
-      jax.random.PRNGKey(0),
+      {'params': rngkey, 'dropout': rngkey, 'aqt': rngkey},
       jnp.ones(target_shape, config.dtype),
       None,
       enable_dropout=False,
@@ -87,7 +85,7 @@ def predict_step(inputs,
   )
   cache = initial_variables["cache"]
 
-  def tokens_ids_to_logits(flat_ids, flat_cache):
+  def tokens_ids_to_logits(flat_ids, flat_cache, aqt_rng):
     """Token slice to logits from decoder model."""
     # --> [batch * beam, 1, vocab]
     flat_logits, new_vars = model.apply(
@@ -99,6 +97,7 @@ def predict_step(inputs,
         None,
         enable_dropout=False,
         decode=True,
+        rngs={'aqt': aqt_rng},
         max_decode_length=config.max_predict_length,
         mutable=["cache"])
     new_flat_cache = new_vars["cache"]
@@ -120,53 +119,36 @@ def predict_step(inputs,
 
   return seqs
 
-def create_learning_rate_schedule(learning_rate: float, warmup_steps: int):
-  return optax.linear_schedule(
-          init_value=0,
-          end_value=learning_rate,
-          transition_steps=warmup_steps
-          )
-
-
 def decode_loop(config, state=None):
   """Decoding loop for the Transformer model."""
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir,
                                                                      config.enable_checkpointing,
-                                                                     config.async_checkpointing)
+                                                                     config.async_checkpointing,
+                                                                     config.save_period)
   rng = random.PRNGKey(0)
-
-  # Model and Optimizer definition
-  model = Transformer(config)
-
-  tx = optax.adam(
-    max_utils.create_learning_rate_schedule(
-      learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
-    )
-  ) # TODO: we need an optax.GradientTransformation to form a TrainState, but we don't use it when decoding
 
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
-  # Set up datasets.
-  train_ds, eval_ds = get_datasets(
-      config=config,
-  )
+  # Model and Optimizer definition
+  model = Transformer(config, mesh = mesh)
 
-  _, _, _, sp_tokenizer = preprocess_dataset(
-    config,
-    mesh,
-    train_ds, eval_ds,
-    vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
-  )
+  tx = optax.adamw(
+    max_utils.create_learning_rate_schedule(config)
+  ) # TODO: we need an optax.GradientTransformation to form a TrainState, but we don't use it when decoding
+
+
+  _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager)
 
-  p_predict_step = pjit(
+  state_mesh_shardings = jax.tree_map(
+      lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
+  replicated_sharding = jax.sharding.NamedSharding(mesh, P(None, None))
+  p_predict_step = jax.jit(
       functools.partial(predict_step, model=model, config=config),
-      in_shardings=(P(None, None),
-                        state_mesh_annotations,
-                        None),
+      in_shardings=(replicated_sharding, state_mesh_shardings, None),
       out_shardings=None
   )
 

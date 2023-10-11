@@ -16,11 +16,15 @@
 
 """Transformer model definition."""
 # pylint: disable=arguments-differ
+# pylint: disable=no-name-in-module
 
 from aqt.jax.v2 import aqt_dot_general as aqt
-from aqt.jax.v2.google import maxtext_sweeps
+from aqt.jax.v2 import aqt_dq_dot_general as aqt_dq
+from aqt.jax.v2.google import aqt_config
+from jax.experimental.shard_map import shard_map
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 
-import dataclasses
 import functools
 import operator
 from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
@@ -36,7 +40,8 @@ from jax import lax
 from jax import random
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
-
+if jax.__version__ >= '0.4.16':
+  from jax.experimental.pallas.ops.tpu import flash_attention
 
 
 
@@ -71,10 +76,12 @@ def dot_product_attention(query: Array,
                           value: Array,
                           bias: Optional[Array] = None,
                           dropout_rng: Optional[PRNGKey] = None,
+                          aqt_rng: Optional[PRNGKey] = None,
                           dropout_rate: float = 0.,
                           deterministic: bool = False,
                           dtype: DType = jnp.float32,
-                          float32_logits: bool = False):
+                          float32_logits: bool = False,
+                          cfg = None):
   """Computes dot-product attention given query, key, and value.
 
   This is the core function for applying attention based on
@@ -109,6 +116,43 @@ def dot_product_attention(query: Array,
   assert key.shape[-3] == value.shape[-3], 'k, v lengths must match.'
   assert query.shape[-1] == key.shape[-1], 'q, k depths must match.'
 
+  def compute_qk_attn_weights(query, key, cfg, aqt_rng):
+    """Computes all query-key dot product pairs"""
+    if not cfg.int8_training:
+      attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
+    else:
+      aqt_cfg = aqt_config.quantization_config(
+        cfg.fwd_int8_qk,
+        cfg.dlhs_int8_qk,
+        cfg.drhs_int8_qk,
+        use_fwd_quant=cfg.aqt_use_fwd_quant,
+        use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
+        rng_type=cfg.aqt_rng_type
+      )
+      aqt_dot_general = aqt.make_dot_general(aqt_cfg)
+      context = aqt.Context(key=aqt_rng, train_step=None)
+      aqt_dot_general = functools.partial(aqt_dot_general, context=context)
+      attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key, _dot_general=aqt_dot_general)
+    return attn_weights
+
+  def compute_weighted_values(attn_weights, value, cfg, aqt_rng):
+    """Computes attn_weights * values"""
+    if not cfg.int8_training:
+      weighted_values = jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
+    else:
+      aqt_cfg = aqt_config.quantization_config(cfg.fwd_int8_pv,
+        cfg.dlhs_int8_pv,
+        cfg.drhs_int8_pv,
+        use_fwd_quant=cfg.aqt_use_fwd_quant,
+        use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
+        rng_type=cfg.aqt_rng_type,
+      )
+      aqt_dot_general = aqt.make_dot_general(aqt_cfg)
+      context = aqt.Context(key=aqt_rng, train_step=None)
+      aqt_dot_general = functools.partial(aqt_dot_general, context=context)
+      weighted_values = jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value, _dot_general=aqt_dot_general)
+    return weighted_values
+
   # Casting logits and softmax computation for float32 for model stability.
   if float32_logits:
     query = query.astype(jnp.float32)
@@ -119,8 +163,8 @@ def dot_product_attention(query: Array,
   query = LayerNorm(dtype=dtype, name='query_layer_norm', kernel_axes = ('heads',))(query)
   key = LayerNorm(dtype=dtype, name='key_layer_norm', kernel_axes = ('heads',))(key)
 
-  # `attn_weights`: [batch, num_heads, q_length, kv_length]
-  attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
+  # QK Product, a.k.a `attn_weights`: [batch, num_heads, q_length, kv_length]
+  attn_weights = compute_qk_attn_weights(query, key, cfg, aqt_rng)
 
   # Apply attention bias: masking, dropout, proximity bias, etc.
   if bias is not None:
@@ -142,7 +186,7 @@ def dot_product_attention(query: Array,
     attn_weights = attn_weights * multiplier
 
   # Take the linear combination of `value`.
-  return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
+  return compute_weighted_values(attn_weights, value, cfg, aqt_rng)
 
 
 dynamic_vector_slice_in_dim = jax.vmap(
@@ -201,6 +245,28 @@ class DenseGeneral(nn.Module):
     Returns:
       The transformed input.
     """
+    def compute_dot_general(inputs, kernel, axis, contract_ind, cfg):
+      """Computes a dot_general operation that may be quantized as determined by cfg options"""
+      if not cfg.int8_training:
+        return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
+      else:
+        aqt_key = self.make_rng('aqt')
+        if cfg.use_dqdg:
+          aqt_dq_dg = aqt_dq.make_aqt_dq_dg()
+          return aqt_dq_dg(aqt_key, inputs, kernel, ((axis, contract_ind), ((), ())))
+        else:
+          aqt_cfg = aqt_config.quantization_config(
+            cfg.fwd_int8,
+            cfg.dlhs_int8,
+            cfg.drhs_int8,
+            use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
+            rng_type=cfg.aqt_rng_type,
+            use_fwd_quant=cfg.aqt_use_fwd_quant,
+          )
+          aqt_dot_general = aqt.make_dot_general(aqt_cfg)
+          context = aqt.Context(key=aqt_key, train_step=None)
+          return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
+
     cfg = self.config
     features = _canonicalize_tuple(self.features)
     axis = _canonicalize_tuple(self.axis)
@@ -221,16 +287,7 @@ class DenseGeneral(nn.Module):
     kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(axis)))
-
-    if not cfg.int8_training:
-      return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
-    else:
-      aqt_cfg = maxtext_sweeps.sweep1(cfg.fwd_int8, cfg.bwd_int8)
-      aqt_dot_general = aqt.make_dot_general(aqt_cfg)
-      aqt_key = self.make_rng('aqt')
-      context = aqt.Context(key=aqt_key, train_step=None)
-
-      return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
+    return compute_dot_general(inputs, kernel, axis, contract_ind, cfg)
 
 def _convert_to_activation_function(
     fn_or_string: Union[str, Callable]) -> Callable:
@@ -263,10 +320,64 @@ class MultiHeadDotProductAttention(nn.Module):
   num_heads: int
   head_dim: int
   config: Config
+  mesh: Mesh
   dtype: DType = jnp.float32
   dropout_rate: float = 0.
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
   float32_logits: bool = False  # computes logits in float32 for stability.
+
+
+  def apply_attention(self, query, key, value, enable_flash_attention,
+                      attention_bias, dropout_rng, deterministic):
+    """ Apply Attention
+    """
+    if enable_flash_attention:
+      # reshaped to ('batch', 'heads', 'length', 'kv')
+      query = jax.numpy.transpose(query, axes = (0,2,1,3))
+      key = jax.numpy.transpose(key, axes = (0,2,1,3))
+      value = jax.numpy.transpose(value, axes = (0,2,1,3))
+      @functools.partial(shard_map, mesh = self.mesh, in_specs = (
+          P(('data','fsdp'),'tensor'),
+          P(('data','fsdp'),'tensor'),
+          P(('data','fsdp'),'tensor'),
+      ), out_specs = P(('data','fsdp'),'tensor'), check_rep=False)
+      def wrap_flash_attention(query, key, value):
+        return flash_attention.flash_attention(
+              query,
+              key,
+              value,
+              causal = False,
+              block_sizes = flash_attention.BlockSizes(
+                  block_q=512,
+                  block_k_major=512,
+                  block_k=512,
+                  block_b=1,
+                  block_q_major_dkv=512,
+                  block_k_major_dkv=512,
+                  block_k_dkv=512,
+                  block_q_dkv=512,
+                  block_k_major_dq=512,
+                  block_k_dq=512,
+                  block_q_dq=512,
+              )
+            )
+      x = wrap_flash_attention(query, key, value)
+      x = jax.numpy.transpose(x, axes = (0,2,1,3))
+    else:
+      aqt_rng = self.make_rng('aqt')
+      x = dot_product_attention(
+          query,
+          key,
+          value,
+          bias=attention_bias,
+          dropout_rng=dropout_rng,
+          dropout_rate=self.dropout_rate,
+          aqt_rng=aqt_rng,
+          deterministic=deterministic,
+          dtype=self.dtype,
+          float32_logits=self.float32_logits,
+          cfg=self.config)
+    return x
 
   @nn.compact
   def __call__(self,
@@ -429,16 +540,7 @@ class MultiHeadDotProductAttention(nn.Module):
       dropout_rng = self.make_rng('dropout')
 
     # Apply attention.
-    x = dot_product_attention(
-        query,
-        key,
-        value,
-        bias=attention_bias,
-        dropout_rng=dropout_rng,
-        dropout_rate=self.dropout_rate,
-        deterministic=deterministic,
-        dtype=self.dtype,
-        float32_logits=self.float32_logits)
+    x = self.apply_attention(query, key, value, cfg.enable_flash_attention, attention_bias, dropout_rng, deterministic)
 
     # Back to the original inputs dimensions.
     out = DenseGeneral(
@@ -553,6 +655,7 @@ class Embed(nn.Module):
     dtype: the dtype of the embedding vectors (default: float32).
     embedding_init: embedding initializer.
   """
+  # pylint: disable=attribute-defined-outside-init
   config: Config
   num_embeddings: int
   features: int
@@ -560,7 +663,6 @@ class Embed(nn.Module):
   dtype: DType = jnp.float32
   attend_dtype: Optional[DType] = None
   embedding_init: Initializer = default_embed_init
-  embedding: Array = dataclasses.field(init=False)
 
   def setup(self):
     self.embedding = self.param(
@@ -945,6 +1047,7 @@ def make_decoder_mask(decoder_target_tokens: Array,
 class DecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
   config: Config
+  mesh: Mesh
 
   @nn.compact
   def __call__(self,
@@ -954,7 +1057,7 @@ class DecoderLayer(nn.Module):
                decode,
                max_decode_length):
     cfg = self.config
-
+    mesh = self.mesh
     # Relative position embedding as attention biases.
     l = max_decode_length if decode and max_decode_length else inputs.shape[-2]
     decoder_bias = RelativePositionBiases(
@@ -981,7 +1084,8 @@ class DecoderLayer(nn.Module):
         head_dim=cfg.head_dim,
         dropout_rate=cfg.dropout_rate,
         name='self_attention',
-        config=cfg)(
+        config=cfg,
+        mesh = mesh)(
             lnx,
             lnx,
             decoder_mask,
@@ -1026,6 +1130,7 @@ class Decoder(nn.Module):
   """A stack of decoder layers as a part of an encoder-decoder architecture."""
   config: Config
   shared_embedding: nn.Module
+  mesh: Mesh
 
   @nn.compact
   def __call__(self,
@@ -1036,6 +1141,7 @@ class Decoder(nn.Module):
                decode=False,
                max_decode_length=None):
     cfg = self.config
+    mesh = self.mesh
     assert decoder_input_tokens.ndim == 2  # [batch, len]
 
     # [batch, length] -> [batch, length, emb_dim]
@@ -1083,14 +1189,14 @@ class Decoder(nn.Module):
                    nn.broadcast),
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'})(
-              config=cfg,
+              config=cfg, mesh=mesh,
               name='decoder')(y, decoder_mask,
                               deterministic, decode, max_decode_length)
     else:
       for lyr in range(cfg.num_decoder_layers):
         # [batch, length, emb_dim] -> [batch, length, emb_dim]
         y = BlockLayer(
-            config=cfg, name=f'layers_{lyr}')(
+            config=cfg, mesh = mesh, name=f'layers_{lyr}')(
                 y,
                 decoder_mask,
                 deterministic,
@@ -1124,10 +1230,12 @@ class Transformer(nn.Module):
   """An decoder-only Transformer model."""
   # pylint: disable=attribute-defined-outside-init
   config: Config
+  mesh: Mesh
 
   def setup(self):
     """Initialize shared_embedding, decoder"""
     cfg = self.config
+    mesh = self.mesh
     self.shared_embedding = Embed(
         num_embeddings=cfg.vocab_size,
         features=cfg.emb_dim,
@@ -1137,7 +1245,7 @@ class Transformer(nn.Module):
         name='token_embedder',
         config=cfg)
 
-    self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding)
+    self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh = mesh)
 
   def __call__(
       self,

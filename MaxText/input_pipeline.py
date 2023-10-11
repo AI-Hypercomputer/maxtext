@@ -203,12 +203,9 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
   if vocab_path is None:
     vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
 
-  # Train or load tokenizer
-  sp_tokenizer = tokenizer.load_or_train_tokenizer(
-      train_ds,
-      vocab_path=vocab_path,
-      vocab_size=config.vocab_size,
-      max_corpus_chars=config.max_corpus_chars)
+  # Load tokenizer
+  sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
+                                          vocab_size=config.vocab_size)
 
   # Tokenize data.
   train_ds = train_ds.map(
@@ -265,6 +262,125 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       data_shuffle_seed = data_shuffle_seed,)
 
   return train_iter, eval_iter, predict_iter, sp_tokenizer
+
+
+def make_c4_train_iterator_and_tokenizer(config, mesh):
+  """ Make train iterator and tokenizer for C4 dataset"""
+  read_config = tfds.ReadConfig(
+    shuffle_seed = config.data_shuffle_seed,
+  )
+  train_ds, eval_ds = get_datasets(
+    config=config,
+    read_config = read_config,
+  )
+  train_iter, _, _, sp_tokenizer = preprocess_dataset(
+    config,
+    mesh,
+    train_ds, eval_ds,
+    vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
+    data_shuffle_seed = config.data_shuffle_seed,
+  )
+  return train_iter, sp_tokenizer
+
+class SyntheticDataIterator():
+  """Creates a synthetic data iterator for performance testing work"""
+  def __init__(self, config, mesh):
+    self.mesh = mesh
+    self.config = config
+    data_pspec = P(*config.data_sharding)
+    data_pspec_shardings = jax.tree_map(
+        lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+    self.data_generator = jax.jit(SyntheticDataIterator.raw_generate_synthetic_data,
+        out_shardings=data_pspec_shardings,
+        static_argnums=0)
+  def __call__(self):
+    with self.mesh:
+      return self.data_generator(self.config)
+
+  @staticmethod
+  def raw_generate_synthetic_data(config):
+    """Generates a single batch of syntehtic data"""
+    output = {}
+    output['inputs'] = jax.numpy.zeros( (config.global_batch_size_to_load, config.max_target_length),
+                                       dtype=jax.numpy.int32)
+    output['inputs_position'] = jax.numpy.zeros( (config.global_batch_size_to_load, config.max_target_length),
+                                                dtype=jax.numpy.int32)
+    output['inputs_segmentation'] = jax.numpy.ones( (config.global_batch_size_to_load, config.max_target_length),
+                                                   dtype=jax.numpy.int32)
+    output['targets'] = jax.numpy.zeros( (config.global_batch_size_to_load, config.max_target_length),
+                                        dtype=jax.numpy.int32)
+    output['targets_position'] = jax.numpy.zeros( (config.global_batch_size_to_load, config.max_target_length),
+                                                 dtype=jax.numpy.int32)
+    output['targets_segmentation'] = jax.numpy.ones( (config.global_batch_size_to_load, config.max_target_length),
+                                                    dtype=jax.numpy.int32)
+    return output
+
+def create_data_iterator_with_tokenizer(config, mesh):
+  if config.dataset_type == "synthetic":
+    return SyntheticDataIterator(config, mesh), None
+  elif config.dataset_type == "c4":
+    return make_c4_train_iterator_and_tokenizer(config, mesh)
+  else:
+    assert False, "dataset type not implemented"
+
+def make_c4_train_iterator_and_tokenizer(config, mesh):
+  """ Make train iterator and tokenizer for C4 dataset"""
+  read_config = tfds.ReadConfig(
+    shuffle_seed = config.data_shuffle_seed,
+  )
+  train_ds, eval_ds = get_datasets(
+    config=config,
+    read_config = read_config,
+  )
+  train_iter, _, _, sp_tokenizer = preprocess_dataset(
+    config,
+    mesh,
+    train_ds, eval_ds,
+    vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
+    data_shuffle_seed = config.data_shuffle_seed,
+  )
+  return train_iter, sp_tokenizer
+
+class SyntheticDataIterator():
+  """Creates a synthetic data iterator for performance testing work"""
+  def __init__(self, config, mesh):
+    self.mesh = mesh
+    self.config = config
+    data_pspec = P(*config.data_sharding)
+    data_pspec_shardings = jax.tree_map(
+        lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+    self.data_generator = jax.jit(SyntheticDataIterator.raw_generate_synthetic_data,
+        out_shardings=data_pspec_shardings,
+        static_argnums=0)
+  def __call__(self):
+    with self.mesh:
+      return self.data_generator(self.config)
+
+  @staticmethod
+  def raw_generate_synthetic_data(config):
+    """Generates a single batch of syntehtic data"""
+    output = {}
+    output['inputs'] = jax.numpy.zeros( (config.global_batch_size_to_load, config.max_target_length),
+                                       dtype=jax.numpy.int32)
+    output['inputs_position'] = jax.numpy.zeros( (config.global_batch_size_to_load, config.max_target_length),
+                                                dtype=jax.numpy.int32)
+    output['inputs_segmentation'] = jax.numpy.ones( (config.global_batch_size_to_load, config.max_target_length),
+                                                   dtype=jax.numpy.int32)
+    output['targets'] = jax.numpy.zeros( (config.global_batch_size_to_load, config.max_target_length),
+                                        dtype=jax.numpy.int32)
+    output['targets_position'] = jax.numpy.zeros( (config.global_batch_size_to_load, config.max_target_length),
+                                                 dtype=jax.numpy.int32)
+    output['targets_segmentation'] = jax.numpy.ones( (config.global_batch_size_to_load, config.max_target_length),
+                                                    dtype=jax.numpy.int32)
+    return output
+
+def create_data_iterator_with_tokenizer(config, mesh):
+  if config.dataset_type == "synthetic":
+    return SyntheticDataIterator(config, mesh), None
+  elif config.dataset_type == "c4":
+    return make_c4_train_iterator_and_tokenizer(config, mesh)
+  else:
+    assert False, "dataset type not implemented"
 
 
 def make_c4_train_iterator_and_tokenizer(config, mesh):

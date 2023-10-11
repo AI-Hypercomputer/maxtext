@@ -105,6 +105,12 @@ class _HyperParameters():
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
+    if raw_keys["learning_rate_schedule_steps"]==-1:
+      raw_keys["learning_rate_schedule_steps"] = raw_keys["steps"]
+    if raw_keys["steps"]==-1:
+      raw_keys["steps"] = raw_keys["learning_rate_schedule_steps"]
+    assert raw_keys["steps"] > 0, "You must set steps or learning_rate_schedule_steps to a positive interger."
+
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys['global_parameter_scale'])
     raw_keys['emb_dim'] = 2**emb_scale * raw_keys['base_emb_dim']
     raw_keys['num_heads'] = 2**num_head_scale * raw_keys['base_num_heads']
@@ -121,8 +127,8 @@ def validate_gcs_bucket_name(bucket_name, config_var):
 def get_individual_scales(scale):
   '''Choose appropriate scales for individual dimensions based on global scale
   We choose to rotate between doubling:
-    embed_dim
     num_head and mlp_dim
+    embed_dim
     num_layers
   Any one of these steps is not a perfect doubling, although going through a cycle
   of three is a near perfect 8x scaling except for the linear -> softmax -> output step'''

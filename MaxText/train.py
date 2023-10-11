@@ -21,6 +21,7 @@
 # See github.com/google/maxtext/issues/20 for more
 import jax
 import os
+import sys
 
 jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
@@ -31,21 +32,19 @@ from typing import Sequence
 import datetime
 from absl import app
 from flax.linen import partitioning as nn_partitioning
+from flax import linen as nn
 import numpy as np
 import optax
 from tensorboardX import SummaryWriter
 
 from layers import Transformer
 import pyconfig
-import tensorflow_datasets as tfds
-from input_pipeline import get_datasets
-from input_pipeline import preprocess_dataset
+from input_pipeline import create_data_iterator_with_tokenizer
 import max_utils
 import checkpointing
 
 import jax.numpy as jnp
 from jax import random
-from jax.experimental.pjit import pjit
 from jax.sharding import PartitionSpec as P
 from jax.sharding import Mesh
 
@@ -115,7 +114,7 @@ def write_metrics(writer, metrics, step, config):
           f"TFLOP/s: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
           f"loss: {metrics['scalar']['learning/loss']:.3f}")
 
-    if full_log:
+    if full_log and jax.process_index() == 0:
       max_logging.log(
           f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
       )
@@ -179,17 +178,22 @@ def train_step(model, config, state, data, dropout_rng):
                          data['inputs_position'],
                          enable_dropout=config.enable_dropout,
                          rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
-    # TODO: is optax xent as good as custom T5X one?
-    xent = optax.softmax_cross_entropy_with_integer_labels(logits, data['targets'])
+    one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
+    xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
+    xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
     # Mask out paddings at the end of each example.
     xent = xent * (data['inputs_segmentation'] != 0)
-    # TODO: mask out the prompt if training prefix-LM
     return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (loss, intermediate_outputs), grads = grad_fn(state.params)
+  (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
+  if config.gradient_clipping_threshold > 0:
+    grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, None, None)
+  else:
+    grads = raw_grads
   new_state = state.apply_gradients(grads=grads)
   metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
+             'learning/raw_grad_norm' : max_utils.l2norm_pytree(raw_grads), 
              'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
@@ -208,47 +212,35 @@ def train_loop(config, state=None):
 
   """
   writer = SummaryWriter(config.tensorboard_dir)
-  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir,
-                                                                     config.enable_checkpointing,
-                                                                     config.async_checkpointing)
+  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+      config.checkpoint_dir,
+      config.enable_checkpointing,
+      config.async_checkpointing,
+      config.save_period,
+  )
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
-
-  # Model and Optimizer definition
-  model = Transformer(config)
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(
-      learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
-  )
-
-  tx = optax.adam(
-      max_utils.create_learning_rate_schedule(
-          learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
-      ),
-      b1=config.adam_b1,
-      b2=config.adam_b2,
-      eps=config.adam_eps,
-      eps_root=config.adam_eps_root
-  )
 
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
-  # Set up datasets.
-  read_config = tfds.ReadConfig(
-    shuffle_seed = config.data_shuffle_seed,
+  # Model and Optimizer definition
+  model = Transformer(config, mesh)
+  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
+
+  # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
+  tx = optax.adamw(
+      max_utils.create_learning_rate_schedule(config),
+      b1=config.adam_b1,
+      b2=config.adam_b2,
+      eps=config.adam_eps,
+      eps_root=config.adam_eps_root,
+      weight_decay=config.adam_weight_decay,
   )
-  train_ds, eval_ds = get_datasets(
-      config=config,
-      read_config = read_config,
-  )
-  train_iter, _, _, _ = preprocess_dataset(
-    config,
-    mesh,
-    train_ds, eval_ds,
-    vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
-    data_shuffle_seed = config.data_shuffle_seed,
-  )
+
+
+  data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   data_pspec = P(*config.data_sharding)
@@ -258,12 +250,14 @@ def train_loop(config, state=None):
   per_device_tflops = calculate_training_tflops(num_model_parameters, config)
 
   # Define compiled top-level functions.
-  p_train_step = pjit(
+  state_mesh_shardings = jax.tree_map(
+      lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
+  data_sharding = jax.tree_map(
+      lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+  p_train_step = jax.jit(
     train_step,
-    in_shardings=(state_mesh_annotations,
-                       data_pspec,
-                       None),
-    out_shardings=(state_mesh_annotations, None, None),
+    in_shardings=(state_mesh_shardings, data_sharding, None),
+      out_shardings=(state_mesh_shardings, None, None),
     static_argnums=(0,1,),
     donate_argnums=2)
 
@@ -274,7 +268,7 @@ def train_loop(config, state=None):
   running_gcs_metrics = [] if config.gcs_metrics else None
 
   for step in np.arange(get_first_step(state), config.steps):
-    example_batch = load_next_batch(train_iter, example_batch, config)
+    example_batch = load_next_batch(data_iterator, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics, nextrng = p_train_step(
           model, config, state, example_batch, nextrng
@@ -285,9 +279,13 @@ def train_loop(config, state=None):
     write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
 
-    if step > 0 and step % config.save_period == 0 and checkpoint_manager is not None:
-      checkpoint_manager.save(step, state)
-      max_logging.log("saved a checkpoint")
+    if checkpoint_manager is not None:
+      if checkpoint_manager.save(step, state):
+        max_logging.log(f"saved a checkpoint at step {step}")
+      # Upon preemption, exit when and only when all ongoing saves are complete.
+      if checkpoint_manager.reached_preemption(step):
+        checkpoint_manager.wait_until_finished()
+        sys.exit()
 
     if config.metrics_file:
       max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
