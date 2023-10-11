@@ -104,6 +104,7 @@ def run_f(f, input_args, input_kwargs, mesh, print_cost=False):
 # def save_compiled_full(f, compiled_name, in_shardings, out_shardings, mesh_axis_names)
 
 # def load_compiled_full(f, compiled_name, input_args, input_kwargs, mesh_axis_names)
+# mesh/mesh_axis_names is required to generate fake data, which is used to construct in_tree/out_tree
 
 # def run_full(f, input_args, input_kwarts, mesh_axis_names, mesh_axis_names)
 
@@ -127,6 +128,7 @@ if args.save:
     print("Saved compiled function!", flush=True)
 
 if args.load:
+    # mesh/mesh_axis_names is required to generate fake data, which is used to construct in_tree/out_tree
     print("Loading the compiled function...", flush=True)
     serialized_compiled = load_compiled(compiled_name)
 
