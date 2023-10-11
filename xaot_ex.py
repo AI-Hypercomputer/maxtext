@@ -16,11 +16,11 @@ parser = argparse.ArgumentParser(description='Xaot example options')
 parser.add_argument('--save', type=bool, default=True, action=argparse.BooleanOptionalAction)
 parser.add_argument('--load', type=bool, default=False, action=argparse.BooleanOptionalAction)
 parser.add_argument('--run_f', type=bool, default=False, action=argparse.BooleanOptionalAction)
-parser.add_argument('--version', type=str, default='v4-8')
+parser.add_argument('--topology', type=str, default='v4-8')
 args = parser.parse_args()
 
 
-def fun(x):
+def func(x):
     return x * x
 
 def gen_data_base():
@@ -35,41 +35,54 @@ def gen_data_sharded(mesh):
     print(f"{out_shaped=}")
     return jit_gen_data_sharded
 
+def gen_input_data(mesh):
+    fake_data = gen_data_sharded(mesh)
+    fake_data_shape = jax.eval_shape(fake_data)
+    input_args = (fake_data_shape,)
+    input_kwargs = {}
+    return input_args, input_kwargs
 
-def make_fake_devices():
-    if args.version=='v4-8':
-        fake_devices = get_topology_desc(
+def generate_topological_mesh(topology, mesh_axes_names):
+    def make_fake_devices():
+        if topology=='v4-8':
+            fake_devices = get_topology_desc(
+                platform='tpu',
+                topology_name=f'v4:2x2x1',
+                chip_config_name='megacore',
+                chips_per_host_bounds=(2, 2, 1),
+                num_slices=1,
+            ).devices
+        elif topology=='v4-16':
+            fake_devices = get_topology_desc(
             platform='tpu',
-            topology_name=f'v4:2x2x1',
+            topology_name=f'v4:2x2x2',
             chip_config_name='megacore',
-            chips_per_host_bounds=(2, 2, 1),
+            chips_per_host_bounds=(2, 2, 2),
             num_slices=1,
         ).devices
-    elif args.version=='v4-16':
-        fake_devices = get_topology_desc(
-        platform='tpu',
-        topology_name=f'v4:2x2x2',
-        chip_config_name='megacore',
-        chips_per_host_bounds=(2, 2, 2),
-        num_slices=1,
-    ).devices
-    return fake_devices
+        return fake_devices
+    
+    devices = make_fake_devices()
+    return jax.sharding.Mesh(devices, mesh_axes_names)
 
-def jit_and_compile(fun, input_args, input_kwargs, mesh, in_shardings, out_shardings):
-    # jit, lower, and compile f using fake devices
-    with mesh:
-        jitted = pjit.pjit(
-            fun, in_shardings=in_shardings, out_shardings=out_shardings
-        )
-        lowered = jitted.lower(*input_args, **input_kwargs)
-    compiled = lowered.compile()
-    return jitted, lowered, compiled
+def save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, in_shardings, out_shardings, mesh):
+    def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings):
+        # Jit, lower, and compile func, possibly with topology devices
+        with mesh:
+            jitted = pjit.pjit(
+                func, in_shardings=in_shardings, out_shardings=out_shardings
+            )
+            lowered = jitted.lower(*func_input_args, **func_input_kwargs)
+        compiled = lowered.compile()
+        return jitted, lowered, compiled
 
-def save_compiled(compiled, save_name):
-    # Serialize and save the compiled object
-    serialized, in_tree, out_tree = serialize(compiled)
-    with open(save_name, "wb") as f:
-        pickle.dump(serialized, f)
+    def save_compiled(compiled, save_name):
+        # Serialize and save the compiled object
+        serialized, in_tree, out_tree = serialize(compiled)
+        with open(save_name, "wb") as f:
+            pickle.dump(serialized, f)
+    jitted, lowered, compiled = jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings)
+    save_compiled(compiled, compiled_name) # Serialize and save the compiled object
 
 def load_compiled(save_name):
     with open(save_name, "rb") as f:
@@ -78,7 +91,7 @@ def load_compiled(save_name):
 
 def get_io_trees(input_args, input_kwargs):
     _, in_tree_recreated = tree_util.tree_flatten((input_args, input_kwargs))
-    out_shaped = jax.eval_shape(fun, *input_args, **input_kwargs)
+    out_shaped = jax.eval_shape(func, *input_args, **input_kwargs)
     _, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
     return in_tree_recreated, out_tree_recreated
 
@@ -113,19 +126,21 @@ def run_f(f, input_args, input_kwargs, mesh, print_cost=False):
 #### Start code ####
 
 # Shared between save,  load, and run
-compiled_name = f"x_aot_{args.version}.pickle"
+compiled_name = f"x_aot_{args.topology}.pickle"
 mesh_axis_names = ('data',)
 
 if args.save:
     print("Saving the compiled function...", flush=True)
+    topological_mesh = generate_topological_mesh(args.topology, mesh_axis_names)
+    func_input_args, func_input_kwargs = gen_input_data(topological_mesh)
     in_shardings=P('data')
     out_shardings=P(None, 'data')
-    fake_devices = make_fake_devices()
-    fake_device_mesh = jax.sharding.Mesh(np.array(fake_devices), mesh_axis_names)
-    fake_data= gen_data_sharded(fake_device_mesh)
-    fake_data_shape = jax.eval_shape(fake_data)
-    jitted, lowered, compiled = jit_and_compile(fun, (fake_data_shape,), {}, fake_device_mesh, in_shardings, out_shardings)
-    save_compiled(compiled, compiled_name) # Serialize and save the compiled object
+    save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, in_shardings, out_shardings, topological_mesh)
+    # fake_devices = make_fake_devices()
+    # fake_device_mesh = jax.sharding.Mesh(np.array(fake_devices), mesh_axis_names)
+
+    # jitted, lowered, compiled = jit_and_compile(fun, (fake_data_shape,), {}, fake_device_mesh, in_shardings, out_shardings)
+    # save_compiled(compiled, compiled_name) # Serialize and save the compiled object
     print("Saved compiled function!", flush=True)
 
 if args.load:
