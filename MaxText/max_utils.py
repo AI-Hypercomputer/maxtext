@@ -425,7 +425,7 @@ def get_abstract_state(model, tx, config, rng, mesh):
   # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return abstract_state, state_mesh_annotations
+  return unboxed_abstract_state, state_mesh_annotations
 
 def get_topology_mesh(config):
   if config.topology=='v4-8':

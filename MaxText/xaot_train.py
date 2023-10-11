@@ -265,11 +265,10 @@ def train_loop(config, state=None):
     #ex_input = 2.0 * jnp.ones((128, 128), dtype=jnp.float32)
     topology_mesh = max_utils.get_topology_mesh(config)
     input_args, input_kwargs, _ = max_utils.gen_input_data(model, tx, config, init_rng, topology_mesh, data_iterator)
-    print(f"{input_args=}")
     input_args_pytree = input_args[2:]
     train_pytree = functools.partial(train_step, model, config)
     in_tree_recreated, out_tree_recreated = max_utils.get_io_trees(train_pytree, input_args_pytree, input_kwargs)
-    compiled = deserialize_and_load(serialized_compiled, in_tree_recreated, out_tree_recreated)
+    p_train_step = deserialize_and_load(serialized_compiled, in_tree_recreated, out_tree_recreated)
     print("Loaded compiled function!", flush=True)
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
@@ -284,12 +283,15 @@ def train_loop(config, state=None):
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
   data_sharding = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
-  p_train_step = jax.jit(
-    train_step,
-    in_shardings=(state_mesh_shardings, data_sharding, None),
-      out_shardings=(state_mesh_shardings, None, None),
-    static_argnums=(0,1,),
-    donate_argnums=2)
+  if not config.load_xaot:
+    print("Jitting from scratch...", flush=True)
+    p_train_step = jax.jit(
+        train_step,
+        in_shardings=(state_mesh_shardings, data_sharding, None),
+        out_shardings=(state_mesh_shardings, None, None),
+        static_argnums=(0,1,),
+        donate_argnums=2)
+    print("Jitting complete!", flush=True)
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
@@ -300,9 +302,14 @@ def train_loop(config, state=None):
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(data_iterator, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      state, metrics, nextrng = p_train_step(
-          model, config, state, example_batch, nextrng
-      )
+      if config.load_xoat:
+        state, metrics, nextrng = p_train_step(
+            state, example_batch, nextrng
+        )
+      else:
+        state, metrics, nextrng = p_train_step(
+            model, config, state, example_batch, nextrng
+        )
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
