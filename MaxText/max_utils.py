@@ -14,397 +14,400 @@
  limitations under the License.
  """
 
-# pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports
-"""Training loop and Decoding of the model."""
-
-# Calling jax.device_count here prevents a "TPU platform already registered" error.
-# See github.com/google/maxtext/issues/20 for more
-import jax
-import os
-
-jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-print(f"Found {jax.device_count()} devices.")
-
-from typing import Sequence
-import datetime
-from absl import app
-from flax.linen import partitioning as nn_partitioning
-import numpy as np
-import optax
-from tensorboardX import SummaryWriter
-
-from layers import Transformer
-import pyconfig
-import tensorflow_datasets as tfds
-from input_pipeline import get_datasets
-from input_pipeline import preprocess_dataset
-import max_utils
+# pylint: disable=bare-except, consider-using-generator
+""" Common Max Utils needed by multiple modules"""
 import checkpointing
-
-import jax.numpy as jnp
-from jax import random
-from jax.experimental.pjit import pjit
-from jax.sharding import PartitionSpec as P
-from jax.sharding import Mesh
-
-from jax.experimental.compilation_cache import compilation_cache as cc
-
-from cloud_tpu_diagnostics import diagnostic
-from cloud_tpu_diagnostics.configuration import debug_configuration
-from cloud_tpu_diagnostics.configuration import diagnostic_configuration
-from cloud_tpu_diagnostics.configuration import stack_trace_configuration
+import functools
 
 import max_logging
-cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
-# https://arxiv.org/pdf/2204.02311.pdf Appendix B
-def calculate_training_tflops(num_model_parameters, config):
-  learnable_weight_tflops = 6 * num_model_parameters * config.max_target_length * config.per_device_batch_size \
-                                   / 10**12
-  attention_tflops = 12 * config.num_heads * config.num_decoder_layers * config.head_dim * config.max_target_length**2 \
-                     * config.per_device_batch_size / 10**12
-  total_tflops = learnable_weight_tflops + attention_tflops
-  print(f'Per train step, total TFLOPs will be {total_tflops:.2f},',
-        f'split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops',
-        f'and {100 * attention_tflops/total_tflops:.2f}% attention flops')
-  return total_tflops
+import numpy as np
+import jax
+import jax.numpy as jnp
+from jax.experimental import mesh_utils
 
-def get_first_step(state):
-  with jax.spmd_mode('allow_all'):
-    return int(state.step)
+import json
+import flax
+from flax.training import train_state
+from flax import linen as nn
+from flax.linen import partitioning as nn_partitioning
+
+import optax
+import os
+import subprocess
+from typing import Tuple
 
 
-def load_next_batch(train_iter, example_batch, config):
-  """Loads the next batch. Can keep reusing the same batch for performance reasons """
+import pickle
+from flax.serialization import to_bytes
 
-  if config.reuse_example_batch and example_batch is not None:
-    return example_batch
+def l2norm_pytree(x):
+  """L2 norm of a pytree of arrays."""
+  return jax.tree_util.tree_reduce(
+      lambda x, y: x + jax.numpy.sum(y ** 2), x, initializer=0.0
+  ) ** 0.5
+
+def activate_profiler(config):
+  if jax.process_index() == 0 and config.enable_profiler:
+    jax.profiler.start_trace(config.tensorboard_dir)
+
+def deactivate_profiler(config):
+  if jax.process_index() == 0 and config.enable_profiler:
+    jax.profiler.stop_trace()
+
+def _prepare_metrics_for_json(metrics, step, run_name):
+  """Converts metric dictionary into json supported types (e.g. float)""" 
+  metrics_dict = {}
+  for val in metrics['scalar']:
+    metrics_dict[val] = float(metrics['scalar'][val])
+  metrics_dict['step'] = float(step)
+  metrics_dict['run_name'] = run_name
+  return metrics_dict
+
+def write_metrics_locally(metrics, step, config, file):
+  """Writes metrics locally for testing"""
+  if step == 0:
+    file.truncate(0)
+
+  metrics_dict = _prepare_metrics_for_json(metrics, step, config.run_name)
+  file.write(str(json.dumps(metrics_dict))+'\n')
+
+  if step == config.steps - 1:
+    file.close()
+
+def write_metrics_for_gcs(metrics, step, config, running_metrics):
+  """Writes metrics to gcs"""
+  metrics_dict_step = _prepare_metrics_for_json(metrics, step, config.run_name)
+  running_metrics.append(metrics_dict_step)
+  if (step + 1) % config.log_period == 0 or step == config.steps - 1:
+    start_step = (step // config.log_period) * config.log_period
+    metrics_filename = f"metrics_step_{start_step:06}_to_step_{step:06}.txt"
+    with open(metrics_filename, 'w', encoding="utf8") as metrics_for_gcs:
+      for metrics_step in running_metrics:
+        metrics_for_gcs.write(str(json.dumps(metrics_step))+'\n')
+
+    metrics_for_gcs.close()
+    gcs_filename=os.path.join(config.metrics_dir, metrics_filename)
+    command = ["gsutil", "mv", metrics_filename, gcs_filename]
+    max_logging.log(f"Moving file {metrics_filename} to GCS...")
+    subprocess.run(command, check=True, capture_output=True)
+    max_logging.log(f"File {metrics_filename} moved successfully!")
+    running_metrics = [] # reset running_metrics to empty list
+  return running_metrics
+
+def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
+  """Evaluates unspecified DCN/ICI parallelism values"""
+  if -1 in parallelism_vals:
+    assert parallelism_vals.count(-1) == 1, f"Found unspecified values (-1) for more than one {parallelism_type}\
+      parallelism axis. At most one axis can be unspecified."
+
+    determined_val = target_product/np.product(parallelism_vals)*-1
+
+    assert determined_val >= 1 and determined_val.is_integer, f"Unspecified value unable to be determined with the given\
+      {parallelism_type} parallelism values"
+
+    parallelism_vals[parallelism_vals.index(-1)] = int(determined_val)
+
+  target_type = "slices" if parallelism_type == 'DCN' else "devices per slice"
+
+  assert np.product(parallelism_vals) == target_product, f"Number of {target_type} {target_product} does not match\
+    the product of the {parallelism_type} parallelism {np.product(parallelism_vals)}"
+
+  return parallelism_vals
+
+def create_device_mesh(config, devices=jax.devices(), logging=True):
+  """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas """
+  
+  #devices = jax.devices()
+  num_devices = len(devices)
+  try:
+    num_slices = 1 + max([d.slice_index for d in devices])
+  except:
+    num_slices = 1
+  num_devices_per_slice = num_devices//num_slices
+  max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
+  assert len(devices) > 1, "You must have at least two devices"
+
+  multi_slice_env = hasattr(devices[0], 'slice_index')
+  #multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
+
+  dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism, config.dcn_tensor_parallelism]
+  ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism, config.ici_tensor_parallelism]
+
+  # Find possible unspecified parallelisms
+  dcn_parallelism = fill_unspecified_mesh_axes(dcn_parallelism, num_slices, 'DCN')
+  ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, 'ICI')
+
+  if multi_slice_env:
+    mesh = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism, devices=devices)
   else:
-    return train_iter()
+    mesh = mesh_utils.create_device_mesh(ici_parallelism, devices=devices)
 
-def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
-  """Records scalar metrics to be written to tensorboard"""
-  metrics['scalar'].update({
-      'perf/step_time_seconds': step_time_delta.total_seconds()
-  })
-  metrics['scalar'].update({
-      'perf/per_device_tflops' : per_device_tflops
-  })
-  metrics['scalar'].update({
-      'perf/per_device_tflops_per_sec':
-          per_device_tflops /
-          step_time_delta.total_seconds()
-  })
-  metrics['scalar'].update({'learning/current_learning_rate': lr })
+  if logging:
+    max_logging.log(f"Decided on mesh: {mesh}")
 
+  return mesh
 
-def write_metrics(writer, metrics, step, config):
-  """Writes metrics to tensorboard"""
-  with jax.spmd_mode('allow_all'):
-    if jax.process_index() == 0:
-      for metric_name in metrics.get("scalar",[]):
-        writer.add_scalar(metric_name, metrics["scalar"][metric_name], step)
-      for metric_name in metrics.get("scalars",[]):
-        writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
+def unbox_logicallypartioned_trainstate(
+    boxed_train_state: train_state.TrainState):
+  """ Unboxes the flax.LogicallyPartitioned pieces in a train state.
 
-    full_log = step % config.log_period == 0
-
-    max_logging.log(f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
-          f"TFLOP/s: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-          f"loss: {metrics['scalar']['learning/loss']:.3f}")
-
-    if full_log:
-      max_logging.log(
-          f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
-      )
-      writer.flush()
-
-def calculate_num_params_from_pytree(params):
-  params_sizes = jax.tree_util.tree_map(jax.numpy.size, params)
-  total_parameters = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes)
-  return total_parameters
-
-# AOT functions
-def fun(x):
-    return x * x
-
-def gen_data_base():
-     return (2 + jax.process_index()) * jnp.ones((128, 128), dtype=jnp.bfloat16)
-
-def gen_data_sharded(mesh):
-    data_sharding = jax.sharding.NamedSharding(mesh, P("data"))
-    jit_gen_data_sharded = jax.jit(
-        gen_data_base, out_shardings=data_sharding
-    )
-    out_shaped = jax.eval_shape(jit_gen_data_sharded)
-    print(f"{out_shaped=}")
-    return jit_gen_data_sharded
-
-
-def make_fake_devices():
-    if args.version=='v4-8':
-        fake_devices = get_topology_desc(
-            platform='tpu',
-            topology_name=f'v4:2x2x1',
-            chip_config_name='megacore',
-            chips_per_host_bounds=(2, 2, 1),
-            num_slices=1,
-        ).devices
-    elif args.version=='v4-16':
-        fake_devices = get_topology_desc(
-        platform='tpu',
-        topology_name=f'v4:2x2x2',
-        chip_config_name='megacore',
-        chips_per_host_bounds=(2, 2, 2),
-        num_slices=1,
-    ).devices
-    return fake_devices
-
-def jit_and_compile(fun, input_args, input_kwargs, mesh, in_shardings, out_shardings):
-    # jit, lower, and compile f using fake devices
-    with mesh:
-        jitted = pjit.pjit(
-            fun, in_shardings=in_shardings, out_shardings=out_shardings
-        )
-        lowered = jitted.lower(*input_args, **input_kwargs)
-    compiled = lowered.compile()
-    return jitted, lowered, compiled
-
-def save_compiled(compiled, save_name):
-    # Serialize and save the compiled object
-    serialized, in_tree, out_tree = serialize(compiled)
-    with open(save_name, "wb") as f:
-        pickle.dump(serialized, f)
-
-def load_compiled(save_name):
-    with open(save_name, "rb") as f:
-        serialized_compiled = pickle.load(f)
-    return serialized_compiled
-
-def get_io_trees(input_args, input_kwargs):
-    _, in_tree_recreated = tree_util.tree_flatten((input_args, input_kwargs))
-    out_shaped = jax.eval_shape(fun, *input_args, **input_kwargs)
-    _, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
-    return in_tree_recreated, out_tree_recreated
-
-def run_f(f, input_args, input_kwargs, mesh, print_cost=False):
-    with mesh:
-        if print_cost:
-            cost = f.cost_analysis()[0]['flops']
-            print(f"{cost=}")
-
-        out = f(*input_args, **input_kwargs)
-        print("computed out")
-        try:
-            print(f"{out=}")
-            out_sum = jnp.sum(out_gathered)
-            print(f"{out_sum=}")
-        except:
-            out_gathered = jax.experimental.multihost_utils.process_allgather(out)
-            print(f"{out_gathered=}")
-            out_sum = jnp.sum(out_gathered)
-            print(f"{out_sum=}")
-
-
-
-
-
-
-
-
-
-# -----------------------------------------------------------------------------
-# Top-level Functions
-# -----------------------------------------------------------------------------
-
-def record_activation_metrics(output_metrics, intermediate_outputs, config):
-  """ Adds the activation metrics to the metrics dict"""
-
-  if config.scan_layers:
-    metrics_dict = intermediate_outputs['intermediates']['decoder']['decoder']
-
-    for layer_num in range(config.num_decoder_layers):
-      output_metrics['scalar'][f'activ_fraction_zero/layer_{layer_num:03d}'] = \
-        metrics_dict["activation_fraction_zero"][0][layer_num]
-      output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = metrics_dict["activation_mean"][0][layer_num]
-      output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = metrics_dict["activation_stdev"][0][layer_num]
-  else:
-    for layer_num in range(config.num_decoder_layers):
-      layer = intermediate_outputs['intermediates']['decoder'][f'layers_{layer_num}']
-      output_metrics['scalar'][f'activ_fraction_zero/layer_{layer_num:03d}'] = layer["activation_fraction_zero"][0]
-      output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = layer["activation_mean"][0]
-      output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
-
-def train_step(model, config, state, data, dropout_rng):
+    Args:
+      boxed_train_state: a train state that includes LogicallyPartitioned
+        leaves.
+    Returns:
+      a TrainState where all all LogicallyPartitioned leaves have been unboxed.
   """
+  return jax.tree_util.tree_map(lambda x: x.unbox() if \
+        isinstance(x, flax.linen.spmd.LogicallyPartitioned) \
+        else x, boxed_train_state, \
+        is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned))
 
-  Args:
-    model: A nn.Module
-    state: A pytree of the current state of the model
-    data: Batch of data to apply to the model
-    dropout_rng: A key to use to generate rng for dropout
-
-  Returns:
-    new_state: Same format as state.
-    metrics: Dictionary of model metrics such as loss, training rate, etc.
-    rng2: A new rng key that can be used in future calls.
-
+def init_train_state(model, tx, config, key):
   """
-  # inputs, targets, segments, positions = apply_args
-  rng1, gen_aqt_rng = jax.random.split(dropout_rng)
-  aqt_rng, rng2 = jax.random.split(gen_aqt_rng)
+  We pass in "static" objects like model, tx, config as JAX compares them by
+  object hash, and instantiating them inside causes pjit top-level annotations
+  to fail to match as pytree prefixes if we re-instantiate.
 
-  # decimate proportion of data when per_device_batch_size<1
-  for k, v in data.items():
-    data[k] = v[:config.global_batch_size_to_train_on,:]
-
-  def loss_fn(params):
-    logits, intermediate_outputs = model.apply({'params': params},
-                         data['inputs'],
-                         data['targets'],
-                         data['inputs_segmentation'],
-                         data['inputs_position'],
-                         enable_dropout=config.enable_dropout,
-                         rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
-    # TODO: is optax xent as good as custom T5X one?
-    xent = optax.softmax_cross_entropy_with_integer_labels(logits, data['targets'])
-    # Mask out paddings at the end of each example.
-    xent = xent * (data['inputs_segmentation'] != 0)
-    # TODO: mask out the prompt if training prefix-LM
-    return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
-
-  grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (loss, intermediate_outputs), grads = grad_fn(state.params)
-  new_state = state.apply_gradients(grads=grads)
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
-             'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
-  if config.record_internal_nn_metrics:
-    record_activation_metrics(metrics, intermediate_outputs, config)
-
-  return new_state, metrics, rng2
-
-def train_loop(config, state=None):
-  """Main Training loop.
-
-  Args:
-    config:
-    state:
-    ckpt_path:
-
-  Returns:
-
+  Args: model, tx, config, key
   """
-  writer = SummaryWriter(config.tensorboard_dir)
-  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir,
-                                                                     config.enable_checkpointing,
-                                                                     config.async_checkpointing)
-  # Initial PRNG Keys
-  init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
-
-  # Model and Optimizer definition
-  model = Transformer(config)
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(
-      learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
+  input_shape = (
+      config.global_batch_size_to_load,
+      config.max_target_length
   )
-
-  tx = optax.adam(
-      max_utils.create_learning_rate_schedule(
-          learning_rate=config.learning_rate, warmup_steps=config.warmup_steps
-      ),
-      b1=config.adam_b1,
-      b2=config.adam_b2,
-      eps=config.adam_eps,
-      eps_root=config.adam_eps_root
-  )
-
-  # Mesh definition
-  devices_array = max_utils.create_device_mesh(config)
-  mesh = Mesh(devices_array, config.mesh_axes)
-
-  # Set up datasets.
-  read_config = tfds.ReadConfig(
-    shuffle_seed = config.data_shuffle_seed,
-  )
-  train_ds, eval_ds = get_datasets(
-      config=config,
-      read_config = read_config,
-  )
-  train_iter, _, _, _ = preprocess_dataset(
-    config,
-    mesh,
-    train_ds, eval_ds,
-    vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
-    data_shuffle_seed = config.data_shuffle_seed,
-  )
-
-  state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
-  data_pspec = P(*config.data_sharding)
-
-  num_model_parameters = calculate_num_params_from_pytree(state.params)
-  max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
-  per_device_tflops = calculate_training_tflops(num_model_parameters, config)
-
-  # Define compiled top-level functions.
-  p_train_step = pjit(
-    train_step,
-    in_shardings=(state_mesh_annotations,
-                       data_pspec,
-                       None),
-    out_shardings=(state_mesh_annotations, None, None),
-    static_argnums=(0,1,),
-    donate_argnums=2)
-
-  example_batch = None
-  last_step_completion = datetime.datetime.now()
-
-  local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
-  running_gcs_metrics = [] if config.gcs_metrics else None
-
-  for step in np.arange(get_first_step(state), config.steps):
-    example_batch = load_next_batch(train_iter, example_batch, config)
-    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      state, metrics, nextrng = p_train_step(
-          model, config, state, example_batch, nextrng
-      )
-
-    new_time = datetime.datetime.now()
-    record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
-    write_metrics(writer, metrics, step, config)
-    last_step_completion = new_time
-
-    if step > 0 and step % config.save_period == 0 and checkpoint_manager is not None:
-      checkpoint_manager.save(step, state)
-      max_logging.log("saved a checkpoint")
-
-    if config.metrics_file:
-      max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
-
-    if config.gcs_metrics and jax.process_index() == 0:
-      running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
-
-    # Start profiling at end of first step to avoid compilation.
-    # Move before for loop to include.
-    if step == 0:
-      max_utils.activate_profiler(config)
-
-  max_utils.deactivate_profiler(config)
-  writer.close()
+  model_vars = model.init({'params': key, 'dropout': key, 'aqt': key},
+                          jnp.ones(input_shape),
+                          jnp.ones(input_shape))
+  state = train_state.TrainState.create(
+      apply_fn=model.apply,
+      params=model_vars['params'],
+      tx=tx)
   return state
 
-def main(argv: Sequence[str]) -> None:
-  pyconfig.initialize(argv)
-  os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
-  debug_config = debug_configuration.DebugConfig(
-    stack_trace_config = stack_trace_configuration.StackTraceConfig(
-      collect_stack_trace = pyconfig.config.collect_stack_trace,
-      stack_trace_to_cloud = pyconfig.config.stack_trace_to_cloud,
-      stack_trace_interval_seconds = pyconfig.config.stack_trace_interval_seconds))
-  diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
-  with diagnostic.diagnose(diagnostic_config):
-    train_loop(pyconfig.config)
+def gen_input_data(model, tx, config, rng, mesh, data_iterator):
+  #model, config, state (S), example_batch (S), example_rng (S)
+  abstract_state, state_mesh_annotations =  get_abstract_state(model, tx, config, rng, mesh)
+  
+  #load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
+  data_iterator_dummy = functools.partial(data_iterator_dummy)
+  example_batch = jax.eval_shape(data_iterator_dummy)
+  example_rng = jax.random.PRNGKey(0)
+  example_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
+  input_args = (model, config, abstract_state, example_batch, example_rng)
+  input_kwargs = {}
+  return input_args, input_kwargs, state_mesh_annotations
+
+def get_shardings(mesh, state_mesh_annotations, config):
+  data_pspec = P(*config.data_sharding)
+  state_mesh_shardings = jax.tree_map(
+      lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
+  data_sharding = jax.tree_map(
+      lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+  in_shardings = (state_mesh_shardings, data_sharding, None)
+  out_shardings = (state_mesh_shardings, None, None)
+  return in_shardings, out_shardings
+
+def save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, in_shardings, out_shardings, mesh):
+    def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings):
+        # Jit, lower, and compile func, possibly with topology devices
+        with mesh:
+            # jitted = pjit.pjit(
+            #     func, in_shardings=in_shardings, out_shardings=out_shardings
+            # )
+            jitted = jax.jit(func, in_shardings=in_shardings, out_shardings=out_shardings)
+            lowered = jitted.lower(*func_input_args, **func_input_kwargs)
+        compiled = lowered.compile()
+        return jitted, lowered, compiled
+
+    def save_compiled(compiled, save_name):
+        # Serialize and save the compiled object
+        serialized, in_tree, out_tree = serialize(compiled)
+        with open(save_name, "wb") as f:
+            pickle.dump(serialized, f)
+    jitted, lowered, compiled = jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings)
+    save_compiled(compiled, compiled_name) # Serialize and save the compiled object
+
+def get_abstract_state(model, tx, config, rng, mesh):
+  init_train_state_partial = functools.partial(init_train_state, model, tx,
+                                               config)
+  abstract_state = jax.eval_shape(init_train_state_partial, rng)
+  state_logical_annotations = nn.get_partition_spec(abstract_state)
+  unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
+
+  # Initialization
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  return abstract_state, state_mesh_annotations
+
+def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
+  """ We initialize the model and optimizer state, and optionally load from a
+  checkpoint as necessary.
+
+  Args:
+    model: the flax model to initialize
+    tx: the optax.GradientTransformation
+    config: config object
+    rng: jax.prng key
+    mesh: jax.devices() mesh
+    checkpoint_manager: an Orbax checkpointing.CheckpointManager object
+
+  Returns:
+    state: the initialized train state
+    state_mesh_annotations: the mesh annotations for the train state
+  """
+  init_train_state_partial = functools.partial(init_train_state, model, tx,
+                                               config)
+  abstract_state = jax.eval_shape(init_train_state_partial, rng)
+  state_logical_annotations = nn.get_partition_spec(abstract_state)
+  unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
+
+  # Initialization
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+    state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
+                                                config.load_parameters_path,
+                                                config.load_from_other_directory,
+                                                config.load_from_other_directory_step,
+                                                unboxed_abstract_state,
+                                                mesh,
+                                                state_mesh_annotations)
+
+    state_mesh_shardings = jax.tree_map(
+        lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
+    # mattdavidow: This errors with fake devices
+    if not state:
+      state = jax.jit(
+          init_train_state_partial,
+          in_shardings=None,
+          out_shardings=state_mesh_shardings
+      )(rng)
+      if raw_params: # If we loaded a partial state, we need to merge it.
+        state = state.replace(params = raw_params)
+    raw_params = None
+
+  state = unbox_logicallypartioned_trainstate(state)
+  return state, state_mesh_annotations
 
 
-if __name__ == "__main__":
-  app.run(main)
+# Learning Rate Schedule
+# -----------------------------------------------------------------------------
+
+def create_learning_rate_schedule(config):
+  """Creates a warmup and cosine decay learning rate schedule:
+  We take inspiration from Llama2's learning rate (LR) schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
+  Learning rate schedule has either two or three parts:
+  1) Linear warmup from 0 to [learning_rate] over steps 0 to [learning_rate_schedule_steps * warmup_steps_fraction]
+  2) Cosine from [learning_rate] to [learning_rate * cosine_learning_rate_final_fraction] until learning_rate_schedule_steps
+  3) Constant learning rate of 0 from learning_rate_schedule_steps to steps.
+  The zero learning rate section can be used to more accurately measure the fully trained model's performance.
+  """
+  def make_cos_schedule(init_lr, final_lr, len_steps):
+    def schedule(step):
+      pct = (step) / len_steps
+      a = 0.5 * (jnp.cos(jnp.pi*pct) + 1)
+      lr = init_lr * a + final_lr * (1 - a)
+      return lr
+    return schedule
+
+  lr = config.learning_rate
+  cos_final_lr = lr * config.cosine_learning_rate_final_fraction
+
+  warmup_steps = int(config.learning_rate_schedule_steps * config.warmup_steps_fraction)
+  cos_steps = config.learning_rate_schedule_steps - warmup_steps
+  constant_zero_steps = config.steps - config.learning_rate_schedule_steps
+
+  warmup_schedule = optax.linear_schedule(
+      init_value=0.0,
+      end_value=lr,
+      transition_steps=warmup_steps
+  )
+  cos_schedule = make_cos_schedule(lr, cos_final_lr, cos_steps)
+  constant_schedule = optax.constant_schedule(0.0)
+
+  pieces = [warmup_schedule, cos_schedule]
+  boundaries=[
+   warmup_steps,
+   warmup_steps + cos_steps,
+   ]
+
+  if constant_zero_steps > 0:
+    pieces.append(constant_schedule)
+    boundaries.append(warmup_steps + cos_steps + constant_zero_steps)
+
+  return optax.join_schedules(pieces, boundaries)
+
+
+# Cross entropy implementation is taken from original T5X codebase:
+# https://github.com/google-research/t5x/blob/ace831eea1e2742b4299cd1a9af7e4f302038351/t5x/losses.py#L25-L101
+@jax.custom_vjp
+def cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray,
+                              z_loss: float) -> Tuple[jnp.ndarray, jnp.ndarray]:
+  """Computes cross entropy loss with stable custom gradient.
+  Computes a stabilized-gradient version of:
+    -jnp.sum(targets * nn.log_softmax(logits), axis=-1)
+  If z_loss > 0, then an auxiliary loss equal to z_loss*log(z)^2
+  will be added to the cross entropy loss (z = softmax normalization constant).
+  The two uses of z_loss are:
+  1. To keep the logits from drifting too far from zero, which can cause
+     unacceptable roundoff errors in bfloat16.
+  2. To encourage the logits to be normalized log-probabilities.
+  Args:
+    logits: [batch, length, num_classes] float array.
+    targets: categorical one-hot targets [batch, length, num_classes] float
+      array.
+    z_loss: coefficient for auxilliary z-loss loss term.
+  Returns:
+    tuple with the total loss and the z_loss, both
+    float arrays with shape [batch, length].
+  """
+  logits_sum = jax.scipy.special.logsumexp(logits, axis=-1, keepdims=True)
+  log_softmax = logits - logits_sum
+  loss = -jnp.sum(targets * log_softmax, axis=-1)
+  # Add auxilliary z-loss term.
+  log_z = jnp.squeeze(logits_sum, axis=-1)
+  total_z_loss = z_loss * jax.lax.square(log_z)
+  loss += total_z_loss
+  return loss, total_z_loss
+
+
+def _cross_entropy_with_logits_fwd(
+    logits: jnp.ndarray,
+    targets: jnp.ndarray,
+    z_loss: float = 0.0
+) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray],
+           Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
+                 jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
+  """Forward-mode of `cross_entropy_with_logits`."""
+  max_logit = logits.max(axis=-1, keepdims=True)
+  shifted = logits - max_logit
+  exp_shifted = jnp.exp(shifted)
+  sum_exp = jnp.sum(exp_shifted, axis=-1, keepdims=True)
+  log_softmax = shifted - jnp.log(sum_exp)
+  loss = -jnp.sum(targets * log_softmax, axis=-1)
+  # Add auxilliary z-loss term.
+  log_z = jnp.squeeze(jnp.log(sum_exp) + max_logit, axis=-1)
+  total_z_loss = z_loss * jax.lax.square(log_z)
+  loss += total_z_loss
+  return (loss, total_z_loss), (logits, targets, z_loss, exp_shifted, sum_exp, #pytype: disable=bad-return-type  #jax-ndarray
+                                log_softmax, log_z)
+
+
+def _cross_entropy_with_logits_bwd(
+    res: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
+               jnp.ndarray, jnp.ndarray], g: Tuple[jnp.ndarray, jnp.ndarray]
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+  """Backward-mode of `cross_entropy_with_logits`."""
+  g = g[0]  # Ignore z_loss component as that is only used for logging.
+  logits, targets, z_loss, exp_shifted, sum_exp, log_softmax, log_z = res
+  # z-loss term adds the (2 * z_loss * log_z) factor.
+  deriv = (
+      jnp.expand_dims(1 + 2 * z_loss * log_z, -1) * exp_shifted / sum_exp -
+      targets)
+  g_logits = jnp.expand_dims(g, axis=-1) * deriv
+  g_targets = -jnp.expand_dims(g, axis=-1) * log_softmax
+  return (jnp.asarray(g_logits,
+                      logits.dtype), jnp.asarray(g_targets, targets.dtype),
+          jnp.array(0.0))  # sets z-loss coeff gradient to 0
+
+cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
+                                 _cross_entropy_with_logits_bwd)
