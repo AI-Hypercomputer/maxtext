@@ -26,13 +26,17 @@ jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
 print(f"Found {jax.device_count()} devices.")
-
+from jax.experimental.topologies import get_topology_desc
 from typing import Sequence
 import datetime
+from input_pipeline import create_data_iterator_with_tokenizer
 from absl import app
 from flax.linen import partitioning as nn_partitioning
 import numpy as np
 import optax
+import functools
+import pickle
+from jax.experimental.serialize_executable import serialize, deserialize_and_load
 from tensorboardX import SummaryWriter
 
 from layers import Transformer
@@ -231,78 +235,140 @@ def train_loop(config, state=None):
   )
 
   # Mesh definition
-  devices_array = max_utils.create_device_mesh(config)
+  # Mattdavidow: xaot
+  topo='v4-8'
+  if topo=='v4-8':
+    topology_devices = get_topology_desc(
+        platform='tpu',
+        topology_name=f'v4:2x2x1',
+        chip_config_name='megacore',
+        chips_per_host_bounds=(2, 2, 1),
+        num_slices=1,
+    ).devices
+  elif topo=='v4-16':
+    topology_devices = get_topology_desc(
+    platform='tpu',
+    topology_name=f'v4:2x2x2',
+    chip_config_name='megacore',
+    chips_per_host_bounds=(2, 2, 2),
+    num_slices=1,
+).devices
+
+  use_devices = topology_devices # either topology_devices or jax.devices()
+  devices_array = max_utils.create_device_mesh(config, use_devices) # alter
   mesh = Mesh(devices_array, config.mesh_axes)
 
   # Set up datasets.
-  read_config = tfds.ReadConfig(
-    shuffle_seed = config.data_shuffle_seed,
-  )
-  train_ds, eval_ds = get_datasets(
-      config=config,
-      read_config = read_config,
-  )
-  train_iter, _, _, _ = preprocess_dataset(
-    config,
-    mesh,
-    train_ds, eval_ds,
-    vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
-    data_shuffle_seed = config.data_shuffle_seed,
-  )
+  # read_config = tfds.ReadConfig(
+  #   shuffle_seed = config.data_shuffle_seed,
+  # )
+  # train_ds, eval_ds = get_datasets(
+  #     config=config,
+  #     read_config = read_config,
+  # )
+  # train_iter, _, _, _ = preprocess_dataset(
+  #   config,
+  #   mesh,
+  #   train_ds, eval_ds,
+  #   vocab_path=os.path.join(config.base_output_directory, config.vocab_relative_path),
+  #   data_shuffle_seed = config.data_shuffle_seed,
+  # )
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   data_pspec = P(*config.data_sharding)
 
-  num_model_parameters = calculate_num_params_from_pytree(state.params)
-  max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
-  per_device_tflops = calculate_training_tflops(num_model_parameters, config)
-
-  # Define compiled top-level functions.
-  p_train_step = pjit(
-    train_step,
-    in_shardings=(state_mesh_annotations,
-                       data_pspec,
-                       None),
-    out_shardings=(state_mesh_annotations, None, None),
-    static_argnums=(0,1,),
-    donate_argnums=2)
+  data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
+  # num_model_parameters = calculate_num_params_from_pytree(state.params)
+  # max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
+  # per_device_tflops = calculate_training_tflops(num_model_parameters, config)
 
   example_batch = None
-  last_step_completion = datetime.datetime.now()
+  example_rng = jax.random.PRNGKey(0)
+  example_batch = load_next_batch(data_iterator, example_batch, config)
+  compiled_pickle_filename = f"x_aot_train_{topo}.pickle"
 
-  local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
-  running_gcs_metrics = [] if config.gcs_metrics else None
+  def run_one_step(compiled, state, example_batch, example_rng):
+    # simpler than getting the inputs to train_step correct, just call cost_analysis
+    cost = compiled.cost_analysis()[0]['flops']
+    print(f"{cost=}")
 
-  for step in np.arange(get_first_step(state), config.steps):
-    example_batch = load_next_batch(train_iter, example_batch, config)
-    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      state, metrics, nextrng = p_train_step(
-          model, config, state, example_batch, nextrng
+    # one step using the locally compiled object
+    print("Running one step using the compiled object...")
+    # one_step_output = compiled(model, config, state, example_batch, example_rng)
+    one_step_output = compiled(state, example_batch, example_rng)
+    print("One step of compiled successfully ran!")
+
+  run_xaot_local = True
+  if run_xaot_local:
+    print("\n\n\n Running xaot locally (will pickle and run)")
+    with mesh,nn_partitioning.axis_rules(config.logical_axis_rules):
+      print("Jitting train step...")
+      jitted = pjit(
+          train_step,
+          in_shardings=(state_mesh_annotations, data_pspec, None),
+          out_shardings=(state_mesh_annotations, None, None),
+          static_argnums=(0,1,),
+          donate_argnums=2
       )
+      print("Jitted train step!!!")
+      print("Lowering jitted train step...")
+      lowered = jitted.lower(model, config, state, example_batch, example_rng)
+      print("Lowered jitted train step!!!")
 
-    new_time = datetime.datetime.now()
-    record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
-    write_metrics(writer, metrics, step, config)
-    last_step_completion = new_time
+    orig_compiled = lowered.compile()
 
-    if step > 0 and step % config.save_period == 0 and checkpoint_manager is not None:
-      checkpoint_manager.save(step, state)
-      max_logging.log("saved a checkpoint")
+    serialized, in_tree, out_tree = serialize(orig_compiled)
 
-    if config.metrics_file:
-      max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
+    # save the serialized via pickle
+    print("Saving the serialized compiled train step...")
+    with open(compiled_pickle_filename, "wb") as f:
+        pickle.dump(serialized, f)
+    print("Saved the serialized compiled!!!")
 
-    if config.gcs_metrics and jax.process_index() == 0:
-      running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
+    compiled = deserialize_and_load(serialized, in_tree, out_tree)
 
-    # Start profiling at end of first step to avoid compilation.
-    # Move before for loop to include.
-    if step == 0:
-      max_utils.activate_profiler(config)
+    run_one_step(compiled, state, example_batch, example_rng)
 
-  max_utils.deactivate_profiler(config)
-  writer.close()
-  return state
+
+  else: # Load!!!
+    print("\n\n\n Running xaot via load!!\n\n\n")
+    print("Loading the serialized compiled train step...")
+    with open(compiled_pickle_filename, "rb") as f:
+        serialized_compiled = pickle.load(f)
+    print("Serialized compiled loaded!!!")
+
+    # out_tree
+    train_pytree = functools.partial(train_step, model, config)
+    out_shaped = jax.eval_shape(train_pytree, state, example_batch, example_rng)
+    flat_out_shaped, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
+    
+    # in_tree
+    input_args = (state, example_batch, example_rng)
+    flat_in_shaped, in_tree_recreated = jax.tree_util.tree_flatten((input_args,{}))
+
+    compiled = deserialize_and_load(serialized_compiled, in_tree_recreated, out_tree_recreated)
+
+    run_one_step(compiled, state, example_batch, example_rng)
+
+
+  
+
+
+
+
+
+
+  # Define compiled top-level functions.
+#   p_train_step = pjit(
+#     train_step,
+#     in_shardings=(state_mesh_annotations,
+#                        data_pspec,
+#                        None),
+#     out_shardings=(state_mesh_annotations, None, None),
+#     static_argnums=(0,1,),
+#     donate_argnums=2)
+
+  return None
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)

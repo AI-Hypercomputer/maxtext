@@ -156,3 +156,9 @@ stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds
 
 # Use iota operator in Embed
 use_iota_embed: False
+
+# xaot options
+save_xaot: True
+load_xoat: False
+run_f: False
+version: "v4-8"
