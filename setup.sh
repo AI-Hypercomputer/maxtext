@@ -43,7 +43,7 @@ if [[ $LIBTPU_GCS_PATH == NONE ]]; then
 fi
 
 if [[ $SKIP_REQUIREMENTS == NONE ]]; then
-    SKIP_REQUIREMENTS="false"
+    unset SKIP_REQUIREMENTS
 fi
 
 if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE) ]]; then
