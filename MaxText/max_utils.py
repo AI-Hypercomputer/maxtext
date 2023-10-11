@@ -462,6 +462,8 @@ def load_next_batch(train_iter, example_batch, config):
     return train_iter()
 
 def get_shaped_batch(config):
+  # Ahh this is bad. Cannot use local devices here since it is xaot - the target system may have a different
+  # count of local devices than the runner machine
   batch_shape = (int(config.per_device_batch_size * len(jax.local_devices())), config.max_target_length)
   print(f"{batch_shape=}")
   batch = {}
@@ -472,3 +474,17 @@ def get_shaped_batch(config):
   batch['targets_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   batch['targets_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   return batch
+
+
+
+# Xaot load
+def load_compiled(save_name):
+    with open(save_name, "rb") as f:
+        serialized_compiled = pickle.load(f)
+    return serialized_compiled
+
+def get_io_trees(func, input_args, input_kwargs):
+    _, in_tree_recreated = jax.tree_util.tree_flatten((input_args, input_kwargs))
+    out_shaped = jax.eval_shape(func, *input_args, **input_kwargs)
+    _, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
+    return in_tree_recreated, out_tree_recreated
