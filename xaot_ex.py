@@ -65,13 +65,19 @@ def generate_topological_mesh(topology, mesh_axes_names):
     devices = make_fake_devices()
     return jax.sharding.Mesh(devices, mesh_axes_names)
 
+def get_shardings(mesh):
+    input_sharding = jax.sharding.NamedSharding(mesh, P('data'))
+    output_sharding = jax.sharding.NamedSharding(mesh, P(None, 'data'))
+    return input_sharding, output_sharding
+
 def save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, in_shardings, out_shardings, mesh):
     def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings):
         # Jit, lower, and compile func, possibly with topology devices
         with mesh:
-            jitted = pjit.pjit(
-                func, in_shardings=in_shardings, out_shardings=out_shardings
-            )
+            # jitted = pjit.pjit(
+            #     func, in_shardings=in_shardings, out_shardings=out_shardings
+            # )
+            jitted = jax.jit(func, in_shardings=in_shardings, out_shardings=out_shardings)
             lowered = jitted.lower(*func_input_args, **func_input_kwargs)
         compiled = lowered.compile()
         return jitted, lowered, compiled
@@ -133,8 +139,7 @@ if args.save:
     print("Saving the compiled function...", flush=True)
     topological_mesh = generate_topological_mesh(args.topology, mesh_axis_names)
     func_input_args, func_input_kwargs = gen_input_data(topological_mesh)
-    in_shardings=P('data')
-    out_shardings=P(None, 'data')
+    in_shardings, out_shardings = get_shardings(topological_mesh)
     save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, in_shardings, out_shardings, topological_mesh)
     # fake_devices = make_fake_devices()
     # fake_device_mesh = jax.sharding.Mesh(np.array(fake_devices), mesh_axis_names)
