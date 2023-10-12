@@ -153,15 +153,12 @@ elif [[ $MODE == "head" ]]; then
     pip3 install dist/*.whl --force-reinstall --no-deps # installs jaxlib (includes XLA)
     pip3 install -e .  # installs jax
     if [[ -n "$LIBTPU_GCS_PATH" ]]; then
-        installed_libtpu_path=$(python3 -c '
-        import os; import jax; print(os.environ["TPU_LIBRARY_PATH"])
-        ')
         # Install custom libtpu
-        echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $installed_libtpu_path"
+        echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
         # Install required dependency
         pip3 install -U crcmod
         # Copy libtpu.so from GCS path
-        gsutil cp "$LIBTPU_GCS_PATH" "$installed_libtpu_path"
+        gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
     else
         echo -e "\n\nError: You must provide a custom libtpu for head mode.\n\n"
         exit 1
