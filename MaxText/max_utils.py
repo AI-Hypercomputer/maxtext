@@ -372,10 +372,6 @@ def gen_input_data(model, tx, config, rng, mesh, data_iterator):
   # example_batch = None
   # load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
   # example_batch = jax.eval_shape(load_partial)
-  print(f"{mesh=}")
-  print(f"{mesh.device_ids=}")
-
-  print(np.size(mesh.device_ids))
   example_batch = get_shaped_batch(config, np.size(mesh.device_ids))
   example_rng = jax.random.PRNGKey(0)
   example_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
@@ -449,7 +445,6 @@ def get_topology_mesh(config):
     chips_per_host_bounds=(2, 2, 2),
     num_slices=1,
 ).devices
-  print(f"{topology_devices=}")
   topology_devices = create_device_mesh(config, topology_devices)
   topology_mesh = Mesh(topology_devices, config.mesh_axes)
   return topology_mesh
