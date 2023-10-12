@@ -120,7 +120,7 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
 
 def create_device_mesh(config, devices=jax.devices(), logging=True):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas """
-  devices = jax.devices()
+  # devices = jax.devices()
   num_devices = len(devices)
   try:
     num_slices = 1 + max([d.slice_index for d in devices])
@@ -130,7 +130,7 @@ def create_device_mesh(config, devices=jax.devices(), logging=True):
   max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
   assert len(devices) > 1, "You must have at least two devices"
 
-  multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
+  multi_slice_env = hasattr(devices, 'slice_index')
 
   dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism, config.dcn_tensor_parallelism]
   ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism, config.ici_tensor_parallelism]
@@ -140,9 +140,9 @@ def create_device_mesh(config, devices=jax.devices(), logging=True):
   ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, 'ICI')
 
   if multi_slice_env:
-    mesh = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism)
+    mesh = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism, devices)
   else:
-    mesh = mesh_utils.create_device_mesh(ici_parallelism)
+    mesh = mesh_utils.create_device_mesh(ici_parallelism, devices)
 
   if logging:
     max_logging.log(f"Decided on mesh: {mesh}")
@@ -372,7 +372,11 @@ def gen_input_data(model, tx, config, rng, mesh, data_iterator):
   # example_batch = None
   # load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
   # example_batch = jax.eval_shape(load_partial)
-  example_batch = get_shaped_batch(config)
+  print(f"{mesh=}")
+  print(f"{mesh.device_ids=}")
+
+  print(np.size(mesh.device_ids))
+  example_batch = get_shaped_batch(config, np.size(mesh.device_ids))
   example_rng = jax.random.PRNGKey(0)
   example_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
   input_args = (model, config, abstract_state, example_batch, example_rng)
@@ -437,6 +441,7 @@ def get_topology_mesh(config):
         num_slices=1,
     ).devices
   elif config.topology=='v4-16':
+    print("excitement16", flush=True)
     topology_devices = get_topology_desc(
     platform='tpu',
     topology_name=f'v4:2x2x2',
@@ -444,6 +449,7 @@ def get_topology_mesh(config):
     chips_per_host_bounds=(2, 2, 2),
     num_slices=1,
 ).devices
+  print(f"{topology_devices=}")
   topology_devices = create_device_mesh(config, topology_devices)
   topology_mesh = Mesh(topology_devices, config.mesh_axes)
   return topology_mesh
@@ -461,10 +467,10 @@ def load_next_batch(train_iter, example_batch, config):
   else:
     return train_iter()
 
-def get_shaped_batch(config):
+def get_shaped_batch(config, num_target_devices):
   # Ahh this is bad. Cannot use local devices here since it is xaot - the target system may have a different
   # count of local devices than the runner machine
-  batch_shape = (int(config.per_device_batch_size * len(jax.local_devices())), config.max_target_length)
+  batch_shape = (int(config.per_device_batch_size * num_target_devices), config.max_target_length)
   print(f"{batch_shape=}")
   batch = {}
   batch['inputs'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)

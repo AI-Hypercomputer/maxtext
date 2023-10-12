@@ -302,7 +302,7 @@ def train_loop(config, state=None):
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(data_iterator, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      if config.load_xoat:
+      if config.load_xaot:
         state, metrics, nextrng = p_train_step(
             state, example_batch, nextrng
         )
