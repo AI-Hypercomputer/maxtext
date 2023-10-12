@@ -41,7 +41,6 @@ Next Steps:
 """
 
 import argparse
-import collections
 import datetime
 import os
 import re
@@ -49,6 +48,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 
 
 ################### Internally used constants ##############
@@ -215,18 +215,15 @@ spec:
         command: [ "sleep", "inf" ]
 """
 
-SystemCharacteristics = collections.namedtuple(
-    'SystemCharacteristcs',
-    [
-        'topology',
-        'vms_per_slice',
-        'gke_accelerator',
-        'gce_machine_type',
-        'chips_per_vm',
-    ],
-)
+@dataclass
+class SystemCharacteristics:
+  topology: str
+  vms_per_slice: int
+  gke_accelerator: str
+  gce_machine_type: str
+  chips_per_vm: int
 
-################### Subcomand Helper Functions #############
+################### Subcommand Helper Functions #############
 
 UserFacingNameToSystemCharacteristics = {
     'v5litepod-16': SystemCharacteristics(
@@ -244,6 +241,39 @@ UserFacingNameToSystemCharacteristics = {
     'v5litepod-256': SystemCharacteristics(
         '16x16', 64, 'tpu-v5-lite-podslice', 'ct5lp-hightpu-4t', 4
     ),
+    'v4-8': SystemCharacteristics(
+      '2x2x1', 1,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-16': SystemCharacteristics(
+      '2x2x2', 2,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-32': SystemCharacteristics(
+      '2x2x4', 4,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-64': SystemCharacteristics(
+      '2x4x4', 8,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-128': SystemCharacteristics(
+      '4x4x4', 16,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-256': SystemCharacteristics(
+      '4x4x8', 32,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-512': SystemCharacteristics(
+      '4x8x8', 64,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-1024': SystemCharacteristics(
+      '8x8x8', 128,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-1536': SystemCharacteristics(
+      '8x8x12', 192,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-2048': SystemCharacteristics(
+      '8x8x16', 256,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
+    'v4-4096': SystemCharacteristics(
+      '8x16x16', 512,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
+    ),
 }
 
 
@@ -257,10 +287,7 @@ def chunks(lst, n):
   Returns:
     List of n-sized chunks for lst.
   """
-  output = []
-  for i in range(0, len(lst), n):
-    output.append(lst[i : i + n])
-  return output
+  return [lst[i:i+n] for i in range(0, len(lst), n)]
 
 
 def make_tmp_files(per_command_name):
@@ -554,10 +581,10 @@ def xpk_print(*args, **kwargs):
 
 
 def xpk_exit(error_code):
-  """Helper function to exit xpk with an associted error code.
+  """Helper function to exit xpk with an associated error code.
 
   Args:
-    error_code: If the code provided is zero, then no issues occured.
+    error_code: If the code provided is zero, then no issues occurred.
   """
   if error_code == 0:
     xpk_print('Exiting XPK cleanly')
@@ -629,18 +656,15 @@ def run_gke_cluster_create_command(args) -> int:
   Returns:
     0 if successful and 1 otherwise.
   """
-  # This cpu node pool will handle system jobs + jobset manager.
-  default_cluster_machine_type = 'e2-standard-32'
-  # Create the cluster.
 
-  region = zone_to_region(args.zone)
+  # Create the cluster.
   command = (
       'gcloud beta container clusters create'
       f' {args.cluster} --release-channel rapid  --enable-autoscaling'
       ' --max-nodes 1000 --min-nodes 5'
-      f' --project={args.project} --region={region}'
+      f' --project={args.project} --region={zone_to_region(args.zone)}'
       f' --cluster-version={args.gke_version} --location-policy=BALANCED'
-      f' --machine-type={default_cluster_machine_type}'
+      f' --machine-type={args.cluster_cpu_machine_type}'
       ' --scopes=storage-full,gke-default'
       f' {args.custom_cluster_arguments}'
   )
@@ -672,7 +696,6 @@ def get_all_clusters_programmatic(args) -> tuple[list[str], int]:
     xpk_print(f'Find if Cluster Exists returned ERROR {return_code}')
     return [], return_code
   cluster_names = [x.split(' ')[0] for x in raw_cluster_output.splitlines()]
-  print(cluster_names)
   return cluster_names, 0
 
 
@@ -718,7 +741,7 @@ def run_gke_node_pool_create_command(args, system_characteristics) -> int:
 
   Args:
     args: user provided arguments for running the command.
-    system_characteristics: System characteristics based on TPU type/toplology.
+    system_characteristics: System characteristics based on TPU type/topology.
 
   Returns:
     0 if successful and 1 otherwise.
@@ -824,7 +847,6 @@ def run_gke_clusters_list_command(args) -> int:
       f' --project={args.project} --region={zone_to_region(args.zone)}'
   )
   return_code = run_command_with_updates(command, 'Cluster List', args)
-
   if return_code != 0:
     xpk_print(f'Cluster list request returned ERROR {return_code}')
     return 1
@@ -868,7 +890,7 @@ def install_kueue_on_cluster(args) -> int:
   """
   command = (
       'kubectl apply -f'
-      ' xpk/kueue_manifests.yml'
+      ' https://github.com/kubernetes-sigs/kueue/releases/download/v0.4.1/manifests.yaml'
   )
   return_code = run_command_with_updates(command, 'Set Kueue On Cluster', args)
 
@@ -1075,7 +1097,7 @@ def cluster_cacheimage(args) -> int:
 
 
 def cluster_describe(args) -> int:
-  """Function around cluster dewscribe.
+  """Function around cluster describe.
 
   Args:
     args: user provided arguments for running the command.
@@ -1422,7 +1444,7 @@ cluster_create_required_arguments.add_argument(
     '--tpu-type',
     type=str,
     default='v5litepod-16',
-    help='The type of the TPU.',
+    help='The type of the TPU. v5litepod and v4 are the only supported types.',
     required=True,
 )
 
@@ -1432,14 +1454,14 @@ cluster_create_optional_arguments.add_argument(
     type=str,
     choices=['AS_NEEDED', 'PERIODIC'],
     default='AS_NEEDED',
-    help='The maintenance policy of the cluster and repective clusters.',
+    help='The maintenance policy of the cluster and respective clusters.',
 )
 cluster_create_optional_arguments.add_argument(
     '--gke-version',
     type=str,
     default='1.27.4-gke.900',
     help=(
-        'The GKE version of the cluster and repective clusters. The default is'
+        'The GKE version of the cluster and respective clusters. The default is'
         ' "1.27.4-gke.900".'
     ),
 )
@@ -1449,6 +1471,16 @@ cluster_create_optional_arguments.add_argument(
     default=1,
     help='The number of slices to run the job on, defaults to 1.',
     required=True,
+)
+cluster_create_optional_arguments.add_argument(
+  '--cluster-cpu-machine-type',
+    type=str,
+    default='e2-standard-32',
+    help=(
+      'Set the machine tpu within the default cpu node pool. For zonal '
+      'clusters, make sure that the zone supports the machine type, and for '
+      'regional clusters, all zones in the region supports the machine type.'
+    )
 )
 add_shared_arguments(cluster_create_optional_arguments)
 cluster_create_optional_arguments.add_argument(
