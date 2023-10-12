@@ -122,15 +122,20 @@ def create_device_mesh(config, devices=jax.devices(), logging=True):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas """
   # devices = jax.devices()
   num_devices = len(devices)
+  print(f"{devices=}")
   try:
     num_slices = 1 + max([d.slice_index for d in devices])
   except:
     num_slices = 1
+  print(f"{num_slices=}")
   num_devices_per_slice = num_devices//num_slices
   max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
   assert len(devices) > 1, "You must have at least two devices"
 
-  multi_slice_env = hasattr(devices, 'slice_index')
+  multi_slice_env = num_slices > 1
+  #multi_slice_env = hasattr(devices, 'slice_index') # fake devices use slice_id instead of slice_index
+  if hasattr(devices, 'slice_id'):
+    print("To id or to index, that is the question", flush=True)
 
   dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism, config.dcn_tensor_parallelism]
   ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism, config.ici_tensor_parallelism]
@@ -412,7 +417,9 @@ def save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, 
         serialized, in_tree, out_tree = serialize(compiled)
         with open(save_name, "wb") as f:
             pickle.dump(serialized, f)
+    print("Jitting train step so it can be saved...", flush=True)
     jitted, lowered, compiled = jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings)
+    print("Jitting train step!!!", flush=True)
     save_compiled(compiled, compiled_name) # Serialize and save the compiled object
 
 def get_abstract_state(model, tx, config, rng, mesh):
@@ -434,17 +441,25 @@ def get_topology_mesh(config):
         topology_name=f'v4:2x2x1',
         chip_config_name='megacore',
         chips_per_host_bounds=(2, 2, 1),
-        num_slices=1,
+        num_slices=config.topology_num_slices,
     ).devices
   elif config.topology=='v4-16':
-    print("excitement16", flush=True)
+    print("excitement v4-16", flush=True)
     topology_devices = get_topology_desc(
     platform='tpu',
     topology_name=f'v4:2x2x2',
     chip_config_name='megacore',
     chips_per_host_bounds=(2, 2, 2),
-    num_slices=1,
+    num_slices=config.topology_num_slices,
 ).devices
+  elif config.topology == 'v5e-16':
+    print("excitement v5e-16")
+    topology_devices = get_topology_desc(
+        platform='tpu',
+        topology_name=f'v5e:2x2',
+        chips_per_host_bounds=(2, 2, 1),
+        num_slices=config.topology_num_slices,
+    ).devices
   topology_devices = create_device_mesh(config, topology_devices)
   topology_mesh = Mesh(topology_devices, config.mesh_axes)
   return topology_mesh
@@ -466,7 +481,7 @@ def get_shaped_batch(config, num_target_devices):
   # Ahh this is bad. Cannot use local devices here since it is xaot - the target system may have a different
   # count of local devices than the runner machine
   batch_shape = (int(config.per_device_batch_size * num_target_devices), config.max_target_length)
-  print(f"{batch_shape=}")
+  print(f"{batch_shape=}", flush=True)
   batch = {}
   batch['inputs'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   batch['inputs_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)

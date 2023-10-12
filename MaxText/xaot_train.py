@@ -245,7 +245,7 @@ def train_loop(config, state=None):
 
   
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh) # maybe can wrap into gen_input_data
-  compiled_name = f"x_aot_train_{config.topology}.pickle"
+  compiled_name = f"x_aot_train_{config.topology}_num_slices_{config.topology_num_slices}.pickle"
   if config.save_xaot:
     print("Saving compiled xaot...", flush=True)
     topology_mesh = max_utils.get_topology_mesh(config)

@@ -190,3 +190,4 @@ use_iota_embed: False
 save_xaot: True
 load_xaot: False
 topology: 'v4-8'
+topology_num_slices: 1
