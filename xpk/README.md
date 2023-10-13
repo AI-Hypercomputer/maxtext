@@ -141,6 +141,45 @@ cleanup with a `Cluster Delete`.
     --cluster xpk-test
     ```
 
+# How to add docker images to a xpk workload
+
+The default behavior is that the local running directory will be built into
+a docker image by xpk and those files are accessable by `xpk workload create`.
+See below for the two ways that xpk supports configuring docker images for the
+workload. Do not mix arguments from these two ways like `--base-docker-image`
+and `--docker-image` in the same command.
+
+## `--base-docker-image` and `--script-dir`
+Pull in a local directory with scripts or files interested in running in
+`xpk workload create`.
+
+* `--base-docker-image` to set the base image that xpk will start with.
+* `--script-dir` to set which directory to pull into the image.
+* See `python3 xpk/xpk.py workload create --help` for more.
+
+Example with defaults which pulled the local directory into the base image:
+```shell
+echo -e '#!/bin/bash \n echo "Hello world from a test script!"' > test.sh
+python3 xpk/xpk.py workload create --cluster xpk-test \
+--workload xpk-test-workload-base-image --command "bash test.sh" \
+--tpu-type=v5litepod-16 --num-slices=1
+```
+
+## `--docker-image`
+If a user wants to directly set the docker image used, set `--docker-image`
+to the image to use in the workload.
+
+Example:
+```shell
+# (Optional) Cacheimage to enable faster start up times.
+python3 xpk/xpk.py cluster cacheimage \
+--cluster xpk-test --docker-image gcr.io/your_docker_image
+# Run workload create with the same image.
+python3 xpk/xpk.py workload create --cluster xpk-test \
+--workload xpk-test-workload-base-image --command "bash test.sh" \
+--tpu-type=v5litepod-16 --num-slices=1 --docker-image=gcr.io/your_docker_image
+```
+
 # More advanced facts:
 
 * Workload create accepts a --docker-name and --docker-image.
@@ -150,3 +189,21 @@ feedback.
 * Workload create accepts a --env-file flag to allow specifying the container's
 environment from a file. Usage is the same as Docker's
 [--env-file flag](https://docs.docker.com/engine/reference/commandline/run/#env)
+
+# Troubleshooting
+
+## `Invalid machine type` for CPUs.
+XPK will create a regional GKE cluster. If you see issues like
+
+```shell
+Invalid machine type e2-standard-32 in zone $ZONE_NAME
+```
+
+Please select a CPU type that exists in all zones in the region.
+
+```shell
+# Find CPU Types supported in zones.
+gcloud compute machine-types list --zones=$ZONE_LIST
+# Adjust default cpu machine type.
+python3 xpk/xpk.py cluster create --cluster-cpu-machine-type=CPU_TYPE ...
+```
