@@ -62,7 +62,7 @@ cleanup with a `Cluster Delete`.
     ```shell
     python3 xpk/xpk.py cluster create \
     --cluster xpk-test --tpu-type=v5litepod-16 \
-    --host-maintenance-interval=PERIODIC --num-slices=4
+    --num-slices=4
     ```
 
     and recreates the cluster with 8 slices. The command will rerun to create 4
@@ -149,7 +149,7 @@ See below for the two ways that xpk supports configuring docker images for the
 workload. Do not mix arguments from these two ways like `--base-docker-image`
 and `--docker-image` in the same command.
 
-## `--base-docker-image` and `--script-dir`
+## Recommended / Default Docker Flow: `--base-docker-image` and `--script-dir`
 Pull in a local directory with scripts or files interested in running in
 `xpk workload create`.
 
@@ -160,25 +160,33 @@ Pull in a local directory with scripts or files interested in running in
 Example with defaults which pulled the local directory into the base image:
 ```shell
 echo -e '#!/bin/bash \n echo "Hello world from a test script!"' > test.sh
+# --script-dir is set by default to the current working directory.
 python3 xpk/xpk.py workload create --cluster xpk-test \
 --workload xpk-test-workload-base-image --command "bash test.sh" \
---tpu-type=v5litepod-16 --num-slices=1
+--tpu-type=v5litepod-16 --num-slices=1 --base-docker-image=python:3.10
 ```
 
-## `--docker-image`
-If a user wants to directly set the docker image used, set `--docker-image`
-to the image to use in the workload.
+## Optional Direct Docker Image Configuration: `--docker-image`
+If a user wants to directly set the docker image used and not layer in the
+current working directory, set `--docker-image` to the image to be use in the
+workload.
 
-Example:
-```shell
-# (Optional) Cacheimage to enable faster start up times.
-python3 xpk/xpk.py cluster cacheimage \
---cluster xpk-test --docker-image gcr.io/your_docker_image
-# Run workload create with the same image.
-python3 xpk/xpk.py workload create --cluster xpk-test \
---workload xpk-test-workload-base-image --command "bash test.sh" \
---tpu-type=v5litepod-16 --num-slices=1 --docker-image=gcr.io/your_docker_image
-```
+* Recommended Flow For Normal Sized Jobs (fewer than 10k accelerators)
+  ```shell
+  python3 xpk/xpk.py workload create --cluster xpk-test \
+  --workload xpk-test-workload-base-image --command "bash test.sh" \
+  --tpu-type=v5litepod-16 --num-slices=1 --docker-image=gcr.io/your_docker_image
+  ```
+
+* Recommended Flow For Large Sized Jobs (more than 10k accelerators):
+  ```shell
+  python3 xpk/xpk.py cluster cacheimage \
+  --cluster xpk-test --docker-image gcr.io/your_docker_image
+  # Run workload create with the same image.
+  python3 xpk/xpk.py workload create --cluster xpk-test \
+  --workload xpk-test-workload-base-image --command "bash test.sh" \
+  --tpu-type=v5litepod-16 --num-slices=1 --docker-image=gcr.io/your_docker_image
+  ```
 
 # More advanced facts:
 
@@ -189,6 +197,14 @@ feedback.
 * Workload create accepts a --env-file flag to allow specifying the container's
 environment from a file. Usage is the same as Docker's
 [--env-file flag](https://docs.docker.com/engine/reference/commandline/run/#env)
+
+* Access stable fleet TPU machines by adding `--host-maintenance-interval=PERIODIC`
+    ```shell
+    python3 xpk/xpk.py cluster create \
+    --cluster xpk-test --tpu-type=v5litepod-16 \
+    --num-slices=4 --host-maintenance-interval=PERIODIC
+    ```
+
 
 # Troubleshooting
 

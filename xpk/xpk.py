@@ -1273,9 +1273,10 @@ def build_docker_image_from_base_image(args, verbose=True) -> tuple[int, str]:
     xpk_exit(1)
 
   # Pick a randomly generated `tag_length` character docker tag.
-  tag_length = 8
-  tag_name = ''.join(random.choices(string.ascii_lowercase, k=tag_length))
-
+  tag_length = 4
+  tag_random_prefix = ''.join(random.choices(string.ascii_lowercase, k=tag_length))
+  tag_datetime = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+  tag_name = f'{tag_random_prefix}-{tag_datetime}'
   cloud_docker_image = f'gcr.io/{args.project}/{docker_name}:{tag_name}'
   xpk_print(f'Adding Docker Image: {cloud_docker_image} to {args.project}')
 
