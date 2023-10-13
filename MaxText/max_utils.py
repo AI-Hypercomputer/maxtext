@@ -363,17 +363,18 @@ def _cross_entropy_with_logits_bwd(
 cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
                                  _cross_entropy_with_logits_bwd)
 
-
-
-
-
-def gen_real_inputs(model, tx, config, rng, mesh, data_iterator, checkpoint_manager=None):
-  return None
+def gen_real_inputs(model, tx, config, rng, mesh, data_iterator, checkpoint_manager=None, return_all=False):
+  state, state_mesh_annotations = setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager)
+  if return_all:
+    return state, state_mesh_annotations
+  else:
+    return state
 
 # Xaot
 def gen_input_data(model, tx, config, rng, mesh, data_iterator):
   #model, config, state (S), example_batch (S), example_rng (S)
   abstract_state, state_mesh_annotations =  get_abstract_state(model, tx, config, rng, mesh)
+  get_state_mesh_annotations(state, mesh, config)
   
   # example_batch = None
   # load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
@@ -423,17 +424,22 @@ def save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, 
     print("Jitting train step!!!", flush=True)
     save_compiled(compiled, compiled_name) # Serialize and save the compiled object
 
+def get_state_mesh_annotations(state, mesh, config):
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  state_mesh_annotations
+
 def get_abstract_state(model, tx, config, rng, mesh):
   init_train_state_partial = functools.partial(init_train_state, model, tx,
                                                config)
   abstract_state = jax.eval_shape(init_train_state_partial, rng)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
   unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
-
-  # Initialization
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return unboxed_abstract_state, state_mesh_annotations
+  return unboxed_abstract_state
+  # # Initialization
+  # with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  #   state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  # return unboxed_abstract_state, state_mesh_annotations
 
 def get_topology_mesh(config):
   if config.topology=='v4-8':

@@ -245,6 +245,9 @@ def train_loop(config, state=None):
 
   
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh) # maybe can wrap into gen_input_data
+  no_arg_input_generator = functools.partial(max_utils.gen_real_inputs, model, tx, config, init_rng, mesh, data_iterator, checkpoint_manager=None)
+  inputs_shaped = jax.eval_shape(no_arg_input_generator)
+
   compiled_name = f"x_aot_train_{config.topology}_num_slices_{config.topology_num_slices}.pickle"
   if config.save_xaot:
     print("Saving compiled xaot...", flush=True)
