@@ -460,6 +460,14 @@ def get_topology_mesh(config):
         chips_per_host_bounds=(2, 2, 1),
         num_slices=config.topology_num_slices,
     ).devices
+  elif config.topology == 'v5e-256':
+    print("excitement v5e-256")
+    topology_devices = get_topology_desc(
+        platform='tpu',
+        topology_name=f'v5e:8x8',
+        chips_per_host_bounds=(8, 8, 1),
+        num_slices=config.topology_num_slices,
+    ).devices
   topology_devices = create_device_mesh(config, topology_devices)
   topology_mesh = Mesh(topology_devices, config.mesh_axes)
   return topology_mesh
