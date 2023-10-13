@@ -792,17 +792,17 @@ def run_gke_node_pool_create_command(args, system_characteristics) -> int:
       node_pools_to_delete.append(existing_node_pool_name)
 
   will_delete = True
-  if (not args.force):
+  if not args.force:
     user_input = input(
       f'Planning to delete {len(node_pools_to_delete)} node pools including '
       f'{node_pools_to_delete}. \nDo you wish to delete: y (yes) / n (no):\n'
     )
-    user_input_approves_delete = (user_input == 'y') or (user_input == 'yes')
+    user_input_approves_delete = user_input in ('y', 'yes')
     if not user_input_approves_delete:
       will_delete = False
 
-  if (not will_delete):
-    xpk_print(f'Skipping delete commands. Continuing to next step.')
+  if not will_delete:
+    xpk_print('Skipping delete commands. Continuing to next step.')
   else:
     for existing_node_pool_name in node_pools_to_delete:
       if (
