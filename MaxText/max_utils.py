@@ -367,7 +367,8 @@ cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
 
 
 
-
+def gen_real_inputs(model, tx, config, rng, mesh, data_iterator, checkpoint_manager=None):
+  return None
 
 # Xaot
 def gen_input_data(model, tx, config, rng, mesh, data_iterator):
@@ -458,6 +459,14 @@ def get_topology_mesh(config):
         platform='tpu',
         topology_name=f'v5e:2x2',
         chips_per_host_bounds=(2, 2, 1),
+        num_slices=config.topology_num_slices,
+    ).devices
+  elif config.topology == 'v5e-256':
+    print("excitement v5e-256")
+    topology_devices = get_topology_desc(
+        platform='tpu',
+        topology_name=f'v5e:8x8',
+        chips_per_host_bounds=(8, 8, 1),
         num_slices=config.topology_num_slices,
     ).devices
   topology_devices = create_device_mesh(config, topology_devices)
