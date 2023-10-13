@@ -370,8 +370,8 @@ def get_shaped_inputs(model, tx, config, rng, mesh, data_iterator):
       # Abstract (ShapeDTypeStruct) example batch
       # Abstract (ShapeDTypeStruct) rng
   
-  state_shape =  get_abstract_state(model, tx, config, rng, mesh)
-  #state_shape = jax.eval_shape(functools.partial(get_abstract_state, model, tx, config, rng, mesh))
+  #state_shape =  get_abstract_state(model, tx, config, rng, mesh)
+  state_shape = jax.eval_shape(functools.partial(get_abstract_state, model, tx, config, rng, mesh))
   # data_shape = jax.eval_shape(data_iterator)
   data_shape = get_shaped_batch(config, np.size(mesh.device_ids))
   rng_shape = jax.ShapeDtypeStruct(rng.shape, rng.dtype)
@@ -381,7 +381,7 @@ def get_shaped_inputs(model, tx, config, rng, mesh, data_iterator):
   print(f"{rng_shape=}")
   input_args_shaped = (model, config, state_shape, data_shape, rng_shape)
   input_kwargs_shaped = {}
-  return input_args_shaped, input_kwargs_shaped
+  return input_args_shaped, input_kwargs_shaped, state_shape
   
   # example_batch = None
   # load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
