@@ -245,15 +245,16 @@ def train_loop(config, state=None):
 
   
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh) # maybe can wrap into gen_input_data
-  no_arg_input_generator = functools.partial(max_utils.gen_real_inputs, model, tx, config, init_rng, mesh, data_iterator, checkpoint_manager=None)
-  inputs_shaped = jax.eval_shape(no_arg_input_generator)
+  #no_arg_input_generator = functools.partial(max_utils.gen_real_inputs, model, tx, config, init_rng, mesh, data_iterator, checkpoint_manager=None)
+  #inputs_shaped = jax.eval_shape(no_arg_input_generator)
 
   compiled_name = f"x_aot_train_{config.topology}_num_slices_{config.topology_num_slices}.pickle"
   if config.save_xaot:
     print("Saving compiled xaot...", flush=True)
     topology_mesh = max_utils.get_topology_mesh(config)
     # topology_data_iterator, _ = create_data_iterator_with_tokenizer(config, topology_mesh)
-    func_input_args, func_input_kwargs, state_mesh_annotations = max_utils.gen_input_data(model, tx, config, init_rng, topology_mesh, data_iterator)
+    func_input_args, func_input_kwargs = max_utils.get_shaped_inputs(model, tx, config, init_rng, topology_mesh, data_iterator)
+    state_mesh_annotations = max_utils.get_state_mesh_annotations(state, topology_mesh, config) #refactor into lower?
     in_shardings, out_shardings = max_utils.get_shardings(topology_mesh, state_mesh_annotations, config)
     static_argnums=(0,1)
     donate_argnums=2
@@ -267,7 +268,7 @@ def train_loop(config, state=None):
     
     #ex_input = 2.0 * jnp.ones((128, 128), dtype=jnp.float32)
     topology_mesh = max_utils.get_topology_mesh(config)
-    input_args, input_kwargs, _ = max_utils.gen_input_data(model, tx, config, init_rng, topology_mesh, data_iterator)
+    input_args, input_kwargs = max_utils.get_shaped_inputs(model, tx, config, rng, topology_mesh, data_iterator)
     input_args_pytree = input_args[2:]
     train_pytree = functools.partial(train_step, model, config)
     in_tree_recreated, out_tree_recreated = max_utils.get_io_trees(train_pytree, input_args_pytree, input_kwargs)

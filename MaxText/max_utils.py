@@ -207,15 +207,11 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     state: the initialized train state
     state_mesh_annotations: the mesh annotations for the train state
   """
-  init_train_state_partial = functools.partial(init_train_state, model, tx,
-                                               config)
-  abstract_state = jax.eval_shape(init_train_state_partial, rng)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
+  unboxed_abstract_state = get_abstract_state(model, tx, config, rng, mesh)
+  state_mesh_annotations = get_state_mesh_annotations(unboxed_abstract_state, mesh, config)
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
                                                 config.load_from_other_directory,
@@ -227,6 +223,8 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     state_mesh_shardings = jax.tree_map(
         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
     if not state:
+      init_train_state_partial = functools.partial(init_train_state, model, tx,
+                                               config)
       state = jax.jit(
           init_train_state_partial,
           in_shardings=None,
@@ -363,28 +361,37 @@ def _cross_entropy_with_logits_bwd(
 cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
                                  _cross_entropy_with_logits_bwd)
 
-def gen_real_inputs(model, tx, config, rng, mesh, data_iterator, checkpoint_manager=None, return_all=False):
-  state, state_mesh_annotations = setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager)
-  if return_all:
-    return state, state_mesh_annotations
-  else:
-    return state
-
 # Xaot
-def gen_input_data(model, tx, config, rng, mesh, data_iterator):
-  #model, config, state (S), example_batch (S), example_rng (S)
-  abstract_state, state_mesh_annotations =  get_abstract_state(model, tx, config, rng, mesh)
-  get_state_mesh_annotations(state, mesh, config)
+def get_shaped_inputs(model, tx, config, rng, mesh, data_iterator):
+  # Get the shape of train_step inputs for Ahead Of time Compliation (AOT)
+  # Returns:
+    # List of shaped: args to train_step 
+      # Abstract (ShapeDTypeStruct) state
+      # Abstract (ShapeDTypeStruct) example batch
+      # Abstract (ShapeDTypeStruct) rng
+  
+  state_shape =  get_abstract_state(model, tx, config, rng, mesh)
+  #state_shape = jax.eval_shape(functools.partial(get_abstract_state, model, tx, config, rng, mesh))
+  # data_shape = jax.eval_shape(data_iterator)
+  data_shape = get_shaped_batch(config, np.size(mesh.device_ids))
+  rng_shape = jax.ShapeDtypeStruct(rng.shape, rng.dtype)
+  #state_mesh_annotations = get_state_mesh_annotations(state_shape, mesh, config)
+  print(f"{state_shape=}")
+  print(f"{data_shape=}")
+  print(f"{rng_shape=}")
+  input_args_shaped = (model, config, state_shape, data_shape, rng_shape)
+  input_kwargs_shaped = {}
+  return input_args_shaped, input_kwargs_shaped
   
   # example_batch = None
   # load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
   # example_batch = jax.eval_shape(load_partial)
-  example_batch = get_shaped_batch(config, np.size(mesh.device_ids))
-  example_rng = jax.random.PRNGKey(0)
-  example_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
-  input_args = (model, config, abstract_state, example_batch, example_rng)
-  input_kwargs = {}
-  return input_args, input_kwargs, state_mesh_annotations
+  # example_batch = get_shaped_batch(config, np.size(mesh.device_ids))
+  # example_rng = jax.random.PRNGKey(0)
+  # example_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
+  # input_args = (model, config, abstract_state, example_batch, example_rng)
+  # input_kwargs = {}
+  # return input_args, input_kwargs, state_mesh_annotations
 
 def get_shardings(mesh, state_mesh_annotations, config):
   data_pspec = P(*config.data_sharding)
@@ -425,11 +432,14 @@ def save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, 
     save_compiled(compiled, compiled_name) # Serialize and save the compiled object
 
 def get_state_mesh_annotations(state, mesh, config):
+  state_logical_annotations = nn.get_partition_spec(state)
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   state_mesh_annotations
 
 def get_abstract_state(model, tx, config, rng, mesh):
+  # This method is modularized to return only the abstract state so it can be used by both
+  # the main training and ahead of time compilation (AOT)
   init_train_state_partial = functools.partial(init_train_state, model, tx,
                                                config)
   abstract_state = jax.eval_shape(init_train_state_partial, rng)
