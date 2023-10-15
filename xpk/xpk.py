@@ -1222,9 +1222,9 @@ def check_if_workload_exists(args) -> bool:
     xpk_exit(return_code)
 
   lines = return_msg.split('\n')
-  prefix = args.workload
+  new_workload_name = args.workload
   for line in lines:
-    if line.startswith(prefix):
+    if line == new_workload_name:
       return True
   return False
 
