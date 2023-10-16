@@ -157,21 +157,30 @@ Pull in a local directory with scripts or files interested in running in
 * `--script-dir` to set which directory to pull into the image.
 * See `python3 xpk/xpk.py workload create --help` for more.
 
-Example with defaults which pulled the local directory into the base image:
-```shell
-echo -e '#!/bin/bash \n echo "Hello world from a test script!"' > test.sh
-# --script-dir is set by default to the current working directory.
-python3 xpk/xpk.py workload create --cluster xpk-test \
---workload xpk-test-workload-base-image --command "bash test.sh" \
---tpu-type=v5litepod-16 --num-slices=1 --base-docker-image=python:3.10
-```
+* Example with defaults which pulled the local directory into the base image:
+  ```shell
+  echo -e '#!/bin/bash \n echo "Hello world from a test script!"' > test.sh
+  # --script-dir is set by default to the current working directory.
+  python3 xpk/xpk.py workload create --cluster xpk-test \
+  --workload xpk-test-workload-base-image --command "bash test.sh" \
+  --tpu-type=v5litepod-16 --num-slices=1 --base-docker-image=python:3.10
+  ```
+
+* Recommended Flow For Normal Sized Jobs (fewer than 10k accelerators):
+  ```shell
+  python3 xpk/xpk.py workload create --cluster xpk-test \
+  --workload xpk-test-workload-base-image --command "bash custom_script.sh" \
+  --base-docker-image=gcr.io/your_dependencies_docker_image \
+  --script-dir=/custom_dir/
+  --tpu-type=v5litepod-16 --num-slices=1
+  ```
 
 ## Optional Direct Docker Image Configuration: `--docker-image`
 If a user wants to directly set the docker image used and not layer in the
 current working directory, set `--docker-image` to the image to be use in the
 workload.
 
-* Recommended Flow For Normal Sized Jobs (fewer than 10k accelerators)
+* Running with `--docker-image`:
   ```shell
   python3 xpk/xpk.py workload create --cluster xpk-test \
   --workload xpk-test-workload-base-image --command "bash test.sh" \
@@ -197,13 +206,6 @@ feedback.
 * Workload create accepts a --env-file flag to allow specifying the container's
 environment from a file. Usage is the same as Docker's
 [--env-file flag](https://docs.docker.com/engine/reference/commandline/run/#env)
-
-* Access stable fleet TPU machines by adding `--host-maintenance-interval=PERIODIC`
-    ```shell
-    python3 xpk/xpk.py cluster create \
-    --cluster xpk-test --tpu-type=v5litepod-16 \
-    --num-slices=4 --host-maintenance-interval=PERIODIC
-    ```
 
 
 # Troubleshooting
