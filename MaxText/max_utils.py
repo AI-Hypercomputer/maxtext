@@ -190,6 +190,18 @@ def init_train_state(model, tx, config, key):
       tx=tx)
   return state
 
+def create_abstract_state(model, tx, config, rng, mesh):
+  init_train_state_partial = functools.partial(init_train_state, model, tx,
+                                               config)
+  abstract_state = jax.eval_shape(init_train_state_partial, rng)
+  unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
+  return unboxed_abstract_state
+
+def create_state_mesh_annotations(state, config):
+  state_logical_annotations = nn.get_partition_spec(state)
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  return state_mesh_annotations
 
 def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
   """ We initialize the model and optimizer state, and optionally load from a
@@ -207,15 +219,11 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     state: the initialized train state
     state_mesh_annotations: the mesh annotations for the train state
   """
-  init_train_state_partial = functools.partial(init_train_state, model, tx,
-                                               config)
-  abstract_state = jax.eval_shape(init_train_state_partial, rng)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
+  unboxed_abstract_state = create_abstract_state(model, tx, config, rng, mesh)
+  state_mesh_annotations = create_state_mesh_annotations(unboxed_abstract_state, config)
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
                                                 config.load_from_other_directory,
@@ -227,6 +235,8 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     state_mesh_shardings = jax.tree_map(
         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
     if not state:
+      init_train_state_partial = functools.partial(init_train_state, model, tx,
+                                               config)
       state = jax.jit(
           init_train_state_partial,
           in_shardings=None,
@@ -370,10 +380,12 @@ cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
 
 
 # Xaot
-def gen_input_data(model, tx, config, rng, mesh, data_iterator):
+def create_shaped_input_data(model, tx, config, rng, mesh, data_iterator):
   #model, config, state (S), example_batch (S), example_rng (S)
   abstract_state, state_mesh_annotations =  get_abstract_state(model, tx, config, rng, mesh)
-  
+  #abstract_state = jax.eval_shape(functools.partial(create_abstract_state, model, tx, config, rng, mesh))
+  # state_mesh_annotations = create_state_mesh_annotations(abstract_state, config)
+
   # example_batch = None
   # load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
   # example_batch = jax.eval_shape(load_partial)
