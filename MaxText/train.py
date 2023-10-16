@@ -178,9 +178,10 @@ def train_step(model, config, state, data, dropout_rng):
                          data['inputs_position'],
                          enable_dropout=config.enable_dropout,
                          rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
-    one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
-    xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
-    xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
+    # one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
+    # xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
+    # xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
+    xent = optax.softmax_cross_entropy_with_integer_labels(logits, data['targets'])
     # Mask out paddings at the end of each example.
     xent = xent * (data['inputs_segmentation'] != 0)
     return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
