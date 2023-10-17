@@ -171,28 +171,31 @@ def train_step(model, config, state, data, dropout_rng):
     data[k] = v[:config.global_batch_size_to_train_on,:]
 
   def loss_fn(params):
-    logits, intermediate_outputs = model.apply({'params': params},
-                         data['inputs'],
-                         data['targets'],
-                         data['inputs_segmentation'],
-                         data['inputs_position'],
-                         enable_dropout=config.enable_dropout,
-                         rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
-    # one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
-    # xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
-    # xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
-    xent = optax.softmax_cross_entropy_with_integer_labels(logits, data['targets'])
-    # Mask out paddings at the end of each example.
-    xent = xent * (data['inputs_segmentation'] != 0)
-    return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
+    with jax.named_scope("optax loss_fn"):
+        logits, intermediate_outputs = model.apply({'params': params},
+                             data['inputs'],
+                             data['targets'],
+                             data['inputs_segmentation'],
+                             data['inputs_position'],
+                             enable_dropout=config.enable_dropout,
+                             rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
+        # one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
+        # xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
+        # xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
+        xent = optax.softmax_cross_entropy_with_integer_labels(logits, data['targets'])
+        # Mask out paddings at the end of each example.
+        xent = xent * (data['inputs_segmentation'] != 0)
+        return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
 
-  grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
-  if config.gradient_clipping_threshold > 0:
-    grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, None, None)
-  else:
-    grads = raw_grads
-  new_state = state.apply_gradients(grads=grads)
+  with jax.named_scope("grad_fn"):
+      grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+      (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
+      if config.gradient_clipping_threshold > 0:
+        grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, None, None)
+      else:
+        grads = raw_grads
+  with jax.named_scope("apply_gradients"):
+      new_state = state.apply_gradients(grads=grads)
   metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
              'learning/raw_grad_norm' : max_utils.l2norm_pytree(raw_grads), 
              'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
