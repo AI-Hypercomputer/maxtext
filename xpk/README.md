@@ -46,15 +46,26 @@ followed by many `Workload Create`s. To understand the state of the system you
 might want to use `Cluster List` or `Workload List` commands. Finally, you can
 cleanup with a `Cluster Delete`.
 
-*   Cluster Create (provision capacity):
+## Cluster Create
+*   Cluster Create (provision on-demand capacity):
 
     ```shell
     python3 xpk/xpk.py cluster create \
     --cluster xpk-test --tpu-type=v5litepod-16 \
-    --host-maintenance-interval=PERIODIC --num-slices=4
+    --num-slices=4
     ```
 
-    Cluster Create can be called again with the same `--cluster name` to modify
+
+*   Cluster Create (provision reserved capacity):
+
+    ```shell
+    python3 xpk/xpk.py cluster create \
+    --cluster xpk-test --tpu-type=v5litepod-256 \
+    --num-slices=2 \
+    --custom-tpu-nodepool-arguments="--reservation-affinity=specific --reservation=RESERVATION_ID"
+    ```
+
+*   Cluster Create can be called again with the same `--cluster name` to modify
     the number of slices or retry failed steps.
 
     For example, if a user creates a cluster with 4 slices:
@@ -71,7 +82,7 @@ cleanup with a `Cluster Delete`.
     ```shell
     python3 xpk/xpk.py cluster create \
     --cluster xpk-test --tpu-type=v5litepod-16 \
-    --host-maintenance-interval=PERIODIC --num-slices=8
+    --num-slices=8
     ```
 
     and recreates the cluster with 6 slices. The command will rerun to delete 2
@@ -81,30 +92,29 @@ cleanup with a `Cluster Delete`.
     ```shell
     python3 xpk/xpk.py cluster create \
     --cluster xpk-test --tpu-type=v5litepod-16 \
-    --host-maintenance-interval=PERIODIC --num-slices=8
+    --num-slices=6
 
     # Skip delete prompts using --force.
 
     python3 xpk/xpk.py cluster create --force \
     --cluster xpk-test --tpu-type=v5litepod-16 \
-    --host-maintenance-interval=PERIODIC --num-slices=8
+    --num-slices=6
 
     ```
-
-
+## Cluster Delete
 *   Cluster Delete (deprovision capacity):
 
     ```shell
     python3 xpk/xpk.py cluster delete \
     --cluster xpk-test
     ```
-
+## Cluster List
 *   Cluster List (see provisioned capacity):
 
     ```shell
     python3 xpk/xpk.py cluster list
     ```
-
+## Cluster Describe
 *   Cluster Describe (see capacity):
 
     ```shell
@@ -112,6 +122,7 @@ cleanup with a `Cluster Delete`.
     --cluster xpk-test
     ```
 
+## Cluster Cacheimage
 *   Cluster Cacheimage (enables faster start times):
 
     ```shell
@@ -119,6 +130,7 @@ cleanup with a `Cluster Delete`.
     --cluster xpk-test --docker-image gcr.io/your_docker_image
     ```
 
+## Workload Create
 *   Workload Create (submit training job):
 
     ```shell
@@ -127,6 +139,7 @@ cleanup with a `Cluster Delete`.
     xpk-test --tpu-type=v5litepod-16
     ```
 
+## Workload Delete
 *   Workload Delete (delete training job):
 
     ```shell
@@ -134,6 +147,7 @@ cleanup with a `Cluster Delete`.
     --workload xpk-test-workload --cluster xpk-test
     ```
 
+## Workload List
 *   Workload List (see training jobs):
 
     ```shell
