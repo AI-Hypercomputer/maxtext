@@ -153,17 +153,21 @@ and `--docker-image` in the same command.
 Pull in a local directory with scripts or files interested in running in
 `xpk workload create`.
 
-* `--base-docker-image` to set the base image that xpk will start with.
-* `--script-dir` to set which directory to pull into the image.
-* See `python3 xpk/xpk.py workload create --help` for more.
+* Below arguments are optional since by default, xpk will pull the local
+  directory with a default base docker image.
+
+  `--base-docker-image` to set the base image that xpk will start with.
+
+  `--script-dir` to set which directory to pull into the image.
+
+  See `python3 xpk/xpk.py workload create --help` for more.
 
 * Example with defaults which pulled the local directory into the base image:
   ```shell
   echo -e '#!/bin/bash \n echo "Hello world from a test script!"' > test.sh
-  # --script-dir is set by default to the current working directory.
   python3 xpk/xpk.py workload create --cluster xpk-test \
   --workload xpk-test-workload-base-image --command "bash test.sh" \
-  --tpu-type=v5litepod-16 --num-slices=1 --base-docker-image=python:3.10
+  --tpu-type=v5litepod-16 --num-slices=1
   ```
 
 * Recommended Flow For Normal Sized Jobs (fewer than 10k accelerators):
@@ -171,7 +175,6 @@ Pull in a local directory with scripts or files interested in running in
   python3 xpk/xpk.py workload create --cluster xpk-test \
   --workload xpk-test-workload-base-image --command "bash custom_script.sh" \
   --base-docker-image=gcr.io/your_dependencies_docker_image \
-  --script-dir=/custom_dir/
   --tpu-type=v5litepod-16 --num-slices=1
   ```
 
