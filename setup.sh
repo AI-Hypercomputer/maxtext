@@ -131,7 +131,7 @@ elif [[ $MODE == "nightly" ]]; then
 # Nightly mode
     if [[ $DEVICE == "gpu" ]]; then 
     # Not supported for gpu right now
-        exit(1)
+        exit 1
     fi
     echo "Installing jax-head, jaxlib-nightly"
     # Install jax from GitHub head
@@ -157,7 +157,7 @@ elif [[ $MODE == "head" ]]; then
 # Head mode
     if [[ $DEVICE == "gpu" ]]; then 
     # Not supported for gpu right now
-        exit(1)
+        exit 1
     elif [[ -n "$LIBTPU_GCS_PATH" ]]; then
         # Install custom libtpu
         echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
