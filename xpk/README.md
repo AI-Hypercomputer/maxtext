@@ -143,26 +143,23 @@ cleanup with a `Cluster Delete`.
 
 # How to add docker images to a xpk workload
 
-The default behavior is that the local running directory will be built into
-a docker image by xpk and those files are accessable by `xpk workload create`.
-See below for the two ways that xpk supports configuring docker images for the
-workload. Do not mix arguments from these two ways like `--base-docker-image`
-and `--docker-image` in the same command.
+The default behavior is `xpk workload create` will layer the local directory (`--script-dir`) into
+the base docker image (`--base-docker-image`) and run the workload command.
+If you don't want this layering behavior, you can directly use `--docker-image`. Do not mix arguments from the two flows in the same command.
 
 ## Recommended / Default Docker Flow: `--base-docker-image` and `--script-dir`
-Pull in a local directory with scripts or files interested in running in
-`xpk workload create`.
+This flow pulls the `--script-dir` into the `--base-docker-image` and runs the new docker image.
 
-* Below arguments are optional since by default, xpk will pull the local
-  directory with a default base docker image.
+* The below arguments are optional by default. xpk will pull the local
+  directory with a generic base docker image.
 
-  `--base-docker-image` to set the base image that xpk will start with.
+  - `--base-docker-image` sets the base image that xpk will start with.
 
-  `--script-dir` to set which directory to pull into the image.
+  - `--script-dir` sets which directory to pull into the image. This defaults to the current working directory.
 
-  See `python3 xpk/xpk.py workload create --help` for more.
+  See `python3 xpk/xpk.py workload create --help` for more info.
 
-* Example with defaults which pulled the local directory into the base image:
+* Example with defaults which pulls the local directory into the base image:
   ```shell
   echo -e '#!/bin/bash \n echo "Hello world from a test script!"' > test.sh
   python3 xpk/xpk.py workload create --cluster xpk-test \
