@@ -1,5 +1,4 @@
 IMAGE_NAME=gcr.io/tpu-prod-env-vlp-2nic/mattdavidow_runner 
-NEW_IMAGE_NAME=${IMAGE_NAME}
 
 for ARGUMENT in "$@"; do
     IFS='=' read -r KEY VALUE <<< "$ARGUMENT"
@@ -7,7 +6,12 @@ for ARGUMENT in "$@"; do
     echo "$KEY"="$VALUE"
 done
 
+echo "Using IMAGE_NAME of ${IMAGE_NAME}"
+
+NEW_IMAGE_NAME=${IMAGE_NAME}_new
+
 container_id=$(docker ps --filter "ancestor=${IMAGE_NAME}" --format "{{.ID}}")
-docker commit -m "Added xaot" -a "mattdavidow" ${container_id} mattdavidow-with-xaot-2:tag
+docker cp setup.sh ${container_id}:/app/x_aot_train_v4-8_num_slices_1.pickle 
+docker commit -m "Added xaot" -a "mattdavidow" ${container_id} ${IMAGE_NAME}:latest
 docker tag ${IMAGE_NAME} ${NEW_IMAGE_NAME}:latest
 docker push ${NEW_IMAGE_NAME}:latest

@@ -16,6 +16,7 @@ GCR_IMAGE_NAME=gcr.io/${PROJECT}/${CLOUD_IMAGE_NAME}
 #docker pull ${GCR_IMAGE_NAME}
 #docker run -v $(pwd):/app --rm -it --privileged --entrypoint bash ${CLOUD_IMAGE_NAME}
 docker run -v $(pwd):/app --rm -it --privileged --entrypoint bash ${GCR_IMAGE_NAME}
+#docker run --rm -it --privileged --entrypoint bash ${GCR_IMAGE_NAME} # remove the [-v $(pwd):/app] so new files are in the containers directory instead of the hosts
 
 # bash save_xaot.sh
 
