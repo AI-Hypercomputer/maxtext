@@ -129,7 +129,10 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
     pip3 install tensorboard-plugin-profile --upgrade
 elif [[ $MODE == "nightly" ]]; then 
 # Nightly mode
-# Not supported for gpu right now
+    if [[ $DEVICE == "gpu" ]]; then 
+    # Not supported for gpu right now
+        exit(1)
+    fi
     echo "Installing jax-head, jaxlib-nightly"
     # Install jax from GitHub head
     pip3 install git+https://github.com/google/jax
@@ -152,8 +155,10 @@ elif [[ $MODE == "nightly" ]]; then
     pip3 install tbp-nightly --upgrade
 elif [[ $MODE == "head" ]]; then 
 # Head mode
-# Not supported for gpu right now
-    if [[ -n "$LIBTPU_GCS_PATH" ]]; then
+    if [[ $DEVICE == "gpu" ]]; then 
+    # Not supported for gpu right now
+        exit(1)
+    elif [[ -n "$LIBTPU_GCS_PATH" ]]; then
         # Install custom libtpu
         echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
         # Install required dependency
