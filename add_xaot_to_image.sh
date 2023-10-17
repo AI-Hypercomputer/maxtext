@@ -1,5 +1,6 @@
 set -e
 
+# Inputs:
 export CLOUD_IMAGE_NAME=${USER}_runner
 export PROJECT=$(gcloud config get-value project)
 

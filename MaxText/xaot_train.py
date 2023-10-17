@@ -264,7 +264,7 @@ def train_loop(config, state=None):
     
     #ex_input = 2.0 * jnp.ones((128, 128), dtype=jnp.float32)
     topology_mesh = max_utils.get_topology_mesh(config)
-    input_args, input_kwargs, _ = max_utils.gen_input_data(model, tx, config, init_rng, topology_mesh, data_iterator)
+    input_args, input_kwargs, state_mesh_annotations = max_utils.create_shaped_input_data(model, tx, config, init_rng, topology_mesh, data_iterator)
     input_args_pytree = input_args[2:]
     train_pytree = functools.partial(train_step, model, config)
     in_tree_recreated, out_tree_recreated = max_utils.get_io_trees(train_pytree, input_args_pytree, input_kwargs)
