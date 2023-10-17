@@ -12,7 +12,7 @@ COPY . .
 WORKDIR /app
 
 # Copy the Bash script into the image
-COPY save_xaot.sh /tmp/
-RUN chmod +x /tmp/save_xaot.sh
-# Set the default command to run the Bash script
-RUN /tmp/save_xaot.sh
+# COPY save_xaot.sh /tmp/
+# RUN chmod +x /tmp/save_xaot.sh
+# # Set the default command to run the Bash script
+# RUN /tmp/save_xaot.sh

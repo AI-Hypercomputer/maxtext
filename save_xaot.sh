@@ -1,1 +1,2 @@
+python3 -c "import jax; print(jax.__version__)"
 python3 MaxText/xaot_train.py MaxText/configs/base.yml base_output_directory=gs://maxtext-experiments-multipod dataset_path=gs://max-datasets-rogue run_name=mattdavidow-save-xaot save_xaot=True steps=1 enable_checkpointing=False
