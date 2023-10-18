@@ -38,7 +38,7 @@ There are three recommended patterns for running MaxText. You can run locally, r
 ## Getting Started: Download Dataset and Configure
 You need to run these steps once per project prior to any local development or cluster experiments.
 
-1. Create two gcs buckets in your project, one for to downloading and retrieving the dataset and the other for storing the logs.
+1. Create two gcs buckets in your project, one for downloading and retrieving the dataset and the other for storing the logs.
 2. Download the dataset in your gcs bucket
 ```
 bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
