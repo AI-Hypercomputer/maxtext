@@ -1169,7 +1169,7 @@ def cluster_describe(args) -> int:
 
   command = (
       f'gcloud container node-pools  list --cluster {args.cluster} '
-      f'--project={args.project} --region={zone_to_region(args.zone)}'
+      f'--project={args.project} --region={zone_to_region(args.zone)} --quiet'
   )
 
   return_code = run_command_with_updates(command, 'Cluster nodepool list', args)
