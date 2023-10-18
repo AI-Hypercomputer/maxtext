@@ -1203,8 +1203,7 @@ class Decoder(nn.Module):
                 decode,
                 max_decode_length)
 
-    # try with skip layernorm
-    # y = LayerNorm(dtype=cfg.dtype, name='decoder_norm', kernel_axes = ('embed',))(y)
+    y = LayerNorm(dtype=cfg.dtype, name='decoder_norm', kernel_axes = ('embed',))(y)
     y = nn.Dropout(
         rate=cfg.dropout_rate, broadcast_dims=(-2,))(
             y, deterministic=deterministic)
