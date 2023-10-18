@@ -85,6 +85,10 @@ class _HyperParameters():
 
   @staticmethod
   def user_init(raw_keys):
+    def validate_gcs_bucket_name(raw_keys, bucket_name, config_var):
+      assert_for_train(raw_keys, bucket_name, f"Please set {config_var}.")
+      assert_for_train(raw_keys, len(bucket_name) > 5 and bucket_name[0:5]=='gs://', f"Erroring out, {config_var} should start with 'gs://' ")
+
     def assert_for_train(raw_keys, condition, error_message):
       if not raw_keys['save_xaot']:
         assert condition, error_message
@@ -94,21 +98,22 @@ class _HyperParameters():
     if raw_keys["run_name"] == "":
       raw_keys["run_name"] = os.environ.get("JOBSET_NAME") #using XPK default
     run_name = raw_keys["run_name"]
-    assert run_name, "Erroring out, need a real run_name"
     assert_for_train(raw_keys, run_name, "Erroring out, need a real run_name")
     base_output_directory = raw_keys["base_output_directory"]
-    validate_gcs_bucket_name(base_output_directory, "base_output_directory")
+    validate_gcs_bucket_name(raw_keys, base_output_directory, "base_output_directory")
     dataset_path = raw_keys["dataset_path"]
-    validate_gcs_bucket_name(dataset_path, "dataset_path")
-    assert ((raw_keys["load_parameters_path"]=="" and raw_keys["load_from_other_directory"]=="") or
-      raw_keys["enable_checkpointing"]), "You must set enable_checkpointing to load a checkpoint"
-    assert raw_keys["load_parameters_path"]=="" or raw_keys["load_from_other_directory"]=="" \
-      "At most one of load_parameters_path or load_from_other_directory should be set"
-    assert raw_keys["load_from_other_directory_step"]==-1 or raw_keys["load_from_other_directory"]!="", \
-      "You must specify the loading directory if you specify the loading step"
-    raw_keys["tensorboard_dir"] = os.path.join(base_output_directory, run_name, "tensorboard", "")
-    raw_keys["checkpoint_dir"] = os.path.join(base_output_directory, run_name, "checkpoints", "")
-    raw_keys["metrics_dir"] = os.path.join(base_output_directory, run_name, "metrics", "")
+    validate_gcs_bucket_name(raw_keys, dataset_path, "dataset_path")
+    assert_for_train(raw_keys, ((raw_keys["load_parameters_path"]=="" and raw_keys["load_from_other_directory"]=="") or
+      raw_keys["enable_checkpointing"]), "You must set enable_checkpointing to load a checkpoint")
+    assert_for_train(raw_keys, raw_keys["load_parameters_path"]=="" or raw_keys["load_from_other_directory"]=="",
+      "At most one of load_parameters_path or load_from_other_directory should be set")
+    assert_for_train(raw_keys, raw_keys["load_from_other_directory_step"]==-1 or raw_keys["load_from_other_directory"]!="",
+      "You must specify the loading directory if you specify the loading step")
+    if not raw_keys['save_xaot']:
+      raw_keys["tensorboard_dir"] = os.path.join(base_output_directory, run_name, "tensorboard", "")
+      raw_keys["checkpoint_dir"] = os.path.join(base_output_directory, run_name, "checkpoints", "")
+      raw_keys["metrics_dir"] = os.path.join(base_output_directory, run_name, "metrics", "")
+
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
@@ -116,7 +121,7 @@ class _HyperParameters():
       raw_keys["learning_rate_schedule_steps"] = raw_keys["steps"]
     if raw_keys["steps"]==-1:
       raw_keys["steps"] = raw_keys["learning_rate_schedule_steps"]
-    assert raw_keys["steps"] > 0, "You must set steps or learning_rate_schedule_steps to a positive interger."
+    assert_for_train(raw_keys, raw_keys["steps"] > 0, "You must set steps or learning_rate_schedule_steps to a positive interger.")
 
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys['global_parameter_scale'])
     raw_keys['emb_dim'] = 2**emb_scale * raw_keys['base_emb_dim']
@@ -127,9 +132,7 @@ class _HyperParameters():
     raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = \
       calculate_global_batch_sizes(raw_keys['per_device_batch_size'])
 
-def validate_gcs_bucket_name(bucket_name, config_var):
-  assert bucket_name, f"Please set {config_var}."
-  assert len(bucket_name) > 5 and bucket_name[0:5]=='gs://', f"Erroring out, {config_var} should start with 'gs://' "
+
 
 def get_individual_scales(scale):
   '''Choose appropriate scales for individual dimensions based on global scale
