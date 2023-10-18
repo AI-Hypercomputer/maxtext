@@ -43,7 +43,9 @@ Next Steps:
 import argparse
 import datetime
 import os
+import random
 import re
+import string
 import subprocess
 import sys
 import tempfile
@@ -52,6 +54,9 @@ from dataclasses import dataclass
 
 
 ################### Internally used constants ##############
+
+default_docker_image = 'python:3.10'
+default_script_dir = os.getcwd()
 
 workload_create_yaml = """apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
@@ -84,7 +89,7 @@ spec:
               dnsPolicy: ClusterFirstWithHostNet
               containers:
               - name: {args.docker_name}
-                image: {args.docker_image}
+                image: {docker_image}
                 env: {args.env}
                 ports:
                 - containerPort: 8471
@@ -107,6 +112,17 @@ metadata:
   name: {args.workload}
   annotations:
     alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool # 1:1 job replica to node pool assignment
+"""
+
+script_dir_dockerfile = """FROM {base_docker_image}
+
+# Set the working directory in the container
+WORKDIR /app
+
+# Copy all files from local workspace into docker container
+COPY . .
+
+WORKDIR /app
 """
 
 cluster_set_crd_yaml = """apiVersion: kueue.x-k8s.io/v1beta1
@@ -1187,17 +1203,17 @@ def cluster_list(args) -> int:
   return 0
 
 
-def validate_docker_image(args) -> int:
+def validate_docker_image(docker_image, args) -> int:
   """Validates that the user provided docker image exists in your project.
 
   Args:
+    docker_image: The docker image to verify.
     args: user provided arguments for running the command.
 
   Returns:
     0 if successful and 1 otherwise.
   """
 
-  docker_image = args.docker_image
   project = args.project
 
   if docker_image.find('gcr.io') == -1:
@@ -1217,6 +1233,85 @@ def validate_docker_image(args) -> int:
     return return_code
   else:
     return 0
+
+
+def build_docker_image_from_base_image(args, verbose=True) -> tuple[int, str]:
+  """Adds script dir to the base docker image and uploads the image.
+
+  Args:
+    args: user provided arguments for running the command.
+
+  Returns:
+    Tuple of:
+      0 if successful and 1 otherwise.
+      Name of the Docker image created.
+  """
+
+  # Pick a name for the docker image.
+  docker_image_prefix = os.getenv('USER', 'unknown')
+  docker_name = f'{docker_image_prefix}-runner'
+
+  docker_file = script_dir_dockerfile.format(
+      base_docker_image=args.base_docker_image,
+  )
+  tmp = write_temporary_file(docker_file)
+  docker_build_command = (
+      f'docker build -f {str(tmp.file.name)} -t {docker_name}'
+      f' {args.script_dir}'
+  )
+  xpk_print(f'Building {args.script_dir} into docker image.')
+  return_code = run_command_with_updates(
+      docker_build_command, 'Building script_dir into docker image', args,
+      verbose=verbose
+  )
+  if return_code != 0:
+    xpk_print(
+        'Failed to add script_dir to docker image, check the base docker image.'
+        f' You should be able to navigate to the URL {args.base_docker_image}'
+        f' in {args.project}.'
+    )
+    xpk_exit(1)
+
+  # Pick a randomly generated `tag_length` character docker tag.
+  tag_length = 4
+  tag_random_prefix = ''.join(random.choices(string.ascii_lowercase, k=tag_length))
+  tag_datetime = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+  tag_name = f'{tag_random_prefix}-{tag_datetime}'
+  cloud_docker_image = f'gcr.io/{args.project}/{docker_name}:{tag_name}'
+  xpk_print(f'Adding Docker Image: {cloud_docker_image} to {args.project}')
+
+  # Tag the docker image.
+  tag_docker_image_command = (
+      f'docker tag {docker_name} {cloud_docker_image}'
+  )
+  return_code = run_command_with_updates(
+      tag_docker_image_command, 'Tag Docker Image', args,
+      verbose=verbose
+  )
+  if return_code != 0:
+    xpk_print(
+        f'Failed to tag docker image with tag: {tag_name}.'
+        f' You should be able to navigate to the URL {cloud_docker_image} in'
+        f' {args.project}.'
+    )
+    xpk_exit(1)
+
+  # Upload image to Artifact Registry.
+  upload_docker_image_command = (
+      f'docker push {cloud_docker_image}'
+  )
+  return_code = run_command_with_updates(
+      upload_docker_image_command, 'Upload Docker Image', args,
+      verbose=verbose
+  )
+  if return_code != 0:
+    xpk_print(
+        f'Failed to upload docker image.'
+        f' You should be able to navigate to the URL {cloud_docker_image} in'
+        f' {args.project}.'
+    )
+    xpk_exit(1)
+  return return_code, cloud_docker_image
 
 
 def check_if_workload_exists(args) -> bool:
@@ -1251,6 +1346,68 @@ def check_if_workload_exists(args) -> bool:
   return False
 
 
+def use_base_docker_image_or_docker_image(args) -> bool:
+  """Checks for correct docker image arguments.
+
+  Args:
+    args: user provided arguments for running the command.
+
+  Returns:
+    True if intented to use base docker image, False to use docker image.
+  """
+  use_base_docker_image = True
+  # Check if (base_docker_image and script_dir) or (docker_image) is set.
+  if args.docker_image is not None:
+    if args.script_dir is not default_script_dir:
+      xpk_print(
+          '`--script-dir` and --docker-image can not be used together. Please'
+          ' see `--help` command for more details.'
+      )
+      xpk_exit(1)
+    if args.base_docker_image is not default_docker_image:
+      xpk_print(
+          '`--base-docker-image` and --docker-image can not be used together.'
+          ' Please see `--help` command for more details.'
+      )
+      xpk_exit(1)
+    use_base_docker_image = False
+  return use_base_docker_image
+
+
+def setup_docker_image(args) -> tuple[int, str]:
+  """Does steps to verify docker args, check image, and build image (if asked).
+
+  Args:
+    args: user provided arguments for running the command.
+
+  Returns:
+    tuple:
+      0 if successful and 1 otherwise.
+      Name of the docker image to use.
+  """
+  use_base_docker_image = use_base_docker_image_or_docker_image(args)
+
+  docker_image = args.base_docker_image
+  if use_base_docker_image:
+    validate_docker_image_code = validate_docker_image(
+        docker_image, args
+    )
+    if validate_docker_image_code != 0:
+      xpk_exit(validate_docker_image_code)
+    build_docker_image_code, docker_image = build_docker_image_from_base_image(args)
+    if build_docker_image_code != 0:
+      xpk_exit(build_docker_image_code)
+  else:
+    docker_image = args.docker_image
+    validate_docker_image_code = validate_docker_image(
+        args.docker_image, args
+    )
+    if validate_docker_image_code != 0:
+      xpk_exit(validate_docker_image_code)
+
+  return 0, docker_image
+
+
 def workload_create(args) -> int:
   """Run jobset apply command for a file.
 
@@ -1278,12 +1435,12 @@ def workload_create(args) -> int:
   xpk_print('Starting workload create', flush=True)
   system = UserFacingNameToSystemCharacteristics[args.tpu_type]
 
-  validate_docker_image_code = validate_docker_image(args)
-  if validate_docker_image_code != 0:
-    xpk_exit(validate_docker_image_code)
+  setup_docker_image_code, docker_image = setup_docker_image(args)
+  if setup_docker_image_code != 0:
+    xpk_exit(setup_docker_image_code)
 
   add_env_config(args)
-  yml_string = workload_create_yaml.format(args=args, system=system)
+  yml_string = workload_create_yaml.format(args=args, system=system, docker_image=docker_image)
   tmp = write_temporary_file(yml_string)
   command = f'kubectl apply -f {str(tmp.file.name)}'
 
@@ -1420,6 +1577,14 @@ def workload_name_type(value, pat=re.compile(r'[a-z]([-a-z0-9]*[a-z0-9])?')):
         'Workload name must be less than 40 characters and match the pattern'
         f' `{pat.pattern}`'
         f' Name is currently {value}'
+    )
+  return value
+
+
+def directory_path_type(value):
+  if not os.path.isdir(value):
+    raise argparse.ArgumentTypeError(
+      f'Directory path is invalid. User provided path was {value}'
     )
   return value
 
@@ -1668,60 +1833,43 @@ workload_subcommands = workload_parser.add_subparsers(
 workload_create_parser = workload_subcommands.add_parser(
     'create', help='Create a new job.'
 )
-workload_custom_arguments = workload_create_parser.add_argument_group(
-    'Workload Built-in Arguments', 'Configure xpk to create a Workload for you.'
+workload_create_parser_required_arguments = (
+    workload_create_parser.add_argument_group(
+        'Workload Built-in Arguments',
+        'Configure xpk to create a Workload for you.'
+    )
 )
-
 workload_create_parser_optional_arguments = (
     workload_create_parser.add_argument_group(
         'Optional Arguments', 'Arguments optional for `job create`.'
     )
 )
-### Workload arguments
-workload_custom_arguments.add_argument(
+workload_base_docker_image_arguments = (
+    workload_create_parser.add_argument_group(
+        'Base Docker Image Arguments',
+        'User supplies a base image or by default the image is set by xpk.'
+        ' Xpk will add the `script_dir` to the base image creating an anonymous'
+        ' docker image. These arguments are exclusive to `--docker-image`.'
+    )
+)
+workload_docker_image_arguments = (
+    workload_create_parser.add_argument_group(
+        'Docker Image Arguments',
+        '`--base-docker-image` is used by default. Set this argument if the'
+        ' user wants the docker image to be used directly by the xpk workload.'
+    )
+)
+
+
+### Workload required arguments
+workload_create_parser_required_arguments.add_argument(
     '--workload',
     type=workload_name_type,
     default=None,
     help='The name of the workload to run.',
     required=True,
 )
-workload_custom_arguments.add_argument(
-    '--docker-name',
-    type=str,
-    default='jax-tpu',
-    help=(
-        'The name of the docker-image to use, default and typically `jax-tpu`.'
-    ),
-)
-workload_custom_arguments.add_argument(
-    '--docker-image',
-    type=str,
-    default='python:3.10',
-    help=(
-        'The version of the docker-image to use, default `python:3.10`. If using'
-        ' a custom docker image it is typically addressed as'
-        ' gcr.io/${PROJECT}/${NAME}:latest'
-    ),
-)
-
-workload_custom_arguments.add_argument(
-    '--num-slices',
-    type=str,
-    default=1,
-    help='The number of slices to use, default=1.',
-)
-workload_custom_arguments.add_argument(
-    '--env-file',
-    type=str,
-    default=None,
-    help=(
-        'Environment file to be applied to the container.  This file should '
-        'use the syntax <variable>=value (which sets the variable to the given '
-        'value) or <variable> (which takes the value from the local '
-        'environment), and # for comments.'
-    ),
-)
-workload_custom_arguments.add_argument(
+workload_create_parser_required_arguments.add_argument(
     '--command',
     type=str,
     default=None,
@@ -1733,14 +1881,14 @@ workload_custom_arguments.add_argument(
     ),
     required=True,
 )
-workload_custom_arguments.add_argument(
+workload_create_parser_required_arguments.add_argument(
     '--tpu-type',
     type=str,
     default=None,
     help='The tpu type to use, v5litepod-16, etc.',
     required=True,
 )
-workload_custom_arguments.add_argument(
+workload_create_parser_required_arguments.add_argument(
     '--cluster',
     type=str,
     default=None,
@@ -1748,10 +1896,66 @@ workload_custom_arguments.add_argument(
     required=True,
 )
 
-### Optional Arguments
-add_shared_arguments(workload_custom_arguments)
+### Workload Optional Arguments
+add_shared_arguments(workload_create_parser_optional_arguments)
 
-workload_custom_arguments.add_argument(
+workload_create_parser_optional_arguments.add_argument(
+    '--docker-name',
+    type=str,
+    default='jax-tpu',
+    help=(
+        'The name of the docker-image to use, default and typically `jax-tpu`.'
+    ),
+)
+workload_docker_image_arguments.add_argument(
+    '--docker-image',
+    type=str,
+    help=(
+        'The version of the docker-image to use. By default, '
+        ' `--base-docker-image` is used. Set this argument if the user wants'
+        ' the docker image to be used directly by the xpk workload.'
+        ' a custom docker image it is typically addressed as'
+        ' gcr.io/${PROJECT}/${NAME}:latest. This docker image will be used'
+        ' directly by the xpk workload.'
+    ),
+)
+workload_base_docker_image_arguments.add_argument(
+    '--base-docker-image',
+    type=str,
+    default=default_docker_image,
+    help=(
+        f'The base docker-image to use, default {default_docker_image}. If'
+        ' using a custom docker image it is typically addressed as'
+        ' gcr.io/${PROJECT}/${NAME}:latest. This docker image will be used as a'
+        ' base image by default and the `--script-dir` by default'
+        ' will be added to the image.'
+    ),
+)
+workload_base_docker_image_arguments.add_argument(
+    '--script-dir',
+     type=directory_path_type,
+     default=default_script_dir,
+    help='The local location of the directory to copy to the docker image and'
+        ' run the main command from. Defaults to current working directory.'
+)
+workload_create_parser_optional_arguments.add_argument(
+    '--num-slices',
+    type=str,
+    default=1,
+    help='The number of slices to use, default=1.',
+)
+workload_create_parser_optional_arguments.add_argument(
+    '--env-file',
+    type=str,
+    default=None,
+    help=(
+        'Environment file to be applied to the container.  This file should '
+        'use the syntax <variable>=value (which sets the variable to the given '
+        'value) or <variable> (which takes the value from the local '
+        'environment), and # for comments.'
+    ),
+)
+workload_create_parser_optional_arguments.add_argument(
     '--priority',
     type=str,
     default='medium',
@@ -1760,8 +1964,7 @@ workload_custom_arguments.add_argument(
         ' Defaults to `medium`.'
     ),
 )
-
-workload_custom_arguments.add_argument(
+workload_create_parser_optional_arguments.add_argument(
     '--scheduler',
     type=str,
     default='default-scheduler',
@@ -1771,9 +1974,7 @@ workload_custom_arguments.add_argument(
         'want to use `gke.io/high-throughput-scheduler`.'
     ),
 )
-
-
-workload_custom_arguments.add_argument(
+workload_create_parser_optional_arguments.add_argument(
     '--max-restarts',
     type=str,
     default='0',
