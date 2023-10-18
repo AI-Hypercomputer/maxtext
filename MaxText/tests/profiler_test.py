@@ -29,7 +29,7 @@ class TpuJAXTest(unittest.TestCase):
 
   def _get_session_snapshot(self):
     """Gets a session snapshot of current session. assume only one session."""
-    profile_plugin_root ="profiles/plugins/profile"
+    profile_plugin_root ="tensorboard/plugins/profile"
     # The session exists under a director whose name is time-dependent.
     profile_session_glob = os.path.join(profile_plugin_root, '*', '*.xplane.pb')
     return glob.glob(profile_session_glob)
