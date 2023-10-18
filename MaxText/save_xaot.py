@@ -26,9 +26,53 @@ import pyconfig
 import jax
 import numpy as np
 from typing import Sequence
+from jax.experimental.topologies import get_topology_desc
 from absl import app
+from jax.sharding import Mesh
+from jax.experimental.serialize_executable import serialize, deserialize_and_load
+import pickle
 
 import train
+
+# Ideally this map exists either in XAOT or we can programmatically call it from elsewhere
+# so the chip layout is consistent across cloud technologies
+def get_topology_mesh(config):
+  if config.topology=='v4-8':
+    topology_devices = get_topology_desc(
+        platform='tpu',
+        topology_name=f'v4:2x2x1',
+        chip_config_name='megacore',
+        chips_per_host_bounds=(2, 2, 1),
+        num_slices=config.topology_num_slices,
+    ).devices
+  elif config.topology=='v4-16':
+    print("excitement v4-16", flush=True)
+    topology_devices = get_topology_desc(
+    platform='tpu',
+    topology_name=f'v4:2x2x2',
+    chip_config_name='megacore',
+    chips_per_host_bounds=(2, 2, 2),
+    num_slices=config.topology_num_slices,
+).devices
+  elif config.topology == 'v5e-16':
+    print("excitement v5e-16")
+    topology_devices = get_topology_desc(
+        platform='tpu',
+        topology_name=f'v5e:2x2',
+        chips_per_host_bounds=(2, 2, 1),
+        num_slices=config.topology_num_slices,
+    ).devices
+  elif config.topology == 'v5e-256':
+    print("excitement v5e-256")
+    topology_devices = get_topology_desc(
+        platform='tpu',
+        topology_name=f'v5e:8x8',
+        chips_per_host_bounds=(8, 8, 1),
+        num_slices=config.topology_num_slices,
+    ).devices
+  topology_device_mesh = max_utils.create_device_mesh(config, topology_devices)
+  topology_mesh = Mesh(topology_device_mesh, config.mesh_axes)
+  return topology_mesh
 
 def save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, in_shardings, out_shardings, static_argnums, donate_argnums, mesh):
     def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings):
@@ -57,7 +101,7 @@ def save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, 
 
 def save_train_xaot(config):
     print("Saving compiled xaot...", flush=True)
-    topology_mesh = max_utils.get_topology_mesh(config)
+    topology_mesh = get_topology_mesh(config)
     model = max_utils.get_model(config, topology_mesh)
     learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
     tx = max_utils.get_optimizer(config, learning_rate_schedule)
@@ -67,8 +111,7 @@ def save_train_xaot(config):
     in_shardings, out_shardings = max_utils.get_shardings(topology_mesh, state_mesh_annotations, config)
     static_argnums=()
     donate_argnums=0
-    compiled_name='go me'
-    save_compiled_full(func_to_xaot, compiled_name, shaped_train_args, shaped_train_kwargs, in_shardings, out_shardings, static_argnums, donate_argnums, topology_mesh)
+    save_compiled_full(func_to_xaot, config.xaot_name, shaped_train_args, shaped_train_kwargs, in_shardings, out_shardings, static_argnums, donate_argnums, topology_mesh)
     print("Saved compiled xaot!!!", flush=True)
 
 

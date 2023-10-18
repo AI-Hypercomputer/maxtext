@@ -254,6 +254,23 @@ def train_loop(config, state=None):
   #   print(key)
   #   print(example_batch[key].shape)
 
+
+  if config.load_xaot:
+    # mesh/mesh_axis_names is required to generate fake data, which is used to construct in_tree/out_tree
+    print("Loading the compiled function...", flush=True)
+    serialized_compiled = max_utils.load_compiled(compiled_name)
+    
+    #ex_input = 2.0 * jnp.ones((128, 128), dtype=jnp.float32)
+    topology_mesh = max_utils.get_topology_mesh(config)
+    input_args, input_kwargs, _ = max_utils.gen_input_data(model, tx, config, topology_mesh)
+    input_args_pytree = input_args
+    train_pytree = functools.partial(train_step, model, config)
+    in_tree_recreated, out_tree_recreated = max_utils.get_io_trees(partial_train, input_args_pytree, input_kwargs)
+    p_train_step = deserialize_and_load(serialized_compiled, in_tree_recreated, out_tree_recreated)
+    print("Loaded compiled function!", flush=True)
+
+
+
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   data_pspec = P(*config.data_sharding)
 

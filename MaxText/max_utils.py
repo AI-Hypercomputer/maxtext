@@ -424,6 +424,45 @@ def get_abstract_state(model, tx, config, rng, mesh):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return unboxed_abstract_state, state_mesh_annotations
 
+# Sadness
+def load_next_batch(train_iter, example_batch, config):
+  """Loads the next batch. Can keep reusing the same batch for performance reasons """
+
+  if config.reuse_example_batch and example_batch is not None:
+    return example_batch
+  else:
+    return train_iter()
+
+def get_shaped_batch(config, num_target_devices):
+  # Ahh this is bad. Cannot use local devices here since it is xaot - the target system may have a different
+  # count of local devices than the runner machine
+  batch_shape = (int(config.per_device_batch_size * num_target_devices), config.max_target_length)
+  print(f"{batch_shape=}", flush=True)
+  batch = {}
+  batch['inputs'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  batch['inputs_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  batch['inputs_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  batch['targets'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  batch['targets_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  batch['targets_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  return batch
+
+
+
+# Xaot load
+def load_compiled(save_name):
+    with open(save_name, "rb") as f:
+        serialized_compiled = pickle.load(f)
+    return serialized_compiled
+
+def get_io_trees(func, input_args, input_kwargs):
+    _, in_tree_recreated = jax.tree_util.tree_flatten((input_args, input_kwargs))
+    out_shaped = jax.eval_shape(func, *input_args, **input_kwargs)
+    _, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
+    return in_tree_recreated, out_tree_recreated
+
+
+# delete me once loading uses real mesh
 def get_topology_mesh(config):
   if config.topology=='v4-8':
     topology_devices = get_topology_desc(
@@ -461,44 +500,3 @@ def get_topology_mesh(config):
   topology_devices = create_device_mesh(config, topology_devices)
   topology_mesh = Mesh(topology_devices, config.mesh_axes)
   return topology_mesh
-
-
-
-
-
-# Sadness
-def load_next_batch(train_iter, example_batch, config):
-  """Loads the next batch. Can keep reusing the same batch for performance reasons """
-
-  if config.reuse_example_batch and example_batch is not None:
-    return example_batch
-  else:
-    return train_iter()
-
-def get_shaped_batch(config, num_target_devices):
-  # Ahh this is bad. Cannot use local devices here since it is xaot - the target system may have a different
-  # count of local devices than the runner machine
-  batch_shape = (int(config.per_device_batch_size * num_target_devices), config.max_target_length)
-  print(f"{batch_shape=}", flush=True)
-  batch = {}
-  batch['inputs'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  batch['inputs_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  batch['inputs_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  batch['targets'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  batch['targets_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  batch['targets_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  return batch
-
-
-
-# Xaot load
-def load_compiled(save_name):
-    with open(save_name, "rb") as f:
-        serialized_compiled = pickle.load(f)
-    return serialized_compiled
-
-def get_io_trees(func, input_args, input_kwargs):
-    _, in_tree_recreated = jax.tree_util.tree_flatten((input_args, input_kwargs))
-    out_shaped = jax.eval_shape(func, *input_args, **input_kwargs)
-    _, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
-    return in_tree_recreated, out_tree_recreated
