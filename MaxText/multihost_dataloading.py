@@ -144,7 +144,6 @@ def get_next_batch_sharded(local_dataset: tf.data.Dataset,
   # manual device placing we just did.
   input_sharding_constraint = PartitionSpec(*data_sharding, None)
 
-
   def form_gda(local_data, shape):
     device_buffers = _put_to_devices(local_data)
     #  Wrap device buffers as GDA
