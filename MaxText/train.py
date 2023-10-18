@@ -234,30 +234,12 @@ def train_loop(config, state=None):
   model = max_utils.get_model(config, mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = max_utils.get_optimizer(config, learning_rate_schedule)
-  
-  # tx = optax.adamw(
-  #     max_utils.create_learning_rate_schedule(config),
-  #     b1=config.adam_b1,
-  #     b2=config.adam_b2,
-  #     eps=config.adam_eps,
-  #     eps_root=config.adam_eps_root,
-  #     weight_decay=config.adam_weight_decay,
-  # )
-
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
   example_batch = None
   load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
   example_batch = load_partial()
-  # print(f"{example_batch=}")
-  # for key in example_batch:
-  #   print(key)
-  #   print(example_batch[key].shape)
-
-
-
-
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   data_pspec = P(*config.data_sharding)
@@ -278,6 +260,13 @@ def train_loop(config, state=None):
   if config.load_xaot:
     print("Loading the compiled function...", flush=True)
     p_train_step = max_utils.load_xaot(config, partial_train, state, np.size(mesh.device_ids))
+
+
+    # Dirty playground
+    #my_load = functools.partial(load_next_batch, data_iterator, None, config)
+    #batch_shape_via_eval = jax.eval_shape(my_load)
+    #print(f"{batch_shape_via_eval=}")
+
     print("Loaded compiled function!", flush=True)
   if not config.load_xaot:
     p_train_step = jax.jit(
@@ -295,9 +284,6 @@ def train_loop(config, state=None):
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(data_iterator, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      # state, metrics, nextrng = p_train_step(
-      #     model, config, state, example_batch, nextrng
-      # )
       state, metrics, nextrng = p_train_step(
           state, example_batch, nextrng
       )

@@ -121,22 +121,16 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
 
 def create_device_mesh(config, devices=jax.devices(), logging=True):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas """
-  # devices = jax.devices()
   num_devices = len(devices)
-  print(f"{devices=}")
   try:
     num_slices = 1 + max([d.slice_index for d in devices])
   except:
     num_slices = 1
-  print(f"{num_slices=}")
   num_devices_per_slice = num_devices//num_slices
   max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
   assert len(devices) > 1, "You must have at least two devices"
 
   multi_slice_env = num_slices > 1
-  #multi_slice_env = hasattr(devices, 'slice_index') # fake devices use slice_id instead of slice_index
-  if hasattr(devices, 'slice_id'):
-    print("To id or to index, that is the question", flush=True)
 
   dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism, config.dcn_tensor_parallelism]
   ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism, config.ici_tensor_parallelism]
@@ -371,7 +365,6 @@ cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
 
 
 # Xaot
-
 def get_model(config, mesh):
   return Transformer(config, mesh)
 
@@ -445,6 +438,7 @@ def get_shaped_batch(config, num_target_devices):
   batch['targets'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   batch['targets_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   batch['targets_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  print(f"{batch=}")
   return batch
 
 
