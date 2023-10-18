@@ -18,18 +18,18 @@
 import glob
 import json
 import os
-from absl.testing import absltest
+import unittest
 
 from tensorboard_plugin_profile.convert import raw_to_tool_data
 
 
-class TpuJAXTest(absltest.TestCase):
+class TpuJAXTest(unittest.TestCase):
 
   """Test for profile collected with JAX."""
 
   def _get_session_snapshot(self):
     """Gets a session snapshot of current session. assume only one session."""
-    profile_plugin_root ="/tmp/tensorboard/plugins/profile"
+    profile_plugin_root ="tensorboard/plugins/profile"
     # The session exists under a director whose name is time-dependent.
     profile_session_glob = os.path.join(profile_plugin_root, '*', '*.xplane.pb')
     return glob.glob(profile_session_glob)
@@ -84,4 +84,4 @@ class TpuJAXTest(absltest.TestCase):
 
 
 if __name__ == '__main__':
-  absltest.main()
+  unittest.main()
