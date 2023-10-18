@@ -187,7 +187,7 @@ def train_step(model, config, state, data, dropout_rng):
     # test with simple reduce sum
     # shape [batch_size, length]
     xent = jnp.sum(logits, axis=-1)
-    # xent = xent * (data['inputs_segmentation'] != 0)
+    xent = xent * (data['inputs_segmentation'] != 0)
     return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
