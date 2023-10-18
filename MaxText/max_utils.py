@@ -24,6 +24,7 @@ import max_logging
 import numpy as np
 import jax
 import jax.numpy as jnp
+from layers import Transformer
 from jax.experimental import mesh_utils
 
 import json
@@ -370,17 +371,34 @@ cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
 
 
 # Xaot
-def gen_input_data(model, tx, config, rng, mesh, data_iterator):
-  #model, config, state (S), example_batch (S), example_rng (S)
-  abstract_state, state_mesh_annotations =  get_abstract_state(model, tx, config, rng, mesh)
+
+def get_model(config, mesh):
+  return Transformer(config, mesh)
+
+def get_optimizer(config, learning_rate_schedule):
+  # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
+  return optax.adamw(
+    learning_rate_schedule,
+    b1=config.adam_b1,
+    b2=config.adam_b2,
+    eps=config.adam_eps,
+    eps_root=config.adam_eps_root,
+    weight_decay=config.adam_weight_decay,
+  )
+
+def gen_shaped_input_data(model, tx, config, mesh):
+  example_rng = jax.random.PRNGKey(0)
+  shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
+  # example_rng = jax.ShapeDtypeStruct((2,), np.uint32)
+
+  abstract_state, state_mesh_annotations =  get_abstract_state(model, tx, config, example_rng, mesh)
   
   # example_batch = None
   # load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
   # example_batch = jax.eval_shape(load_partial)
-  example_batch = get_shaped_batch(config, np.size(mesh.device_ids))
-  example_rng = jax.random.PRNGKey(0)
-  example_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
-  input_args = (model, config, abstract_state, example_batch, example_rng)
+  shaped_batch = get_shaped_batch(config, np.size(mesh.device_ids))
+
+  input_args = (abstract_state, shaped_batch, shaped_rng)
   input_kwargs = {}
   return input_args, input_kwargs, state_mesh_annotations
 
@@ -393,34 +411,6 @@ def get_shardings(mesh, state_mesh_annotations, config):
   in_shardings = (state_mesh_shardings, data_sharding, None)
   out_shardings = (state_mesh_shardings, None, None)
   return in_shardings, out_shardings
-
-def save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, in_shardings, out_shardings, static_argnums, donate_argnums, mesh):
-    def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings):
-        # Jit, lower, and compile func, possibly with topology devices
-        with mesh:
-            # jitted = pjit.pjit(
-            #     func, in_shardings=in_shardings, out_shardings=out_shardings
-            # )
-            jitted = jax.jit(
-              func,
-              in_shardings=in_shardings,
-              out_shardings=out_shardings,
-              static_argnums=static_argnums,
-              donate_argnums=donate_argnums
-            )
-            lowered = jitted.lower(*func_input_args, **func_input_kwargs)
-        compiled = lowered.compile()
-        return jitted, lowered, compiled
-
-    def save_compiled(compiled, save_name):
-        # Serialize and save the compiled object
-        serialized, in_tree, out_tree = serialize(compiled)
-        with open(save_name, "wb") as f:
-            pickle.dump(serialized, f)
-    print("Jitting train step so it can be saved...", flush=True)
-    jitted, lowered, compiled = jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings)
-    print("Jitting train step!!!", flush=True)
-    save_compiled(compiled, compiled_name) # Serialize and save the compiled object
 
 def get_abstract_state(model, tx, config, rng, mesh):
   init_train_state_partial = functools.partial(init_train_state, model, tx,

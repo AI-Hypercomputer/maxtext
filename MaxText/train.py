@@ -37,7 +37,6 @@ import numpy as np
 import optax
 from tensorboardX import SummaryWriter
 
-from layers import Transformer
 import pyconfig
 from input_pipeline import create_data_iterator_with_tokenizer
 import max_utils
@@ -231,18 +230,18 @@ def train_loop(config, state=None):
   mesh = Mesh(devices_array, config.mesh_axes)
 
   # Model and Optimizer definition
-  model = Transformer(config, mesh)
+  model = max_utils.get_model(config, mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
-
-  # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
-  tx = optax.adamw(
-      max_utils.create_learning_rate_schedule(config),
-      b1=config.adam_b1,
-      b2=config.adam_b2,
-      eps=config.adam_eps,
-      eps_root=config.adam_eps_root,
-      weight_decay=config.adam_weight_decay,
-  )
+  tx = max_utils.get_optimizer(config, learning_rate_schedule)
+  
+  # tx = optax.adamw(
+  #     max_utils.create_learning_rate_schedule(config),
+  #     b1=config.adam_b1,
+  #     b2=config.adam_b2,
+  #     eps=config.adam_eps,
+  #     eps_root=config.adam_eps_root,
+  #     weight_decay=config.adam_weight_decay,
+  # )
 
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)

@@ -24,26 +24,58 @@ to compile with target hardware (e.g. a large cluster), without using the hardwa
 import max_utils
 import pyconfig
 import jax
+import numpy as np
 from typing import Sequence
 from absl import app
 
-def save_xaot(config):
+import train
+
+def save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, in_shardings, out_shardings, static_argnums, donate_argnums, mesh):
+    def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings):
+        # Jit, lower, and compile func, using topology devices
+        with mesh:
+            jitted = jax.jit(
+              func,
+              in_shardings=in_shardings,
+              out_shardings=out_shardings,
+              static_argnums=static_argnums,
+              donate_argnums=donate_argnums
+            )
+            lowered = jitted.lower(*func_input_args, **func_input_kwargs)
+        compiled = lowered.compile()
+        return jitted, lowered, compiled
+
+    def save_compiled(compiled, save_name):
+        # Serialize and save the compiled object
+        serialized, in_tree, out_tree = serialize(compiled)
+        with open(save_name, "wb") as f:
+            pickle.dump(serialized, f)
+    print("Jitting train step so it can be saved...", flush=True)
+    jitted, lowered, compiled = jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings)
+    print("Jitting train step!!!", flush=True)
+    save_compiled(compiled, compiled_name) # Serialize and save the compiled object
+
+def save_train_xaot(config):
     print("Saving compiled xaot...", flush=True)
     topology_mesh = max_utils.get_topology_mesh(config)
-    # topology_data_iterator, _ = create_data_iterator_with_tokenizer(config, topology_mesh)
-    # func_input_args, func_input_kwargs, state_mesh_annotations = max_utils.gen_input_data(model, tx, config, init_rng, topology_mesh, data_iterator)
-    # in_shardings, out_shardings = max_utils.get_shardings(topology_mesh, state_mesh_annotations, config)
-    # static_argnums=(0,1)
-    # donate_argnums=2
-    # max_utils.save_compiled_full(train_step, compiled_name, func_input_args, func_input_kwargs, in_shardings, out_shardings, static_argnums, donate_argnums, topology_mesh)
-    # print("Saved compiled xaot!!!", flush=True)
+    model = max_utils.get_model(config, topology_mesh)
+    learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
+    tx = max_utils.get_optimizer(config, learning_rate_schedule)
+
+    func_to_xaot = train.get_partial_train_step_func(train.train_step, model, config)
+    shaped_train_args, shaped_train_kwargs, state_mesh_annotations = max_utils.gen_shaped_input_data(model, tx, config, topology_mesh)
+    in_shardings, out_shardings = max_utils.get_shardings(topology_mesh, state_mesh_annotations, config)
+    static_argnums=()
+    donate_argnums=0
+    compiled_name='go me'
+    save_compiled_full(func_to_xaot, compiled_name, shaped_train_args, shaped_train_kwargs, in_shardings, out_shardings, static_argnums, donate_argnums, topology_mesh)
+    print("Saved compiled xaot!!!", flush=True)
 
 
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
-  save_xaot(pyconfig.config)
-
+  save_train_xaot(pyconfig.config)
 
 if __name__ == "__main__":
   app.run(main)
