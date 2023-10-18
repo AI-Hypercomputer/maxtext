@@ -39,6 +39,7 @@ from tensorboardX import SummaryWriter
 
 import pyconfig
 from input_pipeline import create_data_iterator_with_tokenizer
+from jax.experimental.serialize_executable import serialize, deserialize_and_load
 import max_utils
 import checkpointing
 
@@ -254,15 +255,16 @@ def train_loop(config, state=None):
   #   print(key)
   #   print(example_batch[key].shape)
 
-
+  #partial_train = functools.partial(train_step, model, config)
+  partial_train = get_partial_train_step_func(train_step, model, config)
   if config.load_xaot:
     # mesh/mesh_axis_names is required to generate fake data, which is used to construct in_tree/out_tree
     print("Loading the compiled function...", flush=True)
-    serialized_compiled = max_utils.load_compiled(compiled_name)
+    serialized_compiled = max_utils.load_compiled(config.xaot_name)
     
     #ex_input = 2.0 * jnp.ones((128, 128), dtype=jnp.float32)
     topology_mesh = max_utils.get_topology_mesh(config)
-    input_args, input_kwargs, _ = max_utils.gen_input_data(model, tx, config, topology_mesh)
+    input_args, input_kwargs, _ = max_utils.gen_shaped_input_data(model, tx, config, topology_mesh)
     input_args_pytree = input_args
     train_pytree = functools.partial(train_step, model, config)
     in_tree_recreated, out_tree_recreated = max_utils.get_io_trees(partial_train, input_args_pytree, input_kwargs)
@@ -284,19 +286,18 @@ def train_loop(config, state=None):
   data_sharding = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
   # train_step(model, config, state, data, dropout_rng)
-  #partial_train = functools.partial(train_step, model, config)
-  partial_train = get_partial_train_step_func(train_step, model, config)
   # p_train_step = jax.jit(
   #   train_step,
   #   in_shardings=(state_mesh_shardings, data_sharding, None),
   #     out_shardings=(state_mesh_shardings, None, None),
   #   static_argnums=(0,1,),
   #   donate_argnums=2)
-  p_train_step = jax.jit(
-    partial_train,
-    in_shardings=(state_mesh_shardings, data_sharding, None),
-      out_shardings=(state_mesh_shardings, None, None),
-    donate_argnums=0)
+  if not config.load_xaot:
+    p_train_step = jax.jit(
+      partial_train,
+      in_shardings=(state_mesh_shardings, data_sharding, None),
+        out_shardings=(state_mesh_shardings, None, None),
+      donate_argnums=0)
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
