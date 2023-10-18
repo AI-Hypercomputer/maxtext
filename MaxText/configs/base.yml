@@ -188,6 +188,7 @@ stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds
 use_iota_embed: False
 
 xaot_name: "go_me"
+num_xaot_devices: 0
 save_xaot: False
 load_xaot: False
 topology: 'v4-8'

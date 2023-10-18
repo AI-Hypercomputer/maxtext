@@ -450,6 +450,20 @@ def get_shaped_batch(config, num_target_devices):
 
 
 # Xaot load
+def load_xaot(config, partial_train, state, num_target_devices):
+  # Currently partial_train, state and num_target_devices are needed to reconstruct 
+  # input/output shapes to consturct the in_trees and out_trees for load API 
+  # Parker is working on a serializing these
+  print("Loading the compiled function...", flush=True)
+  serialized_compiled = load_compiled(config.xaot_name)
+  shaped_batch = get_shaped_batch(config, num_target_devices)
+  example_rng = jax.random.PRNGKey(0)
+  shaped_input_args = (state, shaped_batch, example_rng)
+  shaped_input_kwargs = {}
+  in_tree_recreated, out_tree_recreated = get_io_trees(partial_train, shaped_input_args, shaped_input_kwargs)
+  p_train_step = deserialize_and_load(serialized_compiled, in_tree_recreated, out_tree_recreated)
+  return p_train_step
+
 def load_compiled(save_name):
     with open(save_name, "rb") as f:
         serialized_compiled = pickle.load(f)

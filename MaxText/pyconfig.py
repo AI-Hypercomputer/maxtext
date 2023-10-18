@@ -93,11 +93,16 @@ class _HyperParameters():
       if not raw_keys['save_xaot']:
         assert condition, error_message
 
+    def assert_for_xaot(raw_keys, condition, error_message):
+      if raw_keys['save_xaot']:
+        assert condition, error_message
+
     '''Transformations between the config data and configs used at runtime'''
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
     if raw_keys["run_name"] == "":
       raw_keys["run_name"] = os.environ.get("JOBSET_NAME") #using XPK default
     run_name = raw_keys["run_name"]
+    assert_for_xaot(raw_keys, raw_keys['num_xaot_devices']>0, 'Set xaot_num_devices to a positive int')
     assert_for_train(raw_keys, run_name, "Erroring out, need a real run_name")
     base_output_directory = raw_keys["base_output_directory"]
     validate_gcs_bucket_name(raw_keys, base_output_directory, "base_output_directory")
@@ -130,7 +135,7 @@ class _HyperParameters():
     raw_keys['num_decoder_layers'] = 2**layer_scale * raw_keys['base_num_decoder_layers']
 
     raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = \
-      calculate_global_batch_sizes(raw_keys['per_device_batch_size'])
+      calculate_global_batch_sizes(raw_keys)
 
 
 
@@ -155,8 +160,9 @@ def get_individual_scales(scale):
   layer_scale = base_scale
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
 
-def calculate_global_batch_sizes(per_device_batch_size):
-  num_devices = len(jax.devices())
+def calculate_global_batch_sizes(raw_keys):
+  per_device_batch_size = raw_keys['per_device_batch_size']
+  num_devices = get_num_target_devices(raw_keys)
   if per_device_batch_size < 1:
     # For per_device_batch_size<1, we load the data as if per_device_batch_size=1
     global_batch_size_to_load = num_devices
@@ -165,6 +171,12 @@ def calculate_global_batch_sizes(per_device_batch_size):
 
   global_batch_size_to_train_on = int(num_devices * per_device_batch_size)
   return global_batch_size_to_load, global_batch_size_to_train_on
+
+def get_num_target_devices(raw_keys):
+  if raw_keys['save_xaot']:
+    return raw_keys['num_xaot_devices']
+  else:
+    return len(jax.devices())
 
 class HyperParameters(): # pylint: disable=missing-class-docstring
   def __init__(self):
