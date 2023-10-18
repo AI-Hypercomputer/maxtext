@@ -201,6 +201,10 @@ def train_step(model, config, state, data, dropout_rng):
 
   return new_state, metrics, rng2
 
+def get_partial_train_step_func(train_step_func, model, config):
+  # Modularized out so can be publicly called for xaot
+  return functools.partial(train_step, model, config)
+
 def train_loop(config, state=None):
   """Main Training loop.
 
@@ -246,10 +250,10 @@ def train_loop(config, state=None):
   example_batch = None
   load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
   example_batch = load_partial()
-  print(f"{example_batch=}")
-  for key in example_batch:
-    print(key)
-    print(example_batch[key].shape)
+  # print(f"{example_batch=}")
+  # for key in example_batch:
+  #   print(key)
+  #   print(example_batch[key].shape)
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   data_pspec = P(*config.data_sharding)
@@ -263,12 +267,20 @@ def train_loop(config, state=None):
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
   data_sharding = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+  # train_step(model, config, state, data, dropout_rng)
+  #partial_train = functools.partial(train_step, model, config)
+  partial_train = get_partial_train_step_func(train_step, model, config)
+  # p_train_step = jax.jit(
+  #   train_step,
+  #   in_shardings=(state_mesh_shardings, data_sharding, None),
+  #     out_shardings=(state_mesh_shardings, None, None),
+  #   static_argnums=(0,1,),
+  #   donate_argnums=2)
   p_train_step = jax.jit(
-    train_step,
+    partial_train,
     in_shardings=(state_mesh_shardings, data_sharding, None),
       out_shardings=(state_mesh_shardings, None, None),
-    static_argnums=(0,1,),
-    donate_argnums=2)
+    donate_argnums=0)
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
@@ -279,8 +291,11 @@ def train_loop(config, state=None):
   for step in np.arange(get_first_step(state), config.steps):
     example_batch = load_next_batch(data_iterator, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      # state, metrics, nextrng = p_train_step(
+      #     model, config, state, example_batch, nextrng
+      # )
       state, metrics, nextrng = p_train_step(
-          model, config, state, example_batch, nextrng
+          state, example_batch, nextrng
       )
 
     new_time = datetime.datetime.now()

@@ -81,14 +81,21 @@ class _HyperParameters():
     args_dict.update(kwargs)
     return args_dict
 
+
+
   @staticmethod
   def user_init(raw_keys):
+    def assert_for_train(raw_keys, condition, error_message):
+      if not raw_keys['save_xaot']:
+        assert condition, error_message
+
     '''Transformations between the config data and configs used at runtime'''
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
     if raw_keys["run_name"] == "":
       raw_keys["run_name"] = os.environ.get("JOBSET_NAME") #using XPK default
     run_name = raw_keys["run_name"]
     assert run_name, "Erroring out, need a real run_name"
+    assert_for_train(raw_keys, run_name, "Erroring out, need a real run_name")
     base_output_directory = raw_keys["base_output_directory"]
     validate_gcs_bucket_name(base_output_directory, "base_output_directory")
     dataset_path = raw_keys["dataset_path"]
