@@ -22,14 +22,8 @@ def update_yaml_fields(yaml_data, update_dict, allow_new_keys=False):
     return yaml_copy
 
 
-BASE_MHJ_CMD="""export LIBTPU_INIT_ARGS="--xla_tpu_spmd_rng_bit_generator_unsafe=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true" && \
+BASE_CMD="""export LIBTPU_INIT_ARGS="--xla_tpu_spmd_rng_bit_generator_unsafe=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true" && \
 bash setup_with_retries.sh && \
-bash rto_setup.sh && \
-python3 MaxText/train.py """
-
-BASE_MHJ_CMD_14_CP="""export LIBTPU_INIT_ARGS="--xla_tpu_spmd_rng_bit_generator_unsafe=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true" && \
-export TPU_LIBRARY_PATH=$HOME/custom_libtpu/libtpu.so && \
-bash setup_with_retries.sh JAX_VERSION=0.4.14 LIBTPU_GCS_PATH=gs://libtpu_internal/mattdavidow/viperlite/2023-08-24-23:56:27-libtpu.so && \
 bash rto_setup.sh && \
 python3 MaxText/train.py """
 
@@ -103,20 +97,6 @@ def run_job(run_name, base_config, **config_updates):
         experiment_mhj['--COMMAND_TYPE'] = 'curl'
         experiment_mhj['--PROJECT'] = 'tpu-prod-env-vlp-2nic'
 
-
-    # V4_MHJ_DICT={
-    #     '--BUCKET_NAME': 'mattdavidow-br',  # for cloud-tpu-multipod-dev
-    #     '--NUM_SLICE': 1,
-    #     '--TPU_TYPE': 'v4-128',  # v4-8
-    #     '--VERSION': 'tpu-ubuntu2204-base',
-    #     '--PROJECT': 'cloud-tpu-multipod-dev',
-    #     '--ZONE': 'us-central2-b',
-    #     '--CQR_EXTRA_ARGS': ' --best-effort',
-    # }
-    # And this.
-    # 'base_output_directory':'gs://max-experiments',
-    # 'dataset_path':'gs://maxtext-dataset',
-
     mhj_args = []
     for key in experiment_mhj.keys():
         mhj_args.append(key)
@@ -154,20 +134,21 @@ def run_s38(): # 32
     run_job(f"long-FFF", ablation(gps=1), num_slice=16, fill_ratio=0.8 / 16 /1.20  , int8_training=False)
     run_job(f"long-TTF", ablation(gps=1), num_slice=16, fill_ratio=0.8 / 16 /1.20  , int8_training=True)
 
-
+def run_sweep_accum():
+    base_yml_updates = {"int8_training" : True, }
 
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='TPU configuration options')
     parser.add_argument('--dryrun', type=bool, default=True, action=argparse.BooleanOptionalAction)
-    parser.add_argument('--delyml', type=bool, default=False, action=argparse.BooleanOptionalAction)
-    parser.add_argument('--stable', type=bool, default=True, action=argparse.BooleanOptionalAction)
+    #parser.add_argument('--delyml', type=bool, default=False, action=argparse.BooleanOptionalAction)
+    #parser.add_argument('--stable', type=bool, default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--tpu', type=str, default='v5')
     parser.add_argument('--jobre', type=str, default='.*')
     parser.add_argument('--sweep', type=str, default='')
     parser.add_argument('--attempt', type=str, default='')
-    parser.add_argument('--jax_14_cl', type=bool, default=True, action=argparse.BooleanOptionalAction)
+    #parser.add_argument('--jax_14_cl', type=bool, default=True, action=argparse.BooleanOptionalAction)
     pargs = parser.parse_args()
     global args
     args = pargs.__dict__
