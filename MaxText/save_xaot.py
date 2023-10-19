@@ -16,7 +16,6 @@
 
 """ 
 Save a Cross Ahead of Time Compiled (XAOT) version of train.py's train step
-This also saves the config.
 Generates shaped versions of state and data without ever constructing them, so its possible
 to compile with target hardware (e.g. a large cluster), without using the hardware.
 """
