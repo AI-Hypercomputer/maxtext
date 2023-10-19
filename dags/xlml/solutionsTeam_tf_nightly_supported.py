@@ -28,6 +28,20 @@ with models.DAG(
     catchup=False,
 ) as dag:
   # ResNet
+  tf_resnet_v2_8 = tf_config.get_tf_resnet_config(
+      tpu_version=2,
+      tpu_cores=8,
+      tpu_zone=vm_resource.Zone.US_CENTRAL1_C.value,
+      time_out_in_min=60,
+  ).run()
+
+  tf_resnet_v3_8 = tf_config.get_tf_resnet_config(
+      tpu_version=3,
+      tpu_cores=8,
+      tpu_zone=vm_resource.Zone.US_EAST1_D.value,
+      time_out_in_min=60,
+  ).run()
+
   tf_resnet_v4_8 = tf_config.get_tf_resnet_config(
       tpu_version="4",
       tpu_cores=8,
@@ -59,6 +73,8 @@ with models.DAG(
       is_pod=True,
   ).run()
 
-  # Model dependencies
+  # Test dependencies
+  tf_resnet_v2_8
+  tf_resnet_v3_8
   tf_resnet_v4_8 >> tf_resnet_v4_32
   tf_bert_v4_8 >> tf_bert_v4_32
