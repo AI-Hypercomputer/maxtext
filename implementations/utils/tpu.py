@@ -25,22 +25,30 @@ from absl import logging
 import airflow
 from airflow.decorators import task, task_group
 from airflow.utils.task_group import TaskGroup
+from apis import gcp_config, test_config
 import fabric
 import google.api_core.exceptions
 import google.auth
 import google.cloud.tpu_v2alpha1 as tpu_api
 import google.longrunning.operations_pb2 as operations
-import paramiko
-
-from apis import gcp_config, test_config
 from implementations.utils import ssh
+import paramiko
 
 
 @task
-def generate_tpu_name(base_tpu_name: str) -> str:
-  return f'{base_tpu_name}-{str(uuid.uuid4())}'
+def generate_tpu_name(base_tpu_name: str, with_suffix: bool = True) -> str:
+  if with_suffix:
+    return f'{base_tpu_name}-{str(uuid.uuid4())}'
+  return base_tpu_name
 
-def create_queued_resource(tpu_name: airflow.XComArg, accelerator: test_config.Tpu, gcp: gcp_config.GCPConfig, ssh_keys: airflow.XComArg, timeout: datetime.timedelta) -> Tuple[TaskGroup, airflow.XComArg]:
+
+def create_queued_resource(
+    tpu_name: airflow.XComArg,
+    accelerator: test_config.Tpu,
+    gcp: gcp_config.GCPConfig,
+    ssh_keys: airflow.XComArg,
+    timeout: datetime.timedelta,
+) -> Tuple[TaskGroup, airflow.XComArg]:
   """Request a QueuedResource and wait until the nodes are created.
 
   Args:
@@ -54,8 +62,11 @@ def create_queued_resource(tpu_name: airflow.XComArg, accelerator: test_config.T
     A TaskGroup for the entire create operation and an XCom value for the
     qualified queued_resource name.
   """
+
   @task
-  def create_queued_resource_request(tpu_name: str, ssh_keys: ssh.SshKeys) -> str:
+  def create_queued_resource_request(
+      tpu_name: str, ssh_keys: ssh.SshKeys
+  ) -> str:
     creds, _ = google.auth.default()
     client = tpu_api.TpuClient(credentials=creds)
 
@@ -63,57 +74,66 @@ def create_queued_resource(tpu_name: airflow.XComArg, accelerator: test_config.T
     queued_resource = tpu_api.QueuedResource(
         # TODO(wcromar): Implement `validUntilDuration` based on `timeout`
         # TODO(ranran): enable configuration via `AcceleratorConfig`
-        tpu=tpu_api.QueuedResource.Tpu(node_spec=[
-            tpu_api.QueuedResource.Tpu.NodeSpec(
-                node_id=tpu_name,
-                parent=parent,
-                node=tpu_api.Node(accelerator_type=accelerator.name,
-                                  description="noteardown",
-                                  runtime_version=accelerator.runtime_version,
-                                  network_config=tpu_api.NetworkConfig(
-                                      network=accelerator.network,
-                                      subnetwork=accelerator.subnetwork,
-                                      enable_external_ips=True,
-                                  ),
-                                  metadata={
-                                      'ssh-keys':
-                                          f'xl-ml-test:{ssh_keys.public}',
-                                  }))
-        ],),
+        tpu=tpu_api.QueuedResource.Tpu(
+            node_spec=[
+                tpu_api.QueuedResource.Tpu.NodeSpec(
+                    node_id=tpu_name,
+                    parent=parent,
+                    node=tpu_api.Node(
+                        accelerator_type=accelerator.name,
+                        description='noteardown',
+                        runtime_version=accelerator.runtime_version,
+                        network_config=tpu_api.NetworkConfig(
+                            network=accelerator.network,
+                            subnetwork=accelerator.subnetwork,
+                            enable_external_ips=True,
+                        ),
+                        metadata={
+                            'ssh-keys': f'xl-ml-test:{ssh_keys.public}',
+                        },
+                    ),
+                )
+            ],
+        ),
         guaranteed=tpu_api.QueuedResource.Guaranteed(
-            reserved=accelerator.reserved,),
+            reserved=accelerator.reserved,
+        ),
     )
 
     qr_operation = client.create_queued_resource(
-      parent=parent,
-      queued_resource_id=tpu_name,
-      queued_resource=queued_resource)
+        parent=parent,
+        queued_resource_id=tpu_name,
+        queued_resource=queued_resource,
+    )
     response = qr_operation.result()
-    logging.info("Create QR response: {}".format(response))
+    logging.info('Create QR response: {}'.format(response))
     # TODO(wcromar): do anything about failures
 
     return response.name
 
-  @task.sensor(poke_interval=60, timeout=timeout.total_seconds(), mode="reschedule")
+  @task.sensor(
+      poke_interval=60, timeout=timeout.total_seconds(), mode='reschedule'
+  )
   def wait_for_ready_queued_resource(qualified_name: str):
     creds, _ = google.auth.default()
     client = tpu_api.TpuClient(credentials=creds)
 
     qr = client.get_queued_resource(name=qualified_name)
     state = qr.state.state
-    logging.info(f"Queued resource state: {state.name}")
+    logging.info(f'Queued resource state: {state.name}')
     if qr.state.state == tpu_api.QueuedResourceState.State.ACTIVE:
       return True
     elif qr.state.state in [
         tpu_api.QueuedResourceState.State.CREATING,
         tpu_api.QueuedResourceState.State.WAITING_FOR_RESOURCES,
         tpu_api.QueuedResourceState.State.ACCEPTED,
-        tpu_api.QueuedResourceState.State.PROVISIONING]:
+        tpu_api.QueuedResourceState.State.PROVISIONING,
+    ]:
       return False
     else:
-      raise RuntimeError(f"Bad queued resource state {state.name}")
+      raise RuntimeError(f'Bad queued resource state {state.name}')
 
-  with TaskGroup(group_id="create_queued_resource") as tg:
+  with TaskGroup(group_id='create_queued_resource') as tg:
     qualified_name = create_queued_resource_request(tpu_name, ssh_keys)
     wait_for_ready_queued_resource(qualified_name)
 
@@ -129,7 +149,7 @@ def delete_queued_resource(qualified_name: airflow.XComArg):
       resource.
   """
 
-  @task(trigger_rule="all_done")
+  @task(trigger_rule='all_done')
   def delete_tpu_nodes_request(qualified_name: str):
     # TODO(wcromar): Find a less repetitive way to manage the TPU client.
     creds, _ = google.auth.default()
@@ -148,7 +168,7 @@ def delete_queued_resource(qualified_name: airflow.XComArg):
       except google.api_core.exceptions.NotFound:
         logging.info(f'{node.node_id} is already deleted')
 
-  @task.sensor(poke_interval=60, timeout=3600, mode="reschedule")
+  @task.sensor(poke_interval=60, timeout=3600, mode='reschedule')
   def wait_for_tpu_deletion(qualified_name: str):
     creds, _ = google.auth.default()
     client = tpu_api.TpuClient(credentials=creds)
@@ -160,28 +180,29 @@ def delete_queued_resource(qualified_name: airflow.XComArg):
         tpu_api.QueuedResourceState.State.SUSPENDED,
         # TPU will be sitting in WAITING_FOR_RESOURCES if creation timed out.
         tpu_api.QueuedResourceState.State.WAITING_FOR_RESOURCES,
-        tpu_api.QueuedResourceState.State.ACCEPTED]:
+        tpu_api.QueuedResourceState.State.ACCEPTED,
+    ]:
       logging.info(f'All TPU nodes deleted for {qualified_name}')
       return True
 
-    logging.info(f"TPU Nodes: {qr.tpu.node_spec}")
+    logging.info(f'TPU Nodes: {qr.tpu.node_spec}')
     return False
 
-  @task(trigger_rule="all_done")
+  @task(trigger_rule='all_done')
   def delete_queued_resource_request(qualified_name: str) -> Optional[str]:
     creds, _ = google.auth.default()
     client = tpu_api.TpuClient(credentials=creds)
 
     try:
       op = client.delete_queued_resource(name=qualified_name)
-      logging.info(f"delete op {op}")
+      logging.info(f'delete op {op}')
     except google.api_core.exceptions.NotFound:
       logging.info(f'{qualified_name} is already deleted')
       return None
 
     return op.operation.name
 
-  @task.sensor(poke_interval=60, timeout=3600, mode="reschedule")
+  @task.sensor(poke_interval=60, timeout=3600, mode='reschedule')
   def wait_for_queued_resource_deletion(op_name: Optional[str]):
     if not op_name:
       logging.info('No delete operation given')
@@ -190,19 +211,24 @@ def delete_queued_resource(qualified_name: airflow.XComArg):
     creds, _ = google.auth.default()
     client = tpu_api.TpuClient(credentials=creds)
 
-    op = client.get_operation(
-        operations.GetOperationRequest(name=op_name))
+    op = client.get_operation(operations.GetOperationRequest(name=op_name))
     return op.done
 
-  delete_tpu_nodes = delete_tpu_nodes_request(qualified_name) >> wait_for_tpu_deletion(qualified_name)
-  qr_op_name = delete_tpu_nodes >> delete_queued_resource_request(qualified_name)
+  delete_tpu_nodes = delete_tpu_nodes_request(
+      qualified_name
+  ) >> wait_for_tpu_deletion(qualified_name)
+  qr_op_name = delete_tpu_nodes >> delete_queued_resource_request(
+      qualified_name
+  )
   wait_for_queued_resource_deletion(qr_op_name)
+
 
 @task
 def ssh_tpu(
     qualified_name: str,
     cmds: Iterable[str],
-    ssh_keys: ssh.SshKeys
+    ssh_keys: ssh.SshKeys,
+    all_workers: bool,
 ) -> None:
   """SSH TPU and run commands in multi process.
 
@@ -210,6 +236,8 @@ def ssh_tpu(
    qualified_name: The qualified name of a queued resource.
    cmds: The commands to run on a TPU.
    ssh_keys: The SSH key pair to use for authentication.
+   all_workers: The flag to define if run commands on all workers or worker 0
+     only.
   """
   creds, _ = google.auth.default()
   client = tpu_api.TpuClient(credentials=creds)
@@ -217,19 +245,27 @@ def ssh_tpu(
   queued_resource = client.get_queued_resource(name=qualified_name)
 
   nodes = [
-    client.get_node(name=os.path.join(node.parent, 'nodes', node.node_id))
-    for node in queued_resource.tpu.node_spec]
-  endpoints = itertools.chain.from_iterable(
-    node.network_endpoints for node in nodes)
-  ip_addresses = [endpoint.ip_address for endpoint in endpoints]
-  logging.info(f'Connecting to IP addresses {ip_addresses}')
+      client.get_node(name=os.path.join(node.parent, 'nodes', node.node_id))
+      for node in queued_resource.tpu.node_spec
+  ]
+
+  if all_workers:
+    endpoints = itertools.chain.from_iterable(
+        node.network_endpoints for node in nodes
+    )
+    ip_addresses = [endpoint.ip_address for endpoint in endpoints]
+    logging.info(f'Connecting to IP addresses of all workers: {ip_addresses}')
+  else:
+    ip_addresses = [nodes[0].network_endpoints[0].ip_address]
+    logging.info(f'Connecting to IP addresses of worker 0: {ip_addresses}')
 
   pkey = paramiko.RSAKey.from_private_key(io.StringIO(ssh_keys.private))
   ssh_group = fabric.ThreadingGroup(
-    *ip_addresses,
-    connect_kwargs={
-      "auth_strategy":
-        paramiko.auth_strategy.InMemoryPrivateKey('xl-ml-test', pkey)
-    }
+      *ip_addresses,
+      connect_kwargs={
+          'auth_strategy': paramiko.auth_strategy.InMemoryPrivateKey(
+              'xl-ml-test', pkey
+          )
+      },
   )
   ssh_group.run(cmds)

@@ -29,20 +29,36 @@ with models.DAG(
 ) as dag:
   # ResNet
   tf_resnet_v4_8 = tf_config.get_tf_resnet_config(
-      tpu_version=4,
+      tpu_version="4",
       tpu_cores=8,
       tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
+  ).run()
+
+  tf_resnet_v4_32 = tf_config.get_tf_resnet_config(
+      tpu_version="4",
+      tpu_cores=32,
+      tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
+      time_out_in_min=60,
+      is_pod=True,
   ).run()
 
   # BERT
   tf_bert_v4_8 = tf_config.get_tf_bert_config(
-      tpu_version=4,
+      tpu_version="4",
       tpu_cores=8,
       tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
   ).run()
 
+  tf_bert_v4_32 = tf_config.get_tf_bert_config(
+      tpu_version="4",
+      tpu_cores=32,
+      tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
+      time_out_in_min=60,
+      is_pod=True,
+  ).run()
+
   # Model dependencies
-  tf_resnet_v4_8
-  tf_bert_v4_8
+  tf_resnet_v4_8 >> tf_resnet_v4_32
+  tf_bert_v4_8 >> tf_bert_v4_32
