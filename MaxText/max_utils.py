@@ -405,8 +405,10 @@ def get_abstract_state(model, tx, config, rng, mesh):
 def get_shaped_batch(config, num_target_devices):
   # Ahh this is bad. Cannot use local devices here since it is xaot - the target system may have a different
   # count of local devices than the runner machine
-  # TODO(mattdavidow): replace this with global_batch_size.
-  batch_shape = (int(config.per_device_batch_size * num_target_devices), config.max_target_length)
+  
+  #batch_shape = (int(config.per_device_batch_size * num_target_devices), config.max_target_length)
+  # TODO(mattdavidow): confirm this should be global_batch_size_to_load and not global_batch_size_to_train_on
+  batch_shape = (config.global_batch_size_to_load, config.max_target_length)
   print(f"{batch_shape=}", flush=True)
   batch = {}
   batch['inputs'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
