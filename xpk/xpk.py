@@ -1168,6 +1168,7 @@ def cluster_describe(args) -> int:
     xpk_exit(set_cluster_command_code)
 
   command = (
+      f'gcloud components update --quiet && '
       f'gcloud container node-pools  list --cluster {args.cluster} '
       f'--project={args.project} --region={zone_to_region(args.zone)} --quiet'
   )
