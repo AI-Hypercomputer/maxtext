@@ -74,7 +74,7 @@ def get_topology_mesh(config):
   topology_mesh = Mesh(topology_device_mesh, config.mesh_axes)
   return topology_mesh
 
-def save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, in_shardings, out_shardings, static_argnums, donate_argnums, mesh):
+def xaot_compile_and_save(func, compiled_name, func_input_args, func_input_kwargs, in_shardings, out_shardings, static_argnums, donate_argnums, mesh):
     def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings):
         # Jit, lower, and compile func, using topology devices
         with mesh:
@@ -111,7 +111,7 @@ def save_train_xaot(config):
     in_shardings, out_shardings = max_utils.get_shardings(topology_mesh, state_mesh_annotations, config)
     static_argnums=()
     donate_argnums=0
-    save_compiled_full(func_to_xaot, config.xaot_name, shaped_train_args, shaped_train_kwargs, in_shardings, out_shardings, static_argnums, donate_argnums, topology_mesh)
+    save_compiled_fullxaot_compile_and_save(func_to_xaot, config.xaot_name, shaped_train_args, shaped_train_kwargs, in_shardings, out_shardings, static_argnums, donate_argnums, topology_mesh)
     print("Saved compiled xaot!!!", flush=True)
 
 

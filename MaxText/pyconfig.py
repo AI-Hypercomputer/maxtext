@@ -81,8 +81,6 @@ class _HyperParameters():
     args_dict.update(kwargs)
     return args_dict
 
-
-
   @staticmethod
   def user_init(raw_keys):
     def validate_gcs_bucket_name(raw_keys, bucket_name, config_var):
