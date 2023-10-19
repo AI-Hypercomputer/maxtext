@@ -405,7 +405,7 @@ def get_abstract_state(model, tx, config, rng, mesh):
 def get_shaped_batch(config, num_target_devices):
   # Ahh this is bad. Cannot use local devices here since it is xaot - the target system may have a different
   # count of local devices than the runner machine
-  # TODO(mattdavidow): replace this with global_batch_size
+  # TODO(mattdavidow): replace this with global_batch_size.
   batch_shape = (int(config.per_device_batch_size * num_target_devices), config.max_target_length)
   print(f"{batch_shape=}", flush=True)
   batch = {}
