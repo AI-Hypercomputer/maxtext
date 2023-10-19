@@ -39,9 +39,7 @@ import subprocess
 from typing import Tuple
 
 import pickle
-from flax.serialization import to_bytes
-from jax.experimental.serialize_executable import serialize, deserialize_and_load
-from jax.experimental.topologies import get_topology_desc
+from jax.experimental.serialize_executable import deserialize_and_load
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
@@ -358,13 +356,6 @@ def _cross_entropy_with_logits_bwd(
 cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
                                  _cross_entropy_with_logits_bwd)
 
-
-
-
-
-
-
-# Xaot
 def get_model(config, mesh):
   return Transformer(config, mesh)
 
@@ -382,13 +373,7 @@ def get_optimizer(config, learning_rate_schedule):
 def gen_shaped_input_data(model, tx, config, mesh):
   example_rng = jax.random.PRNGKey(0)
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
-  # example_rng = jax.ShapeDtypeStruct((2,), np.uint32)
-
   abstract_state, state_mesh_annotations =  get_abstract_state(model, tx, config, example_rng, mesh)
-  
-  # example_batch = None
-  # load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
-  # example_batch = jax.eval_shape(load_partial)
   shaped_batch = get_shaped_batch(config, np.size(mesh.device_ids))
 
   input_args = (abstract_state, shaped_batch, shaped_rng)
@@ -417,18 +402,10 @@ def get_abstract_state(model, tx, config, rng, mesh):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return unboxed_abstract_state, state_mesh_annotations
 
-# Sadness
-def load_next_batch(train_iter, example_batch, config):
-  """Loads the next batch. Can keep reusing the same batch for performance reasons """
-
-  if config.reuse_example_batch and example_batch is not None:
-    return example_batch
-  else:
-    return train_iter()
-
 def get_shaped_batch(config, num_target_devices):
   # Ahh this is bad. Cannot use local devices here since it is xaot - the target system may have a different
   # count of local devices than the runner machine
+  # TODO(mattdavidow): replace this with global_batch_size
   batch_shape = (int(config.per_device_batch_size * num_target_devices), config.max_target_length)
   print(f"{batch_shape=}", flush=True)
   batch = {}
@@ -443,12 +420,22 @@ def get_shaped_batch(config, num_target_devices):
 
 
 
-# Xaot load
+# XAOT load
 def load_xaot(config, partial_train, state, num_target_devices):
   # Currently partial_train, state and num_target_devices are needed to reconstruct 
   # input/output shapes to consturct the in_trees and out_trees for load API 
   # Parker is working on a serializing these
-  print("Loading the compiled function...", flush=True)
+  def load_compiled(save_name):
+    with open(save_name, "rb") as f:
+        serialized_compiled = pickle.load(f)
+    return serialized_compiled
+
+  def get_io_trees(func, input_args, input_kwargs):
+    _, in_tree_recreated = jax.tree_util.tree_flatten((input_args, input_kwargs))
+    out_shaped = jax.eval_shape(func, *input_args, **input_kwargs)
+    _, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
+    return in_tree_recreated, out_tree_recreated
+
   serialized_compiled = load_compiled(config.xaot_name)
   shaped_batch = get_shaped_batch(config, num_target_devices)
   example_rng = jax.random.PRNGKey(0)
@@ -458,53 +445,3 @@ def load_xaot(config, partial_train, state, num_target_devices):
   p_train_step = deserialize_and_load(serialized_compiled, in_tree_recreated, out_tree_recreated)
   return p_train_step
 
-def load_compiled(save_name):
-    with open(save_name, "rb") as f:
-        serialized_compiled = pickle.load(f)
-    return serialized_compiled
-
-def get_io_trees(func, input_args, input_kwargs):
-    _, in_tree_recreated = jax.tree_util.tree_flatten((input_args, input_kwargs))
-    out_shaped = jax.eval_shape(func, *input_args, **input_kwargs)
-    _, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
-    return in_tree_recreated, out_tree_recreated
-
-
-# delete me once loading uses real mesh
-def get_topology_mesh(config):
-  if config.topology=='v4-8':
-    topology_devices = get_topology_desc(
-        platform='tpu',
-        topology_name=f'v4:2x2x1',
-        chip_config_name='megacore',
-        chips_per_host_bounds=(2, 2, 1),
-        num_slices=config.topology_num_slices,
-    ).devices
-  elif config.topology=='v4-16':
-    print("excitement v4-16", flush=True)
-    topology_devices = get_topology_desc(
-    platform='tpu',
-    topology_name=f'v4:2x2x2',
-    chip_config_name='megacore',
-    chips_per_host_bounds=(2, 2, 2),
-    num_slices=config.topology_num_slices,
-).devices
-  elif config.topology == 'v5e-16':
-    print("excitement v5e-16")
-    topology_devices = get_topology_desc(
-        platform='tpu',
-        topology_name=f'v5e:2x2',
-        chips_per_host_bounds=(2, 2, 1),
-        num_slices=config.topology_num_slices,
-    ).devices
-  elif config.topology == 'v5e-256':
-    print("excitement v5e-256")
-    topology_devices = get_topology_desc(
-        platform='tpu',
-        topology_name=f'v5e:8x8',
-        chips_per_host_bounds=(8, 8, 1),
-        num_slices=config.topology_num_slices,
-    ).devices
-  topology_devices = create_device_mesh(config, topology_devices)
-  topology_mesh = Mesh(topology_devices, config.mesh_axes)
-  return topology_mesh
