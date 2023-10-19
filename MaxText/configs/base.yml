@@ -188,7 +188,7 @@ stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds
 use_iota_embed: False
 
 # Xaot options
-xaot_name: ""
+xaot_save_name: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
 num_xaot_devices: 0
 save_xaot: False
 load_xaot: False

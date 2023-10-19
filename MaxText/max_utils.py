@@ -438,7 +438,7 @@ def load_xaot(config, partial_train, state, num_target_devices):
     _, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
     return in_tree_recreated, out_tree_recreated
 
-  serialized_compiled = load_compiled(config.xaot_name)
+  serialized_compiled = load_compiled(config.xaot_save_name)
   shaped_batch = get_shaped_batch(config, num_target_devices)
   example_rng = jax.random.PRNGKey(0)
   shaped_input_args = (state, shaped_batch, example_rng)

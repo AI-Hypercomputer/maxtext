@@ -111,7 +111,7 @@ def save_train_xaot(config):
     in_shardings, out_shardings = max_utils.get_shardings(topology_mesh, state_mesh_annotations, config)
     static_argnums=()
     donate_argnums=0
-    save_compiled_fullxaot_compile_and_save(func_to_xaot, config.xaot_name, shaped_train_args, shaped_train_kwargs, in_shardings, out_shardings, static_argnums, donate_argnums, topology_mesh)
+    save_compiled_fullxaot_compile_and_save(func_to_xaot, config.xaot_save_name, shaped_train_args, shaped_train_kwargs, in_shardings, out_shardings, static_argnums, donate_argnums, topology_mesh)
     print("Saved compiled xaot!!!", flush=True)
 
 
