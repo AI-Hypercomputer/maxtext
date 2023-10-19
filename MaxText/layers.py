@@ -602,7 +602,7 @@ class MlpBlock(nn.Module):
     x = functools.reduce(operator.mul, activations)
     # Apply dropout and final dense output projection.
     x = nn.Dropout(
-        rate=self.intermediate_dropout_rate, broadcast_dims=(-2,), name="MlpBlockDropout")(
+        rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
             x, deterministic=deterministic)  # Broadcast along length.
     x = nn.with_logical_constraint(x, ('activation_batch', 'activation_length', 'activation_mlp'))
     output = DenseGeneral(
@@ -691,7 +691,7 @@ class Embed(nn.Module):
       if cfg.use_iota_embed:
         iota = lax.iota(jnp.int32, self.num_embeddings)
         one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
-        with jax.named_scope('apply embedding(iota_dot)'):
+        with jax.named_scope('apply embedding(iota_dot'):
           output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
       else:
         output = jnp.asarray(self.embedding, self.dtype)[inputs]
@@ -1110,7 +1110,7 @@ class DecoderLayer(nn.Module):
     next_layer_addition = mlp_lnx + attention_lnx
 
     next_layer_addition_dropped_out = nn.Dropout(
-        rate=cfg.dropout_rate, broadcast_dims=(-2,), name="next_layer_addition_dropped_out")(
+        rate=cfg.dropout_rate, broadcast_dims=(-2,))(
             next_layer_addition, deterministic=deterministic)
 
     layer_output = next_layer_addition_dropped_out + inputs
@@ -1149,7 +1149,7 @@ class Decoder(nn.Module):
     # [batch, length] -> [batch, length, emb_dim]
     y = self.shared_embedding(decoder_input_tokens.astype('int32'))
     y = nn.Dropout(
-        rate=cfg.dropout_rate, broadcast_dims=(-2,), name="EmbedDropout")(
+        rate=cfg.dropout_rate, broadcast_dims=(-2,))(
             y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
 
@@ -1206,9 +1206,9 @@ class Decoder(nn.Module):
                 max_decode_length)
 
     y = LayerNorm(dtype=cfg.dtype, name='decoder_norm', kernel_axes = ('embed',))(y)
-    # y = nn.Dropout(
-    #     rate=cfg.dropout_rate, broadcast_dims=(-2,), name="DropoutBeforeLogit")(
-    #         y, deterministic=deterministic)
+    y = nn.Dropout(
+        rate=cfg.dropout_rate, broadcast_dims=(-2,))(
+            y, deterministic=deterministic)
 
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
