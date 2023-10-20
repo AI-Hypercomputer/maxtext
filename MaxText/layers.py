@@ -1206,12 +1206,12 @@ class Decoder(nn.Module):
                 max_decode_length)
 
     y = nn.with_logical_constraint(y, ('activation_batch', 'activation_length', 'activation_embed'))
-    y = LayerNorm(dtype=cfg.dtype, name='decoder_norm', kernel_axes = ('embed',))(y)
-    y = nn.Dropout(
-        rate=cfg.dropout_rate, broadcast_dims=(-2,))(
-            y, deterministic=deterministic)
+    # y = LayerNorm(dtype=cfg.dtype, name='decoder_norm', kernel_axes = ('embed',))(y)
+    # y = nn.Dropout(
+    #     rate=cfg.dropout_rate, broadcast_dims=(-2,))(
+    #         y, deterministic=deterministic)
 
-    y = nn.with_logical_constraint(y, ('activation_batch', 'activation_length', 'activation_embed'))
+    # y = nn.with_logical_constraint(y, ('activation_batch', 'activation_length', 'activation_embed'))
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
