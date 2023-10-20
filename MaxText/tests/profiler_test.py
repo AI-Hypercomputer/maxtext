@@ -70,16 +70,16 @@ class TpuJAXTest(unittest.TestCase):
     for event in result['traceEvents']:
       if 'name' in event and event['name'] == 'thread_name':
         thread_names.append((event['args']['name']))
-      expected_threads =  [
-            'TensorFlow Name Scope',
-            'TensorFlow Ops',
-            'XLA Modules',
-            'XLA Ops',
-            'XLA TraceMe',
-            'Steps',
-        ]
-      # Ensure that thread_names contains at least all expected threads.
-      self.assertEqual(set(expected_threads)-set(thread_names), set())
+    expected_threads =  [
+          'TensorFlow Name Scope',
+          'TensorFlow Ops',
+          'XLA Modules',
+          'XLA Ops',
+          'XLA TraceMe',
+          'Steps',
+      ]
+    # Ensure that thread_names contains at least all expected threads.
+    self.assertEqual(set(expected_threads)-set(thread_names), set())
 
 
 if __name__ == '__main__':
