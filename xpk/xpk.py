@@ -393,11 +393,10 @@ def run_command_batch(commands, jobname, per_command_name, output_logs):
   children = []
   start_time = datetime.datetime.now()
   for i, command in enumerate(commands):
-    children.append(
-        subprocess.Popen(
-            command, stdout=output_logs[i], stderr=output_logs[i], shell=True
-        )
-    )
+    with subprocess.Popen(
+        command, stdout=output_logs[i], stderr=output_logs[i], shell=True
+    ) as task:
+      children.append(task)
 
   while True:
     returncodes = [child.poll() for child in children]
@@ -564,22 +563,22 @@ def run_command_with_updates(command, task, global_args, verbose=True) -> int:
     xpk_print(
         f'Task: `{task}` is implemented by `{command}`, streaming output live.'
     )
-    child = subprocess.Popen(
+    with subprocess.Popen(
         command,
         stdout=sys.stdout,
         stderr=sys.stderr,
         shell=True,
-    )
-    i = 0
-    while True:
-      return_code = child.poll()
-      if return_code is None:
-        xpk_print(f'Waiting for `{task}`, for {i} seconds')
-        time.sleep(1)
-        i += 1
-      else:
-        xpk_print(f'Task: `{task}` terminated with code `{return_code}`')
-        return return_code
+    ) as child:
+      i = 0
+      while True:
+        return_code = child.poll()
+        if return_code is None:
+          xpk_print(f'Waiting for `{task}`, for {i} seconds')
+          time.sleep(1)
+          i += 1
+        else:
+          xpk_print(f'Task: `{task}` terminated with code `{return_code}`')
+          return return_code
   else:
     xpk_print(
         f'Task: `{task}` is implemented by `{command}`, hiding output unless'
