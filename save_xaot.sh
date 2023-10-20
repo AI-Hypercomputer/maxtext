@@ -1,0 +1,1 @@
+python3 MaxText/save_xaot.py MaxText/configs/base.yml save_xaot=True xaot_save_name=xaot_2xv5e-16.pickle num_xaot_devices=32 topology=v5e-16 topology_num_slices=2 per_device_batch_size=4
