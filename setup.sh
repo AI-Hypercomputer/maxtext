@@ -32,6 +32,10 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
+if [[ -z "$DEVICE" ]]; then
+        export DEVICE="tpu"
+fi
+
 if [[ $JAX_VERSION == NONE ]]; then
   unset JAX_VERSION
 fi
