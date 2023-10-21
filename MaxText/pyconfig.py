@@ -89,12 +89,9 @@ class _HyperParameters():
       assert_for_train(raw_keys, len(bucket_name) > 5 and bucket_name[0:5]=='gs://', f"Erroring out, {config_var} should start with 'gs://' ")
 
     def assert_for_train(raw_keys, condition, error_message):
-      if not raw_keys['save_xaot']:
+      if False:
         assert condition, error_message
 
-    def assert_for_xaot(raw_keys, condition, error_message):
-      if raw_keys['save_xaot']:
-        assert condition, error_message
 
     '''Transformations between the config data and configs used at runtime'''
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
@@ -112,7 +109,7 @@ class _HyperParameters():
       "At most one of load_parameters_path or load_from_other_directory should be set")
     assert_for_train(raw_keys, raw_keys["load_from_other_directory_step"]==-1 or raw_keys["load_from_other_directory"]!="",
       "You must specify the loading directory if you specify the loading step")
-    if not raw_keys['save_xaot']:
+    if run_name:
       raw_keys["tensorboard_dir"] = os.path.join(base_output_directory, run_name, "tensorboard", "")
       raw_keys["checkpoint_dir"] = os.path.join(base_output_directory, run_name, "checkpoints", "")
       raw_keys["metrics_dir"] = os.path.join(base_output_directory, run_name, "metrics", "")

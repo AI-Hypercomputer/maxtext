@@ -58,3 +58,6 @@ UserFacingNameToSystemCharacteristics = {
       'tpu', 'v4:8x16x16', 'megacore', (2, 2, 1), 2048
     ),
 }
+
+def get_system_characteristics(user_facing_name):
+  return UserFacingNameToSystemCharacteristics.get(user_facing_name)
