@@ -24,7 +24,6 @@ import max_logging
 import numpy as np
 import jax
 import jax.numpy as jnp
-from layers import Transformer
 from jax.experimental import mesh_utils
 
 import json
@@ -202,15 +201,11 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     state: the initialized train state
     state_mesh_annotations: the mesh annotations for the train state
   """
-  init_train_state_partial = functools.partial(init_train_state, model, tx,
-                                               config)
-  abstract_state = jax.eval_shape(init_train_state_partial, rng)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
+
+  unboxed_abstract_state, state_mesh_annotations = get_abstract_state(model, tx, config, rng, mesh)
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
                                                 config.load_from_other_directory,
@@ -222,6 +217,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     state_mesh_shardings = jax.tree_map(
         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
     if not state:
+      init_train_state_partial = functools.partial(init_train_state, model, tx, config)
       state = jax.jit(
           init_train_state_partial,
           in_shardings=None,
@@ -358,8 +354,6 @@ def _cross_entropy_with_logits_bwd(
 cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
                                  _cross_entropy_with_logits_bwd)
 
-def get_model(config, mesh):
-  return Transformer(config, mesh)
 
 def get_optimizer(config, learning_rate_schedule):
   # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
@@ -382,15 +376,17 @@ def gen_shaped_input_data(model, tx, config, mesh):
   input_kwargs = {}
   return input_args, input_kwargs, state_mesh_annotations
 
-def get_shardings(mesh, state_mesh_annotations, config):
+def get_train_shardings(mesh, state_mesh_annotations, config):
   data_pspec = P(*config.data_sharding)
   state_mesh_shardings = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
   data_sharding = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
-  in_shardings = (state_mesh_shardings, data_sharding, None)
-  out_shardings = (state_mesh_shardings, None, None)
-  return in_shardings, out_shardings
+  in_shardings = (state_mesh_shardings, data_sharding, None) # State, batch, rng
+  out_shardings = (state_mesh_shardings, None, None) # State, metrics, rng
+  static_argnums = () # We partial out the static argnums of model and config
+  donate_argnums = 0 # This is the index of the state - we allow the compiler to make use of this memory.
+  return in_shardings, out_shardings, static_argnums, donate_argnums
 
 def get_abstract_state(model, tx, config, rng, mesh):
   init_train_state_partial = functools.partial(init_train_state, model, tx,

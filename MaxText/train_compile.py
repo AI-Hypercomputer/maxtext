@@ -24,6 +24,7 @@ as you would on the target hardware.
 """
 
 import max_utils
+from layers import Transformer
 import pyconfig
 import jax
 import numpy as np
@@ -56,17 +57,15 @@ def get_topology_mesh(config):
   return topology_mesh
 
 def get_shaped_inputs(topology_mesh, config):
-  model = max_utils.get_model(config, topology_mesh)
+  model = Transformer(config, topology_mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config) # WARNING!!! This learning_rate_schedule is what is really used at runtime
   tx = max_utils.get_optimizer(config, learning_rate_schedule)
   shaped_train_args, shaped_train_kwargs, state_mesh_annotations = max_utils.gen_shaped_input_data(model, tx, config, topology_mesh)
   return shaped_train_args, shaped_train_kwargs, state_mesh_annotations, model
 
 def get_train_step_and_shardings(model, config, topology_mesh, state_mesh_annotations):
-    func_to_compile = train.get_partial_train_step_func(train.train_step, model, config)
-    in_shardings, out_shardings = max_utils.get_shardings(topology_mesh, state_mesh_annotations, config)
-    static_argnums=()
-    donate_argnums=0 # This is an index - the first argument (state) is donated
+    func_to_compile = train.get_functional_train_step(train.train_step, model, config)
+    in_shardings, out_shardings, static_argnums, donate_argnums = max_utils.get_train_shardings(topology_mesh, state_mesh_annotations, config)
     return func_to_compile, in_shardings, out_shardings, static_argnums, donate_argnums
 
 def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings, static_argnums, donate_argnums):

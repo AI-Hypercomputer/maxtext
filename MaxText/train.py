@@ -37,6 +37,7 @@ import numpy as np
 import optax
 from tensorboardX import SummaryWriter
 
+from layers import Transformer
 import pyconfig
 from input_pipeline import create_data_iterator_with_tokenizer
 from jax.experimental.serialize_executable import serialize, deserialize_and_load
@@ -201,7 +202,7 @@ def train_step(model, config, state, data, dropout_rng):
 
   return new_state, metrics, rng2
 
-def get_partial_train_step_func(train_step_func, model, config):
+def get_functional_train_step(train_step_func, model, config):
   # Modularized out so can be publicly called for xaot
   return functools.partial(train_step, model, config)
 
@@ -231,7 +232,7 @@ def train_loop(config, state=None):
   mesh = Mesh(devices_array, config.mesh_axes)
 
   # Model and Optimizer definition
-  model = max_utils.get_model(config, mesh)
+  model = Transformer(config, mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = max_utils.get_optimizer(config, learning_rate_schedule)
 
@@ -239,38 +240,27 @@ def train_loop(config, state=None):
 
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
-  data_pspec = P(*config.data_sharding)
+  in_shardings, out_shardings, static_argnums, donate_argnums = max_utils.get_train_shardings(mesh, state_mesh_annotations, config)
 
   num_model_parameters = calculate_num_params_from_pytree(state.params)
   max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
   per_device_tflops = calculate_training_tflops(num_model_parameters, config)
-
-  # Define compiled top-level functions.
-  state_mesh_shardings = jax.tree_map(
-      lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
-  data_sharding = jax.tree_map(
-      lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
-
-  # Creating the jitted train step, either via xaot load or new definition    
-  #partial_train = functools.partial(train_step, model, config)
-  partial_train = get_partial_train_step_func(train_step, model, config)
+    
+  functional_train = get_functional_train_step(train_step, model, config)
+  # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit  
   if config.compiled_save_file != '':
     print("Loading the compiled function...", flush=True)
-    p_train_step = max_utils.load_compiled(config, partial_train, state)
-
-
-    # Dirty playground
-    #my_load = functools.partial(load_next_batch, data_iterator, None, config)
-    #batch_shape_via_eval = jax.eval_shape(my_load)
-    #print(f"{batch_shape_via_eval=}")
-
+    # Need to pass train signature and state to determine i/o shapes of train_state
+    # These shapes may become serializable in the future instead.
+    p_train_step = max_utils.load_compiled(config, functional_train, state)
     print("Loaded compiled function!", flush=True)
   else:
     p_train_step = jax.jit(
-      partial_train,
-      in_shardings=(state_mesh_shardings, data_sharding, None),
-        out_shardings=(state_mesh_shardings, None, None),
-      donate_argnums=0)
+      functional_train,
+      in_shardings=in_shardings,
+      out_shardings=out_shardings,
+      static_argnums=static_argnums,
+      donate_argnums=donate_argnums)
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
