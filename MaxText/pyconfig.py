@@ -17,6 +17,7 @@
 # pylint: disable=missing-module-docstring
 from collections import OrderedDict
 
+from hardware_map import UserFacingNameToSystemCharacteristics
 import math
 import os
 import sys
@@ -100,7 +101,6 @@ class _HyperParameters():
     if raw_keys["run_name"] == "":
       raw_keys["run_name"] = os.environ.get("JOBSET_NAME") #using XPK default
     run_name = raw_keys["run_name"]
-    assert_for_xaot(raw_keys, raw_keys['num_xaot_devices']>0, 'Set xaot_num_devices to a positive int')
     assert_for_train(raw_keys, run_name, "Erroring out, need a real run_name")
     base_output_directory = raw_keys["base_output_directory"]
     validate_gcs_bucket_name(raw_keys, base_output_directory, "base_output_directory")
@@ -171,8 +171,10 @@ def calculate_global_batch_sizes(raw_keys):
   return global_batch_size_to_load, global_batch_size_to_train_on
 
 def get_num_target_devices(raw_keys):
-  if raw_keys['save_xaot']:
-    return raw_keys['num_xaot_devices']
+  if raw_keys['compile_topology'] != "":
+    print(f"{UserFacingNameToSystemCharacteristics=}")
+    devices_per_slice = UserFacingNameToSystemCharacteristics[raw_keys['compile_topology']].devices_per_slice
+    return int(devices_per_slice * raw_keys['compile_topology_num_slices'])
   else:
     return len(jax.devices())
 

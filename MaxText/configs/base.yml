@@ -188,9 +188,8 @@ stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds
 use_iota_embed: False
 
 # Xaot options
-xaot_save_name: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
-num_xaot_devices: 0
+xaot_save_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
 save_xaot: False
 load_xaot: False
-topology: 'v4-8'
-topology_num_slices: 1
+compile_topology: '' # Only set this field if using train_compile.py e.g. 'v5e-256'
+compile_topology_num_slices: 1
