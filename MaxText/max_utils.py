@@ -43,6 +43,8 @@ from jax.experimental.serialize_executable import deserialize_and_load
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
+from input_pipeline import get_shaped_batch
+
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
   return jax.tree_util.tree_reduce(
@@ -374,7 +376,7 @@ def gen_shaped_input_data(model, tx, config, mesh):
   example_rng = jax.random.PRNGKey(0)
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
   abstract_state, state_mesh_annotations =  get_abstract_state(model, tx, config, example_rng, mesh)
-  shaped_batch = get_shaped_batch(config, np.size(mesh.device_ids))
+  shaped_batch = get_shaped_batch(config)
 
   input_args = (abstract_state, shaped_batch, shaped_rng)
   input_kwargs = {}
@@ -402,29 +404,11 @@ def get_abstract_state(model, tx, config, rng, mesh):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return unboxed_abstract_state, state_mesh_annotations
 
-def get_shaped_batch(config, num_target_devices):
-  # Ahh this is bad. Cannot use local devices here since it is xaot - the target system may have a different
-  # count of local devices than the runner machine
-  
-  #batch_shape = (int(config.per_device_batch_size * num_target_devices), config.max_target_length)
-  # TODO(mattdavidow): confirm this should be global_batch_size_to_load and not global_batch_size_to_train_on
-  batch_shape = (config.global_batch_size_to_load, config.max_target_length)
-  print(f"{batch_shape=}", flush=True)
-  batch = {}
-  batch['inputs'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  batch['inputs_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  batch['inputs_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  batch['targets'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  batch['targets_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  batch['targets_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  print(f"{batch=}")
-  return batch
-
 
 
 # XAOT load
-def load_xaot(config, partial_train, state, num_target_devices):
-  # Currently partial_train, state and num_target_devices are needed to reconstruct 
+def load_xaot(config, partial_train, state):
+  # Currently partial_train and state  are needed to reconstruct 
   # input/output shapes to consturct the in_trees and out_trees for load API 
   # Parker is working on a serializing these
   def load_compiled(save_name):
@@ -439,7 +423,7 @@ def load_xaot(config, partial_train, state, num_target_devices):
     return in_tree_recreated, out_tree_recreated
 
   serialized_compiled = load_compiled(config.xaot_save_file)
-  shaped_batch = get_shaped_batch(config, num_target_devices)
+  shaped_batch = get_shaped_batch(config)
   example_rng = jax.random.PRNGKey(0)
   shaped_input_args = (state, shaped_batch, example_rng)
   shaped_input_kwargs = {}

@@ -259,7 +259,7 @@ def train_loop(config, state=None):
   partial_train = get_partial_train_step_func(train_step, model, config)
   if config.load_xaot:
     print("Loading the compiled function...", flush=True)
-    p_train_step = max_utils.load_xaot(config, partial_train, state, np.size(mesh.device_ids))
+    p_train_step = max_utils.load_xaot(config, partial_train, state)
 
 
     # Dirty playground
