@@ -34,8 +34,11 @@ from hardware_map import UserFacingNameToSystemCharacteristics
 
 import train
 
-# Ideally this map exists either in XAOT or we can programmatically call it from elsewhere
-# so the chip layout is consistent across cloud technologies
+def validate_config(config):
+  """ Validates the config is is setup correctly to compile, returning useful error messages if not. """
+  assert config.compile_topology != '', "You must pass your desired target hardware in compile_topology, e.g. compile_topology=v5e-256"
+
+
 def get_topology_mesh(config):
   target_hardware = UserFacingNameToSystemCharacteristics[config.compile_topology]
   topology_devices = get_topology_desc(
@@ -50,7 +53,7 @@ def get_topology_mesh(config):
   return topology_mesh
 
 def xaot_compile_and_save(func, compiled_name, func_input_args, func_input_kwargs, in_shardings, out_shardings, static_argnums, donate_argnums, mesh):
-    def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings):
+    def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings, donate_argnums):
         # Jit, lower, and compile func, using topology devices
         with mesh:
             jitted = jax.jit(
@@ -71,29 +74,52 @@ def xaot_compile_and_save(func, compiled_name, func_input_args, func_input_kwarg
             pickle.dump(serialized, f)
     print("Jitting train step so it can be saved...", flush=True)
     jitted, lowered, compiled = jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings)
-    print("Jitting train step!!!", flush=True)
+    print("Jitting train step!", flush=True)
     save_compiled(compiled, compiled_name) # Serialize and save the compiled object
 
-def save_train_xaot(config):
-    print("Saving compiled xaot...", flush=True)
-    topology_mesh = get_topology_mesh(config)
-    model = max_utils.get_model(config, topology_mesh)
-    learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
-    tx = max_utils.get_optimizer(config, learning_rate_schedule)
+def get_shaped_inputs(topology_mesh, config):
+  model = max_utils.get_model(config, topology_mesh)
+  learning_rate_schedule = max_utils.create_learning_rate_schedule(config) # WARNING!!! This learning_rate_schedule is what is really used at runtime
+  tx = max_utils.get_optimizer(config, learning_rate_schedule)
+  shaped_train_args, shaped_train_kwargs, state_mesh_annotations, model = max_utils.gen_shaped_input_data(model, tx, config, topology_mesh)
 
-    func_to_xaot = train.get_partial_train_step_func(train.train_step, model, config)
-    shaped_train_args, shaped_train_kwargs, state_mesh_annotations = max_utils.gen_shaped_input_data(model, tx, config, topology_mesh)
+def get_train_step_and_shardings(model, config, topology_mesh, state_mesh_annotations):
+    func_to_compile = train.get_partial_train_step_func(train.train_step, model, config)
     in_shardings, out_shardings = max_utils.get_shardings(topology_mesh, state_mesh_annotations, config)
     static_argnums=()
-    donate_argnums=0
-    xaot_compile_and_save(func_to_xaot, config.xaot_save_file, shaped_train_args, shaped_train_kwargs, in_shardings, out_shardings, static_argnums, donate_argnums, topology_mesh)
-    print("Saved compiled xaot!!!", flush=True)
+    donate_argnums=0 # This is an index - the first argument (state) is donated
+    return func_to_compile, in_shardings, out_shardings, static_argnums, donate_argnums
 
+def save_train_xaot(config):
 
 
 def main(argv: Sequence[str]) -> None:
+  print("Starting train_compile.py...", flush=True)
+
+  # Parse and validate configuration
   pyconfig.initialize(argv)
-  save_train_xaot(pyconfig.config)
+  validate_config(pyconfig.config)
+
+  # Create target mesh
+  topology_mesh = get_topology_mesh(config)
+
+  # Get shaped inputs
+  shaped_train_args, shaped_train_kwargs, state_mesh_annotations, model = get_shaped_inputs(topology_mesh, config)
+
+  # Get function to compile and shardings
+  func_to_compile, in_shardings, out_shardings, static_argnums, donate_argnums = get_train_step_and_shardings(model, config, topology_mesh, state_mesh_annotations)
+
+  # Compile
+  print("Jitting and compiling train step...", flush=True)
+  _, _, compiled = jit_and_compile(func_to_compile, shaped_train_args, shaped_train_kwargs, topology_mesh, in_shardings, out_shardings, donate_argnums)
+  print("Jitting and compilation complete!", flush=True)
+
+  # Serialize and save the compiled object
+  if config.compiled_save_file != ''
+    print(f"Saving compiled object...")
+    save_compiled(compiled, config.compiled_save_file)
+    print(f"Successfully Saved compiled object as {config.compiled_save_file}")
+  print("Finished train_compile.py successfully!", flush=True)
 
 if __name__ == "__main__":
   app.run(main)

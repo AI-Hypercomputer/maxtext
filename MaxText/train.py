@@ -240,6 +240,7 @@ def train_loop(config, state=None):
   example_batch = None
   load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
   example_batch = load_partial()
+  shaped_example_batch = jax.eval_shape(load_partial)
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   data_pspec = P(*config.data_sharding)
@@ -257,9 +258,9 @@ def train_loop(config, state=None):
   # Creating the jitted train step, either via xaot load or new definition    
   #partial_train = functools.partial(train_step, model, config)
   partial_train = get_partial_train_step_func(train_step, model, config)
-  if config.load_xaot:
+  if config.compiled_save_file != '':
     print("Loading the compiled function...", flush=True)
-    p_train_step = max_utils.load_xaot(config, partial_train, state)
+    p_train_step = max_utils.load_compiled(config, partial_train, state)
 
 
     # Dirty playground

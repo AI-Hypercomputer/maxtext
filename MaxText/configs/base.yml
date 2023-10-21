@@ -77,7 +77,7 @@ record_internal_nn_metrics: 0
 
 # Output directory
 # Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
-base_output_directory: ""
+base_output_directory: "gs://maxtext-experiments-multipod"
 
 # Parallelism
 mesh_axes: ['data', 'fsdp', 'tensor']
@@ -110,7 +110,7 @@ ici_tensor_parallelism: 1
 
 # Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
-dataset_path: ""
+dataset_path: "gs://max-datasets-rogue"
 vocab_size: 32_768 # powers of 2 for sharding
 assets_path: "assets"
 vocab_relative_path: "tokenizer"  # Assumes we're allowed
@@ -187,9 +187,7 @@ stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds
 # Use iota operator in Embed
 use_iota_embed: False
 
-# Xaot options
-xaot_save_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
-save_xaot: False
-load_xaot: False
-compile_topology: '' # Only set this field if using train_compile.py e.g. 'v5e-256'
-compile_topology_num_slices: 1
+# Cross Ahead of time Compilation (aka XAOT)
+compiled_save_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
+compile_topology: '' # Only need to set this field if using train_compile.py e.g. 'v5e-256'
+compile_topology_num_slices: 1 # Only need to set this field if using train_compile.py
