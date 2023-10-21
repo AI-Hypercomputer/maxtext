@@ -237,10 +237,6 @@ def train_loop(config, state=None):
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  example_batch = None
-  load_partial = functools.partial(load_next_batch, data_iterator, example_batch, config)
-  example_batch = load_partial()
-  shaped_example_batch = jax.eval_shape(load_partial)
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   data_pspec = P(*config.data_sharding)
@@ -269,7 +265,7 @@ def train_loop(config, state=None):
     #print(f"{batch_shape_via_eval=}")
 
     print("Loaded compiled function!", flush=True)
-  if not config.load_xaot:
+  else:
     p_train_step = jax.jit(
       partial_train,
       in_shardings=(state_mesh_shardings, data_sharding, None),
@@ -320,6 +316,7 @@ def train_loop(config, state=None):
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   config = pyconfig.config
+  max_utils.validate_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   debug_config = debug_configuration.DebugConfig(
     stack_trace_config = stack_trace_configuration.StackTraceConfig(

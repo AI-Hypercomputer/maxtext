@@ -405,19 +405,19 @@ def get_abstract_state(model, tx, config, rng, mesh):
   return unboxed_abstract_state, state_mesh_annotations
 
 def validate_config(config):
-  def _validate_gcs_bucket_name(raw_keys, bucket_name, config_var):
+  def _validate_gcs_bucket_name(bucket_name, config_var):
     assert bucket_name, f"Please set {config_var}."
     assert len(bucket_name) > 5 and bucket_name[0:5]=='gs://', f"Erroring out, {config_var} should start with 'gs://' "
 
-  assert run_name.run_name, "Erroring out, need a real run_name"
+  assert config.run_name, "Erroring out, need a real run_name"
   _validate_gcs_bucket_name(config.base_output_directory, "base_output_directory")
   _validate_gcs_bucket_name(config.dataset_path, "dataset_path")
 
-  assert ((raw_keys["load_parameters_path"]=="" and raw_keys["load_from_other_directory"]=="") or
-    raw_keys["enable_checkpointing"]), "You must set enable_checkpointing to load a checkpoint"
-  assert raw_keys["load_parameters_path"]=="" or raw_keys["load_from_other_directory"]=="", "At most one of load_parameters_path or load_from_other_directory should be set"
-  assert raw_keys["load_from_other_directory_step"]==-1 or raw_keys["load_from_other_directory"]!="", "You must specify the loading directory if you specify the loading step"
-  assert raw_keys["steps"] > 0, "You must set steps or learning_rate_schedule_steps to a positive interger."
+  assert ((config.load_parameters_path=="" and config.load_from_other_directory=="") or
+    config.enable_checkpointing), "You must set enable_checkpointing to load a checkpoint"
+  assert config.load_parameters_path=="" or config.load_from_other_directory=="", "At most one of load_parameters_path or load_from_other_directory should be set"
+  assert config.load_from_other_directory_step==-1 or config.load_from_other_directory!="", "You must specify the loading directory if you specify the loading step"
+  assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive interger."
 
 # Loading a serialized compiled train step function.
 def load_compiled(config, partial_train, state):
