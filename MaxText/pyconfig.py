@@ -17,7 +17,7 @@
 # pylint: disable=missing-module-docstring
 from collections import OrderedDict
 
-from hardware_map import UserFacingNameToSystemCharacteristics
+from hardware_map import get_system_characteristics
 import math
 import os
 import sys
@@ -84,31 +84,13 @@ class _HyperParameters():
 
   @staticmethod
   def user_init(raw_keys):
-    def validate_gcs_bucket_name(raw_keys, bucket_name, config_var):
-      assert_for_train(raw_keys, bucket_name, f"Please set {config_var}.")
-      assert_for_train(raw_keys, len(bucket_name) > 5 and bucket_name[0:5]=='gs://', f"Erroring out, {config_var} should start with 'gs://' ")
-
-    def assert_for_train(raw_keys, condition, error_message):
-      if False:
-        assert condition, error_message
-
-
     '''Transformations between the config data and configs used at runtime'''
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
     if raw_keys["run_name"] == "":
       raw_keys["run_name"] = os.environ.get("JOBSET_NAME") #using XPK default
     run_name = raw_keys["run_name"]
-    assert_for_train(raw_keys, run_name, "Erroring out, need a real run_name")
     base_output_directory = raw_keys["base_output_directory"]
-    validate_gcs_bucket_name(raw_keys, base_output_directory, "base_output_directory")
     dataset_path = raw_keys["dataset_path"]
-    validate_gcs_bucket_name(raw_keys, dataset_path, "dataset_path")
-    assert_for_train(raw_keys, ((raw_keys["load_parameters_path"]=="" and raw_keys["load_from_other_directory"]=="") or
-      raw_keys["enable_checkpointing"]), "You must set enable_checkpointing to load a checkpoint")
-    assert_for_train(raw_keys, raw_keys["load_parameters_path"]=="" or raw_keys["load_from_other_directory"]=="",
-      "At most one of load_parameters_path or load_from_other_directory should be set")
-    assert_for_train(raw_keys, raw_keys["load_from_other_directory_step"]==-1 or raw_keys["load_from_other_directory"]!="",
-      "You must specify the loading directory if you specify the loading step")
     if run_name:
       raw_keys["tensorboard_dir"] = os.path.join(base_output_directory, run_name, "tensorboard", "")
       raw_keys["checkpoint_dir"] = os.path.join(base_output_directory, run_name, "checkpoints", "")
@@ -121,7 +103,6 @@ class _HyperParameters():
       raw_keys["learning_rate_schedule_steps"] = raw_keys["steps"]
     if raw_keys["steps"]==-1:
       raw_keys["steps"] = raw_keys["learning_rate_schedule_steps"]
-    assert_for_train(raw_keys, raw_keys["steps"] > 0, "You must set steps or learning_rate_schedule_steps to a positive interger.")
 
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys['global_parameter_scale'])
     raw_keys['emb_dim'] = 2**emb_scale * raw_keys['base_emb_dim']
@@ -169,8 +150,7 @@ def calculate_global_batch_sizes(raw_keys):
 
 def get_num_target_devices(raw_keys):
   if raw_keys['compile_topology'] != "":
-    print(f"{UserFacingNameToSystemCharacteristics=}")
-    devices_per_slice = UserFacingNameToSystemCharacteristics[raw_keys['compile_topology']].devices_per_slice
+    devices_per_slice = get_system_characteristics(raw_keys['compile_topology']).devices_per_slice
     return int(devices_per_slice * raw_keys['compile_topology_num_slices'])
   else:
     return len(jax.devices())

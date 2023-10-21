@@ -319,15 +319,16 @@ def train_loop(config, state=None):
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
-  os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
+  config = pyconfig.config
+  os.environ["TFDS_DATA_DIR"] = config.dataset_path
   debug_config = debug_configuration.DebugConfig(
     stack_trace_config = stack_trace_configuration.StackTraceConfig(
-      collect_stack_trace = pyconfig.config.collect_stack_trace,
-      stack_trace_to_cloud = pyconfig.config.stack_trace_to_cloud,
-      stack_trace_interval_seconds = pyconfig.config.stack_trace_interval_seconds))
+      collect_stack_trace = config.collect_stack_trace,
+      stack_trace_to_cloud = config.stack_trace_to_cloud,
+      stack_trace_interval_seconds = config.stack_trace_interval_seconds))
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
   with diagnostic.diagnose(diagnostic_config):
-    train_loop(pyconfig.config)
+    train_loop(config)
 
 
 if __name__ == "__main__":
