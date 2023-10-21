@@ -4,25 +4,25 @@ from dataclasses import dataclass
 class SystemCharacteristics:
   platform: str
   topology_name: str
-  chip_config_name: str # 'Megacore' or None
+  chip_config_name: str # 'megacore' or 'default'
   chips_per_host_bounds: tuple
   devices_per_slice: int
 
 UserFacingNameToSystemCharacteristics = {
     'v5e-16': SystemCharacteristics(
-        'tpu', 'v5e:4x4', None, (2, 2, 1), 16
+        'tpu', 'v5e:4x4', 'default', (2, 2, 1), 16
     ),
     'v5e-32': SystemCharacteristics(
-        'tpu', 'v5e:4x8', None, (2, 2, 1), 32
+        'tpu', 'v5e:4x8', 'default', (2, 2, 1), 32
     ),
     'v5e-64': SystemCharacteristics(
-        'tpu', 'v5e:8x8', None, (2, 2, 1), 64
+        'tpu', 'v5e:8x8', 'default', (2, 2, 1), 64
     ),
     'v5e-128': SystemCharacteristics(
-        'tpu', 'v5e:8x16', None, (2, 2, 1), 128
+        'tpu', 'v5e:8x16', 'default', (2, 2, 1), 128
     ),
     'v5e-256': SystemCharacteristics(
-        'tpu', 'v5e:16x16', None, (2, 2, 1), 256
+        'tpu', 'v5e:16x16', 'default', (2, 2, 1), 256
     ),
     'v4-8': SystemCharacteristics(
       'tpu', 'v4:2x2x1', 'megacore', (2, 2, 1), 4
