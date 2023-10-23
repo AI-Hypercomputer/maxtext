@@ -25,6 +25,8 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
+from jax.experimental.serialize_executable import deserialize_and_load
+from jax.sharding import PartitionSpec as P
 
 import json
 import flax
@@ -38,9 +40,7 @@ import subprocess
 from typing import Tuple
 
 import pickle
-from jax.experimental.serialize_executable import deserialize_and_load
-from jax.sharding import Mesh
-from jax.sharding import PartitionSpec as P
+
 
 from input_pipeline import get_shaped_batch
 
@@ -377,6 +377,7 @@ def gen_shaped_input_data(model, tx, config, mesh):
   return input_args, input_kwargs, state_mesh_annotations
 
 def get_train_shardings(mesh, state_mesh_annotations, config):
+  """ Get the shardings (both state and data) for train_step """
   data_pspec = P(*config.data_sharding)
   state_mesh_shardings = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
@@ -389,6 +390,7 @@ def get_train_shardings(mesh, state_mesh_annotations, config):
   return in_shardings, out_shardings, static_argnums, donate_argnums
 
 def get_abstract_state(model, tx, config, rng, mesh):
+  """ Get a shaped abstraction of the state (including optimizer)"""
   init_train_state_partial = functools.partial(init_train_state, model, tx,
                                                config)
   abstract_state = jax.eval_shape(init_train_state_partial, rng)
@@ -401,6 +403,7 @@ def get_abstract_state(model, tx, config, rng, mesh):
   return unboxed_abstract_state, state_mesh_annotations
 
 def validate_config(config):
+  """ Validates the configuration is set correctly for train.py"""
   def _validate_gcs_bucket_name(bucket_name, config_var):
     assert bucket_name, f"Please set {config_var}."
     assert len(bucket_name) > 5 and bucket_name[0:5]=='gs://', f"Erroring out, {config_var} should start with 'gs://' "
@@ -411,18 +414,21 @@ def validate_config(config):
 
   assert ((config.load_parameters_path=="" and config.load_from_other_directory=="") or
     config.enable_checkpointing), "You must set enable_checkpointing to load a checkpoint"
-  assert config.load_parameters_path=="" or config.load_from_other_directory=="", "At most one of load_parameters_path or load_from_other_directory should be set"
-  assert config.load_from_other_directory_step==-1 or config.load_from_other_directory!="", "You must specify the loading directory if you specify the loading step"
+  assert config.load_parameters_path=="" or config.load_from_other_directory=="",\
+  "At most one of load_parameters_path or load_from_other_directory should be set"
+  assert config.load_from_other_directory_step==-1 or config.load_from_other_directory!="",\
+   "You must specify the loading directory if you specify the loading step"
   assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive interger."
 
-# Loading a serialized compiled train step function.
+
 def load_compiled(config, partial_train, state):
-  # Currently partial_train and state  are needed to reconstruct 
-  # input/output shapes to consturct the in_trees and out_trees for load API 
+  """ # Loading a serialized compiled train step function."""
+  # Currently partial_train and state  are needed to reconstruct
+  # input/output shapes to consturct the in_trees and out_trees for load API
   # Parker is working on a serializing these
   def load_serialized_compiled(save_name):
     with open(save_name, "rb") as f:
-        serialized_compiled = pickle.load(f)
+      serialized_compiled = pickle.load(f)
     return serialized_compiled
 
   def get_io_trees(func, input_args, input_kwargs):
