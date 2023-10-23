@@ -278,3 +278,6 @@ jsonPayload.verb="stacktraceanalyzer"
 3. `stack_trace_interval_seconds` signifies the duration in seconds between each stack trace collection event. Setting `stack_trace_interval_seconds: 600` will collect the stack traces every 600 seconds (10 minutes).
 
 Here is the related PyPI package: https://pypi.org/project/cloud-tpu-diagnostics.
+
+## Cross Ahead of Time Compilation (XAOT)
+To compile ahead of time
