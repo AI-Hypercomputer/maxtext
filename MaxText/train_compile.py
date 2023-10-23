@@ -23,27 +23,26 @@ before having to use the target hardware - you will see the same OOM error messa
 as you would on the target hardware.
 """
 
+import jax
+from jax.experimental.topologies import get_topology_desc
+from jax.sharding import Mesh
+from jax.experimental.serialize_executable import serialize
 import max_utils
 from layers import Transformer
 import pyconfig
-import jax
-import numpy as np
 from typing import Sequence
-from jax.experimental.topologies import get_topology_desc
 from absl import app
-from jax.sharding import Mesh
-from jax.experimental.serialize_executable import serialize, deserialize_and_load
 import pickle
-from hardware_map import UserFacingNameToSystemCharacteristics, get_system_characteristics
-
-import train
+from hardware_map import get_system_characteristics
+from train import get_functional_train_step
 
 def validate_config(config):
   """ Validates the config is is setup correctly to compile, returning a useful error message if not. """
-  assert config.compile_topology != '', "You must pass your desired target hardware in compile_topology, e.g. compile_topology=v5e-256"
+  assert config.compile_topology != '',\
+     "You must pass your desired target hardware in compile_topology, e.g. compile_topology=v5e-256"
 
 def get_topology_mesh(config):
-  #target_hardware = UserFacingNameToSystemCharacteristics[config.compile_topology]
+  """ Get the target hardware devices, and create configured mesh with them """
   target_hardware = get_system_characteristics(config.compile_topology)
   topology_devices = get_topology_desc(
       platform=target_hardware.platform,
@@ -58,33 +57,44 @@ def get_topology_mesh(config):
 
 def get_shaped_inputs(topology_mesh, config):
   model = Transformer(config, topology_mesh)
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(config) # WARNING!!! This learning_rate_schedule is what is really used at runtime
+  # The learning_rate_schedule is baked into the compiled object.
+  learning_rate_schedule = max_utils.create_learning_rate_schedule(config) 
   tx = max_utils.get_optimizer(config, learning_rate_schedule)
-  shaped_train_args, shaped_train_kwargs, state_mesh_annotations = max_utils.gen_shaped_input_data(model, tx, config, topology_mesh)
+  shaped_train_args, shaped_train_kwargs, state_mesh_annotations = max_utils.gen_shaped_input_data(
+    model,
+    tx,
+    config,
+    topology_mesh
+  )
   return shaped_train_args, shaped_train_kwargs, state_mesh_annotations, model
 
 def get_train_step_and_shardings(model, config, topology_mesh, state_mesh_annotations):
-    func_to_compile = train.get_functional_train_step(model, config)
-    in_shardings, out_shardings, static_argnums, donate_argnums = max_utils.get_train_shardings(topology_mesh, state_mesh_annotations, config)
-    return func_to_compile, in_shardings, out_shardings, static_argnums, donate_argnums
+  func_to_compile = get_functional_train_step(model, config)
+  in_shardings, out_shardings, static_argnums, donate_argnums = max_utils.get_train_shardings(
+    topology_mesh,
+    state_mesh_annotations,
+    config
+  )
+  return func_to_compile, in_shardings, out_shardings, static_argnums, donate_argnums
 
-def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings, out_shardings, static_argnums, donate_argnums):
-    # Jit, lower, and compile func, using topology devices
-    with mesh:
-        jitted = jax.jit(
-          func,
-          in_shardings=in_shardings,
-          out_shardings=out_shardings,
-          static_argnums=static_argnums,
-          donate_argnums=donate_argnums
-        )
-        lowered = jitted.lower(*func_input_args, **func_input_kwargs)
-    compiled = lowered.compile()
-    return compiled
+def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings,
+  out_shardings, static_argnums, donate_argnums):
+  """ Jit, lower, and compile func."""
+  with mesh:
+      jitted = jax.jit(
+        func,
+        in_shardings=in_shardings,
+        out_shardings=out_shardings,
+        static_argnums=static_argnums,
+        donate_argnums=donate_argnums
+      )
+      lowered = jitted.lower(*func_input_args, **func_input_kwargs)
+  compiled = lowered.compile()
+  return compiled
 
 def save_compiled(compiled, save_name):
     # Serialize and save the compiled object
-    serialized, in_tree, out_tree = serialize(compiled)
+    serialized, _, _ = serialize(compiled)
     with open(save_name, "wb") as f:
         pickle.dump(serialized, f)
 
@@ -103,16 +113,30 @@ def main(argv: Sequence[str]) -> None:
   shaped_train_args, shaped_train_kwargs, state_mesh_annotations, model = get_shaped_inputs(topology_mesh, config)
 
   # Get function to compile and shardings
-  func_to_compile, in_shardings, out_shardings, static_argnums, donate_argnums = get_train_step_and_shardings(model, config, topology_mesh, state_mesh_annotations)
+  func_to_compile, in_shardings, out_shardings, static_argnums, donate_argnums = get_train_step_and_shardings(
+    model,
+    config,
+    topology_mesh,
+    state_mesh_annotations
+  )
 
   # Compile
   print("Jitting and compiling train step...", flush=True)
-  compiled = jit_and_compile(func_to_compile, shaped_train_args, shaped_train_kwargs, topology_mesh, in_shardings, out_shardings, static_argnums, donate_argnums)
+  compiled = jit_and_compile(
+    func_to_compile,
+    shaped_train_args,
+    shaped_train_kwargs,
+    topology_mesh,
+    in_shardings,
+    out_shardings,
+    static_argnums,
+    donate_argnums
+  )
   print("Jitting and compilation complete!", flush=True)
 
   # Serialize and save the compiled object
   if config.compile_save_file != '':
-    print(f"Saving compiled object...")
+    print("Saving compiled object...")
     save_compiled(compiled, config.compile_save_file)
     print(f"Successfully saved compiled object as {config.compile_save_file}")
   print("Finished train_compile.py successfully!", flush=True)
