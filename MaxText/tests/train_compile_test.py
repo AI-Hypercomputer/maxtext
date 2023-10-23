@@ -20,7 +20,6 @@ import unittest
 from train_compile import main as train_compile_main
 from train import main as train_main
 
-jax.config.update('jax_platform_name', 'cpu')
 
 class TrainCompile(unittest.TestCase):
   """Tests for the Ahead of Time Compilation functionality, train_compile.py"""
