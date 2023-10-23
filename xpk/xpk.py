@@ -257,6 +257,9 @@ class SystemCharacteristics:
   chips_per_vm: int
 
 ################### Subcommand Helper Functions #############
+""" !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+IF YOU MODIFY THE UserFacingNameToSystemCharacteristics MAP YOU SHOULD ALSO ADD CORRESPONDING MODICATIONS TO 
+UserFacingNameToSystemCharacteristics in MaxText/hardware_map.py !!!!! """
 
 UserFacingNameToSystemCharacteristics = {
     'v5litepod-16': SystemCharacteristics(
