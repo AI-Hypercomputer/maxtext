@@ -300,7 +300,8 @@ Here is an example that saves then loads the compiled `train_step`, starting wit
 ```
 # Run the below on a single machine, e.g. a v4-8
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true" 
-python3 MaxText/train_compile.py MaxText/configs/base.yml compile_topology=v5e-256 compile_topology_num_slices=2 \
+python3 MaxText/train_compile.py MaxText/configs/base.yml compile_topology=v5e-256 \
+compile_topology_num_slices=2 \
 compile_save_file=my_compiled_train.pickle global_parameter_scale=16 \
 per_device_batch_size=4 steps=10000 learning_rate=1e-3
 ```
@@ -308,8 +309,10 @@ per_device_batch_size=4 steps=10000 learning_rate=1e-3
 To load the compiled train_step, you just need to pass `compile_save_file=my_compiled_train.pickle` into `train.py`:
 ```
 # Run the below on each host of the target hardware, e.g. each host on 2 slices of v5e-256
-python3 MaxText/train.py MaxText/configs/base.yml run_name=example_load_compile compile_save_file=my_compiled_train.pickle global_parameter_scale=16 \
-per_device_batch_size=4 steps=10000 base_output_directory=gs://my-output-bucket dataset_path=gs://my-dataset-bucket
+python3 MaxText/train.py MaxText/configs/base.yml run_name=example_load_compile \
+compile_save_file=my_compiled_train.pickle \
+global_parameter_scale=16  per_device_batch_size=4 steps=10000 \
+base_output_directory=gs://my-output-bucket dataset_path=gs://my-dataset-bucket
 ```
 
 Above we included exporting the compiler flag `LIBTPU_INIT_ARGS` and `learning_rate` because those affect the compiled object `my_compiled_train.pickle.` The sizes of the model (e.g. `global_parameter_scale`, `max_sequence_length` and `per_device_batch`) are fixed when you initally compile via `compile_train.py`, you will see a size error if you try to run the saved compiled object with different saves than you compiled with. However a subtle note is that the learning rate schedule is also fixed when you run `compile_train` - which is determined by both `steps` and `learning_rate`. The optimizier parameters such as  `adam_b1` are passed only as shaped objects to the compiler - thus their real values are determined when you run `train.py`, not during the compilation.
