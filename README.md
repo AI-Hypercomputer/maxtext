@@ -280,4 +280,19 @@ jsonPayload.verb="stacktraceanalyzer"
 Here is the related PyPI package: https://pypi.org/project/cloud-tpu-diagnostics.
 
 ## Cross Ahead of Time Compilation (XAOT)
-To compile against target hardware ahead of time, we provide a tool `train_compile.py`. This tool allows you to compile the main `train_step` in `train.py` for target hardware (e.g. a large number of devices) without using the target hardware, and instead using  
+To compile against target hardware ahead of time, we provide a tool `train_compile.py`. This tool allows you to compile the main `train_step` in `train.py` for target hardware (e.g. a large number of v5e devices) without using the target hardware, and instead you may use only a single VM from a different family, e.g. a v4-8. This compilation helps with two main goals:
+    * It will flag any out of memory (OOM) information, such as when the `per_device_batch_size` is set to high, with an identical OOM stack trace as if it was compiled on the target hardware
+    * The ahead of time compilation can be saved and then loaded for fast startup and restart times on the target hardware.
+
+The tool `train_compile.py` is tightly linked to `train.py` and uses the same configuration file `configs/base.yml`. Here is an example run:
+```
+python3 MaxText/train_compile.py MaxText/configs/base.yml compile_topology=v5e-256 compile_topology_num_slices=2
+```
+
+This will compile the default MaxText model on 2 v5e pods. Here is an example that saves then loads the compiled `train_step`:
+```
+export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true" 
+python3 MaxText/train_compile.py MaxText/configs/base.yml compile_topology=v5e-256 compile_topology_num_slices=2 compile_save_file=my_compiled_train.pickle steps=10000 learning_rate=1e-3
+```
+
+Here we include exporting the compiler flag `LIBTPU_INIT_ARGS` and `learning_rate` because those affect the compiled object `my_compiled_train.pickle.`
