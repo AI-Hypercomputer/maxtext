@@ -301,9 +301,7 @@ Here is an example that saves then loads the compiled `train_step`, starting wit
 # Run the below on a single machine, e.g. a v4-8
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true" 
 python3 MaxText/train_compile.py MaxText/configs/base.yml compile_topology=v5e-256 compile_topology_num_slices=2 \
-
 compile_save_file=my_compiled_train.pickle global_parameter_scale=16 \
-
 per_device_batch_size=4 steps=10000 learning_rate=1e-3
 ```
 
@@ -311,7 +309,6 @@ To load the compiled train_step, you just need to pass `compile_save_file=my_com
 ```
 # Run the below on each host of the target hardware, e.g. each host on 2 slices of v5e-256
 python3 MaxText/train.py MaxText/configs/base.yml run_name=example_load_compile compile_save_file=my_compiled_train.pickle global_parameter_scale=16 \
-
 per_device_batch_size=4 steps=10000 base_output_directory=gs://my-output-bucket dataset_path=gs://my-dataset-bucket
 ```
 
