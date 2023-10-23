@@ -18,25 +18,25 @@
 import glob
 import json
 import os
-from absl.testing import absltest
+import unittest
 
 from tensorboard_plugin_profile.convert import raw_to_tool_data
 
 
-class TpuJAXTest(absltest.TestCase):
+class TpuJAXTest(unittest.TestCase):
 
   """Test for profile collected with JAX."""
 
   def _get_session_snapshot(self):
     """Gets a session snapshot of current session. assume only one session."""
-    profile_plugin_root ="/tmp/tensorboard/plugins/profile"
+    profile_plugin_root ="tensorboard/plugins/profile"
     # The session exists under a director whose name is time-dependent.
     profile_session_glob = os.path.join(profile_plugin_root, '*', '*.xplane.pb')
     return glob.glob(profile_session_glob)
 
   def test_xplane_is_present(self):
     files = self._get_session_snapshot()
-    self.assertLen(files, 1)
+    self.assertEqual(len(files), 1)
 
   def test_overview_page(self):
     xspace_filenames = self._get_session_snapshot()
@@ -70,18 +70,17 @@ class TpuJAXTest(absltest.TestCase):
     for event in result['traceEvents']:
       if 'name' in event and event['name'] == 'thread_name':
         thread_names.append((event['args']['name']))
-    self.assertContainsSubset(
-        [
-            'TensorFlow Name Scope',
-            'TensorFlow Ops',
-            'XLA Modules',
-            'XLA Ops',
-            'XLA TraceMe',
-            'Steps',
-        ],
-        thread_names,
-    )
+    expected_threads =  [
+          'TensorFlow Name Scope',
+          'TensorFlow Ops',
+          'XLA Modules',
+          'XLA Ops',
+          'XLA TraceMe',
+          'Steps',
+      ]
+    # Ensure that thread_names contains at least all expected threads.
+    self.assertEqual(set(expected_threads)-set(thread_names), set())
 
 
 if __name__ == '__main__':
-  absltest.main()
+  unittest.main()

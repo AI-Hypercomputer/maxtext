@@ -75,17 +75,18 @@ def normalize_gcs_bucket_name(args):
 def print_flags(args):
   """ Print configuration values after defaults have been filled in. """
   print("Running multihost_job with the following configuration:")
-  print(f"Project             (--PROJECT)         = {args.PROJECT}")
-  print(f"Zone                (--ZONE)            = {args.ZONE}")
-  print(f"TPU type            (--TPU_TYPE)        = {args.TPU_TYPE}")
-  print(f"TPU runtime version (--VERSION)         = {args.VERSION}")
-  print(f"Number of slices    (--NUM_SLICES)      = {args.NUM_SLICES}")
-  print(f"Script dir          (--SCRIPT_DIR)      = {args.SCRIPT_DIR}")
-  print(f"Bucket name         (--BUCKET_NAME)     = {args.BUCKET_NAME}")
-  print(f"Bucket dir          (--BUCKET_DIR)      = {args.BUCKET_DIR}")
-  print(f"Run name            (--RUN_NAME)        = {args.RUN_NAME}")
-  print(f"Extra CQR args      (--CQR_EXTRA_ARGS)  = {args.CQR_EXTRA_ARGS}")
-  print(f"Command to run      (--COMMAND)         = {args.COMMAND}\n")
+  print(f"Project               (--PROJECT)               = {args.PROJECT}")
+  print(f"Zone                  (--ZONE)                  = {args.ZONE}")
+  print(f"TPU type              (--TPU_TYPE)              = {args.TPU_TYPE}")
+  print(f"TPU runtime version   (--VERSION)               = {args.VERSION}")
+  print(f"Number of slices      (--NUM_SLICES)            = {args.NUM_SLICES}")
+  print(f"Script dir            (--SCRIPT_DIR)            = {args.SCRIPT_DIR}")
+  print(f"Bucket name           (--BUCKET_NAME)           = {args.BUCKET_NAME}")
+  print(f"Bucket dir            (--BUCKET_DIR)            = {args.BUCKET_DIR}")
+  print(f"Run name              (--RUN_NAME)              = {args.RUN_NAME}")
+  print(f"Extra CQR args        (--CQR_EXTRA_ARGS)        = {args.CQR_EXTRA_ARGS}")
+  print(f"Command to run        (--COMMAND)               = {args.COMMAND}")
+  print(f"Enable Autocheckpoint (--ENABLE_AUTOCHECKPOINT) = {args.ENABLE_AUTOCHECKPOINT}\n")
 
 def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
   """ Zip the script directory, cp it to GCS """
@@ -119,6 +120,9 @@ def run_create_resources(startup_script_file, args):
 
   if args.CQR_EXTRA_ARGS:
     command = command + ' ' + args.CQR_EXTRA_ARGS
+
+  if args.ENABLE_AUTOCHECKPOINT:
+    command = command + ' --autocheckpoint-enabled'
 
   command = command + f' --metadata-from-file=startup-script={startup_script_file}'
 
@@ -280,6 +284,8 @@ def main(raw_args=None) -> None:
   parser.add_argument('--CQR_EXTRA_ARGS', type=str, default=None,
                       help='Additional arguments to be passed verbatim to the CQR request, e.g. \
                       --CQR_EXTRA_ARGS="--reserved --service-account=my-service-account-email-address')
+  parser.add_argument('--ENABLE_AUTOCHECKPOINT', type=bool, default=False,
+                      help='Whether to enable the Autocheckpoint feature')
   args = parser.parse_args(raw_args)
 
 
