@@ -187,7 +187,8 @@ stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds
 # Use iota operator in Embed
 use_iota_embed: False
 
-# Cross Ahead of time Compilation (aka XAOT)
-compile_save_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
-compile_topology: '' # Only need to set this field if using train_compile.py e.g. 'v5e-256'
-compile_topology_num_slices: 1 # Only need to set this field if using train_compile.py
+# Ahead of time Compilation (aka AOT)
+# Only set this arguments if you are running train_compile or loading a compiled train step.
+compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
+compile_topology: '' # Target hardware version, e.g. 'v5e-256'
+compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.

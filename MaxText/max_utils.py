@@ -437,7 +437,7 @@ def load_compiled(config, partial_train, state):
     _, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
     return in_tree_recreated, out_tree_recreated
 
-  serialized_compiled = load_serialized_compiled(config.compile_save_file)
+  serialized_compiled = load_serialized_compiled(config.compiled_trainstep_file)
   shaped_batch = get_shaped_batch(config)
   example_rng = jax.random.PRNGKey(0)
   shaped_input_args = (state, shaped_batch, example_rng)

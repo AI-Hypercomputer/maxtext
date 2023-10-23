@@ -40,6 +40,8 @@ def validate_config(config):
   """ Validates the config is is setup correctly to compile, returning a useful error message if not. """
   assert config.compile_topology != '',\
      "You must pass your desired target hardware in compile_topology, e.g. compile_topology=v5e-256"
+  assert config.compile_topology_num_slices > 0,\
+    "You must set compile_topology_num_slices to a positive integer"
 
 def get_topology_mesh(config):
   """ Get the target hardware devices, and create configured mesh with them """
@@ -136,10 +138,10 @@ def main(argv: Sequence[str]) -> None:
   print("Jitting and compilation complete!", flush=True)
 
   # Serialize and save the compiled object
-  if config.compile_save_file != '':
+  if config.compiled_trainstep_file != '':
     print("Saving compiled object...")
-    save_compiled(compiled, config.compile_save_file)
-    print(f"Successfully saved compiled object as {config.compile_save_file}")
+    save_compiled(compiled, config.compiled_trainstep_file)
+    print(f"Successfully saved compiled object as {config.compiled_trainstep_file}")
   print("Finished train_compile.py successfully!", flush=True)
 
 if __name__ == "__main__":
