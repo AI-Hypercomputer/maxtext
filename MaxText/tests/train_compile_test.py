@@ -16,13 +16,8 @@
 
 """ Tests for the common Max Utils """
 import jax
-import max_utils
 import unittest
-import optax
-from flax import linen as nn
-import subprocess
 from train_compile import main as train_compile_main
-
 from train import main as train_main
 
 jax.config.update('jax_platform_name', 'cpu')
@@ -35,4 +30,6 @@ class TrainCompile(unittest.TestCase):
     # 25 seconds to save
     train_compile_main((None, "configs/base.yml", f"compile_save_file={compile_save_file}", "compile_topology=v4-8"))
     # 17 seconds to run
-    train_main((None, "configs/base.yml", f"compile_save_file={compile_save_file}",  r"base_output_directory=gs://runner-maxtext-logs", r"dataset_path=gs://maxtext-dataset", "steps=2", "run_name=runner_compile_load_test", "enable_checkpointing=False", "assets_path=../assets"))
+    train_main((None, "configs/base.yml", f"compile_save_file={compile_save_file}",
+      r"base_output_directory=gs://runner-maxtext-logs", r"dataset_path=gs://maxtext-dataset",
+      "steps=2", "run_name=runner_compile_load_test", "enable_checkpointing=False", "assets_path=../assets"))

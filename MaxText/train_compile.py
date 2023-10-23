@@ -64,7 +64,7 @@ def get_shaped_inputs(topology_mesh, config):
   return shaped_train_args, shaped_train_kwargs, state_mesh_annotations, model
 
 def get_train_step_and_shardings(model, config, topology_mesh, state_mesh_annotations):
-    func_to_compile = train.get_functional_train_step(train.train_step, model, config)
+    func_to_compile = train.get_functional_train_step(model, config)
     in_shardings, out_shardings, static_argnums, donate_argnums = max_utils.get_train_shardings(topology_mesh, state_mesh_annotations, config)
     return func_to_compile, in_shardings, out_shardings, static_argnums, donate_argnums
 

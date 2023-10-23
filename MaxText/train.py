@@ -40,13 +40,11 @@ from tensorboardX import SummaryWriter
 from layers import Transformer
 import pyconfig
 from input_pipeline import create_data_iterator_with_tokenizer
-from jax.experimental.serialize_executable import serialize, deserialize_and_load
 import max_utils
 import checkpointing
 
 import jax.numpy as jnp
 from jax import random
-from jax.sharding import PartitionSpec as P
 from jax.sharding import Mesh
 
 from jax.experimental.compilation_cache import compilation_cache as cc
@@ -202,7 +200,7 @@ def train_step(model, config, state, data, dropout_rng):
 
   return new_state, metrics, rng2
 
-def get_functional_train_step(train_step_func, model, config):
+def get_functional_train_step(model, config):
   # Modularized out so can be publicly called for xaot
   return functools.partial(train_step, model, config)
 
@@ -240,14 +238,18 @@ def train_loop(config, state=None):
 
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
-  in_shardings, out_shardings, static_argnums, donate_argnums = max_utils.get_train_shardings(mesh, state_mesh_annotations, config)
+  in_shardings, out_shardings, static_argnums, donate_argnums = max_utils.get_train_shardings(
+    mesh,
+    state_mesh_annotations,
+    config
+  )
 
   num_model_parameters = calculate_num_params_from_pytree(state.params)
   max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
   per_device_tflops = calculate_training_tflops(num_model_parameters, config)
-    
+
   functional_train = get_functional_train_step(train_step, model, config)
-  # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit  
+  # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compile_save_file != '':
     print("Loading the compiled function...", flush=True)
     # Need to pass train signature and state to determine i/o shapes of train_state for now.

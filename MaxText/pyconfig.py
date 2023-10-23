@@ -90,7 +90,6 @@ class _HyperParameters():
       raw_keys["run_name"] = os.environ.get("JOBSET_NAME") #using XPK default
     run_name = raw_keys["run_name"]
     base_output_directory = raw_keys["base_output_directory"]
-    dataset_path = raw_keys["dataset_path"]
     if run_name:
       raw_keys["tensorboard_dir"] = os.path.join(base_output_directory, run_name, "tensorboard", "")
       raw_keys["checkpoint_dir"] = os.path.join(base_output_directory, run_name, "checkpoints", "")
@@ -137,6 +136,7 @@ def get_individual_scales(scale):
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
 
 def calculate_global_batch_sizes(raw_keys):
+  """ Calculates target global batch size from target devices and per_device_batch"""
   per_device_batch_size = raw_keys['per_device_batch_size']
   num_devices = get_num_target_devices(raw_keys)
   if per_device_batch_size < 1:
