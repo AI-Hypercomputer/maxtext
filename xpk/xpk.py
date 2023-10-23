@@ -13,7 +13,6 @@
  See the License for the specific language governing permissions and
  limitations under the License.
 """
-# pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports, unspecified-encoding, consider-using-enumerate, consider-using-dict-items, consider-iterating-dictionary
 
 r"""xpk (Accelerated Processing Kit).
 
@@ -394,11 +393,10 @@ def run_command_batch(commands, jobname, per_command_name, output_logs):
   children = []
   start_time = datetime.datetime.now()
   for i, command in enumerate(commands):
-    children.append(
-        subprocess.Popen(
-            command, stdout=output_logs[i], stderr=output_logs[i], shell=True
-        )
-    )
+    with subprocess.Popen(
+        command, stdout=output_logs[i], stderr=output_logs[i], shell=True
+    ) as task:
+      children.append(task)
 
   while True:
     returncodes = [child.poll() for child in children]
@@ -464,7 +462,7 @@ def add_env_config(args):
   if args.env_file:
     print('Setting container environment from', args.env_file)
     pat = re.compile(r'(^[a-zA-Z_][a-zA-Z0-9_]*?)(?:=(.*))$', re.M)
-    with open(args.env_file, 'r') as f:
+    with open(file=args.env_file, mode='r', encoding='utf-8') as f:
       for match in pat.finditer(f.read()):
         variable = match.group(1)
         if len(match.groups()) > 1:
@@ -490,11 +488,11 @@ def write_temporary_file(payload):
   Returns:
     A file object that was written to.
   """
-  tmp = tempfile.NamedTemporaryFile(delete=False)
-  f = open(tmp.name, 'w')
-  f.write(payload)
-  f.flush()
-  return tmp
+  with tempfile.NamedTemporaryFile(delete=False) as tmp:
+    with open(file=tmp.name, mode='w', encoding='utf=8') as f:
+      f.write(payload)
+      f.flush()
+    return tmp
 
 
 def run_command_for_value(
@@ -565,22 +563,22 @@ def run_command_with_updates(command, task, global_args, verbose=True) -> int:
     xpk_print(
         f'Task: `{task}` is implemented by `{command}`, streaming output live.'
     )
-    child = subprocess.Popen(
+    with subprocess.Popen(
         command,
         stdout=sys.stdout,
         stderr=sys.stderr,
         shell=True,
-    )
-    i = 0
-    while True:
-      return_code = child.poll()
-      if return_code is None:
-        xpk_print(f'Waiting for `{task}`, for {i} seconds')
-        time.sleep(1)
-        i += 1
-      else:
-        xpk_print(f'Task: `{task}` terminated with code `{return_code}`')
-        return return_code
+    ) as child:
+      i = 0
+      while True:
+        return_code = child.poll()
+        if return_code is None:
+          xpk_print(f'Waiting for `{task}`, for {i} seconds')
+          time.sleep(1)
+          i += 1
+        else:
+          xpk_print(f'Task: `{task}` terminated with code `{return_code}`')
+          return return_code
   else:
     xpk_print(
         f'Task: `{task}` is implemented by `{command}`, hiding output unless'
@@ -852,8 +850,8 @@ def run_gke_node_pool_create_command(args, system_characteristics) -> int:
         commands.append(command)
         task_names.append(task)
 
-  for i in range(len(commands)):
-    xpk_print(f'To complete {task_names[i]} we are executing {commands[i]}')
+  for i, command in enumerate(commands):
+    xpk_print(f'To complete {task_names[i]} we are executing {command}')
   max_return_code = run_commands(
       commands, 'Create and Delete Nodepools', task_names, dry_run=args.dry_run
   )
@@ -1344,7 +1342,7 @@ def check_if_workload_exists(args) -> bool:
       'Jobset': '.metadata.ownerReferences[0].name',
   }
 
-  s = ','.join([key + ':' + columns[key] for key in columns.keys()])
+  s = ','.join([key + ':' + value for key, value in columns.items()])
 
   command = f"kubectl get workloads -o=custom-columns='{s}'"
   return_code, return_msg = run_command_for_value(
@@ -1370,7 +1368,7 @@ def use_base_docker_image_or_docker_image(args) -> bool:
     args: user provided arguments for running the command.
 
   Returns:
-    True if intented to use base docker image, False to use docker image.
+    True if intended to use base docker image, False to use docker image.
   """
   use_base_docker_image = True
   # Check if (base_docker_image and script_dir) or (docker_image) is set.
@@ -1530,7 +1528,7 @@ def workload_list(args) -> None:
       'All Done': '.status.reclaimablePods[0].count',
   }
 
-  s = ','.join([key + ':' + columns[key] for key in columns.keys()])
+  s = ','.join([key + ':' + value for key, value in columns.items()])
 
   command = f"kubectl get workloads -o=custom-columns='{s}'"
   return_code = run_command_with_updates(command, 'List Jobs', args)
