@@ -248,7 +248,7 @@ def train_loop(config, state=None):
   max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
   per_device_tflops = calculate_training_tflops(num_model_parameters, config)
 
-  functional_train = get_functional_train_step(train_step, model, config)
+  functional_train = get_functional_train_step(model, config)
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compile_save_file != '':
     print("Loading the compiled function...", flush=True)

@@ -24,7 +24,7 @@ jax.config.update('jax_platform_name', 'cpu')
 
 class TrainCompile(unittest.TestCase):
   """Tests for the Ahead of Time Compilation functionality, train_compile.py"""
-  
+
   def test_save_and_restore(self):
     compile_save_file='test_compiled.pickle'
     # 25 seconds to save

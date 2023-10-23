@@ -56,9 +56,10 @@ def get_topology_mesh(config):
   return topology_mesh
 
 def get_shaped_inputs(topology_mesh, config):
+  """ Get shaped abstractions of inputs to train_step: state, batch and rng """
   model = Transformer(config, topology_mesh)
   # The learning_rate_schedule is baked into the compiled object.
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(config) 
+  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = max_utils.get_optimizer(config, learning_rate_schedule)
   shaped_train_args, shaped_train_kwargs, state_mesh_annotations = max_utils.gen_shaped_input_data(
     model,
@@ -81,22 +82,22 @@ def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings
   out_shardings, static_argnums, donate_argnums):
   """ Jit, lower, and compile func."""
   with mesh:
-      jitted = jax.jit(
-        func,
-        in_shardings=in_shardings,
-        out_shardings=out_shardings,
-        static_argnums=static_argnums,
-        donate_argnums=donate_argnums
-      )
-      lowered = jitted.lower(*func_input_args, **func_input_kwargs)
+    jitted = jax.jit(
+      func,
+      in_shardings=in_shardings,
+      out_shardings=out_shardings,
+      static_argnums=static_argnums,
+      donate_argnums=donate_argnums
+    )
+    lowered = jitted.lower(*func_input_args, **func_input_kwargs)
   compiled = lowered.compile()
   return compiled
 
 def save_compiled(compiled, save_name):
-    # Serialize and save the compiled object
-    serialized, _, _ = serialize(compiled)
-    with open(save_name, "wb") as f:
-        pickle.dump(serialized, f)
+  """ Serialize and save the compiled function. """
+  serialized, _, _ = serialize(compiled)
+  with open(save_name, "wb") as f:
+    pickle.dump(serialized, f)
 
 def main(argv: Sequence[str]) -> None:
   print("Starting train_compile.py...", flush=True)
