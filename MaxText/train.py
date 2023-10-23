@@ -248,7 +248,7 @@ def train_loop(config, state=None):
     
   functional_train = get_functional_train_step(train_step, model, config)
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit  
-  if config.compiled_save_file != '':
+  if config.compile_save_file != '':
     print("Loading the compiled function...", flush=True)
     # Need to pass train signature and state to determine i/o shapes of train_state for now.
     p_train_step = max_utils.load_compiled(config, functional_train, state)

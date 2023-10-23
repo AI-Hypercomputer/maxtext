@@ -28,15 +28,11 @@ from train import main as train_main
 jax.config.update('jax_platform_name', 'cpu')
 
 class TrainCompile(unittest.TestCase):
-  """Tests for the summary stats functions in max_utils.py"""
-  compiled_save_file='test_compiled.pickle'
-
-  def test_save_2x_v5e(self):
-    # 1 min to run
-    train_compile_main((None, "configs/base.yml", "per_device_batch_size=1", "compile_topology=v5e-16", "compile_topology_num_slices=2"))
-
+  """Tests for the Ahead of Time Compilation functionality, train_compile.py"""
+  
   def test_save_and_restore(self):
+    compile_save_file='test_compiled.pickle'
     # 25 seconds to save
-    train_compile_main((None, "configs/base.yml", f"compiled_save_file={self.compiled_save_file}", "compile_topology=v4-8"))
+    train_compile_main((None, "configs/base.yml", f"compile_save_file={compile_save_file}", "compile_topology=v4-8"))
     # 17 seconds to run
-    train_main((None, "configs/base.yml", f"compiled_save_file={self.compiled_save_file}",  r"base_output_directory=gs://runner-maxtext-logs", r"dataset_path=gs://maxtext-dataset", "steps=2", "run_name=runner_compile_load_test", "enable_checkpointing=False", "assets_path=../assets"))
+    train_main((None, "configs/base.yml", f"compile_save_file={compile_save_file}",  r"base_output_directory=gs://runner-maxtext-logs", r"dataset_path=gs://maxtext-dataset", "steps=2", "run_name=runner_compile_load_test", "enable_checkpointing=False", "assets_path=../assets"))

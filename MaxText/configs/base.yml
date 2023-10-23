@@ -188,6 +188,6 @@ stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds
 use_iota_embed: False
 
 # Cross Ahead of time Compilation (aka XAOT)
-compiled_save_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
+compile_save_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
 compile_topology: '' # Only need to set this field if using train_compile.py e.g. 'v5e-256'
 compile_topology_num_slices: 1 # Only need to set this field if using train_compile.py

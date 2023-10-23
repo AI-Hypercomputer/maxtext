@@ -290,7 +290,6 @@ The tool `train_compile.py` is tightly linked to `train.py` and uses the same co
 ```
 # Run the below on a single machine, e.g. a v4-8
 python3 MaxText/train_compile.py MaxText/configs/base.yml compile_topology=v5e-256 compile_topology_num_slices=2 \ 
-
 global_parameter_scale=16 per_device_batch_size=4
 ```
 

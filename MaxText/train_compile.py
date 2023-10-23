@@ -111,10 +111,10 @@ def main(argv: Sequence[str]) -> None:
   print("Jitting and compilation complete!", flush=True)
 
   # Serialize and save the compiled object
-  if config.compiled_save_file != '':
+  if config.compile_save_file != '':
     print(f"Saving compiled object...")
-    save_compiled(compiled, config.compiled_save_file)
-    print(f"Successfully saved compiled object as {config.compiled_save_file}")
+    save_compiled(compiled, config.compile_save_file)
+    print(f"Successfully saved compiled object as {config.compile_save_file}")
   print("Finished train_compile.py successfully!", flush=True)
 
 if __name__ == "__main__":
