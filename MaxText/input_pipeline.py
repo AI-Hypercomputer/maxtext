@@ -335,3 +335,4 @@ def get_shaped_batch(config):
   shaped_batch['targets_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   shaped_batch['targets_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   return shaped_batch
+  

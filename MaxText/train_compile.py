@@ -80,7 +80,7 @@ def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings
         )
         lowered = jitted.lower(*func_input_args, **func_input_kwargs)
     compiled = lowered.compile()
-    return jitted, lowered, compiled
+    return compiled
 
 def save_compiled(compiled, save_name):
     # Serialize and save the compiled object
@@ -107,7 +107,7 @@ def main(argv: Sequence[str]) -> None:
 
   # Compile
   print("Jitting and compiling train step...", flush=True)
-  _, _, compiled = jit_and_compile(func_to_compile, shaped_train_args, shaped_train_kwargs, topology_mesh, in_shardings, out_shardings, static_argnums, donate_argnums)
+  compiled = jit_and_compile(func_to_compile, shaped_train_args, shaped_train_kwargs, topology_mesh, in_shardings, out_shardings, static_argnums, donate_argnums)
   print("Jitting and compilation complete!", flush=True)
 
   # Serialize and save the compiled object

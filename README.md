@@ -280,4 +280,4 @@ jsonPayload.verb="stacktraceanalyzer"
 Here is the related PyPI package: https://pypi.org/project/cloud-tpu-diagnostics.
 
 ## Cross Ahead of Time Compilation (XAOT)
-To compile ahead of time
+To compile against target hardware ahead of time, we provide a tool `train_compile.py`. This tool allows you to compile the main `train_step` in `train.py` for target hardware (e.g. a large number of devices) without using the target hardware, and instead using  

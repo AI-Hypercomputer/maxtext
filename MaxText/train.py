@@ -250,8 +250,7 @@ def train_loop(config, state=None):
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit  
   if config.compiled_save_file != '':
     print("Loading the compiled function...", flush=True)
-    # Need to pass train signature and state to determine i/o shapes of train_state
-    # These shapes may become serializable in the future instead.
+    # Need to pass train signature and state to determine i/o shapes of train_state for now.
     p_train_step = max_utils.load_compiled(config, functional_train, state)
     print("Loaded compiled function!", flush=True)
   else:
