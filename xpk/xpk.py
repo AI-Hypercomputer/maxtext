@@ -1525,14 +1525,16 @@ def determine_workload_list_filter_by_status(args) -> str:
   if args.filter_by_status == 'EVERYTHING':
     return ''
   elif args.filter_by_status == 'RUNNING':
-    # Running includes the status Admitted, and when the number of vms running is > 0.
+    # Running includes the status Admitted or Evicted, and when the number of
+    # vms running is > 0.
     return workload_list_awk_command(
-        f'({status_arg} == \"Admitted\" && {running_vms_arg} ~ /^[0-9]+$/ && {running_vms_arg} > 0)'
+        f'({status_arg} ~ \"Admitted|Evicted\" && {running_vms_arg} ~ /^[0-9]+$/ && {running_vms_arg} > 0)'
     )
   elif args.filter_by_status == 'QUEUED':
-    # Queued includes the status Admitted, and when the number of vms running is 0.
+    # Queued includes the status Admitted or Evicted, and when the number of
+    # vms running is 0.
     return workload_list_awk_command(
-        f'({status_arg} == \"Admitted\" && ({running_vms_arg} ~ \"<none>\" || {running_vms_arg} == 0))'
+        f'({status_arg} ~ \"Admitted|Evicted\" && ({running_vms_arg} ~ \"<none>\" || {running_vms_arg} == 0))'
     )
   elif args.filter_by_status == 'FINISHED':
     return workload_list_awk_command(f'{status_arg} == \"Finished\"')
