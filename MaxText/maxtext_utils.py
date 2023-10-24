@@ -107,4 +107,3 @@ def gen_shaped_input_data(model, tx, config, mesh):
   input_args = (abstract_state, shaped_batch, shaped_rng)
   input_kwargs = {}
   return input_args, input_kwargs, state_mesh_annotations
-  

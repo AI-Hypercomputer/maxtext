@@ -113,7 +113,6 @@ class _HyperParameters():
       calculate_global_batch_sizes(raw_keys)
 
 
-
 def get_individual_scales(scale):
   '''Choose appropriate scales for individual dimensions based on global scale
   We choose to rotate between doubling:
