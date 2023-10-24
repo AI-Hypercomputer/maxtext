@@ -15,7 +15,7 @@
  """
 
 # pylint: disable=bare-except, consider-using-generator
-""" Maxtext Utils needed by train.py and the dependent compile_train.py"""
+"""Utils that are only interesting to MaxText. """
 
 import jax
 from jax.sharding import PartitionSpec as P
@@ -54,7 +54,7 @@ def get_optimizer(config, learning_rate_schedule):
     weight_decay=config.adam_weight_decay,
   )
 
-def validate_config(config):
+def validate_train_config(config):
   """ Validates the configuration is set correctly for train.py"""
 
   def _validate_gcs_bucket_name(bucket_name, config_var):

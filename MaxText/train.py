@@ -303,7 +303,7 @@ def train_loop(config, state=None):
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   config = pyconfig.config
-  maxtext_utils.validate_config(config)
+  maxtext_utils.validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   debug_config = debug_configuration.DebugConfig(
     stack_trace_config = stack_trace_configuration.StackTraceConfig(

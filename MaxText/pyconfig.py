@@ -17,7 +17,7 @@
 # pylint: disable=missing-module-docstring
 from collections import OrderedDict
 
-import hardware_map
+import accelerator_to_spec_map
 import math
 import os
 import sys
