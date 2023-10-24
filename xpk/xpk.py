@@ -17,8 +17,6 @@
 r"""xpk (Accelerated Processing Kit).
 
 Next Steps:
-- Better workload view. Cleaner messaging and option to hide done jobs, etc.
-  - Carefully documented as Job View
 - Attach the submitter's name to the job and visualize it in workload list.
 - Cluster describe is broken by Cacheimage since that counts as a workload.
 - Cluster describe: count by jobset.
@@ -26,12 +24,11 @@ Next Steps:
 - Add preemption.
 - How to more gracefully handle job failures, distinguishing between software
   and infra?
-- Migrate MaxText's code copy as an option into workload create.
 - Look into --docker-name and --docker-image.
   Shouldn't one string be adequate to express what we want?
 - Apply learnings from about private, region, coredns, etc:
 - Enable special preheater
-- Create Open Source repo for xpk]
+- Create Open Source repo for xpk
 - Make Argparse logic this a function?
   - Obvious logic that starts in main instead of here in code but args will
     not be a universal argument.
@@ -1499,6 +1496,72 @@ def workload_delete(args) -> int:
   xpk_exit(0)
 
 
+def workload_list_awk_command(filter_key) -> str:
+  """Function returns the awk command needed from the filter specified.
+
+  Args:
+    filter_key: workload list filter to awk against
+
+  Returns:
+    awk command to use in filtering workload list.
+  """
+
+  return f' | awk -e \'NR == 1 || {filter_key} {{print $0}}\''
+
+
+def determine_workload_list_filter_by_status(args) -> str:
+  """Function to create the filtered view of workload list.
+
+  Args:
+    args: user provided arguments for running the command.
+
+  Returns:
+    the argument needed to filter by status of jobs in workload list.
+  """
+  # Argument positions related to columns created by workload list command.
+  status_arg='$8'
+  running_vms_arg='$5'
+  status_verbose_arg='$10'
+  if args.filter_by_status == 'EVERYTHING':
+    return ''
+  elif args.filter_by_status == 'RUNNING':
+    # Running includes the status Admitted, and when the number of vms running is > 0.
+    return workload_list_awk_command(
+        f'({status_arg} == \"Admitted\" && {running_vms_arg} ~ /^[0-9]+$/ && {running_vms_arg} > 0)'
+    )
+  elif args.filter_by_status == 'QUEUED':
+    # Queued includes the status Admitted, and when the number of vms running is 0.
+    return workload_list_awk_command(
+        f'({status_arg} == \"Admitted\" && ({running_vms_arg} ~ \"<none>\" || {running_vms_arg} == 0))'
+    )
+  elif args.filter_by_status == 'FINISHED':
+    return workload_list_awk_command(f'{status_arg} == \"Finished\"')
+  elif args.filter_by_status == 'FAILED':
+    # Failed includes the status Finished, and when the verbose reason is failed.
+    return workload_list_awk_command(f'({status_arg} == \"Finished\" && {status_verbose_arg} ~ \"failed\")')
+  elif args.filter_by_status == 'SUCCESSFUL':
+    # Failed includes the status Finished, and when the verbose reason is finished/success.
+    return workload_list_awk_command(f'({status_arg} == \"Finished\" && {status_verbose_arg} ~ \"finished\")')
+  raise RuntimeError(f'Can not find filter type: {args.filter_by_status}')
+
+
+def determine_workload_list_filter_by_job(args) -> str:
+  """Function to filter view of workload list based on job name.
+
+  Args:
+    args: user provided arguments for running the command.
+
+  Returns:
+    the argument needed to filter job names from workload list
+  """
+  # Argument positions related to columns created by workload list command.
+  if not args.filter_by_job:
+    return ''
+  else:
+    job_name_arg="$1"
+    return workload_list_awk_command(f'{job_name_arg} ~ \"{args.filter_by_job}\"')
+
+
 def workload_list(args) -> None:
   """Function around workload list.
 
@@ -1517,20 +1580,23 @@ def workload_list(args) -> None:
     xpk_exit(set_cluster_command_code)
 
   columns = {
-      'Jobset': '.metadata.ownerReferences[0].name',
+      'Jobset Name': '.metadata.ownerReferences[0].name',
       'Created Time': '.metadata.creationTimestamp',
       'Priority': '.spec.priorityClassName',
       'TPU VMs Needed': '.spec.podSets[0].count',
-      'Last Status Verbose': '.status.conditions[-1].message',
-      'Last Status': '.status.conditions[-1].status',
-      'Last Transition': '.status.conditions[-1].lastTransitionTime',
-      'Current Queue': '.status.admission.clusterQueue',
-      'All Done': '.status.reclaimablePods[0].count',
+      'TPU VMs Running/Ran': '.status.admission.podSetAssignments[-1].count',
+      'TPU VMs Done': '.status.reclaimablePods[0].count',
+      'TPU Slice Dimensions': r'.status.admission.podSetAssignments[-1].flavors.google\.com/tpu',
+      'Status': '.status.conditions[-1].type',
+      'Status Message': '.status.conditions[-1].message',
+      'Status Time': '.status.conditions[-1].lastTransitionTime',
   }
 
   s = ','.join([key + ':' + value for key, value in columns.items()])
 
-  command = f"kubectl get workloads -o=custom-columns='{s}'"
+  workload_list_filter_status_cmd = determine_workload_list_filter_by_status(args)
+  workload_list_filter_job_cmd = determine_workload_list_filter_by_job(args)
+  command = f"kubectl get workloads -o=custom-columns='{s}' {workload_list_filter_status_cmd} {workload_list_filter_job_cmd}"
   return_code = run_command_with_updates(command, 'List Jobs', args)
 
   if return_code != 0:
@@ -2049,6 +2115,23 @@ workload_list_parser.add_argument(
     required=True,
 )
 
+workload_list_parser.add_argument(
+    '--filter-by-status',
+    type=str,
+    default='EVERYTHING',
+    choices=['EVERYTHING', 'FINISHED', 'RUNNING', 'QUEUED', 'FAILED', 'SUCCESSFUL'],
+    help='Filters the arguments based on status. Selected filters are listed'
+        ' above. FAILED and SUCCESSFUL are sub-states of FINISHED.',
+    required=False,
+)
+
+workload_list_parser.add_argument(
+    '--filter-by-job',
+    type=str,
+    help='Filters the arguments based on job name. Provide a regex expression'
+          'to parse jobs that match the pattern or provide a job name to view a single job.',
+    required=False,
+)
 add_shared_arguments(workload_list_parser)
 
 
