@@ -34,7 +34,7 @@ import pyconfig
 from typing import Sequence
 from absl import app
 import pickle
-from accelerator_to_spec_map import get_system_characteristics
+import accelerator_to_spec_map
 import train
 
 def validate_config(config):
@@ -46,7 +46,7 @@ def validate_config(config):
 
 def get_topology_mesh(config):
   """ Get the target hardware devices, and create configured mesh with them """
-  target_hardware = get_system_characteristics(config.compile_topology)
+  target_hardware = accelerator_to_spec_map.get_system_characteristics(config.compile_topology)
   topology_devices = get_topology_desc(
       platform=target_hardware.platform,
       topology_name=target_hardware.topology_name,
