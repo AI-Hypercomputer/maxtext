@@ -29,14 +29,12 @@ import unittest
 import pyconfig
 import multihost_dataloading
 
-os.environ["XLA_FLAGS"] = '--xla_force_host_platform_device_count=2'
-jax.config.update('jax_platform_name', 'cpu')
 
 class MultihostDataloadingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    batch_size = 2
+    batch_size = 4
     pyconfig.initialize(sys.argv + ['configs/base.yml'], per_device_batch_size=1, run_name='test', mesh_axes = ['data'],
                         logical_axis_rules = [['batch', 'data']],
                         data_sharding = ['data'],
@@ -52,6 +50,7 @@ class MultihostDataloadingTest(unittest.TestCase):
     global_data = np.arange(np.prod(global_data_shape)*2).reshape((batch_size * 2, config.max_target_length))
 
     dataset = tf.data.Dataset.from_tensor_slices(global_data)
+    dataset = dataset.repeat()
     dataset = dataset.batch(batch_size)
     self.multihost_gen = (
       multihost_dataloading.get_batch_sharded_data_pipeline(
