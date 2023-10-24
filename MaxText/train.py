@@ -26,7 +26,8 @@ import sys
 jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-print(f"Found {jax.device_count()} devices.")
+print("Starting train.py", flush=True)
+print(f"Found {jax.device_count()} devices.", flush=True)
 
 from typing import Sequence
 import datetime
@@ -304,6 +305,8 @@ def train_loop(config, state=None):
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   config = pyconfig.config
+  print("Starting train main", flush=True)
+  print(f"{jax.devices()=}")
   maxtext_utils.validate_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   debug_config = debug_configuration.DebugConfig(
