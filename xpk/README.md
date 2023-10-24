@@ -36,6 +36,14 @@ return the hardware back to the shared pool when they complete, developers can
 achieve better use of finite hardware resources. And automated tests can run
 overnight while resources tend to be underutilized.
 
+# XPK for Large Scale (>5k VMs)
+
+Follow user instructions in [xpk-large-scale-guide.sh](xpk-large-scale-guide.sh)
+to use xpk for a GKE cluster greater than 5000 VMs. Run these steps to set up a
+GKE cluster with large scale training and high throughput support with XPK, and
+run jobs with XPK. We recommend you manually copy commands per step and verify
+the outputs of each step.
+
 # Example usages:
 
 To get started, be sure to set your GCP Project and Zone as usual via `gcloud
