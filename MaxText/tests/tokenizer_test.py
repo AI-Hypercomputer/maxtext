@@ -25,7 +25,7 @@ import unittest
 import tensorflow_datasets as tfds
 import os
 
-jax.config.update('jax_platform_name', 'cpu')
+# jax.config.update('jax_platform_name', 'cpu')
 
 class TokenizerTest(unittest.TestCase):
   """Tests for train_tokenizer.py"""
