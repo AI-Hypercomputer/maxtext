@@ -280,15 +280,15 @@ jsonPayload.verb="stacktraceanalyzer"
 Here is the related PyPI package: https://pypi.org/project/cloud-tpu-diagnostics.
 
 ## Ahead of Time Compilation (AOT)
-To compile your training run ahead of time, we provide a tool `train_compile.py`. This tool allows you to compile the main `train_step` in `train.py` for target hardware (e.g. a large number of v5e devices) without using the target hardware, and instead you may use only a single VM from a different family, e.g. a v4-8. This compilation helps with two main goals:
+To compile your training run ahead of time, we provide a tool `train_compile.py`. This tool allows you to compile the main `train_step` in `train.py` for target hardware (e.g. a large number of v5e devices) without using the target hardware, and instead you may use only a CPU or a single VM from a different family. This compilation helps with two main goals:
 
 * It will flag any out of memory (OOM) information, such as when the `per_device_batch_size` is set too high, with an identical OOM stack trace as if it was compiled on the target hardware.
 
 * The ahead of time compilation can be saved and then loaded for fast startup and restart times on the target hardware.
 
-The tool `train_compile.py` is tightly linked to `train.py` and uses the same configuration file `configs/base.yml`. Here is an example run:
+The tool `train_compile.py` is tightly linked to `train.py` and uses the same configuration file `configs/base.yml`. Although you don't need to run on a TPU, you do need to install `jax[tpu]` in addition to other dependenices, so we recommend running `setup.sh` to install these if you have not already done so. Here is an example run after installing these dependencies:
 ```
-# Run the below on a single machine, e.g. a v4-8
+# Run the below on a single machine, e.g. a CPU
 python3 MaxText/train_compile.py MaxText/configs/base.yml compile_topology=v5e-256 compile_topology_num_slices=2 \ 
 global_parameter_scale=16 per_device_batch_size=4
 ```
@@ -297,7 +297,7 @@ This will compile a 16B parameter MaxText model on 2 v5e pods.
 
 Here is an example that saves then loads the compiled `train_step`, starting with the save:
 ```
-# Run the below on a single machine, e.g. a v4-8
+# Run the below on a single machine, e.g. a CPU
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true" 
 python3 MaxText/train_compile.py MaxText/configs/base.yml compile_topology=v5e-256 \
 compile_topology_num_slices=2 \

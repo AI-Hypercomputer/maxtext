@@ -34,7 +34,7 @@ import pyconfig
 from typing import Sequence
 from absl import app
 import pickle
-from hardware_map import get_system_characteristics
+from accelerator_to_spec_map import get_system_characteristics
 import train
 
 def validate_config(config):
@@ -109,7 +109,7 @@ def main(argv: Sequence[str]) -> None:
   shaped_train_args, shaped_train_kwargs, state_mesh_annotations, model = get_shaped_inputs(topology_mesh, config)
 
   # Get function to compile and shardings
-  func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_full_signature(
+  func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
     train.train_step,
     topology_mesh,
     state_mesh_annotations,

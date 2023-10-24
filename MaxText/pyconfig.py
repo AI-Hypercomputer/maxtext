@@ -149,7 +149,7 @@ def calculate_global_batch_sizes(raw_keys):
 
 def get_num_target_devices(raw_keys):
   if raw_keys['compile_topology'] != "":
-    devices_per_slice = hardware_map.get_system_characteristics(raw_keys['compile_topology']).devices_per_slice
+    devices_per_slice = accelerator_to_spec_map.get_system_characteristics(raw_keys['compile_topology']).devices_per_slice
     return int(devices_per_slice * raw_keys['compile_topology_num_slices'])
   else:
     return len(jax.devices())
