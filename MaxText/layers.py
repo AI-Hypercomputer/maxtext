@@ -687,15 +687,13 @@ class Embed(nn.Module):
     if not jnp.issubdtype(inputs.dtype, jnp.integer):
       raise ValueError('Input type must be an integer or unsigned integer.')
 
-    with jax.named_scope('apply embedding'):
-      if cfg.use_iota_embed:
-        iota = lax.iota(jnp.int32, self.num_embeddings)
-        one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
-        with jax.named_scope('apply embedding(iota_dot'):
-          output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
-      else:
-        output = jnp.asarray(self.embedding, self.dtype)[inputs]
-      output = nn.with_logical_constraint(output, ('activation_batch', 'activation_length', 'activation_embed'))
+    if cfg.use_iota_embed:
+      iota = lax.iota(jnp.int32, self.num_embeddings)
+      one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
+      output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
+    else:
+      output = jnp.asarray(self.embedding, self.dtype)[inputs]
+    output = nn.with_logical_constraint(output, ('activation_batch', 'activation_length', 'activation_embed'))
     return output
 
   def attend(self, query: Array) -> Array:
