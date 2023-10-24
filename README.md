@@ -279,7 +279,7 @@ jsonPayload.verb="stacktraceanalyzer"
 
 Here is the related PyPI package: https://pypi.org/project/cloud-tpu-diagnostics.
 
-## Cross Ahead of Time Compilation (XAOT)
+## Ahead of Time Compilation (AOT)
 To compile against target hardware ahead of time, we provide a tool `train_compile.py`. This tool allows you to compile the main `train_step` in `train.py` for target hardware (e.g. a large number of v5e devices) without using the target hardware, and instead you may use only a single VM from a different family, e.g. a v4-8. This compilation helps with two main goals:
 
 * It will flag any out of memory (OOM) information, such as when the `per_device_batch_size` is set too high, with an identical OOM stack trace as if it was compiled on the target hardware.

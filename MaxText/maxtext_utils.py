@@ -49,7 +49,7 @@ def get_optimizer(config, learning_rate_schedule):
 def load_compiled(config, partial_train, state):
   """ # Loading a serialized compiled train step function."""
   # Currently partial_train and state  are needed to reconstruct
-  # input/output shapes to consturct the in_trees and out_trees for load API
+  # input/output shapes to construct the in_trees and out_trees for load API
   # Parker is working on a serializing these
   def load_serialized_compiled(save_name):
     with open(save_name, "rb") as f:
