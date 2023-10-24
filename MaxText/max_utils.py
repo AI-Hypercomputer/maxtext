@@ -38,6 +38,7 @@ import os
 import subprocess
 from typing import Tuple
 
+
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
   return jax.tree_util.tree_reduce(

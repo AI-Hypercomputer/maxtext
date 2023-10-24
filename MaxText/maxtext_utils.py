@@ -83,7 +83,7 @@ def load_compiled(config, partial_train, state):
       serialized_compiled = pickle.load(f)
     return serialized_compiled
 
-  def get_io_trees(func, input_args, input_kwargs):
+  def get_train_input_output_trees(func, input_args, input_kwargs):
     _, in_tree_recreated = jax.tree_util.tree_flatten((input_args, input_kwargs))
     out_shaped = jax.eval_shape(func, *input_args, **input_kwargs)
     _, out_tree_recreated = jax.tree_util.tree_flatten(out_shaped)
@@ -94,8 +94,8 @@ def load_compiled(config, partial_train, state):
   example_rng = jax.random.PRNGKey(0)
   shaped_input_args = (state, shaped_batch, example_rng)
   shaped_input_kwargs = {}
-  in_tree_recreated, out_tree_recreated = get_io_trees(partial_train, shaped_input_args, shaped_input_kwargs)
-  p_train_step = deserialize_and_load(serialized_compiled, in_tree_recreated, out_tree_recreated)
+  in_tree, out_tree = get_train_input_output_trees(partial_train, shaped_input_args, shaped_input_kwargs)
+  p_train_step = deserialize_and_load(serialized_compiled, in_tree, out_tree)
   return p_train_step
 
 def gen_shaped_input_data(model, tx, config, mesh):
