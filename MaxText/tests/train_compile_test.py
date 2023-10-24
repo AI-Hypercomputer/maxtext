@@ -27,7 +27,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file='test_compiled.pickle'
     # 25 seconds to save
     train_compile_main((None, "configs/base.yml", f"compiled_trainstep_file={compiled_trainstep_file}",
-      "compile_topology=v4-8"))
+      "compile_topology=v4-8", "compile_topology_num_slices=1"))
     # 17 seconds to run
     train_main((None, "configs/base.yml", f"compiled_trainstep_file={compiled_trainstep_file}",
       r"base_output_directory=gs://runner-maxtext-logs", r"dataset_path=gs://maxtext-dataset",

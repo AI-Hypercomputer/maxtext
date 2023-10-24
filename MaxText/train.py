@@ -228,7 +228,7 @@ def train_loop(config, state=None):
   # Model and Optimizer definition
   model = Transformer(config, mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
-  tx = max_utils.get_optimizer(config, learning_rate_schedule)
+  tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 

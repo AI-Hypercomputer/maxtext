@@ -63,8 +63,8 @@ def get_shaped_inputs(topology_mesh, config):
   model = Transformer(config, topology_mesh)
   # The learning_rate_schedule is baked into the compiled object.
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
-  tx = max_utils.get_optimizer(config, learning_rate_schedule)
-  shaped_train_args, shaped_train_kwargs, state_mesh_annotations = max_utils.gen_shaped_input_data(
+  tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
+  shaped_train_args, shaped_train_kwargs, state_mesh_annotations = maxtext_utils.gen_shaped_input_data(
     model,
     tx,
     config,
