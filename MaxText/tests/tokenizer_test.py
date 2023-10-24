@@ -18,7 +18,6 @@
 """
 
 import numpy as np
-import jax
 import train_tokenizer
 import tokenizer
 import unittest
