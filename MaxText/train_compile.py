@@ -34,7 +34,7 @@ from typing import Sequence
 from absl import app
 import pickle
 from hardware_map import get_system_characteristics
-from train import get_functional_train_step
+import train
 
 def validate_config(config):
   """ Validates the config is is setup correctly to compile, returning a useful error message if not. """
@@ -71,14 +71,6 @@ def get_shaped_inputs(topology_mesh, config):
   )
   return shaped_train_args, shaped_train_kwargs, state_mesh_annotations, model
 
-def get_train_step_and_shardings(model, config, topology_mesh, state_mesh_annotations):
-  func_to_compile = get_functional_train_step(model, config)
-  in_shardings, out_shardings, static_argnums, donate_argnums = max_utils.get_train_shardings(
-    topology_mesh,
-    state_mesh_annotations,
-    config
-  )
-  return func_to_compile, in_shardings, out_shardings, static_argnums, donate_argnums
 
 def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings,
   out_shardings, static_argnums, donate_argnums):
@@ -116,11 +108,12 @@ def main(argv: Sequence[str]) -> None:
   shaped_train_args, shaped_train_kwargs, state_mesh_annotations, model = get_shaped_inputs(topology_mesh, config)
 
   # Get function to compile and shardings
-  func_to_compile, in_shardings, out_shardings, static_argnums, donate_argnums = get_train_step_and_shardings(
+  func_to_compile, in_shardings, out_shardings, static_argnums, donate_argnums = get_functional_train_full_signature(
+    train.train_step,
+    mesh,
+    state_mesh_annotations,
     model,
-    config,
-    topology_mesh,
-    state_mesh_annotations
+    config
   )
 
   # Compile

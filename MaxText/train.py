@@ -41,6 +41,7 @@ from layers import Transformer
 import pyconfig
 from input_pipeline import create_data_iterator_with_tokenizer
 import max_utils
+import maxtext_utils
 import checkpointing
 
 import jax.numpy as jnp
@@ -200,10 +201,6 @@ def train_step(model, config, state, data, dropout_rng):
 
   return new_state, metrics, rng2
 
-def get_functional_train_step(model, config):
-  # Modularized out so can be publicly called for xaot
-  return functools.partial(train_step, model, config)
-
 def train_loop(config, state=None):
   """Main Training loop.
 
@@ -238,9 +235,11 @@ def train_loop(config, state=None):
 
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
-  in_shardings, out_shardings, static_argnums, donate_argnums = max_utils.get_train_shardings(
+  functional_train, in_shardings, out_shardings, static_argnums, donate_argnums = maxtext_utils.get_functional_train_full_signature(
+    train_step,
     mesh,
     state_mesh_annotations,
+    model,
     config
   )
 
@@ -248,12 +247,11 @@ def train_loop(config, state=None):
   max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
   per_device_tflops = calculate_training_tflops(num_model_parameters, config)
 
-  functional_train = get_functional_train_step(model, config)
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != '':
     print("Loading the compiled function...", flush=True)
     # Need to pass train signature and state to determine i/o shapes of train_state for now.
-    p_train_step = max_utils.load_compiled(config, functional_train, state)
+    p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
     print("Loaded compiled function!", flush=True)
   else:
     p_train_step = jax.jit(
@@ -307,7 +305,7 @@ def train_loop(config, state=None):
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   config = pyconfig.config
-  max_utils.validate_config(config)
+  maxtext_utils.validate_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   debug_config = debug_configuration.DebugConfig(
     stack_trace_config = stack_trace_configuration.StackTraceConfig(
