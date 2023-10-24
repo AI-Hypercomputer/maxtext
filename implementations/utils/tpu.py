@@ -74,30 +74,27 @@ def create_queued_resource(
     queued_resource = tpu_api.QueuedResource(
         # TODO(wcromar): Implement `validUntilDuration` based on `timeout`
         # TODO(ranran): enable configuration via `AcceleratorConfig`
-        tpu=tpu_api.QueuedResource.Tpu(
-            node_spec=[
-                tpu_api.QueuedResource.Tpu.NodeSpec(
-                    node_id=tpu_name,
-                    parent=parent,
-                    node=tpu_api.Node(
-                        accelerator_type=accelerator.name,
-                        description='noteardown',
-                        runtime_version=accelerator.runtime_version,
-                        network_config=tpu_api.NetworkConfig(
-                            network=accelerator.network,
-                            subnetwork=accelerator.subnetwork,
-                            enable_external_ips=True,
-                        ),
-                        metadata={
-                            'ssh-keys': f'xl-ml-test:{ssh_keys.public}',
-                        },
+        tpu=tpu_api.QueuedResource.Tpu(node_spec=[
+            tpu_api.QueuedResource.Tpu.NodeSpec(
+                node_id=tpu_name,
+                parent=parent,
+                node=tpu_api.Node(
+                    accelerator_type=accelerator.name,
+                    description='noteardown',
+                    runtime_version=accelerator.runtime_version,
+                    network_config=tpu_api.NetworkConfig(
+                        network=accelerator.network,
+                        subnetwork=accelerator.subnetwork,
+                        enable_external_ips=True,
                     ),
-                )
-            ],
-        ),
+                    metadata={
+                        'ssh-keys': f'ml-auto-solutions:{ssh_keys.public}',
+                    },
+                ),
+            )
+        ],),
         guaranteed=tpu_api.QueuedResource.Guaranteed(
-            reserved=accelerator.reserved,
-        ),
+            reserved=accelerator.reserved,),
     )
 
     qr_operation = client.create_queued_resource(
@@ -263,9 +260,9 @@ def ssh_tpu(
   ssh_group = fabric.ThreadingGroup(
       *ip_addresses,
       connect_kwargs={
-          'auth_strategy': paramiko.auth_strategy.InMemoryPrivateKey(
-              'xl-ml-test', pkey
-          )
+          'auth_strategy':
+              paramiko.auth_strategy.InMemoryPrivateKey('ml-auto-solutions',
+                                                        pkey)
       },
   )
   ssh_group.run(cmds)

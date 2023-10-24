@@ -94,8 +94,7 @@ with models.DAG(
 
   # Test dependencies
   jax_resnet_v2_8 >> jax_resnet_v2_32
-  jax_resnet_v3_8  # TODO(ranran): add dependency of v3_8 to v3_32 once v3_8 creation issue is fixed (b/305310198)
-  jax_resnet_v3_32
+  jax_resnet_v3_8 >> jax_resnet_v3_32
   jax_resnet_v4_8 >> jax_resnet_v4_32
   jax_gpt2_v4_8
   jax_sd_v4_8
