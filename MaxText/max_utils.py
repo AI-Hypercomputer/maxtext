@@ -351,16 +351,6 @@ cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
                                  _cross_entropy_with_logits_bwd)
 
 
-def gen_shaped_input_data(model, tx, config, mesh):
-  example_rng = jax.random.PRNGKey(0)
-  shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
-  abstract_state, state_mesh_annotations =  get_abstract_state(model, tx, config, example_rng, mesh)
-  shaped_batch = get_shaped_batch(config)
-
-  input_args = (abstract_state, shaped_batch, shaped_rng)
-  input_kwargs = {}
-  return input_args, input_kwargs, state_mesh_annotations
-
 def get_train_shardings(mesh, state_mesh_annotations, config):
   """ Get the shardings (both state and data) for train_step """
   data_pspec = P(*config.data_sharding)

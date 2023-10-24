@@ -108,9 +108,9 @@ def main(argv: Sequence[str]) -> None:
   shaped_train_args, shaped_train_kwargs, state_mesh_annotations, model = get_shaped_inputs(topology_mesh, config)
 
   # Get function to compile and shardings
-  func_to_compile, in_shardings, out_shardings, static_argnums, donate_argnums = get_functional_train_full_signature(
+  func_to_compile, in_shardings, out_shardings, static_argnums, donate_argnums = maxtext_utils.get_functional_train_full_signature(
     train.train_step,
-    mesh,
+    topology_mesh,
     state_mesh_annotations,
     model,
     config

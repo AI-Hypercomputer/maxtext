@@ -310,8 +310,8 @@ UserFacingNameToSystemCharacteristics = {
       '8x16x16', 512,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
     ),
 }
-''' If you modify UserFacingNameToSystemCharacteristics you should also modify the corresponding
-Map in MaxText/hardware_map.py''' 
+""" If you modify UserFacingNameToSystemCharacteristics you should also modify the corresponding
+Map in MaxText/hardware_map.py """
 # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 def chunks(lst, n):

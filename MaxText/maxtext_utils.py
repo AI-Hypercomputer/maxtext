@@ -42,7 +42,7 @@ def get_functional_train_step(train_step, model, config):
   return functools.partial(train_step, model, config)
 
 def get_optimizer(config, learning_rate_schedule):
-  # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
+  """ Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2 """
   return optax.adamw(
     learning_rate_schedule,
     b1=config.adam_b1,
@@ -52,24 +52,24 @@ def get_optimizer(config, learning_rate_schedule):
     weight_decay=config.adam_weight_decay,
   )
 
-  def validate_config(config):
-    """ Validates the configuration is set correctly for train.py"""
+def validate_config(config):
+  """ Validates the configuration is set correctly for train.py"""
 
-    def _validate_gcs_bucket_name(bucket_name, config_var):
-      assert bucket_name, f"Please set {config_var}."
-      assert len(bucket_name) > 5 and bucket_name[0:5]=='gs://', f"Erroring out, {config_var} should start with 'gs://' "
+  def _validate_gcs_bucket_name(bucket_name, config_var):
+    assert bucket_name, f"Please set {config_var}."
+    assert len(bucket_name) > 5 and bucket_name[0:5]=='gs://', f"Erroring out, {config_var} should start with 'gs://' "
 
-    assert config.run_name, "Erroring out, need a real run_name"
-    _validate_gcs_bucket_name(config.base_output_directory, "base_output_directory")
-    _validate_gcs_bucket_name(config.dataset_path, "dataset_path")
+  assert config.run_name, "Erroring out, need a real run_name"
+  _validate_gcs_bucket_name(config.base_output_directory, "base_output_directory")
+  _validate_gcs_bucket_name(config.dataset_path, "dataset_path")
 
-    assert ((config.load_parameters_path=="" and config.load_from_other_directory=="") or
-      config.enable_checkpointing), "You must set enable_checkpointing to load a checkpoint"
-    assert config.load_parameters_path=="" or config.load_from_other_directory=="",\
-    "At most one of load_parameters_path or load_from_other_directory should be set"
-    assert config.load_from_other_directory_step==-1 or config.load_from_other_directory!="",\
-    "You must specify the loading directory if you specify the loading step"
-    assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive interger."
+  assert ((config.load_parameters_path=="" and config.load_from_other_directory=="") or
+    config.enable_checkpointing), "You must set enable_checkpointing to load a checkpoint"
+  assert config.load_parameters_path=="" or config.load_from_other_directory=="",\
+  "At most one of load_parameters_path or load_from_other_directory should be set"
+  assert config.load_from_other_directory_step==-1 or config.load_from_other_directory!="",\
+  "You must specify the loading directory if you specify the loading step"
+  assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive interger."
 
 def load_compiled(config, partial_train, state):
   """ # Loading a serialized compiled train step function."""
@@ -95,3 +95,14 @@ def load_compiled(config, partial_train, state):
   in_tree_recreated, out_tree_recreated = get_io_trees(partial_train, shaped_input_args, shaped_input_kwargs)
   p_train_step = deserialize_and_load(serialized_compiled, in_tree_recreated, out_tree_recreated)
   return p_train_step
+
+  def gen_shaped_input_data(model, tx, config, mesh):
+    example_rng = jax.random.PRNGKey(0)
+    shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
+    abstract_state, state_mesh_annotations =  get_abstract_state(model, tx, config, example_rng, mesh)
+    shaped_batch = get_shaped_batch(config)
+
+    input_args = (abstract_state, shaped_batch, shaped_rng)
+    input_kwargs = {}
+    return input_args, input_kwargs, state_mesh_annotations
+  
