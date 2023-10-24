@@ -11,9 +11,9 @@
 ## Step Summary is:
 ## Step 1: Cluster Networking setup.
 ## Step 2: Create your cluster with xpk.
-## Step 3: Move from KubeDNS to CoreDNS.
+## Step 3: Move from KubeDNS to CoreDNS. This is necessary past 1000 VMs.
 ## Step 4: Pass Cluster name and Project ID to Google POCs to setup your cluster
-##         for large scale and high throughput.
+##         for large scale and high throughput. This is necessary past 5000 VMs.
 ## Step 5: Scale up your cluster.
 ## Step 6 (OPTIONAL):  Run a simple sample job on all slices in the cluster.
 ##                     Shows how to run jobs and view jobs with xpk.
@@ -177,7 +177,7 @@ python3 xpk/xpk.py cluster create \
 
 # 1) View other examples of xpk.py here: https://github.com/google/maxtext/blob/main/xpk/README.md
 # 2) xpk create command will update the cluster. If you adjust the num-slices and call create again,
-#    xpk will inteliigently adjust the # number of node pools and execute the number of create / delete commands.
+#    xpk will intelligently adjust the # number of node pools and execute the number of create / delete commands.
 # 3) If xpk create command fails, the first step is to try running create again.
 
 ##### STEP 3 ##############################
@@ -279,8 +279,8 @@ echo -e "\nTell Google POCS: We want $CLUSTER in $PROJECT to be set up for high 
 # TODO(USER): Set NUMSLICES to what you wish to scale to
 ##### 5A #####################
 
-# Remember it is ok to incremently scale if you wish. You can run cluster create
-# repeatly and adjust `--num-slices`.
+# Remember it is ok to incrementally scale if you wish. You can run cluster create
+# repeatedly and adjust `--num-slices`.
 export NUMSLICES=64
 
 ### USER VARIABLES:
@@ -361,7 +361,7 @@ python3 xpk/xpk.py cluster create \
 # Node pools can go into auto repair if there is an issue with their creation. For example,
 # in the DEADLINE error, the node pool will automatically repair itself. This took ~20 minutes for the
 # node pool to repair in the above example. You can continue with rerun cluster create
-# commands while it is autorepairing so that the rest of the cluster continues to
+# commands while it is auto-repairing so that the rest of the cluster continues to
 # be created while the repair occurs.
 
 # It took 20 minutes for the above internal example to go from 4 to 64 NPs with
