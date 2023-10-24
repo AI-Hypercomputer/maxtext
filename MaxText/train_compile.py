@@ -28,6 +28,7 @@ from jax.experimental.topologies import get_topology_desc
 from jax.sharding import Mesh
 from jax.experimental.serialize_executable import serialize
 import max_utils
+import maxtext_utils
 from layers import Transformer
 import pyconfig
 from typing import Sequence
@@ -108,7 +109,7 @@ def main(argv: Sequence[str]) -> None:
   shaped_train_args, shaped_train_kwargs, state_mesh_annotations, model = get_shaped_inputs(topology_mesh, config)
 
   # Get function to compile and shardings
-  func_to_compile, in_shardings, out_shardings, static_argnums, donate_argnums = maxtext_utils.get_functional_train_full_signature(
+  func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_full_signature(
     train.train_step,
     topology_mesh,
     state_mesh_annotations,
@@ -123,8 +124,8 @@ def main(argv: Sequence[str]) -> None:
     shaped_train_args,
     shaped_train_kwargs,
     topology_mesh,
-    in_shardings,
-    out_shardings,
+    in_shard,
+    out_shard,
     static_argnums,
     donate_argnums
   )

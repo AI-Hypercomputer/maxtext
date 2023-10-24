@@ -56,7 +56,6 @@ from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 import max_logging
-import functools
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
@@ -235,7 +234,7 @@ def train_loop(config, state=None):
 
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
-  functional_train, in_shardings, out_shardings, static_argnums, donate_argnums = maxtext_utils.get_functional_train_full_signature(
+  functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_full_signature(
     train_step,
     mesh,
     state_mesh_annotations,
@@ -256,8 +255,8 @@ def train_loop(config, state=None):
   else:
     p_train_step = jax.jit(
       functional_train,
-      in_shardings=in_shardings,
-      out_shardings=out_shardings,
+      in_shardings=in_shard,
+      out_shardings=out_shard,
       static_argnums=static_argnums,
       donate_argnums=donate_argnums)
 
