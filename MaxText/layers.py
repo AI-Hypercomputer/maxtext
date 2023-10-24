@@ -1205,7 +1205,6 @@ class Decoder(nn.Module):
                 decode,
                 max_decode_length)
 
-    y = nn.with_logical_constraint(y, ('activation_batch', 'activation_length', 'activation_embed'))
     y = LayerNorm(dtype=cfg.dtype, name='decoder_norm', kernel_axes = ('embed',))(y)
     y = nn.Dropout(
         rate=cfg.dropout_rate, broadcast_dims=(-2,))(
