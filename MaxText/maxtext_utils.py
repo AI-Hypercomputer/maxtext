@@ -1,3 +1,29 @@
+"""
+ Copyright 2023 Google LLC
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ """
+
+# pylint: disable=bare-except, consider-using-generator
+""" Maxtext Utils needed by train.py and the dependent compile_train.py"""
+
+import jax
+from jax.sharding import PartitionSpec as P
+from jax.experimental.serialize_executable import deserialize_and_load
+import pickle
+import functools
+import input_pipeline
+
 def get_functional_train_full_signature(train_step, mesh, state_mesh_annotations, model, config):
   """ Get the shardings (both state and data) for train_step """
   functional_train = get_functional_train_step(train_step, model, config)
@@ -13,7 +39,6 @@ def get_functional_train_full_signature(train_step, mesh, state_mesh_annotations
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
 
 def get_functional_train_step(train_step, model, config):
-  # Modularized out so can be publicly called for xaot
   return functools.partial(train_step, model, config)
 
 def get_optimizer(config, learning_rate_schedule):
@@ -63,7 +88,7 @@ def load_compiled(config, partial_train, state):
     return in_tree_recreated, out_tree_recreated
 
   serialized_compiled = load_serialized_compiled(config.compiled_trainstep_file)
-  shaped_batch = get_shaped_batch(config)
+  shaped_batch = input_pipeline.get_shaped_batch(config)
   example_rng = jax.random.PRNGKey(0)
   shaped_input_args = (state, shaped_batch, example_rng)
   shaped_input_kwargs = {}

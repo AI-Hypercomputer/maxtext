@@ -25,7 +25,6 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
-from jax.experimental.serialize_executable import deserialize_and_load
 from jax.sharding import PartitionSpec as P
 
 import json
@@ -40,9 +39,6 @@ import subprocess
 from typing import Tuple
 
 import pickle
-
-
-from input_pipeline import get_shaped_batch
 
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""

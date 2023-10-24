@@ -15,7 +15,6 @@
  """
 
 # pylint: disable=missing-module-docstring, missing-function-docstring
-import os
 import sys
 import numpy as np
 import jax

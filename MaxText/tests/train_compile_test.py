@@ -15,7 +15,6 @@
  """
 
 """ Tests for the common Max Utils """
-import jax
 import unittest
 from train_compile import main as train_compile_main
 from train import main as train_main
@@ -27,7 +26,8 @@ class TrainCompile(unittest.TestCase):
   def test_save_and_restore(self):
     compiled_trainstep_file='test_compiled.pickle'
     # 25 seconds to save
-    train_compile_main((None, "configs/base.yml", f"compiled_trainstep_file={compiled_trainstep_file}", "compile_topology=v4-8"))
+    train_compile_main((None, "configs/base.yml", f"compiled_trainstep_file={compiled_trainstep_file}",
+      "compile_topology=v4-8"))
     # 17 seconds to run
     train_main((None, "configs/base.yml", f"compiled_trainstep_file={compiled_trainstep_file}",
       r"base_output_directory=gs://runner-maxtext-logs", r"dataset_path=gs://maxtext-dataset",
