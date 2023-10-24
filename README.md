@@ -233,15 +233,24 @@ For a 52B model. See full run configs in `MaxText/configs/` as `1xv4-384.sh` and
 
 For a 16B model. See full run configs in `MaxText/configs/` as `16b.sh`.
 
-| Hardware    | TFLOP/sec/chip   |  MFU  |
-| ----------- | ---------------- | ----- |
-| 2x v5e-256  | 114              | 57.8% |
+| Hardware    | TFLOP/sec/chip   |   MFU  |
+| ----------- | ---------------- | ------ |
+| 1x v5e-256  | 120              | 67.10% |
+| 2x v5e-256  | 117              | 59.37% |
+| 4x v5e-256  | 117              | 59.14% |
+| 8x v5e-256  | 115              | 58.27% |
+| 16x v5e-256 | 111              | 56.56% |
 
 For a 32B model. See full run configs in `MaxText/configs/` as `32b.sh`.
 
-| Hardware    | TFLOP/sec/chip   |  MFU  |
-| ----------- | ---------------- | ----- |
-| 2x v5e-256  | 113              | 57.3% |
+| Hardware    | TFLOP/sec/chip   |   MFU  |
+| ----------- | ---------------- | ------ |
+| 1x v5e-256  | 132              | 66.86% |
+| 2x v5e-256  | 128              | 64.81% |
+| 4x v5e-256  | 126              | 64.10% |
+| 8x v5e-256  | 125              | 63.67% |
+| 16x v5e-256 | 123              | 62.26% |
+
 
 More details on reproducing these 16B and 32B model results on v5e can be found in `v5e_16b_32b.md`.
 
