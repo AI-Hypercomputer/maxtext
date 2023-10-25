@@ -401,6 +401,10 @@ def save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, 
             # jitted = pjit.pjit(
             #     func, in_shardings=in_shardings, out_shardings=out_shardings
             # )
+            print(f"{in_shardings=}")
+            print(f"{out_shardings=}")
+            print(f"{func_input_args=}")
+            print(f"{func_input_kwargs=}")
             jitted = jax.jit(
               func,
               in_shardings=in_shardings,
@@ -410,6 +414,7 @@ def save_compiled_full(func, compiled_name, func_input_args, func_input_kwargs, 
             )
             lowered = jitted.lower(*func_input_args, **func_input_kwargs)
         compiled = lowered.compile()
+        assert 1 > 2
         return jitted, lowered, compiled
 
     def save_compiled(compiled, save_name):
@@ -450,6 +455,15 @@ def get_topology_mesh(config):
     topology_name=f'v4:2x2x2',
     chip_config_name='megacore',
     chips_per_host_bounds=(2, 2, 2),
+    num_slices=config.topology_num_slices,
+).devices
+  elif config.topology=='v4-128':
+    print("excitement v4-128", flush=True)
+    topology_devices = get_topology_desc(
+    platform='tpu',
+    topology_name=f'v4:4x4x4',
+    chip_config_name='megacore',
+    chips_per_host_bounds=(2, 2, 1),
     num_slices=config.topology_num_slices,
 ).devices
   elif config.topology == 'v5e-16':
