@@ -252,8 +252,6 @@ def train_loop(config, state=None):
     p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
     print("Loaded compiled function!", flush=True)
   else:
-    # print(f"{in_shard=}")
-    # print(f"{out_shard=}")
     p_train_step = jax.jit(
       functional_train,
       in_shardings=in_shard,
