@@ -102,10 +102,6 @@ class _HyperParameters():
     raw_keys["tensorboard_dir"] = os.path.join(base_output_directory, run_name, "tensorboard", "")
     raw_keys["checkpoint_dir"] = os.path.join(base_output_directory, run_name, "checkpoints", "")
     raw_keys["metrics_dir"] = os.path.join(base_output_directory, run_name, "metrics", "")
-
-    assert raw_keys["logical_axis_rules"][1][1] == "None", print(f'type {type(raw_keys["logical_axis_rules"])}, value {raw_keys["logical_axis_rules"]}')
-    raw_keys["logical_axis_rules"][1][1] = None
-    print("change logical_axis_rules")
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     print(f'activation length setting: {raw_keys["logical_axis_rules"]}')
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])

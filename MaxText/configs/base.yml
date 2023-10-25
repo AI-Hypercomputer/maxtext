@@ -83,7 +83,7 @@ base_output_directory: ""
 mesh_axes: ['data', 'fsdp', 'tensor']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp']],
-                      ['activation_length', None],
+                      ['activation_length' , ['data', 'fsdp']],
                       ['activation_embed', 'tensor'],
                       ['activation_mlp', 'tensor'],
                       ['activation_heads', 'tensor'],
