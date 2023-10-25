@@ -228,7 +228,8 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
     return JSonnetTpuVmTest._from_json_helper(
         test,
         setup=test['tpuSettings']['tpuVmPytorchSetup']
-        + test['tpuSettings']['tpuVmExtraSetup'],
+        # HACK: Extra setup assumes a new shell in home directory
+        + '\ncd ~\n' + test['tpuSettings']['tpuVmExtraSetup'],
         exports=test['tpuSettings']['tpuVmExports'],
         test_command=test['command'],
         reserved=reserved_tpu,

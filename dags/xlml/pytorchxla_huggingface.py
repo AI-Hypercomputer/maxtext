@@ -31,29 +31,36 @@ US_CENTRAL2_B = gcp_config.GCPConfig(
 
 
 with models.DAG(
-    dag_id="pytorchxla-torchvision",
+    dag_id="pytorchxla-huggingface",
     schedule=None,
     tags=["pytorchxla", "latest", "supported"],
     start_date=datetime.datetime(2023, 7, 12),
 ):
-  mnist_v2_8 = task.TpuTask(
+  accelerate_v2_8 = task.TpuTask(
       test_config.JSonnetTpuVmTest.from_pytorch(
-          "pt-nightly-mnist-pjrt-func-v2-8-1vm"
+          "pt-nightly-accelerate-smoke-v2-8-1vm"
       ),
       US_CENTRAL1_C,
   ).run()
-  resnet_v2_8 = task.TpuTask(
+  accelerate_v4_8 = task.TpuTask(
       test_config.JSonnetTpuVmTest.from_pytorch(
-          "pt-nightly-resnet50-pjrt-fake-v2-8-1vm"
+          "pt-nightly-accelerate-smoke-v4-8-1vm"
       ),
-      US_CENTRAL1_C,
+      US_CENTRAL2_B,
   ).run()
-  resnet_v4_8 = task.TpuTask(
+  diffusers_v4_8 = task.TpuTask(
       test_config.JSonnetTpuVmTest.from_pytorch(
-          "pt-nightly-resnet50-pjrt-fake-v4-8-1vm"
+          "pt-nightly-hf-diffusers-func-v4-8-1vm"
       ),
       US_CENTRAL2_B,
   ).run()
 
-  mnist_v2_8 >> resnet_v2_8
-  mnist_v2_8 >> resnet_v4_8
+  accelerate_v4_8 >> accelerate_v2_8
+  accelerate_v4_8 >> diffusers_v4_8
+
+  task.TpuTask(
+      test_config.JSonnetTpuVmTest.from_pytorch(
+          "pt-nightly-hf-fsmt-pjrt-func-v4-8-1vm"
+      ),
+      US_CENTRAL2_B,
+  ).run()

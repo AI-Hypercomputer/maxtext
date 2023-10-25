@@ -18,11 +18,6 @@ from apis import gcp_config, metric_config, task, test_config
 from configs import vm_resource
 
 
-US_CENTRAL1_C = gcp_config.GCPConfig(
-    vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
-    vm_resource.Zone.US_CENTRAL1_C.value,
-    metric_config.DatasetOption.XLML_DATASET,
-)
 US_CENTRAL2_B = gcp_config.GCPConfig(
     vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
     vm_resource.Zone.US_CENTRAL2_B.value,
@@ -31,29 +26,20 @@ US_CENTRAL2_B = gcp_config.GCPConfig(
 
 
 with models.DAG(
-    dag_id="pytorchxla-torchvision",
+    dag_id="pytorchxla-llama",
     schedule=None,
     tags=["pytorchxla", "latest", "supported"],
     start_date=datetime.datetime(2023, 7, 12),
 ):
-  mnist_v2_8 = task.TpuTask(
+  llama_inference_v4_8 = task.TpuTask(
       test_config.JSonnetTpuVmTest.from_pytorch(
-          "pt-nightly-mnist-pjrt-func-v2-8-1vm"
-      ),
-      US_CENTRAL1_C,
-  ).run()
-  resnet_v2_8 = task.TpuTask(
-      test_config.JSonnetTpuVmTest.from_pytorch(
-          "pt-nightly-resnet50-pjrt-fake-v2-8-1vm"
-      ),
-      US_CENTRAL1_C,
-  ).run()
-  resnet_v4_8 = task.TpuTask(
-      test_config.JSonnetTpuVmTest.from_pytorch(
-          "pt-nightly-resnet50-pjrt-fake-v4-8-1vm"
+          "pt-nightly-llama2-i-infer-func-v4-8-1vm"
       ),
       US_CENTRAL2_B,
   ).run()
-
-  mnist_v2_8 >> resnet_v2_8
-  mnist_v2_8 >> resnet_v4_8
+  llama_train_v4_8 = task.TpuTask(
+      test_config.JSonnetTpuVmTest.from_pytorch(
+          "pt-nightly-llama2-t-train-spmd-func-v4-8-1vm"
+      ),
+      US_CENTRAL2_B,
+  ).run()
