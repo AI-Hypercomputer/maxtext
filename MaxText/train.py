@@ -167,8 +167,8 @@ def train_step(model, config, state, data, dropout_rng):
   aqt_rng, rng2 = jax.random.split(gen_aqt_rng)
 
   # decimate proportion of data when per_device_batch_size<1
-  for k, v in data.items():
-    data[k] = v[:config.global_batch_size_to_train_on,:]
+  # for k, v in data.items():
+  #   data[k] = v[:config.global_batch_size_to_train_on,:]
 
   def loss_fn(params):
     logits, intermediate_outputs = model.apply({'params': params},
