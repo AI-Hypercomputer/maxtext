@@ -17,3 +17,4 @@ tensorflow==2.13.*
 tensorflow-datasets
 tensorflow-text
 tensorboardx
+tensorboard-plugin-profile
