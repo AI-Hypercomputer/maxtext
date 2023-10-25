@@ -180,10 +180,12 @@ def train_step(model, config, state, data, dropout_rng):
                          rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
     logits = nn.with_logical_constraint(logits, ('activation_batch', 'activation_length', 'activation_vocab'))
     one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
+    one_hot_targets = nn.with_logical_constraint(one_hot_targets, ('activation_batch', 'activation_length', 'activation_vocab'))
     xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
     xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
     # Mask out paddings at the end of each example.
     xent = xent * (data['inputs_segmentation'] != 0)
+    xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
     return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)

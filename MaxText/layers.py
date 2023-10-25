@@ -1215,8 +1215,10 @@ class Decoder(nn.Module):
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
       logits = self.shared_embedding.attend(y)
+      logits = nn.with_logical_constraint(logits, ('activation_batch', 'activation_length', 'activation_vocab'))
       # Correctly normalize pre-softmax logits for this shared case.
       logits = logits / jnp.sqrt(y.shape[-1])
+      logits = nn.with_logical_constraint(logits, ('activation_batch', 'activation_length', 'activation_vocab'))
     else:
       logits = DenseGeneral(
           cfg.vocab_size,
