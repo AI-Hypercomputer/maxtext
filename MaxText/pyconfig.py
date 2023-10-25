@@ -107,6 +107,7 @@ class _HyperParameters():
     raw_keys["logical_axis_rules"][1][1] = None
     print("change logical_axis_rules")
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
+    print(f'activation length setting: {raw_keys["logical_axis_rules"]}')
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
     if raw_keys["learning_rate_schedule_steps"]==-1:
