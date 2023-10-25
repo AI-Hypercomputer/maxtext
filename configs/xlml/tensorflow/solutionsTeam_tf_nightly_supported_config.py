@@ -82,14 +82,14 @@ def get_tf_resnet_config(
       run_model_cmds=run_model_cmds,
       time_out_in_min=time_out_in_min,
       task_owner=test_owner.CHANDRA_D,
-      custom_tpu_name=tpu_name,
-      tpu_name_with_suffix=False,
-      all_workers=not is_pod,
   )
 
   return task.TpuTask(
       task_test_config=job_test_config,
       task_gcp_config=job_gcp_config,
+      custom_tpu_name=tpu_name,
+      suffix_tpu_name=False,
+      all_workers=not is_pod,
   )
 
 
@@ -163,14 +163,14 @@ def get_tf_bert_config(
       run_model_cmds=run_model_cmds,
       time_out_in_min=time_out_in_min,
       task_owner=test_owner.CHANDRA_D,
-      custom_tpu_name=tpu_name,
-      tpu_name_with_suffix=False,
-      all_workers=not is_pod,
   )
 
   return task.TpuTask(
       task_test_config=job_test_config,
       task_gcp_config=job_gcp_config,
+      custom_tpu_name=tpu_name,
+      suffix_tpu_name=False,
+      all_workers=not is_pod,
   )
 
 

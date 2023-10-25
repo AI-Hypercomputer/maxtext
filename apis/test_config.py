@@ -135,18 +135,11 @@ class TpuVmTest(TestConfig[Tpu]):
     test_name: Unique name for this test/model.
     set_up_cmds: List of commands to run once when TPU is created.
     run_model_cmds: List of commands to run the model under test.
-    custom_tpu_name: A custom TPU name.
-    tpu_name_with_suffix: The flag to define if add auto-generated suffix.
-    all_workers: The flag to define if run commands on all workers or worker 0
-      only.
   """
 
   test_name: str
   set_up_cmds: Iterable[str]
   run_model_cmds: Iterable[str]
-  custom_tpu_name: str = ''
-  tpu_name_with_suffix: bool = True
-  all_workers: bool = True
 
   @property
   def benchmark_id(self) -> str:
@@ -177,7 +170,6 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
 
   test_name: str
   setup: str
-
   exports: str
   test_command: List[str]
 
