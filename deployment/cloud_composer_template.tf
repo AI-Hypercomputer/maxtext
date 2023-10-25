@@ -102,11 +102,17 @@ resource "google_composer_environment" "example_environment" {
       airflow_config_overrides = {
         core-allowed_deserialization_classes = ".*"
       }
+      # Note: keep this in sync with .github/requirements.txt
       pypi_packages = {
         apache-airflow-providers-sendgrid = ""
-        jsonlines                         = ""
         fabric                            = ""
         google-cloud-tpu                  = ">=1.16.0"
+        jsonlines                         = ""
+        # These packages are already in the default composer environment.
+        # See https://cloud.google.com/composer/docs/concepts/versioning/composer-versions
+        # google-cloud-bigquery             = ""
+        # google-cloud-storage              = ""
+        # tensorflow-cpu                    = ""
       }
     }
 

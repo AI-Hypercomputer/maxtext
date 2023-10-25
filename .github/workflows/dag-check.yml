@@ -1,0 +1,45 @@
+# Build generated files with JSonnet and run all DAG scripts
+name: DAG Check
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, edited]
+
+  workflow_dispatch: {}
+
+jobs:
+  dags:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        submodules: 'true'
+
+    - name: Setup Go environment
+      uses: actions/setup-go@v2
+      with:
+        go-version: '1.21'
+
+    - name: Install JSonnet
+      run: |
+        go install github.com/google/go-jsonnet/cmd/jsonnet@latest
+        go install github.com/google/go-jsonnet/cmd/jsonnetfmt@latest
+        echo "$HOME/go/bin" >> $GITHUB_PATH
+
+    - name: Build JSonnet
+      run: |
+        scripts/gen-configs.sh
+
+    - uses: actions/setup-python@v4
+      with:
+        # Note: this should match Cloud Composer
+        # https://cloud.google.com/composer/docs/concepts/versioning/composer-versions
+        python-version: '3.8'
+
+    - name: Install Python dependencies
+      run: pip install -r .github/requirements.txt
+
+    - name: Run DAGs
+      run: |
+        scripts/dag-check.sh
