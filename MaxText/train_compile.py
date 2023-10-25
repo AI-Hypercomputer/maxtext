@@ -27,6 +27,7 @@ import jax
 from jax.experimental.topologies import get_topology_desc
 from jax.sharding import Mesh
 from jax.experimental.serialize_executable import serialize
+from flax.linen import partitioning as nn_partitioning
 import max_utils
 import maxtext_utils
 from layers import Transformer
@@ -74,9 +75,9 @@ def get_shaped_inputs(topology_mesh, config):
 
 
 def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings,
-  out_shardings, static_argnums, donate_argnums):
+  out_shardings, static_argnums, donate_argnums, logical_axis_rules):
   """ Jit, lower, and compile func."""
-  with mesh:
+  with mesh, logical_axis_rules:
     jitted = jax.jit(
       func,
       in_shardings=in_shardings,
@@ -127,7 +128,8 @@ def main(argv: Sequence[str]) -> None:
     in_shard,
     out_shard,
     static_argnums,
-    donate_argnums
+    donate_argnums,
+    nn_partitioning.axis_rules(config.logical_axis_rules)
   )
   print("Jitting and compilation complete!", flush=True)
 
