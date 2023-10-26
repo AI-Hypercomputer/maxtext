@@ -60,7 +60,7 @@ def get_topology_mesh(config):
 
 def get_shaped_inputs(topology_mesh, config):
   """ Get shaped abstractions of inputs to train_step: state, batch and rng """
-  # Cnstruct the model and optimizier to get shaped versions of the state
+  # Construct the model and optimizier to get shaped versions of the state
   model = Transformer(config, topology_mesh)
   # The learning_rate_schedule is baked into the compiled object.
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
