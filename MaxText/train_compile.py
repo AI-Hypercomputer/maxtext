@@ -60,16 +60,24 @@ def get_topology_mesh(config):
 
 def get_shaped_inputs(topology_mesh, config):
   """ Get shaped abstractions of inputs to train_step: state, batch and rng """
+  # Cnstruct the model and optimizier to get shaped versions of the state
   model = Transformer(config, topology_mesh)
   # The learning_rate_schedule is baked into the compiled object.
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
-  shaped_train_args, shaped_train_kwargs, state_mesh_annotations = maxtext_utils.gen_shaped_input_data(
-    model,
-    tx,
-    config,
-    topology_mesh
-  )
+
+  # Shaped RNG keys
+  example_rng = jax.random.PRNGKey(0)
+  shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
+
+  # Shaped state
+  abstract_state, state_mesh_annotations =  maxtext_utils.get_abstract_state(model, tx, config, example_rng, mesh)
+
+  # Shaped batch
+  shaped_batch = input_pipeline.get_shaped_batch(config)
+
+  shaped_train_args = (abstract_state, shaped_batch, shaped_rng)
+  shaped_train_kwargs = {}
   return shaped_train_args, shaped_train_kwargs, state_mesh_annotations, model
 
 

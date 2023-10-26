@@ -327,13 +327,3 @@ def load_compiled(config, partial_train, state):
   in_tree, out_tree = get_train_input_output_trees(partial_train, shaped_input_args, shaped_input_kwargs)
   p_train_step = deserialize_and_load(serialized_compiled, in_tree, out_tree)
   return p_train_step
-
-def gen_shaped_input_data(model, tx, config, mesh):
-  example_rng = jax.random.PRNGKey(0)
-  shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
-  abstract_state, state_mesh_annotations =  get_abstract_state(model, tx, config, example_rng, mesh)
-  shaped_batch = input_pipeline.get_shaped_batch(config)
-
-  input_args = (abstract_state, shaped_batch, shaped_rng)
-  input_kwargs = {}
-  return input_args, input_kwargs, state_mesh_annotations
