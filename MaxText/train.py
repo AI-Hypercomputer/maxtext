@@ -58,6 +58,25 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 import max_logging
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
+def validate_train_config(config):
+  """ Validates the configuration is set correctly for train.py"""
+
+  def _validate_gcs_bucket_name(bucket_name, config_var):
+    assert bucket_name, f"Please set {config_var}."
+    assert len(bucket_name) > 5 and bucket_name[0:5]=='gs://', f"Erroring out, {config_var} should start with 'gs://' "
+
+  assert config.run_name, "Erroring out, need a real run_name"
+  _validate_gcs_bucket_name(config.base_output_directory, "base_output_directory")
+  _validate_gcs_bucket_name(config.dataset_path, "dataset_path")
+
+  assert ((config.load_parameters_path=="" and config.load_from_other_directory=="") or
+    config.enable_checkpointing), "You must set enable_checkpointing to load a checkpoint"
+  assert config.load_parameters_path=="" or config.load_from_other_directory=="",\
+  "At most one of load_parameters_path or load_from_other_directory should be set"
+  assert config.load_from_other_directory_step==-1 or config.load_from_other_directory!="",\
+  "You must specify the loading directory if you specify the loading step"
+  assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive interger."
+
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
 def calculate_training_tflops(num_model_parameters, config):
   learnable_weight_tflops = 6 * num_model_parameters * config.max_target_length * config.per_device_batch_size \
@@ -179,7 +198,7 @@ def train_step(model, config, state, data, dropout_rng):
                          enable_dropout=config.enable_dropout,
                          rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
     one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
-    xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
+    xent, _ = maxtext_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
     xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
     # Mask out paddings at the end of each example.
     xent = xent * (data['inputs_segmentation'] != 0)
@@ -222,17 +241,17 @@ def train_loop(config, state=None):
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
 
   # Mesh definition
-  devices_array = max_utils.create_device_mesh(config)
+  devices_array = maxtext_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
   # Model and Optimizer definition
   model = Transformer(config, mesh)
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
+  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  state, state_mesh_annotations = maxtext_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
     train_step,
     mesh,
@@ -286,17 +305,17 @@ def train_loop(config, state=None):
         sys.exit()
 
     if config.metrics_file:
-      max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
+      maxtext_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
 
     if config.gcs_metrics and jax.process_index() == 0:
-      running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
+      running_gcs_metrics = maxtext_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
 
     # Start profiling at end of first step to avoid compilation.
     # Move before for loop to include.
     if step == 0:
-      max_utils.activate_profiler(config)
+      max_utils.activate_profiler(config.tensorboard_dir, enable_profiler=config.enable_profiler)
 
-  max_utils.deactivate_profiler(config)
+  maxtext_utils.deactivate_profiler(config.tensorboard_dir, enable_profiler=config.enable_profiler)
   writer.close()
   return state
 

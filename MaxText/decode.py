@@ -29,6 +29,7 @@ from layers import Transformer
 import pyconfig
 from input_pipeline import create_data_iterator_with_tokenizer
 import max_utils
+import maxtext_utils
 import temperature_sampler
 
 import checkpointing
@@ -128,20 +129,20 @@ def decode_loop(config, state=None):
   rng = random.PRNGKey(0)
 
   # Mesh definition
-  devices_array = max_utils.create_device_mesh(config)
+  devices_array = maxtext_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
   # Model and Optimizer definition
   model = Transformer(config, mesh = mesh)
 
   tx = optax.adamw(
-    max_utils.create_learning_rate_schedule(config)
+    maxtext_utils.create_learning_rate_schedule(config)
   ) # TODO: we need an optax.GradientTransformation to form a TrainState, but we don't use it when decoding
 
 
   _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
 
-  state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager)
+  state, state_mesh_annotations = maxtext_utils.setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager)
 
   state_mesh_shardings = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
@@ -159,7 +160,7 @@ def decode_loop(config, state=None):
   if config.metrics_file:
     local_metrics_file = open(config.metrics_file, 'a', encoding="utf8")
     metrics= {'scalar': {} }
-  max_utils.activate_profiler(config)
+  max_utils.activate_profiler(config.tensorboard_dir, enable_profiler=config.enable_profiler)
   for step in np.arange(config.steps):
     rng, rng_to_use = jax.random.split(rng)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -169,7 +170,7 @@ def decode_loop(config, state=None):
       if config.metrics_file:
         metrics['scalar']['num_tokens'] = num_tokens_decoded
         max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
-  max_utils.deactivate_profiler(config)
+  max_utils.deactivate_profiler(config.tensorboard_dir, enable_profiler=config.enable_profiler)
 
 
 

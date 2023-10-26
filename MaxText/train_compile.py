@@ -28,7 +28,6 @@ from jax.experimental.topologies import get_topology_desc
 from jax.sharding import Mesh
 from jax.experimental.serialize_executable import serialize
 from flax.linen import partitioning as nn_partitioning
-import max_utils
 import maxtext_utils
 from layers import Transformer
 import pyconfig
@@ -55,7 +54,7 @@ def get_topology_mesh(config):
       chips_per_host_bounds=target_hardware.chips_per_host_bounds,
       num_slices=config.compile_topology_num_slices,
   ).devices
-  topology_device_mesh = max_utils.create_device_mesh(config, topology_devices)
+  topology_device_mesh = maxtext_utils.create_device_mesh(config, topology_devices)
   topology_mesh = Mesh(topology_device_mesh, config.mesh_axes)
   return topology_mesh
 
@@ -63,7 +62,7 @@ def get_shaped_inputs(topology_mesh, config):
   """ Get shaped abstractions of inputs to train_step: state, batch and rng """
   model = Transformer(config, topology_mesh)
   # The learning_rate_schedule is baked into the compiled object.
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
+  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
   shaped_train_args, shaped_train_kwargs, state_mesh_annotations = maxtext_utils.gen_shaped_input_data(
     model,
