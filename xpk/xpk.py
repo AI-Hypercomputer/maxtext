@@ -210,10 +210,10 @@ description: "High"
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
-  name: very-high-non-preempt
+  name: very-high
 value: 1000
 globalDefault: false
-description: "Highest priority workload but will not preempt other workloads. It will be schedule ahead of other queued jobs."
+description: "Very High"
 """
 
 cluster_preheat_yml = """
@@ -1982,11 +1982,10 @@ workload_create_parser_optional_arguments.add_argument(
     '--priority',
     type=str,
     default='medium',
-    choices=['verylow', 'low', 'medium', 'high', 'very-high-non-preempt'],
+    choices=['verylow', 'low', 'medium', 'high', 'very-high'],
     help=(
-        'A priority, one of `verylow`, `low`, `medium`, `high` or `very-high-non-preempt`.'
-        ' Defaults to `medium`. `very-high-non-preempt` will not preempt other jobs'
-        ' will go to the front of the queue.'
+        'A priority, one of `verylow`, `low`, `medium`, `high` or `very-high`.'
+        ' Defaults to `medium`.'
     ),
 )
 workload_create_parser_optional_arguments.add_argument(
