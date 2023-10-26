@@ -155,6 +155,9 @@ kind: ClusterQueue
 metadata:
   name: "cluster-queue"
 spec:
+  preemption:
+      reclaimWithinCohort: Never # Don't preempt other queues in the cohort.
+      withinClusterQueue: LowerPriority
   namespaceSelector: {{}} # match all.
   resourceGroups:
   - coveredResources: ["google.com/tpu"]
@@ -207,10 +210,10 @@ description: "High"
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
-  name: veryhigh
+  name: very-high-non-preempt
 value: 1000
 globalDefault: false
-description: "Very high"
+description: "Highest priority workload but will not preempt other workloads. It will be schedule ahead of other queued jobs."
 """
 
 cluster_preheat_yml = """
@@ -1979,9 +1982,11 @@ workload_create_parser_optional_arguments.add_argument(
     '--priority',
     type=str,
     default='medium',
+    choices=['verylow', 'low', 'medium', 'high', 'very-high-non-preempt'],
     help=(
-        'A priority, one of `verylow`, `low`, `medium`, `high` or `veryhigh`.'
-        ' Defaults to `medium`.'
+        'A priority, one of `verylow`, `low`, `medium`, `high` or `very-high-non-preempt`.'
+        ' Defaults to `medium`. `very-high-non-preempt` will not preempt other jobs'
+        ' will go to the front of the queue.'
     ),
 )
 workload_create_parser_optional_arguments.add_argument(

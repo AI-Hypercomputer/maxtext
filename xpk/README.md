@@ -147,6 +147,34 @@ cleanup with a `Cluster Delete`.
     xpk-test --tpu-type=v5litepod-16
     ```
 
+### Workload Priority and Preemption
+* Set the priority level of your workload with `--priority=LEVEL`
+
+  We have five priorities defined: [`verylow`, `low`, `medium`, `high`, `very-high-non-preempt`].
+  The default priority is `medium`.
+
+  Priority determines:
+
+  1. Order of queued jobs.
+
+      Queued jobs are ordered by
+      `verylow` < `low` < `medium` < `high` <  `very-high-non-preempt`
+
+  2. Preemption of lower priority workloads.
+
+      A higher priority job will `evict` lower priority jobs.
+      Evicted jobs are brought back to the queue and will re-hydrate appropriately.
+
+      Only `very-high-non-preempt` will not preempt other jobs. `very-high-non-preempt` will enter the queue with the
+      highest priority and wait its turn.
+
+  #### General Example:
+  ```shell
+  python3 xpk/xpk.py workload create \
+  --workload xpk-test-medium-workload --command "echo goodbye" --cluster \
+  xpk-test --tpu-type=v5litepod-16 --priority=medium
+  ```
+
 ## Workload Delete
 *   Workload Delete (delete training job):
 
