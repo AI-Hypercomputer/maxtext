@@ -36,6 +36,7 @@ from absl import app
 import pickle
 import accelerator_to_spec_map
 import train
+import input_pipeline
 
 def validate_config(config):
   """ Validates the config is is setup correctly to compile, returning a useful error message if not. """
@@ -71,7 +72,7 @@ def get_shaped_inputs(topology_mesh, config):
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
 
   # Shaped state
-  abstract_state, state_mesh_annotations =  maxtext_utils.get_abstract_state(model, tx, config, example_rng, mesh)
+  abstract_state, state_mesh_annotations =  maxtext_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
 
   # Shaped batch
   shaped_batch = input_pipeline.get_shaped_batch(config)
