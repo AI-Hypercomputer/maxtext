@@ -25,12 +25,12 @@ def l2norm_pytree(x):
       lambda x, y: x + jax.numpy.sum(y ** 2), x, initializer=0.0
   ) ** 0.5
 
-def activate_profiler(tensorboard_dir, enable_profiler):
-  if jax.process_index() == 0 and enable_profiler:
+def activate_profiler(tensorboard_dir):
+  if jax.process_index() == 0:
     jax.profiler.start_trace(tensorboard_dir)
 
-def deactivate_profiler(enable_profiler):
-  if jax.process_index() == 0 and enable_profiler:
+def deactivate_profiler():
+  if jax.process_index() == 0:
     jax.profiler.stop_trace()
 
 
