@@ -37,7 +37,6 @@ import max_logging
 import os
 import subprocess
 
-from typing import Tuple
 import json
 import flax
 from flax.training import train_state

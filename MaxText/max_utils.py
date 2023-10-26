@@ -19,6 +19,7 @@
 
 import jax
 import jax.numpy as jnp
+from typing import Tuple
 
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
