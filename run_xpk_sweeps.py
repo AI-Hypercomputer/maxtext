@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
-from multihost_job import main as multihost_job_main
+# High level idea:
+# Instead of writing new config.yml, we will call xpk with maxtext commandline args
 import yaml
 import copy
 import os
