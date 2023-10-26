@@ -32,10 +32,8 @@ import optax
 
 
 import checkpointing
-import functools
 
 import max_logging
-import optax
 import os
 import subprocess
 

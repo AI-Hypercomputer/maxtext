@@ -29,7 +29,7 @@ def activate_profiler(tensorboard_dir, enable_profiler):
   if jax.process_index() == 0 and enable_profiler:
     jax.profiler.start_trace(tensorboard_dir)
 
-def deactivate_profiler(tensorboard_dir, enable_profiler):
+def deactivate_profiler(enable_profiler):
   if jax.process_index() == 0 and enable_profiler:
     jax.profiler.stop_trace()
 

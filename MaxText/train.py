@@ -315,14 +315,14 @@ def train_loop(config, state=None):
     if step == 0:
       max_utils.activate_profiler(config.tensorboard_dir, enable_profiler=config.enable_profiler)
 
-  maxtext_utils.deactivate_profiler(config.tensorboard_dir, enable_profiler=config.enable_profiler)
+  max_utils.deactivate_profiler(enable_profiler=config.enable_profiler)
   writer.close()
   return state
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   config = pyconfig.config
-  maxtext_utils.validate_train_config(config)
+  validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   debug_config = debug_configuration.DebugConfig(
     stack_trace_config = stack_trace_configuration.StackTraceConfig(

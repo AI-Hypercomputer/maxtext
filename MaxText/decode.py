@@ -170,7 +170,7 @@ def decode_loop(config, state=None):
       if config.metrics_file:
         metrics['scalar']['num_tokens'] = num_tokens_decoded
         max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
-  max_utils.deactivate_profiler(config.tensorboard_dir, enable_profiler=config.enable_profiler)
+  max_utils.deactivate_profiler(enable_profiler=config.enable_profiler)
 
 
 
