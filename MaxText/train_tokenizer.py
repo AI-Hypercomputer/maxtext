@@ -19,8 +19,10 @@ import os
 import tempfile
 import argparse
 import time
-from typing import Tuple
+from typing import Tuple, List
 from absl import logging
+from absl import app
+from absl import flags
 
 import tensorflow as tf
 import tensorflow_datasets as tfds
@@ -114,7 +116,7 @@ def train_tokenizer(dataset: tf.data.Dataset,
                       vocab_path: str,
                       vocab_size: int,
                       max_corpus_chars: int,
-                      data_keys: Tuple[str, str] = ('text',)):
+                      data_keys: Tuple[str] = ('text',)):
   """tokenizer training function"""
   logging.info('SentencePiece vocab not found, building one from data.')
   vocab_path = _train_sentencepiece(
@@ -126,55 +128,53 @@ def train_tokenizer(dataset: tf.data.Dataset,
       data_keys=data_keys)
   logging.info('Model saved at %s', vocab_path)
 
+parser = argparse.ArgumentParser(
+  description="Train tokenizer"
+)
+parser.add_argument(
+    "--dataset_path",
+    required=True,
+    default="",
+    help="Path to the dataset",
+    type=str
+)
+parser.add_argument(
+    "--dataset_name",
+    required=True,
+    default="",
+    help="Name to the dataset",
+    type=str
+)
+parser.add_argument(
+  "--vocab_size",
+  default=32_768,
+  help="vocab size",
+  type=int
+)
+parser.add_argument(
+  "--max_corpus_chars",
+  default=10_000_000,
+  help="max corpus chars",
+  type=int
+)
+parser.add_argument(
+    "--assets_path",
+    required=False,
+    default="assets",
+    help="Name to the dataset",
+    type=str
+)
+parser.add_argument(
+    "--vocab_model_name",
+    required=False,
+    default="tokenizer",
+    help="Name to the dataset",
+    type=str
+)
+args = parser.parse_args()
+os.environ["TFDS_DATA_DIR"] = args.dataset_path
 
-
-def main():
-  parser = argparse.ArgumentParser(
-    description="Train tokenizer"
-  )
-  parser.add_argument(
-      "--dataset_path",
-      required=True,
-      default="",
-      help="Path to the dataset",
-      type=str
-  )
-  parser.add_argument(
-      "--dataset_name",
-      required=True,
-      default="",
-      help="Name to the dataset",
-      type=str
-  )
-  parser.add_argument(
-    "--vocab_size",
-    default=32_768,
-    help="vocab size",
-    type=int
-  )
-  parser.add_argument(
-    "--max_corpus_chars",
-    default=10_000_000,
-    help="max corpus chars",
-    type=int
-  )
-  parser.add_argument(
-      "--assets_path",
-      required=False,
-      default="assets",
-      help="Name to the dataset",
-      type=str
-  )
-  parser.add_argument(
-      "--vocab_model_name",
-      required=False,
-      default="tokenizer",
-      help="Name to the dataset",
-      type=str
-  )
-  args = parser.parse_args()
-  os.environ["TFDS_DATA_DIR"] = args.dataset_path
-
+def main(argv: List[str]):
   read_config = tfds.ReadConfig(
     shuffle_seed = 0,
   )
@@ -186,5 +186,9 @@ def main():
                 vocab_size=args.vocab_size,
                 max_corpus_chars=args.max_corpus_chars)
 
-if __name__ == '__main__':
-  main()
+def parse_flags(argv):
+  return parser.parse_args(argv[1:])
+
+if __name__ == "__main__":
+  flags.FLAGS.mark_as_parsed()
+  app.run(main, flags_parser=parse_flags)
