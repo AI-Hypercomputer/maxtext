@@ -104,8 +104,6 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
         # Copy libtpu.so from GCS path
         gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
     fi
-    echo "Installing stable tensorboard plugin profile"
-    pip3 install tensorboard-plugin-profile --upgrade
 elif [[ $MODE == "nightly" ]]; then 
 # Nightly mode
     echo "Installing jax-head, jaxlib-nightly"
@@ -126,8 +124,32 @@ elif [[ $MODE == "nightly" ]]; then
         echo "Installing libtpu-nightly"
         pip3 install libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html -U --pre
     fi
-    echo "Installing nightly tensorboard plugin profile"
-    pip3 install tbp-nightly --upgrade
+elif [[ $MODE == "head" ]]; then 
+# Head mode
+    if [[ -n "$LIBTPU_GCS_PATH" ]]; then
+        # Install custom libtpu
+        echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
+        # Install required dependency
+        pip3 install -U crcmod
+        # Copy libtpu.so from GCS path
+        gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+    else
+        echo -e "\n\nError: You must provide a custom libtpu for head mode.\n\n"
+        exit 1
+    fi
+
+    echo "Installing jax-head, jaxlib-head"
+    # Install jax from GitHub head
+    echo "Installing jax from HEAD..."
+    # Install jax from GitHub head
+    pip3 install git+https://github.com/google/jax
+    # Install jaxlib from GitHub head
+    echo "Installing jaxlib from HEAD..."
+    cd $HOME && git clone https://github.com/openxla/xla
+    cd $HOME && git clone https://github.com/google/jax.git
+    cd $HOME/jax
+    python3 build/build.py --enable_tpu --bazel_options="--override_repository=xla=$HOME/xla"
+    pip3 install dist/jaxlib-*-cp*-manylinux2014_x86_64.whl --force-reinstall --no-deps
 else
     echo -e "\n\nError: You can only set MODE to [stable,nightly,libtpu-only].\n\n"
     exit 1
