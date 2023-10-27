@@ -231,17 +231,17 @@ For a 52B model. See full run configs in `MaxText/configs/` as `1xv4-384.sh` and
 
 ## TPU v5e
 
-For a 16B model. See full run configs in `MaxText/configs/` as `16b.sh`.
+For a 16B model. See full run configs in `MaxText/configs/largest_job/` as `16b.sh`.
 
 | Hardware    | TFLOP/sec/chip   |   MFU  |
 | ----------- | ---------------- | ------ |
-| 1x v5e-256  | 120              | 67.10% |
+| 1x v5e-256  | 120              | 61.10% |
 | 2x v5e-256  | 117              | 59.37% |
 | 4x v5e-256  | 117              | 59.14% |
 | 8x v5e-256  | 115              | 58.27% |
 | 16x v5e-256 | 111              | 56.56% |
 
-For a 32B model. See full run configs in `MaxText/configs/` as `32b.sh`.
+For a 32B model. See full run configs in `MaxText/configs/largest_job/` as `32b.sh`.
 
 | Hardware    | TFLOP/sec/chip   |   MFU  |
 | ----------- | ---------------- | ------ |
@@ -251,8 +251,27 @@ For a 32B model. See full run configs in `MaxText/configs/` as `32b.sh`.
 | 8x v5e-256  | 125              | 63.67% |
 | 16x v5e-256 | 123              | 62.26% |
 
+For a 64B model. See full run configs in `MaxText/configs/largest_job/` as `64b.sh`.
 
-More details on reproducing these 16B and 32B model results on v5e can be found in `v5e_16b_32b.md`.
+| Hardware    | TFLOP/sec/chip   |   MFU  |
+| ----------- | ---------------- | ------ |
+| 1x v5e-256  | 118              | 59.90% |
+| 2x v5e-256  | 112              | 56.66% |
+| 4x v5e-256  | 110              | 55.85% |
+| 8x v5e-256  | 108              | 54.96% |
+| 16x v5e-256 | 105              | 53.39% |
+
+For a 128B model. See full run configs in `MaxText/configs/largest_job/` as `128b.sh`.
+
+| Hardware    | TFLOP/sec/chip   |   MFU  |
+| ----------- | ---------------- | ------ |
+| 1x v5e-256  | 110              | 56.06% |
+| 2x v5e-256  | 110              | 55.82% |
+| 4x v5e-256  | 108              | 54.93% |
+| 8x v5e-256  | 104              | 52.93% |
+| 16x v5e-256 | 100              | 50.86% |
+
+More details on reproducing these results on v5e can be found in `v5e_16b_32b.md`.
 
 
 # Comparison to Alternatives

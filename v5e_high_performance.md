@@ -23,10 +23,10 @@ The following are details on how to achieve up to 66.86% MFU results on TPU v5e 
 | 16B        | 2x v5e-256  | 117              | 59.37% |
 | 32B        | 1x v5e-256  | 132              | 66.86% |
 | 32B        | 2x v5e-256  | 128              | 64.81% |
-| 64B        | 1x v5e-256  | 114              | 57.8% |
-| 64B        | 2x v5e-256  | 114              | 57.8% |
-| 128B       | 1x v5e-256  | 113              | 57.3% |
-| 128B       | 2x v5e-256  | 113              | 57.3% |
+| 64B        | 1x v5e-256  | 118              | 59.90% |
+| 64B        | 2x v5e-256  | 112              | 56.66% |
+| 128B       | 1x v5e-256  | 110              | 56.06% |
+| 128B       | 2x v5e-256  | 110              | 55.82% |
 
 We have shown full scaling performance results up to 16 v5e pods in [README.md](https://github.com/google/maxtext/blob/main/README.md#tpu-v5e
 ) for these configurations, however they are capable of scaling up to hundreds of v5e pods. The full configurations and scripts can be found in [MaxText/configs/largest_job/](https://github.com/google/maxtext/tree/main/MaxText/configs/largest_job). 
