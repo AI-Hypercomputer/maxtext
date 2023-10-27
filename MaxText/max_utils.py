@@ -29,7 +29,6 @@ from jax.experimental import mesh_utils
 import json
 import flax
 from flax.training import train_state
-from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
 import optax
@@ -196,7 +195,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     state_mesh_annotations: the mesh annotations for the train state
   """
 
-  unboxed_abstract_state, state_mesh_annotations = get_abstract_state(model, tx, config, rng, mesh)
+  unboxed_abstract_state, state_mesh_annotations = maxtext_utils.get_abstract_state(model, tx, config, rng, mesh)
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):

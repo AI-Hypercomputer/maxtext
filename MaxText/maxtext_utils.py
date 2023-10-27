@@ -21,8 +21,8 @@ import jax
 from jax.sharding import PartitionSpec as P
 from jax.experimental.serialize_executable import deserialize_and_load
 
-import numpy as np
 
+import maxtext_utils
 import pickle
 import functools
 import input_pipeline
@@ -86,15 +86,15 @@ def load_compiled(config, partial_train, state):
   p_train_step = deserialize_and_load(serialized_compiled, in_tree, out_tree)
   return p_train_step
 
-  def get_abstract_state(model, tx, config, rng, mesh):
-    """ Get a shaped abstraction of the state (including optimizer)"""
-    init_train_state_partial = functools.partial(init_train_state, model, tx,
-                                                config)
-    abstract_state = jax.eval_shape(init_train_state_partial, rng)
-    state_logical_annotations = nn.get_partition_spec(abstract_state)
-    unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
+def get_abstract_state(model, tx, config, rng, mesh):
+  """ Get a shaped abstraction of the state (including optimizer)"""
+  init_train_state_partial = functools.partial(max_utils.init_train_state, model, tx,
+                                              config)
+  abstract_state = jax.eval_shape(init_train_state_partial, rng)
+  state_logical_annotations = nn.get_partition_spec(abstract_state)
+  unboxed_abstract_state = max_utils.unbox_logicallypartioned_trainstate(abstract_state)
 
-    # Initialization
-    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-    return unboxed_abstract_state, state_mesh_annotations
+  # Initialization
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  return unboxed_abstract_state, state_mesh_annotations
