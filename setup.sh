@@ -15,11 +15,11 @@
 # limitations under the License.
 
 # Description:
-# bash setup.sh MODE={stable,nightly,head,libtpu-only} LIBTPU_GCS_PATH={gcs_path_to_custom_libtpu}
+# bash setup.sh MODE={stable,nightly,libtpu-only} LIBTPU_GCS_PATH={gcs_path_to_custom_libtpu}
 
 # You need to specificy a MODE, default value stable. 
 # You have the option to provide a LIBTPU_GCS_PATH that points to a libtpu.so provided to you by Google. 
-# In head MODE and libtpu-only MODE, the LIBTPU_GCS_PATH is mandatory.
+# In libtpu-only MODE, the LIBTPU_GCS_PATH is mandatory.
 # For MODE=stable you may additionally specify JAX_VERSION, e.g. JAX_VERSION=0.4.13
 
 
@@ -124,34 +124,8 @@ elif [[ $MODE == "nightly" ]]; then
         echo "Installing libtpu-nightly"
         pip3 install libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html -U --pre
     fi
-elif [[ $MODE == "head" ]]; then 
-# Head mode
-    if [[ -n "$LIBTPU_GCS_PATH" ]]; then
-        # Install custom libtpu
-        echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
-        # Install required dependency
-        pip3 install -U crcmod
-        # Copy libtpu.so from GCS path
-        gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
-    else
-        echo -e "\n\nError: You must provide a custom libtpu for head mode.\n\n"
-        exit 1
-    fi
-
-    echo "Installing jax-head, jaxlib-head"
-    # Install jax from GitHub head
-    echo "Installing jax from HEAD..."
-    # Install jax from GitHub head
-    pip3 install git+https://github.com/google/jax
-    # Install jaxlib from GitHub head
-    echo "Installing jaxlib from HEAD..."
-    cd $HOME && git clone https://github.com/openxla/xla
-    cd $HOME && git clone https://github.com/google/jax.git
-    cd $HOME/jax
-    python3 build/build.py --enable_tpu --bazel_options="--override_repository=xla=$HOME/xla"
-    pip3 install dist/jaxlib-*-cp*-manylinux2014_x86_64.whl --force-reinstall --no-deps
 else
-    echo -e "\n\nError: You can only set MODE to [stable,nightly,head,libtpu-only].\n\n"
+    echo -e "\n\nError: You can only set MODE to [stable,nightly,libtpu-only].\n\n"
     exit 1
 fi
 

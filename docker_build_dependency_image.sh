@@ -17,7 +17,6 @@
 # Example command: 
 # bash docker_build_dependency_image.sh MODE=stable
 # bash docker_build_dependency_image.sh MODE=nightly
-# bash docker_build_dependency_image.sh MODE=head
 # bash docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
 
 # Enable "exit immediately if any command fails" option
