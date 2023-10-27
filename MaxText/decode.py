@@ -159,8 +159,7 @@ def decode_loop(config, state=None):
   if config.metrics_file:
     local_metrics_file = open(config.metrics_file, 'a', encoding="utf8")
     metrics= {'scalar': {} }
-  if config.enable_profiler:
-    max_utils.activate_profiler(config)
+  max_utils.activate_profiler(config)
   for step in np.arange(config.steps):
     rng, rng_to_use = jax.random.split(rng)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -170,8 +169,7 @@ def decode_loop(config, state=None):
       if config.metrics_file:
         metrics['scalar']['num_tokens'] = num_tokens_decoded
         max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
-  if config.enable_profiler:
-    max_utils.deactivate_profiler(config)
+  max_utils.deactivate_profiler(config)
 
 
 

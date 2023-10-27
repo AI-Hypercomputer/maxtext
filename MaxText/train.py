@@ -312,11 +312,10 @@ def train_loop(config, state=None):
 
     # Start profiling at end of first step to avoid compilation.
     # Move before for loop to include.
-    if step == 0 and config.enable_profiler:
+    if step == 0:
       max_utils.activate_profiler(config)
 
-  if config.enable_profiler:
-    max_utils.deactivate_profiler(config)
+  max_utils.deactivate_profiler(config)
   writer.close()
   return state
 
