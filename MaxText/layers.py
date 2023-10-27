@@ -712,6 +712,86 @@ class Embed(nn.Module):
     dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
     return jnp.dot(query, jnp.asarray(self.embedding, dtype).T)
 
+class LLaMARotaryEmbedding(nn.Module):
+  """LLaMA variant of ROPE where inputs are split in a different way.
+  
+  Attributes:
+    min_timescale: Start of the geometric index. Determines the periodicity of
+      the added signal.
+    max_timescale: End of the geometric index. Determines the frequency of the
+      added signal.
+    embedding_dims: Dimension of the embedding to be generated.
+  """
+  min_timescale: int = 1
+  max_timescale: int = 10_000
+  embedding_dims: int = 0
+  cast_as_fprop_dtype: bool = True
+  fprop_dtype: DType = jnp.float32
+
+  def setup(self) -> None:
+    if self.embedding_dims % 2:
+      raise ValueError(
+          'Embedding dim for rotary position embedding must be a multiple of 2.'
+      )
+
+  def __call__(
+      self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
+      inputs: jax.Array,
+      position: Optional[jax.Array] = None,
+  ) -> jax.Array:
+    """Generates a jax.Array of sinusoids with different frequencies.
+
+    Args:
+      inputs: The input sequence on which to apply the Rotary position
+        embedding. Since rotary position embeddings are applied to query and
+        keys after projection, it is assumed of shape [B, S, N, H].
+      position: Optional position jax.Array which denotes the position of each
+        token in the sequence. This only needs to be supplied when the sequence
+        is packed. It is of shape [B, S].
+
+    Returns:
+      a jax.Array of shape [B, S, N, H] which includes the inputs together with
+      the rotary position embedding incorporated in it.
+    """
+    if len(inputs.shape) != 4:
+      raise ValueError(
+          'Input is assumed to be a rank 4 tensor of shape'
+          '[batch, sequence, heads, dims].'
+      )
+    if self.embedding_dims != inputs.shape[3]:
+      raise ValueError(
+          'The embedding dims of the rotary position embedding'
+          'must match the hidden dimension of the inputs.'
+      )
+    half_embedding_dim = self.embedding_dims // 2
+    fraction = 2 * jnp.arange(0, half_embedding_dim) / self.embedding_dims
+    timescale = (
+        self.min_timescale
+        * (self.max_timescale / self.min_timescale) ** fraction
+    )
+    if position is None:
+      seq_length = inputs.shape[1]
+      position = jnp.arange(seq_length, dtype=jnp.float32)[jnp.newaxis, :]
+    position = position[:, :, jnp.newaxis, jnp.newaxis]
+    timescale = timescale[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
+    sinusoid_inp = position / timescale
+    sin = jnp.sin(sinusoid_inp)
+    cos = jnp.cos(sinusoid_inp)
+    reshape_tensor = inputs.astype(jnp.float32).reshape(
+        *inputs.shape[:-1], -1, 2
+    )
+    first_half = reshape_tensor[..., 0]
+    second_half = reshape_tensor[..., 1]
+    first_part = first_half * cos - second_half * sin
+    second_part = second_half * cos + first_half * sin
+    if self.cast_as_fprop_dtype:
+      first_part = first_part.astype(self.fprop_dtype)
+      second_part = second_part.astype(self.fprop_dtype)
+    x_out = jnp.stack((first_part, second_part), axis=-1).reshape(
+        *first_part.shape[:-1], -1
+    )
+    return x_out
+
 
 class RelativePositionBiases(nn.Module):
   """Adds T5-style relative positional embeddings to the attention logits.
