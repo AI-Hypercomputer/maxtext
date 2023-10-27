@@ -38,7 +38,7 @@ def run_job(run_name, base_config, num_slices, **config_updates):
     print(f"RUN:  {run_name:30}", url)
 
     maxtext_config_args = update_yaml_fields(maxtext_config_args, {'run_name': run_name}, allow_new_keys=True)
-    cmd = BASE_CMD + str(maxtext_config_args)
+    cmd = BASE_CMD + maxtext_config_args
 
 
     xpk_cmd = ["python3", "xpk/xpk.py", "workload", "create",
