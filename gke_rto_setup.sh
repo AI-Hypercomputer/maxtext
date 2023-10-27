@@ -1,4 +1,4 @@
-echo "Running gke_rto_setup.sh..."
+echo "Running gke_rto_setup.sh for GKE..."
 
 # Stop execution if any command exits with error
 set -e
