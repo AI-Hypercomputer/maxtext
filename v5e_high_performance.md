@@ -71,7 +71,7 @@ Depending on your organization's set up, these instructions may vary. Here we pr
 
 4. Install MaxText dependencies and run 16b.sh, 32b.sh, 64b.sh, or 128b.sh on __each worker__.
      ```
-     bash setup.sh && bash MaxText/configs/largest_job/128b.sh OUTPUT_PATH=${MAXTEXT_OUTPUT_PATH} DATASET_PATH=${MAXTEXT_DATASET_PATH} PLATFORM=gce
+     bash setup.sh && bash MaxText/configs/largest_job/128b.sh RUN_NAME=${YOUR_RUN_NAME} OUTPUT_PATH=${MAXTEXT_OUTPUT_PATH} DATASET_PATH=${MAXTEXT_DATASET_PATH} PLATFORM=gce
      ```
 
      We recommend either the orchestration tool [multihost_runner.py](https://github.com/google/maxtext/blob/main/README.md#getting-started-quick-experiments-on-multiple-slices) 
@@ -79,7 +79,7 @@ Depending on your organization's set up, these instructions may vary. Here we pr
      [multihost_job.py](https://github.com/google/maxtext/blob/main/README.md#getting-started-production-jobs-on-multiple-slices) for longer training runs. If you use these tools, 
      then use the above as the input to `--COMMAND`, e.g.:
      ```
-     python3 multihost_runner.py --TPU_PREFIX=${TPU_PREFIX} --COMMAND="bash setup.sh && bash MaxText/configs/largest_job/128b.sh RUN_NAME=${YOUR_RUN_NAME} OUTPUT_PATH=${MAXTEXT_OUTPUT_PATH} DATASET_PATH=${MAXTEXT_DATASET_PATH}"
+     python3 multihost_runner.py --TPU_PREFIX=${TPU_PREFIX} --COMMAND="bash setup.sh && bash MaxText/configs/largest_job/128b.sh RUN_NAME=${YOUR_RUN_NAME} OUTPUT_PATH=${MAXTEXT_OUTPUT_PATH} DATASET_PATH=${MAXTEXT_DATASET_PATH} PLATFORM=gce"
      ```
 
 ### Running on GKE with XPK
