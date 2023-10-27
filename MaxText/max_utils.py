@@ -318,16 +318,24 @@ def _cross_entropy_with_logits_fwd(
            Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
                  jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
   """Forward-mode of `cross_entropy_with_logits`."""
+  logits = nn.with_logical_constraint(logits, ('activation_batch', 'activation_length', 'activation_vocab'))
   max_logit = logits.max(axis=-1, keepdims=True)
   shifted = logits - max_logit
+  shifted = nn.with_logical_constraint(shifted, ('activation_batch', 'activation_length', 'activation_vocab'))
   exp_shifted = jnp.exp(shifted)
+  exp_shifted = nn.with_logical_constraint(exp_shifted, ('activation_batch', 'activation_length', 'activation_vocab'))
   sum_exp = jnp.sum(exp_shifted, axis=-1, keepdims=True)
   log_softmax = shifted - jnp.log(sum_exp)
+  log_softmax = nn.with_logical_constraint(log_softmax, ('activation_batch', 'activation_length', 'activation_vocab'))
   loss = -jnp.sum(targets * log_softmax, axis=-1)
+  loss = nn.with_logical_constraint(loss, ('activation_batch', 'activation_length'))
   # Add auxilliary z-loss term.
   log_z = jnp.squeeze(jnp.log(sum_exp) + max_logit, axis=-1)
+  log_z = nn.with_logical_constraint(log_z, ('activation_batch', 'activation_length'))
   total_z_loss = z_loss * jax.lax.square(log_z)
+  total_z_loss = nn.with_logical_constraint(total_z_loss, ('activation_batch', 'activation_length'))
   loss += total_z_loss
+  loss = nn.with_logical_constraint(loss, ('activation_batch', 'activation_length'))
   return (loss, total_z_loss), (logits, targets, z_loss, exp_shifted, sum_exp, #pytype: disable=bad-return-type  #jax-ndarray
                                 log_softmax, log_z)
 
