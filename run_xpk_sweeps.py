@@ -9,11 +9,10 @@ import re
 
 args = {
     'dryrun': True,
-    'cluster': False,
+    'cluster': '',
     'docker_image': '',
     'tpu-type': 'v4', # 'v4' 'v5litepod-256'
-    
-
+    'jobre'
 }
 
 
@@ -33,35 +32,11 @@ def bname(b: bool):
     assert b == True or b == False, f'not bool: "{b}"'
     return str(b)[0]
 
-def run_job(run_name, base_config, **config_updates):
-    maxtext_config = update_yaml_fields(base_config, config_updates)
-    # model_size = maxtext_config['global_parameter_scale']
-    with open('MaxText/configs/base.yml', 'r') as file:
-        base_yml = yaml.safe_load(file)
-
-    yml = update_yaml_fields(base_yml, maxtext_config)
-
-    num_slice = yml['num_slice']
-    tokens_per_seq = yml['max_target_length']
-    seqs_per_chip = yml['per_device_batch_size']
-    fill_ratio = yml['fill_ratio']
-
-    def calc_chinchilla_step_count(num_params_billions, num_slice, seqs_per_chip, tokens_per_seq, fill_ratio):
-        billion = 2 ** 30
-        chips_per_slice = 256
-        needed_tokens = num_params_billions * billion * 20
-        tokens_per_step = tokens_per_seq * seqs_per_chip * chips_per_slice * num_slice
-        needed_steps = int(needed_tokens / tokens_per_step / fill_ratio)
-        return needed_steps
-    lr_steps = calc_chinchilla_step_count(num_params_billions=model_size, num_slice=num_slice, seqs_per_chip=seqs_per_chip, tokens_per_seq=tokens_per_seq, fill_ratio=fill_ratio)
-
-    yml = update_yaml_fields(yml, {
-        'learning_rate_schedule_steps': lr_steps,
-    })
+def run_job(run_name, base_config, num_slices, **config_updates):
+    maxtext_config_args = update_yaml_fields(base_config, config_updates)
 
     attempt = args['attempt']
     sweep_name = args['sweep']
-    run_name = f'int8-{sweep_name}-a{attempt}-{run_name}'
     jobre = args['jobre']
     url = f"https://pantheon.corp.google.com/logs/query;query=timestamp%20%3E%20%222023-08-18%22%20AND%20labels.%22agent.googleapis.com%2Flog_file_path%22%3D~%22{run_name}.*%2Fmain_command_log_slice_0_worker_0%22"
     if not re.findall(jobre, run_name):
@@ -76,6 +51,16 @@ def run_job(run_name, base_config, **config_updates):
         yaml.dump(yml, file)
 
     xpk_cmd = BASE_XPK_CMD
+
+python3 xpk/xpk.py workload create \
+--cluster bodaborgprivate5 \
+--docker-image gcr.io/${PROJECT_ID}/${USER}_runner \
+--workload ${USER}-first-job \
+--tpu-type=v5litepod-256 \
+--num-slices=1  \
+--command "python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=gs://maxtext-experiments-tpem/ dataset_path=gs://max-datasets-rogue/ steps=100 per_device_batch_size=1"
+
+xpk_workload_cmd = ["python3", "xpk/xpk.py", "workload", "create", "--cluster", args.cluster, "--docker-image", args.docker-image, "--workload", run_name, "--tpu-type", args.tpu-type, "--num-slices", ]
 
     experiment_mhj = {
         '--RUN_NAME': run_name,
@@ -130,21 +115,27 @@ def run_s38(): # 32
     run_job(f"long-FFF", ablation(gps=1), num_slice=16, fill_ratio=0.8 / 16 /1.20  , int8_training=False)
     run_job(f"long-TTF", ablation(gps=1), num_slice=16, fill_ratio=0.8 / 16 /1.20  , int8_training=True)
 
-def run_sweep_accum():
-    base_yml_updates = {"int8_training" : True, }
+def base_test():
+    return dict(
+        global_parameter_scale = 2
+        base_output_directory = "gs://maxtext-experiments-multipod"
+        dataset_path = "gs://max-datasets-rogue"
+    )
 
+def run_test():
+    run_job("mattdavidow-b1", base_test(), per_device_batch_size=1)
+    run_job("mattdavidow-b1", base_test(), per_device_batch_size=2)
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='TPU configuration options')
     parser.add_argument('--dryrun', type=bool, default=True, action=argparse.BooleanOptionalAction)
-    #parser.add_argument('--delyml', type=bool, default=False, action=argparse.BooleanOptionalAction)
-    #parser.add_argument('--stable', type=bool, default=True, action=argparse.BooleanOptionalAction)
-    parser.add_argument('--tpu', type=str, default='v5')
+    parser.add_argument('--cluster', type=str, default='', required=True)
+    parser.add_argument('--docker_image', type=str, default='', required=True)
+    parser.add_argument('--tpu-type', type=str, default='', required=True)
     parser.add_argument('--jobre', type=str, default='.*')
-    parser.add_argument('--sweep', type=str, default='')
-    parser.add_argument('--attempt', type=str, default='')
-    #parser.add_argument('--jax_14_cl', type=bool, default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--sweep', type=str, default='', required=True)
+    parser.add_argument('--attempt', type=str, default='', required=True)
     pargs = parser.parse_args()
     global args
     args = pargs.__dict__
