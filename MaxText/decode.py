@@ -142,7 +142,7 @@ def decode_loop(config, state=None):
 
   _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
 
-  state, state_mesh_annotations = maxtext_utils.setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager)
+  state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager)
 
   state_mesh_shardings = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
@@ -161,7 +161,7 @@ def decode_loop(config, state=None):
     local_metrics_file = open(config.metrics_file, 'a', encoding="utf8")
     metrics= {'scalar': {} }
   if config.enable_profiler:
-    max_utils.activate_profiler(config.tensorboard_dir)
+    max_utils.activate_profiler(config)
   for step in np.arange(config.steps):
     rng, rng_to_use = jax.random.split(rng)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -172,7 +172,7 @@ def decode_loop(config, state=None):
         metrics['scalar']['num_tokens'] = num_tokens_decoded
         max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
   if config.enable_profiler:
-    max_utils.deactivate_profiler()
+    max_utils.deactivate_profiler(config)
 
 
 

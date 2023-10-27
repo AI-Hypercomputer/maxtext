@@ -241,17 +241,17 @@ def train_loop(config, state=None):
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
 
   # Mesh definition
-  devices_array = maxtext_utils.create_device_mesh(config)
+  devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
   # Model and Optimizer definition
   model = Transformer(config, mesh)
-  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
+  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  state, state_mesh_annotations = maxtext_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
     train_step,
     mesh,
@@ -305,18 +305,18 @@ def train_loop(config, state=None):
         sys.exit()
 
     if config.metrics_file:
-      maxtext_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
+      max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
 
     if config.gcs_metrics and jax.process_index() == 0:
-      running_gcs_metrics = maxtext_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
+      running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
 
     # Start profiling at end of first step to avoid compilation.
     # Move before for loop to include.
     if step == 0 and config.enable_profiler:
-      max_utils.activate_profiler(config.tensorboard_dir)
+      max_utils.activate_profiler(config)
 
   if config.enable_profiler:
-    max_utils.deactivate_profiler()
+    max_utils.deactivate_profiler(config)
   writer.close()
   return state
 

@@ -18,10 +18,8 @@
 """Utils that are only interesting to MaxText. """
 
 import jax
-import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 from jax.experimental.serialize_executable import deserialize_and_load
-from jax.experimental import mesh_utils
 
 import numpy as np
 
@@ -31,15 +29,7 @@ import input_pipeline
 import optax
 
 
-import checkpointing
 
-import max_logging
-import os
-import subprocess
-
-import json
-import flax
-from flax.training import train_state
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 

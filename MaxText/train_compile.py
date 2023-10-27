@@ -55,7 +55,7 @@ def get_topology_mesh(config):
       chips_per_host_bounds=target_hardware.chips_per_host_bounds,
       num_slices=config.compile_topology_num_slices,
   ).devices
-  topology_device_mesh = maxtext_utils.create_device_mesh(config, topology_devices)
+  topology_device_mesh = max_utils.create_device_mesh(config, topology_devices)
   topology_mesh = Mesh(topology_device_mesh, config.mesh_axes)
   return topology_mesh
 
