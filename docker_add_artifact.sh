@@ -37,6 +37,8 @@ echo "Command is ${COMMAND}"
 tmp_local_container=tmp_local_container
 
 # Step 1: Build a Docker Container
+# Second -t is probably dead
+# -t just names your container
 docker build -t ${tmp_local_container} -f ./agi.Dockerfile -t ${IMAGE_NAME} .
 
 # Step 2: Run a command inside in the Docker Container
