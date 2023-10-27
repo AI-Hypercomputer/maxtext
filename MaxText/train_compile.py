@@ -65,7 +65,7 @@ def get_shaped_inputs(topology_mesh, config):
   # Construct the model and optimizier to get shaped versions of the state
   model = Transformer(config, topology_mesh)
   # The learning_rate_schedule is baked into the compiled object.
-  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
+  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
 
   # Shaped RNG keys

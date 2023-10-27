@@ -20,6 +20,7 @@ import checkpointing
 import functools
 
 import max_logging
+import maxtext_utils
 
 import numpy as np
 import jax

@@ -22,7 +22,7 @@ from jax.sharding import PartitionSpec as P
 from jax.experimental.serialize_executable import deserialize_and_load
 
 
-import maxtext_utils
+import max_utils
 import pickle
 import functools
 import input_pipeline
