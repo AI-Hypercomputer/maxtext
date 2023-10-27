@@ -21,8 +21,10 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from apis import metric_config
-from implementations.utils import bigquery, composer
+from configs import composer_env
+from implementations.utils import bigquery
 from implementations.utils import metric
+from implementations.utils import composer
 import jsonlines
 import tensorflow as tf
 
@@ -267,9 +269,9 @@ class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
               "COMPOSER_ENVIRONMENT": "test_env",
           },
       ) as mock_variable:
-        with mock.patch.object(
-            composer, "get_airflow_url", return_value="http://airflow"
-        ) as mock_object:
+        with mock.patch.object(composer,
+                               "get_airflow_url",
+                               return_value="http://airflow") as mock_object:
           raw_meta = [
               [
                   bigquery.MetadataHistoryRow(
@@ -313,6 +315,43 @@ class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
           self.assert_metric_and_dimension_equal(
               [], [], actual_value, expected_value
           )
+
+  @parameterized.named_parameters(
+      (
+          "prod_scheduled_run",
+          composer_env.PROD_COMPOSER_ENV_NAME,
+          "scheduled__2023-08-07T21:03:49.181263+00:00",
+          True,
+      ),
+      (
+          "non-prod_scheduled_run",
+          composer_env.DEV_COMPOSER_ENV_NAME,
+          "scheduled__2023-08-07T21:03:49.181263+00:00",
+          False,
+      ),
+      (
+          "prod_manual_run",
+          composer_env.PROD_COMPOSER_ENV_NAME,
+          "manual__2023-08-07T21:03:49.181263+00:00",
+          False,
+      ),
+  )
+  def test_is_valid_entry(self, env_name, run_id, expected_value):
+    with mock.patch(
+        "implementations.utils.metric.get_current_context"
+    ) as mock_context:
+      mock_context.return_value = {
+          "run_id": run_id,
+      }
+
+      with mock.patch.dict(
+          os.environ,
+          {
+              "COMPOSER_ENVIRONMENT": env_name,
+          },
+      ) as mock_variable:
+        actual_value = metric.is_valid_entry()
+        self.assertEqual(actual_value, expected_value)
 
 
 if __name__ == "__main__":

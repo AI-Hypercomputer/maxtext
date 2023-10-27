@@ -27,6 +27,7 @@ from airflow.decorators import task
 from airflow.operators.python import get_current_context
 from apis import gcp_config, test_config
 from apis import metric_config
+from configs import composer_env
 from google.cloud import storage
 from implementations.utils import bigquery
 from implementations.utils import composer
@@ -305,8 +306,8 @@ def add_airflow_metadata(
   dag_run_id = encode_url(run_id)
   airflow_link = composer.get_airflow_url(
       project_name,
-      os.environ.get("COMPOSER_LOCATION"),
-      os.environ.get("COMPOSER_ENVIRONMENT"),
+      os.environ.get(composer_env.COMPOSER_LOCATION),
+      os.environ.get(composer_env.COMPOSER_ENVIRONMENT),
   )
   airflow_dag_run_link = f"{airflow_link}/dags/{dag_id}/grid?dag_run_id={dag_run_id}&task_id={task_id}"
   logging.info(f"airflow_dag_run_link is {airflow_dag_run_link}")
@@ -362,6 +363,30 @@ def generate_process_id() -> str:
     A random uuid.
   """
   return str(uuid.uuid4())
+
+
+def is_valid_entry() -> bool:
+  """Define if entries are valid to insert into the table.
+
+  Only scheduled runs from the prod composer environment are allowed.
+  """
+  # if it's a non-prod run, no entries are inserted
+  if not composer_env.is_prod_env():
+    logging.info(
+        "This is a non-prod run, and no entries are inserted into tables."
+    )
+    return False
+
+  # if it's a manual run, no entries are inserted
+  context = get_current_context()
+  run_id = context["run_id"]
+  if run_id.startswith("manual"):
+    logging.info(
+        "This is a manual run, and no entries are inserted into tables."
+    )
+    return False
+
+  return True
 
 
 # TODO(ranran):
@@ -441,13 +466,5 @@ def process_metrics(
 
   print("Test run rows:", test_run_rows)
 
-  # if it's a manual run, no entries are inserted into tables
-  context = get_current_context()
-  run_id = context["run_id"]
-  if run_id.startswith("manual"):
-    logging.info(
-        "This is a manual run, and no entries are inserted into tables."
-    )
-    return
-
-  bigquery_metric.insert(test_run_rows)
+  if is_valid_entry():
+    bigquery_metric.insert(test_run_rows)
