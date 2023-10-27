@@ -39,18 +39,6 @@ def precompute_freqs_cis(
   return jnp.asarray(freqs_cis)
 
 
-def precompute_pax_freq_cis(dim, seq_length):
-  half_embedding_dim = dim // 2
-  fraction = 2 * jnp.arange(0, half_embedding_dim) / dim
-  timescale = 10000.0**fraction
-  position = jnp.arange(seq_length, dtype=jnp.float32)[jnp.newaxis, :]
-  position = position[:, :, jnp.newaxis, jnp.newaxis]
-  timescale = timescale[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
-  sinusoid_inp = position / timescale
-  sin = jnp.sin(sinusoid_inp)
-  cos = jnp.cos(sinusoid_inp)
-  return np.complex64(cos + 1j * sin)
-
 
 def apply_rotary_emb(
     xq: jnp.ndarray,
@@ -82,7 +70,7 @@ def apply_rotary_emb(
     return xq_out.astype(dtype), xk_out.astype(dtype)
 
 class LlamaRoPETest(unittest.TestCase):
-  """Tests for the RoPE implementation """
+  """Test for the RoPE implementation """
 
   def test_llama_rope(self):
     dim_per_head = 128
