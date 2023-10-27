@@ -89,6 +89,8 @@ class _HyperParameters():
       raw_keys["run_name"] = os.environ.get("JOBSET_NAME") #using XPK default
     run_name = raw_keys["run_name"]
     assert run_name, "Erroring out, need a real run_name"
+    assert ((raw_keys['cloud_zone']!="" or not raw_keys['enable_cloud_monitoring'])),\
+      "You must provide cloud_zone if cloud monitoring is enabled"
     base_output_directory = raw_keys["base_output_directory"]
     validate_gcs_bucket_name(base_output_directory, "base_output_directory")
     dataset_path = raw_keys["dataset_path"]

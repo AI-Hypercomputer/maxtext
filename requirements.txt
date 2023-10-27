@@ -3,6 +3,8 @@ absl-py
 argparse
 cloud-tpu-diagnostics
 datetime
+google-cloud-compute
+google-cloud-monitoring
 google-cloud-storage
 flax
 ml-collections

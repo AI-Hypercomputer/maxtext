@@ -20,6 +20,7 @@ import checkpointing
 import functools
 
 import max_logging
+import monitoring_api
 
 import numpy as np
 import jax
@@ -227,6 +228,9 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
 
   state = unbox_logicallypartioned_trainstate(state)
   return state, state_mesh_annotations
+
+def register_train_metrics(metric_name, metric_description):
+  monitoring_api.create_custom_metric(metric_name, metric_description)
 
 
 # Learning Rate Schedule

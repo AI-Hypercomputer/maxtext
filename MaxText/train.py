@@ -56,6 +56,7 @@ from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 import max_logging
+import monitoring_api
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
@@ -211,13 +212,30 @@ def train_loop(config, state=None):
   Returns:
 
   """
+
+  monitoring_enabled = config.enable_cloud_monitoring
+
+  if monitoring_enabled:
+    max_utils.register_train_metrics('checkpointint_init_start', "Checkpointing Initialization Start")
+    max_utils.register_train_metrics('checkpointing_init_end', "Checkpointing Initialization End")
+    max_utils.register_train_metrics('checkpoint_test_run_start', "Checkpointing Test Run Start")
+    max_utils.register_train_metrics('checkpoint_test_run_end', "Checkpointing Test Run End")
+
+  monitoring_api.write_time_series_step('checkpoint_test_run_start', monitoring_enabled, pyconfig, 0)
+
   writer = SummaryWriter(config.tensorboard_dir)
+
+  monitoring_api.write_time_series_step('checkpointing_init_start', monitoring_enabled, pyconfig, 1)
+
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       config.checkpoint_dir,
       config.enable_checkpointing,
       config.async_checkpointing,
       config.save_period,
   )
+
+  monitoring_api.write_time_series_step('checkpointing_init_end', monitoring_enabled, pyconfig, 1)
+
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
 
@@ -298,6 +316,7 @@ def train_loop(config, state=None):
     if step == 0:
       max_utils.activate_profiler(config)
 
+  monitoring_api.write_time_series_step('checkpoint_test_run_end', monitoring_enabled, pyconfig, config.steps)
   max_utils.deactivate_profiler(config)
   writer.close()
   return state
