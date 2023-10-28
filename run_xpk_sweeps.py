@@ -6,6 +6,7 @@ import yaml
 import copy
 import os
 import re
+import subprocess
 
 def update_yaml_fields(yaml_data, update_dict, allow_new_keys=False):
     yaml_copy=copy.deepcopy(yaml_data)
@@ -17,46 +18,62 @@ def update_yaml_fields(yaml_data, update_dict, allow_new_keys=False):
 
 
 BASE_CMD="""export LIBTPU_INIT_ARGS="--xla_tpu_spmd_rng_bit_generator_unsafe=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true" && \
-python3 MaxText/train.py MaxText/configs/base.yml"""
+python3 MaxText/train.py MaxText/configs/base.yml """
 
 def bname(b: bool):
     assert b == True or b == False, f'not bool: "{b}"'
     return str(b)[0]
 
 def run_job(run_name, base_config, num_slices, **config_updates):
-    maxtext_config_args = update_yaml_fields(base_config, config_updates, allow_new_keys=True)
-    # TODO: Write a check that all keys are valid (match ones in base.yml)
+    def maxtext_arg_dict_to_str(maxtext_arg_dict):
+        output_string = ""
+        for key, value in maxtext_arg_dict.items():
+            output_string = output_string + f"{key}={value} "
+        return output_string
 
-    attempt = args.attempt
-    sweep_name = args.sweep
-    jobre = args.jobre
-    url = f"xpk logs here"
-    if not re.findall(jobre, run_name):
-        print(f"SKIP: {run_name:30}", url)
+    if not re.findall(args.jobre, run_name):
+        print(f"SKIP: {run_name:30}")
         return
 
+    run_name = run_name + f'-a{args.attempt}'
+    url = f"xpk logs here"
     print(f"RUN:  {run_name:30}", url)
 
-    maxtext_config_args = update_yaml_fields(maxtext_config_args, {'run_name': run_name}, allow_new_keys=True)
-    cmd = BASE_CMD + maxtext_config_args
-
-
+    # TODO: Write a check that all keys are valid (match ones in base.yml)
+    maxtext_config_args = update_yaml_fields(base_config, config_updates, allow_new_keys=True)
+    maxtext_config_command_line = maxtext_arg_dict_to_str(maxtext_config_args)
+    cmd = BASE_CMD + maxtext_config_command_line
+    cmd = 'echo lol'
     xpk_cmd = ["python3", "xpk/xpk.py", "workload", "create",
     "--cluster", args.cluster,
     "--docker-image", args.docker_image,
     "--workload", run_name,
     "--tpu-type", args.tpu_type,
-    "--num-slices", num_slices,
+    "--num-slices", str(num_slices),
     "--command", cmd]
 
+    if 0:
+        xpk_cmd = ["python3", "xpk/xpk.py", "workload", "create",
+        f"--cluster={args.cluster}"
+        f"--docker-image={args.docker_image}",
+        f"--workload={run_name}",
+        f"--tpu-type={args.tpu_type}",
+        f"--num-slices={str(num_slices)}",
+        f"--command={cmd}"]
 
+    #xpk_cmd = ["python3", "xpk/xpk.py", "workload", "create"]
     if args.dryrun:
         import pprint
         pprint.pprint(xpk_cmd)
-        # pprint.pprint(experiment_mhj)
-        # print()
     else:
-        subprocess.run(xpk_cmd, capture_output=True, check=True)
+        #subprocess.run(xpk_cmd, capture_output=True, check=True)
+
+        try:
+            completed_command = subprocess.run(xpk_cmd, capture_output=True, check=True)
+            print(completed_command.stdout.decode())
+        except subprocess.CalledProcessError as e:
+            print(f"Error is:\n {e.stderr}")
+            print(e.stdout)
 
 
 ############################### FINAL runs start here
@@ -64,13 +81,14 @@ def run_job(run_name, base_config, num_slices, **config_updates):
 def base_test():
     return dict(
         global_parameter_scale = 2,
+        steps=4,
         base_output_directory = "gs://maxtext-experiments-multipod",
         dataset_path = "gs://max-datasets-rogue"
     )
 
 def run_test():
-    run_job("mattdavidow-b1", base_test(), 1, per_device_batch_size=1)
-    run_job("mattdavidow-b1", base_test(), 1, per_device_batch_size=2)
+    run_job("mattdavidow-test-batch-1", base_test(), 1, per_device_batch_size=1)
+    run_job("mattdavidow-test-batch-2", base_test(), 1, per_device_batch_size=2)
 
 def main():
     import argparse

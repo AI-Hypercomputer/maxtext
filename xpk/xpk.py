@@ -1434,6 +1434,7 @@ def workload_create(args) -> int:
   Returns:
     0 if successful and 1 otherwise.
   """
+  print(args)
   add_zone_and_project(args)
 
   set_cluster_command_code = set_cluster_command(args)
