@@ -41,11 +41,11 @@ from layers import Transformer
 import pyconfig
 from input_pipeline import create_data_iterator_with_tokenizer
 import max_utils
+import maxtext_utils
 import checkpointing
 
 import jax.numpy as jnp
 from jax import random
-from jax.sharding import PartitionSpec as P
 from jax.sharding import Mesh
 
 from jax.experimental.compilation_cache import compilation_cache as cc
@@ -57,6 +57,25 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 import max_logging
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
+
+def validate_train_config(config):
+  """ Validates the configuration is set correctly for train.py"""
+
+  def _validate_gcs_bucket_name(bucket_name, config_var):
+    assert bucket_name, f"Please set {config_var}."
+    assert len(bucket_name) > 5 and bucket_name[0:5]=='gs://', f"Erroring out, {config_var} should start with 'gs://' "
+
+  assert config.run_name, "Erroring out, need a real run_name"
+  _validate_gcs_bucket_name(config.base_output_directory, "base_output_directory")
+  _validate_gcs_bucket_name(config.dataset_path, "dataset_path")
+
+  assert ((config.load_parameters_path=="" and config.load_from_other_directory=="") or
+    config.enable_checkpointing), "You must set enable_checkpointing to load a checkpoint"
+  assert config.load_parameters_path=="" or config.load_from_other_directory=="",\
+  "At most one of load_parameters_path or load_from_other_directory should be set"
+  assert config.load_from_other_directory_step==-1 or config.load_from_other_directory!="",\
+  "You must specify the loading directory if you specify the loading step"
+  assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive interger."
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
 def calculate_training_tflops(num_model_parameters, config):
@@ -228,38 +247,36 @@ def train_loop(config, state=None):
   # Model and Optimizer definition
   model = Transformer(config, mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
-
-  # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
-  tx = optax.adamw(
-      max_utils.create_learning_rate_schedule(config),
-      b1=config.adam_b1,
-      b2=config.adam_b2,
-      eps=config.adam_eps,
-      eps_root=config.adam_eps_root,
-      weight_decay=config.adam_weight_decay,
-  )
-
+  tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
-  data_pspec = P(*config.data_sharding)
+  functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
+    train_step,
+    mesh,
+    state_mesh_annotations,
+    model,
+    config
+  )
 
   num_model_parameters = calculate_num_params_from_pytree(state.params)
   max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
   per_device_tflops = calculate_training_tflops(num_model_parameters, config)
 
-  # Define compiled top-level functions.
-  state_mesh_shardings = jax.tree_map(
-      lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
-  data_sharding = jax.tree_map(
-      lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
-  p_train_step = jax.jit(
-    train_step,
-    in_shardings=(state_mesh_shardings, data_sharding, None),
-      out_shardings=(state_mesh_shardings, None, None),
-    static_argnums=(0,1,),
-    donate_argnums=2)
+  # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
+  if config.compiled_trainstep_file != '':
+    print("Loading the compiled function...", flush=True)
+    # Need to pass train signature and state to determine i/o shapes of train_state for now.
+    p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
+    print("Loaded compiled function!", flush=True)
+  else:
+    p_train_step = jax.jit(
+      functional_train,
+      in_shardings=in_shard,
+      out_shardings=out_shard,
+      static_argnums=static_argnums,
+      donate_argnums=donate_argnums)
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
@@ -271,7 +288,7 @@ def train_loop(config, state=None):
     example_batch = load_next_batch(data_iterator, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics, nextrng = p_train_step(
-          model, config, state, example_batch, nextrng
+          state, example_batch, nextrng
       )
 
     new_time = datetime.datetime.now()
@@ -304,15 +321,17 @@ def train_loop(config, state=None):
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
-  os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
+  config = pyconfig.config
+  validate_train_config(config)
+  os.environ["TFDS_DATA_DIR"] = config.dataset_path
   debug_config = debug_configuration.DebugConfig(
     stack_trace_config = stack_trace_configuration.StackTraceConfig(
-      collect_stack_trace = pyconfig.config.collect_stack_trace,
-      stack_trace_to_cloud = pyconfig.config.stack_trace_to_cloud,
-      stack_trace_interval_seconds = pyconfig.config.stack_trace_interval_seconds))
+      collect_stack_trace = config.collect_stack_trace,
+      stack_trace_to_cloud = config.stack_trace_to_cloud,
+      stack_trace_interval_seconds = config.stack_trace_interval_seconds))
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
   with diagnostic.diagnose(diagnostic_config):
-    train_loop(pyconfig.config)
+    train_loop(config)
 
 
 if __name__ == "__main__":

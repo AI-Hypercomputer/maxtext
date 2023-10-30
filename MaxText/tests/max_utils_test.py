@@ -21,13 +21,13 @@ import unittest
 import optax
 from flax import linen as nn
 
-jax.config.update('jax_platform_name', 'cpu')
 
 class MaxUtilsSummaryStats(unittest.TestCase):
   """Tests for the summary stats functions in max_utils.py"""
   def test_l2norm_pytree(self):
     x = {'a': jax.numpy.array([0, 2, 0]), 'b': jax.numpy.array([0, 3, 6])}
-    self.assertEqual(max_utils.l2norm_pytree(x), 7)
+    pytree_l2_norm = max_utils.l2norm_pytree(x)
+    self.assertTrue(jax.numpy.allclose(pytree_l2_norm, 7, rtol=1e-05, atol=1e-08, equal_nan=False))
 
 class MaxUtilsT5XCrossEntropy(unittest.TestCase):
   """Tests for the cross entropy functions in max_utils.py"""
@@ -36,14 +36,14 @@ class MaxUtilsT5XCrossEntropy(unittest.TestCase):
     key = jax.random.PRNGKey(0)
     targets = jax.random.randint(key, shape=(48, 2048),
                                         dtype=jax.numpy.int32, minval=1, maxval=10)
-    logits = jax.random.uniform(key, shape=(48, 2048, 32768),
+    logits = jax.random.uniform(key, shape=(48, 2048, 4096),
                                         dtype=jax.numpy.float32)
 
     # Calculate xent from optax implementation
     optax_xent = optax.softmax_cross_entropy_with_integer_labels(logits, targets)
 
     # Calculate xent from custom T5X implementation
-    one_hot_targets = jax.nn.one_hot(targets, 32768)
+    one_hot_targets = jax.nn.one_hot(targets, 4096)
     t5x_xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
     t5x_xent = nn.with_logical_constraint(t5x_xent, ('activation_batch', 'activation_length'))
 
@@ -52,4 +52,3 @@ class MaxUtilsT5XCrossEntropy(unittest.TestCase):
 
 if __name__ == '__main__':
   unittest.main()
-

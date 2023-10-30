@@ -256,7 +256,10 @@ class SystemCharacteristics:
   chips_per_vm: int
 
 ################### Subcommand Helper Functions #############
-
+""" !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+IF YOU MODIFY THE BELOW UserFacingNameToSystemCharacteristics MAP YOU SHOULD ALSO ADD CORRESPONDING 
+MODICATIONS TO UserFacingNameToSystemCharacteristics IN MaxText/accelerator_to_spec_map.py !!!!! """
+# vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
 UserFacingNameToSystemCharacteristics = {
     'v5litepod-16': SystemCharacteristics(
         '4x4', 4, 'tpu-v5-lite-podslice', 'ct5lp-hightpu-4t', 4
@@ -307,7 +310,9 @@ UserFacingNameToSystemCharacteristics = {
       '8x16x16', 512,'tpu-v4-podslice', 'ct4p-hightpu-4t', 4
     ),
 }
-
+""" If you modify UserFacingNameToSystemCharacteristics you should also modify the corresponding
+Map in MaxText/accelerator_to_spec_map.py """
+# ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 def chunks(lst, n):
   """Return a list of n-sized chunks from lst.
