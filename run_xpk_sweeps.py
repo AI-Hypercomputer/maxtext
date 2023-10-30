@@ -22,7 +22,7 @@ python3 MaxText/train.py MaxText/configs/base.yml """
 
 def bname(b: bool):
     assert b == True or b == False, f'not bool: "{b}"'
-    return str(b)[0]
+    return str(b)[0].lower()
 
 def run_job(run_name, base_config, num_slices, **config_updates):
     def maxtext_arg_dict_to_str(maxtext_arg_dict):
@@ -36,14 +36,14 @@ def run_job(run_name, base_config, num_slices, **config_updates):
         return
 
     run_name = run_name + f'-a{args.attempt}'
-    url = f"xpk logs here"
+    url = f"xpk logs here" #ex log url: https://console.cloud.google.com/kubernetes/service/us-east5/v5e-256-bodaborg/default/mattdavidow-rm-r-m-int8-t-seed1-a1/details?project=tpu-prod-env-multipod
     print(f"RUN:  {run_name:30}", url)
 
     # TODO: Write a check that all keys are valid (match ones in base.yml)
     maxtext_config_args = update_yaml_fields(base_config, config_updates, allow_new_keys=True)
     maxtext_config_command_line = maxtext_arg_dict_to_str(maxtext_config_args)
     cmd = BASE_CMD + maxtext_config_command_line
-    cmd = 'echo lol'
+    #cmd = 'echo lol'
     xpk_cmd = ["python3", "xpk/xpk.py", "workload", "create",
     "--cluster", args.cluster,
     "--docker-image", args.docker_image,
@@ -52,16 +52,9 @@ def run_job(run_name, base_config, num_slices, **config_updates):
     "--num-slices", str(num_slices),
     "--command", cmd]
 
-    if 0:
-        xpk_cmd = ["python3", "xpk/xpk.py", "workload", "create",
-        f"--cluster={args.cluster}"
-        f"--docker-image={args.docker_image}",
-        f"--workload={run_name}",
-        f"--tpu-type={args.tpu_type}",
-        f"--num-slices={str(num_slices)}",
-        f"--command={cmd}"]
 
     #xpk_cmd = ["python3", "xpk/xpk.py", "workload", "create"]
+    # TODO(mattdavidow): if dryrun run xpk in dryrun mode
     if args.dryrun:
         import pprint
         pprint.pprint(xpk_cmd)
@@ -78,18 +71,36 @@ def run_job(run_name, base_config, num_slices, **config_updates):
 
 ############################### FINAL runs start here
 
-def base_test():
-    return dict(
-        global_parameter_scale = 2,
-        steps=4,
-        base_output_directory = "gs://maxtext-experiments-multipod",
-        dataset_path = "gs://max-datasets-rogue"
-    )
+
 
 def run_test():
+    def base_test():
+        return dict(
+            global_parameter_scale = 2,
+            steps=4,
+            base_output_directory = "gs://maxtext-experiments-multipod",
+            dataset_path = "gs://max-datasets-rogue"
+        )
     run_job("mattdavidow-test-batch-1", base_test(), 1, per_device_batch_size=1)
     run_job("mattdavidow-test-batch-2", base_test(), 1, per_device_batch_size=2)
 
+def run_remat_mystery():
+    def base_remat_mystery():
+        return dict(
+            global_parameter_scale = 1,
+            steps=3400,
+            per_device_batch_size=12.0,
+            learning_rate=1e-3,
+            enable_checkpointing=False,
+            base_output_directory = "gs://maxtext-experiments-multipod",
+            dataset_path = "gs://max-datasets-rogue",   
+        )
+
+    for remat_policy in ['full', 'minimal']:
+        for int8_training in [True, False]:
+            for init_weights_seed in range(2):
+                run_name = f"mattdavidow-rm-r-{remat_policy[0]}-int8-{bname(int8_training)}-seed{init_weights_seed}"
+                run_job(run_name, base_remat_mystery(), 1, init_weights_seed=init_weights_seed, remat_policy=remat_policy, int8_training=int8_training)
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='TPU configuration options')
