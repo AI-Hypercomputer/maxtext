@@ -76,7 +76,7 @@ We call the `runner` machine the one that `multihost_runner.py` is called from. 
 If the runner machine is a cloud VM, it must be in the same project as the workers.
 
 The `multihost_runner.py` script:
-* Distributes your code to multiple worker TPUVM's, recursively copying chosen directory
+* Distributes your code by recursively copying the current state of the chosen directory to multiple worker TPUVM.
 * Runs the code on the workers
 * Logs and monitors the processes' error statuses and brings the logs back to the runner machine.
 
@@ -138,6 +138,7 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
     ```
     RUN_NAME=$YOUR_JOB_NAME # You may set this to any unique name for a fresh run.
     ```
+    Set config values for `base_output_directory` and `dataset_path` in `configs/base.yml` if not set already.
     ```
     python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME"
     ```
