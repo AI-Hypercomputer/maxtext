@@ -229,6 +229,10 @@ feedback.
 environment from a file. Usage is the same as Docker's
 [--env-file flag](https://docs.docker.com/engine/reference/commandline/run/#env)
 
+* Workload create accepts a --debug-dump-gcs flag which is a path to GCS bucket.
+Passing this flag sets the XLA_FLAGS='--xla_dump_to=/tmp/xla_dump/' and uploads
+hlo dumps to the specified GCS bucket for each worker.
+
 
 # Troubleshooting
 
