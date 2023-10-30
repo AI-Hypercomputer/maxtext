@@ -17,7 +17,6 @@
 """ Tests for Llama """
 import jax
 import unittest
-from flax import linen as nn
 import jax.numpy as jnp
 from typing import Tuple
 import layers
