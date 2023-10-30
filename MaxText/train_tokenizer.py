@@ -174,7 +174,7 @@ parser.add_argument(
 args = parser.parse_args()
 os.environ["TFDS_DATA_DIR"] = args.dataset_path
 
-def main(argv: List[str]):
+def main(_argv: List[str]):
   read_config = tfds.ReadConfig(
     shuffle_seed = 0,
   )

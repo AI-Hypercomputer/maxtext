@@ -24,7 +24,7 @@ import yaml
 
 import jax
 
-from typing import Any
+from typing import Any, Union
 
 def string_to_bool(s: str) -> bool:
   if s.lower() == "true":
@@ -38,7 +38,7 @@ _yaml_types_to_parser = {str : str, int : int, float : float, bool : string_to_b
 _config = None
 config = None
 
-def _lists_to_tuples(l: list[Any]) -> tuple[Any]|list[Any]:
+def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any],list[Any]]:
   return tuple(_lists_to_tuples(x) for x in l) if isinstance(l, list) else l
 
 class _HyperParameters():
