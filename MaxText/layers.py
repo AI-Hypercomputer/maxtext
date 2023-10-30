@@ -730,7 +730,7 @@ class LLaMARotaryEmbedding(nn.Module):
   min_timescale: int = 1
   max_timescale: int = 10_000
   embedding_dims: int = 0
-  cast_as_fprop_dtype: bool = True
+  cast_as_fprop_dtype: bool = False
   fprop_dtype: DType = jnp.float32
 
   def setup(self) -> None:
