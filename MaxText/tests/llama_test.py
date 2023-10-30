@@ -44,7 +44,7 @@ def apply_rotary_emb(
   xq: jnp.ndarray,
   xk: jnp.ndarray,
   freqs_cis: jnp.ndarray,
-  dtype: jnp.dtype = jnp.float32,
+  dtype: jnp.dtype = jnp.bfloat16,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
   """ Apply the computed Rotary Postional Embedding"""
   reshape_xq = xq.astype(jnp.float32).reshape(*xq.shape[:-1], -1, 2)
