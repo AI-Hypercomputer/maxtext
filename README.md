@@ -292,7 +292,7 @@ The tool `train_compile.py` is tightly linked to `train.py` and uses the same co
 After installing the dependencies listed above, you are ready to compile ahead of time:
 ```
 # Run the below on a single machine, e.g. a CPU
-python3 MaxText/train_compile.py MaxText/configs/base.yml compile_topology=v5e-256 compile_topology_num_slices=2 \ 
+python3 MaxText/train_compile.py MaxText/configs/base.yml compile_topology=v5e-256 compile_topology_num_slices=2 \
 global_parameter_scale=16 per_device_batch_size=4
 ```
 
