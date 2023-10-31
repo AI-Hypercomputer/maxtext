@@ -43,16 +43,16 @@ Depending on your organization's set up, these instructions may vary. Here we pr
      
      Create a network with an MTU of 8896 bytes and set up firewall rules. (Creating a network requires `compute.networks.create` permission in your project)
      ```
-     gcloud compute networks create mtu9k --mtu=8896 --project={PROJECT} --subnet-mode=auto --bgp-routing-mode=regional
+     gcloud compute networks create mtu9k --mtu=8896 --project=${PROJECT} --subnet-mode=auto --bgp-routing-mode=regional
      ```
      ```
-     gcloud compute firewall-rules create mtu9kfw --network mtu9k --allow tcp,icmp,udp --project={PROJECT}
+     gcloud compute firewall-rules create mtu9kfw --network mtu9k --allow tcp,icmp,udp --project=${PROJECT}
      ```
      
      When you create your TPUs, you need to indicate they should be part of this network using the `--network` flag (`--network=mtu9k`). Below is an 
      example of a queued-resources request
      ```
-     gcloud alpha compute tpus queued-resources create ${QR_ID} --node-prefix=${TPU_NAME} --node-count=${NUM_SLICES} --accelerator_type=${ACCELERATOR_TYPE} --runtime_version=${RUNTIME_VERSION} --network=mtu9k --project={$PROJECT} --zone=${ZONE}
+     gcloud alpha compute tpus queued-resources create ${QR_ID} --node-prefix=${TPU_NAME} --node-count=${NUM_SLICES} --accelerator_type=${ACCELERATOR_TYPE} --runtime_version=${RUNTIME_VERSION} --network=mtu9k --project=${PROJECT} --zone=${ZONE}
      ```
      Note: If you want to use only one slice, you need to replace node-prefix with node-id, and remove node-count
 
@@ -85,10 +85,10 @@ These instructions show how to run the model configurations using XPK on top of 
      
      Create a network with an MTU of 8896 bytes and set up firewall rules. (Creating a network requires `compute.networks.create` permission in your project)
      ```
-     gcloud compute networks create mtu9k --mtu=8896 --project={PROJECT} --subnet-mode=auto --bgp-routing-mode=regional
+     gcloud compute networks create mtu9k --mtu=8896 --project=${PROJECT} --subnet-mode=auto --bgp-routing-mode=regional
      ```
      ```
-     gcloud compute firewall-rules create mtu9kfw --network mtu9k --allow tcp,icmp,udp --project={PROJECT}
+     gcloud compute firewall-rules create mtu9kfw --network mtu9k --allow tcp,icmp,udp --project=${PROJECT}
      ```
 
 2. Install MaxText on your runner.
@@ -127,7 +127,7 @@ These instructions show how to run the model configurations using XPK on top of 
 
 7. Submit a job to the cluster to run 16b.sh, 32b.sh, 64b.sh, or 128b.sh.
      ```
-     python3 /xpk/xpk.py workload create --cluster ${YOUR_CLUSTER_NAME} --docker-image gcr.io/${PROJECT_ID}/${YOUR_IMAGE_NAME} --workload ${YOUR_RUN_NAME} --tpu-type=${ACCELERATOR_TYPE} --num-slices=${NUM_SLICES} --command "bash MaxText/configs/largest_job/128b.sh OUTPUT_PATH=${MAXTEXT_OUTPUT_PATH} DATASET_PATH=${MAXTEXT_DATASET_PATH}"
+     python3 /xpk/xpk.py workload create --cluster ${YOUR_CLUSTER_NAME} --docker-image gcr.io/${PROJECT}/${YOUR_IMAGE_NAME} --workload ${YOUR_RUN_NAME} --tpu-type=${ACCELERATOR_TYPE} --num-slices=${NUM_SLICES} --command "bash MaxText/configs/largest_job/128b.sh OUTPUT_PATH=${MAXTEXT_OUTPUT_PATH} DATASET_PATH=${MAXTEXT_DATASET_PATH}"
      ```
 
 ## Caveats
