@@ -22,7 +22,7 @@ import jax.numpy as jnp
 
 
 def random_centered_uniform(
-    shape: tuple[int, ...], key: jax.random.KeyArray) -> jnp.ndarray:
+    shape: tuple[int, ...], key: jax.Array) -> jnp.ndarray:
   """Generates uniform number in [-0.5, 0.5]."""
   nbits = 16
 
