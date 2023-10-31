@@ -36,7 +36,7 @@ import numpy as onp
 
 @flax.struct.dataclass
 class Context:
-  key: Optional[jax.random.KeyArray]
+  key: Optional[jax.Array]
   train_step: Optional[int]
 
 

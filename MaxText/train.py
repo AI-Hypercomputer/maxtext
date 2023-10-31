@@ -23,11 +23,6 @@ import jax
 import os
 import sys
 
-jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-print(f"Found {jax.device_count()} devices.")
-
 from typing import Sequence
 import datetime
 from absl import app
@@ -56,7 +51,6 @@ from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 import max_logging
-cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 def validate_train_config(config):
   """ Validates the configuration is set correctly for train.py"""
@@ -123,7 +117,7 @@ def write_metrics(writer, metrics, step, config):
   with jax.spmd_mode('allow_all'):
     if jax.process_index() == 0:
       for metric_name in metrics.get("scalar",[]):
-        writer.add_scalar(metric_name, metrics["scalar"][metric_name], step)
+        writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
       for metric_name in metrics.get("scalars",[]):
         writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
 
@@ -207,7 +201,7 @@ def train_step(model, config, state, data, dropout_rng):
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
   if config.gradient_clipping_threshold > 0:
-    grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, None, None)
+    grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
   else:
     grads = raw_grads
   new_state = state.apply_gradients(grads=grads)
@@ -320,6 +314,11 @@ def train_loop(config, state=None):
   return state
 
 def main(argv: Sequence[str]) -> None:
+  jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
+  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+  os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  print(f"Found {jax.device_count()} devices.")
+  cc.initialize_cache(os.path.expanduser("~/jax_cache"))
   pyconfig.initialize(argv)
   config = pyconfig.config
   validate_train_config(config)

@@ -22,16 +22,12 @@ from jax.sharding import PartitionSpec as P
 from jax.experimental.serialize_executable import deserialize_and_load
 
 
-import max_utils
 import pickle
 import functools
 import input_pipeline
 import optax
 
 
-
-from flax import linen as nn
-from flax.linen import partitioning as nn_partitioning
 
 def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config):
   """ Get the shardings (both state and data) for train_step """
@@ -85,16 +81,3 @@ def load_compiled(config, partial_train, state):
   in_tree, out_tree = get_train_input_output_trees(partial_train, shaped_input_args, shaped_input_kwargs)
   p_train_step = deserialize_and_load(serialized_compiled, in_tree, out_tree)
   return p_train_step
-
-def get_abstract_state(model, tx, config, rng, mesh):
-  """ Get a shaped abstraction of the state (including optimizer)"""
-  init_train_state_partial = functools.partial(max_utils.init_train_state, model, tx,
-                                              config)
-  abstract_state = jax.eval_shape(init_train_state_partial, rng)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  unboxed_abstract_state = max_utils.unbox_logicallypartioned_trainstate(abstract_state)
-
-  # Initialization
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return unboxed_abstract_state, state_mesh_annotations

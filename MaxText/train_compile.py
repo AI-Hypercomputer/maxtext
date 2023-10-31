@@ -69,11 +69,11 @@ def get_shaped_inputs(topology_mesh, config):
   tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
 
   # Shaped RNG keys
-  example_rng = jax.random.PRNGKey(0)
+  _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
 
   # Shaped state
-  abstract_state, state_mesh_annotations =  maxtext_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
+  abstract_state, state_mesh_annotations =  max_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
 
   # Shaped batch
   shaped_batch = input_pipeline.get_shaped_batch(config)
@@ -105,6 +105,7 @@ def save_compiled(compiled, save_name):
     pickle.dump(serialized, f)
 
 def main(argv: Sequence[str]) -> None:
+  jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
   print("Starting train_compile.py...", flush=True)
 
   # Parse and validate configuration

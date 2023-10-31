@@ -942,7 +942,7 @@ def combine_biases(*masks: Optional[Array]):
 def make_decoder_mask(decoder_target_tokens: Array,
                       dtype: DType,
                       decoder_causal_attention: Optional[Array] = None,
-                      decoder_segment_ids: Optional[Array] = None) -> Array:
+                      decoder_segment_ids: Optional[Array] = None) -> Optional[Array]:
   """Compute the self-attention mask for a decoder.
 
   Decoder mask is formed by combining a causal mask, a padding mask and an

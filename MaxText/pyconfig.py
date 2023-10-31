@@ -25,7 +25,9 @@ import yaml
 
 import jax
 
-def string_to_bool(s : str):
+from typing import Any, Union
+
+def string_to_bool(s: str) -> bool:
   if s.lower() == "true":
     return True
   if s.lower() == "false":
@@ -37,12 +39,12 @@ _yaml_types_to_parser = {str : str, int : int, float : float, bool : string_to_b
 _config = None
 config = None
 
-def _lists_to_tuples(l):
+def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any],list[Any]]:
   return tuple(_lists_to_tuples(x) for x in l) if isinstance(l, list) else l
 
 class _HyperParameters():
   # pylint: disable=missing-class-docstring
-  def __init__(self, argv, **kwargs):
+  def __init__(self, argv: list[str], **kwargs):
     with open(argv[1], "r", encoding="utf-8") as yaml_file:
       raw_data_from_yaml = yaml.safe_load(yaml_file)
     raw_data_from_cmd_line = self._load_kwargs(argv, **kwargs)
@@ -77,7 +79,7 @@ class _HyperParameters():
     _HyperParameters.user_init(raw_keys)
     self.keys = raw_keys
 
-  def _load_kwargs(self, argv, **kwargs):
+  def _load_kwargs(self, argv: list[str], **kwargs):
     args_dict = dict(a.split("=") for a in argv[2:])
     args_dict.update(kwargs)
     return args_dict
@@ -136,7 +138,7 @@ def get_individual_scales(scale):
 
 def calculate_global_batch_sizes(raw_keys):
   """ Calculates target global batch size from target devices and per_device_batch"""
-  per_device_batch_size = raw_keys['per_device_batch_size']
+  per_device_batch_size = int(raw_keys['per_device_batch_size'])
   num_devices = get_num_target_devices(raw_keys)
   if per_device_batch_size < 1:
     # For per_device_batch_size<1, we load the data as if per_device_batch_size=1
@@ -148,8 +150,9 @@ def calculate_global_batch_sizes(raw_keys):
   return global_batch_size_to_load, global_batch_size_to_train_on
 
 def get_num_target_devices(raw_keys):
-  if raw_keys['compile_topology'] != "":
-    devices_per_slice = accelerator_to_spec_map.get_system_characteristics(raw_keys['compile_topology']).devices_per_slice
+  compile_topology = accelerator_to_spec_map.get_system_characteristics(raw_keys.get('compile_topology', ""))
+  if compile_topology is not None:
+    devices_per_slice = compile_topology.devices_per_slice
     return int(devices_per_slice * raw_keys['compile_topology_num_slices'])
   else:
     return len(jax.devices())

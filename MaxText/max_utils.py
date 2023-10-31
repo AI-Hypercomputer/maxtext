@@ -20,7 +20,6 @@ import checkpointing
 import functools
 
 import max_logging
-import maxtext_utils
 
 import numpy as np
 import jax
@@ -30,6 +29,7 @@ from jax.experimental import mesh_utils
 import json
 import flax
 from flax.training import train_state
+from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
 import optax
@@ -112,8 +112,10 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
 
   return parallelism_vals
 
-def create_device_mesh(config, devices=jax.devices(), logging=True):
+def create_device_mesh(config, devices=None, logging=True):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas """
+  if devices is None:
+    devices = jax.devices()
   num_devices = len(devices)
   try:
     num_slices = 1 + max([d.slice_index for d in devices])
@@ -196,7 +198,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     state_mesh_annotations: the mesh annotations for the train state
   """
 
-  unboxed_abstract_state, state_mesh_annotations = maxtext_utils.get_abstract_state(model, tx, config, rng, mesh)
+  unboxed_abstract_state, state_mesh_annotations = get_abstract_state(model, tx, config, rng, mesh)
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -347,3 +349,17 @@ def _cross_entropy_with_logits_bwd(
 
 cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
                                  _cross_entropy_with_logits_bwd)
+
+# TODO: This function should be moved to maxtext_utils.py after refactoring b/308500675
+def get_abstract_state(model, tx, config, rng, mesh):
+  """ Get a shaped abstraction of the state (including optimizer)"""
+  init_train_state_partial = functools.partial(init_train_state, model, tx,
+                                              config)
+  abstract_state = jax.eval_shape(init_train_state_partial, rng)
+  state_logical_annotations = nn.get_partition_spec(abstract_state)
+  unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
+
+  # Initialization
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  return unboxed_abstract_state, state_mesh_annotations
