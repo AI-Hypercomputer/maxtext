@@ -1130,7 +1130,7 @@ class Decoder(nn.Module):
           BlockLayer,
           prevent_cse=not cfg.scan_layers,
           policy=policy,
-          static_argnums=(-1, -2, -3, -4))
+          static_argnums=(-1, -2, -3, -4, -5))
     if cfg.scan_layers:
       initializing = self.is_mutable_collection('params')
       params_spec = (
@@ -1149,7 +1149,7 @@ class Decoder(nn.Module):
               'aqt': cfg.int8_training
           },
           in_axes=(nn.broadcast, nn.broadcast, nn.broadcast,
-                   nn.broadcast),
+                   nn.broadcast, nn.broadcast),
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'})(
               config=cfg, mesh=mesh,
@@ -1161,6 +1161,7 @@ class Decoder(nn.Module):
         y = BlockLayer(
             config=cfg, mesh = mesh, name=f'layers_{lyr}')(
                 y,
+                decoder_positions,
                 decoder_mask,
                 deterministic,
                 decode,
@@ -1215,7 +1216,7 @@ class Transformer(nn.Module):
       decoder_input_tokens,
       decoder_target_tokens,
       decoder_segment_ids=None,
-      decoder_positions=None, #Anisha: This is what I need to pass to RoPE
+      decoder_positions=None,
       enable_dropout=True,
       decode=False,
       max_decode_length=None):
