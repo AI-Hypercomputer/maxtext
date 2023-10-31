@@ -1588,7 +1588,6 @@ def workload_list(args) -> None:
       'TPU VMs Needed': '.spec.podSets[0].count',
       'TPU VMs Running/Ran': '.status.admission.podSetAssignments[-1].count',
       'TPU VMs Done': '.status.reclaimablePods[0].count',
-      'TPU Slice Dimensions': r'.status.admission.podSetAssignments[-1].flavors.google\.com/tpu',
       'Status': '.status.conditions[-1].type',
       'Status Message': '.status.conditions[-1].message',
       'Status Time': '.status.conditions[-1].lastTransitionTime',
