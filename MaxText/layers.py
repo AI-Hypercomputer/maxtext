@@ -383,6 +383,7 @@ class MultiHeadDotProductAttention(nn.Module):
   def __call__(self,
                inputs_q: Array,
                inputs_kv: Array,
+               inputs_positions:Optional[Array] = None,
                mask: Optional[Array] = None,
                bias: Optional[Array] = None,
                *,
@@ -441,8 +442,8 @@ class MultiHeadDotProductAttention(nn.Module):
     value = projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
     #Apply RoPE
-    query = LLaMARotaryEmbedding(embedding_dims = self.head_dim, name='query_rotary')(query)
-    key = LLaMARotaryEmbedding(embedding_dims = self.head_dim, name='key_rotary')(key)
+    query = LLaMARotaryEmbedding(embedding_dims = self.head_dim, name='query_rotary')(inputs=query, position=inputs_positions)
+    key = LLaMARotaryEmbedding(embedding_dims = self.head_dim, name='key_rotary')(inputs=key, position=inputs_positions)
 
 
     query = nn.with_logical_constraint(
@@ -1022,6 +1023,7 @@ class DecoderLayer(nn.Module):
   @nn.compact
   def __call__(self,
                inputs,
+               decoder_positions,
                decoder_mask,
                deterministic,
                decode,
@@ -1048,6 +1050,7 @@ class DecoderLayer(nn.Module):
         mesh = mesh)(
             lnx,
             lnx,
+            decoder_positions,
             decoder_mask,
             bias = None,
             deterministic=deterministic,
@@ -1150,7 +1153,7 @@ class Decoder(nn.Module):
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'})(
               config=cfg, mesh=mesh,
-              name='decoder')(y, decoder_mask,
+              name='decoder')(y, decoder_positions, decoder_mask,
                               deterministic, decode, max_decode_length)
     else:
       for lyr in range(cfg.num_decoder_layers):
@@ -1212,7 +1215,7 @@ class Transformer(nn.Module):
       decoder_input_tokens,
       decoder_target_tokens,
       decoder_segment_ids=None,
-      decoder_positions=None,
+      decoder_positions=None, #Anisha: This is what I need to pass to RoPE
       enable_dropout=True,
       decode=False,
       max_decode_length=None):
