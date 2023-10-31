@@ -231,7 +231,7 @@ For a 52B model. See full run configs in `MaxText/configs/` as `1xv4-384.sh` and
 
 ## TPU v5e
 
-For a 16B, 32B, 64B, and 128B models. See full run configs in `MaxText/configs/largest_job/` as `16b.sh`, `32b.sh`, `64b.sh`, `128b.sh`.
+For 16B, 32B, 64B, and 128B models. See full run configs in `MaxText/configs/largest_job/` as `16b.sh`, `32b.sh`, `64b.sh`, `128b.sh`.
 
 | Hardware    | 16B TFLOP/sec/chip | 16B MFU | 32B TFLOP/sec/chip | 32B MFU | 64B TFLOP/sec/chip | 64B MFU | 128B TFLOP/sec/chip | 128B MFU |
 | ----------- | -----------------: | ------- | -----------------: | ------- | -----------------: | ------- | ------------------: | -------- |
