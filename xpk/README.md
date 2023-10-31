@@ -150,7 +150,7 @@ cleanup with a `Cluster Delete`.
 ### Workload Priority and Preemption
 * Set the priority level of your workload with `--priority=LEVEL`
 
-  We have five priorities defined: [`verylow`, `low`, `medium`, `high`, `very-high`].
+  We have five priorities defined: [`very-low`, `low`, `medium`, `high`, `very-high`].
   The default priority is `medium`.
 
   Priority determines:
@@ -158,7 +158,7 @@ cleanup with a `Cluster Delete`.
   1. Order of queued jobs.
 
       Queued jobs are ordered by
-      `verylow` < `low` < `medium` < `high` <  `very-high`
+      `very-low` < `low` < `medium` < `high` <  `very-high`
 
   2. Preemption of lower priority workloads.
 
