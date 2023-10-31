@@ -89,7 +89,7 @@ def run_remat_mystery():
         return dict(
             global_parameter_scale = 1,
             steps=3400,
-            per_device_batch_size=12.0,
+            per_device_batch_size=6.0,
             learning_rate=1e-3,
             enable_checkpointing=False,
             base_output_directory = "gs://maxtext-experiments-multipod",
