@@ -26,7 +26,7 @@ The following are details on how to achieve up to 66.86% MFU results on TPU v5e 
 | 16x v5e-256 | 111                | 56.56%  | 123                | 62.26%  | 105                | 53.29%  | 100                 | 50.86%   |
 | 32x v5e-256 | 108                | 54.65%  | 119                | 60.40%  | 99                 | 50.18%  | 91                  | 46.25%   |
 
-We have shown full scaling performance results up to 32 v5e pods in for these configurations, however they are capable of scaling up to hundreds of v5e pods. The full configurations and scripts can be found in [MaxText/configs/largest_job/](https://github.com/google/maxtext/tree/main/MaxText/configs/largest_job). 
+We have shown full scaling performance results up to 32 v5e pods for these configurations, however they are capable of scaling up to hundreds of v5e pods. The full configurations and scripts can be found in [MaxText/configs/largest_job/](https://github.com/google/maxtext/tree/main/MaxText/configs/largest_job). 
 
 Note that these configurations do 3 things:
 * Sets various XLA compiler flags as `LIBTPU_INIT_ARGS` to optimize runtime performance.
