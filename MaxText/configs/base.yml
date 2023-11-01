@@ -43,14 +43,8 @@ int8_training: False
 # The following flags will only have effect when int8_training is True
 use_dqdg: False
 fwd_int8: True
-dlhs_int8: True
-drhs_int8: False
-fwd_int8_qk: False
-dlhs_int8_qk: False
-drhs_int8_qk: False
-fwd_int8_pv: True
-dlhs_int8_pv: True
-drhs_int8_pv: False
+int8_pv: True
+int8_qk: False
 aqt_use_dummy_static_bound: False
 aqt_use_fwd_quant: False
 aqt_rng_type: "jax.uniform"
