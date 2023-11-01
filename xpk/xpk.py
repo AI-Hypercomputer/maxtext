@@ -257,7 +257,7 @@ class SystemCharacteristics:
 
 ################### Subcommand Helper Functions #############
 """ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-IF YOU MODIFY THE BELOW UserFacingNameToSystemCharacteristics MAP YOU SHOULD ALSO ADD CORRESPONDING 
+IF YOU MODIFY THE BELOW UserFacingNameToSystemCharacteristics MAP YOU SHOULD ALSO ADD CORRESPONDING
 MODICATIONS TO UserFacingNameToSystemCharacteristics IN MaxText/accelerator_to_spec_map.py !!!!! """
 # vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
 UserFacingNameToSystemCharacteristics = {
@@ -1622,8 +1622,10 @@ def workload_list(args) -> None:
 
   workload_list_filter_status_cmd = determine_workload_list_filter_by_status(args)
   workload_list_filter_job_cmd = determine_workload_list_filter_by_job(args)
-  command = f"kubectl get workloads -o=custom-columns='{s}' {workload_list_filter_status_cmd} {workload_list_filter_job_cmd}"
-  
+  command = (f'kubectl get workloads -o=custom-columns="{s}" '
+             f'{workload_list_filter_status_cmd} {workload_list_filter_job_cmd}'
+             )
+
   return_code = run_command_with_updates(command, 'List Jobs', args)
 
   if return_code != 0:
