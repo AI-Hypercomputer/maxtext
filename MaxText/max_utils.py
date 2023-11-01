@@ -112,9 +112,10 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
 
   return parallelism_vals
 
-def create_device_mesh(config, logging=True):
+def create_device_mesh(config, devices=None, logging=True):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas """
-  devices = jax.devices()
+  if devices is None:
+    devices = jax.devices()
   num_devices = len(devices)
   try:
     num_slices = 1 + max([d.slice_index for d in devices])
@@ -124,19 +125,19 @@ def create_device_mesh(config, logging=True):
   max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
   assert len(devices) > 1, "You must have at least two devices"
 
-  multi_slice_env = hasattr(jax.devices()[0], 'slice_index')
+  multi_slice_env = num_slices > 1
 
   dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism, config.dcn_tensor_parallelism]
   ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism, config.ici_tensor_parallelism]
 
   # Find possible unspecified parallelisms
-  dcn_parallelism = fill_unspecified_mesh_axes(dcn_parallelism, num_slices, 'DCN')
   ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, 'ICI')
 
   if multi_slice_env:
-    mesh = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism)
+    dcn_parallelism = fill_unspecified_mesh_axes(dcn_parallelism, num_slices, 'DCN')
+    mesh = mesh_utils.create_hybrid_device_mesh(ici_parallelism, dcn_parallelism, devices)
   else:
-    mesh = mesh_utils.create_device_mesh(ici_parallelism)
+    mesh = mesh_utils.create_device_mesh(ici_parallelism, devices)
 
   if logging:
     max_logging.log(f"Decided on mesh: {mesh}")
@@ -196,15 +197,11 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     state: the initialized train state
     state_mesh_annotations: the mesh annotations for the train state
   """
-  init_train_state_partial = functools.partial(init_train_state, model, tx,
-                                               config)
-  abstract_state = jax.eval_shape(init_train_state_partial, rng)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
+
+  unboxed_abstract_state, state_mesh_annotations = get_abstract_state(model, tx, config, rng, mesh)
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
                                                 config.load_from_other_directory,
@@ -216,6 +213,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     state_mesh_shardings = jax.tree_map(
         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
     if not state:
+      init_train_state_partial = functools.partial(init_train_state, model, tx, config)
       state = jax.jit(
           init_train_state_partial,
           in_shardings=None,
@@ -351,3 +349,17 @@ def _cross_entropy_with_logits_bwd(
 
 cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
                                  _cross_entropy_with_logits_bwd)
+
+# TODO: This function should be moved to maxtext_utils.py after refactoring b/308500675
+def get_abstract_state(model, tx, config, rng, mesh):
+  """ Get a shaped abstraction of the state (including optimizer)"""
+  init_train_state_partial = functools.partial(init_train_state, model, tx,
+                                              config)
+  abstract_state = jax.eval_shape(init_train_state_partial, rng)
+  state_logical_annotations = nn.get_partition_spec(abstract_state)
+  unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
+
+  # Initialization
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  return unboxed_abstract_state, state_mesh_annotations

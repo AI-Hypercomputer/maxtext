@@ -1,3 +1,17 @@
+# Copyright 2023 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Language Model configurations for research into backprop quantization."""
 import dataclasses
 import enum
@@ -41,7 +55,7 @@ class HParamsNonDifferentiable:
   use_hardware_integers: bool = True
   matmul_output_type: jnp.dtype = jnp.float32
   # Overided by using fp8 if fp8_type is specified
-  fp8_type: jnp.dtype = None
+  fp8_type: Optional[jnp.dtype] = None
 
 HparamBaseTypes = Optional[HParamsNonDifferentiable]
 
@@ -133,7 +147,7 @@ def _rand_round(
 
 
 def _random(
-    shape: tuple[int, ...], rng: jax.random.KeyArray) -> jnp.ndarray:
+    shape: tuple[int, ...], rng: jax.Array) -> jnp.ndarray:
   """Generates random floats for stochastic rounding."""
   nbits = 16
   assert nbits in [8, 16]

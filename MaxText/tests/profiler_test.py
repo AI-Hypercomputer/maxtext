@@ -36,7 +36,7 @@ class TpuJAXTest(unittest.TestCase):
 
   def test_xplane_is_present(self):
     files = self._get_session_snapshot()
-    self.assertLen(files, 1)
+    self.assertEqual(len(files), 1)
 
   def test_overview_page(self):
     xspace_filenames = self._get_session_snapshot()
@@ -70,17 +70,16 @@ class TpuJAXTest(unittest.TestCase):
     for event in result['traceEvents']:
       if 'name' in event and event['name'] == 'thread_name':
         thread_names.append((event['args']['name']))
-    self.assertContainsSubset(
-        [
-            'TensorFlow Name Scope',
-            'TensorFlow Ops',
-            'XLA Modules',
-            'XLA Ops',
-            'XLA TraceMe',
-            'Steps',
-        ],
-        thread_names,
-    )
+    expected_threads =  [
+          'TensorFlow Name Scope',
+          'TensorFlow Ops',
+          'XLA Modules',
+          'XLA Ops',
+          'XLA TraceMe',
+          'Steps',
+      ]
+    # Ensure that thread_names contains at least all expected threads.
+    self.assertEqual(set(expected_threads)-set(thread_names), set())
 
 
 if __name__ == '__main__':

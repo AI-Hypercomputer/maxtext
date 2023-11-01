@@ -17,7 +17,6 @@
 # Example command: 
 # bash docker_build_dependency_image.sh MODE=stable
 # bash docker_build_dependency_image.sh MODE=nightly
-# bash docker_build_dependency_image.sh MODE=head
 # bash docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
 
 # Enable "exit immediately if any command fails" option
@@ -51,7 +50,8 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
   echo "Default LIBTPU_GCS_PATH=${LIBTPU_GCS_PATH}"
   docker build --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
 else
-  docker build --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg CUSTOM_LIBTPU=true -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+  docker build --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+  docker build --build-arg CUSTOM_LIBTPU=true -f ./maxtext_libtpu_path.Dockerfile -t ${LOCAL_IMAGE_NAME} .
 fi
 
 echo ""

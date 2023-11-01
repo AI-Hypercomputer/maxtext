@@ -28,7 +28,7 @@ Context = Any  # TODO(lew): We could put Context in a separate file.
 
 FreshScaleFn = Callable[[jnp.ndarray], jnp.ndarray]
 ClipAndRoundFn = Callable[[jnp.ndarray, Context], jnp.ndarray]
-NoiseFn = Callable[[tuple[int, ...], jax.random.KeyArray], jnp.ndarray]
+NoiseFn = Callable[[tuple[int, ...], jax.Array], jnp.ndarray]
 
 
 @dataclasses.dataclass

@@ -383,6 +383,7 @@ class MultiHeadDotProductAttention(nn.Module):
   def __call__(self,
                inputs_q: Array,
                inputs_kv: Array,
+               inputs_positions:Optional[Array] = None,
                mask: Optional[Array] = None,
                bias: Optional[Array] = None,
                *,
@@ -439,6 +440,11 @@ class MultiHeadDotProductAttention(nn.Module):
     query = projection(kernel_init=query_init, name='query')(inputs_q)
     key = projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
     value = projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
+
+    #Apply RoPE
+    query = LLaMARotaryEmbedding(embedding_dims = self.head_dim, name='query_rotary')(inputs=query, position=inputs_positions)
+    key = LLaMARotaryEmbedding(embedding_dims = self.head_dim, name='key_rotary')(inputs=key, position=inputs_positions)
+
 
     query = nn.with_logical_constraint(
         query, ('activation_batch', 'activation_length', 'activation_heads', 'activation_kv')
@@ -712,121 +718,86 @@ class Embed(nn.Module):
     dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
     return jnp.dot(query, jnp.asarray(self.embedding, dtype).T)
 
-
-class RelativePositionBiases(nn.Module):
-  """Adds T5-style relative positional embeddings to the attention logits.
-
+class LLaMARotaryEmbedding(nn.Module):
+  """LLaMA variant of ROPE where inputs are split in a different way.
+  
   Attributes:
-    num_buckets: Number of buckets to bucket distances between key and query
-      positions into.
-    max_distance: Maximum distance before everything is lumped into the last
-      distance bucket.
-    num_heads: Number of heads in the attention layer. Each head will get a
-      different relative position weighting.
-    dtype: Type of arrays through this module.
-    embedding_init: initializer for relative embedding table.
+    min_timescale: Start of the geometric index. Determines the periodicity of
+      the added signal.
+    max_timescale: End of the geometric index. Determines the frequency of the
+      added signal.
+    embedding_dims: Dimension of the embedding to be generated.
   """
-  num_buckets: int
-  max_distance: int
-  num_heads: int
-  dtype: Any
-  embedding_init: Callable[..., Array] = nn.linear.default_embed_init
+  min_timescale: int = 1
+  max_timescale: int = 10_000
+  embedding_dims: int = 0
+  cast_as_fprop_dtype: bool = True
+  fprop_dtype: DType = jnp.bfloat16
 
-  @staticmethod
-  def _relative_position_bucket(relative_position,
-                                bidirectional=True,
-                                num_buckets=32,
-                                max_distance=128):
-    """Translate relative position to a bucket number for relative attention.
+  def setup(self) -> None:
+    if self.embedding_dims % 2:
+      raise ValueError(
+          'Embedding dim for rotary position embedding must be a multiple of 2.'
+      )
 
-    The relative position is defined as memory_position - query_position, i.e.
-    the distance in tokens from the attending position to the attended-to
-    position.  If bidirectional=False, then positive relative positions are
-    invalid.
-    We use smaller buckets for small absolute relative_position and larger
-    buckets for larger absolute relative_positions.  All relative
-    positions >=max_distance  map to the same bucket.  All relative
-    positions <=-max_distance map to the same bucket.  This should allow for
-    more graceful generalization to longer sequences than the model has been
-    trained on.
+  def __call__(
+      self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
+      inputs: jax.Array,
+      position: Optional[jax.Array] = None,
+  ) -> jax.Array:
+    """Generates a jax.Array of sinusoids with different frequencies.
 
     Args:
-      relative_position: an int32 array
-      bidirectional: a boolean - whether the attention is bidirectional
-      num_buckets: an integer
-      max_distance: an integer
+      inputs: The input sequence on which to apply the Rotary position
+        embedding. Since rotary position embeddings are applied to query and
+        keys after projection, it is assumed of shape [B, S, N, H].
+      position: Optional position jax.Array which denotes the position of each
+        token in the sequence. This only needs to be supplied when the sequence
+        is packed. It is of shape [B, S].
 
     Returns:
-      a Tensor with the same shape as relative_position, containing int32
-        values in the range [0, num_buckets)
+      a jax.Array of shape [B, S, N, H] which includes the inputs together with
+      the rotary position embedding incorporated in it.
     """
-    ret = 0
-    n = -relative_position
-    if bidirectional:
-      num_buckets //= 2
-      ret += (n < 0).astype(np.int32) * num_buckets
-      n = np.abs(n)
-    else:
-      n = np.maximum(n, 0)
-    # now n is in the range [0, inf)
-    max_exact = num_buckets // 2
-    is_small = n < max_exact
-    val_if_large = max_exact + (
-        np.log(n.astype(np.float32) / max_exact + np.finfo(np.float32).eps) /
-        np.log(max_distance / max_exact) *
-        (num_buckets - max_exact)).astype(np.int32)
-    val_if_large = np.minimum(val_if_large, num_buckets - 1)
-    ret += np.where(is_small, n, val_if_large)
-    return ret
+    if len(inputs.shape) != 4:
+      raise ValueError(
+          'Input is assumed to be a rank 4 tensor of shape'
+          '[batch, sequence, heads, dims].'
+      )
+    if self.embedding_dims != inputs.shape[3]:
+      raise ValueError(
+          'The embedding dims of the rotary position embedding'
+          'must match the hidden dimension of the inputs.'
+      )
+    half_embedding_dim = self.embedding_dims // 2
+    fraction = 2 * jnp.arange(0, half_embedding_dim) / self.embedding_dims
+    timescale = (
+        self.min_timescale
+        * (self.max_timescale / self.min_timescale) ** fraction
+    )
+    if position is None:
+      seq_length = inputs.shape[1]
+      position = jnp.arange(seq_length, dtype=jnp.float32)[jnp.newaxis, :]
+    position = position[:, :, jnp.newaxis, jnp.newaxis]
+    timescale = timescale[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
+    sinusoid_inp = position / timescale
+    sin = jnp.sin(sinusoid_inp)
+    cos = jnp.cos(sinusoid_inp)
+    reshape_tensor = inputs.astype(jnp.float32).reshape(
+        *inputs.shape[:-1], -1, 2
+    )
+    first_half = reshape_tensor[..., 0]
+    second_half = reshape_tensor[..., 1]
+    first_part = first_half * cos - second_half * sin
+    second_part = second_half * cos + first_half * sin
+    if self.cast_as_fprop_dtype:
+      first_part = first_part.astype(self.fprop_dtype)
+      second_part = second_part.astype(self.fprop_dtype)
+    x_out = jnp.stack((first_part, second_part), axis=-1).reshape(
+        *first_part.shape[:-1], -1
+    )
+    return x_out
 
-  @nn.compact
-  def __call__(self, qlen, klen, bidirectional=True):
-    """Produce relative position embedding attention biases.
-
-    Args:
-      qlen: attention query length.
-      klen: attention key length.
-      bidirectional: whether to allow positive memory-query relative position
-        embeddings.
-
-    Returns:
-      output: `(1, len, q_len, k_len)` attention bias
-    """
-    # TODO: should we be computing this w. numpy as a program
-    # constant?
-    context_position = np.arange(qlen, dtype=jnp.int32)[:, None]
-    memory_position = np.arange(klen, dtype=jnp.int32)[None, :]
-    relative_position = memory_position - context_position  # shape (qlen, klen)
-    rp_bucket = self._relative_position_bucket(
-        relative_position,
-        bidirectional=bidirectional,
-        num_buckets=self.num_buckets,
-        max_distance=self.max_distance)
-    relative_attention_bias = self.param(
-        'rel_embedding',
-        withLP(self.embedding_init, ('heads', 'relpos_buckets')),
-        (self.num_heads, self.num_buckets),
-        jnp.float32)
-
-    relative_attention_bias = jnp.asarray(relative_attention_bias, self.dtype)
-    # Instead of using a slow gather, we create a leading-dimension one-hot
-    # array from rp_bucket and use it to perform the gather-equivalent via a
-    # contraction, i.e.:
-    # (num_head, num_buckets) x (num_buckets one-hot, qlen, klen).
-    # This is equivalent to relative_attention_bias[:, rp_bucket]
-    bcast_iota = lax.broadcasted_iota(jnp.int32, (self.num_buckets, 1, 1), 0)
-    rp_bucket_one_hot = jnp.array(
-        rp_bucket[jnp.newaxis, ...] == bcast_iota, dtype=self.dtype)
-    # --> shape (qlen, klen, num_heads)
-    values = lax.dot_general(
-        relative_attention_bias,
-        rp_bucket_one_hot,
-        (
-            ((1,), (0,)),  # rhs, lhs contracting dims
-            ((), ())))  # no batched dims
-    # Add a singleton batch dimension.
-    # --> shape (1, num_heads, qlen, klen)
-    return values[jnp.newaxis, ...]
 
 
 #------------------------------------------------------------------------------
@@ -942,7 +913,7 @@ def combine_biases(*masks: Optional[Array]):
 def make_decoder_mask(decoder_target_tokens: Array,
                       dtype: DType,
                       decoder_causal_attention: Optional[Array] = None,
-                      decoder_segment_ids: Optional[Array] = None) -> Array:
+                      decoder_segment_ids: Optional[Array] = None) -> Optional[Array]:
   """Compute the self-attention mask for a decoder.
 
   Decoder mask is formed by combining a causal mask, a padding mask and an
@@ -1052,22 +1023,13 @@ class DecoderLayer(nn.Module):
   @nn.compact
   def __call__(self,
                inputs,
+               decoder_positions,
                decoder_mask,
                deterministic,
                decode,
                max_decode_length):
     cfg = self.config
     mesh = self.mesh
-    # Relative position embedding as attention biases.
-    l = max_decode_length if decode and max_decode_length else inputs.shape[-2]
-    decoder_bias = RelativePositionBiases(
-        num_buckets=32,
-        max_distance=128,
-        num_heads=cfg.num_heads,
-        dtype=cfg.dtype,
-        embedding_init=nn.initializers.variance_scaling(1.0, 'fan_avg',
-                                                        'uniform'),
-        name='relpos_bias')(l, l, False)
 
     inputs = nn.with_logical_constraint(inputs, ('activation_batch', 'activation_length', 'activation_embed'))
 
@@ -1088,8 +1050,9 @@ class DecoderLayer(nn.Module):
         mesh = mesh)(
             lnx,
             lnx,
+            decoder_positions,
             decoder_mask,
-            decoder_bias,
+            bias = None,
             deterministic=deterministic,
             decode=decode)
     attention_lnx = nn.with_logical_constraint(attention_lnx, ('activation_batch', 'activation_length', 'activation_embed'))
@@ -1167,7 +1130,7 @@ class Decoder(nn.Module):
           BlockLayer,
           prevent_cse=not cfg.scan_layers,
           policy=policy,
-          static_argnums=(-1, -2, -3, -4))
+          static_argnums=(-1, -2, -3, -4, -5))
     if cfg.scan_layers:
       initializing = self.is_mutable_collection('params')
       params_spec = (
@@ -1186,11 +1149,11 @@ class Decoder(nn.Module):
               'aqt': cfg.int8_training
           },
           in_axes=(nn.broadcast, nn.broadcast, nn.broadcast,
-                   nn.broadcast),
+                   nn.broadcast, nn.broadcast),
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'})(
               config=cfg, mesh=mesh,
-              name='decoder')(y, decoder_mask,
+              name='decoder')(y, decoder_positions, decoder_mask,
                               deterministic, decode, max_decode_length)
     else:
       for lyr in range(cfg.num_decoder_layers):
@@ -1198,6 +1161,7 @@ class Decoder(nn.Module):
         y = BlockLayer(
             config=cfg, mesh = mesh, name=f'layers_{lyr}')(
                 y,
+                decoder_positions,
                 decoder_mask,
                 deterministic,
                 decode,

@@ -1,6 +1,5 @@
 orbax-checkpoint
 absl-py
-argparse
 cloud-tpu-diagnostics
 datetime
 google-cloud-storage
@@ -17,3 +16,4 @@ tensorflow==2.13.*
 tensorflow-datasets
 tensorflow-text
 tensorboardx
+tensorboard-plugin-profile
