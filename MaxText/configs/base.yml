@@ -41,13 +41,8 @@ gcs_metrics: False
 dtype: "bfloat16"
 int8_training: False
 # The following flags will only have effect when int8_training is True
-use_dqdg: False
-fwd_int8: True
 int8_pv: True
 int8_qk: False
-aqt_use_dummy_static_bound: False
-aqt_use_fwd_quant: False
-aqt_rng_type: "jax.uniform"
 
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
