@@ -23,7 +23,14 @@ import layers
 import numpy as np
 
 
-  # A few jax_llama implementation from https://github.com/Sea-Snell/
+"""  
+An example reference jax_llama RoPE implementation from https://github.com/Sea-Snell/ 
+Users should feel free to change and optimize the RoPE implementation in MaxText defined in layers.py 
+as long as it passes our tests. But they shouldn't change the "reference" implementation in 
+llama_test.py which is only to be used for comparison purpose. 
+
+"""
+
 def precompute_freqs_cis(
     dim: int, end: int, theta: float = 10000.0, dtype: jnp.dtype = jnp.float32
 ) -> jnp.ndarray:
