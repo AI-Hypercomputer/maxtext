@@ -113,7 +113,7 @@ spec:
                 - bash
                 - -c
                 - |
-                  echo XPK Start: $(date) ; {args.command} ; EXIT_CODE=$? ; echo XPK End: $(date); echo EXIT_CODE=$EXIT_CODE ; sleep 5; exit $EXIT_CODE
+                  echo XPK Start: $(date) ; {command} ; EXIT_CODE=$? ; echo XPK End: $(date); echo EXIT_CODE=$EXIT_CODE ; sleep 5; exit $EXIT_CODE
                 resources:
                   limits:
                     google.com/tpu: {system.chips_per_vm}
@@ -257,7 +257,7 @@ class SystemCharacteristics:
 
 ################### Subcommand Helper Functions #############
 """ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-IF YOU MODIFY THE BELOW UserFacingNameToSystemCharacteristics MAP YOU SHOULD ALSO ADD CORRESPONDING 
+IF YOU MODIFY THE BELOW UserFacingNameToSystemCharacteristics MAP YOU SHOULD ALSO ADD CORRESPONDING
 MODICATIONS TO UserFacingNameToSystemCharacteristics IN MaxText/accelerator_to_spec_map.py !!!!! """
 # vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
 UserFacingNameToSystemCharacteristics = {
@@ -478,6 +478,14 @@ def add_env_config(args):
               'environment, a value must be specified.'
           )
           env[variable] = os.environ[variable]
+
+  if args.debug_dump_gcs:
+    if 'XLA_FLAGS' in env:
+      raise ValueError('Conflict: XLA_FLAGS defined in both --debug_dump_gcs '
+                       'and environment file. Please choose one way to define '
+                       'XLA_FLAGS.')
+    env['XLA_FLAGS'] = '--xla_dump_to=/tmp/xla_dump/'
+
   env_format = '''
                 - name: {key}
                   value: "{value}"'''
@@ -1460,7 +1468,15 @@ def workload_create(args) -> int:
     xpk_exit(setup_docker_image_code)
 
   add_env_config(args)
-  yml_string = workload_create_yaml.format(args=args, system=system, docker_image=docker_image)
+  command = args.command
+  if args.debug_dump_gcs:
+    command += ('; WORKER_ID=$HOSTNAME;'
+                f'gsutil cp -r /tmp/xla_dump/ {args.debug_dump_gcs}/$WORKER_ID')
+
+  yml_string = workload_create_yaml.format(args=args,
+                                           system=system,
+                                           docker_image=docker_image,
+                                           command=command)
   tmp = write_temporary_file(yml_string)
   command = f'kubectl apply -f {str(tmp.file.name)}'
 
@@ -1606,7 +1622,10 @@ def workload_list(args) -> None:
 
   workload_list_filter_status_cmd = determine_workload_list_filter_by_status(args)
   workload_list_filter_job_cmd = determine_workload_list_filter_by_job(args)
-  command = f"kubectl get workloads -o=custom-columns='{s}' {workload_list_filter_status_cmd} {workload_list_filter_job_cmd}"
+  command = (f'kubectl get workloads -o=custom-columns="{s}" '
+             f'{workload_list_filter_status_cmd} {workload_list_filter_job_cmd}'
+             )
+
   return_code = run_command_with_updates(command, 'List Jobs', args)
 
   if return_code != 0:
@@ -1625,16 +1644,16 @@ def add_shared_arguments(custom_parser):
       '--project',
       type=str,
       default=None,
-      help="GCE project name, defaults to 'gcloud config project.'",
+      help='GCE project name, defaults to "gcloud config project."',
   )
   custom_parser.add_argument(
       '--zone',
       type=str,
       default=None,
       help=(
-          "GCE zone, e.g. us-central2-b, defaults to 'gcloud config"
-          " compute/zone.'Only one of --zone or --region is allowed in a"
-          ' command.'
+          'GCE zone, e.g. us-central2-b, defaults to "gcloud config '
+          'compute/zone." Only one of --zone or --region is allowed in a '
+          'command.'
       ),
   )
   custom_parser.add_argument(
@@ -1779,7 +1798,7 @@ cluster_create_optional_arguments.add_argument(
         'Users can add their own arguments to customize their tpu node pool'
         ' create command. Do note, these will not override already used node'
         ' pool creation arguments. e.g.'
-        " --custom-tpu-nodepool-arguments='--enable-ip-alias'"
+        ' --custom-tpu-nodepool-arguments="--enable-ip-alias"'
     ),
 )
 cluster_create_optional_arguments.add_argument(
@@ -2071,8 +2090,17 @@ workload_create_parser_optional_arguments.add_argument(
     type=str,
     default='0',
     help=(
-        "Maximum number of times the JobSet will be restarted upon failure."
-        " Defaults to 0."
+        'Maximum number of times the JobSet will be restarted upon failure. '
+        'Defaults to 0.'
+    ),
+)
+workload_create_parser_optional_arguments.add_argument(
+    '--debug-dump-gcs',
+    type=str,
+    default=None,
+    help=(
+        'GCS bucket or a directory within a bucket, e.g gs://bucket/subdir, '
+        'where debugging information such as HLO dumps are uploaded'
     ),
 )
 
