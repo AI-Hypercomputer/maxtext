@@ -155,6 +155,9 @@ kind: ClusterQueue
 metadata:
   name: "cluster-queue"
 spec:
+  preemption:
+      reclaimWithinCohort: Never # Don't preempt other queues in the cohort.
+      withinClusterQueue: LowerPriority
   namespaceSelector: {{}} # match all.
   resourceGroups:
   - coveredResources: ["google.com/tpu"]
@@ -175,7 +178,7 @@ spec:
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
-  name: verylow
+  name: very-low
 value: 100
 globalDefault: false
 description: "Very Low"
@@ -207,10 +210,10 @@ description: "High"
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
-  name: veryhigh
+  name: very-high
 value: 1000
 globalDefault: false
-description: "Very high"
+description: "Very High"
 """
 
 cluster_preheat_yml = """
@@ -1979,8 +1982,9 @@ workload_create_parser_optional_arguments.add_argument(
     '--priority',
     type=str,
     default='medium',
+    choices=['very-low', 'low', 'medium', 'high', 'very-high'],
     help=(
-        'A priority, one of `verylow`, `low`, `medium`, `high` or `veryhigh`.'
+        'A priority, one of `very-low`, `low`, `medium`, `high` or `very-high`.'
         ' Defaults to `medium`.'
     ),
 )
