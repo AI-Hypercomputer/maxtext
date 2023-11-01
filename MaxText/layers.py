@@ -442,8 +442,10 @@ class MultiHeadDotProductAttention(nn.Module):
     value = projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
     #Apply RoPE
-    query = LLaMARotaryEmbedding(embedding_dims = self.head_dim, name='query_rotary')(inputs=query, position=inputs_positions)
-    key = LLaMARotaryEmbedding(embedding_dims = self.head_dim, name='key_rotary')(inputs=key, position=inputs_positions)
+    query = LLaMARotaryEmbedding(embedding_dims = self.head_dim, name='query_rotary')(inputs=query,
+                                                                                      position=inputs_positions)
+    key = LLaMARotaryEmbedding(embedding_dims = self.head_dim, name='key_rotary')(inputs=key,
+                                                                                  position=inputs_positions)
 
 
     query = nn.with_logical_constraint(
