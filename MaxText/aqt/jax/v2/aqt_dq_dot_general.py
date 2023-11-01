@@ -97,14 +97,6 @@ def cast_tmp(x: jnp.ndarray) -> jnp.ndarray:
   return jax.lax.convert_element_type(x, _TMP_DTYPE)
 
 
-def _jax_random_bits(key, bit_width, shape):
-  from jax._src import prng  # pylint: disable=g-import-not-at-top
-  assert hasattr(prng, 'random_wrap')
-  assert not jax.config.jax_enable_custom_prng
-  key = prng.random_wrap(key, impl=jax.random.default_prng_impl())
-  return prng.random_bits(key, bit_width=bit_width, shape=shape)  # pytype: disable=module-attr
-
-
 def _rand_round(
     shape: tuple[int, ...], bits: jnp.ndarray) -> jnp.ndarray:
   """Random floats in nearly [-0.5, 0.5] of shape `shape`.
@@ -149,9 +141,7 @@ def _rand_round(
 def _random(
     shape: tuple[int, ...], rng: jax.Array) -> jnp.ndarray:
   """Generates random floats for stochastic rounding."""
-  nbits = 16
-  assert nbits in [8, 16]
-  bits = _jax_random_bits(rng, nbits, shape)
+  bits = jax.random.bits(rng, shape=shape, dtype='uint16')
   return _rand_round(shape, bits)
 
 

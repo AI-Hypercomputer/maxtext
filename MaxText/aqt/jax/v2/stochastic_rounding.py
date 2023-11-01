@@ -24,13 +24,12 @@ import jax.numpy as jnp
 def random_centered_uniform(
     shape: tuple[int, ...], key: jax.Array) -> jnp.ndarray:
   """Generates uniform number in [-0.5, 0.5]."""
+  dtype = jnp.uint16
   nbits = 16
 
   # Generate random bits.
-  from jax._src import prng  # pylint: disable=g-import-not-at-top
   assert not jax.config.jax_enable_custom_prng
-  key = prng.random_wrap(key, impl=jax.random.default_prng_impl())
-  bits = prng.random_bits(key, bit_width=nbits, shape=shape)
+  bits = jax.random.bits(key, shape=shape, dtype=dtype)
   assert bits.shape == shape, (bits.shape, bits.shape)
   assert bits.dtype == {8: jnp.uint8, 16: jnp.uint16}[nbits], bits.dtype
 
