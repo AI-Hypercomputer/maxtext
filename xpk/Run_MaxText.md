@@ -30,7 +30,6 @@ This document focusses on steps required to setup XPK on TPU VM and assumes you 
 ```shell
 sudo snap install kubectl --classic
 ```
-
 * Install `gke-gcloud-auth-plugin`
 ```shell
 echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
@@ -93,20 +92,15 @@ after which log out and log back in to the machine.
       gcloud config set project $PROJECT_ID
       gcloud config set compute/zone $ZONE
 
-      # Make sure you are in the maxtext github root directory when running this command
+      # Make sure you are in the xpk github root directory when running this command
+      git clone https://github.com/google/xpk.git
+      cd xpk
 
-      python3 xpk/xpk.py workload create \
+      python3 xpk.py workload create \
       --cluster ${CLUSTER_NAME} \
-      --base-docker-image gcr.io/${PROJECT_ID}/${USER}_runner \
+      --docker-image gcr.io/${PROJECT_ID}/${USER}_runner \
       --workload ${USER}-first-job \
       --tpu-type=v5litepod-256 \
       --num-slices=1  \
       --command "python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
       ```
-
-
-
-
-
-
-
