@@ -86,7 +86,8 @@ def get_shaped_inputs(topology_mesh, config):
 def jit_and_compile(func, func_input_args, func_input_kwargs, mesh, in_shardings,
   out_shardings, static_argnums, donate_argnums, logical_axis_rules):
   """ Jit, lower, and compile func."""
-  with mesh, logical_axis_rules:
+  #with mesh, logical_axis_rules:
+  with logical_axis_rules:
     jitted = jax.jit(
       func,
       in_shardings=in_shardings,
