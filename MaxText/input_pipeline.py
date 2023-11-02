@@ -17,12 +17,15 @@
 """Input pipeline for a LM1B dataset."""
 
 import os
+import re
 from typing import Optional
 import functools
 
+# from array_record.python import array_record_data_source
 import ml_collections
 import tensorflow as tf
 import tensorflow_datasets as tfds
+import grain.python as pygrain
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
@@ -30,6 +33,10 @@ from jax.sharding import PartitionSpec as P
 import tokenizer
 import multihost_dataloading
 import sequence_packing
+import pygrain_operations
+from transformers import T5Tokenizer
+from sentencepiece import SentencePieceProcessor
+import pygrain_tokenizer
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
@@ -87,6 +94,7 @@ def normalize_features(ds):
 
 def preprocessing_pipeline(
   dataset,
+  dataset_type,
   batch_size: int,
   global_mesh,
   shuffle: bool,
@@ -147,8 +155,69 @@ def preprocessing_pipeline(
   if prefetch_size:
     dataset = dataset.prefetch(prefetch_size)
 
-  multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(dataset, global_mesh)
+  multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(dataset_type, dataset, global_mesh)
 
+  # Return multi-host jax.Array prep iterator
+  return multihost_gen
+
+def preprocessing_pipeline_pygrain(
+  dataset,
+  dataset_type,
+  operations,
+  batch_size: int,
+  global_mesh,
+  shuffle: bool,
+  num_epochs: Optional[int] = 1,
+  pack_examples: bool = True,
+  shuffle_buffer_size: int = 1024,
+  max_length: int = 512,
+  shift: bool = True,
+  drop_remainder: bool = True,
+  data_sharding = None,
+  data_shuffle_seed = 0,
+):
+  operations.append(pygrain.FilterOperation(condition_function = pygrain_operations.length_filter(max_length)))
+
+  # Pack and Batch examples.
+  if pack_examples:
+    operations.append(pygrain.experimental.PackAndBatchOperation(
+                        batch_size=batch_size // jax.process_count(),
+                        length_struct={'inputs':max_length,'targets':max_length}))
+    operations.append(pygrain.MapOperation(map_function=pygrain_operations.CombineKeys()))
+  else:
+    # operations.append(pygrain.MapOperation(map_function=pygrain_operations.PadToMaxLength(max_length)))
+    operations.append(pygrain.BatchOperation(batch_size=batch_size // jax.process_count(), drop_remainder=drop_remainder))
+
+  # Shift inputs for teacher-forced training
+  if shift:
+    operations.append(pygrain.MapOperation(map_function=pygrain_operations.ShiftData(axis=0,segmented=pack_examples)))  
+
+  index_sampler = pygrain.IndexSampler(
+    num_records=len(dataset),
+    num_epochs = num_epochs,
+    shard_options=pygrain.ShardOptions(
+      shard_index = jax.process_index(), shard_count = jax.process_count(), drop_remainder = True
+    ),
+    shuffle = shuffle,
+    seed = data_shuffle_seed
+  )
+
+  dataloader = pygrain.DataLoader(
+    data_source = dataset,
+    operations = operations,
+    sampler = index_sampler,
+    worker_count=0,
+  )
+  # data_iter = iter(dataloader)
+  # global_shape = (batch_size, max_length)
+
+  # multihost_gen = (
+  #     multihost_dataloading.get_next_batch_sharded_pygrain(
+  #         data_iter, data_sharding, global_shape, global_mesh
+  #     )
+  # )
+
+  multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(dataset_type, dataloader, global_mesh)
   # Return multi-host jax.Array prep iterator
   return multihost_gen
 
@@ -182,6 +251,21 @@ def get_datasets(
 
   return train_ds, eval_ds
 
+def get_datasets_pygrain(
+  config: ml_collections.ConfigDict,
+  read_config = None,
+):
+  data_dir = os.path.join(config.dataset_path, config.dataset_name)
+  train_files = [data_dir + '/' + f for f in os.listdir(data_dir) if re.match(r'.*train.*', f)]
+  train_ds = pygrain.ArrayRecordDataSource(train_files)
+  if config.eval_dataset_name:
+    eval_files = [data_dir + '/' + f for f in os.listdir(data_dir) if re.match(rf'.*{config.eval_split}.*', f)]
+    eval_ds = pygrain.ArrayRecordDataSource(eval_files)
+  else:
+    eval_ds_builder = train_ds_builder
+
+  return train_ds, eval_ds
+
 def preprocess_dataset(config: ml_collections.ConfigDict,
                         global_mesh,
                         train_ds, eval_ds,
@@ -191,10 +275,11 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
   if vocab_path is None:
     vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
 
+
   # Load tokenizer
   sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
                                           vocab_size=config.vocab_size)
-
+  # sp_tokenizer = T5Tokenizer.from_pretrained('t5-base')
   # Tokenize data.
   train_ds = train_ds.map(
       tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
@@ -216,6 +301,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
 
   train_iter = preprocessing_pipeline(
       train_ds,
+      config.dataset_type,
       global_batch_size_to_load,
       global_mesh,
       shuffle=config.enable_data_shuffling,
@@ -227,6 +313,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
 
   eval_iter = preprocessing_pipeline(
       eval_ds,
+      config.dataset_type,
       eval_batch_size,
       global_mesh,
       shuffle=config.enable_data_shuffling,
@@ -237,6 +324,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
 
   predict_iter = preprocessing_pipeline(
       eval_ds,
+      config.dataset_type,
       eval_batch_size,
       global_mesh,
       shuffle=config.enable_data_shuffling,
@@ -245,6 +333,79 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       shift=False,
       drop_remainder=False,
       data_shuffle_seed = data_shuffle_seed,)
+
+  return train_iter, eval_iter, predict_iter, sp_tokenizer
+
+def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
+                        global_mesh,
+                        train_ds, eval_ds,
+                        vocab_path: Optional[str] = None,
+                        data_shuffle_seed = 0,):
+  """PyGrain: Pre-process the dataset and return iterators"""
+  if vocab_path is None:
+    vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
+
+  # Load tokenizer
+  # sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
+  #                                         vocab_size=config.vocab_size)
+  # sp_tokenizer = T5Tokenizer.from_pretrained('t5-base', model_max_length=1024)
+  sp_tokenizer = SentencePieceProcessor(vocab_path)
+
+  operations = [pygrain.MapOperation(map_function=pygrain_operations.normalize_features())]
+  #operations.append(pygrain.MapOperation(map_function=pygrain_operations.TokenizeOperation(sp_tokenizer)))
+  operations.append(pygrain_tokenizer.TokenizeAndPad(["inputs","targets"], config.max_target_length, vocab_path))
+
+  # Set global batch size.
+  global_batch_size_to_load = config.global_batch_size_to_load
+
+  if config.eval_per_device_batch_size > 0:
+    eval_batch_size = config.eval_per_device_batch_size * global_mesh.size
+  else:
+    eval_batch_size = global_batch_size_to_load
+
+  def filter_keys(record):
+    return {'inputs': record['inputs'], 'targets': record['targets']}
+  operations.append(pygrain.MapOperation(map_function=filter_keys))
+
+  train_iter = preprocessing_pipeline_pygrain(
+      train_ds,
+      config.dataset_type,
+      operations,
+      global_batch_size_to_load,
+      global_mesh,
+      shuffle=config.enable_data_shuffling,
+      num_epochs=1,
+      pack_examples=False,
+      max_length=config.max_target_length,
+      shift=False,
+      data_sharding=config.data_sharding,
+      data_shuffle_seed = data_shuffle_seed,)
+
+  eval_iter = preprocessing_pipeline_pygrain(
+      eval_ds,
+      config.dataset_type,
+      operations,
+      eval_batch_size,
+      global_mesh,
+      shuffle=config.enable_data_shuffling,
+      pack_examples=False,
+      max_length=config.max_eval_target_length,
+      shift=False,
+      data_sharding=config.data_sharding,
+      data_shuffle_seed = data_shuffle_seed,)
+
+  predict_iter = preprocessing_pipeline_pygrain(
+      eval_ds,
+      config.dataset_type,
+      operations,
+      eval_batch_size,
+      global_mesh,
+      shuffle=config.enable_data_shuffling,
+      pack_examples=False,
+      max_length=config.max_eval_target_length,
+      shift=False,
+      data_sharding=config.data_sharding,
+      data_shuffle_seed = data_shuffle_seed,)     
 
   return train_iter, eval_iter, predict_iter, sp_tokenizer
 
@@ -259,6 +420,24 @@ def make_c4_train_iterator_and_tokenizer(config, mesh):
     read_config = read_config,
   )
   train_iter, _, _, sp_tokenizer = preprocess_dataset(
+    config,
+    mesh,
+    train_ds, eval_ds,
+    vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
+    data_shuffle_seed = config.data_shuffle_seed,
+  )
+  return train_iter, sp_tokenizer
+
+def make_pygrain_train_iterator_and_tokenizer(config, mesh):
+  """ Make train iterator and tokenizer for C4 dataset"""
+  read_config = tfds.ReadConfig(
+    shuffle_seed = config.data_shuffle_seed,
+  )
+  train_ds, eval_ds = get_datasets_pygrain(
+    config=config,
+    read_config = read_config,
+  )
+  train_iter, _, _, sp_tokenizer = preprocess_dataset_pygrain(
     config,
     mesh,
     train_ds, eval_ds,
@@ -305,6 +484,8 @@ def create_data_iterator_with_tokenizer(config, mesh):
     return SyntheticDataIterator(config, mesh), None
   elif config.dataset_type == "c4":
     return make_c4_train_iterator_and_tokenizer(config, mesh)
+  elif config.dataset_type == "array_record":
+    return make_pygrain_train_iterator_and_tokenizer(config, mesh)
   else:
     assert False, "dataset type not implemented"
 
