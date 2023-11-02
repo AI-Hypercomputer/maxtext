@@ -272,7 +272,7 @@ def setup_training_state(model, tx, config, rng, mesh, checkpoint_manager):
   is_training = True
   return setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_training)
 
-def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_training=True):
+def setup_initial_state(model, iterator, tx, config, rng, mesh, checkpoint_manager, is_training=True):
   """ We initialize the model and optimizer state, and optionally load from a
   checkpoint as necessary.
 
@@ -299,11 +299,20 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_tra
                                                 config.load_from_other_directory,
                                                 config.load_from_other_directory_step,
                                                 unboxed_abstract_state,
+                                                config.dataset_type,
+                                                iterator,
                                                 mesh,
                                                 state_mesh_annotations)
 
     state_mesh_shardings = jax.tree_map(
         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
+    
+    if state['state']:
+      state = state['state']
+
+    if state['iter'] and config.dataset_type=="array_record":
+      iterator = restore['iter']
+
     if not state:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       state = jax.jit(
@@ -316,7 +325,8 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_tra
     raw_params = None
 
   state = unbox_logicallypartioned_trainstate(state)
-  return state, state_mesh_annotations
+  return state, state_mesh_annotations, iterator
+
 
 
 # Learning Rate Schedule

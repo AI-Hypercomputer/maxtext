@@ -228,6 +228,7 @@ def train_loop(config, state=None):
       config.enable_checkpointing,
       config.async_checkpointing,
       config.checkpoint_period,
+      config.dataset_type,
   )
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
@@ -243,7 +244,7 @@ def train_loop(config, state=None):
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  state, state_mesh_annotations = max_utils.setup_training_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  state, state_mesh_annotations = max_utils.setup_training_state(model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager)
   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
     train_step,
     mesh,
@@ -297,7 +298,9 @@ def train_loop(config, state=None):
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
-      if checkpoint_manager.save(step, state):
+      if config.dataset_type == "array_record" and checkpoint_manager.save(step, {'state':state,'iter':data_iterator}):
+        max_logging.log(f"saved a checkpoint (containing state and iter) at step {step}")
+      elif checkpoint_manager.save(step, state):
         max_logging.log(f"saved a checkpoint at step {step}")
       # Upon preemption, exit when and only when all ongoing saves are complete.
       if checkpoint_manager.reached_preemption(step):
