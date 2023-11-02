@@ -163,7 +163,7 @@ class TpuTask(BaseTask):
     """
     with TaskGroup(group_id="post_process") as group:
       process_id = metric.generate_process_id.override(retries=1)()
-      metric.process_metrics(
+      metric.process_metrics.override(retries=1)(
           process_id,
           self.task_test_config,
           self.task_metric_config,

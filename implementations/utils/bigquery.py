@@ -63,9 +63,8 @@ class TestRun:
 
 class JobStatus(enum.Enum):
   SUCCESS = 0
-  FAILURE = 1
-  TIMEOUT = 2
-  MISSED = 3
+  FAILED = 1
+  MISSED = 2
 
 
 class BigQueryMetricClient:

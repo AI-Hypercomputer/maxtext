@@ -17,6 +17,7 @@
 
 import dataclasses
 import datetime
+import enum
 import hashlib
 import os
 import re
@@ -24,6 +25,7 @@ from typing import Dict, Iterable, List, Optional
 import uuid
 from absl import logging
 from airflow.decorators import task
+from airflow.models import TaskInstance
 from airflow.operators.python import get_current_context
 from apis import gcp_config, test_config
 from apis import metric_config
@@ -41,6 +43,12 @@ from tensorflow.core.util import event_pb2
 class TensorBoardScalar:
   metric_value: float
   step: int
+
+
+class TaskState(enum.Enum):
+  FAILED = "failed"
+  SKIPPED = "upstream_failed"
+  SUCCESS = "success"
 
 
 def is_valid_tag(
@@ -355,7 +363,7 @@ def generate_row_uuid(base_id: str, index: int) -> str:
   return hashlib.sha256(str(base_id + str(index)).encode("utf-8")).hexdigest()
 
 
-@task
+@task(trigger_rule="all_done")
 def generate_process_id() -> str:
   """Generate a process id that will be a base id for uuid of test runs.
 
@@ -389,9 +397,45 @@ def is_valid_entry() -> bool:
   return True
 
 
-# TODO(ranran):
-# 1) handle job status
-# 2) handle Airflow retry to avoid duplicate records in tables
+def get_job_status(benchmark_id: str) -> bigquery.JobStatus:
+  """Get job status for the run.
+
+  MISSED - if any failure occurs in initialize & create_queued_resource
+  FAILED - if any failure occurs in setup & run_model (including timeout of
+  run_model)
+  SUCCESS - end-to-end model tests are successful from provision to run_model
+  """
+  context = get_current_context()
+  execution_date = context["dag_run"].logical_date
+  current_dag = context["dag"]
+
+  # check setup status to see if provision step is successful
+  setup_task = current_dag.get_task(task_id=f"{benchmark_id}.provision.setup")
+  setup_ti = TaskInstance(setup_task, execution_date)
+  setup_state = setup_ti.current_state()
+  if setup_state == TaskState.SKIPPED.value:
+    print("The setup state is skipped, and the job status is missed.")
+    return bigquery.JobStatus.MISSED
+
+  # check setup status to see if setup step is successful
+  if setup_state == TaskState.FAILED.value:
+    print("The setup state is failed, and the job status is failed.")
+    return bigquery.JobStatus.FAILED
+
+  # check run_model status to see if run_model step is successful
+  run_model_task = current_dag.get_task(task_id=f"{benchmark_id}.run_model")
+  run_model_ti = TaskInstance(run_model_task, execution_date)
+  run_model_state = run_model_ti.current_state()
+
+  if run_model_state == TaskState.SUCCESS.value:
+    print("The run_model state is success, and the job status is success.")
+    return bigquery.JobStatus.SUCCESS
+
+  print("The run_model state is failed, and the job status is failed.")
+  return bigquery.JobStatus.FAILED
+
+
+# TODO(ranran): handle Airflow retry to avoid duplicate records in tables
 @task
 def process_metrics(
     base_id: str,
@@ -449,13 +493,14 @@ def process_metrics(
       task_gcp_config.project_name, task_gcp_config.dataset_name.value
   )
 
+  test_job_status = get_job_status(task_test_config.benchmark_id)
   for index in range(len(metadata_history_rows_list)):
     job_history_row = bigquery.JobHistoryRow(
         uuid=generate_row_uuid(base_id, index),
         timestamp=current_time,
         owner=task_test_config.task_owner,
         job_name=benchmark_id,
-        job_status=bigquery.JobStatus.SUCCESS.value,
+        job_status=test_job_status.value,
     )
     test_run_row = bigquery.TestRun(
         job_history_row,
