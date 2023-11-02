@@ -442,10 +442,12 @@ class MultiHeadDotProductAttention(nn.Module):
     value = projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
     #Apply RoPE
-    query = LLaMARotaryEmbedding(embedding_dims = self.head_dim, name='query_rotary')(inputs=query,
-                                                                                      position=inputs_positions)
-    key = LLaMARotaryEmbedding(embedding_dims = self.head_dim, name='key_rotary')(inputs=key,
-                                                                                  position=inputs_positions)
+    query = LLaMARotaryEmbedding(embedding_dims=self.head_dim,
+                                 name='query_rotary'
+                                 )(inputs=query, position=inputs_positions)
+    key = LLaMARotaryEmbedding(embedding_dims=self.head_dim,
+                               name='key_rotary'
+                               )(inputs=key, position=inputs_positions)
 
 
     query = nn.with_logical_constraint(
@@ -483,7 +485,7 @@ class MultiHeadDotProductAttention(nn.Module):
         expected_shape = (batch, 1, num_heads, head_dim)
         if expected_shape != query.shape:
           raise ValueError(f"""Autoregressive cache shape error,
-                           expected query shape %s instead got 
+                           expected query shape %s instead got
                            {(expected_shape, query.shape)}""")
         # Create a OHE of the current index. NOTE: the index is increased below.
         cur_index = cache_index.value
@@ -722,7 +724,7 @@ class Embed(nn.Module):
 
 class LLaMARotaryEmbedding(nn.Module):
   """LLaMA variant of ROPE where inputs are split in a different way.
-  
+
   Attributes:
     min_timescale: Start of the geometric index. Determines the periodicity of
       the added signal.

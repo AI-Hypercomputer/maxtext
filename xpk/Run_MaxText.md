@@ -30,6 +30,7 @@ This document focusses on steps required to setup XPK on TPU VM and assumes you 
 ```shell
 sudo snap install kubectl --classic
 ```
+
 * Install `gke-gcloud-auth-plugin`
 ```shell
 echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
@@ -39,6 +40,26 @@ curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyr
 sudo apt update && sudo apt-get install google-cloud-sdk-gke-gcloud-auth-plugin
 ```
 
+* Authenticate gcloud installation by running this command and following the prompt
+```
+gcloud auth login
+```
+
+* Run this command to configure docker to use docker-credential-gcloud for GCR registries:
+```
+gcloud auth configure-docker
+```
+
+* Test the installation by running
+```
+docker run hello-world
+```
+
+* If getting a permission error, try running
+```
+sudo usermod -aG docker $USER
+```
+after which log out and log back in to the machine.
 
 ## Build Docker Image for Maxtext
 
