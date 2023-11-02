@@ -20,7 +20,7 @@
 import jax
 from jax.sharding import PartitionSpec as P
 from jax.experimental.serialize_executable import deserialize_and_load
-
+from aqt.jax.v2.google import aqt_config
 
 import pickle
 import functools
@@ -81,3 +81,15 @@ def load_compiled(config, partial_train, state):
   in_tree, out_tree = get_train_input_output_trees(partial_train, shaped_input_args, shaped_input_kwargs)
   p_train_step = deserialize_and_load(serialized_compiled, in_tree, out_tree)
   return p_train_step
+
+def quanization_config(config):
+  """ Make the quantization config """
+  aqt_cfg = aqt_config.quantization_config(
+  config.fwd_int8,
+  config.dlhs_int8,
+  config.drhs_int8,
+  use_dummy_static_bound=config.aqt_use_dummy_static_bound,
+  rng_type=config.aqt_rng_type,
+  use_fwd_quant=config.aqt_use_fwd_quant,
+  )
+  return aqt_cfg
