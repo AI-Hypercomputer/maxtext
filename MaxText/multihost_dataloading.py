@@ -43,12 +43,15 @@ Device = Any
 DATA_DIM = 0  # assume data dimension is the first
 
 
-def check_inputs(dataset, global_data_shape, data_axes):
+def check_inputs(dataset_type, dataset, global_data_shape, data_axes):
   # pylint: disable=missing-function-docstring
   # dataset_structure = jax.tree_util.tree_structure(iter(dataset).next())
-  dataset_structure = jax.tree_util.tree_structure(
-      tf.data.experimental.get_structure(dataset)
-  )
+  if dataset_type == "array_record":
+    dataset_structure = jax.tree_util.tree_structure(dataset)
+  else:
+    dataset_structure = jax.tree_util.tree_structure(
+        tf.data.experimental.get_structure(dataset)
+    )
   global_data_shape_structure = jax.tree_util.tree_structure(global_data_shape)
   data_axes_structure = jax.tree_util.tree_structure(data_axes)
   try:
@@ -92,7 +95,7 @@ def get_batch_sharded_data_pipeline(
   Returns:
     sharded_dataset: per_host dataset
   """
-  _ = check_inputs(dataset, global_data_shape, data_axes)
+  _ = check_inputs("c4", dataset, global_data_shape, data_axes)
 
   dataset = iter(dataset.as_numpy_iterator())
 
@@ -148,6 +151,9 @@ def get_next_batch_sharded(local_dataset: tf.data.Dataset,
     device_buffers = _put_to_devices(local_data)
     #  Wrap device buffers as GDA
     shape = tuple(shape)
+    print("####################### Debug")
+    print(f"shape: {shape}; global_mesh: {global_mesh}; ")
+    print(f"input_sharding_constraint: {input_sharding_constraint};")
     input_gda = jax.make_array_from_single_device_arrays(shape,
         jax.sharding.NamedSharding(global_mesh, input_sharding_constraint), device_buffers)
     return input_gda
@@ -156,3 +162,69 @@ def get_next_batch_sharded(local_dataset: tf.data.Dataset,
 
   return input_gdas
 
+def get_next_batch_sharded_pygrain(data_iter,
+                           data_sharding,
+                           global_shape: Pytree,
+                           global_mesh: Mesh) -> jax.Array:
+  """Splits the host loaded data equally over all devices."""
+
+  SLEEP_TIME = 10
+  MAX_DATA_LOAD_ATTEMPTS = 30
+  data_load_attempts = 0
+  loaded_data_success = False
+  while not loaded_data_success and data_load_attempts < MAX_DATA_LOAD_ATTEMPTS:
+    data_load_attempts += 1
+    try:
+      local_data = next(data_iter)
+      loaded_data_success = True
+    except tf.errors.FailedPreconditionError:
+      max_logging.log("Failed to get next data batch, retrying")
+      time.sleep(SLEEP_TIME)
+  # Try one last time, if this fails we will see the full stack trace.
+  if not loaded_data_success:
+    local_data = next(data_iter)
+
+  global_data_shape = jax.tree_map(
+      lambda x: PartitionSpec(*global_shape), local_data
+  )
+  data_axes = jax.tree_map(lambda x: PartitionSpec(*data_sharding), local_data)
+  _ = check_inputs("array_record", local_data, global_data_shape, data_axes)
+
+  # local_devices = jax.local_devices()
+  local_devices = global_mesh.local_devices
+  local_device_count = jax.local_device_count()
+  print(f"local_device: {local_devices}")
+  print(f"local_device_count: {local_device_count}")
+
+  def _put_to_devices(x):
+    try:
+      per_device_arrays = np.split(x, local_device_count, axis=0)
+    except ValueError as array_split_error:
+      raise ValueError(
+          f'Unable to put to devices shape {x.shape} with '
+          f'local device count {local_device_count}') from array_split_error
+    device_buffers = [
+        jax.device_put(arr, d)
+        for arr, d in zip(per_device_arrays, local_devices)
+    ]
+    return device_buffers
+  # 'fully shard' the data (first) axis across both axes
+  # of the hardware mesh. This is layout matches the
+  # manual device placing we just did.
+  input_sharding_constraint = PartitionSpec(*data_sharding, None)
+
+  def form_gda(local_data, shape):
+    device_buffers = _put_to_devices(local_data)
+    #  Wrap device buffers as GDA
+    shape = tuple(shape)
+    print("####################### Debug")
+    print(f"shape: {shape}; global_mesh: {global_mesh}; ")
+    print(f"input_sharding_constraint: {input_sharding_constraint};")
+    print(f"jax.sharding.NamedSharding: {jax.sharding.NamedSharding(global_mesh, input_sharding_constraint)};")
+    input_gda = jax.make_array_from_single_device_arrays(shape,
+        jax.sharding.NamedSharding(global_mesh, input_sharding_constraint), device_buffers)
+    return input_gda
+
+  input_gdas = jax.tree_map(form_gda, local_data, global_data_shape)
+
+  return input_gdas

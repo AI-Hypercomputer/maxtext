@@ -61,7 +61,7 @@ global_parameter_scale: 1
 base_emb_dim: 2560
 base_num_heads: 8
 base_mlp_dim: 8192
-base_num_decoder_layers: 16
+base_num_decoder_layers: 2
 head_dim: 256
 # activation functions are .
 mlp_activations: ["relu"]
@@ -114,13 +114,18 @@ dataset_path: ""
 vocab_size: 32_768 # powers of 2 for sharding
 assets_path: "assets"
 vocab_relative_path: "tokenizer"  # Assumes we're allowed
-dataset_name: 'c4/en:3.0.1'
-eval_dataset_name: 'c4/en:3.0.1'
-eval_split: 'validation'
+# dataset_name: 'c4/en:3.0.1'
+# eval_dataset_name: 'c4/en:3.0.1'
+# dataset_name: 'array-record/c4/en/3.0.1'
+# eval_dataset_name: 'array-record/c4/en/3.0.1'
+dataset_name: 'lm1b/1.1.0'
+eval_dataset_name: 'lm1b/1.1.0'
+eval_split: 'test'
 per_device_batch_size: 12.0
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
-dataset_type: c4 # must be c4 or synthetic
+dataset_type: array_record # must be c4, array_record or synthetic
+# dataset_type: c4
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
@@ -140,9 +145,9 @@ learning_rate_schedule_steps: -1 # By default the length of the schedule is set 
 # dropping fully down. Or you may choose a shorter schedule, where the unspecified steps will have a learning rate of 0.
 
 # Maximum length cutoff for training examples.
-max_target_length: 2048
+max_target_length: 1024
 # Maximum length cutoff for held-out evaluation examples.
-max_eval_target_length: 512
+max_eval_target_length: 1024
 
 # Maximum length cutoff for predicted tokens.
 max_predict_length: 64
