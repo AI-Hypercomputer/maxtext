@@ -19,8 +19,7 @@
 # pylint: disable=no-name-in-module
 
 from aqt.jax.v2 import aqt_dot_general as aqt
-from aqt.jax.v2 import aqt_dq_dot_general as aqt_dq
-from aqt.jax.v2.google import aqt_config
+import maxtext_aqt_config
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
@@ -121,7 +120,7 @@ def dot_product_attention(query: Array,
     if not cfg.int8_training:
       attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
     else:
-      aqt_cfg = aqt_config.quantization_config(
+      aqt_cfg = maxtext_aqt_config.quantization_config(
         cfg.fwd_int8_qk,
         cfg.dlhs_int8_qk,
         cfg.drhs_int8_qk,
@@ -140,13 +139,14 @@ def dot_product_attention(query: Array,
     if not cfg.int8_training:
       weighted_values = jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
     else:
-      aqt_cfg = aqt_config.quantization_config(cfg.fwd_int8_pv,
+      aqt_cfg = maxtext_aqt_config.quantization_config(cfg.fwd_int8_pv,
         cfg.dlhs_int8_pv,
         cfg.drhs_int8_pv,
         use_fwd_quant=cfg.aqt_use_fwd_quant,
         use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
         rng_type=cfg.aqt_rng_type,
       )
+      print(f"{aqt_cfg=}")
       aqt_dot_general = aqt.make_dot_general(aqt_cfg)
       context = aqt.Context(key=aqt_rng, train_step=None)
       aqt_dot_general = functools.partial(aqt_dot_general, context=context)
@@ -255,7 +255,7 @@ class DenseGeneral(nn.Module):
           aqt_dq_dg = aqt_dq.make_aqt_dq_dg()
           return aqt_dq_dg(aqt_key, inputs, kernel, ((axis, contract_ind), ((), ())))
         else:
-          aqt_cfg = aqt_config.quantization_config(
+          aqt_cfg = maxtext_aqt_config.quantization_config(
             cfg.fwd_int8,
             cfg.dlhs_int8,
             cfg.drhs_int8,
