@@ -12,26 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Pylint
+# Run this on 256 chips to achieve a loss value of ~2.6
+echo "Running 1b_convergence.sh"
 
-on: [push]
+RUN_NAME=${1}
+OUTPUT_PATH=${2}
+DATASET_PATH=${3}
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.9", "3.10", "3.11"]
-    steps:
-    - uses: actions/checkout@v3
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install pylint
-    - name: Analysing the code with pylint
-      run: |
-        pylint $(git ls-files '*.py')
+LOSS_THRESHOLD=100.0 # Set to large value so test is guaranteed to pass, since we are not running as a test.
+bash end_to_end/test_convergence_1b_params.sh ${RUN_NAME} ${LOSS_THRESHOLD} ${OUTPUT_PATH} ${DATASET_PATH}
