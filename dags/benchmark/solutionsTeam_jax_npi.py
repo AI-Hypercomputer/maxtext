@@ -21,9 +21,9 @@ from configs.benchmark.jax import solutionsTeam_jax_npi_config as jax_npi_config
 
 
 with models.DAG(
-    dag_id="jax_latest_npi",
+    dag_id="jax_npi",
     schedule=None,
-    tags=["jax", "latest", "npi"],
+    tags=["solutions_team", "jax", "npi", "benchmark"],
     start_date=datetime.datetime(2023, 8, 6),
     catchup=False,
 ) as dag:

@@ -15,46 +15,39 @@
 import datetime
 from airflow import models
 from apis import gcp_config, metric_config, task, test_config
-from configs import vm_resource
+from configs import composer_env, vm_resource
 
-# TODO(ranran): currently we have reserved v2-32 available in us-central1-a (b/295901728), and
-# requested v2-8 in the same zone (b/297217984). v2/v3 donuts and pods are not interchangeable.
+
+# Run once a day at 10 am
+SCHEDULED_TIME = "0 10 * * *" if composer_env.is_prod_env() else None
 US_CENTRAL1_A = gcp_config.GCPConfig(
     vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
     vm_resource.Zone.US_CENTRAL1_A.value,
     metric_config.DatasetOption.XLML_DATASET,
 )
-US_CENTRAL2_B = gcp_config.GCPConfig(
+US_CENTRAL1_C = gcp_config.GCPConfig(
     vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
-    vm_resource.Zone.US_CENTRAL2_B.value,
+    vm_resource.Zone.US_CENTRAL1_C.value,
     metric_config.DatasetOption.XLML_DATASET,
 )
 
 
 with models.DAG(
-    dag_id='jax-integration',
-    schedule=None,
-    tags=['jax', 'latest'],
+    dag_id="jax_latest_integration",
+    schedule=SCHEDULED_TIME,
+    tags=["solutions_team", "jax", "latest", "integration", "xlml"],
     start_date=datetime.datetime(2023, 7, 12),
+    catchup=False,
 ):
   compilation_cache = task.TpuTask(
       test_config.JSonnetTpuVmTest.from_jax(
-          'jax-compilation-cache-test-func-v2-8-1vm'
+          "jax-compilation-cache-test-func-v2-8-1vm"
       ),
-      US_CENTRAL1_A,
+      US_CENTRAL1_C,
   ).run()
   pod = task.TpuTask(
       test_config.JSonnetTpuVmTest.from_jax(
-          'jax-pod-latest-tpu-ubuntu2204-base-func-v2-32-1vm'
+          "jax-pod-latest-tpu-ubuntu2204-base-func-v2-32-1vm"
       ),
       US_CENTRAL1_A,
   ).run()
-  # Tests are currently failing
-  # embedding_pjit = task.TPUTask(
-  #   test_config.JSonnetTpuVmTest.from_jax('jax-tpu-embedding-pjit-func-v4-8-1vm'),
-  #   US_CENTRAL2_B,
-  # ).run()
-  # embedding_pmap = task.TPUTask(
-  #   test_config.JSonnetTpuVmTest.from_jax('jax-tpu-embedding-pmap-func-v3-8-1vm'),
-  #   EUROPE_WEST4_A,
-  # ).run()

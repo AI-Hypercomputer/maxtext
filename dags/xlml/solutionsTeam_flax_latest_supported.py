@@ -27,48 +27,48 @@ SCHEDULED_TIME = "0 2 * * *" if composer_env.is_prod_env() else None
 with models.DAG(
     dag_id="flax_latest_supported",
     schedule=SCHEDULED_TIME,
-    tags=["solutions_team", "flax", "latest", "supported"],
+    tags=["solutions_team", "flax", "latest", "supported", "xlml"],
     start_date=datetime.datetime(2023, 8, 16),
     catchup=False,
 ) as dag:
   # ResNet
   jax_resnet_v2_8 = flax_config.get_flax_resnet_config(
-      tpu_version=2,
+      tpu_version="2",
       tpu_cores=8,
       tpu_zone=vm_resource.Zone.US_CENTRAL1_C.value,
       time_out_in_min=60,
   ).run()
 
   jax_resnet_v2_32 = flax_config.get_flax_resnet_config(
-      tpu_version=2,
+      tpu_version="2",
       tpu_cores=32,
       tpu_zone=vm_resource.Zone.US_CENTRAL1_A.value,
       time_out_in_min=60,
   ).run()
 
   jax_resnet_v3_8 = flax_config.get_flax_resnet_config(
-      tpu_version=3,
+      tpu_version="3",
       tpu_cores=8,
       tpu_zone=vm_resource.Zone.US_EAST1_D.value,
       time_out_in_min=60,
   ).run()
 
   jax_resnet_v3_32 = flax_config.get_flax_resnet_config(
-      tpu_version=3,
+      tpu_version="3",
       tpu_cores=32,
       tpu_zone=vm_resource.Zone.US_EAST1_D.value,
       time_out_in_min=60,
   ).run()
 
   jax_resnet_v4_8 = flax_config.get_flax_resnet_config(
-      tpu_version=4,
+      tpu_version="4",
       tpu_cores=8,
       tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
   ).run()
 
   jax_resnet_v4_32 = flax_config.get_flax_resnet_config(
-      tpu_version=4,
+      tpu_version="4",
       tpu_cores=32,
       tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
@@ -80,8 +80,16 @@ with models.DAG(
       "--per_device_eval_batch_size=64",
   ]
   jax_gpt2_v4_8 = flax_config.get_flax_gpt2_config(
-      tpu_version=4,
+      tpu_version="4",
       tpu_cores=8,
+      tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
+      time_out_in_min=120,
+      extraFlags=" ".join(jax_gpt2_v4_extra_flags),
+  ).run()
+
+  jax_gpt2_v4_32 = flax_config.get_flax_gpt2_config(
+      tpu_version="4",
+      tpu_cores=32,
       tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
       time_out_in_min=120,
       extraFlags=" ".join(jax_gpt2_v4_extra_flags),
@@ -89,8 +97,16 @@ with models.DAG(
 
   # Stable Diffusion
   jax_sd_v4_8 = flax_config.get_flax_sd_config(
-      tpu_version=4,
+      tpu_version="4",
       tpu_cores=8,
+      tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
+      time_out_in_min=60,
+      num_train_epochs=1,
+  ).run()
+
+  jax_sd_v4_32 = flax_config.get_flax_sd_config(
+      tpu_version="4",
+      tpu_cores=32,
       tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
       num_train_epochs=1,
@@ -100,5 +116,5 @@ with models.DAG(
   jax_resnet_v2_8 >> jax_resnet_v2_32
   jax_resnet_v3_8 >> jax_resnet_v3_32
   jax_resnet_v4_8 >> jax_resnet_v4_32
-  jax_gpt2_v4_8
-  jax_sd_v4_8
+  jax_gpt2_v4_8 >> jax_gpt2_v4_32
+  jax_sd_v4_8 >> jax_sd_v4_32
