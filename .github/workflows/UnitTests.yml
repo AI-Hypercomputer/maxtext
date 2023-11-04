@@ -42,7 +42,7 @@ jobs:
     - name: Analysing the code with pylint
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c "pylint MaxText/"
-    - name: Test with pytest
+    - name: Test
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c 'cd MaxText;python3 -m pytest'
     - name: Test train.py
