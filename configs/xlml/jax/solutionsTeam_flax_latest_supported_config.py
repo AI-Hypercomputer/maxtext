@@ -64,6 +64,62 @@ def get_flax_resnet_config(
   )
 
 
+def get_flax_vit_config(
+    tpu_version: str,
+    tpu_cores: int,
+    tpu_zone: str,
+    time_out_in_min: int,
+    extraFlags: str = "",
+) -> task.TpuTask:
+  job_gcp_config = gcp_config.GCPConfig(
+      project_name=vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
+      zone=tpu_zone,
+      dataset_name=metric_config.DatasetOption.XLML_DATASET,
+  )
+
+  set_up_cmds = common.set_up_hugging_face_transformers() + (
+      "pip install -r /tmp/transformers/examples/flax/vision/requirements.txt",
+      "pip install ml_dtypes==0.2.0",
+      (
+          "cd /tmp/transformers && wget"
+          " https://s3.amazonaws.com/fast-ai-imageclas/imagenette2.tgz"
+      ),
+      "cd /tmp/transformers && tar -xvzf imagenette2.tgz",
+  )
+
+  run_model_cmds = (
+      (
+          "JAX_PLATFORM_NAME=TPU python3"
+          " /tmp/transformers/examples/flax/vision/run_image_classification.py"
+          " --model_name_or_path google/vit-base-patch16-224-in21k"
+          " --num_train_epochs 3 --output_dir"
+          " '/tmp/transformers/vit-imagenette' --train_dir"
+          " '/tmp/transformers/imagenette2/train' --validation_dir"
+          " '/tmp/transformers/imagenette2/val' --learning_rate 1e-3"
+          f" --preprocessing_num_workers 32 {extraFlags}"
+      ),
+  )
+
+  job_test_config = test_config.TpuVmTest(
+      test_config.Tpu(
+          version=tpu_version,
+          cores=tpu_cores,
+          runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
+          reserved=True,
+      ),
+      test_name="flax_vit_imagenette",
+      set_up_cmds=set_up_cmds,
+      run_model_cmds=run_model_cmds,
+      time_out_in_min=time_out_in_min,
+      task_owner=test_owner.SHIVA_S,
+  )
+
+  return task.TpuTask(
+      task_test_config=job_test_config,
+      task_gcp_config=job_gcp_config,
+  )
+
+
 def get_flax_gpt2_config(
     tpu_version: str,
     tpu_cores: int,

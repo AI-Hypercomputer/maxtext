@@ -74,6 +74,27 @@ with models.DAG(
       time_out_in_min=60,
   ).run()
 
+  # ViT
+  jax_vit_v4_extra_flags = [
+      "--per_device_train_batch_size=64",
+      "--per_device_eval_batch_size=64",
+  ]
+  jax_vit_v4_8 = flax_config.get_flax_vit_config(
+      tpu_version="4",
+      tpu_cores=8,
+      tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
+      time_out_in_min=60,
+      extraFlags=" ".join(jax_vit_v4_extra_flags),
+  ).run()
+
+  jax_vit_v4_32 = flax_config.get_flax_vit_config(
+      tpu_version="4",
+      tpu_cores=32,
+      tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
+      time_out_in_min=60,
+      extraFlags=" ".join(jax_vit_v4_extra_flags),
+  ).run()
+
   # GPT2
   jax_gpt2_v4_extra_flags = [
       "--per_device_train_batch_size=64",
@@ -116,5 +137,6 @@ with models.DAG(
   jax_resnet_v2_8 >> jax_resnet_v2_32
   jax_resnet_v3_8 >> jax_resnet_v3_32
   jax_resnet_v4_8 >> jax_resnet_v4_32
+  jax_vit_v4_8 >> jax_vit_v4_32
   jax_gpt2_v4_8 >> jax_gpt2_v4_32
   jax_sd_v4_8 >> jax_sd_v4_32
