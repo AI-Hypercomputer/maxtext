@@ -70,18 +70,32 @@ default_embed_init = nn.initializers.variance_scaling(
 # Dot product attention layer.
 #------------------------------------------------------------------------------
 
-def get_aqt_cfg():
-  return config_v3(
+def get_aqt_cfg(config):
+  if config.int8_ttf:
+    return config_v3(
+        fwd_bits=8,
+        dlhs_bits=8,
+        drhs_bits=None,
+        rng_type='jax.uniform',
+        dlhs_local_aqt = None,
+        drhs_local_aqt = None,
+        fwd_accumulator_dtype = jnp.int32,
+        dlhs_accumulator_dtype = jnp.int32,
+        drhs_accumulator_dtype = jnp.int32,
+      )
+  else:
+    return config_v3(
       fwd_bits=8,
       dlhs_bits=8,
-      drhs_bits=None,
+      drhs_bits=8,
       rng_type='jax.uniform',
       dlhs_local_aqt = None,
-      drhs_local_aqt = None,
+      drhs_local_aqt = LocalAqt(256),
       fwd_accumulator_dtype = jnp.int32,
       dlhs_accumulator_dtype = jnp.int32,
       drhs_accumulator_dtype = jnp.int32,
     )
+
 
 def dot_product_attention(query: Array,
                           key: Array,
@@ -140,7 +154,7 @@ def dot_product_attention(query: Array,
     if not cfg.int8_training:
       weighted_values = jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
     else:
-      aqt_cfg = get_aqt_cfg()
+      aqt_cfg = get_aqt_cfg(cfg)
       aqt_dot_general = aqt.make_dot_general(aqt_cfg)
       context = aqt.Context(key=aqt_rng, train_step=None)
       aqt_dot_general = functools.partial(aqt_dot_general, context=context)
@@ -249,7 +263,7 @@ class DenseGeneral(nn.Module):
           aqt_dq_dg = aqt_dq.make_aqt_dq_dg()
           return aqt_dq_dg(aqt_key, inputs, kernel, ((axis, contract_ind), ((), ())))
         else:
-          aqt_cfg = get_aqt_cfg()
+          aqt_cfg = get_aqt_cfg(cfg)
           aqt_dot_general = aqt.make_dot_general(aqt_cfg)
           context = aqt.Context(key=aqt_key, train_step=None)
           return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
