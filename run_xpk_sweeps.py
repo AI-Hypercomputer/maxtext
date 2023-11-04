@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 # High level idea:
 # Instead of writing new config.yml, we will call xpk with maxtext commandline args
 import yaml
@@ -99,7 +101,29 @@ def run_remat_mystery():
             for init_weights_seed in range(2):
                 run_name = f"mattdavidow-rm-r-{remat_policy[0]}-int8-{bname(int8_training)}-seed{init_weights_seed}"
                 run_job(run_name, base_remat_mystery(), 1, init_weights_seed=init_weights_seed, remat_policy=remat_policy, int8_training=int8_training)
+
+
+def run_sweep1():
+    def base_sweep1():
+        return dict(
+            global_parameter_scale = 1,
+            steps=3400,
+            per_device_batch_size=12.0,
+            learning_rate=1e-3,
+            enable_checkpointing=False,
+            base_output_directory = "gs://maxtext-experiments-multipod",
+            dataset_path = "gs://max-datasets-rogue",
+            int8_training=True   
+        )
+    
+    run_job("mattdavidow-ttt", base_sweep1(), 1, int8_ttf=False)
+    run_job("mattdavidow-ttf", base_sweep1(), 1)
+    run_job("mattdavidow-bfloat16", base_sweep1(), 1, int8_training=False)
+    
+
+
 def main():
+    print("hello")
     import argparse
     parser = argparse.ArgumentParser(description='TPU configuration options')
     parser.add_argument('--dryrun', type=bool, default=True, action=argparse.BooleanOptionalAction)
@@ -120,3 +144,5 @@ def main():
     assert attempt != ''
     sweep_fn = globals()[sweep_fn_name]
     sweep_fn()
+
+main()
