@@ -85,17 +85,17 @@ def get_aqt_cfg(config):
       )
   else:
     # 13 TFLOPS
-    # return config_v3(
-    #   fwd_bits=8,
-    #   dlhs_bits=8,
-    #   drhs_bits=8,
-    #   rng_type='jax.uniform',
-    #   dlhs_local_aqt = None,
-    #   drhs_local_aqt = LocalAqt(256),
-    #   fwd_accumulator_dtype = jnp.int32,
-    #   dlhs_accumulator_dtype = jnp.int32,
-    #   drhs_accumulator_dtype = jnp.int32,
-    # )
+    return config_v3(
+      fwd_bits=8,
+      dlhs_bits=8,
+      drhs_bits=8,
+      rng_type='jax.uniform',
+      dlhs_local_aqt = None,
+      drhs_local_aqt = LocalAqt(256),
+      fwd_accumulator_dtype = jnp.int32,
+      dlhs_accumulator_dtype = jnp.int32,
+      drhs_accumulator_dtype = jnp.int32,
+    )
     return config_v3(
       fwd_bits=8,
       dlhs_bits=8,
