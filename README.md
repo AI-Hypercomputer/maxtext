@@ -243,7 +243,7 @@ For a 32B model. See full run configs in `MaxText/configs/` as `32b.sh`.
 | ----------- | ---------------- | ----- |
 | 2x v5e-256  | 113              | 57.3% |
 
-More details on reproducing these 16B and 32B model results on v5e can be found in `v5e_16b_32b.md`.
+More details on reproducing these 16B and 32B model results on v5e can be found in `v5e_high_performance.md`.
 
 
 # Comparison to Alternatives
