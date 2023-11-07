@@ -18,8 +18,8 @@
 # pylint: disable=arguments-differ
 
 from aqt.jax.v2 import aqt_dot_general as aqt
-from aqt.jax.v2 import aqt_dq_dot_general as aqt_dq
-from aqt.jax.v2.google import maxtext_sweeps
+from aqt.jax.v2.config import config_v3
+from aqt.jax.v2.config import LocalAqt
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
@@ -70,6 +70,44 @@ default_embed_init = nn.initializers.variance_scaling(
 #------------------------------------------------------------------------------
 # Dot product attention layer.
 #------------------------------------------------------------------------------
+
+def get_aqt_cfg(config):
+  if config.int8_ttf:
+    return config_v3(
+        fwd_bits=8,
+        dlhs_bits=8,
+        drhs_bits=None,
+        rng_type='jax.uniform',
+        dlhs_local_aqt = None,
+        drhs_local_aqt = None,
+        fwd_accumulator_dtype = jnp.int32,
+        dlhs_accumulator_dtype = jnp.int32,
+        drhs_accumulator_dtype = jnp.int32,
+      )
+  else:
+    # 13 TFLOPS
+    return config_v3(
+      fwd_bits=8,
+      dlhs_bits=8,
+      drhs_bits=8,
+      rng_type='jax.uniform',
+      dlhs_local_aqt = None,
+      drhs_local_aqt = LocalAqt(256),
+      fwd_accumulator_dtype = jnp.int32,
+      dlhs_accumulator_dtype = jnp.int32,
+      drhs_accumulator_dtype = jnp.int32,
+    )
+    return config_v3(
+      fwd_bits=8,
+      dlhs_bits=8,
+      drhs_bits=8,
+      rng_type='jax.uniform',
+      dlhs_local_aqt = None,
+      drhs_local_aqt = None,
+      fwd_accumulator_dtype = jnp.int32,
+      dlhs_accumulator_dtype = jnp.int32,
+      drhs_accumulator_dtype = jnp.int32,
+    )
 
 
 def dot_product_attention(query: Array,
@@ -133,14 +171,7 @@ def dot_product_attention(query: Array,
     attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
   else:
     # fwd_qk
-    aqt_cfg = maxtext_sweeps.sweep1(
-      cfg.fwd_int8_qk,
-      cfg.dlhs_int8_qk,
-      cfg.drhs_int8_qk,
-      use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
-      rng_type=cfg.aqt_rng_type,
-      use_fwd_quant=cfg.aqt_use_fwd_quant,
-    )
+    aqt_cfg = get_aqt_cfg(cfg)
     aqt_dot_general = aqt.make_dot_general(aqt_cfg)
     context = aqt.Context(key=aqt_rng, train_step=None)
     aqt_dot_general = functools.partial(aqt_dot_general, context=context)
@@ -171,14 +202,7 @@ def dot_product_attention(query: Array,
   if not cfg.int8_training:
     return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
   else:
-    aqt_cfg = maxtext_sweeps.sweep1(
-      cfg.fwd_int8_pv,
-      cfg.dlhs_int8_pv,
-      cfg.drhs_int8_pv,
-      use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
-      rng_type=cfg.aqt_rng_type,
-      use_fwd_quant=cfg.aqt_use_fwd_quant,
-    )
+    aqt_cfg = get_aqt_cfg(cfg)
     aqt_dot_general = aqt.make_dot_general(aqt_cfg)
     context = aqt.Context(key=aqt_rng, train_step=None)
     aqt_dot_general = functools.partial(aqt_dot_general, context=context)
@@ -271,14 +295,7 @@ class DenseGeneral(nn.Module):
         aqt_dq_dg = aqt_dq.make_aqt_dq_dg()
         return aqt_dq_dg(aqt_key, inputs, kernel, ((axis, contract_ind), ((), ())))
       else:
-        aqt_cfg = maxtext_sweeps.sweep1(
-          cfg.fwd_int8,
-          cfg.dlhs_int8,
-          cfg.drhs_int8,
-          use_dummy_static_bound=cfg.aqt_use_dummy_static_bound,
-          rng_type=cfg.aqt_rng_type,
-          use_fwd_quant=cfg.aqt_use_fwd_quant,
-        )
+        aqt_cfg = get_aqt_cfg(cfg)
         aqt_dot_general = aqt.make_dot_general(aqt_cfg)
         context = aqt.Context(key=aqt_key, train_step=None)
 
@@ -708,14 +725,7 @@ class Embed(nn.Module):
     if not self.config.int8_training:
       return maxtext_dot(query, jnp.asarray(self.embedding, dtype).T)
     else:
-      aqt_cfg = maxtext_sweeps.sweep1(
-        self.config.fwd_int8_logits,
-        self.config.dlhs_int8_logits,
-        self.config.drhs_int8_logits,
-        use_dummy_static_bound=self.config.aqt_use_dummy_static_bound,
-        rng_type=self.config.aqt_rng_type,
-        use_fwd_quant=self.config.aqt_use_fwd_quant,
-      )
+      aqt_cfg = get_aqt_cfg(self.config)
       aqt_dot_general = aqt.make_dot_general(aqt_cfg)
       aqt_key = self.make_rng('aqt')
       context = aqt.Context(key=aqt_key, train_step=None)
