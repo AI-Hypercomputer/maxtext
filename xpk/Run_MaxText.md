@@ -39,6 +39,26 @@ curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyr
 sudo apt update && sudo apt-get install google-cloud-sdk-gke-gcloud-auth-plugin
 ```
 
+* Authenticate gcloud installation by running this command and following the prompt
+```
+gcloud auth login
+```
+
+* Run this command to configure docker to use docker-credential-gcloud for GCR registries:
+```
+gcloud auth configure-docker
+```
+
+* Test the installation by running
+```
+docker run hello-world
+```
+
+* If getting a permission error, try running
+```
+sudo usermod -aG docker $USER
+```
+after which log out and log back in to the machine.
 
 ## Build Docker Image for Maxtext
 
@@ -72,20 +92,15 @@ sudo apt update && sudo apt-get install google-cloud-sdk-gke-gcloud-auth-plugin
       gcloud config set project $PROJECT_ID
       gcloud config set compute/zone $ZONE
 
-      # Make sure you are in the maxtext github root directory when running this command
+      # Make sure you are in the xpk github root directory when running this command
+      git clone https://github.com/google/xpk.git
+      cd xpk
 
-      python3 xpk/xpk.py workload create \
+      python3 xpk.py workload create \
       --cluster ${CLUSTER_NAME} \
-      --base-docker-image gcr.io/${PROJECT_ID}/${USER}_runner \
+      --docker-image gcr.io/${PROJECT_ID}/${USER}_runner \
       --workload ${USER}-first-job \
       --tpu-type=v5litepod-256 \
       --num-slices=1  \
       --command "python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
       ```
-
-
-
-
-
-
-
