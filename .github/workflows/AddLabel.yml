@@ -17,6 +17,7 @@ name: Add Label
 on:
   workflow_call:
   pull_request_review:
+  pull_request_review_comment:
   workflow_dispatch:
 
 jobs:
@@ -35,11 +36,26 @@ jobs:
             const repo = "maxtext"
             const pull_number = context.payload.pull_request.number
 
+            const reviewers = await github.rest.pulls.listRequestedReviewers({
+              owner,
+              repo,
+              pull_number,
+            })
+            // Once a requested reviewer submits a review, they are no longer considered a requested reviewer.
+            if (reviewers.data.users.length !== 0 && reviewers.data.teams.length !== 0) {
+              console.log("Not adding pull ready because the PR is not approved yet")
+              process.exit()
+            }
+
             const reviews = await github.rest.pulls.listReviews({
               owner,
               repo,
               pull_number,
             })
+            if (reviews.data.length === 0) {
+              console.log("Not adding pull ready because the PR is not approved yet")
+              process.exit()
+            }
             for (const review of reviews.data) {
               if (review.state !== "APPROVED" && review.state !== "COMMENTED") {
                 console.log("Not adding pull ready because the review is requesting a change: ", review.html_url)
