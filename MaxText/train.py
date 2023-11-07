@@ -27,7 +27,7 @@ jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
 XLA_DUMP_DIR="/tmp/xla_dumps"
-os.environ["XLA_FLAGS"]=f"--xla_dump_to={XLA_DUMP_DIR}"
+#os.environ["XLA_FLAGS"]=f"--xla_dump_to={XLA_DUMP_DIR}"
 print(f"Found {jax.device_count()} devices.")
 
 from typing import Sequence
@@ -115,7 +115,7 @@ def write_metrics(writer, metrics, step, config):
 
     max_logging.log(f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
           f"TFLOP/s: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-          f"loss: {metrics['scalar']['learning/loss']:.3f}")
+          f"loss: {metrics['scalar']['learning/loss']:.16f}")
 
     if full_log:
       max_logging.log(
