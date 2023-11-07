@@ -243,6 +243,7 @@ class DenseGeneral(nn.Module):
   dtype: DType = jnp.float32
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
   kernel_axes: Tuple[str, ...] = ()
+  local_aqt: int
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -264,7 +265,7 @@ class DenseGeneral(nn.Module):
           aqt_dq_dg = aqt_dq.make_aqt_dq_dg()
           return aqt_dq_dg(aqt_key, inputs, kernel, ((axis, contract_ind), ((), ())))
         else:
-          aqt_cfg = get_aqt_cfg(cfg,cfg.local_aqt_shards_dg)
+          aqt_cfg = get_aqt_cfg(cfg, self.local_aqt)
           aqt_dot_general = aqt.make_dot_general(aqt_cfg)
           context = aqt.Context(key=aqt_key, train_step=None)
           return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
@@ -427,7 +428,8 @@ class MultiHeadDotProductAttention(nn.Module):
         features=(self.num_heads, self.head_dim),
         kernel_axes=('embed', 'heads', 'kv'),
         dtype=self.dtype,
-        config=cfg)
+        config=cfg,
+        local_aqt=cfg.local_aqt_shards_kv_proj)
 
     # NOTE: T5 does not explicitly rescale the attention logits by
     #       1/sqrt(depth_kq)!  This is folded into the initializers of the
@@ -562,7 +564,8 @@ class MultiHeadDotProductAttention(nn.Module):
         kernel_axes=('heads', 'kv', 'embed'),
         dtype=self.dtype,
         name='out',
-        config=cfg)(
+        config=cfg,
+        local_aqt=cfg.local_aqt_shards_after_attention)(
             x)
     return out
 
@@ -605,7 +608,8 @@ class MlpBlock(nn.Module):
           kernel_init=self.kernel_init,
           kernel_axes=('embed', 'mlp'),
           name=dense_name,
-          config=cfg)(
+          config=cfg,
+          local_aqt=cfg.local_aqt_shards_mlp_1)(
               inputs)
       x = _convert_to_activation_function(act_fn)(x)
       activations.append(x)
@@ -623,7 +627,8 @@ class MlpBlock(nn.Module):
         kernel_init=self.kernel_init,
         kernel_axes=('mlp', 'embed'),
         name='wo',
-        config=cfg)(
+        config=cfg,
+        local_aqt=cfg.local_aqt_shards_mlp_2)(
             x)
     return output
 
