@@ -120,7 +120,20 @@ def run_sweep1():
     run_job("mattdavidow-ttf", base_sweep1(), 1)
     run_job("mattdavidow-bfloat16", base_sweep1(), 1, int8_training=False)
     
+def run_basic_convergence():
+    def base_basic_convergence():
+        return dict(
+            global_parameter_scale = 1,
+            steps=6800,
+            per_device_batch_size=12.0,
+            learning_rate=1e-3,
+            enable_checkpointing=False,
+            base_output_directory = "gs://maxtext-experiments-multipod",
+            dataset_path = "gs://max-datasets-rogue",
+            int8_training=True   
+        )
 
+    run_job("mattdavidow-aqt-package", base_basic_convergence(), 1)
 
 def main():
     print("hello")

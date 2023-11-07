@@ -162,7 +162,7 @@ def dot_product_attention(query: Array,
     return attn_weights
 
   def compute_weighted_values(attn_weights, value, cfg, aqt_rng):
-    """Computes attn_weights * values"""
+    """Computes attn_weights * values""" # AKA PV
     if not cfg.int8_training:
       weighted_values = jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
     else:
