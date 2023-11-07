@@ -36,8 +36,14 @@ def run_job(run_name, base_config, num_slices, **config_updates):
         return
 
     run_name = run_name + f'-a{args.attempt}'
-    url = f"xpk logs here" #ex log url: https://console.cloud.google.com/kubernetes/service/us-east5/v5e-256-bodaborg/default/mattdavidow-rm-r-m-int8-t-seed1-a1/details?project=tpu-prod-env-multipod
-    print(f"RUN:  {run_name:30}", url)
+    if args.run_name:
+        print(run_name)
+        return
+    # zone is wrong for below url, need to get and then parse (remove number) from gcloud config get
+    # url = f"https://console.cloud.google.com/kubernetes/service/us-east5/{args.cluster}/default/{run_name}/details?project=tpu-prod-env-multipod"
+    #url = f"xpk logs here" #ex log url: https://console.cloud.google.com/kubernetes/service/us-east5/v5e-256-bodaborg/default/mattdavidow-rm-r-m-int8-t-seed1-a1/details?project=tpu-prod-env-multipod
+    #print(f"RUN:  {run_name:30}", url)
+    print(f"RUN:  {run_name:30}")
 
     # TODO: Write a check that all keys are valid (match ones in base.yml)
     maxtext_config_args = update_yaml_fields(base_config, config_updates, allow_new_keys=True)
@@ -56,8 +62,10 @@ def run_job(run_name, base_config, num_slices, **config_updates):
     #xpk_cmd = ["python3", "xpk/xpk.py", "workload", "create"]
     # TODO(mattdavidow): if dryrun run xpk in dryrun mode
     if args.dryrun:
+        print('=====================================')
         import pprint
         pprint.pprint(xpk_cmd)
+        print('\n\n')
     else:
         #subprocess.run(xpk_cmd, capture_output=True, check=True)
 
@@ -168,15 +176,16 @@ def run_full_local_shard_perf():
             int8_training=True   
         )
 
-    for local_aqt_shard_pv in [1,2,256]:
+    count = [4, 8, 16, 32, 64, 128]
+    for local_aqt_shard_pv in count:
         run_job(f"mattdavidow-test-shard-count-pv-{local_aqt_shard_pv}", base_full_local_shard_perf(), 2, local_aqt_shards_pv=local_aqt_shard_pv)
-    for local_aqt_shards_kv_proj in [1,2,256]:
+    for local_aqt_shards_kv_proj in count:
         run_job(f"mattdavidow-test-shard-count-kv-{local_aqt_shards_kv_proj}", base_full_local_shard_perf(), 2, local_aqt_shards_kv_proj=local_aqt_shards_kv_proj)
-    for local_aqt_shards_after_attention in [1,2,256]:
+    for local_aqt_shards_after_attention in count:
         run_job(f"mattdavidow-test-shard-count-aa-{local_aqt_shards_after_attention}", base_full_local_shard_perf(), 2, local_aqt_shards_after_attention=local_aqt_shards_after_attention)
-    for local_aqt_shards_mlp_1 in [1,2,256]:
+    for local_aqt_shards_mlp_1 in count:
         run_job(f"mattdavidow-test-shard-count-mlp1-{local_aqt_shards_mlp_1}", base_full_local_shard_perf(), 2, local_aqt_shards_mlp_1=local_aqt_shards_mlp_1)
-    for local_aqt_shards_mlp_2 in [1,2,256]:
+    for local_aqt_shards_mlp_2 in count:
         run_job(f"mattdavidow-test-shard-count-mlp2-{local_aqt_shards_mlp_2}", base_full_local_shard_perf(), 2, local_aqt_shards_mlp_2=local_aqt_shards_mlp_2)
 
 
@@ -200,7 +209,6 @@ def run_shard_convergence():
         run_job(f"mattdavidow-conv-shard-count-dg-{dg_count}", base_shard_convergence(), 2, local_aqt_shards_dg=dg_count)
 
 def main():
-    print("hello")
     import argparse
     parser = argparse.ArgumentParser(description='TPU configuration options')
     parser.add_argument('--dryrun', type=bool, default=True, action=argparse.BooleanOptionalAction)
@@ -210,12 +218,12 @@ def main():
     parser.add_argument('--sweep', type=str, default='', required=True)
     parser.add_argument('--attempt', type=str, default='', required=True)
     parser.add_argument('--jobre', type=str, default='.*')
+    parser.add_argument('--run_name', type=bool, default=False, action=argparse.BooleanOptionalAction)
     global args
     args = parser.parse_args()
     sweep_name = args.sweep
     attempt = args.attempt
 
-    print(args)
     sweep_fn_name = f'run_{sweep_name}'
     assert sweep_fn_name in globals(), f'{sweep_fn_name}() not defined.'
     assert attempt != ''
