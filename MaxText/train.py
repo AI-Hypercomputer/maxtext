@@ -388,7 +388,7 @@ def train_loop(config, state=None):
     # Move before for loop to include.
     if step == 0:
       gcs_xla_destination = os.path.join(config.base_output_directory, config.run_name)
-      max_utils.move_local_dir_to_gcs(XLA_DUMP_DIR, gcs_xla_destination)
+      # max_utils.move_local_dir_to_gcs(XLA_DUMP_DIR, gcs_xla_destination)
 
     if step == 4:
       max_utils.activate_profiler(config)
