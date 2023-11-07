@@ -115,7 +115,7 @@ def write_metrics(writer, metrics, step, config):
 
     max_logging.log(f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
           f"TFLOP/s: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-          f"loss: {metrics['scalar']['learning/loss']:.3f}")
+          f"loss: {metrics['scalar']['learning/loss']:.16f}")
 
     if full_log:
       max_logging.log(
