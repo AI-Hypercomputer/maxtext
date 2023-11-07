@@ -257,7 +257,7 @@ class DenseGeneral(nn.Module):
 
     contract_ind = tuple(range(0, len(axis)))
 
-    if self.never_quantize or not cfg.int8_training:
+    if True or self.never_quantize or not cfg.int8_training:
       return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
     else:
       aqt_key = self.make_rng('aqt')
@@ -688,7 +688,7 @@ class Embed(nn.Module):
       in NLP models.
     """
     dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
-    if not self.config.int8_training:
+    if True or not self.config.int8_training:
       return maxtext_dot(query, jnp.asarray(self.embedding, dtype).T)
     else:
       aqt_cfg = get_aqt_cfg(self.config)

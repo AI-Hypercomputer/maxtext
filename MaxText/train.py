@@ -27,7 +27,7 @@ jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
 XLA_DUMP_DIR="/tmp/xla_dumps"
-os.environ["XLA_FLAGS"]=f"--xla_dump_to={XLA_DUMP_DIR}"
+#os.environ["XLA_FLAGS"]=f"--xla_dump_to={XLA_DUMP_DIR}"
 print(f"Found {jax.device_count()} devices.")
 
 from typing import Sequence
