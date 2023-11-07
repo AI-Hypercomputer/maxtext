@@ -135,6 +135,25 @@ def run_basic_convergence():
 
     run_job("mattdavidow-aqt-package", base_basic_convergence(), 1)
 
+def run_shard_perf():
+    def base_shard_perf():
+        return dict(
+            global_parameter_scale = 1,
+            steps=10,
+            per_device_batch_size=12.0,
+            learning_rate=1e-3,
+            enable_checkpointing=False,
+            base_output_directory = "gs://maxtext-experiments-multipod",
+            dataset_path = "gs://max-datasets-rogue",
+            int8_training=True   
+        )
+
+    #run_job("mattdavidow-test-shard-count", base_shard_perf(), 2)
+    for pv_count in [1,2,256]:
+        run_job(f"mattdavidow-test-shard-count-pv-{pv_count}", base_shard_perf(), 2, local_aqt_shards_pv=pv_count)
+    for dg_count in [1,2,256]:
+        run_job(f"mattdavidow-test-shard-count-dg-{dg_count}", base_shard_perf(), 2, local_aqt_shards_dg=dg_count)
+
 def main():
     print("hello")
     import argparse

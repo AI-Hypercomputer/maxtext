@@ -70,8 +70,8 @@ default_embed_init = nn.initializers.variance_scaling(
 # Dot product attention layer.
 #------------------------------------------------------------------------------
 
-def get_aqt_cfg(config):
-  if config.int8_ttf:
+def get_aqt_cfg(config, local_aqt_shards=0):
+  if local_aqt_shards==0:
     return config_v3(
         fwd_bits=8,
         dlhs_bits=8,
@@ -84,29 +84,18 @@ def get_aqt_cfg(config):
         drhs_accumulator_dtype = jnp.int32,
       )
   else:
-    # 13 TFLOPS
     return config_v3(
       fwd_bits=8,
       dlhs_bits=8,
       drhs_bits=8,
       rng_type='jax.uniform',
       dlhs_local_aqt = None,
-      drhs_local_aqt = LocalAqt(256),
+      drhs_local_aqt = LocalAqt(local_aqt_shards),
       fwd_accumulator_dtype = jnp.int32,
       dlhs_accumulator_dtype = jnp.int32,
       drhs_accumulator_dtype = jnp.int32,
     )
-    return config_v3(
-      fwd_bits=8,
-      dlhs_bits=8,
-      drhs_bits=8,
-      rng_type='jax.uniform',
-      dlhs_local_aqt = None,
-      drhs_local_aqt = None,
-      fwd_accumulator_dtype = jnp.int32,
-      dlhs_accumulator_dtype = jnp.int32,
-      drhs_accumulator_dtype = jnp.int32,
-    )
+
 
 
 def dot_product_attention(query: Array,
@@ -166,7 +155,7 @@ def dot_product_attention(query: Array,
     if not cfg.int8_training:
       weighted_values = jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
     else:
-      aqt_cfg = get_aqt_cfg(cfg)
+      aqt_cfg = get_aqt_cfg(cfg, local_aqt_shards=cfg.local_aqt_shards_pv)
       aqt_dot_general = aqt.make_dot_general(aqt_cfg)
       context = aqt.Context(key=aqt_rng, train_step=None)
       aqt_dot_general = functools.partial(aqt_dot_general, context=context)
@@ -275,7 +264,7 @@ class DenseGeneral(nn.Module):
           aqt_dq_dg = aqt_dq.make_aqt_dq_dg()
           return aqt_dq_dg(aqt_key, inputs, kernel, ((axis, contract_ind), ((), ())))
         else:
-          aqt_cfg = get_aqt_cfg(cfg)
+          aqt_cfg = get_aqt_cfg(cfg,cfg.local_aqt_shards_dg)
           aqt_dot_general = aqt.make_dot_general(aqt_cfg)
           context = aqt.Context(key=aqt_key, train_step=None)
           return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
