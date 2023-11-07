@@ -23,7 +23,6 @@ from aqt.jax.v2 import aqt_dq_dot_general as aqt_dq
 from aqt.jax.v2.google import aqt_config
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
-from jax.sharding import PartitionSpec as P
 
 import functools
 import operator
@@ -40,8 +39,7 @@ from jax import lax
 from jax import random
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
-if jax.__version__ >= '0.4.16':
-  from jax.experimental.pallas.ops.tpu import flash_attention
+from jax.experimental.pallas.ops.tpu import flash_attention
 
 
 
@@ -328,40 +326,49 @@ class MultiHeadDotProductAttention(nn.Module):
 
 
   def apply_attention(self, query, key, value, enable_flash_attention,
-                      attention_bias, dropout_rng, deterministic):
+                      decoder_segment_ids, attention_bias, dropout_rng, deterministic, decode):
     """ Apply Attention
     """
-    if enable_flash_attention:
+    if enable_flash_attention and not decode:
+      query = LayerNorm(dtype=self.dtype, name='query_layer_norm', kernel_axes = ('heads',))(query)
+      key = LayerNorm(dtype=self.dtype, name='key_layer_norm', kernel_axes = ('heads',))(key)
       # reshaped to ('batch', 'heads', 'length', 'kv')
       query = jax.numpy.transpose(query, axes = (0,2,1,3))
       key = jax.numpy.transpose(key, axes = (0,2,1,3))
       value = jax.numpy.transpose(value, axes = (0,2,1,3))
+      if decoder_segment_ids is not None:
+        decoder_segment_ids = flash_attention.SegmentIds(decoder_segment_ids, decoder_segment_ids)
+      axis_names = nn.logical_to_mesh_axes(('activation_batch', 'activation_heads', 'activation_length', 'activation_kv'))
+      segment_axis_names = nn.logical_to_mesh_axes(('activation_batch', 'activation_length'))
       @functools.partial(shard_map, mesh = self.mesh, in_specs = (
-          P(('data','fsdp'),'tensor'),
-          P(('data','fsdp'),'tensor'),
-          P(('data','fsdp'),'tensor'),
-      ), out_specs = P(('data','fsdp'),'tensor'), check_rep=False)
-      def wrap_flash_attention(query, key, value):
+          axis_names,
+          axis_names,
+          axis_names,
+          segment_axis_names,
+      ), out_specs = axis_names, check_rep=False)
+      def wrap_flash_attention(query, key, value, decoder_segment_ids):
         return flash_attention.flash_attention(
               query,
               key,
               value,
-              causal = False,
+              causal = True,
+              segment_ids = decoder_segment_ids,
               block_sizes = flash_attention.BlockSizes(
-                  block_q=512,
-                  block_k_major=512,
-                  block_k=512,
-                  block_b=1,
-                  block_q_major_dkv=512,
-                  block_k_major_dkv=512,
-                  block_k_dkv=512,
-                  block_q_dkv=512,
-                  block_k_major_dq=512,
-                  block_k_dq=512,
-                  block_q_dq=512,
+                block_q=min(512, self.config.max_target_length),
+                block_k_major=min(512, self.config.max_target_length),
+                block_k=min(512, self.config.max_target_length),
+                block_b=2,
+                block_q_major_dkv=512,
+                block_k_major_dkv=512,
+                block_q_dkv=512,
+                block_k_dkv=512,
+                block_q_dq=1024,
+                block_k_dq=256,
+                block_k_major_dq=512,
+
               )
             )
-      x = wrap_flash_attention(query, key, value)
+      x = wrap_flash_attention(query, key, value, decoder_segment_ids)
       x = jax.numpy.transpose(x, axes = (0,2,1,3))
     else:
       aqt_rng = self.make_rng('aqt')
@@ -383,6 +390,8 @@ class MultiHeadDotProductAttention(nn.Module):
   def __call__(self,
                inputs_q: Array,
                inputs_kv: Array,
+               decoder_segment_ids = None,
+               enable_flash_attention = True,
                inputs_positions:Optional[Array] = None,
                mask: Optional[Array] = None,
                bias: Optional[Array] = None,
@@ -550,7 +559,11 @@ class MultiHeadDotProductAttention(nn.Module):
       dropout_rng = self.make_rng('dropout')
 
     # Apply attention.
-    x = self.apply_attention(query, key, value, cfg.enable_flash_attention, attention_bias, dropout_rng, deterministic)
+    x = self.apply_attention(query, key, value, enable_flash_attention,
+                              decoder_segment_ids, attention_bias, dropout_rng, deterministic, decode=decode)
+    x = nn.with_logical_constraint(
+        x, ('activation_batch', 'activation_length', 'activation_heads', 'activation_kv')
+    )
 
     # Back to the original inputs dimensions.
     out = DenseGeneral(
@@ -1027,6 +1040,7 @@ class DecoderLayer(nn.Module):
   @nn.compact
   def __call__(self,
                inputs,
+               decoder_segment_ids,
                decoder_positions,
                decoder_mask,
                deterministic,
@@ -1054,8 +1068,9 @@ class DecoderLayer(nn.Module):
         mesh = mesh)(
             lnx,
             lnx,
-            decoder_positions,
-            decoder_mask,
+            decoder_segment_ids=decoder_segment_ids,
+            inputs_positions=decoder_positions,
+            mask=decoder_mask,
             bias = None,
             deterministic=deterministic,
             decode=decode)
@@ -1102,6 +1117,7 @@ class Decoder(nn.Module):
   @nn.compact
   def __call__(self,
                decoder_input_tokens,
+               decoder_segment_ids=None,
                decoder_positions=None,
                decoder_mask=None,
                deterministic=False,
@@ -1153,11 +1169,11 @@ class Decoder(nn.Module):
               'aqt': cfg.int8_training
           },
           in_axes=(nn.broadcast, nn.broadcast, nn.broadcast,
-                   nn.broadcast, nn.broadcast),
+                   nn.broadcast, nn.broadcast, nn.broadcast),
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'})(
               config=cfg, mesh=mesh,
-              name='decoder')(y, decoder_positions, decoder_mask,
+              name='decoder')(y, decoder_segment_ids, decoder_positions, decoder_mask,
                               deterministic, decode, max_decode_length)
     else:
       for lyr in range(cfg.num_decoder_layers):
@@ -1165,6 +1181,7 @@ class Decoder(nn.Module):
         y = BlockLayer(
             config=cfg, mesh = mesh, name=f'layers_{lyr}')(
                 y,
+                decoder_segment_ids,
                 decoder_positions,
                 decoder_mask,
                 deterministic,
@@ -1248,6 +1265,7 @@ class Transformer(nn.Module):
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
         decoder_mask=decoder_mask,
         deterministic=not enable_dropout,
         decode=decode,
