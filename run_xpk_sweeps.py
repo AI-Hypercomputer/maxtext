@@ -154,6 +154,38 @@ def run_shard_perf():
     for dg_count in [1,2,256]:
         run_job(f"mattdavidow-test-shard-count-dg-{dg_count}", base_shard_perf(), 2, local_aqt_shards_dg=dg_count)
 
+
+def run_full_local_shard_perf():
+    def base_full_local_shard_perf():
+        return dict(
+            global_parameter_scale = 1,
+            steps=10,
+            per_device_batch_size=12.0,
+            learning_rate=1e-3,
+            enable_checkpointing=False,
+            base_output_directory = "gs://maxtext-experiments-multipod",
+            dataset_path = "gs://max-datasets-rogue",
+            int8_training=True   
+        )
+
+for local_aqt_shard_pv in [1,2,256]:
+    run_job(f"mattdavidow-test-shard-count-pv-{local_aqt_shard_pv}", base_full_local_shard_perf(), 2, local_aqt_shards_pv=pv_count)
+for local_aqt_shards_kv_proj in [1,2,256]:
+    run_job(f"mattdavidow-test-shard-count-kv-{local_aqt_shards_kv_proj}", base_full_local_shard_perf(), 2, local_aqt_shards_kv_proj=local_aqt_shards_kv_proj)
+for local_aqt_shards_after_attention in [1,2,256]:
+    run_job(f"mattdavidow-test-shard-count-aa-{local_aqt_shards_after_attention}", base_full_local_shard_perf(), 2, local_aqt_shards_after_attention=local_aqt_shards_after_attention)
+for local_aqt_shards_mlp_1 in [1,2,256]:
+    run_job(f"mattdavidow-test-shard-count-mlp1-{local_aqt_shards_mlp_1}", base_full_local_shard_perf(), 2, local_aqt_shards_mlp_1=local_aqt_shards_mlp_1)
+for local_aqt_shards_mlp_2 in [1,2,256]:
+    run_job(f"mattdavidow-test-shard-count-mlp2-{local_aqt_shards_mlp_2}", base_full_local_shard_perf(), 2, local_aqt_shards_mlp_2=local_aqt_shards_mlp_2)
+
+
+local_aqt_shards_pv: 0
+local_aqt_shards_kv_proj: 0
+local_aqt_shards_after_attention: 0
+local_aqt_shards_mlp_1: 0
+local_aqt_shards_mlp_2: 0
+
 def run_shard_convergence():
     def base_shard_convergence():
         return dict(

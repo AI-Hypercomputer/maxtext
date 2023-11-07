@@ -243,7 +243,7 @@ class DenseGeneral(nn.Module):
   dtype: DType = jnp.float32
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
   kernel_axes: Tuple[str, ...] = ()
-  local_aqt: int
+  local_aqt: int = 0
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
