@@ -177,7 +177,11 @@ def dot_product_attention(query: Array,
     aqt_dot_general = aqt.make_dot_general(aqt_cfg)
     context = aqt.Context(key=aqt_rng, train_step=None)
     aqt_dot_general = functools.partial(aqt_dot_general, context=context)
-    attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key, _dot_general=aqt_dot_general)
+    if cfg.fwd_int8_qk:
+      attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key, _dot_general=aqt_dot_general)
+    else:
+      attn_weights = jnp.einsum('bqhd,bkhd->bhqk', query, key)
+
 
   # Apply attention bias: masking, dropout, proximity bias, etc.
   if bias is not None:
@@ -208,7 +212,11 @@ def dot_product_attention(query: Array,
     aqt_dot_general = aqt.make_dot_general(aqt_cfg)
     context = aqt.Context(key=aqt_rng, train_step=None)
     aqt_dot_general = functools.partial(aqt_dot_general, context=context)
-    return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value, _dot_general=aqt_dot_general)
+    if cfg.fwd_int8_pv:
+      return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value, _dot_general=aqt_dot_general)
+    else:
+      return jnp.einsum('bhqk,bkhd->bqhd', attn_weights, value)
+
 
 
 dynamic_vector_slice_in_dim = jax.vmap(
@@ -300,8 +308,11 @@ class DenseGeneral(nn.Module):
         aqt_cfg = get_aqt_cfg(cfg.fwd_int8, cfg.dlhs_int8, cfg.drhs_int8)
         aqt_dot_general = aqt.make_dot_general(aqt_cfg)
         context = aqt.Context(key=aqt_key, train_step=None)
+        if cfg.fwd_int8:
+          return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
+        else:
+          return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
 
-        return aqt_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), context=context)
 
 def _convert_to_activation_function(
     fn_or_string: Union[str, Callable]) -> Callable:
@@ -727,13 +738,18 @@ class Embed(nn.Module):
     if not self.config.int8_training:
       return maxtext_dot(query, jnp.asarray(self.embedding, dtype).T)
     else:
+      cfg = self.config
       aqt_cfg = get_aqt_cfg(cfg.fwd_int8_logits, cfg.dlhs_int8_logits, cfg.drhs_int8_logits)
       aqt_dot_general = aqt.make_dot_general(aqt_cfg)
       aqt_key = self.make_rng('aqt')
       context = aqt.Context(key=aqt_key, train_step=None)
       aqt_dot_general = functools.partial(aqt_dot_general, context=context)
       dtype = jnp.float32 if query.dtype==jnp.float32 or self.embedding.dtype==jnp.float32 else jnp.bfloat16
-      return maxtext_dot(jnp.asarray(query, dtype), jnp.asarray(self.embedding, dtype).T, aqt_dot_general)
+      if cfg.fwd_int8_logits:
+        return maxtext_dot(jnp.asarray(query, dtype), jnp.asarray(self.embedding, dtype).T, aqt_dot_general)
+      else:
+        return maxtext_dot(query, jnp.asarray(self.embedding, dtype).T)
+
 
 class RelativePositionBiases(nn.Module):
   """Adds T5-style relative positional embeddings to the attention logits.
