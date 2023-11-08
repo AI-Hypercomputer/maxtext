@@ -166,9 +166,9 @@ def run_shard_perf():
 def run_full_local_shard_perf():
     def base_full_local_shard_perf():
         return dict(
-            global_parameter_scale = 1,
+            global_parameter_scale = 8,
             steps=10,
-            per_device_batch_size=12.0,
+            per_device_batch_size=4.0,
             learning_rate=1e-3,
             enable_checkpointing=False,
             base_output_directory = "gs://maxtext-experiments-multipod",
@@ -176,7 +176,7 @@ def run_full_local_shard_perf():
             int8_training=True   
         )
 
-    count = [4, 8, 16, 32, 64, 128]
+    count = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
     for local_aqt_shard_pv in count:
         run_job(f"mattdavidow-test-shard-count-pv-{local_aqt_shard_pv}", base_full_local_shard_perf(), 2, local_aqt_shards_pv=local_aqt_shard_pv)
     for local_aqt_shards_kv_proj in count:
@@ -187,6 +187,8 @@ def run_full_local_shard_perf():
         run_job(f"mattdavidow-test-shard-count-mlp1-{local_aqt_shards_mlp_1}", base_full_local_shard_perf(), 2, local_aqt_shards_mlp_1=local_aqt_shards_mlp_1)
     for local_aqt_shards_mlp_2 in count:
         run_job(f"mattdavidow-test-shard-count-mlp2-{local_aqt_shards_mlp_2}", base_full_local_shard_perf(), 2, local_aqt_shards_mlp_2=local_aqt_shards_mlp_2)
+    run_job(f"mattdavidow-test-shard-count-ttf", base_full_local_shard_perf(), 2)
+    
 
 
 def run_shard_convergence():
@@ -207,6 +209,25 @@ def run_shard_convergence():
         run_job(f"mattdavidow-conv-shard-count-pv-{pv_count}", base_shard_convergence(), 2, local_aqt_shards_pv=pv_count)
     for dg_count in [1,2,256]:
         run_job(f"mattdavidow-conv-shard-count-dg-{dg_count}", base_shard_convergence(), 2, local_aqt_shards_dg=dg_count)
+
+def run_ttt_convergence():
+    def base_shard_convergence():
+        return dict(
+            global_parameter_scale = 1,
+            steps=1700,
+            per_device_batch_size=12.0,
+            learning_rate=1e-3,
+            enable_checkpointing=False,
+            base_output_directory = "gs://maxtext-experiments-multipod",
+            dataset_path = "gs://max-datasets-rogue",
+            int8_training=True   
+        )
+    run_job("mattdavidow-conv-v5-ttf", base_shard_convergence(), 2)
+    run_job("mattdavidow-conv-v5-bf16", base_shard_convergence(), 2, int8_training=False)
+    run_job("mattdavidow-conv-v5-ttt-specific", base_shard_convergence(), 2, local_aqt_shards_kv_proj=512,local_aqt_shards_mlp_2=2)
+    run_job("mattdavidow-conv-v5-ttt-nonlocal", base_shard_convergence(), 2, local_aqt_shards_kv_proj=1,local_aqt_shards_mlp_2=1, local_aqt_shards_mlp_1=1, local_aqt_shard_pv=1, local_aqt_shards_after_attention=1)
+
+
 
 def main():
     import argparse
