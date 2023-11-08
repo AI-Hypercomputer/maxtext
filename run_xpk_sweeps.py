@@ -225,7 +225,7 @@ def run_ttt_convergence():
     run_job("mattdavidow-conv-v5-ttf", base_shard_convergence(), 2)
     run_job("mattdavidow-conv-v5-bf16", base_shard_convergence(), 2, int8_training=False)
     run_job("mattdavidow-conv-v5-ttt-specific", base_shard_convergence(), 2, local_aqt_shards_kv_proj=512,local_aqt_shards_mlp_2=2)
-    run_job("mattdavidow-conv-v5-ttt-nonlocal", base_shard_convergence(), 2, local_aqt_shards_kv_proj=1,local_aqt_shards_mlp_2=1, local_aqt_shards_mlp_1=1, local_aqt_shard_pv=1, local_aqt_shards_after_attention=1)
+    run_job("mattdavidow-conv-v5-ttt-nonlocal", base_shard_convergence(), 2, local_aqt_shards_kv_proj=1,local_aqt_shards_mlp_2=1, local_aqt_shards_mlp_1=1, local_aqt_shards_pv=1, local_aqt_shards_after_attention=1)
 
 
 
