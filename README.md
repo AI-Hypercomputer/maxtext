@@ -68,7 +68,7 @@ python3 MaxText/decode.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
 ```
 Be aware, these decodings will be random. To get high quality decodings you need pass in a checkpoint, typically via the `load_parameters_path` argument.
 
-## Getting Started: Quick Experiments on Multiple Slices
+## Getting Started: Quick Experiments on Multiple Hosts (or Multiple Slices)
 
 This workflow using `multihost_runner.py` is optimized for quick experiments, repeatedly re-using the same TPUs. Because the `multihost_runner.py` script depends on long-lived `ssh` connections, we do not recommend it for any long-running jobs.
 
