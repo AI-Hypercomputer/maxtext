@@ -54,7 +54,7 @@ class AttentionTest(unittest.TestCase):
         config=self.cfg,
         mesh = self.mesh)
     self.variable = self.attention.init({'params': self.rng, 'aqt': self.rng}, jnp.ones((self.BS, self.MAX_TARGET_LENGTH, self.BASE_EMB_DIM)), 
-                            jnp.ones((self.BS, self.MAX_TARGET_LENGTH, self.BASE_EMB_DIM)), False)
+                            jnp.ones((self.BS, self.MAX_TARGET_LENGTH, self.BASE_EMB_DIM)), 'flash')
 
 
   def get_decoder_mask(self):
@@ -79,7 +79,7 @@ class AttentionTest(unittest.TestCase):
             lnx,
             lnx,
             decoder_segment_ids = decoder_segment_ids,
-            enable_flash_attention=False,
+            attention_type='mha',
             inputs_positions = decoder_positions,
             mask = decoder_mask,
             bias = None,
@@ -92,7 +92,7 @@ class AttentionTest(unittest.TestCase):
             lnx,
             lnx,
             decoder_segment_ids = decoder_segment_ids,
-            enable_flash_attention=True,
+            attention_type='flash',
             inputs_positions = decoder_positions,
             mask = decoder_mask,
             bias = None,

@@ -36,6 +36,13 @@ def string_to_bool(s: str) -> bool:
 
 _yaml_types_to_parser = {str : str, int : int, float : float, bool : string_to_bool}
 
+def validate_attention_type(s: str) -> bool:
+  valid_attention_types = ('mha', 'flash')
+  if s not in valid_attention_types: # currently supported attention
+    raise ValueError(
+      "Invalid attention type was passed. Valid options ", valid_attention_types
+    )
+
 _config = None
 config = None
 
@@ -114,6 +121,8 @@ class _HyperParameters():
     raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = \
       calculate_global_batch_sizes(raw_keys)
 
+    validate_attention_type(raw_keys['attention'])
+
 
 def get_individual_scales(scale):
   '''Choose appropriate scales for individual dimensions based on global scale
@@ -138,9 +147,9 @@ def get_individual_scales(scale):
 
 def calculate_global_batch_sizes(raw_keys):
   """ Calculates target global batch size from target devices and per_device_batch"""
-  per_device_batch_size = int(raw_keys['per_device_batch_size'])
+  per_device_batch_size = raw_keys['per_device_batch_size']
   num_devices = get_num_target_devices(raw_keys)
-  if per_device_batch_size < 1:
+  if per_device_batch_size < 1.0:
     # For per_device_batch_size<1, we load the data as if per_device_batch_size=1
     global_batch_size_to_load = num_devices
   else:

@@ -57,7 +57,7 @@ logits_via_embedding: True  # NOTE: this is True just for testing.
 remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
-enable_flash_attention: True
+attention: 'flash' # Supported attention: flash, mha
 
 record_internal_nn_metrics: 0
 
@@ -66,21 +66,21 @@ record_internal_nn_metrics: 0
 base_output_directory: ""
 
 # Parallelism
-mesh_axes: ['data', 'fsdp', 'tensor']
+mesh_axes: ['data', 'fsdp', 'sequence', 'tensor']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp']],
-                      ['activation_length' , ['data', 'fsdp']],
+                      ['activation_heads', ['tensor','sequence']],
+                      ['activation_length', 'sequence'],
                       ['activation_embed', 'tensor'],
                       ['activation_mlp', 'tensor'],
-                      ['activation_heads', 'tensor'],
                       ['activation_kv', 'tensor'],
-                      ['activation_vocab', 'tensor'],
+                      ['activation_vocab', ['tensor', 'sequence']],
                       ['mlp', 'tensor'],
                       ['vocab', 'tensor'],
-                      ['embed', 'fsdp'],
+                      ['embed', ['fsdp', 'sequence']],
                       ['heads', 'tensor'],
                     ]
-data_sharding: [['data', 'fsdp', 'tensor']]
+data_sharding: [['data', 'fsdp', 'sequence', 'tensor']]
 
 # One axis for each parallelism type may hold a placeholder (-1)
 # value to auto-shard based on available slices and devices.
@@ -88,9 +88,11 @@ data_sharding: [['data', 'fsdp', 'tensor']]
 # and product of the ICI axes should equal number of devices per slice.
 dcn_data_parallelism: -1  # recommended DCN axis to be auto-sharded
 dcn_fsdp_parallelism: 1
+dcn_sequence_parallelism: 1
 dcn_tensor_parallelism: 1
 ici_data_parallelism: 1
 ici_fsdp_parallelism: -1  # recommended ICI axis to be auto-sharded
+ici_sequence_parallelism: 1
 ici_tensor_parallelism: 1
 
 
