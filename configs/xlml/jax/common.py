@@ -34,6 +34,14 @@ def set_up_google_flax() -> Tuple[str]:
   )
 
 
+def set_up_google_pax() -> Tuple[str]:
+  """Common set up for pax repo."""
+  return (
+      "pip install paxml",
+      INSTALL_LATEST_JAX,
+  )
+
+
 def set_up_hugging_face_transformers() -> Tuple[str]:
   """Common set up for hugging face transformer repo."""
   return (

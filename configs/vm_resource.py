@@ -31,3 +31,4 @@ class RuntimeVersion(enum.Enum):
   VM_NIGHTLY = "1vm-nightly"
   VM_NIGHTLY_POD = "1vm-nightly-pod"
   TPU_UBUNTU2204_BASE = "tpu-ubuntu2204-base"
+  TPU_VM_V4_BASE = "tpu-vm-v4-base"

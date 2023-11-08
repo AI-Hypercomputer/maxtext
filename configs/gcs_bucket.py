@@ -19,6 +19,7 @@
 IMAGENET_DIR = "gs://xl-ml-test-us-central2/data/imagenet"
 TFDS_DATA_DIR = "gs://xl-ml-test-us-central2/tfds-data"
 TF_NLP_BERT_DIR = "gs://cloud-tpu-checkpoints/bert/tf_nlp_bert"
+PAX_DIR = "gs://cloud-tpu-checkpoints/pax"
 
 # GCS bucket for output
 BENCHMARK_OUTPUT_DIR = "gs://ml-auto-solutions/output/benchmark"
