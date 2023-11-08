@@ -1,12 +1,13 @@
-echo "Running 64b_big_batch.sh"
+echo "Running 64b.sh"
 # Example command to invoke this script
-# bash MaxText/configs/largest_job/64b_big_batch.sh 
+# bash MaxText/configs/largest_job/64b.sh 
 
 # Stop execution if any command exits with error
 set -e
 
 export OUTPUT_PATH="gs://maxtext-experiments-multipod"
 export DATASET_PATH="gs://maxtext-dataset/"
+export PLATFORM="gke" # Can be "gke" or "gce"
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -15,7 +16,11 @@ for ARGUMENT in "$@"; do
 done
 
 # Set up network
-bash gke_rto_setup.sh
+if [[ $PLATFORM == "gce" ]]; then
+    bash rto_setup.sh
+else
+    bash gke_rto_setup.sh
+fi
 
 # For DNS lookup when running on large number of VMs
 echo '142.250.123.95 www.googleapis.com' | tee -a /etc/hosts
@@ -28,4 +33,4 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
     enable_profiler=false remat_policy=full global_parameter_scale=64\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\
     dataset_path=$DATASET_PATH use_iota_embed=true reuse_example_batch=1\
-    dataset_type=synthetic
+    dataset_type=synthetic enable_flash_attention=true gcs_metrics=true
