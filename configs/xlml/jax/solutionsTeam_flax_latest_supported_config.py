@@ -14,9 +14,14 @@
 
 """Utilities to construct configs for solutionsTeam_flax_latest_supported DAG."""
 
+import uuid
 from apis import gcp_config, metric_config, task, test_config
 from configs import gcs_bucket, test_owner, vm_resource
 from configs.xlml.jax import common
+
+
+PROJECT_NAME = vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS
+IS_TPU_RESERVED = True
 
 
 def get_flax_resnet_config(
@@ -28,19 +33,20 @@ def get_flax_resnet_config(
     extraFlags: str = "",
 ) -> task.TpuTask:
   job_gcp_config = gcp_config.GCPConfig(
-      project_name=vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
+      project_name=PROJECT_NAME,
       zone=tpu_zone,
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
 
   set_up_cmds = common.set_up_google_flax()
 
+  work_dir = generate_unique_dir("/tmp/imagenet")
   run_model_cmds = (
       (
           f"export TFDS_DATA_DIR={data_dir} &&"
           " JAX_PLATFORM_NAME=TPU python3 /tmp/flax/examples/imagenet/main.py"
           " --config=/tmp/flax/examples/imagenet/configs/tpu.py"
-          f" --workdir=/tmp/imagenet --config.num_epochs=1 {extraFlags}"
+          f" --workdir={work_dir} --config.num_epochs=1 {extraFlags}"
       ),
   )
 
@@ -49,7 +55,7 @@ def get_flax_resnet_config(
           version=tpu_version,
           cores=tpu_cores,
           runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
-          reserved=True,
+          reserved=IS_TPU_RESERVED,
       ),
       test_name="flax_resnet_imagenet",
       set_up_cmds=set_up_cmds,
@@ -128,7 +134,7 @@ def get_flax_gpt2_config(
     extraFlags: str = "",
 ) -> task.TpuTask:
   job_gcp_config = gcp_config.GCPConfig(
-      project_name=vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
+      project_name=PROJECT_NAME,
       zone=tpu_zone,
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
@@ -165,7 +171,7 @@ def get_flax_gpt2_config(
           version=tpu_version,
           cores=tpu_cores,
           runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
-          reserved=True,
+          reserved=IS_TPU_RESERVED,
       ),
       test_name="flax_gpt2_oscar",
       set_up_cmds=set_up_cmds,
@@ -189,7 +195,7 @@ def get_flax_sd_config(
     extraFlags: str = "",
 ) -> task.TpuTask:
   job_gcp_config = gcp_config.GCPConfig(
-      project_name=vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
+      project_name=PROJECT_NAME,
       zone=tpu_zone,
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
@@ -201,6 +207,7 @@ def get_flax_sd_config(
       ),
   )
 
+  work_dir = generate_unique_dir("./sd-pokemon-model")
   run_model_cmds = (
       (
           "cd /tmp/diffusers/examples/text_to_image && JAX_PLATFORM_NAME=TPU"
@@ -209,8 +216,8 @@ def get_flax_sd_config(
           " --dataset_name='lambdalabs/pokemon-blip-captions' --resolution=512"
           " --center_crop --random_flip --train_batch_size=8"
           f" --num_train_epochs={num_train_epochs} --learning_rate=1e-05"
-          " --max_grad_norm=1 --output_dir='./sd-pokemon-model' --cache_dir"
-          f" /tmp {extraFlags}"
+          f" --max_grad_norm=1 --output_dir={work_dir} --cache_dir /tmp"
+          f" {extraFlags}"
       ),
   )
 
@@ -219,7 +226,7 @@ def get_flax_sd_config(
           version=tpu_version,
           cores=tpu_cores,
           runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
-          reserved=True,
+          reserved=IS_TPU_RESERVED,
       ),
       test_name="flax_sd_pokemon",
       set_up_cmds=set_up_cmds,
@@ -232,3 +239,163 @@ def get_flax_sd_config(
       task_test_config=job_test_config,
       task_gcp_config=job_gcp_config,
   )
+
+
+def get_flax_bart_config(
+    tpu_version: str,
+    tpu_cores: int,
+    tpu_zone: str,
+    time_out_in_min: int,
+    extraFlags: str = "",
+) -> task.TpuTask:
+  job_gcp_config = gcp_config.GCPConfig(
+      project_name=PROJECT_NAME,
+      zone=tpu_zone,
+      dataset_name=metric_config.DatasetOption.XLML_DATASET,
+  )
+
+  set_up_cmds = common.set_up_hugging_face_transformers() + (
+      "pip install -r examples/flax/summarization/requirements.txt",
+      "pip install ml_dtypes==0.2.0",
+  )
+
+  run_model_cmds = (
+      (
+          "cd /tmp/transformers/examples/flax/summarization &&"
+          " JAX_PLATFORM_NAME=TPU python3 run_summarization_flax.py"
+          " --model_name_or_path facebook/bart-base --tokenizer_name"
+          " facebook/bart-base --dataset_name wiki_summary --do_train"
+          " --do_eval --do_predict --predict_with_generate --learning_rate"
+          " 5e-5 --warmup_steps 0 --output_dir=./bart-base-wiki"
+          " --overwrite_output_dir --num_train_epochs 3 --max_source_length"
+          f" 512 --max_target_length 64 {extraFlags}"
+      ),
+  )
+
+  job_test_config = test_config.TpuVmTest(
+      test_config.Tpu(
+          version=tpu_version,
+          cores=tpu_cores,
+          runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
+          reserved=IS_TPU_RESERVED,
+      ),
+      test_name="flax_bart_wiki",
+      set_up_cmds=set_up_cmds,
+      run_model_cmds=run_model_cmds,
+      time_out_in_min=time_out_in_min,
+      task_owner=test_owner.SHIVA_S,
+  )
+
+  return task.TpuTask(
+      task_test_config=job_test_config,
+      task_gcp_config=job_gcp_config,
+  )
+
+
+def get_flax_bert_config(
+    tpu_version: str,
+    tpu_cores: int,
+    tpu_zone: str,
+    time_out_in_min: int,
+    task_name: str,
+    num_train_epochs: int = 1,
+    extraFlags: str = "",
+) -> task.TpuTask:
+  job_gcp_config = gcp_config.GCPConfig(
+      project_name=PROJECT_NAME,
+      zone=tpu_zone,
+      dataset_name=metric_config.DatasetOption.XLML_DATASET,
+  )
+
+  set_up_cmds = common.set_up_hugging_face_transformers() + (
+      "pip install -r examples/flax/text-classification/requirements.txt",
+      "pip install ml_dtypes==0.2.0",
+  )
+
+  run_model_cmds = (
+      (
+          "cd /tmp/transformers/examples/flax/text-classification &&"
+          " JAX_PLATFORM_NAME=TPU python3 run_flax_glue.py --output_dir"
+          " ./bert-glue --model_name_or_path bert-base-cased"
+          f" --overwrite_output_dir --task_name {task_name} --num_train_epochs"
+          f" {num_train_epochs} --logging_dir ./bert-glue {extraFlags}"
+      ),
+  )
+
+  job_test_config = test_config.TpuVmTest(
+      test_config.Tpu(
+          version=tpu_version,
+          cores=tpu_cores,
+          runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
+          reserved=IS_TPU_RESERVED,
+      ),
+      test_name=f"flax_bert_{task_name}",
+      set_up_cmds=set_up_cmds,
+      run_model_cmds=run_model_cmds,
+      time_out_in_min=time_out_in_min,
+      task_owner=test_owner.SHIVA_S,
+  )
+
+  return task.TpuTask(
+      task_test_config=job_test_config,
+      task_gcp_config=job_gcp_config,
+  )
+
+
+def get_flax_wmt_config(
+    tpu_version: str,
+    tpu_cores: int,
+    tpu_zone: str,
+    time_out_in_min: int,
+    num_train_steps: int,
+    data_dir: str = gcs_bucket.TFDS_DATA_DIR,
+    extraFlags: str = "",
+) -> task.TpuTask:
+  job_gcp_config = gcp_config.GCPConfig(
+      project_name=PROJECT_NAME,
+      zone=tpu_zone,
+      dataset_name=metric_config.DatasetOption.XLML_DATASET,
+  )
+
+  set_up_cmds = common.set_up_google_flax() + (
+      "pip install tf-nightly-cpu",
+      "pip install tensorflow-datasets",
+      "pip install tensorflow-text-nightly",
+      "pip install sentencepiece",
+  )
+
+  work_dir = generate_unique_dir("/tmp/wmt")
+  run_model_cmds = (
+      (
+          f"export TFDS_DATA_DIR={data_dir} &&"
+          " JAX_PLATFORM_NAME=TPU python3 /tmp/flax/examples/wmt/main.py"
+          " --config=/tmp/flax/examples/wmt/configs/default.py"
+          f" --workdir={work_dir} --config.num_train_steps={num_train_steps}"
+          f" --config.per_device_batch_size=16 {extraFlags}"
+      ),
+  )
+
+  job_test_config = test_config.TpuVmTest(
+      test_config.Tpu(
+          version=tpu_version,
+          cores=tpu_cores,
+          runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
+          reserved=IS_TPU_RESERVED,
+      ),
+      test_name="flax_wmt_translate",
+      set_up_cmds=set_up_cmds,
+      run_model_cmds=run_model_cmds,
+      time_out_in_min=time_out_in_min,
+      task_owner=test_owner.SHIVA_S,
+  )
+
+  return task.TpuTask(
+      task_test_config=job_test_config,
+      task_gcp_config=job_gcp_config,
+  )
+
+
+def generate_unique_dir(prefix: str) -> str:
+  """Generate a unique dir based on prefix to avoid skipping runs during retry."""
+  short_id = str(uuid.uuid4())[:8]
+  return f"{prefix}_{short_id}"

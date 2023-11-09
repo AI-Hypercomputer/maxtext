@@ -18,7 +18,7 @@ from apis import gcp_config, metric_config, task, test_config
 from configs import composer_env, vm_resource
 
 
-# Run once a day at 10 am
+# Run once a day at 10 am UTC (2 am PST)
 SCHEDULED_TIME = "0 10 * * *" if composer_env.is_prod_env() else None
 US_CENTRAL1_A = gcp_config.GCPConfig(
     vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,

@@ -20,7 +20,7 @@ from configs import composer_env, vm_resource
 from configs.xlml.tensorflow import solutionsTeam_tf_nightly_supported_config as tf_config
 
 
-# Run once a day at 6 am
+# Run once a day at 6 am UTC (10 pm PST)
 SCHEDULED_TIME = "0 6 * * *" if composer_env.is_prod_env() else None
 
 
