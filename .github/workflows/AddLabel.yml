@@ -49,7 +49,7 @@ jobs:
             console.log(reviewers)
             console.log("----------------------------------")
             // Once a requested reviewer submits a review, they are no longer considered a requested reviewer.
-            if (reviewers.data.users.length !== 0 && reviewers.data.teams.length !== 0) {
+            if (reviewers.data.users.length !== 0 || reviewers.data.teams.length !== 0) {
               console.log("Not adding pull ready because the PR is not approved yet")
               process.exit()
             }
