@@ -46,11 +46,17 @@ def l2norm_pytree(x):
 
 def activate_profiler(config):
   if jax.process_index() == 0 and config.enable_profiler:
-    jax.profiler.start_trace(config.tensorboard_dir)
+    if config.programmatic_capture:
+      jax.profiler.start_trace(config.tensorboard_dir)
+    else:
+      jax.profiler.start_server(config.profiling_port)
 
 def deactivate_profiler(config):
   if jax.process_index() == 0 and config.enable_profiler:
-    jax.profiler.stop_trace()
+    if config.programmatic_capture:
+      jax.profiler.stop_trace()
+    else:
+      jax.profiler.stop_server()
 
 def _prepare_metrics_for_json(metrics, step, run_name):
   """Converts metric dictionary into json supported types (e.g. float)""" 

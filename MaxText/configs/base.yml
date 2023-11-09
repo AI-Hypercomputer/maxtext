@@ -155,6 +155,10 @@ eos_id: 2  # sentencepiece default
 prompt: "I love to "
 
 enable_profiler: False
+# Profiles can either be captured programmatically or manually, programmatic capture is the default.
+programmatic_capture: True
+# Default Port for manual capture if programmatic_capture is set to False.
+profiling_port: 9999
 # If enable_checkpointing is true, an asynchronous checkpointer will be used if
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the sychronous one.
