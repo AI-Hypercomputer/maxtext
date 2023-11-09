@@ -36,11 +36,18 @@ jobs:
             const repo = "maxtext"
             const pull_number = context.payload.pull_request.number
 
+
+            console.log("----------------------------------")
+            console.log(context.payload)
+            console.log("----------------------------------")
             const reviewers = await github.rest.pulls.listRequestedReviewers({
               owner,
               repo,
               pull_number,
             })
+            console.log("----------------------------------")
+            console.log(reviewers)
+            console.log("----------------------------------")
             // Once a requested reviewer submits a review, they are no longer considered a requested reviewer.
             if (reviewers.data.users.length !== 0 && reviewers.data.teams.length !== 0) {
               console.log("Not adding pull ready because the PR is not approved yet")
@@ -52,6 +59,10 @@ jobs:
               repo,
               pull_number,
             })
+
+            console.log("----------------------------------")
+            console.log(reviews)
+            console.log("----------------------------------")
             if (reviews.data.length === 0) {
               console.log("Not adding pull ready because the PR is not approved yet")
               process.exit()
@@ -63,7 +74,6 @@ jobs:
               }
             }
 
-            let allPassed = true
             const commits = await github.rest.pulls.listCommits({
               owner,
               repo,
