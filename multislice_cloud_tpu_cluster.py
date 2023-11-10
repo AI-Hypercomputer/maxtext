@@ -46,16 +46,16 @@ def get_metadata(key):
 
 class MultisliceTpuCluster(clusters.ClusterEnv):
 
+  @staticmethod
   def get_tpu_env_dict():
     tpu_env_data = get_metadata('tpu-env')
     # should trim this to ignore last blank linke
     items = tpu_env_data.split('\n')
-    print(vals)
     tpu_env_dict = dict()
     for item in items[0:-1]:
         col_split = item.split(':')
-        key,val = col_split[0], col_split[1]
-        tpu_env_dict[a]=b
+        key,val = col_split[0].strip(), col_split[1].strip()
+        tpu_env_dict[key]=val
     return tpu_env_dict
 
   @classmethod
@@ -66,24 +66,33 @@ class MultisliceTpuCluster(clusters.ClusterEnv):
   @classmethod
   def get_coordinator_address(cls) -> str:
     # TODO: First try to get from environment variable before TPU env
-    tpu_env_dict = get_tpu_env_dict()
-    coordinator_address = tpu_env_dict['MEGASCALE_COORDINATOR_ADDRESS']
+    tpu_env_dict = cls.get_tpu_env_dict()
+    coordinator_address = tpu_env_dict['MEGASCALE_COORDINATOR_ADDRESS'].strip("'")
     coordinator_address.split(':')[0] + ':8476'
-    return cls._get_worker_endpoints()[0].split(':')[2] + ':8476'
+    print(f"{coordinator_address=}")
+    return coordinator_address
 
   @classmethod
   def get_process_count(cls) -> int:
-    tpu_env_dict = get_tpu_env_dict()
+    tpu_env_dict = cls.get_tpu_env_dict()
     num_slices = tpu_env_dict['MEGASCALE_NUM_SLICES']
-    return int(xla_bridge.process_count() * num_slices)
+    num_processes = int(xla_bridge.process_count() * num_slices)
+    print(f"{num_processes=}")
+    return num_processes
 
   @classmethod
   def get_process_id(cls) -> int:
-    if cls.get_process_count() != len(cls._get_worker_endpoints()):
-      raise RuntimeError('Number of workers does not equal the number of '
-                         'processes. Auto detecting process_id is not possible.'
-                         'Please pass process_id to jax.distributed.initialize() manually.')
-    return int(get_metadata('agent-worker-number'))
+    # if cls.get_process_count() != len(cls._get_worker_endpoints()):
+    #   raise RuntimeError('Number of workers does not equal the number of '
+    #                      'processes. Auto detecting process_id is not possible.'
+    #                      'Please pass process_id to jax.distributed.initialize() manually.')
+    tpu_env_dict = cls.get_tpu_env_dict()
+    slice_id = int(tpu_env_dict['MEGASCALE_SLICE_ID'].strip("'"))
+    num_workers_per_slice = xla_bridge.process_count() # this actually gets total workers?
+    #process_id = int(get_metadata('agent-worker-number')) + num_workers_per_slice * slice_id
+    process_id = int(get_metadata('agent-worker-number')) + 0
+    print(f"{process_id=}")
+    return int(process_id)
 
   @classmethod
   def get_local_process_id(cls) -> Optional[int]:
@@ -92,3 +101,4 @@ class MultisliceTpuCluster(clusters.ClusterEnv):
   @staticmethod
   def _get_worker_endpoints() -> str:
     return get_metadata('worker-network-endpoints').split(',')
+
