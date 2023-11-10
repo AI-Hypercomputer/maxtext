@@ -60,6 +60,7 @@ class MultisliceTpuCluster(clusters.ClusterEnv):
 
   @classmethod
   def is_env_present(cls) -> bool:
+    print("WE ARE EXCITED TO CHECK IF WE SHOULD USE THIS!", flush=True)
     return running_in_cloud_tpu_vm
     # DO NOT SUBMIT: also check in multislice environment
 
@@ -68,16 +69,17 @@ class MultisliceTpuCluster(clusters.ClusterEnv):
     # TODO: First try to get from environment variable before TPU env
     tpu_env_dict = cls.get_tpu_env_dict()
     coordinator_address = tpu_env_dict['MEGASCALE_COORDINATOR_ADDRESS'].strip("'")
-    coordinator_address.split(':')[0] + ':8476'
-    print(f"{coordinator_address=}")
+    coordinator_address = coordinator_address.split(':')[0] + ':8476'
+    print(f"{coordinator_address=}", flush=True)
     return coordinator_address
 
   @classmethod
   def get_process_count(cls) -> int:
     tpu_env_dict = cls.get_tpu_env_dict()
-    num_slices = tpu_env_dict['MEGASCALE_NUM_SLICES']
-    num_processes = int(xla_bridge.process_count() * num_slices)
-    print(f"{num_processes=}")
+    num_slices = int(tpu_env_dict['MEGASCALE_NUM_SLICES'].strip("'"))
+    # num_processes = int(xla_bridge.process_count() * num_slices)
+    num_processes = int(xla_bridge.process_count())
+    print(f"{num_processes=}", flush=True)
     return num_processes
 
   @classmethod
@@ -88,10 +90,11 @@ class MultisliceTpuCluster(clusters.ClusterEnv):
     #                      'Please pass process_id to jax.distributed.initialize() manually.')
     tpu_env_dict = cls.get_tpu_env_dict()
     slice_id = int(tpu_env_dict['MEGASCALE_SLICE_ID'].strip("'"))
-    num_workers_per_slice = xla_bridge.process_count() # this actually gets total workers?
-    #process_id = int(get_metadata('agent-worker-number')) + num_workers_per_slice * slice_id
-    process_id = int(get_metadata('agent-worker-number')) + 0
-    print(f"{process_id=}")
+    num_total_workers = xla_bridge.process_count() # this actually gets total workers? Not workers per slice?
+    num_workers_per_slice = num_total_workers // int(tpu_env_dict['MEGASCALE_NUM_SLICES'].strip("'"))
+    process_id = int(get_metadata('agent-worker-number')) + num_workers_per_slice * slice_id
+    #process_id = int(get_metadata('agent-worker-number')) + 0
+    print(f"{process_id=}", flush=True)
     return int(process_id)
 
   @classmethod
