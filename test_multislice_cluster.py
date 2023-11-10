@@ -1,5 +1,5 @@
 import jax
-from multislice_cloud_tpu_cluster import MultisliceTpuCluster
+from cloud_tpu_cluster import MultisliceTpuCluster
 
 
 
