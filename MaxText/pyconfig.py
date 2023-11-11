@@ -18,6 +18,7 @@
 from collections import OrderedDict
 
 import accelerator_to_spec_map
+import checkpointing
 import math
 import os
 import sys
