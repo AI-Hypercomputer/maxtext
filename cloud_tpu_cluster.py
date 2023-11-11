@@ -97,12 +97,16 @@ class TpuCluster(clusters.ClusterEnv):
 class MultisliceTpuCluster(clusters.ClusterEnv):
   @classmethod
   def is_env_present(cls) -> bool:
+    print("Rawr")
+    a= running_in_cloud_tpu_vm and isMultisliceEnv()
+    print(f"{a=}")
     return running_in_cloud_tpu_vm and isMultisliceEnv()
   @classmethod
   def get_coordinator_address(cls) -> str:
     coordinator_address = get_tpu_env_value('MEGASCALE_COORDINATOR_ADDRESS')
     # Use a different port for the jax coordinator than the MXLA coordinator.
     coordinator_address = coordinator_address.split(':')[0] + ':8476'
+    print(f"{coordinator_address=}", flush=True)
     return coordinator_address
 
   @classmethod
