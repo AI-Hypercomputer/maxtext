@@ -86,6 +86,10 @@ class _HyperParameters():
 
   @staticmethod
   def user_init(raw_keys):
+
+    if raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"]:
+      checkpointing.multislice_distribute_initialize()
+
     '''Transformations between the config data and configs used at runtime'''
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
     if raw_keys["run_name"] == "":

@@ -29,27 +29,33 @@ import max_logging
 
 from flax.training import train_state
 
-def _multislice_distribute_initialize():
-  """Calls jax.distribute.initialize() with appropriate multislice arguments."""
+def multislice_distribute_initialize():
+  def legacy_distribute_initialize():
+    """Calls jax.distribute.initialize() with appropriate multislice arguments."""
 
-  def gen_local_ip():
-    hostname = socket.gethostname()
-    return socket.gethostbyname(hostname)
+    def gen_local_ip():
+      hostname = socket.gethostname()
+      return socket.gethostbyname(hostname)
 
-  def gen_local_ip_nums():
-    return [int(num) for num in gen_local_ip().split(':')[-1].split('.')]
+    def gen_local_ip_nums():
+      return [int(num) for num in gen_local_ip().split(':')[-1].split('.')]
 
-  def get_coordinator_ip():
-    local_ip_nums = jax.numpy.array(gen_local_ip_nums())
-    coordinator_ip_nums = multihost_utils.broadcast_one_to_all(local_ip_nums)
-    coordinator_ip_strings = [str(num) for num in list(coordinator_ip_nums)]
-    return '.'.join(coordinator_ip_strings)
+    def get_coordinator_ip():
+      local_ip_nums = jax.numpy.array(gen_local_ip_nums())
+      coordinator_ip_nums = multihost_utils.broadcast_one_to_all(local_ip_nums)
+      coordinator_ip_strings = [str(num) for num in list(coordinator_ip_nums)]
+      return '.'.join(coordinator_ip_strings)
 
-  port = multihost_utils.broadcast_one_to_all(jax.numpy.array(portpicker.pick_unused_port()))
-  coordinator_address = get_coordinator_ip() + ':' + str(port)
-  jax.distributed.initialize(coordinator_address=coordinator_address,
-                             num_processes=jax.process_count(),
-                             process_id=jax.process_index())
+    port = multihost_utils.broadcast_one_to_all(jax.numpy.array(portpicker.pick_unused_port()))
+    coordinator_address = get_coordinator_ip() + ':' + str(port)
+    jax.distributed.initialize(coordinator_address=coordinator_address,
+                              num_processes=jax.process_count(),
+                              process_id=jax.process_index())
+                            
+if jax.__version__ >= '0.4.21':
+  jax.distributed.initialize()
+else:
+  legacy_distribute_initialize()
 
 def create_orbax_checkpoint_manager(
     checkpoint_dir: str,
@@ -64,7 +70,6 @@ def create_orbax_checkpoint_manager(
   max_logging.log("Creating checkpoint manager...")
   p = epath.Path(checkpoint_dir)
   if use_async:
-    _multislice_distribute_initialize()
     checkpointer = AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler())
   else:
     checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
