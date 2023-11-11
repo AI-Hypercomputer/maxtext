@@ -16,13 +16,17 @@ name: Add Label
 
 on:
   workflow_call:
+  workflow_run:
+    # workflows: [Unit Test, CodeQL]
+    workflows: [CodeQL]
+    types:
+      - completed
   pull_request_review:
   pull_request_review_comment:
   workflow_dispatch:
 
 jobs:
   AddPullReady:
-    if: github.ref != 'refs/heads/main'
     permissions:
       checks: read
       pull-requests: write
@@ -34,19 +38,23 @@ jobs:
           script: |
             const owner = "google"
             const repo = "maxtext"
-            const pull_number = context.payload.pull_request.number
-
-            const reviewers = await github.rest.pulls.listRequestedReviewers({
-              owner,
-              repo,
-              pull_number,
-            })
-            // Once a requested reviewer submits a review, they are no longer considered a requested reviewer.
-            if (reviewers.data.users.length !== 0 && reviewers.data.teams.length !== 0) {
-              console.log("Not adding pull ready because the PR is not approved yet")
-              process.exit()
+            let pull_number = -1
+            if (context.payload.pull_request !== undefined) {
+              pull_number = context.payload.pull_request.number
+            } else if (context.payload.workflow_run !== undefined) {
+              if (context.payload.workflow_run.pull_requests.length === 0) {
+                console.log("This workflow is NOT running within a PR's context")
+                process.exit()
+              }
+              console.log(context.payload.workflow_run.pull_requests)
+              pull_number = context.payload.workflow_run.pull_requests[0].number
+            } else {
+              console.log("This workflow is running within an invalid context")
+              process.exit(1)
             }
 
+            // This list should match with CODEOWNERS
+            let requiredReviewers = { rwitten: "" }
             const reviews = await github.rest.pulls.listReviews({
               owner,
               repo,
@@ -57,13 +65,15 @@ jobs:
               process.exit()
             }
             for (const review of reviews.data) {
-              if (review.state !== "APPROVED" && review.state !== "COMMENTED") {
-                console.log("Not adding pull ready because the review is requesting a change: ", review.html_url)
-                process.exit()
+              if (review.state === "APPROVED") {
+                delete requiredReviewers[review.user.login]
               }
             }
+            if (Object.keys(requiredReviewers).length !== 0) {
+              console.log("Not adding pull ready because the PR is not approved yet")
+              process.exit()
+            }
 
-            let allPassed = true
             const commits = await github.rest.pulls.listCommits({
               owner,
               repo,
@@ -83,7 +93,7 @@ jobs:
             for (const checkRun of checkRuns.data.check_runs) {
               if (checkRun.name.endsWith(context.job)) continue
               if (checkRun.conclusion !== "success") {
-                console.log("Not adding pull ready because " + checkRun.name + " has not passed yet: checkRun.html_url")
+                console.log("Not adding pull ready because " + checkRun.name + " has not passed yet: " + checkRun.html_url)
                 process.exit()
               }
             }
@@ -94,4 +104,3 @@ jobs:
               owner,
               repo,
             })
-            
