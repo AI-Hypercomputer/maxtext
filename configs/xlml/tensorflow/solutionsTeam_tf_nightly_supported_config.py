@@ -182,8 +182,8 @@ def export_env_variable(is_pod: bool) -> str:
 def get_tpu_runtime(is_pod: bool) -> str:
   """Get TPU runtime image."""
   if is_pod:
-    return vm_resource.RuntimeVersion.VM_NIGHTLY_POD.value
-  return vm_resource.RuntimeVersion.VM_NIGHTLY.value
+    return vm_resource.RuntimeVersion.TPU_VM_TF_NIGHTLY_POD.value
+  return vm_resource.RuntimeVersion.TPU_VM_TF_NIGHTLY.value
 
 
 def create_tpu_name(test_name: str, tpu_version: str, tpu_cores: int) -> str:
