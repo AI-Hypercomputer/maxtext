@@ -87,12 +87,15 @@ with models.DAG(
       extraFlags=" ".join(jax_vit_v4_extra_flags),
   ).run()
 
-  jax_vit_v4_32 = flax_config.get_flax_vit_config(
+  jax_vit_v4_32_extra_flags = jax_vit_v4_extra_flags + [
+      "--model_name_or_path google/vit-base-patch16-224-in21k",
+  ]
+  jax_vit_v4_32 = flax_config.get_flax_vit_conv_config(
       tpu_version="4",
       tpu_cores=32,
       tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
-      extraFlags=" ".join(jax_vit_v4_extra_flags),
+      extraFlags=" ".join(jax_vit_v4_32_extra_flags),
   ).run()
 
   # GPT2

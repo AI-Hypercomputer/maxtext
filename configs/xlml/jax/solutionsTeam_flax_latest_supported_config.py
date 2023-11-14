@@ -14,6 +14,7 @@
 
 """Utilities to construct configs for solutionsTeam_flax_latest_supported DAG."""
 
+from typing import Tuple
 import uuid
 from apis import gcp_config, metric_config, task, test_config
 from configs import gcs_bucket, test_owner, vm_resource
@@ -21,6 +22,7 @@ from configs.xlml.jax import common
 
 
 PROJECT_NAME = vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS
+RUNTIME_IMAGE = vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value
 IS_TPU_RESERVED = True
 
 
@@ -54,7 +56,7 @@ def get_flax_resnet_config(
       test_config.Tpu(
           version=tpu_version,
           cores=tpu_cores,
-          runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
+          runtime_version=RUNTIME_IMAGE,
           reserved=IS_TPU_RESERVED,
       ),
       test_name="flax_resnet_imagenet",
@@ -70,20 +72,8 @@ def get_flax_resnet_config(
   )
 
 
-def get_flax_vit_config(
-    tpu_version: str,
-    tpu_cores: int,
-    tpu_zone: str,
-    time_out_in_min: int,
-    extraFlags: str = "",
-) -> task.TpuTask:
-  job_gcp_config = gcp_config.GCPConfig(
-      project_name=vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
-      zone=tpu_zone,
-      dataset_name=metric_config.DatasetOption.XLML_DATASET,
-  )
-
-  set_up_cmds = common.set_up_hugging_face_transformers() + (
+def get_flax_vit_setup_cmds() -> Tuple[str]:
+  return common.set_up_hugging_face_transformers() + (
       "pip install -r /tmp/transformers/examples/flax/vision/requirements.txt",
       "pip install ml_dtypes==0.2.0",
       (
@@ -93,24 +83,48 @@ def get_flax_vit_config(
       "cd /tmp/transformers && tar -xvzf imagenette2.tgz",
   )
 
-  run_model_cmds = (
+
+def get_flax_vit_run_model_cmds(
+    num_train_epochs: int,
+    extraFlags: str = "",
+    extra_run_cmds: Tuple[str] = ("echo",),
+) -> Tuple[str]:
+  return (
       (
           "JAX_PLATFORM_NAME=TPU python3"
           " /tmp/transformers/examples/flax/vision/run_image_classification.py"
           " --model_name_or_path google/vit-base-patch16-224-in21k"
-          " --num_train_epochs 3 --output_dir"
+          f" --num_train_epochs {num_train_epochs} --output_dir"
           " '/tmp/transformers/vit-imagenette' --train_dir"
           " '/tmp/transformers/imagenette2/train' --validation_dir"
           " '/tmp/transformers/imagenette2/val' --learning_rate 1e-3"
-          f" --preprocessing_num_workers 32 {extraFlags}"
+          f" --preprocessing_num_workers 32 --overwrite_output_dir {extraFlags}"
       ),
+  ) + extra_run_cmds
+
+
+def get_flax_vit_config(
+    tpu_version: str,
+    tpu_cores: int,
+    tpu_zone: str,
+    time_out_in_min: int,
+    num_train_epochs: int = 3,
+    extraFlags: str = "",
+) -> task.TpuTask:
+  job_gcp_config = gcp_config.GCPConfig(
+      project_name=PROJECT_NAME,
+      zone=tpu_zone,
+      dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
+
+  set_up_cmds = get_flax_vit_setup_cmds()
+  run_model_cmds = get_flax_vit_run_model_cmds(num_train_epochs, extraFlags)
 
   job_test_config = test_config.TpuVmTest(
       test_config.Tpu(
           version=tpu_version,
           cores=tpu_cores,
-          runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
+          runtime_version=RUNTIME_IMAGE,
           reserved=True,
       ),
       test_name="flax_vit_imagenette",
@@ -123,6 +137,64 @@ def get_flax_vit_config(
   return task.TpuTask(
       task_test_config=job_test_config,
       task_gcp_config=job_gcp_config,
+  )
+
+
+def get_flax_vit_conv_config(
+    tpu_version: str,
+    tpu_cores: int,
+    tpu_zone: str,
+    time_out_in_min: int,
+    num_train_epochs: int = 30,
+    extraFlags: str = "",
+) -> task.TpuTask:
+  job_gcp_config = gcp_config.GCPConfig(
+      project_name=PROJECT_NAME,
+      zone=tpu_zone,
+      dataset_name=metric_config.DatasetOption.XLML_DATASET,
+  )
+
+  set_up_cmds = get_flax_vit_setup_cmds()
+  tf_summary_location = (
+      "/tmp/transformers/vit-imagenette/events.out.tfevents.jax-vit.v2"
+  )
+  gcs_location = f"{gcs_bucket.XLML_OUTPUT_DIR}/flax/vit/metric/events.out.tfevents.jax-vit.v2"
+  extra_run_cmds = (
+      (
+          "cp /tmp/transformers/vit-imagenette/events.out.tfevents.*"
+          f" {tf_summary_location} || exit 0"
+      ),
+      f"gsutil cp {tf_summary_location} {gcs_location} || exit 0",
+  )
+  run_model_cmds = get_flax_vit_run_model_cmds(
+      num_train_epochs, extraFlags, extra_run_cmds
+  )
+
+  job_test_config = test_config.TpuVmTest(
+      test_config.Tpu(
+          version=tpu_version,
+          cores=tpu_cores,
+          runtime_version=RUNTIME_IMAGE,
+          reserved=True,
+      ),
+      test_name="flax_vit_imagenette_conv",
+      set_up_cmds=set_up_cmds,
+      run_model_cmds=run_model_cmds,
+      time_out_in_min=time_out_in_min,
+      task_owner=test_owner.SHIVA_S,
+  )
+
+  job_metric_config = metric_config.MetricConfig(
+      tensorboard_summary=metric_config.SummaryConfig(
+          file_location=gcs_location,
+          aggregation_strategy=metric_config.AggregationStrategy.LAST,
+      )
+  )
+
+  return task.TpuTask(
+      task_test_config=job_test_config,
+      task_gcp_config=job_gcp_config,
+      task_metric_config=job_metric_config,
   )
 
 
@@ -170,7 +242,7 @@ def get_flax_gpt2_config(
       test_config.Tpu(
           version=tpu_version,
           cores=tpu_cores,
-          runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
+          runtime_version=RUNTIME_IMAGE,
           reserved=IS_TPU_RESERVED,
       ),
       test_name="flax_gpt2_oscar",
@@ -225,7 +297,7 @@ def get_flax_sd_config(
       test_config.Tpu(
           version=tpu_version,
           cores=tpu_cores,
-          runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
+          runtime_version=RUNTIME_IMAGE,
           reserved=IS_TPU_RESERVED,
       ),
       test_name="flax_sd_pokemon",
@@ -276,7 +348,7 @@ def get_flax_bart_config(
       test_config.Tpu(
           version=tpu_version,
           cores=tpu_cores,
-          runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
+          runtime_version=RUNTIME_IMAGE,
           reserved=IS_TPU_RESERVED,
       ),
       test_name="flax_bart_wiki",
@@ -326,7 +398,7 @@ def get_flax_bert_config(
       test_config.Tpu(
           version=tpu_version,
           cores=tpu_cores,
-          runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
+          runtime_version=RUNTIME_IMAGE,
           reserved=IS_TPU_RESERVED,
       ),
       test_name=f"flax_bert_{task_name}",
@@ -379,7 +451,7 @@ def get_flax_wmt_config(
       test_config.Tpu(
           version=tpu_version,
           cores=tpu_cores,
-          runtime_version=vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value,
+          runtime_version=RUNTIME_IMAGE,
           reserved=IS_TPU_RESERVED,
       ),
       test_name="flax_wmt_translate",
