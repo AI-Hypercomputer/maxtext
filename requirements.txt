@@ -1,5 +1,6 @@
 orbax-checkpoint
 absl-py
+aqtp
 cloud-tpu-diagnostics
 datetime
 google-cloud-storage
