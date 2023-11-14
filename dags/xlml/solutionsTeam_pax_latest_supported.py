@@ -20,7 +20,7 @@ from configs import composer_env, gcs_bucket, vm_resource
 from configs.xlml.jax import solutionsTeam_pax_latest_supported_config as pax_config
 
 
-# Run once a day at 10 pm UTC (2 pm PST)
+# Run once a day at 10 am UTC (2 am PST)
 SCHEDULED_TIME = "0 10 * * *" if composer_env.is_prod_env() else None
 
 

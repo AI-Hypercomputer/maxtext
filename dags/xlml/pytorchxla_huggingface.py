@@ -15,9 +15,11 @@
 import datetime
 from airflow import models
 from apis import gcp_config, metric_config, task, test_config
-from configs import vm_resource
+from configs import composer_env, vm_resource
 
 
+# Run once a day at 10 pm UTC (2 pm PST)
+SCHEDULED_TIME = "0 22 * * *" if composer_env.is_prod_env() else None
 US_CENTRAL1_C = gcp_config.GCPConfig(
     vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
     vm_resource.Zone.US_CENTRAL1_C.value,
@@ -32,9 +34,10 @@ US_CENTRAL2_B = gcp_config.GCPConfig(
 
 with models.DAG(
     dag_id="pytorchxla-huggingface",
-    schedule=None,
-    tags=["pytorchxla", "latest", "supported"],
+    schedule=SCHEDULED_TIME,
+    tags=["pytorchxla", "latest", "supported", "xlml"],
     start_date=datetime.datetime(2023, 7, 12),
+    catchup=False,
 ):
   accelerate_v2_8 = task.TpuTask(
       test_config.JSonnetTpuVmTest.from_pytorch(
