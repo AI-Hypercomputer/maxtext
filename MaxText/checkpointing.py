@@ -56,6 +56,7 @@ def multislice_distribute_initialize():
   if jax.__version__ >= '0.4.21' and True:
     print("Running without args...", flush=True)
     jax.distributed.initialize()
+    print("JDI successful!!!", flush=True)
   else:
     print("Running with args...", flush=True)
     legacy_distribute_initialize()
