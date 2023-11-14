@@ -52,9 +52,12 @@ def multislice_distribute_initialize():
                               num_processes=jax.process_count(),
                               process_id=jax.process_index())
                             
-  if jax.__version__ >= '0.4.21':
+  print("calling jdi...", flush=True)
+  if jax.__version__ >= '0.4.21' and True:
+    print("Running without args...", flush=True)
     jax.distributed.initialize()
   else:
+    print("Running with args...", flush=True)
     legacy_distribute_initialize()
 
 def create_orbax_checkpoint_manager(
