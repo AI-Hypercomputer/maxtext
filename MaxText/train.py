@@ -55,13 +55,11 @@ import max_logging
 def validate_train_config(config):
   """ Validates the configuration is set correctly for train.py"""
 
-  def _validate_gcs_bucket_name(bucket_name, config_var):
-    assert bucket_name, f"Please set {config_var}."
-    assert len(bucket_name) > 5 and bucket_name[0:5]=='gs://', f"Erroring out, {config_var} should start with 'gs://' "
-
   assert config.run_name, "Erroring out, need a real run_name"
-  _validate_gcs_bucket_name(config.base_output_directory, "base_output_directory")
-  _validate_gcs_bucket_name(config.dataset_path, "dataset_path")
+  if not config.dataset_path.startswith('gs://'):
+    max_logging.log("WARNING: 'dataste_path' might be pointing your local file system")
+  if not config.base_output_directory.startswith('gs://'):
+    max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
 
   assert ((config.load_parameters_path=="" and config.load_from_other_directory=="") or
     config.enable_checkpointing), "You must set enable_checkpointing to load a checkpoint"
