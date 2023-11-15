@@ -57,7 +57,7 @@ def validate_train_config(config):
 
   assert config.run_name, "Erroring out, need a real run_name"
   if not config.dataset_path.startswith('gs://'):
-    max_logging.log("WARNING: 'dataste_path' might be pointing your local file system")
+    max_logging.log("WARNING: 'dataset_path' might be pointing your local file system")
   if not config.base_output_directory.startswith('gs://'):
     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
 
