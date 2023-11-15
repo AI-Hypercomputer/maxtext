@@ -53,7 +53,7 @@ class MultihostDataloadingTest(unittest.TestCase):
     dataset = dataset.batch(batch_size)
     self.multihost_gen = (
       multihost_dataloading.get_batch_sharded_data_pipeline(
-          dataset, data_sharding, global_data_shape, mesh, data_axes
+          dataset, mesh
       )
     )
 

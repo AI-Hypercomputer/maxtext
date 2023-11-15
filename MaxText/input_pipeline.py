@@ -97,7 +97,6 @@ def preprocessing_pipeline(
   shift: bool = True,
   drop_remainder: bool = True,
   prefetch_size = tf.data.experimental.AUTOTUNE,
-  data_sharding = None,
   data_shuffle_seed = 0,
 ):
   """Shuffle and batch/pack the given dataset."""
@@ -130,14 +129,6 @@ def preprocessing_pipeline(
       num_parallel_calls=tf.data.AUTOTUNE,
       deterministic=True)
 
-  # Multihost dataloading: sharding and jax.Array prep function
-  dataset_structure = tf.data.experimental.get_structure(dataset)
-  global_data_shape = jax.tree_map(
-      lambda x: P(batch_size, max_length), dataset_structure
-  )
-  data_axes = jax.tree_map(lambda x: P(*data_sharding), dataset_structure)
-
-
   assert (
         batch_size % global_mesh.size == 0
     ), 'Batch size should be divisible number of global devices.'
@@ -156,11 +147,8 @@ def preprocessing_pipeline(
   if prefetch_size:
     dataset = dataset.prefetch(prefetch_size)
 
-  multihost_gen = (
-      multihost_dataloading.get_batch_sharded_data_pipeline(
-          dataset, data_sharding, global_data_shape, global_mesh, data_axes
-      )
-  )
+  multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(dataset, global_mesh)
+
   # Return multi-host jax.Array prep iterator
   return multihost_gen
 
@@ -235,7 +223,6 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       pack_examples=True,
       max_length=config.max_target_length,
       shift=True,
-      data_sharding = config.data_sharding,
       data_shuffle_seed = data_shuffle_seed,)
 
   eval_iter = preprocessing_pipeline(
@@ -246,7 +233,6 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       pack_examples=False,
       max_length=config.max_eval_target_length,
       shift=False,
-      data_sharding = config.data_sharding,
       data_shuffle_seed = data_shuffle_seed,)
 
   predict_iter = preprocessing_pipeline(
@@ -258,7 +244,6 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       max_length=config.max_predict_length,
       shift=False,
       drop_remainder=False,
-      data_sharding = config.data_sharding,
       data_shuffle_seed = data_shuffle_seed,)
 
   return train_iter, eval_iter, predict_iter, sp_tokenizer
