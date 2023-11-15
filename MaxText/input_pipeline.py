@@ -130,14 +130,6 @@ def preprocessing_pipeline(
       num_parallel_calls=tf.data.AUTOTUNE,
       deterministic=True)
 
-  # Multihost dataloading: sharding and jax.Array prep function
-  dataset_structure = tf.data.experimental.get_structure(dataset)
-  global_data_shape = jax.tree_map(
-      lambda x: P(batch_size, max_length), dataset_structure
-  )
-  data_axes = jax.tree_map(lambda x: P(*data_sharding), dataset_structure)
-
-
   assert (
         batch_size % global_mesh.size == 0
     ), 'Batch size should be divisible number of global devices.'
@@ -156,11 +148,8 @@ def preprocessing_pipeline(
   if prefetch_size:
     dataset = dataset.prefetch(prefetch_size)
 
-  multihost_gen = (
-      multihost_dataloading.get_batch_sharded_data_pipeline(
-          dataset, data_sharding, global_data_shape, global_mesh, data_axes
-      )
-  )
+  multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(dataset, global_mesh)
+
   # Return multi-host jax.Array prep iterator
   return multihost_gen
 
