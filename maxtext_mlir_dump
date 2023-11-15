@@ -1,0 +1,1483 @@
+Found 4 devices.
+Checkpointing disabled, not creating checkpoint manager.
+Devices: [TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0), TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0), TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0)] (num_devices: 4)
+Decided on mesh: [[[TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0)]
+  [TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0)]
+  [TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0)]
+  [TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0)]]]
+Model path: assets/tokenizer
+no checkpoint manager, not restoring checkpoint
+number parameters: 1.091 billion
+Per train step, total TFLOPs will be 180.60, split as 89.04% learnable weight flops and 10.96% attention flops
+[jax_mosaic_dump_mlir] initial module
+module {
+  func.func @main(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32, %arg4: memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, %arg5: memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, %arg6: memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, %arg7: memref<2x512x128xi32, #tpu.memory_space<vmem>>, %arg8: memref<2x8x512xi32, #tpu.memory_space<vmem>>, %arg9: memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, %arg10: memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, %arg11: memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, %arg12: memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, %arg13: memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, %arg14: memref<2x1x512x128xf32, #tpu.memory_space<vmem>>) attributes {dimension_semantics = [#tpu.dimension_semantics<parallel>, #tpu.dimension_semantics<parallel>, #tpu.dimension_semantics<parallel>, #tpu.dimension_semantics<arbitrary>], iteration_bounds = array<i64: 6, 8, 4, 4>, scalar_prefetch = 0 : i64, scratch_operands = 0 : i64, window_params = [{transform_indices = @transform_0, window_bounds = array<i64: 2, 1, 512, 256>}, {transform_indices = @transform_1, window_bounds = array<i64: 2, 1, 512, 256>}, {transform_indices = @transform_2, window_bounds = array<i64: 2, 1, 512, 256>}, {transform_indices = @transform_3, window_bounds = array<i64: 2, 512, 128>}, {transform_indices = @transform_4, window_bounds = array<i64: 2, 8, 512>}, {transform_indices = @transform_5, window_bounds = array<i64: 2, 1, 512, 256>}, {transform_indices = @transform_6, window_bounds = array<i64: 2, 1, 512, 128>}, {transform_indices = @transform_7, window_bounds = array<i64: 2, 1, 512, 128>}, {transform_indices = @transform_8, window_bounds = array<i64: 2, 1, 512, 256>}, {transform_indices = @transform_9, window_bounds = array<i64: 2, 1, 512, 128>}, {transform_indices = @transform_10, window_bounds = array<i64: 2, 1, 512, 128>}]} {
+    %c0_i32 = arith.constant 0 : i32
+    %0 = arith.cmpi eq, %arg3, %c0_i32 : i32
+    %1 = arith.extui %0 : i1 to i32
+    %c0_i32_0 = arith.constant 0 : i32
+    %2 = arith.cmpi ne, %1, %c0_i32_0 : i32
+    scf.if %2 {
+      %cst = arith.constant 0xFF800000 : f32
+      %26 = vector.broadcast %cst : f32 to vector<512x128xf32>
+      %c0 = arith.constant 0 : index
+      %c0_14 = arith.constant 0 : index
+      %c0_15 = arith.constant 0 : index
+      %c0_16 = arith.constant 0 : index
+      %27 = vector.load %arg10[%c0, %c0_14, %c0_15, %c0_16] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %28 = vector.shape_cast %27 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %29 = vector.shape_cast %26 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %29, %arg10[%c0, %c0_14, %c0_15, %c0_16] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %cst_17 = arith.constant 0.000000e+00 : f32
+      %30 = vector.broadcast %cst_17 : f32 to vector<512x128xf32>
+      %c0_18 = arith.constant 0 : index
+      %c0_19 = arith.constant 0 : index
+      %c0_20 = arith.constant 0 : index
+      %c0_21 = arith.constant 0 : index
+      %31 = vector.load %arg11[%c0_18, %c0_19, %c0_20, %c0_21] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %32 = vector.shape_cast %31 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %33 = vector.shape_cast %30 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %33, %arg11[%c0_18, %c0_19, %c0_20, %c0_21] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %cst_22 = arith.constant 0.000000e+00 : f32
+      %34 = vector.broadcast %cst_22 : f32 to vector<512x256xf32>
+      %c0_23 = arith.constant 0 : index
+      %c0_24 = arith.constant 0 : index
+      %c0_25 = arith.constant 0 : index
+      %c0_26 = arith.constant 0 : index
+      %35 = vector.load %arg12[%c0_23, %c0_24, %c0_25, %c0_26] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %36 = vector.shape_cast %35 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %37 = vector.shape_cast %34 : vector<512x256xf32> to vector<1x1x512x256xf32>
+      vector.store %37, %arg12[%c0_23, %c0_24, %c0_25, %c0_26] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+    } else {
+    }
+    %c1_i32 = arith.constant 1 : i32
+    %3 = arith.addi %arg2, %c1_i32 : i32
+    %c512_i32 = arith.constant 512 : i32
+    %4 = arith.muli %3, %c512_i32 : i32
+    %c1_i32_1 = arith.constant 1 : i32
+    %5 = arith.subi %4, %c1_i32_1 : i32
+    %c512_i32_2 = arith.constant 512 : i32
+    %6 = arith.muli %arg3, %c512_i32_2 : i32
+    %7 = arith.cmpi sgt, %5, %6 : i32
+    %8 = arith.extui %7 : i1 to i32
+    %c0_i32_3 = arith.constant 0 : i32
+    %9 = arith.cmpi ne, %8, %c0_i32_3 : i32
+    scf.if %9 {
+      %c0_i32_14 = arith.constant 0 : i32
+      %c0 = arith.constant 0 : index
+      %c0_15 = arith.constant 0 : index
+      %c0_16 = arith.constant 0 : index
+      %c0_17 = arith.constant 0 : index
+      %26 = vector.load %arg10[%c0, %c0_15, %c0_16, %c0_17] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %27 = vector.shape_cast %26 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %c0_18 = arith.constant 0 : index
+      %c0_19 = arith.constant 0 : index
+      %c0_20 = arith.constant 0 : index
+      %c0_21 = arith.constant 0 : index
+      %28 = vector.load %arg11[%c0_18, %c0_19, %c0_20, %c0_21] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %29 = vector.shape_cast %28 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %c0_22 = arith.constant 0 : index
+      %c0_23 = arith.constant 0 : index
+      %c0_24 = arith.constant 0 : index
+      %c0_25 = arith.constant 0 : index
+      %30 = vector.load %arg4[%c0_22, %c0_23, %c0_24, %c0_25] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %31 = vector.shape_cast %30 : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %c512_i32_26 = arith.constant 512 : i32
+      %32 = arith.muli %c0_i32_14, %c512_i32_26 : i32
+      %c0_27 = arith.constant 0 : index
+      %c0_28 = arith.constant 0 : index
+      %33 = arith.index_cast %32 : i32 to index
+      %c0_29 = arith.constant 0 : index
+      %34 = vector.load %arg5[%c0_27, %c0_28, %33, %c0_29] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %35 = vector.shape_cast %34 : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %cst = arith.constant dense<0.000000e+00> : vector<512x512xf32>
+      %36 = tpu.matmul %31, %35, %cst {transpose_rhs = true} : vector<512x256xbf16>, vector<512x256xbf16>, vector<512x512xf32> -> vector<512x512xf32>
+      %c0_30 = arith.constant 0 : index
+      %c0_31 = arith.constant 0 : index
+      %c0_32 = arith.constant 0 : index
+      %37 = vector.load %arg7[%c0_30, %c0_31, %c0_32] : memref<2x512x128xi32, #tpu.memory_space<vmem>>, vector<1x512x128xi32>
+      %38 = vector.shape_cast %37 : vector<1x512x128xi32> to vector<512x128xi32>
+      %39 = tpu.repeat %38, 1 x 4 : vector<512x128xi32> -> vector<512x512xi32>
+      %c0_33 = arith.constant 0 : index
+      %c0_34 = arith.constant 0 : index
+      %40 = arith.index_cast %32 : i32 to index
+      %41 = vector.load %arg8[%c0_33, %c0_34, %40] : memref<2x8x512xi32, #tpu.memory_space<vmem>>, vector<1x1x512xi32>
+      %42 = vector.shape_cast %41 : vector<1x1x512xi32> to vector<1x512xi32>
+      %43 = vector.broadcast %42 : vector<1x512xi32> to vector<512x512xi32>
+      %44 = arith.cmpi eq, %39, %43 : vector<512x512xi32>
+      %45 = tpu.iota {dimension = 0 : i32} : vector<512x512xi32>
+      %c512_i32_35 = arith.constant 512 : i32
+      %46 = arith.muli %arg2, %c512_i32_35 : i32
+      %47 = vector.broadcast %46 : i32 to vector<512x512xi32>
+      %48 = arith.addi %45, %47 : vector<512x512xi32>
+      %49 = tpu.iota {dimension = 1 : i32} : vector<512x512xi32>
+      %c512_i32_36 = arith.constant 512 : i32
+      %50 = arith.muli %arg3, %c512_i32_36 : i32
+      %51 = arith.addi %50, %32 : i32
+      %52 = vector.broadcast %51 : i32 to vector<512x512xi32>
+      %53 = arith.addi %49, %52 : vector<512x512xi32>
+      %54 = arith.cmpi sle, %53, %48 : vector<512x512xi32>
+      %55 = arith.andi %44, %54 : vector<512x512xi1>
+      %cst_37 = arith.constant 0.000000e+00 : f32
+      %cst_38 = arith.constant -2.38197633E+38 : f32
+      %56 = vector.broadcast %cst_37 : f32 to vector<512x512xf32>
+      %57 = vector.broadcast %cst_38 : f32 to vector<512x512xf32>
+      %58 = arith.select %55, %56, %57 : vector<512x512xi1>, vector<512x512xf32>
+      %59 = arith.addf %36, %58 : vector<512x512xf32>
+      %cst_39 = arith.constant dense<0xFF800000> : vector<512xf32>
+      %60 = vector.multi_reduction <maxf>, %59, %cst_39 [1] : vector<512x512xf32> to vector<512xf32>
+      %61 = vector.shape_cast %60 : vector<512xf32> to vector<512x1xf32>
+      %62 = vector.broadcast %61 : vector<512x1xf32> to vector<512x128xf32>
+      %63 = arith.maximumf %27, %62 : vector<512x128xf32>
+      %64 = tpu.repeat %63, 1 x 4 : vector<512x128xf32> -> vector<512x512xf32>
+      %65 = arith.subf %59, %64 : vector<512x512xf32>
+      %66 = math.exp %65 : vector<512x512xf32>
+      %67 = arith.subf %27, %63 : vector<512x128xf32>
+      %68 = math.exp %67 : vector<512x128xf32>
+      %69 = arith.mulf %68, %29 : vector<512x128xf32>
+      %cst_40 = arith.constant dense<0.000000e+00> : vector<512xf32>
+      %70 = vector.multi_reduction <add>, %66, %cst_40 [1] : vector<512x512xf32> to vector<512xf32>
+      %71 = vector.shape_cast %70 : vector<512xf32> to vector<512x1xf32>
+      %72 = vector.broadcast %71 : vector<512x1xf32> to vector<512x128xf32>
+      %73 = arith.addf %72, %69 : vector<512x128xf32>
+      %c0_41 = arith.constant 0 : index
+      %c0_42 = arith.constant 0 : index
+      %c0_43 = arith.constant 0 : index
+      %c0_44 = arith.constant 0 : index
+      %74 = vector.load %arg11[%c0_41, %c0_42, %c0_43, %c0_44] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %75 = vector.shape_cast %74 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %76 = vector.shape_cast %73 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %76, %arg11[%c0_41, %c0_42, %c0_43, %c0_44] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %c0_45 = arith.constant 0 : index
+      %c0_46 = arith.constant 0 : index
+      %c0_47 = arith.constant 0 : index
+      %c0_48 = arith.constant 0 : index
+      %77 = vector.load %arg10[%c0_45, %c0_46, %c0_47, %c0_48] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %78 = vector.shape_cast %77 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %79 = vector.shape_cast %63 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %79, %arg10[%c0_45, %c0_46, %c0_47, %c0_48] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %cst_49 = arith.constant 0.000000e+00 : f32
+      %80 = vector.broadcast %cst_49 : f32 to vector<512x128xf32>
+      %81 = arith.cmpf oeq, %73, %80 : vector<512x128xf32>
+      %cst_50 = arith.constant 1.000000e+00 : f32
+      %82 = vector.broadcast %cst_50 : f32 to vector<512x128xf32>
+      %83 = arith.divf %82, %73 : vector<512x128xf32>
+      %cst_51 = arith.constant 1.000000e+00 : f32
+      %84 = vector.broadcast %cst_51 : f32 to vector<512x128xf32>
+      %85 = arith.select %81, %84, %83 : vector<512x128xi1>, vector<512x128xf32>
+      %c0_52 = arith.constant 0 : index
+      %c0_53 = arith.constant 0 : index
+      %c0_54 = arith.constant 0 : index
+      %c0_55 = arith.constant 0 : index
+      %86 = vector.load %arg12[%c0_52, %c0_53, %c0_54, %c0_55] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %87 = vector.shape_cast %86 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %88 = arith.mulf %69, %85 : vector<512x128xf32>
+      %89 = tpu.repeat %88, 1 x 2 : vector<512x128xf32> -> vector<512x256xf32>
+      %90 = arith.mulf %87, %89 : vector<512x256xf32>
+      %c0_56 = arith.constant 0 : index
+      %c0_57 = arith.constant 0 : index
+      %c0_58 = arith.constant 0 : index
+      %c0_59 = arith.constant 0 : index
+      %91 = vector.load %arg12[%c0_56, %c0_57, %c0_58, %c0_59] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %92 = vector.shape_cast %91 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %93 = vector.shape_cast %90 : vector<512x256xf32> to vector<1x1x512x256xf32>
+      vector.store %93, %arg12[%c0_56, %c0_57, %c0_58, %c0_59] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %c0_60 = arith.constant 0 : index
+      %c0_61 = arith.constant 0 : index
+      %94 = arith.index_cast %32 : i32 to index
+      %c0_62 = arith.constant 0 : index
+      %95 = vector.load %arg6[%c0_60, %c0_61, %94, %c0_62] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %96 = vector.shape_cast %95 : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %97 = arith.truncf %66 : vector<512x512xf32> to vector<512x512xbf16>
+      %cst_63 = arith.constant dense<0.000000e+00> : vector<512x256xf32>
+      %98 = tpu.matmul %97, %96, %cst_63 : vector<512x512xbf16>, vector<512x256xbf16>, vector<512x256xf32> -> vector<512x256xf32>
+      %c0_64 = arith.constant 0 : index
+      %c0_65 = arith.constant 0 : index
+      %c0_66 = arith.constant 0 : index
+      %c0_67 = arith.constant 0 : index
+      %99 = vector.load %arg12[%c0_64, %c0_65, %c0_66, %c0_67] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %100 = vector.shape_cast %99 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %101 = tpu.repeat %85, 1 x 2 : vector<512x128xf32> -> vector<512x256xf32>
+      %102 = arith.mulf %98, %101 : vector<512x256xf32>
+      %103 = arith.addf %100, %102 : vector<512x256xf32>
+      %c0_68 = arith.constant 0 : index
+      %c0_69 = arith.constant 0 : index
+      %c0_70 = arith.constant 0 : index
+      %c0_71 = arith.constant 0 : index
+      %104 = vector.load %arg12[%c0_68, %c0_69, %c0_70, %c0_71] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %105 = vector.shape_cast %104 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %106 = vector.shape_cast %103 : vector<512x256xf32> to vector<1x1x512x256xf32>
+      vector.store %106, %arg12[%c0_68, %c0_69, %c0_70, %c0_71] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %c1_i32_72 = arith.constant 1 : i32
+    } else {
+    }
+    %c3_i32 = arith.constant 3 : i32
+    %10 = arith.cmpi eq, %arg3, %c3_i32 : i32
+    %11 = arith.extui %10 : i1 to i32
+    %c0_i32_4 = arith.constant 0 : i32
+    %12 = arith.cmpi ne, %11, %c0_i32_4 : i32
+    scf.if %12 {
+      %c0 = arith.constant 0 : index
+      %c0_14 = arith.constant 0 : index
+      %c0_15 = arith.constant 0 : index
+      %c0_16 = arith.constant 0 : index
+      %26 = vector.load %arg12[%c0, %c0_14, %c0_15, %c0_16] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %27 = vector.shape_cast %26 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %28 = arith.truncf %27 : vector<512x256xf32> to vector<512x256xbf16>
+      %c0_17 = arith.constant 0 : index
+      %c0_18 = arith.constant 0 : index
+      %c0_19 = arith.constant 0 : index
+      %c0_20 = arith.constant 0 : index
+      %29 = vector.load %arg9[%c0_17, %c0_18, %c0_19, %c0_20] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %30 = vector.shape_cast %29 : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %31 = vector.shape_cast %28 : vector<512x256xbf16> to vector<1x1x512x256xbf16>
+      vector.store %31, %arg9[%c0_17, %c0_18, %c0_19, %c0_20] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %c0_21 = arith.constant 0 : index
+      %c0_22 = arith.constant 0 : index
+      %c0_23 = arith.constant 0 : index
+      %c0_24 = arith.constant 0 : index
+      %32 = vector.load %arg11[%c0_21, %c0_22, %c0_23, %c0_24] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %33 = vector.shape_cast %32 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %c0_25 = arith.constant 0 : index
+      %c0_26 = arith.constant 0 : index
+      %c0_27 = arith.constant 0 : index
+      %c0_28 = arith.constant 0 : index
+      %34 = vector.load %arg13[%c0_25, %c0_26, %c0_27, %c0_28] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %35 = vector.shape_cast %34 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %36 = vector.shape_cast %33 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %36, %arg13[%c0_25, %c0_26, %c0_27, %c0_28] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %c0_29 = arith.constant 0 : index
+      %c0_30 = arith.constant 0 : index
+      %c0_31 = arith.constant 0 : index
+      %c0_32 = arith.constant 0 : index
+      %37 = vector.load %arg10[%c0_29, %c0_30, %c0_31, %c0_32] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %38 = vector.shape_cast %37 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %c0_33 = arith.constant 0 : index
+      %c0_34 = arith.constant 0 : index
+      %c0_35 = arith.constant 0 : index
+      %c0_36 = arith.constant 0 : index
+      %39 = vector.load %arg14[%c0_33, %c0_34, %c0_35, %c0_36] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %40 = vector.shape_cast %39 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %41 = vector.shape_cast %38 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %41, %arg14[%c0_33, %c0_34, %c0_35, %c0_36] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+    } else {
+    }
+    %c0_i32_5 = arith.constant 0 : i32
+    %13 = arith.cmpi eq, %arg3, %c0_i32_5 : i32
+    %14 = arith.extui %13 : i1 to i32
+    %c0_i32_6 = arith.constant 0 : i32
+    %15 = arith.cmpi ne, %14, %c0_i32_6 : i32
+    scf.if %15 {
+      %cst = arith.constant 0xFF800000 : f32
+      %26 = vector.broadcast %cst : f32 to vector<512x128xf32>
+      %c1 = arith.constant 1 : index
+      %c0 = arith.constant 0 : index
+      %c0_14 = arith.constant 0 : index
+      %c0_15 = arith.constant 0 : index
+      %27 = vector.load %arg10[%c1, %c0, %c0_14, %c0_15] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %28 = vector.shape_cast %27 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %29 = vector.shape_cast %26 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %29, %arg10[%c1, %c0, %c0_14, %c0_15] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %cst_16 = arith.constant 0.000000e+00 : f32
+      %30 = vector.broadcast %cst_16 : f32 to vector<512x128xf32>
+      %c1_17 = arith.constant 1 : index
+      %c0_18 = arith.constant 0 : index
+      %c0_19 = arith.constant 0 : index
+      %c0_20 = arith.constant 0 : index
+      %31 = vector.load %arg11[%c1_17, %c0_18, %c0_19, %c0_20] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %32 = vector.shape_cast %31 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %33 = vector.shape_cast %30 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %33, %arg11[%c1_17, %c0_18, %c0_19, %c0_20] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %cst_21 = arith.constant 0.000000e+00 : f32
+      %34 = vector.broadcast %cst_21 : f32 to vector<512x256xf32>
+      %c1_22 = arith.constant 1 : index
+      %c0_23 = arith.constant 0 : index
+      %c0_24 = arith.constant 0 : index
+      %c0_25 = arith.constant 0 : index
+      %35 = vector.load %arg12[%c1_22, %c0_23, %c0_24, %c0_25] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %36 = vector.shape_cast %35 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %37 = vector.shape_cast %34 : vector<512x256xf32> to vector<1x1x512x256xf32>
+      vector.store %37, %arg12[%c1_22, %c0_23, %c0_24, %c0_25] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+    } else {
+    }
+    %c1_i32_7 = arith.constant 1 : i32
+    %16 = arith.addi %arg2, %c1_i32_7 : i32
+    %c512_i32_8 = arith.constant 512 : i32
+    %17 = arith.muli %16, %c512_i32_8 : i32
+    %c1_i32_9 = arith.constant 1 : i32
+    %18 = arith.subi %17, %c1_i32_9 : i32
+    %c512_i32_10 = arith.constant 512 : i32
+    %19 = arith.muli %arg3, %c512_i32_10 : i32
+    %20 = arith.cmpi sgt, %18, %19 : i32
+    %21 = arith.extui %20 : i1 to i32
+    %c0_i32_11 = arith.constant 0 : i32
+    %22 = arith.cmpi ne, %21, %c0_i32_11 : i32
+    scf.if %22 {
+      %c0_i32_14 = arith.constant 0 : i32
+      %c1 = arith.constant 1 : index
+      %c0 = arith.constant 0 : index
+      %c0_15 = arith.constant 0 : index
+      %c0_16 = arith.constant 0 : index
+      %26 = vector.load %arg10[%c1, %c0, %c0_15, %c0_16] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %27 = vector.shape_cast %26 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %c1_17 = arith.constant 1 : index
+      %c0_18 = arith.constant 0 : index
+      %c0_19 = arith.constant 0 : index
+      %c0_20 = arith.constant 0 : index
+      %28 = vector.load %arg11[%c1_17, %c0_18, %c0_19, %c0_20] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %29 = vector.shape_cast %28 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %c1_21 = arith.constant 1 : index
+      %c0_22 = arith.constant 0 : index
+      %c0_23 = arith.constant 0 : index
+      %c0_24 = arith.constant 0 : index
+      %30 = vector.load %arg4[%c1_21, %c0_22, %c0_23, %c0_24] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %31 = vector.shape_cast %30 : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %c512_i32_25 = arith.constant 512 : i32
+      %32 = arith.muli %c0_i32_14, %c512_i32_25 : i32
+      %c1_26 = arith.constant 1 : index
+      %c0_27 = arith.constant 0 : index
+      %33 = arith.index_cast %32 : i32 to index
+      %c0_28 = arith.constant 0 : index
+      %34 = vector.load %arg5[%c1_26, %c0_27, %33, %c0_28] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %35 = vector.shape_cast %34 : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %cst = arith.constant dense<0.000000e+00> : vector<512x512xf32>
+      %36 = tpu.matmul %31, %35, %cst {transpose_rhs = true} : vector<512x256xbf16>, vector<512x256xbf16>, vector<512x512xf32> -> vector<512x512xf32>
+      %c1_29 = arith.constant 1 : index
+      %c0_30 = arith.constant 0 : index
+      %c0_31 = arith.constant 0 : index
+      %37 = vector.load %arg7[%c1_29, %c0_30, %c0_31] : memref<2x512x128xi32, #tpu.memory_space<vmem>>, vector<1x512x128xi32>
+      %38 = vector.shape_cast %37 : vector<1x512x128xi32> to vector<512x128xi32>
+      %39 = tpu.repeat %38, 1 x 4 : vector<512x128xi32> -> vector<512x512xi32>
+      %c1_32 = arith.constant 1 : index
+      %c0_33 = arith.constant 0 : index
+      %40 = arith.index_cast %32 : i32 to index
+      %41 = vector.load %arg8[%c1_32, %c0_33, %40] : memref<2x8x512xi32, #tpu.memory_space<vmem>>, vector<1x1x512xi32>
+      %42 = vector.shape_cast %41 : vector<1x1x512xi32> to vector<1x512xi32>
+      %43 = vector.broadcast %42 : vector<1x512xi32> to vector<512x512xi32>
+      %44 = arith.cmpi eq, %39, %43 : vector<512x512xi32>
+      %45 = tpu.iota {dimension = 0 : i32} : vector<512x512xi32>
+      %c512_i32_34 = arith.constant 512 : i32
+      %46 = arith.muli %arg2, %c512_i32_34 : i32
+      %47 = vector.broadcast %46 : i32 to vector<512x512xi32>
+      %48 = arith.addi %45, %47 : vector<512x512xi32>
+      %49 = tpu.iota {dimension = 1 : i32} : vector<512x512xi32>
+      %c512_i32_35 = arith.constant 512 : i32
+      %50 = arith.muli %arg3, %c512_i32_35 : i32
+      %51 = arith.addi %50, %32 : i32
+      %52 = vector.broadcast %51 : i32 to vector<512x512xi32>
+      %53 = arith.addi %49, %52 : vector<512x512xi32>
+      %54 = arith.cmpi sle, %53, %48 : vector<512x512xi32>
+      %55 = arith.andi %44, %54 : vector<512x512xi1>
+      %cst_36 = arith.constant 0.000000e+00 : f32
+      %cst_37 = arith.constant -2.38197633E+38 : f32
+      %56 = vector.broadcast %cst_36 : f32 to vector<512x512xf32>
+      %57 = vector.broadcast %cst_37 : f32 to vector<512x512xf32>
+      %58 = arith.select %55, %56, %57 : vector<512x512xi1>, vector<512x512xf32>
+      %59 = arith.addf %36, %58 : vector<512x512xf32>
+      %cst_38 = arith.constant dense<0xFF800000> : vector<512xf32>
+      %60 = vector.multi_reduction <maxf>, %59, %cst_38 [1] : vector<512x512xf32> to vector<512xf32>
+      %61 = vector.shape_cast %60 : vector<512xf32> to vector<512x1xf32>
+      %62 = vector.broadcast %61 : vector<512x1xf32> to vector<512x128xf32>
+      %63 = arith.maximumf %27, %62 : vector<512x128xf32>
+      %64 = tpu.repeat %63, 1 x 4 : vector<512x128xf32> -> vector<512x512xf32>
+      %65 = arith.subf %59, %64 : vector<512x512xf32>
+      %66 = math.exp %65 : vector<512x512xf32>
+      %67 = arith.subf %27, %63 : vector<512x128xf32>
+      %68 = math.exp %67 : vector<512x128xf32>
+      %69 = arith.mulf %68, %29 : vector<512x128xf32>
+      %cst_39 = arith.constant dense<0.000000e+00> : vector<512xf32>
+      %70 = vector.multi_reduction <add>, %66, %cst_39 [1] : vector<512x512xf32> to vector<512xf32>
+      %71 = vector.shape_cast %70 : vector<512xf32> to vector<512x1xf32>
+      %72 = vector.broadcast %71 : vector<512x1xf32> to vector<512x128xf32>
+      %73 = arith.addf %72, %69 : vector<512x128xf32>
+      %c1_40 = arith.constant 1 : index
+      %c0_41 = arith.constant 0 : index
+      %c0_42 = arith.constant 0 : index
+      %c0_43 = arith.constant 0 : index
+      %74 = vector.load %arg11[%c1_40, %c0_41, %c0_42, %c0_43] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %75 = vector.shape_cast %74 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %76 = vector.shape_cast %73 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %76, %arg11[%c1_40, %c0_41, %c0_42, %c0_43] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %c1_44 = arith.constant 1 : index
+      %c0_45 = arith.constant 0 : index
+      %c0_46 = arith.constant 0 : index
+      %c0_47 = arith.constant 0 : index
+      %77 = vector.load %arg10[%c1_44, %c0_45, %c0_46, %c0_47] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %78 = vector.shape_cast %77 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %79 = vector.shape_cast %63 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %79, %arg10[%c1_44, %c0_45, %c0_46, %c0_47] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %cst_48 = arith.constant 0.000000e+00 : f32
+      %80 = vector.broadcast %cst_48 : f32 to vector<512x128xf32>
+      %81 = arith.cmpf oeq, %73, %80 : vector<512x128xf32>
+      %cst_49 = arith.constant 1.000000e+00 : f32
+      %82 = vector.broadcast %cst_49 : f32 to vector<512x128xf32>
+      %83 = arith.divf %82, %73 : vector<512x128xf32>
+      %cst_50 = arith.constant 1.000000e+00 : f32
+      %84 = vector.broadcast %cst_50 : f32 to vector<512x128xf32>
+      %85 = arith.select %81, %84, %83 : vector<512x128xi1>, vector<512x128xf32>
+      %c1_51 = arith.constant 1 : index
+      %c0_52 = arith.constant 0 : index
+      %c0_53 = arith.constant 0 : index
+      %c0_54 = arith.constant 0 : index
+      %86 = vector.load %arg12[%c1_51, %c0_52, %c0_53, %c0_54] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %87 = vector.shape_cast %86 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %88 = arith.mulf %69, %85 : vector<512x128xf32>
+      %89 = tpu.repeat %88, 1 x 2 : vector<512x128xf32> -> vector<512x256xf32>
+      %90 = arith.mulf %87, %89 : vector<512x256xf32>
+      %c1_55 = arith.constant 1 : index
+      %c0_56 = arith.constant 0 : index
+      %c0_57 = arith.constant 0 : index
+      %c0_58 = arith.constant 0 : index
+      %91 = vector.load %arg12[%c1_55, %c0_56, %c0_57, %c0_58] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %92 = vector.shape_cast %91 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %93 = vector.shape_cast %90 : vector<512x256xf32> to vector<1x1x512x256xf32>
+      vector.store %93, %arg12[%c1_55, %c0_56, %c0_57, %c0_58] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %c1_59 = arith.constant 1 : index
+      %c0_60 = arith.constant 0 : index
+      %94 = arith.index_cast %32 : i32 to index
+      %c0_61 = arith.constant 0 : index
+      %95 = vector.load %arg6[%c1_59, %c0_60, %94, %c0_61] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %96 = vector.shape_cast %95 : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %97 = arith.truncf %66 : vector<512x512xf32> to vector<512x512xbf16>
+      %cst_62 = arith.constant dense<0.000000e+00> : vector<512x256xf32>
+      %98 = tpu.matmul %97, %96, %cst_62 : vector<512x512xbf16>, vector<512x256xbf16>, vector<512x256xf32> -> vector<512x256xf32>
+      %c1_63 = arith.constant 1 : index
+      %c0_64 = arith.constant 0 : index
+      %c0_65 = arith.constant 0 : index
+      %c0_66 = arith.constant 0 : index
+      %99 = vector.load %arg12[%c1_63, %c0_64, %c0_65, %c0_66] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %100 = vector.shape_cast %99 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %101 = tpu.repeat %85, 1 x 2 : vector<512x128xf32> -> vector<512x256xf32>
+      %102 = arith.mulf %98, %101 : vector<512x256xf32>
+      %103 = arith.addf %100, %102 : vector<512x256xf32>
+      %c1_67 = arith.constant 1 : index
+      %c0_68 = arith.constant 0 : index
+      %c0_69 = arith.constant 0 : index
+      %c0_70 = arith.constant 0 : index
+      %104 = vector.load %arg12[%c1_67, %c0_68, %c0_69, %c0_70] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %105 = vector.shape_cast %104 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %106 = vector.shape_cast %103 : vector<512x256xf32> to vector<1x1x512x256xf32>
+      vector.store %106, %arg12[%c1_67, %c0_68, %c0_69, %c0_70] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %c1_i32_71 = arith.constant 1 : i32
+    } else {
+    }
+    %c3_i32_12 = arith.constant 3 : i32
+    %23 = arith.cmpi eq, %arg3, %c3_i32_12 : i32
+    %24 = arith.extui %23 : i1 to i32
+    %c0_i32_13 = arith.constant 0 : i32
+    %25 = arith.cmpi ne, %24, %c0_i32_13 : i32
+    scf.if %25 {
+      %c1 = arith.constant 1 : index
+      %c0 = arith.constant 0 : index
+      %c0_14 = arith.constant 0 : index
+      %c0_15 = arith.constant 0 : index
+      %26 = vector.load %arg12[%c1, %c0, %c0_14, %c0_15] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %27 = vector.shape_cast %26 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %28 = arith.truncf %27 : vector<512x256xf32> to vector<512x256xbf16>
+      %c1_16 = arith.constant 1 : index
+      %c0_17 = arith.constant 0 : index
+      %c0_18 = arith.constant 0 : index
+      %c0_19 = arith.constant 0 : index
+      %29 = vector.load %arg9[%c1_16, %c0_17, %c0_18, %c0_19] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %30 = vector.shape_cast %29 : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %31 = vector.shape_cast %28 : vector<512x256xbf16> to vector<1x1x512x256xbf16>
+      vector.store %31, %arg9[%c1_16, %c0_17, %c0_18, %c0_19] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %c1_20 = arith.constant 1 : index
+      %c0_21 = arith.constant 0 : index
+      %c0_22 = arith.constant 0 : index
+      %c0_23 = arith.constant 0 : index
+      %32 = vector.load %arg11[%c1_20, %c0_21, %c0_22, %c0_23] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %33 = vector.shape_cast %32 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %c1_24 = arith.constant 1 : index
+      %c0_25 = arith.constant 0 : index
+      %c0_26 = arith.constant 0 : index
+      %c0_27 = arith.constant 0 : index
+      %34 = vector.load %arg13[%c1_24, %c0_25, %c0_26, %c0_27] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %35 = vector.shape_cast %34 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %36 = vector.shape_cast %33 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %36, %arg13[%c1_24, %c0_25, %c0_26, %c0_27] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %c1_28 = arith.constant 1 : index
+      %c0_29 = arith.constant 0 : index
+      %c0_30 = arith.constant 0 : index
+      %c0_31 = arith.constant 0 : index
+      %37 = vector.load %arg10[%c1_28, %c0_29, %c0_30, %c0_31] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %38 = vector.shape_cast %37 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %c1_32 = arith.constant 1 : index
+      %c0_33 = arith.constant 0 : index
+      %c0_34 = arith.constant 0 : index
+      %c0_35 = arith.constant 0 : index
+      %39 = vector.load %arg14[%c1_32, %c0_33, %c0_34, %c0_35] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %40 = vector.shape_cast %39 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %41 = vector.shape_cast %38 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %41, %arg14[%c1_32, %c0_33, %c0_34, %c0_35] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+    } else {
+    }
+    return
+  }
+  func.func @transform_0(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant 0 : i32
+    return %arg0, %arg1, %arg2, %c0_i32 : i32, i32, i32, i32
+  }
+  func.func @transform_1(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c1_i32 = arith.constant 1 : i32
+    %0 = arith.addi %arg2, %c1_i32 : i32
+    %c512_i32 = arith.constant 512 : i32
+    %1 = arith.muli %0, %c512_i32 : i32
+    %c1_i32_0 = arith.constant 1 : i32
+    %2 = arith.subi %1, %c1_i32_0 : i32
+    %c512_i32_1 = arith.constant 512 : i32
+    %3 = arith.muli %arg3, %c512_i32_1 : i32
+    %4 = arith.cmpi sgt, %2, %3 : i32
+    %c0_i32 = arith.constant 0 : i32
+    %5 = arith.select %4, %arg3, %c0_i32 : i32
+    %c0_i32_2 = arith.constant 0 : i32
+    return %arg0, %arg1, %5, %c0_i32_2 : i32, i32, i32, i32
+  }
+  func.func @transform_2(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c1_i32 = arith.constant 1 : i32
+    %0 = arith.addi %arg2, %c1_i32 : i32
+    %c512_i32 = arith.constant 512 : i32
+    %1 = arith.muli %0, %c512_i32 : i32
+    %c1_i32_0 = arith.constant 1 : i32
+    %2 = arith.subi %1, %c1_i32_0 : i32
+    %c512_i32_1 = arith.constant 512 : i32
+    %3 = arith.muli %arg3, %c512_i32_1 : i32
+    %4 = arith.cmpi sgt, %2, %3 : i32
+    %c0_i32 = arith.constant 0 : i32
+    %5 = arith.select %4, %arg3, %c0_i32 : i32
+    %c0_i32_2 = arith.constant 0 : i32
+    return %arg0, %arg1, %5, %c0_i32_2 : i32, i32, i32, i32
+  }
+  func.func @transform_3(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32) {
+    %c0_i32 = arith.constant 0 : i32
+    return %arg0, %arg2, %c0_i32 : i32, i32, i32
+  }
+  func.func @transform_4(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32) {
+    %c1_i32 = arith.constant 1 : i32
+    %0 = arith.addi %arg2, %c1_i32 : i32
+    %c512_i32 = arith.constant 512 : i32
+    %1 = arith.muli %0, %c512_i32 : i32
+    %c1_i32_0 = arith.constant 1 : i32
+    %2 = arith.subi %1, %c1_i32_0 : i32
+    %c512_i32_1 = arith.constant 512 : i32
+    %3 = arith.muli %arg3, %c512_i32_1 : i32
+    %4 = arith.cmpi sgt, %2, %3 : i32
+    %c0_i32 = arith.constant 0 : i32
+    %5 = arith.select %4, %arg3, %c0_i32 : i32
+    %c0_i32_2 = arith.constant 0 : i32
+    return %arg0, %c0_i32_2, %5 : i32, i32, i32
+  }
+  func.func @transform_5(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant 0 : i32
+    return %arg0, %arg1, %arg2, %c0_i32 : i32, i32, i32, i32
+  }
+  func.func @transform_6(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant 0 : i32
+    %c0_i32_0 = arith.constant 0 : i32
+    %c0_i32_1 = arith.constant 0 : i32
+    %c0_i32_2 = arith.constant 0 : i32
+    return %c0_i32, %c0_i32_0, %c0_i32_1, %c0_i32_2 : i32, i32, i32, i32
+  }
+  func.func @transform_7(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant 0 : i32
+    %c0_i32_0 = arith.constant 0 : i32
+    %c0_i32_1 = arith.constant 0 : i32
+    %c0_i32_2 = arith.constant 0 : i32
+    return %c0_i32, %c0_i32_0, %c0_i32_1, %c0_i32_2 : i32, i32, i32, i32
+  }
+  func.func @transform_8(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant 0 : i32
+    %c0_i32_0 = arith.constant 0 : i32
+    %c0_i32_1 = arith.constant 0 : i32
+    %c0_i32_2 = arith.constant 0 : i32
+    return %c0_i32, %c0_i32_0, %c0_i32_1, %c0_i32_2 : i32, i32, i32, i32
+  }
+  func.func @transform_9(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant 0 : i32
+    return %arg0, %arg1, %arg2, %c0_i32 : i32, i32, i32, i32
+  }
+  func.func @transform_10(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant 0 : i32
+    return %arg0, %arg1, %arg2, %c0_i32 : i32, i32, i32, i32
+  }
+}
+
+[jax_mosaic_dump_mlir] after infer memref layout pass
+module {
+  func.func @main(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32, %arg4: memref<2x1x512x256xbf16, #tpu.tiled<(8,128)(2,1),[128,128,2,1]>, #tpu.memory_space<vmem>>, %arg5: memref<2x1x512x256xbf16, #tpu.tiled<(8,128)(2,1),[128,128,2,1]>, #tpu.memory_space<vmem>>, %arg6: memref<2x1x512x256xbf16, #tpu.tiled<(8,128)(2,1),[128,128,2,1]>, #tpu.memory_space<vmem>>, %arg7: memref<2x512x128xi32, #tpu.tiled<(8,128),[64,1,1]>, #tpu.memory_space<vmem>>, %arg8: memref<2x8x512xi32, #tpu.tiled<(8,128),[4,4,1]>, #tpu.memory_space<vmem>>, %arg9: memref<2x1x512x256xbf16, #tpu.tiled<(8,128)(2,1),[128,128,2,1]>, #tpu.memory_space<vmem>>, %arg10: memref<2x1x512x128xf32, #tpu.tiled<(8,128),[64,64,1,1]>, #tpu.memory_space<vmem>>, %arg11: memref<2x1x512x128xf32, #tpu.tiled<(8,128),[64,64,1,1]>, #tpu.memory_space<vmem>>, %arg12: memref<2x1x512x256xf32, #tpu.tiled<(8,128),[128,128,2,1]>, #tpu.memory_space<vmem>>, %arg13: memref<2x1x512x128xf32, #tpu.tiled<(8,128),[64,64,1,1]>, #tpu.memory_space<vmem>>, %arg14: memref<2x1x512x128xf32, #tpu.tiled<(8,128),[64,64,1,1]>, #tpu.memory_space<vmem>>) attributes {dimension_semantics = [#tpu.dimension_semantics<parallel>, #tpu.dimension_semantics<parallel>, #tpu.dimension_semantics<parallel>, #tpu.dimension_semantics<arbitrary>], iteration_bounds = array<i64: 6, 8, 4, 4>, scalar_prefetch = 0 : i64, scratch_operands = 0 : i64, window_params = [{transform_indices = @transform_0, window_bounds = array<i64: 2, 1, 512, 256>}, {transform_indices = @transform_1, window_bounds = array<i64: 2, 1, 512, 256>}, {transform_indices = @transform_2, window_bounds = array<i64: 2, 1, 512, 256>}, {transform_indices = @transform_3, window_bounds = array<i64: 2, 512, 128>}, {transform_indices = @transform_4, window_bounds = array<i64: 2, 8, 512>}, {transform_indices = @transform_5, window_bounds = array<i64: 2, 1, 512, 256>}, {transform_indices = @transform_6, window_bounds = array<i64: 2, 1, 512, 128>}, {transform_indices = @transform_7, window_bounds = array<i64: 2, 1, 512, 128>}, {transform_indices = @transform_8, window_bounds = array<i64: 2, 1, 512, 256>}, {transform_indices = @transform_9, window_bounds = array<i64: 2, 1, 512, 128>}, {transform_indices = @transform_10, window_bounds = array<i64: 2, 1, 512, 128>}]} {
+    %0 = tpu.erase_memref_layout %arg4 : memref<2x1x512x256xbf16, #tpu.tiled<(8,128)(2,1),[128,128,2,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>
+    %1 = tpu.erase_memref_layout %arg5 : memref<2x1x512x256xbf16, #tpu.tiled<(8,128)(2,1),[128,128,2,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>
+    %2 = tpu.erase_memref_layout %arg6 : memref<2x1x512x256xbf16, #tpu.tiled<(8,128)(2,1),[128,128,2,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>
+    %3 = tpu.erase_memref_layout %arg7 : memref<2x512x128xi32, #tpu.tiled<(8,128),[64,1,1]>, #tpu.memory_space<vmem>> -> memref<2x512x128xi32, #tpu.memory_space<vmem>>
+    %4 = tpu.erase_memref_layout %arg8 : memref<2x8x512xi32, #tpu.tiled<(8,128),[4,4,1]>, #tpu.memory_space<vmem>> -> memref<2x8x512xi32, #tpu.memory_space<vmem>>
+    %5 = tpu.erase_memref_layout %arg9 : memref<2x1x512x256xbf16, #tpu.tiled<(8,128)(2,1),[128,128,2,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>
+    %6 = tpu.erase_memref_layout %arg10 : memref<2x1x512x128xf32, #tpu.tiled<(8,128),[64,64,1,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x128xf32, #tpu.memory_space<vmem>>
+    %7 = tpu.erase_memref_layout %arg11 : memref<2x1x512x128xf32, #tpu.tiled<(8,128),[64,64,1,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x128xf32, #tpu.memory_space<vmem>>
+    %8 = tpu.erase_memref_layout %arg12 : memref<2x1x512x256xf32, #tpu.tiled<(8,128),[128,128,2,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x256xf32, #tpu.memory_space<vmem>>
+    %9 = tpu.erase_memref_layout %arg13 : memref<2x1x512x128xf32, #tpu.tiled<(8,128),[64,64,1,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x128xf32, #tpu.memory_space<vmem>>
+    %10 = tpu.erase_memref_layout %arg14 : memref<2x1x512x128xf32, #tpu.tiled<(8,128),[64,64,1,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x128xf32, #tpu.memory_space<vmem>>
+    %c0_i32 = arith.constant 0 : i32
+    %11 = arith.cmpi eq, %arg3, %c0_i32 : i32
+    %12 = arith.extui %11 : i1 to i32
+    %c0_i32_0 = arith.constant 0 : i32
+    %13 = arith.cmpi ne, %12, %c0_i32_0 : i32
+    scf.if %13 {
+      %cst = arith.constant 0xFF800000 : f32
+      %37 = vector.broadcast %cst : f32 to vector<512x128xf32>
+      %c0 = arith.constant 0 : index
+      %c0_14 = arith.constant 0 : index
+      %c0_15 = arith.constant 0 : index
+      %c0_16 = arith.constant 0 : index
+      %38 = vector.load %6[%c0, %c0_14, %c0_15, %c0_16] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %39 = vector.shape_cast %38 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %40 = vector.shape_cast %37 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %40, %6[%c0, %c0_14, %c0_15, %c0_16] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %cst_17 = arith.constant 0.000000e+00 : f32
+      %41 = vector.broadcast %cst_17 : f32 to vector<512x128xf32>
+      %c0_18 = arith.constant 0 : index
+      %c0_19 = arith.constant 0 : index
+      %c0_20 = arith.constant 0 : index
+      %c0_21 = arith.constant 0 : index
+      %42 = vector.load %7[%c0_18, %c0_19, %c0_20, %c0_21] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %43 = vector.shape_cast %42 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %44 = vector.shape_cast %41 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %44, %7[%c0_18, %c0_19, %c0_20, %c0_21] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %cst_22 = arith.constant 0.000000e+00 : f32
+      %45 = vector.broadcast %cst_22 : f32 to vector<512x256xf32>
+      %c0_23 = arith.constant 0 : index
+      %c0_24 = arith.constant 0 : index
+      %c0_25 = arith.constant 0 : index
+      %c0_26 = arith.constant 0 : index
+      %46 = vector.load %8[%c0_23, %c0_24, %c0_25, %c0_26] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %47 = vector.shape_cast %46 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %48 = vector.shape_cast %45 : vector<512x256xf32> to vector<1x1x512x256xf32>
+      vector.store %48, %8[%c0_23, %c0_24, %c0_25, %c0_26] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+    } else {
+    }
+    %c1_i32 = arith.constant 1 : i32
+    %14 = arith.addi %arg2, %c1_i32 : i32
+    %c512_i32 = arith.constant 512 : i32
+    %15 = arith.muli %14, %c512_i32 : i32
+    %c1_i32_1 = arith.constant 1 : i32
+    %16 = arith.subi %15, %c1_i32_1 : i32
+    %c512_i32_2 = arith.constant 512 : i32
+    %17 = arith.muli %arg3, %c512_i32_2 : i32
+    %18 = arith.cmpi sgt, %16, %17 : i32
+    %19 = arith.extui %18 : i1 to i32
+    %c0_i32_3 = arith.constant 0 : i32
+    %20 = arith.cmpi ne, %19, %c0_i32_3 : i32
+    scf.if %20 {
+      %c0_i32_14 = arith.constant 0 : i32
+      %c0 = arith.constant 0 : index
+      %c0_15 = arith.constant 0 : index
+      %c0_16 = arith.constant 0 : index
+      %c0_17 = arith.constant 0 : index
+      %37 = vector.load %6[%c0, %c0_15, %c0_16, %c0_17] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %38 = vector.shape_cast %37 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %c0_18 = arith.constant 0 : index
+      %c0_19 = arith.constant 0 : index
+      %c0_20 = arith.constant 0 : index
+      %c0_21 = arith.constant 0 : index
+      %39 = vector.load %7[%c0_18, %c0_19, %c0_20, %c0_21] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %40 = vector.shape_cast %39 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %c0_22 = arith.constant 0 : index
+      %c0_23 = arith.constant 0 : index
+      %c0_24 = arith.constant 0 : index
+      %c0_25 = arith.constant 0 : index
+      %41 = vector.load %0[%c0_22, %c0_23, %c0_24, %c0_25] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %42 = vector.shape_cast %41 : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %c512_i32_26 = arith.constant 512 : i32
+      %43 = arith.muli %c0_i32_14, %c512_i32_26 : i32
+      %c0_27 = arith.constant 0 : index
+      %c0_28 = arith.constant 0 : index
+      %44 = arith.index_cast %43 : i32 to index
+      %c0_29 = arith.constant 0 : index
+      %45 = vector.load %1[%c0_27, %c0_28, %44, %c0_29] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %46 = vector.shape_cast %45 : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %cst = arith.constant dense<0.000000e+00> : vector<512x512xf32>
+      %47 = tpu.matmul %42, %46, %cst {transpose_rhs = true} : vector<512x256xbf16>, vector<512x256xbf16>, vector<512x512xf32> -> vector<512x512xf32>
+      %c0_30 = arith.constant 0 : index
+      %c0_31 = arith.constant 0 : index
+      %c0_32 = arith.constant 0 : index
+      %48 = vector.load %3[%c0_30, %c0_31, %c0_32] : memref<2x512x128xi32, #tpu.memory_space<vmem>>, vector<1x512x128xi32>
+      %49 = vector.shape_cast %48 : vector<1x512x128xi32> to vector<512x128xi32>
+      %50 = tpu.repeat %49, 1 x 4 : vector<512x128xi32> -> vector<512x512xi32>
+      %c0_33 = arith.constant 0 : index
+      %c0_34 = arith.constant 0 : index
+      %51 = arith.index_cast %43 : i32 to index
+      %52 = vector.load %4[%c0_33, %c0_34, %51] : memref<2x8x512xi32, #tpu.memory_space<vmem>>, vector<1x1x512xi32>
+      %53 = vector.shape_cast %52 : vector<1x1x512xi32> to vector<1x512xi32>
+      %54 = vector.broadcast %53 : vector<1x512xi32> to vector<512x512xi32>
+      %55 = arith.cmpi eq, %50, %54 : vector<512x512xi32>
+      %56 = tpu.iota {dimension = 0 : i32} : vector<512x512xi32>
+      %c512_i32_35 = arith.constant 512 : i32
+      %57 = arith.muli %arg2, %c512_i32_35 : i32
+      %58 = vector.broadcast %57 : i32 to vector<512x512xi32>
+      %59 = arith.addi %56, %58 : vector<512x512xi32>
+      %60 = tpu.iota {dimension = 1 : i32} : vector<512x512xi32>
+      %c512_i32_36 = arith.constant 512 : i32
+      %61 = arith.muli %arg3, %c512_i32_36 : i32
+      %62 = arith.addi %61, %43 : i32
+      %63 = vector.broadcast %62 : i32 to vector<512x512xi32>
+      %64 = arith.addi %60, %63 : vector<512x512xi32>
+      %65 = arith.cmpi sle, %64, %59 : vector<512x512xi32>
+      %66 = arith.andi %55, %65 : vector<512x512xi1>
+      %cst_37 = arith.constant 0.000000e+00 : f32
+      %cst_38 = arith.constant -2.38197633E+38 : f32
+      %67 = vector.broadcast %cst_37 : f32 to vector<512x512xf32>
+      %68 = vector.broadcast %cst_38 : f32 to vector<512x512xf32>
+      %69 = arith.select %66, %67, %68 : vector<512x512xi1>, vector<512x512xf32>
+      %70 = arith.addf %47, %69 : vector<512x512xf32>
+      %cst_39 = arith.constant dense<0xFF800000> : vector<512xf32>
+      %71 = vector.multi_reduction <maxf>, %70, %cst_39 [1] : vector<512x512xf32> to vector<512xf32>
+      %72 = vector.shape_cast %71 : vector<512xf32> to vector<512x1xf32>
+      %73 = vector.broadcast %72 : vector<512x1xf32> to vector<512x128xf32>
+      %74 = arith.maximumf %38, %73 : vector<512x128xf32>
+      %75 = tpu.repeat %74, 1 x 4 : vector<512x128xf32> -> vector<512x512xf32>
+      %76 = arith.subf %70, %75 : vector<512x512xf32>
+      %77 = math.exp %76 : vector<512x512xf32>
+      %78 = arith.subf %38, %74 : vector<512x128xf32>
+      %79 = math.exp %78 : vector<512x128xf32>
+      %80 = arith.mulf %79, %40 : vector<512x128xf32>
+      %cst_40 = arith.constant dense<0.000000e+00> : vector<512xf32>
+      %81 = vector.multi_reduction <add>, %77, %cst_40 [1] : vector<512x512xf32> to vector<512xf32>
+      %82 = vector.shape_cast %81 : vector<512xf32> to vector<512x1xf32>
+      %83 = vector.broadcast %82 : vector<512x1xf32> to vector<512x128xf32>
+      %84 = arith.addf %83, %80 : vector<512x128xf32>
+      %c0_41 = arith.constant 0 : index
+      %c0_42 = arith.constant 0 : index
+      %c0_43 = arith.constant 0 : index
+      %c0_44 = arith.constant 0 : index
+      %85 = vector.load %7[%c0_41, %c0_42, %c0_43, %c0_44] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %86 = vector.shape_cast %85 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %87 = vector.shape_cast %84 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %87, %7[%c0_41, %c0_42, %c0_43, %c0_44] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %c0_45 = arith.constant 0 : index
+      %c0_46 = arith.constant 0 : index
+      %c0_47 = arith.constant 0 : index
+      %c0_48 = arith.constant 0 : index
+      %88 = vector.load %6[%c0_45, %c0_46, %c0_47, %c0_48] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %89 = vector.shape_cast %88 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %90 = vector.shape_cast %74 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %90, %6[%c0_45, %c0_46, %c0_47, %c0_48] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %cst_49 = arith.constant 0.000000e+00 : f32
+      %91 = vector.broadcast %cst_49 : f32 to vector<512x128xf32>
+      %92 = arith.cmpf oeq, %84, %91 : vector<512x128xf32>
+      %cst_50 = arith.constant 1.000000e+00 : f32
+      %93 = vector.broadcast %cst_50 : f32 to vector<512x128xf32>
+      %94 = arith.divf %93, %84 : vector<512x128xf32>
+      %cst_51 = arith.constant 1.000000e+00 : f32
+      %95 = vector.broadcast %cst_51 : f32 to vector<512x128xf32>
+      %96 = arith.select %92, %95, %94 : vector<512x128xi1>, vector<512x128xf32>
+      %c0_52 = arith.constant 0 : index
+      %c0_53 = arith.constant 0 : index
+      %c0_54 = arith.constant 0 : index
+      %c0_55 = arith.constant 0 : index
+      %97 = vector.load %8[%c0_52, %c0_53, %c0_54, %c0_55] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %98 = vector.shape_cast %97 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %99 = arith.mulf %80, %96 : vector<512x128xf32>
+      %100 = tpu.repeat %99, 1 x 2 : vector<512x128xf32> -> vector<512x256xf32>
+      %101 = arith.mulf %98, %100 : vector<512x256xf32>
+      %c0_56 = arith.constant 0 : index
+      %c0_57 = arith.constant 0 : index
+      %c0_58 = arith.constant 0 : index
+      %c0_59 = arith.constant 0 : index
+      %102 = vector.load %8[%c0_56, %c0_57, %c0_58, %c0_59] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %103 = vector.shape_cast %102 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %104 = vector.shape_cast %101 : vector<512x256xf32> to vector<1x1x512x256xf32>
+      vector.store %104, %8[%c0_56, %c0_57, %c0_58, %c0_59] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %c0_60 = arith.constant 0 : index
+      %c0_61 = arith.constant 0 : index
+      %105 = arith.index_cast %43 : i32 to index
+      %c0_62 = arith.constant 0 : index
+      %106 = vector.load %2[%c0_60, %c0_61, %105, %c0_62] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %107 = vector.shape_cast %106 : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %108 = arith.truncf %77 : vector<512x512xf32> to vector<512x512xbf16>
+      %cst_63 = arith.constant dense<0.000000e+00> : vector<512x256xf32>
+      %109 = tpu.matmul %108, %107, %cst_63 : vector<512x512xbf16>, vector<512x256xbf16>, vector<512x256xf32> -> vector<512x256xf32>
+      %c0_64 = arith.constant 0 : index
+      %c0_65 = arith.constant 0 : index
+      %c0_66 = arith.constant 0 : index
+      %c0_67 = arith.constant 0 : index
+      %110 = vector.load %8[%c0_64, %c0_65, %c0_66, %c0_67] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %111 = vector.shape_cast %110 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %112 = tpu.repeat %96, 1 x 2 : vector<512x128xf32> -> vector<512x256xf32>
+      %113 = arith.mulf %109, %112 : vector<512x256xf32>
+      %114 = arith.addf %111, %113 : vector<512x256xf32>
+      %c0_68 = arith.constant 0 : index
+      %c0_69 = arith.constant 0 : index
+      %c0_70 = arith.constant 0 : index
+      %c0_71 = arith.constant 0 : index
+      %115 = vector.load %8[%c0_68, %c0_69, %c0_70, %c0_71] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %116 = vector.shape_cast %115 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %117 = vector.shape_cast %114 : vector<512x256xf32> to vector<1x1x512x256xf32>
+      vector.store %117, %8[%c0_68, %c0_69, %c0_70, %c0_71] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %c1_i32_72 = arith.constant 1 : i32
+    } else {
+    }
+    %c3_i32 = arith.constant 3 : i32
+    %21 = arith.cmpi eq, %arg3, %c3_i32 : i32
+    %22 = arith.extui %21 : i1 to i32
+    %c0_i32_4 = arith.constant 0 : i32
+    %23 = arith.cmpi ne, %22, %c0_i32_4 : i32
+    scf.if %23 {
+      %c0 = arith.constant 0 : index
+      %c0_14 = arith.constant 0 : index
+      %c0_15 = arith.constant 0 : index
+      %c0_16 = arith.constant 0 : index
+      %37 = vector.load %8[%c0, %c0_14, %c0_15, %c0_16] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %38 = vector.shape_cast %37 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %39 = arith.truncf %38 : vector<512x256xf32> to vector<512x256xbf16>
+      %c0_17 = arith.constant 0 : index
+      %c0_18 = arith.constant 0 : index
+      %c0_19 = arith.constant 0 : index
+      %c0_20 = arith.constant 0 : index
+      %40 = vector.load %5[%c0_17, %c0_18, %c0_19, %c0_20] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %41 = vector.shape_cast %40 : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %42 = vector.shape_cast %39 : vector<512x256xbf16> to vector<1x1x512x256xbf16>
+      vector.store %42, %5[%c0_17, %c0_18, %c0_19, %c0_20] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %c0_21 = arith.constant 0 : index
+      %c0_22 = arith.constant 0 : index
+      %c0_23 = arith.constant 0 : index
+      %c0_24 = arith.constant 0 : index
+      %43 = vector.load %7[%c0_21, %c0_22, %c0_23, %c0_24] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %44 = vector.shape_cast %43 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %c0_25 = arith.constant 0 : index
+      %c0_26 = arith.constant 0 : index
+      %c0_27 = arith.constant 0 : index
+      %c0_28 = arith.constant 0 : index
+      %45 = vector.load %9[%c0_25, %c0_26, %c0_27, %c0_28] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %46 = vector.shape_cast %45 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %47 = vector.shape_cast %44 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %47, %9[%c0_25, %c0_26, %c0_27, %c0_28] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %c0_29 = arith.constant 0 : index
+      %c0_30 = arith.constant 0 : index
+      %c0_31 = arith.constant 0 : index
+      %c0_32 = arith.constant 0 : index
+      %48 = vector.load %6[%c0_29, %c0_30, %c0_31, %c0_32] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %49 = vector.shape_cast %48 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %c0_33 = arith.constant 0 : index
+      %c0_34 = arith.constant 0 : index
+      %c0_35 = arith.constant 0 : index
+      %c0_36 = arith.constant 0 : index
+      %50 = vector.load %10[%c0_33, %c0_34, %c0_35, %c0_36] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %51 = vector.shape_cast %50 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %52 = vector.shape_cast %49 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %52, %10[%c0_33, %c0_34, %c0_35, %c0_36] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+    } else {
+    }
+    %c0_i32_5 = arith.constant 0 : i32
+    %24 = arith.cmpi eq, %arg3, %c0_i32_5 : i32
+    %25 = arith.extui %24 : i1 to i32
+    %c0_i32_6 = arith.constant 0 : i32
+    %26 = arith.cmpi ne, %25, %c0_i32_6 : i32
+    scf.if %26 {
+      %cst = arith.constant 0xFF800000 : f32
+      %37 = vector.broadcast %cst : f32 to vector<512x128xf32>
+      %c1 = arith.constant 1 : index
+      %c0 = arith.constant 0 : index
+      %c0_14 = arith.constant 0 : index
+      %c0_15 = arith.constant 0 : index
+      %38 = vector.load %6[%c1, %c0, %c0_14, %c0_15] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %39 = vector.shape_cast %38 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %40 = vector.shape_cast %37 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %40, %6[%c1, %c0, %c0_14, %c0_15] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %cst_16 = arith.constant 0.000000e+00 : f32
+      %41 = vector.broadcast %cst_16 : f32 to vector<512x128xf32>
+      %c1_17 = arith.constant 1 : index
+      %c0_18 = arith.constant 0 : index
+      %c0_19 = arith.constant 0 : index
+      %c0_20 = arith.constant 0 : index
+      %42 = vector.load %7[%c1_17, %c0_18, %c0_19, %c0_20] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %43 = vector.shape_cast %42 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %44 = vector.shape_cast %41 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %44, %7[%c1_17, %c0_18, %c0_19, %c0_20] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %cst_21 = arith.constant 0.000000e+00 : f32
+      %45 = vector.broadcast %cst_21 : f32 to vector<512x256xf32>
+      %c1_22 = arith.constant 1 : index
+      %c0_23 = arith.constant 0 : index
+      %c0_24 = arith.constant 0 : index
+      %c0_25 = arith.constant 0 : index
+      %46 = vector.load %8[%c1_22, %c0_23, %c0_24, %c0_25] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %47 = vector.shape_cast %46 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %48 = vector.shape_cast %45 : vector<512x256xf32> to vector<1x1x512x256xf32>
+      vector.store %48, %8[%c1_22, %c0_23, %c0_24, %c0_25] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+    } else {
+    }
+    %c1_i32_7 = arith.constant 1 : i32
+    %27 = arith.addi %arg2, %c1_i32_7 : i32
+    %c512_i32_8 = arith.constant 512 : i32
+    %28 = arith.muli %27, %c512_i32_8 : i32
+    %c1_i32_9 = arith.constant 1 : i32
+    %29 = arith.subi %28, %c1_i32_9 : i32
+    %c512_i32_10 = arith.constant 512 : i32
+    %30 = arith.muli %arg3, %c512_i32_10 : i32
+    %31 = arith.cmpi sgt, %29, %30 : i32
+    %32 = arith.extui %31 : i1 to i32
+    %c0_i32_11 = arith.constant 0 : i32
+    %33 = arith.cmpi ne, %32, %c0_i32_11 : i32
+    scf.if %33 {
+      %c0_i32_14 = arith.constant 0 : i32
+      %c1 = arith.constant 1 : index
+      %c0 = arith.constant 0 : index
+      %c0_15 = arith.constant 0 : index
+      %c0_16 = arith.constant 0 : index
+      %37 = vector.load %6[%c1, %c0, %c0_15, %c0_16] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %38 = vector.shape_cast %37 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %c1_17 = arith.constant 1 : index
+      %c0_18 = arith.constant 0 : index
+      %c0_19 = arith.constant 0 : index
+      %c0_20 = arith.constant 0 : index
+      %39 = vector.load %7[%c1_17, %c0_18, %c0_19, %c0_20] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %40 = vector.shape_cast %39 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %c1_21 = arith.constant 1 : index
+      %c0_22 = arith.constant 0 : index
+      %c0_23 = arith.constant 0 : index
+      %c0_24 = arith.constant 0 : index
+      %41 = vector.load %0[%c1_21, %c0_22, %c0_23, %c0_24] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %42 = vector.shape_cast %41 : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %c512_i32_25 = arith.constant 512 : i32
+      %43 = arith.muli %c0_i32_14, %c512_i32_25 : i32
+      %c1_26 = arith.constant 1 : index
+      %c0_27 = arith.constant 0 : index
+      %44 = arith.index_cast %43 : i32 to index
+      %c0_28 = arith.constant 0 : index
+      %45 = vector.load %1[%c1_26, %c0_27, %44, %c0_28] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %46 = vector.shape_cast %45 : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %cst = arith.constant dense<0.000000e+00> : vector<512x512xf32>
+      %47 = tpu.matmul %42, %46, %cst {transpose_rhs = true} : vector<512x256xbf16>, vector<512x256xbf16>, vector<512x512xf32> -> vector<512x512xf32>
+      %c1_29 = arith.constant 1 : index
+      %c0_30 = arith.constant 0 : index
+      %c0_31 = arith.constant 0 : index
+      %48 = vector.load %3[%c1_29, %c0_30, %c0_31] : memref<2x512x128xi32, #tpu.memory_space<vmem>>, vector<1x512x128xi32>
+      %49 = vector.shape_cast %48 : vector<1x512x128xi32> to vector<512x128xi32>
+      %50 = tpu.repeat %49, 1 x 4 : vector<512x128xi32> -> vector<512x512xi32>
+      %c1_32 = arith.constant 1 : index
+      %c0_33 = arith.constant 0 : index
+      %51 = arith.index_cast %43 : i32 to index
+      %52 = vector.load %4[%c1_32, %c0_33, %51] : memref<2x8x512xi32, #tpu.memory_space<vmem>>, vector<1x1x512xi32>
+      %53 = vector.shape_cast %52 : vector<1x1x512xi32> to vector<1x512xi32>
+      %54 = vector.broadcast %53 : vector<1x512xi32> to vector<512x512xi32>
+      %55 = arith.cmpi eq, %50, %54 : vector<512x512xi32>
+      %56 = tpu.iota {dimension = 0 : i32} : vector<512x512xi32>
+      %c512_i32_34 = arith.constant 512 : i32
+      %57 = arith.muli %arg2, %c512_i32_34 : i32
+      %58 = vector.broadcast %57 : i32 to vector<512x512xi32>
+      %59 = arith.addi %56, %58 : vector<512x512xi32>
+      %60 = tpu.iota {dimension = 1 : i32} : vector<512x512xi32>
+      %c512_i32_35 = arith.constant 512 : i32
+      %61 = arith.muli %arg3, %c512_i32_35 : i32
+      %62 = arith.addi %61, %43 : i32
+      %63 = vector.broadcast %62 : i32 to vector<512x512xi32>
+      %64 = arith.addi %60, %63 : vector<512x512xi32>
+      %65 = arith.cmpi sle, %64, %59 : vector<512x512xi32>
+      %66 = arith.andi %55, %65 : vector<512x512xi1>
+      %cst_36 = arith.constant 0.000000e+00 : f32
+      %cst_37 = arith.constant -2.38197633E+38 : f32
+      %67 = vector.broadcast %cst_36 : f32 to vector<512x512xf32>
+      %68 = vector.broadcast %cst_37 : f32 to vector<512x512xf32>
+      %69 = arith.select %66, %67, %68 : vector<512x512xi1>, vector<512x512xf32>
+      %70 = arith.addf %47, %69 : vector<512x512xf32>
+      %cst_38 = arith.constant dense<0xFF800000> : vector<512xf32>
+      %71 = vector.multi_reduction <maxf>, %70, %cst_38 [1] : vector<512x512xf32> to vector<512xf32>
+      %72 = vector.shape_cast %71 : vector<512xf32> to vector<512x1xf32>
+      %73 = vector.broadcast %72 : vector<512x1xf32> to vector<512x128xf32>
+      %74 = arith.maximumf %38, %73 : vector<512x128xf32>
+      %75 = tpu.repeat %74, 1 x 4 : vector<512x128xf32> -> vector<512x512xf32>
+      %76 = arith.subf %70, %75 : vector<512x512xf32>
+      %77 = math.exp %76 : vector<512x512xf32>
+      %78 = arith.subf %38, %74 : vector<512x128xf32>
+      %79 = math.exp %78 : vector<512x128xf32>
+      %80 = arith.mulf %79, %40 : vector<512x128xf32>
+      %cst_39 = arith.constant dense<0.000000e+00> : vector<512xf32>
+      %81 = vector.multi_reduction <add>, %77, %cst_39 [1] : vector<512x512xf32> to vector<512xf32>
+      %82 = vector.shape_cast %81 : vector<512xf32> to vector<512x1xf32>
+      %83 = vector.broadcast %82 : vector<512x1xf32> to vector<512x128xf32>
+      %84 = arith.addf %83, %80 : vector<512x128xf32>
+      %c1_40 = arith.constant 1 : index
+      %c0_41 = arith.constant 0 : index
+      %c0_42 = arith.constant 0 : index
+      %c0_43 = arith.constant 0 : index
+      %85 = vector.load %7[%c1_40, %c0_41, %c0_42, %c0_43] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %86 = vector.shape_cast %85 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %87 = vector.shape_cast %84 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %87, %7[%c1_40, %c0_41, %c0_42, %c0_43] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %c1_44 = arith.constant 1 : index
+      %c0_45 = arith.constant 0 : index
+      %c0_46 = arith.constant 0 : index
+      %c0_47 = arith.constant 0 : index
+      %88 = vector.load %6[%c1_44, %c0_45, %c0_46, %c0_47] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %89 = vector.shape_cast %88 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %90 = vector.shape_cast %74 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %90, %6[%c1_44, %c0_45, %c0_46, %c0_47] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %cst_48 = arith.constant 0.000000e+00 : f32
+      %91 = vector.broadcast %cst_48 : f32 to vector<512x128xf32>
+      %92 = arith.cmpf oeq, %84, %91 : vector<512x128xf32>
+      %cst_49 = arith.constant 1.000000e+00 : f32
+      %93 = vector.broadcast %cst_49 : f32 to vector<512x128xf32>
+      %94 = arith.divf %93, %84 : vector<512x128xf32>
+      %cst_50 = arith.constant 1.000000e+00 : f32
+      %95 = vector.broadcast %cst_50 : f32 to vector<512x128xf32>
+      %96 = arith.select %92, %95, %94 : vector<512x128xi1>, vector<512x128xf32>
+      %c1_51 = arith.constant 1 : index
+      %c0_52 = arith.constant 0 : index
+      %c0_53 = arith.constant 0 : index
+      %c0_54 = arith.constant 0 : index
+      %97 = vector.load %8[%c1_51, %c0_52, %c0_53, %c0_54] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %98 = vector.shape_cast %97 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %99 = arith.mulf %80, %96 : vector<512x128xf32>
+      %100 = tpu.repeat %99, 1 x 2 : vector<512x128xf32> -> vector<512x256xf32>
+      %101 = arith.mulf %98, %100 : vector<512x256xf32>
+      %c1_55 = arith.constant 1 : index
+      %c0_56 = arith.constant 0 : index
+      %c0_57 = arith.constant 0 : index
+      %c0_58 = arith.constant 0 : index
+      %102 = vector.load %8[%c1_55, %c0_56, %c0_57, %c0_58] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %103 = vector.shape_cast %102 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %104 = vector.shape_cast %101 : vector<512x256xf32> to vector<1x1x512x256xf32>
+      vector.store %104, %8[%c1_55, %c0_56, %c0_57, %c0_58] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %c1_59 = arith.constant 1 : index
+      %c0_60 = arith.constant 0 : index
+      %105 = arith.index_cast %43 : i32 to index
+      %c0_61 = arith.constant 0 : index
+      %106 = vector.load %2[%c1_59, %c0_60, %105, %c0_61] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %107 = vector.shape_cast %106 : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %108 = arith.truncf %77 : vector<512x512xf32> to vector<512x512xbf16>
+      %cst_62 = arith.constant dense<0.000000e+00> : vector<512x256xf32>
+      %109 = tpu.matmul %108, %107, %cst_62 : vector<512x512xbf16>, vector<512x256xbf16>, vector<512x256xf32> -> vector<512x256xf32>
+      %c1_63 = arith.constant 1 : index
+      %c0_64 = arith.constant 0 : index
+      %c0_65 = arith.constant 0 : index
+      %c0_66 = arith.constant 0 : index
+      %110 = vector.load %8[%c1_63, %c0_64, %c0_65, %c0_66] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %111 = vector.shape_cast %110 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %112 = tpu.repeat %96, 1 x 2 : vector<512x128xf32> -> vector<512x256xf32>
+      %113 = arith.mulf %109, %112 : vector<512x256xf32>
+      %114 = arith.addf %111, %113 : vector<512x256xf32>
+      %c1_67 = arith.constant 1 : index
+      %c0_68 = arith.constant 0 : index
+      %c0_69 = arith.constant 0 : index
+      %c0_70 = arith.constant 0 : index
+      %115 = vector.load %8[%c1_67, %c0_68, %c0_69, %c0_70] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %116 = vector.shape_cast %115 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %117 = vector.shape_cast %114 : vector<512x256xf32> to vector<1x1x512x256xf32>
+      vector.store %117, %8[%c1_67, %c0_68, %c0_69, %c0_70] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %c1_i32_71 = arith.constant 1 : i32
+    } else {
+    }
+    %c3_i32_12 = arith.constant 3 : i32
+    %34 = arith.cmpi eq, %arg3, %c3_i32_12 : i32
+    %35 = arith.extui %34 : i1 to i32
+    %c0_i32_13 = arith.constant 0 : i32
+    %36 = arith.cmpi ne, %35, %c0_i32_13 : i32
+    scf.if %36 {
+      %c1 = arith.constant 1 : index
+      %c0 = arith.constant 0 : index
+      %c0_14 = arith.constant 0 : index
+      %c0_15 = arith.constant 0 : index
+      %37 = vector.load %8[%c1, %c0, %c0_14, %c0_15] : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %38 = vector.shape_cast %37 : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %39 = arith.truncf %38 : vector<512x256xf32> to vector<512x256xbf16>
+      %c1_16 = arith.constant 1 : index
+      %c0_17 = arith.constant 0 : index
+      %c0_18 = arith.constant 0 : index
+      %c0_19 = arith.constant 0 : index
+      %40 = vector.load %5[%c1_16, %c0_17, %c0_18, %c0_19] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %41 = vector.shape_cast %40 : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %42 = vector.shape_cast %39 : vector<512x256xbf16> to vector<1x1x512x256xbf16>
+      vector.store %42, %5[%c1_16, %c0_17, %c0_18, %c0_19] : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %c1_20 = arith.constant 1 : index
+      %c0_21 = arith.constant 0 : index
+      %c0_22 = arith.constant 0 : index
+      %c0_23 = arith.constant 0 : index
+      %43 = vector.load %7[%c1_20, %c0_21, %c0_22, %c0_23] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %44 = vector.shape_cast %43 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %c1_24 = arith.constant 1 : index
+      %c0_25 = arith.constant 0 : index
+      %c0_26 = arith.constant 0 : index
+      %c0_27 = arith.constant 0 : index
+      %45 = vector.load %9[%c1_24, %c0_25, %c0_26, %c0_27] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %46 = vector.shape_cast %45 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %47 = vector.shape_cast %44 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %47, %9[%c1_24, %c0_25, %c0_26, %c0_27] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %c1_28 = arith.constant 1 : index
+      %c0_29 = arith.constant 0 : index
+      %c0_30 = arith.constant 0 : index
+      %c0_31 = arith.constant 0 : index
+      %48 = vector.load %6[%c1_28, %c0_29, %c0_30, %c0_31] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %49 = vector.shape_cast %48 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %c1_32 = arith.constant 1 : index
+      %c0_33 = arith.constant 0 : index
+      %c0_34 = arith.constant 0 : index
+      %c0_35 = arith.constant 0 : index
+      %50 = vector.load %10[%c1_32, %c0_33, %c0_34, %c0_35] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %51 = vector.shape_cast %50 : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %52 = vector.shape_cast %49 : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %52, %10[%c1_32, %c0_33, %c0_34, %c0_35] : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+    } else {
+    }
+    return
+  }
+  func.func @transform_0(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant 0 : i32
+    return %arg0, %arg1, %arg2, %c0_i32 : i32, i32, i32, i32
+  }
+  func.func @transform_1(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c1_i32 = arith.constant 1 : i32
+    %0 = arith.addi %arg2, %c1_i32 : i32
+    %c512_i32 = arith.constant 512 : i32
+    %1 = arith.muli %0, %c512_i32 : i32
+    %c1_i32_0 = arith.constant 1 : i32
+    %2 = arith.subi %1, %c1_i32_0 : i32
+    %c512_i32_1 = arith.constant 512 : i32
+    %3 = arith.muli %arg3, %c512_i32_1 : i32
+    %4 = arith.cmpi sgt, %2, %3 : i32
+    %c0_i32 = arith.constant 0 : i32
+    %5 = arith.select %4, %arg3, %c0_i32 : i32
+    %c0_i32_2 = arith.constant 0 : i32
+    return %arg0, %arg1, %5, %c0_i32_2 : i32, i32, i32, i32
+  }
+  func.func @transform_2(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c1_i32 = arith.constant 1 : i32
+    %0 = arith.addi %arg2, %c1_i32 : i32
+    %c512_i32 = arith.constant 512 : i32
+    %1 = arith.muli %0, %c512_i32 : i32
+    %c1_i32_0 = arith.constant 1 : i32
+    %2 = arith.subi %1, %c1_i32_0 : i32
+    %c512_i32_1 = arith.constant 512 : i32
+    %3 = arith.muli %arg3, %c512_i32_1 : i32
+    %4 = arith.cmpi sgt, %2, %3 : i32
+    %c0_i32 = arith.constant 0 : i32
+    %5 = arith.select %4, %arg3, %c0_i32 : i32
+    %c0_i32_2 = arith.constant 0 : i32
+    return %arg0, %arg1, %5, %c0_i32_2 : i32, i32, i32, i32
+  }
+  func.func @transform_3(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32) {
+    %c0_i32 = arith.constant 0 : i32
+    return %arg0, %arg2, %c0_i32 : i32, i32, i32
+  }
+  func.func @transform_4(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32) {
+    %c1_i32 = arith.constant 1 : i32
+    %0 = arith.addi %arg2, %c1_i32 : i32
+    %c512_i32 = arith.constant 512 : i32
+    %1 = arith.muli %0, %c512_i32 : i32
+    %c1_i32_0 = arith.constant 1 : i32
+    %2 = arith.subi %1, %c1_i32_0 : i32
+    %c512_i32_1 = arith.constant 512 : i32
+    %3 = arith.muli %arg3, %c512_i32_1 : i32
+    %4 = arith.cmpi sgt, %2, %3 : i32
+    %c0_i32 = arith.constant 0 : i32
+    %5 = arith.select %4, %arg3, %c0_i32 : i32
+    %c0_i32_2 = arith.constant 0 : i32
+    return %arg0, %c0_i32_2, %5 : i32, i32, i32
+  }
+  func.func @transform_5(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant 0 : i32
+    return %arg0, %arg1, %arg2, %c0_i32 : i32, i32, i32, i32
+  }
+  func.func @transform_6(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant 0 : i32
+    %c0_i32_0 = arith.constant 0 : i32
+    %c0_i32_1 = arith.constant 0 : i32
+    %c0_i32_2 = arith.constant 0 : i32
+    return %c0_i32, %c0_i32_0, %c0_i32_1, %c0_i32_2 : i32, i32, i32, i32
+  }
+  func.func @transform_7(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant 0 : i32
+    %c0_i32_0 = arith.constant 0 : i32
+    %c0_i32_1 = arith.constant 0 : i32
+    %c0_i32_2 = arith.constant 0 : i32
+    return %c0_i32, %c0_i32_0, %c0_i32_1, %c0_i32_2 : i32, i32, i32, i32
+  }
+  func.func @transform_8(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant 0 : i32
+    %c0_i32_0 = arith.constant 0 : i32
+    %c0_i32_1 = arith.constant 0 : i32
+    %c0_i32_2 = arith.constant 0 : i32
+    return %c0_i32, %c0_i32_0, %c0_i32_1, %c0_i32_2 : i32, i32, i32, i32
+  }
+  func.func @transform_9(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant 0 : i32
+    return %arg0, %arg1, %arg2, %c0_i32 : i32, i32, i32, i32
+  }
+  func.func @transform_10(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant 0 : i32
+    return %arg0, %arg1, %arg2, %c0_i32 : i32, i32, i32, i32
+  }
+}
+
+[jax_mosaic_dump_mlir] after infer vector layout pass
+module {
+  func.func @main(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32, %arg4: memref<2x1x512x256xbf16, #tpu.tiled<(8,128)(2,1),[128,128,2,1]>, #tpu.memory_space<vmem>>, %arg5: memref<2x1x512x256xbf16, #tpu.tiled<(8,128)(2,1),[128,128,2,1]>, #tpu.memory_space<vmem>>, %arg6: memref<2x1x512x256xbf16, #tpu.tiled<(8,128)(2,1),[128,128,2,1]>, #tpu.memory_space<vmem>>, %arg7: memref<2x512x128xi32, #tpu.tiled<(8,128),[64,1,1]>, #tpu.memory_space<vmem>>, %arg8: memref<2x8x512xi32, #tpu.tiled<(8,128),[4,4,1]>, #tpu.memory_space<vmem>>, %arg9: memref<2x1x512x256xbf16, #tpu.tiled<(8,128)(2,1),[128,128,2,1]>, #tpu.memory_space<vmem>>, %arg10: memref<2x1x512x128xf32, #tpu.tiled<(8,128),[64,64,1,1]>, #tpu.memory_space<vmem>>, %arg11: memref<2x1x512x128xf32, #tpu.tiled<(8,128),[64,64,1,1]>, #tpu.memory_space<vmem>>, %arg12: memref<2x1x512x256xf32, #tpu.tiled<(8,128),[128,128,2,1]>, #tpu.memory_space<vmem>>, %arg13: memref<2x1x512x128xf32, #tpu.tiled<(8,128),[64,64,1,1]>, #tpu.memory_space<vmem>>, %arg14: memref<2x1x512x128xf32, #tpu.tiled<(8,128),[64,64,1,1]>, #tpu.memory_space<vmem>>) attributes {dimension_semantics = [#tpu.dimension_semantics<parallel>, #tpu.dimension_semantics<parallel>, #tpu.dimension_semantics<parallel>, #tpu.dimension_semantics<arbitrary>], iteration_bounds = array<i64: 6, 8, 4, 4>, scalar_prefetch = 0 : i64, scratch_operands = 0 : i64, window_params = [{transform_indices = @transform_0, window_bounds = array<i64: 2, 1, 512, 256>}, {transform_indices = @transform_1, window_bounds = array<i64: 2, 1, 512, 256>}, {transform_indices = @transform_2, window_bounds = array<i64: 2, 1, 512, 256>}, {transform_indices = @transform_3, window_bounds = array<i64: 2, 512, 128>}, {transform_indices = @transform_4, window_bounds = array<i64: 2, 8, 512>}, {transform_indices = @transform_5, window_bounds = array<i64: 2, 1, 512, 256>}, {transform_indices = @transform_6, window_bounds = array<i64: 2, 1, 512, 128>}, {transform_indices = @transform_7, window_bounds = array<i64: 2, 1, 512, 128>}, {transform_indices = @transform_8, window_bounds = array<i64: 2, 1, 512, 256>}, {transform_indices = @transform_9, window_bounds = array<i64: 2, 1, 512, 128>}, {transform_indices = @transform_10, window_bounds = array<i64: 2, 1, 512, 128>}]} {
+    %cst = arith.constant {out_layout = [#tpu.vpad<"32,{*,*},(8,128)">]} dense<1.000000e+00> : vector<512x128xf32>
+    %cst_0 = arith.constant {out_layout = [#tpu.vpad<"32,{*,*},(8,128)">]} dense<0.000000e+00> : vector<512x128xf32>
+    %cst_1 = arith.constant {out_layout = [#tpu.vpad<"32,{*,*},(8,128)">]} dense<-2.38197633E+38> : vector<512x512xf32>
+    %cst_2 = arith.constant {out_layout = [#tpu.vpad<"32,{*,*},(8,128)">]} dense<0.000000e+00> : vector<1x1x512x256xf32>
+    %cst_3 = arith.constant {out_layout = [#tpu.vpad<"32,{*,*},(8,128)">]} dense<0.000000e+00> : vector<1x1x512x128xf32>
+    %cst_4 = arith.constant {out_layout = [#tpu.vpad<"32,{*,*},(8,128)">]} dense<0xFF800000> : vector<1x1x512x128xf32>
+    %c1 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 1 : index
+    %c3_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 3 : i32
+    %cst_5 = arith.constant {out_layout = [#tpu.vpad<"32,{*,*},(8,128)">]} dense<0.000000e+00> : vector<512x256xf32>
+    %cst_6 = arith.constant {out_layout = [#tpu.vpad<"32,{*,*},(8,128),-2">]} dense<0.000000e+00> : vector<512xf32>
+    %cst_7 = arith.constant {out_layout = [#tpu.vpad<"32,{*,*},(8,128),-2">]} dense<0xFF800000> : vector<512xf32>
+    %cst_8 = arith.constant {out_layout = [#tpu.vpad<"32,{*,*},(8,128)">]} dense<0.000000e+00> : vector<512x512xf32>
+    %c512_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 512 : i32
+    %c1_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 1 : i32
+    %c0 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 0 : index
+    %c0_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 0 : i32
+    %0 = tpu.erase_memref_layout %arg4 {in_layout = [#tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : memref<2x1x512x256xbf16, #tpu.tiled<(8,128)(2,1),[128,128,2,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>
+    %1 = tpu.erase_memref_layout %arg5 {in_layout = [#tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : memref<2x1x512x256xbf16, #tpu.tiled<(8,128)(2,1),[128,128,2,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>
+    %2 = tpu.erase_memref_layout %arg6 {in_layout = [#tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : memref<2x1x512x256xbf16, #tpu.tiled<(8,128)(2,1),[128,128,2,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>
+    %3 = tpu.erase_memref_layout %arg7 {in_layout = [#tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : memref<2x512x128xi32, #tpu.tiled<(8,128),[64,1,1]>, #tpu.memory_space<vmem>> -> memref<2x512x128xi32, #tpu.memory_space<vmem>>
+    %4 = tpu.erase_memref_layout %arg8 {in_layout = [#tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : memref<2x8x512xi32, #tpu.tiled<(8,128),[4,4,1]>, #tpu.memory_space<vmem>> -> memref<2x8x512xi32, #tpu.memory_space<vmem>>
+    %5 = tpu.erase_memref_layout %arg9 {in_layout = [#tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : memref<2x1x512x256xbf16, #tpu.tiled<(8,128)(2,1),[128,128,2,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>
+    %6 = tpu.erase_memref_layout %arg10 {in_layout = [#tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : memref<2x1x512x128xf32, #tpu.tiled<(8,128),[64,64,1,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x128xf32, #tpu.memory_space<vmem>>
+    %7 = tpu.erase_memref_layout %arg11 {in_layout = [#tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : memref<2x1x512x128xf32, #tpu.tiled<(8,128),[64,64,1,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x128xf32, #tpu.memory_space<vmem>>
+    %8 = tpu.erase_memref_layout %arg12 {in_layout = [#tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : memref<2x1x512x256xf32, #tpu.tiled<(8,128),[128,128,2,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x256xf32, #tpu.memory_space<vmem>>
+    %9 = tpu.erase_memref_layout %arg13 {in_layout = [#tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : memref<2x1x512x128xf32, #tpu.tiled<(8,128),[64,64,1,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x128xf32, #tpu.memory_space<vmem>>
+    %10 = tpu.erase_memref_layout %arg14 {in_layout = [#tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : memref<2x1x512x128xf32, #tpu.tiled<(8,128),[64,64,1,1]>, #tpu.memory_space<vmem>> -> memref<2x1x512x128xf32, #tpu.memory_space<vmem>>
+    %11 = arith.cmpi eq, %arg3, %c0_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    scf.if %11 {
+      vector.store %cst_4, %6[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      vector.store %cst_3, %7[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      vector.store %cst_2, %8[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+    } {in_layout = [#tpu.vpad<"none">]}
+    %12 = arith.addi %arg2, %c1_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %13 = arith.muli %12, %c512_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %14 = arith.subi %13, %c1_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %15 = arith.muli %arg3, %c512_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %16 = arith.cmpi sgt, %14, %15 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    scf.if %16 {
+      %18 = vector.load %6[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %19 = vector.shape_cast %18 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %20 = vector.load %7[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %21 = vector.shape_cast %20 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %22 = vector.load %0[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %23 = vector.shape_cast %22 {in_layout = [#tpu.vpad<"16,{0,0},(8,128)">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %24 = vector.load %1[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %25 = vector.shape_cast %24 {in_layout = [#tpu.vpad<"16,{0,0},(8,128)">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %26 = vector.load %3[%c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : memref<2x512x128xi32, #tpu.memory_space<vmem>>, vector<1x512x128xi32>
+      %27 = vector.shape_cast %26 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<1x512x128xi32> to vector<512x128xi32>
+      %28 = tpu.repeat %27, 1 x 4 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xi32> -> vector<512x512xi32>
+      %29 = vector.load %4[%c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(1,128)">]} : memref<2x8x512xi32, #tpu.memory_space<vmem>>, vector<1x1x512xi32>
+      %30 = vector.shape_cast %29 {in_layout = [#tpu.vpad<"32,{0,0},(1,128)">], out_layout = [#tpu.vpad<"32,{0,0},(1,128)">]} : vector<1x1x512xi32> to vector<1x512xi32>
+      %31 = vector.broadcast %30 {in_layout = [#tpu.vpad<"32,{*,0},(8,128)">], out_layout = [#tpu.vpad<"32,{*,0},(8,128)">]} : vector<1x512xi32> to vector<512x512xi32>
+      %32 = arith.cmpi eq, %28, %31 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{*,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x512xi32>
+      %33 = tpu.iota {dimension = 0 : i32, out_layout = [#tpu.vpad<"32,{0,*},(8,128)">]} : vector<512x512xi32>
+      %34 = arith.muli %arg2, %c512_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+      %35 = vector.broadcast %34 {in_layout = [#tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{*,*},(8,128)">]} : i32 to vector<512x512xi32>
+      %36 = arith.addi %33, %35 {in_layout = [#tpu.vpad<"32,{0,*},(8,128)">, #tpu.vpad<"32,{0,*},(8,128)">], out_layout = [#tpu.vpad<"32,{0,*},(8,128)">]} : vector<512x512xi32>
+      %37 = tpu.iota {dimension = 1 : i32, out_layout = [#tpu.vpad<"32,{*,0},(8,128)">]} : vector<512x512xi32>
+      %38 = vector.broadcast %15 {in_layout = [#tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{*,*},(8,128)">]} : i32 to vector<512x512xi32>
+      %39 = arith.addi %37, %38 {in_layout = [#tpu.vpad<"32,{*,0},(8,128)">, #tpu.vpad<"32,{*,0},(8,128)">], out_layout = [#tpu.vpad<"32,{*,0},(8,128)">]} : vector<512x512xi32>
+      %40 = arith.cmpi sle, %39, %36 {in_layout = [#tpu.vpad<"32,{*,0},(8,128)">, #tpu.vpad<"32,{0,*},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x512xi32>
+      %41 = arith.andi %32, %40 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x512xi1>
+      %42 = arith.select %41, %cst_8, %cst_1 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x512xi1>, vector<512x512xf32>
+      %43 = tpu.matmul %23, %25, %42 {in_layout = [#tpu.vpad<"16,{0,0},(16,128)">, #tpu.vpad<"16,{0,0},(16,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">], transpose_rhs = true} : vector<512x256xbf16>, vector<512x256xbf16>, vector<512x512xf32> -> vector<512x512xf32>
+      %44 = vector.multi_reduction <maxf>, %43, %cst_7 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{*,*},(8,128),-2">], out_layout = [#tpu.vpad<"32,{0,*},(8,128),-1">]} [1] : vector<512x512xf32> to vector<512xf32>
+      %45 = vector.shape_cast %44 {in_layout = [#tpu.vpad<"32,{0,*},(8,128),-1">], out_layout = [#tpu.vpad<"32,{0,*},(8,128)">]} : vector<512xf32> to vector<512x1xf32>
+      %46 = vector.broadcast %45 {in_layout = [#tpu.vpad<"32,{0,*},(8,128)">], out_layout = [#tpu.vpad<"32,{0,*},(8,128)">]} : vector<512x1xf32> to vector<512x128xf32>
+      %47 = arith.maximumf %19, %46 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,*},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32>
+      %48 = tpu.repeat %47, 1 x 4 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32> -> vector<512x512xf32>
+      %49 = arith.subf %43, %48 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x512xf32>
+      %50 = math.exp %49 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x512xf32>
+      %51 = arith.subf %19, %47 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32>
+      %52 = math.exp %51 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32>
+      %53 = arith.mulf %52, %21 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32>
+      %54 = vector.multi_reduction <add>, %50, %cst_6 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{*,*},(8,128),-2">], out_layout = [#tpu.vpad<"32,{0,*},(8,128),-1">]} [1] : vector<512x512xf32> to vector<512xf32>
+      %55 = vector.shape_cast %54 {in_layout = [#tpu.vpad<"32,{0,*},(8,128),-1">], out_layout = [#tpu.vpad<"32,{0,*},(8,128)">]} : vector<512xf32> to vector<512x1xf32>
+      %56 = vector.broadcast %55 {in_layout = [#tpu.vpad<"32,{0,*},(8,128)">], out_layout = [#tpu.vpad<"32,{0,*},(8,128)">]} : vector<512x1xf32> to vector<512x128xf32>
+      %57 = arith.addf %56, %53 {in_layout = [#tpu.vpad<"32,{0,*},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32>
+      %58 = vector.shape_cast %57 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %58, %7[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %59 = vector.shape_cast %47 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %59, %6[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %60 = arith.cmpf oeq, %57, %cst_0 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32>
+      %61 = arith.divf %cst, %57 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32>
+      %62 = arith.select %60, %cst, %61 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xi1>, vector<512x128xf32>
+      %63 = vector.load %8[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %64 = vector.shape_cast %63 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %65 = arith.mulf %53, %62 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32>
+      %66 = tpu.repeat %65, 1 x 2 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32> -> vector<512x256xf32>
+      %67 = arith.mulf %64, %66 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x256xf32>
+      %68 = vector.shape_cast %67 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x256xf32> to vector<1x1x512x256xf32>
+      vector.store %68, %8[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %69 = vector.load %2[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %70 = vector.shape_cast %69 {in_layout = [#tpu.vpad<"16,{0,0},(8,128)">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %71 = arith.truncf %50 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : vector<512x512xf32> to vector<512x512xbf16>
+      %72 = tpu.matmul %71, %70, %cst_5 {in_layout = [#tpu.vpad<"16,{0,0},(16,128)">, #tpu.vpad<"16,{0,0},(16,128)">, #tpu.vpad<"32,{*,*},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x512xbf16>, vector<512x256xbf16>, vector<512x256xf32> -> vector<512x256xf32>
+      %73 = vector.load %8[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %74 = vector.shape_cast %73 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %75 = tpu.repeat %62, 1 x 2 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32> -> vector<512x256xf32>
+      %76 = arith.mulf %72, %75 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x256xf32>
+      %77 = arith.addf %74, %76 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x256xf32>
+      %78 = vector.shape_cast %77 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x256xf32> to vector<1x1x512x256xf32>
+      vector.store %78, %8[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+    } {in_layout = [#tpu.vpad<"none">]}
+    %17 = arith.cmpi eq, %arg3, %c3_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    scf.if %17 {
+      %18 = vector.load %8[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %19 = vector.shape_cast %18 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %20 = arith.truncf %19 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : vector<512x256xf32> to vector<512x256xbf16>
+      %21 = vector.shape_cast %20 {in_layout = [#tpu.vpad<"16,{0,0},(8,128)">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : vector<512x256xbf16> to vector<1x1x512x256xbf16>
+      vector.store %21, %5[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"16,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %22 = vector.load %7[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      vector.store %22, %9[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %23 = vector.load %6[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      vector.store %23, %10[%c0, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+    } {in_layout = [#tpu.vpad<"none">]}
+    scf.if %11 {
+      vector.store %cst_4, %6[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      vector.store %cst_3, %7[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      vector.store %cst_2, %8[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+    } {in_layout = [#tpu.vpad<"none">]}
+    scf.if %16 {
+      %18 = vector.load %6[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %19 = vector.shape_cast %18 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %20 = vector.load %7[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %21 = vector.shape_cast %20 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<1x1x512x128xf32> to vector<512x128xf32>
+      %22 = vector.load %0[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %23 = vector.shape_cast %22 {in_layout = [#tpu.vpad<"16,{0,0},(8,128)">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %24 = vector.load %1[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %25 = vector.shape_cast %24 {in_layout = [#tpu.vpad<"16,{0,0},(8,128)">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %26 = vector.load %3[%c1, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : memref<2x512x128xi32, #tpu.memory_space<vmem>>, vector<1x512x128xi32>
+      %27 = vector.shape_cast %26 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<1x512x128xi32> to vector<512x128xi32>
+      %28 = tpu.repeat %27, 1 x 4 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xi32> -> vector<512x512xi32>
+      %29 = vector.load %4[%c1, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(1,128)">]} : memref<2x8x512xi32, #tpu.memory_space<vmem>>, vector<1x1x512xi32>
+      %30 = vector.shape_cast %29 {in_layout = [#tpu.vpad<"32,{0,0},(1,128)">], out_layout = [#tpu.vpad<"32,{0,0},(1,128)">]} : vector<1x1x512xi32> to vector<1x512xi32>
+      %31 = vector.broadcast %30 {in_layout = [#tpu.vpad<"32,{*,0},(8,128)">], out_layout = [#tpu.vpad<"32,{*,0},(8,128)">]} : vector<1x512xi32> to vector<512x512xi32>
+      %32 = arith.cmpi eq, %28, %31 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{*,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x512xi32>
+      %33 = tpu.iota {dimension = 0 : i32, out_layout = [#tpu.vpad<"32,{0,*},(8,128)">]} : vector<512x512xi32>
+      %34 = arith.muli %arg2, %c512_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+      %35 = vector.broadcast %34 {in_layout = [#tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{*,*},(8,128)">]} : i32 to vector<512x512xi32>
+      %36 = arith.addi %33, %35 {in_layout = [#tpu.vpad<"32,{0,*},(8,128)">, #tpu.vpad<"32,{0,*},(8,128)">], out_layout = [#tpu.vpad<"32,{0,*},(8,128)">]} : vector<512x512xi32>
+      %37 = tpu.iota {dimension = 1 : i32, out_layout = [#tpu.vpad<"32,{*,0},(8,128)">]} : vector<512x512xi32>
+      %38 = vector.broadcast %15 {in_layout = [#tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{*,*},(8,128)">]} : i32 to vector<512x512xi32>
+      %39 = arith.addi %37, %38 {in_layout = [#tpu.vpad<"32,{*,0},(8,128)">, #tpu.vpad<"32,{*,0},(8,128)">], out_layout = [#tpu.vpad<"32,{*,0},(8,128)">]} : vector<512x512xi32>
+      %40 = arith.cmpi sle, %39, %36 {in_layout = [#tpu.vpad<"32,{*,0},(8,128)">, #tpu.vpad<"32,{0,*},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x512xi32>
+      %41 = arith.andi %32, %40 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x512xi1>
+      %42 = arith.select %41, %cst_8, %cst_1 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x512xi1>, vector<512x512xf32>
+      %43 = tpu.matmul %23, %25, %42 {in_layout = [#tpu.vpad<"16,{0,0},(16,128)">, #tpu.vpad<"16,{0,0},(16,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">], transpose_rhs = true} : vector<512x256xbf16>, vector<512x256xbf16>, vector<512x512xf32> -> vector<512x512xf32>
+      %44 = vector.multi_reduction <maxf>, %43, %cst_7 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{*,*},(8,128),-2">], out_layout = [#tpu.vpad<"32,{0,*},(8,128),-1">]} [1] : vector<512x512xf32> to vector<512xf32>
+      %45 = vector.shape_cast %44 {in_layout = [#tpu.vpad<"32,{0,*},(8,128),-1">], out_layout = [#tpu.vpad<"32,{0,*},(8,128)">]} : vector<512xf32> to vector<512x1xf32>
+      %46 = vector.broadcast %45 {in_layout = [#tpu.vpad<"32,{0,*},(8,128)">], out_layout = [#tpu.vpad<"32,{0,*},(8,128)">]} : vector<512x1xf32> to vector<512x128xf32>
+      %47 = arith.maximumf %19, %46 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,*},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32>
+      %48 = tpu.repeat %47, 1 x 4 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32> -> vector<512x512xf32>
+      %49 = arith.subf %43, %48 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x512xf32>
+      %50 = math.exp %49 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x512xf32>
+      %51 = arith.subf %19, %47 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32>
+      %52 = math.exp %51 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32>
+      %53 = arith.mulf %52, %21 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32>
+      %54 = vector.multi_reduction <add>, %50, %cst_6 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{*,*},(8,128),-2">], out_layout = [#tpu.vpad<"32,{0,*},(8,128),-1">]} [1] : vector<512x512xf32> to vector<512xf32>
+      %55 = vector.shape_cast %54 {in_layout = [#tpu.vpad<"32,{0,*},(8,128),-1">], out_layout = [#tpu.vpad<"32,{0,*},(8,128)">]} : vector<512xf32> to vector<512x1xf32>
+      %56 = vector.broadcast %55 {in_layout = [#tpu.vpad<"32,{0,*},(8,128)">], out_layout = [#tpu.vpad<"32,{0,*},(8,128)">]} : vector<512x1xf32> to vector<512x128xf32>
+      %57 = arith.addf %56, %53 {in_layout = [#tpu.vpad<"32,{0,*},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32>
+      %58 = vector.shape_cast %57 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %58, %7[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %59 = vector.shape_cast %47 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32> to vector<1x1x512x128xf32>
+      vector.store %59, %6[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %60 = arith.cmpf oeq, %57, %cst_0 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32>
+      %61 = arith.divf %cst, %57 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32>
+      %62 = arith.select %60, %cst, %61 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xi1>, vector<512x128xf32>
+      %63 = vector.load %8[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %64 = vector.shape_cast %63 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %65 = arith.mulf %53, %62 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32>
+      %66 = tpu.repeat %65, 1 x 2 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32> -> vector<512x256xf32>
+      %67 = arith.mulf %64, %66 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x256xf32>
+      %68 = vector.shape_cast %67 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x256xf32> to vector<1x1x512x256xf32>
+      vector.store %68, %8[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %69 = vector.load %2[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %70 = vector.shape_cast %69 {in_layout = [#tpu.vpad<"16,{0,0},(8,128)">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : vector<1x1x512x256xbf16> to vector<512x256xbf16>
+      %71 = arith.truncf %50 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : vector<512x512xf32> to vector<512x512xbf16>
+      %72 = tpu.matmul %71, %70, %cst_5 {in_layout = [#tpu.vpad<"16,{0,0},(16,128)">, #tpu.vpad<"16,{0,0},(16,128)">, #tpu.vpad<"32,{*,*},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x512xbf16>, vector<512x256xbf16>, vector<512x256xf32> -> vector<512x256xf32>
+      %73 = vector.load %8[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %74 = vector.shape_cast %73 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %75 = tpu.repeat %62, 1 x 2 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x128xf32> -> vector<512x256xf32>
+      %76 = arith.mulf %72, %75 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x256xf32>
+      %77 = arith.addf %74, %76 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x256xf32>
+      %78 = vector.shape_cast %77 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<512x256xf32> to vector<1x1x512x256xf32>
+      vector.store %78, %8[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+    } {in_layout = [#tpu.vpad<"none">]}
+    scf.if %17 {
+      %18 = vector.load %8[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : memref<2x1x512x256xf32, #tpu.memory_space<vmem>>, vector<1x1x512x256xf32>
+      %19 = vector.shape_cast %18 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : vector<1x1x512x256xf32> to vector<512x256xf32>
+      %20 = arith.truncf %19 {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : vector<512x256xf32> to vector<512x256xbf16>
+      %21 = vector.shape_cast %20 {in_layout = [#tpu.vpad<"16,{0,0},(8,128)">], out_layout = [#tpu.vpad<"16,{0,0},(8,128)">]} : vector<512x256xbf16> to vector<1x1x512x256xbf16>
+      vector.store %21, %5[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"16,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x256xbf16, #tpu.memory_space<vmem>>, vector<1x1x512x256xbf16>
+      %22 = vector.load %7[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      vector.store %22, %9[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      %23 = vector.load %6[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"32,{0,0},(8,128)">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+      vector.store %23, %10[%c1, %c0, %c0, %c0] {in_layout = [#tpu.vpad<"32,{0,0},(8,128)">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} : memref<2x1x512x128xf32, #tpu.memory_space<vmem>>, vector<1x1x512x128xf32>
+    } {in_layout = [#tpu.vpad<"none">]}
+    return {in_layout = []}
+  }
+  func.func @transform_0(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 0 : i32
+    return {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} %arg0, %arg1, %arg2, %c0_i32 : i32, i32, i32, i32
+  }
+  func.func @transform_1(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 0 : i32
+    %c512_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 512 : i32
+    %c1_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 1 : i32
+    %0 = arith.addi %arg2, %c1_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %1 = arith.muli %0, %c512_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %2 = arith.subi %1, %c1_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %3 = arith.muli %arg3, %c512_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %4 = arith.cmpi sgt, %2, %3 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %5 = arith.select %4, %arg3, %c0_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    return {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} %arg0, %arg1, %5, %c0_i32 : i32, i32, i32, i32
+  }
+  func.func @transform_2(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 0 : i32
+    %c512_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 512 : i32
+    %c1_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 1 : i32
+    %0 = arith.addi %arg2, %c1_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %1 = arith.muli %0, %c512_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %2 = arith.subi %1, %c1_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %3 = arith.muli %arg3, %c512_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %4 = arith.cmpi sgt, %2, %3 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %5 = arith.select %4, %arg3, %c0_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    return {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} %arg0, %arg1, %5, %c0_i32 : i32, i32, i32, i32
+  }
+  func.func @transform_3(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32) {
+    %c0_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 0 : i32
+    return {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} %arg0, %arg2, %c0_i32 : i32, i32, i32
+  }
+  func.func @transform_4(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32) {
+    %c0_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 0 : i32
+    %c512_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 512 : i32
+    %c1_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 1 : i32
+    %0 = arith.addi %arg2, %c1_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %1 = arith.muli %0, %c512_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %2 = arith.subi %1, %c1_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %3 = arith.muli %arg3, %c512_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %4 = arith.cmpi sgt, %2, %3 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    %5 = arith.select %4, %arg3, %c0_i32 {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">], out_layout = [#tpu.vpad<"none">]} : i32
+    return {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} %arg0, %c0_i32, %5 : i32, i32, i32
+  }
+  func.func @transform_5(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 0 : i32
+    return {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} %arg0, %arg1, %arg2, %c0_i32 : i32, i32, i32, i32
+  }
+  func.func @transform_6(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 0 : i32
+    return {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} %c0_i32, %c0_i32, %c0_i32, %c0_i32 : i32, i32, i32, i32
+  }
+  func.func @transform_7(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 0 : i32
+    return {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} %c0_i32, %c0_i32, %c0_i32, %c0_i32 : i32, i32, i32, i32
+  }
+  func.func @transform_8(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 0 : i32
+    return {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} %c0_i32, %c0_i32, %c0_i32, %c0_i32 : i32, i32, i32, i32
+  }
+  func.func @transform_9(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 0 : i32
+    return {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} %arg0, %arg1, %arg2, %c0_i32 : i32, i32, i32, i32
+  }
+  func.func @transform_10(%arg0: i32, %arg1: i32, %arg2: i32, %arg3: i32) -> (i32, i32, i32, i32) {
+    %c0_i32 = arith.constant {in_layout = [], out_layout = [#tpu.vpad<"none">]} 0 : i32
+    return {in_layout = [#tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">, #tpu.vpad<"none">]} %arg0, %arg1, %arg2, %c0_i32 : i32, i32, i32, i32
+  }
+}
+
