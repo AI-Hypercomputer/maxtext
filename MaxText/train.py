@@ -24,6 +24,7 @@ import datetime
 import os
 import sys
 
+
 from typing import Sequence
 from absl import app
 from flax import linen as nn
@@ -52,6 +53,7 @@ from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
+
 
 Transformer = models.Transformer
 
@@ -98,7 +100,15 @@ def load_next_batch(train_iter, example_batch, config):
   if config.reuse_example_batch and example_batch is not None:
     return example_batch
   else:
-    return train_iter()
+      return train_iter()
+
+def load_next_batch_pygrain(train_iter, example_batch, config, mesh):
+  if config.reuse_example_batch and example_batch is not None:
+    return example_batch
+  else:
+    global_shape = (config.global_batch_size_to_load, config.max_target_length)
+    return get_next_batch_sharded_pygrain(
+      train_iter, config.data_sharding, global_shape, mesh)  
 
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   """Records scalar metrics to be written to tensorboard"""
