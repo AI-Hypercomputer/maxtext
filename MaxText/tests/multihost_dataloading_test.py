@@ -24,6 +24,7 @@ from jax.sharding import PartitionSpec
 
 import tensorflow as tf
 import unittest
+import pytest
 
 import pyconfig
 import multihost_dataloading
@@ -58,7 +59,7 @@ class MultihostDataloadingTest(unittest.TestCase):
       )
     )
 
-
+  @pytest.mark.tpu
   def test_batch_sharded_data_pipeline(self):
     first_batch = self.multihost_gen()
     sec_batch = self.multihost_gen()

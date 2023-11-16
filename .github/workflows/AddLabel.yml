@@ -15,10 +15,8 @@
 name: Add Label
 
 on:
-  workflow_call:
   workflow_run:
-    # workflows: [Unit Test, CodeQL]
-    workflows: [CodeQL]
+    workflows: [Unit Test, CodeQL]
     types:
       - completed
   pull_request_review:

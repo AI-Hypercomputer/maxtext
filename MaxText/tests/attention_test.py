@@ -23,6 +23,7 @@ from jax.sharding import Mesh
 from layers import attentions
 from jax.sharding import PartitionSpec as P
 import numpy as np
+import pytest
 
 import pyconfig
 import sys
@@ -34,7 +35,7 @@ class AttentionTest(unittest.TestCase):
   """Test for the Attention """
   def setUp(self):
     super().setUp()
-    pyconfig.initialize(sys.argv + ['configs/base.yml'], per_device_batch_size = 1.0, run_name='test', enable_checkpointing=False)
+    pyconfig.initialize([sys.argv[0], 'configs/base.yml'], per_device_batch_size = 1.0, run_name='test', enable_checkpointing=False)
     self.cfg = pyconfig.config
     self.rng = jax.random.PRNGKey(0)
 
@@ -74,6 +75,7 @@ class AttentionTest(unittest.TestCase):
     decoder_mask = self.get_decoder_mask()
     return lnx, decoder_mask, decoder_segment_ids, decoder_positions
 
+  @pytest.mark.tpu
   def test_attention(self):
     lnx, decoder_mask, decoder_segment_ids, decoder_positions = self.get_data()
 
