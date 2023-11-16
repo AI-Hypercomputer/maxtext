@@ -368,8 +368,8 @@ class MultiHeadDotProductAttention(nn.Module):
   def __call__(self,
                inputs_q: Array,
                inputs_kv: Array,
+               enable_flash_attention,
                decoder_segment_ids = None,
-               enable_flash_attention = True,
                inputs_positions:Optional[Array] = None,
                mask: Optional[Array] = None,
                bias: Optional[Array] = None,
@@ -1046,6 +1046,7 @@ class DecoderLayer(nn.Module):
         mesh = mesh)(
             lnx,
             lnx,
+            enable_flash_attention=cfg.enable_flash_attention,
             decoder_segment_ids=decoder_segment_ids,
             inputs_positions=decoder_positions,
             mask=decoder_mask,
