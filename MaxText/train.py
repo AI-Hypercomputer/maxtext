@@ -313,6 +313,20 @@ def train_loop(config, state=None):
   writer.close()
   return state
 
+import socket
+
+def is_port_open(port):
+  try:
+      # Create a socket object
+      host= socket.gethostname()
+      sock = socket.create_connection((host, port))
+      # If connection succeeds, the port is open
+      sock.close()
+      return True
+  except (socket.timeout, ConnectionRefusedError):
+      # If connection times out or is refused, the port is closed
+      return False
+
 def main(argv: Sequence[str]) -> None:
   jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
