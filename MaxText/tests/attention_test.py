@@ -54,7 +54,7 @@ class AttentionTest(unittest.TestCase):
         config=self.cfg,
         mesh = self.mesh)
     self.variable = self.attention.init({'params': self.rng, 'aqt': self.rng}, jnp.ones((self.BS, self.MAX_TARGET_LENGTH, self.BASE_EMB_DIM)), 
-                            jnp.ones((self.BS, self.MAX_TARGET_LENGTH, self.BASE_EMB_DIM)), jnp.ones((self.BS, self.MAX_TARGET_LENGTH)))
+                            jnp.ones((self.BS, self.MAX_TARGET_LENGTH, self.BASE_EMB_DIM)), False)
 
 
   def get_decoder_mask(self):
