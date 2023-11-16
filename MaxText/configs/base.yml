@@ -53,7 +53,7 @@ base_emb_dim: 2560
 base_num_query_heads: 8
 base_num_kv_heads: 8
 base_mlp_dim: 8192
-base_num_decoder_layers: 2
+base_num_decoder_layers: 16
 head_dim: 256
 # activation functions are .
 mlp_activations: ["relu"]
@@ -122,8 +122,8 @@ eval_split: 'validation'
 per_device_batch_size: 12.0
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
-dataset_type: array_record # must be c4, array_record or synthetic
-# dataset_type: c4
+# dataset_type: c4 # must be c4, array_record or synthetic
+dataset_type: array_record
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps

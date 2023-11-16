@@ -34,8 +34,6 @@ import tokenizer
 import multihost_dataloading
 import sequence_packing
 import pygrain_operations
-from transformers import T5Tokenizer
-from sentencepiece import SentencePieceProcessor
 import pygrain_tokenizer
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
@@ -176,6 +174,12 @@ def preprocessing_pipeline_pygrain(
   data_sharding = None,
   data_shuffle_seed = 0,
 ):
+  
+  operations = []
+  operations.append(pygrain_operations.ParseFeatures())
+  operations.append(pygrain_operations.NormalizeFeatures())
+  operations.append(pygrain_tokenizer.Tokenize(["inputs","targets"], max_length, vocab_path))
+  operations.append(pygrain.MapOperation(map_function=pygrain_operations.filter_keys))
   operations.append(pygrain.FilterOperation(condition_function = pygrain_operations.length_filter(max_length)))
 
   # Pack and Batch examples.
@@ -185,7 +189,7 @@ def preprocessing_pipeline_pygrain(
                         length_struct={'inputs':max_length,'targets':max_length}))
     operations.append(pygrain.MapOperation(map_function=pygrain_operations.CombineKeys()))
   else:
-    # operations.append(pygrain.MapOperation(map_function=pygrain_operations.PadToMaxLength(max_length)))
+    operations.append(pygrain.MapOperation(map_function=pygrain_operations.PadToMaxLength(max_length)))
     operations.append(pygrain.BatchOperation(batch_size=batch_size // jax.process_count(), drop_remainder=drop_remainder))
 
   # Shift inputs for teacher-forced training
@@ -203,10 +207,10 @@ def preprocessing_pipeline_pygrain(
   )
 
   dataloader = pygrain.DataLoader(
-    data_source = dataset,
-    operations = operations,
-    sampler = index_sampler,
-    worker_count=0,
+      data_source = dataset,
+      operations = operations,
+      sampler = index_sampler,
+      worker_count=1,
   )
   # data_iter = iter(dataloader)
   # global_shape = (batch_size, max_length)
@@ -279,7 +283,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
   # Load tokenizer
   sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
                                           vocab_size=config.vocab_size)
-  # sp_tokenizer = T5Tokenizer.from_pretrained('t5-base')
+
   # Tokenize data.
   train_ds = train_ds.map(
       tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
@@ -346,15 +350,9 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
     vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
 
   # Load tokenizer
-  # sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
-  #                                         vocab_size=config.vocab_size)
-  # sp_tokenizer = T5Tokenizer.from_pretrained('t5-base', model_max_length=1024)
-  sp_tokenizer = SentencePieceProcessor(vocab_path)
-
-  operations = [pygrain.MapOperation(map_function=pygrain_operations.normalize_features())]
-  #operations.append(pygrain.MapOperation(map_function=pygrain_operations.TokenizeOperation(sp_tokenizer)))
-  operations.append(pygrain_tokenizer.TokenizeAndPad(["inputs","targets"], config.max_target_length, vocab_path))
-
+  sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
+                                          vocab_size=config.vocab_size)
+                                          
   # Set global batch size.
   global_batch_size_to_load = config.global_batch_size_to_load
 
@@ -362,10 +360,6 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
     eval_batch_size = config.eval_per_device_batch_size * global_mesh.size
   else:
     eval_batch_size = global_batch_size_to_load
-
-  def filter_keys(record):
-    return {'inputs': record['inputs'], 'targets': record['targets']}
-  operations.append(pygrain.MapOperation(map_function=filter_keys))
 
   train_iter = preprocessing_pipeline_pygrain(
       train_ds,
@@ -377,7 +371,7 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
       num_epochs=1,
       pack_examples=False,
       max_length=config.max_target_length,
-      shift=False,
+      shift=True,
       data_sharding=config.data_sharding,
       data_shuffle_seed = data_shuffle_seed,)
 
@@ -390,7 +384,7 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
       shuffle=config.enable_data_shuffling,
       pack_examples=False,
       max_length=config.max_eval_target_length,
-      shift=False,
+      shift=True,
       data_sharding=config.data_sharding,
       data_shuffle_seed = data_shuffle_seed,)
 
@@ -403,7 +397,7 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
       shuffle=config.enable_data_shuffling,
       pack_examples=False,
       max_length=config.max_eval_target_length,
-      shift=False,
+      shift=True,
       data_sharding=config.data_sharding,
       data_shuffle_seed = data_shuffle_seed,)     
 
