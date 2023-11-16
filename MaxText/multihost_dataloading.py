@@ -126,7 +126,6 @@ def get_next_batch_sharded(local_dataset: tf.data.Dataset,
   if not loaded_data_success:
     local_data = local_dataset.next()
 
-  # local_devices = jax.local_devices()
   local_devices = global_mesh.local_devices
   local_device_count = jax.local_device_count()
 
@@ -190,11 +189,8 @@ def get_next_batch_sharded_pygrain(data_iter,
   data_axes = jax.tree_map(lambda x: PartitionSpec(*data_sharding), local_data)
   _ = check_inputs("array_record", local_data, global_data_shape, data_axes)
 
-  # local_devices = jax.local_devices()
   local_devices = global_mesh.local_devices
   local_device_count = jax.local_device_count()
-  print(f"local_device: {local_devices}")
-  print(f"local_device_count: {local_device_count}")
 
   def _put_to_devices(x):
     try:
@@ -217,10 +213,6 @@ def get_next_batch_sharded_pygrain(data_iter,
     device_buffers = _put_to_devices(local_data)
     #  Wrap device buffers as GDA
     shape = tuple(shape)
-    print("####################### Debug")
-    print(f"shape: {shape}; global_mesh: {global_mesh}; ")
-    print(f"input_sharding_constraint: {input_sharding_constraint};")
-    print(f"jax.sharding.NamedSharding: {jax.sharding.NamedSharding(global_mesh, input_sharding_constraint)};")
     input_gda = jax.make_array_from_single_device_arrays(shape,
         jax.sharding.NamedSharding(global_mesh, input_sharding_constraint), device_buffers)
     return input_gda

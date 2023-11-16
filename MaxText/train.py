@@ -23,10 +23,6 @@ import jax
 import os
 import sys
 
-jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-print(f"Found {jax.device_count()} devices.")
 
 from typing import Sequence
 import datetime
@@ -55,6 +51,8 @@ from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
+from multihost_dataloading import get_next_batch_sharded_pygrain
+
 import max_logging
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
@@ -81,7 +79,15 @@ def load_next_batch(train_iter, example_batch, config):
   if config.reuse_example_batch and example_batch is not None:
     return example_batch
   else:
-    return train_iter()
+      return train_iter()
+
+def load_next_batch_pygrain(train_iter, example_batch, config, mesh):
+  if config.reuse_example_batch and example_batch is not None:
+    return example_batch
+  else:
+    global_shape = (config.global_batch_size_to_load, config.max_target_length)
+    return get_next_batch_sharded_pygrain(
+      train_iter, config.data_sharding, global_shape, mesh)  
 
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   """Records scalar metrics to be written to tensorboard"""
@@ -243,11 +249,6 @@ def train_loop(config, state=None):
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  # if config.dataset_type == "array_record":
-  #   inital_iterator = data_iterator
-  # else:
-  #   inital_iterator = None
-
   state, state_mesh_annotations, data_iterator = max_utils.setup_initial_state(model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager)
   data_pspec = P(*config.data_sharding)
 
@@ -274,7 +275,10 @@ def train_loop(config, state=None):
   running_gcs_metrics = [] if config.gcs_metrics else None
 
   for step in np.arange(get_first_step(state), config.steps):
-    example_batch = load_next_batch(data_iterator, example_batch, config)
+    if config.dataset_type == "array_record":
+      example_batch = load_next_batch_pygrain(data_iterator, example_batch, config, mesh)
+    else:
+      example_batch = load_next_batch(data_iterator, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics, nextrng = p_train_step(
           model, config, state, example_batch, nextrng
@@ -311,6 +315,10 @@ def train_loop(config, state=None):
   return state
 
 def main(argv: Sequence[str]) -> None:
+  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+  os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
+  print(f"Found {jax.device_count()} devices.")  
   pyconfig.initialize(argv)
   os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
   debug_config = debug_configuration.DebugConfig(
@@ -319,7 +327,7 @@ def main(argv: Sequence[str]) -> None:
       stack_trace_to_cloud = pyconfig.config.stack_trace_to_cloud,
       stack_trace_interval_seconds = pyconfig.config.stack_trace_interval_seconds))
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
-  with diagnostic.diagnose(diagnostic_config):
+  with diagnostic.diagnose(diagnostic_config):   
     train_loop(pyconfig.config)
 
 

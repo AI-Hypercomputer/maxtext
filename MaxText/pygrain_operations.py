@@ -1,3 +1,5 @@
+from collections.abc import Mapping, Sequence
+import dataclasses
 from typing import Dict
 import grain.python as pygrain
 import numpy as np
@@ -13,6 +15,29 @@ class normalize_features():
       # features['targets'] = features['inputs']
       return {'inputs':features, 'targets': features}
     return _normalize_features(features)
+
+@dataclasses.dataclass
+class ParseFeatures(pygrain.MapTransform):
+    def map(self, features):
+        def _parse(example):
+            parsed = tf.io.parse_example(
+                example, {
+                'text': tf.io.FixedLenFeature(shape=(), dtype=tf.string)
+            })
+            return parsed
+        return _parse(features)
+
+
+@dataclasses.dataclass
+class NormalizeFeatures(pygrain.MapTransform):
+    def map(self, features):
+        return {
+            'inputs':features['text'].numpy().decode(), 
+            'targets': features['text'].numpy().decode()
+            }
+
+def filter_keys(record):
+    return {'inputs': record['inputs'], 'targets': record['targets']}
 
 class TokenizeOperation():
     """ TokenizeOp
@@ -70,27 +95,29 @@ class CombineKeys():
         combined_data.update(positions)
         return combined_data
 
-def shift_right_tf(x, axis=1):
+def shift_right(x, axis=1):
   """Shift the input to the right by padding and slicing on axis."""
   pad_widths = [(0, 0)] * len(x.shape)
   pad_widths[axis] = (1, 0)
   slices = [slice(None),] * len(x.shape)
   slices[axis] = slice(0, -1)
-  padded = tf.pad(
+  padded = np.pad(
       x,
-      tf.constant(pad_widths),
+      pad_widths,
       mode='constant',
-      constant_values=tf.constant(0, x.dtype))
+      constant_values=x.dtype.type(0)
+    #   constant_values=tf.constant(0, x.dtype)
+      )
   return padded[tuple(slices)]
 
-def shift_inputs_tf(x, segment_ids=None, axis=1):
+def shift_inputs(x, segment_ids=None, axis=1):
   """Shift inputs and replace EOS by 0 for packed inputs."""
-  shifted = shift_right_tf(x, axis=axis)
+  shifted = shift_right(x, axis=axis)
   # For packed targets, the first shifted token of a new sequence is made
   # 0, rather than being the EOS token for the last sequence.
   if segment_ids is not None:
     shifted *= tf.cast(
-        segment_ids == shift_right_tf(segment_ids, axis=axis), x.dtype
+        segment_ids == shift_right(segment_ids, axis=axis), x.dtype
     )
   return shifted
 
@@ -101,5 +128,5 @@ class ShiftData():
 
     def __call__(self, x):
         segment_ids = x['inputs_segmentation'] if self.segmented else None
-        x['inputs'] = shift_inputs_tf(x['inputs'], segment_ids=segment_ids, axis=self.axis)
+        x['inputs'] = shift_inputs(x['inputs'], segment_ids=segment_ids, axis=self.axis)
         return x        

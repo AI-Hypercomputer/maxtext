@@ -1,9 +1,11 @@
-orbax-checkpoint
+orbax-checkpoint==0.4.1
 absl-py
+array-record
 argparse
 cloud-tpu-diagnostics
 datetime
 google-cloud-storage
+grain-nightly==0.0.3
 flax
 ml-collections
 numpy

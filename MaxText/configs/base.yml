@@ -118,14 +118,15 @@ vocab_relative_path: "tokenizer"  # Assumes we're allowed
 # eval_dataset_name: 'c4/en:3.0.1'
 # dataset_name: 'array-record/c4/en/3.0.1'
 # eval_dataset_name: 'array-record/c4/en/3.0.1'
+# eval_split: 'validation'  # for c4 data
 dataset_name: 'lm1b/1.1.0'
 eval_dataset_name: 'lm1b/1.1.0'
-eval_split: 'test'
+eval_split: 'test'  # for lm1b
 per_device_batch_size: 12.0
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
-dataset_type: array_record # must be c4, array_record or synthetic
-# dataset_type: c4
+# dataset_type: c4 # must be c4, array_record or synthetic
+dataset_type: array_record
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
