@@ -46,4 +46,8 @@ sudo apt-get -y install gcsfuse
 
 mkdir -p $MOUNT_PATH
 
-gcsfuse --implicit-dirs "$DATASET_GCS_BUCKET" "$MOUNT_PATH"
+# gcsfuse --implicit-dirs "$DATASET_GCS_BUCKET" "$MOUNT_PATH"
+
+gcsfuse --implicit-dirs --http-client-timeout=5s --max-conns-per-host=2000 \
+        --debug_fuse_errors --debug_fuse --debug_gcs --debug_invariants --debug_mutex \
+        --log-file=$HOME/gcsfuse.json "$DATASET_GCS_BUCKET" "$MOUNT_PATH"
