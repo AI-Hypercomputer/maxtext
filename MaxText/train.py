@@ -204,7 +204,7 @@ def train_step(model, config, state, data, dropout_rng):
     grads = raw_grads
   new_state = state.apply_gradients(grads=grads)
   metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
-             'learning/raw_grad_norm' : max_utils.l2norm_pytree(raw_grads), 
+             'learning/raw_grad_norm' : max_utils.l2norm_pytree(raw_grads),
              'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
@@ -228,6 +228,7 @@ def train_loop(config, state=None):
       config.enable_checkpointing,
       config.async_checkpointing,
       config.save_period,
+      enable_single_slice_checkpointing=True,
   )
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)

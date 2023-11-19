@@ -41,7 +41,7 @@ gcs_metrics: False
 dtype: "bfloat16"
 int8_training: False
 
-# Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
+# Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
 global_parameter_scale: 1
 base_emb_dim: 2560
@@ -57,7 +57,7 @@ logits_via_embedding: True  # NOTE: this is True just for testing.
 remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
-enable_flash_attention: True
+enable_flash_attention: false
 
 record_internal_nn_metrics: 0
 
@@ -117,12 +117,12 @@ save_period: 10_000
 # 1) Linear warmup from 0 to [learning_rate] over steps 0 to [learning_rate_schedule_steps * warmup_steps_fraction]
 # 2) Cosine decay from [learning_rate] to [learning_rate * cosine_learning_rate_final_fraction] from warmup to learning_rate_schedule_steps
 # 3) Constant learning rate of 0 from learning_rate_schedule_steps to steps.
-# The zero learning rate section can be used to more accurately measure the fully trained model's performance. 
+# The zero learning rate section can be used to more accurately measure the fully trained model's performance.
 learning_rate: 3.e-5
-cosine_learning_rate_final_fraction: 0.1 
+cosine_learning_rate_final_fraction: 0.1
 warmup_steps_fraction: 0.1
 learning_rate_schedule_steps: -1 # By default the length of the schedule is set to the number of steps.
-# However you may choose a longer schedule (learning_rate_schedule_steps > steps), in which case the training will end before 
+# However you may choose a longer schedule (learning_rate_schedule_steps > steps), in which case the training will end before
 # dropping fully down. Or you may choose a shorter schedule, where the unspecified steps will have a learning rate of 0.
 
 # Maximum length cutoff for training examples.
@@ -147,7 +147,7 @@ enable_profiler: False
 enable_checkpointing: True
 async_checkpointing: True
 
-# When dropout is false the model is a deterministic function of the 
+# When dropout is false the model is a deterministic function of the
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
 enable_dropout: True
 enable_data_shuffling: True

@@ -18,7 +18,7 @@
 """ Common Max Utils needed by multiple modules"""
 import checkpointing
 import functools
-
+import time
 import max_logging
 
 import numpy as np
@@ -53,7 +53,7 @@ def deactivate_profiler(config):
     jax.profiler.stop_trace()
 
 def _prepare_metrics_for_json(metrics, step, run_name):
-  """Converts metric dictionary into json supported types (e.g. float)""" 
+  """Converts metric dictionary into json supported types (e.g. float)"""
   metrics_dict = {}
   for val in metrics['scalar']:
     metrics_dict[val] = float(metrics['scalar'][val])
@@ -202,6 +202,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
+    start_time = time.time()
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
                                                 config.load_from_other_directory,
@@ -209,6 +210,8 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
                                                 unboxed_abstract_state,
                                                 mesh,
                                                 state_mesh_annotations)
+    end_time = time.time()
+    print(f"Finished load_state_if_possible in {end_time-start_time} seconds", flush=True)
 
     state_mesh_shardings = jax.tree_map(
         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
