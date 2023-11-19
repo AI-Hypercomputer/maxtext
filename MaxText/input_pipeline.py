@@ -84,6 +84,13 @@ def normalize_features(ds):
       _normalize_features,
       num_parallel_calls=AUTOTUNE)
 
+# Max length filter.
+def length_filter(max_len):
+  def filter_fn(x):
+    source, target = x['inputs'], x['targets']
+    l = tf.maximum(tf.shape(source)[0], tf.shape(target)[0])
+    return tf.less(l, max_len + 1)
+  return filter_fn
 
 # -----------------------------------------------------------------------------
 # Main dataset preparation.
@@ -106,14 +113,6 @@ def preprocessing_pipeline(
   data_shuffle_seed = 0,
 ):
   """Shuffle and batch/pack the given dataset."""
-
-  # Max length filter.
-  def length_filter(max_len):
-    def filter_fn(x):
-      source, target = x['inputs'], x['targets']
-      l = tf.maximum(tf.shape(source)[0], tf.shape(target)[0])
-      return tf.less(l, max_len + 1)
-    return filter_fn
 
   if max_length > 0:
     dataset = dataset.filter(length_filter(max_length))
@@ -158,10 +157,30 @@ def preprocessing_pipeline(
   # Return multi-host jax.Array prep iterator
   return multihost_gen
 
+# def preprocessing_pipeline_lazydata(
+#   dataset,
+#   vocab_path,
+#   batch_size: int,
+#   global_mesh,
+#   shuffle: bool,
+#   num_epochs: Optional[int] = 1,
+#   pack_examples: bool = True,
+#   shuffle_buffer_size: int = 1024,
+#   max_length: int = 512,
+#   shift: bool = True,
+#   drop_remainder: bool = True,
+#   data_sharding = None,
+#   data_shuffle_seed = 0,
+# ):
+#   dataset = normalize_features(dataset)
+#   dataset = dataset.filter(length_filter(max_length))
+
+
 def preprocessing_pipeline_pygrain(
   dataset,
   dataset_type,
-  operations,
+  grain_worker_count,
+  vocab_path,
   batch_size: int,
   global_mesh,
   shuffle: bool,
@@ -210,7 +229,7 @@ def preprocessing_pipeline_pygrain(
       data_source = dataset,
       operations = operations,
       sampler = index_sampler,
-      worker_count=1,
+      worker_count=grain_worker_count,
   )
   # data_iter = iter(dataloader)
   # global_shape = (batch_size, max_length)
@@ -266,7 +285,17 @@ def get_datasets_pygrain(
     eval_files = [data_dir + '/' + f for f in os.listdir(data_dir) if re.match(rf'.*{config.eval_split}.*', f)]
     eval_ds = pygrain.ArrayRecordDataSource(eval_files)
   else:
-    eval_ds_builder = train_ds_builder
+    eval_ds = train_ds
+
+  # train_ds = tfds.data_source(config.dataset_name, split="train")
+  # if config.eval_dataset_name:
+  #   eval_ds = tfds.data_source(config.dataset_name, split=config.eval_split)
+  # else:
+  #   eval_ds = train_ds
+
+  # lazy_dataset = pygrain.experimental.lazy_dataset
+  # train_ds = lazy_dataset.SourceLazyMapDataset(train_ds)
+  # eval_ds = lazy_dataset.SourceLazyMapDataset(eval_ds)
 
   return train_ds, eval_ds
 
@@ -364,7 +393,8 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
   train_iter = preprocessing_pipeline_pygrain(
       train_ds,
       config.dataset_type,
-      operations,
+      config.grain_worker_count,
+      vocab_path,
       global_batch_size_to_load,
       global_mesh,
       shuffle=config.enable_data_shuffling,
@@ -378,7 +408,8 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
   eval_iter = preprocessing_pipeline_pygrain(
       eval_ds,
       config.dataset_type,
-      operations,
+      config.dataset_type,
+      vocab_path,
       eval_batch_size,
       global_mesh,
       shuffle=config.enable_data_shuffling,
@@ -391,7 +422,8 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
   predict_iter = preprocessing_pipeline_pygrain(
       eval_ds,
       config.dataset_type,
-      operations,
+      config.grain_worker_count,
+      vocab_path,
       eval_batch_size,
       global_mesh,
       shuffle=config.enable_data_shuffling,
