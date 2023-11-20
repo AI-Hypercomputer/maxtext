@@ -1,7 +1,7 @@
 orbax-checkpoint
 absl-py
+aqtp
 cloud-tpu-diagnostics
-datetime
 google-cloud-storage
 flax
 ml-collections
@@ -12,8 +12,8 @@ protobuf==3.20.3
 pylint
 pytest
 sentencepiece==0.1.97
-tensorflow==2.13.*
 tensorflow-datasets
 tensorflow-text
 tensorboardx
+tensorflow
 tensorboard-plugin-profile

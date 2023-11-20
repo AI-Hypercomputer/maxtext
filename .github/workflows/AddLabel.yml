@@ -1,0 +1,106 @@
+# Copyright 2023 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Add Label
+
+on:
+  workflow_call:
+  workflow_run:
+    # workflows: [Unit Test, CodeQL]
+    workflows: [CodeQL]
+    types:
+      - completed
+  pull_request_review:
+  pull_request_review_comment:
+  workflow_dispatch:
+
+jobs:
+  AddPullReady:
+    permissions:
+      checks: read
+      pull-requests: write
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/github-script@v6
+        with:
+          script: |
+            const owner = "google"
+            const repo = "maxtext"
+            let pull_number = -1
+            if (context.payload.pull_request !== undefined) {
+              pull_number = context.payload.pull_request.number
+            } else if (context.payload.workflow_run !== undefined) {
+              if (context.payload.workflow_run.pull_requests.length === 0) {
+                console.log("This workflow is NOT running within a PR's context")
+                process.exit()
+              }
+              console.log(context.payload.workflow_run.pull_requests)
+              pull_number = context.payload.workflow_run.pull_requests[0].number
+            } else {
+              console.log("This workflow is running within an invalid context")
+              process.exit(1)
+            }
+
+            // This list should match with CODEOWNERS
+            let requiredReviewers = { rwitten: "" }
+            const reviews = await github.rest.pulls.listReviews({
+              owner,
+              repo,
+              pull_number,
+            })
+            if (reviews.data.length === 0) {
+              console.log("Not adding pull ready because the PR is not approved yet")
+              process.exit()
+            }
+            for (const review of reviews.data) {
+              if (review.state === "APPROVED") {
+                delete requiredReviewers[review.user.login]
+              }
+            }
+            if (Object.keys(requiredReviewers).length !== 0) {
+              console.log("Not adding pull ready because the PR is not approved yet")
+              process.exit()
+            }
+
+            const commits = await github.rest.pulls.listCommits({
+              owner,
+              repo,
+              pull_number,
+              per_page: 100,
+            })
+            const ref = commits.data.slice(-1)[0].sha
+            const checkRuns = await github.rest.checks.listForRef({
+              owner,
+              repo,
+              ref,
+            })
+            if (checkRuns.data.check_runs.length === 0) {
+              console.log("Not adding pull ready because no check runs are associated with the last commit: " + ref)
+              process.exit()
+            }
+            for (const checkRun of checkRuns.data.check_runs) {
+              if (checkRun.name.endsWith(context.job)) continue
+              if (checkRun.conclusion !== "success") {
+                console.log("Not adding pull ready because " + checkRun.name + " has not passed yet: " + checkRun.html_url)
+                process.exit()
+              }
+            }
+            console.log("Adding pull ready label because the PR is approved AND all the check runs have passed")
+            await github.rest.issues.addLabels({
+              issue_number: pull_number,
+              labels: ["pull ready"],
+              owner,
+              repo,
+            })
