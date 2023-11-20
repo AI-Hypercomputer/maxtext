@@ -108,7 +108,8 @@ parser.add_argument(
 args = parser.parse_args()
 
 def main(_argv: Sequence[str]) -> None:
-  cc.initialize_cache(os.path.expanduser("~/jax_cache_2"))
+  os.environ["XLA_FLAGS"]="--xla_dump_to=/tmp/hlo_dumps/test_shardings"
+  cc.initialize_cache(os.path.expanduser("~/jax_cache_shardings_2"))
 
   def activate_profiler(profiler_path):
     if profiler_path:
