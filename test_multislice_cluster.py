@@ -1,9 +1,9 @@
 import jax
-from cloud_tpu_cluster import MultisliceTpuCluster
+from cloud_tpu_cluster import SingleSliceGceTpuCluster
 
 
 
-c = MultisliceTpuCluster()
+c = SingleSliceGceTpuCluster()
 
 print(f"{c=}")
 print(f"{c.is_env_present()=}")
