@@ -276,6 +276,7 @@ def create_orbax_checkpoint_manager(
 
   if enable_single_slice_checkpointing:
     ocp.type_handlers.register_type_handler(jax.Array, SingleSliceArrayHandler(), override=True)
+    # ocp.type_handlers._enable_ocdbt_for_handlers()
     ocp.type_handlers.enable_ocdbt_for_handlers()
 
   mngr = CheckpointManager(
