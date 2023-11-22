@@ -31,10 +31,22 @@ def set_up_torchbench(model_name: str = "") -> Tuple[str]:
       "sudo apt install -y libsndfile-dev",
       "sudo apt-get install libgl1 -y",
       "pip install numpy pandas",
-      "pip install --user --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cpu",
-      "pip install --user 'torch_xla[tpuvm] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-nightly-cp310-cp310-linux_x86_64.whl'",
-      "pip install --pre torchtext==0.17.0.dev20231025+cpu --index-url  https://download.pytorch.org/whl/nightly/cpu --no-dependencies",
-      "pip install --pre torchaudio==2.2.0.dev20231025+cpu --index-url https://download.pytorch.org/whl/nightly/cpu --no-dependencies",
+      (
+          "pip install --user --pre torch torchvision --index-url"
+          " https://download.pytorch.org/whl/nightly/cpu"
+      ),
+      (
+          "pip install --user 'torch_xla[tpuvm] @"
+          " https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-nightly-cp310-cp310-linux_x86_64.whl'"
+      ),
+      (
+          "pip install --pre torchtext==0.17.0.dev20231025+cpu --index-url "
+          " https://download.pytorch.org/whl/nightly/cpu --no-dependencies"
+      ),
+      (
+          "pip install --pre torchaudio==2.2.0.dev20231118+cpu --index-url"
+          " https://download.pytorch.org/whl/nightly/cpu --no-dependencies"
+      ),
       "pip install Pillow --no-dependencies",
       "sudo chmod 777 /usr/local/lib/python3.10/dist-packages/",
       "sudo chmod 777 /usr/local/bin/",
@@ -42,8 +54,7 @@ def set_up_torchbench(model_name: str = "") -> Tuple[str]:
       "pip install tqdm --no-dependencies",
       "pip install psutil",
       "cd; git clone https://github.com/pytorch/benchmark.git",
-      "cd ~/benchmark && git checkout xla_benchmark",
-      "cd; git clone https://github.com/zpcore/xla.git xla",
+      "cd; git clone https://github.com/zpcore/xla.git",
       "cd ~/xla && git checkout benchmark",
   )
 
@@ -75,7 +86,7 @@ def get_torchbench_config(
   run_script_cmds = (
       (
           "cd ~/xla/benchmarks && python experiment_runner.py"
-          " --suite-name=torchbench --accelerator=tpu --progress-bar"
+          " --suite-name=torchbench --xla=PJRT --accelerator=tpu --progress-bar"
           f" {extraFlags}"
       ),
       "python ~/xla/benchmarks/result_analyzer.py",
@@ -94,7 +105,7 @@ def get_torchbench_config(
       set_up_cmds=set_up_cmds,
       run_model_cmds=run_script_cmds,
       time_out_in_min=time_out_in_min,
-      task_owner=test_owner.RAN_R,
+      task_owner=test_owner.PEI_Z,
   )
 
   job_metric_config = metric_config.MetricConfig(

@@ -25,3 +25,6 @@ ERIC_L = "Eric L."
 CHANDRA_D = "Chandra D."
 GAGIK_A = "Gagik A."
 RAN_R = "Ran R."
+
+# PYTORCH
+PEI_Z = "Pei Z."
