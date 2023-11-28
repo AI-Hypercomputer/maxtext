@@ -26,6 +26,7 @@ import sys
 from typing import Sequence
 import datetime
 from absl import app
+from flax.linen import partitioning as nn_partitioning
 from flax import linen as nn
 import numpy as np
 import optax
@@ -44,10 +45,10 @@ from jax.sharding import Mesh
 
 from jax.experimental.compilation_cache import compilation_cache as cc
 
-# from cloud_tpu_diagnostics import diagnostic
-# from cloud_tpu_diagnostics.configuration import debug_configuration
-# from cloud_tpu_diagnostics.configuration import diagnostic_configuration
-# from cloud_tpu_diagnostics.configuration import stack_trace_configuration
+from cloud_tpu_diagnostics import diagnostic
+from cloud_tpu_diagnostics.configuration import debug_configuration
+from cloud_tpu_diagnostics.configuration import diagnostic_configuration
+from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 import max_logging
 
@@ -221,7 +222,7 @@ def train_loop(config, state=None):
   Returns:
 
   """
-#   writer = SummaryWriter(config.tensorboard_dir)
+  writer = SummaryWriter(config.tensorboard_dir)
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       config.checkpoint_dir,
       config.enable_checkpointing,
@@ -242,41 +243,76 @@ def train_loop(config, state=None):
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
   
-  print("train.py:preprocessing_pipeline ROSHANI create_data_iterator_with_tokenizer done!")
+  print("train.py:preprocessing_pipeline ROSHANI data loaded ")
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
+    train_step,
+    mesh,
+    state_mesh_annotations,
+    model,
+    config
+  )
+
+#   num_model_parameters = calculate_num_params_from_pytree(state.params)
+#   max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
+#   per_device_tflops = calculate_training_tflops(num_model_parameters, config)
+
+#   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
+#   if config.compiled_trainstep_file != '':
+#     print("Loading the compiled function...", flush=True)
+#     # Need to pass train signature and state to determine i/o shapes of train_state for now.
+#     p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
+#     print("Loaded compiled function!", flush=True)
+#   else:
+#     p_train_step = jax.jit(
+#       functional_train,
+#       in_shardings=in_shard,
+#       out_shardings=out_shard,
+#       static_argnums=static_argnums,
+#       donate_argnums=donate_argnums)
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
   print("last_step_completion is ", last_step_completion)
+  
+  local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
+  running_gcs_metrics = [] if config.gcs_metrics else None
 
   # Actual training steps
   for step in np.arange(get_first_step(state), config.steps):
     print("Step ", step, " is starting at ", last_step_completion)
-    example_batch = load_next_batch(data_iterator, example_batch, config)
-    print(" Shape of example batch: ", example_batch)
     new_time = datetime.datetime.now()
     last_step_completion = new_time
-    
-  print("train.py:preprocessing_pipeline ROSHANI loading batches done!")
+
+    if checkpoint_manager is not None:
+      if checkpoint_manager.save(step, state):
+        max_logging.log(f"saved a checkpoint at step {step}")
+      # Upon preemption, exit when and only when all ongoing saves are complete.
+      if checkpoint_manager.reached_preemption(step):
+        print(" ROSHANI writing checkpoints! ")
+        checkpoint_manager.wait_until_finished()
+        sys.exit()
 
   return state
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
-#   jax.config.update('jax_platform_name', 'cpu')
-  os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-  # os.environ["JAX_PLATFORMS"] = "cpu"
-  print(f"ROSHANI ... \n Found {jax.device_count()} devices.")
-  print(f"ROSHANI ... \n Found {jax.process_count()} processes.")
-  print(f"ROSHANI ... \n Found {jax.devices()} devices.")
+  os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  print(f"Found {jax.device_count()} devices.")
   cc.initialize_cache(os.path.expanduser("~/jax_cache"))
   pyconfig.initialize(argv)
   config = pyconfig.config
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
-  train_loop(config)
-
+  debug_config = debug_configuration.DebugConfig(
+    stack_trace_config = stack_trace_configuration.StackTraceConfig(
+      collect_stack_trace = config.collect_stack_trace,
+      stack_trace_to_cloud = config.stack_trace_to_cloud,
+      stack_trace_interval_seconds = config.stack_trace_interval_seconds))
+  diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
+  with diagnostic.diagnose(diagnostic_config):
+    train_loop(config)
 
 
 if __name__ == "__main__":

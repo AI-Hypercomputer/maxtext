@@ -326,7 +326,7 @@ def train_loop(config, state=None):
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
     write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
-      print("last_step_completion is ", last_step_completion)
+    print("last_step_completion is ", last_step_completion)
 
     if checkpoint_manager is not None:
       if checkpoint_manager.save(step, state):
