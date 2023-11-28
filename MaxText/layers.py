@@ -39,8 +39,14 @@ from jax import random
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.experimental.pallas.ops.tpu import flash_attention
+import os
+import math
 
-
+try:
+  from jax.experimental.pallas.ops import attention
+  from jax.experimental.pallas.ops import layer_norm
+except ImportError:
+  logging.warning('jax_triton not found, please `pip install jax-triton`')
 
 withLP = nn.with_logical_partitioning
 ScanIn = nn_partitioning.ScanIn
@@ -304,7 +310,7 @@ class MultiHeadDotProductAttention(nn.Module):
 
 
   def apply_attention(self, query, key, value, enable_flash_attention,
-                      decoder_segment_ids, attention_bias, dropout_rng, deterministic, decode):
+                      decoder_segment_ids, attention_bias, dropout_rng, deterministic, decode, gpu_fast_attention=False):
     """ Apply Attention
     """
     if enable_flash_attention and not decode:
@@ -348,6 +354,29 @@ class MultiHeadDotProductAttention(nn.Module):
             )
       x = wrap_flash_attention(query, key, value, decoder_segment_ids)
       x = jax.numpy.transpose(x, axes = (0,2,1,3))
+      
+    elif gpu_fast_attention and not decode:
+      query = LayerNorm(dtype=self.dtype, name='query_layer_norm', kernel_axes = ('heads',))(query)
+      key = LayerNorm(dtype=self.dtype, name='key_layer_norm', kernel_axes = ('heads',))(key)
+      b, s, n, h = key.shape
+      bwd_pass_impl = os.getenv(
+        'maxtext_flash_attention_backward_pass_impl', default='xla'
+      )
+      axis_names = nn.logical_to_mesh_axes(('activation_batch', 'activation_heads', 'activation_length', 'activation_kv'))
+      segment_axis_names = nn.logical_to_mesh_axes(('activation_batch', 'activation_length'))
+
+      @functools.partial(shard_map, mesh = self.mesh, in_specs = (
+          axis_names,
+          axis_names,
+          axis_names,
+          segment_axis_names,
+      ), out_specs = axis_names, check_rep=False)
+      def wrap_gpu_flash_attention(query, key, value):
+        return attention.mha(
+          query, key, value, sm_scale=1.0 / math.sqrt(h), backward_pass_impl=bwd_pass_impl, num_stages = 1, causal = True, segment_ids = None
+        )
+      x = wrap_gpu_flash_attention(query, key, value)
+
     else:
       aqt_rng = self.make_rng('aqt')
       x = dot_product_attention(
