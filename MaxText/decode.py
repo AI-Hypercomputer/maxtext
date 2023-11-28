@@ -21,6 +21,7 @@ from typing import Sequence
 
 import os
 from absl import app
+import datetime
 from flax.linen import partitioning as nn_partitioning
 import numpy as np
 import optax
@@ -146,29 +147,43 @@ def decode_loop(config, state=None):
   state_mesh_shardings = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
   replicated_sharding = jax.sharding.NamedSharding(mesh, P(None, None))
+  partial_predict_step = functools.partial(predict_step, model=model, config=config)
+  partial_predict_step.__name__ = "predict_step"
   p_predict_step = jax.jit(
-      functools.partial(predict_step, model=model, config=config),
+      partial_predict_step,
       in_shardings=(replicated_sharding, state_mesh_shardings, None),
       out_shardings=None
   )
 
   # Encode the demo prompt.
-  tokenized_prompts = encode_strings(
+  np_tokenized_prompts = encode_strings(
       [config.prompt], config.max_predict_length, sp_tokenizer)
+  
+  #import pdb ; pdb.set_trace()
+  tokenized_prompts = jax.device_put(np.vstack([np_tokenized_prompts]*32), jax.sharding.NamedSharding(mesh, P()))
 
   if config.metrics_file:
     local_metrics_file = open(config.metrics_file, 'a', encoding="utf8")
     metrics= {'scalar': {} }
   max_utils.activate_profiler(config)
+
+  last_step_completion = datetime.datetime.now()
+  step_times = []
   for step in np.arange(config.steps):
     rng, rng_to_use = jax.random.split(rng)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      seqs = p_predict_step(tokenized_prompts, state, rng_to_use)
-      decoded_string, num_tokens_decoded = decode_tokens(np.array(seqs)[0], sp_tokenizer, config.eos_id)
-      max_logging.log(f"Decoding #{step} (num tokens {num_tokens_decoded}):\n\t{decoded_string}")
-      if config.metrics_file:
-        metrics['scalar']['num_tokens'] = num_tokens_decoded
-        max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
+      seqs = jax.block_until_ready(p_predict_step(tokenized_prompts, state, rng_to_use))
+      new_time = datetime.datetime.now()
+      step_times.append((new_time-last_step_completion).total_seconds())
+      last_step_completion = new_time
+
+  print(f"Median Step Time Seconds {sorted(step_times)[len(step_times)//2]} {step_times=}")
+
+  decoded_string, num_tokens_decoded = decode_tokens(np.array(seqs)[0], sp_tokenizer, config.eos_id)
+  max_logging.log(f"Decoding #{step} (num tokens {num_tokens_decoded}):\n\t{decoded_string}")
+  if config.metrics_file:
+    metrics['scalar']['num_tokens'] = num_tokens_decoded
+    max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
   max_utils.deactivate_profiler(config)
 
 
