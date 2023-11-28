@@ -57,7 +57,7 @@ logits_via_embedding: True  # NOTE: this is True just for testing.
 remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
-enable_flash_attention: True
+enable_flash_attention: False
 
 record_internal_nn_metrics: 0
 
@@ -178,3 +178,6 @@ use_iota_embed: False
 compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
 compile_topology: '' # Target hardware version, e.g. 'v5e-256'
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
+
+# Maxtext training emulator for storage
+enable_emulator: True
