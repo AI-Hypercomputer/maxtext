@@ -193,5 +193,9 @@ else
     exit 1
 fi
 
+# JAX_PLATFORMS=cpu
+# echo $JAX_PLATFORMS
+# pip3 install --upgrade "jax[cpu]"
+
 # Install dependencies from requirements.txt
 cd $run_name_folder_path && pip3 install -r requirements.txt

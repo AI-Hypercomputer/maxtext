@@ -19,28 +19,24 @@
 
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
-
-import datetime
+import jax
 import os
 import sys
 
 from typing import Sequence
+import datetime
 from absl import app
 from flax import linen as nn
-from flax.linen import partitioning as nn_partitioning
-import jax
 import numpy as np
 import optax
 from tensorboardX import SummaryWriter
 
-import checkpointing
+from layers import Transformer
+import pyconfig
+from input_pipeline import create_data_iterator_with_tokenizer
 import max_utils
 import maxtext_utils
-import max_logging
-import pyconfig
-
-from input_pipeline import create_data_iterator_with_tokenizer
-from layers import models
+import checkpointing
 
 import jax.numpy as jnp
 from jax import random
@@ -48,13 +44,12 @@ from jax.sharding import Mesh
 
 from jax.experimental.compilation_cache import compilation_cache as cc
 
-from cloud_tpu_diagnostics import diagnostic
-from cloud_tpu_diagnostics.configuration import debug_configuration
-from cloud_tpu_diagnostics.configuration import diagnostic_configuration
-from cloud_tpu_diagnostics.configuration import stack_trace_configuration
+# from cloud_tpu_diagnostics import diagnostic
+# from cloud_tpu_diagnostics.configuration import debug_configuration
+# from cloud_tpu_diagnostics.configuration import diagnostic_configuration
+# from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
-Transformer = models.Transformer
-
+import max_logging
 
 def validate_train_config(config):
   """ Validates the configuration is set correctly for train.py"""
@@ -75,16 +70,14 @@ def validate_train_config(config):
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
 def calculate_training_tflops(num_model_parameters, config):
-  """ Calculate training TFLOP"""
   learnable_weight_tflops = 6 * num_model_parameters * config.max_target_length * config.per_device_batch_size \
                                    / 10**12
-  noncasual_attention_flops = 12 * config.num_heads * config.num_decoder_layers * config.head_dim \
-                      * config.max_target_length**2 * config.per_device_batch_size / 10**12
-  causal_attention_tflops = noncasual_attention_flops / 2 # due to causality in attention
-  total_tflops = learnable_weight_tflops + causal_attention_tflops
+  attention_tflops = 12 * config.num_heads * config.num_decoder_layers * config.head_dim * config.max_target_length**2 \
+                     * config.per_device_batch_size / 10**12
+  total_tflops = learnable_weight_tflops + attention_tflops
   print(f'Per train step, total TFLOPs will be {total_tflops:.2f},',
         f'split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops',
-        f'and {100 * causal_attention_tflops/total_tflops:.2f}% attention flops')
+        f'and {100 * attention_tflops/total_tflops:.2f}% attention flops')
   return total_tflops
 
 def get_first_step(state):
@@ -136,6 +129,11 @@ def write_metrics(writer, metrics, step, config):
           f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
       )
       writer.flush()
+
+def calculate_num_params_from_pytree(params):
+  params_sizes = jax.tree_util.tree_map(jax.numpy.size, params)
+  total_parameters = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes)
+  return total_parameters
 
 # -----------------------------------------------------------------------------
 # Top-level Functions
@@ -204,42 +202,32 @@ def train_step(model, config, state, data, dropout_rng):
   else:
     grads = raw_grads
   new_state = state.apply_gradients(grads=grads)
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm': max_utils.l2norm_pytree(grads),
-             'learning/raw_grad_norm': max_utils.l2norm_pytree(raw_grads),
-             'learning/param_norm': max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
+  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
+             'learning/raw_grad_norm' : max_utils.l2norm_pytree(raw_grads), 
+             'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
   return new_state, metrics, rng2
 
-
-def setup_train_loop(config):
-  """ Set up prerequisites for the training loop -
-      checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
-      Set up data iterator and tokenizer, initialize the model.
+def train_loop(config, state=None):
+  """Main Training loop.
 
   Args:
-      config
+    config:
+    state:
+    ckpt_path:
 
   Returns:
-      writer: Summary writer for tensorboard
-      checkpoint_manager: Orbax checkpointer
-      nextrng: key used in train_step for dropout
-      state_mesh_annotations: the mesh annotations for the train state 
-      model:
-      mesh: 
-      learning_rate_schedule:
-      data_iterator: 
-      state: the initialized train state
+
   """
-  writer = SummaryWriter(config.tensorboard_dir)
+#   writer = SummaryWriter(config.tensorboard_dir)
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       config.checkpoint_dir,
       config.enable_checkpointing,
       config.async_checkpointing,
       config.save_period,
   )
-
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
 
@@ -253,119 +241,106 @@ def setup_train_loop(config):
   tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
+  
+  print("train.py:preprocessing_pipeline ROSHANI create_data_iterator_with_tokenizer done!")
+  
+  state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+#   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
+#     train_step,
+#     mesh,
+#     state_mesh_annotations,
+#     model,
+#     config
+#   )
 
-  state, state_mesh_annotations = max_utils.setup_training_state(model, tx, config, init_rng, mesh, checkpoint_manager)
-
-  return ( writer, checkpoint_manager, nextrng, state_mesh_annotations, model,
-          mesh, learning_rate_schedule, data_iterator, state)
-
-
-def train_loop(config, state=None):
-  """Main Training loop.
-
-  Args:
-    config:
-    state:
-    ckpt_path:
-
-  Returns:
-
-  """
-  ( writer, checkpoint_manager, nextrng, state_mesh_annotations, model,
-  mesh, learning_rate_schedule, data_iterator, state) = setup_train_loop(config)
-
-  functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
-    train_step,
-    mesh,
-    state_mesh_annotations,
-    model,
-    config
-  )
-
-  num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
-  max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
-  per_device_tflops = calculate_training_tflops(num_model_parameters, config)
+#   num_model_parameters = calculate_num_params_from_pytree(state.params)
+#   max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
+#   per_device_tflops = calculate_training_tflops(num_model_parameters, config)
 
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
-  if config.compiled_trainstep_file != '':
-    print("Loading the compiled function...", flush=True)
-    # Need to pass train signature and state to determine i/o shapes of train_state for now.
-    p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
-    print("Loaded compiled function!", flush=True)
-  else:
-    p_train_step = jax.jit(
-      functional_train,
-      in_shardings=in_shard,
-      out_shardings=out_shard,
-      static_argnums=static_argnums,
-      donate_argnums=donate_argnums)
+#   if config.compiled_trainstep_file != '':
+#     print("Loading the compiled function...", flush=True)
+#     # Need to pass train signature and state to determine i/o shapes of train_state for now.
+#     p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
+#     print("Loaded compiled function!", flush=True)
+#   else:
+#     p_train_step = jax.jit(
+#       functional_train,
+#       in_shardings=in_shard,
+#       out_shardings=out_shard,
+#       static_argnums=static_argnums,
+#       donate_argnums=donate_argnums)
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
-  print("last_step_completion is ", last_step_completion)
-  
-  local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
-  running_gcs_metrics = [] if config.gcs_metrics else None
+#   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
+#   running_gcs_metrics = [] if config.gcs_metrics else None
 
-  start_step = get_first_step(state) # this is the start_step for training
-  first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
-  if config.enable_profiler and first_profiling_step >= config.steps:
-    raise ValueError("Profiling requested but initial profiling step set past training final step")
-  last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1, first_profiling_step, config.steps - 1)
-  for step in np.arange(start_step, config.steps):
-    if step == first_profiling_step:
-      max_utils.activate_profiler(config)
-
+  # Actual training steps
+  for step in np.arange(get_first_step(state), config.steps):
+    print("Step ", step, " is starting at ", last_step_completion)
     example_batch = load_next_batch(data_iterator, example_batch, config)
-    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      state, metrics, nextrng = p_train_step(
-          state, example_batch, nextrng
-      )
+    # Commenting out the actual training here 
+    # with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    #   state, metrics, nextrng = p_train_step(
+    #       state, example_batch, nextrng
+    #   )
 
     new_time = datetime.datetime.now()
-    record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
-    write_metrics(writer, metrics, step, config)
+    print("Step ", step, " is ending at ", new_time)
+    # record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
+    # write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
-      print("last_step_completion is ", last_step_completion)
+    
 
-    if checkpoint_manager is not None:
-      if checkpoint_manager.save(step, state):
-        max_logging.log(f"saved a checkpoint at step {step}")
-      # Upon preemption, exit when and only when all ongoing saves are complete.
-      if checkpoint_manager.reached_preemption(step):
-        checkpoint_manager.wait_until_finished()
-        sys.exit()
+    # if checkpoint_manager is not None:
+    #   if checkpoint_manager.save(step, state):
+    #     max_logging.log(f"saved a checkpoint at step {step}")
+    #   # Upon preemption, exit when and only when all ongoing saves are complete.
+    #   if checkpoint_manager.reached_preemption(step):
+    #     print("ROSHANI checkpointing reached preemption step at {step}")
+    #     checkpoint_manager.wait_until_finished()
+    #     sys.exit()
 
-    if config.metrics_file:
-      max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
+    # if config.metrics_file:
+    #   max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
 
-    if config.gcs_metrics and jax.process_index() == 0:
-      running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
+    # if config.gcs_metrics and jax.process_index() == 0:
+    #   running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
 
-    if step == last_profiling_step:
-      max_utils.deactivate_profiler(config)
+    # Start profiling at end of first step to avoid compilation.
+    # Move before for loop to include.
+    # if step == 0:
+    #   max_utils.activate_profiler(config)
 
-  writer.close()
+#   max_utils.deactivate_profiler(config)
+#   writer.close()
   return state
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
-  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+#   jax.config.update('jax_platform_name', 'cpu')
   os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+  # os.environ["JAX_PLATFORMS"] = "cpu"
+  print(f"ROSHANI ... \n Found {jax.device_count()} devices.")
+  print(f"ROSHANI ... \n Found {jax.process_count()} processes.")
+  print(f"ROSHANI ... \n Found {jax.devices()} devices.")
+  cc.initialize_cache(os.path.expanduser("~/jax_cache"))
   pyconfig.initialize(argv)
-  print(f"Found {jax.device_count()} devices.")
   config = pyconfig.config
   validate_train_config(config)
-  cc.initialize_cache(os.path.expanduser(config.jax_cache_dir))
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
-  debug_config = debug_configuration.DebugConfig(
-    stack_trace_config = stack_trace_configuration.StackTraceConfig(
-      collect_stack_trace = config.collect_stack_trace,
-      stack_trace_to_cloud = config.stack_trace_to_cloud,
-      stack_trace_interval_seconds = config.stack_trace_interval_seconds))
-  diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
-  with diagnostic.diagnose(diagnostic_config):
-    train_loop(config)
+  train_loop(config)
+  
+#   debug_config = debug_configuration.DebugConfig(
+#     stack_trace_config = stack_trace_configuration.StackTraceConfig(
+#       collect_stack_trace = config.collect_stack_trace,
+#       stack_trace_to_cloud = config.stack_trace_to_cloud,
+#       stack_trace_interval_seconds = config.stack_trace_interval_seconds))
+#   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
+#   with diagnostic.diagnose(diagnostic_config):
+
 
 
 if __name__ == "__main__":
