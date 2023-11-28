@@ -106,13 +106,13 @@ class MultisliceGceTpuCluster(clusters.ClusterEnv):
   @classmethod
   def get_process_count(cls) -> int:
     processes_per_slice = cls._get_process_count_per_slice()
-    num_slices = get_metadata('MEGASCALE_NUM_SLICES')
+    num_slices = int(get_tpu_env_value('MEGASCALE_NUM_SLICES'))
     return processes_per_slice * num_slices
 
   @classmethod
   def get_process_id(cls) -> int:
     process_id_in_slice = int(get_metadata('agent-worker-number'))
-    slice_id = get_metadata('MEGASCALE_SLICE_ID')
+    slice_id = int(get_tpu_env_value('MEGASCALE_SLICE_ID'))
     processes_per_slice = cls._get_process_count_per_slice()
     return process_id_in_slice + slice_id * processes_per_slice
 
