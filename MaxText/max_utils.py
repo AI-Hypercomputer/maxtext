@@ -34,9 +34,9 @@ from flax.linen import partitioning as nn_partitioning
 
 import optax
 import os
-import subprocess
 from typing import Tuple
 
+from google.cloud import storage
 
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
@@ -85,12 +85,25 @@ def write_metrics_for_gcs(metrics, step, config, running_metrics):
 
     metrics_for_gcs.close()
     gcs_filename=os.path.join(config.metrics_dir, metrics_filename)
-    command = ["gsutil", "mv", metrics_filename, gcs_filename]
     max_logging.log(f"Moving file {metrics_filename} to GCS...")
-    subprocess.run(command, check=True, capture_output=True)
+    upload_blob(gcs_filename, metrics_filename)
     max_logging.log(f"File {metrics_filename} moved successfully!")
     running_metrics = [] # reset running_metrics to empty list
   return running_metrics
+
+def parse_gcs_bucket_and_prefix(destination_gcs_name):
+  path_parts = destination_gcs_name.replace("gs://", "").split("/")
+  bucket = path_parts.pop(0)
+  key = "/".join(path_parts)
+  return bucket, key
+
+def upload_blob(destination_gcs_name, source_file_name):
+  """Uploads a file to a GCS location"""
+  bucket_name, prefix_name = parse_gcs_bucket_and_prefix(destination_gcs_name)
+  storage_client = storage.Client()
+  bucket = storage_client.get_bucket(bucket_name)
+  blob = bucket.blob(prefix_name)
+  blob.upload_from_filename(source_file_name)
 
 def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
   """Evaluates unspecified DCN/ICI parallelism values"""
