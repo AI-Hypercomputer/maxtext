@@ -114,7 +114,7 @@ def train_tokenizer(dataset: tf.data.Dataset,
                       vocab_path: str,
                       vocab_size: int,
                       max_corpus_chars: int,
-                      data_keys: Tuple[str, str] = ('text',)):
+                      data_keys: Tuple[str] = ('text',)):
   """tokenizer training function"""
   logging.info('SentencePiece vocab not found, building one from data.')
   vocab_path = _train_sentencepiece(
