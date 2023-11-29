@@ -43,8 +43,8 @@ import os
 import math
 
 try:
-  from jax.experimental.pallas.ops import attention
-  from jax.experimental.pallas.ops import layer_norm
+  from jax.experimental.pallas.ops import attention as pallas_attention
+  from jax.experimental.pallas.ops import layer_norm as pallas_layernorm
 except ImportError:
   logging.warning('jax_triton not found, please `pip install jax-triton`')
 
@@ -372,7 +372,7 @@ class MultiHeadDotProductAttention(nn.Module):
           segment_axis_names,
       ), out_specs = axis_names, check_rep=False)
       def wrap_gpu_flash_attention(query, key, value):
-        return attention.mha(
+        return pallas_attention.mha(
           query, key, value, sm_scale=1.0 / math.sqrt(h), backward_pass_impl=bwd_pass_impl, num_stages = 1, causal = True, segment_ids = None
         )
       x = wrap_gpu_flash_attention(query, key, value)
