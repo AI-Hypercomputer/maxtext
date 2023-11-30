@@ -33,6 +33,7 @@ import sequence_packing
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # Right-shifting token inputs for teacher-forced training.
 # -----------------------------------------------------------------------------
@@ -192,8 +193,13 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
     vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
 
   # Load tokenizer
-  sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
-                                          vocab_size=config.vocab_size)
+  # sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
+  #                                         vocab_size=config.vocab_size)
+  
+  sp_tokenizer = AutoTokenizer.from_pretrained("stabilityai/stablecode-completion-alpha-3b")
+
+                                          
+                                        
 
   # Tokenize data.
   train_ds = train_ds.map(
