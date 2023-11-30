@@ -32,3 +32,9 @@ class TrainCompile(unittest.TestCase):
       r"base_output_directory=gs://runner-maxtext-logs", r"dataset_path=gs://maxtext-dataset",
       "steps=2", "run_name=runner_compile_load_test", "enable_checkpointing=False", "assets_path=../assets",
       "base_emb_dim=256", "base_mlp_dim=256", "base_num_decoder_layers=2"))
+  
+  def test_sequence_parallelism(self):
+    compiled_trainstep_file='test_compiled.pickle'
+    train_compile_main((None, "configs/base.yml", f"compiled_trainstep_file={compiled_trainstep_file}",
+      "compile_topology=v5e-256", "use_iota_embed=true", "compile_topology_num_slices=1", 
+      "ici_sequence_parallelism=16", "global_parameter_scale=32", "per_device_batch_size=0.125", "max_target_length=65536"))
