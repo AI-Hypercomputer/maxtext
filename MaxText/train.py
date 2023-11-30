@@ -277,16 +277,15 @@ def train_loop(config, state=None):
   running_gcs_metrics = [] if config.gcs_metrics else None
 
   total_preprocessing_time = datetime.timedelta()
-  count_preprocessing_time = 0
+  count_preprocessing_time = -1
   for step in np.arange(get_first_step(state), config.steps):
     load_next_batch_time_start = datetime.datetime.now()
     example_batch = load_next_batch(data_iterator, example_batch, config)
     load_next_batch_time_end = datetime.datetime.now()
-    while count_preprocessing_time < 100:
-      total_preprocessing_time += (load_next_batch_time_end-load_next_batch_time_start)
-      count_preprocessing_time += 1
+    total_preprocessing_time += (load_next_batch_time_end-load_next_batch_time_start)
+    count_preprocessing_time += 1
 
-      max_logging.log(f"for batch # {count_preprocessing_time}, processing_time = {load_next_batch_time_end-load_next_batch_time_start} ")
+    max_logging.log(f"for batch # {count_preprocessing_time}, processing_time = {load_next_batch_time_end-load_next_batch_time_start} ")
 
     
 
@@ -300,7 +299,6 @@ def train_loop(config, state=None):
     write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
 
-    max_logging.log(f"After {count_preprocessing_time} batches , total_preprocessing_time = {total_preprocessing_time} ")
     if checkpoint_manager is not None:
       if checkpoint_manager.save(step, state):
         max_logging.log(f"saved a checkpoint at step {step}")
@@ -319,6 +317,8 @@ def train_loop(config, state=None):
     # Move before for loop to include.
     if step == 0:
       max_utils.activate_profiler(config)
+
+  max_logging.log(f"After {count_preprocessing_time} batches , total_preprocessing_time = {total_preprocessing_time} ")
 
   max_utils.deactivate_profiler(config)
   writer.close()
