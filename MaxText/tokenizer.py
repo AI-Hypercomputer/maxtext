@@ -75,8 +75,8 @@ class TokenizeOp:
       features_to_tokenize = {name: value for name, value in features.items() if name==k}
 
       dtypes = [tf.int32]*len(features_to_tokenize)
-      print(f"features in TokenizeOp = {features}")
-      print(f"features in features_to_tokenize = {features_to_tokenize}")
+      # print(f"features in TokenizeOp = {features}")
+      # print(f"features in features_to_tokenize = {features_to_tokenize}")
       
       values =  tf.py_function(func=self.tokenize_function, inp=features_to_tokenize.values(), Tout=dtypes) 
 
@@ -87,10 +87,10 @@ class TokenizeOp:
     return features
 
   def tokenize_function(self, features: Features) -> Features:
-    print(f"features in tokenize_function = {features}")
+    # print(f"features in tokenize_function = {features}")
     tokenized_feature = self.sp_tokenizer.encode(features.numpy().decode('utf-8'))
-    print(f"tokenized_feature = {tokenized_feature}")
-    print(f"tokenized_feature[0] type= {type(tokenized_feature[0])}")
+    # print(f"tokenized_feature = {tokenized_feature}")
+    # print(f"tokenized_feature[0] type= {type(tokenized_feature[0])}")
     tokenized_feature_numpy = np.array(tokenized_feature).astype(np.int32)
     return tf.convert_to_tensor(tokenized_feature_numpy)
     for k in features.keys():
