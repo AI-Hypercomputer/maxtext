@@ -2,8 +2,12 @@ import jax
 #from jax._src.clusters.cloud_tpu_cluster import SingleSliceGceTpuCluster
 from cloud_tpu_cluster import SingleSliceGceTpuCluster
 from cloud_tpu_cluster import MultisliceGceTpuCluster
+from cloud_tpu_cluster import GkeTpuCluster
+import time
 
-c = MultisliceGceTpuCluster()
+time.sleep(10)
+
+c = GkeTpuCluster()
 
 print(f"{c=}", flush=True)
 print(f"{c.is_env_present()=}", flush=True)

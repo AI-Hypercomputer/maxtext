@@ -13,13 +13,11 @@
 # limitations under the License.
 
 import os
+import re
 from typing import Optional
-from jax._src import xla_bridge
 from jax._src import clusters
 from jax._src.cloud_tpu_init import running_in_cloud_tpu_vm
 
-# TODO(mattdavidow) # Does QR always align worker 0 to coordinator?
-# Test on the big 5 (qr,gke) x (single,multi) + borg
 
 def get_metadata(key):
   import requests  # pytype: disable=import-error
@@ -50,10 +48,10 @@ def get_tpu_env_value(key):
     tpu_env_data = get_metadata('tpu-env')
     key_value_pairs = tpu_env_data.split('\n')
     for key_value_pair in key_value_pairs:
-      # Typical line is <MEGASCALE_NUM_SLICES: '2'>
+      # Typical line is MEGASCALE_NUM_SLICES: '2'
       if ':' in key_value_pair:
-        key_value_split = key_value_pair.split(':')
-        row_key, value = key_value_split[0].strip(), key_value_split[1]
+        row_key, value = re.split(':', key_value_pair, 1)
+        row_key = row_key.strip()
         if row_key == key:
           return value.strip().strip("'")
     return None
@@ -61,19 +59,27 @@ def get_tpu_env_value(key):
   value = os.environ.get(key, None)
   return value if value is not None else get_tpu_env_value_from_metadata(key)
 
-def is_multislice_env():
-  return get_tpu_env_value('MEGASCALE_COORDINATOR_ADDRESS') is not None
+def is_gce_env():
+  worker_number_string = get_metadata('agent-worker-number')
+  try:
+    worker_number = int(worker_number_string)
+    return True
+  except:
+    return False
+
+def is_multislice_gce_env():
+  return is_gce_env() and get_tpu_env_value('MEGASCALE_COORDINATOR_ADDRESS') is not None
 
 def is_gke_env():
-  return os.environ.get("TPU_WORKER_ID", None) is not None
+  return os.environ.get("TPU_WORKER_HOSTNAMES", None) is not None
 
 def get_gce_worker_endpoints() -> str:
-    return get_metadata('worker-network-endpoints').split(',')
+  return get_metadata('worker-network-endpoints').split(',')
 
 class SingleSliceGceTpuCluster(clusters.ClusterEnv):
   @classmethod
   def is_env_present(cls) -> bool:
-    return running_in_cloud_tpu_vm and not is_multislice_env() and not is_gke_env()
+    return running_in_cloud_tpu_vm and is_gce_env() and not is_multislice_gce_env()
 
   @classmethod
   def get_coordinator_address(cls) -> str:
@@ -94,12 +100,13 @@ class SingleSliceGceTpuCluster(clusters.ClusterEnv):
 class MultisliceGceTpuCluster(clusters.ClusterEnv):
   @classmethod
   def is_env_present(cls) -> bool:
-    return running_in_cloud_tpu_vm and is_multislice_env() and not is_gke_env()
+    return running_in_cloud_tpu_vm and is_multislice_gce_env()
 
   @classmethod
   def get_coordinator_address(cls) -> str:
     coordinator_address = get_tpu_env_value('MEGASCALE_COORDINATOR_ADDRESS')
-    # Use a different port for the jax coordinator than the MXLA coordinator.
+    # Use a different port for the jax coordinator than the MXLA coordinator,
+    # which is set to 8080 in multislice GCE.
     coordinator_address = coordinator_address.split(':')[0] + ':8476'
     return coordinator_address
 
@@ -111,7 +118,7 @@ class MultisliceGceTpuCluster(clusters.ClusterEnv):
 
   @classmethod
   def get_process_id(cls) -> int:
-    process_id_in_slice = int(get_metadata('agent-worker-number'))
+    process_id_in_slice = cls._get_process_id_in_slice()
     slice_id = int(get_tpu_env_value('MEGASCALE_SLICE_ID'))
     processes_per_slice = cls._get_process_count_per_slice()
     return process_id_in_slice + slice_id * processes_per_slice
@@ -124,35 +131,22 @@ class MultisliceGceTpuCluster(clusters.ClusterEnv):
   def _get_process_count_per_slice() -> Optional[int]:
     return len(get_gce_worker_endpoints())
 
-class GkeTpuCluster(clusters.ClusterEnv):
+  @staticmethod
+  def _get_process_id_in_slice() -> Optional[int]:
+    return int(get_metadata('agent-worker-number'))
+
+class GkeTpuCluster(MultisliceGceTpuCluster):
+  # This class handles both single and multislice GKE as the environment
+  # variables are set the same in both cases.
   @classmethod
   def is_env_present(cls) -> bool:
     return running_in_cloud_tpu_vm and is_gke_env()
 
-  @classmethod
-  def get_coordinator_address(cls) -> str:
-    coordinator_address = get_tpu_env_value('MEGASCALE_COORDINATOR_ADDRESS')
-    # Use a different port for the jax coordinator than the MXLA coordinator.
-    coordinator_address = coordinator_address.split(':')[0] + ':8476'
-    return coordinator_address
-
-  @classmethod
-  def get_process_count(cls) -> int:
-    processes_per_slice = cls._get_process_count_per_slice()
-    num_slices = int(os.environ.get('MEGASCALE_NUM_SLICES'))
-    return processes_per_slice * num_slices
-
-  @classmethod
-  def get_process_id(cls) -> int:
-    process_id_in_slice = int(os.environ.get('TPU_WORKER_ID'))
-    slice_id = int(os.environ.get('MEGASCALE_SLICE_ID'))
-    processes_per_slice = cls._get_process_count_per_slice()
-    return process_id_in_slice + slice_id * processes_per_slice
-
-  @classmethod
-  def get_local_process_id(cls) -> Optional[int]:
-    return None
-
   @staticmethod
   def _get_process_count_per_slice() -> Optional[int]:
-    return len(os.environ.get('TPU_WORKER_HOSTNAMES').split(','))
+    tpu_worker_hostnames = str(os.environ.get('TPU_WORKER_HOSTNAMES', None))
+    return len(tpu_worker_hostnames.split(','))
+
+  @staticmethod
+  def _get_process_id_in_slice() -> Optional[int]:
+    return int(os.environ.get('TPU_WORKER_ID'))
