@@ -71,14 +71,16 @@ def validate_train_config(config):
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
 def calculate_training_tflops(num_model_parameters, config):
+  """ Calculate training TFLOP"""
   learnable_weight_tflops = 6 * num_model_parameters * config.max_target_length * config.per_device_batch_size \
                                    / 10**12
-  attention_tflops = 12 * config.num_heads * config.num_decoder_layers * config.head_dim * config.max_target_length**2 \
-                     * config.per_device_batch_size / 10**12
-  total_tflops = learnable_weight_tflops + attention_tflops
+  noncasual_attention_flops = 12 * config.num_heads * config.num_decoder_layers * config.head_dim \
+                      * config.max_target_length**2 * config.per_device_batch_size / 10**12
+  causal_attention_tflops = noncasual_attention_flops / 2 # due to causality in attention
+  total_tflops = learnable_weight_tflops + causal_attention_tflops
   print(f'Per train step, total TFLOPs will be {total_tflops:.2f},',
         f'split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops',
-        f'and {100 * attention_tflops/total_tflops:.2f}% attention flops')
+        f'and {100 * causal_attention_tflops/total_tflops:.2f}% attention flops')
   return total_tflops
 
 def get_first_step(state):

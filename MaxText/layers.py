@@ -144,11 +144,6 @@ def dot_product_attention(query: Array,
   if float32_logits:
     query = query.astype(jnp.float32)
     key = key.astype(jnp.float32)
-  # Layer norms here prevent (near) one-hot softmaxes, which can lead to
-  # unstable training loss and nans, see the "QK Normalization" subsection in
-  # https://arxiv.org/pdf/2302.05442.pdf.
-  query = LayerNorm(dtype=dtype, name='query_layer_norm', kernel_axes = ('heads',))(query)
-  key = LayerNorm(dtype=dtype, name='key_layer_norm', kernel_axes = ('heads',))(key)
 
   # QK Product, a.k.a `attn_weights`: [batch, num_heads, q_length, kv_length]
   attn_weights = compute_qk_attn_weights(query, key)
@@ -303,13 +298,14 @@ class MultiHeadDotProductAttention(nn.Module):
   float32_logits: bool = False  # computes logits in float32 for stability.
 
 
-  def apply_attention(self, query, key, value, enable_flash_attention,
+  def apply_attention(self, query, key, value, attention_type,
                       decoder_segment_ids, attention_bias, dropout_rng, deterministic, decode):
     """ Apply Attention
     """
-    if enable_flash_attention and not decode:
-      query = LayerNorm(dtype=self.dtype, name='query_layer_norm', kernel_axes = ('heads',))(query)
-      key = LayerNorm(dtype=self.dtype, name='key_layer_norm', kernel_axes = ('heads',))(key)
+    if attention_type == 'flash':
+      if decode:
+        raise ValueError("""Decode not supported with flash attention.
+                             Use MHA instead.""")
       # reshaped to ('batch', 'heads', 'length', 'kv')
       query = jax.numpy.transpose(query, axes = (0,2,1,3))
       key = jax.numpy.transpose(key, axes = (0,2,1,3))
@@ -317,7 +313,7 @@ class MultiHeadDotProductAttention(nn.Module):
       if decoder_segment_ids is not None:
         decoder_segment_ids = flash_attention.SegmentIds(decoder_segment_ids, decoder_segment_ids)
       axis_names = nn.logical_to_mesh_axes(('activation_batch', 'activation_heads', 'activation_length', 'activation_kv'))
-      segment_axis_names = nn.logical_to_mesh_axes(('activation_batch', 'activation_length'))
+      segment_axis_names = nn.logical_to_mesh_axes(('activation_batch', 'activation_length_no_heads'))
       @functools.partial(shard_map, mesh = self.mesh, in_specs = (
           axis_names,
           axis_names,
@@ -325,6 +321,9 @@ class MultiHeadDotProductAttention(nn.Module):
           segment_axis_names,
       ), out_specs = axis_names, check_rep=False)
       def wrap_flash_attention(query, key, value, decoder_segment_ids):
+        if decoder_segment_ids is not None:
+          assert query.shape[2] == self.config.max_target_length == decoder_segment_ids.q.shape[1], \
+            "Sharding along sequence dimension not allowed in flash attention"
         return flash_attention.flash_attention(
               query,
               key,
@@ -332,20 +331,23 @@ class MultiHeadDotProductAttention(nn.Module):
               causal = True,
               segment_ids = decoder_segment_ids,
               block_sizes = flash_attention.BlockSizes(
-                block_q=min(512, self.config.max_target_length),
-                block_k_major=min(512, self.config.max_target_length),
-                block_k=min(512, self.config.max_target_length),
-                block_b=2,
-                block_q_major_dkv=512,
-                block_k_major_dkv=512,
-                block_q_dkv=512,
-                block_k_dkv=512,
-                block_q_dq=1024,
-                block_k_dq=256,
-                block_k_major_dq=512,
+                block_q=min(512, query.shape[2]),
+                block_k_major=min(512, key.shape[2]),
+                block_k=min(512, key.shape[2]),
+                block_b=min(2, query.shape[0]),
+                block_q_major_dkv=min(512, query.shape[2]),
+                block_k_major_dkv=min(512, key.shape[2]),
+                block_q_dkv=min(512, query.shape[2]),
+                block_k_dkv=min(512, key.shape[2]),
+                block_q_dq=min(1024, query.shape[2]),
+                block_k_dq=min(256, key.shape[2]),
+                block_k_major_dq=min(512, key.shape[2]),
 
               )
             )
+      devices_in_data_fsdp = self.mesh.shape['data'] * self.mesh.shape['fsdp']
+      assert (query.shape[0]/devices_in_data_fsdp).is_integer(), \
+              'Batch dimension should be shardable among the devices in data and fsdp axis'
       x = wrap_flash_attention(query, key, value, decoder_segment_ids)
       x = jax.numpy.transpose(x, axes = (0,2,1,3))
     else:
@@ -368,7 +370,7 @@ class MultiHeadDotProductAttention(nn.Module):
   def __call__(self,
                inputs_q: Array,
                inputs_kv: Array,
-               enable_flash_attention,
+               attention_type,
                decoder_segment_ids = None,
                inputs_positions:Optional[Array] = None,
                mask: Optional[Array] = None,
@@ -436,6 +438,12 @@ class MultiHeadDotProductAttention(nn.Module):
                                name='key_rotary'
                                )(inputs=key, position=inputs_positions)
 
+    # Layer norms here prevent (near) one-hot softmaxes, which can lead to
+    # unstable training loss and nans, see the "QK Normalization" subsection in
+    # https://arxiv.org/pdf/2302.05442.pdf.
+    query = LayerNorm(dtype=self.dtype, name='query_layer_norm', kernel_axes = ('heads',))(query)
+    key = LayerNorm(dtype=self.dtype, name='key_layer_norm', kernel_axes = ('heads',))(key)
+    value = LayerNorm(dtype=self.dtype, name='value_layer_norm', kernel_axes = ('heads',))(value)
 
     query = nn.with_logical_constraint(
         query, ('activation_batch', 'activation_length', 'activation_heads', 'activation_kv')
@@ -537,7 +545,7 @@ class MultiHeadDotProductAttention(nn.Module):
       dropout_rng = self.make_rng('dropout')
 
     # Apply attention.
-    x = self.apply_attention(query, key, value, enable_flash_attention,
+    x = self.apply_attention(query, key, value, attention_type,
                               decoder_segment_ids, attention_bias, dropout_rng, deterministic, decode=decode)
     x = nn.with_logical_constraint(
         x, ('activation_batch', 'activation_length', 'activation_heads', 'activation_kv')
@@ -1046,7 +1054,7 @@ class DecoderLayer(nn.Module):
         mesh = mesh)(
             lnx,
             lnx,
-            enable_flash_attention=cfg.enable_flash_attention,
+            attention_type=cfg.attention,
             decoder_segment_ids=decoder_segment_ids,
             inputs_positions=decoder_positions,
             mask=decoder_mask,

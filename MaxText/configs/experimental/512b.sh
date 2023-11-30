@@ -36,4 +36,4 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
     ici_fsdp_parallelism=-1 ici_tensor_parallelism=16\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\
     dataset_path=$DATASET_PATH use_iota_embed=true reuse_example_batch=1\
-    dataset_type=synthetic gcs_metrics=true enable_flash_attention=true int8_training=false
+    dataset_type=synthetic gcs_metrics=true attention='flash' int8_training=false
