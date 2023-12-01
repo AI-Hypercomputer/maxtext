@@ -19,6 +19,7 @@ import math
 from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
+import google.auth
 from google.cloud import bigquery
 from implementations.utils import bigquery as test_bigquery
 
@@ -55,21 +56,26 @@ class BenchmarkBigQueryMetricTest(parameterized.TestCase, absltest.TestCase):
       ("5.0", 5.0, True),
   )
   def test_is_valid_metric(self, x: float, expected_value: bool):
-    bq_metric = test_bigquery.BigQueryMetricClient()
-    actual_value = bq_metric.is_valid_metric(x)
-    self.assertEqual(actual_value, expected_value)
+    with mock.patch.object(
+        google.auth, "default", return_value=["mock", "mock_project"]
+    ) as mock_object:
+      bq_metric = test_bigquery.BigQueryMetricClient()
+      actual_value = bq_metric.is_valid_metric(x)
+      self.assertEqual(actual_value, expected_value)
 
+  @mock.patch.object(google.auth, "default", return_value=["mock", "mock_project"])
   @mock.patch.object(bigquery.Client, "get_table", return_value="mock_table")
   @mock.patch.object(
       bigquery.Client, "insert_rows", return_value=["there is an error"]
   )
-  def test_insert_failure(self, get_table, insert_rows):
+  def test_insert_failure(self, default, get_table, insert_rows):
     bq_metric = test_bigquery.BigQueryMetricClient()
     self.assertRaises(RuntimeError, bq_metric.insert, self.test_runs)
 
+  @mock.patch.object(google.auth, "default", return_value=["mock", "mock_project"])
   @mock.patch.object(bigquery.Client, "get_table", return_value="mock_table")
   @mock.patch.object(bigquery.Client, "insert_rows", return_value=[])
-  def test_insert_success(self, get_table, insert_rows):
+  def test_insert_success(self, default, get_table, insert_rows):
     bq_metric = test_bigquery.BigQueryMetricClient()
     bq_metric.insert(self.test_runs)
 

@@ -16,15 +16,17 @@
 
 import hashlib
 import os
+import sys
 from typing import Iterable, Optional
 from unittest import mock
+from absl import flags
 from absl.testing import absltest
 from absl.testing import parameterized
 from apis import metric_config
 from configs import composer_env
 from implementations.utils import bigquery
-from implementations.utils import metric
 from implementations.utils import composer
+from implementations.utils import metric
 import jsonlines
 import tensorflow as tf
 
@@ -34,8 +36,15 @@ import tensorflow as tf
 
 class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
 
+  def get_tempdir(self):
+    try:
+      flags.FLAGS.test_tmpdir
+    except flags.UnparsedFlagAccessError:
+      flags.FLAGS(sys.argv)
+    return self.create_tempdir().full_path
+
   def generate_tb_file(self):
-    temp_dir = self.create_tempdir().full_path
+    temp_dir = self.get_tempdir()
     summary_writer = tf.summary.create_file_writer(temp_dir)
 
     with summary_writer.as_default():
@@ -269,9 +278,9 @@ class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
               "COMPOSER_ENVIRONMENT": "test_env",
           },
       ) as mock_variable:
-        with mock.patch.object(composer,
-                               "get_airflow_url",
-                               return_value="http://airflow") as mock_object:
+        with mock.patch.object(
+            composer, "get_airflow_url", return_value="http://airflow"
+        ) as mock_object:
           raw_meta = [
               [
                   bigquery.MetadataHistoryRow(

@@ -1,0 +1,32 @@
+# Run all unit tests in files named as *_test.py
+name: Unit Test
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, edited]
+
+  push:
+    branches: [master]
+
+  workflow_dispatch: {}
+
+jobs:
+  dags:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        submodules: 'true'
+
+    - uses: actions/setup-python@v4
+      with:
+        # Note: this should match Cloud Composer
+        # https://cloud.google.com/composer/docs/concepts/versioning/composer-versions
+        python-version: '3.8'
+
+    - name: Install Python dependencies
+      run: pip install -r .github/requirements.txt
+
+    - name: Run tests
+      run: python3 -m unittest discover implementations "*_test.py"
