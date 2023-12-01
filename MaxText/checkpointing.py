@@ -47,6 +47,7 @@ import max_logging
 import numpy as np
 import orbax.checkpoint as ocp
 import portpicker
+import pdb
 
 jax.config.update('jax_spmd_mode', 'allow_all')
 
@@ -78,7 +79,7 @@ def _sum(x):
 
 
 def broadcast_one_slice_to_all(
-    in_tree, global_mesh, per_slice_shardings, is_source
+    in_tree, global_mesh, per_slice_shardings, is_source, num_passes=1
 ):
 
   num_slices = global_mesh.devices.shape[0]
@@ -103,7 +104,6 @@ def broadcast_one_slice_to_all(
 
   out_tree = ()
   N = len(in_tree)
-  num_passes = 2
   # pdb.set_trace()
   for i in range(num_passes):
     in_tree_half = in_tree[i*N//num_passes:(i+1)*N//num_passes]
@@ -114,16 +114,14 @@ def broadcast_one_slice_to_all(
         in_tree_half,
     )
 
-    # in_tree = jax.tree_map(pre_jit, in_tree, per_slice_shardings)
-    # out_tree = jax.jit(_sum, out_shardings=out_sharding)(in_tree)
     in_tree_sharded = jax.tree_map(pre_jit,
                                    in_tree_half,
-                                   per_slice_shardings[i*N//2:(i+1)*N//2]
+                                   per_slice_shardings[i*N//num_passes:(i+1)*N//num_passes]
                                    )
-    # jax.tree_map(lambda x: x.delete(), in_tree)
     out_tree_half = jax.jit(_sum, out_shardings=out_sharding_half)(in_tree_sharded)
     out_tree += out_tree_half
-  jax.tree_map(lambda x: x.delete(), in_tree)
+  # pdb.set_trace()
+  # jax.tree_map(lambda x: x.delete(), in_tree)
   return out_tree
 
 
@@ -241,6 +239,7 @@ class SingleSliceArrayHandler(ocp.type_handlers.ArrayHandler):
         shardings[0].mesh,
         single_slice_shardings,
         is_source=_is_host_for_slice(0),
+        num_passes=4,
     )
 
     print("Finished broadcasting shared state!", flush=True)
@@ -270,13 +269,15 @@ def create_orbax_checkpoint_manager(
   p = epath.Path(checkpoint_dir)
   if use_async:
     _multislice_distribute_initialize()
-    checkpointer = AsyncCheckpointer(PyTreeCheckpointHandler())
+    checkpointer = AsyncCheckpointer(PyTreeCheckpointHandler(), timeout_secs=900)
   else:
     checkpointer = Checkpointer(PyTreeCheckpointHandler())
 
   if enable_single_slice_checkpointing:
-    ocp.type_handlers.register_type_handler(jax.Array, SingleSliceArrayHandler(), override=True)
-    # ocp.type_handlers._enable_ocdbt_for_handlers()
+    ocp.type_handlers.register_type_handler(jax.Array,
+                                            SingleSliceArrayHandler(),
+                                            override=True
+                                            )
     ocp.type_handlers.enable_ocdbt_for_handlers()
 
   mngr = CheckpointManager(
