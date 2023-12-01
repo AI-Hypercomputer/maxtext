@@ -178,5 +178,5 @@ use_iota_embed: False
 
 #Monitoring parameters - Export in-workload metrics to Cloud monitoring
 enable_cloud_monitoring: False
-cloud_monitoring_dashboard: "https://pantheon.corp.google.com/monitoring/dashboards?project="
+cloud_monitoring_dashboard: "https://pantheon.corp.google.com/monitoring/dashboards?"
 cloud_zone: "" # zone name for cloud jobs - used for cloud metrics emitting

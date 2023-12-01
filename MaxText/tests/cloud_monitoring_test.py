@@ -30,6 +30,8 @@ class CloudMonitoringTests(unittest.TestCase):
     pyconfig.initialize(sys.argv + ['configs/base.yml'], per_device_batch_size=1, run_name='test', mesh_axes = ['data'],
                         logical_axis_rules = [['batch', 'data']],
                         data_sharding = ['data'],
+                        base_output_directory = "gs://max-experiments/",
+                        dataset_path = "gs://maxtext-dataset/",
                         enable_cloud_monitoring=True,
                         cloud_zone='us-central2-b')
     monitoring_api.create_custom_metric('test_metric', "This is an example metric")

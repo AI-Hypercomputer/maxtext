@@ -8,28 +8,10 @@ import sys
 from google.cloud import monitoring_v3
 from google.cloud import compute_v1
 from google.api import metric_pb2
-import requests
 import time
 import os
 
 import max_logging
-
-def get_metadata(project_id, zone, instance_id):
-  """
-  Fetches metadata
-
-  Args:
-    project_id
-    zone
-    instance_id
-  
-  Returns:
-    metadata as json
-  """
-  r = requests.get(url="https://compute.googleapis.com/compute/v1/projects/\
-                   {project_id}/zones/{zone}/instances/{instance_id}")
-  metadata = r.json()
-  return metadata
 
 def create_custom_metric(metric_name, description):
   """
@@ -99,13 +81,7 @@ def write_time_series_step(metric_name, monitoring_enabled, pyconfig, step=1):
       "%d %b %Y %H:%M:%S UTC", time.gmtime(seconds_since_epoch_utc)
   )
   max_logging.log(
-      "Emitting metric ",
-      metric_name,
-      " for step = ",
-      step,
-      " at: ",
-      event_time,
-  )
+      f"Emitting metric {metric_name} for step = {step} at: {event_time}")
 
   instance_id = get_instance_id(project_id, zone)
 
@@ -126,18 +102,11 @@ def write_time_series_step(metric_name, monitoring_enabled, pyconfig, step=1):
       )
   ]
 
-  client.create_time_series(name=project_name, time_series=[series], metadata=get_metadata(project_id, zone, instance_id))
+  client.create_time_series(name=project_name, time_series=[series])
   dashboard_link = pyconfig.config.cloud_monitoring_dashboard+project_name
   max_logging.log(
-      "Time series added for step",
-      step,
-      "and instance_id ",
-      instance_id,
-      " and zone ",
-      zone,
-      "\nView dashboards or use metrics: ",
-      dashboard_link,
-  )
+      f"Time series added for step {step} and instance_id {instance_id} and zone {zone}\
+        \n View dashboards or use metrics: {dashboard_link}")
   return [series]
 
 def get_time_series_step_data(metric_name):
