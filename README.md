@@ -1,4 +1,4 @@
-# ML Automation Solutions
+# ML Automation Solutions (MAS)
 
 A simplified and automated orchestration workflow to perform ML end-to-end (E2E) model tests and benchmarking on Cloud VMs across different frameworks.
 
@@ -12,7 +12,7 @@ bash scripts/upload-tests.sh gs://<your_bucket_name>/dags
 ```
 4. After the automatically scheduled tests start running, integrate [Looker Studio](https://cloud.google.com/bigquery/docs/bi-engine-looker-studio) or any other dashboard with BigQuery to monitor metrics.
 
-If you have a use case that ML Automation Solutions does not cover, please email ml-testing-accelerators-users@googlegroups.com. We're here to help!
+If you have a use case that MAS does not cover, please email ml-auto-solutions-users@googlegroups.com. We're here to help!
 
 ## Contributing
 
