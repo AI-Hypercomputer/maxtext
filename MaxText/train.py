@@ -205,9 +205,9 @@ def train_step(model, config, state, data, dropout_rng):
   else:
     grads = raw_grads
   new_state = state.apply_gradients(grads=grads)
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
-             'learning/raw_grad_norm' : max_utils.l2norm_pytree(raw_grads), 
-             'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
+  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm': max_utils.l2norm_pytree(grads),
+             'learning/raw_grad_norm': max_utils.l2norm_pytree(raw_grads),
+             'learning/param_norm': max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
@@ -278,7 +278,8 @@ def train_loop(config, state=None):
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
-  for step in np.arange(get_first_step(state), config.steps):
+  start_step = get_first_step(state)
+  for step in np.arange(start_step, config.steps):
     example_batch = load_next_batch(data_iterator, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics, nextrng = p_train_step(
@@ -306,7 +307,7 @@ def train_loop(config, state=None):
 
     # Start profiling at end of first step to avoid compilation.
     # Move before for loop to include.
-    if step == 0:
+    if step == start_step:
       max_utils.activate_profiler(config)
 
   max_utils.deactivate_profiler(config)
