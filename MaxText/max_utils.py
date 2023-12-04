@@ -24,7 +24,7 @@ import max_logging
 import numpy as np
 import jax
 import jax.numpy as jnp
-from jax.experimental import mesh_utils
+from jax.experimental import mesh_utils, multihost_utils
 
 import json
 import flax
@@ -34,6 +34,8 @@ from flax.linen import partitioning as nn_partitioning
 
 import optax
 import os
+import portpicker
+import socket
 from typing import Tuple
 
 from google.cloud import storage
@@ -104,6 +106,47 @@ def upload_blob(destination_gcs_name, source_file_name):
   bucket = storage_client.get_bucket(bucket_name)
   blob = bucket.blob(prefix_name)
   blob.upload_from_filename(source_file_name)
+
+def initialize_jax_distributed_system():
+  """ The jax distributed system is necessary for certain tasks such as asynchronous checkpointing in multihost settings.
+  Automatic arguments are chosen on cloud TPU starting with Jax 0.4.21
+  If are you in a different environment, e.g. GPUs, you will need to provide the appropriate arguments, see
+  https://jax.readthedocs.io/en/latest/_autosummary/jax.distributed.initialize.html
+  If you are unable to start the jax distributed system, you may remove the initialization attempt and instead use a
+  synchronous checkpointer (or no checkpointer) with async_checkpointing=False
+  (or enable_checkpointing=False to not use a checkpointer at all) """
+
+  def legacy_distribute_initialize():
+    """Calls jax.distribute.initialize() with appropriate multihost/multislice arguments.
+    This 'legacy' implementation uses the device backend (e.g. TPU backend), which
+    is forbidden starting in Jax version 0.4.21. The jax distributed system should be
+    initialized before the device backend, this is enforced starting with version 0.4.21."""
+
+    def gen_local_ip():
+      hostname = socket.gethostname()
+      return socket.gethostbyname(hostname)
+
+    def gen_local_ip_nums():
+      return [int(num) for num in gen_local_ip().split(':')[-1].split('.')]
+
+    def get_coordinator_ip():
+      local_ip_nums = jax.numpy.array(gen_local_ip_nums())
+      coordinator_ip_nums = multihost_utils.broadcast_one_to_all(local_ip_nums)
+      coordinator_ip_strings = [str(num) for num in list(coordinator_ip_nums)]
+      return '.'.join(coordinator_ip_strings)
+
+    port = multihost_utils.broadcast_one_to_all(jax.numpy.array(portpicker.pick_unused_port()))
+    coordinator_address = get_coordinator_ip() + ':' + str(port)
+    jax.distributed.initialize(coordinator_address=coordinator_address,
+                              num_processes=jax.process_count(),
+                              process_id=jax.process_index())
+
+  max_logging.log("Attempting to initialize the jax distributed system...")
+  if jax.__version__ >= '0.4.21':
+    jax.distributed.initialize()
+  else:
+    legacy_distribute_initialize()
+  max_logging.log("Jax distributed system initialized!")
 
 def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
   """Evaluates unspecified DCN/ICI parallelism values"""
