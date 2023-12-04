@@ -1,6 +1,22 @@
 steps:
-  - name: google/cloud-sdk
-    args:
-      - scripts/upload-tests.sh
-      - gs://us-central1-ml-automation-s-bc954647-bucket/dags
-    entrypoint: bash
+- name: golang:alpine
+  id: download-jsonnet
+  entrypoint: 'go'
+  args:
+  - install
+  - github.com/google/go-jsonnet/cmd/jsonnet@latest
+- name: golang:alpine
+  id: build-templates
+  entrypoint: sh
+  args:
+  - scripts/gen-configs.sh
+- name: google/cloud-sdk:slim
+  args:
+    - scripts/upload-tests.sh
+    - gs://us-central1-ml-automation-s-bc954647-bucket/dags
+  entrypoint: bash
+options:
+  machineType: E2_HIGHCPU_32
+  volumes:
+  - name: go-modules
+    path: /go
