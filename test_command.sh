@@ -21,7 +21,7 @@ XLA_FLAGS=\"--xla_dump_to=/tmp/xla_dump/\" \
 python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME \
 base_output_directory=gs://maxtext-experiments-tpem/ dataset_path=gs://max-datasets-rogue \
 per_device_batch_size=6 reuse_example_batch=1 \
-steps=10 enable_checkpointing=false enable_profiler=true profile_start_step=5 \
+steps=50 enable_checkpointing=false enable_profiler=true profile_start_step=5 \
 attention=mha int8_training=false;"
 
 # # already installed libtpu-nightly
@@ -32,5 +32,5 @@ attention=mha int8_training=false;"
 # python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME \
 # base_output_directory=gs://maxtext-experiments-tpem/ dataset_path=gs://max-datasets-rogue \
 # per_device_batch_size=6 reuse_example_batch=1 \
-# steps=10 enable_checkpointing=false enable_profiler=true profile_start_step=5 \
+# steps=50 enable_checkpointing=false enable_profiler=true profile_start_step=5 \
 # attention=mha int8_training=false;"
