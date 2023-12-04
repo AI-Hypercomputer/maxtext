@@ -304,10 +304,12 @@ def train_loop(config, state=None):
 
     if config.gcs_metrics and jax.process_index() == 0:
       running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
-
-    # Start profiling at end of first step to avoid compilation.
+          
+    # Start profiling at end of step to avoid compilation.
     # Move before for loop to include.
-    if step == start_step:
+    print("step: ",int(step),int(config.profile_start_step))
+    if int(step) == int(config.profile_start_step):
+      print("profileing starts at step: ",step)
       max_utils.activate_profiler(config)
 
   max_utils.deactivate_profiler(config)

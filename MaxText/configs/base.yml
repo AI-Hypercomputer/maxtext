@@ -146,6 +146,7 @@ enable_profiler: False
 # If enable_checkpointing is true, an asynchronous checkpointer will be used if
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the sychronous one.
+profile_start_step: 5
 enable_checkpointing: True
 async_checkpointing: True
 
