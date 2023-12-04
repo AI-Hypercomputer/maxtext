@@ -3,7 +3,7 @@ export ACCELERATOR_TYPE=v5p-8
 export ZONE=us-east5-a
 export RUNTIME_VERSION=v2-alpha-tpuv5
 export NODE_COUNT=2
-export TPU_NAME=tonyjohnchen-v5-tpu-v5p-8-2-slices-dcn-9k-jh
+export TPU_NAME=tonyjohnchen-tpu-v5p-64-2-slices-dcn-9k-tony
 export NETWORK=${USER}-mtu9k
 export GCS_PATH="${USER}-1vm/dcn_benchmarks"
 

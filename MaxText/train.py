@@ -307,7 +307,6 @@ def train_loop(config, state=None):
           
     # Start profiling at end of config.profile_start_step to avoid compilation.
     # Move before for loop to include.
-    print("step: ",int(step),int(config.profile_start_step))
     if int(step) == int(config.profile_start_step):
       print("profileing starts at step: ",step)
       max_utils.activate_profiler(config)
