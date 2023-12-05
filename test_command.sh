@@ -2,14 +2,24 @@ export PROJECT_ID=tpu-prod-env-multipod
 export ACCELERATOR_TYPE=v5p-8
 export ZONE=us-east5-a
 export RUNTIME_VERSION=v2-alpha-tpuv5
-export NODE_COUNT=2
-export TPU_NAME=tonyjohnchen-tpu-v5p-64-2-slices-dcn-9k-tony
+export NODE_COUNT=16
+export TPU_NAME=tonyjohnchen-tpu-${ACCELERATOR_TYPE}-${NODE_COUNT}-slices-9k-tony
 export NETWORK=${USER}-mtu9k
 export GCS_PATH="${USER}-1vm/dcn_benchmarks"
 
 gcloud auth list
 gcloud config set project ${PROJECT_ID}
 gcloud config set compute/zone ${ZONE}
+
+# # Create with QR in mtu9k network
+# gcloud alpha compute tpus queued-resources create ${TPU_NAME} \
+# --node-prefix ${TPU_NAME} \
+# --node-count ${NODE_COUNT} \
+# --project ${PROJECT_ID} \
+# --zone ${ZONE} \
+# --network ${NETWORK} \
+# --accelerator-type ${ACCELERATOR_TYPE} \
+# --runtime-version ${RUNTIME_VERSION}
 
 RUN_NAME=${USER}-maxtext-$(date +%Y-%m-%d-%H-%M-%S)
 
