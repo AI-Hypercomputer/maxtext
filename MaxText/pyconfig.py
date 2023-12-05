@@ -97,8 +97,7 @@ class _HyperParameters():
     '''Transformations between the config data and configs used at runtime'''
 
     # We initialize the jax distributed system here because it must be done before device backend is initialized.
-    print(f'{raw_keys["compile_topology_num_slices"]}')
-    if raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and raw_keys["compile_topology_num_slices"] is None:
+    if raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and raw_keys["compile_topology_num_slices"]==-1:
       max_utils.initialize_jax_distributed_system()
 
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
