@@ -18,7 +18,6 @@
 from collections import OrderedDict
 
 import accelerator_to_spec_map
-import max_utils
 import math
 import os
 import sys
@@ -36,6 +35,13 @@ def string_to_bool(s: str) -> bool:
   raise ValueError(f"Can't convert {s} to bool")
 
 _yaml_types_to_parser = {str : str, int : int, float : float, bool : string_to_bool}
+
+def validate_attention_type(s: str) -> bool:
+  valid_attention_types = ('mha', 'flash')
+  if s not in valid_attention_types: # currently supported attention
+    raise ValueError(
+      "Invalid attention type was passed. Valid options ", valid_attention_types
+    )
 
 _config = None
 config = None
@@ -87,13 +93,6 @@ class _HyperParameters():
 
   @staticmethod
   def user_init(raw_keys):
-    """ Parse input arguments """
-
-    # We check whether to initialize the jax distributed system here since
-    # it must be initialized before the device backend.
-    if raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and raw_keys["compile_topology_num_slices"]=="":
-      max_utils.initialize_jax_distributed_system()
-
     '''Transformations between the config data and configs used at runtime'''
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
     if raw_keys["run_name"] == "":
@@ -122,6 +121,8 @@ class _HyperParameters():
     raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = \
       calculate_global_batch_sizes(raw_keys)
 
+    validate_attention_type(raw_keys['attention'])
+
 
 def get_individual_scales(scale):
   '''Choose appropriate scales for individual dimensions based on global scale
@@ -146,9 +147,9 @@ def get_individual_scales(scale):
 
 def calculate_global_batch_sizes(raw_keys):
   """ Calculates target global batch size from target devices and per_device_batch"""
-  per_device_batch_size = int(raw_keys['per_device_batch_size'])
+  per_device_batch_size = raw_keys['per_device_batch_size']
   num_devices = get_num_target_devices(raw_keys)
-  if per_device_batch_size < 1:
+  if per_device_batch_size < 1.0:
     # For per_device_batch_size<1, we load the data as if per_device_batch_size=1
     global_batch_size_to_load = num_devices
   else:
