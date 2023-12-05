@@ -82,6 +82,8 @@ def convert(base_model_path, maxtext_model_path, model_size):
   vocab_size = model_params['vocab']
   combined_qkv = model_params['combined_qkv'] #Anisha: what is this?
   num_gpus = model_params['num_gpus']
+  #Anisha: base_mlp_dim
+  #Anisha: base_embed_dim
   
   dataset_type = 'c4'
 
@@ -178,7 +180,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
   
 
-  commandline_args = ["dummy", "/home/mazumdera/maxtext/MaxText/configs/base.yml","run_name=1xv3-8", "dcn_data_parallelism=1", "save_period=5","ici_data_parallelism=4","ici_tensor_parallelism=2","steps=20","enable_profiler=true","remat_policy=full","base_emb_dim=512", base_num_heads, head_dim,"vocab_size=50272", base_num_decoder_layers, "per_device_batch_size=0.5","enable_profiler=true", "base_mlp_dim=2048", dataset_type,"max_predict_length=512"]
+  commandline_args = ["", "/home/mazumdera/maxtext/MaxText/configs/base.yml","run_name=1xv3-8", "dcn_data_parallelism=1", "save_period=5","ici_data_parallelism=4","steps=20","enable_profiler=true","remat_policy=full","base_emb_dim=512", f"base_num_heads={base_num_heads}", f"head_dim={head_dim}","vocab_size=50272", f"base_num_decoder_layers={base_num_decoder_layers}", "per_device_batch_size=0.5","enable_profiler=true", "base_mlp_dim=2048", f"dataset_type={dataset_type}","max_predict_length=512"]
   pyconfig.initialize(commandline_args)
   config = pyconfig.config
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
