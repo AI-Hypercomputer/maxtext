@@ -91,7 +91,7 @@ class _HyperParameters():
 
     # We check whether to initialize the jax distributed system here since
     # it must be initialized before the device backend.
-    if raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"]:
+    if raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and raw_keys["compile_topology_num_slices"]=="":
       max_utils.initialize_jax_distributed_system()
 
     '''Transformations between the config data and configs used at runtime'''
