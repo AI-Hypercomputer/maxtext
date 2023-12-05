@@ -19,6 +19,7 @@ from collections import OrderedDict
 
 import accelerator_to_spec_map
 import math
+import max_utils
 import os
 import sys
 import yaml
