@@ -35,13 +35,13 @@ with models.DAG(
 ):
   llama_inference_v4_8 = task.TpuTask(
       test_config.JSonnetTpuVmTest.from_pytorch(
-          "pt-nightly-llama2-i-infer-func-v4-8-1vm"
+          "pt-nightly-llama2-pjrt-infer-func-v4-8-1vm-1vm"
       ),
       US_CENTRAL2_B,
   ).run()
   llama_train_v4_8 = task.TpuTask(
       test_config.JSonnetTpuVmTest.from_pytorch(
-          "pt-nightly-llama2-t-train-spmd-func-v4-8-1vm"
+          "pt-nightly-llama2-pjrt-train-spmd-func-v4-8-1vm-1vm"
       ),
       US_CENTRAL2_B,
   ).run()
