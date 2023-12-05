@@ -28,6 +28,7 @@ def get_pax_lm_config(
     exp_path: str,
     model_name: str,
     log_dir: str,
+    pax_version: str = "stable",
     ckp_path: str = "",
     extraFlags: str = "",
 ) -> task.TpuTask:
@@ -56,7 +57,7 @@ def get_pax_lm_config(
           runtime_version=vm_resource.RuntimeVersion.TPU_VM_V4_BASE.value,
           reserved=True,
       ),
-      test_name=f"pax_{model_name}_c4",
+      test_name=f"pax_{pax_version}_{model_name}",
       set_up_cmds=set_up_cmds,
       run_model_cmds=run_model_cmds,
       time_out_in_min=time_out_in_min,
