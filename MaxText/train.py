@@ -318,8 +318,7 @@ def main(argv: Sequence[str]) -> None:
   jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-  max_utils.initialize_jax_distributed_system()
-  print(f"Found {jax.device_count()} devices.") # This is the first command that initializes the device backend.
+  print(f"Found {jax.device_count()} devices.")
   cc.initialize_cache(os.path.expanduser("~/jax_cache"))
   pyconfig.initialize(argv)
   config = pyconfig.config
