@@ -87,7 +87,10 @@ class _HyperParameters():
 
   @staticmethod
   def user_init(raw_keys):
+    """ Parse input arguments """
 
+    # We check whether to initialize the jax distributed system here since
+    # it must be initialized before the device backend.
     if raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"]:
       max_utils.initialize_jax_distributed_system()
 
