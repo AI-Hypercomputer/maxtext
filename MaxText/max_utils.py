@@ -25,7 +25,6 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils, multihost_utils
-from jax._src.cloud_tpu_init import running_in_cloud_tpu_vm
 
 
 import json
@@ -143,13 +142,12 @@ def initialize_jax_distributed_system():
                               num_processes=jax.process_count(),
                               process_id=jax.process_index())
 
-  if running_in_cloud_tpu_vm:
-    max_logging.log("Attempting to initialize the jax distributed system...")
-    if jax.__version__ >= '0.4.21':
-      jax.distributed.initialize()
-    else:
-      legacy_distribute_initialize()
-    max_logging.log("Jax distributed system initialized!")
+  max_logging.log("Attempting to initialize the jax distributed system...")
+  if jax.__version__ >= '0.4.21':
+    jax.distributed.initialize()
+  else:
+    legacy_distribute_initialize()
+  max_logging.log("Jax distributed system initialized!")
 
 def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
   """Evaluates unspecified DCN/ICI parallelism values"""

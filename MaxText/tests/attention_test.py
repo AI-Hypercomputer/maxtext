@@ -31,7 +31,7 @@ class AttentionTest(unittest.TestCase):
   """Test for the Attention """
   def setUp(self):
     super().setUp()
-    pyconfig.initialize(sys.argv + ['configs/base.yml'], per_device_batch_size = 1.0, run_name='test')
+    pyconfig.initialize(sys.argv + ['configs/base.yml'], per_device_batch_size = 1.0, run_name='test', enable_checkpointing=False)
     self.cfg = pyconfig.config
     self.rng = jax.random.PRNGKey(0)
 
