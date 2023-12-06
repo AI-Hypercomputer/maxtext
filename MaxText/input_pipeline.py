@@ -148,10 +148,6 @@ def preprocessing_pipeline(
     dataset = dataset.prefetch(prefetch_size)
 
   multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(dataset, global_mesh)
-  # print("input_pipeline.py:preprocessing_pipeline ROSHANI shared datasets on hosts.... ")
-  # Return multi-host jax.Array prep iterator
-  # if (jax.process_index() < jax.process_count()):
-  #   print("input_pipeline.py:preprocessing_pipeline ROSHANI host number", jax.process_index(), ".... ") 
 
   return multihost_gen
 

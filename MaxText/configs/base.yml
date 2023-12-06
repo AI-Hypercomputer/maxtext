@@ -47,7 +47,7 @@ int8_training: False
 
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
-global_parameter_scale: 128 #128B model
+global_parameter_scale: 1
 base_emb_dim: 2560
 base_num_heads: 8
 base_mlp_dim: 8192
@@ -68,7 +68,7 @@ record_internal_nn_metrics: 0
 
 # Output directory
 # Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
-base_output_directory: "gs://maxtext-experiments-multipod"
+base_output_directory: ""
 
 # Jax cache directory
 jax_cache_dir: "~/jax_cache"
@@ -106,21 +106,21 @@ ici_tensor_parallelism: 1
 
 # Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
-dataset_path:  "gs://max-datasets-rogue"
+dataset_path:  ""
 vocab_size: 32_768 # powers of 2 for sharding
 assets_path: "assets"
 vocab_relative_path: "tokenizer"  # Assumes we're allowed
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
-per_device_batch_size: 1.0
+per_device_batch_size: 12.0
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
 dataset_type: c4 # must be c4 or synthetic
 
 # Training loop
-steps: 30 #150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
-log_period: 29 #100
+steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
+log_period: 100
 save_period: 10_000
 # We take inspiration from Llama2's learning rate (LR) schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
 # Learning rate schedule has either two or three parts:
@@ -159,8 +159,8 @@ profiler_steps: 5
 # If enable_checkpointing is true, an asynchronous checkpointer will be used if
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the sychronous one.
-enable_checkpointing: False
-async_checkpointing: False
+enable_checkpointing: True
+async_checkpointing: True
 
 # When dropout is false the model is a deterministic function of the 
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
