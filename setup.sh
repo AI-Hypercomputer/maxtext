@@ -17,8 +17,8 @@
 # Description:
 # bash setup.sh MODE={stable,nightly,libtpu-only} LIBTPU_GCS_PATH={gcs_path_to_custom_libtpu}
 
-# You need to specificy a MODE, default value stable. 
-# You have the option to provide a LIBTPU_GCS_PATH that points to a libtpu.so provided to you by Google. 
+# You need to specificy a MODE, default value stable.
+# You have the option to provide a LIBTPU_GCS_PATH that points to a libtpu.so provided to you by Google.
 # In libtpu-only MODE, the LIBTPU_GCS_PATH is mandatory.
 # For MODE=stable you may additionally specify JAX_VERSION, e.g. JAX_VERSION=0.4.13
 
@@ -67,7 +67,7 @@ fi
 run_name_folder_path=$(pwd)
 
 # Uninstall existing jax, jaxlib and  libtpu-nightly
-pip3 show jax && pip3 uninstall -y jax 
+pip3 show jax && pip3 uninstall -y jax
 pip3 show jaxlib && pip3 uninstall -y jaxlib
 pip3 show libtpu-nightly && pip3 uninstall -y libtpu-nightly
 
@@ -96,7 +96,7 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
         pip3 install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
     fi
 
-    if [[ -n "$LIBTPU_GCS_PATH" ]]; then 
+    if [[ -n "$LIBTPU_GCS_PATH" ]]; then
         # Install custom libtpu
         echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
         # Install required dependency
@@ -104,7 +104,7 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
         # Copy libtpu.so from GCS path
         gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
     fi
-elif [[ $MODE == "nightly" ]]; then 
+elif [[ $MODE == "nightly" ]]; then
 # Nightly mode
     echo "Installing jax-head, jaxlib-nightly"
     # Install jax from GitHub head

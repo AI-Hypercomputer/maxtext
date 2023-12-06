@@ -230,6 +230,7 @@ def train_loop(config, state=None):
       config.enable_checkpointing,
       config.async_checkpointing,
       config.save_period,
+      enable_single_slice_checkpointing=True,
   )
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)

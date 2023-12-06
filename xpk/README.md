@@ -36,6 +36,13 @@ return the hardware back to the shared pool when they complete, developers can
 achieve better use of finite hardware resources. And automated tests can run
 overnight while resources tend to be underutilized.
 
+# Installation
+To install xpk, run the following command:
+
+```shell
+pip install xpk
+```
+
 # XPK for Large Scale (>1k VMs)
 
 Follow user instructions in [xpk-large-scale-guide.sh](xpk-large-scale-guide.sh)
@@ -55,22 +62,28 @@ might want to use `Cluster List` or `Workload List` commands. Finally, you can
 cleanup with a `Cluster Delete`.
 
 ## Cluster Create
-*   Cluster Create (provision on-demand capacity):
 
-    ```shell
-    python3 xpk/xpk.py cluster create \
-    --cluster xpk-test --tpu-type=v5litepod-16 \
-    --num-slices=4
-    ```
-
+The cluster created is a regional cluster to enable the GKE control plane across
+all zones.
 
 *   Cluster Create (provision reserved capacity):
 
     ```shell
-    python3 xpk/xpk.py cluster create \
+    # Find your reservations
+    gcloud compute reservations list --project=$PROJECT_ID
+    # Run cluster create with reservation
+    python3 xpk.py cluster create \
     --cluster xpk-test --tpu-type=v5litepod-256 \
     --num-slices=2 \
-    --custom-tpu-nodepool-arguments="--reservation-affinity=specific --reservation=RESERVATION_ID"
+    --reservation=$RESERVATION_ID
+    ```
+
+*   Cluster Create (provision on-demand capacity):
+
+    ```shell
+    python3 xpk.py cluster create \
+    --cluster xpk-test --tpu-type=v5litepod-16 \
+    --num-slices=4 --on-demand
     ```
 
 *   Cluster Create can be called again with the same `--cluster name` to modify
@@ -79,7 +92,7 @@ cleanup with a `Cluster Delete`.
     For example, if a user creates a cluster with 4 slices:
 
     ```shell
-    python3 xpk/xpk.py cluster create \
+    python3 xpk.py cluster create \
     --cluster xpk-test --tpu-type=v5litepod-16 \
     --num-slices=4
     ```
@@ -88,7 +101,7 @@ cleanup with a `Cluster Delete`.
     new slices:
 
     ```shell
-    python3 xpk/xpk.py cluster create \
+    python3 xpk.py cluster create \
     --cluster xpk-test --tpu-type=v5litepod-16 \
     --num-slices=8
     ```
@@ -98,13 +111,13 @@ cleanup with a `Cluster Delete`.
     Use `--force` to skip prompts.
 
     ```shell
-    python3 xpk/xpk.py cluster create \
+    python3 xpk.py cluster create \
     --cluster xpk-test --tpu-type=v5litepod-16 \
     --num-slices=6
 
     # Skip delete prompts using --force.
 
-    python3 xpk/xpk.py cluster create --force \
+    python3 xpk.py cluster create --force \
     --cluster xpk-test --tpu-type=v5litepod-16 \
     --num-slices=6
 
@@ -113,20 +126,20 @@ cleanup with a `Cluster Delete`.
 *   Cluster Delete (deprovision capacity):
 
     ```shell
-    python3 xpk/xpk.py cluster delete \
+    python3 xpk.py cluster delete \
     --cluster xpk-test
     ```
 ## Cluster List
 *   Cluster List (see provisioned capacity):
 
     ```shell
-    python3 xpk/xpk.py cluster list
+    python3 xpk.py cluster list
     ```
 ## Cluster Describe
 *   Cluster Describe (see capacity):
 
     ```shell
-    python3 xpk/xpk.py cluster describe \
+    python3 xpk.py cluster describe \
     --cluster xpk-test
     ```
 
@@ -134,7 +147,7 @@ cleanup with a `Cluster Delete`.
 *   Cluster Cacheimage (enables faster start times):
 
     ```shell
-    python3 xpk/xpk.py cluster cacheimage \
+    python3 xpk.py cluster cacheimage \
     --cluster xpk-test --docker-image gcr.io/your_docker_image
     ```
 
@@ -142,7 +155,7 @@ cleanup with a `Cluster Delete`.
 *   Workload Create (submit training job):
 
     ```shell
-    python3 xpk/xpk.py workload create \
+    python3 xpk.py workload create \
     --workload xpk-test-workload --command "echo goodbye" --cluster \
     xpk-test --tpu-type=v5litepod-16
     ```
@@ -167,7 +180,7 @@ cleanup with a `Cluster Delete`.
 
   #### General Example:
   ```shell
-  python3 xpk/xpk.py workload create \
+  python3 xpk.py workload create \
   --workload xpk-test-medium-workload --command "echo goodbye" --cluster \
   xpk-test --tpu-type=v5litepod-16 --priority=medium
   ```
@@ -176,7 +189,7 @@ cleanup with a `Cluster Delete`.
 *   Workload Delete (delete training job):
 
     ```shell
-    python3 xpk/xpk.py workload delete \
+    python3 xpk.py workload delete \
     --workload xpk-test-workload --cluster xpk-test
     ```
 
@@ -184,7 +197,7 @@ cleanup with a `Cluster Delete`.
 *   Workload List (see training jobs):
 
     ```shell
-    python3 xpk/xpk.py workload list \
+    python3 xpk.py workload list \
     --cluster xpk-test
     ```
 
@@ -199,12 +212,12 @@ cleanup with a `Cluster Delete`.
   * `user-fifth-job-in-queue-preempted`: **filter-status** is `QUEUED`.
 
   ```
-  Jobset Name                     Created Time           Priority   TPU VMs Needed   TPU VMs Running/Ran   TPU VMs Done   TPU Slice Dimensions   Status     Status Message                                                  Status Time
-  user-first-job-failed           2023-1-1T1:00:00Z      medium     4                4                     <none>         2xv4-8                 Finished   JobSet failed                                                   2023-1-1T1:05:00Z
-  user-second-job-success         2023-1-1T1:10:00Z      medium     4                4                     4              2xv4-8                 Finished   JobSet finished successfully                                    2023-1-1T1:14:00Z
-  user-third-job-running          2023-1-1T1:15:00Z      medium     4                4                     <none>         2xv4-8                 Admitted   Admitted by ClusterQueue cluster-queue                          2023-1-1T1:16:00Z
-  user-forth-job-in-queue         2023-1-1T1:16:05Z      medium     4                <none>                <none>         2xv4-8                 Admitted   couldn't assign flavors to pod set slice-job: insufficient unused quota for google.com/tpu in flavor 2xv4-8, 4 more need   2023-1-1T1:16:10Z
-  user-fifth-job-preempted        2023-1-1T1:10:05Z      low        4                <none>                <none>         2xv4-8                 Evicted    Preempted to accommodate a higher priority Workload             2023-1-1T1:10:00Z
+  Jobset Name                     Created Time           Priority   TPU VMs Needed   TPU VMs Running/Ran   TPU VMs Done      Status     Status Message                                                  Status Time
+  user-first-job-failed           2023-1-1T1:00:00Z      medium     4                4                     <none>            Finished   JobSet failed                                                   2023-1-1T1:05:00Z
+  user-second-job-success         2023-1-1T1:10:00Z      medium     4                4                     4                 Finished   JobSet finished successfully                                    2023-1-1T1:14:00Z
+  user-third-job-running          2023-1-1T1:15:00Z      medium     4                4                     <none>            Admitted   Admitted by ClusterQueue cluster-queue                          2023-1-1T1:16:00Z
+  user-forth-job-in-queue         2023-1-1T1:16:05Z      medium     4                <none>                <none>            Admitted   couldn't assign flavors to pod set slice-job: insufficient unused quota for google.com/tpu in flavor 2xv4-8, 4 more need   2023-1-1T1:16:10Z
+  user-fifth-job-preempted        2023-1-1T1:10:05Z      low        4                <none>                <none>            Evicted    Preempted to accommodate a higher priority Workload             2023-1-1T1:10:00Z
   ```
 
 * Workload List supports filtering. Observe a portion of jobs that match user criteria.
@@ -219,7 +232,7 @@ cleanup with a `Cluster Delete`.
   Filter the workload list by the name of a job.
 
     ```shell
-    python3 xpk/xpk.py workload list \
+    python3 xpk.py workload list \
     --cluster xpk-test --filter-by-job=$USER
     ```
 
@@ -239,19 +252,19 @@ This flow pulls the `--script-dir` into the `--base-docker-image` and runs the n
 
   - `--script-dir` sets which directory to pull into the image. This defaults to the current working directory.
 
-  See `python3 xpk/xpk.py workload create --help` for more info.
+  See `python3 xpk.py workload create --help` for more info.
 
 * Example with defaults which pulls the local directory into the base image:
   ```shell
   echo -e '#!/bin/bash \n echo "Hello world from a test script!"' > test.sh
-  python3 xpk/xpk.py workload create --cluster xpk-test \
+  python3 xpk.py workload create --cluster xpk-test \
   --workload xpk-test-workload-base-image --command "bash test.sh" \
   --tpu-type=v5litepod-16 --num-slices=1
   ```
 
 * Recommended Flow For Normal Sized Jobs (fewer than 10k accelerators):
   ```shell
-  python3 xpk/xpk.py workload create --cluster xpk-test \
+  python3 xpk.py workload create --cluster xpk-test \
   --workload xpk-test-workload-base-image --command "bash custom_script.sh" \
   --base-docker-image=gcr.io/your_dependencies_docker_image \
   --tpu-type=v5litepod-16 --num-slices=1
@@ -264,17 +277,17 @@ workload.
 
 * Running with `--docker-image`:
   ```shell
-  python3 xpk/xpk.py workload create --cluster xpk-test \
+  python3 xpk.py workload create --cluster xpk-test \
   --workload xpk-test-workload-base-image --command "bash test.sh" \
   --tpu-type=v5litepod-16 --num-slices=1 --docker-image=gcr.io/your_docker_image
   ```
 
 * Recommended Flow For Large Sized Jobs (more than 10k accelerators):
   ```shell
-  python3 xpk/xpk.py cluster cacheimage \
+  python3 xpk.py cluster cacheimage \
   --cluster xpk-test --docker-image gcr.io/your_docker_image
   # Run workload create with the same image.
-  python3 xpk/xpk.py workload create --cluster xpk-test \
+  python3 xpk.py workload create --cluster xpk-test \
   --workload xpk-test-workload-base-image --command "bash test.sh" \
   --tpu-type=v5litepod-16 --num-slices=1 --docker-image=gcr.io/your_docker_image
   ```
@@ -309,5 +322,48 @@ Please select a CPU type that exists in all zones in the region.
 # Find CPU Types supported in zones.
 gcloud compute machine-types list --zones=$ZONE_LIST
 # Adjust default cpu machine type.
-python3 xpk/xpk.py cluster create --cluster-cpu-machine-type=CPU_TYPE ...
+python3 xpk.py cluster create --cluster-cpu-machine-type=CPU_TYPE ...
 ```
+
+## Permission Issues: `requires one of ["permission_name"] permission(s)`.
+
+1) Determine the role needed based on the permission error:
+
+    ```shell
+    # For example: `requires one of ["container.*"] permission(s)`
+    # Add [Kubernetes Engine Admin](https://cloud.google.com/iam/docs/understanding-roles#kubernetes-engine-roles) to your user.
+    ```
+
+2) Add the role to the user in your project.
+
+    Go to [iam-admin](https://console.cloud.google.com/iam-admin/) or use gcloud cli:
+    ```shell
+    PROJECT_ID=my-project-id
+    CURRENT_GKE_USER=$(gcloud config get account)
+    ROLE=roles/container.admin  # container.admin is the role needed for Kubernetes Engine Admin
+    gcloud projects add-iam-policy-binding $PROJECT_ID --member user:$CURRENT_GKE_USER --role=$ROLE
+    ```
+
+3) Check the permissions are correct for the users.
+
+    Go to [iam-admin](https://console.cloud.google.com/iam-admin/) or use gcloud cli:
+
+    ```shell
+    PROJECT_ID=my-project-id
+    CURRENT_GKE_USER=$(gcloud config get account)
+    gcloud projects get-iam-policy $PROJECT_ID --filter="bindings.members:$CURRENT_GKE_USER" --flatten="bindings[].members"
+    ```
+
+4) Confirm you have logged in locally with the correct user.
+
+    ```shell
+    gcloud auth login
+    ```
+
+
+
+### Roles needed based on permission errors:
+
+* `requires one of ["container.*"] permission(s)`
+
+  Add [Kubernetes Engine Admin](https://cloud.google.com/iam/docs/understanding-roles#kubernetes-engine-roles) to your user.
