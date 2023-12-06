@@ -213,17 +213,8 @@ def train_step(model, config, state, data, dropout_rng):
 
   return new_state, metrics, rng2
 
-def train_loop(config, state=None):
-  """Main Training loop.
 
-  Args:
-    config:
-    state:
-    ckpt_path:
-
-  Returns:
-
-  """
+def setup_train_loop(config):
   writer = SummaryWriter(config.tensorboard_dir)
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       config.checkpoint_dir,
@@ -231,6 +222,7 @@ def train_loop(config, state=None):
       config.async_checkpointing,
       config.save_period,
   )
+  
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
 
@@ -244,9 +236,24 @@ def train_loop(config, state=None):
   tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
-  
-  print("train.py:preprocessing_pipeline ROSHANI data loaded ")
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  
+  return writer, checkpoint_manager, nextrng, state_mesh_annotations, model, mesh, data_iterator, state
+
+
+def train_loop(config, state=None):
+  """Main Training loop.
+
+  Args:
+    config:
+    state:
+    ckpt_path:
+
+  Returns:
+
+  """
+  writer, checkpoint_manager, nextrng, state_mesh_annotations, model, mesh, data_iterator, state = setup_train_loop(config)
+
   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
     train_step,
     mesh,
