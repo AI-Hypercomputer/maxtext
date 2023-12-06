@@ -39,7 +39,7 @@ reuse_example_batch: 0 # for testing TPU performance, this options repeated uses
 
 metrics_file: "" # for testing, local file that stores scalar metrics. If empty, no metrics are written.
 # If true save metrics such as loss and TFLOPS to GCS in {base_output_directory}/{run_name}/metrics/
-gcs_metrics: True
+gcs_metrics: False
 
 # Activation dtypes.
 dtype: "bfloat16"
@@ -106,7 +106,7 @@ ici_tensor_parallelism: 1
 
 # Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
-dataset_path:  ""
+dataset_path: ""
 vocab_size: 32_768 # powers of 2 for sharding
 assets_path: "assets"
 vocab_relative_path: "tokenizer"  # Assumes we're allowed

@@ -74,7 +74,6 @@ def get_batch_sharded_data_pipeline(
     sharded_dataset: per_host dataset
   """
   dataset = iter(dataset.as_numpy_iterator())
-
   multihost_generator = partial(get_next_batch_sharded, dataset, global_mesh)
   return multihost_generator
 
