@@ -253,7 +253,6 @@ def setup_train_loop(config):
   tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
-
   state, state_mesh_annotations = max_utils.setup_training_state(model, tx, config, init_rng, mesh, checkpoint_manager)
 
   return ( writer, checkpoint_manager, nextrng, state_mesh_annotations, model,
