@@ -504,6 +504,9 @@ class MultiHeadDotProductAttention(nn.Module):
         key = jnp.moveaxis(key, -1, -3)
         value = jnp.moveaxis(value, -1, -3)
 
+        # Assign an index for decoding.
+        decoder_segment_ids = jnp.ones((key.shape[0], 1) ) * cur_index
+
         # Causal mask for cached decoder self-attention: our single query
         # position should only attend to those key positions that have already
         # been generated and cached, not the remaining zero elements.
