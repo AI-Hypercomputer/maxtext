@@ -101,23 +101,29 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
   jax_weights = {
       'decoder': {
-          'softmax': { #Anisha: what is this?
-              'logits_ffn': {
-                  'linear': {
-                      'w': np.concatenate([var['output.weight'].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()[:, :vocab_size]
-                      }
-                  }
-              },
+        #   'softmax': { #Anisha: what is this?
+        #       'logits_ffn': {
+        #           'linear': {
+        #               'w': np.concatenate([var['output.weight'].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()[:, :vocab_size]
+        #               }
+        #           }
+        #       },
+          'decoder': {
+             'mlp': {}, 
+             'pre_self_attention_layer_norm' : {},
+             'post_self_attention_layer_norm' : {}, 
+             'self_attention' : {},            
+          }, 
           'decoder_norm': {
               'scale': pytorch_vars[0]['norm.weight'].type(torch.float16).numpy()
-              },
-          'transformer': {} #Anisha: what is this?
-          },
+              },         
+        },
        'token_embedder':{
               'embedding': np.concatenate([var['tok_embeddings.weight'].type(torch.float16).numpy() for var in pytorch_vars], axis=1)[:vocab_size,:]
          
        }
       }
+    
 
   self_attention = {
         'query': {
@@ -202,7 +208,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
 
     # layer_weight.update(attention_weights)
-    jax_weights['decoder']['transformer']['x_layers_%d' % layer_idx] = layer_weight
+    # jax_weights['decoder']['transformer']['x_layers_%d' % layer_idx] = layer_weight
 
     layer_weight['mlp']['wi']['kernel'].append(ffn_layer1_gate)
     layer_weight['mlp']['ffn_layer1']['kernel'].append(ffn_layer1)
@@ -215,10 +221,10 @@ def convert(base_model_path, maxtext_model_path, model_size):
   self_attention['value']['kernel'] = np.array(self_attention['value']['kernel'])
   self_attention['out']['kernel'] = np.array(self_attention['out']['kernel'])
   #Swap the 0th and 1st indices for q,k,v and out's dims should be (4, 1, 96, 512), dtype=float32), names=('heads', 'layers', 'kv', 'embed')
-  self_attention['query']['kernel'] = jnp.transpose(self_attention['query']['kernel'],axes=(1, 0)) 
-  self_attention['key']['kernel'] = jnp.transpose(self_attention['key']['kernel'],axes=(1, 0))
-  self_attention['value']['kernel'] = jnp.transpose(self_attention['value']['kernel'],axes=(1, 0))
-  self_attention['out']['kernel'] = jnp.transpose(self_attention['out']['kernel'],axes=(1, 0))
+  self_attention['query']['kernel'] = jnp.transpose(self_attention['query']['kernel'],axes=(1, 0, 2, 3)) 
+  self_attention['key']['kernel'] = jnp.transpose(self_attention['key']['kernel'],axes=(1, 0, 2, 3))
+  self_attention['value']['kernel'] = jnp.transpose(self_attention['value']['kernel'],axes=(1, 0, 2, 3))
+  self_attention['out']['kernel'] = jnp.transpose(self_attention['out']['kernel'],axes=(1, 0, 2, 3))
 
   jax_weights['decoder']['decoder']['self_attention'] = self_attention
 
@@ -229,12 +235,15 @@ def convert(base_model_path, maxtext_model_path, model_size):
   layer_weight['pre_self_attention_layer_norm']['scale'] = np.array(layer_weight['pre_self_attention_layer_norm']['scale'])
   layer_weight['post_self_attention_layer_norm']['scale'] = np.array(layer_weight['post_self_attention_layer_norm']['scale'])
   #swap the layer index
-  layer_weight['mlp']['wi']['kernel'] = jnp.transpose(layer_weight['mlp']['wi']['kernel'],axes=(1, 0))
-  layer_weight['mlp']['ffn_layer1']['kernel'] = jnp.transpose(layer_weight['mlp']['ffn_layer1']['kernel'],axes=(1, 0))
-  layer_weight['mlp']['wo']['kernel'] = jnp.transpose(layer_weight['mlp']['wo']['kernel'],axes=(1, 0))
+  layer_weight['mlp']['wi']['kernel'] = jnp.transpose(layer_weight['mlp']['wi']['kernel'],axes=(1, 0, 2))
+  layer_weight['mlp']['ffn_layer1']['kernel'] = jnp.transpose(layer_weight['mlp']['ffn_layer1']['kernel'],axes=(1, 0, 2))
+  layer_weight['mlp']['wo']['kernel'] = jnp.transpose(layer_weight['mlp']['wo']['kernel'],axes=(1, 0, 2))
   layer_weight['pre_self_attention_layer_norm']['scale'] = jnp.transpose(layer_weight['pre_self_attention_layer_norm']['scale'],axes=(1, 0))
   layer_weight['post_self_attention_layer_norm']['scale'] = jnp.transpose(layer_weight['post_self_attention_layer_norm']['scale'],axes=(1, 0))
-
+  
+  jax_weights['decoder']['decoder']['mlp'] = layer_weight['mlp']
+  jax_weights['decoder']['decoder']['pre_self_attention_layer_norm'] = layer_weight['pre_self_attention_layer_norm']
+  jax_weights['decoder']['decoder']['post_self_attention_layer_norm'] = layer_weight['post_self_attention_layer_norm']
   
   base_output_directory="base_output_directory=gs://mazumdera-test-bucket/maxtext/llama2/12062023/1"
   base_num_decoder_layers="base_num_decoder_layers=32"
