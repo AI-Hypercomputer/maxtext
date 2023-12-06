@@ -31,6 +31,8 @@ import optax
 from jax.sharding import Mesh
 from layers import Transformer
 from jax import random
+import jax.numpy as jnp
+import functools
 
 import max_logging
 
@@ -62,7 +64,8 @@ MODEL_PARAMS_DICT = {
         'dims_per_head': 128,
         'vocab': 32000,
         'num_gpus': 1,
-        'combined_qkv': True,
+        # 'combined_qkv': True,
+        'combined_qkv': False,
     },
 }
 
@@ -129,7 +132,27 @@ def convert(base_model_path, maxtext_model_path, model_size):
         'out': {
             'kernel' : []
         },
-    } 
+    }
+
+  layer_weight = {
+        'mlp': {
+            'wi': {
+                'kernel' : []
+                },
+            'ffn_layer1': {
+                'kernel' : []
+                },
+            'wo': {
+                'kernel' : []
+                },
+            },
+        'pre_self_attention_layer_norm': {
+            'scale': []
+            },
+        'post_self_attention_layer_norm': {
+            'scale': []
+            }
+        } 
   
   for layer_idx in range(base_num_decoder_layers):
     wq = np.concatenate([var['layers.%d.attention.wq.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()
@@ -171,44 +194,59 @@ def convert(base_model_path, maxtext_model_path, model_size):
     self_attention['value']['kernel'].append(wv)
     self_attention['out']['kernel'].append(w_post)
 
-    layer_weight = {
-        'ff_layer': {
-            'ffn_layer1_gate': {
-                'linear': {
-                    'w': np.concatenate([var['layers.%d.feed_forward.w1.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()
-                    }
-                },
-            'ffn_layer1': {
-                'linear': {
-                    'w': np.concatenate([var['layers.%d.feed_forward.w3.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()
-                    }
-                },
-            'ffn_layer2': {
-                'linear': {
-                    'w': np.concatenate([var['layers.%d.feed_forward.w2.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=1).transpose()
-                    }
-                },
-            'layer_norm': {
-                'scale': pytorch_vars[0]['layers.%d.ffn_norm.weight' % (layer_idx)].type(torch.float16).numpy()
-                }
-            },
-        'layer_norm': {
-            'scale': pytorch_vars[0]['layers.%d.attention_norm.weight' % (layer_idx)].type(torch.float16).numpy()
-            }
-        }
+    ffn_layer1_gate = np.concatenate([var['layers.%d.feed_forward.w1.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()
+    ffn_layer1 = np.concatenate([var['layers.%d.feed_forward.w3.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()
+    ffn_layer2 = np.concatenate([var['layers.%d.feed_forward.w2.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=1).transpose()
+    pre_self_attention_layernorm = pytorch_vars[0]['layers.%d.attention_norm.weight' % (layer_idx)].type(torch.float16).numpy()
+    post_self_attention_layernorm = pytorch_vars[0]['layers.%d.ffn_norm.weight' % (layer_idx)].type(torch.float16).numpy()
+
+
     # layer_weight.update(attention_weights)
     jax_weights['decoder']['transformer']['x_layers_%d' % layer_idx] = layer_weight
+
+    layer_weight['mlp']['wi']['kernel'].append(ffn_layer1_gate)
+    layer_weight['mlp']['ffn_layer1']['kernel'].append(ffn_layer1)
+    layer_weight['mlp']['wo']['kernel'].append(ffn_layer2)
+    layer_weight['pre_self_attention_layer_norm']['scale'].append(pre_self_attention_layernorm)
+    layer_weight['post_self_attention_layer_norm']['scale'].append(post_self_attention_layernorm)
   
   self_attention['query']['kernel'] = np.array(self_attention['query']['kernel'])
   self_attention['key']['kernel'] = np.array(self_attention['key']['kernel'])
   self_attention['value']['kernel'] = np.array(self_attention['value']['kernel'])
   self_attention['out']['kernel'] = np.array(self_attention['out']['kernel'])
-  #TODO: Swap the 0th and 1st indices for q,k,v and out's dims should be (4, 1, 96, 512), dtype=float32), names=('heads', 'layers', 'kv', 'embed')
+  #Swap the 0th and 1st indices for q,k,v and out's dims should be (4, 1, 96, 512), dtype=float32), names=('heads', 'layers', 'kv', 'embed')
+  self_attention['query']['kernel'] = jnp.transpose(self_attention['query']['kernel'],axes=(1, 0)) 
+  self_attention['key']['kernel'] = jnp.transpose(self_attention['key']['kernel'],axes=(1, 0))
+  self_attention['value']['kernel'] = jnp.transpose(self_attention['value']['kernel'],axes=(1, 0))
+  self_attention['out']['kernel'] = jnp.transpose(self_attention['out']['kernel'],axes=(1, 0))
+
   jax_weights['decoder']['decoder']['self_attention'] = self_attention
 
-  
 
-  commandline_args = ["", "/home/mazumdera/maxtext/MaxText/configs/base.yml","run_name=1xv3-8", "dcn_data_parallelism=1", "save_period=5","ici_data_parallelism=4","steps=20","enable_profiler=true","remat_policy=full","base_emb_dim=512", f"base_num_heads={base_num_heads}", f"head_dim={head_dim}","vocab_size=50272", f"base_num_decoder_layers={base_num_decoder_layers}", "per_device_batch_size=0.5","enable_profiler=true", "base_mlp_dim=2048", f"dataset_type={dataset_type}","max_predict_length=512"]
+  layer_weight['mlp']['wi']['kernel'] = np.array(layer_weight['mlp']['wi']['kernel'])
+  layer_weight['mlp']['ffn_layer1']['kernel'] = np.array(layer_weight['mlp']['ffn_layer1']['kernel'])
+  layer_weight['mlp']['wo']['kernel'] = np.array(layer_weight['mlp']['wo']['kernel'])
+  layer_weight['pre_self_attention_layer_norm']['scale'] = np.array(layer_weight['pre_self_attention_layer_norm']['scale'])
+  layer_weight['post_self_attention_layer_norm']['scale'] = np.array(layer_weight['post_self_attention_layer_norm']['scale'])
+  #swap the layer index
+  layer_weight['mlp']['wi']['kernel'] = jnp.transpose(layer_weight['mlp']['wi']['kernel'],axes=(1, 0))
+  layer_weight['mlp']['ffn_layer1']['kernel'] = jnp.transpose(layer_weight['mlp']['ffn_layer1']['kernel'],axes=(1, 0))
+  layer_weight['mlp']['wo']['kernel'] = jnp.transpose(layer_weight['mlp']['wo']['kernel'],axes=(1, 0))
+  layer_weight['pre_self_attention_layer_norm']['scale'] = jnp.transpose(layer_weight['pre_self_attention_layer_norm']['scale'],axes=(1, 0))
+  layer_weight['post_self_attention_layer_norm']['scale'] = jnp.transpose(layer_weight['post_self_attention_layer_norm']['scale'],axes=(1, 0))
+
+  
+  base_output_directory="base_output_directory=gs://mazumdera-test-bucket/maxtext/llama2/12062023/1"
+  base_num_decoder_layers="base_num_decoder_layers=32"
+  base_num_heads = "base_num_heads=32"
+  head_nums = "head_dim=128"
+  # activation_function="\"relu\""
+  # mlp_activations = f"mlp_activations=[{activation_function}]"
+  async_checkpointing="async_checkpointing=False" 
+  enable_dropout="enable_dropout=False"
+
+  commandline_args = ["dummy", "/home/mazumdera/maxtext/MaxText/configs/base.yml","run_name=1xv4-8", "dcn_data_parallelism=1", "save_period=5","ici_data_parallelism=1","ici_tensor_parallelism=1","steps=20","enable_profiler=true","remat_policy=full","base_emb_dim=512", base_num_heads, head_nums,"vocab_size=50272", base_num_decoder_layers, "per_device_batch_size=0.5","enable_profiler=true", "base_mlp_dim=2048", base_output_directory, "max_predict_length=512", async_checkpointing, enable_dropout]# , mlp_activations]
+
   pyconfig.initialize(commandline_args)
   config = pyconfig.config
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
@@ -226,6 +264,13 @@ def convert(base_model_path, maxtext_model_path, model_size):
       tx = tx,
       apply_fn=model.apply
       )
+  
+  print(f'Verify train state')
+  init_train_state_partial = functools.partial(max_utils.init_train_state, model, tx,
+                                               config)
+  abstract_state = jax.eval_shape(init_train_state_partial, init_rng)
+  print(f'abstract_state = {abstract_state}')
+
   
   print(f'Saving the maxtext model to {maxtext_model_path}')
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
