@@ -49,8 +49,8 @@ def l2norm_pytree(x):
 
 
 def get_metadata(key):
-  import requests  # pytype: disable=import-error
-  import time  # pytype: disable=import-error
+  import requests
+  import time
   # Based on https://github.com/tensorflow/tensorflow/pull/40317
   gce_metadata_endpoint = 'http://' + os.environ.get(
       'GCE_METADATA_IP', 'metadata.google.internal')
