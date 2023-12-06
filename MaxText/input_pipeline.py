@@ -149,6 +149,7 @@ def preprocessing_pipeline(
 
   multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(dataset, global_mesh)
 
+  # Return multi-host jax.Array prep iterator
   return multihost_gen
 
 
