@@ -17,7 +17,7 @@
 import datetime
 from airflow import models
 from configs import composer_env, vm_resource
-from configs.xlml.tensorflow import solutionsTeam_tf_nightly_supported_config as tf_config
+from configs.xlml.tensorflow import solutionsteam_tf_nightly_supported_config as tf_config
 
 
 # Run once a day at 6 am UTC (10 pm PST)

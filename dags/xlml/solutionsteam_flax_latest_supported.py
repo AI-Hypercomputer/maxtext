@@ -17,7 +17,7 @@
 import datetime
 from airflow import models
 from configs import composer_env, vm_resource
-from configs.xlml.jax import solutionsTeam_flax_latest_supported_config as flax_config
+from configs.xlml.jax import solutionsteam_flax_latest_supported_config as flax_config
 
 
 # Run once a day at 2 am UTC (6 pm PST)

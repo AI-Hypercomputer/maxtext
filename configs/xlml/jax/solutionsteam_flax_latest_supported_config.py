@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Utilities to construct configs for solutionsTeam_flax_latest_supported DAG."""
+"""Utilities to construct configs for solutionsteam_flax_latest_supported DAG."""
 
 from typing import Tuple
 import uuid

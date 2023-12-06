@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Utilities to construct configs for solutionsTeam_jax_npi DAG."""
+"""Utilities to construct configs for solutionsteam_jax_npi DAG."""
 
 from apis import gcp_config, metric_config, task, test_config
 from configs import gcs_bucket, test_owner, vm_resource

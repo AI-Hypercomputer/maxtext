@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Utilities to construct configs for solutionsTeam_tf_nightly_supported DAG."""
+"""Utilities to construct configs for solutionsteam_tf_nightly_supported DAG."""
 
 import uuid
 from apis import gcp_config, metric_config, task, test_config

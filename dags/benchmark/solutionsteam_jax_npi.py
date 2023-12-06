@@ -17,7 +17,7 @@
 import datetime
 from airflow import models
 from configs import vm_resource
-from configs.benchmark.jax import solutionsTeam_jax_npi_config as jax_npi_config
+from configs.benchmark.jax import solutionsteam_jax_npi_config as jax_npi_config
 
 
 with models.DAG(
