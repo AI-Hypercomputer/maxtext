@@ -73,7 +73,7 @@ save_period = 1
 step_number_to_save_new_ckpt = 0
 
 def convert(base_model_path, maxtext_model_path, model_size):
-  """Convert from Llama to pax."""
+  """Convert from Llama to maxtext."""
   model_params = MODEL_PARAMS_DICT[model_size]
   base_num_decoder_layers = model_params['num_layers']
   base_num_heads = model_params['num_heads']
@@ -97,32 +97,48 @@ def convert(base_model_path, maxtext_model_path, model_size):
   pytorch_vars = [pytorch_vars[i] for i in sorted(list(pytorch_vars.keys()))]
 
   jax_weights = {
-      'lm': {
-          'embedding_lookup': {
-              'emb_var': np.concatenate([var['tok_embeddings.weight'].type(torch.float16).numpy() for var in pytorch_vars], axis=1)[:vocab_size,:]
-              },
-          'softmax': {
+      'decoder': {
+          'softmax': { #Anisha: what is this?
               'logits_ffn': {
                   'linear': {
                       'w': np.concatenate([var['output.weight'].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()[:, :vocab_size]
                       }
                   }
               },
-          'final_ln': {
+          'decoder_norm': {
               'scale': pytorch_vars[0]['norm.weight'].type(torch.float16).numpy()
               },
-          'transformer': {}
-          }
+          'transformer': {} #Anisha: what is this?
+          },
+       'token_embedder':{
+              'embedding': np.concatenate([var['tok_embeddings.weight'].type(torch.float16).numpy() for var in pytorch_vars], axis=1)[:vocab_size,:]
+         
+       }
       }
 
+  self_attention = {
+        'query': {
+            'kernel' : []
+        }, 
+        'key': {
+            'kernel' : []
+        },
+        'value': {
+            'kernel' : []
+        },
+        'out': {
+            'kernel' : []
+        },
+    } 
+  
   for layer_idx in range(base_num_decoder_layers):
     wq = np.concatenate([var['layers.%d.attention.wq.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()
     wk = np.concatenate([var['layers.%d.attention.wk.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()
     wv = np.concatenate([var['layers.%d.attention.wv.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()
-    if combined_qkv:
-      wc = np.stack([wq, wk, wv], axis=0)
-      wc = np.reshape(wc, [3, base_num_heads * head_dim, base_num_heads, head_dim])
-    else:
+    if True:#combined_qkv:
+    #   wc = np.stack([wq, wk, wv], axis=0)
+    #   wc = np.reshape(wc, [3, base_num_heads * head_dim, base_num_heads, head_dim])
+    # else:
       wq = np.reshape(wq, [base_num_heads * head_dim, base_num_heads, head_dim])
       wk = np.reshape(wk, [base_num_heads * head_dim, num_kv_heads, head_dim])
       wv = np.reshape(wv, [base_num_heads * head_dim, num_kv_heads, head_dim])
@@ -136,19 +152,24 @@ def convert(base_model_path, maxtext_model_path, model_size):
     )
     w_post = np.reshape(w_post, [base_num_heads * head_dim, base_num_heads, head_dim])
 
-    if combined_qkv:
-      attention_weights = {
-          'self_attention': {'combined_qkv': {'w': wc}, 'post': {'w': w_post}}
-      }
-    else:
-      attention_weights = {
-          'self_attention': {
-              'query': {'w': wq},
-              'key': {'w': wk},
-              'value': {'w': wv},
-              'post': {'w': w_post},
-          },
-      }
+    # if combined_qkv:
+    #   attention_weights = {
+    #       'self_attention': {'combined_qkv': {'w': wc}, 'post': {'w': w_post}}
+    #   }
+    # else:
+    #   attention_weights = {
+    #       'self_attention': {
+    #           'query': {'w': wq},
+    #           'key': {'w': wk},
+    #           'value': {'w': wv},
+    #           'post': {'w': w_post},
+    #       },
+    #   }
+
+    self_attention['query']['kernel'].append(wq)
+    self_attention['key']['kernel'].append(wk)
+    self_attention['value']['kernel'].append(wv)
+    self_attention['out']['kernel'].append(w_post)
 
     layer_weight = {
         'ff_layer': {
@@ -175,8 +196,15 @@ def convert(base_model_path, maxtext_model_path, model_size):
             'scale': pytorch_vars[0]['layers.%d.attention_norm.weight' % (layer_idx)].type(torch.float16).numpy()
             }
         }
-    layer_weight.update(attention_weights)
-    jax_weights['lm']['transformer']['x_layers_%d' % layer_idx] = layer_weight
+    # layer_weight.update(attention_weights)
+    jax_weights['decoder']['transformer']['x_layers_%d' % layer_idx] = layer_weight
+  
+  self_attention['query']['kernel'] = np.array(self_attention['query']['kernel'])
+  self_attention['key']['kernel'] = np.array(self_attention['key']['kernel'])
+  self_attention['value']['kernel'] = np.array(self_attention['value']['kernel'])
+  self_attention['out']['kernel'] = np.array(self_attention['out']['kernel'])
+  #TODO: Swap the 0th and 1st indices for q,k,v and out's dims should be (4, 1, 96, 512), dtype=float32), names=('heads', 'layers', 'kv', 'embed')
+  jax_weights['decoder']['decoder']['self_attention'] = self_attention
 
   
 
