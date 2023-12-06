@@ -167,6 +167,7 @@ def get_datasets(
   train_ds = train_ds_builder.as_dataset(split='train',
                                            read_config = read_config,
                                            shuffle_files=config.enable_data_shuffling)
+  print("input_pipeline.py:get_datasets ROSHANI dataset, loading dataset, currently on host " , jax.process_index())
   # shard the dataset as soon as it is loaded
   train_ds = train_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
   print("input_pipeline.py:get_datasets ROSHANI dataset shared among ", jax.process_count() ," hosts currently on host " , jax.process_index())
