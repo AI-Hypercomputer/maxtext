@@ -21,15 +21,11 @@
 # See github.com/google/maxtext/issues/20 for more
 import jax
 import os
-import sys
 
 from typing import Sequence
 import datetime
 from absl import app
-from flax import linen as nn
 import numpy as np
-import optax
-from tensorboardX import SummaryWriter
 
 from layers import Transformer
 import pyconfig
@@ -37,8 +33,8 @@ from input_pipeline import create_data_iterator_with_tokenizer
 import max_utils
 import maxtext_utils
 import checkpointing
+from train import validate_train_config, get_first_step, load_next_batch
 
-import jax.numpy as jnp
 from jax import random
 from jax.sharding import Mesh
 
@@ -49,168 +45,167 @@ from jax.experimental.compilation_cache import compilation_cache as cc
 # from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 # from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
-import max_logging
 
-def validate_train_config(config):
-  """ Validates the configuration is set correctly for train.py"""
+# def validate_train_config(config):
+#   """ Validates the configuration is set correctly for train.py"""
 
-  assert config.run_name, "Erroring out, need a real run_name"
-  if not config.dataset_path.startswith('gs://'):
-    max_logging.log("WARNING: 'dataset_path' might be pointing your local file system")
-  if not config.base_output_directory.startswith('gs://'):
-    max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
+#   assert config.run_name, "Erroring out, need a real run_name"
+#   if not config.dataset_path.startswith('gs://'):
+#     max_logging.log("WARNING: 'dataset_path' might be pointing your local file system")
+#   if not config.base_output_directory.startswith('gs://'):
+#     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
 
-  assert ((config.load_parameters_path=="" and config.load_from_other_directory=="") or
-    config.enable_checkpointing), "You must set enable_checkpointing to load a checkpoint"
-  assert config.load_parameters_path=="" or config.load_from_other_directory=="",\
-  "At most one of load_parameters_path or load_from_other_directory should be set"
-  assert config.load_from_other_directory_step==-1 or config.load_from_other_directory!="",\
-  "You must specify the loading directory if you specify the loading step"
-  assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive interger."
+#   assert ((config.load_parameters_path=="" and config.load_from_other_directory=="") or
+#     config.enable_checkpointing), "You must set enable_checkpointing to load a checkpoint"
+#   assert config.load_parameters_path=="" or config.load_from_other_directory=="",\
+#   "At most one of load_parameters_path or load_from_other_directory should be set"
+#   assert config.load_from_other_directory_step==-1 or config.load_from_other_directory!="",\
+#   "You must specify the loading directory if you specify the loading step"
+#   assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive interger."
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
-def calculate_training_tflops(num_model_parameters, config):
-  learnable_weight_tflops = 6 * num_model_parameters * config.max_target_length * config.per_device_batch_size \
-                                   / 10**12
-  attention_tflops = 12 * config.num_heads * config.num_decoder_layers * config.head_dim * config.max_target_length**2 \
-                     * config.per_device_batch_size / 10**12
-  total_tflops = learnable_weight_tflops + attention_tflops
-  print(f'Per train step, total TFLOPs will be {total_tflops:.2f},',
-        f'split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops',
-        f'and {100 * attention_tflops/total_tflops:.2f}% attention flops')
-  return total_tflops
+# def calculate_training_tflops(num_model_parameters, config):
+#   learnable_weight_tflops = 6 * num_model_parameters * config.max_target_length * config.per_device_batch_size \
+#                                    / 10**12
+#   attention_tflops = 12 * config.num_heads * config.num_decoder_layers * config.head_dim * config.max_target_length**2 \
+#                      * config.per_device_batch_size / 10**12
+#   total_tflops = learnable_weight_tflops + attention_tflops
+#   print(f'Per train step, total TFLOPs will be {total_tflops:.2f},',
+#         f'split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops',
+#         f'and {100 * attention_tflops/total_tflops:.2f}% attention flops')
+#   return total_tflops
 
-def get_first_step(state):
-  with jax.spmd_mode('allow_all'):
-    return int(state.step)
-
-
-def load_next_batch(train_iter, example_batch, config):
-  """Loads the next batch. Can keep reusing the same batch for performance reasons """
-
-  if config.reuse_example_batch and example_batch is not None:
-    return example_batch
-  else:
-    return train_iter()
-
-def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
-  """Records scalar metrics to be written to tensorboard"""
-  metrics['scalar'].update({
-      'perf/step_time_seconds': step_time_delta.total_seconds()
-  })
-  metrics['scalar'].update({
-      'perf/per_device_tflops' : per_device_tflops
-  })
-  metrics['scalar'].update({
-      'perf/per_device_tflops_per_sec':
-          per_device_tflops /
-          step_time_delta.total_seconds()
-  })
-  metrics['scalar'].update({'learning/current_learning_rate': lr })
+# def get_first_step(state):
+#   with jax.spmd_mode('allow_all'):
+#     return int(state.step)
 
 
-def write_metrics(writer, metrics, step, config):
-  """Writes metrics to tensorboard"""
-  with jax.spmd_mode('allow_all'):
-    if jax.process_index() == 0:
-      for metric_name in metrics.get("scalar",[]):
-        writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
-      for metric_name in metrics.get("scalars",[]):
-        writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
+# def load_next_batch(train_iter, example_batch, config):
+#   """Loads the next batch. Can keep reusing the same batch for performance reasons """
 
-    full_log = step % config.log_period == 0
+#   if config.reuse_example_batch and example_batch is not None:
+#     return example_batch
+#   else:
+#     return train_iter()
 
-    max_logging.log(f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
-          f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-          f"loss: {metrics['scalar']['learning/loss']:.3f}")
+# def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
+#   """Records scalar metrics to be written to tensorboard"""
+#   metrics['scalar'].update({
+#       'perf/step_time_seconds': step_time_delta.total_seconds()
+#   })
+#   metrics['scalar'].update({
+#       'perf/per_device_tflops' : per_device_tflops
+#   })
+#   metrics['scalar'].update({
+#       'perf/per_device_tflops_per_sec':
+#           per_device_tflops /
+#           step_time_delta.total_seconds()
+#   })
+#   metrics['scalar'].update({'learning/current_learning_rate': lr })
 
-    if full_log and jax.process_index() == 0:
-      max_logging.log(
-          f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
-      )
-      writer.flush()
 
-def calculate_num_params_from_pytree(params):
-  params_sizes = jax.tree_util.tree_map(jax.numpy.size, params)
-  total_parameters = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes)
-  return total_parameters
+# def write_metrics(writer, metrics, step, config):
+#   """Writes metrics to tensorboard"""
+#   with jax.spmd_mode('allow_all'):
+#     if jax.process_index() == 0:
+#       for metric_name in metrics.get("scalar",[]):
+#         writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
+#       for metric_name in metrics.get("scalars",[]):
+#         writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
+
+#     full_log = step % config.log_period == 0
+
+#     max_logging.log(f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
+#           f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
+#           f"loss: {metrics['scalar']['learning/loss']:.3f}")
+
+#     if full_log and jax.process_index() == 0:
+#       max_logging.log(
+#           f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
+#       )
+#       writer.flush()
+
+# def calculate_num_params_from_pytree(params):
+#   params_sizes = jax.tree_util.tree_map(jax.numpy.size, params)
+#   total_parameters = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes)
+#   return total_parameters
 
 # -----------------------------------------------------------------------------
 # Top-level Functions
 # -----------------------------------------------------------------------------
 
-def record_activation_metrics(output_metrics, intermediate_outputs, config):
-  """ Adds the activation metrics to the metrics dict"""
+# def record_activation_metrics(output_metrics, intermediate_outputs, config):
+#   """ Adds the activation metrics to the metrics dict"""
 
-  if config.scan_layers:
-    metrics_dict = intermediate_outputs['intermediates']['decoder']['decoder']
+#   if config.scan_layers:
+#     metrics_dict = intermediate_outputs['intermediates']['decoder']['decoder']
 
-    for layer_num in range(config.num_decoder_layers):
-      output_metrics['scalar'][f'activ_fraction_zero/layer_{layer_num:03d}'] = \
-        metrics_dict["activation_fraction_zero"][0][layer_num]
-      output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = metrics_dict["activation_mean"][0][layer_num]
-      output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = metrics_dict["activation_stdev"][0][layer_num]
-  else:
-    for layer_num in range(config.num_decoder_layers):
-      layer = intermediate_outputs['intermediates']['decoder'][f'layers_{layer_num}']
-      output_metrics['scalar'][f'activ_fraction_zero/layer_{layer_num:03d}'] = layer["activation_fraction_zero"][0]
-      output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = layer["activation_mean"][0]
-      output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
+#     for layer_num in range(config.num_decoder_layers):
+#       output_metrics['scalar'][f'activ_fraction_zero/layer_{layer_num:03d}'] = \
+#         metrics_dict["activation_fraction_zero"][0][layer_num]
+#       output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = metrics_dict["activation_mean"][0][layer_num]
+#       output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = metrics_dict["activation_stdev"][0][layer_num]
+#   else:
+#     for layer_num in range(config.num_decoder_layers):
+#       layer = intermediate_outputs['intermediates']['decoder'][f'layers_{layer_num}']
+#       output_metrics['scalar'][f'activ_fraction_zero/layer_{layer_num:03d}'] = layer["activation_fraction_zero"][0]
+#       output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = layer["activation_mean"][0]
+#       output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
 
-def train_step(model, config, state, data, dropout_rng):
-  """
+# def train_step(model, config, state, data, dropout_rng):
+#   """
 
-  Args:
-    model: A nn.Module
-    state: A pytree of the current state of the model
-    data: Batch of data to apply to the model
-    dropout_rng: A key to use to generate rng for dropout
+#   Args:
+#     model: A nn.Module
+#     state: A pytree of the current state of the model
+#     data: Batch of data to apply to the model
+#     dropout_rng: A key to use to generate rng for dropout
 
-  Returns:
-    new_state: Same format as state.
-    metrics: Dictionary of model metrics such as loss, training rate, etc.
-    rng2: A new rng key that can be used in future calls.
+#   Returns:
+#     new_state: Same format as state.
+#     metrics: Dictionary of model metrics such as loss, training rate, etc.
+#     rng2: A new rng key that can be used in future calls.
 
-  """
-  # inputs, targets, segments, positions = apply_args
-  rng1, gen_aqt_rng = jax.random.split(dropout_rng)
-  aqt_rng, rng2 = jax.random.split(gen_aqt_rng)
+#   """
+#   # inputs, targets, segments, positions = apply_args
+#   rng1, gen_aqt_rng = jax.random.split(dropout_rng)
+#   aqt_rng, rng2 = jax.random.split(gen_aqt_rng)
 
-  # decimate proportion of data when per_device_batch_size<1
-  for k, v in data.items():
-    data[k] = v[:config.global_batch_size_to_train_on,:]
+#   # decimate proportion of data when per_device_batch_size<1
+#   for k, v in data.items():
+#     data[k] = v[:config.global_batch_size_to_train_on,:]
 
-  def loss_fn(params):
-    logits, intermediate_outputs = model.apply({'params': params},
-                         data['inputs'],
-                         data['targets'],
-                         data['inputs_segmentation'],
-                         data['inputs_position'],
-                         enable_dropout=config.enable_dropout,
-                         rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
-    one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
-    xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
-    xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
-    # Mask out paddings at the end of each example.
-    xent = xent * (data['inputs_segmentation'] != 0)
-    return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
+  # def loss_fn(params):
+  #   logits, intermediate_outputs = model.apply({'params': params},
+  #                        data['inputs'],
+  #                        data['targets'],
+  #                        data['inputs_segmentation'],
+  #                        data['inputs_position'],
+  #                        enable_dropout=config.enable_dropout,
+  #                        rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
+  #   one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
+  #   xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
+  #   xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
+  #   # Mask out paddings at the end of each example.
+  #   xent = xent * (data['inputs_segmentation'] != 0)
+  #   return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
 
-  grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
-  if config.gradient_clipping_threshold > 0:
-    grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
-  else:
-    grads = raw_grads
-  new_state = state.apply_gradients(grads=grads)
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
-             'learning/raw_grad_norm' : max_utils.l2norm_pytree(raw_grads), 
-             'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
-  if config.record_internal_nn_metrics:
-    record_activation_metrics(metrics, intermediate_outputs, config)
+  # grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+  # (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
+  # if config.gradient_clipping_threshold > 0:
+  #   grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
+  # else:
+  #   grads = raw_grads
+  # new_state = state.apply_gradients(grads=grads)
+  # metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
+  #            'learning/raw_grad_norm' : max_utils.l2norm_pytree(raw_grads), 
+  #            'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
+  # if config.record_internal_nn_metrics:
+  #   record_activation_metrics(metrics, intermediate_outputs, config)
 
-  return new_state, metrics, rng2
+  # return new_state, metrics, rng2
 
-def train_loop(config, state=None):
+def data_load_loop(config, state=None):
   """Main Training loop.
 
   Args:
@@ -242,13 +237,13 @@ def train_loop(config, state=None):
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
   
-  print("train.py:preprocessing_pipeline ROSHANI create_data_iterator_with_tokenizer done!")
+  print("data_loading_test.py:preprocessing_pipeline ROSHANI create_data_iterator_with_tokenizer done!")
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
   print("last_step_completion is ", last_step_completion)
-
+  start = datetime.datetime.now()
   # Actual training steps
   for step in np.arange(get_first_step(state), config.steps):
     print("Step ", step, " is starting at ", last_step_completion)
@@ -256,10 +251,10 @@ def train_loop(config, state=None):
     print(" Shape of example batch: ", example_batch)
     new_time = datetime.datetime.now()
     last_step_completion = new_time
-    
-  print("train.py:preprocessing_pipeline ROSHANI loading batches done!")
-
+  end = datetime.datetime.now()  
+  print("data_loading_test.py:preprocessing_pipeline ROSHANI loading batches done in ", end-start ," seconds. " )
   return state
+
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
@@ -269,13 +264,13 @@ def main(argv: Sequence[str]) -> None:
   # os.environ["JAX_PLATFORMS"] = "cpu"
   print(f"ROSHANI ... \n Found {jax.device_count()} devices.")
   print(f"ROSHANI ... \n Found {jax.process_count()} processes.")
-  print(f"ROSHANI ... \n Found {jax.devices()} devices.")
+  # print(f"ROSHANI ... \n Found {jax.devices()} devices.")
   cc.initialize_cache(os.path.expanduser("~/jax_cache"))
   pyconfig.initialize(argv)
   config = pyconfig.config
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
-  train_loop(config)
+  data_load_loop(config)
 
 
 

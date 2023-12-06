@@ -39,7 +39,7 @@ reuse_example_batch: 0 # for testing TPU performance, this options repeated uses
 
 metrics_file: "" # for testing, local file that stores scalar metrics. If empty, no metrics are written.
 # If true save metrics such as loss and TFLOPS to GCS in {base_output_directory}/{run_name}/metrics/
-gcs_metrics: False
+gcs_metrics: True
 
 # Activation dtypes.
 dtype: "bfloat16"
@@ -47,7 +47,7 @@ int8_training: False
 
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
-global_parameter_scale: 1
+global_parameter_scale: 128 #128B model
 base_emb_dim: 2560
 base_num_heads: 8
 base_mlp_dim: 8192
@@ -159,8 +159,8 @@ profiler_steps: 5
 # If enable_checkpointing is true, an asynchronous checkpointer will be used if
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the sychronous one.
-enable_checkpointing: True
-async_checkpointing: True
+enable_checkpointing: False
+async_checkpointing: False
 
 # When dropout is false the model is a deterministic function of the 
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
@@ -193,6 +193,3 @@ use_iota_embed: False
 compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
 compile_topology: '' # Target hardware version, e.g. 'v5e-256'
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
-
-# Maxtext training emulator for storage
-enable_emulator: True
