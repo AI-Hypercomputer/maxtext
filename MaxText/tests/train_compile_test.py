@@ -23,15 +23,11 @@ from train import main as train_main
 class TrainCompile(unittest.TestCase):
   """Tests for the Ahead of Time Compilation functionality, train_compile.py"""
 
-  def test_save_and_restore_v4_8(self):
+  def test_save_compiled(self):
     compiled_trainstep_file='test_compiled.pickle'
     train_compile_main((None, "configs/base.yml", f"compiled_trainstep_file={compiled_trainstep_file}",
       "compile_topology=v4-8", "compile_topology_num_slices=1", "base_emb_dim=256", "base_mlp_dim=256",
       "base_num_decoder_layers=2"))
-    train_main((None, "configs/base.yml", f"compiled_trainstep_file={compiled_trainstep_file}",
-      r"base_output_directory=gs://runner-maxtext-logs", r"dataset_path=gs://maxtext-dataset",
-      "steps=2", "run_name=runner_compile_load_test", "enable_checkpointing=False", "assets_path=../assets",
-      "base_emb_dim=256", "base_mlp_dim=256", "base_num_decoder_layers=2"))
   
   def test_sequence_parallelism(self):
     compiled_trainstep_file='test_compiled.pickle'

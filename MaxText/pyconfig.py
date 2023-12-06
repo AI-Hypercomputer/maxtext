@@ -19,6 +19,7 @@ from collections import OrderedDict
 
 import accelerator_to_spec_map
 import math
+import max_utils
 import os
 import sys
 import yaml
@@ -94,6 +95,11 @@ class _HyperParameters():
   @staticmethod
   def user_init(raw_keys):
     '''Transformations between the config data and configs used at runtime'''
+
+    # We initialize the jax distributed system here because it must be done before device backend is initialized.
+    if raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and raw_keys["compile_topology_num_slices"]==-1:
+      max_utils.initialize_jax_distributed_system()
+
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
     if raw_keys["run_name"] == "":
       raw_keys["run_name"] = os.environ.get("JOBSET_NAME") #using XPK default

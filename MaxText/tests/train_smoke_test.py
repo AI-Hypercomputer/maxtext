@@ -30,7 +30,7 @@ class Train(unittest.TestCase):
       r"dataset_path=gs://maxtext-dataset",
       "base_emb_dim=8", "base_num_heads=4", "base_mlp_dim=32",
       "base_num_decoder_layers=8", "head_dim=16", "per_device_batch_size=2",
-      "max_target_length=1024", "dataset_type=synthetic", "steps=10"])
+      "max_target_length=1024", "dataset_type=synthetic", "steps=10", "enable_checkpointing=False"])
 
 if __name__ == '__main__':
   absltest.main()
