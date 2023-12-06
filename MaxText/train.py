@@ -282,7 +282,6 @@ def train_loop(config, state=None):
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
-  print("last_step_completion is ", last_step_completion)
   
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
@@ -299,7 +298,6 @@ def train_loop(config, state=None):
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
     write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
-    print("last_step_completion is ", last_step_completion)
 
     if checkpoint_manager is not None:
       if checkpoint_manager.save(step, state):

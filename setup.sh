@@ -88,10 +88,6 @@ fi
 
 if [[ "$MODE" == "stable" || ! -v MODE ]]; then
 # Stable mode
-    # if[[ $JAX_PLATFORMS == "cpu" ]]; then
-    #     echo "ROSHANI is Installing JAX CPU"
-    #     pip3 install --upgrade "jax[cpu]"
-    # el
     if [[ -n "$JAX_VERSION" ]]; then
         echo "Installing stable jax, jaxlib, libtpu version ${JAX_VERSION}"
         pip3 install jax[tpu]==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
@@ -132,10 +128,6 @@ else
     echo -e "\n\nError: You can only set MODE to [stable,nightly,libtpu-only].\n\n"
     exit 1
 fi
-
-# JAX_PLATFORMS=cpu
-# echo $JAX_PLATFORMS
-# pip3 install --upgrade "jax[cpu]"
 
 # Install dependencies from requirements.txt
 cd $run_name_folder_path && pip3 install -r requirements.txt
