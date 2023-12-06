@@ -47,12 +47,62 @@ def l2norm_pytree(x):
       lambda x, y: x + jax.numpy.sum(y ** 2), x, initializer=0.0
   ) ** 0.5
 
+
+def get_metadata(key):
+  import requests  # pytype: disable=import-error
+  import time  # pytype: disable=import-error
+  # Based on https://github.com/tensorflow/tensorflow/pull/40317
+  gce_metadata_endpoint = 'http://' + os.environ.get(
+      'GCE_METADATA_IP', 'metadata.google.internal')
+
+  retry_count = 0
+  retrySeconds = 0.500
+  api_resp = None
+
+  while retry_count < 6:
+    api_resp = requests.get(
+        f'{gce_metadata_endpoint}/computeMetadata/v1/instance/attributes/{key}',
+        headers={'Metadata-Flavor': 'Google'})
+    if api_resp.status_code == 200:
+      break
+    retry_count += 1
+    time.sleep(retrySeconds)
+
+  if api_resp is None:
+    raise RuntimeError(f"Getting metadata['{key}'] failed for 6 tries")
+  return api_resp.text
+
+def get_in_slice_id():
+  # Returns an ID that is unique only within slice
+  return int(get_metadata('agent-worker-number'))
+
+def get_slice_id():
+  import re
+  def get_tpu_env_value(key):
+    def get_tpu_env_value_from_metadata(key):
+      tpu_env_data = get_metadata('tpu-env')
+      key_value_pairs = tpu_env_data.split('\n')
+      for key_value_pair in key_value_pairs:
+        # Typical line is MEGASCALE_NUM_SLICES: '2'
+        if ':' in key_value_pair:
+          row_key, value = re.split(':', key_value_pair, 1)
+          row_key = row_key.strip()
+          if row_key == key:
+            return value.strip().strip("'")
+      return None
+
+    value = os.environ.get(key, None)
+    return value if value is not None else get_tpu_env_value_from_metadata(key)
+  return get_tpu_env_value("MEGASCALE_SLICE_ID")
+
 def activate_profiler(config):
-  if jax.process_index() == 0 and config.enable_profiler:
-    jax.profiler.start_trace(config.tensorboard_dir)
+  if get_in_slice_id() == 0 and config.enable_profiler:
+    profile_path = os.path.join(config.tensorboard_dir, f'slice_{get_slice_id()}', "")
+    print(f"Profiling to {profile_path}", flush=True)
+    jax.profiler.start_trace(profile_path)
 
 def deactivate_profiler(config):
-  if jax.process_index() == 0 and config.enable_profiler:
+  if get_in_slice_id() == 0 and config.enable_profiler:
     jax.profiler.stop_trace()
 
 def _prepare_metrics_for_json(metrics, step, run_name):
