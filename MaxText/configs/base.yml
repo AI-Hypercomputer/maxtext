@@ -65,6 +65,9 @@ record_internal_nn_metrics: 0
 # Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
 base_output_directory: ""
 
+# Jax cache directory
+jax_cache_dir: "~/jax_cache"
+
 # Parallelism
 mesh_axes: ['data', 'fsdp', 'sequence', 'tensor']
 logical_axis_rules: [
