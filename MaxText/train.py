@@ -283,14 +283,14 @@ def train_loop(config, state=None):
   start_step = get_first_step(state)
   for step in np.arange(start_step, config.steps):
     example_batch = load_next_batch(data_iterator, example_batch, config)
-    # with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    #   state, metrics, nextrng = p_train_step(
-    #       state, example_batch, nextrng
-    #   )
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      state, metrics, nextrng = p_train_step(
+          state, example_batch, nextrng
+      )
 
     new_time = datetime.datetime.now()
-    # record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
-    # write_metrics(writer, metrics, step, config)
+    record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
+    write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
     print("last_step_completion is ", last_step_completion)
 
@@ -302,11 +302,11 @@ def train_loop(config, state=None):
         checkpoint_manager.wait_until_finished()
         sys.exit()
 
-    # if config.metrics_file:
-    #   max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
+    if config.metrics_file:
+      max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
 
-    # if config.gcs_metrics and jax.process_index() == 0:
-    #   running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
+    if config.gcs_metrics and jax.process_index() == 0:
+      running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
 
     # Start profiling at end of first step to avoid compilation.
     # Move before for loop to include.
