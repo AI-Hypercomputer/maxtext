@@ -93,7 +93,11 @@ def get_slice_id():
 
     value = os.environ.get(key, None)
     return value if value is not None else get_tpu_env_value_from_metadata(key)
-  return get_tpu_env_value("MEGASCALE_SLICE_ID")
+  slice_id = get_tpu_env_value("MEGASCALE_SLICE_ID")
+  if slice_id == None: # Singe slice GCE case may not set MEGASCALE_SLICE_ID
+    return 0
+  else:
+    return int(slice_id)
 
 def activate_profiler(config):
   if get_in_slice_id() == 0 and config.enable_profiler:
