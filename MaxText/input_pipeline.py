@@ -164,10 +164,8 @@ def get_datasets(
   train_ds = train_ds_builder.as_dataset(split='train',
                                            read_config = read_config,
                                            shuffle_files=config.enable_data_shuffling)
-  print("input_pipeline.py:get_datasets ROSHANI dataset, loading dataset, currently on host " , jax.process_index())
   # shard the dataset as soon as it is loaded
   train_ds = train_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
-  print("input_pipeline.py:get_datasets ROSHANI dataset shared among ", jax.process_count() ," hosts currently on host " , jax.process_index())
   train_ds = normalize_features(train_ds)
 
   # Evaluation dataset.
@@ -247,7 +245,6 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       shift=False,
       drop_remainder=False,
       data_shuffle_seed = data_shuffle_seed,)
-  print("input_pipeline.py: preprocess_dataset done on hosts ROSHANI") 
   return train_iter, eval_iter, predict_iter, sp_tokenizer
 
 
