@@ -1,4 +1,12 @@
 steps:
+- name: alpine/git
+  id: init-submodules
+  entrypoint: git
+  args:
+  - submodule
+  - update
+  - --init
+  - --recursive
 - name: golang:alpine
   id: download-jsonnet
   entrypoint: 'go'
@@ -12,8 +20,8 @@ steps:
   - scripts/gen-configs.sh
 - name: google/cloud-sdk:slim
   args:
-    - scripts/upload-tests.sh
-    - gs://us-central1-ml-automation-s-bc954647-bucket/dags
+  - scripts/upload-tests.sh
+  - gs://us-central1-ml-automation-s-bc954647-bucket/dags
   entrypoint: bash
 options:
   machineType: E2_HIGHCPU_32
