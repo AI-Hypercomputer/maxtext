@@ -57,8 +57,9 @@ logits_via_embedding: True  # NOTE: this is True just for testing.
 remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
-attention: 'flash' # Supported attention: flash, mha
+attention: 'flash' # Supported attention: flash, mha, gpu_flash
 
+gpu_flash_attention_backward_pass_impl: "xla" # allowed values (xla, triton)
 record_internal_nn_metrics: 0
 
 # Output directory
