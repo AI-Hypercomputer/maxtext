@@ -38,7 +38,7 @@ def string_to_bool(s: str) -> bool:
 _yaml_types_to_parser = {str : str, int : int, float : float, bool : string_to_bool}
 
 def validate_attention_type(s: str) -> bool:
-  valid_attention_types = ('mha', 'flash')
+  valid_attention_types = ('mha', 'flash', 'gpu_mha')
   if s not in valid_attention_types: # currently supported attention
     raise ValueError(
       "Invalid attention type was passed. Valid options ", valid_attention_types
