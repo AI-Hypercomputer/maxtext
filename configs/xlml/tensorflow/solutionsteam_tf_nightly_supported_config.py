@@ -30,7 +30,7 @@ def get_tf_resnet_config(
     tfds_data_dir: str = gcs_bucket.TFDS_DATA_DIR,
     train_steps: int = 320,
     validation_interval: int = 320,
-) -> task.TpuTask:
+) -> task.TpuQueuedResourceTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
       zone=tpu_zone,
@@ -84,7 +84,7 @@ def get_tf_resnet_config(
       task_owner=test_owner.CHANDRA_D,
   )
 
-  return task.TpuTask(
+  return task.TpuQueuedResourceTask(
       task_test_config=job_test_config,
       task_gcp_config=job_gcp_config,
       custom_tpu_name=tpu_name,
@@ -103,7 +103,7 @@ def get_tf_bert_config(
     tfds_data_dir: str = gcs_bucket.TFDS_DATA_DIR,
     train_steps: int = 2000,
     validation_interval: int = 1000,
-) -> task.TpuTask:
+) -> task.TpuQueuedResourceTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
       zone=tpu_zone,
@@ -165,7 +165,7 @@ def get_tf_bert_config(
       task_owner=test_owner.CHANDRA_D,
   )
 
-  return task.TpuTask(
+  return task.TpuQueuedResourceTask(
       task_test_config=job_test_config,
       task_gcp_config=job_gcp_config,
       custom_tpu_name=tpu_name,

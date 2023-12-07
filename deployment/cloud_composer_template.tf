@@ -112,7 +112,9 @@ resource "google_composer_environment" "example_environment" {
         # See https://cloud.google.com/composer/docs/concepts/versioning/composer-versions
         # google-cloud-bigquery             = ""
         # google-cloud-storage              = ""
+        # google-cloud-container            = ""
         # tensorflow-cpu                    = ""
+        # apache-airflow-providers-cncf-kubernetes = ""
       }
     }
 

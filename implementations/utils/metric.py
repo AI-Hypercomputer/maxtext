@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 """Utilities to process Benchmark metrics."""
 
 import dataclasses
@@ -397,8 +396,38 @@ def is_valid_entry() -> bool:
   return True
 
 
-def get_job_status(benchmark_id: str) -> bigquery.JobStatus:
-  """Get job status for the run.
+def get_gke_job_status(benchmark_id: str) -> bigquery.JobStatus:
+  """Get job status for the GKE run.
+
+  FAILED - if any failure occurs in run_model
+  SUCCESS - end-to-end model tests are successful in run_model
+  """
+  context = get_current_context()
+  execution_date = context["dag_run"].logical_date
+  current_dag = context["dag"]
+
+  workload_completion = current_dag.get_task(
+      task_id=f"{benchmark_id}.run_model.wait_for_workload_completion"
+  )
+  workload_completion_ti = TaskInstance(workload_completion, execution_date)
+  workload_completion_state = workload_completion_ti.current_state()
+
+  if workload_completion_state == TaskState.SUCCESS.value:
+    logging.info(
+        "The wait_for_workload_completion state is success, and the job status"
+        " is success."
+    )
+    return bigquery.JobStatus.SUCCESS
+
+  logging.info(
+      "The wait_for_workload_completion state is not success, and the job"
+      " status is failed."
+  )
+  return bigquery.JobStatus.FAILED
+
+
+def get_gce_job_status(benchmark_id: str) -> bigquery.JobStatus:
+  """Get job status for the GCE run.
 
   MISSED - if any failure occurs in initialize & create_queued_resource
   FAILED - if any failure occurs in setup & run_model (including timeout of
@@ -414,12 +443,12 @@ def get_job_status(benchmark_id: str) -> bigquery.JobStatus:
   setup_ti = TaskInstance(setup_task, execution_date)
   setup_state = setup_ti.current_state()
   if setup_state == TaskState.SKIPPED.value:
-    print("The setup state is skipped, and the job status is missed.")
+    logging.info("The setup state is skipped, and the job status is missed.")
     return bigquery.JobStatus.MISSED
 
   # check setup status to see if setup step is successful
   if setup_state == TaskState.FAILED.value:
-    print("The setup state is failed, and the job status is failed.")
+    logging.info("The setup state is failed, and the job status is failed.")
     return bigquery.JobStatus.FAILED
 
   # check run_model status to see if run_model step is successful
@@ -428,10 +457,12 @@ def get_job_status(benchmark_id: str) -> bigquery.JobStatus:
   run_model_state = run_model_ti.current_state()
 
   if run_model_state == TaskState.SUCCESS.value:
-    print("The run_model state is success, and the job status is success.")
+    logging.info(
+        "The run_model state is success, and the job status is success."
+    )
     return bigquery.JobStatus.SUCCESS
 
-  print("The run_model state is failed, and the job status is failed.")
+  logging.info("The run_model state is failed, and the job status is failed.")
   return bigquery.JobStatus.FAILED
 
 
@@ -493,7 +524,11 @@ def process_metrics(
       task_gcp_config.project_name, task_gcp_config.dataset_name.value
   )
 
-  test_job_status = get_job_status(task_test_config.benchmark_id)
+  if task_test_config.cluster_name:
+    test_job_status = get_gke_job_status(task_test_config.benchmark_id)
+  else:
+    test_job_status = get_gce_job_status(task_test_config.benchmark_id)
+
   for index in range(len(metadata_history_rows_list)):
     job_history_row = bigquery.JobHistoryRow(
         uuid=generate_row_uuid(base_id, index),

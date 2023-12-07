@@ -49,6 +49,7 @@ import os
 import shlex
 from typing import Any, Generic, Iterable, List, Optional, TypeVar
 import attrs
+from configs import vm_resource
 
 
 class Accelerator(abc.ABC):
@@ -78,7 +79,7 @@ class Tpu(Accelerator):
 
   version: str
   cores: int
-  runtime_version: str
+  runtime_version: Optional[str] = None
   network: str = 'default'
   subnetwork: str = 'default'
   reserved: bool = False
@@ -152,6 +153,39 @@ class TpuVmTest(TestConfig[Tpu]):
   @property
   def test_script(self) -> str:
     return '\n'.join(self.run_model_cmds)
+
+
+@attrs.define
+class TpuGkeTest(TestConfig[Tpu]):
+  """Test config that runs on a single Cloud TPU instance in GKE cluster.
+
+  Attributes:
+    test_name: Unique name for this test/model.
+    cluster_name: Name of the cluster that has provisioned TPUs.
+    docker_image: Image of the docker to run.
+    set_up_cmds: List of commands to run once when TPU is created.
+    run_model_cmds: List of commands to run the model under test.
+    num_slices: The number of slices.
+  """
+
+  test_name: str
+  cluster_name: str
+  docker_image: str
+  set_up_cmds: Iterable[str]
+  run_model_cmds: Iterable[str]
+  num_slices: int = attrs.field(default=1, kw_only=True)
+
+  @property
+  def benchmark_id(self) -> str:
+    return f'{self.test_name}-{self.accelerator.name}'
+
+  @property
+  def setup_script(self) -> Optional[str]:
+    return ';'.join(self.set_up_cmds)
+
+  @property
+  def test_script(self) -> str:
+    return ';'.join(self.run_model_cmds)
 
 
 @attrs.define

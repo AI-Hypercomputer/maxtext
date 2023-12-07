@@ -25,7 +25,7 @@ def get_jax_vit_config(
     tpu_cores: int,
     tpu_zone: str,
     time_out_in_min: int,
-) -> task.TpuTask:
+) -> task.TpuQueuedResourceTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
       zone=tpu_zone,
@@ -99,7 +99,7 @@ def get_jax_vit_config(
       )
   )
 
-  return task.TpuTask(
+  return task.TpuQueuedResourceTask(
       task_test_config=job_test_config,
       task_gcp_config=job_gcp_config,
       task_metric_config=job_metric_config,

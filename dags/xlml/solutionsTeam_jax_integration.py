@@ -39,21 +39,21 @@ with models.DAG(
     start_date=datetime.datetime(2023, 7, 12),
     catchup=False,
 ):
-  compilation_cache = task.TpuTask(
+  compilation_cache = task.TpuQueuedResourceTask(
       test_config.JSonnetTpuVmTest.from_jax(
           "jax-compilation-cache-test-func-v2-8-1vm"
       ),
       US_CENTRAL1_C,
   ).run()
 
-  pod_latest = task.TpuTask(
+  pod_latest = task.TpuQueuedResourceTask(
       test_config.JSonnetTpuVmTest.from_jax(
           "jax-pod-latest-tpu-ubuntu2204-base-func-v2-32-1vm"
       ),
       US_CENTRAL1_A,
   ).run()
 
-  pod_head = task.TpuTask(
+  pod_head = task.TpuQueuedResourceTask(
       test_config.JSonnetTpuVmTest.from_jax(
           "jax-pod-head-tpu-ubuntu2204-base-func-v2-32-1vm"
       ),

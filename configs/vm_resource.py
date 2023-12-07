@@ -32,3 +32,14 @@ class RuntimeVersion(enum.Enum):
   TPU_VM_TF_NIGHTLY_POD = "tpu-vm-tf-nightly-pod"
   TPU_UBUNTU2204_BASE = "tpu-ubuntu2204-base"
   TPU_VM_V4_BASE = "tpu-vm-v4-base"
+
+
+class ClusterName(enum.Enum):
+  V4_8_CLUSTER = "mas-v4-8"
+  V4_32_CLUSTER = "mas-v4-32"
+  V5E_4_CLUSTER = "mas-v5e-4"
+  V5E_16_CLUSTER = "mas-v5e-16"
+
+
+class DockerImage(enum.Enum):
+  XPK_JAX_TEST = "gcr.io/cloud-ml-auto-solutions/xpk_jax_test:latest"

@@ -24,7 +24,7 @@ from airflow.models.taskmixin import DAGNode
 from airflow.utils.task_group import TaskGroup
 from apis import gcp_config, metric_config, test_config
 from implementations.utils import metric
-from implementations.utils import ssh, tpu
+from implementations.utils import ssh, tpu, xpk
 
 
 class BaseTask(abc.ABC):
@@ -41,15 +41,15 @@ class BaseTask(abc.ABC):
 
 
 @dataclasses.dataclass
-class TpuTask(BaseTask):
-  """This is a class to set up tasks for TPU.
+class TpuQueuedResourceTask(BaseTask):
+  """This is a class to set up tasks for TPU provisioned by Queued Resource.
 
   Attributes:
     task_test_config: Test configs to run on this TPU.
     task_gcp_config: Runtime TPU creation parameters.
     task_metric_config: Metric configs to process metrics.
-    custom_tpu_name: A custom TPU name. By default the name is 
-      test name + accelerator name.
+    custom_tpu_name: A custom TPU name. By default the name is test name +
+      accelerator name.
     suffix_tpu_name: The flag to define if add auto-generated suffix.
     all_workers: The flag to define if run commands on all workers or worker 0
       only.
@@ -187,6 +187,83 @@ class TpuTask(BaseTask):
     return tpu.delete_queued_resource.override(group_id="clean_up")(
         queued_resource
     )
+
+
+@dataclasses.dataclass
+class TpuXpkTask(BaseTask):
+  """This is a class to set up tasks for TPU provisioned by XPK tool.
+
+  Attributes:
+    task_test_config: Test configs to run on this TPU.
+    task_gcp_config: Runtime TPU creation parameters.
+    task_metric_config: Metric configs to process metrics.
+  """
+
+  task_test_config: test_config.TestConfig[test_config.Tpu]
+  task_gcp_config: gcp_config.GCPConfig
+  task_metric_config: Optional[metric_config.MetricConfig] = None
+
+  def run(self) -> DAGNode:
+    """Run a test job within a docker image.
+
+    Returns:
+      A task group with the following tasks chained: run_model and
+      post_process.
+    """
+    with TaskGroup(group_id=self.task_test_config.benchmark_id) as group:
+      self.run_model() >> self.post_process()
+
+    return group
+
+  def run_model(self) -> DAGNode:
+    """Run the TPU test in `task_test_config` using xpk.
+
+    Returns:
+      A DAG node that executes the model test.
+    """
+    with TaskGroup(group_id="run_model") as group:
+      workload_id = xpk.generate_workload_id(self.task_test_config.benchmark_id)
+      run_workload = xpk.run_workload(
+          task_id="run_workload",
+          project_id=self.task_gcp_config.project_name,
+          zone=self.task_gcp_config.zone,
+          cluster_name=self.task_test_config.cluster_name,
+          benchmark_id=self.task_test_config.benchmark_id,
+          workload_id=workload_id,
+          docker_image=self.task_test_config.docker_image,
+          accelerator_type=self.task_test_config.accelerator.name,
+          run_cmds=self.task_test_config.run_model_cmds,
+          task_owner=self.task_test_config.task_owner,
+          num_slices=self.task_test_config.num_slices,
+      )
+      wait_for_workload_completion = xpk.wait_for_workload_completion.override(
+          timeout=self.task_test_config.time_out_in_min * 60,
+      )(
+          workload_id=workload_id,
+          project_id=self.task_gcp_config.project_name,
+          region=self.task_gcp_config.zone[:-2],
+          cluster_name=self.task_test_config.cluster_name,
+      )
+
+      workload_id >> run_workload >> wait_for_workload_completion
+      return group
+
+  def post_process(self) -> DAGNode:
+    """Process metrics and metadata, and insert them into BigQuery tables.
+
+    Returns:
+      A DAG node that executes the post process.
+    """
+    with TaskGroup(group_id="post_process") as group:
+      process_id = metric.generate_process_id.override(retries=1)()
+      metric.process_metrics.override(retries=1)(
+          process_id,
+          self.task_test_config,
+          self.task_metric_config,
+          self.task_gcp_config,
+      )
+
+      return group
 
 
 @dataclasses.dataclass

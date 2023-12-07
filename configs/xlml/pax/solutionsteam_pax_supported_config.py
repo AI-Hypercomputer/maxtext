@@ -95,7 +95,7 @@ def get_pax_lm_config(
     pax_version: PaxVersion = PaxVersion.STABLE,
     ckp_path: str = "",
     extraFlags: str = "",
-) -> task.TpuTask:
+) -> task.TpuQueuedResourceTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
       zone=tpu_zone,
@@ -127,7 +127,7 @@ def get_pax_lm_config(
       task_owner=test_owner.GERSON_K,
   )
 
-  return task.TpuTask(
+  return task.TpuQueuedResourceTask(
       task_test_config=job_test_config,
       task_gcp_config=job_gcp_config,
   )
