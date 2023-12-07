@@ -299,11 +299,11 @@ class MultiHeadDotProductAttention(nn.Module):
 
 
   def apply_attention(self, query, key, value, attention_type,
-                      decoder_segment_ids, attention_bias, dropout_rng, deterministic, decode):
+                      decoder_segment_ids, attention_bias, dropout_rng, deterministic, model_mode):
     """ Apply Attention
     """
     if attention_type == 'flash':
-      if decode:
+      if model_mode != "train":
         raise ValueError("""Decode not supported with flash attention.
                              Use MHA instead.""")
       # reshaped to ('batch', 'heads', 'length', 'kv')
@@ -376,19 +376,17 @@ class MultiHeadDotProductAttention(nn.Module):
                mask: Optional[Array] = None,
                bias: Optional[Array] = None,
                *,
-               decode: bool = False,
+               model_mode: [str] = "train",
                deterministic: bool = False) -> Array:
     """Applies multi-head dot product attention on the input data.
 
     Projects the inputs into multi-headed query, key, and value vectors,
     applies dot-product attention and project the results to an output vector.
 
-    There are two modes: decoding and non-decoding (e.g., training). The mode is
-    determined by `decode` argument. For decoding, this method is called twice,
-    first to initialize the cache and then for an actual decoding process. The
-    two calls are differentiated by the presence of 'cached_key' in the variable
-    dict. In the cache initialization stage, the cache variables are initialized
-    as zeros and will be filled in the subsequent decoding process.
+    There are three modes: 'train', 'prefill' and 'autoregressive'. The mode is
+    determined by `model_mode` argument. For decoding, this method is called twice,
+    first to initialize the cache ('prefill') and then for an actual decoding process
+    ('autoregerssive').
 
     In the cache initialization call, `inputs_q` has a shape [batch, length,
     q_features] and `inputs_kv`: [batch, length, kv_features]. During the
@@ -400,7 +398,7 @@ class MultiHeadDotProductAttention(nn.Module):
       inputs_kv: key/values of shape `[batch, kv_length, kv_features]`.
       mask: attention mask of shape `[batch, num_heads, q_length, kv_length]`.
       bias: attention bias of shape `[batch, num_heads, q_length, kv_length]`.
-      decode: Whether to prepare and use an autoregressive cache.
+      model_mode: Whether to prepare and use an autoregressive cache.
       deterministic: Disables dropout if set to True.
 
     Returns:
@@ -456,7 +454,7 @@ class MultiHeadDotProductAttention(nn.Module):
     )
     value = checkpoint_name(value, 'value_proj')
 
-    if decode:
+    if model_mode == "autoregressive" or model_mode == "decode":
       # Detect if we're initializing by absence of existing cache data.
       is_initialized = self.has_variable('cache', 'cached_key')
       # The key and value have dimension [batch, length, num_heads, head_dim],
@@ -549,7 +547,7 @@ class MultiHeadDotProductAttention(nn.Module):
 
     # Apply attention.
     x = self.apply_attention(query, key, value, attention_type,
-                              decoder_segment_ids, attention_bias, dropout_rng, deterministic, decode=decode)
+                              decoder_segment_ids, attention_bias, dropout_rng, deterministic, model_mode=model_mode)
     x = nn.with_logical_constraint(
         x, ('activation_batch', 'activation_length', 'activation_heads', 'activation_kv')
     )
@@ -590,7 +588,7 @@ class MlpBlock(nn.Module):
   dtype: Any = jnp.float32
 
   @nn.compact
-  def __call__(self, inputs, decode: bool = False, deterministic: bool = False):
+  def __call__(self, inputs, deterministic: bool = False):
     """Applies Transformer MlpBlock module."""
     cfg = self.config
 
@@ -1033,7 +1031,7 @@ class DecoderLayer(nn.Module):
                decoder_positions,
                decoder_mask,
                deterministic,
-               decode,
+               model_mode,
                max_decode_length):
     cfg = self.config
     mesh = self.mesh
@@ -1063,7 +1061,7 @@ class DecoderLayer(nn.Module):
             mask=decoder_mask,
             bias = None,
             deterministic=deterministic,
-            decode=decode)
+            model_mode=model_mode)
     attention_lnx = nn.with_logical_constraint(attention_lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
     # MLP block.
@@ -1111,7 +1109,7 @@ class Decoder(nn.Module):
                decoder_positions=None,
                decoder_mask=None,
                deterministic=False,
-               decode=False,
+               model_mode="train",
                max_decode_length=None):
     cfg = self.config
     mesh = self.mesh
@@ -1164,7 +1162,7 @@ class Decoder(nn.Module):
           metadata_params={nn.PARTITION_NAME: 'layers'})(
               config=cfg, mesh=mesh,
               name='decoder')(y, decoder_segment_ids, decoder_positions, decoder_mask,
-                              deterministic, decode, max_decode_length)
+                              deterministic, model_mode, max_decode_length)
     else:
       for lyr in range(cfg.num_decoder_layers):
         # [batch, length, emb_dim] -> [batch, length, emb_dim]
@@ -1175,7 +1173,7 @@ class Decoder(nn.Module):
                 decoder_positions,
                 decoder_mask,
                 deterministic,
-                decode,
+                model_mode,
                 max_decode_length)
 
     y = LayerNorm(dtype=cfg.dtype, name='decoder_norm', kernel_axes = ('embed',))(y)
@@ -1229,13 +1227,14 @@ class Transformer(nn.Module):
       decoder_segment_ids=None,
       decoder_positions=None,
       enable_dropout=True,
-      decode=False,
+      model_mode="train",
       max_decode_length=None):
     """Applies Transformer decoder-branch on encoded-input and target."""
+    assert model_mode in ["train", "autoregressive", "prefill"]
     cfg = self.config
 
     # Make padding attention masks.
-    if decode:
+    if model_mode=="autoregressive":
       # Do not mask decoder attention based on targets padding at
       # decoding/inference time.
       decoder_mask = None
@@ -1246,11 +1245,10 @@ class Transformer(nn.Module):
           decoder_segment_ids=decoder_segment_ids)
 
     # Add segmentation block-diagonal attention masks if using segmented data.
-    if decoder_segment_ids is not None:
-      if decode:
-        raise ValueError(
-            'During decoding, packing should not be used but '
-            '`encoder_segment_ids` was passed to `Transformer.decode`.')
+    if decoder_segment_ids is not None and model_mode=="autoregressive":
+      raise ValueError(
+          'During decoding, packing should not be used but '
+          '`decoder_segment_ids` was passed to `Transformer.decode`.')
 
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
@@ -1258,6 +1256,6 @@ class Transformer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         decoder_mask=decoder_mask,
         deterministic=not enable_dropout,
-        decode=decode,
+        model_mode=model_mode,
         max_decode_length=max_decode_length)
     return logits

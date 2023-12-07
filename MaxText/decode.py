@@ -81,7 +81,7 @@ def predict_step(inputs,
       jnp.ones(target_shape, config.dtype),
       None,
       enable_dropout=False,
-      decode=True,
+      model_mode="autoregressive",
       max_decode_length=config.max_predict_length
   )
   cache = initial_variables["cache"]
@@ -97,7 +97,7 @@ def predict_step(inputs,
         flat_ids,
         None,
         enable_dropout=False,
-        decode=True,
+        model_mode="autoregressive",
         rngs={'aqt': aqt_rng},
         max_decode_length=config.max_predict_length,
         mutable=["cache"])
