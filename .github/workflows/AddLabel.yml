@@ -80,6 +80,11 @@ jobs:
               pull_number,
               per_page: 100,
             })
+            // Check that the number of commits in the PR is 1.
+            if (commits.data.length !== 1) {
+              console.log("Not adding pull ready because the PR has more than one commit. Please squash your commits.")
+              process.exit(1)
+            }
             const ref = commits.data.slice(-1)[0].sha
             const checkRuns = await github.rest.checks.listForRef({
               owner,
