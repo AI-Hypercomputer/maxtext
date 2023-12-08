@@ -83,9 +83,9 @@ python3 MaxText/decode.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
 ## Getting Starting: Multihost development
 There are three patterns for running MaxText with more than one host.
 
-1. [GKE, recommended] [Running Maxtext with xpk](getting-started/Run_MaxText_via_xpk.md) - Quick Experimentation and Production support
-2. [GCE] [Running Maxtext with Multihost Jobs](getting-started/Run_MaxText_via_multihost_jobs.md) - Long Running Production Jobs with Queued Resources
-3. [GCE] [Running Maxtext with Multihost Runner](getting-started/Run_MaxText_via_multihost_runner.md) -  Fast experiments via multiple ssh connections.
+1. [GKE, recommended] [Running Maxtext with xpk](getting_started/Run_MaxText_via_xpk.md) - Quick Experimentation and Production support
+2. [GCE] [Running Maxtext with Multihost Jobs](getting_started/Run_MaxText_via_multihost_jobs.md) - Long Running Production Jobs with Queued Resources
+3. [GCE] [Running Maxtext with Multihost Runner](getting_started/Run_MaxText_via_multihost_runner.md) -  Fast experiments via multiple ssh connections.
 
 # Runtime Performance Results
 
