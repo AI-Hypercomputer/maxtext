@@ -37,22 +37,22 @@ def data_load_loop(config, state=None):
   """Main data loader loop.
     Loads batches of data for each training step.
   """
-  _, _, _, _, _, _, data_iterator, state = setup_train_loop(config)
-  
+  _, _, _, _, _, _, _, data_iterator, state = setup_train_loop(config)
+
   example_batch = None
-  
+
   start = datetime.datetime.now()
   last_step_completion = datetime.datetime.now()
-  
+
   start_step = get_first_step(state)
-  
+
   # Actual data loading steps
   for step in np.arange(start_step, config.steps):
     example_batch = load_next_batch(data_iterator, example_batch, config)
     new_time = datetime.datetime.now()
     print("Step ", step, " finished in ", new_time - last_step_completion)
     last_step_completion = new_time
-    
+
   end = datetime.datetime.now()
   print("Batches loaded in ", end-start ," seconds, on host ", jax.process_index())
   return state

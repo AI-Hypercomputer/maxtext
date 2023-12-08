@@ -229,6 +229,7 @@ def setup_train_loop(config):
       state_mesh_annotations: the mesh annotations for the train state 
       model:
       mesh: 
+      learning_rate_schedule:
       data_iterator: 
       state: the initialized train state
   """
@@ -239,7 +240,7 @@ def setup_train_loop(config):
       config.async_checkpointing,
       config.save_period,
   )
-  
+
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
 
@@ -255,8 +256,8 @@ def setup_train_loop(config):
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
-  
-  return writer, checkpoint_manager, nextrng, state_mesh_annotations, model, mesh, data_iterator, state
+
+  return writer, checkpoint_manager, nextrng, state_mesh_annotations, model, mesh, learning_rate_schedule, data_iterator, state
 
 
 def train_loop(config, state=None):
@@ -270,7 +271,7 @@ def train_loop(config, state=None):
   Returns:
 
   """
-  writer, checkpoint_manager, nextrng, state_mesh_annotations, model, mesh, data_iterator, state = setup_train_loop(config)
+  writer, checkpoint_manager, nextrng, state_mesh_annotations, model, mesh, learning_rate_schedule, data_iterator, state = setup_train_loop(config)
 
   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
     train_step,
