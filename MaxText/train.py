@@ -133,11 +133,6 @@ def write_metrics(writer, metrics, step, config):
       )
       writer.flush()
 
-def calculate_num_params_from_pytree(params):
-  params_sizes = jax.tree_util.tree_map(jax.numpy.size, params)
-  total_parameters = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes)
-  return total_parameters
-
 # -----------------------------------------------------------------------------
 # Top-level Functions
 # -----------------------------------------------------------------------------
@@ -255,7 +250,7 @@ def setup_train_loop(config):
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  state, state_mesh_annotations = max_utils.setup_training_state(model, tx, config, init_rng, mesh, checkpoint_manager)
 
   return ( writer, checkpoint_manager, nextrng, state_mesh_annotations, model,
           mesh, learning_rate_schedule, data_iterator, state)
@@ -283,7 +278,7 @@ def train_loop(config, state=None):
     config
   )
 
-  num_model_parameters = calculate_num_params_from_pytree(state.params)
+  num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
   max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
   per_device_tflops = calculate_training_tflops(num_model_parameters, config)
 

@@ -8,16 +8,23 @@ DATASET_PATH=${3}
 
 
 if [ -z ${4} ]
-then 
+then
     RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S)
 else
     RUN_NAME=${4}_$(date +%Y-%m-%d-%H)
 fi
 
-#Train
-python3 MaxText/decode.py MaxText/configs/base.yml run_name=$RUN_NAME\
-    steps=50 enable_checkpointing=False metrics_file='metrics.txt'\
-    base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH\
-    ici_tensor_parallelism=4
+if [ -z ${5} ]
+then
+    ICI_TENSOR_PARALLELISM=4
+else
+    ICI_TENSOR_PARALLELISM=${5}
+fi
 
-python3 end_to_end/eval_assert.py metrics_average metrics.txt $NUM_TOKEN_THRESHOLD num_tokens
+# Decode without checkpoint
+python3 MaxText/decode.py MaxText/configs/base.yml run_name=$RUN_NAME\
+    steps=50 enable_checkpointing=False metrics_file=/tmp/${RUN_NAME}_metrics.txt \
+    base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH \
+    attention=mha ici_tensor_parallelism=${ICI_TENSOR_PARALLELISM}
+
+python3 end_to_end/eval_assert.py metrics_average /tmp/${RUN_NAME}_metrics.txt $NUM_TOKEN_THRESHOLD num_tokens
