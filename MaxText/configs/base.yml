@@ -40,20 +40,6 @@ gcs_metrics: False
 # Activation dtypes.
 dtype: "bfloat16"
 int8_training: False
-# The following flags will only have effect when int8_training is True
-use_dqdg: False
-fwd_int8: True
-dlhs_int8: True
-drhs_int8: False
-fwd_int8_qk: False
-dlhs_int8_qk: False
-drhs_int8_qk: False
-fwd_int8_pv: True
-dlhs_int8_pv: True
-drhs_int8_pv: False
-aqt_use_dummy_static_bound: False
-aqt_use_fwd_quant: False
-aqt_rng_type: "jax.uniform"
 
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
@@ -71,7 +57,7 @@ logits_via_embedding: True  # NOTE: this is True just for testing.
 remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
-enable_flash_attention: False # WARNING: Does not support attention_bias, requires JAX>=0.4.16
+attention: 'flash' # Supported attention: flash, mha
 
 record_internal_nn_metrics: 0
 
@@ -80,21 +66,21 @@ record_internal_nn_metrics: 0
 base_output_directory: ""
 
 # Parallelism
-mesh_axes: ['data', 'fsdp', 'tensor']
+mesh_axes: ['data', 'fsdp', 'sequence', 'tensor']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp']],
-                      ['activation_length' , ['data', 'fsdp']],
+                      ['activation_heads', ['tensor','sequence']],
+                      ['activation_length', 'sequence'],
                       ['activation_embed', 'tensor'],
                       ['activation_mlp', 'tensor'],
-                      ['activation_heads', 'tensor'],
                       ['activation_kv', 'tensor'],
-                      ['activation_vocab', 'tensor'],
+                      ['activation_vocab', ['tensor', 'sequence']],
                       ['mlp', 'tensor'],
                       ['vocab', 'tensor'],
-                      ['embed', 'fsdp'],
+                      ['embed', ['fsdp', 'sequence']],
                       ['heads', 'tensor'],
                     ]
-data_sharding: [['data', 'fsdp', 'tensor']]
+data_sharding: [['data', 'fsdp', 'sequence', 'tensor']]
 
 # One axis for each parallelism type may hold a placeholder (-1)
 # value to auto-shard based on available slices and devices.
@@ -102,9 +88,11 @@ data_sharding: [['data', 'fsdp', 'tensor']]
 # and product of the ICI axes should equal number of devices per slice.
 dcn_data_parallelism: -1  # recommended DCN axis to be auto-sharded
 dcn_fsdp_parallelism: 1
+dcn_sequence_parallelism: 1
 dcn_tensor_parallelism: 1
 ici_data_parallelism: 1
 ici_fsdp_parallelism: -1  # recommended ICI axis to be auto-sharded
+ici_sequence_parallelism: 1
 ici_tensor_parallelism: 1
 
 

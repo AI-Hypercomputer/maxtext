@@ -32,6 +32,7 @@ import optax
 def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config):
   """ Get the shardings (both state and data) for train_step """
   functional_train = get_functional_train_step(train_step, model, config)
+  functional_train.__name__ = "train_step"
   data_pspec = P(*config.data_sharding)
   state_mesh_shardings = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)

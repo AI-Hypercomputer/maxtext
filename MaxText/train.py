@@ -55,13 +55,11 @@ import max_logging
 def validate_train_config(config):
   """ Validates the configuration is set correctly for train.py"""
 
-  def _validate_gcs_bucket_name(bucket_name, config_var):
-    assert bucket_name, f"Please set {config_var}."
-    assert len(bucket_name) > 5 and bucket_name[0:5]=='gs://', f"Erroring out, {config_var} should start with 'gs://' "
-
   assert config.run_name, "Erroring out, need a real run_name"
-  _validate_gcs_bucket_name(config.base_output_directory, "base_output_directory")
-  _validate_gcs_bucket_name(config.dataset_path, "dataset_path")
+  if not config.dataset_path.startswith('gs://'):
+    max_logging.log("WARNING: 'dataset_path' might be pointing your local file system")
+  if not config.base_output_directory.startswith('gs://'):
+    max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
 
   assert ((config.load_parameters_path=="" and config.load_from_other_directory=="") or
     config.enable_checkpointing), "You must set enable_checkpointing to load a checkpoint"
@@ -73,14 +71,16 @@ def validate_train_config(config):
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
 def calculate_training_tflops(num_model_parameters, config):
+  """ Calculate training TFLOP"""
   learnable_weight_tflops = 6 * num_model_parameters * config.max_target_length * config.per_device_batch_size \
                                    / 10**12
-  attention_tflops = 12 * config.num_heads * config.num_decoder_layers * config.head_dim * config.max_target_length**2 \
-                     * config.per_device_batch_size / 10**12
-  total_tflops = learnable_weight_tflops + attention_tflops
+  noncasual_attention_flops = 12 * config.num_heads * config.num_decoder_layers * config.head_dim \
+                      * config.max_target_length**2 * config.per_device_batch_size / 10**12
+  causal_attention_tflops = noncasual_attention_flops / 2 # due to causality in attention
+  total_tflops = learnable_weight_tflops + causal_attention_tflops
   print(f'Per train step, total TFLOPs will be {total_tflops:.2f},',
         f'split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops',
-        f'and {100 * attention_tflops/total_tflops:.2f}% attention flops')
+        f'and {100 * causal_attention_tflops/total_tflops:.2f}% attention flops')
   return total_tflops
 
 def get_first_step(state):
@@ -124,7 +124,7 @@ def write_metrics(writer, metrics, step, config):
     full_log = step % config.log_period == 0
 
     max_logging.log(f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
-          f"TFLOP/s: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
+          f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
           f"loss: {metrics['scalar']['learning/loss']:.3f}")
 
     if full_log and jax.process_index() == 0:
@@ -205,9 +205,9 @@ def train_step(model, config, state, data, dropout_rng):
   else:
     grads = raw_grads
   new_state = state.apply_gradients(grads=grads)
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm' : max_utils.l2norm_pytree(grads),
-             'learning/raw_grad_norm' : max_utils.l2norm_pytree(raw_grads), 
-             'learning/param_norm' : max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
+  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm': max_utils.l2norm_pytree(grads),
+             'learning/raw_grad_norm': max_utils.l2norm_pytree(raw_grads),
+             'learning/param_norm': max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
@@ -278,7 +278,8 @@ def train_loop(config, state=None):
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
-  for step in np.arange(get_first_step(state), config.steps):
+  start_step = get_first_step(state)
+  for step in np.arange(start_step, config.steps):
     example_batch = load_next_batch(data_iterator, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics, nextrng = p_train_step(
@@ -306,7 +307,7 @@ def train_loop(config, state=None):
 
     # Start profiling at end of first step to avoid compilation.
     # Move before for loop to include.
-    if step == 0:
+    if step == start_step:
       max_utils.activate_profiler(config)
 
   max_utils.deactivate_profiler(config)
@@ -317,9 +318,9 @@ def main(argv: Sequence[str]) -> None:
   jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-  print(f"Found {jax.device_count()} devices.")
   cc.initialize_cache(os.path.expanduser("~/jax_cache"))
   pyconfig.initialize(argv)
+  print(f"Found {jax.device_count()} devices.")
   config = pyconfig.config
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path

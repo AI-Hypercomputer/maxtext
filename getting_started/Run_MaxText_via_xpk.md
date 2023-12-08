@@ -17,7 +17,7 @@
 
 # How to run MaxText with XPK?
 
-This document focusses on steps required to setup XPK on TPU VM and assumes you have gone through the [README](https://github.com/google/maxtext/blob/main/xpk/README.md) to understand XPK basics.
+This document focuses on steps required to setup XPK on TPU VM and assumes you have gone through the [README](https://github.com/google/xpk/blob/main/README.md) to understand XPK basics.
 
 ## Steps to setup XPK on TPU VM
 
@@ -30,7 +30,6 @@ This document focusses on steps required to setup XPK on TPU VM and assumes you 
 ```shell
 sudo snap install kubectl --classic
 ```
-
 * Install `gke-gcloud-auth-plugin`
 ```shell
 echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
@@ -77,36 +76,44 @@ after which log out and log back in to the machine.
     # Default will pick stable versions of dependencies
     bash docker_build_dependency_image.sh
     ```
-3. Upload image to your gcp project
+3. After building the dependency image `maxtext_base_image`, xpk can handle updates to the working directory when running `xpk workload create` and using `--base-docker-image`.
 
-    This copies your working directory to the cloud and layers it on top of the dependency image. The first time you do this for a given dependency_image it will take a couple minutes. Subsequent times take less than a second!
+    See details on docker images in xpk here: https://github.com/google/xpk/blob/main/README.md#how-to-add-docker-images-to-a-xpk-workload
 
-    ```shell
-    gcloud config set project $PROJECT_ID
-    bash docker_upload_runner.sh CLOUD_IMAGE_NAME=${USER}_runner
-    ```
-4. After uploading the custom image once, xpk can handle updates to the working directory when running `xpk workload create`
-
-    __Using XPK to upload image to your gcp project and run Maxtext__
+    __Using xpk to upload image to your gcp project and run Maxtext__
 
       ```shell
       gcloud config set project $PROJECT_ID
       gcloud config set compute/zone $ZONE
 
-      # Make sure you are in the maxtext github root directory when running this command
+      # See instructions in README.me to create below buckets.
+      BASE_OUTPUT_DIR=gs://output_bucket/
+      DATASET_PATH=gs://dataset_bucket/
 
-      python3 xpk/xpk.py workload create \
+      # Install xpk
+      pip install xpk
+
+      # Make sure you are still in the maxtext github root directory when running this command
+      xpk workload create \
       --cluster ${CLUSTER_NAME} \
-      --base-docker-image gcr.io/${PROJECT_ID}/${USER}_runner \
+      --base-docker-image maxtext_base_image \
       --workload ${USER}-first-job \
       --tpu-type=v5litepod-256 \
       --num-slices=1  \
       --command "python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
       ```
 
+      __Using [xpk github repo](https://github.com/google/xpk.git)__
 
+      ```shell
+      git clone https://github.com/google/xpk.git
 
-
-
-
-
+      # Make sure you are still in the maxtext github root directory when running this command
+      python3 xpk/xpk.py workload create \
+      --cluster ${CLUSTER_NAME} \
+      --base-docker-image maxtext_base_image \
+      --workload ${USER}-first-job \
+      --tpu-type=v5litepod-256 \
+      --num-slices=1  \
+      --command "python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
+      ```

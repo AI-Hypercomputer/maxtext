@@ -7,6 +7,7 @@ set -e
 
 export OUTPUT_PATH="gs://maxtext-experiments-multipod"
 export DATASET_PATH="gs://maxtext-dataset/"
+export PLATFORM="gke" # Can be "gke" or "gce"
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -15,7 +16,11 @@ for ARGUMENT in "$@"; do
 done
 
 # Set up network
-bash gke_rto_setup.sh
+if [[ $PLATFORM == "gce" ]]; then
+    bash rto_setup.sh
+else
+    bash gke_rto_setup.sh
+fi
 
 # For DNS lookup when running on large number of VMs
 echo '142.250.123.95 www.googleapis.com' | tee -a /etc/hosts
@@ -29,4 +34,4 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
     ici_fsdp_parallelism=16 ici_tensor_parallelism=16\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\
     dataset_path=$DATASET_PATH use_iota_embed=true reuse_example_batch=1\
-    dataset_type=synthetic
+    dataset_type=synthetic attention='flash' gcs_metrics=true

@@ -48,10 +48,10 @@ fi
 if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
   export LIBTPU_GCS_PATH=NONE
   echo "Default LIBTPU_GCS_PATH=${LIBTPU_GCS_PATH}"
-  docker build --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+  docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
 else
-  docker build --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
-  docker build --build-arg CUSTOM_LIBTPU=true -f ./maxtext_libtpu_path.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+  docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+  docker build --network host --build-arg CUSTOM_LIBTPU=true -f ./maxtext_libtpu_path.Dockerfile -t ${LOCAL_IMAGE_NAME} .
 fi
 
 echo ""
@@ -61,7 +61,7 @@ echo ""
 echo "Built your base docker image and named it ${LOCAL_IMAGE_NAME}.
 It only has the dependencies installed. Assuming you're on a TPUVM, to run the
 docker image locally and mirror your local working directory run:"
-echo "docker run -v $(pwd):/app --rm -it --privileged --entrypoint bash maxtext_base_image"
+echo "docker run -v $(pwd):/app --rm -it --privileged --entrypoint bash ${LOCAL_IMAGE_NAME}"
 echo ""
 echo "You can run MaxText and your development tests inside of the docker image. Changes to your workspace will automatically
 be reflected inside the docker container."

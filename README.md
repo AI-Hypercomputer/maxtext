@@ -69,6 +69,7 @@ python3 MaxText/decode.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
 ```
 Be aware, these decodings will be random. To get high quality decodings you need pass in a checkpoint, typically via the `load_parameters_path` argument.
 
+
 #### Running on NVIDIA GPUs
 1. `maxtext_dependencies.Dockerfile` can be used to build a container with the required dependencies.
 2. After installation is completed, run training with the command:

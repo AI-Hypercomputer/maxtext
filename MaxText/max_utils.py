@@ -24,7 +24,8 @@ import max_logging
 import numpy as np
 import jax
 import jax.numpy as jnp
-from jax.experimental import mesh_utils
+from jax.experimental import mesh_utils, multihost_utils
+
 
 import json
 import flax
@@ -34,9 +35,11 @@ from flax.linen import partitioning as nn_partitioning
 
 import optax
 import os
-import subprocess
+import portpicker
+import socket
 from typing import Tuple
 
+from google.cloud import storage
 
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
@@ -85,12 +88,66 @@ def write_metrics_for_gcs(metrics, step, config, running_metrics):
 
     metrics_for_gcs.close()
     gcs_filename=os.path.join(config.metrics_dir, metrics_filename)
-    command = ["gsutil", "mv", metrics_filename, gcs_filename]
     max_logging.log(f"Moving file {metrics_filename} to GCS...")
-    subprocess.run(command, check=True, capture_output=True)
+    upload_blob(gcs_filename, metrics_filename)
     max_logging.log(f"File {metrics_filename} moved successfully!")
     running_metrics = [] # reset running_metrics to empty list
   return running_metrics
+
+def parse_gcs_bucket_and_prefix(destination_gcs_name):
+  path_parts = destination_gcs_name.replace("gs://", "").split("/")
+  bucket = path_parts.pop(0)
+  key = "/".join(path_parts)
+  return bucket, key
+
+def upload_blob(destination_gcs_name, source_file_name):
+  """Uploads a file to a GCS location"""
+  bucket_name, prefix_name = parse_gcs_bucket_and_prefix(destination_gcs_name)
+  storage_client = storage.Client()
+  bucket = storage_client.get_bucket(bucket_name)
+  blob = bucket.blob(prefix_name)
+  blob.upload_from_filename(source_file_name)
+
+def initialize_jax_distributed_system():
+  """ The jax distributed system is necessary for certain tasks such as asynchronous checkpointing in multihost settings.
+  Automatic arguments are chosen on cloud TPU starting with Jax 0.4.21
+  If are you in a different environment, e.g. GPUs, you will need to provide the appropriate arguments, see
+  https://jax.readthedocs.io/en/latest/_autosummary/jax.distributed.initialize.html
+  If you are unable to start the jax distributed system, you may remove the initialization attempt and instead use a
+  synchronous checkpointer (or no checkpointer) with async_checkpointing=False
+  (or enable_checkpointing=False to not use a checkpointer at all) """
+
+  def legacy_distribute_initialize():
+    """Calls jax.distribute.initialize() with appropriate multihost/multislice arguments.
+    This 'legacy' implementation uses the device backend (e.g. TPU backend), which
+    is forbidden starting in Jax version 0.4.21. The jax distributed system should be
+    initialized before the device backend, this is enforced starting with version 0.4.21."""
+
+    def gen_local_ip():
+      hostname = socket.gethostname()
+      return socket.gethostbyname(hostname)
+
+    def gen_local_ip_nums():
+      return [int(num) for num in gen_local_ip().split(':')[-1].split('.')]
+
+    def get_coordinator_ip():
+      local_ip_nums = jax.numpy.array(gen_local_ip_nums())
+      coordinator_ip_nums = multihost_utils.broadcast_one_to_all(local_ip_nums)
+      coordinator_ip_strings = [str(num) for num in list(coordinator_ip_nums)]
+      return '.'.join(coordinator_ip_strings)
+
+    port = multihost_utils.broadcast_one_to_all(jax.numpy.array(portpicker.pick_unused_port()))
+    coordinator_address = get_coordinator_ip() + ':' + str(port)
+    jax.distributed.initialize(coordinator_address=coordinator_address,
+                              num_processes=jax.process_count(),
+                              process_id=jax.process_index())
+
+  max_logging.log("Attempting to initialize the jax distributed system...")
+  if jax.__version__ >= '0.4.21':
+    jax.distributed.initialize()
+  else:
+    legacy_distribute_initialize()
+  max_logging.log("Jax distributed system initialized!")
 
 def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
   """Evaluates unspecified DCN/ICI parallelism values"""
@@ -127,8 +184,10 @@ def create_device_mesh(config, devices=None, logging=True):
 
   multi_slice_env = num_slices > 1
 
-  dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism, config.dcn_tensor_parallelism]
-  ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism, config.ici_tensor_parallelism]
+  dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism,
+                     config.dcn_sequence_parallelism, config.dcn_tensor_parallelism]
+  ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism,
+                     config.ici_sequence_parallelism, config.ici_tensor_parallelism]
 
   # Find possible unspecified parallelisms
   ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, 'ICI')

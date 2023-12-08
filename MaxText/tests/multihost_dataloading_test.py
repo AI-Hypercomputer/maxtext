@@ -38,7 +38,8 @@ class MultihostDataloadingTest(unittest.TestCase):
                         logical_axis_rules = [['batch', 'data']],
                         data_sharding = ['data'],
                         base_output_directory = "gs://max-experiments/",
-                        dataset_path = "gs://maxtext-dataset/")
+                        dataset_path = "gs://maxtext-dataset/",
+                        enable_checkpointing=False)
     config = pyconfig.config
     global_data_shape = PartitionSpec(batch_size, config.max_target_length)
     data_sharding = ('data',)
@@ -53,7 +54,7 @@ class MultihostDataloadingTest(unittest.TestCase):
     dataset = dataset.batch(batch_size)
     self.multihost_gen = (
       multihost_dataloading.get_batch_sharded_data_pipeline(
-          dataset, data_sharding, global_data_shape, mesh, data_axes
+          dataset, mesh
       )
     )
 
