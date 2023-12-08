@@ -215,6 +215,23 @@ def train_step(model, config, state, data, dropout_rng):
 
 
 def setup_train_loop(config):
+  """ Set up prerequisites for the training loop -
+      checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
+      Set up data iterator and tokenizer, initialize the model.
+
+  Args:
+      config
+
+  Returns:
+      writer: Summary writer for tensorboard
+      checkpoint_manager: Orbax checkpointer
+      nextrng: key used in train_step for dropout
+      state_mesh_annotations: the mesh annotations for the train state 
+      model:
+      mesh: 
+      data_iterator: 
+      state: the initialized train state
+  """
   writer = SummaryWriter(config.tensorboard_dir)
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       config.checkpoint_dir,
@@ -236,6 +253,7 @@ def setup_train_loop(config):
   tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
+
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   
   return writer, checkpoint_manager, nextrng, state_mesh_annotations, model, mesh, data_iterator, state
@@ -282,7 +300,7 @@ def train_loop(config, state=None):
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
-  
+
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
