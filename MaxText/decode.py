@@ -23,7 +23,6 @@ import os
 from absl import app
 from flax.linen import partitioning as nn_partitioning
 import numpy as np
-import optax
 
 from layers import Transformer
 import pyconfig
@@ -133,15 +132,13 @@ def decode_loop(config, state=None):
 
   # Model and Optimizer definition
   model = Transformer(config, mesh = mesh)
-
-  tx = optax.adamw(
-    max_utils.create_learning_rate_schedule(config)
-  ) # TODO: we need an optax.GradientTransformation to form a TrainState, but we don't use it when decoding
-
-
   _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
-
-  state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager)
+  state, state_mesh_annotations = max_utils.setup_decode_state(
+    model, config, rng, mesh, checkpoint_manager
+    )
+  assert state.opt_state == {}, "non null opt_state in checkpoint"
+  num_params = max_utils.calculate_num_params_from_pytree(state.params)
+  max_logging.log(f"Number of model params={num_params/10**9:.3f} billion")
 
   state_mesh_shardings = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
