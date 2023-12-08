@@ -133,7 +133,9 @@ max_target_length: 2048
 max_eval_target_length: 512
 
 # Maximum length cutoff for predicted tokens.
-max_predict_length: 64
+max_predict_length: 256
+max_prefill_predict_length: 64
+
 # Sampling temperature for language model inference.
 sampling_temperature: 0.6
 # Top k cutoff for logit sampling. If 0 then no top-k cutoff is used.

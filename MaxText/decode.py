@@ -42,6 +42,8 @@ from jax.sharding import Mesh
 
 from jax.experimental.compilation_cache import compilation_cache as cc
 
+import sys
+
 import max_logging
 
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
@@ -67,14 +69,50 @@ def encode_strings(strs, max_len, tokenizer):
     tokenized_batch[i, :toks.shape[0]-1] = toks[:-1]
   return tokenized_batch
 
-def predict_step(inputs,
+
+def prefill_predict_step(inputs,
+                 state,
+                 rngkey,
+                 model,
+                 config):
+  target_shape = inputs.shape
+  initial_variables = model.init(
+      {'params': rngkey, 'dropout': rngkey, 'aqt': rngkey},
+      jnp.ones(target_shape, config.dtype),
+      None,
+      enable_dropout=False,
+      model_mode="prefill",
+      max_decode_length=config.max_predict_length
+  )
+
+  cache = initial_variables["cache"]
+  print(cache)
+
+
+  flat_logits, new_vars = model.apply(
+    {
+        "params": state.params
+    },
+    inputs,
+    None,
+    enable_dropout=False,
+    model_mode="prefill",
+    rngs={'aqt': rngkey},
+    max_decode_length=config.max_predict_length,
+    mutable=["cache"]
+  )
+
+  #cache = initial_variables["cache"]
+  return flat_logits
+
+
+def ar_predict_step(inputs,
                  state,
                  rngkey,
                  model,
                  config):
   """Predict language model on a batch."""
-  # NOTE: wtf are we adding inputs.shape[2:] here?  it's almost always empty??
-  target_shape = (inputs.shape[0], config.max_predict_length) + inputs.shape[2:]
+  target_shape = (inputs.shape[0], config.max_predict_length)
 
   initial_variables = model.init(
       {'params': rngkey, 'dropout': rngkey, 'aqt': rngkey},
@@ -143,24 +181,35 @@ def decode_loop(config, state=None):
   _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager)
-
   state_mesh_shardings = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
   replicated_sharding = jax.sharding.NamedSharding(mesh, P(None, None))
-  partial_predict_step = functools.partial(predict_step, model=model, config=config)
-  partial_predict_step.__name__ = "predict_step"
-  p_predict_step = jax.jit(
-      partial_predict_step,
+
+  # Encode the demo prompt.
+  np_tokenized_prompts = encode_strings(
+      [config.prompt], config.max_prefill_predict_length, sp_tokenizer)
+  
+  tokenized_prompts = jax.device_put(np.vstack([np_tokenized_prompts]*(int(config.per_device_batch_size) * jax.device_count())), jax.sharding.NamedSharding(mesh, P()))
+
+  partial_prefill_predict_step = functools.partial(prefill_predict_step, model=model, config=config)
+  p_prefill_predict_step = jax.jit(
+      partial_prefill_predict_step,
       in_shardings=(replicated_sharding, state_mesh_shardings, None),
       out_shardings=None
   )
 
-  # Encode the demo prompt.
-  np_tokenized_prompts = encode_strings(
-      [config.prompt], config.max_predict_length, sp_tokenizer)
-  
-  #import pdb ; pdb.set_trace()
-  tokenized_prompts = jax.device_put(np.vstack([np_tokenized_prompts]*32), jax.sharding.NamedSharding(mesh, P()))
+  prefill_output = p_prefill_predict_step(tokenized_prompts, state, rng)
+  print(f"{prefill_output.shape=}")
+  print(f"{tokenized_prompts.shape=}")
+  sys.exit(0)
+
+
+  partial_ar_predict_step = functools.partial(ar_predict_step, model=model, config=config)
+  p_ar_predict_step = jax.jit(
+      partial_ar_predict_step,
+      in_shardings=(replicated_sharding, state_mesh_shardings, None),
+      out_shardings=None
+  )
 
   if config.metrics_file:
     local_metrics_file = open(config.metrics_file, 'a', encoding="utf8")
@@ -172,7 +221,7 @@ def decode_loop(config, state=None):
   for step in np.arange(config.steps):
     rng, rng_to_use = jax.random.split(rng)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      seqs = jax.block_until_ready(p_predict_step(tokenized_prompts, state, rng_to_use))
+      seqs = jax.block_until_ready(p_ar_predict_step(tokenized_prompts, state, rng_to_use))
       new_time = datetime.datetime.now()
       step_times.append((new_time-last_step_completion).total_seconds())
       last_step_completion = new_time

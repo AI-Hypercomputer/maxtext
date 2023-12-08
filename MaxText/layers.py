@@ -386,7 +386,7 @@ class MultiHeadDotProductAttention(nn.Module):
     There are three modes: 'train', 'prefill' and 'autoregressive'. The mode is
     determined by `model_mode` argument. For decoding, this method is called twice,
     first to initialize the cache ('prefill') and then for an actual decoding process
-    ('autoregerssive').
+    ('autoregressive').
 
     In the cache initialization call, `inputs_q` has a shape [batch, length,
     q_features] and `inputs_kv`: [batch, length, kv_features]. During the
@@ -454,7 +454,7 @@ class MultiHeadDotProductAttention(nn.Module):
     )
     value = checkpoint_name(value, 'value_proj')
 
-    if model_mode == "autoregressive" or model_mode == "decode":
+    if model_mode == "autoregressive":
       # Detect if we're initializing by absence of existing cache data.
       is_initialized = self.has_variable('cache', 'cached_key')
       # The key and value have dimension [batch, length, num_heads, head_dim],
@@ -526,6 +526,14 @@ class MultiHeadDotProductAttention(nn.Module):
           # This is equivalent to bias[..., cur_index:cur_index+1, :].
           bias = dynamic_vector_slice_in_dim(
               jnp.squeeze(bias, axis=0), jnp.reshape(cur_index, (-1)), 1, -2)
+
+    if model_mode == "prefill":
+      cached_key = self.variable('cache', 'cached_key', jnp.zeros,
+                                 key.shape, key.dtype)
+      cached_value = self.variable('cache', 'cached_value', jnp.zeros,
+                                   value.shape, value.dtype)
+      cache_index = self.variable('cache', 'cache_index',
+                                  lambda: jnp.array(0, dtype=jnp.int32))
 
     # Convert the boolean attention mask to an attention bias.
     if mask is not None:
@@ -1234,11 +1242,12 @@ class Transformer(nn.Module):
     cfg = self.config
 
     # Make padding attention masks.
-    if model_mode=="autoregressive":
+    if model_mode=="autoregressive" or model_mode=="prefill": # to be updated, shouldw e use decoder mask?
       # Do not mask decoder attention based on targets padding at
       # decoding/inference time.
       decoder_mask = None
     else:
+      print(decoder_target_tokens)
       decoder_mask = make_decoder_mask(
           decoder_target_tokens=decoder_target_tokens,
           dtype=cfg.dtype,
