@@ -15,7 +15,7 @@
  """
 
 # pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports
-""" Standalone data loader - only loads data for each training step."""
+""" Standalone data loader - only loads data for each training step, accesses storage needs."""
 
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
@@ -54,7 +54,7 @@ def data_load_loop(config, state=None):
     last_step_completion = new_time
     
   end = datetime.datetime.now()
-  print("Batches loaded in ", end-start ," seconds. " )
+  print("Batches loaded in ", end-start ," seconds, on host ", jax.process_index())
   return state
 
 
