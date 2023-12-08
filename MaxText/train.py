@@ -301,7 +301,7 @@ def train_loop(config, state=None):
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
-  
+
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
