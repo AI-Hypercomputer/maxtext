@@ -524,7 +524,7 @@ def process_metrics(
       task_gcp_config.project_name, task_gcp_config.dataset_name.value
   )
 
-  if task_test_config.cluster_name:
+  if hasattr(task_test_config, "cluster_name"):
     test_job_status = get_gke_job_status(task_test_config.benchmark_id)
   else:
     test_job_status = get_gce_job_status(task_test_config.benchmark_id)
