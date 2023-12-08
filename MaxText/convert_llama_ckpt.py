@@ -33,6 +33,10 @@ from layers import Transformer
 from jax import random
 import jax.numpy as jnp
 import functools
+import orbax.checkpoint as ocp
+import functools
+import max_utils
+import maxtext_utils
 
 import max_logging
 
@@ -224,10 +228,14 @@ def convert(base_model_path, maxtext_model_path, model_size):
   self_attention['query']['kernel'] = jnp.transpose(self_attention['query']['kernel'],axes=(1, 0, 2, 3)) 
   self_attention['key']['kernel'] = jnp.transpose(self_attention['key']['kernel'],axes=(1, 0, 2, 3))
   self_attention['value']['kernel'] = jnp.transpose(self_attention['value']['kernel'],axes=(1, 0, 2, 3))
-  self_attention['out']['kernel'] = jnp.transpose(self_attention['out']['kernel'],axes=(1, 0, 2, 3))
+  self_attention['out']['kernel'] = jnp.transpose(self_attention['out']['kernel'],axes=(2, 0, 3, 1))
 
   jax_weights['decoder']['decoder']['self_attention'] = self_attention
 
+# layers, base_num_heads * head_dim, base_num_heads, head_dim => base_num_heads * head_dim, layers, base_num_heads, head_dim
+# 
+# 32, 4096, 32, 128 => 4096, 32, 32, 128
+# wanted: 32, 32, 128, 4096 (base_num_heads, layers, head_dim, base_num_heads*head_dim)=>()
 
   layer_weight['mlp']['wi']['kernel'] = np.array(layer_weight['mlp']['wi']['kernel'])
   layer_weight['mlp']['ffn_layer1']['kernel'] = np.array(layer_weight['mlp']['ffn_layer1']['kernel'])
@@ -245,6 +253,8 @@ def convert(base_model_path, maxtext_model_path, model_size):
   jax_weights['decoder']['decoder']['pre_self_attention_layer_norm'] = layer_weight['pre_self_attention_layer_norm']
   jax_weights['decoder']['decoder']['post_self_attention_layer_norm'] = layer_weight['post_self_attention_layer_norm']
   
+  print(f"jax_weights = {jax_weights}")
+
   base_output_directory="base_output_directory=gs://mazumdera-test-bucket/maxtext/llama2/12062023/1"
   base_num_decoder_layers="base_num_decoder_layers=32"
   base_num_heads = "base_num_heads=32"
@@ -254,7 +264,20 @@ def convert(base_model_path, maxtext_model_path, model_size):
   async_checkpointing="async_checkpointing=False" 
   enable_dropout="enable_dropout=False"
 
-  commandline_args = ["dummy", "/home/mazumdera/maxtext/MaxText/configs/base.yml","run_name=1xv4-8", "dcn_data_parallelism=1", "save_period=5","ici_data_parallelism=1","ici_tensor_parallelism=1","steps=20","enable_profiler=true","remat_policy=full","base_emb_dim=512", base_num_heads, head_nums,"vocab_size=50272", base_num_decoder_layers, "per_device_batch_size=0.5","enable_profiler=true", "base_mlp_dim=2048", base_output_directory, "max_predict_length=512", async_checkpointing, enable_dropout]# , mlp_activations]
+  vocab_size="vocab_size=32000"  
+  base_emb_dim="base_emb_dim=4096" 
+  base_mlp_dim="base_mlp_dim=11008" 
+  max_target_length="max_target_length=11008" 
+  max_eval_target_length="max_eval_target_length=4096" 
+#   attention="attention='mha'" 
+  max_predict_length = "max_predict_length=512" #Anisha: what should be this value?
+
+  commandline_args = ["dummy", 
+                      "/home/mazumdera/maxtext/MaxText/configs/base.yml","run_name=1xv4-8", "dcn_data_parallelism=1", "save_period=5","ici_data_parallelism=1","ici_tensor_parallelism=1",
+                      "steps=20","enable_profiler=true","remat_policy=full",base_emb_dim, base_mlp_dim, base_num_heads, head_nums,
+                      vocab_size, base_num_decoder_layers, max_target_length, max_eval_target_length,  
+                      "per_device_batch_size=0.5","enable_profiler=true", async_checkpointing, 
+                      base_output_directory, enable_dropout]# , mlp_activations]
 
   pyconfig.initialize(commandline_args)
   config = pyconfig.config
@@ -262,7 +285,8 @@ def convert(base_model_path, maxtext_model_path, model_size):
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
   model = Transformer(config, mesh)
-  tx = optax.adam(1e-3)
+  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
+  tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
 #   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
 
 
@@ -274,23 +298,61 @@ def convert(base_model_path, maxtext_model_path, model_size):
       apply_fn=model.apply
       )
   
-  print(f'Verify train state')
-  init_train_state_partial = functools.partial(max_utils.init_train_state, model, tx,
-                                               config)
-  abstract_state = jax.eval_shape(init_train_state_partial, init_rng)
-  print(f'abstract_state = {abstract_state}')
+  print(f"jax_states = {jax_states}")
+#   print(f'Verify train state')
+#   init_train_state_partial = functools.partial(max_utils.init_train_state, model, tx,
+#                                                config)
+#   abstract_state = jax.eval_shape(init_train_state_partial, init_rng)
+#   print(f'abstract_state = {abstract_state}')
 
   
-  print(f'Saving the maxtext model to {maxtext_model_path}')
+#   print(f'Saving the maxtext model to {maxtext_model_path}')
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       maxtext_model_path,
       config.enable_checkpointing,
       config.async_checkpointing,
       config.save_period,
   )
+
+#   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+#   init_train_state_partial = functools.partial(max_utils.init_train_state, model, tx,
+#                                                config)
+#   abstract_state = jax.eval_shape(init_train_state_partial, init_rng)
+  
+  state_new, _ = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  print(f"default trainstate={state_new}")
+
+  for key in state_new.params.keys():
+    state_new.params[key] = jax_weights[key]
+#   state_new.replace(params=jax_weights)
+
+
+  print(f"trainstate after replacing params with jax_weights={state_new}")
+
   if checkpoint_manager is not None:
-      if checkpoint_manager.save(step_number_to_save_new_ckpt, jax_states):
-          max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
+      if checkpoint_manager.save(0, state_new):
+        max_logging.log(f"saved a checkpoint at step {0}")
+
+  #Next try loading the checkpoint
+  state_read_from_ckpt, _ = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  print(f"state_read_from_ckpt={state_read_from_ckpt}")
+
+
+def match_nested_dict_shapes(dictionary, indent=0):
+    for key, value in dictionary.items():
+        if isinstance(value, dict):
+            # print("  " * indent + f"Key: {key}")
+
+            match_nested_dict_shapes(value, indent + 1)
+        else:
+            print("  " * indent + f"Key: {key}, Value: {value}")
+
+
+
+  
+#   checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
+#   checkpointer.save('/home/mazumdera/anisha-checkpoints/2/default/', state_new)
+#   checkpointer.restore(path, abstract_state)
 
   
   
