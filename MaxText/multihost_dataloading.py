@@ -150,9 +150,6 @@ def get_next_batch_sharded(local_dataset: tf.data.Dataset,
     device_buffers = _put_to_devices(local_data)
     #  Wrap device buffers as GDA
     shape = tuple(shape)
-    print("####################### Debug")
-    print(f"shape: {shape}; global_mesh: {global_mesh}; ")
-    print(f"input_sharding_constraint: {input_sharding_constraint};")
     input_gda = jax.make_array_from_single_device_arrays(shape,
         jax.sharding.NamedSharding(global_mesh, input_sharding_constraint), device_buffers)
     return input_gda
