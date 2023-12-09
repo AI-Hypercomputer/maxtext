@@ -119,11 +119,11 @@ def convert(base_model_path, maxtext_model_path, model_size):
              'self_attention' : {},            
           }, 
           'decoder_norm': {
-              'scale': pytorch_vars[0]['norm.weight'].type(torch.float16).numpy()
+              'scale': jnp.array(pytorch_vars[0]['norm.weight'].type(torch.float16).numpy())
               },         
         },
        'token_embedder':{
-              'embedding': np.concatenate([var['tok_embeddings.weight'].type(torch.float16).numpy() for var in pytorch_vars], axis=1)[:vocab_size,:]
+              'embedding': jnp.array(np.concatenate([var['tok_embeddings.weight'].type(torch.float16).numpy() for var in pytorch_vars], axis=1)[:vocab_size,:])
          
        }
       }
@@ -168,13 +168,10 @@ def convert(base_model_path, maxtext_model_path, model_size):
     wq = np.concatenate([var['layers.%d.attention.wq.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()
     wk = np.concatenate([var['layers.%d.attention.wk.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()
     wv = np.concatenate([var['layers.%d.attention.wv.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()
-    if True:#combined_qkv:
-    #   wc = np.stack([wq, wk, wv], axis=0)
-    #   wc = np.reshape(wc, [3, base_num_heads * head_dim, base_num_heads, head_dim])
-    # else:
-      wq = np.reshape(wq, [base_num_heads * head_dim, base_num_heads, head_dim])
-      wk = np.reshape(wk, [base_num_heads * head_dim, num_kv_heads, head_dim])
-      wv = np.reshape(wv, [base_num_heads * head_dim, num_kv_heads, head_dim])
+
+    wq = np.reshape(wq, [base_num_heads * head_dim, base_num_heads, head_dim])
+    wk = np.reshape(wk, [base_num_heads * head_dim, num_kv_heads, head_dim])
+    wv = np.reshape(wv, [base_num_heads * head_dim, num_kv_heads, head_dim])
 
     w_post = np.concatenate(
         [
@@ -185,19 +182,6 @@ def convert(base_model_path, maxtext_model_path, model_size):
     )
     w_post = np.reshape(w_post, [base_num_heads * head_dim, base_num_heads, head_dim])
 
-    # if combined_qkv:
-    #   attention_weights = {
-    #       'self_attention': {'combined_qkv': {'w': wc}, 'post': {'w': w_post}}
-    #   }
-    # else:
-    #   attention_weights = {
-    #       'self_attention': {
-    #           'query': {'w': wq},
-    #           'key': {'w': wk},
-    #           'value': {'w': wv},
-    #           'post': {'w': w_post},
-    #       },
-    #   }
 
     self_attention['query']['kernel'].append(wq)
     self_attention['key']['kernel'].append(wk)
@@ -211,8 +195,6 @@ def convert(base_model_path, maxtext_model_path, model_size):
     post_self_attention_layernorm = pytorch_vars[0]['layers.%d.ffn_norm.weight' % (layer_idx)].type(torch.float16).numpy()
 
 
-    # layer_weight.update(attention_weights)
-    # jax_weights['decoder']['transformer']['x_layers_%d' % layer_idx] = layer_weight
 
     layer_weight['mlp']['wi']['kernel'].append(ffn_layer1_gate)
     layer_weight['mlp']['ffn_layer1']['kernel'].append(ffn_layer1)
@@ -220,11 +202,10 @@ def convert(base_model_path, maxtext_model_path, model_size):
     layer_weight['pre_self_attention_layer_norm']['scale'].append(pre_self_attention_layernorm)
     layer_weight['post_self_attention_layer_norm']['scale'].append(post_self_attention_layernorm)
   
-  self_attention['query']['kernel'] = np.array(self_attention['query']['kernel'])
-  self_attention['key']['kernel'] = np.array(self_attention['key']['kernel'])
-  self_attention['value']['kernel'] = np.array(self_attention['value']['kernel'])
-  self_attention['out']['kernel'] = np.array(self_attention['out']['kernel'])
-  #Swap the 0th and 1st indices for q,k,v and out's dims should be (4, 1, 96, 512), dtype=float32), names=('heads', 'layers', 'kv', 'embed')
+  self_attention['query']['kernel'] = jnp.array(self_attention['query']['kernel'])
+  self_attention['key']['kernel'] = jnp.array(self_attention['key']['kernel'])
+  self_attention['value']['kernel'] = jnp.array(self_attention['value']['kernel'])
+  self_attention['out']['kernel'] = jnp.array(self_attention['out']['kernel'])
   self_attention['query']['kernel'] = jnp.transpose(self_attention['query']['kernel'],axes=(1, 0, 2, 3)) 
   self_attention['key']['kernel'] = jnp.transpose(self_attention['key']['kernel'],axes=(1, 0, 2, 3))
   self_attention['value']['kernel'] = jnp.transpose(self_attention['value']['kernel'],axes=(1, 0, 2, 3))
@@ -232,16 +213,12 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
   jax_weights['decoder']['decoder']['self_attention'] = self_attention
 
-# layers, base_num_heads * head_dim, base_num_heads, head_dim => base_num_heads * head_dim, layers, base_num_heads, head_dim
-# 
-# 32, 4096, 32, 128 => 4096, 32, 32, 128
-# wanted: 32, 32, 128, 4096 (base_num_heads, layers, head_dim, base_num_heads*head_dim)=>()
 
-  layer_weight['mlp']['wi']['kernel'] = np.array(layer_weight['mlp']['wi']['kernel'])
-  layer_weight['mlp']['ffn_layer1']['kernel'] = np.array(layer_weight['mlp']['ffn_layer1']['kernel'])
-  layer_weight['mlp']['wo']['kernel'] = np.array(layer_weight['mlp']['wo']['kernel'])
-  layer_weight['pre_self_attention_layer_norm']['scale'] = np.array(layer_weight['pre_self_attention_layer_norm']['scale'])
-  layer_weight['post_self_attention_layer_norm']['scale'] = np.array(layer_weight['post_self_attention_layer_norm']['scale'])
+  layer_weight['mlp']['wi']['kernel'] = jnp.array(layer_weight['mlp']['wi']['kernel'])
+  layer_weight['mlp']['ffn_layer1']['kernel'] = jnp.array(layer_weight['mlp']['ffn_layer1']['kernel'])
+  layer_weight['mlp']['wo']['kernel'] = jnp.array(layer_weight['mlp']['wo']['kernel'])
+  layer_weight['pre_self_attention_layer_norm']['scale'] = jnp.array(layer_weight['pre_self_attention_layer_norm']['scale'])
+  layer_weight['post_self_attention_layer_norm']['scale'] = jnp.array(layer_weight['post_self_attention_layer_norm']['scale'])
   #swap the layer index
   layer_weight['mlp']['wi']['kernel'] = jnp.transpose(layer_weight['mlp']['wi']['kernel'],axes=(1, 0, 2))
   layer_weight['mlp']['ffn_layer1']['kernel'] = jnp.transpose(layer_weight['mlp']['ffn_layer1']['kernel'],axes=(1, 0, 2))
@@ -299,14 +276,8 @@ def convert(base_model_path, maxtext_model_path, model_size):
       )
   
   print(f"jax_states = {jax_states}")
-#   print(f'Verify train state')
-#   init_train_state_partial = functools.partial(max_utils.init_train_state, model, tx,
-#                                                config)
-#   abstract_state = jax.eval_shape(init_train_state_partial, init_rng)
-#   print(f'abstract_state = {abstract_state}')
 
   
-#   print(f'Saving the maxtext model to {maxtext_model_path}')
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       maxtext_model_path,
       config.enable_checkpointing,
@@ -314,17 +285,12 @@ def convert(base_model_path, maxtext_model_path, model_size):
       config.save_period,
   )
 
-#   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
-#   init_train_state_partial = functools.partial(max_utils.init_train_state, model, tx,
-#                                                config)
-#   abstract_state = jax.eval_shape(init_train_state_partial, init_rng)
   
   state_new, _ = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   print(f"default trainstate={state_new}")
 
   for key in state_new.params.keys():
     state_new.params[key] = jax_weights[key]
-#   state_new.replace(params=jax_weights)
 
 
   print(f"trainstate after replacing params with jax_weights={state_new}")
@@ -333,46 +299,10 @@ def convert(base_model_path, maxtext_model_path, model_size):
       if checkpoint_manager.save(0, state_new):
         max_logging.log(f"saved a checkpoint at step {0}")
 
-  #Next try loading the checkpoint
-  state_read_from_ckpt, _ = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
-  print(f"state_read_from_ckpt={state_read_from_ckpt}")
-
-
-def match_nested_dict_shapes(dictionary, indent=0):
-    for key, value in dictionary.items():
-        if isinstance(value, dict):
-            # print("  " * indent + f"Key: {key}")
-
-            match_nested_dict_shapes(value, indent + 1)
-        else:
-            print("  " * indent + f"Key: {key}, Value: {value}")
-
-
-
   
-#   checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
-#   checkpointer.save('/home/mazumdera/anisha-checkpoints/2/default/', state_new)
-#   checkpointer.restore(path, abstract_state)
 
-  
-  
-#   global_mesh = jax.sharding.Mesh(
-#       device_mesh, ['replica', 'data_mdl2', 'mdl'])
 
-#   # Identity pjit is needed to output a GDA model_states.
-#   def identity(x):
-#     return x
 
-#   pjitted_identity = pjit.pjit(identity,
-#                                in_shardings=None,
-#                                out_shardings=None)
-
-#   with global_mesh:
-#     jax_states_gda = pjitted_identity(jax_states)
-
-#   checkpoints.save_checkpoint(
-#       jax_states_gda, maxtext_model_path,
-#       checkpoint_type=checkpoints.CheckpointType.GDA)
 
 
 if __name__ == '__main__':
