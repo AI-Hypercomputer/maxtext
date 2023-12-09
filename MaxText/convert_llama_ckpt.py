@@ -37,6 +37,8 @@ import orbax.checkpoint as ocp
 import functools
 import max_utils
 import maxtext_utils
+from flax.linen import partitioning as nn_partitioning
+
 
 import max_logging
 
@@ -119,11 +121,11 @@ def convert(base_model_path, maxtext_model_path, model_size):
              'self_attention' : {},            
           }, 
           'decoder_norm': {
-              'scale': jnp.array(pytorch_vars[0]['norm.weight'].type(torch.float16).numpy())
+              'scale': pytorch_vars[0]['norm.weight'].type(torch.float16).numpy()
               },         
         },
        'token_embedder':{
-              'embedding': jnp.array(np.concatenate([var['tok_embeddings.weight'].type(torch.float16).numpy() for var in pytorch_vars], axis=1)[:vocab_size,:])
+              'embedding': np.concatenate([var['tok_embeddings.weight'].type(torch.float16).numpy() for var in pytorch_vars], axis=1)[:vocab_size,:]
          
        }
       }
@@ -287,6 +289,32 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
   
   state_new, _ = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  # cpu_device = jax.devices('cpu')[0]
+  # with jax.default_device(cpu_device):
+
+  #   unboxed_abstract_state, state_mesh_annotations = max_utils.get_abstract_state(model, tx, config, init_rng, mesh)
+
+  #   # Initialization
+  #   with nn_partitioning.axis_rules(config.logical_axis_rules):
+  #     state_new, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
+  #                                                 config.load_parameters_path,
+  #                                                 config.load_from_other_directory,
+  #                                                 config.load_from_other_directory_step,
+  #                                                 unboxed_abstract_state,
+  #                                                 mesh,
+  #                                                 state_mesh_annotations)
+
+  #     state_mesh_shardings = jax.tree_map(
+  #         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
+  #     if not state_new:
+  #       init_train_state_partial = functools.partial(max_utils.init_train_state, model, tx, config)
+  #       state_new = init_train_state_partial(init_rng)
+  #       if raw_params: # If we loaded a partial state, we need to merge it.
+  #         state_new = state_new.replace(params = raw_params)
+  #     raw_params = None
+
+  #   state_new = max_utils.unbox_logicallypartioned_trainstate(state_new)
+
   print(f"default trainstate={state_new}")
 
   for key in state_new.params.keys():
