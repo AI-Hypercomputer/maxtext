@@ -60,6 +60,7 @@ def validate_train_config(config):
     max_logging.log("WARNING: 'dataset_path' might be pointing your local file system")
   if not config.base_output_directory.startswith('gs://'):
     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
+  assert config.base_output_directory != "", "config.base_output_directory must not be empty"
 
   assert ((config.load_parameters_path=="" and config.load_from_other_directory=="") or
     config.enable_checkpointing), "You must set enable_checkpointing to load a checkpoint"

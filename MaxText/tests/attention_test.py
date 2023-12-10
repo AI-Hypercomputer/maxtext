@@ -56,11 +56,6 @@ class AttentionTest(unittest.TestCase):
     self.variable = self.attention.init({'params': self.rng, 'aqt': self.rng}, jnp.ones((self.BS, self.MAX_TARGET_LENGTH, self.BASE_EMB_DIM)), 
                             jnp.ones((self.BS, self.MAX_TARGET_LENGTH, self.BASE_EMB_DIM)), 'flash')
 
-
-  def get_decoder_mask(self):
-    a = jnp.stack([jnp.tri(self.MAX_TARGET_LENGTH, dtype = 'bfloat16')[jnp.newaxis,:] for _ in range(self.BS)])
-    return a
-
   def get_data(self):
     lnx = jax.random.uniform(self.rng, shape = (self.BS, self.MAX_TARGET_LENGTH, self.BASE_EMB_DIM),dtype = 'bfloat16')
     decoder_segment_ids = jnp.ones(shape = (self.BS, self.MAX_TARGET_LENGTH), dtype = np.int32)
@@ -68,11 +63,10 @@ class AttentionTest(unittest.TestCase):
       return [jnp.arange(self.MAX_TARGET_LENGTH, dtype=jnp.int32) for _ in range(self.BS)]
     if self.BS > 1:
       decoder_positions = jnp.stack(batch_positions())
-    decoder_mask = self.get_decoder_mask()
-    return lnx, decoder_mask, decoder_segment_ids, decoder_positions
+    return lnx, decoder_segment_ids, decoder_positions
 
   def test_attention(self):
-    lnx, decoder_mask, decoder_segment_ids, decoder_positions = self.get_data()
+    lnx, decoder_segment_ids, decoder_positions = self.get_data()
 
     mha_output = self.attention.apply(
             self.variable,
@@ -81,10 +75,8 @@ class AttentionTest(unittest.TestCase):
             decoder_segment_ids = decoder_segment_ids,
             attention_type='mha',
             inputs_positions = decoder_positions,
-            mask = decoder_mask,
-            bias = None,
             deterministic=True,
-            decode=False,
+            model_mode="train",
             rngs={'aqt': self.rng}
     )
     flash_output = self.attention.apply(
@@ -94,10 +86,8 @@ class AttentionTest(unittest.TestCase):
             decoder_segment_ids = decoder_segment_ids,
             attention_type='flash',
             inputs_positions = decoder_positions,
-            mask = decoder_mask,
-            bias = None,
             deterministic=True,
-            decode=False,
+            model_mode="train",
             rngs={'aqt': self.rng}
     )
     self.assertTrue(jax.numpy.allclose(flash_output, mha_output, rtol=1e-01, atol=1e-01, equal_nan=False))

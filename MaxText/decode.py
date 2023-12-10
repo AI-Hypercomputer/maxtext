@@ -86,12 +86,11 @@ def prefill_predict_step(inputs,
   )
 
   cache = initial_variables["cache"]
-  print(cache)
-
 
   flat_logits, new_vars = model.apply(
     {
-        "params": state.params
+        "params": state.params,
+        "cache": cache
     },
     inputs,
     None,
@@ -101,6 +100,8 @@ def prefill_predict_step(inputs,
     max_decode_length=config.max_predict_length,
     mutable=["cache"]
   )
+  cache = new_vars["cache"]
+  #jax.debug.print("cache: {}", cache)
 
   #cache = initial_variables["cache"]
   return flat_logits
@@ -201,6 +202,10 @@ def decode_loop(config, state=None):
   prefill_output = p_prefill_predict_step(tokenized_prompts, state, rng)
   print(f"{prefill_output.shape=}")
   print(f"{tokenized_prompts.shape=}")
+  indices = jax.numpy.argmax(prefill_output, axis=2)
+  decoded_tokens = decode_tokens(np.array(indices)[0], sp_tokenizer, config.eos_id)
+  print(f"{np_tokenized_prompts=} -> {indices=}")
+  print(f"{decoded_tokens=}")
   sys.exit(0)
 
 
