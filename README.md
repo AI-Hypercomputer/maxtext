@@ -71,7 +71,7 @@ Be aware, these decodings will be random. To get high quality decodings you need
 
 
 #### Running on NVIDIA GPUs
-1. `maxtext_dependencies.Dockerfile` can be used to build a container with the required dependencies.
+1. Use `bash docker_build_dependency_image.sh DEVICE=gpu` can be used to build a container with the required dependencies.
 2. After installation is completed, run training with the command:
 ```
 python3 MaxText/train.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
