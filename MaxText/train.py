@@ -313,11 +313,11 @@ def main(argv: Sequence[str]) -> None:
   jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-  cc.initialize_cache(os.path.expanduser("~/jax_cache"))
   pyconfig.initialize(argv)
   print(f"Found {jax.device_count()} devices.")
   config = pyconfig.config
   validate_train_config(config)
+  cc.initialize_cache(os.path.expanduser(config.jax_cache_dir))
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   debug_config = debug_configuration.DebugConfig(
     stack_trace_config = stack_trace_configuration.StackTraceConfig(
