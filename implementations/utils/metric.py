@@ -66,9 +66,7 @@ def is_valid_tag(
   Returns:
     A bool to indicate if this tag should be included.
   """
-  if exclude_tag_patterns and any(
-      re.match(x, tag) for x in exclude_tag_patterns
-  ):
+  if exclude_tag_patterns and any(re.match(x, tag) for x in exclude_tag_patterns):
     # check if tag in exclude_tag_patterns
     return False
   if include_tag_patterns:
@@ -102,9 +100,7 @@ def read_from_tb(
   for ex in serialized_examples:
     event = event_pb2.Event.FromString(ex.numpy())
     for value in event.summary.value:
-      if not is_valid_tag(
-          value.tag, include_tag_patterns, exclude_tag_patterns
-      ):
+      if not is_valid_tag(value.tag, include_tag_patterns, exclude_tag_patterns):
         continue
       value_type = value.metadata.plugin_data.plugin_name
       if value_type == "scalars":
@@ -115,9 +111,7 @@ def read_from_tb(
       elif value_type == "text":
         metadata[value.tag] = bytes(value.tensor.string_val[0]).decode("utf-8")
       else:
-        logging.info(
-            f"Discarding data point {value.tag} with type {value_type}."
-        )
+        logging.info(f"Discarding data point {value.tag} with type {value_type}.")
 
   return metrics, metadata
 
@@ -146,9 +140,7 @@ def aggregate_metrics(
     raise NotImplementedError(f"Unknown aggregation strategy: {strategy}")
 
 
-def download_object_from_gcs(
-    source_location: str, destination_location: str
-) -> None:
+def download_object_from_gcs(source_location: str, destination_location: str) -> None:
   """Download object from GCS bucket.
 
   Args:
@@ -169,10 +161,7 @@ def download_object_from_gcs(
 def process_json_lines(
     base_id: str,
     file_location: str,
-) -> (
-    List[List[bigquery.MetricHistoryRow]],
-    List[List[bigquery.MetadataHistoryRow]],
-):
+) -> (List[List[bigquery.MetricHistoryRow]], List[List[bigquery.MetadataHistoryRow]],):
   """Process metrics and dimensions from JSON Lines file.
 
   Args:
@@ -201,9 +190,7 @@ def process_json_lines(
 
       for key, value in raw_metrics.items():
         metric_history_rows.append(
-            bigquery.MetricHistoryRow(
-                job_uuid=uuid, metric_key=key, metric_value=value
-            )
+            bigquery.MetricHistoryRow(job_uuid=uuid, metric_key=key, metric_value=value)
         )
 
       for key, value in metadata.items():
@@ -222,10 +209,7 @@ def process_json_lines(
 def process_tensorboard_summary(
     base_id: str,
     summary_config: metric_config.SummaryConfig,
-) -> (
-    List[List[bigquery.MetricHistoryRow]],
-    List[List[bigquery.MetadataHistoryRow]],
-):
+) -> (List[List[bigquery.MetricHistoryRow]], List[List[bigquery.MetadataHistoryRow]],):
   """Process metrics and dimensions from TensorBoard file.
 
   Args:
@@ -255,9 +239,7 @@ def process_tensorboard_summary(
 
   for key, value in aggregated_metrics.items():
     metric_history_rows.append(
-        bigquery.MetricHistoryRow(
-            job_uuid=uuid, metric_key=key, metric_value=value
-        )
+        bigquery.MetricHistoryRow(job_uuid=uuid, metric_key=key, metric_value=value)
     )
 
   for key, value in metadata.items():
@@ -316,7 +298,9 @@ def add_airflow_metadata(
       os.environ.get(composer_env.COMPOSER_LOCATION),
       os.environ.get(composer_env.COMPOSER_ENVIRONMENT),
   )
-  airflow_dag_run_link = f"{airflow_link}/dags/{dag_id}/grid?dag_run_id={dag_run_id}&task_id={task_id}"
+  airflow_dag_run_link = (
+      f"{airflow_link}/dags/{dag_id}/grid?dag_run_id={dag_run_id}&task_id={task_id}"
+  )
   logging.info(f"airflow_dag_run_link is {airflow_dag_run_link}")
 
   # append airflow metadata for each test run.
@@ -379,18 +363,14 @@ def is_valid_entry() -> bool:
   """
   # if it's a non-prod run, no entries are inserted
   if not composer_env.is_prod_env():
-    logging.info(
-        "This is a non-prod run, and no entries are inserted into tables."
-    )
+    logging.info("This is a non-prod run, and no entries are inserted into tables.")
     return False
 
   # if it's a manual run, no entries are inserted
   context = get_current_context()
   run_id = context["run_id"]
   if run_id.startswith("manual"):
-    logging.info(
-        "This is a manual run, and no entries are inserted into tables."
-    )
+    logging.info("This is a manual run, and no entries are inserted into tables.")
     return False
 
   return True
@@ -457,9 +437,7 @@ def get_gce_job_status(benchmark_id: str) -> bigquery.JobStatus:
   run_model_state = run_model_ti.current_state()
 
   if run_model_state == TaskState.SUCCESS.value:
-    logging.info(
-        "The run_model state is success, and the job status is success."
-    )
+    logging.info("The run_model state is success, and the job status is success.")
     return bigquery.JobStatus.SUCCESS
 
   logging.info("The run_model state is failed, and the job status is failed.")
@@ -488,11 +466,10 @@ def process_metrics(
           base_id, task_metric_config.json_lines.file_location
       )
     if task_metric_config.tensorboard_summary:
-      metric_history_rows_list, metadata_history_rows_list = (
-          process_tensorboard_summary(
-              base_id, task_metric_config.tensorboard_summary
-          )
-      )
+      (
+          metric_history_rows_list,
+          metadata_history_rows_list,
+      ) = process_tensorboard_summary(base_id, task_metric_config.tensorboard_summary)
     if task_metric_config.profile:
       has_profile = True
       num_profiles = len(task_metric_config.profile.file_locations)

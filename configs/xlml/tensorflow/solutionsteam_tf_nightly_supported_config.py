@@ -65,8 +65,7 @@ def get_tf_resnet_config(
           " PYTHONPATH='.' python3 official/vision/train.py"
           f" --tpu={tpu_name} --experiment=resnet_imagenet"
           " --mode=train_and_eval --model_dir=/tmp/output"
-          " --params_override='%s'"
-          % str(params_override)
+          " --params_override='%s'" % str(params_override)
       ),
   )
 
@@ -119,15 +118,11 @@ def get_tf_bert_config(
           ),
           "train_data": {
               "tfds_data_dir": tfds_data_dir,
-              "vocab_file": (
-                  tf_nlp_bert_dir + "/uncased_L-12_H-768_A-12/vocab.txt"
-              ),
+              "vocab_file": (tf_nlp_bert_dir + "/uncased_L-12_H-768_A-12/vocab.txt"),
           },
           "validation_data": {
               "tfds_data_dir": tfds_data_dir,
-              "vocab_file": (
-                  tf_nlp_bert_dir + "/uncased_L-12_H-768_A-12/vocab.txt"
-              ),
+              "vocab_file": (tf_nlp_bert_dir + "/uncased_L-12_H-768_A-12/vocab.txt"),
           },
       },
       "trainer": {
@@ -146,8 +141,7 @@ def get_tf_bert_config(
           f" --tpu={tpu_name} --experiment=bert/sentence_prediction_text"
           " --config_file=official/nlp/configs/experiments/glue_mnli_text.yaml"
           " --mode=train_and_eval --model_dir=/tmp/output"
-          " --params_override='%s'"
-          % str(params_override)
+          " --params_override='%s'" % str(params_override)
       ),
   )
 

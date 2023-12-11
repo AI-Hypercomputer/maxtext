@@ -1,0 +1,8 @@
+repos:
+  - repo: https://github.com/google/pyink
+    rev: 23.10.0
+    hooks:
+      - id: pyink
+        args: [--pyink-indentation=2, --pyink-use-majority-quotes]
+        language_version: python3.8
+        verbose: true

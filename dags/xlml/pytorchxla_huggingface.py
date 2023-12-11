@@ -40,15 +40,11 @@ with models.DAG(
     catchup=False,
 ):
   accelerate_v2_8 = task.TpuQueuedResourceTask(
-      test_config.JSonnetTpuVmTest.from_pytorch(
-          "pt-nightly-accelerate-smoke-v2-8-1vm"
-      ),
+      test_config.JSonnetTpuVmTest.from_pytorch("pt-nightly-accelerate-smoke-v2-8-1vm"),
       US_CENTRAL1_C,
   ).run()
   accelerate_v4_8 = task.TpuQueuedResourceTask(
-      test_config.JSonnetTpuVmTest.from_pytorch(
-          "pt-nightly-accelerate-smoke-v4-8-1vm"
-      ),
+      test_config.JSonnetTpuVmTest.from_pytorch("pt-nightly-accelerate-smoke-v4-8-1vm"),
       US_CENTRAL2_B,
   ).run()
   diffusers_v4_8 = task.TpuQueuedResourceTask(

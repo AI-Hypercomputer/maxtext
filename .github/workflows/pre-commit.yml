@@ -1,0 +1,20 @@
+name: Pre-commit
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, edited]
+  push:
+    branches: [master]
+
+jobs:
+  format_check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions/setup-python@v4
+      with:
+        # Note: this should match Cloud Composer
+        # https://cloud.google.com/composer/docs/concepts/versioning/composer-versions
+        python-version: '3.8'
+    - uses: pre-commit/action@v3.0.0

@@ -40,9 +40,7 @@ with models.DAG(
     catchup=False,
 ):
   compilation_cache = task.TpuQueuedResourceTask(
-      test_config.JSonnetTpuVmTest.from_jax(
-          "jax-compilation-cache-test-func-v2-8-1vm"
-      ),
+      test_config.JSonnetTpuVmTest.from_jax("jax-compilation-cache-test-func-v2-8-1vm"),
       US_CENTRAL1_C,
   ).run()
 

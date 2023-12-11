@@ -91,9 +91,7 @@ def wait_for_workload_completion(
 
   # Get cluster configuration
   container_client = container_v1.ClusterManagerClient()
-  cluster_path = (
-      f"projects/{project_id}/locations/{region}/clusters/{cluster_name}"
-  )
+  cluster_path = f"projects/{project_id}/locations/{region}/clusters/{cluster_name}"
   response = container_client.get_cluster(name=cluster_path)
   creds, _ = google.auth.default()
   auth_req = google.auth.transport.requests.Request()

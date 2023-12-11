@@ -22,7 +22,9 @@ PROJECT_CLOUD_ML_AUTO_SOLUTIONS = "cloud-ml-auto-solutions"
 
 class Zone(enum.Enum):
   US_CENTRAL1_A = "us-central1-a"  # reservation for v2-32 in cloud-ml-auto-solutions
-  US_CENTRAL2_B = "us-central2-b"  # reservation for v4-8 & v4-32 in cloud-ml-auto-solutions
+  US_CENTRAL2_B = (  # reservation for v4-8 & v4-32 in cloud-ml-auto-solutions
+      "us-central2-b"
+  )
   US_CENTRAL1_C = "us-central1-c"  # reservation for v2-8 in cloud-ml-auto-solutions
   US_EAST1_D = "us-east1-d"  # reservation for v3-8 & v3-32 in cloud-ml-auto-solutions
 

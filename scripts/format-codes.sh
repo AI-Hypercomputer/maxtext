@@ -12,7 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-export PYTHONPATH=$PWD
-export XLMLTEST_CONFIGS=$PWD/configs/jsonnet/
+# Format Python codes using Pyink
+# Googlers: please run `sudo apt install pipx; pipx install pyink` in advance
 
-find dags -name '*.py' |  xargs -n 1 -t python
+set -e
+
+FOLDERS_TO_FORMAT=("apis" "configs" "dags" "implementations")
+
+for folder in "${FOLDERS_TO_FORMAT[@]}"
+do
+  pyink "$folder" --pyink-indentation=2 --pyink-use-majority-quotes
+done
+
+echo "Successfully format codes."

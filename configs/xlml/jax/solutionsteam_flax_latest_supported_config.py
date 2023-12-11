@@ -158,7 +158,9 @@ def get_flax_vit_conv_config(
   tf_summary_location = (
       "/tmp/transformers/vit-imagenette/events.out.tfevents.jax-vit.v2"
   )
-  gcs_location = f"{gcs_bucket.XLML_OUTPUT_DIR}/flax/vit/metric/events.out.tfevents.jax-vit.v2"
+  gcs_location = (
+      f"{gcs_bucket.XLML_OUTPUT_DIR}/flax/vit/metric/events.out.tfevents.jax-vit.v2"
+  )
   extra_run_cmds = (
       (
           "cp /tmp/transformers/vit-imagenette/events.out.tfevents.*"

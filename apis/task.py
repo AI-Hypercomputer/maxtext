@@ -184,9 +184,7 @@ class TpuQueuedResourceTask(BaseTask):
     Raises:
       AirflowTaskTimeout: An error occurs when execution_timeout is breached.
     """
-    return tpu.delete_queued_resource.override(group_id="clean_up")(
-        queued_resource
-    )
+    return tpu.delete_queued_resource.override(group_id="clean_up")(queued_resource)
 
 
 @dataclasses.dataclass
