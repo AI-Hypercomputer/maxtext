@@ -47,6 +47,13 @@ def l2norm_pytree(x):
       lambda x, y: x + jax.numpy.sum(y ** 2), x, initializer=0.0
   ) ** 0.5
 
+def calculate_num_params_from_pytree(params):
+  # NOMUTANTS -- false alert, verified test exists.
+  params_sizes = jax.tree_util.tree_map(jax.numpy.size, params)
+  total_parameters = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes)
+  assert total_parameters >= 0
+  return total_parameters
+
 def activate_profiler(config):
   if jax.process_index() == 0 and config.enable_profiler:
     jax.profiler.start_trace(config.tensorboard_dir)
@@ -56,7 +63,7 @@ def deactivate_profiler(config):
     jax.profiler.stop_trace()
 
 def _prepare_metrics_for_json(metrics, step, run_name):
-  """Converts metric dictionary into json supported types (e.g. float)""" 
+  """Converts metric dictionary into json supported types (e.g. float)"""
   metrics_dict = {}
   for val in metrics['scalar']:
     metrics_dict[val] = float(metrics['scalar'][val])
@@ -218,13 +225,33 @@ def unbox_logicallypartioned_trainstate(
         else x, boxed_train_state, \
         is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned))
 
-def init_train_state(model, tx, config, key):
+def init_decode_state(apply_fn, params):
+  """Init train state with null opt state for decode."""
+  state = train_state.TrainState(
+    step=0,
+    apply_fn=apply_fn,
+    params=params,
+    tx=None, # type: ignore
+    opt_state={}
+    )
+  return state
+
+def init_training_state(apply_fn, params, tx):
+  """Init train state with null opt state for decode."""
+  state = train_state.TrainState.create(
+    apply_fn=apply_fn,
+    params=params,
+    tx=tx
+    )
+  return state
+
+def init_initial_state(model, tx, config, is_training, key):
   """
   We pass in "static" objects like model, tx, config as JAX compares them by
   object hash, and instantiating them inside causes pjit top-level annotations
   to fail to match as pytree prefixes if we re-instantiate.
 
-  Args: model, tx, config, key
+  Args: model, tx, config, is_training, key
   """
   input_shape = (
       config.global_batch_size_to_load,
@@ -233,14 +260,19 @@ def init_train_state(model, tx, config, key):
   model_vars = model.init({'params': key, 'dropout': key, 'aqt': key},
                           jnp.ones(input_shape),
                           jnp.ones(input_shape))
-  state = train_state.TrainState.create(
-      apply_fn=model.apply,
-      params=model_vars['params'],
-      tx=tx)
-  return state
+  if is_training:
+    return init_training_state(model.apply, model_vars['params'], tx)
+  return init_decode_state(model.apply, model_vars['params'])
 
+def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
+  is_training = False
+  return setup_initial_state(model, None, config, rng, mesh, checkpoint_manager, is_training)
 
-def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
+def setup_training_state(model, tx, config, rng, mesh, checkpoint_manager):
+  is_training = True
+  return setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_training)
+
+def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_training=True):
   """ We initialize the model and optimizer state, and optionally load from a
   checkpoint as necessary.
 
@@ -251,13 +283,14 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     rng: jax.prng key
     mesh: jax.devices() mesh
     checkpoint_manager: an Orbax checkpointing.CheckpointManager object
+    is_training: True to initialize training state, False for decode state
 
   Returns:
     state: the initialized train state
     state_mesh_annotations: the mesh annotations for the train state
   """
 
-  unboxed_abstract_state, state_mesh_annotations = get_abstract_state(model, tx, config, rng, mesh)
+  unboxed_abstract_state, state_mesh_annotations = get_abstract_state(model, tx, config, rng, mesh, is_training)
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -272,9 +305,9 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager):
     state_mesh_shardings = jax.tree_map(
         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
     if not state:
-      init_train_state_partial = functools.partial(init_train_state, model, tx, config)
+      init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       state = jax.jit(
-          init_train_state_partial,
+          init_state_partial,
           in_shardings=None,
           out_shardings=state_mesh_shardings
       )(rng)
@@ -410,11 +443,11 @@ cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
                                  _cross_entropy_with_logits_bwd)
 
 # TODO: This function should be moved to maxtext_utils.py after refactoring b/308500675
-def get_abstract_state(model, tx, config, rng, mesh):
+def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   """ Get a shaped abstraction of the state (including optimizer)"""
-  init_train_state_partial = functools.partial(init_train_state, model, tx,
-                                              config)
-  abstract_state = jax.eval_shape(init_train_state_partial, rng)
+  init_state_partial = functools.partial(init_initial_state, model, tx,
+                                              config, is_training)
+  abstract_state = jax.eval_shape(init_state_partial, rng)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
   unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
 

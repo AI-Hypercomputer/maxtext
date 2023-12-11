@@ -17,10 +17,15 @@
 """ Tests for the common Max Utils """
 import jax
 import max_utils
-import unittest
-import optax
 from flax import linen as nn
-
+from flax.training import train_state
+from jax import numpy as jnp
+from jax import random
+from jax.sharding import Mesh
+import optax
+import pyconfig
+import unittest
+from layers import Transformer
 
 class MaxUtilsSummaryStats(unittest.TestCase):
   """Tests for the summary stats functions in max_utils.py"""
@@ -28,6 +33,94 @@ class MaxUtilsSummaryStats(unittest.TestCase):
     x = {'a': jax.numpy.array([0, 2, 0]), 'b': jax.numpy.array([0, 3, 6])}
     pytree_l2_norm = max_utils.l2norm_pytree(x)
     self.assertTrue(jax.numpy.allclose(pytree_l2_norm, 7, rtol=1e-05, atol=1e-08, equal_nan=False))
+
+class MaxUtilsInitState(unittest.TestCase):
+  """Tests initialization of training and decode states in max_utils.py"""
+  def setUp(self):
+    self.model = nn.Dense(features=5)
+    self.key1, self.key2 = random.split(random.key(0))
+    self.input = random.normal(self.key1, (10,)) # Dummy input data
+    self.params = self.model.init(self.key2, self.input)
+    self.output = self.model.apply(self.params, self.input)
+    self.tx = optax.adam(learning_rate=0.001)
+
+  def test_calculate_num_params_from_pytree(self):
+    example_tree = [
+      [1, 'a', object()],
+      (1, (2, 3), ()),
+      [1, {'k1': 2, 'k2': (3, 4)}, 5],
+      {'a': 2, 'b': (2, 3)},
+      jnp.array([1, 2, 3]),
+      ]
+    self.assertEqual(max_utils.calculate_num_params_from_pytree(example_tree), 17)
+    # Model params
+    self.assertEqual(max_utils.calculate_num_params_from_pytree(self.params), 55)
+
+  def test_init_train_state(self):
+    state = train_state.TrainState(
+    step=0,
+    apply_fn=self.model.apply,
+    params=self.params,
+    tx=None, # type: ignore
+    opt_state={}
+    )
+    self.assertEqual(state.tx, None)
+    self.assertEqual(state.step, 0)
+    self.assertEqual(state.opt_state, {})
+    self.assertEqual(state.apply_fn, self.model.apply)
+    self.assertEqual(max_utils.calculate_num_params_from_pytree(state.params),
+                     max_utils.calculate_num_params_from_pytree(self.params))
+
+
+  def test_init_decode_state(self):
+    decode_state = max_utils.init_decode_state(
+      self.model.apply, self.params
+      )
+    self.assertEqual(decode_state.apply_fn, self.model.apply)
+    output = decode_state.apply_fn(self.params, self.input)
+    self.assertEqual(output.tolist(), self.output.tolist())
+    self.assertEqual(decode_state.tx, None)
+    self.assertEqual(decode_state.opt_state, {})
+    self.assertEqual(decode_state.step, 0)
+    self.assertEqual(
+      max_utils.calculate_num_params_from_pytree(decode_state.params),
+      max_utils.calculate_num_params_from_pytree(self.params)
+    )
+
+  def test_init_training_state(self):
+    state = max_utils.init_training_state(self.model.apply, self.params, self.tx)
+    self.assertEqual(state.apply_fn, self.model.apply)
+    self.assertEqual(state.tx, self.tx)
+    self.assertNotEqual(state.opt_state, {})
+    self.assertEqual(
+      max_utils.calculate_num_params_from_pytree(state.params),
+      max_utils.calculate_num_params_from_pytree(self.params)
+    )
+
+class MaxUtilsInitTransformerState(unittest.TestCase):
+  """Tests initialization of transformer states in max_utils.py"""
+
+  def setUp(self):
+    pyconfig.initialize([None, "configs/base.yml"], enable_checkpointing=False)
+    self.config = pyconfig.config
+    devices_array = max_utils.create_device_mesh(self.config)
+    self.mesh = Mesh(devices_array, self.config.mesh_axes)
+    self.model = Transformer(self.config, mesh=self.mesh)
+
+  def test_setup_decode_state(self):
+    rng = random.PRNGKey(0)
+    state, _ = max_utils.setup_decode_state(
+      self.model, self.config, rng, self.mesh, None)
+    self.assertEqual(state.tx, None)
+    self.assertEqual(state.opt_state, {})
+
+  def test_setup_initial_state(self):
+    rng = random.PRNGKey(0)
+    tx = optax.adam(learning_rate=0.001)
+    state, _ = max_utils.setup_initial_state(
+      self.model, tx, self.config, rng, self.mesh, None)
+    self.assertEqual(state.tx, tx)
+    self.assertNotEqual(state.opt_state, {})
 
 class MaxUtilsT5XCrossEntropy(unittest.TestCase):
   """Tests for the cross entropy functions in max_utils.py"""
