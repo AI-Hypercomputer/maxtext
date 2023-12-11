@@ -319,7 +319,7 @@ class MultiHeadDotProductAttention(nn.Module):
     query = projection(kernel_init=query_init, name='query')(inputs_q)
     key = projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
     value = projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
-
+    
     #Apply RoPE
     query = LLaMARotaryEmbedding(embedding_dims=self.head_dim,
                                  name='query_rotary'
@@ -873,7 +873,7 @@ class Transformer(nn.Module):
   def __call__(
       self,
       decoder_input_tokens,
-      decoder_target_tokens,
+      decoder_target_tokens, #TODO(rwitten): delete? part of the mask war.
       decoder_segment_ids=None,
       decoder_positions=None,
       enable_dropout=True,

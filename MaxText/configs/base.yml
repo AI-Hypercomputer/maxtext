@@ -134,7 +134,7 @@ max_eval_target_length: 512
 
 # Maximum length cutoff for predicted tokens.
 max_predict_length: 256
-max_prefill_predict_length: 64
+max_prefill_predict_length: 4
 
 # Sampling temperature for language model inference.
 sampling_temperature: 0.6
@@ -142,7 +142,7 @@ sampling_temperature: 0.6
 sampling_top_k: 20
 eos_id: 2  # sentencepiece default
 # Prompt for language model sampling.
-prompt: "I love to "
+prompt: "Secret sandwich for life is "
 
 enable_profiler: False
 # If enable_checkpointing is true, an asynchronous checkpointer will be used if

@@ -50,15 +50,19 @@ cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
-def decode_tokens(toks, tokenizer, eos_id):
-  if np.argmax(toks == eos_id) > 0:
-    valid_toks = toks[:np.argmax(toks == eos_id)]
-  else:
-    valid_toks = toks
-    valid_toks[-1] = eos_id
+def match_input_and_output_stream(prompt, outputs, tokenizer):
+  for i in range(len(prompt)):
+      prompt_mini = prompt[0:i+1]
+      prompt_mini_arr = np.array(prompt_mini, dtype=np.int32)
+      prompt_mini_str = decode_tokens(prompt_mini_arr, tokenizer)
+      output_mini = outputs[i:i+1]
+      output_mini_arr = np.array(output_mini, dtype=np.int32)
+      print(output_mini_arr)
+      output_mini_str = decode_tokens(output_mini_arr, tokenizer)
+      print(f"{prompt_mini_str} -> {output_mini_str}")
 
-  valid_toks = valid_toks.astype(np.int32)
-  return tokenizer.detokenize(valid_toks).numpy().decode("utf-8"), len(valid_toks)
+def decode_tokens(toks, tokenizer):
+  return tokenizer.detokenize(toks).numpy().decode("utf-8"), len(toks)
 
 
 def encode_strings(strs, max_len, tokenizer):
@@ -75,32 +79,24 @@ def prefill_predict_step(inputs,
                  rngkey,
                  model,
                  config):
-  target_shape = inputs.shape
-  initial_variables = model.init(
-      {'params': rngkey, 'dropout': rngkey, 'aqt': rngkey},
-      jnp.ones(target_shape, config.dtype),
-      None,
-      enable_dropout=False,
-      model_mode="prefill",
-      max_decode_length=config.max_predict_length
-  )
+  decoder_segment_ids = jax.numpy.zeros( inputs.shape)
 
-  cache = initial_variables["cache"]
+  #cache = initial_variables["cache"]
+  cache = None
 
-  flat_logits, new_vars = model.apply(
+  flat_logits = model.apply(
     {
-        "params": state.params,
-        "cache": cache
+        "params": state.params
     },
     inputs,
     None,
+    decoder_segment_ids=decoder_segment_ids,
     enable_dropout=False,
-    model_mode="prefill",
+    model_mode="train",
     rngs={'aqt': rngkey},
-    max_decode_length=config.max_predict_length,
-    mutable=["cache"]
+    max_decode_length=config.max_predict_length 
   )
-  cache = new_vars["cache"]
+  #cache = new_vars["cache"]
   #jax.debug.print("cache: {}", cache)
 
   #cache = initial_variables["cache"]
@@ -181,6 +177,16 @@ def decode_loop(config, state=None):
 
   _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
 
+  do_weird_visualization = False
+  if do_weird_visualization:
+    prompt = [0, 4153,213,  1586,  2247,  1080,    25,  2049,  1625,     8,     5, 23135, 5289,     8,  1127,    42]
+    output = [25,213,  1586,  2247,     4,  1127,  2520, 10506,     8,     5, 23135,  5289,   8,  1127,    42, 10802,]
+
+    match_input_and_output_stream(prompt, output, sp_tokenizer)
+  
+    sys.exit(1)
+  
+
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager)
   state_mesh_shardings = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
@@ -189,6 +195,10 @@ def decode_loop(config, state=None):
   # Encode the demo prompt.
   np_tokenized_prompts = encode_strings(
       [config.prompt], config.max_prefill_predict_length, sp_tokenizer)
+  np_tokenized_prompts = [0, 6970, 12643,    13,   176,    12,     0,     0,     0,     0,
+            0,     0,     0,     0,     0, 0]
+  print(np_tokenized_prompts)
+  #np_tokenized_prompts=  [0, 4153,213,  1586,  2247,  1080,    25,  2049,  1625,     8,     5, 23135, 5289,     8,  1127,    42]
   
   tokenized_prompts = jax.device_put(np.vstack([np_tokenized_prompts]*(int(config.per_device_batch_size) * jax.device_count())), jax.sharding.NamedSharding(mesh, P()))
 
@@ -199,13 +209,16 @@ def decode_loop(config, state=None):
       out_shardings=None
   )
 
+  #import pdb ; pdb.set_trace()
   prefill_output = p_prefill_predict_step(tokenized_prompts, state, rng)
+  #import pdb ; pdb.set_trace()
   print(f"{prefill_output.shape=}")
   print(f"{tokenized_prompts.shape=}")
   indices = jax.numpy.argmax(prefill_output, axis=2)
-  decoded_tokens = decode_tokens(np.array(indices)[0], sp_tokenizer, config.eos_id)
-  print(f"{np_tokenized_prompts=} -> {indices=}")
-  print(f"{decoded_tokens=}")
+  decoded_tokens = decode_tokens(np.array(indices)[0], sp_tokenizer)
+
+  match_input_and_output_stream(np_tokenized_prompts, indices[0,:], sp_tokenizer)
+
   sys.exit(0)
 
 
@@ -245,6 +258,8 @@ def decode_loop(config, state=None):
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
+
+  
   decode_loop(pyconfig.config)
 
 
