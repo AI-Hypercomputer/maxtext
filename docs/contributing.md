@@ -25,6 +25,24 @@ Guidelines](https://opensource.google/conduct/).
 
 ## Contribution process
 
+### Code Style
+
+We use the automatice code formatter [Pyink](https://github.com/google/pyink), which is a fork of the [Black](https://github.com/psf/black) formatter with a few different behaviors tailored towards Google internal repository.
+
+#### Step 1: Install Pyink.
+
+*For Googlers:*
+
+Run `sudo apt install pipx; pipx install pyink` on your Cloudtop to install Pyink. 
+
+*For external contributors:*
+
+Run `pip install pyink` on your machine to install Pyink.
+
+#### Step 2: Format codes.
+
+Run `bash scripts/format-codes.sh` to format your codes.
+
 ### Code Reviews
 
 All submissions, including submissions by project members, require review. We
