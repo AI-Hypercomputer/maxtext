@@ -1,4 +1,4 @@
-r"""Convert weights from a llama/vicuna model to a MaxText one.
+r"""Convert weights from a llama model to a MaxText one.
 
 Usage:
 

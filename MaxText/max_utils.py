@@ -302,7 +302,6 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_tra
                                                 mesh,
                                                 state_mesh_annotations)
 
-    
     state_mesh_shardings = jax.tree_map(
         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
     if not state:
