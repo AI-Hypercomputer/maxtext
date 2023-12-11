@@ -146,6 +146,9 @@ eos_id: 2  # sentencepiece default
 prompt: "I love to "
 
 enable_profiler: False
+# Skip first n steps for profiling, to omit things like compilation and to give
+# the iteration time a chance to stabilize.
+skip_first_n_steps_for_profiler: 1
 # If enable_checkpointing is true, an asynchronous checkpointer will be used if
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the sychronous one.
