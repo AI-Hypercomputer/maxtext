@@ -48,20 +48,20 @@ int8_training: False
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
 global_parameter_scale: 1
-base_emb_dim: 2560
-base_num_heads: 8
-base_mlp_dim: 8192
-base_num_decoder_layers: 16
-head_dim: 256
+base_emb_dim: 4096
+base_num_heads: 32
+base_mlp_dim: 11008
+base_num_decoder_layers: 32
+head_dim: 128
 # activation functions are .
-mlp_activations: ["relu"]
+mlp_activations: ["silu"]
 dropout_rate: 0
 logits_via_embedding: True  # NOTE: this is True just for testing.
 # proj, minimal, full, or none
 remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
-attention: 'flash' # Supported attention: flash, mha, gpu_flash
+attention: 'mha' # Supported attention: flash, mha, gpu_flash
 
 gpu_flash_attention_backward_pass_impl: "xla" # allowed values (xla, triton)
 record_internal_nn_metrics: 0

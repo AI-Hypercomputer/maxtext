@@ -302,6 +302,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_tra
                                                 mesh,
                                                 state_mesh_annotations)
 
+    
     state_mesh_shardings = jax.tree_map(
         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
     if not state:
@@ -455,3 +456,11 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return unboxed_abstract_state, state_mesh_annotations
+
+def convert_state_to_jnp(state_dictionary):
+  for key, value in state_dictionary.items():
+      if isinstance(value, dict):
+          convert_state_to_jnp(value)
+      else:
+          state_dictionary[key] = jnp.array(state_dictionary[key])
+

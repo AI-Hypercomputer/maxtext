@@ -51,8 +51,6 @@ MODEL_PARAMS_DICT = {
         'num_kv_heads': 8,
         'dims_per_head': 128,
         'vocab': 32000,
-        'num_gpus': 1,
-        'combined_qkv': False,
     },
     '13b': {
         'num_layers': 40,
@@ -69,9 +67,10 @@ MODEL_PARAMS_DICT = {
         'num_kv_heads': 32,
         'dims_per_head': 128,
         'vocab': 32000,
-        'num_gpus': 1,
-        # 'combined_qkv': True,
-        'combined_qkv': False,
+        'base_emb_dim': 4096,
+        'base_mlp_dim': 11008,
+        'max_target_length': 11008,
+        'max_eval_target_length': 4096,
     },
 }
 
@@ -87,15 +86,14 @@ def convert(base_model_path, maxtext_model_path, model_size):
   base_num_decoder_layers = model_params['num_layers']
   base_num_heads = model_params['num_heads']
   head_dim = model_params['dims_per_head']
-  num_kv_heads = model_params['num_kv_heads'] #Anisha: what is this?
+  num_kv_heads = model_params['num_kv_heads']
   vocab_size = model_params['vocab']
-  combined_qkv = model_params['combined_qkv'] #Anisha: what is this?
-  num_gpus = model_params['num_gpus']
-  #Anisha: base_mlp_dim
-  #Anisha: base_embed_dim
+  base_emb_dim = model_params['base_emb_dim']
+  base_mlp_dim = model_params['base_mlp_dim']
+  max_target_length = model_params['max_target_length']
+  max_eval_target_length = model_params['max_eval_target_length']
   
-  dataset_type = 'c4'
-
+  
   print(f'Loading the base model from {base_model_path}')
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob('*.pth'))
   pytorch_vars = {}
@@ -107,13 +105,6 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
   jax_weights = {
       'decoder': {
-        #   'softmax': { #Anisha: what is this?
-        #       'logits_ffn': {
-        #           'linear': {
-        #               'w': np.concatenate([var['output.weight'].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()[:, :vocab_size]
-        #               }
-        #           }
-        #       },
           'decoder': {
              'mlp': {}, 
              'pre_self_attention_layer_norm' : {},
@@ -204,29 +195,29 @@ def convert(base_model_path, maxtext_model_path, model_size):
     layer_weight['pre_self_attention_layer_norm']['scale'].append(pre_self_attention_layernorm)
     layer_weight['post_self_attention_layer_norm']['scale'].append(post_self_attention_layernorm)
   
-  self_attention['query']['kernel'] = jnp.array(self_attention['query']['kernel'])
-  self_attention['key']['kernel'] = jnp.array(self_attention['key']['kernel'])
-  self_attention['value']['kernel'] = jnp.array(self_attention['value']['kernel'])
-  self_attention['out']['kernel'] = jnp.array(self_attention['out']['kernel'])
-  self_attention['query']['kernel'] = jnp.transpose(self_attention['query']['kernel'],axes=(1, 0, 2, 3)) 
-  self_attention['key']['kernel'] = jnp.transpose(self_attention['key']['kernel'],axes=(1, 0, 2, 3))
-  self_attention['value']['kernel'] = jnp.transpose(self_attention['value']['kernel'],axes=(1, 0, 2, 3))
-  self_attention['out']['kernel'] = jnp.transpose(self_attention['out']['kernel'],axes=(2, 0, 3, 1))
+  self_attention['query']['kernel'] = np.array(self_attention['query']['kernel'])
+  self_attention['key']['kernel'] = np.array(self_attention['key']['kernel'])
+  self_attention['value']['kernel'] = np.array(self_attention['value']['kernel'])
+  self_attention['out']['kernel'] = np.array(self_attention['out']['kernel'])
+  self_attention['query']['kernel'] = np.transpose(self_attention['query']['kernel'],axes=(1, 0, 2, 3)) 
+  self_attention['key']['kernel'] = np.transpose(self_attention['key']['kernel'],axes=(1, 0, 2, 3))
+  self_attention['value']['kernel'] = np.transpose(self_attention['value']['kernel'],axes=(1, 0, 2, 3))
+  self_attention['out']['kernel'] = np.transpose(self_attention['out']['kernel'],axes=(2, 0, 3, 1))
 
   jax_weights['decoder']['decoder']['self_attention'] = self_attention
 
 
-  layer_weight['mlp']['wi']['kernel'] = jnp.array(layer_weight['mlp']['wi']['kernel'])
-  layer_weight['mlp']['ffn_layer1']['kernel'] = jnp.array(layer_weight['mlp']['ffn_layer1']['kernel'])
-  layer_weight['mlp']['wo']['kernel'] = jnp.array(layer_weight['mlp']['wo']['kernel'])
-  layer_weight['pre_self_attention_layer_norm']['scale'] = jnp.array(layer_weight['pre_self_attention_layer_norm']['scale'])
-  layer_weight['post_self_attention_layer_norm']['scale'] = jnp.array(layer_weight['post_self_attention_layer_norm']['scale'])
+  layer_weight['mlp']['wi']['kernel'] = np.array(layer_weight['mlp']['wi']['kernel'])
+  layer_weight['mlp']['ffn_layer1']['kernel'] = np.array(layer_weight['mlp']['ffn_layer1']['kernel'])
+  layer_weight['mlp']['wo']['kernel'] = np.array(layer_weight['mlp']['wo']['kernel'])
+  layer_weight['pre_self_attention_layer_norm']['scale'] = np.array(layer_weight['pre_self_attention_layer_norm']['scale'])
+  layer_weight['post_self_attention_layer_norm']['scale'] = np.array(layer_weight['post_self_attention_layer_norm']['scale'])
   #swap the layer index
-  layer_weight['mlp']['wi']['kernel'] = jnp.transpose(layer_weight['mlp']['wi']['kernel'],axes=(1, 0, 2))
-  layer_weight['mlp']['ffn_layer1']['kernel'] = jnp.transpose(layer_weight['mlp']['ffn_layer1']['kernel'],axes=(1, 0, 2))
-  layer_weight['mlp']['wo']['kernel'] = jnp.transpose(layer_weight['mlp']['wo']['kernel'],axes=(1, 0, 2))
-  layer_weight['pre_self_attention_layer_norm']['scale'] = jnp.transpose(layer_weight['pre_self_attention_layer_norm']['scale'],axes=(1, 0))
-  layer_weight['post_self_attention_layer_norm']['scale'] = jnp.transpose(layer_weight['post_self_attention_layer_norm']['scale'],axes=(1, 0))
+  layer_weight['mlp']['wi']['kernel'] = np.transpose(layer_weight['mlp']['wi']['kernel'],axes=(1, 0, 2))
+  layer_weight['mlp']['ffn_layer1']['kernel'] = np.transpose(layer_weight['mlp']['ffn_layer1']['kernel'],axes=(1, 0, 2))
+  layer_weight['mlp']['wo']['kernel'] = np.transpose(layer_weight['mlp']['wo']['kernel'],axes=(1, 0, 2))
+  layer_weight['pre_self_attention_layer_norm']['scale'] = np.transpose(layer_weight['pre_self_attention_layer_norm']['scale'],axes=(1, 0))
+  layer_weight['post_self_attention_layer_norm']['scale'] = np.transpose(layer_weight['post_self_attention_layer_norm']['scale'],axes=(1, 0))
   
   jax_weights['decoder']['decoder']['mlp'] = layer_weight['mlp']
   jax_weights['decoder']['decoder']['pre_self_attention_layer_norm'] = layer_weight['pre_self_attention_layer_norm']
@@ -234,29 +225,25 @@ def convert(base_model_path, maxtext_model_path, model_size):
   
   print(f"jax_weights = {jax_weights}")
 
-  base_output_directory="base_output_directory=gs://mazumdera-test-bucket/maxtext/llama2/12062023/1"
-  base_num_decoder_layers="base_num_decoder_layers=32"
-  base_num_heads = "base_num_heads=32"
-  head_nums = "head_dim=128"
-  # activation_function="\"relu\""
-  # mlp_activations = f"mlp_activations=[{activation_function}]"
+  base_output_directory="base_output_directory=dummy_base_output_dir"
+  base_num_decoder_layers=f"base_num_decoder_layers={base_num_decoder_layers}"
+  base_num_heads = f"base_num_heads={base_num_heads}"
+  head_dim = f"head_dim={head_dim}"
   async_checkpointing="async_checkpointing=False" 
   enable_dropout="enable_dropout=False"
 
-  vocab_size="vocab_size=32000"  
-  base_emb_dim="base_emb_dim=4096" 
-  base_mlp_dim="base_mlp_dim=11008" 
-  max_target_length="max_target_length=11008" 
-  max_eval_target_length="max_eval_target_length=4096" 
-#   attention="attention='mha'" 
-  max_predict_length = "max_predict_length=512" #Anisha: what should be this value?
-
-  commandline_args = ["dummy", 
-                      "/home/mazumdera/maxtext/MaxText/configs/base.yml","run_name=1xv4-8", "dcn_data_parallelism=1", "save_period=5","ici_data_parallelism=1","ici_tensor_parallelism=1",
-                      "steps=20","enable_profiler=true","remat_policy=full",base_emb_dim, base_mlp_dim, base_num_heads, head_nums,
+  vocab_size=f"vocab_size={vocab_size}"  
+  base_emb_dim=f"base_emb_dim={base_emb_dim}" 
+  base_mlp_dim=f"base_mlp_dim={base_mlp_dim}" 
+  max_target_length=f"max_target_length={max_target_length}" 
+  max_eval_target_length=f"max_eval_target_length={max_eval_target_length}" 
+  
+  commandline_args = ["", 
+                      "MaxText/configs/base.yml","save_period=5",
+                      "steps=20", base_emb_dim, base_mlp_dim, base_num_heads, head_dim,
                       vocab_size, base_num_decoder_layers, max_target_length, max_eval_target_length,  
-                      "per_device_batch_size=0.5","enable_profiler=true", async_checkpointing, 
-                      base_output_directory, enable_dropout]# , mlp_activations]
+                      async_checkpointing, 
+                      base_output_directory, enable_dropout]
 
   pyconfig.initialize(commandline_args)
   config = pyconfig.config
@@ -266,7 +253,6 @@ def convert(base_model_path, maxtext_model_path, model_size):
   model = Transformer(config, mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
-#   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
 
 
   jax_states = train_state.TrainState(
@@ -289,31 +275,6 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
   
   state_new, _ = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
-  # cpu_device = jax.devices('cpu')[0]
-  # with jax.default_device(cpu_device):
-
-  #   unboxed_abstract_state, state_mesh_annotations = max_utils.get_abstract_state(model, tx, config, init_rng, mesh)
-
-  #   # Initialization
-  #   with nn_partitioning.axis_rules(config.logical_axis_rules):
-  #     state_new, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
-  #                                                 config.load_parameters_path,
-  #                                                 config.load_from_other_directory,
-  #                                                 config.load_from_other_directory_step,
-  #                                                 unboxed_abstract_state,
-  #                                                 mesh,
-  #                                                 state_mesh_annotations)
-
-  #     state_mesh_shardings = jax.tree_map(
-  #         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
-  #     if not state_new:
-  #       init_train_state_partial = functools.partial(max_utils.init_train_state, model, tx, config)
-  #       state_new = init_train_state_partial(init_rng)
-  #       if raw_params: # If we loaded a partial state, we need to merge it.
-  #         state_new = state_new.replace(params = raw_params)
-  #     raw_params = None
-
-  #   state_new = max_utils.unbox_logicallypartioned_trainstate(state_new)
 
   print(f"default trainstate={state_new}")
 

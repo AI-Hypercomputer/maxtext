@@ -23,6 +23,7 @@ from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointMan
 from orbax.checkpoint import type_handlers
 
 import max_logging
+import max_utils
 
 from flax.training import train_state
 
@@ -118,8 +119,11 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
     else:
       step = load_from_other_directory_step
       max_logging.log(f"restoring state from {load_from_other_directory} step {step}")
-    return mngr_loader.restore(step, abstract_unboxed_pre_state,
-                                      {"restore_args" : restore_args}), None
+    state = mngr_loader.restore(step, abstract_unboxed_pre_state,
+                                      {"restore_args" : restore_args})
+    
+    max_utils.convert_state_to_jnp(state.params)    
+    return state,None
   else:
     max_logging.log("No existing checkpoints found, not restoring checkpoint.")
     return None, None
