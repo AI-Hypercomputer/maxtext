@@ -1,11 +1,11 @@
-r"""Convert weights from a llama/vicuna model to a pax one.
+r"""Convert weights from a llama/vicuna model to a MaxText one.
 
 Usage:
 
 # Get LLaMA pytorch_vars from Meta
 
 # Example cmd:
-python3 -m convert_llama_ckpt --base llama_7b --pax pax_7b --model-size 7b
+python3 MaxText/convert_llama_ckpt.py --base-model-path <path/to/meta/ckpt> --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size 7b
 
 # For large size model (e.g. 70B model), this script requires large memory VM.
 # The script load and save weights in a single pass.
@@ -20,24 +20,15 @@ import jax
 from jax.experimental import pjit
 import numpy as np
 
-# from paxml import checkpoints
 import checkpointing
 from flax.training import train_state
-# from paxml import train_states
-# from praxis import py_utils
 import max_utils
 import pyconfig
-import optax
 from jax.sharding import Mesh
 from layers import Transformer
 from jax import random
-import jax.numpy as jnp
-import functools
-import orbax.checkpoint as ocp
-import functools
 import max_utils
 import maxtext_utils
-from flax.linen import partitioning as nn_partitioning
 
 
 import max_logging
