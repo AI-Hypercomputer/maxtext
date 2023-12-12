@@ -57,20 +57,20 @@ def match_input_and_output_stream(prompt, outputs, tokenizer):
       prompt_mini_str = decode_tokens(prompt_mini_arr, tokenizer)
       output_mini = outputs[i:i+1]
       output_mini_arr = np.array(output_mini, dtype=np.int32)
-      print(output_mini_arr)
       output_mini_str = decode_tokens(output_mini_arr, tokenizer)
       print(f"{prompt_mini_str} -> {output_mini_str}")
 
 def decode_tokens(toks, tokenizer):
   return tokenizer.detokenize(toks).numpy().decode("utf-8"), len(toks)
 
-
 def encode_strings(strs, max_len, tokenizer):
   tokenized_batch = np.zeros((len(strs), max_len), np.int32)
   for i, s in enumerate(strs):
     toks = tokenizer.tokenize(s).numpy()
-    # Remove EOS token in prompt.
-    tokenized_batch[i, :toks.shape[0]-1] = toks[:-1]
+    prompt = toks[:-1] # Remove EOS token in prompt.
+    assert toks.shape[0] <= max_len, f"We aren't able to tokenize input {i}, it is too long"
+    start_index = max_len - prompt.shape[0]
+    tokenized_batch[i, start_index:] = prompt
   return tokenized_batch
 
 
@@ -174,33 +174,18 @@ def decode_loop(config, state=None):
     max_utils.create_learning_rate_schedule(config)
   ) # TODO: we need an optax.GradientTransformation to form a TrainState, but we don't use it when decoding
 
-
   _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
-
-  do_weird_visualization = False
-  if do_weird_visualization:
-    prompt = [0, 4153,213,  1586,  2247,  1080,    25,  2049,  1625,     8,     5, 23135, 5289,     8,  1127,    42]
-    output = [25,213,  1586,  2247,     4,  1127,  2520, 10506,     8,     5, 23135,  5289,   8,  1127,    42, 10802,]
-
-    match_input_and_output_stream(prompt, output, sp_tokenizer)
-  
-    sys.exit(1)
-  
 
   state, state_mesh_annotations = max_utils.setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager)
   state_mesh_shardings = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
   replicated_sharding = jax.sharding.NamedSharding(mesh, P(None, None))
 
-  # Encode the demo prompt.
+  # Encode the demo prompt -- to measure performance we encode it multiple times.
   np_tokenized_prompts = encode_strings(
       [config.prompt], config.max_prefill_predict_length, sp_tokenizer)
-  np_tokenized_prompts = [0, 6970, 12643,    13,   176,    12,     0,     0,     0,     0,
-            0,     0,     0,     0,     0, 0]
-  print(np_tokenized_prompts)
-  #np_tokenized_prompts=  [0, 4153,213,  1586,  2247,  1080,    25,  2049,  1625,     8,     5, 23135, 5289,     8,  1127,    42]
-  
-  tokenized_prompts = jax.device_put(np.vstack([np_tokenized_prompts]*(int(config.per_device_batch_size) * jax.device_count())), jax.sharding.NamedSharding(mesh, P()))
+  replicated_prompts = np.vstack([np_tokenized_prompts]*(int(config.per_device_batch_size) * jax.device_count()))
+  tokenized_prompts = jax.device_put(replicated_prompts, jax.sharding.NamedSharding(mesh, P()))
 
   partial_prefill_predict_step = functools.partial(prefill_predict_step, model=model, config=config)
   p_prefill_predict_step = jax.jit(
@@ -209,15 +194,9 @@ def decode_loop(config, state=None):
       out_shardings=None
   )
 
-  #import pdb ; pdb.set_trace()
   prefill_output = p_prefill_predict_step(tokenized_prompts, state, rng)
-  #import pdb ; pdb.set_trace()
-  print(f"{prefill_output.shape=}")
-  print(f"{tokenized_prompts.shape=}")
   indices = jax.numpy.argmax(prefill_output, axis=2)
-  decoded_tokens = decode_tokens(np.array(indices)[0], sp_tokenizer)
-
-  match_input_and_output_stream(np_tokenized_prompts, indices[0,:], sp_tokenizer)
+  match_input_and_output_stream(replicated_prompts[0], np.array(indices[0,:]), sp_tokenizer)
 
   sys.exit(0)
 

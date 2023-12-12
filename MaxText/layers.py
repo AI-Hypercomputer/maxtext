@@ -886,7 +886,11 @@ class Transformer(nn.Module):
     if decoder_segment_ids is not None and model_mode=="autoregressive":
       raise ValueError(
           'During decoding, packing should not be used but '
-          '`decoder_segment_ids` was passed to `Transformer.decode`.')
+          '`decoder_segment_ids` was passed to `Transformer.decode`. '
+          'This is a design decision -- we could choose to tell the model '
+          'to ignore padding tokens. For now we do not worry about that '
+          'but will want to fix it for performance reasons in the future. '
+          'However the kernels in place do not exploit that structure.')
 
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
