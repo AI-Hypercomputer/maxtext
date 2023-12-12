@@ -27,7 +27,9 @@ on:
 
 jobs:
   AddPullReady:
-    permissions: write-all
+    permissions:
+      checks: read
+      pull-requests: write
     runs-on: ubuntu-latest
 
     steps:
