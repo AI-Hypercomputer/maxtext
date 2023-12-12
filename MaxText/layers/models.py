@@ -324,6 +324,7 @@ class Decoder(nn.Module):
   config: Config
   shared_embedding: nn.Module
   mesh: Mesh
+  position_embedding: Optional[nn.Module] = None
 
   @nn.compact
   def __call__(self,
@@ -341,6 +342,9 @@ class Decoder(nn.Module):
 
     # [batch, length] -> [batch, length, emb_dim]
     y = self.shared_embedding(decoder_input_tokens.astype('int32'))
+    if self.position_embedding:
+      assert decoder_positions
+      y += self.position_embedding(decoder_positions.astype('int32'))
     y = nn.Dropout(
         rate=cfg.dropout_rate, broadcast_dims=(-2,))(
             y, deterministic=deterministic)
@@ -472,9 +476,21 @@ class Transformer(nn.Module):
         embed_lookup_style=cfg.embed_lookup_style,
         config=cfg,
     )
+    self.position_embedding = Embed(
+        num_embeddings=cfg.max_target_length,
+        features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        embedding_init=nn.initializers.normal(stddev=1.0),
+        name='position_embedder',
+        embed_lookup_style=cfg.embed_lookup_style,
+        config=cfg) if cfg.use_position_embedding else None
+
 
     self.decoder = Decoder(
-        config=cfg, shared_embedding=self.shared_embedding, mesh=mesh
+        config=cfg,
+        shared_embedding=self.shared_embedding,
+        position_embedding=self.position_embedding,
+        mesh=mesh
     )
 
   def __call__(

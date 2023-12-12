@@ -181,6 +181,9 @@ stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds
 # one of ('iota', 'index', 'matmul') and default to 'index'
 embed_lookup_style: 'index'
 
+# whether to add position_embedding
+use_position_embedding: False
+
 # whether to add bias in all linear layers in Transformer
 # including: attention qkv and out projection layers and mlp feedforward layers
 use_bias_linear: False
