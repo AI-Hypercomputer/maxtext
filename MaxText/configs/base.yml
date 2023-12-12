@@ -178,8 +178,8 @@ collect_stack_trace: False
 stack_trace_to_cloud: False  # Uploads to cloud logging if True, else to the console if False.
 stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds.
 
-# Use iota operator in Embed
-use_iota_embed: False
+# one of ('iota', 'index', 'matmul') and default to 'index'
+embed_lookup_style: 'index'
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.

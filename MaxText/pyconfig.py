@@ -37,6 +37,13 @@ def string_to_bool(s: str) -> bool:
 
 _yaml_types_to_parser = {str : str, int : int, float : float, bool : string_to_bool}
 
+def validate_embed_lookup_style(s: str) -> bool:
+  valid_embed_lookup_styles = ('index', 'iota', 'matmul')
+  if s not in valid_embed_lookup_styles:
+    raise ValueError(
+      "Invalid embed_lookup_style was passed. Valid options ", valid_embed_lookup_styles
+    )
+
 def validate_attention_type(s: str) -> bool:
   valid_attention_types = ('mha', 'flash')
   if s not in valid_attention_types: # currently supported attention
@@ -128,6 +135,7 @@ class _HyperParameters():
       calculate_global_batch_sizes(raw_keys)
 
     validate_attention_type(raw_keys['attention'])
+    validate_embed_lookup_style(raw_keys['embed_lookup_style'])
 
 
 def get_individual_scales(scale):

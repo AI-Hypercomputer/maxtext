@@ -32,5 +32,5 @@ class TrainCompile(unittest.TestCase):
   def test_sequence_parallelism(self):
     compiled_trainstep_file='test_compiled.pickle'
     train_compile_main((None, "configs/base.yml", f"compiled_trainstep_file={compiled_trainstep_file}",
-      "compile_topology=v5e-256", "use_iota_embed=true", "compile_topology_num_slices=1", 
+      "compile_topology=v5e-256", "embed_lookup_style=iota", "compile_topology_num_slices=1", 
       "ici_sequence_parallelism=16", "global_parameter_scale=32", "per_device_batch_size=0.125", "max_target_length=65536"))

@@ -35,5 +35,5 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
     enable_profiler=false remat_policy=full global_parameter_scale=1024\
     ici_fsdp_parallelism=-1 ici_tensor_parallelism=16\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\
-    dataset_path=$DATASET_PATH use_iota_embed=true reuse_example_batch=1\
+    dataset_path=$DATASET_PATH embed_lookup_style='iota' reuse_example_batch=1\
     dataset_type=synthetic gcs_metrics=true attention='flash' int8_training=false

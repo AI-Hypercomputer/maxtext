@@ -445,6 +445,7 @@ class Transformer(nn.Module):
         attend_dtype=jnp.float32,  # for logit training stability
         embedding_init=nn.initializers.normal(stddev=1.0),
         name='token_embedder',
+        embed_lookup_style=cfg.embed_lookup_style,
         config=cfg,
     )
 

@@ -32,5 +32,5 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
     steps=30 per_device_batch_size=6 enable_checkpointing=false\
     enable_profiler=false remat_policy=full global_parameter_scale=16\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\
-    dataset_path=$DATASET_PATH use_iota_embed=true reuse_example_batch=1\
+    dataset_path=$DATASET_PATH embed_lookup_style='iota' reuse_example_batch=1\
     dataset_type=synthetic attention='flash' gcs_metrics=true 

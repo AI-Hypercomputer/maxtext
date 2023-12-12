@@ -39,6 +39,7 @@ class Embed(nn.Module):
     features: number of feature dimensions for each embedding.
     dtype: the dtype of the embedding vectors (default: float32).
     embedding_init: embedding initializer.
+    embed_lookup_style: the way to apply embedding lookup.
   """
 
   # pylint: disable=attribute-defined-outside-init
@@ -49,6 +50,9 @@ class Embed(nn.Module):
   dtype: DType = jnp.float32
   attend_dtype: Optional[DType] = None
   embedding_init: Initializer = default_embed_init
+  
+  # one of ('iota', 'index', 'matmul') and default to 'index'
+  embed_lookup_style: Optional[str] = 'index'
 
   def setup(self):
     self.embedding = self.param(
@@ -74,10 +78,17 @@ class Embed(nn.Module):
     if not jnp.issubdtype(inputs.dtype, jnp.integer):
       raise ValueError('Input type must be an integer or unsigned integer.')
 
-    if cfg.use_iota_embed:
+    if self.embed_lookup_style == 'iota':
       iota = lax.iota(jnp.int32, self.num_embeddings)
       one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
       output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
+    elif self.embed_lookup_style == 'matmul':
+      # a similar idea but slightly different in implementation of iota
+      # https://github.com/google/praxis/blob/6d03a37735953e3dadde5163f1668ed03dc57b0a/praxis/layers/embedding_softmax.py#L492
+      one_hot = jax.nn.one_hot(
+          inputs, self.num_embeddings, dtype=self.dtype
+      )
+      output = jnp.einsum('...y,yz->...z', one_hot, self.embedding)
     else:
       output = jnp.asarray(self.embedding, self.dtype)[inputs]
     output = nn.with_logical_constraint(
