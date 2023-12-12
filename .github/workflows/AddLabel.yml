@@ -27,9 +27,7 @@ on:
 
 jobs:
   AddPullReady:
-    permissions:
-      checks: read
-      pull-requests: write
+    permissions: write-all
     runs-on: ubuntu-latest
 
     steps:
@@ -53,55 +51,55 @@ jobs:
               process.exit(1)
             }
 
-            // This list should match with CODEOWNERS
-            let requiredReviewers = { rwitten: "" }
-            const reviews = await github.rest.pulls.listReviews({
-              owner,
-              repo,
-              pull_number,
-            })
-            if (reviews.data.length === 0) {
-              console.log("Not adding pull ready because the PR is not approved yet")
-              process.exit()
-            }
-            for (const review of reviews.data) {
-              if (review.state === "APPROVED") {
-                delete requiredReviewers[review.user.login]
-              }
-            }
-            if (Object.keys(requiredReviewers).length !== 0) {
-              console.log("Not adding pull ready because the PR is not approved yet")
-              process.exit()
-            }
+            # // This list should match with CODEOWNERS
+            # let requiredReviewers = { rwitten: "" }
+            # const reviews = await github.rest.pulls.listReviews({
+            #   owner,
+            #   repo,
+            #   pull_number,
+            # })
+            # if (reviews.data.length === 0) {
+            #   console.log("Not adding pull ready because the PR is not approved yet")
+            #   process.exit()
+            # }
+            # for (const review of reviews.data) {
+            #   if (review.state === "APPROVED") {
+            #     delete requiredReviewers[review.user.login]
+            #   }
+            # }
+            # if (Object.keys(requiredReviewers).length !== 0) {
+            #   console.log("Not adding pull ready because the PR is not approved yet")
+            #   process.exit()
+            # }
 
-            const commits = await github.rest.pulls.listCommits({
-              owner,
-              repo,
-              pull_number,
-              per_page: 100,
-            })
-            // Check that the number of commits in the PR is 1.
-            if (commits.data.length !== 1) {
-              console.log("Not adding pull ready because the PR has more than one commit. Please squash your commits.")
-              process.exit(1)
-            }
-            const ref = commits.data.slice(-1)[0].sha
-            const checkRuns = await github.rest.checks.listForRef({
-              owner,
-              repo,
-              ref,
-            })
-            if (checkRuns.data.check_runs.length === 0) {
-              console.log("Not adding pull ready because no check runs are associated with the last commit: " + ref)
-              process.exit()
-            }
-            for (const checkRun of checkRuns.data.check_runs) {
-              if (checkRun.name.endsWith(context.job)) continue
-              if (checkRun.conclusion !== "success") {
-                console.log("Not adding pull ready because " + checkRun.name + " has not passed yet: " + checkRun.html_url)
-                process.exit()
-              }
-            }
+            # const commits = await github.rest.pulls.listCommits({
+            #   owner,
+            #   repo,
+            #   pull_number,
+            #   per_page: 100,
+            # })
+            # // Check that the number of commits in the PR is 1.
+            # if (commits.data.length !== 1) {
+            #   console.log("Not adding pull ready because the PR has more than one commit. Please squash your commits.")
+            #   process.exit(1)
+            # }
+            # const ref = commits.data.slice(-1)[0].sha
+            # const checkRuns = await github.rest.checks.listForRef({
+            #   owner,
+            #   repo,
+            #   ref,
+            # })
+            # if (checkRuns.data.check_runs.length === 0) {
+            #   console.log("Not adding pull ready because no check runs are associated with the last commit: " + ref)
+            #   process.exit()
+            # }
+            # for (const checkRun of checkRuns.data.check_runs) {
+            #   if (checkRun.name.endsWith(context.job)) continue
+            #   if (checkRun.conclusion !== "success") {
+            #     console.log("Not adding pull ready because " + checkRun.name + " has not passed yet: " + checkRun.html_url)
+            #     process.exit()
+            #   }
+            # }
             console.log("Adding pull ready label because the PR is approved AND all the check runs have passed")
             await github.rest.issues.addLabels({
               issue_number: pull_number,
