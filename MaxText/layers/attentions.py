@@ -352,6 +352,7 @@ class MultiHeadDotProductAttention(nn.Module):
         features=(self.num_heads, self.head_dim),
         kernel_axes=('embed', 'heads', 'kv'),
         dtype=self.dtype,
+        use_bias=cfg.use_bias_linear,
         config=cfg)
 
     # NOTE: T5 does not explicitly rescale the attention logits by
@@ -542,6 +543,7 @@ class MultiHeadDotProductAttention(nn.Module):
         kernel_axes=('heads', 'kv', 'embed'),
         dtype=self.dtype,
         name='out',
+        use_bias=cfg.use_bias_linear,
         config=cfg)(
             x)
     return out

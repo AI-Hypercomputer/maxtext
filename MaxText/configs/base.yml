@@ -181,6 +181,10 @@ stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds
 # one of ('iota', 'index', 'matmul') and default to 'index'
 embed_lookup_style: 'index'
 
+# whether to add bias in all linear layers in Transformer
+# including: attention qkv and out projection layers and mlp feedforward layers
+use_bias_linear: False
+
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
 compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle

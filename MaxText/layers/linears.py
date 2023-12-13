@@ -61,13 +61,14 @@ def _canonicalize_tuple(x):
 
 
 class DenseGeneral(nn.Module):
-  """A linear transformation (without bias) with flexible axes.
+  """A linear transformation with flexible axes.
 
   Attributes:
     features: tuple with numbers of output features.
     axis: tuple with axes to apply the transformation on.
     dtype: the dtype of the computation (default: float32).
     kernel_init: initializer function for the weight matrix.
+    use_bias: whether to add bias in linear transformation
   """
 
   features: Union[Iterable[int], int]
@@ -76,6 +77,8 @@ class DenseGeneral(nn.Module):
   dtype: DType = jnp.float32
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
   kernel_axes: Tuple[str, ...] = ()
+  use_bias: bool = False
+  bias_init: NdInitializer = initializers.default_bias_init
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -120,7 +123,20 @@ class DenseGeneral(nn.Module):
     kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(axis)))
-    return compute_dot_general(inputs, kernel, axis, contract_ind, cfg)
+    output = compute_dot_general(inputs, kernel, axis, contract_ind, cfg)
+
+    if self.use_bias:
+      bias_axes, bias_shape = self.kernel_axes[-len(features):], kernel_shape[-len(features):]
+      bias = self.param(
+          'bias',
+          nn.with_logical_patitioning(self.bias_init, bias_axes),
+          bias_shape,
+          jnp.float32,
+      )
+      bias = jnp.asarray(bias, self.dtype)
+      output += bias
+    return output
+
 
 
 class MlpBlock(nn.Module):
@@ -159,6 +175,7 @@ class MlpBlock(nn.Module):
           kernel_init=self.kernel_init,
           kernel_axes=('embed', 'mlp'),
           name=dense_name,
+          use_bias=cfg.use_bias_linear,
           config=cfg,
       )(inputs)
       x = _convert_to_activation_function(act_fn)(x)
@@ -179,6 +196,7 @@ class MlpBlock(nn.Module):
         kernel_init=self.kernel_init,
         kernel_axes=('mlp', 'embed'),
         name='wo',
+        use_bias=cfg.use_bias_linear,
         config=cfg,
     )(x)
     return output
