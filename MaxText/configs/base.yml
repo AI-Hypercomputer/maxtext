@@ -192,6 +192,9 @@ use_pre_norm_mlp: False
 # including: pre layer_norm in each block, feedforward one in MLP, final one in Transformer
 use_bias_layer_norm: False
 
+# whether to subtract mean in layer_norms
+use_mean_center_layer_norm: False
+
 # whether to enable RoPE in MultiHeadDotProductAttention
 use_rotary_position_emb: True
 

@@ -172,6 +172,7 @@ class MlpBlock(nn.Module):
         name='mlp_layer_norm',
         dtype=cfg.dtype,
         kernel_axes=('embed',),
+        use_bias=cfg.use_bias_layer_norm,
         )(inputs)
 
     # Iterate over specified MLP input activation functions.

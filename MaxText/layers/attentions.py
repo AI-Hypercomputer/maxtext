@@ -430,18 +430,21 @@ class MultiHeadDotProductAttention(nn.Module):
           name='query_norm',
           kernel_axes=('heads',)
           use_bias=cfg.use_bias_layer_norm,
+          use_mean_center=cfg.use_mean_center_layer_norm,
           )(query)
       key = RMSNorm(
           dtype=self.dtype,
           name='key_norm',
           kernel_axes=('heads',)
           use_bias=cfg.use_bias_layer_norm,
+          use_mean_center=cfg.use_mean_center_layer_norm,
           )(key)
       value = RMSNorm(
           dtype=self.dtype,
           name='value_norm',
           kernel_axes=('heads',)
           use_bias=cfg.use_bias_layer_norm,
+          use_mean_center=cfg.use_mean_center_layer_norm,
           )(value)
 
     query = nn.with_logical_constraint(

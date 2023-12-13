@@ -32,11 +32,14 @@ class RMSNorm(nn.Module):
   scale_init: Initializer = nn.initializers.ones
   use_bias: bool = False
   bias_init: Initializer = initializers.default_bias_init
+  use_mean_center: bool = False
 
   @nn.compact
   def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
     """Applies layer normalization on the input."""
     x = jnp.asarray(x, jnp.float32)
+    if self.use_mean_center:
+      x -= jnp.mean(x, axis=[-1], keepdims=True)
     features = x.shape[-1]
     mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
     y = jnp.asarray(x * lax.rsqrt(mean2 + self.epsilon), self.dtype)
