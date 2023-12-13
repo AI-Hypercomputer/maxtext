@@ -50,6 +50,46 @@ dynamic_vector_slice_in_dim = jax.vmap(
     lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
 
 
+def get_large_negative_number(dtype: jnp.dtype):
+  """Returns a large negative value for the given dtype."""
+  # from https://github.com/google/praxis/blob/4712a6b9ee13e224b86e235ff55f7c6bab9fbab3/praxis/py_utils.py#L694
+  # -0.7 is a float64 in Jax. Explicit cast output to target dtype.
+  if jnp.issubdtype(dtype, jnp.inexact):
+    dtype_max = jnp.finfo(dtype).max
+  elif jnp.issubdtype(dtype, jnp.integer):
+    dtype_max = jnp.iinfo(dtype).max
+  else:
+    raise ValueError('Unsupported dtype for inputs.')
+  return jnp.asarray(-0.7 * dtype_max, dtype=dtype)
+
+
+def apply_mask_to_logits(logits: Array, mask: Array):
+  """Applies a floating-point mask to a set of logits.
+
+  The mask is represented as a tensor with some dtype where 0 represents true and values
+  below a large negative number (here set to
+  get_large_negative_number(logits.dtype) / 2) represent false. Applying the mask
+  leaves the logits alone in the true case and replaces them by
+  get_large_negative_number(logits.dtype) in the false case. Previously, this was
+  done by adding the logits to the mask; however, this leads to a bad fusion
+  decision in the compiler that saves the values in memory rather than
+  just the predicate. This implementation avoids that problem.
+
+  Args:
+    logits: A JTensor of logit values.
+    mask: A JTensor of mask values with the encoding described in the
+      function documentation.
+
+  Returns:
+    Masked logits.
+  """
+  # from https://github.com/google/praxis/blob/4712a6b9ee13e224b86e235ff55f7c6bab9fbab3/praxis/py_utils.py#L706
+  # handle -inf values in mask biases possible after combine_biases step
+  #    and return masked logits with either logit value or min_value
+  min_value = get_large_negative_number(logits.dtype)
+  return jnp.where((mask >= min_value * 0.5), logits, min_value)
+
+
 def combine_biases(*masks: Optional[Array]):
   """Combine attention biases.
 
@@ -162,7 +202,7 @@ def dot_product_attention(query: Array,
 
   # Apply attention bias: masking, dropout, proximity bias, etc.
   if bias is not None:
-    attn_weights = attn_weights + bias.astype(attn_weights.dtype)
+    attn_weights = apply_mask_to_logits(attn_weights, bias)
 
   # Normalize the attention weights across `kv_length` dimension.
   attn_weights = jax.nn.softmax(attn_weights).astype(dtype)
@@ -504,7 +544,7 @@ class MultiHeadDotProductAttention(nn.Module):
       attention_bias = lax.select(
           mask > 0,
           jnp.full(mask.shape, 0.).astype(self.dtype),
-          jnp.full(mask.shape, -1e10).astype(self.dtype))
+          jnp.full(mask.shape, get_large_negative_number(self.dtype)))
     else:
       attention_bias = None
 
