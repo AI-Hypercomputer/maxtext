@@ -185,6 +185,9 @@ embed_lookup_style: 'index'
 # including: attention qkv and out projection layers and mlp feedforward layers
 use_bias_linear: False
 
+# whether to add pre layer norm in mlp layers
+use_pre_norm_mlp: False
+
 # whether to enable RoPE in MultiHeadDotProductAttention
 use_rotary_position_emb: True
 

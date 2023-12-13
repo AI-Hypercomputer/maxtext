@@ -273,6 +273,7 @@ class DecoderLayer(nn.Module):
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         name='mlp',
+        use_pre_norm=cfg.use_pre_norm_mlp,
         config=cfg,
     )(lnx, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(
