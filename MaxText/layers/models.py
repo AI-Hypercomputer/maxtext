@@ -252,6 +252,7 @@ class DecoderLayer(nn.Module):
         head_dim=cfg.head_dim,
         dropout_rate=cfg.dropout_rate,
         use_rotary_position_emb=cfg.use_rotary_position_emb,
+        use_qk_norm=cfg.use_qk_norm,
         name='self_attention',
         config=cfg,
         mesh=mesh)(

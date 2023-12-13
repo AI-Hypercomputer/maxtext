@@ -247,6 +247,7 @@ class MultiHeadDotProductAttention(nn.Module):
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
   float32_logits: bool = False  # computes logits in float32 for stability.
   use_rotary_position_emb: bool = True
+  use_qk_norm: bool = True
 
   def apply_attention(
       self,
@@ -420,27 +421,28 @@ class MultiHeadDotProductAttention(nn.Module):
             inputs=key, position=inputs_positions
         )
 
-    # Layer norms here prevent (near) one-hot softmaxes, which can lead to
-    # unstable training loss and nans, see the "QK Normalization" subsection in
-    # https://arxiv.org/pdf/2302.05442.pdf.
-    query = RMSNorm(
-        dtype=self.dtype,
-        name='query_norm',
-        kernel_axes=('heads',),
-        use_bias=cfg.use_bias_layer_norm,
-        )(query)
-    key = RMSNorm(
-        dtype=self.dtype,
-        name='key_norm',
-        kernel_axes=('heads',)
-        use_bias=cfg.use_bias_layer_norm,
-        )(key)
-    value = RMSNorm(
-        dtype=self.dtype,
-        name='value_norm',
-        kernel_axes=('heads',)
-        use_bias=cfg.use_bias_layer_norm,
-        )(value)
+    if self.use_qk_norm:
+      # Layer norms here prevent (near) one-hot softmaxes, which can lead to
+      # unstable training loss and nans, see the "QK Normalization" subsection in
+      # https://arxiv.org/pdf/2302.05442.pdf.
+      query = RMSNorm(
+          dtype=self.dtype,
+          name='query_norm',
+          kernel_axes=('heads',)
+          use_bias=cfg.use_bias_layer_norm,
+          )(query)
+      key = RMSNorm(
+          dtype=self.dtype,
+          name='key_norm',
+          kernel_axes=('heads',)
+          use_bias=cfg.use_bias_layer_norm,
+          )(key)
+      value = RMSNorm(
+          dtype=self.dtype,
+          name='value_norm',
+          kernel_axes=('heads',)
+          use_bias=cfg.use_bias_layer_norm,
+          )(value)
 
     query = nn.with_logical_constraint(
         query,
