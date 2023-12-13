@@ -22,6 +22,10 @@ from configs.xlml.jax import solutionsteam_flax_latest_supported_config as flax_
 
 # Run once a day at 2 am UTC (6 pm PST)
 SCHEDULED_TIME = "0 2 * * *" if composer_env.is_prod_env() else None
+NETWORK_PREFIX = "projects/tpu-prod-env-automated"
+V5_NETWORKS = f"{NETWORK_PREFIX}/global/networks/mas-test"
+V5E_SUBNETWORKS = f"{NETWORK_PREFIX}/regions/us-east1/subnetworks/mas-test"
+V5P_SUBNETWORKS = f"{NETWORK_PREFIX}/regions/us-east5/subnetworks/mas-test"
 
 
 with models.DAG(
@@ -71,6 +75,50 @@ with models.DAG(
       tpu_version="4",
       tpu_cores=32,
       tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
+      time_out_in_min=60,
+  ).run()
+
+  jax_resnet_v5e_4 = flax_config.get_flax_resnet_config(
+      project_name=vm_resource.PROJECT_TPU_PROD_ENV_AUTOMATED,
+      tpu_version="5litepod",
+      tpu_cores=4,
+      tpu_zone=vm_resource.Zone.US_EAST1_C.value,
+      runtime_version=vm_resource.RuntimeVersion.V2_ALPHA_TPUV5_LITE.value,
+      network=V5_NETWORKS,
+      subnetwork=V5E_SUBNETWORKS,
+      time_out_in_min=60,
+  ).run()
+
+  jax_resnet_v5e_16 = flax_config.get_flax_resnet_config(
+      project_name=vm_resource.PROJECT_TPU_PROD_ENV_AUTOMATED,
+      tpu_version="5litepod",
+      tpu_cores=16,
+      tpu_zone=vm_resource.Zone.US_EAST1_C.value,
+      runtime_version=vm_resource.RuntimeVersion.V2_ALPHA_TPUV5_LITE.value,
+      network=V5_NETWORKS,
+      subnetwork=V5E_SUBNETWORKS,
+      time_out_in_min=60,
+  ).run()
+
+  jax_resnet_v5p_8 = flax_config.get_flax_resnet_config(
+      project_name=vm_resource.PROJECT_TPU_PROD_ENV_AUTOMATED,
+      tpu_version="5p",
+      tpu_cores=8,
+      tpu_zone=vm_resource.Zone.US_EAST5_A.value,
+      runtime_version=vm_resource.RuntimeVersion.V2_ALPHA_TPUV5.value,
+      network=V5_NETWORKS,
+      subnetwork=V5E_SUBNETWORKS,
+      time_out_in_min=60,
+  ).run()
+
+  jax_resnet_v5p_32 = flax_config.get_flax_resnet_config(
+      project_name=vm_resource.PROJECT_TPU_PROD_ENV_AUTOMATED,
+      tpu_version="5p",
+      tpu_cores=32,
+      tpu_zone=vm_resource.Zone.US_EAST5_A.value,
+      runtime_version=vm_resource.RuntimeVersion.V2_ALPHA_TPUV5.value,
+      network=V5_NETWORKS,
+      subnetwork=V5E_SUBNETWORKS,
       time_out_in_min=60,
   ).run()
 
@@ -227,6 +275,8 @@ with models.DAG(
   jax_resnet_v2_8 >> jax_resnet_v2_32
   jax_resnet_v3_8 >> jax_resnet_v3_32
   jax_resnet_v4_8 >> jax_resnet_v4_32
+  jax_resnet_v5e_4 >> jax_resnet_v5e_16
+  jax_resnet_v5p_8 >> jax_resnet_v5p_32
   jax_vit_v4_8 >> jax_vit_v4_32
   jax_gpt2_v4_8 >> jax_gpt2_v4_32
   jax_sd_v4_8 >> jax_sd_v4_32

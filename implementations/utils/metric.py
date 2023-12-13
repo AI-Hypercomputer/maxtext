@@ -481,7 +481,7 @@ def process_metrics(
 
   # add default airflow metadata
   metadata_history_rows_list = add_airflow_metadata(
-      base_id, task_gcp_config.project_name, metadata_history_rows_list
+      base_id, task_gcp_config.composer_project, metadata_history_rows_list
   )
 
   # append profile metrics to metric_history_rows_list if any

@@ -32,10 +32,14 @@ def get_flax_resnet_config(
     tpu_zone: str,
     time_out_in_min: int,
     data_dir: str = gcs_bucket.TFDS_DATA_DIR,
+    project_name: str = PROJECT_NAME,
+    runtime_version: str = RUNTIME_IMAGE,
+    network: str = "default",
+    subnetwork: str = "default",
     extraFlags: str = "",
 ) -> task.TpuQueuedResourceTask:
   job_gcp_config = gcp_config.GCPConfig(
-      project_name=PROJECT_NAME,
+      project_name=project_name,
       zone=tpu_zone,
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
@@ -56,8 +60,10 @@ def get_flax_resnet_config(
       test_config.Tpu(
           version=tpu_version,
           cores=tpu_cores,
-          runtime_version=RUNTIME_IMAGE,
+          runtime_version=runtime_version,
           reserved=IS_TPU_RESERVED,
+          network=network,
+          subnetwork=subnetwork,
       ),
       test_name="flax_resnet_imagenet",
       set_up_cmds=set_up_cmds,

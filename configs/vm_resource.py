@@ -17,7 +17,9 @@
 import enum
 
 
+# TODO(ranran): update to enum class (this change has been included in an on-going PR)
 PROJECT_CLOUD_ML_AUTO_SOLUTIONS = "cloud-ml-auto-solutions"
+PROJECT_TPU_PROD_ENV_AUTOMATED = "tpu-prod-env-automated"
 
 
 class Zone(enum.Enum):
@@ -26,7 +28,9 @@ class Zone(enum.Enum):
       "us-central2-b"
   )
   US_CENTRAL1_C = "us-central1-c"  # reservation for v2-8 in cloud-ml-auto-solutions
+  US_EAST1_C = "us-east1-c"  # reservation for v5e in tpu-prod-env-automated
   US_EAST1_D = "us-east1-d"  # reservation for v3-8 & v3-32 in cloud-ml-auto-solutions
+  US_EAST5_A = "us-east5-a"  # reservation for v5p in tpu-prod-env-automated
 
 
 class RuntimeVersion(enum.Enum):
@@ -34,6 +38,8 @@ class RuntimeVersion(enum.Enum):
   TPU_VM_TF_NIGHTLY_POD = "tpu-vm-tf-nightly-pod"
   TPU_UBUNTU2204_BASE = "tpu-ubuntu2204-base"
   TPU_VM_V4_BASE = "tpu-vm-v4-base"
+  V2_ALPHA_TPUV5_LITE = "v2-alpha-tpuv5-lite"
+  V2_ALPHA_TPUV5 = "v2-alpha-tpuv5"
 
 
 class ClusterName(enum.Enum):
