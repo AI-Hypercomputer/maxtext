@@ -60,6 +60,7 @@ def validate_train_config(config):
     max_logging.log("WARNING: 'dataset_path' might be pointing your local file system")
   if not config.base_output_directory.startswith('gs://'):
     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
+  assert config.base_output_directory != "", "config.base_output_directory must not be empty"
 
   assert ((config.load_parameters_path=="" and config.load_from_other_directory=="") or
     config.enable_checkpointing), "You must set enable_checkpointing to load a checkpoint"
@@ -191,6 +192,13 @@ def train_step(model, config, state, data, dropout_rng):
                          data['inputs_position'],
                          enable_dropout=config.enable_dropout,
                          rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
+
+    jax.debug.print("data -- {}", data['inputs'][0][0:16])
+    jax.debug.print("targets -- {}", data['targets'][0][0:16])
+
+    mle = jax.numpy.argmax(logits, axis=2)
+    jax.debug.print("logit_mles -- {}", mle[0][0:16])
+    
     one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
     xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
     xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
