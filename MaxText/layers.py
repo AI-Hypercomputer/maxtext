@@ -346,74 +346,76 @@ class MultiHeadDotProductAttention(nn.Module):
     )
     value = checkpoint_name(value, 'value_proj')
 
-    if model_mode == "autoregressive":
-      # Detect if we're initializing by absence of existing cache data.
-      is_initialized = self.has_variable('cache', 'cached_key')
-      # The key and value have dimension [batch, length, num_heads, head_dim],
-      # but we cache them as [batch, num_heads, head_dim, length] as a TPU
-      # fusion optimization. This also enables the "scatter via one-hot
-      # broadcast" trick, which means we do a one-hot broadcast instead of a
-      # scatter/gather operations, resulting in a 3-4x speedup in practice.
-      def swap_dims(x):
-        return x[:-3] + tuple(x[i] for i in [-2, -1, -3])
-      cached_key = self.variable('cache', 'cached_key', jnp.zeros,
-                                 swap_dims(key.shape), key.dtype)
-      cached_value = self.variable('cache', 'cached_value', jnp.zeros,
-                                   swap_dims(value.shape), value.dtype)
-      cache_index = self.variable('cache', 'cache_index',
-                                  lambda: jnp.array(0, dtype=jnp.int32))
-      if is_initialized:
-        batch, num_heads, head_dim, length = cached_key.value.shape
-        # During fast autoregressive decoding, we feed one position at a time,
-        # and cache the keys and values step by step.
-        # Sanity shape check of cached key against input query.
-        expected_shape = (batch, 1, num_heads, head_dim)
-        if expected_shape != query.shape:
-          raise ValueError(f"""Autoregressive cache shape error,
-                           expected query shape %s instead got
-                           {(expected_shape, query.shape)}""")
-        # Create a OHE of the current index. NOTE: the index is increased below.
-        cur_index = cache_index.value
-        one_hot_indices = jax.nn.one_hot(cur_index, length, dtype=key.dtype)
-        # In order to update the key, value caches with the current key and
-        # value, we move the length axis to the back, similar to what we did for
-        # the cached ones above.
-        # Note these are currently the key and value of a single position, since
-        # we feed one position at a time.
-        one_token_key = jnp.moveaxis(key, -3, -1)
-        one_token_value = jnp.moveaxis(value, -3, -1)
-        # Update key, value caches with our new 1d spatial slices.
-        # We implement an efficient scatter into the cache via one-hot
-        # broadcast and addition.
-        key = cached_key.value + one_token_key * one_hot_indices
-        value = cached_value.value + one_token_value * one_hot_indices
-        cached_key.value = key
-        cached_value.value = value
-        cache_index.value = cache_index.value + 1
-        # Move the keys and values back to their original shapes.
-        key = jnp.moveaxis(key, -1, -3)
-        value = jnp.moveaxis(value, -1, -3)
+    def swap_dims(x):
+      return x[:-3] + tuple(x[i] for i in [-2, -1, -3])
 
-        # Assign an index for decoding.
-        decoder_segment_ids = jnp.ones((key.shape[0], 1) ) * cur_index
+    def swap_axes(A):
+      return jnp.moveaxis(A, -3, -1)
 
 
     if model_mode == "prefill":
+      '''
+      In this mode, we prepare the KV cache and prefill it. But we don't use it!
+      '''
       cached_key = self.variable('cache', 'cached_key', jnp.zeros,
-                                 key.shape, key.dtype)
+                                 swap_dims((key.shape[0], cfg.max_predict_length, key.shape[2], key.shape[3])), key.dtype)
+      
       cached_value = self.variable('cache', 'cached_value', jnp.zeros,
-                                   value.shape, value.dtype)
+                                 swap_dims((value.shape[0], cfg.max_predict_length, value.shape[2], value.shape[3])), value.dtype)
+      
       cache_index = self.variable('cache', 'cache_index',
-                                  lambda: jnp.array(0, dtype=jnp.int32))
+                                  lambda: jnp.array(cfg.max_prefill_predict_length, dtype=jnp.int32))
+
+      swapped_key = swap_axes(key)
+      swapped_value = swap_axes(value)
+
+      cached_key.value = cached_key.value.at[:, :, :, 0:cfg.max_prefill_predict_length].set(swapped_key)
+      cached_value.value = cached_value.value.at[:, :, :, 0:cfg.max_prefill_predict_length].set(swapped_value)
+
+      key_to_use = key
+      value_to_use = value
+    elif model_mode == "autoregressive":
+      '''
+      In this mode, we're receiving one token at a time and updating the KV cache accordingly
+      '''
+      cached_key = self.variable('cache', 'cached_key', jnp.zeros,
+                                 swap_dims((key.shape[0], cfg.max_predict_length, key.shape[2], key.shape[3])), key.dtype)
+      
+      cached_value = self.variable('cache', 'cached_value', jnp.zeros,
+                                 swap_dims((value.shape[0], cfg.max_predict_length, value.shape[2], value.shape[3])), value.dtype)
+      
+      cache_index = self.variable('cache', 'cache_index',
+                                  lambda: jnp.array(cfg.max_prefill_predict_length, dtype=jnp.int32))
+      
+      batch, num_heads, head_dim, length = cached_key.value.shape
+      expected_shape = (batch, 1, num_heads, head_dim)
+      if expected_shape != query.shape:
+        raise ValueError(f"""Autoregressive cache shape error,
+                          expected query shape %s instead got
+                          {(expected_shape, query.shape)}""")
+      
+      one_hot_indices = jax.nn.one_hot(cache_index.value, cfg.max_predict_length, dtype=key.dtype)
+      cached_key.value = cached_key.value + swap_axes(key) * one_hot_indices 
+      cached_value.value = cached_value.value + swap_axes(value) * one_hot_indices 
+      cache_index.value = cache_index.value + 1
+
+      key_to_use = swap_axes(cached_key.value)
+      value_to_use = swap_axes(cached_value.value)
+      print(f"{key_to_use.shape=} {value_to_use.shape=}")
+    elif model_mode == "train":
+      '''
+      No KV cache!
+      '''
+      key_to_use = key
+      value_to_use = value
+
 
     dropout_rng = None
     if not deterministic and self.dropout_rate > 0.:
       dropout_rng = self.make_rng('dropout')
 
-
-
     # Apply attention.
-    x = self.apply_attention(query, key, value, attention_type,
+    x = self.apply_attention(query, key_to_use, value_to_use, attention_type,
                               decoder_segment_ids, dropout_rng, deterministic, model_mode=model_mode)
     x = nn.with_logical_constraint(
         x, ('activation_batch', 'activation_length', 'activation_heads', 'activation_kv')
@@ -430,9 +432,6 @@ class MultiHeadDotProductAttention(nn.Module):
         config=cfg)(
             x)
     return out
-
-
-
 
 
 class MlpBlock(nn.Module):

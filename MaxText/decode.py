@@ -81,10 +81,7 @@ def prefill_predict_step(inputs,
                  config):
   decoder_segment_ids = jax.numpy.zeros( inputs.shape)
 
-  #cache = initial_variables["cache"]
-  cache = None
-
-  flat_logits = model.apply(
+  flat_logits, new_vars = model.apply(
     {
         "params": state.params
     },
@@ -92,35 +89,22 @@ def prefill_predict_step(inputs,
     None,
     decoder_segment_ids=decoder_segment_ids,
     enable_dropout=False,
-    model_mode="train",
+    model_mode="prefill",
     rngs={'aqt': rngkey},
-    max_decode_length=config.max_predict_length 
+    max_decode_length=config.max_predict_length,
+    mutable=["cache"]
   )
-  #cache = new_vars["cache"]
-  #jax.debug.print("cache: {}", cache)
 
-  #cache = initial_variables["cache"]
-  return flat_logits
+  return flat_logits, new_vars['cache']
 
 
 def ar_predict_step(inputs,
+                    kv_cache,
                  state,
                  rngkey,
                  model,
                  config):
   """Predict language model on a batch."""
-  target_shape = (inputs.shape[0], config.max_predict_length)
-
-  initial_variables = model.init(
-      {'params': rngkey, 'dropout': rngkey, 'aqt': rngkey},
-      jnp.ones(target_shape, config.dtype),
-      None,
-      enable_dropout=False,
-      model_mode="autoregressive",
-      max_decode_length=config.max_predict_length
-  )
-  cache = initial_variables["cache"]
-
   def tokens_ids_to_logits(flat_ids, flat_cache, aqt_rng):
     """Token slice to logits from decoder model."""
     # --> [batch * beam, 1, vocab]
@@ -144,16 +128,16 @@ def ar_predict_step(inputs,
 
   # Using the above-defined single-step decoder function, run a
   # search over possible sequences given input encoding.
-  seqs = temperature_sampler.temperature_sample(
+  seqs, kv_cache = temperature_sampler.temperature_sample(
       inputs,
-      cache,
+      kv_cache,
       tokens_ids_to_logits,
       rngkey,
       temperature=config.sampling_temperature,
       topk=config.sampling_top_k,
       eos_token=config.eos_id)
 
-  return seqs
+  return seqs, kv_cache
 
 def decode_loop(config, state=None):
   """Decoding loop for the Transformer model."""
@@ -194,19 +178,19 @@ def decode_loop(config, state=None):
       out_shardings=None
   )
 
-  prefill_output = p_prefill_predict_step(tokenized_prompts, state, rng)
+  prefill_output, prefill_cache = p_prefill_predict_step(tokenized_prompts, state, rng)
   indices = jax.numpy.argmax(prefill_output, axis=2)
   match_input_and_output_stream(replicated_prompts[0], np.array(indices[0,:]), sp_tokenizer)
-
-  sys.exit(0)
-
 
   partial_ar_predict_step = functools.partial(ar_predict_step, model=model, config=config)
   p_ar_predict_step = jax.jit(
       partial_ar_predict_step,
-      in_shardings=(replicated_sharding, state_mesh_shardings, None),
-      out_shardings=None
+      in_shardings=(replicated_sharding, None, state_mesh_shardings, None), # sharding strategy?
+      out_shardings=(None,None)
   )
+  seqs, output_cache = p_ar_predict_step(tokenized_prompts, prefill_cache, state, rng)
+  import pdb; pdb.set_trace()
+  sys.exit(1)
 
   if config.metrics_file:
     local_metrics_file = open(config.metrics_file, 'a', encoding="utf8")

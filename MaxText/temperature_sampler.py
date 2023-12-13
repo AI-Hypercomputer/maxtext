@@ -16,6 +16,7 @@
 
 """Fast decoding routines for inference from a trained language model."""
 
+import jax
 from jax import lax
 from jax import random
 import jax.numpy as jnp
@@ -118,5 +119,6 @@ def temperature_sample(prompt_inputs,
 
   # Pick part of the state corresponding to the sampled sequences.
   final_sequences = final_state[1]
-  return final_sequences
+  final_cache = final_state[2]
+  return final_sequences, final_cache
 
