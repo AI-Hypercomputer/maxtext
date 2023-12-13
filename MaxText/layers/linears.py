@@ -173,6 +173,7 @@ class MlpBlock(nn.Module):
         dtype=cfg.dtype,
         kernel_axes=('embed',),
         )(inputs)
+
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
     activations = []

@@ -426,15 +426,21 @@ class MultiHeadDotProductAttention(nn.Module):
     query = RMSNorm(
         dtype=self.dtype,
         name='query_norm',
-        kernel_axes=('heads',))(query)
+        kernel_axes=('heads',),
+        use_bias=cfg.use_bias_layer_norm,
+        )(query)
     key = RMSNorm(
         dtype=self.dtype,
         name='key_norm',
-        kernel_axes=('heads',))(key)
+        kernel_axes=('heads',)
+        use_bias=cfg.use_bias_layer_norm,
+        )(key)
     value = RMSNorm(
         dtype=self.dtype,
         name='value_norm',
-        kernel_axes=('heads',))(value)
+        kernel_axes=('heads',)
+        use_bias=cfg.use_bias_layer_norm,
+        )(value)
 
     query = nn.with_logical_constraint(
         query,

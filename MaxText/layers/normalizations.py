@@ -30,6 +30,8 @@ class RMSNorm(nn.Module):
   dtype: Any = jnp.float32
   kernel_axes: Tuple[str, ...] = ()
   scale_init: Initializer = nn.initializers.ones
+  use_bias: bool = False
+  bias_init: Initializer = initializers.default_bias_init
 
   @nn.compact
   def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
@@ -46,4 +48,15 @@ class RMSNorm(nn.Module):
     )
 
     scale = jnp.asarray(scale, self.dtype)
-    return y * scale
+    output = y * scale
+
+    if self.use_bias:
+      bias = self.param(
+        'bias',
+        nn.with_logical_partitioning(self.bias_init, self.kernel_axes),
+        (features,),
+        jnp.float32,
+      )
+      bias = jnp.asarray(bias, self.dtype)
+      output += bias
+    return output
