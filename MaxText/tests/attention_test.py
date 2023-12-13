@@ -54,6 +54,7 @@ class AttentionTest(unittest.TestCase):
         head_dim=self.HEAD_DIM,
         dropout_rate=self.cfg.dropout_rate,
         name='self_attention',
+        use_rotary_position_emb=self.cfg.use_rotary_position_emb,
         config=self.cfg,
         mesh = self.mesh)
     self.variable = self.attention.init({'params': self.rng, 'aqt': self.rng}, jnp.ones((self.BS, self.MAX_TARGET_LENGTH, self.BASE_EMB_DIM)), 

@@ -195,6 +195,7 @@ class MultiHeadDotProductAttention(nn.Module):
       kernel_init: initializer for the kernel of the Dense layers.
       float32_logits: bool, if True then compute logits in float32 to avoid
         numerical issues with bfloat16.
+      use_rotary_position_emb: apply rotary_position_emb to query and key if True
   """
 
   num_heads: int
@@ -205,6 +206,7 @@ class MultiHeadDotProductAttention(nn.Module):
   dropout_rate: float = 0.
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
   float32_logits: bool = False  # computes logits in float32 for stability.
+  use_rotary_position_emb: bool = True
 
   def apply_attention(
       self,
@@ -369,13 +371,14 @@ class MultiHeadDotProductAttention(nn.Module):
     key = projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
     value = projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
-    # Apply RoPE
-    query = LLaMARotaryEmbedding(
-        embedding_dims=self.head_dim, name='query_rotary'
-    )(inputs=query, position=inputs_positions)
-    key = LLaMARotaryEmbedding(embedding_dims=self.head_dim, name='key_rotary')(
-        inputs=key, position=inputs_positions
-    )
+    # Apply RoPE if True
+    if self.use_rotary_position_emb:
+        query = LLaMARotaryEmbedding(
+            embedding_dims=self.head_dim, name='query_rotary'
+        )(inputs=query, position=inputs_positions)
+        key = LLaMARotaryEmbedding(embedding_dims=self.head_dim, name='key_rotary')(
+            inputs=key, position=inputs_positions
+        )
 
     # Layer norms here prevent (near) one-hot softmaxes, which can lead to
     # unstable training loss and nans, see the "QK Normalization" subsection in

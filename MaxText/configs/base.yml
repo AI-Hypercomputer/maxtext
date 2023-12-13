@@ -185,6 +185,9 @@ embed_lookup_style: 'index'
 # including: attention qkv and out projection layers and mlp feedforward layers
 use_bias_linear: False
 
+# whether to enable RoPE in MultiHeadDotProductAttention
+use_rotary_position_emb: True
+
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
 compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
