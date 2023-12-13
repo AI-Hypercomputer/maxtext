@@ -498,7 +498,7 @@ def process_metrics(
 
   test_run_rows = []
   bigquery_metric = bigquery.BigQueryMetricClient(
-      task_gcp_config.project_name, task_gcp_config.dataset_name.value
+      task_gcp_config.dataset_project, task_gcp_config.dataset_name.value
   )
 
   if hasattr(task_test_config, "cluster_name"):

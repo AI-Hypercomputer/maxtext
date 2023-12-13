@@ -27,10 +27,12 @@ class GCPConfig:
     project_name: The name of a project to provision resource and run a test job.
     zone: The zone to provision resource and run a test job.
     dataset_name: The option of dataset for metrics.
+    dataset_project: The name of a project that hosts the dataset.
     composer_project: The name of a project that hosts the composer env.
   """
 
   project_name: str
   zone: str
   dataset_name: metric_config.DatasetOption
+  dataset_project: str = vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS
   composer_project: str = vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS
