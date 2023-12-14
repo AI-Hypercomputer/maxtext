@@ -15,7 +15,7 @@
 """Attentions Layers."""
 
 import functools
-from typing import Optional
+from typing import Optional, Sequence
 
 from flax import linen as nn
 import jax
@@ -516,6 +516,9 @@ class FlashMultiHeadDotProductAttention(MultiHeadDotProductAttention):
       raise ValueError("""Decode not supported with flash attention.
                             Use MHA instead.""")
 
+    if self.max_target_length == -1:
+      raise ValueError('max_target_length must be defined for flash MHA.')
+
     # Transpose to ('batch', 'heads', 'length', 'kv')
     query = jax.numpy.transpose(query, axes=(0, 2, 1, 3))
     key = jax.numpy.transpose(key, axes=(0, 2, 1, 3))
@@ -584,6 +587,9 @@ class FlashMultiHeadDotProductAttention(MultiHeadDotProductAttention):
 class MultiQueryDotProductAttention(MultiHeadDotProductAttention):
   """Multi-Query Attention https://arxiv.org/abs/1911.02150."""
 
+  key_axis_names: AxisNames = (BATCH, LENGTH, D_KV)
+  value_axis_names: AxisNames = (BATCH, LENGTH, D_KV)
+
   def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:
     """Projection for Key and Value.
 
@@ -595,15 +601,80 @@ class MultiQueryDotProductAttention(MultiHeadDotProductAttention):
       Projection of key or value, in shape of `[batch, kv_length, head_dim]`.
     """
 
-    projection = functools.partial(
-        DenseGeneral,
-        axis=-1,
-        features=self.head_dim,
-        kernel_axes=('embed', 'kv'),
-        dtype=self.dtype,
-        use_int8=self.use_int8)
-    proj = projection(kernel_init=self.kernel_init, name=proj_name)(inputs_kv)
-    return proj
+    kv_proj = DenseGeneral(
+      features=self.head_dim,
+      axis=-1,
+      kernel_init=self.kernel_init,
+      kernel_axes=('embed', 'kv'),
+      dtype=self.dtype,
+      name=proj_name,
+      use_int8=self.use_int8)(inputs_kv)
+    return kv_proj
+  
+  def qk_product(self, query: Array, key: Array) -> Array:
+    """Query-Key product.
+    
+    Args:
+      query: Query projection, in shape of [b, t, n, d], where b: batch size, t:
+        query length, n: number of heads, d: project dimension. 
+      key: Key projection in shape of [b, s, d] for multi-query attention.
+
+    Returns:
+      results in shape [b, n, t, s].
+    """
+    return jnp.einsum('btnd,bsd->bnts', query, key)
+  
+  def wv_product(
+      self,
+      attn_weights: Array,
+      value: Array,
+      aqt_rng: PRNGKey | None) -> Array:
+    """weighted value product.
+    
+    Args:
+      attn_weights: Computed results of qk_einsum, in shape of [b, n, t, s].
+      value: Value projection, in shape of [b, s, d] for multi-head attention.
+      aqt_rng: A PRNGKey for aqt ops.
+
+    Returns:
+      result in shape [b, t, n, d]
+    """
+    einsum = _maybe_aqt_einsum(self.use_int8, aqt_rng)
+    return einsum('bnts,bsd->btnd', attn_weights, value)
+  
+  def key_rotary(self, key: Array, inputs_positions: Array):
+    """Apply Rotary Embedding to Key."""
+    key_input_shape = key.shape
+    key = jnp.expand_dims(key, axis=-2) # [b, s, d] -> [b, s, 1, d]
+    key = super().key_rotary(key, inputs_positions)
+    return jnp.reshape(key, key_input_shape)
+
+
+class GroupedQueryDotProductAttention(MultiHeadDotProductAttention):
+  """Multi-Query Attention https://arxiv.org/abs/1911.02150."""
+
+  num_kv_heads: int = -1
+
+  def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:
+    """Projection for Key and Value.
+
+    Args;
+      inputs_kv: inputs_kv: key/values of shape `[batch, kv_length, num_kv_heads, 
+        kv_features]`.
+      proj_name: name of projection, `key` or `value`.
+
+    Returns:
+      Projection of key or value, in shape of `[batch, kv_length, head_dim]`.
+    """
+    kv_proj = DenseGeneral(
+      features=(self.num_kv_heads, self.head_dim),
+      axis=-1,
+      kernel_init=self.kernel_init,
+      kernel_axes=('embed', 'heads', 'kv'),
+      dtype=self.dtype,
+      name=proj_name,
+      use_int8=self.use_int8)(inputs_kv)
+    return kv_proj
   
   def qk_product(self, query: Array, key: Array) -> Array:
     """Query-Key product.
