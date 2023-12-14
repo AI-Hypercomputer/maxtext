@@ -213,6 +213,9 @@ use_rotary_position_emb: True
 # whether to apply normalization for query and key in attention block
 use_qk_norm: True
 
+# whether to normalize pre-softmax logits
+logits_norm: True
+
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
 compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
