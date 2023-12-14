@@ -19,7 +19,7 @@ import jax
 import unittest
 import jax.numpy as jnp
 from typing import Tuple
-import layers
+from layers import embeddings
 import numpy as np
 
 
@@ -97,8 +97,8 @@ class LlamaRoPETest(unittest.TestCase):
     )
 
     # Calculate RoPE embeddings from MaxText implementation
-    query_proj = layers.LLaMARotaryEmbedding(embedding_dims = dim_per_head)(x_q)
-    key_proj = layers.LLaMARotaryEmbedding(embedding_dims = dim_per_head)(x_k)
+    query_proj = embeddings.LLaMARotaryEmbedding(embedding_dims = dim_per_head)(x_q)
+    key_proj = embeddings.LLaMARotaryEmbedding(embedding_dims = dim_per_head)(x_k)
 
     # Compare results
     self.assertTrue(jax.numpy.allclose(llama_output[0], query_proj, rtol=1e-02, atol=1e-05, equal_nan=False))
