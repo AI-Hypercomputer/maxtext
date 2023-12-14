@@ -17,6 +17,8 @@
 # pylint: disable=missing-module-docstring
 from collections import OrderedDict
 
+import max_logging
+
 import accelerator_to_spec_map
 import math
 import max_utils
@@ -42,6 +44,13 @@ def validate_attention_type(s: str) -> bool:
   if s not in valid_attention_types: # currently supported attention
     raise ValueError(
       "Invalid attention type was passed. Valid options ", valid_attention_types
+    )
+
+def validate_model_name(s: str) -> bool:
+  valid_model_names= ('default',) # currently supported models
+  if s not in valid_model_names:
+    raise ValueError(
+      "Invalid model name was passed. Valid options ", valid_model_names
     )
 
 _config = None
@@ -84,6 +93,7 @@ class _HyperParameters():
       else:
         raw_keys[k] = raw_data_from_yaml[k]
 
+    _HyperParameters.update_model_vars(raw_keys)
     _HyperParameters.user_init(raw_keys)
     self.keys = raw_keys
 
@@ -128,6 +138,37 @@ class _HyperParameters():
       calculate_global_batch_sizes(raw_keys)
 
     validate_attention_type(raw_keys['attention'])
+
+  @staticmethod
+  def update_model_vars(raw_keys):
+    ''' Update model config variables
+    '''
+    validate_model_name(raw_keys['model_name'])
+    if raw_keys['model_name'] == 'llama-7b':
+      max_logging.log(f"Running Model: {raw_keys['model_name']}")
+      llama_7b_model_vars = {
+        'base_emb_dim': 4096,
+        'base_num_heads': 32,
+        'base_mlp_dim': 11008,
+        'base_num_decoder_layers': 32,
+        'head_dim': 128,
+        'mlp_activations': ['silu'],
+      }
+      raw_keys = validate_and_update_keys(raw_keys, llama_7b_model_vars)
+
+def validate_and_update_keys(raw_keys, model_keys):
+  ''' Validate and update model specific config keys
+  '''
+  max_logging.log("Updating following parameters in config\n")
+  for k in model_keys:
+    max_logging.log(f"{k}: {model_keys[k]}")
+    if k not in raw_keys:
+      raise ValueError(f'Key {k} does not exist in config/base.yml.')
+    elif not isinstance(raw_keys[k], type(model_keys[k])):
+      raise ValueError(f'Type of key:{k} does not match with {type(model_keys[k])}')
+    else:
+      raw_keys[k] = model_keys[k]
+  return raw_keys
 
 
 def get_individual_scales(scale):
