@@ -25,7 +25,9 @@ from jax.sharding import Mesh
 import optax
 import pyconfig
 import unittest
-from layers import Transformer
+from layers import models
+
+Transformer = models.Transformer
 
 class MaxUtilsSummaryStats(unittest.TestCase):
   """Tests for the summary stats functions in max_utils.py"""

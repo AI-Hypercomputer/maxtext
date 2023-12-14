@@ -32,11 +32,11 @@ from maxtext.layers import linears
 from maxtext.layers import normalizations
 from maxtext.layers import quantizations
 
-Array = types.Array
-Config = types.Config
-DType = types.DType
-Mesh = types.Mesh
-PRNGKey = types.PRNGKey
+Array = common_types.Array
+Config = common_types.Config
+DType = common_types.DType
+Mesh = common_types.Mesh
+PRNGKey = common_types.PRNGKey
 
 DenseGeneral = linears.DenseGeneral
 LLaMARotaryEmbedding = embeddings.LLaMARotaryEmbedding

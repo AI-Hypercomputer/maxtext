@@ -26,9 +26,9 @@ from maxtext.layers import initializers
 from maxtext.layers import quantizations
 import numpy as np
 
-Array = types.Array
-Config = types.Config
-DType = types.DType
+Array = common_types.Array
+Config = common_types.Config
+DType = common_types.DType
 NdInitializer = initializers.NdInitializer
 
 nd_dense_init = initializers.nd_dense_init

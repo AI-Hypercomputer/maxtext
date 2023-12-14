@@ -28,11 +28,11 @@ from maxtext.layers import embeddings
 from maxtext.layers import linears
 from maxtext.layers import normalizations
 
-Array = types.Array
-Config = types.Config
-DType = types.DType
-Mesh = types.Mesh
-ScanIn = types.ScanIn
+Array = common_types.Array
+Config = common_types.Config
+DType = common_types.DType
+Mesh = common_types.Mesh
+ScanIn = common_types.ScanIn
 
 Embed = embeddings.Embed
 LLaMARotaryEmbedding = embeddings.LLaMARotaryEmbedding
