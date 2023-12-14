@@ -26,11 +26,11 @@ from jax.experimental import shard_map
 from jax.experimental.pallas.ops.tpu import flash_attention
 import jax.numpy as jnp
 from maxtext import types
-from maxtext.layers import embeddings
-from maxtext.layers import initializers
-from maxtext.layers import linears
-from maxtext.layers import normalizations
-from maxtext.layers import quantizations
+from layers import embeddings
+from layers import initializers
+from layers import linears
+from layers import normalizations
+from layers import quantizations
 
 Array = types.Array
 Config = types.Config

@@ -23,10 +23,10 @@ from flax import linen as nn
 import jax
 import jax.numpy as jnp
 from maxtext import types
-from maxtext.layers import attentions
-from maxtext.layers import embeddings
-from maxtext.layers import linears
-from maxtext.layers import normalizations
+from layers import attentions
+from layers import embeddings
+from layers import linears
+from layers import normalizations
 
 Array = types.Array
 Config = types.Config

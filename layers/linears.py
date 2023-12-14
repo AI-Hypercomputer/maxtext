@@ -22,8 +22,8 @@ import flax.linen as nn
 from jax import lax
 import jax.numpy as jnp
 from maxtext import types
-from maxtext.layers import initializers
-from maxtext.layers import quantizations
+from layers import initializers
+from layers import quantizations
 import numpy as np
 
 Array = types.Array

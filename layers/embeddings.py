@@ -20,7 +20,7 @@ from flax import linen as nn
 import jax
 from jax import lax
 import jax.numpy as jnp
-from maxtext.layers import initializers
+from layers import initializers
 
 Config = Any
 Array = jnp.ndarray
