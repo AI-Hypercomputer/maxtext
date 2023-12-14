@@ -21,14 +21,14 @@ from typing import Any, Callable, Iterable, Sequence, Tuple, Union
 import flax.linen as nn
 from jax import lax
 import jax.numpy as jnp
-from maxtext import types
+import common_types
 from layers import initializers
 from layers import quantizations
 import numpy as np
 
-Array = types.Array
-Config = types.Config
-DType = types.DType
+Array = common_types.Array
+Config = common_types.Config
+DType = common_types.DType
 NdInitializer = initializers.NdInitializer
 
 nd_dense_init = initializers.nd_dense_init

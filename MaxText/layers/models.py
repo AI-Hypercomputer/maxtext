@@ -22,17 +22,17 @@ from typing import Callable, Optional
 from flax import linen as nn
 import jax
 import jax.numpy as jnp
-from maxtext import types
+import common_types
 from layers import attentions
 from layers import embeddings
 from layers import linears
 from layers import normalizations
 
-Array = types.Array
-Config = types.Config
-DType = types.DType
-Mesh = types.Mesh
-ScanIn = types.ScanIn
+Array = common_types.Array
+Config = common_types.Config
+DType = common_types.DType
+Mesh = common_types.Mesh
+ScanIn = common_types.ScanIn
 
 Embed = embeddings.Embed
 LLaMARotaryEmbedding = embeddings.LLaMARotaryEmbedding
