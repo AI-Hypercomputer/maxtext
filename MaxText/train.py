@@ -19,25 +19,28 @@
 
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
-import jax
+
+import datetime
 import os
 import sys
 
 from typing import Sequence
-import datetime
 from absl import app
-from flax.linen import partitioning as nn_partitioning
 from flax import linen as nn
+from flax.linen import partitioning as nn_partitioning
+import jax
 import numpy as np
 import optax
 from tensorboardX import SummaryWriter
 
-from layers import Transformer
-import pyconfig
-from input_pipeline import create_data_iterator_with_tokenizer
+import checkpointing
 import max_utils
 import maxtext_utils
-import checkpointing
+import max_logging
+import pyconfig
+
+from input_pipeline import create_data_iterator_with_tokenizer
+from layers import models
 
 import jax.numpy as jnp
 from jax import random
@@ -50,7 +53,8 @@ from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
-import max_logging
+Transformer = models.Transformer
+
 
 def validate_train_config(config):
   """ Validates the configuration is set correctly for train.py"""
