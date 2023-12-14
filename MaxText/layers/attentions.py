@@ -431,6 +431,7 @@ class MultiHeadDotProductAttention(nn.Module):
           kernel_axes=('heads',)
           use_bias=cfg.use_bias_layer_norm,
           use_mean_center=cfg.use_mean_center_layer_norm,
+          reductions_in_fp32=cfg.reductions_in_fp32_layer_norm,
           )(query)
       key = RMSNorm(
           dtype=self.dtype,
@@ -438,6 +439,7 @@ class MultiHeadDotProductAttention(nn.Module):
           kernel_axes=('heads',)
           use_bias=cfg.use_bias_layer_norm,
           use_mean_center=cfg.use_mean_center_layer_norm,
+          reductions_in_fp32=cfg.reductions_in_fp32_layer_norm,
           )(key)
       value = RMSNorm(
           dtype=self.dtype,
@@ -445,6 +447,7 @@ class MultiHeadDotProductAttention(nn.Module):
           kernel_axes=('heads',)
           use_bias=cfg.use_bias_layer_norm,
           use_mean_center=cfg.use_mean_center_layer_norm,
+          reductions_in_fp32=cfg.reductions_in_fp32_layer_norm,
           )(value)
 
     query = nn.with_logical_constraint(
