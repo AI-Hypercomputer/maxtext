@@ -29,7 +29,6 @@ import common_types
 from layers import embeddings
 from layers import initializers
 from layers import linears
-from layers import normalizations
 from layers import quantizations
 
 Array = common_types.Array
@@ -41,7 +40,6 @@ PRNGKey = common_types.PRNGKey
 DenseGeneral = linears.DenseGeneral
 LLaMARotaryEmbedding = embeddings.LLaMARotaryEmbedding
 NdInitializer = initializers.NdInitializer
-RMSNorm = normalizations.RMSNorm
 
 AxisNames = common_types.AxisNames
 BATCH = common_types.BATCH
@@ -137,14 +135,6 @@ class MultiHeadDotProductAttention(nn.Module):
   def query_projection(self, inputs_q: Array) -> Array:
     """Query projection."""
 
-    projection = functools.partial(
-        DenseGeneral,
-        axis=-1,
-        features=(self.num_heads, self.head_dim),
-        kernel_axes=('embed', 'heads', 'kv'),
-        dtype=self.dtype,
-        use_int8=self.use_int8)
-
     # NOTE: T5 does not explicitly rescale the attention logits by
     #       1/sqrt(depth_kq)!  This is folded into the initializers of the
     #       linear transformations, which is equivalent under Adafactor.
@@ -153,29 +143,46 @@ class MultiHeadDotProductAttention(nn.Module):
       #pylint: disable=no-value-for-parameter
       return self.kernel_init(*args) / depth_scaling
 
-    query = projection(kernel_init=query_init, name='query')(inputs_q)
-    return query
+    query_proj = DenseGeneral(
+      features=(self.num_heads, self.head_dim),
+      axis=-1,
+      kernel_init=query_init
+      kernel_axes=('embed', 'heads', 'kv'),
+      dtype=self.dtype,
+      name='query'
+      use_int8=self.use_int8)(inputs_q)
+    return query_proj
 
   def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:
-    projection = functools.partial(
-        DenseGeneral,
-        axis=-1,
-        features=(self.num_heads, self.head_dim),
-        kernel_axes=('embed', 'heads', 'kv'),
-        dtype=self.dtype,
-        use_int8=self.use_int8)
-    proj = projection(kernel_init=self.kernel_init, name=proj_name)(inputs_kv)
-    return proj
+    """Projection for Key and Value.
+
+    Args;
+      inputs_kv: inputs_kv: key/values of shape `[batch, kv_length, kv_features]`.
+      proj_name: name of projection, `key` or `value`.
+
+    Returns:
+      Projection of key or value, in shape of `[batch, kv_length, num_heads,
+      head_dim]`.
+    """
+    kv_proj = DenseGeneral(
+      features=(self.num_heads, self.head_dim),
+      axis=-1,
+      kernel_init=self.kernel_init,
+      kernel_axes=('embed', 'heads', 'kv'),
+      dtype=self.dtype,
+      name=proj_name,
+      use_int8=self.use_int8)(inputs_kv)
+    return kv_proj
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
     out_proj = DenseGeneral(
-        features=output_dim,
-        axis=(-2, -1),
-        kernel_init=self.kernel_init,
-        kernel_axes=('heads', 'kv', 'embed'),
-        dtype=self.dtype,
-        name='out',
-        use_int8=self.use_int8)(out)
+      features=output_dim,
+      axis=(-2, -1),
+      kernel_init=self.kernel_init,
+      kernel_axes=('heads', 'kv', 'embed'),
+      dtype=self.dtype,
+      name='out',
+      use_int8=self.use_int8)(out)
     return out_proj
 
   def attention_dropout(
@@ -216,12 +223,10 @@ class MultiHeadDotProductAttention(nn.Module):
     Args:
       query: Query projection, in shape of [b, t, n, d], where b: batch size, t:
         query length, n: number of heads, d: project dimension. 
-      key: Key projection in shape of [b, s, n, d] for multihead attention; for
-        grouped query attention, its shape is [b, s, k, d]
+      key: Key projection in shape of [b, s, n, d] for multihead attention.
 
     Returns:
-      results in shape [b, n, t, s] for MHA.
-
+      results in shape [b, n, t, s].
     """
     return jnp.einsum('btnd,bsnd->bnts', query, key)
 
@@ -244,6 +249,13 @@ class MultiHeadDotProductAttention(nn.Module):
 
     einsum = _maybe_aqt_einsum(self.use_int8, aqt_rng)
     return einsum('bnts,bsnd->btnd', attn_weights, value)
+  
+  def key_rotary(self, key: Array, inputs_positions: Array):
+    """Apply Rotary Embedding to key."""
+    query = LLaMARotaryEmbedding(
+      embedding_dims=self.head_dim, 
+      name='key_rotary')(inputs=key, position=inputs_positions)
+    return query
 
   def apply_attention(
       self,
@@ -427,17 +439,7 @@ class MultiHeadDotProductAttention(nn.Module):
     query = LLaMARotaryEmbedding(
         embedding_dims=self.head_dim, name='query_rotary'
     )(inputs=query, position=inputs_positions)
-    key = LLaMARotaryEmbedding(
-        embedding_dims=self.head_dim, name='key_rotary'
-        )(inputs=key, position=inputs_positions)
-
-    # apply RMS norm.
-    query = RMSNorm(
-        dtype=self.dtype, name='query_norm', kernel_axes=('heads',))(query)
-    key = RMSNorm(
-        dtype=self.dtype, name='key_norm', kernel_axes=('heads',))(key)
-    value = RMSNorm(
-        dtype=self.dtype, name='value_norm', kernel_axes=('heads',))(value)
+    key = self.key_rotary(key, inputs_positions)
 
     # annotate with sharding constraint.
     query = nn.with_logical_constraint(query, self.query_axis_names)
@@ -577,3 +579,66 @@ class FlashMultiHeadDotProductAttention(MultiHeadDotProductAttention):
     x = wrap_flash_attention(query, key, value, decoder_segment_ids)
     x = jax.numpy.transpose(x, axes=(0, 2, 1, 3))
     return x
+
+
+class MultiQueryDotProductAttention(MultiHeadDotProductAttention):
+  """Multi-Query Attention https://arxiv.org/abs/1911.02150."""
+
+  def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:
+    """Projection for Key and Value.
+
+    Args;
+      inputs_kv: inputs_kv: key/values of shape `[batch, kv_length, kv_features]`.
+      proj_name: name of projection, `key` or `value`.
+
+    Returns:
+      Projection of key or value, in shape of `[batch, kv_length, head_dim]`.
+    """
+
+    projection = functools.partial(
+        DenseGeneral,
+        axis=-1,
+        features=self.head_dim,
+        kernel_axes=('embed', 'kv'),
+        dtype=self.dtype,
+        use_int8=self.use_int8)
+    proj = projection(kernel_init=self.kernel_init, name=proj_name)(inputs_kv)
+    return proj
+  
+  def qk_product(self, query: Array, key: Array) -> Array:
+    """Query-Key product.
+    
+    Args:
+      query: Query projection, in shape of [b, t, n, d], where b: batch size, t:
+        query length, n: number of heads, d: project dimension. 
+      key: Key projection in shape of [b, s, d] for multi-query attention.
+
+    Returns:
+      results in shape [b, n, t, s].
+    """
+    return jnp.einsum('btnd,bsd->bnts', query, key)
+  
+  def wv_product(
+      self,
+      attn_weights: Array,
+      value: Array,
+      aqt_rng: PRNGKey | None) -> Array:
+    """weighted value product.
+    
+    Args:
+      attn_weights: Computed results of qk_einsum, in shape of [b, n, t, s].
+      value: Value projection, in shape of [b, s, d] for multi-head attention.
+      aqt_rng: A PRNGKey for aqt ops.
+
+    Returns:
+      result in shape [b, t, n, d]
+    """
+    einsum = _maybe_aqt_einsum(self.use_int8, aqt_rng)
+    return einsum('bnts,bsd->btnd', attn_weights, value)
+  
+  def key_rotary(self, key: Array, inputs_positions: Array):
+    """Apply Rotary Embedding to Key."""
+    key_input_shape = key.shape
+    key = jnp.expand_dims(key, axis=-2) # [b, s, d] -> [b, s, 1, d]
+    key = super().key_rotary(key, inputs_positions)
+    return jnp.reshape(key, key_input_shape)
