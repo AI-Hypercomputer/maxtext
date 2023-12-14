@@ -20,12 +20,15 @@ import unittest
 import jax.numpy as jnp
 import max_utils
 from jax.sharding import Mesh
-from layers import MultiHeadDotProductAttention
+from layers import attentions
 from jax.sharding import PartitionSpec as P
 import numpy as np
 
 import pyconfig
 import sys
+
+MultiHeadDotProductAttention = attentions.MultiHeadDotProductAttention
+
 
 class AttentionTest(unittest.TestCase):
   """Test for the Attention """

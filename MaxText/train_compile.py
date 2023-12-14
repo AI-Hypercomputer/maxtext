@@ -30,14 +30,17 @@ from jax.experimental.serialize_executable import serialize
 from flax.linen import partitioning as nn_partitioning
 import maxtext_utils
 import max_utils
-from layers import Transformer
 import pyconfig
+from layers import models
 from typing import Sequence
 from absl import app
 import pickle
 import accelerator_to_spec_map
 import train
 import input_pipeline
+
+Transformer = models.Transformer
+
 
 def validate_config(config):
   """ Validates the config is is setup correctly to compile, returning a useful error message if not. """
