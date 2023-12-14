@@ -36,6 +36,7 @@ ScanIn = common_types.ScanIn
 
 Embed = embeddings.Embed
 LLaMARotaryEmbedding = embeddings.LLaMARotaryEmbedding
+FlashMultiHeadDotProductAttention = attentions.FlashMultiHeadDotProductAttention
 MultiHeadDotProductAttention = attentions.MultiHeadDotProductAttention
 RMSNorm = normalizations.RMSNorm
 
@@ -244,23 +245,36 @@ class DecoderLayer(nn.Module):
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
     # Self-attention block
-    attention_lnx = MultiHeadDotProductAttention(
+    if cfg.attention == 'flash':
+      attention_layer =  FlashMultiHeadDotProductAttention(
         num_heads=cfg.num_heads,
-        dtype=cfg.dtype,
         head_dim=cfg.head_dim,
+        mesh=mesh,
+        dtype=cfg.dtype,
         dropout_rate=cfg.dropout_rate,
         name='self_attention',
-        config=cfg,
-        mesh=mesh)(
-            lnx,
-            lnx,
-            attention_type=cfg.attention,
-            decoder_segment_ids=decoder_segment_ids,
-            inputs_positions=decoder_positions,
-            mask=decoder_mask,
-            bias=None,
-            deterministic=deterministic,
-            decode=decode)
+        use_int8=cfg.int8_training,
+        max_target_length=cfg.max_target_length)
+    elif cfg.attention == 'mha':
+      attention_layer =  MultiHeadDotProductAttention(
+        num_heads=cfg.num_heads,
+        head_dim=cfg.head_dim,
+        mesh=mesh,
+        dtype=cfg.dtype,
+        dropout_rate=cfg.dropout_rate,
+        name='self_attention',
+        use_int8=cfg.int8_training)
+
+    attention_lnx = attention_layer(
+      lnx,
+      lnx,
+      decoder_segment_ids=decoder_segment_ids,
+      inputs_positions=decoder_positions,
+      mask=decoder_mask,
+      bias=None,
+      deterministic=deterministic,
+      decode=decode)
+
     attention_lnx = nn.with_logical_constraint(
         attention_lnx,
         ('activation_batch', 'activation_length', 'activation_embed'))

@@ -1,11 +1,11 @@
 #  Copyright 2023 Google LLC
-
+#
 #  Licensed under the Apache License, Version 2.0 (the "License");
 #  you may not use this file except in compliance with the License.
 #  You may obtain a copy of the License at
-
+#
 #       https://www.apache.org/licenses/LICENSE-2.0
-
+#
 #  Unless required by applicable law or agreed to in writing, software
 #  distributed under the License is distributed on an "AS IS" BASIS,
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -23,7 +23,7 @@ from jax import lax
 from jax import random
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
-from jax.experimental.pallas.ops.tpu import flash_attention
+from jax.experimental.pallas.ops.tpu import flash_attention as tpu_flash_attention
 import jax.numpy as jnp
 import common_types
 from layers import embeddings
@@ -42,6 +42,12 @@ DenseGeneral = linears.DenseGeneral
 LLaMARotaryEmbedding = embeddings.LLaMARotaryEmbedding
 NdInitializer = initializers.NdInitializer
 RMSNorm = normalizations.RMSNorm
+
+AxisNames = common_types.AxisNames
+BATCH = common_types.BATCH
+LENGTH = common_types.LENGTH
+HEAD = common_types.HEAD
+D_KV = common_types.D_KV
 
 nd_dense_init = initializers.nd_dense_init
 shard_map = shard_map.shard_map
@@ -91,34 +97,6 @@ def combine_masks(*masks: Array | None, dtype: DType = jnp.float32):
   return mask.astype(dtype)
 
 
-def qk_einsum(query, key, attention_type):
-  """Computes all query-key dot product pairs.
-
-  Args:
-    query: Query projection, in shape of [b, t, n, d], where b: batch size, t:
-      query length, n: number of heads, d: project dimension. In Grouped query
-      attention, query will be reshaped as [b, t, k, g, d] where g is number of
-      group, k is number of kv heads, and g = n // k.
-    key: Key projection in shape of [b, s, n, d] for multihead attention; for
-      grouped query attention, its shape is [b, s, k, d]; for multi-query
-      attention, its shape is [b, s, d].
-    attention_type: attention type, only support MHA, MQA, GQA.
-
-  Returns:
-    results in shape [b, n, t, s] for MHA or [b, k, n // k, t, s].
-  """
-  if attention_type == 'mha':
-    einsum_eqn = 'btnd,bsnd->bnts'
-  elif attention_type == 'gqa':
-    einsum_eqn = 'btkgd,bskd->bkgts'
-  elif attention_type == 'mqa':
-    einsum_eqn = 'btnd,bsd->bnts'
-  else:
-    raise ValueError('Does not support attention_type = ', attention_type)
-
-  return jnp.einsum(einsum_eqn, query, key)
-
-
 def _maybe_aqt_einsum(int8_training, aqt_rng):
   """Maybe overwrite dot general with aqt_dot_general."""
   if not int8_training:
@@ -126,133 +104,6 @@ def _maybe_aqt_einsum(int8_training, aqt_rng):
   else:
     aqt_dot_general = quantizations.int8_dot_general(aqt_rng)
     return functools.partial(jnp.einsum, _dot_general=aqt_dot_general)
-
-
-def wv_einsum(attn_weights, value, attention_type, aqt_rng, int8_training):
-  """Computes attn_weights * value.
-
-  Args:
-    attn_weights: Computed results of qk_einsum, in shape of [b, n, t, s] for
-      multi-head attention; and in shape of [b, k, n // k, t, s] for grouped
-      query attention.
-    value: Value projection, in shape of [b, s, n, d] for multi-head attention;
-      and in shape of [b, s, k, d] for grouped query attention, k is number of
-      kv_heads.
-    attention_type: attention type, only support MHA, MQA, GQA.
-    aqt_rng: A PRNGKey for aqt ops.
-
-  Returns:
-    result in shape [b, t, n, d] for MHA, and [b, t, k, n // k, d] for GQA.
-  """
-  if attention_type == 'mha':
-    einsum_eqn = 'bnts,bsnd->btnd'
-  elif attention_type == 'gqa':
-    einsum_eqn = 'bkgts,bskd->btkgd'
-  elif attention_type == 'mqa':
-    einsum_eqn = 'bnts,bsd->btnd'
-  else:
-    raise ValueError('Does not support attention_type = ', attention_type)
-
-  einsum = _maybe_aqt_einsum(int8_training, aqt_rng)
-  return einsum(einsum_eqn, attn_weights, value)
-
-
-def dot_product_attention(query: Array,
-                          key: Array,
-                          value: Array,
-                          bias: Optional[Array] = None,
-                          dropout_rng: Optional[PRNGKey] = None,
-                          aqt_rng: Optional[PRNGKey] = None,
-                          dropout_rate: float = 0.,
-                          deterministic: bool = False,
-                          dtype: DType = jnp.float32,
-                          float32_logits: bool = False,
-                          attention_type: str = 'mha',
-                          use_int8: bool = False):
-  """Computes dot-product attention given query, key, and value.
-
-  This is the core function for applying attention based on
-  https://arxiv.org/abs/1706.03762. It calculates the attention weights given
-  query and key and combines the values using the attention weights.
-
-  Args:
-    query: queries for calculating attention with shape of `[batch, q_length,
-      num_heads, qk_depth_per_head]`.
-    key: keys for calculating attention with shape of `[batch, kv_length,
-      num_heads, qk_depth_per_head]` for MHA, in shape of `[batch, kv_length,
-      num_kv_heads, qk_depth_per_head]` for GQA, in shape of `[batch, kv_length,
-      qk_depth_per_head]` for MQA.
-    value: values to be used in attention with shape of `[batch, kv_length,
-      num_heads, v_depth_per_head]` for MHA, rest cases same as key.
-    bias: bias for the attention weights. This should be broadcastable to the
-      shape `[batch, num_heads, q_length, kv_length]` This can be used for
-      incorporating causal masks, padding masks, proximity bias, etc.
-    dropout_rng: JAX PRNGKey: to be used for dropout
-    aqt_rng: A PRNGKey to be used for aqt ops.
-    dropout_rate: dropout rate
-    deterministic: bool, deterministic or not (to apply dropout)
-    dtype: the dtype of the computation (default: float32)
-    float32_logits: bool, if True then compute logits in float32 to avoid
-      numerical issues with bfloat16.
-    use_int8: parsed configuration.
-
-  Returns:
-    Output of shape `[batch, length, num_heads, v_depth_per_head]`.
-  """
-  if attention_type != 'mqa':
-    assert key.ndim == query.ndim == value.ndim, 'q, k, v must have same rank.'
-  assert query.shape[:-3] == key.shape[:-3] == value.shape[:-3], (
-      'q, k, v batch dims must match.')
-
-  if attention_type == 'mha':
-    assert query.shape[-2] == key.shape[-2] == value.shape[-2], (
-        'q, k, v num_heads must match.')
-  elif attention_type == 'gqa':
-    assert key.shape[-2] == value.shape[-2], ('k, v num_heads must match.')
-  elif attention_type == 'mqa':
-    raise NotImplementedError('Multi-query attention is not supported yet.')
-  assert key.shape[-3] == value.shape[-3], 'k, v lengths must match.'
-  assert query.shape[-1] == key.shape[-1], 'q, k depths must match.'
-
-  # Casting logits and softmax computation for float32 for model stability.
-  if float32_logits:
-    query = query.astype(jnp.float32)
-    key = key.astype(jnp.float32)
-
-  # QK Product, a.k.a `attn_weights`:
-  # For MHA: [batch, num_heads, q_length, kv_length]
-  # GQA: [batch, num_kv_heads, num_heads // num_kv_heads  q_length, kv_length].
-  b, t, n, d = query.shape
-  if attention_type == 'gqa':
-    k = key.shape[2]
-    query = jnp.reshape(query, (b, t, k, n // k, d))
-
-  attn_weights = qk_einsum(query, key, attention_type)
-
-  # Apply attention bias: masking, dropout, proximity bias, etc.
-  if bias is not None:
-    attn_weights = attn_weights + bias.astype(attn_weights.dtype)
-
-  # Normalize the attention weights across `kv_length` dimension.
-  attn_weights = jax.nn.softmax(attn_weights).astype(dtype)
-
-  # Apply attention dropout.
-  if not deterministic and dropout_rate > 0.:
-    keep_prob = 1.0 - dropout_rate
-    # Broadcast dropout mask along the query dim.
-    dropout_shape = list(attn_weights.shape)
-    dropout_shape[-2] = 1
-    keep = random.bernoulli(dropout_rng, keep_prob, dropout_shape)
-    keep = jnp.broadcast_to(keep, attn_weights.shape)
-    multiplier = (
-        keep.astype(attn_weights.dtype) / jnp.asarray(keep_prob, dtype=dtype))
-    attn_weights = attn_weights * multiplier
-
-  # Take the linear combination of `value`.
-  out = wv_einsum(attn_weights, value, attention_type, aqt_rng, use_int8)
-  if attention_type == 'gqa':
-    out = jnp.reshape(out, (b, t, n, d))
-  return out
 
 
 class MultiHeadDotProductAttention(nn.Module):
@@ -327,6 +178,73 @@ class MultiHeadDotProductAttention(nn.Module):
         use_int8=self.use_int8)(out)
     return out_proj
 
+  def attention_dropout(
+      self, 
+      attn_weights: Array,
+      dropout_rng: PRNGKey | None) -> Array:
+    """Apply attention dropout."""
+    keep_prob = 1.0 - self.dropout_rate
+    # Broadcast dropout mask along the query dim.
+    dropout_shape = list(attn_weights.shape)
+    dropout_shape[-2] = 1
+    keep = random.bernoulli(dropout_rng, keep_prob, dropout_shape)
+    keep = jnp.broadcast_to(keep, attn_weights.shape)
+    multiplier = keep.astype(attn_weights.dtype) / jnp.asarray(
+        keep_prob, dtype=self.dtype
+    )
+    attn_weights = attn_weights * multiplier
+    return attn_weights
+
+  def check_attention_inputs(
+      self,
+      query: Array,
+      key: Array,
+      value: Array) -> None:
+    """Check attention inputs."""
+
+    assert key.ndim == query.ndim == value.ndim, 'q, k, v must have same rank.'
+    assert query.shape[:-3] == key.shape[:-3] == value.shape[:-3], (
+        'q, k, v batch dims must match.')
+    assert query.shape[-2] == key.shape[-2] == value.shape[-2], (
+        'q, k, v num_heads must match.')
+    assert key.shape[-3] == value.shape[-3], 'k, v lengths must match.'
+    assert query.shape[-1] == key.shape[-1], 'q, k depths must match.'
+
+  def qk_product(self, query: Array, key: Array) -> Array:
+    """Query-Key product.
+    
+    Args:
+      query: Query projection, in shape of [b, t, n, d], where b: batch size, t:
+        query length, n: number of heads, d: project dimension. 
+      key: Key projection in shape of [b, s, n, d] for multihead attention; for
+        grouped query attention, its shape is [b, s, k, d]
+
+    Returns:
+      results in shape [b, n, t, s] for MHA.
+
+    """
+    return jnp.einsum('btnd,bsnd->bnts', query, key)
+
+  def wv_product(
+      self,
+      attn_weights: Array,
+      value: Array,
+      aqt_rng: PRNGKey | None) -> Array:
+    """weighted value product.
+    
+    Args:
+      attn_weights: Computed results of qk_einsum, in shape of [b, n, t, s] for
+        multi-head attention
+      value: Value projection, in shape of [b, s, n, d] for multi-head attention
+      aqt_rng: A PRNGKey for aqt ops.
+
+    Returns:
+      result in shape [b, t, n, d]
+    """
+
+    einsum = _maybe_aqt_einsum(self.use_int8, aqt_rng)
+    return einsum('bnts,bsnd->btnd', attn_weights, value)
+
   def apply_attention(
       self,
       query: Array,
@@ -344,19 +262,29 @@ class MultiHeadDotProductAttention(nn.Module):
     del decode
 
     aqt_rng = self.make_rng('aqt')
-    x = dot_product_attention(
-        query,
-        key,
-        value,
-        bias=attention_bias,
-        dropout_rng=dropout_rng,
-        dropout_rate=self.dropout_rate,
-        aqt_rng=aqt_rng,
-        deterministic=deterministic,
-        dtype=self.dtype,
-        float32_logits=self.float32_logits,
-        use_int8=self.use_int8)
-    return x
+    self.check_attention_inputs(query, key, value)
+
+    # Casting logits and softmax computation for float32 for model stability.
+    if self.float32_logits:
+      query = query.astype(jnp.float32)
+      key = key.astype(jnp.float32)
+
+    # QK Product, a.k.a `attn_weights`: [batch, num_heads, q_length, kv_length]
+    attn_weights = self.qk_product(query, key)
+
+    # Apply attention bias: masking, dropout, proximity bias, etc.
+    if attention_bias is not None:
+      attn_weights = attn_weights + attention_bias.astype(attn_weights.dtype)
+
+    # Normalize the attention weights across `kv_length` dimension.
+    attn_weights = jax.nn.softmax(attn_weights).astype(self.dtype)
+
+    # Apply attention dropout.
+    if not deterministic and self.dropout_rate > 0.:
+      attn_weights = self.attention_dropout(attn_weights, dropout_rng)
+
+    # Take the linear combination of `value`.
+    return self.wv_product(attn_weights, value, aqt_rng)
 
   def decode(
       self,
