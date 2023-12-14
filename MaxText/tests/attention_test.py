@@ -33,6 +33,7 @@ MultiHeadDotProductAttention = attentions.MultiHeadDotProductAttention
 
 class AttentionTest(unittest.TestCase):
   """Test for the Attention """
+
   def setUp(self):
     super().setUp()
 
@@ -83,14 +84,8 @@ class AttentionTest(unittest.TestCase):
     return lnx, decoder_mask, decoder_segment_ids, decoder_positions
 
   def test_flash_mha_attention(self):
-    variable = self.attention.init(
-        {'params': self.rng, 'aqt': self.rng},
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        'mha',
-    )
+    """Test MHA layer and Flash MHA equivalence."""
+
     mha_attention_layer = MultiHeadDotProductAttention(
         num_heads=self.num_heads,
         head_dim=self.head_dim,
@@ -99,6 +94,15 @@ class AttentionTest(unittest.TestCase):
         dropout_rate=self.cfg.dropout_rate,
         name='self_attention',
     )
+    variable = mha_attention_layer.init(
+        {'params': self.rng, 'aqt': self.rng},
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+        'mha',
+    )
+
     flash_attention_layer = FlashMultiHeadDotProductAttention(
         num_heads=self.num_heads,
         head_dim=self.head_dim,
