@@ -18,12 +18,12 @@ from typing import Callable, Tuple, Union
 
 from flax import linen as nn
 import jax
-from maxtext import types
+import common_types
 
-Array = types.Array
-DType = types.DType
-PRNGKey = types.PRNGKey
-Shape = types.Shape
+Array = common_types.Array
+DType = common_types.DType
+PRNGKey = common_types.PRNGKey
+Shape = common_types.Shape
 
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
 InitializerAxis = Union[int, Tuple[int, ...]]

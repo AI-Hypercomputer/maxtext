@@ -25,18 +25,18 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
 from jax.experimental.pallas.ops.tpu import flash_attention
 import jax.numpy as jnp
-from maxtext import types
+import common_types
 from layers import embeddings
 from layers import initializers
 from layers import linears
 from layers import normalizations
 from layers import quantizations
 
-Array = types.Array
-Config = types.Config
-DType = types.DType
-Mesh = types.Mesh
-PRNGKey = types.PRNGKey
+Array = common_types.Array
+Config = common_types.Config
+DType = common_types.DType
+Mesh = common_types.Mesh
+PRNGKey = common_types.PRNGKey
 
 DenseGeneral = linears.DenseGeneral
 LLaMARotaryEmbedding = embeddings.LLaMARotaryEmbedding
