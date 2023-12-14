@@ -24,11 +24,11 @@ from absl import app
 from flax.linen import partitioning as nn_partitioning
 import numpy as np
 
-from layers import Transformer
 import pyconfig
-from input_pipeline import create_data_iterator_with_tokenizer
 import max_utils
 import temperature_sampler
+from input_pipeline import create_data_iterator_with_tokenizer
+from layers import models
 
 import checkpointing
 
@@ -42,9 +42,11 @@ from jax.experimental.compilation_cache import compilation_cache as cc
 
 import max_logging
 
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+Transformer = models.Transformer
+
 
 def decode_tokens(toks, tokenizer, eos_id):
   if np.argmax(toks == eos_id) > 0:
