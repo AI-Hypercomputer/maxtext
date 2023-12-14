@@ -15,6 +15,7 @@
 """Attentions Layers."""
 
 import functools
+import math
 from typing import Optional, Sequence
 
 from flax import linen as nn
@@ -23,6 +24,7 @@ from jax import lax
 from jax import random
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
+from jax.experimental.pallas.ops import attention as pallas_attention
 from jax.experimental.pallas.ops.tpu import flash_attention as tpu_flash_attention
 import jax.numpy as jnp
 import common_types
@@ -499,26 +501,15 @@ class FlashMultiHeadDotProductAttention(MultiHeadDotProductAttention):
 
   max_target_length: int = -1
   flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
+  device_type: str = 'tpu'
 
-  def apply_attention(
+  def tpu_flash_attention(
       self,
       query: Array,
       key: Array,
       value: Array,
-      decoder_segment_ids: Array | None,
-      attention_bias: Array | None,
-      dropout_rng: PRNGKey | None,
-      deterministic: bool,
-      decode: bool = False) -> Array:
-    """"Applies flash attention."""
-
-    if decode:
-      raise ValueError("""Decode not supported with flash attention.
-                            Use MHA instead.""")
-
-    if self.max_target_length == -1:
-      raise ValueError('max_target_length must be defined for flash MHA.')
-
+      decoder_segment_ids: Array | None) -> Array:
+    """Call pallas TPU Flash Attention."""
     # Transpose to ('batch', 'heads', 'length', 'kv')
     query = jax.numpy.transpose(query, axes=(0, 2, 1, 3))
     key = jax.numpy.transpose(key, axes=(0, 2, 1, 3))
@@ -582,6 +573,58 @@ class FlashMultiHeadDotProductAttention(MultiHeadDotProductAttention):
     x = wrap_flash_attention(query, key, value, decoder_segment_ids)
     x = jax.numpy.transpose(x, axes=(0, 2, 1, 3))
     return x
+  
+  def gpu_flash_attention(
+      self,
+      query: Array,
+      key: Array,
+      value: Array
+    ) -> Array:
+    b, n, s, h = key.shape  # pylint: disable=unused-variable
+    bwd_pass_impl = self.config.gpu_flash_attention_backward_pass_impl
+    axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
+    segment_axis_names = nn.logical_to_mesh_axes((BATCH, LENGTH))
+
+    @functools.partial(shard_map, mesh = self.mesh, in_specs = (
+        axis_names,
+        axis_names,
+        axis_names,
+        segment_axis_names,
+    ), out_specs = axis_names, check_rep=False)
+    def wrap_gpu_flash_attention(query, key, value):
+      return pallas_attention.mha(
+        query, key, value, sm_scale=1.0 / math.sqrt(h), backward_pass_impl=bwd_pass_impl,
+        num_stages = 1, causal = True, segment_ids = None
+      )
+    x = wrap_gpu_flash_attention(query, key, value)
+    return x
+
+  def apply_attention(
+      self,
+      query: Array,
+      key: Array,
+      value: Array,
+      decoder_segment_ids: Array | None,
+      attention_bias: Array | None,
+      dropout_rng: PRNGKey | None,
+      deterministic: bool,
+      decode: bool = False) -> Array:
+    """"Applies flash attention."""
+
+    if decode:
+      raise ValueError("""Decode not supported with flash attention.
+                            Use MHA instead.""")
+
+    if self.max_target_length == -1:
+      raise ValueError('max_target_length must be defined for flash MHA.')
+    
+    if self.device_type.lower() == 'tpu':
+      del attention_bias, dropout_rng, deterministic
+      return self.tpu_flash_attention(query, key, value, decoder_segment_ids)
+    elif self.device_type.lower() == 'gpu':
+      return self.gpu_flash_attention(query, key, value)
+    else:
+      raise ValueError('Device Type is not expected.')
 
 
 class MultiQueryDotProductAttention(MultiHeadDotProductAttention):

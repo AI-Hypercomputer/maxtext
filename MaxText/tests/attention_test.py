@@ -110,8 +110,7 @@ class AttentionTest(unittest.TestCase):
         dtype=self.cfg.dtype,
         dropout_rate=self.cfg.dropout_rate,
         name='self_attention',
-        max_target_length=self.max_target_length
-    )
+        max_target_length=self.max_target_length)
 
     lnx, decoder_mask, decoder_segment_ids, decoder_positions = self.get_data()
     bias = None
