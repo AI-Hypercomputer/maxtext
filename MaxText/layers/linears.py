@@ -161,13 +161,14 @@ class MlpBlock(nn.Module):
   intermediate_dropout_rate: float = 0.1
   dtype: Any = jnp.float32
   use_pre_norm: bool = False
+  add_skip_connection: bool = False
   apply_padding_mask: bool = False
 
   @nn.compact
   def __call__(self, inputs, padding_mask: Optional[Array] = None, decode: bool = False, deterministic: bool = False):
     """Applies Transformer MlpBlock module."""
     cfg = self.config
-
+    residual = inputs
     if self.use_pre_norm:
       inputs = RMSNorm(
         name='mlp_layer_norm',
@@ -224,4 +225,8 @@ class MlpBlock(nn.Module):
 
     if self.apply_padding_mask and padding_mask is not None:
       output *= padding_mask
+    
+    if self.add_skip_connection:
+      output += residual
+
     return output

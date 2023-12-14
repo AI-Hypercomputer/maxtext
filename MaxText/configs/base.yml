@@ -191,6 +191,9 @@ use_pre_norm_mlp: False
 # whether to apply padding mask in mlp layers
 apply_padding_mask_mlp: False
 
+# whether to add add residual connection in mlp layers
+add_skip_connection_mlp: False
+
 # whether to add bias in all layer_norms in Transformer
 # including: pre layer_norm in each block, feedforward one in MLP, final one in Transformer
 use_bias_layer_norm: False
