@@ -351,6 +351,9 @@ class MultiHeadDotProductAttention(nn.Module):
 
     def swap_axes(A):
       return jnp.moveaxis(A, -3, -1)
+    
+    def unswap_axes(A):
+      return jnp.moveaxis(A, -1, -3)
 
 
     if model_mode == "prefill":
@@ -399,9 +402,8 @@ class MultiHeadDotProductAttention(nn.Module):
       cached_value.value = cached_value.value + swap_axes(value) * one_hot_indices 
       cache_index.value = cache_index.value + 1
 
-      key_to_use = swap_axes(cached_key.value)
-      value_to_use = swap_axes(cached_value.value)
-      print(f"{key_to_use.shape=} {value_to_use.shape=}")
+      key_to_use = unswap_axes(cached_key.value)
+      value_to_use = unswap_axes(cached_value.value)
     elif model_mode == "train":
       '''
       No KV cache!

@@ -188,7 +188,10 @@ def decode_loop(config, state=None):
       in_shardings=(replicated_sharding, None, state_mesh_shardings, None), # sharding strategy?
       out_shardings=(None,None)
   )
-  seqs, output_cache = p_ar_predict_step(tokenized_prompts, prefill_cache, state, rng)
+  prompt_for_inference = jax.numpy.pad(tokenized_prompts, ((0,0),(0, config.max_predict_length-config.max_prefill_predict_length)))
+  seqs, output_cache = p_ar_predict_step(prompt_for_inference, prefill_cache, state, rng)
+  ### TODO: assert that they don't mess with our first N tokens.
+  match_input_and_output_stream(np.array(seqs[0,:]), np.array(seqs[0,:]), sp_tokenizer)
   import pdb; pdb.set_trace()
   sys.exit(1)
 
