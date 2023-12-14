@@ -118,6 +118,27 @@ resource "google_composer_environment" "example_environment" {
       }
     }
 
+    workloads_config {
+      scheduler {
+        cpu        = 2
+        memory_gb  = 8
+        storage_gb = 10
+        count      = 2
+      }
+      web_server {
+        cpu        = 2
+        memory_gb  = 8
+        storage_gb = 10
+      }
+      worker {
+        cpu        = 2
+        memory_gb  = 8
+        storage_gb = 10
+        min_count  = 1
+        max_count  = 3
+      }
+    }
+
     node_config {
       service_account = google_service_account.custom_service_account[each.key].email
     }
