@@ -15,6 +15,7 @@
 """Attentions Layers."""
 
 import functools
+import math
 from typing import Optional
 
 from flax import linen as nn
@@ -24,6 +25,7 @@ from jax import random
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
 from jax.experimental.pallas.ops.tpu import flash_attention
+from jax.experimental.pallas.ops import attention as pallas_attention
 import jax.numpy as jnp
 import common_types
 from layers import embeddings
@@ -288,6 +290,26 @@ class MultiHeadDotProductAttention(nn.Module):
       )
       x = wrap_flash_attention(query, key, value, decoder_segment_ids)
       x = jax.numpy.transpose(x, axes=(0, 2, 1, 3))
+    elif attention_type == 'gpu_flash':
+      if decode:
+        raise ValueError("""Decode not supported with this attention. Use mha instead""")
+      b, n, s, h = key.shape # pylint: disable=unused-variable
+      bwd_pass_impl = self.config.gpu_flash_attention_backward_pass_impl
+      axis_names = nn.logical_to_mesh_axes(('activation_batch', 'activation_heads', 'activation_length', 'activation_kv'))
+      segment_axis_names = nn.logical_to_mesh_axes(('activation_batch', 'activation_length'))
+
+      @functools.partial(shard_map, mesh = self.mesh, in_specs = (
+          axis_names,
+          axis_names,
+          axis_names,
+          segment_axis_names,
+      ), out_specs = axis_names, check_rep=False)
+      def wrap_gpu_flash_attention(query, key, value):
+        return pallas_attention.mha(
+          query, key, value, sm_scale=1.0 / math.sqrt(h), backward_pass_impl=bwd_pass_impl,
+          num_stages = 1, causal = True, segment_ids = None
+        )
+      x = wrap_gpu_flash_attention(query, key, value)
     else:
       aqt_rng = self.make_rng('aqt')
       x = dot_product_attention(
