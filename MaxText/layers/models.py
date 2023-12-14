@@ -239,10 +239,11 @@ class DecoderLayer(nn.Module):
     lnx = RMSNorm(
         dtype=cfg.dtype, 
         name='pre_self_attention_norm', 
-        kernel_axes=('embed',)
+        kernel_axes=('embed',),
         use_bias=cfg.use_bias_layer_norm,
         use_mean_center=cfg.use_mean_center_layer_norm,
         reductions_in_fp32=cfg.reductions_in_fp32_layer_norm,
+        epsilon=cfg.epsilon_layer_norm,
         )(inputs)
     lnx = nn.with_logical_constraint(
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
@@ -418,6 +419,7 @@ class Decoder(nn.Module):
         use_bias=cfg.use_bias_layer_norm,
         use_mean_center=cfg.use_mean_center_layer_norm,
         reductions_in_fp32=cfg.reductions_in_fp32_layer_norm,
+        epsilon=cfg.epsilon_layer_norm,
         )(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
         y, deterministic=deterministic

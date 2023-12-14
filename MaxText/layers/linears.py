@@ -174,6 +174,8 @@ class MlpBlock(nn.Module):
         kernel_axes=('embed',),
         use_bias=cfg.use_bias_layer_norm,
         use_mean_center=cfg.use_mean_center_layer_norm,
+        reductions_in_fp32=cfg.reductions_in_fp32_layer_norm,
+        epsilon=cfg.epsilon_layer_norm,
         )(inputs)
 
     # Iterate over specified MLP input activation functions.

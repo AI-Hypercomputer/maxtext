@@ -198,6 +198,9 @@ use_mean_center_layer_norm: False
 # whether to compute mean and variance in fp32 in all layer_norms of Transformer
 reductions_in_fp32_layer_norm: True
 
+# a value in layer norm for numerical stability
+epsilon_layer_norm: 1.e-6
+
 # whether to enable RoPE in MultiHeadDotProductAttention
 use_rotary_position_emb: True
 
