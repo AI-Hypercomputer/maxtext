@@ -16,6 +16,10 @@
 # If there is already a checkpoint under this run, that checkpoint will auto-resume.
 run_name: ""
 
+# Types of models supported.
+# default model (palm like model with no overrides in config)
+model_name: "default"
+
 # At most one of load_parameters_path and load_from_other_directory should be set.
 #   * load_parameters_path is used when you only care about the parameters, not the optimizer state or
 #      the step count
