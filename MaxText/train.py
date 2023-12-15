@@ -198,8 +198,9 @@ def train_step(model, config, state, data, dropout_rng):
       xent = -jnp.sum(nn.log_softmax(logits) * one_hot_targets, axis=-1)
     xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
     # Mask out paddings at the end of each example.
-    xent = xent * (data['inputs_segmentation'] != 0)
-    return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
+    padding_mask = data['targets_segmentation'] != 0
+    xent = xent * padding_mask
+    return jnp.sum(xent)/jnp.sum(padding_mask), intermediate_outputs
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
