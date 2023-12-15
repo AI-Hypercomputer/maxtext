@@ -42,6 +42,12 @@ class AttentionTest(unittest.TestCase):
         per_device_batch_size=1.0,
         run_name='test',
         enable_checkpointing=False)
+
+    pyconfig.initialize(
+        sys.argv + ['third_party/py/maxtext/configs/base.yml'],
+        per_device_batch_size=1.0,
+        run_name='test',
+        enable_checkpointing=False)
     self.cfg = pyconfig.config
     self.rng = jax.random.PRNGKey(0)
 
@@ -83,36 +89,7 @@ class AttentionTest(unittest.TestCase):
     decoder_mask = self.get_decoder_mask()
     return lnx, decoder_mask, decoder_segment_ids, decoder_positions
 
-  def test_flash_mha_attention(self):
-    """Test MHA layer and Flash MHA equivalence."""
-
-    mha_attention_layer = MultiHeadDotProductAttention(
-        num_heads=self.num_heads,
-        head_dim=self.head_dim,
-        mesh=self.mesh,
-        dtype=self.cfg.dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        name='self_attention',
-    )
-    variable = mha_attention_layer.init(
-        {'params': self.rng, 'aqt': self.rng},
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        'mha',
-    )
-
-    flash_attention_layer = FlashMultiHeadDotProductAttention(
-        num_heads=self.num_heads,
-        head_dim=self.head_dim,
-        mesh=self.mesh,
-        dtype=self.cfg.dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        name='self_attention',
-        max_target_length=self.max_target_length
-    )
-
+  def test_attention(self):
     lnx, decoder_mask, decoder_segment_ids, decoder_positions = self.get_data()
     bias = None
     mha_output = mha_attention_layer.apply(
