@@ -18,6 +18,8 @@
 
 from etils import epath
 import jax
+import numpy as np
+
 from orbax import checkpoint
 from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, Checkpointer, AsyncCheckpointer
 from orbax.checkpoint import type_handlers
@@ -39,7 +41,7 @@ def create_orbax_checkpoint_manager(
   max_logging.log("Creating checkpoint manager...")
   p = epath.Path(checkpoint_dir)
   if use_async:
-    checkpointer = AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler())
+    checkpointer = AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler(),  timeout_secs=900)
   else:
     checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
 
@@ -55,13 +57,31 @@ def create_orbax_checkpoint_manager(
   return mngr
 
 
+def _find_np_idx(array, filter_fn):
+  for idx, val in np.ndenumerate(array):
+    if filter_fn(val):
+      return idx
+
+
+def _slice_devices(device_array):
+  ### slices are assumed to be restricted to the first axis
+  idx = _find_np_idx(
+      device_array, lambda x: x.process_index == jax.process_index()
+  )
+  zeroth_idx = idx[0]
+  sliced_result = device_array[zeroth_idx : zeroth_idx + 1, :, :]
+  return sliced_result
+
+
 def load_state_if_possible(checkpoint_manager: CheckpointManager,
                            first_checkpoint_path: str,
                            load_from_other_directory: str,
                            load_from_other_directory_step: int,
                            abstract_unboxed_pre_state: train_state.TrainState,
                            mesh,
-                           state_mesh_annotations):
+                           state_mesh_annotations,
+                           enable_single_slice_checkpointing: bool
+                           ):
   """Loads TrainState as possible from the inputs.
 
   Args:
@@ -88,9 +108,19 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
   def map_to_pspec(data, pspec):
     if isinstance(data, (jax.Array, jax.ShapeDtypeStruct)) \
           and pspec is not None:
-      return type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
-    else:
-      return type_handlers.RestoreArgs()
+      if enable_single_slice_checkpointing:
+          slice_devices = _slice_devices(mesh.devices)
+          slice_mesh = jax.sharding.Mesh(slice_devices, mesh.axis_names)
+          return type_handlers.SingleSliceArrayRestoreArgs(
+              sharding=jax.sharding.NamedSharding(mesh, pspec),
+              single_slice_sharding=jax.sharding.NamedSharding(slice_mesh, pspec),
+              global_shape=data.shape,
+              dtype=data.dtype,
+          )
+      else:
+        return type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
+
+    return type_handlers.RestoreArgs()
 
   restore_args = jax.tree_util.tree_map(map_to_pspec,
                                         abstract_unboxed_pre_state,

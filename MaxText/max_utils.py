@@ -300,7 +300,9 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_tra
                                                 config.load_from_other_directory_step,
                                                 unboxed_abstract_state,
                                                 mesh,
-                                                state_mesh_annotations)
+                                                state_mesh_annotations,
+                                                config.enable_single_slice_checkpointing
+                                                )
 
     state_mesh_shardings = jax.tree_map(
         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
