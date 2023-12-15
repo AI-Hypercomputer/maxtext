@@ -70,7 +70,8 @@ class DenseGeneral(nn.Module):
     axis: tuple with axes to apply the transformation on.
     dtype: the dtype of the computation (default: float32).
     kernel_init: initializer function for the weight matrix.
-    use_bias: whether to add bias in linear transformation
+    use_bias: whether to add bias in linear transformation.
+    bias_init: initializer function for the bias matrix.
   """
 
   features: Union[Iterable[int], int]
@@ -131,7 +132,7 @@ class DenseGeneral(nn.Module):
       bias_axes, bias_shape = self.kernel_axes[-len(features):], kernel_shape[-len(features):]
       bias = self.param(
           'bias',
-          nn.with_logical_patitioning(self.bias_init, bias_axes),
+          nn.with_logical_partitioning(self.bias_init, bias_axes),
           bias_shape,
           jnp.float32,
       )
@@ -152,6 +153,9 @@ class MlpBlock(nn.Module):
     deterministic: Whether the dropout layers should be deterministic.
     intermediate_dropout_rate: Dropout rate used after the intermediate layers.
     dtype: Type for the dense layer.
+    use_pre_norm: whether to add pre layer norm in mlp layers.
+    apply_packing_mask: whether to apply packing mask in mlp layers.
+    add_skip_connection_mlp: whether to add add residual connection in mlp layers.
   """
 
   config: Config
@@ -225,7 +229,7 @@ class MlpBlock(nn.Module):
 
     if self.apply_padding_mask and padding_mask is not None:
       output *= padding_mask
-    
+
     if self.add_skip_connection:
       output += residual
 

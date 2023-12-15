@@ -260,8 +260,8 @@ class DecoderLayer(nn.Module):
 
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = RMSNorm(
-        dtype=cfg.dtype, 
-        name='pre_self_attention_norm', 
+        dtype=cfg.dtype,
+        name='pre_self_attention_norm',
         kernel_axes=('embed',),
         use_bias=cfg.use_bias_layer_norm,
         use_mean_center=cfg.use_mean_center_layer_norm,
@@ -373,7 +373,7 @@ class Decoder(nn.Module):
     # [batch, length] -> [batch, length, emb_dim]
     y = self.shared_embedding(decoder_input_tokens.astype('int32'))
     if self.position_embedding:
-      assert decoder_positions
+      assert decoder_positions is not None
       y += self.position_embedding(decoder_positions.astype('int32'))
     y = nn.Dropout(
         rate=cfg.dropout_rate, broadcast_dims=(-2,))(
@@ -461,9 +461,9 @@ class Decoder(nn.Module):
         )
 
     y = RMSNorm(
-        dtype=cfg.dtype, 
-        name='decoder_norm', 
-        kernel_axes=('embed',)
+        dtype=cfg.dtype,
+        name='decoder_norm',
+        kernel_axes=('embed',),
         use_bias=cfg.use_bias_layer_norm,
         use_mean_center=cfg.use_mean_center_layer_norm,
         reductions_in_fp32=cfg.reductions_in_fp32_layer_norm,

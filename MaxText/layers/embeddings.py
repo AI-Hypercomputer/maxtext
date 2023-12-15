@@ -50,7 +50,7 @@ class Embed(nn.Module):
   dtype: DType = jnp.float32
   attend_dtype: Optional[DType] = None
   embedding_init: Initializer = default_embed_init
-  
+
   # one of ('iota', 'index', 'matmul') and default to 'index'
   embed_lookup_style: Optional[str] = 'index'
 
@@ -72,7 +72,6 @@ class Embed(nn.Module):
       Output which is embedded input data.  The output shape follows the input,
       with an additional `features` dimension appended.
     """
-    cfg = self.config
     if self.cast_input_dtype:
       inputs = inputs.astype(self.cast_input_dtype)
     if not jnp.issubdtype(inputs.dtype, jnp.integer):
