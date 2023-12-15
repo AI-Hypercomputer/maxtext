@@ -84,7 +84,6 @@ class AttentionTest(unittest.TestCase):
     return lnx, decoder_mask, decoder_segment_ids, decoder_positions
 
   def test_flash_mha_attention(self):
-    """Test MHA layer and Flash MHA equivalence."""
 
     mha_attention_layer = MultiHeadDotProductAttention(
         num_heads=self.num_heads,
