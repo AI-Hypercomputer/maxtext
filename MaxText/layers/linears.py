@@ -181,8 +181,4 @@ class MlpBlock(nn.Module):
         name='wo',
         config=cfg,
     )(x)
-<<<<<<< HEAD
     return output
-=======
-    return output
->>>>>>> 81c738178d622a9ca9b870fe4cc9fe00a6249089

@@ -42,6 +42,12 @@ class AttentionTest(unittest.TestCase):
         per_device_batch_size=1.0,
         run_name='test',
         enable_checkpointing=False)
+
+    pyconfig.initialize(
+        sys.argv + ['third_party/py/maxtext/configs/base.yml'],
+        per_device_batch_size=1.0,
+        run_name='test',
+        enable_checkpointing=False)
     self.cfg = pyconfig.config
     self.rng = jax.random.PRNGKey(0)
 
@@ -144,7 +150,6 @@ class AttentionTest(unittest.TestCase):
             flash_output, mha_output, rtol=1e-01, atol=1e-01, equal_nan=False
         )
     )
-
 
 if __name__ == '__main__':
   unittest.main()
