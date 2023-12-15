@@ -71,11 +71,11 @@ class DenseGeneral(nn.Module):
   """
 
   features: Union[Iterable[int], int]
-  config: Config
   axis: Union[Iterable[int], int] = -1
   dtype: DType = jnp.float32
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
   kernel_axes: Tuple[str, ...] = ()
+  use_int8: bool = False
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -88,9 +88,9 @@ class DenseGeneral(nn.Module):
       The transformed input.
     """
 
-    def compute_dot_general(inputs, kernel, axis, contract_ind, cfg):
+    def compute_dot_general(inputs, kernel, axis, contract_ind):
       """Computes a dot_general operation that may be quantized."""
-      if not cfg.int8_training:
+      if not self.use_int8:
         return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
       else:
         aqt_rng = self.make_rng('aqt')
@@ -99,7 +99,6 @@ class DenseGeneral(nn.Module):
             inputs, kernel, ((axis, contract_ind), ((), ()))
         )
 
-    cfg = self.config
     features = _canonicalize_tuple(self.features)
     axis = _canonicalize_tuple(self.axis)
 
@@ -120,7 +119,7 @@ class DenseGeneral(nn.Module):
     kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(axis)))
-    return compute_dot_general(inputs, kernel, axis, contract_ind, cfg)
+    return compute_dot_general(inputs, kernel, axis, contract_ind)
 
 
 class MlpBlock(nn.Module):
@@ -159,7 +158,7 @@ class MlpBlock(nn.Module):
           kernel_init=self.kernel_init,
           kernel_axes=('embed', 'mlp'),
           name=dense_name,
-          config=cfg,
+          use_int8=cfg.int8_training,
       )(inputs)
       x = _convert_to_activation_function(act_fn)(x)
       activations.append(x)
@@ -179,6 +178,6 @@ class MlpBlock(nn.Module):
         kernel_init=self.kernel_init,
         kernel_axes=('mlp', 'embed'),
         name='wo',
-        config=cfg,
+        use_int8=cfg.int8_training,
     )(x)
     return output
