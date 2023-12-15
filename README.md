@@ -92,7 +92,7 @@ There are three patterns for running MaxText with more than one host.
 
 ## TPU v4
 
-For a 22B model. See full run configs in `MaxText/configs/` as `1xv4-128.sh`, `2xv4-128.sh`, `4xv4-128.sh`, and `8xv4-128.sh`.
+For a 22B model. See full run configs in `MaxText/configs/v4/` as `22b.sh`.
 
 | Hardware    | TFLOP/sec/chip   |  MFU  |
 | ----------- | ---------------- | ----- |
@@ -101,7 +101,7 @@ For a 22B model. See full run configs in `MaxText/configs/` as `1xv4-128.sh`, `2
 | 4x v4-128   | 149              | 54.3% |
 | 8x v4-128   | 146              | 53.2% |
 
-For a 52B model. See full run configs in `MaxText/configs/` as `1xv4-384.sh` and `2xv4-384.sh`.
+For a 52B model. See full run configs in `MaxText/configs/v4/` as `52b.sh`.
 
 | Hardware    | TFLOP/sec/chip   |  MFU  |
 | ----------- | ---------------- | ----- |
@@ -110,7 +110,7 @@ For a 52B model. See full run configs in `MaxText/configs/` as `1xv4-384.sh` and
 
 ## TPU v5e
 
-For 16B, 32B, 64B, and 128B models. See full run configs in `MaxText/configs/largest_job/` as `16b.sh`, `32b.sh`, `64b.sh`, `128b.sh`.
+For 16B, 32B, 64B, and 128B models. See full run configs in `MaxText/configs/v5e/` as `16b.sh`, `32b.sh`, `64b.sh`, `128b.sh`.
 
 | Hardware    | 16B TFLOP/sec/chip | 16B MFU | 32B TFLOP/sec/chip | 32B MFU | 64B TFLOP/sec/chip | 64B MFU | 128B TFLOP/sec/chip | 128B MFU |
 | ----------- | -----------------: | ------- | -----------------: | ------- | -----------------: | ------- | ------------------: | -------- |
@@ -121,7 +121,7 @@ For 16B, 32B, 64B, and 128B models. See full run configs in `MaxText/configs/lar
 | 16x v5e-256 | 111                | 56.56%  | 123                | 62.26%  | 105                | 53.29%  | 100                 | 50.86%   |
 | 32x v5e-256 | 108                | 54.65%  | 119                | 60.40%  | 99                 | 50.18%  | 91                  | 46.25%   |
 
-More details on reproducing these results on v5e can be found in `v5e_high_performance.md`.
+More details on reproducing these results can be found in `MaxText/configs/README.md`.
 
 
 # Comparison to Alternatives
