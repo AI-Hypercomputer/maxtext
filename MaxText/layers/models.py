@@ -36,6 +36,7 @@ ScanIn = common_types.ScanIn
 
 Embed = embeddings.Embed
 LLaMARotaryEmbedding = embeddings.LLaMARotaryEmbedding
+FlashMultiHeadDotProductAttention = attentions.FlashMultiHeadDotProductAttention
 MultiHeadDotProductAttention = attentions.MultiHeadDotProductAttention
 RMSNorm = normalizations.RMSNorm
 
@@ -237,30 +238,45 @@ class DecoderLayer(nn.Module):
 
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = RMSNorm(
-        dtype=cfg.dtype, 
-        name='pre_self_attention_norm', 
+        dtype=cfg.dtype,
+        name='pre_self_attention_norm',
         kernel_axes=('embed',))(inputs)
     lnx = nn.with_logical_constraint(
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
     # Self-attention block
-    attention_lnx = MultiHeadDotProductAttention(
+    if cfg.attention == ('flash' or 'gpu_flash'):
+      device_type = 'gpu' if cfg.attention == 'gpu_flash' else 'tpu'
+      attention_layer = FlashMultiHeadDotProductAttention(
         num_heads=cfg.num_heads,
-        dtype=cfg.dtype,
         head_dim=cfg.head_dim,
+        mesh=mesh,
+        dtype=cfg.dtype,
         dropout_rate=cfg.dropout_rate,
         name='self_attention',
-        config=cfg,
-        mesh=mesh)(
-            lnx,
-            lnx,
-            attention_type=cfg.attention,
-            decoder_segment_ids=decoder_segment_ids,
-            inputs_positions=decoder_positions,
-            mask=decoder_mask,
-            bias=None,
-            deterministic=deterministic,
-            decode=decode)
+        use_int8=cfg.int8_training,
+        max_target_length=cfg.max_target_length,
+        device_type=device_type)
+    elif cfg.attention == 'mha':
+      attention_layer = MultiHeadDotProductAttention(
+        num_heads=cfg.num_heads,
+        head_dim=cfg.head_dim,
+        mesh=mesh,
+        dtype=cfg.dtype,
+        dropout_rate=cfg.dropout_rate,
+        name='self_attention',
+        use_int8=cfg.int8_training)
+
+    attention_lnx = attention_layer(
+      lnx,
+      lnx,
+      decoder_segment_ids=decoder_segment_ids,
+      inputs_positions=decoder_positions,
+      mask=decoder_mask,
+      bias=None,
+      deterministic=deterministic,
+      decode=decode)
+
     attention_lnx = nn.with_logical_constraint(
         attention_lnx,
         ('activation_batch', 'activation_length', 'activation_embed'))
@@ -421,7 +437,7 @@ class Decoder(nn.Module):
           dtype=jnp.float32,  # Use float32 for stabiliity.
           kernel_axes=('embed', 'vocab'),
           name='logits_dense',
-          config=cfg)(y)
+          use_int8=cfg.int8_training)(y)
     logits = nn.with_logical_constraint(
         logits, ('activation_batch', 'activation_length', 'activation_vocab'))
     return logits

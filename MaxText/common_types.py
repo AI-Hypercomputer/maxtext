@@ -29,3 +29,10 @@ Shape = Sequence[int]
 
 Mesh = jax.sharding.Mesh
 ScanIn = partitioning.ScanIn
+
+AxisNames = tuple[str, ...]
+
+BATCH = 'activation_batch'
+LENGTH = 'activation_length'
+HEAD = 'activation_heads'
+D_KV = 'activation_kv'
