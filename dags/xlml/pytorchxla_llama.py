@@ -20,7 +20,7 @@ from configs import composer_env, vm_resource
 # Run once a day at 6 pm UTC (10 am PST)
 SCHEDULED_TIME = "0 18 * * *" if composer_env.is_prod_env() else None
 US_CENTRAL2_B = gcp_config.GCPConfig(
-    vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
+    vm_resource.Project.CLOUD_ML_AUTO_SOLUTIONS.value,
     vm_resource.Zone.US_CENTRAL2_B.value,
     metric_config.DatasetOption.XLML_DATASET,
 )

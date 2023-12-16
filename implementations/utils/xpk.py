@@ -37,7 +37,7 @@ def generate_workload_id(benchmark_id: str) -> str:
 
 def run_workload(
     task_id: str,
-    project_id: str,
+    cluster_project: str,
     zone: str,
     cluster_name: str,
     benchmark_id: str,
@@ -46,6 +46,7 @@ def run_workload(
     accelerator_type: str,
     run_cmds: str,
     task_owner: str,
+    startup_timeout: int,
     num_slices: int = 1,
 ) -> KubernetesPodOperator:
   """Run workload through xpk tool.
@@ -59,7 +60,7 @@ def run_workload(
 
   cmds = (
       "set -x",
-      f"gcloud config set project {project_id}",
+      f"gcloud config set project {cluster_project}",
       f"gcloud config set compute/zone {zone}",
       "git clone https://github.com/google/xpk.git /tmp/xpk",
       "cd /tmp/xpk",
@@ -79,6 +80,7 @@ def run_workload(
       image=docker_image,
       config_file="/home/airflow/composer_kube_config",
       kubernetes_conn_id="kubernetes_default",
+      startup_timeout_seconds=startup_timeout,
       owner=task_owner,
   )
 
@@ -117,15 +119,17 @@ def wait_for_workload_completion(
 
   # Check status of pods
   if not pods.items:
-    RuntimeError(f"No pod is found for workload selector: {pods}.")
-  print(f"pods: {pods}")
+    # This could happen when workload is in the queue (not initialized yet)
+    logging.info(f"No pod is found for workload selector: {workload_id}.")
+    return False
 
+  logging.info(f"pods: {pods}")
   for pod in pods.items:
     if pod.status.phase in ["Pending", "Running"]:
       logging.info(f"One pod phase is: {pod.status.phase}")
       return False
     elif pod.status.phase in ["Failed", "Unknown"]:
-      RuntimeError(f"Bad pod phase: {pod.status.phase}")
+      raise RuntimeError(f"Bad pod phase: {pod.status.phase}")
 
   logging.info("All pod(s) phase are succeeded.")
   return True

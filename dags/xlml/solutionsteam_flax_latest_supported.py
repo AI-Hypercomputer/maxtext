@@ -79,7 +79,7 @@ with models.DAG(
   ).run()
 
   jax_resnet_v5e_4 = flax_config.get_flax_resnet_config(
-      project_name=vm_resource.PROJECT_TPU_PROD_ENV_AUTOMATED,
+      project_name=vm_resource.Project.TPU_PROD_ENV_AUTOMATED.value,
       tpu_version="5litepod",
       tpu_cores=4,
       tpu_zone=vm_resource.Zone.US_EAST1_C.value,
@@ -90,7 +90,7 @@ with models.DAG(
   ).run()
 
   jax_resnet_v5e_16 = flax_config.get_flax_resnet_config(
-      project_name=vm_resource.PROJECT_TPU_PROD_ENV_AUTOMATED,
+      project_name=vm_resource.Project.TPU_PROD_ENV_AUTOMATED.value,
       tpu_version="5litepod",
       tpu_cores=16,
       tpu_zone=vm_resource.Zone.US_EAST1_C.value,
@@ -101,7 +101,7 @@ with models.DAG(
   ).run()
 
   jax_resnet_v5p_8 = flax_config.get_flax_resnet_config(
-      project_name=vm_resource.PROJECT_TPU_PROD_ENV_AUTOMATED,
+      project_name=vm_resource.Project.TPU_PROD_ENV_AUTOMATED.value,
       tpu_version="5p",
       tpu_cores=8,
       tpu_zone=vm_resource.Zone.US_EAST5_A.value,
@@ -112,7 +112,7 @@ with models.DAG(
   ).run()
 
   jax_resnet_v5p_32 = flax_config.get_flax_resnet_config(
-      project_name=vm_resource.PROJECT_TPU_PROD_ENV_AUTOMATED,
+      project_name=vm_resource.Project.TPU_PROD_ENV_AUTOMATED.value,
       tpu_version="5p",
       tpu_cores=32,
       tpu_zone=vm_resource.Zone.US_EAST5_A.value,

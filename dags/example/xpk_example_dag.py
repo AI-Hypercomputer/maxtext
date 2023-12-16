@@ -31,11 +31,25 @@ with models.DAG(
     start_date=datetime.datetime(2023, 11, 29),
     catchup=False,
 ) as dag:
-  jax_resnet_tpu_xpk = config.get_flax_resnet_xpk_config(
+  flax_resnet_tpu_singleslice_v4_8 = config.get_flax_resnet_xpk_config(
       tpu_version="4",
       tpu_cores=8,
       tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
+      test_name="resnet-single-slice",
+      project_name=vm_resource.Project.CLOUD_ML_AUTO_SOLUTIONS.value,
       cluster_name=vm_resource.ClusterName.V4_8_CLUSTER.value,
       docker_image=vm_resource.DockerImage.XPK_JAX_TEST.value,
       time_out_in_min=60,
+  ).run()
+
+  flax_resnet_tpu_multislice_v4_128 = config.get_flax_resnet_xpk_config(
+      tpu_version="4",
+      tpu_cores=128,
+      tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
+      test_name="resnet-multi-slice",
+      project_name=vm_resource.Project.TPU_PROD_ENV_MULTIPOD.value,
+      cluster_name=vm_resource.ClusterName.V4_128_MULTISLICE_CLUSTER.value,
+      docker_image=vm_resource.DockerImage.XPK_JAX_TEST.value,
+      time_out_in_min=60,
+      num_slices=4,
   ).run()

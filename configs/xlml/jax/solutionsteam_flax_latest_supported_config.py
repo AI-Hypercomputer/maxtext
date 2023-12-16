@@ -21,7 +21,7 @@ from configs import gcs_bucket, test_owner, vm_resource
 from configs.xlml.jax import common
 
 
-PROJECT_NAME = vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS
+PROJECT_NAME = vm_resource.Project.CLOUD_ML_AUTO_SOLUTIONS.value
 RUNTIME_IMAGE = vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value
 IS_TPU_RESERVED = True
 

@@ -72,7 +72,7 @@ def get_torchbench_config(
     extraFlags: str = "",
 ) -> task.TpuQueuedResourceTask:
   job_gcp_config = gcp_config.GCPConfig(
-      project_name=vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
+      project_name=vm_resource.Project.CLOUD_ML_AUTO_SOLUTIONS.value,
       zone=tpu_zone,
       dataset_name=metric_config.DatasetOption.BENCHMARK_DATASET,
   )

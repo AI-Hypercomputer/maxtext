@@ -22,12 +22,15 @@ def get_flax_resnet_xpk_config(
     tpu_version: str,
     tpu_cores: int,
     tpu_zone: str,
+    test_name: str,
+    project_name: str,
     cluster_name: str,
     docker_image: str,
     time_out_in_min: int,
+    num_slices: int = 1,
 ) -> task.TpuXpkTask:
   job_gcp_config = gcp_config.GCPConfig(
-      project_name=vm_resource.PROJECT_CLOUD_ML_AUTO_SOLUTIONS,
+      project_name=project_name,
       zone=tpu_zone,
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
@@ -43,13 +46,14 @@ def get_flax_resnet_xpk_config(
           version=tpu_version,
           cores=tpu_cores,
       ),
-      test_name="flax-resnet-xpk-example",
+      test_name=test_name,
       cluster_name=cluster_name,
       docker_image=docker_image,
       run_model_cmds=run_model_cmds,
       set_up_cmds=None,
       time_out_in_min=time_out_in_min,
       task_owner=test_owner.RAN_R,
+      num_slices=num_slices,
   )
 
   return task.TpuXpkTask(
