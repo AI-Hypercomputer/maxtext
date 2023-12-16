@@ -35,6 +35,10 @@ import sequence_packing
 import pygrain_operations
 import pygrain_tokenizer
 
+
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
 
@@ -380,8 +384,9 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
     vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
 
   # Load tokenizer
-  sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
-                                          vocab_size=config.vocab_size)
+  # sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
+  #                                         vocab_size=config.vocab_size)
+  sp_tokenizer = AutoTokenizer.from_pretrained("stabilityai/stablecode-completion-alpha-3b")
                                           
   # Set global batch size.
   global_batch_size_to_load = config.global_batch_size_to_load

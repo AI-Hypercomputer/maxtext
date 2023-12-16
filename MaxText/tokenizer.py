@@ -25,6 +25,7 @@ import tensorflow_text as tftxt
 
 import max_logging
 
+import numpy as np
 
 Features = Dict[str, tf.Tensor]
 
@@ -64,5 +65,6 @@ class TokenizeOp:
 
   def __call__(self, features: Features) -> Features:
     for k in self.data_keys:
-      features[k] = self.sp_tokenizer.tokenize(features[k])
+      # features[k] = self.sp_tokenizer.tokenize(features[k])
+      features[k] = np.asarray(self.sp_tokenizer.encode(str(features[k])))
     return features
