@@ -216,9 +216,31 @@ def make_decoder_mask(decoder_target_tokens: Array,
 
 
 class DecoderLayer(nn.Module):
-  """Transformer decoder layer that attends to the encoder."""
+  """Transformer decoder layer that attends to the encoder.
+
+  Including 2 types of skip_connection_style
+  T5:
+    inputs_norm = layer_norm(inputs)
+    attention_lnx = attention(inputs_norm)
+    mlp_lnx = ff_layer(inputs_norm)
+    next_layer_addition = mlp_lnx + attention_lnx
+    output = dropout(next_layer_addition) + inputs
+
+  GPT3
+    inputs_norm = layer_norm(inputs)
+    attention_lnx = attention(inputs_norm)
+    output = ff_layer(attention_lnx + inputs)
+
+  Args:
+    config: config object
+    mesh: a physical TPU mesh
+    skip_connection_style: choice of T5 and GPT3 which defaults to T5
+  Returns:
+    the combined decoder mask.
+  """
   config: Config
   mesh: Mesh
+  skip_connection_style: str = 'T5'
 
   @nn.compact
   def __call__(self,
@@ -273,6 +295,9 @@ class DecoderLayer(nn.Module):
         attention_lnx,
         ('activation_batch', 'activation_length', 'activation_embed'))
 
+    if self.skip_connection_style == "GPT3":
+      lnx = attention_lnx + inputs
+
     # MLP block.
     mlp_lnx = linears.MlpBlock(
         intermediate_dim=cfg.mlp_dim,
@@ -289,13 +314,17 @@ class DecoderLayer(nn.Module):
         mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')
     )
 
-    next_layer_addition = mlp_lnx + attention_lnx
+    if self.skip_connection_style == "T5":
+      next_layer_addition = mlp_lnx + attention_lnx
 
-    next_layer_addition_dropped_out = nn.Dropout(
-        rate=cfg.dropout_rate, broadcast_dims=(-2,)
-    )(next_layer_addition, deterministic=deterministic)
+      next_layer_addition_dropped_out = nn.Dropout(
+          rate=cfg.dropout_rate, broadcast_dims=(-2,)
+      )(next_layer_addition, deterministic=deterministic)
 
-    layer_output = next_layer_addition_dropped_out + inputs
+      layer_output = next_layer_addition_dropped_out + inputs
+    else:
+      layer_output = mlp_lnx
+
     layer_output = nn.with_logical_constraint(
         layer_output,
         ('activation_batch', 'activation_length', 'activation_embed'),
@@ -399,7 +428,10 @@ class Decoder(nn.Module):
           ),
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'},
-      )(config=cfg, mesh=mesh, name='decoder')(
+      )(config=cfg,
+        mesh=mesh,
+        skip_connection_style=cfg.skip_connection_style_decoder,
+        name='decoder')(
           y,
           decoder_segment_ids,
           decoder_positions,
@@ -412,7 +444,11 @@ class Decoder(nn.Module):
     else:
       for lyr in range(cfg.num_decoder_layers):
         # [batch, length, emb_dim] -> [batch, length, emb_dim]
-        y = BlockLayer(config=cfg, mesh=mesh, name=f'layers_{lyr}')(
+        y = BlockLayer(
+          config=cfg,
+          mesh=mesh,
+          skip_connection_style=cfg.skip_connection_style_decoder,
+          name=f'layers_{lyr}')(
             y,
             decoder_segment_ids,
             decoder_positions,
