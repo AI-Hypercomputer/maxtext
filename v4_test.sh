@@ -25,23 +25,12 @@ gcloud alpha compute tpus queued-resources list --filter=tonyjohnchen
 
 
 DATETIME=$(date +%Y-%m-%d-%H-%M-%S)
-RUN_NAME=${USER}-offload-collective-${ACCELERATOR_TYPE}-${NODE_COUNT}slices-${DATETIME}
+RUN_NAME=${USER}-mxla-debug-${ACCELERATOR_TYPE}-${NODE_COUNT}slices-${DATETIME}
 python3 multihost_runner.py --TPU_PREFIX=$TPU_NAME \
---COMMAND="bash setup.sh MODE=nightly; \
+--COMMAND="bash setup.sh MODE=nightly LIBTPU_GCS_PATH=gs://libtpu_internal/tonyjohnchen/mxla/libtpu.so; \
+TPU_LIBRARY_PATH=\$HOME/custom_libtpu/libtpu.so \
 python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME \
 base_output_directory=gs://tonyjohnchen-mxla-debug/ dataset_path=gs://max-datasets-rogue \
 per_device_batch_size=1 \
 steps=50 enable_checkpointing=false \
 attention=mha int8_training=false;"
-
-
-# DATETIME=$(date +%Y-%m-%d-%H-%M-%S)
-# RUN_NAME=${USER}-offload-collective-${ACCELERATOR_TYPE}-${NODE_COUNT}slices-${DATETIME}
-# python3 multihost_runner.py --TPU_PREFIX=$TPU_NAME \
-# --COMMAND="bash setup.sh MODE=nightly; \
-# TPU_LIBRARY_PATH=\$HOME/custom_libtpu/libtpu.so \
-# python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME \
-# base_output_directory=gs://tonyjohnchen-mxla-debug/ dataset_path=gs://max-datasets-rogue \
-# per_device_batch_size=1 \
-# steps=50 enable_checkpointing=false \
-# attention=mha int8_training=false;"
