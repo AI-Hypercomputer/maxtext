@@ -213,7 +213,7 @@ def preprocessing_pipeline_pygrain(
 
   # Shift inputs for teacher-forced training
   if shift:
-    operations.append(pygrain.MapOperation(map_function=pygrain_operations.ShiftData(axis=0,segmented=pack_examples)))  
+    operations.append(pygrain.MapOperation(map_function=pygrain_operations.ShiftData(axis=1,segmented=pack_examples)))  
 
   index_sampler = pygrain.IndexSampler(
     num_records=len(dataset),
