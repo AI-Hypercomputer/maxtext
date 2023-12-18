@@ -163,6 +163,7 @@ def decode_loop(config, state=None):
     rng, rng_to_use = jax.random.split(rng)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       seqs = p_predict_step(tokenized_prompts, state, rng_to_use)
+      max_logging.log(f"Anisha:seqs={seqs}")
       decoded_string, num_tokens_decoded = decode_tokens(np.array(seqs)[0], sp_tokenizer, config.eos_id)
       max_logging.log(f"Decoding #{step} (num tokens {num_tokens_decoded}):\n\t{decoded_string}")
       if config.metrics_file:
