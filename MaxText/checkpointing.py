@@ -109,13 +109,13 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
     if isinstance(data, (jax.Array, jax.ShapeDtypeStruct)) \
           and pspec is not None:
       if enable_single_slice_checkpointing:
-          slice_devices = _slice_devices(mesh.devices)
-          slice_mesh = jax.sharding.Mesh(slice_devices, mesh.axis_names)
-          return type_handlers.SingleSliceArrayRestoreArgs(
-              sharding=jax.sharding.NamedSharding(mesh, pspec),
-              single_slice_sharding=jax.sharding.NamedSharding(slice_mesh, pspec),
-              global_shape=data.shape,
-              dtype=data.dtype,
+        slice_devices = _slice_devices(mesh.devices)
+        slice_mesh = jax.sharding.Mesh(slice_devices, mesh.axis_names)
+        return type_handlers.SingleSliceArrayRestoreArgs(
+          sharding=jax.sharding.NamedSharding(mesh, pspec),
+          single_slice_sharding=jax.sharding.NamedSharding(slice_mesh, pspec),
+          global_shape=data.shape,
+          dtype=data.dtype,
           )
       else:
         return type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
