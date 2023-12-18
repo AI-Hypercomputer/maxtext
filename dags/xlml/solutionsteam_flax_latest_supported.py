@@ -22,10 +22,6 @@ from configs.xlml.jax import solutionsteam_flax_latest_supported_config as flax_
 
 # Run once a day at 2 am UTC (6 pm PST)
 SCHEDULED_TIME = "0 2 * * *" if composer_env.is_prod_env() else None
-NETWORK_PREFIX = "projects/tpu-prod-env-automated"
-V5_NETWORKS = f"{NETWORK_PREFIX}/global/networks/mas-test"
-V5E_SUBNETWORKS = f"{NETWORK_PREFIX}/regions/us-east1/subnetworks/mas-test"
-V5P_SUBNETWORKS = f"{NETWORK_PREFIX}/regions/us-east5/subnetworks/mas-test"
 
 
 with models.DAG(
@@ -84,8 +80,8 @@ with models.DAG(
       tpu_cores=4,
       tpu_zone=vm_resource.Zone.US_EAST1_C.value,
       runtime_version=vm_resource.RuntimeVersion.V2_ALPHA_TPUV5_LITE.value,
-      network=V5_NETWORKS,
-      subnetwork=V5E_SUBNETWORKS,
+      network=vm_resource.V5_NETWORKS,
+      subnetwork=vm_resource.V5E_SUBNETWORKS,
       time_out_in_min=60,
   ).run()
 
@@ -95,8 +91,8 @@ with models.DAG(
       tpu_cores=16,
       tpu_zone=vm_resource.Zone.US_EAST1_C.value,
       runtime_version=vm_resource.RuntimeVersion.V2_ALPHA_TPUV5_LITE.value,
-      network=V5_NETWORKS,
-      subnetwork=V5E_SUBNETWORKS,
+      network=vm_resource.V5_NETWORKS,
+      subnetwork=vm_resource.V5E_SUBNETWORKS,
       time_out_in_min=60,
   ).run()
 
@@ -106,8 +102,8 @@ with models.DAG(
       tpu_cores=8,
       tpu_zone=vm_resource.Zone.US_EAST5_A.value,
       runtime_version=vm_resource.RuntimeVersion.V2_ALPHA_TPUV5.value,
-      network=V5_NETWORKS,
-      subnetwork=V5E_SUBNETWORKS,
+      network=vm_resource.V5_NETWORKS,
+      subnetwork=vm_resource.V5P_SUBNETWORKS,
       time_out_in_min=60,
   ).run()
 
@@ -117,8 +113,8 @@ with models.DAG(
       tpu_cores=32,
       tpu_zone=vm_resource.Zone.US_EAST5_A.value,
       runtime_version=vm_resource.RuntimeVersion.V2_ALPHA_TPUV5.value,
-      network=V5_NETWORKS,
-      subnetwork=V5E_SUBNETWORKS,
+      network=vm_resource.V5_NETWORKS,
+      subnetwork=vm_resource.V5P_SUBNETWORKS,
       time_out_in_min=60,
   ).run()
 
