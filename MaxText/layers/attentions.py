@@ -248,6 +248,7 @@ class MultiHeadDotProductAttention(nn.Module):
   float32_logits: bool = False  # computes logits in float32 for stability.
   use_rotary_position_emb: bool = True
   use_qk_norm: bool = True
+  query_scale_style: str = 'init'
 
   def apply_attention(
       self,
@@ -398,17 +399,20 @@ class MultiHeadDotProductAttention(nn.Module):
         use_bias=cfg.use_bias_linear,
         config=cfg)
 
-    # NOTE: T5 does not explicitly rescale the attention logits by
-    #       1/sqrt(depth_kq)!  This is folded into the initializers of the
-    #       linear transformations, which is equivalent under Adafactor.
     depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
-    def query_init(*args):
-      # pylint: disable=no-value-for-parameter
-      return self.kernel_init(*args) / depth_scaling
+    if self.query_scale_style == 'init':
+      # NOTE: T5 does not explicitly rescale the attention logits by
+      #       1/sqrt(depth_kq)!  This is folded into the initializers of the
+      #       linear transformations, which is equivalent under Adafactor.
+      def query_init(*args):
+        # pylint: disable=no-value-for-parameter
+        return self.kernel_init(*args) / depth_scaling
 
-    # Project inputs_q to multi-headed q/k/v
-    # dimensions are then [batch, length, num_heads, head_dim]
-    query = projection(kernel_init=query_init, name='query')(inputs_q)
+      # Project inputs_q to multi-headed q/k/v
+      # dimensions are then [batch, length, num_heads, head_dim]
+      query = projection(kernel_init=query_init, name='query')(inputs_q)
+    else:
+      query = projection(kernel_init=self.kernel_init, name='query')(inputs_q)
     key = projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
     value = projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
@@ -453,6 +457,11 @@ class MultiHeadDotProductAttention(nn.Module):
           epsilon=cfg.epsilon_layer_norm,
           )(value)
 
+    if self.query_scale_style == 'post':
+      # NOTE: Different from initializing query projection layer weights with
+      #       depth scaling in T5, GPT3 applies rescaling on query logits with
+      #       1/sqrt(depth_kq).
+      query /= depth_scaling
     query = nn.with_logical_constraint(
         query,
         (

@@ -37,6 +37,13 @@ def string_to_bool(s: str) -> bool:
 
 _yaml_types_to_parser = {str : str, int : int, float : float, bool : string_to_bool}
 
+def validate_query_scale_style(s: str) -> bool:
+  valid_query_scale_styles = ('init', 'post')
+  if s not in valid_query_scale_styles:
+    raise ValueError(
+      "Invalid query_scale_styles was passed. Valid options ", valid_query_scale_styles
+    )
+
 def validate_skip_connection_style_decoder(s: str) -> bool:
   valid_skip_connection_styles = ('T5', 'GPT3')
   if s not in valid_skip_connection_styles:
@@ -144,6 +151,7 @@ class _HyperParameters():
     validate_attention_type(raw_keys['attention'])
     validate_embed_lookup_style(raw_keys['embed_lookup_style'])
     validate_skip_connection_style_decoder(raw_keys['skip_connection_style_decoder'])
+    validate_query_scale_style(raw_keys["query_scale_style"])
 
 
 def get_individual_scales(scale):

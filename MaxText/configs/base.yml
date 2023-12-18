@@ -222,6 +222,12 @@ logits_norm: True
 # whether to use stabilized-gradient version of cross entropy loss
 stable_cross_entropy_loss: True
 
+# the style to apply query scale one of ('init', 'post') and defaults to 'init'
+# 'init' means initializing query projection layer weights with depth scaling in T5
+# 'post' means applying post depth scaling to query while
+#    initializing query projection layer without depth scaling used in GPT3
+query_scale_style: 'init'
+
 # skip connection style in decoder one of ('T5', 'GPT3') and defaults to 'T5'
 skip_connection_style_decoder: T5
 
