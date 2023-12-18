@@ -57,21 +57,18 @@ def create_orbax_checkpoint_manager(
   return mngr
 
 
-def _find_np_idx(array, filter_fn):
+def _find_zeroth_idx(array):
   for idx, val in np.ndenumerate(array):
-    if filter_fn(val):
-      return idx
+    if val.process_index == jax.process_index():
+      break
+  return idx[0]
 
 
 def _slice_devices(device_array):
   ### slices are assumed to be restricted to the first axis
-  idx = _find_np_idx(
-      device_array, lambda x: x.process_index == jax.process_index()
-  )
-  zeroth_idx = idx[0]
+  zeroth_idx =  _find_zeroth_idx(device_array)
   sliced_result = device_array[zeroth_idx : zeroth_idx + 1, :, :]
   return sliced_result
-
 
 def load_state_if_possible(checkpoint_manager: CheckpointManager,
                            first_checkpoint_path: str,
@@ -109,6 +106,9 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
     if isinstance(data, (jax.Array, jax.ShapeDtypeStruct)) \
           and pspec is not None:
       if enable_single_slice_checkpointing:
+        type_handlers.register_type_handler(jax.Array,
+                                            type_handlers.SingleSliceArrayHandler(),
+                                            override=True)
         slice_devices = _slice_devices(mesh.devices)
         slice_mesh = jax.sharding.Mesh(slice_devices, mesh.axis_names)
         return type_handlers.SingleSliceArrayRestoreArgs(
