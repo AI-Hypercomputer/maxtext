@@ -228,7 +228,8 @@ class DecoderLayer(nn.Module):
                decoder_mask,
                deterministic,
                decode,
-               max_decode_length):
+               max_decode_length,
+               padding_mask):
     cfg = self.config
     mesh = self.mesh
 
@@ -280,8 +281,9 @@ class DecoderLayer(nn.Module):
         dtype=cfg.dtype,
         name='mlp',
         use_pre_norm=cfg.use_pre_norm_mlp,
+        apply_padding_mask=cfg.apply_padding_mask_mlp,
         config=cfg,
-    )(lnx, deterministic=deterministic)
+    )(lnx, padding_mask=padding_mask, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(
         mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')
     )
@@ -330,7 +332,8 @@ class Decoder(nn.Module):
                decoder_mask=None,
                deterministic=False,
                decode=False,
-               max_decode_length=None):
+               max_decode_length=None,
+               padding_mask=None):
     cfg = self.config
     mesh = self.mesh
     assert decoder_input_tokens.ndim == 2  # [batch, len]
@@ -387,6 +390,7 @@ class Decoder(nn.Module):
               nn.broadcast,
               nn.broadcast,
               nn.broadcast,
+              nn.broadcast,
           ),
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'},
@@ -398,6 +402,7 @@ class Decoder(nn.Module):
           deterministic,
           decode,
           max_decode_length,
+          padding_mask,
       )
     else:
       for lyr in range(cfg.num_decoder_layers):
@@ -410,6 +415,7 @@ class Decoder(nn.Module):
             deterministic,
             decode,
             max_decode_length,
+            padding_mask,
         )
 
     y = RMSNorm(
@@ -477,7 +483,8 @@ class Transformer(nn.Module):
       decoder_positions=None,
       enable_dropout=True,
       decode=False,
-      max_decode_length=None):
+      max_decode_length=None,
+      padding_mask=None):
     """Applies Transformer decoder-branch on encoded-input and target."""
     cfg = self.config
 
@@ -506,5 +513,6 @@ class Transformer(nn.Module):
         decoder_mask=decoder_mask,
         deterministic=not enable_dropout,
         decode=decode,
-        max_decode_length=max_decode_length)
+        max_decode_length=max_decode_length,
+        padding_mask=padding_mask)
     return logits

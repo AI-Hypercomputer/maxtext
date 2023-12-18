@@ -16,7 +16,7 @@
 
 import functools
 import operator
-from typing import Any, Callable, Iterable, Sequence, Tuple, Union
+from typing import Any, Callable, Iterable, Sequence, Tuple, Union, Optional
 
 import flax.linen as nn
 from jax import lax
@@ -161,9 +161,10 @@ class MlpBlock(nn.Module):
   intermediate_dropout_rate: float = 0.1
   dtype: Any = jnp.float32
   use_pre_norm: bool = False
+  apply_padding_mask: bool = False
 
   @nn.compact
-  def __call__(self, inputs, decode: bool = False, deterministic: bool = False):
+  def __call__(self, inputs, padding_mask: Optional[Array] = None, decode: bool = False, deterministic: bool = False):
     """Applies Transformer MlpBlock module."""
     cfg = self.config
 
@@ -197,6 +198,13 @@ class MlpBlock(nn.Module):
 
     # Take elementwise product of above intermediate activations.
     x = functools.reduce(operator.mul, activations)
+    if padding_mask is not None:
+      # from [B, L] to [B, L, D]
+      padding_mask = jnp.expand_dims(padding_mask, axis=-1)
+
+    if self.apply_padding_mask and padding_mask is not None:
+      x *= padding_mask
+
     # Apply dropout and final dense output projection.
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
         x, deterministic=deterministic
@@ -213,4 +221,7 @@ class MlpBlock(nn.Module):
         use_bias=cfg.use_bias_linear,
         config=cfg,
     )(x)
+
+    if self.apply_padding_mask and padding_mask is not None:
+      output *= padding_mask
     return output
