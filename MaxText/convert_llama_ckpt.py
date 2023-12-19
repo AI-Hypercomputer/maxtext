@@ -5,7 +5,10 @@ Usage:
 # Get LLaMA pytorch_vars from Meta
 
 # Example cmd:
-python3 MaxText/convert_llama_ckpt.py --base-model-path <path/to/meta/ckpt> --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size 7b
+##To save a ckpt to finetune (this is the default)
+python3 MaxText/convert_llama_ckpt.py --base-model-path <path/to/meta/ckpt> --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size 7b --save-training-ckpt
+##To save a ckpt for decoding
+python3 MaxText/convert_llama_ckpt.py --base-model-path <path/to/meta/ckpt> --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size 7b --save-decoding-ckpt
 
 # For large size model (e.g. 70B model), this script requires large memory VM.
 # The script load and save weights in a single pass.
@@ -25,7 +28,7 @@ from flax.training import train_state
 import max_utils
 import pyconfig
 from jax.sharding import Mesh
-from layers import Transformer
+from layers.llama2 import Transformer
 from jax import random
 import max_utils
 import maxtext_utils
@@ -34,6 +37,8 @@ import maxtext_utils
 import max_logging
 
 import torch
+
+import sys
 
 MODEL_PARAMS_DICT = {
     '70b': {
@@ -71,7 +76,9 @@ async_checkpointing = True
 save_period = 1
 step_number_to_save_new_ckpt = 0
 
-def convert(base_model_path, maxtext_model_path, model_size):
+def convert(base_model_path, maxtext_model_path, model_size, save_training_ckpt):
+  
+  print(f"save_training_ckpt = {save_training_ckpt}")
   """Convert from Llama to maxtext."""
   model_params = MODEL_PARAMS_DICT[model_size]
   base_num_decoder_layers = model_params['num_layers']
@@ -242,19 +249,6 @@ def convert(base_model_path, maxtext_model_path, model_size):
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
   model = Transformer(config, mesh)
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
-  tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
-
-
-  jax_states = train_state.TrainState(
-      step=0,
-      params=jax_weights,
-      opt_state={},
-      tx = tx,
-      apply_fn=model.apply
-      )
-  
-  print(f"jax_states = {jax_states}")
 
   
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
@@ -264,8 +258,18 @@ def convert(base_model_path, maxtext_model_path, model_size):
       config.save_period,
   )
 
-  
-  state_new, _ = max_utils.setup_initial_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  if save_training_ckpt:
+    print("Creating a training state")
+    learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
+    tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
+    state_new, _ = max_utils.setup_training_state(
+      model, tx, config, init_rng, mesh, checkpoint_manager
+      )
+  else:
+    print("Creating a decoding state")
+    state_new, _ = max_utils.setup_decode_state(
+      model, config, init_rng, mesh, checkpoint_manager
+      )
 
   print(f"default trainstate={state_new}")
 
@@ -278,6 +282,10 @@ def convert(base_model_path, maxtext_model_path, model_size):
   if checkpoint_manager is not None:
       if checkpoint_manager.save(0, state_new):
         max_logging.log(f"saved a checkpoint at step {0}")
+      # Upon preemption, exit when and only when all ongoing saves are complete.
+      if checkpoint_manager.reached_preemption(0):
+          checkpoint_manager.wait_until_finished()
+          sys.exit()
 
   
 
@@ -290,8 +298,12 @@ if __name__ == '__main__':
   parser.add_argument('--base-model-path', type=str, required=True)
   parser.add_argument('--maxtext-model-path', type=str, required=True)
   parser.add_argument('--model-size', type=str, required=True)
+  parser.add_argument('--save-training-ckpt', dest='save_training_ckpt', action='store_true')
+  parser.add_argument('--save-decoding-ckpt', dest='save_training_ckpt', action='store_false')
+  parser.set_defaults(save_training_ckpt=True)
+
   args = parser.parse_args()
 
   if args.model_size not in MODEL_PARAMS_DICT:
     raise NotImplementedError
-  convert(args.base_model_path, args.maxtext_model_path, args.model_size)
+  convert(args.base_model_path, args.maxtext_model_path, args.model_size, args.save_training_ckpt)
