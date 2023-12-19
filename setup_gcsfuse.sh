@@ -15,9 +15,9 @@
 # limitations under the License.
 
 # Description:
-# bash setup_gcsfuse.sh DATASET_GCS_BUCKET=maxtext-dataset MOUNT_PATH=dataset
+# sudo bash setup_gcsfuse.sh DATASET_GCS_BUCKET=maxtext-dataset MOUNT_PATH=dataset
 
-set -e
+set -e -x
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -31,18 +31,22 @@ if [[ -z ${DATASET_GCS_BUCKET} || -z ${MOUNT_PATH} ]]; then
   exit 1
 fi
 
-if [[ $GCS_BUCKET == gs://* ]] ;
-then
+if [[ $GCS_BUCKET == gs://* ]] ; then
     echo "Remove gs:// from GCS bucket name"
     exit 1
 fi
 
-sudo apt-get -y install fuse
-export GCSFUSE_REPO=gcsfuse-`lsb_release -c -s`
-echo "deb https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | sudo tee /etc/apt/sources.list.d/gcsfuse.list
-curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
-sudo apt-get update
-sudo apt-get -y install gcsfuse
+if ! command -v gcsfuse &> /dev/null ; then
+  apt-get update -y && \
+  apt-get install -y lsb-release && \
+  apt-get install -y gnupg && \
+  apt-get install -y curl
+  export GCSFUSE_REPO=gcsfuse-`lsb_release -c -s`
+  echo "deb https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | tee /etc/apt/sources.list.d/gcsfuse.list
+  curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+  apt-get update -y && apt-get -y install gcsfuse
+  rm -rf /var/lib/apt/lists/*
+fi
 
 mkdir -p $MOUNT_PATH
 
