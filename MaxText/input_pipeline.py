@@ -288,15 +288,6 @@ def get_datasets_pygrain(
   else:
     eval_ds = train_ds
 
-  # train_ds = tfds.data_source(config.dataset_name, split="train")
-  # if config.eval_dataset_name:
-  #   eval_ds = tfds.data_source(config.dataset_name, split=config.eval_split)
-  # else:
-  #   eval_ds = train_ds
-
-  # lazy_dataset = pygrain.experimental.lazy_dataset
-  # train_ds = lazy_dataset.SourceLazyMapDataset(train_ds)
-  # eval_ds = lazy_dataset.SourceLazyMapDataset(eval_ds)
 
   return train_ds, eval_ds
 
