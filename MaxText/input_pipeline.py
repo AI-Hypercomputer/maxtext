@@ -157,24 +157,6 @@ def preprocessing_pipeline(
   # Return multi-host jax.Array prep iterator
   return multihost_gen
 
-# def preprocessing_pipeline_lazydata(
-#   dataset,
-#   vocab_path,
-#   batch_size: int,
-#   global_mesh,
-#   shuffle: bool,
-#   num_epochs: Optional[int] = 1,
-#   pack_examples: bool = True,
-#   shuffle_buffer_size: int = 1024,
-#   max_length: int = 512,
-#   shift: bool = True,
-#   drop_remainder: bool = True,
-#   data_sharding = None,
-#   data_shuffle_seed = 0,
-# ):
-#   dataset = normalize_features(dataset)
-#   dataset = dataset.filter(length_filter(max_length))
-
 
 def preprocessing_pipeline_pygrain(
   dataset,
@@ -193,7 +175,7 @@ def preprocessing_pipeline_pygrain(
   data_sharding = None,
   data_shuffle_seed = 0,
 ):
-  
+  """Apply pygrain operations to preprocess the given dataset."""
   operations = []
   operations.append(pygrain_operations.ParseFeatures())
   operations.append(pygrain_operations.NormalizeFeatures())
@@ -278,6 +260,7 @@ def get_datasets_pygrain(
   config: ml_collections.ConfigDict,
   read_config = None,
 ):
+ """Load dataset from array_record files for using with pygrain"""
   data_dir = os.path.join(config.dataset_path, config.dataset_name)
   train_files = [data_dir + '/' + f for f in os.listdir(data_dir) if re.match(r'.*train.*', f)]
   train_ds = pygrain.ArrayRecordDataSource(train_files)
