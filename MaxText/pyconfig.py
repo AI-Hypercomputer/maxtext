@@ -47,7 +47,7 @@ def validate_attention_type(s: str) -> bool:
     )
 
 def validate_model_name(s: str) -> bool:
-  valid_model_names= ('default',) # currently supported models
+  valid_model_names= ('default', 'llama2-7b') # currently supported models
   if s not in valid_model_names:
     raise ValueError(
       "Invalid model name was passed. Valid options ", valid_model_names
@@ -144,9 +144,9 @@ class _HyperParameters():
     ''' Update model config variables
     '''
     validate_model_name(raw_keys['model_name'])
-    if raw_keys['model_name'] == 'llama-7b':
+    if raw_keys['model_name'] == 'llama2-7b':
       max_logging.log(f"Running Model: {raw_keys['model_name']}")
-      llama_7b_model_vars = {
+      llama2_7b_model_vars = {
         'base_emb_dim': 4096,
         'base_num_heads': 32,
         'base_mlp_dim': 11008,
@@ -154,7 +154,7 @@ class _HyperParameters():
         'head_dim': 128,
         'mlp_activations': ['silu'],
       }
-      raw_keys = validate_and_update_keys(raw_keys, llama_7b_model_vars)
+      raw_keys = validate_and_update_keys(raw_keys, llama2_7b_model_vars)
 
 def validate_and_update_keys(raw_keys, model_keys):
   ''' Validate and update model specific config keys

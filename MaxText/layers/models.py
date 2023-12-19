@@ -314,6 +314,8 @@ class Decoder(nn.Module):
   shared_embedding: nn.Module
   mesh: Mesh
 
+
+  decoderLayer: DecoderLayer
   @nn.compact
   def __call__(self,
                decoder_input_tokens,
@@ -334,7 +336,7 @@ class Decoder(nn.Module):
             y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
 
-    BlockLayer = DecoderLayer
+    BlockLayer = self.decoderLayer
 
     if cfg.remat_policy != 'none':
       if cfg.remat_policy == 'minimal':

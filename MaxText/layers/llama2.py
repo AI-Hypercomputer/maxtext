@@ -38,9 +38,15 @@ from jax import lax
 from jax import random
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
-from jax.experimental.pallas.ops.tpu import flash_attention
+# from jax.experimental.pallas.ops.tpu import flash_attention
+from layers import attentions
+from layers import embeddings
+from layers import linears
+from layers import normalizations
 
 from layers import models
+
+
 
 class MultiHeadDotProductAttention(models.MultiHeadDotProductAttention):
   """Multi-head dot-product attention for Llama2.
@@ -99,7 +105,7 @@ class MultiHeadDotProductAttention(models.MultiHeadDotProductAttention):
     cfg = self.config
 
     projection = functools.partial(
-        models.DenseGeneral,
+        linears.DenseGeneral,
         axis=-1,
         features=(self.num_heads, self.head_dim),
         kernel_axes=('embed', 'heads', 'kv'),
@@ -198,7 +204,7 @@ class MultiHeadDotProductAttention(models.MultiHeadDotProductAttention):
         # Causal mask for cached decoder self-attention: our single query
         # position should only attend to those key positions that have already
         # been generated and cached, not the remaining zero elements.
-        mask = models.combine_masks(
+        mask = attentions.combine_masks(
             mask,
             jnp.broadcast_to(
                 jnp.arange(length) <= cur_index,
@@ -214,7 +220,7 @@ class MultiHeadDotProductAttention(models.MultiHeadDotProductAttention):
           # The bias is a full attention matrix, but during decoding we only
           # have to take a slice of it.
           # This is equivalent to bias[..., cur_index:cur_index+1, :].
-          bias = models.dynamic_vector_slice_in_dim(
+          bias = attentions.dynamic_vector_slice_in_dim(
               jnp.squeeze(bias, axis=0), jnp.reshape(cur_index, (-1)), 1, -2)
 
     # Convert the boolean attention mask to an attention bias.
@@ -229,7 +235,7 @@ class MultiHeadDotProductAttention(models.MultiHeadDotProductAttention):
 
     # Add provided bias term (e.g. relative position embedding).
     if bias is not None:
-      attention_bias = models.combine_biases(attention_bias, bias)
+      attention_bias = attentions.combine_biases(attention_bias, bias)
 
     dropout_rng = None
     if not deterministic and self.dropout_rate > 0.:
@@ -243,7 +249,7 @@ class MultiHeadDotProductAttention(models.MultiHeadDotProductAttention):
     )
 
     # Back to the original inputs dimensions.
-    out = models.DenseGeneral(
+    out = linears.DenseGeneral(
         features=inputs_q.shape[-1],  # output dim is set to the input dim.
         axis=(-2, -1),
         kernel_init=self.kernel_init,
@@ -272,7 +278,7 @@ class MlpBlock(nn.Module):
   config: models.Config
   intermediate_dim: int = 2048
   activations: Sequence[Union[str, Callable]] = ('relu',)
-  kernel_init: models.NdInitializer = models.nd_dense_init(1.0, 'fan_in', 'truncated_normal')
+  kernel_init: linears.NdInitializer = linears.nd_dense_init(1.0, 'fan_in', 'truncated_normal')
   intermediate_dropout_rate: float = 0.1
   dtype: Any = jnp.float32
 
@@ -286,7 +292,7 @@ class MlpBlock(nn.Module):
     activations = []
     for idx, act_fn in enumerate(self.activations):
       dense_name = 'wi' if len(self.activations) == 1 else f'wi_{idx}'
-      x = models.DenseGeneral(
+      x = linears.DenseGeneral(
           self.intermediate_dim,
           dtype=self.dtype,
           kernel_init=self.kernel_init,
@@ -294,7 +300,7 @@ class MlpBlock(nn.Module):
           name=dense_name,
           config=cfg)(
               inputs)
-      x = models._convert_to_activation_function(act_fn)(x)
+      x = linears._convert_to_activation_function(act_fn)(x)
       activations.append(x)
 
     # Take elementwise product of above intermediate activations.
@@ -306,7 +312,7 @@ class MlpBlock(nn.Module):
             x, deterministic=deterministic)  # Broadcast along length.
     x = nn.with_logical_constraint(x, ('activation_batch', 'activation_length', 'activation_mlp'))
 
-    up_proj_x = models.DenseGeneral(
+    up_proj_x = linears.DenseGeneral(
           self.intermediate_dim,
           dtype=self.dtype,
           kernel_init=self.kernel_init,
@@ -320,7 +326,7 @@ class MlpBlock(nn.Module):
         rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
             x, deterministic=deterministic)  # Broadcast along length.
     x = nn.with_logical_constraint(x, ('activation_batch', 'activation_length', 'activation_mlp'))
-    output = models.DenseGeneral(
+    output = linears.DenseGeneral(
         inputs.shape[-1],
         dtype=self.dtype,
         kernel_init=self.kernel_init,
@@ -337,7 +343,7 @@ class MlpBlock(nn.Module):
 #------------------------------------------------------------------------------
 
 
-class DecoderLayer(nn.Module):
+class DecoderLayer(models.DecoderLayer):
   """Transformer decoder layer that attends to the encoder."""
   config: models.Config
   mesh: Mesh
@@ -362,7 +368,7 @@ class DecoderLayer(nn.Module):
     #input_layernorm aka pre_self_attention_layer_norm
     lnx = models.RMSNorm(
         dtype=cfg.dtype, 
-        name='pre_self_attention_norm', 
+        name='pre_self_attention_layer_norm', 
         kernel_axes=('embed',))(inputs)
     lnx = nn.with_logical_constraint(
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
@@ -393,7 +399,7 @@ class DecoderLayer(nn.Module):
 
     # Fully Connected
     residual = hidden_states
-    hidden_states = models.LayerNorm(
+    hidden_states = models.RMSNorm(
         dtype=cfg.dtype, name='post_self_attention_layer_norm', kernel_axes=('embed',))(
             hidden_states)
     hidden_states = nn.with_logical_constraint(lnx, ('activation_batch', 'activation_length', 'activation_embed'))
@@ -441,5 +447,26 @@ class DecoderLayer(nn.Module):
 
 
 
+class Transformer(models.Transformer):
+  """An decoder-only Transformer model."""
+  # pylint: disable=attribute-defined-outside-init
+  config: models.Config
+  mesh: Mesh
 
+  def setup(self, decoder = None):
+    """Initialize shared_embedding & decoder layers."""
 
+    cfg = self.config
+    mesh = self.mesh
+    self.shared_embedding = models.Embed(
+        num_embeddings=cfg.vocab_size,
+        features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        attend_dtype=jnp.float32,  # for logit training stability
+        embedding_init=nn.initializers.normal(stddev=1.0),
+        name='token_embedder',
+        config=cfg,
+    )
+
+    self.decoder = models.Decoder(
+        config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, decoderLayer = DecoderLayer)

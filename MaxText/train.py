@@ -53,6 +53,9 @@ from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
+from layers import llama2
+
+models = llama2
 Transformer = models.Transformer
 
 
