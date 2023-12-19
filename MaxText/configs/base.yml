@@ -123,7 +123,7 @@ eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
 # dataset_type: c4 # must be c4, array_record or synthetic
 dataset_type: array_record
-grain_worker_count: 0
+grain_worker_count: 1
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
