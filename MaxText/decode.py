@@ -28,7 +28,7 @@ import pyconfig
 import max_utils
 import temperature_sampler
 from input_pipeline import create_data_iterator_with_tokenizer
-from layers import models
+from layers import transformers
 
 import checkpointing
 
@@ -45,7 +45,7 @@ import max_logging
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
-Transformer = models.Transformer
+Transformer = transformers.Transformer
 
 
 def decode_tokens(toks, tokenizer, eos_id):

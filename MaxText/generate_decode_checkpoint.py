@@ -31,9 +31,9 @@ from etils import epath
 from jax.sharding import Mesh
 from jax import random
 from typing import Sequence
-from layers import models
+from layers import transformers
 
-Transformer = models.Transformer
+Transformer = transformers.Transformer
 
 
 def _read_checkpoint(config, checkpoint_manager, is_training):
