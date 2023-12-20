@@ -54,12 +54,21 @@ def calculate_num_params_from_pytree(params):
   assert total_parameters >= 0
   return total_parameters
 
+def is_profiling_host():
+  # Only profile on megascale device 0 of each slice.
+  for d in jax.local_devices():
+    # On single slice the devices have IDs 0, 1...
+    # On multislice the devices have IDs 100000 * (num_slice + 1) + in_slice_id
+    if d.id % 100000 == 0:
+      return True
+  return False
+
 def activate_profiler(config):
-  if jax.process_index() == 0 and config.enable_profiler:
+  if is_profiling_host() and config.enable_profiler:
     jax.profiler.start_trace(config.tensorboard_dir)
 
 def deactivate_profiler(config):
-  if jax.process_index() == 0 and config.enable_profiler:
+  if is_profiling_host() and config.enable_profiler:
     jax.profiler.stop_trace()
 
 def _prepare_metrics_for_json(metrics, step, run_name):
