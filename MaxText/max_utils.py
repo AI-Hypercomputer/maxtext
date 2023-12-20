@@ -55,11 +55,13 @@ def calculate_num_params_from_pytree(params):
   return total_parameters
 
 def is_profiling_host():
-  # Only profile on megascale device 0 of each slice.
+  # Only profile on a specific set of hosts correpsonding to certain megascale device numbers.
+  megascale_device_numbers = [0, 20, 40] # Choose three device IDs for three different hosts per slice.
   for d in jax.local_devices():
     # On single slice the devices have IDs 0, 1...
     # On multislice the devices have IDs 100000 * (num_slice + 1) + in_slice_id
-    if d.id % 100000 == 0:
+    # Each host has 4 devices with nearby IDs - though not necessarily consecutive
+    if d.id % 100000 in megascale_device_numbers:
       return True
   return False
 
