@@ -40,177 +40,6 @@ FlashMultiHeadDotProductAttention = attentions.FlashMultiHeadDotProductAttention
 MultiHeadDotProductAttention = attentions.MultiHeadDotProductAttention
 RMSNorm = normalizations.RMSNorm
 
-
-#------------------------------------------------------------------------------
-# Mask-making utility functions.
-#------------------------------------------------------------------------------
-def make_attention_mask(query_input: Array,
-                        key_input: Array,
-                        pairwise_fn: Callable = jnp.multiply,
-                        extra_batch_dims: int = 0,
-                        dtype: DType = jnp.float32) -> Array:
-  """Mask-making helper for attention weights.
-
-  In case of 1d inputs (i.e., `[batch, len_q]`, `[batch, len_kv]`, the
-  attention weights will be `[batch, heads, len_q, len_kv]` and this
-  function will produce `[batch, 1, len_q, len_kv]`.
-
-  Args:
-    query_input: a batched, flat input of query_length size
-    key_input: a batched, flat input of key_length size
-    pairwise_fn: broadcasting elementwise comparison function
-    extra_batch_dims: number of extra batch dims to add singleton axes for, none
-      by default
-    dtype: mask return dtype
-
-  Returns:
-    A `[batch, 1, len_q, len_kv]` shaped mask for 1d attention.
-  """
-  # [batch, len_q, len_kv]
-  mask = pairwise_fn(
-      # [batch, len_q] -> [batch, len_q, 1]
-      jnp.expand_dims(query_input, axis=-1),
-      # [batch, len_q] -> [batch, 1, len_kv]
-      jnp.expand_dims(key_input, axis=-2))
-
-  # [batch, 1, len_q, len_kv]. This creates the head dim.
-  mask = jnp.expand_dims(mask, axis=-3)
-  mask = jnp.expand_dims(mask, axis=tuple(range(extra_batch_dims)))
-  return mask.astype(dtype)
-
-
-def make_causal_mask(x: Array,
-                     extra_batch_dims: int = 0,
-                     dtype: DType = jnp.float32) -> Array:
-  """Make a causal mask for self-attention.
-
-  In case of 1d inputs (i.e., `[batch, len]`, the self-attention weights
-  will be `[batch, heads, len, len]` and this function will produce a
-  causal mask of shape `[batch, 1, len, len]`.
-
-  Note that a causal mask does not depend on the values of x; it only depends on
-  the shape. If x has padding elements, they will not be treated in a special
-  manner.
-
-  Args:
-    x: input array of shape `[batch, len]`
-    extra_batch_dims: number of batch dims to add singleton axes for, none by
-      default
-    dtype: mask return dtype
-
-  Returns:
-    A `[batch, 1, len, len]` shaped causal mask for 1d attention.
-  """
-  idxs = jnp.broadcast_to(jnp.arange(x.shape[-1], dtype=jnp.int32), x.shape)
-  return make_attention_mask(
-      idxs,
-      idxs,
-      jnp.greater_equal,
-      extra_batch_dims=extra_batch_dims,
-      dtype=dtype)
-
-
-def make_decoder_mask(decoder_target_tokens: Array,
-                      dtype: DType,
-                      decoder_causal_attention: Optional[Array] = None,
-                      decoder_segment_ids: Optional[Array] = None
-                      ) -> Optional[Array]:
-  """Compute the self-attention mask for a decoder.
-
-  Decoder mask is formed by combining a causal mask, a padding mask and an
-  optional packing mask. If decoder_causal_attention is passed, it makes the
-  masking non-causal for positions that have value of 1.
-
-  A prefix LM is applied to a dataset which has a notion of "inputs" and
-  "targets", e.g., a machine translation task. The inputs and targets are
-  concatenated to form a new target. `decoder_target_tokens` is the concatenated
-  decoder output tokens.
-
-  The "inputs" portion of the concatenated sequence can attend to other "inputs"
-  tokens even for those at a later time steps. In order to control this
-  behavior, `decoder_causal_attention` is necessary. This is a binary mask with
-  a value of 1 indicating that the position belonged to "inputs" portion of the
-  original dataset.
-
-  Example:
-
-    Suppose we have a dataset with two examples.
-
-    ds = [{"inputs": [6, 7], "targets": [8]},
-          {"inputs": [3, 4], "targets": [5]}]
-
-    After the data preprocessing with packing, the two examples are packed into
-    one example with the following three fields (some fields are skipped for
-    simplicity).
-
-       decoder_target_tokens = [[6, 7, 8, 3, 4, 5, 0]]
-         decoder_segment_ids = [[1, 1, 1, 2, 2, 2, 0]]
-    decoder_causal_attention = [[1, 1, 0, 1, 1, 0, 0]]
-
-    where each array has [batch, length] shape with batch size being 1. Then,
-    this function computes the following mask.
-
-                      mask = [[[[1, 1, 0, 0, 0, 0, 0],
-                                [1, 1, 0, 0, 0, 0, 0],
-                                [1, 1, 1, 0, 0, 0, 0],
-                                [0, 0, 0, 1, 1, 0, 0],
-                                [0, 0, 0, 1, 1, 0, 0],
-                                [0, 0, 0, 1, 1, 1, 0],
-                                [0, 0, 0, 0, 0, 0, 0]]]]
-
-    mask[b, 1, :, :] represents the mask for the example `b` in the batch.
-    Because mask is for a self-attention layer, the mask's shape is a square of
-    shape [query length, key length].
-
-    mask[b, 1, i, j] = 1 means that the query token at position i can attend to
-    the key token at position j.
-
-  Args:
-    decoder_target_tokens: decoder output tokens. [batch, length]
-    dtype: dtype of the output mask.
-    decoder_causal_attention: a binary mask indicating which position should
-      only attend to earlier positions in the sequence. Others will attend
-      bidirectionally. [batch, length]
-    decoder_segment_ids: decoder segmentation info for packed examples. [batch,
-      length]
-
-  Returns:
-    the combined decoder mask.
-  """
-  masks = []
-  # The same mask is applied to all attention heads. So the head dimension is 1,
-  # i.e., the mask will be broadcast along the heads dim.
-  # [batch, 1, length, length]
-  causal_mask = make_causal_mask(decoder_target_tokens, dtype=dtype)
-
-  # Positions with value 1 in `decoder_causal_attneition` can attend
-  # bidirectionally.
-  if decoder_causal_attention is not None:
-    # [batch, 1, length, length]
-    inputs_mask = make_attention_mask(
-        decoder_causal_attention,
-        decoder_causal_attention,
-        jnp.logical_and,
-        dtype=dtype)
-    masks.append(jnp.logical_or(causal_mask, inputs_mask).astype(dtype))
-  else:
-    masks.append(causal_mask)
-
-  # Padding mask.
-  masks.append(
-      make_attention_mask(
-          decoder_target_tokens > 0, decoder_target_tokens > 0, dtype=dtype))
-
-  # Packing mask
-  if decoder_segment_ids is not None:
-    masks.append(
-        make_attention_mask(
-            decoder_segment_ids, decoder_segment_ids, jnp.equal, dtype=dtype))
-
-  return attentions.combine_masks(*masks, dtype=dtype)
-
-
-
 #------------------------------------------------------------------------------
 # The network: Decoder & Transformer Definitions
 #------------------------------------------------------------------------------
@@ -226,7 +55,6 @@ class DecoderLayer(nn.Module):
                inputs,
                decoder_segment_ids,
                decoder_positions,
-               decoder_mask,
                deterministic,
                decode,
                max_decode_length):
@@ -270,10 +98,8 @@ class DecoderLayer(nn.Module):
     attention_lnx = attention_layer(
       lnx,
       lnx,
+      decoder_positions,
       decoder_segment_ids=decoder_segment_ids,
-      inputs_positions=decoder_positions,
-      mask=decoder_mask,
-      bias=None,
       deterministic=deterministic,
       decode=decode)
 
@@ -333,9 +159,8 @@ class Decoder(nn.Module):
   @nn.compact
   def __call__(self,
                decoder_input_tokens,
+               decoder_positions,
                decoder_segment_ids=None,
-               decoder_positions=None,
-               decoder_mask=None,
                deterministic=False,
                decode=False,
                max_decode_length=None):
@@ -394,7 +219,6 @@ class Decoder(nn.Module):
               nn.broadcast,
               nn.broadcast,
               nn.broadcast,
-              nn.broadcast,
           ),
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'},
@@ -402,7 +226,6 @@ class Decoder(nn.Module):
           y,
           decoder_segment_ids,
           decoder_positions,
-          decoder_mask,
           deterministic,
           decode,
           max_decode_length,
@@ -414,7 +237,6 @@ class Decoder(nn.Module):
             y,
             decoder_segment_ids,
             decoder_positions,
-            decoder_mask,
             deterministic,
             decode,
             max_decode_length,
@@ -471,38 +293,23 @@ class Transformer(nn.Module):
   def __call__(
       self,
       decoder_input_tokens,
-      decoder_target_tokens,
+      decoder_positions,
       decoder_segment_ids=None,
-      decoder_positions=None,
       enable_dropout=True,
       decode=False,
       max_decode_length=None):
     """Applies Transformer decoder-branch on encoded-input and target."""
-    cfg = self.config
 
-    # Make padding attention masks.
-    if decode:
-      # Do not mask decoder attention based on targets padding at
-      # decoding/inference time.
-      decoder_mask = None
-    else:
-      decoder_mask = make_decoder_mask(
-          decoder_target_tokens=decoder_target_tokens,
-          dtype=cfg.dtype,
-          decoder_segment_ids=decoder_segment_ids)
-
-    # Add segmentation block-diagonal attention masks if using segmented data.
     if decoder_segment_ids is not None:
       if decode:
         raise ValueError(
             'During decoding, packing should not be used but '
-            '`encoder_segment_ids` was passed to `Transformer.decode`.')
+            '`decoder_segment_ids` was passed to `Transformer.decode`.')
 
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
-        decoder_mask=decoder_mask,
         deterministic=not enable_dropout,
         decode=decode,
         max_decode_length=max_decode_length)
