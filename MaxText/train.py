@@ -308,6 +308,9 @@ def train_loop(config, state=None):
 
   start_step = get_first_step(state) # this is the start_step for training
   first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
+  if config.enable_profiler and first_profiling_step >= config.steps:
+    raise ValueError("Profiling requested but initial profiling step set past training final step")
+  last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1, first_profiling_step, config.steps - 1)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
@@ -337,7 +340,9 @@ def train_loop(config, state=None):
     if config.gcs_metrics and jax.process_index() == 0:
       running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
 
-  max_utils.deactivate_profiler(config)
+    if step == last_profiling_step:
+      max_utils.deactivate_profiler(config)
+
   writer.close()
   return state
 
