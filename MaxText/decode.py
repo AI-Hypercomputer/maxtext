@@ -79,7 +79,7 @@ def predict_step(inputs,
   initial_variables = model.init(
       {'params': rngkey, 'dropout': rngkey, 'aqt': rngkey},
       jnp.ones(target_shape, config.dtype),
-      None,
+      jnp.ones(target_shape),
       enable_dropout=False,
       decode=True,
       max_decode_length=config.max_predict_length
@@ -89,13 +89,14 @@ def predict_step(inputs,
   def tokens_ids_to_logits(flat_ids, flat_cache, aqt_rng):
     """Token slice to logits from decoder model."""
     # --> [batch * beam, 1, vocab]
+
     flat_logits, new_vars = model.apply(
         {
             "params": state.params,
             "cache": flat_cache
         },
         flat_ids,
-        None,
+        jnp.ones(flat_ids.shape),
         enable_dropout=False,
         decode=True,
         rngs={'aqt': aqt_rng},

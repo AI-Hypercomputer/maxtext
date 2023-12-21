@@ -49,54 +49,14 @@ BATCH = common_types.BATCH
 LENGTH = common_types.LENGTH
 HEAD = common_types.HEAD
 D_KV = common_types.D_KV
+DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
+
 
 nd_dense_init = initializers.nd_dense_init
 shard_map = shard_map.shard_map
 
 dynamic_vector_slice_in_dim = jax.vmap(
     lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
-
-
-def combine_biases(*masks: Array | None):
-  """Combine attention biases.
-
-  Args:
-    *masks: set of attention bias arguments to combine, some can be None.
-
-  Returns:
-    Combined mask, reduced by summation, returns None if no masks given.
-  """
-  masks = [m for m in masks if m is not None]
-  if not masks:
-    return None
-  assert all(map(lambda x: x.ndim == masks[0].ndim, masks)), (
-      f'masks must have same rank: {tuple(map(lambda x: x.ndim, masks))}')
-  mask, *other_masks = masks
-  for other_mask in other_masks:
-    mask = mask + other_mask
-  return mask
-
-
-def combine_masks(*masks: Array | None, dtype: DType = jnp.float32):
-  """Combine attention masks.
-
-  Args:
-    *masks: set of attention mask arguments to combine, some can be None.
-    dtype: final mask dtype
-
-  Returns:
-    Combined mask, reduced by logical and, returns None if no masks given.
-  """
-  masks = [m for m in masks if m is not None]
-  if not masks:
-    return None
-  assert all(map(lambda x: x.ndim == masks[0].ndim, masks)), (
-      f'masks must have same rank: {tuple(map(lambda x: x.ndim, masks))}')
-  mask, *other_masks = masks
-  for other_mask in other_masks:
-    mask = jnp.logical_and(mask, other_mask)
-  return mask.astype(dtype)
-
 
 def _maybe_aqt_einsum(int8_training, aqt_rng):
   """Maybe overwrite dot general with aqt_dot_general."""
@@ -194,7 +154,7 @@ class MultiHeadDotProductAttention(nn.Module):
       dropout_rng: PRNGKey | None) -> Array:
     """Apply attention dropout."""
     keep_prob = 1.0 - self.dropout_rate
-    # Broadcast dropout mask along the query dim.
+    # Broadcast dropout along the query dim.
     dropout_shape = list(attn_weights.shape)
     dropout_shape[-2] = 1
     keep = random.bernoulli(dropout_rng, keep_prob, dropout_shape)
@@ -260,21 +220,42 @@ class MultiHeadDotProductAttention(nn.Module):
       name='key_rotary')(inputs=key, position=inputs_positions)
     return key
 
+
+  # Following Pallas MHA Flash Attention Reference.
+  # https://github.com/google/jax/blob/main/jax/experimental/pallas/ops/tpu/flash_attention.py
+  def generate_attention_mask(
+      self,
+      query,
+      key,
+      decoder_segment_ids: Array | None,
+      decode: bool = False,
+  ) -> Array | None:
+    mask = None
+    if decoder_segment_ids is not None:
+      mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
+      mask = mask[:, None, :, :]
+
+    _, q_seq_len, _, _ = query.shape
+    _, kv_seq_len, _, _ = key.shape
+    mask_shape = (q_seq_len, kv_seq_len)
+    row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
+    col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
+    causal_mask = (col_ids <= row_ids)[None, None, :, :]
+
+    mask = causal_mask if mask is None else jnp.logical_and(mask, causal_mask)
+    return jnp.where(mask, 0.0, DEFAULT_MASK_VALUE) if mask is not None else None
+
   def apply_attention(
       self,
       query: Array,
       key: Array,
       value: Array,
       decoder_segment_ids: Array | None,
-      attention_bias: Array | None,
       dropout_rng: PRNGKey | None,
       deterministic: bool,
       decode: bool = False,
   ) -> Array:
     """Apply Attention."""
-
-    del decoder_segment_ids
-    del decode
 
     aqt_rng = self.make_rng('aqt')
     self.check_attention_inputs(query, key, value)
@@ -287,9 +268,9 @@ class MultiHeadDotProductAttention(nn.Module):
     # QK Product, a.k.a `attn_weights`: [batch, num_heads, q_length, kv_length]
     attn_weights = self.qk_product(query, key)
 
-    # Apply attention bias: masking, dropout, proximity bias, etc.
-    if attention_bias is not None:
-      attn_weights = attn_weights + attention_bias.astype(attn_weights.dtype)
+    attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, decode)
+    if attn_mask is not None:
+      attn_weights += attn_mask
 
     # Normalize the attention weights across `kv_length` dimension.
     attn_weights = jax.nn.softmax(attn_weights).astype(self.dtype)
@@ -297,6 +278,8 @@ class MultiHeadDotProductAttention(nn.Module):
     # Apply attention dropout.
     if not deterministic and self.dropout_rate > 0.:
       attn_weights = self.attention_dropout(attn_weights, dropout_rng)
+
+
 
     # Take the linear combination of `value`.
     return self.wv_product(attn_weights, value, aqt_rng)
@@ -344,8 +327,6 @@ class MultiHeadDotProductAttention(nn.Module):
       self,
       key: Array,
       value: Array,
-      mask: Array,
-      bias: Array,
       query_shape: Sequence[int]
   ) -> tuple[Array, Array, Optional[Array], Optional[Array]]:
     """Decoding method.
@@ -360,7 +341,6 @@ class MultiHeadDotProductAttention(nn.Module):
       key: in shape [b, s, n, d].
       value: in shape [b, s, n, d].
       mask: 
-      bias:  
       query_shape: expected to be [b, 1, n, d].
 
     Returns:
@@ -379,7 +359,7 @@ class MultiHeadDotProductAttention(nn.Module):
                                 lambda: jnp.array(0, dtype=jnp.int32))
 
     if not is_initialized:
-      return key, value, mask, bias
+      return key, value
 
     batch, num_heads, head_dim, length = cached_key.value.shape
     # During fast autoregressive decoding, we feed one position at a time,
@@ -415,37 +395,14 @@ class MultiHeadDotProductAttention(nn.Module):
     key = self.revert_kvlen_axis(key)
     value = self.revert_kvlen_axis(value)
 
-    # Causal mask for cached decoder self-attention: our single query
-    # position should only attend to those key positions that have already
-    # been generated and cached, not the remaining zero elements.
-    mask = combine_masks(
-        mask,
-        jnp.broadcast_to(
-            jnp.arange(length) <= cur_index,
-            # (1, 1, length) represent (head dim, query length, key length)
-            # query length is 1 because during decoding we deal with one
-            # index.
-            # The same mask is applied to all batch elements and heads.
-            (batch, 1, 1, length)))
-
-    # Grab the correct relative attention bias during decoding. This is
-    # only required during single step decoding.
-    if bias is not None:
-      # The bias is a full attention matrix, but during decoding we only
-      # have to take a slice of it.
-      # This is equivalent to bias[..., cur_index:cur_index+1, :].
-      bias = dynamic_vector_slice_in_dim(
-          jnp.squeeze(bias, axis=0), jnp.reshape(cur_index, (-1)), 1, -2)
-    return key, value, mask, bias
+    return key, value
 
   @nn.compact
   def __call__(self,
                inputs_q: Array,
                inputs_kv: Array,
+               inputs_positions: Array,
                decoder_segment_ids = None,
-               inputs_positions: Optional[Array] = None,
-               mask: Optional[Array] = None,
-               bias: Optional[Array] = None,
                *,
                decode: bool = False,
                deterministic: bool = False):
@@ -469,8 +426,6 @@ class MultiHeadDotProductAttention(nn.Module):
     Args:
       inputs_q: input queries of shape `[batch, q_length, q_features]`.
       inputs_kv: key/values of shape `[batch, kv_length, kv_features]`.
-      mask: attention mask of shape `[batch, num_heads, q_length, kv_length]`.
-      bias: attention bias of shape `[batch, num_heads, q_length, kv_length]`.
       decode: Whether to prepare and use an autoregressive cache.
       deterministic: Disables dropout if set to True.
 
@@ -497,22 +452,8 @@ class MultiHeadDotProductAttention(nn.Module):
     value = checkpoint_name(value, 'value_proj')
 
     if decode:
-      key, value, mask, bias = self.decode(key, value, mask, bias, query.shape)
+      key, value = self.decode(key, value, query.shape)
 
-    # Convert the boolean attention mask to an attention bias.
-    if mask is not None:
-      # attention mask in the form of attention bias
-      attention_bias = lax.select(
-          mask > 0,
-          jnp.full(mask.shape, 0.0).astype(self.dtype),
-          jnp.full(mask.shape, -1e10).astype(self.dtype),
-      )
-    else:
-      attention_bias = None
-
-    # Add provided bias term (e.g. relative position embedding).
-    if bias is not None:
-      attention_bias = combine_biases(attention_bias, bias)
 
     dropout_rng = None
     if not deterministic and self.dropout_rate > 0.0:
@@ -524,7 +465,6 @@ class MultiHeadDotProductAttention(nn.Module):
         key,
         value,
         decoder_segment_ids,
-        attention_bias,
         dropout_rng,
         deterministic,
         decode=decode
@@ -652,13 +592,12 @@ class FlashMultiHeadDotProductAttention(MultiHeadDotProductAttention):
       key: Array,
       value: Array,
       decoder_segment_ids: Array | None,
-      attention_bias: Array | None,
       dropout_rng: PRNGKey | None,
       deterministic: bool,
       decode: bool = False) -> Array:
     """"Applies flash attention."""
 
-    del attention_bias, dropout_rng, deterministic
+    del dropout_rng, deterministic
 
     if decode:
       raise ValueError("""Decode not supported with flash attention.
