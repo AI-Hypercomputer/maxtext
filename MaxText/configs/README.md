@@ -37,15 +37,23 @@ These configurations do 3 things:
      gcloud compute firewall-rules create mtu9kfw --network mtu9k --allow tcp,icmp,udp --project=${PROJECT}
      ```
      
-     When you create your TPUs, you need to indicate they should be part of this network using the `--network` flag (`--network=mtu9k`). Below is an 
-     example of a queued-resources request
+     When you create your TPUs, you need to indicate they should be part of this network. 
+     
+     Here is an example of a queued-resources request on GCE using the `--network` flag (`--network=mtu9k`). 
      ```
      gcloud alpha compute tpus queued-resources create ${QR_ID} --node-prefix=${TPU_NAME} --node-count=${NUM_SLICES} --accelerator_type=${ACCELERATOR_TYPE} --runtime_version=${RUNTIME_VERSION} --network=mtu9k --project=${PROJECT} --zone=${ZONE}
      ```
-     Note: If you want to use only one slice, you need to replace node-prefix with node-id, and remove node-count
+     Note: If you want to use only one slice, you need to replace node-prefix with node-id, and remove node-count.
+     
+     Here is an example of creating a GKE cluster with XPK using the `--network` and `--subnetwork` flags (`--network=mtu9k --subnetwork=mtu9k`).
+     ```
+     export CLUSTER_ARGUMENTS="--network=mtu9k --subnetwork=mtu9k"
+     
+     python3 xpk/xpk.py cluster create --cluster ${YOUR_CLUSTER_NAME} --tpu-type ${ACCELERATOR_TYPE} --num-slices ${NUM_SLICES} --custom-cluster-arguments="${CLUSTER_ARGUMENTS}"
+     ```
 
 ### Run model config scripts on TPUs
-1. You can run these model configs on the GCE platform using `multihost_runner.py` or `multihost_job.py`, or on the GKE platform using `XPK`. Take a look at the [getting_started](https://github.com/google/maxtext/tree/main/getting_started) directory for directions on how to set up your TPUs and use these tools.
+1. You can run these model configs on the GCE platform using `multihost_runner.py` or `multihost_job.py`, or on the GKE platform using [XPK](https://github.com/google/xpk). Take a look at the [getting_started](https://github.com/google/maxtext/tree/main/getting_started) directory for directions on how to set up your TPUs and use these tools.
 
 2. Here are some example commands to run the model configs:
 
