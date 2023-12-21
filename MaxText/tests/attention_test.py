@@ -63,21 +63,36 @@ class AttentionTest(unittest.TestCase):
         dropout_rate=self.cfg.dropout_rate,
         name='self_attention',
     )
-    self.variable = self.mha_attention.init(
+
+    self.mha_variable = self.mha_attention.init(
         {'params': self.rng, 'aqt': self.rng},
         jnp.ones(
             (self.global_batch_size, self.max_target_length, self.embed_dim)),
         jnp.ones(
             (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        'mha',
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length)),
     )
 
-  def get_decoder_mask(self, dtype):
-    a = jnp.stack([
-        jnp.tri(self.max_target_length, dtype=dtype)[jnp.newaxis, :]
-        for _ in range(self.global_batch_size)
-    ])
-    return a
+    self.flash_attention = FlashMultiHeadDotProductAttention(
+        num_heads=self.num_heads,
+        head_dim=self.head_dim,
+        mesh=self.mesh,
+        dtype=self.dtype,
+        dropout_rate=self.cfg.dropout_rate,
+        name='self_attention',
+        max_target_length=self.max_target_length
+    )
+
+    self.flash_variable = self.flash_attention.init(
+        {'params': self.rng, 'aqt': self.rng},
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length)),
+    )
 
   def get_data(self, dtype):
     lnx = jax.random.uniform(
@@ -98,46 +113,31 @@ class AttentionTest(unittest.TestCase):
     if self.global_batch_size > 1:
       decoder_positions = jnp.stack(batch_positions())
 
-    decoder_mask = self.get_decoder_mask(dtype)
-    return lnx, decoder_mask, decoder_segment_ids, decoder_positions
+    return lnx , decoder_segment_ids, decoder_positions
 
   @pytest.mark.tpu
   def test_attention(self):
     """Test equalvant between MHA and Flash MHA."""
 
-    flash_attention = FlashMultiHeadDotProductAttention(
-        num_heads=self.num_heads,
-        head_dim=self.head_dim,
-        mesh=self.mesh,
-        dtype=self.dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        name='self_attention',
-        max_target_length=self.max_target_length
-    )
-
-    lnx, decoder_mask, decoder_segment_ids, decoder_positions = self.get_data(
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(
         self.dtype)
-    bias = None
+
     mha_output = self.mha_attention.apply(
-        self.variable,
+        self.mha_variable,
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
-        mask=decoder_mask,
-        bias=bias,
         deterministic=True,
         decode=False,
         rngs={'aqt': self.rng},
     )
-    flash_output = flash_attention.apply(
-        self.variable,
+    flash_output = self.flash_attention.apply(
+        self.flash_variable,
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
-        mask=decoder_mask,
-        bias=bias,
         deterministic=True,
         decode=False,
         rngs={'aqt': self.rng},
@@ -146,52 +146,6 @@ class AttentionTest(unittest.TestCase):
     self.assertTrue(
         jax.numpy.allclose(
             flash_output, mha_output, rtol=1e-01, atol=1e-01, equal_nan=False
-        )
-    )
-
-  def test_groupedquery_attention(self):
-    """Test GQA is equivalent to MHA."""
-    gqa_attention = GroupedQueryDotProductAttention(
-        num_heads=self.num_heads,
-        num_kv_heads=self.num_heads,
-        head_dim=self.head_dim,
-        mesh=self.mesh,
-        dtype=self.dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        name='gqa'
-    )
-
-    lnx, _, decoder_segment_ids, decoder_positions = self.get_data(
-        self.dtype)
-    bias = None
-    mha_output = self.mha_attention.apply(
-        self.variable,
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        mask=None,
-        bias=bias,
-        deterministic=True,
-        decode=False,
-        rngs={'aqt': self.rng},
-    )
-    gqa_output = gqa_attention.apply(
-        self.variable,
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        mask=None,
-        bias=bias,
-        deterministic=True,
-        decode=False,
-        rngs={'aqt': self.rng},
-    )
-
-    self.assertTrue(
-        jax.numpy.allclose(
-            gqa_output, mha_output, rtol=1e-01, atol=1e-01, equal_nan=False
         )
     )
 

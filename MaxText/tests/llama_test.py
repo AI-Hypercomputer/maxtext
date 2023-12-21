@@ -93,12 +93,15 @@ class LlamaRoPETest(unittest.TestCase):
     )
 
     llama_output = apply_rotary_emb(
-    jnp.asarray(x_q), jnp.asarray(x_k), freqs_cis
+        jnp.asarray(x_q), jnp.asarray(x_k), freqs_cis
     )
 
+    seq_length = x_q.shape[1]
+    position = jnp.arange(seq_length, dtype=jnp.float32)[jnp.newaxis, :]
+
     # Calculate RoPE embeddings from MaxText implementation
-    query_proj = embeddings.LLaMARotaryEmbedding(embedding_dims = dim_per_head)(x_q)
-    key_proj = embeddings.LLaMARotaryEmbedding(embedding_dims = dim_per_head)(x_k)
+    query_proj = embeddings.LLaMARotaryEmbedding(embedding_dims = dim_per_head)(x_q, position = position)
+    key_proj = embeddings.LLaMARotaryEmbedding(embedding_dims = dim_per_head)(x_k, position = position)
 
     # Compare results
     self.assertTrue(jax.numpy.allclose(llama_output[0], query_proj, rtol=1e-02, atol=1e-05, equal_nan=False))

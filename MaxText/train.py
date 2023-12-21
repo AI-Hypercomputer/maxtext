@@ -185,9 +185,8 @@ def train_step(model, config, state, data, dropout_rng):
   def loss_fn(params):
     logits, intermediate_outputs = model.apply({'params': params},
                          data['inputs'],
-                         data['targets'],
-                         data['inputs_segmentation'],
                          data['inputs_position'],
+                         decoder_segment_ids=data['inputs_segmentation'],
                          enable_dropout=config.enable_dropout,
                          rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
     one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
