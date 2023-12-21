@@ -81,6 +81,11 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
 python3 MaxText/decode.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
 ```
 
+* If you see the following error when running inside a container, set a larger `--shm-size` (e.g. `--shm-size=1g`)
+```
+Failed to execute XLA Runtime executable: run time error: custom call 'xla.gpu.all_reduce' failed: external/xla/xla/service/gpu/nccl_utils.cc:297: NCCL operation ncclCommInitRank(&comm, nranks, id, rank) failed: unhandled cuda error (run with NCCL_DEBUG=INFO for details); current tracing scope: all-reduce-start.2; current profiling annotation: XlaModule:#hlo_module=jit__unnamed_wrapped_function_,program_id=7#.
+```
+
 ## Getting Starting: Multihost development
 There are three patterns for running MaxText with more than one host.
 

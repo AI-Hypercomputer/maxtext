@@ -175,6 +175,7 @@ def decode_loop(config, state=None):
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
+  os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
   decode_loop(pyconfig.config)
 
 
