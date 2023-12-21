@@ -154,6 +154,8 @@ enable_profiler: False
 # Skip first n steps for profiling, to omit things like compilation and to give
 # the iteration time a chance to stabilize.
 skip_first_n_steps_for_profiler: 1
+# Profile for a small number of steps to avoid a large profile file size.
+profiler_steps: 5
 # If enable_checkpointing is true, an asynchronous checkpointer will be used if
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the sychronous one.
