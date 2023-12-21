@@ -64,7 +64,10 @@ def decode_tokens(toks, tokenizer):
   return tokenizer.detokenize(toks).numpy().decode("utf-8"), len(toks)
 
 def encode_strings(strs, max_len, tokenizer):
+  #TODO: sequence is zeros for in play, one for out of play.
+
   tokenized_batch = np.zeros((len(strs), max_len), np.int32)
+  segment_ids = np.zeros((len(strs), max_len), np.int32)
   for i, s in enumerate(strs):
     toks = tokenizer.tokenize(s).numpy()
     prompt = toks[:-1] # Remove EOS token in prompt.
@@ -133,6 +136,7 @@ def ar_predict_step(inputs,
       kv_cache,
       tokens_ids_to_logits,
       rngkey,
+      config.max_prefill_predict_length,
       temperature=config.sampling_temperature,
       topk=config.sampling_top_k,
       eos_token=config.eos_id)
@@ -182,17 +186,23 @@ def decode_loop(config, state=None):
   indices = jax.numpy.argmax(prefill_output, axis=2)
   match_input_and_output_stream(replicated_prompts[0], np.array(indices[0,:]), sp_tokenizer)
 
+  # TODO(rwitten): note to self if we want to simulate disagg.
+  #mything2 = orbax_checkpointer.load("/home/rwitten/maxtext/mything")
+  #prefill_output = orbax_checkpointer.restore("/home/rwitten/maxtext/mything")
+
   partial_ar_predict_step = functools.partial(ar_predict_step, model=model, config=config)
   p_ar_predict_step = jax.jit(
       partial_ar_predict_step,
       in_shardings=(replicated_sharding, None, state_mesh_shardings, None), # sharding strategy?
       out_shardings=(None,None)
   )
+  #import pdb ; pdb.set_trace()
   prompt_for_inference = jax.numpy.pad(tokenized_prompts, ((0,0),(0, config.max_predict_length-config.max_prefill_predict_length)))
   seqs, output_cache = p_ar_predict_step(prompt_for_inference, prefill_cache, state, rng)
   ### TODO: assert that they don't mess with our first N tokens.
-  match_input_and_output_stream(np.array(seqs[0,:]), np.array(seqs[0,:]), sp_tokenizer)
-  import pdb; pdb.set_trace()
+  match_input_and_output_stream(np.array(seqs[0,:]), np.array(seqs[0,1:]), sp_tokenizer)
+  import pdb ; pdb.set_trace()
+
   sys.exit(1)
 
   if config.metrics_file:

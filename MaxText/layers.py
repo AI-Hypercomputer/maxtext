@@ -251,12 +251,16 @@ class MultiHeadDotProductAttention(nn.Module):
       query = jax.numpy.transpose(query, axes = (0,2,1,3))
       key = jax.numpy.transpose(key, axes = (0,2,1,3))
       value = jax.numpy.transpose(value, axes = (0,2,1,3))
+      if model_mode == "autoregressive":
+        causal = False
+      else:
+        causal = True
       x = tpu_flash_attention.mha_reference(
           query,
           key,
           value,
           None,
-          causal = True,
+          causal = causal,
           segment_ids = decoder_segment_ids
       )
       x = jax.numpy.transpose(x, axes = (0,2,1,3))
@@ -404,6 +408,9 @@ class MultiHeadDotProductAttention(nn.Module):
 
       key_to_use = unswap_axes(cached_key.value)
       value_to_use = unswap_axes(cached_value.value)
+
+      #jax.debug.print("key_to_use {}", key_to_use[0,:,0,0])
+      #jax.debug.print("Decoder segment ids {}", decoder_segment_ids)
     elif model_mode == "train":
       '''
       No KV cache!

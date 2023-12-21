@@ -33,6 +33,7 @@ def temperature_sample(prompt_inputs,
                        init_cache,
                        tokens_to_logits,
                        prng_key,
+                       start_pos,
                        temperature=1.0,
                        topk=20,
                        eos_token=EOS_ID):
@@ -60,9 +61,10 @@ def temperature_sample(prompt_inputs,
   # initial loop PRNGKey
   rng0 = prng_key
   # loop position counter.
-  i0 = jnp.array(0)
+  i0 = jnp.array(start_pos-1)
   # per batch-item holding current token in loop.
-  token0 = jnp.zeros((batch_size, 1), dtype=jnp.int32)
+  token0 = prompt_inputs[:, start_pos-1:start_pos]
+  jax.debug.print("token0 {}", token0)
   # per batch-item state bit indicating if sentence has finished.
   ended0 = jnp.zeros((batch_size, 1), dtype=jnp.bool_)
   # (batch, length) array containing prefix prompt tokens for sampling loop
@@ -87,6 +89,10 @@ def temperature_sample(prompt_inputs,
     rng1, rng2 = random.split(rng)
     # Call fast-decoder model on current tokens to get next-position logits.
     logits, new_cache = tokens_to_logits(cur_token, cache, rng1)
+    #jax.debug.print("new logit[25]: {}", logits[0,25])
+    #jax.debug.print("old_cache {}", cache['decoder']['decoder']['self_attention']['cached_key'][0,0,0,0,:])
+    #jax.debug.print("new_cache {}", new_cache['decoder']['decoder']['self_attention']['cached_key'][0,0,0,0,:])
+    #jax.debug.print("new_cache index {}", new_cache['decoder']['decoder']['self_attention']['cache_index'][0])
     # Sample next token from logits.
     # TODO: add top-p "nucleus" sampling option.
     if topk:
@@ -100,10 +106,9 @@ def temperature_sample(prompt_inputs,
     else:
       next_token = random.categorical(
           rng1, logits / temperature).astype(jnp.int32)
-    # Only use sampled tokens if we're past provided prefix tokens.
-    out_of_prompt = (sequences[:, i+1] == 0)
-    next_token = (next_token * out_of_prompt +
-                  sequences[:, i+1] * ~out_of_prompt)
+      
+    jax.debug.print("next_token {}", next_token)
+
     # If end-marker reached for batch item, only emit padding tokens.
     next_token_or_endpad = (next_token[:, None] * ~ended)
     ended |= (next_token_or_endpad == end_marker)
