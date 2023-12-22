@@ -67,33 +67,57 @@ def _maybe_aqt_einsum(int8_training, aqt_rng):
     return functools.partial(jnp.einsum, _dot_general=aqt_dot_general)
 
 
-class MultiHeadDotProductAttention(nn.Module):
-
-  """Multi-head dot-product attention.
+class Attention(nn.Module):
+  """ Generic Attention.
 
     Attributes:
-      num_heads: number of attention heads. Features (i.e. inputs_q.shape[-1])
+      num_query_heads: number of query attention heads. Features (i.e. inputs_q.shape[-1])
         should be divisible by the number of heads.
+      num_kv_heads: number of kv attention heads.
       head_dim: dimension of each head.
+      mesh: Mesh, device mesh
+      attention_kernel: str, guidance on if we should use an attention kernel
       dtype: the dtype of the computation.
       dropout_rate: dropout rate
       kernel_init: initializer for the kernel of the Dense layers.
       float32_logits: bool, if True then compute logits in float32 to avoid
         numerical issues with bfloat16.
+      use_int8: bool, if true accelerate in int8
   """
-  num_heads: int
+    
+  num_query_heads: int
+  num_kv_heads: int
   head_dim: int
   mesh: Mesh
+  attention_kernel: str
   dtype: DType = jnp.float32
   dropout_rate: float = 0.
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
   float32_logits: bool = False  # computes logits in float32 for stability.
   use_int8: bool = False
+  
 
   query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
   key_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
   value_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
   out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
+
+
+
+  def check_attention_inputs(
+      self,
+      query: Array,
+      key: Array,
+      value: Array) -> None:
+    """Check attention inputs."""
+
+    assert key.ndim == value.ndim, 'k, v must have same rank.'
+    assert query.shape[:-3] == key.shape[:-3] == value.shape[:-3], (
+        'q, k, v batch dims must match.')
+    assert key.shape[-2] == value.shape[-2], ('k, v num_kv_heads must match.')
+    assert key.shape[-3] == value.shape[-3], 'k, v lengths must match.'
+    assert query.shape[-1] == key.shape[-1], 'q, k depths must match.'
 
   def query_projection(self, inputs_q: Array) -> Array:
     """Query projection."""
@@ -107,7 +131,7 @@ class MultiHeadDotProductAttention(nn.Module):
       return self.kernel_init(*args) / depth_scaling
 
     query_proj = DenseGeneral(
-      features=(self.num_heads, self.head_dim),
+      features=(self.num_query_heads, self.head_dim),
       axis=-1,
       kernel_init=query_init,
       kernel_axes=('embed', 'heads', 'kv'),
@@ -119,22 +143,28 @@ class MultiHeadDotProductAttention(nn.Module):
   def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:
     """Projection for Key and Value.
 
-    Args;
-      inputs_kv: inputs_kv: key/values of shape `[batch, kv_length, kv_features]`.
+    Args:
+      inputs_kv: inputs_kv: key/values of shape `[batch, kv_length,
+        num_kv_heads, kv_dim]`.
       proj_name: name of projection, `key` or `value`.
 
     Returns:
-      Projection of key or value, in shape of `[batch, kv_length, num_heads,
-      head_dim]`.
+      Projection of key or value, in shape of `[batch, kv_length, head_dim]`.
     """
+    if self.num_kv_heads <= 0:
+      raise ValueError(f'{self.num_kv_heads=} is not defined.')
+
+    if self.num_query_heads % self.num_kv_heads != 0:
+      raise ValueError(f'Invaid num_kv_heads for GQA, {self.num_query_heads=}, {self.num_kv_heads=}.')
+
     kv_proj = DenseGeneral(
-      features=(self.num_heads, self.head_dim),
-      axis=-1,
-      kernel_init=self.kernel_init,
-      kernel_axes=('embed', 'heads', 'kv'),
-      dtype=self.dtype,
-      name=proj_name,
-      use_int8=self.use_int8)(inputs_kv)
+        features=(self.num_kv_heads, self.head_dim),
+        axis=-1,
+        kernel_init=self.kernel_init,
+        kernel_axes=('embed', 'heads', 'kv'),
+        dtype=self.dtype,
+        name=proj_name,
+        use_int8=self.use_int8)(inputs_kv)
     return kv_proj
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
@@ -165,33 +195,24 @@ class MultiHeadDotProductAttention(nn.Module):
     attn_weights = attn_weights * multiplier
     return attn_weights
 
-  def check_attention_inputs(
-      self,
-      query: Array,
-      key: Array,
-      value: Array) -> None:
-    """Check attention inputs."""
-
-    assert key.ndim == query.ndim == value.ndim, 'q, k, v must have same rank.'
-    assert query.shape[:-3] == key.shape[:-3] == value.shape[:-3], (
-        'q, k, v batch dims must match.')
-    assert query.shape[-2] == key.shape[-2] == value.shape[-2], (
-        'q, k, v num_heads must match.')
-    assert key.shape[-3] == value.shape[-3], 'k, v lengths must match.'
-    assert query.shape[-1] == key.shape[-1], 'q, k depths must match.'
-
   def qk_product(self, query: Array, key: Array) -> Array:
     """Query-Key product.
-
+    
     Args:
       query: Query projection, in shape of [b, t, n, d], where b: batch size, t:
-        query length, n: number of heads, d: project dimension.
-      key: Key projection in shape of [b, s, n, d] for multihead attention.
+        query length, n: number of heads, d: project dimension. 
+      key: Key projection in shape of [b, s, n_kv, d] for where n_kv is 
+        kv heads. The number of group for query is n // n_kv.
 
     Returns:
-      results in shape [b, n, t, s].
+      results in shape [b, n_kv, n // n_kv,  t, s].
     """
-    return jnp.einsum('btnd,bsnd->bnts', query, key)
+    b, t, n, d = query.shape
+    n_kv = key.shape[-2]
+    assert n_kv == self.num_kv_heads
+    query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
+    return jnp.einsum('btkgd,bskd->bkgts', query, key)
+
 
   def wv_product(
       self,
@@ -199,19 +220,19 @@ class MultiHeadDotProductAttention(nn.Module):
       value: Array,
       aqt_rng: PRNGKey | None) -> Array:
     """weighted value product.
-
+    
     Args:
-      attn_weights: Computed results of qk_einsum, in shape of [b, n, t, s] for
-        multi-head attention
-      value: Value projection, in shape of [b, s, n, d] for multi-head attention
+      attn_weights: Computed results of qk_einsum, in shape of [b, n, t, s].
+      value: Value projection, in shape of [b, s, d] for multi-head attention.
       aqt_rng: A PRNGKey for aqt ops.
 
     Returns:
       result in shape [b, t, n, d]
     """
-
     einsum = _maybe_aqt_einsum(self.use_int8, aqt_rng)
-    return einsum('bnts,bsnd->btnd', attn_weights, value)
+    out = einsum('bkgts,bskd->btkgd', attn_weights, value)
+    b, t, n_kv, g, d = out.shape
+    return jnp.reshape(out, (b, t, n_kv * g, d))
 
   def key_rotary(self, key: Array, inputs_positions: Array):
     """Apply Rotary Embedding to key."""
@@ -233,19 +254,151 @@ class MultiHeadDotProductAttention(nn.Module):
     mask = None
     if decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
-      mask = mask[:, None, :, :]
+      mask = mask[:, None, None,:, :]
 
     _, q_seq_len, _, _ = query.shape
     _, kv_seq_len, _, _ = key.shape
     mask_shape = (q_seq_len, kv_seq_len)
     row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
     col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
-    causal_mask = (col_ids <= row_ids)[None, None, :, :]
+    causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
 
     mask = causal_mask if mask is None else jnp.logical_and(mask, causal_mask)
     return jnp.where(mask, 0.0, DEFAULT_MASK_VALUE) if mask is not None else None
+  
+  def apply_attention(self,
+      query: Array,
+      key: Array,
+      value: Array,
+      decoder_segment_ids: Array | None,
+      dropout_rng: PRNGKey | None,
+      deterministic: bool,
+      decode: bool = False) -> Array:
+    
+    if self.attention_kernel == "dot_product":
+      return self.apply_attention_dot(query, key, value, decoder_segment_ids, dropout_rng, deterministic, decode)
+    elif self.attention_kernel == 'flash':
+      if decode:
+        raise ValueError("""Decode not supported with flash attention.
+                            Use `dot_product` instead.""")
+      return self.tpu_flash_attention(query, key, value, decoder_segment_ids)
+    elif self.attention_kernel == 'gpu_flash' or self.attention_kernel == 'gpu_flash_triton':
+      if decode:
+        raise ValueError("""Decode not supported with flash attention.
+                            Use `dot_product` instead.""")
+      return self.gpu_flash_attention(query, key, value)
+    else:
+      raise ValueError(f'Unexpected attention kernel {self.attention_kernel=}.')
 
-  def apply_attention(
+  def tpu_flash_attention(
+    self,
+    query: Array,
+    key: Array,
+    value: Array,
+    decoder_segment_ids: Array | None) -> Array:
+    """TPU Flash Attention."""
+    # Transpose to ('batch', 'heads', 'length', 'kv')
+    query = jnp.transpose(query, axes=(0, 2, 1, 3))
+    key = jnp.transpose(key, axes=(0, 2, 1, 3))
+    value = jnp.transpose(value, axes=(0, 2, 1, 3))
+    if not(query.shape[1] == key.shape[1] == value.shape[1]):
+      raise ValueError(f"The flash attention kernel requires Q, K and V to have the same number of heads"
+                       "{query.shape=} {key.shape=}, {value.shape=}")
+
+    if decoder_segment_ids is not None:
+      decoder_segment_ids = tpu_flash_attention.SegmentIds(
+          decoder_segment_ids, decoder_segment_ids
+      )
+    axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
+    segment_axis_names = nn.logical_to_mesh_axes(
+        (BATCH, 'activation_length_no_heads')
+    )
+
+    @functools.partial(
+        shard_map,
+        mesh=self.mesh,
+        in_specs=(
+            axis_names,
+            axis_names,
+            axis_names,
+            segment_axis_names,
+        ),
+        out_specs=axis_names,
+        check_rep=False,
+    )
+    def wrap_flash_attention(query, key, value, decoder_segment_ids):
+      if decoder_segment_ids is not None:
+        assert (
+            query.shape[2]
+            == decoder_segment_ids.q.shape[1]
+        ), 'Sharding along sequence dimension not allowed in flash attention'
+      return tpu_flash_attention.flash_attention(
+          query,
+          key,
+          value,
+          causal=True,
+          segment_ids=decoder_segment_ids,
+          block_sizes=tpu_flash_attention.BlockSizes(
+              block_q=min(512, query.shape[2]),
+              block_k_major=min(512, key.shape[2]),
+              block_k=min(512, key.shape[2]),
+              block_b=min(2, query.shape[0]),
+              block_q_major_dkv=min(512, query.shape[2]),
+              block_k_major_dkv=min(512, key.shape[2]),
+              block_q_dkv=min(512, query.shape[2]),
+              block_k_dkv=min(512, key.shape[2]),
+              block_q_dq=min(1024, query.shape[2]),
+              block_k_dq=min(256, key.shape[2]),
+              block_k_major_dq=min(512, key.shape[2]),
+          ),
+      )
+
+    devices_in_data_fsdp = self.mesh.shape['data'] * self.mesh.shape['fsdp']
+    assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
+        'Batch dimension should be shardable among the devices in data and fsdp'
+        ' axis'
+    )
+    x = wrap_flash_attention(query, key, value, decoder_segment_ids)
+    x = jnp.transpose(x, axes=(0, 2, 1, 3))
+    return x
+
+  def gpu_flash_attention(
+      self,
+      query: Array,
+      key: Array,
+      value: Array,
+  ) -> Array:
+    """GPU Flash Attention."""
+    b, n, s, h = key.shape # pylint: disable=unused-variable
+    if self.attention_kernel == "gpu_flash_xla":
+      bwd_pass_impl = "xla"
+    elif self.attention_kernel == "gpu_flash_triton":
+      bwd_pass_impl = "triton"
+    else:
+      raise ValueError(f"Can't convert {self.attention_kernel } to a bwd_pass_impl")
+  
+    bwd_pass_impl = self.config.gpu_flash_attention_backward_pass_impl
+    axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
+    segment_axis_names = nn.logical_to_mesh_axes((BATCH, LENGTH))
+
+    @functools.partial(
+        shard_map,
+        mesh = self.mesh,
+        in_specs = (
+          axis_names,
+          axis_names,
+          axis_names,
+          segment_axis_names),
+        out_specs = axis_names,
+        check_rep=False)
+    def wrap_gpu_flash_attention(query, key, value):
+      return pallas_attention.mha(
+        query, key, value, sm_scale=1.0 / math.sqrt(h), backward_pass_impl=bwd_pass_impl,
+        num_stages = 1, causal = True, segment_ids = None
+      )
+    return wrap_gpu_flash_attention(query, key, value)
+
+  def apply_attention_dot(
       self,
       query: Array,
       key: Array,
@@ -256,7 +409,6 @@ class MultiHeadDotProductAttention(nn.Module):
       decode: bool = False,
   ) -> Array:
     """Apply Attention."""
-
     aqt_rng = self.make_rng('aqt')
     self.check_attention_inputs(query, key, value)
 
@@ -265,7 +417,7 @@ class MultiHeadDotProductAttention(nn.Module):
       query = query.astype(jnp.float32)
       key = key.astype(jnp.float32)
 
-    # QK Product, a.k.a `attn_weights`: [batch, num_heads, q_length, kv_length]
+    # QK Product, a.k.a `attn_weights`: [batch, num_kv_heads, num_query_heads_per_kv_head, q_length, kv_length]
     attn_weights = self.qk_product(query, key)
 
     attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, decode)
@@ -278,8 +430,6 @@ class MultiHeadDotProductAttention(nn.Module):
     # Apply attention dropout.
     if not deterministic and self.dropout_rate > 0.:
       attn_weights = self.attention_dropout(attn_weights, dropout_rng)
-
-
 
     # Take the linear combination of `value`.
     return self.wv_product(attn_weights, value, aqt_rng)
@@ -340,11 +490,10 @@ class MultiHeadDotProductAttention(nn.Module):
     Args:
       key: in shape [b, s, n, d].
       value: in shape [b, s, n, d].
-      mask: 
       query_shape: expected to be [b, 1, n, d].
 
     Returns:
-      tuple of key, value with cached, 
+      tuple of key, value with cached,
     Raises:
       ValueError: when query shape is not [batch, 1, num_heads, heads_dim].
     """
@@ -474,341 +623,3 @@ class MultiHeadDotProductAttention(nn.Module):
     # apply output projection,  output dim is set to the input dim.
     out = self.out_projection(inputs_q.shape[-1], out)
     return out
-
-
-class FlashMultiHeadDotProductAttention(MultiHeadDotProductAttention):
-  """Multi-head flash attention."""
-
-  max_target_length: int = -1
-  flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
-  device_type: str = 'tpu'
-
-  def tpu_flash_attention(
-      self,
-      query: Array,
-      key: Array,
-      value: Array,
-      decoder_segment_ids: Array | None) -> Array:
-    """TPU Flash Attention."""
-
-    if self.max_target_length == -1:
-      raise ValueError('max_target_length must be defined for flash MHA.')
-
-    # Transpose to ('batch', 'heads', 'length', 'kv')
-    query = jax.numpy.transpose(query, axes=(0, 2, 1, 3))
-    key = jax.numpy.transpose(key, axes=(0, 2, 1, 3))
-    value = jax.numpy.transpose(value, axes=(0, 2, 1, 3))
-
-    if decoder_segment_ids is not None:
-      decoder_segment_ids = tpu_flash_attention.SegmentIds(
-          decoder_segment_ids, decoder_segment_ids
-      )
-    axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
-    segment_axis_names = nn.logical_to_mesh_axes(
-        (BATCH, 'activation_length_no_heads')
-    )
-
-    @functools.partial(
-        shard_map,
-        mesh=self.mesh,
-        in_specs=(
-            axis_names,
-            axis_names,
-            axis_names,
-            segment_axis_names,
-        ),
-        out_specs=axis_names,
-        check_rep=False,
-    )
-    def wrap_flash_attention(query, key, value, decoder_segment_ids):
-      if decoder_segment_ids is not None:
-        assert (
-            query.shape[2]
-            == self.max_target_length
-            == decoder_segment_ids.q.shape[1]
-        ), 'Sharding along sequence dimension not allowed in flash attention'
-      return tpu_flash_attention.flash_attention(
-          query,
-          key,
-          value,
-          causal=True,
-          segment_ids=decoder_segment_ids,
-          block_sizes=tpu_flash_attention.BlockSizes(
-              block_q=min(512, query.shape[2]),
-              block_k_major=min(512, key.shape[2]),
-              block_k=min(512, key.shape[2]),
-              block_b=min(2, query.shape[0]),
-              block_q_major_dkv=min(512, query.shape[2]),
-              block_k_major_dkv=min(512, key.shape[2]),
-              block_q_dkv=min(512, query.shape[2]),
-              block_k_dkv=min(512, key.shape[2]),
-              block_q_dq=min(1024, query.shape[2]),
-              block_k_dq=min(256, key.shape[2]),
-              block_k_major_dq=min(512, key.shape[2]),
-          ),
-      )
-
-    devices_in_data_fsdp = self.mesh.shape['data'] * self.mesh.shape['fsdp']
-    assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
-        'Batch dimension should be shardable among the devices in data and fsdp'
-        ' axis'
-    )
-    x = wrap_flash_attention(query, key, value, decoder_segment_ids)
-    x = jax.numpy.transpose(x, axes=(0, 2, 1, 3))
-    return x
-
-  def gpu_flash_attention(
-      self,
-      query: Array,
-      key: Array,
-      value: Array,
-  ) -> Array:
-    """GPU Flash Attention."""
-    b, n, s, h = key.shape # pylint: disable=unused-variable
-    bwd_pass_impl = self.config.gpu_flash_attention_backward_pass_impl
-    axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
-    segment_axis_names = nn.logical_to_mesh_axes((BATCH, LENGTH))
-
-    @functools.partial(
-        shard_map,
-        mesh = self.mesh,
-        in_specs = (
-          axis_names,
-          axis_names,
-          axis_names,
-          segment_axis_names),
-        out_specs = axis_names,
-        check_rep=False)
-    def wrap_gpu_flash_attention(query, key, value):
-      return pallas_attention.mha(
-        query, key, value, sm_scale=1.0 / math.sqrt(h), backward_pass_impl=bwd_pass_impl,
-        num_stages = 1, causal = True, segment_ids = None
-      )
-    return wrap_gpu_flash_attention(query, key, value)
-
-  def apply_attention(
-      self,
-      query: Array,
-      key: Array,
-      value: Array,
-      decoder_segment_ids: Array | None,
-      dropout_rng: PRNGKey | None,
-      deterministic: bool,
-      decode: bool = False) -> Array:
-    """"Applies flash attention."""
-
-    del dropout_rng, deterministic
-
-    if decode:
-      raise ValueError("""Decode not supported with flash attention.
-                            Use MHA instead.""")
-    if self.device_type.lower() == 'tpu':
-      return self.tpu_flash_attention(query, key, value, decoder_segment_ids)
-    elif self.device_type.lower() == 'gpu':
-      return self.gpu_flash_attention(query, key, value)
-    else:
-      raise ValueError('Unexpected deivce type.')
-
-
-class MultiQueryDotProductAttention(MultiHeadDotProductAttention):
-  """Multi-Query Attention https://arxiv.org/abs/1911.02150."""
-
-  key_axis_names: AxisNames = (BATCH, LENGTH, D_KV)
-  value_axis_names: AxisNames = (BATCH, LENGTH, D_KV)
-
-  def check_attention_inputs(
-      self,
-      query: Array,
-      key: Array,
-      value: Array) -> None:
-    """Check attention inputs."""
-
-    assert key.ndim == value.ndim, 'k, v must have same rank.'
-    assert query.shape[:-3] == key.shape[:-2] == value.shape[:-2], (
-        'q, k, v batch dims must match.')
-    assert query.shape[-2] == self.num_heads, 'q num_heads must match.'
-    assert key.shape[-3] == value.shape[-3], 'k, v lengths must match.'
-    assert query.shape[-1] == key.shape[-1], 'q, k depths must match.'
-
-  def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:
-    """Projection for Key and Value.
-
-    Args:
-      inputs_kv: inputs_kv: key/values of shape `[batch, kv_length, kv_dim]`.
-      proj_name: name of projection, `key` or `value`.
-
-    Returns:
-      Projection of key or value, in shape of `[batch, kv_length, head_dim]`.
-    """
-
-    kv_proj = DenseGeneral(
-        features=self.head_dim,
-        axis=-1,
-        kernel_init=self.kernel_init,
-        kernel_axes=('embed', 'kv'),
-        dtype=self.dtype,
-        name=proj_name,
-        use_int8=self.use_int8)(inputs_kv)
-    return kv_proj
-
-  def qk_product(self, query: Array, key: Array) -> Array:
-    """Query-Key product.
-
-    Args:
-      query: Query projection, in shape of [b, t, n, d], where b: batch size, t:
-        query length, n: number of heads, d: project dimension.
-      key: Key projection in shape of [b, s, d] for multi-query attention.
-
-    Returns:
-      results in shape [b, n, t, s].
-    """
-    return jnp.einsum('btnd,bsd->bnts', query, key)
-
-  def wv_product(
-      self,
-      attn_weights: Array,
-      value: Array,
-      aqt_rng: PRNGKey | None) -> Array:
-    """weighted value product.
-    
-    Args:
-      attn_weights: Computed results of qk_einsum, in shape of [b, n, t, s].
-      value: Value projection, in shape of [b, s, d] for multi-head attention.
-      aqt_rng: A PRNGKey for aqt ops.
-
-    Returns:
-      result in shape [b, t, n, d]
-    """
-    einsum = _maybe_aqt_einsum(self.use_int8, aqt_rng)
-    return einsum('bnts,bsd->btnd', attn_weights, value)
-
-  def key_rotary(self, key: Array, inputs_positions: Array):
-    """Apply Rotary Embedding to Key."""
-    key_input_shape = key.shape
-    key = jnp.expand_dims(key, axis=-2)  # [b, s, d] -> [b, s, 1, d]
-    key = super().key_rotary(key, inputs_positions)
-    return jnp.reshape(key, key_input_shape)
-
-  def revert_kvlen_axis(self, kv):
-    """Revert key/value length axis.
-
-    Args:
-      kv: in shape [b, ..., d, s].
-    
-    Returns:
-      reshaped kv as [b, ..., s, d]
-    """
-    return jnp.moveaxis(kv, -1, -2)
-
-  def move_kvlen_axis(self, kv):
-    """Move key/value length axis to the end.
-
-    Args:
-      kv: in shape [b, ..., s, d].
-    
-    Returns:
-      reshaped kv as [b, ..., d, s]
-    """
-    return jnp.moveaxis(kv, -2, -1)
-
-  def cached_kv_shape(self, kv_shape):
-    """Cached KV shape.
-
-    The key and value have dimension [batch, length, num_heads, head_dim], but
-    we cache them as [batch, num_heads, head_dim, length] as a TPU fusion
-    optimization. This also enables the "scatter via one-hot broadcast" trick,
-    which means we do a one-hot broadcast instead of a scatter/gather
-    operations, resulting in a 3-4x speedup in practice.
-
-    Args:
-      kv_shape: shape of key or value for caching, as [b, ..., s, d].
-    
-    Returns:
-      Swapped kv_shape as [b, ..., d, s] for cache.
-    """
-    return kv_shape[:-2] + tuple(kv_shape[i] for i in [-1, -2])
-
-
-class GroupedQueryDotProductAttention(MultiHeadDotProductAttention):
-  """Grouped-Query Attention https://arxiv.org/abs/2305.13245."""
-
-  num_kv_heads: int = -1
-
-  def check_attention_inputs(
-      self,
-      query: Array,
-      key: Array,
-      value: Array) -> None:
-    """Check attention inputs."""
-
-    assert key.ndim == value.ndim, 'k, v must have same rank.'
-    assert query.shape[:-3] == key.shape[:-3] == value.shape[:-3], (
-        'q, k, v batch dims must match.')
-    assert key.shape[-2] == value.shape[-2], ('k, v num_kv_heads must match.')
-    assert key.shape[-3] == value.shape[-3], 'k, v lengths must match.'
-    assert query.shape[-1] == key.shape[-1], 'q, k depths must match.'
-
-  def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:
-    """Projection for Key and Value.
-
-    Args:
-      inputs_kv: inputs_kv: key/values of shape `[batch, kv_length,
-        num_kv_heads, kv_dim]`.
-      proj_name: name of projection, `key` or `value`.
-
-    Returns:
-      Projection of key or value, in shape of `[batch, kv_length, head_dim]`.
-    """
-    if self.num_kv_heads == -1:
-      raise ValueError('num_kv_heads is not defined.')
-
-    if self.num_heads % self.num_kv_heads != 0:
-      raise ValueError('Invaid num_kv_heads for GQA.')
-
-    kv_proj = DenseGeneral(
-        features=(self.num_kv_heads, self.head_dim),
-        axis=-1,
-        kernel_init=self.kernel_init,
-        kernel_axes=('embed', 'heads', 'kv'),
-        dtype=self.dtype,
-        name=proj_name,
-        use_int8=self.use_int8)(inputs_kv)
-    return kv_proj
-
-  def qk_product(self, query: Array, key: Array) -> Array:
-    """Query-Key product.
-    
-    Args:
-      query: Query projection, in shape of [b, t, n, d], where b: batch size, t:
-        query length, n: number of heads, d: project dimension. 
-      key: Key projection in shape of [b, s, n_kv, d] for where n_kv is 
-        kv heads. The number of group for query is n // n_kv.
-
-    Returns:
-      results in shape [b, n_kv, n // n_kv,  t, s].
-    """
-    b, t, n, d = query.shape
-    n_kv = key.shape[-2]
-    assert n_kv == self.num_kv_heads
-    query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
-    return jnp.einsum('btkgd,bskd->bkgts', query, key)
-
-  def wv_product(
-      self,
-      attn_weights: Array,
-      value: Array,
-      aqt_rng: PRNGKey | None) -> Array:
-    """weighted value product.
-    
-    Args:
-      attn_weights: Computed results of qk_einsum, in shape of [b, n, t, s].
-      value: Value projection, in shape of [b, s, d] for multi-head attention.
-      aqt_rng: A PRNGKey for aqt ops.
-
-    Returns:
-      result in shape [b, t, n, d]
-    """
-    einsum = _maybe_aqt_einsum(self.use_int8, aqt_rng)
-    out = einsum('bkgts,bskd->btkgd', attn_weights, value)
-    b, t, n_kv, g, d = out.shape
-    return jnp.reshape(out, (b, t, n_kv * g, d))
