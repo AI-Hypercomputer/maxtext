@@ -36,8 +36,7 @@ ScanIn = common_types.ScanIn
 
 Embed = embeddings.Embed
 LLaMARotaryEmbedding = embeddings.LLaMARotaryEmbedding
-FlashMultiHeadDotProductAttention = attentions.FlashMultiHeadDotProductAttention
-MultiHeadDotProductAttention = attentions.MultiHeadDotProductAttention
+Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
 
 #------------------------------------------------------------------------------
@@ -72,28 +71,17 @@ class DecoderLayer(nn.Module):
     lnx = nn.with_logical_constraint(
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
-    # Self-attention block
-    if cfg.attention == ('flash' or 'gpu_flash'):
-      device_type = 'gpu' if cfg.attention == 'gpu_flash' else 'tpu'
-      attention_layer = FlashMultiHeadDotProductAttention(
-        num_heads=cfg.num_heads,
-        head_dim=cfg.head_dim,
-        mesh=mesh,
-        dtype=cfg.dtype,
-        dropout_rate=cfg.dropout_rate,
-        name='self_attention',
-        use_int8=cfg.int8_training,
-        max_target_length=cfg.max_target_length,
-        device_type=device_type)
-    elif cfg.attention == 'mha':
-      attention_layer = MultiHeadDotProductAttention(
-        num_heads=cfg.num_heads,
-        head_dim=cfg.head_dim,
-        mesh=mesh,
-        dtype=cfg.dtype,
-        dropout_rate=cfg.dropout_rate,
-        name='self_attention',
-        use_int8=cfg.int8_training)
+    attention_layer = Attention(
+      num_query_heads=cfg.num_query_heads,
+      num_kv_heads=cfg.num_kv_heads,
+      head_dim=cfg.head_dim,
+      attention_kernel=cfg.attention,
+      mesh=mesh,
+      dtype=cfg.dtype,
+      dropout_rate=cfg.dropout_rate,
+      name='self_attention',
+      use_int8=cfg.int8_training)
+
 
     attention_lnx = attention_layer(
       lnx,

@@ -30,10 +30,7 @@ from layers import attentions
 from layers import embeddings
 
 Mesh = jax.sharding.Mesh
-FlashMultiHeadDotProductAttention = attentions.FlashMultiHeadDotProductAttention
-MultiHeadDotProductAttention = attentions.MultiHeadDotProductAttention
-MultiQueryDotProductAttention = attentions.MultiQueryDotProductAttention
-GroupedQueryDotProductAttention = attentions.GroupedQueryDotProductAttention
+Attention = attentions.Attention
 LLaMARotaryEmbedding = embeddings.LLaMARotaryEmbedding
 
 
@@ -49,22 +46,25 @@ class AttentionTest(unittest.TestCase):
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
 
     self.global_batch_size = self.cfg.global_batch_size_to_train_on
-    self.num_heads = self.cfg.base_num_heads
+    self.num_kv_heads = self.cfg.num_kv_heads
+    self.num_query_heads = self.cfg.num_query_heads
     self.max_target_length = self.cfg.max_target_length
     self.head_dim = self.cfg.head_dim
     self.embed_dim = self.cfg.base_emb_dim
     self.dtype = self.cfg.dtype
 
-    self.mha_attention = MultiHeadDotProductAttention(
-        num_heads=self.num_heads,
+    self._attention_as_mha_generic = Attention(
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
         head_dim=self.head_dim,
         mesh=self.mesh,
+        attention_kernel = "dot_product",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
         name='self_attention',
     )
 
-    self.mha_variable = self.mha_attention.init(
+    self._attention_as_mha_generic_variable = self._attention_as_mha_generic.init(
         {'params': self.rng, 'aqt': self.rng},
         jnp.ones(
             (self.global_batch_size, self.max_target_length, self.embed_dim)),
@@ -74,17 +74,39 @@ class AttentionTest(unittest.TestCase):
             (self.global_batch_size, self.max_target_length)),
     )
 
-    self.flash_attention = FlashMultiHeadDotProductAttention(
-        num_heads=self.num_heads,
+    self._attention_as_mha_flash = Attention(
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
         head_dim=self.head_dim,
         mesh=self.mesh,
+        attention_kernel = "flash",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
         name='self_attention',
-        max_target_length=self.max_target_length
     )
 
-    self.flash_variable = self.flash_attention.init(
+    self._attention_as_mha_flash_variable = self._attention_as_mha_flash.init(
+        {'params': self.rng, 'aqt': self.rng},
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length)),
+    )
+
+    self._attention_as_mqa = Attention(
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=1,
+        head_dim=self.head_dim,
+        mesh=self.mesh,
+        attention_kernel = "dot_product",
+        dtype=self.dtype,
+        dropout_rate=self.cfg.dropout_rate,
+        name='self_attention',
+    )
+
+    self._attention_as_mqa_variable = self._attention_as_mqa.init(
         {'params': self.rng, 'aqt': self.rng},
         jnp.ones(
             (self.global_batch_size, self.max_target_length, self.embed_dim)),
@@ -95,25 +117,16 @@ class AttentionTest(unittest.TestCase):
     )
 
   def get_data(self, dtype):
-    lnx = jax.random.uniform(
+    lnx = jax.random.normal(
         self.rng,
         shape=(self.global_batch_size, self.max_target_length, self.embed_dim),
         dtype=dtype,
     )
-    decoder_segment_ids = jnp.ones(
-        shape=(self.global_batch_size, self.max_target_length), dtype=np.int32
-    )
 
-    def batch_positions():
-      return [
-          jnp.arange(self.max_target_length, dtype=jnp.int32)
-          for _ in range(self.global_batch_size)
-      ]
+    decoder_segment_ids = jax.random.randint(self.rng, (self.global_batch_size, self.max_target_length), 0, 4)
+    decoder_positions = jax.random.randint(self.rng, (self.global_batch_size, self.max_target_length), 0, self.max_target_length)
 
-    if self.global_batch_size > 1:
-      decoder_positions = jnp.stack(batch_positions())
-
-    return lnx , decoder_segment_ids, decoder_positions
+    return lnx, decoder_segment_ids, decoder_positions
 
   @pytest.mark.tpu
   def test_attention(self):
@@ -121,23 +134,24 @@ class AttentionTest(unittest.TestCase):
 
     lnx, decoder_segment_ids, decoder_positions = self.get_data(
         self.dtype)
-
-    mha_output = self.mha_attention.apply(
-        self.mha_variable,
+    
+    mha_generic_output = self._attention_as_mha_generic.apply(
+        self._attention_as_mha_generic_variable,
         lnx,
         lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
+        decoder_segment_ids=decoder_positions,
+        inputs_positions=decoder_segment_ids,
         deterministic=True,
         decode=False,
         rngs={'aqt': self.rng},
     )
-    flash_output = self.flash_attention.apply(
-        self.flash_variable,
+
+    mha_generic_flash_output = self._attention_as_mha_flash.apply(
+        self._attention_as_mha_flash_variable,
         lnx,
         lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
+        decoder_segment_ids=decoder_positions,
+        inputs_positions=decoder_segment_ids,
         deterministic=True,
         decode=False,
         rngs={'aqt': self.rng},
@@ -145,7 +159,59 @@ class AttentionTest(unittest.TestCase):
 
     self.assertTrue(
         jax.numpy.allclose(
-            flash_output, mha_output, rtol=1e-01, atol=1e-01, equal_nan=False
+            mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False
+        )
+    )
+
+  @pytest.mark.tpu
+  def test_multiquery_attention(self):
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(
+        self.dtype)
+
+    mqa_generic_output = self._attention_as_mqa.apply(
+        self._attention_as_mqa_variable,
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_positions,
+        inputs_positions=decoder_segment_ids,
+        deterministic=True,
+        decode=False,
+        rngs={'aqt': self.rng},
+    )
+
+    attention_as_mha_generic_variable = self._attention_as_mha_generic.init(
+        {'params': self.rng, 'aqt': self.rng},
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length)),
+    )
+
+    new_key_kernel = jax.numpy.repeat(self._attention_as_mqa_variable['params']['key']['kernel'].value, self.num_kv_heads, axis=1)
+    attention_as_mha_generic_variable['params']['key']['kernel'] = attention_as_mha_generic_variable['params']['key']['kernel'].replace(value = new_key_kernel)
+    new_value_kernel = jax.numpy.repeat(self._attention_as_mqa_variable['params']['value']['kernel'].value, self.num_kv_heads, axis=1)
+    attention_as_mha_generic_variable['params']['value']['kernel'] = attention_as_mha_generic_variable['params']['value']['kernel'].replace(value = new_value_kernel)
+    new_out_kernel = self._attention_as_mqa_variable['params']['out']['kernel'].value
+    attention_as_mha_generic_variable['params']['out']['kernel'] = attention_as_mha_generic_variable['params']['out']['kernel'].replace(value = new_out_kernel)
+    new_query_kernel = self._attention_as_mqa_variable['params']['query']['kernel'].value
+    attention_as_mha_generic_variable['params']['query']['kernel'] = attention_as_mha_generic_variable['params']['query']['kernel'].replace(value = new_query_kernel)
+
+    mha_generic = self._attention_as_mha_generic.apply(
+        attention_as_mha_generic_variable,
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_positions,
+        inputs_positions=decoder_segment_ids,
+        deterministic=True,
+        decode=False,
+        rngs={'aqt': self.rng},
+    )
+
+    self.assertTrue(
+        jax.numpy.allclose(
+            mqa_generic_output, mha_generic, rtol=1e-06, atol=1e-06, equal_nan=False
         )
     )
 
