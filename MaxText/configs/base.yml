@@ -46,10 +46,12 @@ dtype: "bfloat16"
 int8_training: False
 
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
-# then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
+# then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,
+# base_mlp_dim, base_num_decoder_layers and/or head_dim.
 global_parameter_scale: 1
 base_emb_dim: 2560
-base_num_heads: 8
+base_num_query_heads: 8
+base_num_kv_heads: 8
 base_mlp_dim: 8192
 base_num_decoder_layers: 16
 head_dim: 256
@@ -61,9 +63,8 @@ logits_via_embedding: True  # NOTE: this is True just for testing.
 remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
-attention: 'flash' # Supported attention: flash, mha, gpu_flash
+attention: 'flash' # Supported attention: dot_product, flash, gpu_flash_xla, gpu_flash_triton
 
-gpu_flash_attention_backward_pass_impl: "xla" # allowed values (xla, triton)
 record_internal_nn_metrics: 0
 
 # Output directory

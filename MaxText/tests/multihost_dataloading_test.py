@@ -35,7 +35,7 @@ class MultihostDataloadingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     batch_size = 4
-    pyconfig.initialize(sys.argv + ['configs/base.yml'], per_device_batch_size=1, run_name='test', mesh_axes = ['data'],
+    pyconfig.initialize([sys.argv[0], 'configs/base.yml'], per_device_batch_size=1, run_name='test', mesh_axes = ['data'],
                         logical_axis_rules = [['batch', 'data']],
                         data_sharding = ['data'],
                         base_output_directory = "gs://max-experiments/",
