@@ -514,7 +514,7 @@ class Transformer(nn.Module):
         config=cfg,
     )
     self.position_embedding = Embed(
-        num_embeddings=cfg.max_target_length,
+        num_embeddings=cfg.max_trainable_pe_max_seq_len,
         features=cfg.emb_dim,
         dtype=cfg.dtype,
         embedding_init=nn.initializers.normal(stddev=1.0),
