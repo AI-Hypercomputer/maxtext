@@ -52,11 +52,12 @@ To run maxtext the TPUVMs must have permission to read the gcs bucket. These per
 Local development is a convenient way to run MaxText on a single host. It doesn't scale to
 multiple hosts.
 
-1. [Create and SSH to the single-host TPU of your choice.](https://cloud.google.com/tpu/docs/users-guide-tpu-vm#creating_a_cloud_tpu_vm_with_gcloud) We recommend a `v4-8`.
-2. Clone MaxText onto that TPUVM.
+1. Create and SSH to the single-host [TPU](https://cloud.google.com/tpu/docs/users-guide-tpu-vm#creating_a_cloud_tpu_vm_with_gcloud) or [GPU](https://cloud.google.com/compute/docs/gpus/create-gpu-vm-accelerator-optimized#create-vm) of your choice. We recommend a `v4-8` for TPU and `A100-40GB` for GPU 
+2. Clone MaxText onto that VM.
 3. Within the root directory of that `git` repo, install dependencies by running:
+     * if you are running on a GPU VM, See [Setting up NVIDIA GPU VM](#Setting-up-NVIDIA-GPU-VM)
 ```
-bash setup.sh
+bash setup.sh DEVICE={tpu,gpu}
 ```
 4. After installation completes, run training with the command:
 ```
@@ -70,18 +71,43 @@ python3 MaxText/decode.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
 Be aware, these decodings will be random. To get high quality decodings you need pass in a checkpoint, typically via the `load_parameters_path` argument.
 
 
-#### Running on NVIDIA GPUs
-1. Use `bash docker_build_dependency_image.sh DEVICE=gpu` can be used to build a container with the required dependencies.
-2. After installation is completed, run training with the command:
+### Setting up NVIDIA GPU VM
+If you are running on a VM directly:
+1. [Install the appropriate CUDA toolkit and driver for your VM](https://developer.nvidia.com/cuda-downloads). For example, on Ubuntu2204
 ```
-python3 MaxText/train.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
-```
-3. If you want to decode, you can decode as follows.
-```
-python3 MaxText/decode.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
+curl https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb -o cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt-get update
+sudo apt-get -y install cuda-toolkit-12-3
+sudo apt-get install -y nvidia-kernel-open-545
+sudo apt-get install -y cuda-drivers-545
 ```
 
-* If you see the following error when running inside a container, set a larger `--shm-size` (e.g. `--shm-size=1g`)
+
+If you are running inside a container:
+1. Run the following command to build a base image:
+```
+bash docker_build_dependency_image.sh DEVICE=gpu
+```
+2. [Install and configure NVIDIA container toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). For example, on Ubuntu2204:
+```
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
+  && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+    sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+    sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sed -i -e '/experimental/ s/^#//g' /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update
+sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+3. On your VM, run the following command to run inside the container:
+```
+sudo docker run -v {YOUR_PATH_TO_MAXTEXT_REPO}:/app --rm --privileged --shm-size=1g maxtext_base_image bash -c "COMMAND"
+```
+
+* If you see the following error when running inside a container, set a larger `--shm-size` (e.g. `--shm-size=2g`)
+
 ```
 Failed to execute XLA Runtime executable: run time error: custom call 'xla.gpu.all_reduce' failed: external/xla/xla/service/gpu/nccl_utils.cc:297: NCCL operation ncclCommInitRank(&comm, nranks, id, rank) failed: unhandled cuda error (run with NCCL_DEBUG=INFO for details); current tracing scope: all-reduce-start.2; current profiling annotation: XlaModule:#hlo_module=jit__unnamed_wrapped_function_,program_id=7#.
 ```
