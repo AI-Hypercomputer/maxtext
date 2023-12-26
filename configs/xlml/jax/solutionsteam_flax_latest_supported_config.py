@@ -17,17 +17,18 @@
 from typing import Tuple
 import uuid
 from apis import gcp_config, metric_config, task, test_config
-from configs import gcs_bucket, test_owner, vm_resource
+from configs import gcs_bucket, test_owner
 from configs.xlml.jax import common
+from configs.vm_resource import TpuVersion, Project, RuntimeVersion
 
 
-PROJECT_NAME = vm_resource.Project.CLOUD_ML_AUTO_SOLUTIONS.value
-RUNTIME_IMAGE = vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value
+PROJECT_NAME = Project.CLOUD_ML_AUTO_SOLUTIONS.value
+RUNTIME_IMAGE = RuntimeVersion.TPU_UBUNTU2204_BASE.value
 IS_TPU_RESERVED = True
 
 
 def get_flax_resnet_config(
-    tpu_version: str,
+    tpu_version: TpuVersion,
     tpu_cores: int,
     tpu_zone: str,
     time_out_in_min: int,
@@ -110,7 +111,7 @@ def get_flax_vit_run_model_cmds(
 
 
 def get_flax_vit_config(
-    tpu_version: str,
+    tpu_version: TpuVersion,
     tpu_cores: int,
     tpu_zone: str,
     time_out_in_min: int,
@@ -147,7 +148,7 @@ def get_flax_vit_config(
 
 
 def get_flax_vit_conv_config(
-    tpu_version: str,
+    tpu_version: TpuVersion,
     tpu_cores: int,
     tpu_zone: str,
     time_out_in_min: int,
@@ -207,7 +208,7 @@ def get_flax_vit_conv_config(
 
 
 def get_flax_gpt2_config(
-    tpu_version: str,
+    tpu_version: TpuVersion,
     tpu_cores: int,
     tpu_zone: str,
     time_out_in_min: int,
@@ -267,7 +268,7 @@ def get_flax_gpt2_config(
 
 
 def get_flax_sd_config(
-    tpu_version: str,
+    tpu_version: TpuVersion,
     tpu_cores: int,
     tpu_zone: str,
     time_out_in_min: int,
@@ -322,7 +323,7 @@ def get_flax_sd_config(
 
 
 def get_flax_bart_config(
-    tpu_version: str,
+    tpu_version: TpuVersion,
     tpu_cores: int,
     tpu_zone: str,
     time_out_in_min: int,
@@ -373,7 +374,7 @@ def get_flax_bart_config(
 
 
 def get_flax_bert_config(
-    tpu_version: str,
+    tpu_version: TpuVersion,
     tpu_cores: int,
     tpu_zone: str,
     time_out_in_min: int,
@@ -423,7 +424,7 @@ def get_flax_bert_config(
 
 
 def get_flax_wmt_config(
-    tpu_version: str,
+    tpu_version: TpuVersion,
     tpu_cores: int,
     tpu_zone: str,
     time_out_in_min: int,

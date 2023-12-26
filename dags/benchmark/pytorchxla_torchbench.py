@@ -16,8 +16,9 @@
 
 import datetime
 from airflow import models
-from configs import composer_env, vm_resource
+from configs import composer_env
 from configs.benchmark.pytorch import pytorchxla_torchbench_config as config
+from configs.vm_resource import TpuVersion, Zone
 
 _MODELS = [
     "BERT_pytorch",
@@ -40,9 +41,9 @@ with models.DAG(
   for model in _MODELS:
     torchbench_extra_flags = [f"--filter={model}"]
     config.get_torchbench_config(
-        tpu_version=4,
+        tpu_version=TpuVersion.V4,
         tpu_cores=8,
-        tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
+        tpu_zone=Zone.US_CENTRAL2_B.value,
         model_name=model,
         time_out_in_min=60,
         extraFlags=" ".join(torchbench_extra_flags),

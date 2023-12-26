@@ -15,19 +15,20 @@
 import datetime
 from airflow import models
 from apis import gcp_config, metric_config, task, test_config
-from configs import composer_env, vm_resource
+from configs import composer_env
+from configs.vm_resource import Project, Zone
 
 
 # Run once a day at 2 pm UTC (6 am PST)
 SCHEDULED_TIME = "0 14 * * *" if composer_env.is_prod_env() else None
 US_CENTRAL1_C = gcp_config.GCPConfig(
-    vm_resource.Project.CLOUD_ML_AUTO_SOLUTIONS.value,
-    vm_resource.Zone.US_CENTRAL1_C.value,
+    Project.CLOUD_ML_AUTO_SOLUTIONS.value,
+    Zone.US_CENTRAL1_C.value,
     metric_config.DatasetOption.XLML_DATASET,
 )
 US_CENTRAL2_B = gcp_config.GCPConfig(
-    vm_resource.Project.CLOUD_ML_AUTO_SOLUTIONS.value,
-    vm_resource.Zone.US_CENTRAL2_B.value,
+    Project.CLOUD_ML_AUTO_SOLUTIONS.value,
+    Zone.US_CENTRAL2_B.value,
     metric_config.DatasetOption.XLML_DATASET,
 )
 

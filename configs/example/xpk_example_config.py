@@ -15,11 +15,12 @@
 """Utilities to construct configs for example_dag."""
 
 from apis import gcp_config, metric_config, task, test_config
-from configs import test_owner, vm_resource
+from configs import test_owner
+from configs.vm_resource import TpuVersion
 
 
 def get_flax_resnet_xpk_config(
-    tpu_version: str,
+    tpu_version: TpuVersion,
     tpu_cores: int,
     tpu_zone: str,
     test_name: str,

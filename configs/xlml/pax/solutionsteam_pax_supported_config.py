@@ -20,8 +20,9 @@ from typing import Tuple
 import uuid
 from absl import logging
 from apis import gcp_config, metric_config, task, test_config
-from configs import test_owner, vm_resource
+from configs import test_owner
 from configs.xlml.pax import common
+from configs.vm_resource import TpuVersion, RuntimeVersion, Project
 
 
 class PaxVersion(enum.Enum):
@@ -69,22 +70,22 @@ def get_setup_cmds(
     raise RuntimeError(f"Please specify set up cmds for: {pax_version.value}.")
 
 
-def get_runtime_version(pax_version: PaxVersion, tpu_version: str) -> str:
-  if tpu_version == "5litepod":
-    return vm_resource.RuntimeVersion.V2_ALPHA_TPUV5_LITE.value
-  elif tpu_version == "5p":
-    return vm_resource.RuntimeVersion.V2_ALPHA_TPUV5.value
+def get_runtime_version(pax_version: PaxVersion, tpu_version: TpuVersion) -> str:
+  if tpu_version is TpuVersion.V5E:
+    return RuntimeVersion.V2_ALPHA_TPUV5_LITE.value
+  elif tpu_version is TpuVersion.V5P:
+    return RuntimeVersion.V2_ALPHA_TPUV5.value
   else:
     if pax_version is PaxVersion.STABLE:
-      return vm_resource.RuntimeVersion.TPU_VM_V4_BASE.value
+      return RuntimeVersion.TPU_VM_V4_BASE.value
     elif pax_version is PaxVersion.NIGHTLY:
-      return vm_resource.RuntimeVersion.TPU_UBUNTU2204_BASE.value
+      return RuntimeVersion.TPU_UBUNTU2204_BASE.value
     else:
       raise RuntimeError(f"Please specify runtime version for: {pax_version.value}.")
 
 
 def get_pax_lm_config(
-    tpu_version: str,
+    tpu_version: TpuVersion,
     tpu_cores: int,
     tpu_zone: str,
     time_out_in_min: int,
@@ -92,7 +93,7 @@ def get_pax_lm_config(
     model_name: str,
     log_dir: str,
     pax_version: PaxVersion = PaxVersion.STABLE,
-    project_name: str = vm_resource.Project.TPU_PROD_ENV_AUTOMATED.value,
+    project_name: str = Project.CLOUD_ML_AUTO_SOLUTIONS.value,
     ckp_path: str = "",
     extraFlags: str = "",
     network: str = "default",

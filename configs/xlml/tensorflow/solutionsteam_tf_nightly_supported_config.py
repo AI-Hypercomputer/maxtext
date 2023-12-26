@@ -16,17 +16,18 @@
 
 import uuid
 from apis import gcp_config, metric_config, task, test_config
-from configs import gcs_bucket, test_owner, vm_resource
+from configs import gcs_bucket, test_owner
 from configs.xlml.tensorflow import common
+from configs.vm_resource import TpuVersion, Project, RuntimeVersion
 
 
 def get_tf_resnet_config(
-    tpu_version: str,
+    tpu_version: TpuVersion,
     tpu_cores: int,
     tpu_zone: str,
     time_out_in_min: int,
-    project_name: str = vm_resource.Project.CLOUD_ML_AUTO_SOLUTIONS.value,
-    runtime_version: str = vm_resource.RuntimeVersion.TPU_VM_TF_2150_PJRT.value,
+    project_name: str = Project.CLOUD_ML_AUTO_SOLUTIONS.value,
+    runtime_version: str = RuntimeVersion.TPU_VM_TF_2150_PJRT.value,
     network: str = "default",
     subnetwork: str = "default",
     is_pod: bool = False,
@@ -110,6 +111,6 @@ def export_env_variable(is_pod: bool) -> str:
   return "export TPU_LOAD_LIBRARY=0" if is_pod else "echo"
 
 
-def create_tpu_name(test_name: str, tpu_version: str, tpu_cores: int) -> str:
+def create_tpu_name(test_name: str, tpu_version: TpuVersion, tpu_cores: int) -> str:
   """Create a custom TPU name."""
-  return f"{test_name}-v{tpu_version}-{tpu_cores}-{str(uuid.uuid4())}"
+  return f"{test_name}-v{tpu_version.value}-{tpu_cores}-{str(uuid.uuid4())}"

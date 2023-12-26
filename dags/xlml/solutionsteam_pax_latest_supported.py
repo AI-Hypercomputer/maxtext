@@ -16,7 +16,8 @@
 
 import datetime
 from airflow import models
-from configs import composer_env, gcs_bucket, vm_resource
+from configs import composer_env, gcs_bucket
+from configs.vm_resource import TpuVersion, Zone
 from configs.xlml.pax import solutionsteam_pax_supported_config as pax_config
 
 
@@ -36,9 +37,9 @@ with models.DAG(
   # Language model with SPMD
   lmspmd2b_exp_path = "tasks.lm.params.lm_cloud.LmCloudSpmd2BLimitSteps"
   pax_stable_lmspmd2b_v4_8 = pax_config.get_pax_lm_config(
-      tpu_version="4",
+      tpu_version=TpuVersion.V4,
       tpu_cores=8,
-      tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
+      tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
       log_dir=f"{log_dir_prefix}/lmspmd2b/v4-8",
       exp_path=lmspmd2b_exp_path,
@@ -46,9 +47,9 @@ with models.DAG(
   ).run()
 
   pax_stable_lmspmd2b_ckpt_v4_8 = pax_config.get_pax_lm_config(
-      tpu_version="4",
+      tpu_version=TpuVersion.V4,
       tpu_cores=8,
-      tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
+      tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
       log_dir=f"{log_dir_prefix}/lmspmd2b_ckpt/v4-8",
       exp_path=lmspmd2b_exp_path,
@@ -62,9 +63,9 @@ with models.DAG(
       "--pmap_use_tensorstore=True",
   ]
   pax_stable_lmtransformeradam_v4_8 = pax_config.get_pax_lm_config(
-      tpu_version="4",
+      tpu_version=TpuVersion.V4,
       tpu_cores=8,
-      tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
+      tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
       log_dir=f"{log_dir_prefix}/lmtransformeradam/v4-8",
       exp_path="tasks.lm.params.lm_cloud.LmCloudTransformerAdamLimitSteps",
