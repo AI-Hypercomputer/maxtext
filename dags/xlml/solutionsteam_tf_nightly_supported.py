@@ -25,7 +25,7 @@ SCHEDULED_TIME = "0 6 * * *" if composer_env.is_prod_env() else None
 
 
 with models.DAG(
-    dag_id="tf_latest_supported",
+    dag_id="tf_nightly_supported",
     schedule=SCHEDULED_TIME,
     tags=["solutions_team", "tf", "nightly", "supported", "xlml"],
     start_date=datetime.datetime(2023, 8, 16),
@@ -33,14 +33,15 @@ with models.DAG(
 ) as dag:
   # ResNet
   tf_resnet_v2_8 = tf_config.get_tf_resnet_config(
-      tpu_version=2,
+      tpu_version="2",
       tpu_cores=8,
       tpu_zone=vm_resource.Zone.US_CENTRAL1_C.value,
       time_out_in_min=60,
+      global_batch_size=1024,
   ).run()
 
   tf_resnet_v3_8 = tf_config.get_tf_resnet_config(
-      tpu_version=3,
+      tpu_version="3",
       tpu_cores=8,
       tpu_zone=vm_resource.Zone.US_EAST1_D.value,
       time_out_in_min=60,
@@ -53,15 +54,30 @@ with models.DAG(
       time_out_in_min=60,
   ).run()
 
-  tf_resnet_v4_32 = tf_config.get_tf_resnet_config(
-      tpu_version="4",
-      tpu_cores=32,
-      tpu_zone=vm_resource.Zone.US_CENTRAL2_B.value,
+  tf_resnet_v5e_4 = tf_config.get_tf_resnet_config(
+      project_name=vm_resource.Project.TPU_PROD_ENV_AUTOMATED.value,
+      tpu_version="5litepod",
+      tpu_cores=4,
+      tpu_zone=vm_resource.Zone.US_EAST1_C.value,
       time_out_in_min=60,
-      is_pod=True,
+      global_batch_size=2048,
+      network=vm_resource.V5_NETWORKS,
+      subnetwork=vm_resource.V5E_SUBNETWORKS,
+  ).run()
+
+  tf_resnet_v5p_8 = tf_config.get_tf_resnet_config(
+      project_name=vm_resource.Project.TPU_PROD_ENV_AUTOMATED.value,
+      tpu_version="5p",
+      tpu_cores=8,
+      tpu_zone=vm_resource.Zone.US_EAST5_A.value,
+      time_out_in_min=60,
+      network=vm_resource.V5_NETWORKS,
+      subnetwork=vm_resource.V5E_SUBNETWORKS,
   ).run()
 
   # Test dependencies
   tf_resnet_v2_8
   tf_resnet_v3_8
-  tf_resnet_v4_8 >> tf_resnet_v4_32
+  tf_resnet_v4_8
+  tf_resnet_v5e_4
+  tf_resnet_v5p_8

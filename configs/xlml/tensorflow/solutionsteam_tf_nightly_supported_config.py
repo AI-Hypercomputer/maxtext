@@ -25,29 +25,36 @@ def get_tf_resnet_config(
     tpu_cores: int,
     tpu_zone: str,
     time_out_in_min: int,
+    project_name: str = vm_resource.Project.CLOUD_ML_AUTO_SOLUTIONS.value,
+    runtime_version: str = vm_resource.RuntimeVersion.TPU_VM_TF_2150_PJRT.value,
+    network: str = "default",
+    subnetwork: str = "default",
     is_pod: bool = False,
     imagenet_dir: str = gcs_bucket.IMAGENET_DIR,
     tfds_data_dir: str = gcs_bucket.TFDS_DATA_DIR,
+    global_batch_size: int = 4096,
     train_steps: int = 320,
     validation_interval: int = 320,
 ) -> task.TpuQueuedResourceTask:
   job_gcp_config = gcp_config.GCPConfig(
-      project_name=vm_resource.Project.CLOUD_ML_AUTO_SOLUTIONS.value,
+      project_name=project_name,
       zone=tpu_zone,
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
 
-  set_up_cmds = common.set_up_google_tensorflow_models()
+  set_up_cmds = common.set_up_pjrt_nightly() + common.set_up_google_tensorflow_models()
   params_override = {
       "runtime": {"distribution_strategy": "tpu"},
       "task": {
           "train_data": {
               "input_path": imagenet_dir + "/train*",
               "tfds_data_dir": tfds_data_dir,
+              "global_batch_size": global_batch_size,
           },
           "validation_data": {
               "input_path": imagenet_dir + "/valid*",
               "tfds_data_dir": tfds_data_dir,
+              "global_batch_size": global_batch_size,
           },
       },
       "trainer": {
@@ -58,12 +65,16 @@ def get_tf_resnet_config(
 
   test_name = "tf_resnet_imagenet"
   tpu_name = create_tpu_name(test_name, tpu_version, tpu_cores)
+  tpu_name_param = tpu_name if is_pod else "local"
   env_variable = export_env_variable(is_pod)
   run_model_cmds = (
       (
           f"cd /usr/share/tpu/models && {env_variable} &&"
-          " PYTHONPATH='.' python3 official/vision/train.py"
-          f" --tpu={tpu_name} --experiment=resnet_imagenet"
+          " PYTHONPATH='.' NEXT_PLUGGABLE_DEVICE_USE_C_API=true"
+          " TF_PLUGGABLE_DEVICE_LIBRARY_PATH=/lib/libtpu.so"
+          " TF_USE_LEGACY_KERAS=1"
+          " python3 official/vision/train.py"
+          f" --tpu={tpu_name_param} --experiment=resnet_imagenet"
           " --mode=train_and_eval --model_dir=/tmp/output"
           " --params_override='%s'" % str(params_override)
       ),
@@ -73,8 +84,10 @@ def get_tf_resnet_config(
       test_config.Tpu(
           version=tpu_version,
           cores=tpu_cores,
-          runtime_version=get_tpu_runtime(is_pod),
+          runtime_version=runtime_version,
           reserved=True,
+          network=network,
+          subnetwork=subnetwork,
       ),
       test_name=test_name,
       set_up_cmds=set_up_cmds,
@@ -95,13 +108,6 @@ def get_tf_resnet_config(
 def export_env_variable(is_pod: bool) -> str:
   """Export environment variables for training if any."""
   return "export TPU_LOAD_LIBRARY=0" if is_pod else "echo"
-
-
-def get_tpu_runtime(is_pod: bool) -> str:
-  """Get TPU runtime image."""
-  if is_pod:
-    return vm_resource.RuntimeVersion.TPU_VM_TF_NIGHTLY_POD.value
-  return vm_resource.RuntimeVersion.TPU_VM_TF_NIGHTLY.value
 
 
 def create_tpu_name(test_name: str, tpu_version: str, tpu_cores: int) -> str:
