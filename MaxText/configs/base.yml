@@ -121,8 +121,8 @@ dataset_type: c4 # must be c4 or synthetic
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
-log_period: 100
-save_period: 10_000
+log_period: 100 # Flushes Tensorboard
+
 # We take inspiration from Llama2's learning rate (LR) schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
 # Learning rate schedule has either two or three parts:
 # 1) Linear warmup from 0 to [learning_rate] over steps 0 to [learning_rate_schedule_steps * warmup_steps_fraction]
@@ -136,20 +136,12 @@ learning_rate_schedule_steps: -1 # By default the length of the schedule is set 
 # However you may choose a longer schedule (learning_rate_schedule_steps > steps), in which case the training will end before 
 # dropping fully down. Or you may choose a shorter schedule, where the unspecified steps will have a learning rate of 0.
 
-# Maximum length cutoff for training examples.
-max_target_length: 2048
-# Maximum length cutoff for held-out evaluation examples.
-max_eval_target_length: 512
-
-# Maximum length cutoff for predicted tokens.
-max_predict_length: 64
-# Sampling temperature for language model inference.
-sampling_temperature: 0.6
-# Top k cutoff for logit sampling. If 0 then no top-k cutoff is used.
-sampling_top_k: 20
+max_target_length: 2048 # Maximum sequence length
+max_prefill_predict_length: 64 # Maximum length for the prefill when doing autoregression
 eos_id: 2  # sentencepiece default
-# Prompt for language model sampling.
-prompt: "I love to "
+prompt: "I love to " # Prompt for language model sampling.
+load_from_prefill_dir: False # If true, decode.py doesn't "prefill" but just reads from directory
+prefill_cache_dir: "" # If set and load_from_prefill_dir, decode.py reads from directory. If set, decode.py writes to directory
 
 enable_profiler: False
 # Skip first n steps for profiling, to omit things like compilation and to give
@@ -157,11 +149,13 @@ enable_profiler: False
 skip_first_n_steps_for_profiler: 1
 # Profile for a small number of steps to avoid a large profile file size.
 profiler_steps: 5
+
 # If enable_checkpointing is true, an asynchronous checkpointer will be used if
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the sychronous one.
 enable_checkpointing: True
 async_checkpointing: True
+checkpoint_period: 10_000
 
 # When dropout is false the model is a deterministic function of the 
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)

@@ -10,7 +10,6 @@ helpFunction()
   echo -e "\t-r runid: run_test_model_0b"
   echo -e "\t-d dataset_path: gs://test-maxtext-dataset"
   echo -e "\t-o output_path: gs://test-maxtext-output"
-  echo -e "\t-t num_token_threshold: 40"
   echo -e "\t-i ici_tensor_parallelism: 8"
   echo -e "\t-a attention: flash"
   exit 1 # Exit script after printing help
@@ -22,7 +21,6 @@ run_id=test_model_0b_$(date +%Y-%m-%d-%H)
 dataset_path=gs://test-maxtext-dataset
 base_output_directory=gs://test-maxtext-output
 ici_tensor_parallelism=8
-num_tokens_threshold=40
 attention=flash
 
 while getopts "nr:d:o:t:i:a:" opt
@@ -32,7 +30,6 @@ do
       r ) run_id="$OPTARG" ;;
       d ) dataset_path="$OPTARG";;
       o ) base_output_directory="$OPTARG";;
-      t ) num_tokens_threshold="$OPTARG" ;;
       i ) ici_tensor_parallelism="$OPTARG" ;;
       a ) attention="$OPTARG" ;;
       ? ) helpFunction ;; # Print helpFunction in case parameter is non-existent
@@ -41,7 +38,7 @@ done
 
 echo
 echo "Running: ./$0 dataset_path=${dataset_path} base_output_directory=${base_output_directory}"
-echo "          dry_run=${dry_run} run_id=${run_id} num_tokens_threshold=${num_tokens_threshold} "
+echo "          dry_run=${dry_run} run_id=${run_id}  "
 echo "          ici_tensor_parallelism=${ici_tensor_parallelism} attention=${attention}"
 echo
 
@@ -62,7 +59,7 @@ $cmd python3 MaxText/train.py MaxText/configs/base.yml \
 run_name=${training_ckpt_run_id} \
 base_output_directory=${base_output_directory} \
 dataset_path=${dataset_path} attention=${attention} \
-steps=5 save_period=3 async_checkpointing=false \
+steps=5 checkpoint_period=3 async_checkpointing=false \
 ${model_params} \
 
 
@@ -107,7 +104,7 @@ base_output_directory=${base_output_directory} \
 dataset_path=${dataset_path} \
 load_parameters_path=${base_output_directory}/${decode_ckpt_run_id}/checkpoints/0/default \
 attention=dot_product ici_tensor_parallelism=${ici_tensor_parallelism} steps=50 \
-metrics_file=/tmp/${run_id}_metrics.txt async_checkpointing=false \
+async_checkpointing=false \
 ${model_params} \
 
 if [ $? -eq 0 ]
@@ -117,8 +114,3 @@ else
   echo "Could not run decode decode optimized checkpoint" >&2
   exit 1
 fi
-
-echo
-echo "Evaluate metrics in file /tmp/${run_id}_metrics.txt"
-echo
-$cmd python3 end_to_end/eval_assert.py metrics_average /tmp/${run_id}_metrics.txt ${num_tokens_threshold} num_tokens
