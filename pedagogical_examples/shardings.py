@@ -25,7 +25,7 @@ from jax.sharding import PartitionSpec
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 from jax.experimental.compilation_cache import compilation_cache as cc
-from jax.experimental.pjit import with_sharding_constraint
+from jax._src.pjit import with_sharding_constraint
 
 import argparse
 import datetime
