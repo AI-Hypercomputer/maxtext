@@ -88,6 +88,7 @@ class Attention(nn.Module):
   num_query_heads: int
   num_kv_heads: int
   head_dim: int
+  max_target_length: int
   mesh: Mesh
   attention_kernel: str
   dtype: DType = jnp.float32
@@ -244,27 +245,41 @@ class Attention(nn.Module):
 
   # Following Pallas MHA Flash Attention Reference.
   # https://github.com/google/jax/blob/main/jax/experimental/pallas/ops/tpu/flash_attention.py
+  # This mask models (1) separate sequences (decoder_segment_ids) and (2) causality
   def generate_attention_mask(
       self,
       query,
       key,
       decoder_segment_ids: Array | None,
-      decode: bool = False,
+      model_mode: str
   ) -> Array | None:
     mask = None
-    if decoder_segment_ids is not None:
+    if model_mode == common_types.AUTOREGRESSIVE_MODEL_MODE:
+      mask = decoder_segment_ids[:, None, None, None, :] == common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    elif decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
       mask = mask[:, None, None,:, :]
 
-    _, q_seq_len, _, _ = query.shape
-    _, kv_seq_len, _, _ = key.shape
-    mask_shape = (q_seq_len, kv_seq_len)
-    row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
-    col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
-    causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
+    causal_mask = None
+    # We enforce causality except for AUTOREGRESSION
+    if model_mode != common_types.AUTOREGRESSIVE_MODEL_MODE:
+      _, q_seq_len, _, _ = query.shape
+      _, kv_seq_len, _, _ = key.shape
+      mask_shape = (q_seq_len, kv_seq_len)
+      row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
+      col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
+      causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
 
-    mask = causal_mask if mask is None else jnp.logical_and(mask, causal_mask)
-    return jnp.where(mask, 0.0, DEFAULT_MASK_VALUE) if mask is not None else None
+    if (mask is not None) and (causal_mask is not None):
+      output_mask = jnp.logical_and(mask, causal_mask)
+    elif mask is not None:
+      output_mask = mask
+    elif causal_mask is not None:
+      output_mask = causal_mask
+    else:
+      output_mask = None
+
+    return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
   
   def apply_attention(self,
       query: Array,
@@ -273,17 +288,17 @@ class Attention(nn.Module):
       decoder_segment_ids: Array | None,
       dropout_rng: PRNGKey | None,
       deterministic: bool,
-      decode: bool = False) -> Array:
-    
+      model_mode: str) -> Array:
     if self.attention_kernel == "dot_product":
-      return self.apply_attention_dot(query, key, value, decoder_segment_ids, dropout_rng, deterministic, decode)
+      return self.apply_attention_dot(query, key, value, decoder_segment_ids, dropout_rng, deterministic, model_mode)
     elif self.attention_kernel == 'flash':
-      if decode:
+      if model_mode == common_types.AUTOREGRESSIVE_MODEL_MODE:
         raise ValueError("""Decode not supported with flash attention.
                             Use `dot_product` instead.""")
+      print(f"{query.shape=} {key.shape=} {value.shape=}, {decoder_segment_ids=}")
       return self.tpu_flash_attention(query, key, value, decoder_segment_ids)
-    elif self.attention_kernel == 'gpu_flash' or self.attention_kernel == 'gpu_flash_triton':
-      if decode:
+    elif self.attention_kernel == 'gpu_flash_xla' or self.attention_kernel == 'gpu_flash_triton':
+      if model_mode == common_types.AUTOREGRESSIVE_MODEL_MODE:
         raise ValueError("""Decode not supported with flash attention.
                             Use `dot_product` instead.""")
       return self.gpu_flash_attention(query, key, value)
@@ -406,7 +421,7 @@ class Attention(nn.Module):
       decoder_segment_ids: Array | None,
       dropout_rng: PRNGKey | None,
       deterministic: bool,
-      decode: bool = False,
+      model_mode: str = common_types.TRAIN_MODEL_MODE,
   ) -> Array:
     """Apply Attention."""
     aqt_rng = self.make_rng('aqt')
@@ -420,7 +435,7 @@ class Attention(nn.Module):
     # QK Product, a.k.a `attn_weights`: [batch, num_kv_heads, num_heads_per_group, q_length, kv_length]
     attn_weights = self.qk_product(query, key)
 
-    attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, decode)
+    attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
     if attn_mask is not None:
       attn_weights += attn_mask
 
@@ -473,12 +488,13 @@ class Attention(nn.Module):
     """
     return kv_shape[:-3] + tuple(kv_shape[i] for i in [-2, -1, -3])
 
-  def decode(
+  def kv_cache(
       self,
       key: Array,
       value: Array,
-      query_shape: Sequence[int]
-  ) -> tuple[Array, Array, Optional[Array], Optional[Array]]:
+      decoder_segment_ids: Array,
+      model_mode: str
+  ) -> tuple[Array, Array]:
     """Decoding method.
 
     The key and value have dimension [batch, length, num_heads, head_dim],
@@ -490,61 +506,92 @@ class Attention(nn.Module):
     Args:
       key: in shape [b, s, n, d].
       value: in shape [b, s, n, d].
-      query_shape: expected to be [b, 1, n, d].
+      model_mode: model mode controlling model
 
     Returns:
       tuple of key, value with cached,
     Raises:
       ValueError: when query shape is not [batch, 1, num_heads, heads_dim].
     """
-    # Detect if we're initializing by absence of existing cache data.
-    is_initialized = self.has_variable('cache', 'cached_key')
+    cache_logical_shape = (key.shape[0], self.max_target_length, key.shape[2], key.shape[3])
 
-    cached_key = self.variable('cache', 'cached_key', jnp.zeros,
-                               self.cached_kv_shape(key.shape), key.dtype)
-    cached_value = self.variable('cache', 'cached_value', jnp.zeros,
-                                 self.cached_kv_shape(value.shape), value.dtype)
-    cache_index = self.variable('cache', 'cache_index',
-                                lambda: jnp.array(0, dtype=jnp.int32))
 
-    if not is_initialized:
-      return key, value
+    if key.shape != value.shape:
+      raise ValueError(f"Can't KV cache with mismatched shapes {key.shape=}, {value.shape=}")
 
-    batch, num_heads, head_dim, length = cached_key.value.shape
-    # During fast autoregressive decoding, we feed one position at a time,
-    # and cache the keys and values step by step.
-    # Sanity shape check of cached key against input query.
-    expected_shape = (batch, 1, num_heads, head_dim)
-    if expected_shape != query_shape:
-      raise ValueError(f"""Autoregressive cache shape error,
-                        expected query shape %s instead got
-                        {(expected_shape, query_shape)}""")
-    # Create a OHE of the current index. NOTE: the index is increased below.
-    cur_index = cache_index.value
-    one_hot_indices = jax.nn.one_hot(cur_index, length, dtype=key.dtype)
+    if model_mode == common_types.TRAIN_MODEL_MODE:
+      return key, value, decoder_segment_ids
+    elif model_mode == common_types.PREFILL_MODEL_MODE:
+      batch, sequence, num_heads, head_dim = key.shape
 
-    # In order to update the key, value caches with the current key and
-    # value, we move the length axis to the back, similar to what we did for
-    # the cached ones above.
-    # Note these are currently the key and value of a single position, since
-    # we feed one position at a time.
-    one_token_key = self.move_kvlen_axis(key)
-    one_token_value = self.move_kvlen_axis(value)
+      cached_key = self.variable('cache', 'cached_key', jnp.zeros,
+                                self.cached_kv_shape(cache_logical_shape), key.dtype)
+      cached_key.value *= 0 # we might be prefilling something that already exists!
+      cached_value = self.variable('cache', 'cached_value', jnp.zeros,
+                                  self.cached_kv_shape(cache_logical_shape), value.dtype)
+      cached_value.value *= 0 # we might be prefilling something that already exists!
+      cached_segment_id = self.variable('cache', 'cache_segment_id',
+                          jnp.zeros,
+                          (key.shape[0], self.max_target_length), jnp.int32)
+      cached_segment_id.value *= 0
+      cache_index = self.variable('cache', 'cache_index',
+                                  lambda: jnp.array(0, jnp.int32))
 
-    # Update key, value caches with our new 1d spatial slices.
-    # We implement an efficient scatter into the cache via one-hot
-    # broadcast and addition.
-    key = cached_key.value + one_token_key * one_hot_indices
-    value = cached_value.value + one_token_value * one_hot_indices
-    cached_key.value = key
-    cached_value.value = value
-    cache_index.value = cache_index.value + 1
+      cache_index.value = jnp.array(sequence)
 
-    # Move the keys and values back to their original shapes.
-    key = self.revert_kvlen_axis(key)
-    value = self.revert_kvlen_axis(value)
+      key_shaped_for_cache = self.move_kvlen_axis(key)
+      value_shaped_for_cache = self.move_kvlen_axis(value)
+        
+      cached_key.value = cached_key.value.at[:, :, :, 0:sequence].set(key_shaped_for_cache)
+      cached_value.value = cached_value.value.at[:, :, :, 0:sequence].set(value_shaped_for_cache)
+      cached_segment_id.value = cached_segment_id.value.at[:, 0:sequence].set(decoder_segment_ids)
+      return key, value, decoder_segment_ids
+    elif model_mode == common_types.AUTOREGRESSIVE_MODEL_MODE:
+      is_initialized = self.has_variable('cache', 'cached_key')
+      if not is_initialized:
+        raise ValueError("Error, we can't do autoregression if we haven't seeded the KV Cache.")
 
-    return key, value
+      cached_key = self.variable('cache', 'cached_key', jnp.zeros,
+                          self.cached_kv_shape(cache_logical_shape), key.dtype)
+      cached_value = self.variable('cache', 'cached_value', jnp.zeros,
+                                  self.cached_kv_shape(cache_logical_shape), value.dtype)
+      cache_index = self.variable('cache', 'cache_index',
+                                  lambda: jnp.array(0, jnp.int32))
+      cached_segment_id = self.variable('cache', 'cache_segment_id',
+                          jnp.zeros,
+                          (key.shape[0], self.max_target_length), jnp.int32)
+      batch, num_heads, head_dim, length = cached_key.value.shape
+
+      # Create a OHE of the current index. NOTE: the index is increased below.
+      cur_index = cache_index.value
+      one_hot_indices = jax.nn.one_hot(cur_index, length, dtype=key.dtype)
+      one_hot_indices_int32 = jax.nn.one_hot(cur_index, length, dtype=jnp.int32)
+
+      # In order to update the key, value caches with the current key and
+      # value, we move the length axis to the back, similar to what we did for
+      # the cached ones above.
+      # Note these are currently the key and value of a single position, since
+      # we feed one position at a time.
+      one_token_key = self.move_kvlen_axis(key)
+      one_token_value = self.move_kvlen_axis(value)
+
+      # Update key, value caches with our new 1d spatial slices.
+      # We implement an efficient scatter into the cache via one-hot
+      # broadcast and addition.
+      key = cached_key.value + one_token_key * one_hot_indices
+      value = cached_value.value + one_token_value * one_hot_indices
+      cached_key.value = key
+      cached_value.value = value
+      cached_segment_id.value = cached_segment_id.value + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR * one_hot_indices_int32
+      cache_index.value = cache_index.value + 1
+
+      # Move the keys and values back to their original shapes.
+      key = self.revert_kvlen_axis(key)
+      value = self.revert_kvlen_axis(value)
+
+      return key, value, cached_segment_id.value
+    else:
+      raise ValueError(f"Model Mode isn't supported! {model_mode=}")
 
   @nn.compact
   def __call__(self,
@@ -553,19 +600,15 @@ class Attention(nn.Module):
                inputs_positions: Array,
                decoder_segment_ids = None,
                *,
-               decode: bool = False,
+               model_mode: str = common_types.TRAIN_MODEL_MODE,
                deterministic: bool = False):
     """Applies multi-head dot product attention on the input data.
 
     Projects the inputs into multi-headed query, key, and value vectors,
     applies dot-product attention and project the results to an output vector.
 
-    There are two modes: decoding and non-decoding (e.g., training). The mode is
-    determined by `decode` argument. For decoding, this method is called twice,
-    first to initialize the cache and then for an actual decoding process. The
-    two calls are differentiated by the presence of 'cached_key' in the variable
-    dict. In the cache initialization stage, the cache variables are initialized
-    as zeros and will be filled in the subsequent decoding process.
+    There are three modes: training, prefill and autoregression. During training, the KV cahce
+    is ignored. During prefill, the cache is filled. During autoregression the cache is used.
 
     In the cache initialization call, `inputs_q` has a shape [batch, length,
     q_features] and `inputs_kv`: [batch, length, kv_features]. During the
@@ -575,7 +618,7 @@ class Attention(nn.Module):
     Args:
       inputs_q: input queries of shape `[batch, q_length, q_features]`.
       inputs_kv: key/values of shape `[batch, kv_length, kv_features]`.
-      decode: Whether to prepare and use an autoregressive cache.
+      model_mode: corresponding to train, prefill and decode.
       deterministic: Disables dropout if set to True.
 
     Returns:
@@ -600,9 +643,7 @@ class Attention(nn.Module):
     value = nn.with_logical_constraint(value, self.value_axis_names)
     value = checkpoint_name(value, 'value_proj')
 
-    if decode:
-      key, value = self.decode(key, value, query.shape)
-
+    key_to_use, value_to_use, decoder_segment_ids_to_use = self.kv_cache(key, value, decoder_segment_ids, model_mode)
 
     dropout_rng = None
     if not deterministic and self.dropout_rate > 0.0:
@@ -611,12 +652,12 @@ class Attention(nn.Module):
     # Apply attention.
     out = self.apply_attention(
         query,
-        key,
-        value,
-        decoder_segment_ids,
+        key_to_use,
+        value_to_use,
+        decoder_segment_ids_to_use,
         dropout_rng,
         deterministic,
-        decode=decode
+        model_mode=model_mode,
     )
     out = nn.with_logical_constraint(out, self.out_axis_names)
 

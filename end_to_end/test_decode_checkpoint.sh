@@ -62,7 +62,7 @@ $cmd python3 MaxText/train.py MaxText/configs/base.yml \
 run_name=${training_ckpt_run_id} \
 base_output_directory=${base_output_directory} \
 dataset_path=${dataset_path} attention=${attention} \
-steps=5 save_period=3 async_checkpointing=false \
+steps=5 checkpoint_period=3 async_checkpointing=false \
 ${model_params} \
 
 

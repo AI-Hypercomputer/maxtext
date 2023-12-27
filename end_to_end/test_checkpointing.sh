@@ -8,7 +8,7 @@ COLLECT_STACK_TRACE=${4}
 
 #Train
 python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME steps=501\
-    metrics_file='saved_metrics.txt' save_period=20 base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH\
+    metrics_file='saved_metrics.txt' checkpoint_period=20 base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH\
     collect_stack_trace=$COLLECT_STACK_TRACE
 
 # Wait for first train to finish
