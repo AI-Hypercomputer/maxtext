@@ -80,7 +80,7 @@ class InputPipelineTest(unittest.TestCase):
 
 
   def test_eval_ds(self):
-    expected_shape = [2, self.config.max_eval_target_length]
+    expected_shape = [2, self.config.max_target_length]
     batch = self.eval_iter()
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
        'inputs': expected_shape,
@@ -89,7 +89,7 @@ class InputPipelineTest(unittest.TestCase):
 
 
   def test_predict_ds(self):
-    expected_shape = [2, self.config.max_predict_length]
+    expected_shape = [2, self.config.max_target_length]
     batch = self.predict_iter()
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
         'inputs': expected_shape,

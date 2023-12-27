@@ -55,7 +55,7 @@ class DecoderLayer(nn.Module):
                decoder_segment_ids,
                decoder_positions,
                deterministic,
-               decode,
+               model_mode,
                max_decode_length):
     cfg = self.config
     mesh = self.mesh
@@ -75,6 +75,7 @@ class DecoderLayer(nn.Module):
       num_query_heads=cfg.num_query_heads,
       num_kv_heads=cfg.num_kv_heads,
       head_dim=cfg.head_dim,
+      max_target_length=cfg.max_target_length,
       attention_kernel=cfg.attention,
       mesh=mesh,
       dtype=cfg.dtype,
@@ -89,7 +90,7 @@ class DecoderLayer(nn.Module):
       decoder_positions,
       decoder_segment_ids=decoder_segment_ids,
       deterministic=deterministic,
-      decode=decode)
+      model_mode=model_mode)
 
     attention_lnx = nn.with_logical_constraint(
         attention_lnx,
@@ -150,7 +151,7 @@ class Decoder(nn.Module):
                decoder_positions,
                decoder_segment_ids=None,
                deterministic=False,
-               decode=False,
+               model_mode=common_types.TRAIN_MODEL_MODE,
                max_decode_length=None):
     cfg = self.config
     mesh = self.mesh
@@ -215,7 +216,7 @@ class Decoder(nn.Module):
           decoder_segment_ids,
           decoder_positions,
           deterministic,
-          decode,
+          model_mode,
           max_decode_length,
       )
     else:
@@ -226,7 +227,7 @@ class Decoder(nn.Module):
             decoder_segment_ids,
             decoder_positions,
             deterministic,
-            decode,
+            model_mode,
             max_decode_length,
         )
 
@@ -284,21 +285,20 @@ class Transformer(nn.Module):
       decoder_positions,
       decoder_segment_ids=None,
       enable_dropout=True,
-      decode=False,
+      model_mode=common_types.TRAIN_MODEL_MODE,
       max_decode_length=None):
     """Applies Transformer decoder-branch on encoded-input and target."""
 
-    if decoder_segment_ids is not None:
-      if decode:
-        raise ValueError(
-            'During decoding, packing should not be used but '
-            '`decoder_segment_ids` was passed to `Transformer.decode`.')
-
+    if decoder_segment_ids is not None and model_mode == "AUTOREGRESSIVE":
+      raise ValueError(
+        f'During autoregressive decoding we assume the tokens are in the active sequence'
+        f' which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}.')
+    
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=not enable_dropout,
-        decode=decode,
+        model_mode=model_mode,
         max_decode_length=max_decode_length)
     return logits
