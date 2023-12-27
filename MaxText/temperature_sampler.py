@@ -19,7 +19,7 @@
 from jax import lax
 from jax import random
 import jax.numpy as jnp
-
+import jax
 
 # Constants
 # The default End-of-Sentence token id is 2 (SentencePiece).
@@ -61,7 +61,8 @@ def temperature_sample(prompt_inputs,
   # loop position counter.
   i0 = jnp.array(0)
   # per batch-item holding current token in loop.
-  token0 = jnp.zeros((batch_size, 1), dtype=jnp.int32)
+  # ANISHA: Fix: BOS is hardcoded to 0
+  token0 = jnp.ones((batch_size, 1), dtype=jnp.int32)
   # per batch-item state bit indicating if sentence has finished.
   ended0 = jnp.zeros((batch_size, 1), dtype=jnp.bool_)
   # (batch, length) array containing prefix prompt tokens for sampling loop
@@ -79,9 +80,22 @@ def temperature_sample(prompt_inputs,
     all_sequences_ended = jnp.all(ended)
     return not_at_end & (~all_sequences_ended)
 
+  def get_shape_dict(state_dictionary):
+    out = {}
+    for key, value in state_dictionary.items():
+        if isinstance(value, dict):
+            out[key] = get_shape_dict(value)
+        else:
+            out[key] = value.shape
+    return out
+
   def sampling_loop_body_fn(state):
     """Sampling loop state update."""
     i, sequences, cache, cur_token, ended, rng = state
+    jax.debug.print("Anisha cur STATE->i:{i}",i=i)
+    jax.debug.print("Anisha cur token {cur_token}",cur_token=cur_token)
+    #jax.debug.print("Anisha cur cache {cache}",cache=cache)
+    print("Anisha: cur cache shape:", get_shape_dict(cache))
     # Split RNG for sampling.
     rng1, rng2 = random.split(rng)
     # Call fast-decoder model on current tokens to get next-position logits.
@@ -103,12 +117,15 @@ def temperature_sample(prompt_inputs,
     out_of_prompt = (sequences[:, i+1] == 0)
     next_token = (next_token * out_of_prompt +
                   sequences[:, i+1] * ~out_of_prompt)
+    jax.debug.print("Anisha next token:{next_token}",next_token=next_token)
+    
     # If end-marker reached for batch item, only emit padding tokens.
     next_token_or_endpad = (next_token[:, None] * ~ended)
     ended |= (next_token_or_endpad == end_marker)
     # Add current sampled tokens to recorded sequences.
     new_sequences = lax.dynamic_update_slice(
         sequences, next_token_or_endpad, (0, i+1))
+    jax.debug.print("Anisha new_sequences {new_sequences}",new_sequences=new_sequences)
     return (i+1, new_sequences, new_cache, next_token_or_endpad, ended, rng2)
 
   # Run sampling loop and collect final state.

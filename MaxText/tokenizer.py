@@ -45,7 +45,7 @@ def _load_sentencepiece_tokenizer(model_path: str,
 def load_tokenizer(vocab_path: str, vocab_size: int,):
   """Loads the tokenizer at `vocab_path` or trains a one from `dataset`."""
   try:
-    sp_tokenizer = _load_sentencepiece_tokenizer(vocab_path)
+    sp_tokenizer = _load_sentencepiece_tokenizer(vocab_path, add_bos=True, add_eos=False)
     sp_size = int(sp_tokenizer.vocab_size())
     if sp_size != vocab_size:
       raise ValueError(f'Existing sentencepiece vocabulary size {sp_size} '

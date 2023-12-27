@@ -239,7 +239,9 @@ class DecoderLayer(nn.Module):
     lnx = RMSNorm(
         dtype=cfg.dtype, 
         name='pre_self_attention_norm', 
-        kernel_axes=('embed',))(inputs)
+        kernel_axes=('embed',),
+        epsilon=1e-05
+        )(inputs)
     lnx = nn.with_logical_constraint(
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
@@ -328,9 +330,11 @@ class Decoder(nn.Module):
     cfg = self.config
     mesh = self.mesh
     assert decoder_input_tokens.ndim == 2  # [batch, len]
-
+    jax.debug.print("Anisha: decoder_input_tokens = {decoder_input_tokens} ", decoder_input_tokens=decoder_input_tokens)
     # [batch, length] -> [batch, length, emb_dim]
     y = self.shared_embedding(decoder_input_tokens.astype('int32'))
+    jax.debug.print("Anisha: y embedding size = {shape}", shape=y.shape)
+    jax.debug.print("Anisha: y embedding =  {y} ", y=y)
     y = nn.Dropout(
         rate=cfg.dropout_rate, broadcast_dims=(-2,))(
             y, deterministic=deterministic)
@@ -415,8 +419,10 @@ class Decoder(nn.Module):
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
       logits = self.shared_embedding.attend(y)
+      jax.debug.print("logits={logits}", logits=logits)
       # Correctly normalize pre-softmax logits for this shared case.
       logits = logits / jnp.sqrt(y.shape[-1])
+      jax.debug.print("logits2={logits}", logits=logits)
     else:
       logits = linears.DenseGeneral(
           cfg.vocab_size,

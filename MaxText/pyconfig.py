@@ -153,6 +153,10 @@ class _HyperParameters():
         'base_num_decoder_layers': 32,
         'head_dim': 128,
         'mlp_activations': ['silu'],
+        'vocab_size': 32000,
+        'enable_dropout': False,
+        'attention':'mha',
+        'vocab_relative_path':'tokenizer.llama2',
       }
       raw_keys = validate_and_update_keys(raw_keys, llama2_7b_model_vars)
 

@@ -126,6 +126,11 @@ class MultiHeadDotProductAttention(models.MultiHeadDotProductAttention):
     key = projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
     value = projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
+    # query = projection( name='query')(inputs_q)
+    # key = projection(name='key')(inputs_kv)
+    # value = projection(name='value')(inputs_kv)
+    jax.debug.print("Anisha: shape query, key, value {qkv}", qkv=[query.shape, key.shape, value.shape])
+    jax.debug.print("Anisha: query, key, value {qkv}", qkv=[query, key, value])
     #Apply RoPE
     query = models.LLaMARotaryEmbedding(embedding_dims=self.head_dim,
                                  name='query_rotary'
@@ -169,6 +174,7 @@ class MultiHeadDotProductAttention(models.MultiHeadDotProductAttention):
                                    swap_dims(value.shape), value.dtype)
       cache_index = self.variable('cache', 'cache_index',
                                   lambda: jnp.array(0, dtype=jnp.int32))
+      jax.debug.print("Anisha: is_initialized = {is_initialized}", is_initialized=is_initialized)
       if is_initialized:
         batch, num_heads, head_dim, length = cached_key.value.shape
         # During fast autoregressive decoding, we feed one position at a time,
@@ -289,22 +295,25 @@ class MlpBlock(nn.Module):
 
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
-    activations = []
-    for idx, act_fn in enumerate(self.activations):
-      dense_name = 'wi' if len(self.activations) == 1 else f'wi_{idx}'
-      x = linears.DenseGeneral(
-          self.intermediate_dim,
-          dtype=self.dtype,
-          kernel_init=self.kernel_init,
-          kernel_axes=('embed', 'mlp'),
-          name=dense_name,
-          config=cfg)(
-              inputs)
-      x = linears._convert_to_activation_function(act_fn)(x)
-      activations.append(x)
-
+    # activations = []
+    # for idx, act_fn in enumerate(self.activations):
+    #   dense_name = 'wi' if len(self.activations) == 1 else f'wi_{idx}'
+  
+    #   activations.append(x)
+    gate_mlp = linears.DenseGeneral(
+      self.intermediate_dim,
+      dtype=self.dtype,
+      kernel_init=self.kernel_init,
+      kernel_axes=('embed', 'mlp'),
+      name="wi",
+      config=cfg)
+    
+    x = gate_mlp(
+          inputs)
+    x = linears._convert_to_activation_function(self.activations[0])(x)
+    jax.debug.print("Anisha: inp_of_ln_lnx =  {inputs} ", inputs = inputs)
     # Take elementwise product of above intermediate activations.
-    x = functools.reduce(operator.mul, activations)
+    #x = functools.reduce(operator.mul, activations)
 
     # Apply dropout and final dense output projection.
     x = nn.Dropout(
@@ -347,6 +356,7 @@ class DecoderLayer(models.DecoderLayer):
   """Transformer decoder layer that attends to the encoder."""
   config: models.Config
   mesh: Mesh
+  name: str
 
   @nn.compact
   def __call__(self,
@@ -359,17 +369,25 @@ class DecoderLayer(models.DecoderLayer):
                max_decode_length):
     cfg = self.config
     mesh = self.mesh
+    name = self.name
 
     inputs = nn.with_logical_constraint(
         inputs, ('activation_batch', 'activation_length', 'activation_embed'))
 
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
-    residual = inputs
     #input_layernorm aka pre_self_attention_layer_norm
-    lnx = models.RMSNorm(
+    #jax.debug.print(name+"Anisha: inp_of_ln_lnx =  {inputs} ", inputs = inputs)
+    
+    lnx_rms = models.RMSNorm(
         dtype=cfg.dtype, 
         name='pre_self_attention_layer_norm', 
-        kernel_axes=('embed',))(inputs)
+        kernel_axes=('embed',),
+        epsilon=1e-05
+        )
+    lnx = lnx_rms(inputs)
+    #jax.debug.print("Anisha: ln eps =  {eps} ", eps = lnx_rms.epsilon)
+    jax.debug.print("Anisha: inp_of_attention_lnx =  {lnx} ", lnx = lnx)
+    
     lnx = nn.with_logical_constraint(
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
@@ -394,16 +412,19 @@ class DecoderLayer(models.DecoderLayer):
     attention_lnx = nn.with_logical_constraint(
         attention_lnx,
         ('activation_batch', 'activation_length', 'activation_embed'))
-
-    hidden_states = residual + attention_lnx
-
+    #jax.debug.print("Anisha: attention_lnx =  {attention_lnx} ", attention_lnx = attention_lnx)
+    #jax.debug.print("Anisha: inputs again =  {inputs} ", inputs = inputs)
+    intermediate_inputs = inputs + attention_lnx
+    #jax.debug.print("Anisha: attention + residual =  {intermediate_inputs} ", intermediate_inputs = intermediate_inputs)
+    
     # Fully Connected
-    residual = hidden_states
     hidden_states = models.RMSNorm(
-        dtype=cfg.dtype, name='post_self_attention_layer_norm', kernel_axes=('embed',))(
-            hidden_states)
-    hidden_states = nn.with_logical_constraint(lnx, ('activation_batch', 'activation_length', 'activation_embed'))
-
+        dtype=cfg.dtype, name='post_self_attention_layer_norm', kernel_axes=('embed',),
+        epsilon=1e-05
+        )(intermediate_inputs)
+    hidden_states = nn.with_logical_constraint(hidden_states, ('activation_batch', 'activation_length', 'activation_embed'))
+    
+    #jax.debug.print("Anisha: input of mlp_lnx =  {hidden_states} ", hidden_states = hidden_states)
     # MLP block.
     mlp_lnx = MlpBlock(
         intermediate_dim=cfg.mlp_dim,
@@ -417,7 +438,11 @@ class DecoderLayer(models.DecoderLayer):
         mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')
     )
 
-    layer_output = mlp_lnx + residual
+    jax.debug.print("Anisha: inp, ln(inp), attn, resi, ln(resi), mlp_lnx =  {mlp_lnx} ", 
+                    mlp_lnx = [inputs, lnx, attention_lnx, intermediate_inputs, hidden_states,mlp_lnx ])
+
+
+    layer_output = mlp_lnx + intermediate_inputs
 
     layer_output = nn.Dropout(
         rate=cfg.dropout_rate, broadcast_dims=(-2,))(
@@ -436,9 +461,6 @@ class DecoderLayer(models.DecoderLayer):
           'activation_fraction_zero',
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
-
-    if cfg.scan_layers:
-      return layer_output, None
 
     if cfg.scan_layers:
       return layer_output, None
