@@ -100,7 +100,7 @@ def generate_decode_checkpoint(config):
       config.checkpoint_dir,
       config.enable_checkpointing,
       config.async_checkpointing,
-      config.save_period,
+      config.checkpoint_period,
   )
   # Read training state from config.load_paramaters_path
   max_logging.log(f"Read training checkpoint from: {config.load_parameters_path}")
