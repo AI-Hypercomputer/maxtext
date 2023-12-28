@@ -87,7 +87,7 @@ class Embed(nn.Module):
       one_hot = jax.nn.one_hot(
           inputs, self.num_embeddings, dtype=self.dtype
       )
-      output = jnp.einsum('...y,yz->...z', one_hot, self.embedding)
+      output = jnp.einsum('...y,yz->...z', one_hot, jnp.asarray(self.embedding, self.dtype))
     else:
       output = jnp.asarray(self.embedding, self.dtype)[inputs]
     output = nn.with_logical_constraint(

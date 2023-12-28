@@ -26,13 +26,14 @@ import pickle
 import functools
 import input_pipeline
 import optax
+from praxis.optimizers import sharded_adam
 
 
 
-def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config):
+def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config, is_train):
   """ Get the shardings (both state and data) for train_step """
-  functional_train = get_functional_train_step(train_step, model, config)
-  functional_train.__name__ = "train_step"
+  functional_train = get_functional_train_step(train_step, model, config, is_train)
+  functional_train.__name__ = "train_step" if is_train else "eval_step"
   data_pspec = P(*config.data_sharding)
   state_mesh_shardings = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
@@ -40,25 +41,26 @@ def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations
       lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
   in_shardings = (state_mesh_shardings, data_sharding, None) # State, batch, rng
   out_shardings = (state_mesh_shardings, None, None) # State, metrics, rng
-  static_argnums = () # We partial out the static argnums of model and config
-  donate_argnums = 0 # This is the index of the state - we allow the compiler to make use of this memory.
+  static_argnums = () # We partial out the static argnums of model, config and is_train
+  donate_argnums = 0 if is_train else () # This is the index of the state - we allow the compiler to make use of this memory.
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
 
-def get_functional_train_step(train_step, model, config):
-  return functools.partial(train_step, model, config)
+def get_functional_train_step(train_step, model, config, is_train):
+  return functools.partial(train_step, model, config, is_train=is_train)
 
 def get_optimizer(config, learning_rate_schedule):
   """ Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2 """
 
   # hack
-  return optax.adam(
-    learning_rate_schedule,
-    b1=config.adam_b1,
-    b2=config.adam_b2,
-    eps=config.adam_eps,
-    eps_root=config.adam_eps_root,
-    # weight_decay=config.adam_weight_decay,
-  )
+  return sharded_adam(
+          learning_rate_fn=learning_rate_schedule,
+          beta1=config.adam_b1,
+          beta2=config.adam_b2,
+          epsilon=config.adam_eps,
+          epsilon_root=config.adam_eps_root,
+          update_capping=-1.,  # disable
+          weight_decay=config.adam_weight_decay,
+          )
 
 def load_compiled(config, partial_train, state):
   """ # Loading a serialized compiled train step function."""

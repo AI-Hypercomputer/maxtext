@@ -200,6 +200,9 @@ def dot_product_attention(query: Array,
   # QK Product, a.k.a `attn_weights`: [batch, num_heads, q_length, kv_length]
   attn_weights = compute_qk_attn_weights(query, key)
 
+  # fp32 append
+  attn_weights = attn_weights.astype(jnp.float32)
+
   # Apply attention bias: masking, dropout, proximity bias, etc.
   if bias is not None:
     attn_weights = apply_mask_to_logits(attn_weights, bias)

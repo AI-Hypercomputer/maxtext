@@ -52,6 +52,10 @@ from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
+import functools
+import multihost_dataloading
+from jax.experimental.multihost_utils import process_allgather
+import math
 
 Transformer = models.Transformer
 
@@ -159,7 +163,7 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = layer["activation_mean"][0]
       output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
 
-def train_step(model, config, state, data, dropout_rng):
+def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
   """
 
   Args:
@@ -182,16 +186,19 @@ def train_step(model, config, state, data, dropout_rng):
   for k, v in data.items():
     data[k] = v[:config.global_batch_size_to_train_on,:]
 
-  def loss_fn(params):
+  def loss_fn(params, is_train=True):
     logits, intermediate_outputs = model.apply({'params': params},
                          data['inputs'],
                          data['targets'],
                          data['inputs_segmentation'],
                          data['inputs_position'],
                          padding_mask=data['targets_segmentation'] != 0,
-                         enable_dropout=config.enable_dropout,
+                         enable_dropout=config.enable_dropout if is_train else False,
                          rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
-    one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
+    
+    one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size, dtype=jnp.float32)
+    # add
+    logits = logits.astype(jnp.float32)
     if config.stable_cross_entropy_loss:
       xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
     else:
@@ -200,18 +207,36 @@ def train_step(model, config, state, data, dropout_rng):
     # Mask out paddings at the end of each example.
     padding_mask = data['targets_segmentation'] != 0
     xent = xent * padding_mask
-    return jnp.sum(xent)/jnp.sum(padding_mask), intermediate_outputs
+    cum_loss = jnp.sum(xent).astype(jnp.float32)
+    cum_weights = jnp.sum(padding_mask).astype(jnp.float32)
+    loss = (cum_loss / (cum_weights + 1e-6)).astype(jnp.float32)
+    aux = {
+      'intermediate_outputs': intermediate_outputs,
+      'cum_loss': cum_loss,
+      'cum_weights': cum_weights,
+    }
+    return loss, aux
 
-  grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
-  if config.gradient_clipping_threshold > 0:
-    grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
+  if is_train:
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    (loss, aux), raw_grads = grad_fn(state.params)
+    intermediate_outputs = aux['intermediate_outputs']
+
+    if config.gradient_clipping_threshold > 0:
+      grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
+    else:
+      grads = raw_grads
+    new_state = state.apply_gradients(grads=grads)
+    metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm': max_utils.l2norm_pytree(grads),
+            'learning/raw_grad_norm': max_utils.l2norm_pytree(raw_grads),
+            'learning/param_norm': max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   else:
-    grads = raw_grads
-  new_state = state.apply_gradients(grads=grads)
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm': max_utils.l2norm_pytree(grads),
-             'learning/raw_grad_norm': max_utils.l2norm_pytree(raw_grads),
-             'learning/param_norm': max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
+    loss, aux = loss_fn(state.params, is_train=False)
+    cum_loss = aux['cum_loss']
+    cum_weights = aux['cum_weights']
+    metrics = {'scalar': {'evaluation/loss': loss, 'evaluation/cum_loss': cum_loss, 'evaluation/cum_weights': cum_weights}}
+    new_state = state
+
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
@@ -247,16 +272,55 @@ def train_loop(config, state=None):
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
 
-  data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
+  train_data_iterator, eval_ds, _ = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations = max_utils.setup_training_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+
+  # hack overwrite state
+  def map_fn(key_path, value):
+    key_path_str = jax.tree_util.keystr(key_path)
+    if key_path_str in  (".step", ".opt_state[0].count", ".opt_state[1].count", "opt_state.count"):
+      return config.overwrite_ckpt_step
+    else:
+      return value
+
+  state = jax.tree_util.tree_map_with_path(map_fn, state)
+  start_step = get_first_step(state) # this is the start_step for training
+
+  eval_interval = math.ceil(24567 / config.global_batch_size_to_train_on)
+  if jax.process_index() == 0:
+    max_logging.log(f":::MLLOG init_checkpoint_step: {start_step}")
+    max_logging.log(f":::MLLOG opt_base_learning_rate: {config.learning_rate}")
+    max_logging.log(f":::MLLOG opt_end_learning_rate: {config.cosine_learning_rate_final_fraction}")
+    max_logging.log(f":::MLLOG opt_weight_decay: {config.adam_weight_decay}")
+    max_logging.log(f":::MLLOG opt_learning_rate_decay_steps: {int(config.learning_rate_schedule_steps * (1 - config.warmup_steps_fraction))}")
+    max_logging.log(f":::MLLOG opt_learning_rate_warmup_steps: {int(config.learning_rate_schedule_steps * config.warmup_steps_fraction + 1)}")
+    max_logging.log(f":::MLLOG opt_adam_beta_1: {config.adam_b1}")
+    max_logging.log(f":::MLLOG opt_adam_beta_2: {config.adam_b2}")
+    max_logging.log(f":::MLLOG opt_adam_epsilon: {config.adam_eps}")
+    max_logging.log(f":::MLLOG opt_gradient_clip_norm: {config.gradient_clipping_threshold}")
+    max_logging.log(f":::MLLOG global_batch_size: {config.global_batch_size_to_train_on}")
+    max_logging.log(f":::MLLOG sequence_length: {config.max_target_length}")
+    max_logging.log(f":::MLLOG eval interval: {eval_interval}")
+
   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
     train_step,
     mesh,
     state_mesh_annotations,
     model,
-    config
+    config,
+    is_train=True,
   )
+
+  if eval_ds:
+    functional_eval, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
+      train_step,
+      mesh,
+      state_mesh_annotations,
+      model,
+      config,
+      is_train=False,
+    )
 
   num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
   max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
@@ -275,6 +339,14 @@ def train_loop(config, state=None):
       out_shardings=out_shard,
       static_argnums=static_argnums,
       donate_argnums=donate_argnums)
+  if eval_ds:
+    p_eval_step = jax.jit(
+      functional_eval,
+      in_shardings=in_shard,
+      out_shardings=out_shard,
+      static_argnums=static_argnums,
+      donate_argnums=donate_argnums,
+    )
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
@@ -282,13 +354,40 @@ def train_loop(config, state=None):
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
-  start_step = get_first_step(state) # this is the start_step for training
   first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
+
+  valid_loss = 0
+  valid_cum_loss = 0
+  valid_cum_weights = 0
+  eval_data_iterator = multihost_dataloading.get_batch_sharded_data_pipeline(eval_ds, mesh)
+  i = 0
+  count = 0
+  while True:
+    batch = eval_data_iterator()
+    if not batch:
+      break
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      _, metrics, _ = p_eval_step(
+        state, batch, nextrng
+      )
+    batch_valid_loss = float(metrics['scalar']['evaluation/loss'])
+    batch_valid_cum_loss = float(metrics['scalar']['evaluation/cum_loss'])
+    batch_valid_cum_weights = float(metrics['scalar']['evaluation/cum_weights'])
+    valid_loss += batch_valid_loss
+    valid_cum_loss += batch_valid_loss * batch_valid_cum_weights
+    valid_cum_weights += batch_valid_cum_weights
+    count += 1
+    i += 1
+
+  mean_valid_loss = valid_loss / count
+  weighted_mean_valid_loss = valid_cum_loss / (valid_cum_weights + 1e-8)
+  max_logging.log(f"average loss at step {start_step}: mean={mean_valid_loss}, weighted_mean={weighted_mean_valid_loss}, total_weights={valid_cum_weights}")
+
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
 
-    example_batch = load_next_batch(data_iterator, example_batch, config)
+    example_batch = load_next_batch(train_data_iterator, example_batch, config)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics, nextrng = p_train_step(
           state, example_batch, nextrng
@@ -299,13 +398,13 @@ def train_loop(config, state=None):
     write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
 
-    if checkpoint_manager is not None:
-      if checkpoint_manager.save(step, state):
-        max_logging.log(f"saved a checkpoint at step {step}")
-      # Upon preemption, exit when and only when all ongoing saves are complete.
-      if checkpoint_manager.reached_preemption(step):
-        checkpoint_manager.wait_until_finished()
-        sys.exit()
+    # if checkpoint_manager is not None:
+    #   if step > 0 and checkpoint_manager.save(step, state):
+    #     max_logging.log(f"saved a checkpoint at step {step}")
+    #   # Upon preemption, exit when and only when all ongoing saves are complete.
+    #   if checkpoint_manager.reached_preemption(step):
+    #     checkpoint_manager.wait_until_finished()
+    #     sys.exit()
 
     if config.metrics_file:
       max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
@@ -313,6 +412,41 @@ def train_loop(config, state=None):
     if config.gcs_metrics and jax.process_index() == 0:
       running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
 
+    valid_loss = 0
+    valid_cum_loss = 0
+    valid_cum_weights = 0
+    if step % eval_interval == 0 or step == start_step:
+      eval_data_iterator = multihost_dataloading.get_batch_sharded_data_pipeline(eval_ds, mesh)
+      i = 0
+      count = 0
+      while True:
+        batch = eval_data_iterator()
+        if not batch:
+          break
+        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          _, metrics, _ = p_eval_step(
+            state, batch, nextrng
+          )
+        batch_valid_loss = float(metrics['scalar']['evaluation/loss'])
+        batch_valid_cum_loss = float(metrics['scalar']['evaluation/cum_loss'])
+        batch_valid_cum_weights = float(metrics['scalar']['evaluation/cum_weights'])
+        if math.isnan(batch_valid_loss):
+          max_logging.log(f"found nan at batch {i}: {batch}")
+        else:
+          valid_loss += batch_valid_loss
+          valid_cum_loss += batch_valid_loss * batch_valid_cum_weights
+          valid_cum_weights += batch_valid_cum_weights
+          count += 1
+        i += 1
+
+      mean_valid_loss = valid_loss / count
+      weighted_mean_valid_loss = valid_cum_loss / (valid_cum_weights + 1e-8)
+      max_logging.log(f"average loss at step {step}: mean={mean_valid_loss}, weighted_mean={weighted_mean_valid_loss}, total_weights={valid_cum_weights}")
+      if weighted_mean_valid_loss <= 2.69:
+        max_logging.log(f"early stop")
+        break
+        
+          
   max_utils.deactivate_profiler(config)
   writer.close()
   return state

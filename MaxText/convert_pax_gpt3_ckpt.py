@@ -25,6 +25,7 @@ import functools
 from paxml import trainer_lib
 from paxml.tasks.lm.params.c4 import C4SpmdGpt3AdamOrgHP
 from praxis import py_utils
+import optax
 
 NestedMap = py_utils.NestedMap
 
@@ -90,7 +91,7 @@ base_args = [
     'ici_fsdp_parallelism=-1',
     'ici_tensor_parallelism=4',
     'attention=mha',
-    'steps=5', 'run_name=convergence_test', 'base_output_directory=gs://lizhiyu-multipods/lizhiyu/colab',
+    'steps=5', 'run_name=convergence_test', 'base_output_directory=gs://lizhiyu-multipods/lizhiyu/colab_adamw',
     'dtype=float32',
     'save_period=1000',
     'async_checkpointing=false',
@@ -123,7 +124,15 @@ def main(args: Sequence[str]):
 
     model = Transformer(config=cfg, mesh=mesh)
     learning_rate_schedule = max_utils.create_learning_rate_schedule(cfg)
-    tx = maxtext_utils.get_optimizer(cfg, learning_rate_schedule)
+    # tx = maxtext_utils.get_optimizer(cfg, learning_rate_schedule)
+    tx = optax.adamw(
+        learning_rate_schedule,
+        b1=cfg.adam_b1,
+        b2=cfg.adam_b2,
+        eps=cfg.adam_eps,
+        eps_root=cfg.adam_eps_root,
+        weight_decay=cfg.adam_weight_decay,
+    )
 
     checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
         cfg.checkpoint_dir,
@@ -140,6 +149,7 @@ def main(args: Sequence[str]):
         ".step": ("step", None),
         ".opt_state[0].count": ("opt_states_0.no_prefix_0.count", None),
         ".opt_state[1].count": ("opt_states_0.no_prefix_1.count", None),
+        ".opt_state[2].count": ("opt_states_0.no_prefix_2.count", None),
         ".params['token_embedder']['embedding']": ("mdl_vars.params.lm.softmax.logits_ffn.linear.w", lambda x: x.T),
         ".params['position_embedder']['embedding']": ("mdl_vars.params.lm.position_emb.emb_var", None),
         ".params['decoder']['decoder']['pre_self_attention_norm']['scale']": ("mdl_vars.params.lm.transformer.repeat.sub.x_layers_0.layer_norm.scale", lambda x: np.moveaxis(x, 0, cfg.param_scan_axis) + 1.),
@@ -167,9 +177,9 @@ def main(args: Sequence[str]):
         ".opt_state[0].mu['decoder']['decoder']['self_attention']['query']['kernel']": (f"opt_states_0.p#{cfg.base_num_decoder_layers}#i-1_2.m.params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.w", lambda x: np.moveaxis(x[:,0], 0, cfg.param_scan_axis)),
         ".opt_state[0].mu['decoder']['decoder']['self_attention']['query']['bias']": (f"opt_states_0.p#{cfg.base_num_decoder_layers}#i-1_2.m.params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.b", lambda x: np.moveaxis(x[:,0], 0, cfg.param_scan_axis)),
         ".opt_state[0].mu['decoder']['decoder']['self_attention']['key']['kernel']": (f"opt_states_0.p#{cfg.base_num_decoder_layers}#i-1_2.m.params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.w", lambda x: np.moveaxis(x[:,1], 0, cfg.param_scan_axis)),
-        ".opt_state[0].mu['decoder']['decoder']['self_attention']['key']['bias']": (f"opt_states_0.p#{cfg.base_num_decoder_layers}#i-1_2.v.params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.b", lambda x: np.moveaxis(x[:,1], 0, cfg.param_scan_axis)),
+        ".opt_state[0].mu['decoder']['decoder']['self_attention']['key']['bias']": (f"opt_states_0.p#{cfg.base_num_decoder_layers}#i-1_2.m.params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.b", lambda x: np.moveaxis(x[:,1], 0, cfg.param_scan_axis)),
         ".opt_state[0].mu['decoder']['decoder']['self_attention']['value']['kernel']": (f"opt_states_0.p#{cfg.base_num_decoder_layers}#i-1_2.m.params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.w", lambda x: np.moveaxis(x[:,2], 0, cfg.param_scan_axis)),
-        ".opt_state[0].mu['decoder']['decoder']['self_attention']['value']['bias']": (f"opt_states_0.p#{cfg.base_num_decoder_layers}#i-1_2.v.params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.b", lambda x: np.moveaxis(x[:,2], 0, cfg.param_scan_axis)),
+        ".opt_state[0].mu['decoder']['decoder']['self_attention']['value']['bias']": (f"opt_states_0.p#{cfg.base_num_decoder_layers}#i-1_2.m.params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.b", lambda x: np.moveaxis(x[:,2], 0, cfg.param_scan_axis)),
         ".opt_state[0].mu['decoder']['decoder']['self_attention']['out']['kernel']": (f"opt_states_0.p#{cfg.base_num_decoder_layers}#i-1_2.m.params.lm.transformer.repeat.sub.x_layers_0.self_attention.post.w", lambda x: np.transpose(x, (2, 0, 3, 1))),
         ".opt_state[0].mu['decoder']['decoder']['self_attention']['out']['bias']": (f"opt_states_0.p#{cfg.base_num_decoder_layers}#i-1_2.m.params.lm.transformer.repeat.sub.x_layers_0.self_attention.post.b", lambda x: np.moveaxis(x, 0, cfg.param_scan_axis)),
         ".opt_state[0].mu['decoder']['decoder']['mlp']['mlp_layer_norm']['scale']": (f"opt_states_0.p#{cfg.base_num_decoder_layers}#i-1_2.m.params.lm.transformer.repeat.sub.x_layers_0.ff_layer.layer_norm.scale", lambda x: np.moveaxis(x, 0, cfg.param_scan_axis)),
@@ -201,6 +211,12 @@ def main(args: Sequence[str]):
         ".opt_state[0].nu['decoder']['decoder_norm']['scale']": ("opt_states_0.no_prefix_2.v.params.lm.final_ln.scale", lambda x: x.T),
         ".opt_state[0].nu['decoder']['decoder_norm']['bias']": ("opt_states_0.no_prefix_2.v.params.lm.final_ln.bias", None),
     }
+
+    def verify_fn(key_path, value, prefix='gpt3_spmd1x64x24_tpuv4-3072_v84_20221101/checkpoints/checkpoint_00004000'):
+        key_path_str = jax.tree_util.keystr(key_path)
+        assert key_path_str in MAPS, f"{key_path_str} not found"
+
+    jax.tree_util.tree_map_with_path(verify_fn, state)
 
     def map_fn(key_path, value, prefix='gpt3_spmd1x64x24_tpuv4-3072_v84_20221101/checkpoints/checkpoint_00004000'):
         key_path_str = jax.tree_util.keystr(key_path)
