@@ -265,15 +265,17 @@ def train_loop(config, state=None):
     state_mesh_annotations,
     model,
     config
+    is_train=True,
   )
 
   if eval_ds:
     functional_eval, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
-      functools.partial(train_step, is_train=False),
+      train_step,
       mesh,
       state_mesh_annotations,
       model,
-      config
+      config,
+      is_train=False,
     )
 
   num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
@@ -349,7 +351,7 @@ def train_loop(config, state=None):
           break
         max_logging.log(f"{i}: {batch}")
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-          state, metrics, _ = p_eval_step(
+          _, metrics, _ = p_eval_step(
             state, batch, nextrng
           )
         valid_loss += float(metrics['scalar']['evaluation/loss'])
