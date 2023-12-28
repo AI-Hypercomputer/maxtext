@@ -395,10 +395,10 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
   eval_ds = eval_ds.prefetch(AUTOTUNE)
 
   train_multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(train_ds, mesh)
-  eval_multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(eval_ds, mesh)
+  # eval_multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(eval_ds, mesh)
 
   # Return multi-host jax.Array prep iterator
-  return train_multihost_gen, eval_multihost_gen, sp_tokenizer
+  return train_multihost_gen, eval_ds, sp_tokenizer
   
 
 

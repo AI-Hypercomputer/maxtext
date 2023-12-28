@@ -92,7 +92,7 @@ def get_next_batch_sharded(
   while not loaded_data_success and data_load_attempts < MAX_DATA_LOAD_ATTEMPTS:
     data_load_attempts += 1
     try:
-      local_data = local_dataset.next()
+      local_data = next(local_dataset, None)
       loaded_data_success = True
     except tf.errors.FailedPreconditionError:
       max_logging.log("Failed to get next data batch, retrying")
@@ -100,8 +100,8 @@ def get_next_batch_sharded(
 
   # Try one last time, if this fails we will see the full stack trace.
   if not loaded_data_success:
-    local_data = local_dataset.next()
+    local_data = next(local_dataset, None)
+  if local_data:
+    local_data = jtu.tree_map_with_path(partial(_form_global_array, global_mesh = global_mesh), local_data)
 
-  input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh = global_mesh), local_data)
-
-  return input_gdas
+  return local_data

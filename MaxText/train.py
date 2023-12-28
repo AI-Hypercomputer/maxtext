@@ -53,6 +53,7 @@ from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 import functools
+import multihost_dataloading
 
 Transformer = models.Transformer
 
@@ -255,7 +256,7 @@ def train_loop(config, state=None):
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
 
-  train_data_iterator, eval_data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
+  train_data_iterator, eval_ds, _ = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations = max_utils.setup_training_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
@@ -266,7 +267,7 @@ def train_loop(config, state=None):
     config
   )
 
-  if eval_data_iterator:
+  if eval_ds:
     functional_eval, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
       functools.partial(train_step, is_train=False),
       mesh,
@@ -338,15 +339,26 @@ def train_loop(config, state=None):
     if config.gcs_metrics and jax.process_index() == 0:
       running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
 
-    sum_metrics = {}
+    valid_loss = 0
     if step % 1 == 0:
+      eval_data_iterator = multihost_dataloading.get_batch_sharded_data_pipeline(eval_ds, mesh)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        for i, batch in enumerate(eval_data_iterator):
+        i = 0
+        while True:
+          batch = eval_data_iterator()
+          if not batch:
+            break
           _, metrics, _ = p_eval_step(
             state, batch, nextrng
           )
+          valid_loss += metrics['scalar']['evaluation/loss']
           if i % 100 == 0:
             max_logging.log(f"eval: {metrics}")
+          i += 1
+
+        max_logging.log(f"average loss: {valid_loss / i}")
+        
+          
   max_utils.deactivate_profiler(config)
   writer.close()
   return state
