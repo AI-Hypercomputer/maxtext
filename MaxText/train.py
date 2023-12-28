@@ -216,7 +216,7 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
             'learning/raw_grad_norm': max_utils.l2norm_pytree(raw_grads),
             'learning/param_norm': max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   else:
-    loss, intermediate_outputs = loss_fn(state)
+    loss, intermediate_outputs = loss_fn(state.params)
     metrics = {'scalar': {'evaluation/loss': loss}}
     new_state = state
 
