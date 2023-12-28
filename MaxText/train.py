@@ -293,7 +293,7 @@ def train_loop(config, state=None):
       out_shardings=out_shard,
       static_argnums=static_argnums,
       donate_argnums=donate_argnums)
-  if eval_data_iterator:
+  if eval_ds:
     p_eval_step = jax.jit(
       functional_eval,
       in_shardings=in_shard,
