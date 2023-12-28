@@ -378,7 +378,7 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
     ), 'Batch size should be divisible number of global devices.'
   
   train_ds = train_ds.batch(batch_size // jax.process_count(), drop_remainder=True)
-  # eval_ds = _pad_to_batch_size(eval_ds, batch_size // jax.process_count())
+  # eval_ds = _pad_to_batch_size(eval_ds, batch_size)
   eval_ds = eval_ds.batch(batch_size // jax.process_count(), drop_remainder=False)
   
   # self.reset_for_eval=True: We are running eval over exactly one epoch.

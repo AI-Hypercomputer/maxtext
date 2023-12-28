@@ -347,7 +347,7 @@ def train_loop(config, state=None):
         batch = eval_data_iterator()
         if not batch:
           break
-        print(batch)
+        max_logging.log(f"{i}: {batch}")
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           _, metrics, _ = p_eval_step(
             state, batch, nextrng
