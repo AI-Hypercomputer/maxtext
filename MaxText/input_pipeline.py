@@ -321,7 +321,7 @@ def split_tokens_to_targets_length(dataset, sequence_length):
 
 def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
   """ Make train iterator and tokenizer for C4 dataset"""
-  os.environ["TFDS_DATA_DIR"] = config.dataset_path
+  os.environ["TFDS_DATA_DIR"] = "gs://mlperf-llm-public2"
 
   read_config = tfds.ReadConfig(
     shuffle_seed = config.data_shuffle_seed,
@@ -354,9 +354,9 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
   train_ds = reduce_concat_tokens(train_ds, feature_key='targets', batch_size=4096)
   train_ds = split_tokens_to_targets_length(train_ds, config.max_target_length)
 
-  # shuffle_buffer_size = 1024
-  # data_shuffle_seed = 0
-  # train_ds = train_ds.shuffle(shuffle_buffer_size, seed = data_shuffle_seed)
+  shuffle_buffer_size = 10000
+  data_shuffle_seed = 0
+  train_ds = train_ds.shuffle(shuffle_buffer_size, seed = data_shuffle_seed)
   train_ds = sequence_packing.pack_dataset(train_ds, config.max_target_length)
   eval_ds = sequence_packing.pack_dataset(eval_ds, config.max_target_length)
 
