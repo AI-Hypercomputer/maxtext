@@ -31,8 +31,8 @@ import tokenizer
 import multihost_dataloading
 import sequence_packing
 import math
-import seqio
 import numpy as np
+from jax.experimental import multihost_utils
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
@@ -268,7 +268,7 @@ def split_tokens(dataset,
 
   # Filter empty examples.
   dataset = dataset.filter(lambda x: tf.not_equal(tf.size(x[feature_key]), 0))
-  dataset = dataset.map(_split_tokens, num_parallel_calls=num_parallel_calls())
+  dataset = dataset.map(_split_tokens, num_parallel_calls=AUTOTUNE)
   dataset = dataset.unbatch()
   return dataset.map(
       _strip_padding, num_parallel_calls=tf.data.experimental.AUTOTUNE)
@@ -372,7 +372,7 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
   
   train_ds = train_ds.map(map_fn, num_parallel_calls=AUTOTUNE)
   eval_ds = eval_ds.map(map_fn, num_parallel_calls=AUTOTUNE)
-  batch_size = int(config.per_device_batch_size * global_mesh.size )
+  batch_size = int(config.per_device_batch_size * mesh.size )
   assert (
         batch_size % mesh.size == 0
     ), 'Batch size should be divisible number of global devices.'
