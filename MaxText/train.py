@@ -52,6 +52,7 @@ from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
+import functools
 
 Transformer = models.Transformer
 
@@ -159,7 +160,7 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = layer["activation_mean"][0]
       output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
 
-def train_step(model, config, state, data, dropout_rng):
+def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
   """
 
   Args:
@@ -189,7 +190,7 @@ def train_step(model, config, state, data, dropout_rng):
                          data['inputs_segmentation'],
                          data['inputs_position'],
                          padding_mask=data['targets_segmentation'] != 0,
-                         enable_dropout=config.enable_dropout,
+                         enable_dropout=config.enable_dropout if is_train else False,
                          rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
     one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
     if config.stable_cross_entropy_loss:
@@ -202,16 +203,23 @@ def train_step(model, config, state, data, dropout_rng):
     xent = xent * padding_mask
     return jnp.sum(xent)/jnp.sum(padding_mask), intermediate_outputs
 
-  grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
-  if config.gradient_clipping_threshold > 0:
-    grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
+  if is_train:
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
+    if config.gradient_clipping_threshold > 0:
+      grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
+    else:
+      grads = raw_grads
+    new_state = state.apply_gradients(grads=grads)
+    metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm': max_utils.l2norm_pytree(grads),
+            'learning/raw_grad_norm': max_utils.l2norm_pytree(raw_grads),
+            'learning/param_norm': max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   else:
-    grads = raw_grads
-  new_state = state.apply_gradients(grads=grads)
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm': max_utils.l2norm_pytree(grads),
-             'learning/raw_grad_norm': max_utils.l2norm_pytree(raw_grads),
-             'learning/param_norm': max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
+    loss, intermediate_outputs = loss_fn(state)
+    metrics = {'scalar': {'evaluation/loss': loss}}
+    new_state = state
+
+  metrics['scalar']['learning/loss'] = loss
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
@@ -247,7 +255,7 @@ def train_loop(config, state=None):
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
 
-  data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
+  train_data_iterator, eval_data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations = max_utils.setup_training_state(model, tx, config, init_rng, mesh, checkpoint_manager)
   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
@@ -257,6 +265,15 @@ def train_loop(config, state=None):
     model,
     config
   )
+
+  if eval_data_iterator:
+    functional_eval, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
+      functools.partial(train_step, train=False),
+      mesh,
+      state_mesh_annotations,
+      model,
+      config
+    )
 
   num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
   max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
@@ -275,6 +292,14 @@ def train_loop(config, state=None):
       out_shardings=out_shard,
       static_argnums=static_argnums,
       donate_argnums=donate_argnums)
+  if eval_data_iterator:
+    p_eval_step = jax.jit(
+      functional_eval,
+      in_shardings=in_shard,
+      out_shardings=out_shard,
+      static_argnums=static_argnums,
+      donate_argnums=donate_argnums,
+    )
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
@@ -313,6 +338,15 @@ def train_loop(config, state=None):
     if config.gcs_metrics and jax.process_index() == 0:
       running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
 
+    sum_metrics = {}
+    if step % 1 == 0:
+      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        for i, batch in enumerate(eval_data_iterator):
+          _, metrics, _ = p_eval_step(
+            state, batch, nextrng
+          )
+          if i % 100 == 0:
+            max_logging.log(f"eval: {metrics}")
   max_utils.deactivate_profiler(config)
   writer.close()
   return state

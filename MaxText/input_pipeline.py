@@ -17,7 +17,7 @@
 """Input pipeline for a LM1B dataset."""
 
 import os
-from typing import Optional
+from typing import Optional, Sequence
 import functools
 
 import ml_collections
@@ -30,6 +30,9 @@ from jax.sharding import PartitionSpec as P
 import tokenizer
 import multihost_dataloading
 import sequence_packing
+import math
+import seqio
+import numpy as np
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
@@ -50,6 +53,23 @@ def shift_right_tf(x, axis=1):
       constant_values=tf.constant(0, x.dtype))
   return padded[tuple(slices)]
 
+def _shift_left_and_pad(tensor, pad_val):
+  # Expand dims here so that the below code can work with 1-d tensors.
+  v = tf.expand_dims(tensor, 0)
+  # Make sure we keep tensor as ragged to allow for uneven concat.
+  if isinstance(v, tf.Tensor):
+    v = tf.RaggedTensor.from_tensor(v)
+
+  # Append padding to the last item of every sequence.
+  pad_shape = tf.concat([v.bounding_shape()[:-2], [1, 1]], axis=0)
+  pad_tensor = tf.broadcast_to(pad_val, pad_shape)
+  last_in_sequence = tf.concat([v[..., -1:, 1:], pad_tensor], axis=-1)
+  # Concat back the newly modified final sequence item.
+  v = tf.concat([v[..., :-1, :], last_in_sequence], axis=-2)
+  # Un-expand outer dimension.
+  v = v[0]
+  return v
+
 
 def shift_inputs_tf(x, segment_ids=None, axis=1):
   """Shift inputs and replace EOS by 0 for packed inputs."""
@@ -68,15 +88,35 @@ def shift_data(x, axis=0, segmented=True):
   return x
 
 
-def normalize_features(ds):
-  """Normalize text feature keys."""
-  def _normalize_features(features):
-    features['inputs'] = features.pop('text')
-    features['targets'] = features['inputs']
-    return features
+def rekey(ds, key_map={'input': 'text', 'target': 'text', 'text': None}):
+  def _rekey(x, key_map=None):
+    """Replace the feature keys according to the mapping in `key_map`.
+
+    For example, if the dataset returns examples of the format:
+    {'foo': 'something', 'bar': 'something else'}
+    and key_map = {'boo': 'foo', 'spar': 'bar'} then this function will return
+    examples with the format
+    {'boo': 'something', 'spar': 'something else'}
+
+    If a mapping is to an empty key name or None, the new value is set to an empty
+    string.
+
+    Args:
+      x: an example to process.
+      key_map: dictionary mapping new keys to original keys
+
+    Returns:
+      A preprocessed example with the format listed above.
+    """
+    if key_map:
+      return {
+          new_key: x[old_key] if old_key else ''
+          for new_key, old_key in key_map.items()
+      }
+    return x
 
   return ds.map(
-      _normalize_features,
+      functools.partial(_rekey, key_map=key_map),
       num_parallel_calls=AUTOTUNE)
 
 
@@ -153,6 +193,215 @@ def preprocessing_pipeline(
   return multihost_gen
 
 
+def reduce_concat_tokens(dataset,
+                         feature_key='targets',
+                         batch_size=128,
+                         **unused_kwargs):
+  """Token-preprocessor to concatenate multiple unrelated documents.
+
+  If we want to generate examples of exactly the right length,
+  (to avoid wasting space on padding), then we use this function, folowed by
+  split_tokens.
+
+  Args:
+    dataset: a tf.data.Dataset with dictionaries containing the key feature_key.
+    feature_key: an string
+    batch_size: an integer - how many documents to concatenate into one
+
+  Returns:
+    a dataset
+  """
+  dataset = dataset.map(
+      lambda x: {feature_key: x[feature_key]}, num_parallel_calls=AUTOTUNE)
+  dataset = dataset.padded_batch(batch_size, padded_shapes={feature_key: [-1]})
+  def _my_fn(x):
+    tokens = tf.reshape(x[feature_key], [-1])
+    # strip padding
+    tokens = tf.boolean_mask(tokens, tf.cast(tokens, tf.bool))
+    return {feature_key: tokens}
+
+  return dataset.map(_my_fn, num_parallel_calls=AUTOTUNE)
+
+def split_tokens(dataset,
+                 max_tokens_per_segment=128,
+                 feature_key='targets',
+                 **unused_kwargs):
+  """Split examples into multiple examples each.
+
+  The intended use case is to break up long examples for use in unsupervised
+  transfer-learning.
+
+  This function is generally preceded by select_random_chunk.
+
+  If min_tokens_per_segment is provided, the segment length is chosen randomly
+  per document from a log-uniform distribution.  If min_tokens_per_segment is
+  None, then the segment length is max_tokens_per_segment (except for a possibly
+  shorter last segment in each document).
+
+  Args:
+    dataset: a tf.data.Dataset with dictionaries containing the key feature_key.
+    min_tokens_per_segment: an optional integer
+    max_tokens_per_segment: an integer, the maximum number of tokens in each
+      segment. Only the final segment may be shorter.
+    feature_key: a string, the feature to split
+
+  Returns:
+    a dataset
+  """
+  def _split_tokens(x):
+    """Split one token sequence into multiple multiple."""
+    tokens = x[feature_key]
+    n_tokens = tf.size(tokens)
+    length = max_tokens_per_segment
+
+    # Pad to a multiple of length, then use tf.reshape to split up the tokens
+    # into num_segments segments each of the given length.
+    num_segments = tf.cast(
+        tf.ceil(tf.cast(n_tokens, tf.float32) / tf.cast(length, tf.float32)),
+        tf.int32)
+    padding = num_segments * length - tf.size(tokens)
+    tokens = tf.pad(tokens, [[0, padding]])
+    return tf.reshape(tokens, [-1, length])
+
+  def _strip_padding(x):
+    return {feature_key: tf.boolean_mask(x, tf.cast(x, tf.bool))}
+
+  # Filter empty examples.
+  dataset = dataset.filter(lambda x: tf.not_equal(tf.size(x[feature_key]), 0))
+  dataset = dataset.map(_split_tokens, num_parallel_calls=num_parallel_calls())
+  dataset = dataset.unbatch()
+  return dataset.map(
+      _strip_padding, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
+def _pad_to_batch_size(ds: tf.data.Dataset,  batch_size: int, num_examples: int = None,) -> tf.data.Dataset:
+  """Pad the data with new entries to multiples of global batch size."""
+
+  # local_num represents the total number of examples in eval dataset,
+  # computed as:
+  #   - eval_num_examples, if provided by the user.
+  #   - Otherwise, we iterate over dataset to compute
+  #     number of examples.
+  # Note: Global cached stats are available for Task, when cache_dir is set.
+  # It needs to be investigated if local number of examples can be computed
+  # from cached_stats using:
+  # `self.task_inst.get_cached_stats(split=self.split_name)['examples']`
+  # divided by `self.num_infeed_hosts`
+  if num_examples:
+    local_num = num_examples
+  else:
+    def _get_num_examples(ds: tf.data.Dataset) -> int:
+      # Iterate one-by-one instead of len(list(...)) to reduce peak memory.
+      num_examples = 0
+      for _ in ds:
+        num_examples += 1
+
+      return num_examples
+        
+    local_num = _get_num_examples(ds)
+  local_num_batches = (local_num + batch_size - 1) // batch_size
+  # Find the max number of batches required across all Jax processes.
+  num_batches_all = multihost_utils.process_allgather(
+      jnp.array([local_num_batches]), tiled=False)
+  num_batches = np.max(num_batches_all)
+
+  pad_num = num_batches * batch_size - local_num
+  assert pad_num >= 0
+  print(
+      'Eval data has %d local entries, padding now with '
+      '%d extra entries to get %d batches.', local_num, pad_num, num_batches)
+  # Repeat a random example to make the last batch full.
+  def _add_pad(x):
+      x['targets_segmentation'] *= 0
+      return x
+  pad_ds = ds.take(1).map(_add_pad).repeat(pad_num)
+  return ds.concatenate(pad_ds)
+
+def split_tokens_to_targets_length(dataset, sequence_length):
+  return split_tokens(dataset, max_tokens_per_segment=sequence_length)
+
+def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
+  """ Make train iterator and tokenizer for C4 dataset"""
+  os.environ["TFDS_DATA_DIR"] = config.dataset_path
+
+  read_config = tfds.ReadConfig(
+    shuffle_seed = config.data_shuffle_seed,
+  )
+  # load
+  # train_ds_builder = tfds.builder(config.dataset_name)
+  train_ds_builder = tfds.builder('c4/en:3.0.4')
+  train_ds = train_ds_builder.as_dataset(split='train2', read_config = read_config, shuffle_files=False)
+
+  eval_ds_builder = tfds.builder('c4/en:3.0.5')
+  eval_ds = eval_ds_builder.as_dataset(split='validation_tokenized_5662seqs', read_config = read_config, shuffle_files=False)
+
+  # shard the dataset as soon as it is loaded
+  train_ds = train_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
+  train_ds = rekey(train_ds, {'inputs': None, 'targets': 'text'})
+
+  eval_ds = eval_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
+  eval_ds = rekey(eval_ds, {'inputs': None, 'targets': 'ids'})
+  
+  # sp_tokenizer = tokenizer.load_tokenizer(vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
+  #                                         vocab_size=config.vocab_size)
+  sp_tokenizer = tokenizer.load_tokenizer(
+    vocab_path='gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model',
+    vocab_size=50257)
+
+  # tokenize
+  train_ds = train_ds.map(
+      tokenizer.TokenizeOp(sp_tokenizer, data_keys=('targets',)), num_parallel_calls=AUTOTUNE)
+  
+  train_ds = reduce_concat_tokens(train_ds, feature_key='targets', batch_size=4096)
+  train_ds = split_tokens_to_targets_length(train_ds, config.max_target_length)
+
+  # shuffle_buffer_size = 1024
+  # data_shuffle_seed = 0
+  # train_ds = train_ds.shuffle(shuffle_buffer_size, seed = data_shuffle_seed)
+  train_ds = sequence_packing.pack_dataset(train_ds, config.max_target_length)
+  eval_ds = sequence_packing.pack_dataset(eval_ds, config.max_target_length)
+
+  eos_id = 1
+
+  def map_fn(x):
+      x["inputs"] = x["targets"]
+      x["inputs_position"] = x["targets_position"]
+      x["inputs_segmentation"] = x["targets_segmentation"]
+      x["targets"] = _shift_left_and_pad(x["targets"], eos_id)
+      x["targets_segmentation"] *= tf.cast(x["targets"] != eos_id, x["targets_position"].dtype)
+      return x
+  
+  train_ds = train_ds.map(map_fn, num_parallel_calls=AUTOTUNE)
+  eval_ds = eval_ds.map(map_fn, num_parallel_calls=AUTOTUNE)
+  batch_size = int(config.per_device_batch_size * global_mesh.size )
+  assert (
+        batch_size % mesh.size == 0
+    ), 'Batch size should be divisible number of global devices.'
+  
+  train_ds = train_ds.batch(batch_size // jax.process_count(), drop_remainder=True)
+  # eval_ds = _pad_to_batch_size(eval_ds, batch_size // jax.process_count())
+  eval_ds = eval_ds.batch(batch_size // jax.process_count(), drop_remainder=False)
+  
+  # self.reset_for_eval=True: We are running eval over exactly one epoch.
+  # We explicitly cache the entire epoch (in memory) to ensure that it is the
+  # same across different iterations. Note that this is needed not only
+  # because of ordering, but for data contents as well. For instance, with
+  # seqio's FewshotDataSource preprocessing, some training data is part of the
+  # prompt. These training data may be shuffled with
+  # `reshuffle_each_iteration=True`. In general, there is no guarantee that
+  # the underlying eval dataset stays unchanged across different iterations
+  # of epochs.
+  eval_ds = eval_ds.cache()
+  train_ds = train_ds.prefetch(AUTOTUNE)
+  eval_ds = eval_ds.prefetch(AUTOTUNE)
+
+  train_multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(train_ds, mesh)
+  eval_multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(eval_ds, mesh)
+
+  # Return multi-host jax.Array prep iterator
+  return train_multihost_gen, eval_multihost_gen
+  
+
+
 def get_datasets(
   config: ml_collections.ConfigDict,
   read_config = None,
@@ -166,7 +415,7 @@ def get_datasets(
                                            shuffle_files=config.enable_data_shuffling)
   # shard the dataset as soon as it is loaded
   train_ds = train_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
-  train_ds = normalize_features(train_ds)
+  train_ds = rekey(train_ds)
 
   # Evaluation dataset.
   if config.eval_dataset_name:
@@ -178,7 +427,7 @@ def get_datasets(
                                           read_config = read_config,
                                           shuffle_files=config.enable_data_shuffling)
   eval_ds = eval_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
-  eval_ds = normalize_features(eval_ds)
+  eval_ds = rekey(eval_ds)
 
   return train_ds, eval_ds
 
@@ -192,14 +441,17 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
     vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
 
   # Load tokenizer
+  # hack
   sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
-                                          vocab_size=config.vocab_size)
+                                          vocab_size=50257)
 
   # Tokenize data.
   train_ds = train_ds.map(
       tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
-  eval_ds = eval_ds.map(
-      tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
+  
+  # hack skip eval
+  # eval_ds = eval_ds.map(
+  #     tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
 
   # Set global batch size.
   global_batch_size_to_load = config.global_batch_size_to_load
@@ -265,7 +517,7 @@ def make_c4_train_iterator_and_tokenizer(config, mesh):
     vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
     data_shuffle_seed = config.data_shuffle_seed,
   )
-  return train_iter, sp_tokenizer
+  return train_iter, None, sp_tokenizer
 
 class SyntheticDataIterator():
   """Creates a synthetic data iterator for performance testing work"""
@@ -302,9 +554,11 @@ class SyntheticDataIterator():
 
 def create_data_iterator_with_tokenizer(config, mesh):
   if config.dataset_type == "synthetic":
-    return SyntheticDataIterator(config, mesh), None
+    return SyntheticDataIterator(config, mesh), None, None
   elif config.dataset_type == "c4":
     return make_c4_train_iterator_and_tokenizer(config, mesh)
+  elif config.dataset_type == "c4_mlperf":
+    return make_mlperf_c4_train_iterator_and_tokenizer(config, mesh)
   else:
     assert False, "dataset type not implemented"
 
