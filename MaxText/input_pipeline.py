@@ -390,7 +390,7 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
   # `reshuffle_each_iteration=True`. In general, there is no guarantee that
   # the underlying eval dataset stays unchanged across different iterations
   # of epochs.
-  eval_ds = eval_ds.cache()
+  # eval_ds = eval_ds.cache()
   train_ds = train_ds.prefetch(AUTOTUNE)
   eval_ds = eval_ds.prefetch(AUTOTUNE)
 
