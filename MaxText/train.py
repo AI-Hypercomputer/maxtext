@@ -268,7 +268,7 @@ def train_loop(config, state=None):
 
   if eval_data_iterator:
     functional_eval, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
-      functools.partial(train_step, train=False),
+      functools.partial(train_step, is_train=False),
       mesh,
       state_mesh_annotations,
       model,
@@ -325,7 +325,7 @@ def train_loop(config, state=None):
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
-      if checkpoint_manager.save(step, state):
+      if step > 0 and checkpoint_manager.save(step, state):
         max_logging.log(f"saved a checkpoint at step {step}")
       # Upon preemption, exit when and only when all ongoing saves are complete.
       if checkpoint_manager.reached_preemption(step):
