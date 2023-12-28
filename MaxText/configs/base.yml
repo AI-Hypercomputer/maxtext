@@ -50,7 +50,7 @@ base_mlp_dim: 8192
 base_num_decoder_layers: 16
 head_dim: 256
 # activation functions are .
-mlp_activations: ["relu"]
+mlp_activations: ["gelu"]
 dropout_rate: 0
 logits_via_embedding: True  # NOTE: this is True just for testing.
 # proj, minimal, full, or none
