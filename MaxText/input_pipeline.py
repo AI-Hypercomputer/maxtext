@@ -257,7 +257,7 @@ def split_tokens(dataset,
     # Pad to a multiple of length, then use tf.reshape to split up the tokens
     # into num_segments segments each of the given length.
     num_segments = tf.cast(
-        tf.ceil(tf.cast(n_tokens, tf.float32) / tf.cast(length, tf.float32)),
+        tf.math.ceil(tf.cast(n_tokens, tf.float32) / tf.cast(length, tf.float32)),
         tf.int32)
     padding = num_segments * length - tf.size(tokens)
     tokens = tf.pad(tokens, [[0, padding]])
