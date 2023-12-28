@@ -54,6 +54,7 @@ from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 import functools
 import multihost_dataloading
+from jax.experimental.multihost_utils import process_allgather
 
 Transformer = models.Transformer
 
@@ -220,7 +221,6 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
     metrics = {'scalar': {'evaluation/loss': loss}}
     new_state = state
 
-  metrics['scalar']['learning/loss'] = loss
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
@@ -342,21 +342,21 @@ def train_loop(config, state=None):
     valid_loss = 0
     if step % 1 == 0:
       eval_data_iterator = multihost_dataloading.get_batch_sharded_data_pipeline(eval_ds, mesh)
-      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        i = 0
-        while True:
-          batch = eval_data_iterator()
-          if not batch:
-            break
+      i = 0
+      while True:
+        batch = eval_data_iterator()
+        if not batch:
+          break
+        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           _, metrics, _ = p_eval_step(
             state, batch, nextrng
           )
-          valid_loss += metrics['scalar']['evaluation/loss']
-          if i % 100 == 0:
-            max_logging.log(f"eval: {metrics}")
-          i += 1
+        valid_loss += float(metrics['scalar']['evaluation/loss'])
+        if i % 100 == 0:
+          max_logging.log(f"eval: {metrics}")
+        i += 1
 
-        max_logging.log(f"average loss: {valid_loss / i}")
+      max_logging.log(f"average loss: {valid_loss / i}")
         
           
   max_utils.deactivate_profiler(config)
