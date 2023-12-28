@@ -264,7 +264,7 @@ def train_loop(config, state=None):
     mesh,
     state_mesh_annotations,
     model,
-    config
+    config,
     is_train=True,
   )
 
