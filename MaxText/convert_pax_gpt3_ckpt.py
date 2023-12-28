@@ -240,12 +240,12 @@ def main(args: Sequence[str]):
     max_logging.log("converted state finished")
     print_memory()
 
-    if checkpoint_manager.save(converted_state.step, converted_state):
-        max_logging.log(f"saved a checkpoint at step {converted_state.step}")
-    # Upon preemption, exit when and only when all ongoing saves are complete.
-    if checkpoint_manager.reached_preemption(converted_state.step):
-        checkpoint_manager.wait_until_finished()
-        sys.exit()
+    # if checkpoint_manager.save(converted_state.step, converted_state):
+    #     max_logging.log(f"saved a checkpoint at step {converted_state.step}")
+    # # Upon preemption, exit when and only when all ongoing saves are complete.
+    # if checkpoint_manager.reached_preemption(converted_state.step):
+    #     checkpoint_manager.wait_until_finished()
+    #     sys.exit()
 
     max_logging.log(f"Peak cpu memory in a single process: {fmt_size(PEAK_CPU_MEMORY)}")
     max_logging.log("checkpoint converted and saved successfully.")
