@@ -110,8 +110,8 @@ def rekey(ds, key_map={'input': 'text', 'target': 'text', 'text': None}):
     """
     if key_map:
       return {
-          new_key: x[old_key] if old_key else ''
-          for new_key, old_key in key_map.items()
+          new_key: x[old_key]
+          for new_key, old_key in key_map.items() if old_key
       }
     return x
 
