@@ -206,10 +206,8 @@ def main(args: Sequence[str]):
     def verify_fn(key_path, value, prefix='gpt3_spmd1x64x24_tpuv4-3072_v84_20221101/checkpoints/checkpoint_00004000'):
         key_path_str = jax.tree_util.keystr(key_path)
         assert key_path_str in MAPS, f"{key_path_str} not found"
-        return value
 
-    _ = jax.tree_util.tree_map_with_path(verify_fn, state)
-    del _
+    jax.tree_util.tree_map_with_path(verify_fn, state)
 
     def map_fn(key_path, value, prefix='gpt3_spmd1x64x24_tpuv4-3072_v84_20221101/checkpoints/checkpoint_00004000'):
         key_path_str = jax.tree_util.keystr(key_path)
