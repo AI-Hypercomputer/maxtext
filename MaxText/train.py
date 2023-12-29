@@ -377,11 +377,15 @@ def train_loop(config, state=None):
           _, metrics, _ = p_eval_step(
             state, batch, nextrng
           )
-        valid_loss += float(metrics['scalar']['evaluation/loss'])
-        if i % 100 == 0:
+        batch_valid_loss = float(metrics['scalar']['evaluation/loss'])
+        if math.isnan(batch_valid_loss):
+          max_logging.log(f"found nan at batch {i}")
+          max_logging.log(f"batch {batch}")
+        else:
+          valid_loss += batch_valid_loss
+          i += 1
+        if i % 10 == 0:
           max_logging.log(f"batch valid loss at {i}: {metrics['scalar']['evaluation/loss']}")
-        i += 1
-      max_logging.log(f"batch valid loss at final {i}: {metrics['scalar']['evaluation/loss']}")
 
       mean_valid_loss = valid_loss / i
       max_logging.log(f"average loss at step {step}: {mean_valid_loss}")
