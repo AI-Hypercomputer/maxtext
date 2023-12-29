@@ -381,6 +381,7 @@ def train_loop(config, state=None):
         if i % 100 == 0:
           max_logging.log(f"batch valid loss at {i}: {metrics['scalar']['evaluation/loss']}")
         i += 1
+      max_logging.log(f"batch valid loss at final {i}: {metrics['scalar']['evaluation/loss']}")
 
       mean_valid_loss = valid_loss / i
       max_logging.log(f"average loss at step {step}: {mean_valid_loss}")
