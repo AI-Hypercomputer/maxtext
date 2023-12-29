@@ -263,7 +263,7 @@ def train_loop(config, state=None):
   # hack overwrite state
   def map_fn(key_path, value):
     key_path_str = jax.tree_util.keystr(key_path)
-    if key_path in  (".step", ".opt_state[0].count", ".opt_state[1].count"):
+    if key_path_str in  (".step", ".opt_state[0].count", ".opt_state[1].count"):
       return config.overwrite_ckpt_step
     else:
       return value
