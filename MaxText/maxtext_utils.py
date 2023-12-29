@@ -51,15 +51,13 @@ def get_optimizer(config, learning_rate_schedule):
   """ Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2 """
 
   # hack
-  return optax.chain(
-    optax.adam(
+  return optax.adamw(
         learning_rate_schedule,
         b1=config.adam_b1,
         b2=config.adam_b2,
         eps=config.adam_eps,
         eps_root=config.adam_eps_root,
-    ),
-    optax.add_decayed_weights(config.adam_weight_decay),
+        weight_decay=config.adam_weight_decay,
   )
 
 def load_compiled(config, partial_train, state):
