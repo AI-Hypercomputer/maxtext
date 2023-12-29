@@ -140,6 +140,7 @@ def main(args: Sequence[str]):
         ".step": ("step", None),
         ".opt_state[0].count": ("opt_states_0.no_prefix_0.count", None),
         ".opt_state[1].count": ("opt_states_0.no_prefix_1.count", None),
+        ".opt_state[2].count": ("opt_states_0.no_prefix_2.count", None),
         ".params['token_embedder']['embedding']": ("mdl_vars.params.lm.softmax.logits_ffn.linear.w", lambda x: x.T),
         ".params['position_embedder']['embedding']": ("mdl_vars.params.lm.position_emb.emb_var", None),
         ".params['decoder']['decoder']['pre_self_attention_norm']['scale']": ("mdl_vars.params.lm.transformer.repeat.sub.x_layers_0.layer_norm.scale", lambda x: np.moveaxis(x, 0, cfg.param_scan_axis) + 1.),
@@ -205,8 +206,10 @@ def main(args: Sequence[str]):
     def verify_fn(key_path, value, prefix='gpt3_spmd1x64x24_tpuv4-3072_v84_20221101/checkpoints/checkpoint_00004000'):
         key_path_str = jax.tree_util.keystr(key_path)
         assert key_path_str in MAPS, f"{key_path_str} not found"
+        return value
 
-    jax.tree_util.tree_map_with_path(verify_fn, state)
+    _ = jax.tree_util.tree_map_with_path(verify_fn, state)
+    del _
 
     def map_fn(key_path, value, prefix='gpt3_spmd1x64x24_tpuv4-3072_v84_20221101/checkpoints/checkpoint_00004000'):
         key_path_str = jax.tree_util.keystr(key_path)
