@@ -382,7 +382,7 @@ def train_loop(config, state=None):
 
       mean_valid_loss = valid_loss / i
       max_logging.log(f"average loss at step {step}: {mean_valid_loss}")
-      if mean_valid_loss < 2.69:
+      if mean_valid_loss <= 2.69:
         max_logging.log(f"early stop")
         break
         
