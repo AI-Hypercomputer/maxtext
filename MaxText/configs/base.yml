@@ -184,6 +184,7 @@ embed_lookup_style: 'index'
 # whether to add position_embedding
 use_position_embedding: False
 max_trainable_pe_max_seq_len: 16384
+overwrite_ckpt_step: -1
 
 # whether to add bias in all linear layers in Transformer
 # including: attention qkv and out projection layers and mlp feedforward layers

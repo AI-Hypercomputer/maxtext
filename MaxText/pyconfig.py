@@ -25,6 +25,7 @@ import sys
 import yaml
 
 import jax
+import math
 
 from typing import Any, Union
 
@@ -105,6 +106,7 @@ class _HyperParameters():
       else:
         raw_keys[k] = raw_data_from_yaml[k]
 
+    _HyperParameters.update_model_vars(raw_keys)
     _HyperParameters.user_init(raw_keys)
     self.keys = raw_keys
 
@@ -112,6 +114,27 @@ class _HyperParameters():
     args_dict = dict(a.split("=") for a in argv[2:])
     args_dict.update(kwargs)
     return args_dict
+
+  @staticmethod
+  def update_model_vars(raw_keys):
+    global_batch_size = calculate_global_batch_sizes(raw_keys)[1]
+    if global_batch_size <= 3584:
+      raw_keys['learning_rate'] = 2e-5
+    else:
+      raw_keys['learning_rate'] = 3e-5
+
+    warmup_steps = math.ceil(265.0 * 1536 / global_batch_size - 1e-6)
+    decay_end_step = math.ceil(108600.0 * 1536 / global_batch_size - 1e-6)
+    raw_keys['learning_rate_schedule_steps'] = decay_end_step
+    raw_keys['warmup_steps_fraction'] = warmup_steps / decay_end_step
+    raw_keys['overwrite_ckpt_step'] = math.ceil(4000.0 * 1536 / global_batch_size)
+
+    # hack
+    raw_keys['gradient_clipping_threshold'] = 1.
+    raw_keys['adam_b1'] = 0.9
+    raw_keys['adam_b2'] = 0.95
+    raw_keys['adam_eps'] = 1.e-8
+
 
   @staticmethod
   def user_init(raw_keys):

@@ -259,6 +259,28 @@ def train_loop(config, state=None):
   train_data_iterator, eval_ds, _ = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations = max_utils.setup_training_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+
+  # hack overwrite state
+  def map_fn(key_path, value):
+    key_path_str = jax.tree_util.keystr(key_path)
+    if key_path in  (".step", ".opt_state[0].count", ".opt_state[1].count"):
+      return config.overwrite_ckpt_step
+    else:
+      return value
+
+  state = jax.tree_util.tree_map_with_path(map_fn, state)
+  start_step = get_first_step(state) # this is the start_step for training
+  
+  if jax.process_index() == 0:
+    max_logging.log(f":::MLLOG init_checkpoint_step: {start_step}")
+    max_logging.log(f":::MLLOG opt_base_learning_rate: {config.learning_rate}")
+    max_logging.log(f":::MLLOG opt_adam_beta_1: {config.adam_b1}")
+    max_logging.log(f":::MLLOG opt_adam_beta_2: {config.adam_b2}")
+    max_logging.log(f":::MLLOG opt_adam_epsilon: {config.adam_eps}")
+    max_logging.log(f":::MLLOG opt_gradient_clip_norm: {config.gradient_clipping_threshold}")
+    max_logging.log(f":::MLLOG global_batch_size: {config.global_batch_size_to_train_on}")
+    max_logging.log(f":::MLLOG sequence_length: {config.max_target_length}")
+
   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
     train_step,
     mesh,
@@ -310,7 +332,6 @@ def train_loop(config, state=None):
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
-  start_step = get_first_step(state) # this is the start_step for training
   first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
@@ -349,17 +370,14 @@ def train_loop(config, state=None):
         batch = eval_data_iterator()
         if not batch:
           break
-        max_logging.log(f"{i}: {batch}")
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           _, metrics, _ = p_eval_step(
             state, batch, nextrng
           )
         valid_loss += float(metrics['scalar']['evaluation/loss'])
-        if i % 100 == 0:
-          max_logging.log(f"eval: {metrics}")
         i += 1
 
-      max_logging.log(f"average loss: {valid_loss / i}")
+      max_logging.log(f"average loss at step {step}: {valid_loss / i}")
         
           
   max_utils.deactivate_profiler(config)
