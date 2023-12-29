@@ -311,7 +311,7 @@ def _pad_to_batch_size(ds: tf.data.Dataset,  batch_size: int, num_examples: int 
       '%d extra entries to get %d batches.', local_num, pad_num, num_batches)
   # Repeat a random example to make the last batch full.
   def _add_pad(x):
-      x['targets_segmentation'] *= 0.
+      x['targets_segmentation'] *= 0
       return x
   pad_ds = ds.take(1).map(_add_pad).repeat(pad_num)
   return ds.concatenate(pad_ds)
