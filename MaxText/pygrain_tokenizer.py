@@ -16,6 +16,7 @@ class Tokenize(grain.MapTransform):
   feature_names: str | Sequence[str]
   sequence_length: int | Sequence[int]
   model_path: str
+  vocab_size: int
 
   def __post_init__(self):
     self._processor = None
@@ -36,7 +37,7 @@ class Tokenize(grain.MapTransform):
       text = features[feature_name]
       token_ids = self._processor.EncodeAsIds(text)
       token_ids = token_ids[:sequence_length]
-      features[feature_name] = np.asarray(token_ids)
+      features[feature_name] = np.asarray(token_ids, dtype=np.int32)
     return features
 
   def __getstate__(self):
