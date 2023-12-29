@@ -379,8 +379,7 @@ def train_loop(config, state=None):
           )
         batch_valid_loss = float(metrics['scalar']['evaluation/loss'])
         if math.isnan(batch_valid_loss):
-          max_logging.log(f"found nan at batch {i}")
-          max_logging.log(f"batch {batch}")
+          max_logging.log(f"found nan at batch {i}: {batch}")
         else:
           valid_loss += batch_valid_loss
           i += 1
