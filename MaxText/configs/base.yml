@@ -111,8 +111,8 @@ dataset_path: ""
 vocab_size: 32_768 # powers of 2 for sharding
 assets_path: "assets"
 vocab_relative_path: "tokenizer"  # Assumes we're allowed
-# dataset_name: 'c4/en:3.1.0'
-# eval_dataset_name: 'c4/en:3.1.0'
+# dataset_name: 'c4/en:3.0.1'
+# eval_dataset_name: 'c4/en:3.0.1'
 dataset_name: 'array-record/c4/en/3.0.1'
 eval_dataset_name: 'array-record/c4/en/3.0.1'
 eval_split: 'validation'  # for c4 data
@@ -125,6 +125,7 @@ max_corpus_chars: 10_000_000
 # dataset_type: c4 # must be c4, array_record or synthetic
 dataset_type: array_record
 grain_worker_count: 1
+pack_examples: True
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
