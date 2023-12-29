@@ -378,6 +378,8 @@ def train_loop(config, state=None):
             state, batch, nextrng
           )
         valid_loss += float(metrics['scalar']['evaluation/loss'])
+        if i % 100 == 0:
+          max_logging.log(f"batch valid loss at {i}: {metrics['scalar']['evaluation/loss']}")
         i += 1
 
       mean_valid_loss = valid_loss / i
