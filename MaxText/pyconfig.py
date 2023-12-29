@@ -106,8 +106,8 @@ class _HyperParameters():
       else:
         raw_keys[k] = raw_data_from_yaml[k]
 
-    _HyperParameters.update_model_vars(raw_keys)
     _HyperParameters.user_init(raw_keys)
+    _HyperParameters.update_model_vars(raw_keys)
     self.keys = raw_keys
 
   def _load_kwargs(self, argv: list[str], **kwargs):
