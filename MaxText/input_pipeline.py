@@ -92,6 +92,17 @@ def length_filter(max_len):
     return tf.less(l, max_len + 1)
   return filter_fn
 
+def add_annotations(ds):
+  def _add_annotations(features):
+    features['inputs_segmentation'] = tf.ones_like(features['inputs'], dtype = tf.int32)
+    features['inputs_position'] = tf.range(tf.size(features['inputs']), dtype = tf.int32)
+    features['targets_segmentation'] = tf.ones_like(features['inputs'], dtype = tf.int32)
+    features['targets_position'] = tf.range(tf.size(features['inputs']), dtype = tf.int32)    
+    return features
+
+  return ds.map(
+      _add_annotations,
+      num_parallel_calls=AUTOTUNE)
 # -----------------------------------------------------------------------------
 # Main dataset preparation.
 # -----------------------------------------------------------------------------
@@ -126,11 +137,14 @@ def preprocessing_pipeline(
   # Perform greedy sequence packing
   if pack_examples:
     dataset = sequence_packing.pack_dataset(dataset, max_length)
+  else:
+    dataset = add_annotations(dataset)
+    # dataset.apply(add_annotations)
 
   # Shift inputs for teacher-forced training
   if shift:
     dataset = dataset.map(
-      functools.partial(shift_data, axis=0, segmented=pack_examples),
+      functools.partial(shift_data, axis=0, segmented=1),
       num_parallel_calls=tf.data.AUTOTUNE,
       deterministic=True)
 
@@ -145,8 +159,20 @@ def preprocessing_pipeline(
     # simple (static-shape) padded batching
     dataset = dataset.padded_batch(
         batch_size // jax.process_count(),
-        padded_shapes={'inputs': max_length, 'targets': max_length},
-        padding_values={'inputs': 0, 'targets': 0},
+        padded_shapes={
+                        'inputs': max_length, 
+                        'targets': max_length,
+                        'inputs_position': max_length,
+                        'targets_position': max_length,
+                        'inputs_segmentation': max_length,
+                        'targets_segmentation': max_length,
+                      },
+        padding_values={'inputs': 0, 'targets': 0,
+                        'inputs_position': 0,
+                        'targets_position': 0,
+                        'inputs_segmentation': 0,
+                        'targets_segmentation': 0,                       
+                        },
         drop_remainder=drop_remainder)
 
   if prefetch_size:
@@ -179,23 +205,27 @@ def preprocessing_pipeline_pygrain(
   operations = []
   operations.append(pygrain_operations.ParseFeatures())
   operations.append(pygrain_operations.NormalizeFeatures())
-  operations.append(pygrain_tokenizer.Tokenize(["inputs","targets"], max_length, vocab_path))
-  operations.append(pygrain.MapOperation(map_function=pygrain_operations.filter_keys))
-  operations.append(pygrain.FilterOperation(condition_function = pygrain_operations.length_filter(max_length)))
+  operations.append(pygrain_tokenizer.Tokenize(["inputs","targets"], max_length, vocab_path, 32768))
+  # operations.append(pygrain.MapOperation(map_function=pygrain_operations.filter_keys))
+  operations.append(pygrain_operations.LengthFilter(max_length))
+  #operations.append(pygrain.FilterOperation(condition_function = pygrain_operations.length_filter(max_length)))
 
   # Pack and Batch examples.
   if pack_examples:
     operations.append(pygrain.experimental.PackAndBatchOperation(
                         batch_size=batch_size // jax.process_count(),
                         length_struct={'inputs':max_length,'targets':max_length}))
-    operations.append(pygrain.MapOperation(map_function=pygrain_operations.CombineKeys()))
+    # operations.append(pygrain.MapOperation(map_function=pygrain_operations.CombineKeys()))
+    operations.append(pygrain_operations.ReformatPacking())
   else:
     operations.append(pygrain.MapOperation(map_function=pygrain_operations.PadToMaxLength(max_length)))
     operations.append(pygrain.BatchOperation(batch_size=batch_size // jax.process_count(), drop_remainder=drop_remainder))
 
   # Shift inputs for teacher-forced training
   if shift:
-    operations.append(pygrain.MapOperation(map_function=pygrain_operations.ShiftData(axis=1,segmented=pack_examples)))  
+    operations.append(pygrain.MapOperation(map_function=pygrain_operations.ShiftData(axis=1)))  
+
+  # operations.append(pygrain_operations.ConvertToTF())
 
   index_sampler = pygrain.IndexSampler(
     num_records=len(dataset),
@@ -260,7 +290,7 @@ def get_datasets_pygrain(
   config: ml_collections.ConfigDict,
   read_config = None,
 ):
- """Load dataset from array_record files for using with pygrain"""
+  """Load dataset from array_record files for using with pygrain"""
   data_dir = os.path.join(config.dataset_path, config.dataset_name)
   train_files = [data_dir + '/' + f for f in os.listdir(data_dir) if re.match(r'.*train.*', f)]
   train_ds = pygrain.ArrayRecordDataSource(train_files)
@@ -313,7 +343,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       global_mesh,
       shuffle=config.enable_data_shuffling,
       num_epochs=None,
-      pack_examples=True,
+      pack_examples=config.pack_examples,
       max_length=config.max_target_length,
       shift=True,
       data_shuffle_seed = data_shuffle_seed,)
@@ -324,7 +354,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       eval_batch_size,
       global_mesh,
       shuffle=config.enable_data_shuffling,
-      pack_examples=False,
+      pack_examples=config.pack_examples,
       max_length=config.max_eval_target_length,
       shift=False,
       data_shuffle_seed = data_shuffle_seed,)
@@ -335,7 +365,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       eval_batch_size,
       global_mesh,
       shuffle=config.enable_data_shuffling,
-      pack_examples=False,
+      pack_examples=config.pack_examples,
       max_length=config.max_predict_length,
       shift=False,
       drop_remainder=False,
@@ -373,7 +403,7 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
       global_mesh,
       shuffle=config.enable_data_shuffling,
       num_epochs=1,
-      pack_examples=False,
+      pack_examples=config.pack_examples,
       max_length=config.max_target_length,
       shift=True,
       data_sharding=config.data_sharding,
@@ -387,7 +417,7 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
       eval_batch_size,
       global_mesh,
       shuffle=config.enable_data_shuffling,
-      pack_examples=False,
+      pack_examples=config.pack_examples,
       max_length=config.max_eval_target_length,
       shift=True,
       data_sharding=config.data_sharding,
@@ -401,7 +431,7 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
       eval_batch_size,
       global_mesh,
       shuffle=config.enable_data_shuffling,
-      pack_examples=False,
+      pack_examples=config.pack_examples,
       max_length=config.max_eval_target_length,
       shift=True,
       data_sharding=config.data_sharding,

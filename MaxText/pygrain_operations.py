@@ -6,16 +6,6 @@ import numpy as np
 import tensorflow as tf
 Features = Dict[str, tf.Tensor]
 
-class normalize_features():
-  """Normalize text feature keys.
-  """
-  def __call__(self, features):
-    def _normalize_features(features):
-      # features['inputs'] = features.pop('text')
-      # features['targets'] = features['inputs']
-      return {'inputs':features, 'targets': features}
-    return _normalize_features(features)
-
 @dataclasses.dataclass
 class ParseFeatures(pygrain.MapTransform):
     def map(self, features):
@@ -35,6 +25,47 @@ class NormalizeFeatures(pygrain.MapTransform):
             'inputs':features['text'].numpy().decode(), 
             'targets': features['text'].numpy().decode()
             }
+
+# @dataclasses.dataclass
+# class ConvertToTF(pygrain.MapTransform):
+#     def map(self, data):
+#         for key in data:
+#             data[key] = tf.convert_to_tensor(data[key], dtype=tf.int32)
+#         return data
+
+@dataclasses.dataclass
+class ReformatPacking(pygrain.MapTransform):
+    def map(self, data):
+        return{
+            'inputs':data[0]['inputs'],
+            'targets':data[0]['targets'],
+            'inputs_segmentation':data[1]['inputs'],
+            'targets_segmentation':data[1]['targets'],
+            'inputs_position':data[2]['inputs'],
+            'targets_position':data[2]['targets'],
+        }
+
+
+@dataclasses.dataclass
+class LengthFilter(pygrain.FilterTransform):
+    def __init__(self, max_length):
+        self.max_length = max_length
+    def filter(self, data):
+        # source, target = data['inputs'], data['targets']
+        # l = np.maximum(np.shape(source)[0], np.shape(target)[0])
+        # print(data['inputs'].shape)
+        return data['inputs'].shape[0] < self.max_length
+
+
+def length_filter():
+    """pygrain max length filter
+    """
+    def __init__(self,max_length):
+        self.max_length = max_length
+    def __call__(self, x):
+        source, target = x['inputs'], x['targets']
+        l = np.maximum(np.shape(source)[0], np.shape(target)[0])
+        return np.less(l, self.max_length + 1)
 
 def filter_keys(record):
     return {'inputs': record['inputs'], 'targets': record['targets']}
@@ -74,26 +105,28 @@ class PadToMaxLength():
             pad_amount = max(max_length - x.shape[0], 0)
             pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
             return np.pad(x, pad_amount)
-        data['inputs_segmentation'] = np.ones(data['inputs'].shape)
-        data['inputs_position'] = np.ones(data['inputs'].shape, dtype = np.int32)
+        data['inputs_segmentation'] = np.ones(data['inputs'].shape, dtype = np.int32)
+        data['inputs_position'] = np.arange(data['inputs'].shape[0], dtype = np.int32)
+        data['targets_segmentation'] = np.ones(data['targets'].shape, dtype = np.int32)
+        data['targets_position'] = np.arange(data['targets'].shape[0], dtype = np.int32)
         for key, _ in data.items():
             data[key] = pad(data[key], self.feature_lengths)
         return data
 
-class CombineKeys():
-    """ Combine tuples of sequence packing output in different keys
-    """
-    def __call__(self, data):
-        combined_data = data[0]
-        segments = data[1]
-        segments['inputs_segmentation'] = segments.pop('inputs')
-        segments['targets_segmentation'] = segments.pop('targets')
-        positions = data[2]
-        positions['inputs_position'] = positions.pop('inputs')
-        positions['targets_position'] = positions.pop('targets')
-        combined_data.update(segments)
-        combined_data.update(positions)
-        return combined_data
+# class CombineKeys():
+#     """ Combine tuples of sequence packing output in different keys
+#     """
+#     def __call__(self, data):
+#         combined_data = data[0]
+#         segments = data[1]
+#         segments['inputs_segmentation'] = segments.pop('inputs')
+#         segments['targets_segmentation'] = segments.pop('targets')
+#         positions = data[2]
+#         positions['inputs_position'] = positions.pop('inputs')
+#         positions['targets_position'] = positions.pop('targets')
+#         combined_data.update(segments)
+#         combined_data.update(positions)
+#         return combined_data
 
 def shift_right(x, axis=1):
   """Shift the input to the right by padding and slicing on axis."""
@@ -106,27 +139,25 @@ def shift_right(x, axis=1):
       pad_widths,
       mode='constant',
       constant_values=x.dtype.type(0)
-    #   constant_values=tf.constant(0, x.dtype)
       )
   return padded[tuple(slices)]
 
-def shift_inputs(x, segment_ids=None, axis=1):
+def shift_and_refine(x, axis=1):
   """Shift inputs and replace EOS by 0 for packed inputs."""
-  shifted = shift_right(x, axis=axis)
+  x['inputs'] = shift_right(x['inputs'], axis=axis)
+  targets_nonzero = (x['targets'] != 0)
+  x['inputs_segmentation'] *= targets_nonzero
+  x['targets_segmentation'] *= targets_nonzero
   # For packed targets, the first shifted token of a new sequence is made
-  # 0, rather than being the EOS token for the last sequence.
-  if segment_ids is not None:
-    shifted *= tf.cast(
-        segment_ids == shift_right(segment_ids, axis=axis), x.dtype
-    )
-  return shifted
+  # 0, rather than being the EOS token for the last sequence.  
+  x['inputs'] *= (x['inputs_segmentation'] == shift_right(x['inputs_segmentation'], axis=axis))
+
+  return x
 
 class ShiftData():
-    def __init__(self, axis = 0, segmented=True):
+    def __init__(self, axis = 1):
         self.axis = axis
-        self.segmented = segmented
 
     def __call__(self, x):
-        segment_ids = x['inputs_segmentation'] if self.segmented else None
-        x['inputs'] = shift_inputs(x['inputs'], segment_ids=segment_ids, axis=self.axis)
-        return x        
+        x = shift_and_refine(x, axis=self.axis)
+        return x
