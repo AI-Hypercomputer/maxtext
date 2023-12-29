@@ -161,24 +161,34 @@ class LLaMARotaryEmbedding(nn.Module):
         * (self.max_timescale / self.min_timescale) ** fraction
     )
     if position is None:
+      jax.debug.print("position came none")
       seq_length = inputs.shape[1]
       position = jnp.arange(seq_length, dtype=jnp.float32)[jnp.newaxis, :]
+    
     position = position[:, :, jnp.newaxis, jnp.newaxis]
     timescale = timescale[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
     sinusoid_inp = position / timescale
     sin = jnp.sin(sinusoid_inp)
     cos = jnp.cos(sinusoid_inp)
-    reshape_tensor = inputs.astype(jnp.float32).reshape(
-        *inputs.shape[:-1], -1, 2
-    )
-    first_half = reshape_tensor[..., 0]
-    second_half = reshape_tensor[..., 1]
+    #jax.debug.print("Anisha: position, sin, cos {position}", position=[position, sin, cos])
+    # reshape_tensor = inputs.astype(jnp.float32).reshape(
+    #     *inputs.shape[:-1], -1, 2
+    # )
+    # first_half = reshape_tensor[..., 0]
+    # second_half = reshape_tensor[..., 1]
+    first_half = inputs[...,:half_embedding_dim]
+    second_half = inputs[...,half_embedding_dim:]
     first_part = first_half * cos - second_half * sin
     second_part = second_half * cos + first_half * sin
     if self.cast_as_fprop_dtype:
       first_part = first_part.astype(self.fprop_dtype)
       second_part = second_part.astype(self.fprop_dtype)
-    x_out = jnp.stack((first_part, second_part), axis=-1).reshape(
+    # x_out = jnp.stack((first_part, second_part), axis=-1).reshape(
+    #     *first_part.shape[:-1], -1
+    # )
+    x_out = jnp.stack((first_part, second_part), axis=-2).reshape(
         *first_part.shape[:-1], -1
     )
+    # jax.debug.print("Anisha: shapes: position, sin, cos, first_half, second_half, first_part, second_part {position}", 
+    #                 position=[position.shape, sin.shape, cos.shape, first_half.shape, second_half.shape, first_part.shape, second_part.shape])
     return x_out

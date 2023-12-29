@@ -102,6 +102,19 @@ class MultiHeadDotProductAttention(models.MultiHeadDotProductAttention):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
+    # if decode:
+
+    #   # Detect if we're initializing by absence of existing cache data.
+    #   is_initialized = self.has_variable('cache', 'cached_key')
+
+    #   cache_index = self.variable('cache', 'cache_index',
+    #                               lambda: jnp.array(0, dtype=jnp.int32))
+    #   # jax.debug.print("Anisha: is_initialized = {is_initialized}", is_initialized=is_initialized)
+    #   if is_initialized and inputs_positions is None:
+    #     cur_index = cache_index.value.item().astype(int)
+    #     inputs_positions = jnp.arange(cur_index, cur_index+1, dtype=jnp.float32)[jnp.newaxis, :]
+    #     jax.debug.print("Anisha is_initialized cur_index {cc}", cc=cur_index)
+    
     cfg = self.config
 
     projection = functools.partial(
@@ -129,15 +142,17 @@ class MultiHeadDotProductAttention(models.MultiHeadDotProductAttention):
     # query = projection( name='query')(inputs_q)
     # key = projection(name='key')(inputs_kv)
     # value = projection(name='value')(inputs_kv)
-    jax.debug.print("Anisha: shape query, key, value {qkv}", qkv=[query.shape, key.shape, value.shape])
-    jax.debug.print("Anisha: query, key, value {qkv}", qkv=[query, key, value])
+    # jax.debug.print("Anisha: shape query, key, value {qkv}", qkv=[query.shape, key.shape, value.shape])
+    # jax.debug.print("Anisha: query, key, value {qkv}", qkv=[query, key, value])
     #Apply RoPE
     query = models.LLaMARotaryEmbedding(embedding_dims=self.head_dim,
-                                 name='query_rotary'
+                                 name='query_rotary', fprop_dtype=jnp.float32
                                  )(inputs=query, position=inputs_positions)
     key = models.LLaMARotaryEmbedding(embedding_dims=self.head_dim,
-                               name='key_rotary'
+                               name='key_rotary', fprop_dtype=jnp.float32
                                )(inputs=key, position=inputs_positions)
+    # jax.debug.print("Anisha: after rotary shapes of query, key, {qk}", qk=[query.shape, key.shape])
+    # jax.debug.print("Anisha: after rotary query, key, {qk}", qk=[query, key])
 
     # Layer norms here prevent (near) one-hot softmaxes, which can lead to
     # unstable training loss and nans, see the "QK Normalization" subsection in
@@ -174,7 +189,7 @@ class MultiHeadDotProductAttention(models.MultiHeadDotProductAttention):
                                    swap_dims(value.shape), value.dtype)
       cache_index = self.variable('cache', 'cache_index',
                                   lambda: jnp.array(0, dtype=jnp.int32))
-      jax.debug.print("Anisha: is_initialized = {is_initialized}", is_initialized=is_initialized)
+      # jax.debug.print("Anisha: is_initialized = {is_initialized}", is_initialized=is_initialized)
       if is_initialized:
         batch, num_heads, head_dim, length = cached_key.value.shape
         # During fast autoregressive decoding, we feed one position at a time,
@@ -246,7 +261,7 @@ class MultiHeadDotProductAttention(models.MultiHeadDotProductAttention):
     dropout_rng = None
     if not deterministic and self.dropout_rate > 0.:
       dropout_rng = self.make_rng('dropout')
-
+    # jax.debug.print("Anisha: attention_bias = {attention_bias}, mask = {mask}", attention_bias=attention_bias, mask=mask)
     # Apply attention.
     x = self.apply_attention(query, key, value, attention_type,
                               decoder_segment_ids, attention_bias, dropout_rng, deterministic, decode=decode)
@@ -311,7 +326,7 @@ class MlpBlock(nn.Module):
     x = gate_mlp(
           inputs)
     x = linears._convert_to_activation_function(self.activations[0])(x)
-    jax.debug.print("Anisha: inp_of_ln_lnx =  {inputs} ", inputs = inputs)
+    # jax.debug.print("Anisha: inp_of_ln_lnx =  {inputs} ", inputs = inputs)
     # Take elementwise product of above intermediate activations.
     #x = functools.reduce(operator.mul, activations)
 
@@ -386,7 +401,7 @@ class DecoderLayer(models.DecoderLayer):
         )
     lnx = lnx_rms(inputs)
     #jax.debug.print("Anisha: ln eps =  {eps} ", eps = lnx_rms.epsilon)
-    jax.debug.print("Anisha: inp_of_attention_lnx =  {lnx} ", lnx = lnx)
+    # jax.debug.print("Anisha: inp_of_attention_lnx =  {lnx} ", lnx = lnx)
     
     lnx = nn.with_logical_constraint(
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
@@ -438,8 +453,8 @@ class DecoderLayer(models.DecoderLayer):
         mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')
     )
 
-    jax.debug.print("Anisha: inp, ln(inp), attn, resi, ln(resi), mlp_lnx =  {mlp_lnx} ", 
-                    mlp_lnx = [inputs, lnx, attention_lnx, intermediate_inputs, hidden_states,mlp_lnx ])
+    # jax.debug.print("Anisha: inp, ln(inp), attn, resi, ln(resi), mlp_lnx =  {mlp_lnx} ", 
+    #                 mlp_lnx = [inputs, lnx, attention_lnx, intermediate_inputs, hidden_states,mlp_lnx ])
 
 
     layer_output = mlp_lnx + intermediate_inputs
@@ -468,6 +483,125 @@ class DecoderLayer(models.DecoderLayer):
       return layer_output
 
 
+class Decoder(nn.Module):
+  """A stack of decoder layers as a part of an encoder-decoder architecture."""
+  config: models.Config
+  shared_embedding: nn.Module
+  mesh: Mesh
+
+  @nn.compact
+  def __call__(self,
+               decoder_input_tokens,
+               decoder_segment_ids=None,
+               decoder_positions=None,
+               decoder_mask=None,
+               deterministic=False,
+               decode=False,
+               max_decode_length=None):
+    cfg = self.config
+    mesh = self.mesh
+    assert decoder_input_tokens.ndim == 2  # [batch, len]
+    # jax.debug.print("Anisha: decoder_input_tokens = {decoder_input_tokens} ", decoder_input_tokens=decoder_input_tokens)
+    # [batch, length] -> [batch, length, emb_dim]
+    y = self.shared_embedding(decoder_input_tokens.astype('int32'))
+    # jax.debug.print("Anisha: y embedding size = {shape}", shape=y.shape)
+    # jax.debug.print("Anisha: y embedding =  {y} ", y=y)
+    y = nn.Dropout(
+        rate=cfg.dropout_rate, broadcast_dims=(-2,))(
+            y, deterministic=deterministic)
+    y = y.astype(cfg.dtype)
+
+    BlockLayer = DecoderLayer
+
+    if cfg.remat_policy != 'none':
+      if cfg.remat_policy == 'minimal':
+        policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
+      elif cfg.remat_policy == 'proj':
+        policy = jax.checkpoint_policies.save_only_these_names(
+            'query_proj', 'value_proj', 'key_proj'
+        )
+      else:
+        assert (
+            cfg.remat_policy == 'full'
+        ), 'Remat policy needs to be on list of remat policies'
+        policy = None
+      BlockLayer = nn.remat(  # pylint: disable=invalid-name
+          BlockLayer,
+          prevent_cse=not cfg.scan_layers,
+          policy=policy,
+          static_argnums=(-1, -2, -3, -4, -5),
+      )
+    if cfg.scan_layers:
+      initializing = self.is_mutable_collection('params')
+      params_spec = (
+          cfg.param_scan_axis if initializing else models.ScanIn(cfg.param_scan_axis)
+      )
+      cache_spec = 0
+      y, _ = nn.scan(
+          BlockLayer,
+          variable_axes={
+              'params': params_spec,
+              'cache': cache_spec,
+              'intermediates': 0,
+          },
+          split_rngs={
+              'params': True,
+              'dropout': cfg.enable_dropout,
+              'aqt': cfg.int8_training,
+          },
+          in_axes=(
+              nn.broadcast,
+              nn.broadcast,
+              nn.broadcast,
+              nn.broadcast,
+              nn.broadcast,
+              nn.broadcast,
+          ),
+          length=cfg.num_decoder_layers,
+          metadata_params={nn.PARTITION_NAME: 'layers'},
+      )(config=cfg, mesh=mesh, name='decoder')(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          decoder_mask,
+          deterministic,
+          decode,
+          max_decode_length,
+      )
+    else:
+      for lyr in range(cfg.num_decoder_layers):
+        # [batch, length, emb_dim] -> [batch, length, emb_dim]
+        y = BlockLayer(config=cfg, mesh=mesh, name=f'layers_{lyr}')(
+            y,
+            decoder_segment_ids,
+            decoder_positions,
+            decoder_mask,
+            deterministic,
+            decode,
+            max_decode_length,
+        )
+
+    # jax.debug.print("Anisha after all decoder layers = {y}",y = y)
+    y = models.RMSNorm(dtype=cfg.dtype, name='decoder_norm', epsilon=1e-05, 
+                kernel_axes=('embed',))(y)
+    y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
+        y, deterministic=deterministic
+    )
+    jax.debug.print("Anisha after ln of last decoder layer = {y}",y = y)
+    # [batch, length, emb_dim] -> [batch, length, vocab_size]
+    logits = linears.DenseGeneral(
+          cfg.vocab_size,
+          dtype=jnp.float32,  # Use float32 for stabiliity.
+          kernel_axes=('embed', 'vocab'),
+          name='logits_dense',
+          config=cfg)(y)
+    logits = nn.with_logical_constraint(
+        logits, ('activation_batch', 'activation_length', 'activation_vocab'))
+    jax.debug.print("Anisha logits = {logits}",logits = logits)
+
+    return logits
+
+
 
 class Transformer(models.Transformer):
   """An decoder-only Transformer model."""
@@ -490,5 +624,6 @@ class Transformer(models.Transformer):
         config=cfg,
     )
 
-    self.decoder = models.Decoder(
-        config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, decoderLayer = DecoderLayer)
+    self.decoder = Decoder(
+        config=cfg, shared_embedding=self.shared_embedding, mesh=mesh)
+    

@@ -140,9 +140,13 @@ def dot_product_attention(query: Array,
   assert key.shape[-3] == value.shape[-3], 'k, v lengths must match.'
   assert query.shape[-1] == key.shape[-1], 'q, k depths must match.'
 
-  def compute_qk_attn_weights(query, key):
+  def compute_qk_attn_weights(query, key, cfg):
     """Computes all query-key dot product pairs."""
-    return jnp.einsum('bqhd,bkhd->bhqk', query, key)
+    att_wt = jnp.einsum('bqhd,bkhd->bhqk', query, key) #/ jnp.sqrt(cfg.head_dim).astype(cfg.dtype)
+    # jax.debug.print("Anisha: att_wt unscaled = {att_wt}", att_wt=att_wt)
+    att_wt_scaled = att_wt / jnp.sqrt(cfg.head_dim).astype(cfg.dtype)
+    # jax.debug.print("Anisha: att_wt scaled = {att_wt_scaled}", att_wt_scaled=att_wt_scaled)
+    return att_wt_scaled
 
   def compute_weighted_values(attn_weights, value, cfg, aqt_rng):
     """Computes attn_weights * values."""
@@ -160,7 +164,7 @@ def dot_product_attention(query: Array,
     key = key.astype(jnp.float32)
 
   # QK Product, a.k.a `attn_weights`: [batch, num_heads, q_length, kv_length]
-  attn_weights = compute_qk_attn_weights(query, key)
+  attn_weights = compute_qk_attn_weights(query, key, cfg)
 
   # Apply attention bias: masking, dropout, proximity bias, etc.
   if bias is not None:

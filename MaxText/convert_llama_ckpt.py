@@ -40,6 +40,9 @@ import torch
 
 import sys
 
+#tmp:
+import pickle
+
 MODEL_PARAMS_DICT = {
     '70b': {
         'num_layers': 80,
@@ -76,6 +79,16 @@ async_checkpointing = True
 save_period = 1
 step_number_to_save_new_ckpt = 0
 
+# permute for sliced rotary
+def permute(w, n_heads, dim1, dim2):
+    # return w.view(n_heads, dim1 // n_heads // 2, 2, dim2).transpose(1, 2).reshape(dim1, dim2)
+  print(f"w.shape = {w.shape}, n_heads = {n_heads}, dim1 = {dim1}, dim2 = {dim2}")
+  w1 = np.reshape(w, (n_heads, dim1 // n_heads // 2, 2, dim2))
+  print(f"w1.shape = {w1.shape}")
+  w2 = np.transpose(w1, (0, 2 ,1, 3))
+  print(f"w2.shape = {w2.shape}")
+  return np.reshape(w2, (dim1, dim2))
+
 def convert(base_model_path, maxtext_model_path, model_size, save_training_ckpt):
   
   print(f"save_training_ckpt = {save_training_ckpt}")
@@ -111,13 +124,17 @@ def convert(base_model_path, maxtext_model_path, model_size, save_training_ckpt)
           }, 
           'decoder_norm': {
               'scale': pytorch_vars[0]['norm.weight'].type(torch.float16).numpy()
-              },         
+              },
+         'logits_dense':{
+              'kernel': np.concatenate([var['output.weight'].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()[:, :vocab_size]         
+              }        
         },
        'token_embedder':{
               'embedding': np.concatenate([var['tok_embeddings.weight'].type(torch.float16).numpy() for var in pytorch_vars], axis=1)[:vocab_size,:]
          
        }
-      }
+       
+    }
     
 
   self_attention = {
@@ -155,10 +172,21 @@ def convert(base_model_path, maxtext_model_path, model_size, save_training_ckpt)
             }
         } 
   
+  meta_self_attention = {'query': [], 'key': [], 'value': [], 'out': []}
+
   for layer_idx in range(base_num_decoder_layers):
-    wq = np.concatenate([var['layers.%d.attention.wq.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()
-    wk = np.concatenate([var['layers.%d.attention.wk.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()
+    wq = np.concatenate([var['layers.%d.attention.wq.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=0)#.transpose()
+    wk = np.concatenate([var['layers.%d.attention.wk.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=0)#.transpose()
     wv = np.concatenate([var['layers.%d.attention.wv.weight' % (layer_idx)].type(torch.float16).numpy() for var in pytorch_vars], axis=0).transpose()
+    t = wq
+    #apply permute like HF
+    wq = permute(wq, base_num_heads, wq.shape[0], wq.shape[1]).transpose()
+    wk = permute(wk, base_num_heads, wk.shape[0], wk.shape[1]).transpose()
+
+    #temp:saving meta's checkpoint
+    meta_self_attention['query'].append((wq,t))
+    meta_self_attention['key'].append(wk)
+    meta_self_attention['value'].append(wv)
 
     wq = np.reshape(wq, [base_num_heads * head_dim, base_num_heads, head_dim])
     wk = np.reshape(wk, [base_num_heads * head_dim, num_kv_heads, head_dim])
@@ -171,6 +199,9 @@ def convert(base_model_path, maxtext_model_path, model_size, save_training_ckpt)
         ],
         axis=1,
     )
+    #temp:saving meta's checkpoint
+    meta_self_attention['out'].append(w_post)
+
     w_post = np.reshape(w_post, [base_num_heads * head_dim, base_num_heads, head_dim])
 
 
@@ -193,6 +224,11 @@ def convert(base_model_path, maxtext_model_path, model_size, save_training_ckpt)
     layer_weight['pre_self_attention_layer_norm']['scale'].append(pre_self_attention_layernorm)
     layer_weight['post_self_attention_layer_norm']['scale'].append(post_self_attention_layernorm)
   
+  #temp:saving meta's checkpoint
+    
+  with open('/dev/shm/llama2-7b-meta-permute-no-transpose.pickle', 'wb') as handle:
+    pickle.dump(meta_self_attention, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
   self_attention['query']['kernel'] = np.array(self_attention['query']['kernel'])
   self_attention['key']['kernel'] = np.array(self_attention['key']['kernel'])
   self_attention['value']['kernel'] = np.array(self_attention['value']['kernel'])
@@ -200,6 +236,7 @@ def convert(base_model_path, maxtext_model_path, model_size, save_training_ckpt)
   self_attention['query']['kernel'] = np.transpose(self_attention['query']['kernel'],axes=(1, 0, 2, 3)) 
   self_attention['key']['kernel'] = np.transpose(self_attention['key']['kernel'],axes=(1, 0, 2, 3))
   self_attention['value']['kernel'] = np.transpose(self_attention['value']['kernel'],axes=(1, 0, 2, 3))
+  #layers, base_num_heads * head_dim, base_num_heads, head_dim => base_num_heads, layers,head_dim, base_num_heads * head_dim
   self_attention['out']['kernel'] = np.transpose(self_attention['out']['kernel'],axes=(2, 0, 3, 1))
 
   jax_weights['decoder']['decoder']['self_attention'] = self_attention
@@ -257,6 +294,10 @@ def convert(base_model_path, maxtext_model_path, model_size, save_training_ckpt)
       config.async_checkpointing,
       config.save_period,
   )
+
+
+  with open('/dev/shm/llama2-7b.pickle', 'wb') as handle:
+    pickle.dump(jax_weights, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
   if save_training_ckpt:
     print("Creating a training state")

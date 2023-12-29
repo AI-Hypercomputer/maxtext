@@ -92,14 +92,17 @@ def temperature_sample(prompt_inputs,
   def sampling_loop_body_fn(state):
     """Sampling loop state update."""
     i, sequences, cache, cur_token, ended, rng = state
-    jax.debug.print("Anisha cur STATE->i:{i}",i=i)
-    jax.debug.print("Anisha cur token {cur_token}",cur_token=cur_token)
+    # jax.debug.print("Anisha cur STATE->i:{i}",i=i)
+    # jax.debug.print("Anisha cur token {cur_token}",cur_token=cur_token)
     #jax.debug.print("Anisha cur cache {cache}",cache=cache)
-    print("Anisha: cur cache shape:", get_shape_dict(cache))
+    jax.debug.print("Anisha: cur cache shape: {y}", y = get_shape_dict(cache))
     # Split RNG for sampling.
     rng1, rng2 = random.split(rng)
+    #decoder position
+    decoder_position = jnp.zeros((batch_size, 1), dtype=jnp.int32)+i
+    # jax.debug.print("Anisha decoder_position {decoder_position}", decoder_position=decoder_position)
     # Call fast-decoder model on current tokens to get next-position logits.
-    logits, new_cache = tokens_to_logits(cur_token, cache, rng1)
+    logits, new_cache = tokens_to_logits(cur_token, cache, rng1, decoder_position)
     # Sample next token from logits.
     # TODO: add top-p "nucleus" sampling option.
     if topk:
@@ -117,7 +120,7 @@ def temperature_sample(prompt_inputs,
     out_of_prompt = (sequences[:, i+1] == 0)
     next_token = (next_token * out_of_prompt +
                   sequences[:, i+1] * ~out_of_prompt)
-    jax.debug.print("Anisha next token:{next_token}",next_token=next_token)
+    # jax.debug.print("Anisha next token:{next_token}",next_token=next_token)
     
     # If end-marker reached for batch item, only emit padding tokens.
     next_token_or_endpad = (next_token[:, None] * ~ended)
@@ -125,7 +128,7 @@ def temperature_sample(prompt_inputs,
     # Add current sampled tokens to recorded sequences.
     new_sequences = lax.dynamic_update_slice(
         sequences, next_token_or_endpad, (0, i+1))
-    jax.debug.print("Anisha new_sequences {new_sequences}",new_sequences=new_sequences)
+    # jax.debug.print("Anisha new_sequences {new_sequences}",new_sequences=new_sequences)
     return (i+1, new_sequences, new_cache, next_token_or_endpad, ended, rng2)
 
   # Run sampling loop and collect final state.

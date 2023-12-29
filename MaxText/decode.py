@@ -77,7 +77,7 @@ def predict_step(inputs,
   """Predict language model on a batch."""
   # NOTE: wtf are we adding inputs.shape[2:] here?  it's almost always empty??
   target_shape = (inputs.shape[0], config.max_predict_length) + inputs.shape[2:]
-
+  # jax.debug.print("Anisha: predict step inputs =  {inputs} ", inputs=inputs)
   initial_variables = model.init(
       {'params': rngkey, 'dropout': rngkey, 'aqt': rngkey},
       jnp.ones(target_shape, config.dtype),
@@ -87,8 +87,9 @@ def predict_step(inputs,
       max_decode_length=config.max_predict_length
   )
   cache = initial_variables["cache"]
+  # print(f"initial_variables.keys()={initial_variables.keys()}")
 
-  def tokens_ids_to_logits(flat_ids, flat_cache, aqt_rng):
+  def tokens_ids_to_logits(flat_ids, flat_cache, aqt_rng, decoder_positions=None):
     """Token slice to logits from decoder model."""
     # --> [batch * beam, 1, vocab]
     flat_logits, new_vars = model.apply(
@@ -98,6 +99,7 @@ def predict_step(inputs,
         },
         flat_ids,
         None,
+        decoder_positions = decoder_positions, 
         enable_dropout=False,
         decode=True,
         rngs={'aqt': aqt_rng},
@@ -156,6 +158,8 @@ def decode_loop(config, state=None):
   # Encode the demo prompt.
   tokenized_prompts = encode_strings(
       [config.prompt], config.max_predict_length, sp_tokenizer)
+  
+  print(f"Anisha: tokenized_prompts = {tokenized_prompts}")
 
   if config.metrics_file:
     local_metrics_file = open(config.metrics_file, 'a', encoding="utf8")

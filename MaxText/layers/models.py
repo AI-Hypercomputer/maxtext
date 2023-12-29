@@ -330,11 +330,11 @@ class Decoder(nn.Module):
     cfg = self.config
     mesh = self.mesh
     assert decoder_input_tokens.ndim == 2  # [batch, len]
-    jax.debug.print("Anisha: decoder_input_tokens = {decoder_input_tokens} ", decoder_input_tokens=decoder_input_tokens)
+    # jax.debug.print("Anisha: decoder_input_tokens = {decoder_input_tokens} ", decoder_input_tokens=decoder_input_tokens)
     # [batch, length] -> [batch, length, emb_dim]
     y = self.shared_embedding(decoder_input_tokens.astype('int32'))
-    jax.debug.print("Anisha: y embedding size = {shape}", shape=y.shape)
-    jax.debug.print("Anisha: y embedding =  {y} ", y=y)
+    # jax.debug.print("Anisha: y embedding size = {shape}", shape=y.shape)
+    # jax.debug.print("Anisha: y embedding =  {y} ", y=y)
     y = nn.Dropout(
         rate=cfg.dropout_rate, broadcast_dims=(-2,))(
             y, deterministic=deterministic)
@@ -410,11 +410,13 @@ class Decoder(nn.Module):
             max_decode_length,
         )
 
-    y = RMSNorm(dtype=cfg.dtype, name='decoder_norm', kernel_axes=('embed',))(y)
+    # jax.debug.print("Anisha after all decoder layers = {y}",y = y)
+    y = RMSNorm(dtype=cfg.dtype, name='decoder_norm', epsilon=1e-05, 
+                kernel_axes=('embed',))(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
         y, deterministic=deterministic
     )
-
+    jax.debug.print("Anisha after ln of last decoder layer = {y}",y = y)
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
@@ -422,7 +424,7 @@ class Decoder(nn.Module):
       jax.debug.print("logits={logits}", logits=logits)
       # Correctly normalize pre-softmax logits for this shared case.
       logits = logits / jnp.sqrt(y.shape[-1])
-      jax.debug.print("logits2={logits}", logits=logits)
+      # jax.debug.print("logits2={logits}", logits=logits)
     else:
       logits = linears.DenseGeneral(
           cfg.vocab_size,
