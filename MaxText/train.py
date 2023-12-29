@@ -366,7 +366,7 @@ def train_loop(config, state=None):
       running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
 
     valid_loss = 0
-    if step % eval_interval == 0:
+    if step % eval_interval == 0 or step == start_step:
       eval_data_iterator = multihost_dataloading.get_batch_sharded_data_pipeline(eval_ds, mesh)
       i = 0
       while True:
