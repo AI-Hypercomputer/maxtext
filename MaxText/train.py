@@ -55,6 +55,7 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 import functools
 import multihost_dataloading
 from jax.experimental.multihost_utils import process_allgather
+import math
 
 Transformer = models.Transformer
 
@@ -270,7 +271,8 @@ def train_loop(config, state=None):
 
   state = jax.tree_util.tree_map_with_path(map_fn, state)
   start_step = get_first_step(state) # this is the start_step for training
-  
+
+  eval_interval = math.ceil(24567 / config.global_batch_size_to_train_on)
   if jax.process_index() == 0:
     max_logging.log(f":::MLLOG init_checkpoint_step: {start_step}")
     max_logging.log(f":::MLLOG opt_base_learning_rate: {config.learning_rate}")
@@ -280,6 +282,7 @@ def train_loop(config, state=None):
     max_logging.log(f":::MLLOG opt_gradient_clip_norm: {config.gradient_clipping_threshold}")
     max_logging.log(f":::MLLOG global_batch_size: {config.global_batch_size_to_train_on}")
     max_logging.log(f":::MLLOG sequence_length: {config.max_target_length}")
+    max_logging.log(f":::MLLOG eval interval: {eval_interval}")
 
   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
     train_step,
@@ -348,13 +351,13 @@ def train_loop(config, state=None):
     write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
 
-    if checkpoint_manager is not None:
-      if step > 0 and checkpoint_manager.save(step, state):
-        max_logging.log(f"saved a checkpoint at step {step}")
-      # Upon preemption, exit when and only when all ongoing saves are complete.
-      if checkpoint_manager.reached_preemption(step):
-        checkpoint_manager.wait_until_finished()
-        sys.exit()
+    # if checkpoint_manager is not None:
+    #   if step > 0 and checkpoint_manager.save(step, state):
+    #     max_logging.log(f"saved a checkpoint at step {step}")
+    #   # Upon preemption, exit when and only when all ongoing saves are complete.
+    #   if checkpoint_manager.reached_preemption(step):
+    #     checkpoint_manager.wait_until_finished()
+    #     sys.exit()
 
     if config.metrics_file:
       max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
@@ -363,7 +366,7 @@ def train_loop(config, state=None):
       running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
 
     valid_loss = 0
-    if step % 1 == 0:
+    if step % eval_interval == 0:
       eval_data_iterator = multihost_dataloading.get_batch_sharded_data_pipeline(eval_ds, mesh)
       i = 0
       while True:
@@ -377,7 +380,11 @@ def train_loop(config, state=None):
         valid_loss += float(metrics['scalar']['evaluation/loss'])
         i += 1
 
-      max_logging.log(f"average loss at step {step}: {valid_loss / i}")
+      mean_valid_loss = valid_loss / i
+      max_logging.log(f"average loss at step {step}: {mean_valid_loss}")
+      if mean_valid_loss < 2.69:
+        max_logging.log(f"early stop")
+        break
         
           
   max_utils.deactivate_profiler(config)
