@@ -369,6 +369,7 @@ def train_loop(config, state=None):
     if step % eval_interval == 0 or step == start_step:
       eval_data_iterator = multihost_dataloading.get_batch_sharded_data_pipeline(eval_ds, mesh)
       i = 0
+      count = 0
       while True:
         batch = eval_data_iterator()
         if not batch:
@@ -382,11 +383,12 @@ def train_loop(config, state=None):
           max_logging.log(f"found nan at batch {i}: {batch}")
         else:
           valid_loss += batch_valid_loss
-          i += 1
+          count += 1
         if i % 10 == 0:
           max_logging.log(f"batch valid loss at {i}: {metrics['scalar']['evaluation/loss']}")
+        i += 1
 
-      mean_valid_loss = valid_loss / i
+      mean_valid_loss = valid_loss / count
       max_logging.log(f"average loss at step {step}: {mean_valid_loss}")
       if mean_valid_loss <= 2.69:
         max_logging.log(f"early stop")
