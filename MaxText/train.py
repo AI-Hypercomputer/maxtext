@@ -196,7 +196,6 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
                          enable_dropout=config.enable_dropout if is_train else False,
                          rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
     one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
-    logits = logits.astype(jnp.float32)
     if config.stable_cross_entropy_loss:
       xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
     else:
