@@ -311,7 +311,7 @@ def _pad_to_batch_size(ds: tf.data.Dataset,  batch_size: int, num_examples: int 
       '%d extra entries to get %d batches.', local_num, pad_num, num_batches)
   # Repeat a random example to make the last batch full.
   def _add_pad(x):
-      # x['targets_segmentation'] *= 0
+      x['targets_segmentation'] *= 0
       return x
   pad_ds = ds.take(1).map(_add_pad).repeat(pad_num)
   return ds.concatenate(pad_ds)
@@ -338,7 +338,7 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
   train_ds = train_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
   train_ds = rekey(train_ds, {'inputs': None, 'targets': 'text'})
 
-  eval_ds = eval_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
+  # eval_ds = eval_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
   eval_ds = rekey(eval_ds, {'inputs': None, 'targets': 'ids'})
   
   # sp_tokenizer = tokenizer.load_tokenizer(vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
@@ -380,6 +380,7 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
   train_ds = train_ds.batch(batch_size // jax.process_count(), drop_remainder=True)
   # ensure array split in an equal division for each device
   eval_ds = _pad_to_batch_size(eval_ds, batch_size)
+  eval_ds = eval_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
   eval_ds = eval_ds.batch(batch_size // jax.process_count(), drop_remainder=False)
   
   # self.reset_for_eval=True: We are running eval over exactly one epoch.
