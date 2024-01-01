@@ -93,7 +93,7 @@ def prefill_predict_step(inputs, input_positions, decoder_segment_ids,
     input_positions,
     decoder_segment_ids=decoder_segment_ids,
     enable_dropout=False,
-    model_mode=common_types.PREFILL_MODEL_MODE,
+    model_mode=common_types.MODEL_MODE_PREFILL,
     rngs={'aqt': rngkey},
     max_decode_length=config.max_target_length,
     mutable=["cache"]
@@ -111,7 +111,7 @@ def ar_predict_single_token(token_input, token_position, kv_cache, state, rngkey
     token_input,
     token_position,
     enable_dropout=False,
-    model_mode=common_types.AUTOREGRESSIVE_MODEL_MODE,
+    model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
     rngs={'aqt': rngkey},
     max_decode_length=config.max_target_length,
     mutable=["cache"])

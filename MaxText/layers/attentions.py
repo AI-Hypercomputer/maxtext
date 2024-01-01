@@ -102,7 +102,7 @@ class AttentionOp(nn.Module):
       model_mode: str
   ) -> Array | None:
     mask = None
-    if model_mode == common_types.AUTOREGRESSIVE_MODEL_MODE:
+    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       mask = decoder_segment_ids[:, None, None, None, :] == common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     elif decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
@@ -110,7 +110,7 @@ class AttentionOp(nn.Module):
 
     causal_mask = None
     # We enforce causality except for AUTOREGRESSION
-    if model_mode != common_types.AUTOREGRESSIVE_MODEL_MODE:
+    if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE:
       _, q_seq_len, _, _ = query.shape
       _, kv_seq_len, _, _ = key.shape
       mask_shape = (q_seq_len, kv_seq_len)
@@ -139,12 +139,12 @@ class AttentionOp(nn.Module):
     if self.attention_kernel == "dot_product":
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
     elif self.attention_kernel == 'flash':
-      if model_mode == common_types.AUTOREGRESSIVE_MODEL_MODE:
+      if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
         raise ValueError("""Decode not supported with flash attention.
                             Use `dot_product` instead.""")
       return self.tpu_flash_attention(query, key, value, decoder_segment_ids)
     elif self.attention_kernel == 'gpu_flash_xla' or self.attention_kernel == 'gpu_flash_triton':
-      if model_mode == common_types.AUTOREGRESSIVE_MODEL_MODE:
+      if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
         raise ValueError("""Decode not supported with flash attention.
                             Use `dot_product` instead.""")
       return self.gpu_flash_attention(query, key, value)
@@ -264,7 +264,7 @@ class AttentionOp(nn.Module):
       key: Array,
       value: Array,
       decoder_segment_ids: Array | None,
-      model_mode: str = common_types.TRAIN_MODEL_MODE,
+      model_mode: str = common_types.MODEL_MODE_TRAIN,
   ) -> Array:
     """Apply Attention."""
     aqt_rng = self.make_rng('aqt')
@@ -364,42 +364,26 @@ class AttentionOp(nn.Module):
       Swapped kv_shape as [b, ..., n, d, s] for cache.
     """
     return kv_shape[:-3] + tuple(kv_shape[i] for i in [-2, -1, -3])
+  
+  def kv_cache_prefill(self,
+                        key: Array,
+                        value: Array,
+                        decoder_segment_ids: Array,
+                       ):
+      """In prefill mode, we zero out the existing cache, run the computation and 
+      prepare the cache as necessary.
 
-  def kv_cache(
-      self,
-      key: Array,
-      value: Array,
-      decoder_segment_ids: Array,
-      model_mode: str
-  ) -> tuple[Array, Array]:
-    """Decoding method.
+      Args:
+        key: in shape [b, s, n, d].
+        value: in shape [b, s, n, d].
+        decoder_segment_ids: [b, s] -- marking segment ids for tokens
 
-    The key and value have dimension [batch, length, num_heads, head_dim],
-    but we cache them as [batch, num_heads, head_dim, length] as a TPU
-    fusion optimization. This also enables the "scatter via one-hot
-    broadcast" trick, which means we do a one-hot broadcast instead of a
-    scatter/gather operations, resulting in a 3-4x speedup in practice.
+      Returns:
+        tuple of key, value with cached,
 
-    Args:
-      key: in shape [b, s, n, d].
-      value: in shape [b, s, n, d].
-      model_mode: model mode controlling model
-
-    Returns:
-      tuple of key, value with cached,
-    Raises:
-      ValueError: when query shape is not [batch, 1, num_heads, heads_dim].
-    """
-    cache_logical_shape = (key.shape[0], self.max_target_length, key.shape[2], key.shape[3])
-
-
-    if key.shape != value.shape:
-      raise ValueError(f"Can't KV cache with mismatched shapes {key.shape=}, {value.shape=}")
-
-    if model_mode == common_types.TRAIN_MODEL_MODE:
-      return key, value, decoder_segment_ids
-    elif model_mode == common_types.PREFILL_MODEL_MODE:
-      batch, sequence, num_heads, head_dim = key.shape
+      """
+      cache_logical_shape = (key.shape[0], self.max_target_length, key.shape[2], key.shape[3])
+      _, sequence, _, _ = key.shape
 
       cached_key = self.variable('cache', 'cached_key', jnp.zeros,
                                 self.cached_kv_shape(cache_logical_shape), key.dtype)
@@ -423,11 +407,32 @@ class AttentionOp(nn.Module):
       cached_value.value = cached_value.value.at[:, :, :, 0:sequence].set(value_shaped_for_cache)
       cached_segment_id.value = cached_segment_id.value.at[:, 0:sequence].set(decoder_segment_ids)
       return key, value, decoder_segment_ids
-    elif model_mode == common_types.AUTOREGRESSIVE_MODEL_MODE:
+
+  def kv_cache_autoregressive(self,
+                              key: Array,
+                              value: Array,
+                              decoder_segment_ids: Array,
+                             ):
+      """In autoregressive mode, we update the cache for this entry and 
+         then return the full cache.
+
+      Args:
+        key: in shape [b, 1, n, d].
+        value: in shape [b, 1, n, d].
+        decoder_segment_ids: [b, 1] -- marking segment ids for tokens
+
+      Returns:
+        tuple of key, value with cached,
+      Raises:
+        ValueError: when key/value shape is not [batch, 1, num_heads, heads_dim].
+      """
+      cache_logical_shape = (key.shape[0], self.max_target_length, key.shape[2], key.shape[3])
+      _, sequence, _, _ = key.shape
+      if sequence != 1:
+        raise ValueError(f"Sequence length should be 1 during autoregression, got {sequence=}")
       is_initialized = self.has_variable('cache', 'cached_key')
       if not is_initialized:
         raise ValueError("Error, we can't do autoregression if we haven't seeded the KV Cache.")
-
       cached_key = self.variable('cache', 'cached_key', jnp.zeros,
                           self.cached_kv_shape(cache_logical_shape), key.dtype)
       cached_value = self.variable('cache', 'cached_value', jnp.zeros,
@@ -437,7 +442,7 @@ class AttentionOp(nn.Module):
       cached_segment_id = self.variable('cache', 'cache_segment_id',
                           jnp.zeros,
                           (key.shape[0], self.max_target_length), jnp.int32)
-      batch, num_heads, head_dim, length = cached_key.value.shape
+      _, _, _, length = cached_key.value.shape
 
       # Create a OHE of the current index. NOTE: the index is increased below.
       cur_index = cache_index.value
@@ -467,6 +472,40 @@ class AttentionOp(nn.Module):
       value = self.revert_kvlen_axis(value)
 
       return key, value, cached_segment_id.value
+
+  def kv_cache(
+      self,
+      key: Array,
+      value: Array,
+      decoder_segment_ids: Array,
+      model_mode: str
+  ) -> tuple[Array, Array]:
+    """KV cache takes the current state and updates the state accordingly
+
+    The key and value have dimension [batch, length, num_heads, head_dim],
+    but we cache them as [batch, num_heads, head_dim, length] as a TPU
+    fusion optimization. This also enables the "scatter via one-hot
+    broadcast" trick, which means we do a one-hot broadcast instead of a
+    scatter/gather operations, resulting in a 3-4x speedup in practice.
+
+    Args:
+      key: in shape [b, s, n, d].
+      value: in shape [b, s, n, d].
+      model_mode: model mode controlling model
+
+    Returns:
+      tuple of key, value with cached,
+
+    """
+    if key.shape != value.shape:
+      raise ValueError(f"Can't KV cache with mismatched shapes {key.shape=}, {value.shape=}")
+
+    if model_mode == common_types.MODEL_MODE_TRAIN:
+      return key, value, decoder_segment_ids
+    elif model_mode == common_types.MODEL_MODE_PREFILL:
+      return self.kv_cache_prefill(key, value, decoder_segment_ids)
+    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      return self.kv_cache_autoregressive(key, value, decoder_segment_ids)
     else:
       raise ValueError(f"Model Mode isn't supported! {model_mode=}")
 
@@ -593,7 +632,7 @@ class Attention(nn.Module):
                inputs_positions: Array,
                decoder_segment_ids = None,
                *,
-               model_mode: str = common_types.TRAIN_MODEL_MODE,
+               model_mode: str = common_types.MODEL_MODE_TRAIN,
                deterministic: bool = False):
     """Applies Attention on the input data.
 

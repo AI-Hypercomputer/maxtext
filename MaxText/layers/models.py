@@ -151,7 +151,7 @@ class Decoder(nn.Module):
                decoder_positions,
                decoder_segment_ids=None,
                deterministic=False,
-               model_mode=common_types.TRAIN_MODEL_MODE,
+               model_mode=common_types.MODEL_MODE_TRAIN,
                max_decode_length=None):
     cfg = self.config
     mesh = self.mesh
@@ -285,7 +285,7 @@ class Transformer(nn.Module):
       decoder_positions,
       decoder_segment_ids=None,
       enable_dropout=True,
-      model_mode=common_types.TRAIN_MODEL_MODE,
+      model_mode=common_types.MODEL_MODE_TRAIN,
       max_decode_length=None):
     """Applies Transformer decoder-branch on encoded-input and target."""
 
