@@ -204,6 +204,8 @@ def dot_product_attention(query: Array,
   if bias is not None:
     attn_weights = apply_mask_to_logits(attn_weights, bias)
 
+  # fp32 append
+  attn_weights = attn_weights.astype(jnp.float32)
   # Normalize the attention weights across `kv_length` dimension.
   attn_weights = jax.nn.softmax(attn_weights).astype(dtype)
 
