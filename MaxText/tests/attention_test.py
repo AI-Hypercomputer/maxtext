@@ -120,7 +120,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
-        model_mode=common_types.TRAIN_MODEL_MODE,
+        model_mode=common_types.MODEL_MODE_TRAIN,
         rngs={'aqt': self.rng},
     )
     
@@ -135,7 +135,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids_prefill,
         inputs_positions=decoder_positions_prefill,
         deterministic=True,
-        model_mode=common_types.PREFILL_MODEL_MODE,
+        model_mode=common_types.MODEL_MODE_PREFILL,
         rngs={'aqt': self.rng},
         mutable=["cache"]
     )
@@ -156,7 +156,7 @@ class AttentionTest(unittest.TestCase):
         lnx_idx,
         inputs_positions=decoder_positions_idx,
         deterministic=True,
-        model_mode=common_types.AUTOREGRESSIVE_MODEL_MODE,
+        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
         rngs={'aqt': self.rng},
         mutable=["cache"]
       )
@@ -185,7 +185,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_positions,
         inputs_positions=decoder_segment_ids,
         deterministic=True,
-        model_mode=common_types.TRAIN_MODEL_MODE,
+        model_mode=common_types.MODEL_MODE_TRAIN,
         rngs={'aqt': self.rng},
     )
 
@@ -218,7 +218,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_positions,
         inputs_positions=decoder_segment_ids,
         deterministic=True,
-        model_mode=common_types.TRAIN_MODEL_MODE,
+        model_mode=common_types.MODEL_MODE_TRAIN,
         rngs={'aqt': self.rng},
     )
 
@@ -261,7 +261,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_positions,
         inputs_positions=decoder_segment_ids,
         deterministic=True,
-        model_mode=common_types.TRAIN_MODEL_MODE,
+        model_mode=common_types.MODEL_MODE_TRAIN,
         rngs={'aqt': self.rng},
     )
 
@@ -291,7 +291,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_positions,
         inputs_positions=decoder_segment_ids,
         deterministic=True,
-        model_mode=common_types.TRAIN_MODEL_MODE,
+        model_mode=common_types.MODEL_MODE_TRAIN,
         rngs={'aqt': self.rng},
     )
 
