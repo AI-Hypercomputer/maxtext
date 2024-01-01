@@ -195,6 +195,7 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
                          padding_mask=data['targets_segmentation'] != 0,
                          enable_dropout=config.enable_dropout if is_train else False,
                          rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
+    
     one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
     if config.stable_cross_entropy_loss:
       xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
@@ -204,11 +205,13 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
     # Mask out paddings at the end of each example.
     padding_mask = data['targets_segmentation'] != 0
     xent = xent * padding_mask
-    return jnp.sum(xent)/jnp.sum(padding_mask), intermediate_outputs
+    cum_loss = jnp.sum(xent)
+    cum_weights = jnp.sum(padding_mask)
+    return cum_loss / cum_weights, intermediate_outputs, cum_loss, cum_weights
 
   if is_train:
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
+    (loss, intermediate_outputs, cum_loss, cum_weights), raw_grads = grad_fn(state.params)
     if config.gradient_clipping_threshold > 0:
       grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
     else:
@@ -219,7 +222,7 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
             'learning/param_norm': max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   else:
     loss, intermediate_outputs = loss_fn(state.params)
-    metrics = {'scalar': {'evaluation/loss': loss}}
+    metrics = {'scalar': {'evaluation/loss': loss, 'evaluation/cum_loss': cum_loss, 'evaluation/cum_weights': cum_weights}}
     new_state = state
 
   if config.record_internal_nn_metrics:
@@ -366,6 +369,8 @@ def train_loop(config, state=None):
       running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
 
     valid_loss = 0
+    valid_cum_loss = 0
+    valid_cum_weights = 0
     if step % eval_interval == 0 or step == start_step:
       eval_data_iterator = multihost_dataloading.get_batch_sharded_data_pipeline(eval_ds, mesh)
       i = 0
@@ -379,18 +384,23 @@ def train_loop(config, state=None):
             state, batch, nextrng
           )
         batch_valid_loss = float(metrics['scalar']['evaluation/loss'])
+        batch_valid_cum_loss = float(metrics['scalar']['evaluation/cum_loss'])
+        batch_valid_cum_weights = float(metrics['scalar']['evaluation/cum_weights'])
         if math.isnan(batch_valid_loss):
           max_logging.log(f"found nan at batch {i}: {batch}")
         else:
           valid_loss += batch_valid_loss
+          valid_cum_loss += batch_valid_cum_loss
+          valid_cum_weights += batch_valid_cum_weights
           count += 1
         if i % 10 == 0:
           max_logging.log(f"batch valid loss at {i}: {metrics['scalar']['evaluation/loss']}")
         i += 1
 
       mean_valid_loss = valid_loss / count
-      max_logging.log(f"average loss at step {step}: {mean_valid_loss}")
-      if mean_valid_loss <= 2.69:
+      weighted_mean_valid_loss = valid_cum_loss / valid_cum_weights
+      max_logging.log(f"average loss at step {step}: {mean_valid_loss}, {weighted_mean_valid_loss}")
+      if weighted_mean_valid_loss <= 2.69:
         max_logging.log(f"early stop")
         break
         
