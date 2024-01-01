@@ -186,7 +186,7 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
   for k, v in data.items():
     data[k] = v[:config.global_batch_size_to_train_on,:]
 
-  def loss_fn(params):
+  def loss_fn(params, is_train=True):
     logits, intermediate_outputs = model.apply({'params': params},
                          data['inputs'],
                          data['targets'],
@@ -207,11 +207,15 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
     xent = xent * padding_mask
     cum_loss = jnp.sum(xent)
     cum_weights = jnp.sum(padding_mask)
-    return cum_loss / cum_weights, intermediate_outputs, cum_loss, cum_weights
+    if is_train:
+      return cum_loss / cum_weights, intermediate_outputs
+    else:
+      return cum_loss / cum_weights, intermediate_outputs, cum_loss, cum_weights
 
   if is_train:
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (loss, intermediate_outputs, cum_loss, cum_weights), raw_grads = grad_fn(state.params)
+    (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
+
     if config.gradient_clipping_threshold > 0:
       grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
     else:
@@ -221,7 +225,8 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
             'learning/raw_grad_norm': max_utils.l2norm_pytree(raw_grads),
             'learning/param_norm': max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   else:
-    loss, intermediate_outputs, cum_loss, cum_weights = loss_fn(state.params)
+    loss, intermediate_outputs, cum_loss, cum_weights = loss_fn(state.params, is_train=False)
+    
     metrics = {'scalar': {'evaluation/loss': loss, 'evaluation/cum_loss': cum_loss, 'evaluation/cum_weights': cum_weights}}
     new_state = state
 
