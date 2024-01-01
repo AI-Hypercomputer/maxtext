@@ -207,24 +207,21 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
     xent = xent * padding_mask
     cum_loss = jnp.sum(xent)
     cum_weights = jnp.sum(padding_mask)
-    metrics = {"avg_loss": cum_loss / cum_weights, "cum_loss": cum_loss, "cum_weights": cum_weights}
-    return metrics, intermediate_outputs
+    return cum_loss / cum_weights, intermediate_outputs, cum_loss, cum_weights
 
   if is_train:
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (batch_metrics, intermediate_outputs), raw_grads = grad_fn(state.params)
+    (loss, intermediate_outputs, cum_loss, cum_weights), raw_grads = grad_fn(state.params)
     if config.gradient_clipping_threshold > 0:
       grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
     else:
       grads = raw_grads
     new_state = state.apply_gradients(grads=grads)
-    loss = batch_metrics["avg_loss"]
     metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm': max_utils.l2norm_pytree(grads),
             'learning/raw_grad_norm': max_utils.l2norm_pytree(raw_grads),
             'learning/param_norm': max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   else:
-    batch_metrics, intermediate_outputs = loss_fn(state.params)
-    loss, cum_loss, cum_weights = batch_metrics["avg_loss"], batch_metrics["cum_loss"], batch_metrics["cum_weights"]
+    loss, intermediate_outputs, cum_loss, cum_weights = loss_fn(state.params)
     metrics = {'scalar': {'evaluation/loss': loss, 'evaluation/cum_loss': cum_loss, 'evaluation/cum_weights': cum_weights}}
     new_state = state
 
