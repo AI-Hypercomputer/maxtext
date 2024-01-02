@@ -21,15 +21,25 @@ def set_up_pjrt_nightly() -> Tuple[str]:
   """Common set up for PJRT nightly tests."""
   return (
       "pip install tensorflow-text-nightly",
-      "gsutil -m cp gs://cloud-tpu-v2-images-dev-artifacts/tensorflow/tf-nightly/latest/*.whl /tmp/ && pip install /tmp/tf*.whl --force",
+      "sudo gsutil -m cp gs://cloud-tpu-v2-images-dev-artifacts/tensorflow/tf-nightly/latest/*.whl /tmp/ && pip install /tmp/tf*.whl --force",
       "sudo gsutil -m cp gs://cloud-tpu-v2-images-dev-artifacts/libtpu/latest/libtpu.so /lib/",
-      "sudo mkdir -p /usr/share/tpu && cd /usr/share/tpu && git clone https://github.com/tensorflow/models.git",
+  )
+
+
+# TODO(ranran): migrate repo `tf2-api-tests` from xl-ml-test to cloud-ml-auto-solutions project
+def set_up_tensorflow_keras() -> Tuple[str]:
+  """Common set up for tensorflow Keras tests."""
+  return (
+      "pip install --upgrade --force-reinstall tf-keras-nightly",
+      "export PATH=$PATH:/root/google-cloud-sdk/bin && cd /tmp && sudo gcloud source repos clone tf2-api-tests --project=xl-ml-test",
+      "cd /tmp/tf2-api-tests && pip install behave matplotlib",
   )
 
 
 def set_up_google_tensorflow_models() -> Tuple[str]:
-  """Common set up for tensorflow."""
+  """Common set up for tensorflow models."""
   return (
+      "sudo mkdir -p /usr/share/tpu && cd /usr/share/tpu && git clone https://github.com/tensorflow/models.git",
       "pip install -r /usr/share/tpu/models/official/requirements.txt",
       "pip install tensorflow-recommenders --no-deps",
       "pip install --upgrade --force-reinstall tf-keras-nightly",

@@ -21,6 +21,61 @@ from configs.xlml.tensorflow import common
 from configs.vm_resource import TpuVersion, Project, RuntimeVersion
 
 
+def get_tf_keras_config(
+    tpu_version: TpuVersion,
+    tpu_cores: int,
+    tpu_zone: str,
+    time_out_in_min: int,
+    test_feature: str,
+    test_name: str,
+    project_name: str = Project.CLOUD_ML_AUTO_SOLUTIONS.value,
+    runtime_version: str = RuntimeVersion.TPU_VM_TF_2150_PJRT.value,
+    is_pod: bool = False,
+    network: str = "default",
+    subnetwork: str = "default",
+) -> task.TpuQueuedResourceTask:
+  job_gcp_config = gcp_config.GCPConfig(
+      project_name=project_name,
+      zone=tpu_zone,
+      dataset_name=metric_config.DatasetOption.XLML_DATASET,
+  )
+
+  set_up_cmds = common.set_up_pjrt_nightly() + common.set_up_tensorflow_keras()
+  # TODO(ranran): enable tests for pod and is blocked by
+  # https://github.com/GoogleCloudPlatform/ml-auto-solutions/pull/15
+  skipped_tag = "--tags=-failspod" if is_pod else ""
+  run_model_cmds = (
+      (
+          "export PATH=$PATH:/home/ml-auto-solutions/.local/bin &&"
+          " export TPU_NAME=local &&"
+          " cd /tmp/tf2-api-tests && NEXT_PLUGGABLE_DEVICE_USE_C_API=true"
+          " TF_PLUGGABLE_DEVICE_LIBRARY_PATH=/lib/libtpu.so"
+          " TF_USE_LEGACY_KERAS=1 behave -e ipynb_checkpoints"
+          f" --tags=-fails {skipped_tag} -i {test_feature}"
+      ),
+  )
+  job_test_config = test_config.TpuVmTest(
+      test_config.Tpu(
+          version=tpu_version,
+          cores=tpu_cores,
+          runtime_version=runtime_version,
+          reserved=True,
+          network=network,
+          subnetwork=subnetwork,
+      ),
+      test_name=f"tf_keras_api_{test_name}",
+      set_up_cmds=set_up_cmds,
+      run_model_cmds=run_model_cmds,
+      time_out_in_min=time_out_in_min,
+      task_owner=test_owner.ERIC_L,
+  )
+
+  return task.TpuQueuedResourceTask(
+      task_test_config=job_test_config,
+      task_gcp_config=job_gcp_config,
+  )
+
+
 def get_tf_resnet_config(
     tpu_version: TpuVersion,
     tpu_cores: int,
