@@ -122,7 +122,7 @@ def main(args):
       is_leaf=is_leaf
   )
 
-  if args.use_single_slice:
+  if args.restore_method == 1:
     type_handlers.register_type_handler(jax.Array,
                                       type_handlers.SingleSliceArrayHandler(),
                                       override=True)
@@ -136,20 +136,37 @@ def main(args):
           )
 
     restore_args = jax.tree_util.tree_map(
-            _create_restore_args,
-            abstract_state,
-            mesh_tree,
-            axes_tree
-        )
+      _create_restore_args,
+      abstract_state,
+      mesh_tree,
+      axes_tree
+      )
 
     restored = mngr.restore(
-            mngr.latest_step(),
-            items=abstract_state,
-            restore_kwargs={'restore_args':
-              cast(type_handlers.SingleSliceArrayRestoreArgs, restore_args)}
-        )
+      mngr.latest_step(),
+      items=abstract_state,
+      restore_kwargs={'restore_args':
+        cast(type_handlers.SingleSliceArrayRestoreArgs, restore_args)}
+      )
+  if args.restore_method == 2:
+    print('restoring with ArrayRestoreArgs')
+    def map_to_pspec(data, mesh, pspec):
+      return type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
+
+    restore_args = jax.tree_util.tree_map(
+      map_to_pspec,
+      abstract_state,
+      mesh_tree,
+      axes_tree
+      )
+
+    restored = mngr.restore(
+      mngr.latest_step(),
+      abstract_state,
+      restore_kwargs={'restore_args': restore_args}
+      )
   else:
-    print('restoring without single slice')
+    print('restoring orig')
     shardings = jax.tree_map(lambda x: x.sharding, abstract_state)
     restore_args = ocp.checkpoint_utils.construct_restore_args(
         abstract_state, shardings)
@@ -169,10 +186,10 @@ def main(args):
 def parser(args):
   parser = argparse.ArgumentParser()
   parser.add_argument(
-  '--use-single-slice',
-  type=bool,
-  default=False,
-  help='whether to use sinceslice and broadcast while restoring the ckpt'
+  '--restore-method',
+  type=int,
+  default=0,
+  help='specifies how to restore the ckpt'
   )
   return parser.parse_args(args)
 
