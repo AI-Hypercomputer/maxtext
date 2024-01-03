@@ -26,6 +26,7 @@ import pickle
 import functools
 import input_pipeline
 import optax
+from praxis.optimizers import sharded_adam
 
 
 
@@ -51,14 +52,15 @@ def get_optimizer(config, learning_rate_schedule):
   """ Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2 """
 
   # hack
-  return optax.adamw(
-        learning_rate_schedule,
-        b1=config.adam_b1,
-        b2=config.adam_b2,
-        eps=config.adam_eps,
-        eps_root=config.adam_eps_root,
-        weight_decay=config.adam_weight_decay,
-  )
+  return sharded_adam(
+          learning_rate_fn=lambda x: learning_rate_schedule(x) / config.learning_rate,  # learning_rate_fn is normalized in praxis implementation see: https://github.com/google/praxis/blob/8abfea805e58b546205b8a9aa56106f110db4bf3/praxis/optimizers.py#L1157
+          beta1=config.adam_b1,
+          beta2=config.adam_b2,
+          epsilon=config.adam_eps,
+          epsilon_root=config.adam_eps_root,
+          update_capping=1.,  # disable
+          weight_decay=config.adam_weight_decay,
+          )
 
 def load_compiled(config, partial_train, state):
   """ # Loading a serialized compiled train step function."""

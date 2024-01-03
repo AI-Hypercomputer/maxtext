@@ -209,14 +209,17 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
     xent = xent * padding_mask
     cum_loss = jnp.sum(xent)
     cum_weights = jnp.sum(padding_mask)
-    if is_train:
-      return cum_loss / cum_weights, intermediate_outputs
-    else:
-      return cum_loss / cum_weights, intermediate_outputs, cum_loss, cum_weights
+    aux = {
+      'intermediate_outputs': intermediate_outputs,
+      'cum_loss': cum_loss,
+      'cum_weights': cum_weights,
+    }
+    return cum_loss / cum_weights, aux
 
   if is_train:
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
+    (loss, aux), raw_grads = grad_fn(state.params)
+    intermediate_outputs = aux['intermediate_outputs']
 
     if config.gradient_clipping_threshold > 0:
       grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
@@ -227,8 +230,9 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
             'learning/raw_grad_norm': max_utils.l2norm_pytree(raw_grads),
             'learning/param_norm': max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   else:
-    loss, intermediate_outputs, cum_loss, cum_weights = loss_fn(state.params, is_train=False)
-    
+    loss, aux = loss_fn(state.params, is_train=False)
+    cum_loss = aux['cum_loss']
+    cum_weights = aux['cum_weights']
     metrics = {'scalar': {'evaluation/loss': loss, 'evaluation/cum_loss': cum_loss, 'evaluation/cum_weights': cum_weights}}
     new_state = state
 
