@@ -82,8 +82,7 @@ def encode_strings(strs, max_len, tokenizer, mesh):
 def prefill_predict_step(inputs, input_positions, decoder_segment_ids,
                  state,
                  rngkey,
-                 model=None,
-                 config=None):
+                 model=None):
   """Prefill KV Cache and output logits"""
   flat_logits, new_vars = model.apply(
     {
@@ -93,15 +92,14 @@ def prefill_predict_step(inputs, input_positions, decoder_segment_ids,
     input_positions,
     decoder_segment_ids=decoder_segment_ids,
     enable_dropout=False,
-    model_mode=common_types.PREFILL_MODEL_MODE,
+    model_mode=common_types.MODEL_MODE_PREFILL,
     rngs={'aqt': rngkey},
-    max_decode_length=config.max_target_length,
     mutable=["cache"]
   )
 
   return flat_logits, new_vars['cache']
 
-def ar_predict_single_token(token_input, token_position, kv_cache, state, rngkey, model, config):
+def ar_predict_single_token(token_input, token_position, kv_cache, state, rngkey, model):
   """Predict one token, return new cache"""
   flat_logits, new_vars = model.apply(
     {
@@ -111,9 +109,8 @@ def ar_predict_single_token(token_input, token_position, kv_cache, state, rngkey
     token_input,
     token_position,
     enable_dropout=False,
-    model_mode=common_types.AUTOREGRESSIVE_MODEL_MODE,
+    model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
     rngs={'aqt': rngkey},
-    max_decode_length=config.max_target_length,
     mutable=["cache"])
   new_flat_cache = new_vars["cache"]
   return flat_logits, new_flat_cache
@@ -128,7 +125,7 @@ def compute_prefill(config, model, state, rng, sp_tokenizer, mesh, state_mesh_sh
   tokenized_prompts, prompt_decoder_positions, prompt_decoder_segment_ids  = encode_strings(tokenized_prompt,\
       config.max_prefill_predict_length, sp_tokenizer, mesh)
 
-  partial_prefill_predict_step = functools.partial(prefill_predict_step, model=model, config=config)
+  partial_prefill_predict_step = functools.partial(prefill_predict_step, model=model)
   p_prefill_predict_step = jax.jit(
       partial_prefill_predict_step,
       in_shardings=(replicated_sharding, replicated_sharding, replicated_sharding, state_mesh_shardings, None),
@@ -201,7 +198,7 @@ def decode_loop(config, state=None):
   prefill_cache, new_id, new_position = prefill_or_load(config, model, state, rng, sp_tokenizer,\
                                                    mesh, state_mesh_shardings)
 
-  partial_ar_predict_step = functools.partial(ar_predict_single_token, model=model, config=config)
+  partial_ar_predict_step = functools.partial(ar_predict_single_token, model=model)
   partial_ar_predict_step.__name__ = "partial_ar_predict_step"
   p_ar_predict_step = jax.jit(
       partial_ar_predict_step,

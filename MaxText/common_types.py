@@ -37,8 +37,8 @@ LENGTH = 'activation_length'
 HEAD = 'activation_heads'
 D_KV = 'activation_kv'
 
-AUTOREGRESSIVE_MODEL_MODE = 'autoregressive'
-PREFILL_MODEL_MODE = 'prefill'
-TRAIN_MODEL_MODE = 'train'
+MODEL_MODE_AUTOREGRESSIVE = 'autoregressive'
+MODEL_MODE_PREFILL = 'prefill'
+MODEL_MODE_TRAIN = 'train'
 
 DECODING_ACTIVE_SEQUENCE_INDICATOR = 1

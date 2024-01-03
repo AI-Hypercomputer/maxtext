@@ -66,51 +66,22 @@ def _maybe_aqt_einsum(int8_training, aqt_rng):
     aqt_dot_general = quantizations.int8_dot_general(aqt_rng)
     return functools.partial(jnp.einsum, _dot_general=aqt_dot_general)
 
-
-class Attention(nn.Module):
-  """ Generic Attention.
-
-    Attributes:
-      num_query_heads: number of query attention heads. Features (i.e. inputs_q.shape[-1])
-        should be divisible by the number of heads.
-      num_kv_heads: number of kv attention heads.
-      head_dim: dimension of each head.
-      mesh: Mesh, device mesh
-      attention_kernel: str, guidance on if we should use an attention kernel
-      dtype: the dtype of the computation.
-      dropout_rate: dropout rate
-      kernel_init: initializer for the kernel of the Dense layers.
-      float32_logits: bool, if True then compute logits in float32 to avoid
-        numerical issues with bfloat16.
-      use_int8: bool, if true accelerate in int8
-  """
-    
-  num_query_heads: int
-  num_kv_heads: int
-  head_dim: int
-  max_target_length: int
+class AttentionOp(nn.Module):
   mesh: Mesh
   attention_kernel: str
-  dtype: DType = jnp.float32
-  dropout_rate: float = 0.
-  kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
-  float32_logits: bool = False  # computes logits in float32 for stability.
-  use_int8: bool = False
-  
-
-  query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
-  key_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
-  value_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
-  out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  max_target_length: int
+  use_int8: bool
+  num_query_heads: int
+  num_kv_heads: int
+  float32_logits: bool = False
   flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
-
-
+  dtype: DType = jnp.float32
 
   def check_attention_inputs(
-      self,
-      query: Array,
-      key: Array,
-      value: Array) -> None:
+    self,
+    query: Array,
+    key: Array,
+    value: Array) -> None:
     """Check attention inputs."""
 
     assert key.ndim == value.ndim, 'k, v must have same rank.'
@@ -119,129 +90,6 @@ class Attention(nn.Module):
     assert key.shape[-2] == value.shape[-2], ('k, v num_kv_heads must match.')
     assert key.shape[-3] == value.shape[-3], 'k, v lengths must match.'
     assert query.shape[-1] == key.shape[-1], 'q, k depths must match.'
-
-  def query_projection(self, inputs_q: Array) -> Array:
-    """Query projection."""
-
-    # NOTE: T5 does not explicitly rescale the attention logits by
-    #       1/sqrt(depth_kq)!  This is folded into the initializers of the
-    #       linear transformations, which is equivalent under Adafactor.
-    depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
-    def query_init(*args):
-      #pylint: disable=no-value-for-parameter
-      return self.kernel_init(*args) / depth_scaling
-
-    query_proj = DenseGeneral(
-      features=(self.num_query_heads, self.head_dim),
-      axis=-1,
-      kernel_init=query_init,
-      kernel_axes=('embed', 'heads', 'kv'),
-      dtype=self.dtype,
-      name='query',
-      use_int8=self.use_int8)(inputs_q)
-    return query_proj
-
-  def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:
-    """Projection for Key and Value.
-
-    Args:
-      inputs_kv: inputs_kv: key/values of shape `[batch, kv_length,
-        num_kv_heads, kv_dim]`.
-      proj_name: name of projection, `key` or `value`.
-
-    Returns:
-      Projection of key or value, in shape of `[batch, kv_length, head_dim]`.
-    """
-    if self.num_kv_heads <= 0:
-      raise ValueError(f'{self.num_kv_heads=} is not defined.')
-
-    if self.num_query_heads % self.num_kv_heads != 0:
-      raise ValueError(f'Invaid num_kv_heads for GQA, {self.num_query_heads=}, {self.num_kv_heads=}.')
-
-    kv_proj = DenseGeneral(
-        features=(self.num_kv_heads, self.head_dim),
-        axis=-1,
-        kernel_init=self.kernel_init,
-        kernel_axes=('embed', 'heads', 'kv'),
-        dtype=self.dtype,
-        name=proj_name,
-        use_int8=self.use_int8)(inputs_kv)
-    return kv_proj
-
-  def out_projection(self, output_dim: int, out: Array) -> Array:
-    out_proj = DenseGeneral(
-      features=output_dim,
-      axis=(-2, -1),
-      kernel_init=self.kernel_init,
-      kernel_axes=('heads', 'kv', 'embed'),
-      dtype=self.dtype,
-      name='out',
-      use_int8=self.use_int8)(out)
-    return out_proj
-
-  def attention_dropout(
-      self,
-      attn_weights: Array,
-      dropout_rng: PRNGKey | None) -> Array:
-    """Apply attention dropout."""
-    keep_prob = 1.0 - self.dropout_rate
-    # Broadcast dropout along the query dim.
-    dropout_shape = list(attn_weights.shape)
-    dropout_shape[-2] = 1
-    keep = random.bernoulli(dropout_rng, keep_prob, dropout_shape)
-    keep = jnp.broadcast_to(keep, attn_weights.shape)
-    multiplier = keep.astype(attn_weights.dtype) / jnp.asarray(
-        keep_prob, dtype=self.dtype
-    )
-    attn_weights = attn_weights * multiplier
-    return attn_weights
-
-  def qk_product(self, query: Array, key: Array) -> Array:
-    """Query-Key product.
-    
-    Args:
-      query: Query projection, in shape of [b, t, n, d], where b: batch size, t:
-        query length, n: number of heads, d: project dimension. 
-      key: Key projection in shape of [b, s, n_kv, d] for where n_kv is 
-        kv heads. The number of group for query is n // n_kv.
-
-    Returns:
-      results in shape [b, n_kv, n // n_kv,  t, s].
-    """
-    b, t, n, d = query.shape
-    n_kv = key.shape[-2]
-    assert n_kv == self.num_kv_heads
-    query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
-    return jnp.einsum('btkgd,bskd->bkgts', query, key)
-
-
-  def wv_product(
-      self,
-      attn_weights: Array,
-      value: Array,
-      aqt_rng: PRNGKey | None) -> Array:
-    """weighted value product.
-    
-    Args:
-      attn_weights: Computed results of qk_einsum, in shape of [b, n, t, s].
-      value: Value projection, in shape of [b, s, d] for multi-head attention.
-      aqt_rng: A PRNGKey for aqt ops.
-
-    Returns:
-      result in shape [b, t, n, d]
-    """
-    einsum = _maybe_aqt_einsum(self.use_int8, aqt_rng)
-    out = einsum('bkgts,bskd->btkgd', attn_weights, value)
-    b, t, n_kv, g, d = out.shape
-    return jnp.reshape(out, (b, t, n_kv * g, d))
-
-  def key_rotary(self, key: Array, inputs_positions: Array):
-    """Apply Rotary Embedding to key."""
-    key = LLaMARotaryEmbedding(
-      embedding_dims=self.head_dim,
-      name='key_rotary')(inputs=key, position=inputs_positions)
-    return key
-
 
   # Following Pallas MHA Flash Attention Reference.
   # https://github.com/google/jax/blob/main/jax/experimental/pallas/ops/tpu/flash_attention.py
@@ -254,7 +102,7 @@ class Attention(nn.Module):
       model_mode: str
   ) -> Array | None:
     mask = None
-    if model_mode == common_types.AUTOREGRESSIVE_MODEL_MODE:
+    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       mask = decoder_segment_ids[:, None, None, None, :] == common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     elif decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
@@ -262,7 +110,7 @@ class Attention(nn.Module):
 
     causal_mask = None
     # We enforce causality except for AUTOREGRESSION
-    if model_mode != common_types.AUTOREGRESSIVE_MODEL_MODE:
+    if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE:
       _, q_seq_len, _, _ = query.shape
       _, kv_seq_len, _, _ = key.shape
       mask_shape = (q_seq_len, kv_seq_len)
@@ -286,19 +134,17 @@ class Attention(nn.Module):
       key: Array,
       value: Array,
       decoder_segment_ids: Array | None,
-      dropout_rng: PRNGKey | None,
-      deterministic: bool,
       model_mode: str) -> Array:
+    self.check_attention_inputs(query, key, value)
     if self.attention_kernel == "dot_product":
-      return self.apply_attention_dot(query, key, value, decoder_segment_ids, dropout_rng, deterministic, model_mode)
+      return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
     elif self.attention_kernel == 'flash':
-      if model_mode == common_types.AUTOREGRESSIVE_MODEL_MODE:
+      if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
         raise ValueError("""Decode not supported with flash attention.
                             Use `dot_product` instead.""")
-      print(f"{query.shape=} {key.shape=} {value.shape=}, {decoder_segment_ids=}")
       return self.tpu_flash_attention(query, key, value, decoder_segment_ids)
     elif self.attention_kernel == 'gpu_flash_xla' or self.attention_kernel == 'gpu_flash_triton':
-      if model_mode == common_types.AUTOREGRESSIVE_MODEL_MODE:
+      if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
         raise ValueError("""Decode not supported with flash attention.
                             Use `dot_product` instead.""")
       return self.gpu_flash_attention(query, key, value)
@@ -392,7 +238,6 @@ class Attention(nn.Module):
     else:
       raise ValueError(f"Can't convert {self.attention_kernel } to a bwd_pass_impl")
   
-    bwd_pass_impl = self.config.gpu_flash_attention_backward_pass_impl
     axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
     segment_axis_names = nn.logical_to_mesh_axes((BATCH, LENGTH))
 
@@ -419,13 +264,10 @@ class Attention(nn.Module):
       key: Array,
       value: Array,
       decoder_segment_ids: Array | None,
-      dropout_rng: PRNGKey | None,
-      deterministic: bool,
-      model_mode: str = common_types.TRAIN_MODEL_MODE,
+      model_mode: str = common_types.MODEL_MODE_TRAIN,
   ) -> Array:
     """Apply Attention."""
     aqt_rng = self.make_rng('aqt')
-    self.check_attention_inputs(query, key, value)
 
     # Casting logits and softmax computation for float32 for model stability.
     if self.float32_logits:
@@ -442,12 +284,47 @@ class Attention(nn.Module):
     # Normalize the attention weights across `kv_length` dimension.
     attn_weights = jax.nn.softmax(attn_weights).astype(self.dtype)
 
-    # Apply attention dropout.
-    if not deterministic and self.dropout_rate > 0.:
-      attn_weights = self.attention_dropout(attn_weights, dropout_rng)
-
     # Take the linear combination of `value`.
     return self.wv_product(attn_weights, value, aqt_rng)
+
+  def qk_product(self, query: Array, key: Array) -> Array:
+    """Query-Key product.
+    
+    Args:
+      query: Query projection, in shape of [b, t, n, d], where b: batch size, t:
+        query length, n: number of heads, d: project dimension. 
+      key: Key projection in shape of [b, s, n_kv, d] for where s: key length, n_kv is
+        kv heads (sometimes k). The number of group for query is n // n_kv (sometimes g).
+
+    Returns:
+      results in shape [b, n_kv, n // n_kv,  t, s].
+    """
+    b, t, n, d = query.shape
+    n_kv = key.shape[-2]
+    assert n_kv == self.num_kv_heads
+    query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
+    return jnp.einsum('btkgd,bskd->bkgts', query, key)
+
+
+  def wv_product(
+      self,
+      attn_weights: Array,
+      value: Array,
+      aqt_rng: PRNGKey | None) -> Array:
+    """weighted value product.
+    
+    Args:
+      attn_weights: Computed results of qk_einsum, in shape of [b, n, t, s].
+      value: Value projection, in shape of [b, s, d] for multi-head attention.
+      aqt_rng: A PRNGKey for aqt ops.
+
+    Returns:
+      result in shape [b, t, n, d]
+    """
+    einsum = _maybe_aqt_einsum(self.use_int8, aqt_rng)
+    out = einsum('bkgts,bskd->btkgd', attn_weights, value)
+    b, t, n_kv, g, d = out.shape
+    return jnp.reshape(out, (b, t, n_kv * g, d))
 
   def revert_kvlen_axis(self, kv):
     """Revert key/value length axis.
@@ -487,42 +364,26 @@ class Attention(nn.Module):
       Swapped kv_shape as [b, ..., n, d, s] for cache.
     """
     return kv_shape[:-3] + tuple(kv_shape[i] for i in [-2, -1, -3])
+  
+  def kv_cache_prefill(self,
+                        key: Array,
+                        value: Array,
+                        decoder_segment_ids: Array,
+                       ):
+      """In prefill mode, we zero out the existing cache, run the computation and 
+      prepare the cache as necessary.
 
-  def kv_cache(
-      self,
-      key: Array,
-      value: Array,
-      decoder_segment_ids: Array,
-      model_mode: str
-  ) -> tuple[Array, Array, Array]:
-    """Decoding method.
+      Args:
+        key: in shape [b, s, n, d].
+        value: in shape [b, s, n, d].
+        decoder_segment_ids: [b, s] -- marking segment ids for tokens
 
-    The key and value have dimension [batch, length, num_heads, head_dim],
-    but we cache them as [batch, num_heads, head_dim, length] as a TPU
-    fusion optimization. This also enables the "scatter via one-hot
-    broadcast" trick, which means we do a one-hot broadcast instead of a
-    scatter/gather operations, resulting in a 3-4x speedup in practice.
+      Returns:
+        tuple of key, value, decoder_segment_id.
 
-    Args:
-      key: in shape [b, s, n, d].
-      value: in shape [b, s, n, d].
-      model_mode: model mode controlling model
-
-    Returns:
-      tuple of key, value with cached,
-    Raises:
-      ValueError: when query shape is not [batch, 1, num_heads, heads_dim].
-    """
-    cache_logical_shape = (key.shape[0], self.max_target_length, key.shape[2], key.shape[3])
-
-
-    if key.shape != value.shape:
-      raise ValueError(f"Can't KV cache with mismatched shapes {key.shape=}, {value.shape=}")
-
-    if model_mode == common_types.TRAIN_MODEL_MODE:
-      return key, value, decoder_segment_ids
-    elif model_mode == common_types.PREFILL_MODEL_MODE:
-      batch, sequence, num_heads, head_dim = key.shape
+      """
+      cache_logical_shape = (key.shape[0], self.max_target_length, key.shape[2], key.shape[3])
+      _, sequence, _, _ = key.shape
 
       cached_key = self.variable('cache', 'cached_key', jnp.zeros,
                                 self.cached_kv_shape(cache_logical_shape), key.dtype)
@@ -546,11 +407,32 @@ class Attention(nn.Module):
       cached_value.value = cached_value.value.at[:, :, :, 0:sequence].set(value_shaped_for_cache)
       cached_segment_id.value = cached_segment_id.value.at[:, 0:sequence].set(decoder_segment_ids)
       return key, value, decoder_segment_ids
-    elif model_mode == common_types.AUTOREGRESSIVE_MODEL_MODE:
+
+  def kv_cache_autoregressive(self,
+                              key: Array,
+                              value: Array,
+                              decoder_segment_ids: Array,
+                             ):
+      """In autoregressive mode, we update the cache for this entry and 
+         then return the full cache.
+
+      Args:
+        key: in shape [b, 1, n, d].
+        value: in shape [b, 1, n, d].
+        decoder_segment_ids: [b, 1] -- marking segment ids for tokens
+
+      Returns:
+        tuple of key, value with cached,
+      Raises:
+        ValueError: when key/value shape is not [batch, 1, num_heads, heads_dim].
+      """
+      cache_logical_shape = (key.shape[0], self.max_target_length, key.shape[2], key.shape[3])
+      _, sequence, _, _ = key.shape
+      if sequence != 1:
+        raise ValueError(f"Sequence length should be 1 during autoregression, got {sequence=}")
       is_initialized = self.has_variable('cache', 'cached_key')
       if not is_initialized:
         raise ValueError("Error, we can't do autoregression if we haven't seeded the KV Cache.")
-
       cached_key = self.variable('cache', 'cached_key', jnp.zeros,
                           self.cached_kv_shape(cache_logical_shape), key.dtype)
       cached_value = self.variable('cache', 'cached_value', jnp.zeros,
@@ -560,7 +442,7 @@ class Attention(nn.Module):
       cached_segment_id = self.variable('cache', 'cache_segment_id',
                           jnp.zeros,
                           (key.shape[0], self.max_target_length), jnp.int32)
-      batch, num_heads, head_dim, length = cached_key.value.shape
+      _, _, _, length = cached_key.value.shape
 
       # Create a OHE of the current index. NOTE: the index is increased below.
       cur_index = cache_index.value
@@ -590,8 +472,158 @@ class Attention(nn.Module):
       value = self.revert_kvlen_axis(value)
 
       return key, value, cached_segment_id.value
+
+  def kv_cache(
+      self,
+      key: Array,
+      value: Array,
+      decoder_segment_ids: Array,
+      model_mode: str
+  ) -> tuple[Array, Array, Array]:
+    """KV cache takes the current state and updates the state accordingly.
+
+    The key and value have dimension [batch, length, num_heads, head_dim],
+    but we cache them as [batch, num_heads, head_dim, length] as a TPU
+    fusion optimization. This also enables the "scatter via one-hot
+    broadcast" trick, which means we do a one-hot broadcast instead of a
+    scatter/gather operations, resulting in a 3-4x speedup in practice.
+
+    Args:
+      key: in shape [b, s, n, d].
+      value: in shape [b, s, n, d].
+      model_mode: model mode controlling model
+
+    Returns:
+      tuple of key, value with cached,
+
+    """
+    if key.shape != value.shape:
+      raise ValueError(f"Can't KV cache with mismatched shapes {key.shape=}, {value.shape=}")
+
+    if model_mode == common_types.MODEL_MODE_TRAIN:
+      return key, value, decoder_segment_ids
+    elif model_mode == common_types.MODEL_MODE_PREFILL:
+      return self.kv_cache_prefill(key, value, decoder_segment_ids)
+    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      return self.kv_cache_autoregressive(key, value, decoder_segment_ids)
     else:
       raise ValueError(f"Model Mode isn't supported! {model_mode=}")
+
+  @nn.compact
+  def __call__(self, query, key, value, decoder_segment_ids, model_mode):
+    key_to_use, value_to_use, decoder_segment_ids_to_use = self.kv_cache(key, value, decoder_segment_ids, model_mode)
+
+    # Apply attention.
+    out = self.apply_attention(
+        query,
+        key_to_use,
+        value_to_use,
+        decoder_segment_ids_to_use,
+        model_mode=model_mode,
+    )
+    return out
+
+class Attention(nn.Module):
+  """ Generic Attention.
+
+    Attributes:
+      num_query_heads: number of query attention heads. Features (i.e. inputs_q.shape[-1])
+        should be divisible by the number of heads.
+      num_kv_heads: number of kv attention heads.
+      head_dim: dimension of each head.
+      mesh: Mesh, device mesh
+      attention_kernel: str, guidance on if we should use an attention kernel
+      dtype: the dtype of the computation.
+      dropout_rate: dropout rate
+      kernel_init: initializer for the kernel of the Dense layers.
+      float32_logits: bool, if True then compute logits in float32 to avoid
+        numerical issues with bfloat16.
+      use_int8: bool, if true accelerate in int8
+  """
+    
+  num_query_heads: int
+  num_kv_heads: int
+  head_dim: int
+  max_target_length: int
+  mesh: Mesh
+  attention_kernel: str
+  dtype: DType = jnp.float32
+  dropout_rate: float = 0.
+  kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
+  float32_logits: bool = False  # computes logits in float32 for stability.
+  use_int8: bool = False
+  
+
+  query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  key_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  value_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+
+  def query_projection(self, inputs_q: Array) -> Array:
+    """Query projection."""
+
+    # NOTE: T5 does not explicitly rescale the attention logits by
+    #       1/sqrt(depth_kq)!  This is folded into the initializers of the
+    #       linear transformations, which is equivalent under Adafactor.
+    depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
+    def query_init(*args):
+      #pylint: disable=no-value-for-parameter
+      return self.kernel_init(*args) / depth_scaling
+
+    query_proj = DenseGeneral(
+      features=(self.num_query_heads, self.head_dim),
+      axis=-1,
+      kernel_init=query_init,
+      kernel_axes=('embed', 'heads', 'kv'),
+      dtype=self.dtype,
+      name='query',
+      use_int8=self.use_int8)(inputs_q)
+    return query_proj
+
+  def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:
+    """Projection for Key and Value.
+
+    Args:
+      inputs_kv: inputs_kv: key/values of shape `[batch, kv_length,
+        num_kv_heads, kv_dim]`.
+      proj_name: name of projection, `key` or `value`.
+
+    Returns:
+      Projection of key or value, in shape of `[batch, kv_length, head_dim]`.
+    """
+    if self.num_kv_heads == -1:
+      raise ValueError('num_kv_heads is not defined.')
+
+    if self.num_query_heads % self.num_kv_heads != 0:
+      raise ValueError('Invaid num_kv_heads for GQA.')
+
+    kv_proj = DenseGeneral(
+        features=(self.num_kv_heads, self.head_dim),
+        axis=-1,
+        kernel_init=self.kernel_init,
+        kernel_axes=('embed', 'heads', 'kv'),
+        dtype=self.dtype,
+        name=proj_name,
+        use_int8=self.use_int8)(inputs_kv)
+    return kv_proj
+
+  def out_projection(self, output_dim: int, out: Array) -> Array:
+    out_proj = DenseGeneral(
+      features=output_dim,
+      axis=(-2, -1),
+      kernel_init=self.kernel_init,
+      kernel_axes=('heads', 'kv', 'embed'),
+      dtype=self.dtype,
+      name='out',
+      use_int8=self.use_int8)(out)
+    return out_proj
+
+  def key_rotary(self, key: Array, inputs_positions: Array):
+    """Apply Rotary Embedding to key."""
+    key = LLaMARotaryEmbedding(
+      embedding_dims=self.head_dim,
+      name='key_rotary')(inputs=key, position=inputs_positions)
+    return key
 
   @nn.compact
   def __call__(self,
@@ -600,9 +632,9 @@ class Attention(nn.Module):
                inputs_positions: Array,
                decoder_segment_ids: Array | None = None,
                *,
-               model_mode: str = common_types.TRAIN_MODEL_MODE,
+               model_mode: str = common_types.MODEL_MODE_TRAIN,
                deterministic: bool = False):
-    """Applies multi-head dot product attention on the input data.
+    """Applies Attention on the input data.
 
     Projects the inputs into multi-headed query, key, and value vectors,
     applies dot-product attention and project the results to an output vector.
@@ -643,22 +675,17 @@ class Attention(nn.Module):
     value = nn.with_logical_constraint(value, self.value_axis_names)
     value = checkpoint_name(value, 'value_proj')
 
-    key_to_use, value_to_use, decoder_segment_ids_to_use = self.kv_cache(key, value, decoder_segment_ids, model_mode)
+    attention_op = AttentionOp(mesh=self.mesh,
+                               attention_kernel=self.attention_kernel,
+                               max_target_length=self.max_target_length,
+                               float32_logits=self.float32_logits,
+                               use_int8=self.use_int8,
+                               num_query_heads=self.num_query_heads,
+                               num_kv_heads=self.num_kv_heads,
+                               dtype=self.dtype)
+    
+    out = attention_op(query, key, value, decoder_segment_ids, model_mode)
 
-    dropout_rng = None
-    if not deterministic and self.dropout_rate > 0.0:
-      dropout_rng = self.make_rng('dropout')
-
-    # Apply attention.
-    out = self.apply_attention(
-        query,
-        key_to_use,
-        value_to_use,
-        decoder_segment_ids_to_use,
-        dropout_rng,
-        deterministic,
-        model_mode=model_mode,
-    )
     out = nn.with_logical_constraint(out, self.out_axis_names)
 
     # apply output projection,  output dim is set to the input dim.
