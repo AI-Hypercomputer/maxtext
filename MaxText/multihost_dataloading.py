@@ -106,7 +106,7 @@ def get_next_batch_sharded(
 
   # Try one last time, if this fails we will see the full stack trace.
   if not loaded_data_success:
-    local_data = local_dataset.next()
+    local_data = next(local_dataset)
 
   input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh = global_mesh), local_data)
 

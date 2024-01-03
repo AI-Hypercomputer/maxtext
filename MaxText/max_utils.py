@@ -268,9 +268,9 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   is_training = False
   return setup_initial_state(model, None, config, rng, mesh, checkpoint_manager, is_training)
 
-def setup_training_state(model, tx, config, rng, mesh, checkpoint_manager):
+def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
   is_training = True
-  return setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_training)
+  return setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager, is_training)
 
 def setup_initial_state(model, iterator, tx, config, rng, mesh, checkpoint_manager, is_training=True):
   """ We initialize the model and optimizer state, and optionally load from a
@@ -307,11 +307,11 @@ def setup_initial_state(model, iterator, tx, config, rng, mesh, checkpoint_manag
     state_mesh_shardings = jax.tree_map(
         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
     
-    if state['state']:
-      state = state['state']
-
-    if state['iter'] and config.dataset_type=="array_record":
-      iterator = restore['iter']
+    if isinstance(state, (dict)):
+      if 'iter' in state and config.dataset_type=="array_record":
+        iterator = state['iter']
+      if 'state' in state:
+        state = state['state']
 
     if not state:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
