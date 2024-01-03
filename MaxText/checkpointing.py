@@ -41,7 +41,6 @@ def create_orbax_checkpoint_manager(
   max_logging.log("Creating checkpoint manager...")
   p = epath.Path(checkpoint_dir)
   if use_async:
-    _multislice_distribute_initialize()
     if dataset_type == "array_record":
       checkpointer = {'state':AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler()),
                       'iter':Checkpointer(pygrain.PyGrainCheckpointHandler())}

@@ -26,12 +26,6 @@ class NormalizeFeatures(pygrain.MapTransform):
             'targets': features['text'].numpy().decode()
             }
 
-# @dataclasses.dataclass
-# class ConvertToTF(pygrain.MapTransform):
-#     def map(self, data):
-#         for key in data:
-#             data[key] = tf.convert_to_tensor(data[key], dtype=tf.int32)
-#         return data
 
 @dataclasses.dataclass
 class ReformatPacking(pygrain.MapTransform):
@@ -51,56 +45,16 @@ class LengthFilter(pygrain.FilterTransform):
     def __init__(self, max_length):
         self.max_length = max_length
     def filter(self, data):
-        # source, target = data['inputs'], data['targets']
-        # l = np.maximum(np.shape(source)[0], np.shape(target)[0])
-        # print(data['inputs'].shape)
-        return data['inputs'].shape[0] < self.max_length
+        source, target = data['inputs'], data['targets']
+        l = max(np.shape(source)[0], np.shape(target)[0])
+        return l <= self.max_length
 
 
-def length_filter():
-    """pygrain max length filter
-    """
-    def __init__(self,max_length):
+@dataclasses.dataclass
+class PadToMaxLength(pygrain.MapTransform):
+    def __init__(self, max_length):
         self.max_length = max_length
-    def __call__(self, x):
-        source, target = x['inputs'], x['targets']
-        l = np.maximum(np.shape(source)[0], np.shape(target)[0])
-        return np.less(l, self.max_length + 1)
-
-def filter_keys(record):
-    return {'inputs': record['inputs'], 'targets': record['targets']}
-
-class TokenizeOperation():
-    """ TokenizeOp
-    """
-    def __init__(self, sp_tokenizer):
-        self.sp_tokenizer = sp_tokenizer
-
-    def __call__(self, features: Features):
-        data_keys = ('inputs', 'targets')
-        for k in data_keys:
-            features[k] = np.asarray(self.sp_tokenizer.tokenize(str(features[k])))
-            # features[k] = self.sp_tokenizer.tokenize(str(features[k]))
-        # import pdb;pdb.set_trace()
-        return features
-
-class length_filter():
-    """pygrain max length filter
-    """
-    def __init__(self,max_length):
-        self.max_len = max_length
-    def __call__(self, x):
-        source, target = x['inputs'], x['targets']
-        l = np.maximum(np.shape(source)[0], np.shape(target)[0])
-        return np.less(l, self.max_len + 1)
-
-class PadToMaxLength():
-    """Pads each input to the specified length
-    """
-    def __init__(self, feature_lengths):
-        self.feature_lengths = feature_lengths
-
-    def __call__(self, data):
+    def map(self, data):
         def pad(x, max_length):
             pad_amount = max(max_length - x.shape[0], 0)
             pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
@@ -110,23 +64,27 @@ class PadToMaxLength():
         data['targets_segmentation'] = np.ones(data['targets'].shape, dtype = np.int32)
         data['targets_position'] = np.arange(data['targets'].shape[0], dtype = np.int32)
         for key, _ in data.items():
-            data[key] = pad(data[key], self.feature_lengths)
-        return data
+            data[key] = pad(data[key], self.max_length)
+        return data                
 
-# class CombineKeys():
-#     """ Combine tuples of sequence packing output in different keys
+# class PadToMaxLength():
+#     """Pads each input to the specified length
 #     """
+#     def __init__(self, feature_lengths):
+#         self.feature_lengths = feature_lengths
+
 #     def __call__(self, data):
-#         combined_data = data[0]
-#         segments = data[1]
-#         segments['inputs_segmentation'] = segments.pop('inputs')
-#         segments['targets_segmentation'] = segments.pop('targets')
-#         positions = data[2]
-#         positions['inputs_position'] = positions.pop('inputs')
-#         positions['targets_position'] = positions.pop('targets')
-#         combined_data.update(segments)
-#         combined_data.update(positions)
-#         return combined_data
+#         def pad(x, max_length):
+#             pad_amount = max(max_length - x.shape[0], 0)
+#             pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
+#             return np.pad(x, pad_amount)
+#         data['inputs_segmentation'] = np.ones(data['inputs'].shape, dtype = np.int32)
+#         data['inputs_position'] = np.arange(data['inputs'].shape[0], dtype = np.int32)
+#         data['targets_segmentation'] = np.ones(data['targets'].shape, dtype = np.int32)
+#         data['targets_position'] = np.arange(data['targets'].shape[0], dtype = np.int32)
+#         for key, _ in data.items():
+#             data[key] = pad(data[key], self.feature_lengths)
+#         return data
 
 def shift_right(x, axis=1):
   """Shift the input to the right by padding and slicing on axis."""
@@ -154,10 +112,9 @@ def shift_and_refine(x, axis=1):
 
   return x
 
-class ShiftData():
+@dataclasses.dataclass
+class ShiftData(pygrain.MapTransform):
     def __init__(self, axis = 1):
         self.axis = axis
-
-    def __call__(self, x):
-        x = shift_and_refine(x, axis=self.axis)
-        return x
+    def map(self, data):
+        return shift_and_refine(data, axis=self.axis)

@@ -124,7 +124,7 @@ eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
 # dataset_type: c4 # must be c4, array_record or synthetic
 dataset_type: array_record
-grain_worker_count: 1
+grain_worker_count: 4
 pack_examples: True
 
 # Training loop

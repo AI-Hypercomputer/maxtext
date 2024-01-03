@@ -96,8 +96,13 @@ def add_annotations(ds):
   def _add_annotations(features):
     features['inputs_segmentation'] = tf.ones_like(features['inputs'], dtype = tf.int32)
     features['inputs_position'] = tf.range(tf.size(features['inputs']), dtype = tf.int32)
-    features['targets_segmentation'] = tf.ones_like(features['inputs'], dtype = tf.int32)
-    features['targets_position'] = tf.range(tf.size(features['inputs']), dtype = tf.int32)    
+    features['targets_segmentation'] = tf.ones_like(features['targets'], dtype = tf.int32)
+    features['targets_position'] = tf.range(tf.size(features['targets']), dtype = tf.int32)
+    # wherever target element is 0, set corresponding segmentation to 0
+    nonzero_mask = tf.not_equal(features['targets'], 0)
+    nonzero_mask = tf.cast(nonzero_mask, tf.int32)
+    features['inputs_segmentation'] *= nonzero_mask
+    features['targets_segmentation'] *= nonzero_mask
     return features
 
   return ds.map(
@@ -138,8 +143,8 @@ def preprocessing_pipeline(
   if pack_examples:
     dataset = sequence_packing.pack_dataset(dataset, max_length)
   else:
-    dataset = add_annotations(dataset)
-    # dataset.apply(add_annotations)
+    # dataset = add_annotations(dataset)
+    dataset.apply(add_annotations)
 
   # Shift inputs for teacher-forced training
   if shift:
@@ -205,27 +210,23 @@ def preprocessing_pipeline_pygrain(
   operations = []
   operations.append(pygrain_operations.ParseFeatures())
   operations.append(pygrain_operations.NormalizeFeatures())
-  operations.append(pygrain_tokenizer.Tokenize(["inputs","targets"], max_length, vocab_path, 32768))
-  # operations.append(pygrain.MapOperation(map_function=pygrain_operations.filter_keys))
+  operations.append(pygrain_tokenizer.Tokenize(["inputs","targets"], max_length, vocab_path))
   operations.append(pygrain_operations.LengthFilter(max_length))
-  #operations.append(pygrain.FilterOperation(condition_function = pygrain_operations.length_filter(max_length)))
 
   # Pack and Batch examples.
   if pack_examples:
     operations.append(pygrain.experimental.PackAndBatchOperation(
                         batch_size=batch_size // jax.process_count(),
                         length_struct={'inputs':max_length,'targets':max_length}))
-    # operations.append(pygrain.MapOperation(map_function=pygrain_operations.CombineKeys()))
     operations.append(pygrain_operations.ReformatPacking())
   else:
-    operations.append(pygrain.MapOperation(map_function=pygrain_operations.PadToMaxLength(max_length)))
-    operations.append(pygrain.BatchOperation(batch_size=batch_size // jax.process_count(), drop_remainder=drop_remainder))
+    operations.append(pygrain_operations.PadToMaxLength(max_length))
+    # operations.append(pygrain.MapOperation(map_function=pygrain_operations.PadToMaxLength(max_length)))
+    operations.append(pygrain.Batch(batch_size=batch_size // jax.process_count(), drop_remainder=drop_remainder))
 
   # Shift inputs for teacher-forced training
   if shift:
-    operations.append(pygrain.MapOperation(map_function=pygrain_operations.ShiftData(axis=1)))  
-
-  # operations.append(pygrain_operations.ConvertToTF())
+    operations.append(pygrain_operations.ShiftData(axis=1))
 
   index_sampler = pygrain.IndexSampler(
     num_records=len(dataset),
@@ -243,18 +244,10 @@ def preprocessing_pipeline_pygrain(
       sampler = index_sampler,
       worker_count=grain_worker_count,
   )
-  # data_iter = iter(dataloader)
-  # global_shape = (batch_size, max_length)
 
-  # multihost_gen = (
-  #     multihost_dataloading.get_next_batch_sharded_pygrain(
-  #         data_iter, data_sharding, global_shape, global_mesh
-  #     )
-  # )
+  data_iter = iter(dataloader)
 
-  multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(dataset_type, dataloader, global_mesh)
-  # Return multi-host jax.Array prep iterator
-  return multihost_gen
+  return data_iter
 
 
 def get_datasets(
@@ -412,7 +405,7 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
   eval_iter = preprocessing_pipeline_pygrain(
       eval_ds,
       config.dataset_type,
-      config.dataset_type,
+      config.grain_worker_count,
       vocab_path,
       eval_batch_size,
       global_mesh,

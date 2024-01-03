@@ -41,6 +41,7 @@ import max_logging
 import pyconfig
 
 from input_pipeline import create_data_iterator_with_tokenizer
+from multihost_dataloading import get_next_batch_sharded
 from layers import models
 
 import jax.numpy as jnp
@@ -94,21 +95,24 @@ def get_first_step(state):
     return int(state.step)
 
 
-def load_next_batch(train_iter, example_batch, config):
+def load_next_batch(train_iter, example_batch, config, mesh):
   """Loads the next batch. Can keep reusing the same batch for performance reasons """
 
   if config.reuse_example_batch and example_batch is not None:
     return example_batch
   else:
-      return train_iter()
+      if config.dataset_type == 'c4':
+        return train_iter()
+      elif config.dataset_type == 'array_record':
+        return get_next_batch_sharded(train_iter, mesh)
 
-def load_next_batch_pygrain(train_iter, example_batch, config, mesh):
-  if config.reuse_example_batch and example_batch is not None:
-    return example_batch
-  else:
-    global_shape = (config.global_batch_size_to_load, config.max_target_length)
-    return get_next_batch_sharded_pygrain(
-      train_iter, config.data_sharding, global_shape, mesh)  
+# def load_next_batch_pygrain(train_iter, example_batch, config, mesh):
+#   if config.reuse_example_batch and example_batch is not None:
+#     return example_batch
+#   else:
+#     global_shape = (config.global_batch_size_to_load, config.max_target_length)
+#     return get_next_batch_sharded_pygrain(
+#       train_iter, config.data_sharding, global_shape, mesh)  
 
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   """Records scalar metrics to be written to tensorboard"""
@@ -254,7 +258,7 @@ def train_loop(config, state=None):
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  state, state_mesh_annotations = max_utils.setup_training_state(model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager)
+  state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager)
   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
     train_step,
     mesh,
@@ -296,7 +300,7 @@ def train_loop(config, state=None):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
 
-    example_batch = load_next_batch(data_iterator, example_batch, config)
+    example_batch = load_next_batch(data_iterator, example_batch, config, mesh)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics, nextrng = p_train_step(
           state, example_batch, nextrng

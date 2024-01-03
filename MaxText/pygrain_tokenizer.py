@@ -16,7 +16,6 @@ class Tokenize(grain.MapTransform):
   feature_names: str | Sequence[str]
   sequence_length: int | Sequence[int]
   model_path: str
-  vocab_size: int
 
   def __post_init__(self):
     self._processor = None
