@@ -47,6 +47,7 @@ def data_load_loop(config, state=None):
   # Actual data loading steps
   for step in np.arange(start_step, config.steps):
     example_batch = load_next_batch(data_iterator, example_batch, config)
+    jax.block_until_ready(example_batch)
     if step==0:
       new_time = datetime.datetime.now()
       print("First step completed in ", new_time-start," seconds")
