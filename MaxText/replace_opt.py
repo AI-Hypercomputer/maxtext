@@ -124,7 +124,7 @@ def main(args: Sequence[str]):
         step=state_src.step,
         params=state_src.params,
         opt_state=dict(
-            count=state_src.opt_state.count,
+            count=state_src.opt_state[0].count,
             m=state_src.opt_state[0].mu,
             v=state_src.opt_state[0].nu,
             ),
