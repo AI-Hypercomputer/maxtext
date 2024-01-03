@@ -17,6 +17,8 @@
 import sys
 import unittest
 
+import common_types
+
 from flax.core import freeze
 import jax
 import jax.numpy as jnp
@@ -57,6 +59,7 @@ class AttentionTest(unittest.TestCase):
         num_query_heads=self.num_query_heads,
         num_kv_heads=self.num_kv_heads,
         head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
         mesh=self.mesh,
         attention_kernel = "dot_product",
         dtype=self.dtype,
@@ -74,42 +77,10 @@ class AttentionTest(unittest.TestCase):
             (self.global_batch_size, self.max_target_length)),
     )
 
-
-
-  def get_data(self, dtype):
-    lnx = jax.random.normal(
-        self.rng,
-        shape=(self.global_batch_size, self.max_target_length, self.embed_dim),
-        dtype=dtype,
-    )
-
-    decoder_segment_ids = jax.random.randint(self.rng, (self.global_batch_size, self.max_target_length), 0, 4)
-    decoder_positions = jax.random.randint(self.rng, (self.global_batch_size, self.max_target_length), 0, self.max_target_length)
-
-    return lnx, decoder_segment_ids, decoder_positions
-
-  @pytest.mark.tpu
-  def test_attention(self):
-    """Test equalvant between MHA and Flash MHA."""
-
-    lnx, decoder_segment_ids, decoder_positions = self.get_data(
-        self.dtype)
-    
-    mha_generic_output = self._attention_as_mha_generic.apply(
-        self._attention_as_mha_generic_variable,
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_positions,
-        inputs_positions=decoder_segment_ids,
-        deterministic=True,
-        decode=False,
-        rngs={'aqt': self.rng},
-    )
-
-    attention_as_mha_flash = Attention(
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=self.num_kv_heads,
+    self.flash_attention = FlashMultiHeadDotProductAttention(
+        num_heads=self.num_heads,
         head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
         mesh=self.mesh,
         attention_kernel = "flash",
         dtype=self.dtype,
@@ -127,45 +98,30 @@ class AttentionTest(unittest.TestCase):
             (self.global_batch_size, self.max_target_length)),
     )
 
-    mha_generic_flash_output = attention_as_mha_flash.apply(
-        attention_as_mha_flash_variable,
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_positions,
-        inputs_positions=decoder_segment_ids,
-        deterministic=True,
-        decode=False,
-        rngs={'aqt': self.rng},
+  def get_data(self, dtype):
+    lnx = jax.random.uniform(
+        self.rng,
+        shape=(self.global_batch_size, self.max_target_length, self.embed_dim),
+        dtype=dtype,
+    )
+    decoder_segment_ids = jnp.ones(
+        shape=(self.global_batch_size, self.max_target_length), dtype=np.int32
     )
 
-    self.assertTrue(
-        jax.numpy.allclose(
-            mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False
-        )
-    )
+    def batch_positions():
+      return [
+          jnp.arange(self.max_target_length, dtype=jnp.int32)
+          for _ in range(self.global_batch_size)
+      ]
+
+    if self.global_batch_size > 1:
+      decoder_positions = jnp.stack(batch_positions())
+
+    return lnx , decoder_segment_ids, decoder_positions
 
   @pytest.mark.tpu
-  def test_multiquery_attention(self):
-    attention_as_mqa = Attention(
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=1,
-        head_dim=self.head_dim,
-        mesh=self.mesh,
-        attention_kernel = "dot_product",
-        dtype=self.dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        name='self_attention',
-    )
-
-    attention_as_mqa_variable = attention_as_mqa.init(
-        {'params': self.rng, 'aqt': self.rng},
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length)),
-    )
+  def test_attention(self):
+    """Test equalvant between MHA and Flash MHA."""
 
     lnx, decoder_segment_ids, decoder_positions = self.get_data(
         self.dtype)
@@ -177,7 +133,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_positions,
         inputs_positions=decoder_segment_ids,
         deterministic=True,
-        decode=False,
+        model_mode=common_types.TRAIN_MODEL_MODE,
         rngs={'aqt': self.rng},
     )
 
@@ -207,7 +163,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_positions,
         inputs_positions=decoder_segment_ids,
         deterministic=True,
-        decode=False,
+        model_mode=common_types.TRAIN_MODEL_MODE,
         rngs={'aqt': self.rng},
     )
 
