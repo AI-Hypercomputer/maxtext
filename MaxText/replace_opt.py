@@ -143,7 +143,7 @@ def main(args: Sequence[str]):
         in_shardings=in_shard,
         out_shardings=out_shard,
         static_argnums=static_argnums,
-        donate_argnums=donate_argnums)
+        donate_argnums=())
 
 
     train_data_iterator, eval_ds, _ = create_data_iterator_with_tokenizer(cfg, mesh)
