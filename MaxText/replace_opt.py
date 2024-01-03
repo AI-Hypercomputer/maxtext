@@ -123,7 +123,7 @@ def main(args: Sequence[str]):
     state_dist = state_dist.replace(
         step=state_src.step,
         params=state_src.params,
-        opt_state=dict(
+        opt_state=NestedMap(
             count=state_src.opt_state[0].count,
             m=state_src.opt_state[0].mu,
             v=state_src.opt_state[0].nu,
