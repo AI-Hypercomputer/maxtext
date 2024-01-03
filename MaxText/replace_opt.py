@@ -26,6 +26,11 @@ from paxml import trainer_lib
 from paxml.tasks.lm.params.c4 import C4SpmdGpt3AdamOrgHP
 from praxis import py_utils
 import optax
+from train import train_step
+from input_pipeline import create_data_iterator_with_tokenizer
+from train import load_next_batch
+from flax.linen import partitioning as nn_partitioning
+
 
 NestedMap = py_utils.NestedMap
 
@@ -52,6 +57,7 @@ base_args = [
     f'max_target_length={MLPerf_GPT3_175B["max_target_length"]}',
     f'max_trainable_pe_max_seq_len={MLPerf_GPT3_175B["max_trainable_pe_max_seq_len"]}',
     'per_device_batch_size=0.25',
+    'dataset_type=c4_mlperf',
     'ici_fsdp_parallelism=-1',
     'ici_tensor_parallelism=4',
     'attention=mha',
@@ -123,6 +129,33 @@ def main(args: Sequence[str]):
             v=state_src.opt_state[0].nu,
             ),
         )
+
+    functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
+        train_step,
+        mesh,
+        state_dist,
+        model,
+        cfg,
+        is_train=True,
+    )
+    p_train_step = jax.jit(
+        functional_train,
+        in_shardings=in_shard,
+        out_shardings=out_shard,
+        static_argnums=static_argnums,
+        donate_argnums=donate_argnums)
+
+
+    train_data_iterator, eval_ds, _ = create_data_iterator_with_tokenizer(cfg, mesh)
+
+    example_batch = None
+    example_batch = load_next_batch(train_data_iterator, example_batch, cfg)
+
+    with mesh, nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        _, metrics, _ = p_train_step(
+            state_dist, example_batch, nextrng
+        )
+    max_logging.log(f"loss metrics {metrics}")
 
     if checkpoint_manager_dist.save(state_dist.step, state_dist):
         max_logging.log(f"saved a checkpoint at step {state_dist.step}")
