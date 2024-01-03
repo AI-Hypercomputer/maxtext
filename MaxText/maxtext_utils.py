@@ -52,15 +52,14 @@ def get_optimizer(config, learning_rate_schedule):
   """ Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2 """
 
   # hack
-  return sharded_adam(
-          learning_rate_fn=learning_rate_schedule,
-          beta1=config.adam_b1,
-          beta2=config.adam_b2,
-          epsilon=config.adam_eps,
-          epsilon_root=config.adam_eps_root,
-          update_capping=-1.,  # disable
-          weight_decay=config.adam_weight_decay,
-          )
+  return optax.adamw(
+        learning_rate_schedule,
+        b1=config.adam_b1,
+        b2=config.adam_b2,
+        eps=config.adam_eps,
+        eps_root=config.adam_eps_root,
+        weight_decay=config.adam_weight_decay,
+  )
 
 def load_compiled(config, partial_train, state):
   """ # Loading a serialized compiled train step function."""
