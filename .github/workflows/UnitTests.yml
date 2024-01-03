@@ -43,6 +43,9 @@ jobs:
     - name: Install dependencies
       run: |
         bash docker_build_dependency_image.sh
+    - name: Typecheck the code with pytype
+      run: |
+        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c "pytype --jobs auto --disable import-error MaxText/"
     - name: Analysing the code with pylint
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c "pylint MaxText/"
@@ -86,6 +89,9 @@ jobs:
     - name: Install dependencies
       run: |
         bash docker_build_dependency_image.sh DEVICE=gpu
+    - name: Typecheck the code with pytype
+      run: |
+        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c "pytype --jobs auto --disable import-error MaxText/"
     - name: Analysing the code with pylint
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c "pylint MaxText/"
