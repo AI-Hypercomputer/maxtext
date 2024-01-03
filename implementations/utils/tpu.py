@@ -33,13 +33,18 @@ import google.cloud.tpu_v2alpha1 as tpu_api
 import google.longrunning.operations_pb2 as operations
 from implementations.utils import ssh
 import paramiko
+from airflow.models import Variable
 
 
 @task
-def generate_tpu_name(base_tpu_name: str, with_suffix: bool = True) -> str:
-  if with_suffix:
-    return f'{base_tpu_name}-{str(uuid.uuid4())}'
-  return base_tpu_name
+def generate_tpu_name(
+    base_tpu_name: str,
+    set_env_var: bool,
+) -> str:
+  tpu_name = f'{base_tpu_name}-{str(uuid.uuid4())}'
+  if set_env_var:
+    Variable.set(base_tpu_name, tpu_name)
+  return tpu_name
 
 
 def create_queued_resource(
@@ -52,7 +57,7 @@ def create_queued_resource(
   """Request a QueuedResource and wait until the nodes are created.
 
   Args:
-    tpu_name: XCom value for unique TPU name
+    tpu_name: XCom value for unique TPU name.
     accelerator: Description of TPU to create.
     gcp: GCP project/zone configuration.
     ssh_keys: XCom value for SSH keys to communicate with these TPUs.

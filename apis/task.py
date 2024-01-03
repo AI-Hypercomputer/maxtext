@@ -18,7 +18,6 @@ import abc
 import dataclasses
 import datetime
 from typing import Optional, Tuple
-from absl import logging
 import airflow
 from airflow.models.taskmixin import DAGNode
 from airflow.utils.task_group import TaskGroup
@@ -48,9 +47,7 @@ class TpuQueuedResourceTask(BaseTask):
     task_test_config: Test configs to run on this TPU.
     task_gcp_config: Runtime TPU creation parameters.
     task_metric_config: Metric configs to process metrics.
-    custom_tpu_name: A custom TPU name. By default the name is test name +
-      accelerator name.
-    suffix_tpu_name: The flag to define if add auto-generated suffix.
+    tpu_name_env_var: The flag to define if set up env variable for tpu name.
     all_workers: The flag to define if run commands on all workers or worker 0
       only.
   """
@@ -60,8 +57,7 @@ class TpuQueuedResourceTask(BaseTask):
   task_gcp_config: gcp_config.GCPConfig
   tpu_create_timeout: datetime.timedelta = datetime.timedelta(minutes=60)
   task_metric_config: Optional[metric_config.MetricConfig] = None
-  custom_tpu_name: Optional[str] = None
-  suffix_tpu_name: bool = True
+  tpu_name_env_var: bool = False
   all_workers: bool = True
 
   def run(self) -> DAGNode:
@@ -98,14 +94,8 @@ class TpuQueuedResourceTask(BaseTask):
     """
     with TaskGroup(group_id="provision") as group:
       with TaskGroup(group_id="initialize"):
-        if self.custom_tpu_name:
-          base_tpu_name = self.custom_tpu_name
-        else:
-          base_tpu_name = self.task_test_config.benchmark_id
-
         tpu_name = tpu.generate_tpu_name(
-            base_tpu_name,
-            self.suffix_tpu_name,
+            self.task_test_config.benchmark_id, self.tpu_name_env_var
         )
         ssh_keys = ssh.generate_ssh_keys()
 

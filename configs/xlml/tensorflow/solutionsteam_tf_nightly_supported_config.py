@@ -14,10 +14,10 @@
 
 """Utilities to construct configs for solutionsteam_tf_nightly_supported DAG."""
 
-import uuid
 from apis import gcp_config, metric_config, task, test_config
 from configs import gcs_bucket, test_owner
 from configs.xlml.tensorflow import common
+from airflow.models import Variable
 from configs.vm_resource import TpuVersion, Project, RuntimeVersion
 
 
@@ -120,8 +120,10 @@ def get_tf_resnet_config(
   }
 
   test_name = "tf_resnet_imagenet"
-  tpu_name = create_tpu_name(test_name, tpu_version, tpu_cores)
-  tpu_name_param = tpu_name if is_pod else "local"
+  benchmark_id = f"{test_name}-v{tpu_version}-{tpu_cores}"
+  # Add default_var to pass DAG check
+  # TODO(ranran): replace Variable.get() to XCOM when it applies
+  tpu_name = Variable.get(benchmark_id, default_var=None) if is_pod else "local"
   env_variable = export_env_variable(is_pod)
   run_model_cmds = (
       (
@@ -130,7 +132,7 @@ def get_tf_resnet_config(
           " TF_PLUGGABLE_DEVICE_LIBRARY_PATH=/lib/libtpu.so"
           " TF_USE_LEGACY_KERAS=1"
           " python3 official/vision/train.py"
-          f" --tpu={tpu_name_param} --experiment=resnet_imagenet"
+          f" --tpu={tpu_name} --experiment=resnet_imagenet"
           " --mode=train_and_eval --model_dir=/tmp/output"
           " --params_override='%s'" % str(params_override)
       ),
@@ -155,8 +157,7 @@ def get_tf_resnet_config(
   return task.TpuQueuedResourceTask(
       task_test_config=job_test_config,
       task_gcp_config=job_gcp_config,
-      custom_tpu_name=tpu_name,
-      suffix_tpu_name=False,
+      tpu_name_env_var=is_pod,
       all_workers=not is_pod,
   )
 
@@ -164,8 +165,3 @@ def get_tf_resnet_config(
 def export_env_variable(is_pod: bool) -> str:
   """Export environment variables for training if any."""
   return "export TPU_LOAD_LIBRARY=0" if is_pod else "echo"
-
-
-def create_tpu_name(test_name: str, tpu_version: TpuVersion, tpu_cores: int) -> str:
-  """Create a custom TPU name."""
-  return f"{test_name}-v{tpu_version.value}-{tpu_cores}-{str(uuid.uuid4())}"
