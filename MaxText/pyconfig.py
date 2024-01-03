@@ -40,7 +40,7 @@ def string_to_bool(s: str) -> bool:
 _yaml_types_to_parser = {str : str, int : int, float : float, bool : string_to_bool}
 
 def validate_attention_type(s: str) -> bool:
-  valid_attention_types = ('mha', 'flash', 'gpu_flash')
+  valid_attention_types = ('dot_product', 'flash', 'gpu_flash_xla', 'gpu_flash_triton')
   if s not in valid_attention_types: # currently supported attention
     raise ValueError(
       "Invalid attention type was passed. Valid options ", valid_attention_types
@@ -130,7 +130,8 @@ class _HyperParameters():
 
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys['global_parameter_scale'])
     raw_keys['emb_dim'] = 2**emb_scale * raw_keys['base_emb_dim']
-    raw_keys['num_heads'] = 2**num_head_scale * raw_keys['base_num_heads']
+    raw_keys['num_query_heads'] = 2**num_head_scale * raw_keys['base_num_query_heads']
+    raw_keys['num_kv_heads'] = 2**num_head_scale * raw_keys['base_num_kv_heads']
     raw_keys['mlp_dim'] = 2**mlp_dim_scale * raw_keys['base_mlp_dim']
     raw_keys['num_decoder_layers'] = 2**layer_scale * raw_keys['base_num_decoder_layers']
 
@@ -148,7 +149,8 @@ class _HyperParameters():
       max_logging.log(f"Running Model: {raw_keys['model_name']}")
       llama_7b_model_vars = {
         'base_emb_dim': 4096,
-        'base_num_heads': 32,
+        'num_query_heads': 32,
+        'num_kv_heads': 32,
         'base_mlp_dim': 11008,
         'base_num_decoder_layers': 32,
         'head_dim': 128,

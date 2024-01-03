@@ -36,8 +36,7 @@ ScanIn = common_types.ScanIn
 
 Embed = embeddings.Embed
 LLaMARotaryEmbedding = embeddings.LLaMARotaryEmbedding
-FlashMultiHeadDotProductAttention = attentions.FlashMultiHeadDotProductAttention
-MultiHeadDotProductAttention = attentions.MultiHeadDotProductAttention
+Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
 
 #------------------------------------------------------------------------------
@@ -56,7 +55,7 @@ class DecoderLayer(nn.Module):
                decoder_segment_ids,
                decoder_positions,
                deterministic,
-               decode,
+               model_mode,
                max_decode_length):
     cfg = self.config
     mesh = self.mesh
@@ -72,28 +71,18 @@ class DecoderLayer(nn.Module):
     lnx = nn.with_logical_constraint(
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
-    # Self-attention block
-    if cfg.attention == ('flash' or 'gpu_flash'):
-      device_type = 'gpu' if cfg.attention == 'gpu_flash' else 'tpu'
-      attention_layer = FlashMultiHeadDotProductAttention(
-        num_heads=cfg.num_heads,
-        head_dim=cfg.head_dim,
-        mesh=mesh,
-        dtype=cfg.dtype,
-        dropout_rate=cfg.dropout_rate,
-        name='self_attention',
-        use_int8=cfg.int8_training,
-        max_target_length=cfg.max_target_length,
-        device_type=device_type)
-    elif cfg.attention == 'mha':
-      attention_layer = MultiHeadDotProductAttention(
-        num_heads=cfg.num_heads,
-        head_dim=cfg.head_dim,
-        mesh=mesh,
-        dtype=cfg.dtype,
-        dropout_rate=cfg.dropout_rate,
-        name='self_attention',
-        use_int8=cfg.int8_training)
+    attention_layer = Attention(
+      num_query_heads=cfg.num_query_heads,
+      num_kv_heads=cfg.num_kv_heads,
+      head_dim=cfg.head_dim,
+      max_target_length=cfg.max_target_length,
+      attention_kernel=cfg.attention,
+      mesh=mesh,
+      dtype=cfg.dtype,
+      dropout_rate=cfg.dropout_rate,
+      name='self_attention',
+      use_int8=cfg.int8_training)
+
 
     attention_lnx = attention_layer(
       lnx,
@@ -101,7 +90,7 @@ class DecoderLayer(nn.Module):
       decoder_positions,
       decoder_segment_ids=decoder_segment_ids,
       deterministic=deterministic,
-      decode=decode)
+      model_mode=model_mode)
 
     attention_lnx = nn.with_logical_constraint(
         attention_lnx,
@@ -162,7 +151,7 @@ class Decoder(nn.Module):
                decoder_positions,
                decoder_segment_ids=None,
                deterministic=False,
-               decode=False,
+               model_mode=common_types.TRAIN_MODEL_MODE,
                max_decode_length=None):
     cfg = self.config
     mesh = self.mesh
@@ -227,7 +216,7 @@ class Decoder(nn.Module):
           decoder_segment_ids,
           decoder_positions,
           deterministic,
-          decode,
+          model_mode,
           max_decode_length,
       )
     else:
@@ -238,7 +227,7 @@ class Decoder(nn.Module):
             decoder_segment_ids,
             decoder_positions,
             deterministic,
-            decode,
+            model_mode,
             max_decode_length,
         )
 
@@ -296,21 +285,20 @@ class Transformer(nn.Module):
       decoder_positions,
       decoder_segment_ids=None,
       enable_dropout=True,
-      decode=False,
+      model_mode=common_types.TRAIN_MODEL_MODE,
       max_decode_length=None):
     """Applies Transformer decoder-branch on encoded-input and target."""
 
-    if decoder_segment_ids is not None:
-      if decode:
-        raise ValueError(
-            'During decoding, packing should not be used but '
-            '`decoder_segment_ids` was passed to `Transformer.decode`.')
-
+    if decoder_segment_ids is not None and model_mode == "AUTOREGRESSIVE":
+      raise ValueError(
+        f'During autoregressive decoding we assume the tokens are in the active sequence'
+        f' which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}.')
+    
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=not enable_dropout,
-        decode=decode,
+        model_mode=model_mode,
         max_decode_length=max_decode_length)
     return logits

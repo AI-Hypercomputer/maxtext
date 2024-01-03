@@ -19,21 +19,20 @@
 import functools
 from typing import Sequence
 
+import orbax
 import os
 from absl import app
-from flax.linen import partitioning as nn_partitioning
 import numpy as np
 
 import pyconfig
 import max_utils
-import temperature_sampler
 from input_pipeline import create_data_iterator_with_tokenizer
 from layers import models
 
 import checkpointing
+import common_types
 
 import jax
-import jax.numpy as jnp
 from jax import random
 from jax.sharding import PartitionSpec as P
 from jax.sharding import Mesh
@@ -47,86 +46,138 @@ cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 Transformer = models.Transformer
 
+def match_input_and_output_stream(prompt, outputs, tokenizer):
+  for i in range(len(prompt)):
+    prompt_mini = prompt[0:i+1]
+    prompt_mini_arr = np.array(prompt_mini, dtype=np.int32)
+    prompt_mini_str = decode_tokens(prompt_mini_arr, tokenizer)
+    output_mini = outputs[i:i+1]
+    output_mini_arr = np.array(output_mini, dtype=np.int32)
+    output_mini_str = decode_tokens(output_mini_arr, tokenizer)
+    print(f"{prompt_mini_str} -> {output_mini_str}")
 
-def decode_tokens(toks, tokenizer, eos_id):
-  if np.argmax(toks == eos_id) > 0:
-    valid_toks = toks[:np.argmax(toks == eos_id)]
-  else:
-    valid_toks = toks
-    valid_toks[-1] = eos_id
+def decode_tokens(toks, tokenizer):
+  return tokenizer.detokenize(toks).numpy().decode("utf-8"), len(toks)
 
-  valid_toks = valid_toks.astype(np.int32)
-  return tokenizer.detokenize(valid_toks).numpy().decode("utf-8"), len(valid_toks)
-
-
-def encode_strings(strs, max_len, tokenizer):
+def encode_strings(strs, max_len, tokenizer, mesh):
+  """Pack prefill prompts into Jax.Array. The prompts are `right-aligned`, i.e. padded with zeros and all ending on the same
+     index."""
   tokenized_batch = np.zeros((len(strs), max_len), np.int32)
+  positions = np.zeros((len(strs), max_len), np.int32)
+  segment_ids = np.zeros((len(strs), max_len), np.int32)
+
   for i, s in enumerate(strs):
     toks = tokenizer.tokenize(s).numpy()
-    # Remove EOS token in prompt.
-    tokenized_batch[i, :toks.shape[0]-1] = toks[:-1]
-  return tokenized_batch
+    assert toks.shape[0] < max_len, f"We aren't able to tokenize input {i}, it is too long"
+    prompt = toks[:-1] # Remove EOS token in prompt.
+    start_index = max_len - prompt.shape[0]
+    tokenized_batch[i, start_index:] = prompt
+    padded_start_index = start_index - 1
+    segment_ids[i, padded_start_index:] = common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    positions[i, padded_start_index:] = np.arange(len(prompt)+1)
+  return jax.device_put(tokenized_batch, jax.sharding.NamedSharding(mesh, P())),\
+         jax.device_put(positions, jax.sharding.NamedSharding(mesh, P())),\
+         jax.device_put(segment_ids, jax.sharding.NamedSharding(mesh, P()))
 
-def predict_step(inputs,
+def prefill_predict_step(inputs, input_positions, decoder_segment_ids,
                  state,
                  rngkey,
-                 model,
-                 config):
-  """Predict language model on a batch."""
-  # NOTE: wtf are we adding inputs.shape[2:] here?  it's almost always empty??
-  target_shape = (inputs.shape[0], config.max_predict_length) + inputs.shape[2:]
-
-  initial_variables = model.init(
-      {'params': rngkey, 'dropout': rngkey, 'aqt': rngkey},
-      jnp.ones(target_shape, config.dtype),
-      jnp.ones(target_shape),
-      enable_dropout=False,
-      decode=True,
-      max_decode_length=config.max_predict_length
+                 model=None,
+                 config=None):
+  """Prefill KV Cache and output logits"""
+  flat_logits, new_vars = model.apply(
+    {
+        "params": state.params
+    },
+    inputs,
+    input_positions,
+    decoder_segment_ids=decoder_segment_ids,
+    enable_dropout=False,
+    model_mode=common_types.PREFILL_MODEL_MODE,
+    rngs={'aqt': rngkey},
+    max_decode_length=config.max_target_length,
+    mutable=["cache"]
   )
-  cache = initial_variables["cache"]
 
-  def tokens_ids_to_logits(flat_ids, flat_cache, aqt_rng):
-    """Token slice to logits from decoder model."""
-    # --> [batch * beam, 1, vocab]
+  return flat_logits, new_vars['cache']
 
-    flat_logits, new_vars = model.apply(
-        {
-            "params": state.params,
-            "cache": flat_cache
-        },
-        flat_ids,
-        jnp.ones(flat_ids.shape),
-        enable_dropout=False,
-        decode=True,
-        rngs={'aqt': aqt_rng},
-        max_decode_length=config.max_predict_length,
-        mutable=["cache"])
-    new_flat_cache = new_vars["cache"]
-    # Remove singleton sequence-length dimension:
-    # [batch, 1, vocab] --> [batch, vocab]
-    flat_logits = flat_logits.squeeze(axis=1)
-    return flat_logits, new_flat_cache
+def ar_predict_single_token(token_input, token_position, kv_cache, state, rngkey, model, config):
+  """Predict one token, return new cache"""
+  flat_logits, new_vars = model.apply(
+    {
+        "params": state.params,
+        "cache": kv_cache
+    },
+    token_input,
+    token_position,
+    enable_dropout=False,
+    model_mode=common_types.AUTOREGRESSIVE_MODEL_MODE,
+    rngs={'aqt': rngkey},
+    max_decode_length=config.max_target_length,
+    mutable=["cache"])
+  new_flat_cache = new_vars["cache"]
+  return flat_logits, new_flat_cache
 
-  # Using the above-defined single-step decoder function, run a
-  # search over possible sequences given input encoding.
-  seqs = temperature_sampler.temperature_sample(
-      inputs,
-      cache,
-      tokens_ids_to_logits,
-      rngkey,
-      temperature=config.sampling_temperature,
-      topk=config.sampling_top_k,
-      eos_token=config.eos_id)
+def compute_prefill(config, model, state, rng, sp_tokenizer, mesh, state_mesh_shardings):
+  """Compute the necessary prefill state."""
 
-  return seqs
+  replicated_sharding = jax.sharding.NamedSharding(mesh, P(None))
+  tokenized_prompt = [config.prompt] * (int(config.per_device_batch_size) * jax.device_count())
+
+  # Encode the demo prompt -- to measure performance we encode it multiple times.
+  tokenized_prompts, prompt_decoder_positions, prompt_decoder_segment_ids  = encode_strings(tokenized_prompt,\
+      config.max_prefill_predict_length, sp_tokenizer, mesh)
+
+  partial_prefill_predict_step = functools.partial(prefill_predict_step, model=model, config=config)
+  p_prefill_predict_step = jax.jit(
+      partial_prefill_predict_step,
+      in_shardings=(replicated_sharding, replicated_sharding, replicated_sharding, state_mesh_shardings, None),
+      out_shardings=(replicated_sharding,replicated_sharding)
+  )
+
+  prefill_output, prefill_cache = p_prefill_predict_step(tokenized_prompts, prompt_decoder_positions,\
+                                                        prompt_decoder_segment_ids, state, rng)
+  indices = jax.numpy.argmax(prefill_output, axis=2)
+  match_input_and_output_stream(tokenized_prompts[0, :], np.array(indices[0,:]), sp_tokenizer)
+
+  last_index = indices[:, -1:]
+  return prefill_cache, last_index, prompt_decoder_positions[:, -1:]+1
+
+def prefill_or_load(config, model, state, rng, sp_tokenizer, mesh, state_mesh_shardings):
+  """We either load the necessary prefill state or generate it.  """
+  def map_to_pspec(data):
+    if isinstance(data, (jax.Array, jax.ShapeDtypeStruct)):
+      return orbax.checkpoint.type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=P(None))
+    else:
+      return orbax.checkpoint.type_handlers.RestoreArgs()
+  orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+  if config.load_from_prefill_dir:
+    blob_private = orbax_checkpointer.restore(config.prefill_cache_dir)
+    #TODO: this loading code from orbax sloppily does two loads,
+    #      one to figure out the PyTree and one to load with the right mesh)
+    restore_args = jax.tree_util.tree_map(map_to_pspec, blob_private)
+    blob = orbax_checkpointer.restore(config.prefill_cache_dir, restore_args=restore_args)
+    max_logging.log(f"Restored prefill cache from {config.prefill_cache_dir}")
+    return blob["cache"], blob["next_token"], blob["pos"]
+  else:
+    cache, next_token, pos = compute_prefill(config, model, state, rng, sp_tokenizer, mesh, state_mesh_shardings)
+    max_logging.log(f"Computed prefill cache {config.prefill_cache_dir}")
+
+    if config.prefill_cache_dir != "":
+      blob = {"cache":cache, "next_token":next_token, "pos":pos}
+      orbax_checkpointer.save(config.prefill_cache_dir, blob)
+      max_logging.log(f"Wrote prefill cache to {config.prefill_cache_dir}")
+    return cache, next_token, pos
+
+
+
 
 def decode_loop(config, state=None):
   """Decoding loop for the Transformer model."""
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir,
                                                                      config.enable_checkpointing,
                                                                      config.async_checkpointing,
-                                                                     config.save_period)
+                                                                     config.checkpoint_period)
   rng = random.PRNGKey(0)
 
   # Mesh definition
@@ -138,47 +189,42 @@ def decode_loop(config, state=None):
   _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
   state, state_mesh_annotations = max_utils.setup_decode_state(
     model, config, rng, mesh, checkpoint_manager
-    )
+  )
   assert state.opt_state == {}, "non null opt_state in checkpoint"
   num_params = max_utils.calculate_num_params_from_pytree(state.params)
   max_logging.log(f"Number of model params={num_params/10**9:.3f} billion")
 
   state_mesh_shardings = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
-  replicated_sharding = jax.sharding.NamedSharding(mesh, P(None, None))
-  p_predict_step = jax.jit(
-      functools.partial(predict_step, model=model, config=config),
-      in_shardings=(replicated_sharding, state_mesh_shardings, None),
-      out_shardings=None
+  replicated_sharding = jax.sharding.NamedSharding(mesh, P(None))
+
+  prefill_cache, new_id, new_position = prefill_or_load(config, model, state, rng, sp_tokenizer,\
+                                                   mesh, state_mesh_shardings)
+
+  partial_ar_predict_step = functools.partial(ar_predict_single_token, model=model, config=config)
+  partial_ar_predict_step.__name__ = "partial_ar_predict_step"
+  p_ar_predict_step = jax.jit(
+      partial_ar_predict_step,
+      in_shardings=(replicated_sharding, replicated_sharding, replicated_sharding, state_mesh_shardings, None),
+      out_shardings=(replicated_sharding,replicated_sharding)
   )
 
-  # Encode the demo prompt.
-  tokenized_prompts = encode_strings(
-      [config.prompt], config.max_predict_length, sp_tokenizer)
+  new_cache = prefill_cache
+  outputs = []
+  for _ in range(config.max_prefill_predict_length, config.max_target_length):
+    output_logits, new_cache = p_ar_predict_step(new_id, new_position, new_cache, state, rng)
+    new_position += 1
+    new_id = jax.numpy.argmax(output_logits, axis=2)
+    outputs.append(int(new_id[0,0]))
 
-  if config.metrics_file:
-    local_metrics_file = open(config.metrics_file, 'a', encoding="utf8")
-    metrics= {'scalar': {} }
-  max_utils.activate_profiler(config)
-  for step in np.arange(config.steps):
-    rng, rng_to_use = jax.random.split(rng)
-    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      seqs = p_predict_step(tokenized_prompts, state, rng_to_use)
-      decoded_string, num_tokens_decoded = decode_tokens(np.array(seqs)[0], sp_tokenizer, config.eos_id)
-      max_logging.log(f"Decoding #{step} (num tokens {num_tokens_decoded}):\n\t{decoded_string}")
-      if config.metrics_file:
-        metrics['scalar']['num_tokens'] = num_tokens_decoded
-        max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
-  max_utils.deactivate_profiler(config)
-
-
+  new_text, _ = decode_tokens(outputs, sp_tokenizer)
+  max_logging.log(f"Completion: `{new_text}`")
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
   os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
   decode_loop(pyconfig.config)
-
 
 if __name__ == "__main__":
   app.run(main)
