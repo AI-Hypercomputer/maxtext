@@ -53,7 +53,7 @@ def get_optimizer(config, learning_rate_schedule):
 
   # hack
   return sharded_adam(
-          learning_rate_fn=lambda x: learning_rate_schedule(x) / config.learning_rate,  # learning_rate_fn is normalized in praxis implementation see: https://github.com/google/praxis/blob/8abfea805e58b546205b8a9aa56106f110db4bf3/praxis/optimizers.py#L1157
+          learning_rate_fn=learning_rate_schedule,
           beta1=config.adam_b1,
           beta2=config.adam_b2,
           epsilon=config.adam_eps,
