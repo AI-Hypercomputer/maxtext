@@ -17,6 +17,7 @@
 # Description:
 # bash setup.sh MODE={stable,nightly,head,libtpu-only} LIBTPU_GCS_PATH={gcs_path_to_custom_libtpu} DEVICE={tpu,gpu}
 
+
 # You need to specificy a MODE, default value stable. 
 # You have the option to provide a LIBTPU_GCS_PATH that points to a libtpu.so provided to you by Google. 
 # In libtpu-only MODE, the LIBTPU_GCS_PATH is mandatory.
@@ -103,7 +104,7 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
             pip3 install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
         fi
 
-    if [[ -n "$LIBTPU_GCS_PATH" ]]; then 
+        if [[ -n "$LIBTPU_GCS_PATH" ]]; then 
             # Install custom libtpu
             echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
             # Install required dependency
@@ -129,8 +130,6 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
             pip3 install -U "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
         fi
     fi
-    echo "Installing stable tensorboard plugin profile"
-    pip3 install tensorboard-plugin-profile --upgrade
 elif [[ $MODE == "nightly" ]]; then 
 # Nightly mode
     if [[ $DEVICE == "gpu" ]]; then 
@@ -189,7 +188,7 @@ elif [[ $MODE == "head" ]]; then
     echo "Installing nightly tensorboard plugin profile"
     pip3 install tbp-nightly --upgrade
 else
-    echo -e "\n\nError: You can only set MODE to [stable,nightly,head,libtpu-only].\n\n"
+    echo -e "\n\nError: You can only set MODE to [stable,nightly,libtpu-only].\n\n"
     exit 1
 fi
 

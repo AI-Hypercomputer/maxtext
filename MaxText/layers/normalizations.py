@@ -19,7 +19,7 @@ from typing import Any, Tuple
 from flax import linen as nn
 from jax import lax
 import jax.numpy as jnp
-from maxtext.layers import initializers
+from layers import initializers
 
 Initializer = initializers.Initializer
 

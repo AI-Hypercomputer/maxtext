@@ -21,9 +21,9 @@ from typing import Any, Callable, Iterable, Sequence, Tuple, Union
 import flax.linen as nn
 from jax import lax
 import jax.numpy as jnp
-from maxtext import types
-from maxtext.layers import initializers
-from maxtext.layers import quantizations
+import common_types
+from layers import initializers
+from layers import quantizations
 import numpy as np
 
 Array = common_types.Array
