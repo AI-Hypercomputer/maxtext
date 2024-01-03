@@ -144,14 +144,14 @@ with models.DAG(
   ).run()
 
   jax_vit_v5e_4 = flax_config.get_flax_vit_config(
-      tpu_version="5litepod",
+      tpu_version=TpuVersion.V5E,
       tpu_cores=4,
-      tpu_zone=vm_resource.Zone.US_EAST1_C.value,
-      project_name=vm_resource.Project.TPU_PROD_ENV_AUTOMATED.value,
-      runtime_version=vm_resource.RuntimeVersion.V2_ALPHA_TPUV5_LITE.value,
+      tpu_zone=Zone.US_EAST1_C.value,
+      project_name=Project.TPU_PROD_ENV_AUTOMATED.value,
+      runtime_version=RuntimeVersion.V2_ALPHA_TPUV5_LITE.value,
       time_out_in_min=60,
-      network=vm_resource.V5_NETWORKS,
-      subnetwork=vm_resource.V5E_SUBNETWORKS,
+      network=V5_NETWORKS,
+      subnetwork=V5E_SUBNETWORKS,
       extraFlags=" ".join(jax_vit_func_extra_flags),
   ).run()
 
@@ -177,13 +177,13 @@ with models.DAG(
   ).run()
 
   jax_gpt2_v5e_4 = flax_config.get_flax_gpt2_config(
-      tpu_version="5litepod",
+      tpu_version=TpuVersion.V5E,
       tpu_cores=4,
-      tpu_zone=vm_resource.Zone.US_EAST1_C.value,
-      project_name=vm_resource.Project.TPU_PROD_ENV_AUTOMATED.value,
-      runtime_version=vm_resource.RuntimeVersion.V2_ALPHA_TPUV5_LITE.value,
-      network=vm_resource.V5_NETWORKS,
-      subnetwork=vm_resource.V5E_SUBNETWORKS,
+      tpu_zone=Zone.US_EAST1_C.value,
+      project_name=Project.TPU_PROD_ENV_AUTOMATED.value,
+      runtime_version=RuntimeVersion.V2_ALPHA_TPUV5_LITE.value,
+      network=V5_NETWORKS,
+      subnetwork=V5E_SUBNETWORKS,
       time_out_in_min=120,
       extraFlags=" ".join(jax_gpt2_extra_flags),
   ).run()
@@ -206,13 +206,13 @@ with models.DAG(
   ).run()
 
   jax_sd_v5e_4 = flax_config.get_flax_sd_config(
-      tpu_version="5litepod",
+      tpu_version=TpuVersion.V5E,
       tpu_cores=4,
-      tpu_zone=vm_resource.Zone.US_EAST1_C.value,
-      project_name=vm_resource.Project.TPU_PROD_ENV_AUTOMATED.value,
-      runtime_version=vm_resource.RuntimeVersion.V2_ALPHA_TPUV5_LITE.value,
-      network=vm_resource.V5_NETWORKS,
-      subnetwork=vm_resource.V5E_SUBNETWORKS,
+      tpu_zone=Zone.US_EAST1_C.value,
+      project_name=Project.TPU_PROD_ENV_AUTOMATED.value,
+      runtime_version=RuntimeVersion.V2_ALPHA_TPUV5_LITE.value,
+      network=V5_NETWORKS,
+      subnetwork=V5E_SUBNETWORKS,
       time_out_in_min=60,
       resolution=128,
       num_train_epochs=1,
