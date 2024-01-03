@@ -103,7 +103,7 @@ def main(args: Sequence[str]):
         cfg.save_period,
     )
 
-    state_dist, _ = max_utils.setup_training_state(model, tx, cfg, init_rng, mesh, checkpoint_manager_dist)
+    state_dist, state_mesh_annotations_dist = max_utils.setup_training_state(model, tx, cfg, init_rng, mesh, checkpoint_manager_dist)
 
     checkpoint_manager_src = checkpointing.create_orbax_checkpoint_manager(
         'gs://lizhiyu-multipods/lizhiyu/colab/convergence_test/checkpoints',
@@ -133,7 +133,7 @@ def main(args: Sequence[str]):
     functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
         train_step,
         mesh,
-        state_mesh_annotations_src,
+        state_mesh_annotations_dist,
         model,
         cfg,
         is_train=True,
