@@ -119,7 +119,7 @@ def main(args: Sequence[str]):
         eps_root=cfg.adam_eps_root,
         weight_decay=cfg.adam_weight_decay,
     )
-    state_src, _ = max_utils.setup_training_state(model, tx_src, cfg, init_rng, mesh, checkpoint_manager_src)
+    state_src, state_mesh_annotations_src = max_utils.setup_training_state(model, tx_src, cfg, init_rng, mesh, checkpoint_manager_src)
     state_dist = state_dist.replace(
         step=state_src.step,
         params=state_src.params,
@@ -133,7 +133,7 @@ def main(args: Sequence[str]):
     functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
         train_step,
         mesh,
-        state_dist,
+        state_mesh_annotations_src,
         model,
         cfg,
         is_train=True,
