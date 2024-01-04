@@ -56,7 +56,7 @@ class DecoderLayer(nn.Module):
                decoder_positions,
                deterministic,
                model_mode,
-               max_decode_length):
+              ):
     cfg = self.config
     mesh = self.mesh
 
@@ -151,8 +151,8 @@ class Decoder(nn.Module):
                decoder_positions,
                decoder_segment_ids=None,
                deterministic=False,
-               model_mode=common_types.TRAIN_MODEL_MODE,
-               max_decode_length=None):
+               model_mode=common_types.MODEL_MODE_TRAIN,
+              ):
     cfg = self.config
     mesh = self.mesh
     assert decoder_input_tokens.ndim == 2  # [batch, len]
@@ -207,7 +207,6 @@ class Decoder(nn.Module):
               nn.broadcast,
               nn.broadcast,
               nn.broadcast,
-              nn.broadcast,
           ),
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'},
@@ -217,7 +216,6 @@ class Decoder(nn.Module):
           decoder_positions,
           deterministic,
           model_mode,
-          max_decode_length,
       )
     else:
       for lyr in range(cfg.num_decoder_layers):
@@ -228,7 +226,6 @@ class Decoder(nn.Module):
             decoder_positions,
             deterministic,
             model_mode,
-            max_decode_length,
         )
 
     y = RMSNorm(dtype=cfg.dtype, name='decoder_norm', kernel_axes=('embed',))(y)
@@ -285,11 +282,11 @@ class Transformer(nn.Module):
       decoder_positions,
       decoder_segment_ids=None,
       enable_dropout=True,
-      model_mode=common_types.TRAIN_MODEL_MODE,
-      max_decode_length=None):
+      model_mode=common_types.MODEL_MODE_TRAIN
+  ):
     """Applies Transformer decoder-branch on encoded-input and target."""
 
-    if decoder_segment_ids is not None and model_mode == "AUTOREGRESSIVE":
+    if decoder_segment_ids is not None and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
         f'During autoregressive decoding we assume the tokens are in the active sequence'
         f' which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}.')
@@ -300,5 +297,5 @@ class Transformer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=not enable_dropout,
         model_mode=model_mode,
-        max_decode_length=max_decode_length)
+    )
     return logits
