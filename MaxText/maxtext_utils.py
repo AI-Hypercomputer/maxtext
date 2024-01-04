@@ -58,7 +58,7 @@ def get_optimizer(config, learning_rate_schedule):
           beta2=config.adam_b2,
           epsilon=config.adam_eps,
           epsilon_root=config.adam_eps_root,
-          update_capping=1.,  # disable
+          update_capping=-1.,  # disable
           weight_decay=config.adam_weight_decay,
           )
 

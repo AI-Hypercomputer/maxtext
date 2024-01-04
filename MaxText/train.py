@@ -209,12 +209,13 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
     xent = xent * padding_mask
     cum_loss = jnp.sum(xent)
     cum_weights = jnp.sum(padding_mask)
+    loss = (cum_loss / (cum_weights + 1e-6)).astype(jnp.float32)
     aux = {
       'intermediate_outputs': intermediate_outputs,
       'cum_loss': cum_loss,
       'cum_weights': cum_weights,
     }
-    return cum_loss / cum_weights, aux
+    return loss, aux
 
   if is_train:
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
@@ -290,6 +291,10 @@ def train_loop(config, state=None):
   if jax.process_index() == 0:
     max_logging.log(f":::MLLOG init_checkpoint_step: {start_step}")
     max_logging.log(f":::MLLOG opt_base_learning_rate: {config.learning_rate}")
+    max_logging.log(f":::MLLOG opt_end_learning_rate: {config.cosine_learning_rate_final_fraction}")
+    max_logging.log(f":::MLLOG opt_weight_decay: {config.adam_weight_decay}")
+    max_logging.log(f":::MLLOG opt_learning_rate_decay_steps: {int(config.learning_rate_schedule_steps * (1 - config.warmup_steps_fraction))}")
+    max_logging.log(f":::MLLOG opt_learning_rate_warmup_steps: {int(config.learning_rate_schedule_steps * config.warmup_steps_fraction + 1)}")
     max_logging.log(f":::MLLOG opt_adam_beta_1: {config.adam_b1}")
     max_logging.log(f":::MLLOG opt_adam_beta_2: {config.adam_b2}")
     max_logging.log(f":::MLLOG opt_adam_epsilon: {config.adam_eps}")
@@ -401,16 +406,14 @@ def train_loop(config, state=None):
           max_logging.log(f"found nan at batch {i}: {batch}")
         else:
           valid_loss += batch_valid_loss
-          valid_cum_loss += batch_valid_cum_loss
+          valid_cum_loss += batch_valid_loss * batch_valid_cum_weights
           valid_cum_weights += batch_valid_cum_weights
           count += 1
-        if i % 10 == 0:
-          max_logging.log(f"batch valid loss at {i}: {metrics['scalar']['evaluation/loss']}")
         i += 1
 
       mean_valid_loss = valid_loss / count
-      weighted_mean_valid_loss = valid_cum_loss / valid_cum_weights
-      max_logging.log(f"average loss at step {step}: {mean_valid_loss}, {weighted_mean_valid_loss}")
+      weighted_mean_valid_loss = valid_cum_loss / (valid_cum_weights + 1e-8)
+      max_logging.log(f"average loss at step {step}: mean={mean_valid_loss}, weighted_mean={weighted_mean_valid_loss}, total_weights={valid_cum_weights}")
       if weighted_mean_valid_loss <= 2.69:
         max_logging.log(f"early stop")
         break

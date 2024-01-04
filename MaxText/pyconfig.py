@@ -134,6 +134,7 @@ class _HyperParameters():
     raw_keys['adam_b1'] = 0.9
     raw_keys['adam_b2'] = 0.95
     raw_keys['adam_eps'] = 1.e-8
+    raw_keys['adam_weight_decay'] = 0.1
 
 
   @staticmethod
