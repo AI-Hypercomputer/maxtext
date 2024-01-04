@@ -308,7 +308,7 @@ def setup_initial_state(model, iterator, tx, config, rng, mesh, checkpoint_manag
         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
     
     if isinstance(state, (dict)):
-      if 'iter' in state and config.dataset_type=="array_record":
+      if 'iter' in state and config.dataset_type=="c4-array_record":
         iterator = state['iter']
       if 'state' in state:
         state = state['state']

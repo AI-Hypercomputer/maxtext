@@ -41,16 +41,6 @@ class ReformatPacking(pygrain.MapTransform):
 
 
 @dataclasses.dataclass
-class LengthFilter(pygrain.FilterTransform):
-    def __init__(self, max_length):
-        self.max_length = max_length
-    def filter(self, data):
-        source, target = data['inputs'], data['targets']
-        l = max(np.shape(source)[0], np.shape(target)[0])
-        return l <= self.max_length
-
-
-@dataclasses.dataclass
 class PadToMaxLength(pygrain.MapTransform):
     def __init__(self, max_length):
         self.max_length = max_length

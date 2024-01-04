@@ -41,13 +41,13 @@ def create_orbax_checkpoint_manager(
   max_logging.log("Creating checkpoint manager...")
   p = epath.Path(checkpoint_dir)
   if use_async:
-    if dataset_type == "array_record":
+    if dataset_type == "c4-array_record":
       checkpointer = {'state':AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler()),
                       'iter':Checkpointer(pygrain.PyGrainCheckpointHandler())}
     else:
       checkpointer = AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler()) 
   else:
-    if dataset_type == "array_record":
+    if dataset_type == "c4-array_record":
       checkpointer = {'state':Checkpointer(checkpoint.PyTreeCheckpointHandler()),
                       'iter':Checkpointer(pygrain.PyGrainCheckpointHandler())}
     else:
@@ -104,7 +104,7 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
     else:
       return type_handlers.RestoreArgs()
 
-  if dataset_type=="array_record":
+  if dataset_type=="c4-array_record":
     restore_state = jax.tree_util.tree_map(map_to_pspec,
                                           abstract_unboxed_pre_state,
                                           state_mesh_annotations)
@@ -118,7 +118,7 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
   if latest_step is not None:
     max_logging.log(f"restoring state from this run's directory latest step \
         {latest_step}")
-    if dataset_type=="array_record":
+    if dataset_type=="c4-array_record":
       return checkpoint_manager.restore(latest_step, {'state':abstract_unboxed_pre_state,'iter':iterator},
                                       {"restore_args" : restore_args}), None
     else:
@@ -128,7 +128,7 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
     max_logging.log(f"restoring state from first_checkpoint_path {first_checkpoint_path}")
     p = epath.Path(first_checkpoint_path)
     checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
-    if dataset_type=="array_record":
+    if dataset_type=="c4-array_record":
       return None, checkpointer.restore(p,
                                       item={'state':abstract_unboxed_pre_state,'iter':iterator},
                                       restore_args=restore_args).params
@@ -146,7 +146,7 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
     else:
       step = load_from_other_directory_step
       max_logging.log(f"restoring state from {load_from_other_directory} step {step}")
-    if dataset_type=="array_record":
+    if dataset_type=="c4-array_record":
       return mngr_loader.restore(step, {'state':abstract_unboxed_pre_state,'iter':iterator},
                                       {"restore_args" : restore_args}), None
     else:

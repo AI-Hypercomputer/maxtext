@@ -111,19 +111,15 @@ dataset_path: ""
 vocab_size: 32_768 # powers of 2 for sharding
 assets_path: "assets"
 vocab_relative_path: "tokenizer"  # Assumes we're allowed
-# dataset_name: 'c4/en:3.0.1'
-# eval_dataset_name: 'c4/en:3.0.1'
-dataset_name: 'array-record/c4/en/3.0.1'
-eval_dataset_name: 'array-record/c4/en/3.0.1'
+dataset_name: 'c4/en:3.0.1'
+eval_dataset_name: 'c4/en:3.0.1'
+# dataset_name: 'array-record/c4/en/3.0.1'
+# eval_dataset_name: 'array-record/c4/en/3.0.1'
 eval_split: 'validation'  # for c4 data
-# dataset_name: 'lm1b/1.1.0'
-# eval_dataset_name: 'lm1b/1.1.0'
-# eval_split: 'test'  # for lm1b
 per_device_batch_size: 12.0
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
-# dataset_type: c4 # must be c4, array_record or synthetic
-dataset_type: array_record
+dataset_type: c4 # must be c4, c4-array_record or synthetic
 grain_worker_count: 4
 pack_examples: True
 

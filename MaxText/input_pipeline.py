@@ -84,13 +84,20 @@ def normalize_features(ds):
       _normalize_features,
       num_parallel_calls=AUTOTUNE)
 
-# Max length filter.
-def length_filter(max_len):
-  def filter_fn(x):
-    source, target = x['inputs'], x['targets']
-    l = tf.maximum(tf.shape(source)[0], tf.shape(target)[0])
-    return tf.less(l, max_len + 1)
-  return filter_fn
+
+# Trim to Max length
+def length_trim(ds, max_len):
+  def _trim_fn(features):
+    if tf.shape(features['inputs'])[0] > max_len:
+      features['inputs'] = features['inputs'][:max_len]
+    if tf.shape(features['targets'])[0] > max_len:
+      features['targets'] = features['targets'][:max_len]
+    return features
+
+  return ds.map(
+    _trim_fn,
+    num_parallel_calls=AUTOTUNE
+  )
 
 def add_annotations(ds):
   def _add_annotations(features):
@@ -131,7 +138,7 @@ def preprocessing_pipeline(
   """Shuffle and batch/pack the given dataset."""
 
   if max_length > 0:
-    dataset = dataset.filter(length_filter(max_length))
+    dataset = length_trim(dataset, max_len=max_length)
 
   # Shuffle and repeat.
   if shuffle:
@@ -210,8 +217,7 @@ def preprocessing_pipeline_pygrain(
   operations = []
   operations.append(pygrain_operations.ParseFeatures())
   operations.append(pygrain_operations.NormalizeFeatures())
-  operations.append(pygrain_tokenizer.Tokenize(["inputs","targets"], max_length, vocab_path))
-  operations.append(pygrain_operations.LengthFilter(max_length))
+  operations.append(pygrain_tokenizer.TokenizeAndTrim(["inputs","targets"], max_length, vocab_path))
 
   # Pack and Batch examples.
   if pack_examples:
@@ -411,7 +417,7 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
       global_mesh,
       shuffle=config.enable_data_shuffling,
       pack_examples=config.pack_examples,
-      max_length=config.max_eval_target_length,
+      max_length=config.max_target_length,
       shift=True,
       data_sharding=config.data_sharding,
       data_shuffle_seed = data_shuffle_seed,)
@@ -425,7 +431,7 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
       global_mesh,
       shuffle=config.enable_data_shuffling,
       pack_examples=config.pack_examples,
-      max_length=config.max_eval_target_length,
+      max_length=config.max_target_length,
       shift=True,
       data_sharding=config.data_sharding,
       data_shuffle_seed = data_shuffle_seed,)     
@@ -507,7 +513,7 @@ def create_data_iterator_with_tokenizer(config, mesh):
     return SyntheticDataIterator(config, mesh), None
   elif config.dataset_type == "c4":
     return make_c4_train_iterator_and_tokenizer(config, mesh)
-  elif config.dataset_type == "array_record":
+  elif config.dataset_type == "c4-array_record":
     return make_pygrain_train_iterator_and_tokenizer(config, mesh)
   else:
     assert False, "dataset type not implemented"

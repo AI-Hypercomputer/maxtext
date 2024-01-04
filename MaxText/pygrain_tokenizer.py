@@ -10,7 +10,7 @@ import grain.python as grain
 import numpy as np
 
 @dataclasses.dataclass
-class Tokenize(grain.MapTransform):
+class TokenizeAndTrim(grain.MapTransform):
   """Tokenize, truncate and pad features to sequence length."""
 
   feature_names: str | Sequence[str]

@@ -103,7 +103,7 @@ def load_next_batch(train_iter, example_batch, config, mesh):
   else:
       if config.dataset_type == 'c4':
         return train_iter()
-      elif config.dataset_type == 'array_record':
+      elif config.dataset_type == 'c4-array_record':
         return get_next_batch_sharded(train_iter, mesh)
 
 # def load_next_batch_pygrain(train_iter, example_batch, config, mesh):
@@ -312,7 +312,7 @@ def train_loop(config, state=None):
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
-      if config.dataset_type == "array_record" and checkpoint_manager.save(step, {'state':state,'iter':data_iterator}):
+      if config.dataset_type == "c4-array_record" and checkpoint_manager.save(step, {'state':state,'iter':data_iterator}):
         max_logging.log(f"saved a checkpoint (containing state and iter) at step {step}")
       elif checkpoint_manager.save(step, state):
         max_logging.log(f"saved a checkpoint at step {step}")
