@@ -125,7 +125,7 @@ def main(args: Sequence[str]):
     model = Transformer(config=cfg, mesh=mesh)
     learning_rate_schedule = max_utils.create_learning_rate_schedule(cfg)
     # tx = maxtext_utils.get_optimizer(cfg, learning_rate_schedule)
-    tx_src = optax.adamw(
+    tx = optax.adamw(
         learning_rate_schedule,
         b1=cfg.adam_b1,
         b2=cfg.adam_b2,
