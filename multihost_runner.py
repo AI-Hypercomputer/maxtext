@@ -43,6 +43,7 @@ from collections import namedtuple
 import subprocess
 import time
 from datetime import datetime
+import portpicker
 import os
 import re
 
@@ -96,6 +97,10 @@ if args.USE_EXISTING_FOLDER is True and not args.RUN_NAME:
   raise ValueError("When USE_EXISTING_FOLDER is true, RUN_NAME must be specified.")
 
 Slice = namedtuple('Slice', ['name', 'slice_num', 'num_workers', 'version'])
+
+def ip_address_from_machine_name(slice):
+  slice_name = slice.name
+  return '10.130.0.74'
 
 def get_slices():
   """ Returns a list of slices matching TPU_PREFIX """
@@ -217,7 +222,7 @@ def scps(slices, run_name_dir, zip_name):
 
   return return_code
 
-def execute_main_command(main_command, slices, local_log_dir, zip_name):
+def execute_main_command(main_command, slices, local_log_dir, zip_name, coordinator_address):
   """ Run the main command on each worker, logging each separately. """
   kill_script_name = "kill_existing_processes.sh" # File written on worker machines
   commands = []
@@ -235,12 +240,13 @@ def execute_main_command(main_command, slices, local_log_dir, zip_name):
       unzip_command = f"tar xzf {zip_name}"
       write_kill_script_command = f"echo '{kill_existing_processes_str()}' > {kill_script_name}"
       kill_existing_command = f"bash {kill_script_name} {cur_slice.version}"
+      export_coordinator_vars_command = f"export JAX_COORDINATOR_ADDRESS={coordinator_address}; export JAX_PROCESS_ID={slice_num}; export JAX_PROCESS_COUNT={len(slices)}"
 
       if args.USE_EXISTING_FOLDER is False:
         remote_command_list = [mkdir_command , mv_zip_command , cd_command , unzip_command ,
-                        write_kill_script_command , kill_existing_command , main_command]
+                        write_kill_script_command , kill_existing_command , export_coordinator_vars_command, main_command]
       else:
-        remote_command_list = [cd_command, write_kill_script_command , kill_existing_command , main_command]
+        remote_command_list = [cd_command, write_kill_script_command , kill_existing_command , export_coordinator_vars_command, main_command]
       remote_command_list_str = " && ".join(remote_command_list)
       gcloud_command=[
           "gcloud", "alpha", "compute", "tpus", "tpu-vm", "ssh", cur_slice.name, f"--worker={worker_num}",
@@ -374,6 +380,10 @@ def main() -> None:
   local_log_dir = os.path.join("/tmp", args.RUN_NAME, "")
   zip_name = "script_dir_zip_" + args.RUN_NAME + ".tar.gz"
 
+  coord_IP = ip_address_from_machine_name(slices[0])
+  port = portpicker.pick_unused_port() + 319
+  coordinator_address = str(coord_IP) + ':' + str(port)
+
   if args.USE_EXISTING_FOLDER is False:
     ##### Step 2 when using a new folder: Zip code and move it to the TPUs #####
     return_code = scps(slices, local_log_dir, zip_name)
@@ -383,7 +393,7 @@ def main() -> None:
 
   ##### Step 3: Unzip if using a new folder, kill existing processes, and run #####
   print(f"Running main command, logs located in: {local_log_dir}", flush=True)
-  return_code = execute_main_command(args.COMMAND, slices, local_log_dir, zip_name)
+  return_code = execute_main_command(args.COMMAND, slices, local_log_dir, zip_name, coordinator_address)
   if return_code == 0:
     print(f"Main command completed successfully, logs located in: {local_log_dir}", flush=True)
     print("Multihost runner finished successfully!", flush=True)
