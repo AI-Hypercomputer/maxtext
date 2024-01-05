@@ -85,8 +85,8 @@ def normalize_features(ds):
       num_parallel_calls=AUTOTUNE)
 
 
-# Trim to Max length
 def length_trim(ds, max_len):
+  """"Trim to Max length"""
   def _trim_fn(features):
     if tf.shape(features['inputs'])[0] > max_len:
       features['inputs'] = features['inputs'][:max_len]
@@ -100,12 +100,13 @@ def length_trim(ds, max_len):
   )
 
 def add_annotations(ds):
+  """Annotate with segmentation and position"""
   def _add_annotations(features):
     features['inputs_segmentation'] = tf.ones_like(features['inputs'], dtype = tf.int32)
     features['inputs_position'] = tf.range(tf.size(features['inputs']), dtype = tf.int32)
     features['targets_segmentation'] = tf.ones_like(features['targets'], dtype = tf.int32)
     features['targets_position'] = tf.range(tf.size(features['targets']), dtype = tf.int32)
-    # wherever target element is 0, set corresponding segmentation to 0
+    # set segmentation to 0 when target element is 0
     nonzero_mask = tf.not_equal(features['targets'], 0)
     nonzero_mask = tf.cast(nonzero_mask, tf.int32)
     features['inputs_segmentation'] *= nonzero_mask
@@ -156,7 +157,7 @@ def preprocessing_pipeline(
   # Shift inputs for teacher-forced training
   if shift:
     dataset = dataset.map(
-      functools.partial(shift_data, axis=0, segmented=1),
+      functools.partial(shift_data, axis=0, segmented=True),
       num_parallel_calls=tf.data.AUTOTUNE,
       deterministic=True)
 
@@ -198,7 +199,6 @@ def preprocessing_pipeline(
 
 def preprocessing_pipeline_pygrain(
   dataset,
-  dataset_type,
   grain_worker_count,
   vocab_path,
   batch_size: int,
@@ -206,14 +206,16 @@ def preprocessing_pipeline_pygrain(
   shuffle: bool,
   num_epochs: Optional[int] = 1,
   pack_examples: bool = True,
-  shuffle_buffer_size: int = 1024,
   max_length: int = 512,
   shift: bool = True,
   drop_remainder: bool = True,
-  data_sharding = None,
   data_shuffle_seed = 0,
 ):
   """Apply pygrain operations to preprocess the given dataset."""
+  assert (
+        batch_size % global_mesh.size == 0
+  ), 'Batch size should be divisible number of global devices.'
+
   operations = []
   operations.append(pygrain_operations.ParseFeatures())
   operations.append(pygrain_operations.NormalizeFeatures())
@@ -227,7 +229,6 @@ def preprocessing_pipeline_pygrain(
     operations.append(pygrain_operations.ReformatPacking())
   else:
     operations.append(pygrain_operations.PadToMaxLength(max_length))
-    # operations.append(pygrain.MapOperation(map_function=pygrain_operations.PadToMaxLength(max_length)))
     operations.append(pygrain.Batch(batch_size=batch_size // jax.process_count(), drop_remainder=drop_remainder))
 
   # Shift inputs for teacher-forced training
@@ -286,8 +287,7 @@ def get_datasets(
   return train_ds, eval_ds
 
 def get_datasets_pygrain(
-  config: ml_collections.ConfigDict,
-  read_config = None,
+  config: ml_collections.ConfigDict
 ):
   """Load dataset from array_record files for using with pygrain"""
   data_dir = os.path.join(config.dataset_path, config.dataset_name)
@@ -384,7 +384,7 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
   # Load tokenizer
   sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
                                           vocab_size=config.vocab_size)
-                                          
+
   # Set global batch size.
   global_batch_size_to_load = config.global_batch_size_to_load
 
@@ -395,7 +395,6 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
 
   train_iter = preprocessing_pipeline_pygrain(
       train_ds,
-      config.dataset_type,
       config.grain_worker_count,
       vocab_path,
       global_batch_size_to_load,
@@ -405,12 +404,10 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
       pack_examples=config.pack_examples,
       max_length=config.max_target_length,
       shift=True,
-      data_sharding=config.data_sharding,
       data_shuffle_seed = data_shuffle_seed,)
 
   eval_iter = preprocessing_pipeline_pygrain(
       eval_ds,
-      config.dataset_type,
       config.grain_worker_count,
       vocab_path,
       eval_batch_size,
@@ -419,12 +416,10 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
       pack_examples=config.pack_examples,
       max_length=config.max_target_length,
       shift=True,
-      data_sharding=config.data_sharding,
       data_shuffle_seed = data_shuffle_seed,)
 
   predict_iter = preprocessing_pipeline_pygrain(
       eval_ds,
-      config.dataset_type,
       config.grain_worker_count,
       vocab_path,
       eval_batch_size,
@@ -433,8 +428,7 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
       pack_examples=config.pack_examples,
       max_length=config.max_target_length,
       shift=True,
-      data_sharding=config.data_sharding,
-      data_shuffle_seed = data_shuffle_seed,)     
+      data_shuffle_seed = data_shuffle_seed,)
 
   return train_iter, eval_iter, predict_iter, sp_tokenizer
 
@@ -459,12 +453,8 @@ def make_c4_train_iterator_and_tokenizer(config, mesh):
 
 def make_pygrain_train_iterator_and_tokenizer(config, mesh):
   """ Make train iterator and tokenizer for C4 dataset"""
-  read_config = tfds.ReadConfig(
-    shuffle_seed = config.data_shuffle_seed,
-  )
   train_ds, eval_ds = get_datasets_pygrain(
-    config=config,
-    read_config = read_config,
+    config=config
   )
   train_iter, _, _, sp_tokenizer = preprocess_dataset_pygrain(
     config,

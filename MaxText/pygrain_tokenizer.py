@@ -1,8 +1,23 @@
-import abc
-from collections.abc import Mapping, Sequence
-import copy
+"""
+ Copyright 2023 Google LLC
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ """
+
+"""Tokenize Op used by Pygrain"""
+
+from collections.abc import Sequence
 import dataclasses
-import math
 import threading
 from typing import Any
 from sentencepiece import SentencePieceProcessor
@@ -11,8 +26,8 @@ import numpy as np
 
 @dataclasses.dataclass
 class TokenizeAndTrim(grain.MapTransform):
-  """Tokenize, truncate and pad features to sequence length."""
-
+  """Tokenize and trim features to sequence length."""
+  # pylint: disable=attribute-defined-outside-init
   feature_names: str | Sequence[str]
   sequence_length: int | Sequence[int]
   model_path: str
@@ -26,10 +41,12 @@ class TokenizeAndTrim(grain.MapTransform):
       self.sequence_length = [self.sequence_length] * len(self.feature_names)
 
   def map(self, features: dict[str, Any]) -> dict[str, Any]:
+    """Maps to each element."""
     if self._processor is None:
       with self._initialize_processor_lock:
         if self._processor is None:  # Ensures only one thread initializes SPP.
-          self._processor = SentencePieceProcessor(self.model_path)
+          self._processor = SentencePieceProcessor()
+          self._processor.load(self.model_path)
     for feature_name, sequence_length in zip(
         self.feature_names, self.sequence_length, strict=True
     ):

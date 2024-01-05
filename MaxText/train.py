@@ -101,18 +101,11 @@ def load_next_batch(train_iter, example_batch, config, mesh):
   if config.reuse_example_batch and example_batch is not None:
     return example_batch
   else:
-      if config.dataset_type == 'c4':
-        return train_iter()
-      elif config.dataset_type == 'c4-array_record':
-        return get_next_batch_sharded(train_iter, mesh)
+    if config.dataset_type == 'c4':
+      return train_iter()
+    elif config.dataset_type == 'c4-array_record':
+      return get_next_batch_sharded(train_iter, mesh)
 
-# def load_next_batch_pygrain(train_iter, example_batch, config, mesh):
-#   if config.reuse_example_batch and example_batch is not None:
-#     return example_batch
-#   else:
-#     global_shape = (config.global_batch_size_to_load, config.max_target_length)
-#     return get_next_batch_sharded_pygrain(
-#       train_iter, config.data_sharding, global_shape, mesh)  
 
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   """Records scalar metrics to be written to tensorboard"""
@@ -258,7 +251,9 @@ def train_loop(config, state=None):
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager)
+  state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(
+    model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
+  )
   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
     train_step,
     mesh,

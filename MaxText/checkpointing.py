@@ -45,7 +45,7 @@ def create_orbax_checkpoint_manager(
       checkpointer = {'state':AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler()),
                       'iter':Checkpointer(pygrain.PyGrainCheckpointHandler())}
     else:
-      checkpointer = AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler()) 
+      checkpointer = AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler())
   else:
     if dataset_type == "c4-array_record":
       checkpointer = {'state':Checkpointer(checkpoint.PyTreeCheckpointHandler()),
@@ -112,7 +112,7 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
   else:
     restore_args = jax.tree_util.tree_map(map_to_pspec,
                                           abstract_unboxed_pre_state,
-                                          state_mesh_annotations) 
+                                          state_mesh_annotations)
 
   latest_step = checkpoint_manager.latest_step()
   if latest_step is not None:
@@ -135,7 +135,7 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
     else:
       return None, checkpointer.restore(p,
                                       item=abstract_unboxed_pre_state,
-                                      restore_args=restore_args).params                          
+                                      restore_args=restore_args).params
   elif load_from_other_directory != "":
     p = epath.Path(load_from_other_directory)
     checkpointer_loader = Checkpointer(checkpoint.PyTreeCheckpointHandler())
@@ -151,7 +151,7 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
                                       {"restore_args" : restore_args}), None
     else:
       return mngr_loader.restore(step, abstract_unboxed_pre_state,
-                                      {"restore_args" : restore_args}), None                                        
+                                      {"restore_args" : restore_args}), None
   else:
     max_logging.log("No existing checkpoints found, not restoring checkpoint.")
     return None, None
