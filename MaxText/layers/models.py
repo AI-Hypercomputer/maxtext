@@ -507,7 +507,6 @@ class Transformer(nn.Module):
         num_embeddings=cfg.vocab_size,
         features=cfg.emb_dim,
         dtype=cfg.dtype,
-        attend_dtype=jnp.float32,  # for logit training stability
         embedding_init=nn.initializers.normal(stddev=1.0),
         name='token_embedder',
         embed_lookup_style=cfg.embed_lookup_style,
