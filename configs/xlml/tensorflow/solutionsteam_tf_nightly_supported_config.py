@@ -41,19 +41,24 @@ def get_tf_keras_config(
   )
 
   set_up_cmds = common.set_up_pjrt_nightly() + common.set_up_tensorflow_keras()
-  # TODO(ranran): enable tests for pod and is blocked by
-  # https://github.com/GoogleCloudPlatform/ml-auto-solutions/pull/15
+  keras_test_name = f"tf_keras_api_{test_name}"
+  benchmark_id = f"{keras_test_name}-v{tpu_version.value}-{tpu_cores}"
+  # Add default_var to pass DAG check
+  # TODO(ranran): replace Variable.get() to XCOM when it applies
+  tpu_name = Variable.get(benchmark_id, default_var=None) if is_pod else "local"
+  env_variable = export_env_variable(is_pod)
   skipped_tag = "--tags=-failspod" if is_pod else ""
   run_model_cmds = (
+      "sudo chmod -R 777 /tmp/",
       (
           "export PATH=$PATH:/home/ml-auto-solutions/.local/bin &&"
-          " export TPU_NAME=local &&"
-          " cd /tmp/tf2-api-tests && NEXT_PLUGGABLE_DEVICE_USE_C_API=true"
-          " TF_PLUGGABLE_DEVICE_LIBRARY_PATH=/lib/libtpu.so"
-          " TF_USE_LEGACY_KERAS=1 behave -e ipynb_checkpoints"
+          f" export TPU_NAME={tpu_name} && {env_variable} &&"
+          " cd /tmp/tf2-api-tests && TF_USE_LEGACY_KERAS=1"
+          " behave -e ipynb_checkpoints"
           f" --tags=-fails {skipped_tag} -i {test_feature}"
       ),
   )
+
   job_test_config = test_config.TpuVmTest(
       test_config.Tpu(
           version=tpu_version,
@@ -63,7 +68,7 @@ def get_tf_keras_config(
           network=network,
           subnetwork=subnetwork,
       ),
-      test_name=f"tf_keras_api_{test_name}",
+      test_name=keras_test_name,
       set_up_cmds=set_up_cmds,
       run_model_cmds=run_model_cmds,
       time_out_in_min=time_out_in_min,
@@ -73,6 +78,8 @@ def get_tf_keras_config(
   return task.TpuQueuedResourceTask(
       task_test_config=job_test_config,
       task_gcp_config=job_gcp_config,
+      tpu_name_env_var=is_pod,
+      all_workers=not is_pod,
   )
 
 
@@ -120,17 +127,16 @@ def get_tf_resnet_config(
   }
 
   test_name = "tf_resnet_imagenet"
-  benchmark_id = f"{test_name}-v{tpu_version}-{tpu_cores}"
+  benchmark_id = f"{test_name}-v{tpu_version.value}-{tpu_cores}"
   # Add default_var to pass DAG check
   # TODO(ranran): replace Variable.get() to XCOM when it applies
   tpu_name = Variable.get(benchmark_id, default_var=None) if is_pod else "local"
   env_variable = export_env_variable(is_pod)
   run_model_cmds = (
+      "sudo chmod -R 777 /tmp/",
       (
           f"cd /usr/share/tpu/models && {env_variable} &&"
-          " PYTHONPATH='.' NEXT_PLUGGABLE_DEVICE_USE_C_API=true"
-          " TF_PLUGGABLE_DEVICE_LIBRARY_PATH=/lib/libtpu.so"
-          " TF_USE_LEGACY_KERAS=1"
+          " PYTHONPATH='.' TF_USE_LEGACY_KERAS=1"
           " python3 official/vision/train.py"
           f" --tpu={tpu_name} --experiment=resnet_imagenet"
           " --mode=train_and_eval --model_dir=/tmp/output"
@@ -164,4 +170,8 @@ def get_tf_resnet_config(
 
 def export_env_variable(is_pod: bool) -> str:
   """Export environment variables for training if any."""
-  return "export TPU_LOAD_LIBRARY=0" if is_pod else "echo"
+  return (
+      "export TPU_LOAD_LIBRARY=0"
+      if is_pod
+      else "export NEXT_PLUGGABLE_DEVICE_USE_C_API=true && export TF_PLUGGABLE_DEVICE_LIBRARY_PATH=/lib/libtpu.so"
+  )
