@@ -266,7 +266,7 @@ def init_initial_state(model, tx, config, is_training, key):
 
 def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   is_training = False
-  return setup_initial_state(model, None, config, rng, mesh, checkpoint_manager, is_training)
+  return setup_initial_state(model, None, None, config, rng, mesh, checkpoint_manager, is_training)
 
 def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
   is_training = True

@@ -184,7 +184,7 @@ def decode_loop(config, state=None):
   # Model and Optimizer definition
   model = Transformer(config, mesh = mesh)
   _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
-  state, state_mesh_annotations = max_utils.setup_decode_state(
+  state, state_mesh_annotations, _ = max_utils.setup_decode_state(
     model, config, rng, mesh, checkpoint_manager
   )
   assert state.opt_state == {}, "non null opt_state in checkpoint"

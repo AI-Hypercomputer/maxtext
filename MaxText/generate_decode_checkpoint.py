@@ -51,7 +51,7 @@ def _read_checkpoint(config, checkpoint_manager, is_training):
       model, tx, config, rng, mesh, checkpoint_manager
       )
   else:
-    state, state_mesh_notations = max_utils.setup_decode_state(
+    state, state_mesh_notations, _ = max_utils.setup_decode_state(
       model, config, rng, mesh, checkpoint_manager
       )
   num_params = max_utils.calculate_num_params_from_pytree(state.params)
