@@ -318,8 +318,14 @@ def train_loop(config, state=None):
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
+  jax.config.update('jax_cpu_enable_gloo_collectives', True)
+  print(os.environ.get("JAX_COORDINATOR_ADDRESS"))
+  print(os.environ.get("JAX_PROCESS_ID"))
+  print(os.environ.get("JAX_PROCESS_COUNT"))
+  jax.distributed.initialize(coordinator_address=os.environ.get("JAX_COORDINATOR_ADDRESS"), process_id=int(os.environ.get("JAX_PROCESS_ID")), num_processes=int(os.environ.get("JAX_PROCESS_COUNT")))
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  #max_utils.jax_init()
   pyconfig.initialize(argv)
   print(f"Found {jax.device_count()} devices.")
   config = pyconfig.config
