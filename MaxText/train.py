@@ -196,7 +196,7 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
                          enable_dropout=config.enable_dropout if is_train else False,
                          rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
     
-    one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
+    one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size, dtype=jnp.float32)
     # add
     logits = logits.astype(jnp.float32)
     if config.stable_cross_entropy_loss:
@@ -207,8 +207,8 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
     # Mask out paddings at the end of each example.
     padding_mask = data['targets_segmentation'] != 0
     xent = xent * padding_mask
-    cum_loss = jnp.sum(xent)
-    cum_weights = jnp.sum(padding_mask)
+    cum_loss = jnp.sum(xent).astype(jnp.float32)
+    cum_weights = jnp.sum(padding_mask).astype(jnp.float32)
     loss = (cum_loss / (cum_weights + 1e-6)).astype(jnp.float32)
     aux = {
       'intermediate_outputs': intermediate_outputs,
@@ -415,7 +415,7 @@ def train_loop(config, state=None):
     valid_loss = 0
     valid_cum_loss = 0
     valid_cum_weights = 0
-    if step % eval_interval == 0:
+    if step % eval_interval == 0 or step == start_step:
       eval_data_iterator = multihost_dataloading.get_batch_sharded_data_pipeline(eval_ds, mesh)
       i = 0
       count = 0
