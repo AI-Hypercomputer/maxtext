@@ -20,7 +20,7 @@ from flax import linen as nn
 import jax
 from jax import lax
 import jax.numpy as jnp
-from maxtext.layers import initializers
+from layers import initializers
 
 Config = Any
 Array = jnp.ndarray
@@ -128,7 +128,7 @@ class LLaMARotaryEmbedding(nn.Module):
   def __call__(
       self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
       inputs: jax.Array,
-      position: Optional[jax.Array] = None,
+      position: jax.Array,
   ) -> jax.Array:
     """Generates a jax.Array of sinusoids with different frequencies.
 
@@ -144,6 +144,7 @@ class LLaMARotaryEmbedding(nn.Module):
       a jax.Array of shape [B, S, N, H] which includes the inputs together with
       the rotary position embedding incorporated in it.
     """
+    assert position is not None
     if len(inputs.shape) != 4:
       raise ValueError(
           'Input is assumed to be a rank 4 tensor of shape'
@@ -160,9 +161,6 @@ class LLaMARotaryEmbedding(nn.Module):
         self.min_timescale
         * (self.max_timescale / self.min_timescale) ** fraction
     )
-    if position is None:
-      seq_length = inputs.shape[1]
-      position = jnp.arange(seq_length, dtype=jnp.float32)[jnp.newaxis, :]
     position = position[:, :, jnp.newaxis, jnp.newaxis]
     timescale = timescale[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
     sinusoid_inp = position / timescale

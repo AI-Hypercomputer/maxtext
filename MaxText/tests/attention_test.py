@@ -17,6 +17,8 @@
 import sys
 import unittest
 
+import common_types
+
 from flax.core import freeze
 import jax
 import jax.numpy as jnp
@@ -30,10 +32,7 @@ from layers import attentions
 from layers import embeddings
 
 Mesh = jax.sharding.Mesh
-FlashMultiHeadDotProductAttention = attentions.FlashMultiHeadDotProductAttention
-MultiHeadDotProductAttention = attentions.MultiHeadDotProductAttention
-MultiQueryDotProductAttention = attentions.MultiQueryDotProductAttention
-GroupedQueryDotProductAttention = attentions.GroupedQueryDotProductAttention
+Attention = attentions.Attention
 LLaMARotaryEmbedding = embeddings.LLaMARotaryEmbedding
 
 
@@ -49,149 +48,259 @@ class AttentionTest(unittest.TestCase):
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
 
     self.global_batch_size = self.cfg.global_batch_size_to_train_on
-    self.num_heads = self.cfg.base_num_heads
+    self.num_kv_heads = self.cfg.num_kv_heads
+    self.num_query_heads = self.cfg.num_query_heads
     self.max_target_length = self.cfg.max_target_length
     self.head_dim = self.cfg.head_dim
     self.embed_dim = self.cfg.base_emb_dim
     self.dtype = self.cfg.dtype
 
-    self.mha_attention = MultiHeadDotProductAttention(
-        num_heads=self.num_heads,
+    self._attention_as_mha_generic = Attention(
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
         head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
         mesh=self.mesh,
+        attention_kernel = "dot_product",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
         name='self_attention',
     )
-    self.variable = self.mha_attention.init(
+
+    self._attention_as_mha_generic_variable = self._attention_as_mha_generic.init(
         {'params': self.rng, 'aqt': self.rng},
         jnp.ones(
             (self.global_batch_size, self.max_target_length, self.embed_dim)),
         jnp.ones(
             (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        'mha',
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length)),
     )
 
-  def get_decoder_mask(self, dtype):
-    a = jnp.stack([
-        jnp.tri(self.max_target_length, dtype=dtype)[jnp.newaxis, :]
-        for _ in range(self.global_batch_size)
-    ])
-    return a
-
   def get_data(self, dtype):
-    lnx = jax.random.uniform(
+    lnx = jax.random.normal(
         self.rng,
         shape=(self.global_batch_size, self.max_target_length, self.embed_dim),
         dtype=dtype,
     )
-    decoder_segment_ids = jnp.ones(
-        shape=(self.global_batch_size, self.max_target_length), dtype=np.int32
+
+    decoder_segment_ids = jax.random.randint(self.rng, (self.global_batch_size, self.max_target_length), 0, 4)
+    decoder_positions = jax.random.randint(self.rng, (self.global_batch_size, self.max_target_length), 0, self.max_target_length)
+
+    return lnx, decoder_segment_ids, decoder_positions
+
+  def get_structured_data(self, dtype):
+    lnx = jax.random.normal(
+        self.rng,
+        shape=(self.global_batch_size, self.max_target_length, self.embed_dim),
+        dtype=dtype,
     )
 
-    def batch_positions():
-      return [
+    decoder_positions = jnp.stack([
           jnp.arange(self.max_target_length, dtype=jnp.int32)
           for _ in range(self.global_batch_size)
-      ]
+    ])
 
-    if self.global_batch_size > 1:
-      decoder_positions = jnp.stack(batch_positions())
+    decoder_segment_ids = jax.numpy.zeros((self.global_batch_size, self.max_target_length))\
+                          + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
 
-    decoder_mask = self.get_decoder_mask(dtype)
-    return lnx, decoder_mask, decoder_segment_ids, decoder_positions
+    return lnx, decoder_segment_ids, decoder_positions
+  
+  @pytest.mark.tpu
+  def test_autoregression(self):
+    prefill_length = 16
+    decode_total_length = 64
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(
+        self.dtype)
+    
+    mha_full = self._attention_as_mha_generic.apply(
+        self._attention_as_mha_generic_variable,
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_TRAIN,
+        rngs={'aqt': self.rng},
+    )
+    
+    lnx_prefill = lnx[:, 0:prefill_length, :]
+    decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
+    decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
+    
+    mha_prefill, output_cache = self._attention_as_mha_generic.apply(
+        self._attention_as_mha_generic_variable,
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_PREFILL,
+        rngs={'aqt': self.rng},
+        mutable=["cache"]
+    )
+
+    self.assertTrue(
+        jax.numpy.allclose(
+            mha_prefill, mha_full[:,:prefill_length,:], rtol=1e-02, atol=1e-02, equal_nan=False
+        )
+    )
+
+    for idx in range(prefill_length, decode_total_length):
+      lnx_idx = lnx[:, idx:idx+1, :]
+      decoder_positions_idx = decoder_positions[:, idx:idx+1]
+      self._attention_as_mha_generic_variable.update(output_cache)
+      mha_idx, output_cache = self._attention_as_mha_generic.apply(
+        self._attention_as_mha_generic_variable,
+        lnx_idx,
+        lnx_idx,
+        inputs_positions=decoder_positions_idx,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+        rngs={'aqt': self.rng},
+        mutable=["cache"]
+      )
+
+      mha_full_this_idx = mha_full[:,idx:idx+1,:]
+      self.assertTrue(
+        mha_full_this_idx.shape == mha_idx.shape
+      )
+      self.assertTrue(
+        jax.numpy.allclose(
+            mha_full_this_idx, mha_idx, rtol=1e-02, atol=1e-02, equal_nan=False
+        )
+      )
 
   @pytest.mark.tpu
   def test_attention(self):
     """Test equalvant between MHA and Flash MHA."""
 
-    flash_attention = FlashMultiHeadDotProductAttention(
-        num_heads=self.num_heads,
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(
+        self.dtype)
+
+    mha_generic_output = self._attention_as_mha_generic.apply(
+        self._attention_as_mha_generic_variable,
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_positions,
+        inputs_positions=decoder_segment_ids,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_TRAIN,
+        rngs={'aqt': self.rng},
+    )
+
+    attention_as_mha_flash = Attention(
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
         head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
         mesh=self.mesh,
+        attention_kernel = "flash",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
         name='self_attention',
-        max_target_length=self.max_target_length
     )
 
-    lnx, decoder_mask, decoder_segment_ids, decoder_positions = self.get_data(
-        self.dtype)
-    bias = None
-    mha_output = self.mha_attention.apply(
-        self.variable,
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        mask=decoder_mask,
-        bias=bias,
-        deterministic=True,
-        decode=False,
-        rngs={'aqt': self.rng},
+    attention_as_mha_flash_variable = attention_as_mha_flash.init(
+        {'params': self.rng, 'aqt': self.rng},
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length)),
     )
-    flash_output = flash_attention.apply(
-        self.variable,
+
+    mha_generic_flash_output = attention_as_mha_flash.apply(
+        attention_as_mha_flash_variable,
         lnx,
         lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        mask=decoder_mask,
-        bias=bias,
+        decoder_segment_ids=decoder_positions,
+        inputs_positions=decoder_segment_ids,
         deterministic=True,
-        decode=False,
+        model_mode=common_types.MODEL_MODE_TRAIN,
         rngs={'aqt': self.rng},
     )
 
     self.assertTrue(
         jax.numpy.allclose(
-            flash_output, mha_output, rtol=1e-01, atol=1e-01, equal_nan=False
+            mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False
         )
     )
 
-  def test_groupedquery_attention(self):
-    """Test GQA is equivalent to MHA."""
-    gqa_attention = GroupedQueryDotProductAttention(
-        num_heads=self.num_heads,
-        num_kv_heads=self.num_heads,
+
+  @pytest.mark.tpu
+  def test_multiquery_attention(self):
+    """Test equalvant between MHA and Flash MHA."""
+    attention_as_mqa = Attention(
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=1,
         head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
         mesh=self.mesh,
+        attention_kernel = "dot_product",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
-        name='gqa'
+        name='self_attention',
     )
 
-    lnx, _, decoder_segment_ids, decoder_positions = self.get_data(
+    attention_as_mqa_variable = attention_as_mqa.init(
+        {'params': self.rng, 'aqt': self.rng},
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length)),
+    )
+
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(
         self.dtype)
-    bias = None
-    mha_output = self.mha_attention.apply(
-        self.variable,
+
+    mqa_generic_output = attention_as_mqa.apply(
+        attention_as_mqa_variable,
         lnx,
         lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        mask=None,
-        bias=bias,
+        decoder_segment_ids=decoder_positions,
+        inputs_positions=decoder_segment_ids,
         deterministic=True,
-        decode=False,
+        model_mode=common_types.MODEL_MODE_TRAIN,
         rngs={'aqt': self.rng},
     )
-    gqa_output = gqa_attention.apply(
-        self.variable,
+
+    attention_as_mha_generic_variable = self._attention_as_mha_generic.init(
+        {'params': self.rng, 'aqt': self.rng},
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length)),
+    )
+
+    new_key_kernel = jax.numpy.repeat(attention_as_mqa_variable['params']['key']['kernel'].value, self.num_kv_heads, axis=1)
+    attention_as_mha_generic_variable['params']['key']['kernel'] = attention_as_mha_generic_variable['params']['key']['kernel'].replace(value = new_key_kernel)
+    new_value_kernel = jax.numpy.repeat(attention_as_mqa_variable['params']['value']['kernel'].value, self.num_kv_heads, axis=1)
+    attention_as_mha_generic_variable['params']['value']['kernel'] = attention_as_mha_generic_variable['params']['value']['kernel'].replace(value = new_value_kernel)
+    new_out_kernel = attention_as_mqa_variable['params']['out']['kernel'].value
+    attention_as_mha_generic_variable['params']['out']['kernel'] = attention_as_mha_generic_variable['params']['out']['kernel'].replace(value = new_out_kernel)
+    new_query_kernel = attention_as_mqa_variable['params']['query']['kernel'].value
+    attention_as_mha_generic_variable['params']['query']['kernel'] = attention_as_mha_generic_variable['params']['query']['kernel'].replace(value = new_query_kernel)
+
+    mha_generic = self._attention_as_mha_generic.apply(
+        attention_as_mha_generic_variable,
         lnx,
         lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        mask=None,
-        bias=bias,
+        decoder_segment_ids=decoder_positions,
+        inputs_positions=decoder_segment_ids,
         deterministic=True,
-        decode=False,
+        model_mode=common_types.MODEL_MODE_TRAIN,
         rngs={'aqt': self.rng},
     )
 
     self.assertTrue(
         jax.numpy.allclose(
-            gqa_output, mha_output, rtol=1e-01, atol=1e-01, equal_nan=False
+            mqa_generic_output, mha_generic, rtol=1e-06, atol=1e-06, equal_nan=False
         )
     )
 

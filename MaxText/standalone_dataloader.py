@@ -42,19 +42,18 @@ def data_load_loop(config, state=None):
   example_batch = None
 
   start = datetime.datetime.now()
-  last_step_completion = datetime.datetime.now()
-
   start_step = get_first_step(state)
 
   # Actual data loading steps
   for step in np.arange(start_step, config.steps):
     example_batch = load_next_batch(data_iterator, example_batch, config)
-    new_time = datetime.datetime.now()
-    print("Step ", step, " finished in ", new_time - last_step_completion)
-    last_step_completion = new_time
+    jax.block_until_ready(example_batch)
+    if step==0:
+      new_time = datetime.datetime.now()
+      print("First step completed in ", new_time-start," seconds")
 
   end = datetime.datetime.now()
-  print("Batches loaded in ", end-start ," seconds, on host ", jax.process_index())
+  print(config.steps," batches loaded in ", end-start ," seconds, on host ", jax.process_index())
   return state
 
 
@@ -62,13 +61,13 @@ def main(argv: Sequence[str]) -> None:
   jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
   os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-  print(f"Found {jax.device_count()} devices.")
-  print(f"Found {jax.process_count()} processes.")
-  print(f"Found {jax.devices()} devices.")
-  cc.initialize_cache(os.path.expanduser("~/jax_cache"))
   pyconfig.initialize(argv)
   config = pyconfig.config
   validate_train_config(config)
+  cc.initialize_cache(os.path.expanduser(config.jax_cache_dir))
+  print(f"Found {jax.device_count()} devices.")
+  print(f"Found {jax.process_count()} processes.")
+  print(f"Found {jax.devices()} devices.")
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   data_load_loop(config)
 

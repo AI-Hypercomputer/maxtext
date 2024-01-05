@@ -231,7 +231,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       global_mesh,
       shuffle=config.enable_data_shuffling,
       pack_examples=False,
-      max_length=config.max_eval_target_length,
+      max_length=config.max_target_length,
       shift=False,
       data_shuffle_seed = data_shuffle_seed,)
 
@@ -241,7 +241,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       global_mesh,
       shuffle=config.enable_data_shuffling,
       pack_examples=False,
-      max_length=config.max_predict_length,
+      max_length=config.max_target_length,
       shift=False,
       drop_remainder=False,
       data_shuffle_seed = data_shuffle_seed,)
