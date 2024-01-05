@@ -89,7 +89,7 @@ base_args = [
     f'max_trainable_pe_max_seq_len={MLPerf_GPT3_175B["max_trainable_pe_max_seq_len"]}',
     'per_device_batch_size=0.25',
     'ici_fsdp_parallelism=-1',
-    'ici_tensor_parallelism=4',
+    'ici_tensor_parallelism=8',
     'attention=mha',
     'steps=5', 'run_name=convergence_test', 'base_output_directory=gs://lizhiyu-multipods/lizhiyu/colab',
     'dtype=float32',
