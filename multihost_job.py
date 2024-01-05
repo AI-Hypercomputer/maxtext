@@ -222,10 +222,7 @@ def install_ops_script_str(run_name, log_name):
   fi
   sudo chmod 777 /etc/google-cloud-ops-agent/config.yaml
   if ! grep -q '/{run_name}/{log_name}' /etc/google-cloud-ops-agent/config.yaml; then
-    echo 'Matt not found'
     sudo echo \\"{create_ops_config_str(run_name, log_name)}\\" >> /etc/google-cloud-ops-agent/config.yaml
-  else
-    echo 'Matt already exists'
   fi
   sudo service google-cloud-ops-agent restart
 """
@@ -327,7 +324,6 @@ def main(raw_args=None) -> None:
   log_name = "main_command_log_slice_${SLICE_ID}_worker_${WORKER_ID}"
   zip_gcs_path = os.path.join(bucket_path, zip_name)
   write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file, args)
-  print(f"writing startup_script to {startup_script_file}")
 
   print("Running CQR command...")
   captured_output = run_create_resources(startup_script_file, args)
