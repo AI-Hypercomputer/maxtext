@@ -41,6 +41,7 @@ import argparse
 import sys
 from collections import namedtuple
 import subprocess
+import socket
 import time
 from datetime import datetime
 import portpicker
@@ -230,6 +231,14 @@ def execute_main_command(main_command, slices, local_log_dir, zip_name, coordina
   worker_list = []
   os.makedirs(local_log_dir, exist_ok=True)
 
+  """
+  slice:[0, 1, 2, 3]
+  worker slice 0: [0, 1, 2, 3] - process nums = [0, 1, 2, 3]
+  worker slice 1: [0, 1, 2, 3] + 1 - process nums = [1, 2, 3, 4]
+  worker slice 2: [0, 1, 2, 3] + 1
+  process num = slice num + worker num? 
+  """
+  process_id = 0
   for slice_num, cur_slice  in enumerate(slices):
     for worker_num in range(cur_slice.num_workers):
       output_filename = os.path.join(local_log_dir, f"output_slice_{cur_slice.slice_num:04d}_worker_{worker_num:04d}.txt")
@@ -240,7 +249,8 @@ def execute_main_command(main_command, slices, local_log_dir, zip_name, coordina
       unzip_command = f"tar xzf {zip_name}"
       write_kill_script_command = f"echo '{kill_existing_processes_str()}' > {kill_script_name}"
       kill_existing_command = f"bash {kill_script_name} {cur_slice.version}"
-      export_coordinator_vars_command = f"export JAX_COORDINATOR_ADDRESS={coordinator_address}; export JAX_PROCESS_ID={slice_num}; export JAX_PROCESS_COUNT={len(slices)}"
+      export_coordinator_vars_command = f"export JAX_COORDINATOR_ADDRESS={coordinator_address}; export JAX_PROCESS_ID={process_id}; export JAX_PROCESS_COUNT={cur_slice.num_workers*len(slices)}"
+      process_id += 1
 
       if args.USE_EXISTING_FOLDER is False:
         remote_command_list = [mkdir_command , mv_zip_command , cd_command , unzip_command ,
