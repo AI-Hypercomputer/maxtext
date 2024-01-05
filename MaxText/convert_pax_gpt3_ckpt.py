@@ -25,6 +25,7 @@ import functools
 from paxml import trainer_lib
 from paxml.tasks.lm.params.c4 import C4SpmdGpt3AdamOrgHP
 from praxis import py_utils
+import optax
 
 NestedMap = py_utils.NestedMap
 
@@ -123,7 +124,15 @@ def main(args: Sequence[str]):
 
     model = Transformer(config=cfg, mesh=mesh)
     learning_rate_schedule = max_utils.create_learning_rate_schedule(cfg)
-    tx = maxtext_utils.get_optimizer(cfg, learning_rate_schedule)
+    # tx = maxtext_utils.get_optimizer(cfg, learning_rate_schedule)
+    tx_src = optax.adamw(
+        learning_rate_schedule,
+        b1=cfg.adam_b1,
+        b2=cfg.adam_b2,
+        eps=cfg.adam_eps,
+        eps_root=cfg.adam_eps_root,
+        weight_decay=cfg.adam_weight_decay,
+    )
 
     checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
         cfg.checkpoint_dir,
