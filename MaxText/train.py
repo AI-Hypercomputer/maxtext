@@ -97,7 +97,6 @@ def get_first_step(state):
 
 def load_next_batch(train_iter, example_batch, config, mesh):
   """Loads the next batch. Can keep reusing the same batch for performance reasons """
-
   if config.reuse_example_batch and example_batch is not None:
     return example_batch
   else:
@@ -105,7 +104,8 @@ def load_next_batch(train_iter, example_batch, config, mesh):
       return train_iter()
     elif config.dataset_type == 'c4-array_record':
       return get_next_batch_sharded(train_iter, mesh)
-
+    else:
+      raise ValueError('Unknow dataset_type, must be c4, c4-array_record or synthetic')
 
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   """Records scalar metrics to be written to tensorboard"""
