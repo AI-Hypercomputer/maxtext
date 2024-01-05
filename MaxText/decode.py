@@ -119,7 +119,7 @@ def compute_prefill(config, model, state, rng, sp_tokenizer, mesh, state_mesh_sh
   """Compute the necessary prefill state."""
 
   replicated_sharding = jax.sharding.NamedSharding(mesh, P(None))
-  tokenized_prompt = [config.prompt] * (int(config.per_device_batch_size) * jax.device_count())
+  tokenized_prompt = [config.prompt] * int(config.per_device_batch_size * jax.device_count())
 
   # Encode the demo prompt -- to measure performance we encode it multiple times.
   tokenized_prompts, prompt_decoder_positions, prompt_decoder_segment_ids  = encode_strings(tokenized_prompt,\
