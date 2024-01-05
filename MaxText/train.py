@@ -355,6 +355,34 @@ def train_loop(config, state=None):
   running_gcs_metrics = [] if config.gcs_metrics else None
 
   first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
+
+  valid_loss = 0
+  valid_cum_loss = 0
+  valid_cum_weights = 0
+  eval_data_iterator = multihost_dataloading.get_batch_sharded_data_pipeline(eval_ds, mesh)
+  i = 0
+  count = 0
+  while True:
+    batch = eval_data_iterator()
+    if not batch:
+      break
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      _, metrics, _ = p_eval_step(
+        state, batch, nextrng
+      )
+    batch_valid_loss = float(metrics['scalar']['evaluation/loss'])
+    batch_valid_cum_loss = float(metrics['scalar']['evaluation/cum_loss'])
+    batch_valid_cum_weights = float(metrics['scalar']['evaluation/cum_weights'])
+    valid_loss += batch_valid_loss
+    valid_cum_loss += batch_valid_loss * batch_valid_cum_weights
+    valid_cum_weights += batch_valid_cum_weights
+    count += 1
+    i += 1
+
+  mean_valid_loss = valid_loss / count
+  weighted_mean_valid_loss = valid_cum_loss / (valid_cum_weights + 1e-8)
+  max_logging.log(f"average loss at step {start_step}: mean={mean_valid_loss}, weighted_mean={weighted_mean_valid_loss}, total_weights={valid_cum_weights}")
+
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
@@ -387,7 +415,7 @@ def train_loop(config, state=None):
     valid_loss = 0
     valid_cum_loss = 0
     valid_cum_weights = 0
-    if step % eval_interval == 0 or step == start_step:
+    if step % eval_interval == 0:
       eval_data_iterator = multihost_dataloading.get_batch_sharded_data_pipeline(eval_ds, mesh)
       i = 0
       count = 0
