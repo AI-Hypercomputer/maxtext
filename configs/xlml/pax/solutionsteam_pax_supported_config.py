@@ -53,6 +53,7 @@ def get_setup_cmds(
             "set -x; set -e; gsutil cp"
             f" gs://pax-on-cloud-tpu-project/wheels/{build_date}/praxis*.whl ."
         ),
+        "pip install --upgrade pip",
         "pip install praxis*.whl",
         "pip install paxml*.whl",
         "sudo pip uninstall --yes jax jaxlib libtpu-nightly",
