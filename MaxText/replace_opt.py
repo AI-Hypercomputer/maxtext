@@ -106,7 +106,7 @@ def main(args: Sequence[str]):
     state_dist, state_mesh_annotations_dist = max_utils.setup_training_state(model, tx, cfg, init_rng, mesh, checkpoint_manager_dist)
 
     checkpoint_manager_src = checkpointing.create_orbax_checkpoint_manager(
-        'gs://lizhiyu-multipods/lizhiyu/colab/convergence_test/checkpoints',
+        'gs://lizhiyu-multipods/lizhiyu/colab_adam/convergence_test/checkpoints',
         cfg.enable_checkpointing,
         cfg.async_checkpointing,
         cfg.save_period,
