@@ -106,7 +106,7 @@ def main(args: Sequence[str]):
     state_dist, state_mesh_annotations_dist = max_utils.setup_training_state(model, tx, cfg, init_rng, mesh, checkpoint_manager_dist)
 
     checkpoint_manager_src = checkpointing.create_orbax_checkpoint_manager(
-        'gs://lizhiyu-multipods/lizhiyu/colab/convergence_test_0/',
+        'gs://lizhiyu-multipods/lizhiyu/colab/convergence_test_0/checkpoints',
         cfg.enable_checkpointing,
         cfg.async_checkpointing,
         cfg.save_period,
@@ -143,7 +143,6 @@ def main(args: Sequence[str]):
         if transform_fn is not None:
             arr = transform_fn(arr)
 
-        global PEAK_CPU_MEMORY
         PEAK_CPU_MEMORY = max(PEAK_CPU_MEMORY, Process().memory_info().rss)
         assert value.shape == arr.shape, f"{key_path}, {value.shape}, {arr.shape}"
         shape = value.shape
