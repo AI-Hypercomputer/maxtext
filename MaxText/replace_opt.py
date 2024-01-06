@@ -143,7 +143,6 @@ def main(args: Sequence[str]):
         if transform_fn is not None:
             arr = transform_fn(arr)
 
-        PEAK_CPU_MEMORY = max(PEAK_CPU_MEMORY, Process().memory_info().rss)
         assert value.shape == arr.shape, f"{key_path}, {value.shape}, {arr.shape}"
         shape = value.shape
         sharding = value.sharding
