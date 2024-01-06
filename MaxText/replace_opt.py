@@ -61,7 +61,7 @@ base_args = [
     'ici_fsdp_parallelism=-1',
     'ici_tensor_parallelism=4',
     'attention=mha',
-    'steps=5', 'run_name=convergence_test', 'base_output_directory=gs://lizhiyu-multipods/lizhiyu/colab_adamw',
+    'steps=5', 'run_name=convergence_test', 'base_output_directory=gs://lizhiyu-multipods/lizhiyu/colab_adam',
     'dtype=float32',
     'save_period=1000',
     'async_checkpointing=false',
@@ -106,7 +106,7 @@ def main(args: Sequence[str]):
     state_dist, state_mesh_annotations_dist = max_utils.setup_training_state(model, tx, cfg, init_rng, mesh, checkpoint_manager_dist)
 
     checkpoint_manager_src = checkpointing.create_orbax_checkpoint_manager(
-        'gs://lizhiyu-multipods/lizhiyu/colab_adam/convergence_test/checkpoints',
+        'gs://lizhiyu-multipods/lizhiyu/colab/convergence_test_0',
         cfg.enable_checkpointing,
         cfg.async_checkpointing,
         cfg.save_period,
