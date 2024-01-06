@@ -106,7 +106,7 @@ def main(args: Sequence[str]):
     state_dist, state_mesh_annotations_dist = max_utils.setup_training_state(model, tx, cfg, init_rng, mesh, checkpoint_manager_dist)
 
     checkpoint_manager_src = checkpointing.create_orbax_checkpoint_manager(
-        'gs://lizhiyu-multipods/lizhiyu/colab/convergence_test_0/checkpoints',
+        'gs://lizhiyu-multipods/lizhiyu/colab_adamw/convergence_test_0/checkpoints',
         cfg.enable_checkpointing,
         cfg.async_checkpointing,
         cfg.save_period,
@@ -120,48 +120,6 @@ def main(args: Sequence[str]):
         weight_decay=cfg.adam_weight_decay,
     )
     state_src, state_mesh_annotations_src = max_utils.setup_training_state(model, tx_src, cfg, init_rng, mesh, checkpoint_manager_src)
-
-    MAPS = {
-        ".opt_state[0].mu['decoder']['decoder']['self_attention']['key']['bias']": (f"opt_states_0.p#{cfg.base_num_decoder_layers}#i-1_2.m.params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.b", lambda x: np.moveaxis(x[:,1], 0, cfg.param_scan_axis)),
-        ".opt_state[0].mu['decoder']['decoder']['self_attention']['value']['bias']": (f"opt_states_0.p#{cfg.base_num_decoder_layers}#i-1_2.m.params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.b", lambda x: np.moveaxis(x[:,2], 0, cfg.param_scan_axis)),
-    }
-
-    def map_fn(key_path, value, prefix='gpt3_spmd1x64x24_tpuv4-3072_v84_20221101/checkpoints/checkpoint_00004000'):
-        key_path_str = jax.tree_util.keystr(key_path)
-        if key_path_str not in MAPS:
-            return value
-        file_path, transform_fn = MAPS[key_path_str]
-        full_path = os.path.join(prefix, file_path)
-        spec = {'driver': 'zarr', 'metadata_key': '.zarray', 'kvstore': {}}
-        spec['kvstore'] = {
-            'bucket': 'mlperf-llm-public2',
-            'driver': 'gcs',
-            'path': full_path,
-        }
-
-        arr = ts.open(ts.Spec(spec), open=True).result().read().result()
-        if transform_fn is not None:
-            arr = transform_fn(arr)
-
-        assert value.shape == arr.shape, f"{key_path}, {value.shape}, {arr.shape}"
-        shape = value.shape
-        sharding = value.sharding
-        result = jax.make_array_from_single_device_arrays(
-            shape, 
-            sharding, 
-            [jax.device_put(np.array(arr[index]), d)
-                for d, index in sharding.addressable_devices_indices_map(shape).items()],
-            )
-
-        arr = None
-        del arr
-        gc.collect()
-        max_logging.log(f"{key_path_str} finished")
-        return result
-
-    state_src = jax.tree_util.tree_map_with_path(map_fn, state_src)
-    max_logging.log("converted state finished")
-
     state_dist = state_dist.replace(
         step=state_src.step,
         params=state_src.params,
