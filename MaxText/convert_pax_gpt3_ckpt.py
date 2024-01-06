@@ -91,7 +91,7 @@ base_args = [
     'ici_fsdp_parallelism=-1',
     'ici_tensor_parallelism=8',
     'attention=mha',
-    'steps=5', 'run_name=convergence_test', 'base_output_directory=gs://lizhiyu-multipods/lizhiyu/colab',
+    'steps=5', 'run_name=convergence_test', 'base_output_directory=gs://lizhiyu-multipods/lizhiyu/colab_adam',
     'dtype=float32',
     'save_period=1000',
     'async_checkpointing=false',
