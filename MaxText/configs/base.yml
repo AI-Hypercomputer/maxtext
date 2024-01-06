@@ -75,7 +75,7 @@ base_output_directory: ""
 jax_cache_dir: "~/jax_cache"
 
 # Parallelism
-mesh_axes: ['data', 'fsdp', 'sequence', 'tensor']
+mesh_axes: ['data', 'fsdp', 'sequence', 'tensor', 'autoregressive']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp']],
                       ['activation_heads', ['tensor','sequence']],
@@ -84,12 +84,17 @@ logical_axis_rules: [
                       ['activation_mlp', 'tensor'],
                       ['activation_kv', 'tensor'],
                       ['activation_vocab', ['tensor', 'sequence']],
-                      ['mlp', 'tensor'],
-                      ['vocab', 'tensor'],
+                      ['mlp', ['tensor','autoregressive']],
+                      ['vocab', ['tensor', 'autoregressive']],
                       ['embed', ['fsdp', 'sequence']],
-                      ['heads', 'tensor'],
+                      ['heads', ['tensor', 'autoregressive']],
+                      ['kv', []],
+                      ['cache_batch', []],
+                      ['cache_heads', ['autoregressive']],
+                      ['cache_kv', []],
+                      ['cache_sequence', []],
                     ]
-data_sharding: [['data', 'fsdp', 'sequence', 'tensor']]
+data_sharding: [['data', 'fsdp', 'sequence', 'tensor', 'autoregressive']]
 
 # One axis for each parallelism type may hold a placeholder (-1)
 # value to auto-shard based on available slices and devices.
@@ -97,13 +102,14 @@ data_sharding: [['data', 'fsdp', 'sequence', 'tensor']]
 # and product of the ICI axes should equal number of devices per slice.
 dcn_data_parallelism: -1  # recommended DCN axis to be auto-sharded
 dcn_fsdp_parallelism: 1
-dcn_sequence_parallelism: 1
-dcn_tensor_parallelism: 1
+dcn_sequence_parallelism: 1  # never recommended
+dcn_tensor_parallelism: 1 # never recommeneded
+dcn_autoregressive_parallelism: 1 # never recommended
 ici_data_parallelism: 1
-ici_fsdp_parallelism: -1  # recommended ICI axis to be auto-sharded
+ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
 ici_sequence_parallelism: 1
 ici_tensor_parallelism: 1
-
+ici_autoregressive_parallelism: 1
 
 # Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
