@@ -53,7 +53,7 @@ class RMSNorm(nn.Module):
     )
 
     scale = jnp.asarray(scale, self.dtype)
-    output = y * scale
+    output = y * (scale + 1)
 
     if self.use_bias:
       bias = self.param(

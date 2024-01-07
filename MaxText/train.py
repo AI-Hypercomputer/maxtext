@@ -281,6 +281,10 @@ def train_loop(config, state=None):
     key_path_str = jax.tree_util.keystr(key_path)
     if key_path_str in  (".step", ".opt_state[0].count", ".opt_state[1].count", "opt_state.count"):
       return config.overwrite_ckpt_step
+    elif key_path_str in (".params['decoder']['decoder']['pre_self_attention_norm']['scale']",  ".params['decoder']['decoder']['mlp']['mlp_layer_norm']['scale']", ".params['decoder']['decoder_norm']['scale']"):
+      max_logging.log(f"replaced {key_path}")
+      with jax.spmd_mode('allow_all'):
+        return value - 1.
     else:
       return value
 
