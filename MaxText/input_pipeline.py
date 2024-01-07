@@ -361,13 +361,14 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
   eval_ds = sequence_packing.pack_dataset(eval_ds, config.max_target_length)
 
   eos_id = 1
+  pad_id = 0
 
   def map_fn(x):
       x["inputs"] = x["targets"]
       x["inputs_position"] = x["targets_position"]
       x["inputs_segmentation"] = x["targets_segmentation"]
       x["targets"] = _shift_left_and_pad(x["targets"], eos_id)
-      x["targets_segmentation"] *= tf.cast(x["targets"] != eos_id, x["targets_position"].dtype)
+      x["targets_segmentation"] *= tf.cast(x["targets"] != eos_id, x["targets_position"].dtype) * tf.cast(x["targets"] != pad_id, x["targets_position"].dtype)
       return x
   
   train_ds = train_ds.map(map_fn, num_parallel_calls=AUTOTUNE)
