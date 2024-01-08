@@ -202,6 +202,8 @@ stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds
 
 # Use iota operator in Embed
 use_iota_embed: False
+# use positional embedding
+use_positional_embedding: False
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
