@@ -144,7 +144,10 @@ def main(argv: Sequence[str]) -> None:
     donate_argnums,
     nn_partitioning.axis_rules(config.logical_axis_rules)
   )
+  print(compiled)
   print("Jitting and compilation complete!", flush=True)
+  print(f"Cost analysis {compiled.cost_analysis()}")
+
 
   # Serialize and save the compiled object
   if config.compiled_trainstep_file != '':
