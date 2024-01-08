@@ -41,7 +41,6 @@ import argparse
 import sys
 from collections import namedtuple
 import subprocess
-import socket
 import time
 from datetime import datetime
 import portpicker
@@ -238,13 +237,6 @@ def execute_main_command(main_command, slices, local_log_dir, zip_name, coordina
   worker_list = []
   os.makedirs(local_log_dir, exist_ok=True)
 
-  """
-  slice:[0, 1, 2, 3]
-  worker slice 0: [0, 1, 2, 3] - process nums = [0, 1, 2, 3]
-  worker slice 1: [0, 1, 2, 3] + 1 - process nums = [1, 2, 3, 4]
-  worker slice 2: [0, 1, 2, 3] + 1
-  process num = slice num + worker num? 
-  """
   process_id = 0
   for slice_num, cur_slice  in enumerate(slices):
     for worker_num in range(cur_slice.num_workers):
