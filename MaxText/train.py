@@ -273,7 +273,8 @@ def setup_train_loop(config):
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(model, tx, data_iterator, config, init_rng, mesh, checkpoint_manager)
+  state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(model, tx, data_iterator, config,
+                                                                                init_rng, mesh, checkpoint_manager)
 
   return ( writer, checkpoint_manager, nextrng, state_mesh_annotations, model,
           mesh, learning_rate_schedule, data_iterator, state)
@@ -363,7 +364,9 @@ def train_loop(config, state=None):
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
-      if config.dataset_type == "c4-array_record" and checkpoint_manager.save(step, {'default':state,'iter':data_iterator}):
+      if config.dataset_type == "c4-array_record" and checkpoint_manager.save(step,
+                                                                              {'default':state,
+                                                                               'iter':data_iterator}):
         max_logging.log(f"saved a checkpoint (contains data iterator) at step {step}")
       elif checkpoint_manager.save(step, state):
         max_logging.log(f"saved a checkpoint at step {step}")
