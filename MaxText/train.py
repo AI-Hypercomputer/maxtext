@@ -218,16 +218,24 @@ def train_step(model, config, state, data, dropout_rng):
 
   return new_state, metrics, rng2
 
-def train_loop(config, state=None):
-  """Main Training loop.
+def setup_train_loop(config):
+  """ Set up prerequisites for the training loop -
+      checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
+      Set up data iterator and tokenizer, initialize the model.
 
   Args:
-    config:
-    state:
-    ckpt_path:
+    config
 
   Returns:
-
+    writer: Summary writer for tensorboard
+    checkpoint_manager: Orbax checkpointer
+    nextrng: key used in train_step for dropout
+    state_mesh_annotations: the mesh annotations for the train state 
+    model:
+    mesh: 
+    learning_rate_schedule:
+    data_iterator: 
+    state: the initialized train state
   """
   writer = SummaryWriter(config.tensorboard_dir)
 
@@ -265,9 +273,23 @@ def train_loop(config, state=None):
 
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(
-    model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
-  )
+  state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(model, tx, data_iterator, config, init_rng, mesh, checkpoint_manager)
+
+  return ( writer, checkpoint_manager, nextrng, state_mesh_annotations, model,
+          mesh, learning_rate_schedule, data_iterator, state)
+
+
+def train_loop(config, state=None):
+  """Main Training loop.
+  Args:
+    config:
+    state:
+    ckpt_path:
+  Returns:
+  """
+  ( writer, checkpoint_manager, nextrng, state_mesh_annotations, model,
+  mesh, learning_rate_schedule, data_iterator, state) = setup_train_loop(config)
+
   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
     train_step,
     mesh,
