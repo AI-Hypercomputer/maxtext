@@ -114,6 +114,7 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
         return type_handlers.SingleSliceArrayRestoreArgs(
           sharding=jax.sharding.NamedSharding(mesh, pspec),
           single_slice_sharding=jax.sharding.NamedSharding(slice_mesh, pspec),
+          replica_axis_name='data',
           global_shape=data.shape,
           dtype=data.dtype,
           )
