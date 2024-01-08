@@ -202,7 +202,7 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
     if config.stable_cross_entropy_loss:
       xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
     else:
-      xent = -jnp.sum(nn.log_softmax(logits) * one_hot_targets, axis=-1)
+      xent = -jnp.sum(jax.nn.log_softmax(logits) * one_hot_targets, axis=-1, dtype=jnp.float32)
     xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
     # Mask out paddings at the end of each example.
     padding_mask = data['targets_segmentation'] != 0
@@ -279,10 +279,11 @@ def train_loop(config, state=None):
   # hack overwrite state
   def map_fn(key_path, value):
     key_path_str = jax.tree_util.keystr(key_path)
-    if key_path_str in  (".step", ".opt_state[0].count", ".opt_state[1].count", "opt_state.count"):
+    if key_path_str in  (".step", ".opt_state[0].count", ".opt_state[1].count", "opt_state.count", ".opt_state[<flat index 0>]"):
+      max_logging.log(f"overwrite step: {key_path_str}")
       return config.overwrite_ckpt_step
     elif key_path_str in (".params['decoder']['decoder']['pre_self_attention_norm']['scale']",  ".params['decoder']['decoder']['mlp']['mlp_layer_norm']['scale']", ".params['decoder']['decoder_norm']['scale']"):
-      max_logging.log(f"replaced {key_path}")
+      max_logging.log(f"replaced {key_path_str}")
       with jax.spmd_mode('allow_all'):
         return value - 1.
     else:

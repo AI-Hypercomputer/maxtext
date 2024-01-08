@@ -356,7 +356,7 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
 
   shuffle_buffer_size = 10000
   data_shuffle_seed = 0
-  train_ds = train_ds.shuffle(shuffle_buffer_size, seed = 4321)
+  train_ds = train_ds.shuffle(shuffle_buffer_size, seed = 1375)
   train_ds = sequence_packing.pack_dataset(train_ds, config.max_target_length)
   eval_ds = sequence_packing.pack_dataset(eval_ds, config.max_target_length)
 

@@ -154,7 +154,7 @@ def main(args: Sequence[str]):
         ".params['position_embedder']['embedding']": ("mdl_vars.params.lm.position_emb.emb_var", None),
         ".params['decoder']['decoder']['pre_self_attention_norm']['scale']": ("mdl_vars.params.lm.transformer.repeat.sub.x_layers_0.layer_norm.scale", lambda x: np.moveaxis(x, 0, cfg.param_scan_axis) + 1.),
         ".params['decoder']['decoder']['pre_self_attention_norm']['bias']": ("mdl_vars.params.lm.transformer.repeat.sub.x_layers_0.layer_norm.bias", lambda x: np.moveaxis(x, 0, cfg.param_scan_axis)),
-        ".params['decoder']['decoder']['self_attention']['query']['kernel']": ("mdl_vars.params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.w",lambda x: np.moveaxis(x[:,0], 0, cfg.param_scan_axis)),
+        ".params['decoder']['decoder']['self_attention']['query']['kernel']": ("mdl_vars.params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.w", lambda x: np.moveaxis(x[:,0], 0, cfg.param_scan_axis)),
         ".params['decoder']['decoder']['self_attention']['query']['bias']": ("mdl_vars.params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.b", lambda x: np.moveaxis(x[:,0], 0, cfg.param_scan_axis)),
         ".params['decoder']['decoder']['self_attention']['key']['kernel']": ("mdl_vars.params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.w", lambda x: np.moveaxis(x[:,1], 0, cfg.param_scan_axis)),
         ".params['decoder']['decoder']['self_attention']['key']['bias']": ("mdl_vars.params.lm.transformer.repeat.sub.x_layers_0.self_attention.combined_qkv.b", lambda x: np.moveaxis(x[:,1], 0, cfg.param_scan_axis)),
