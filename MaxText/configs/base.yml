@@ -21,8 +21,8 @@ run_name: ""
 model_name: "default"
 
 # At most one of load_parameters_path and load_from_other_directory should be set.
-#   * load_parameters_path is used when you only care about the parameters, not the optimizer state or
-#      the step count
+#   * load_parameters_path is used when you only care about the parameters, not the optimizer state, 
+#      data iterator or the step count, load_data_iterator_from_checkpoint will be treated as False
 #   * load_from_other_directory is used when you want to use a saved checkpoint from a different directory
 #        (corresponding to a different run_name), and save new metrics and checkpoints to a new directory.
 #   * If neither is provided then the most recent checkpoint saved under the current run_name is loaded if
@@ -70,7 +70,6 @@ record_internal_nn_metrics: 0
 # Output directory
 # Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
 base_output_directory: ""
-
 # Jax cache directory
 jax_cache_dir: "~/jax_cache"
 
@@ -119,7 +118,12 @@ eval_split: 'validation'  # for c4 data
 per_device_batch_size: 12.0
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
-dataset_type: c4 # must be c4, c4-array_record or synthetic
+# dataset_type must be c4, c4-array_record or synthetic
+# when dataset_type is c4-array_record, new training checkpoints will contain data iterator
+# Note that setting dataset_type to c4-array_record does not auto-enable loading data iterator from ckpt
+# Set load_data_iterator_from_checkpoint to True to enable loading data iterator from ckpt
+dataset_type: c4
+load_data_iterator_from_checkpoint: False
 grain_worker_count: 4
 pack_examples: True
 
@@ -160,6 +164,7 @@ profiler_steps: 5
 enable_checkpointing: True
 async_checkpointing: True
 checkpoint_period: 10_000
+load_data_iterator_from_checkpoint: False
 
 # When dropout is false the model is a deterministic function of the 
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)

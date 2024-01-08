@@ -299,7 +299,7 @@ def setup_initial_state(model, iterator, tx, config, rng, mesh, checkpoint_manag
                                                 config.load_from_other_directory,
                                                 config.load_from_other_directory_step,
                                                 unboxed_abstract_state,
-                                                config.dataset_type,
+                                                config.load_data_iterator_from_checkpoint,
                                                 iterator,
                                                 mesh,
                                                 state_mesh_annotations)
@@ -308,10 +308,10 @@ def setup_initial_state(model, iterator, tx, config, rng, mesh, checkpoint_manag
         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
 
     if isinstance(state, (dict)):
-      if 'iter' in state and config.dataset_type=="c4-array_record":
+      if 'iter' in state and config.load_data_iterator_from_checkpoint:
         iterator = state['iter']
-      if 'state' in state:
-        state = state['state']
+      if 'default' in state:
+        state = state['default']
 
     if not state:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)

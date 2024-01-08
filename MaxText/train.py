@@ -230,13 +230,27 @@ def train_loop(config, state=None):
 
   """
   writer = SummaryWriter(config.tensorboard_dir)
-  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      config.checkpoint_dir,
-      config.enable_checkpointing,
-      config.async_checkpointing,
-      config.checkpoint_period,
-      config.dataset_type,
-  )
+
+  if config.load_from_other_directory != "":
+    checkpoint_load_path = config.load_from_other_directory
+  else:
+    checkpoint_load_path = config.checkpoint_dir
+
+  if config.load_data_iterator_from_checkpoint:
+    checkpoint_manager = checkpointing.create_orbax_checkpoint_manager_pygrain(
+        checkpoint_load_path,
+        config.enable_checkpointing,
+        config.async_checkpointing,
+        config.checkpoint_period,
+    )
+  else:
+    checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+        checkpoint_load_path,
+        config.enable_checkpointing,
+        config.async_checkpointing,
+        config.checkpoint_period,
+    )
+
   # Initial PRNG Keys
   init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
 
@@ -291,6 +305,26 @@ def train_loop(config, state=None):
   if config.enable_profiler and first_profiling_step >= config.steps:
     raise ValueError("Profiling requested but initial profiling step set past training final step")
   last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1, first_profiling_step, config.steps - 1)
+
+  # create a new checkpoint_manager for saving when:
+  # 1. if load_data_iterator_from_checkpoint is False but want to save new data iterator
+  # 2. load_from_other_directory is set
+  if config.dataset_type == "c4-array_record" and (checkpoint_manager.metadata()['iter'] is False
+                                                   or config.load_from_other_directory!=""):
+    checkpoint_manager = checkpointing.create_orbax_checkpoint_manager_pygrain(
+      config.checkpoint_dir,
+      config.enable_checkpointing,
+      config.async_checkpointing,
+      config.checkpoint_period
+    )
+  elif config.load_from_other_directory!="":
+    checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+      config.checkpoint_dir,
+      config.enable_checkpointing,
+      config.async_checkpointing,
+      config.checkpoint_period
+    )
+
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
@@ -307,8 +341,8 @@ def train_loop(config, state=None):
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
-      if config.dataset_type == "c4-array_record" and checkpoint_manager.save(step, {'state':state,'iter':data_iterator}):
-        max_logging.log(f"saved a checkpoint (containing state and iter) at step {step}")
+      if config.dataset_type == "c4-array_record" and checkpoint_manager.save(step, {'default':state,'iter':data_iterator}):
+        max_logging.log(f"saved a checkpoint (contains data iterator) at step {step}")
       elif checkpoint_manager.save(step, state):
         max_logging.log(f"saved a checkpoint at step {step}")
       # Upon preemption, exit when and only when all ongoing saves are complete.

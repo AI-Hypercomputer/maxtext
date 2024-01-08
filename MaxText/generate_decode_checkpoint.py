@@ -47,8 +47,8 @@ def _read_checkpoint(config, checkpoint_manager, is_training):
   if is_training:
     learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
     tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
-    state, state_mesh_notations = max_utils.setup_training_state(
-      model, tx, config, rng, mesh, checkpoint_manager
+    state, state_mesh_notations, _ = max_utils.setup_training_state(
+      model, None, tx, config, rng, mesh, checkpoint_manager
       )
   else:
     state, state_mesh_notations, _ = max_utils.setup_decode_state(

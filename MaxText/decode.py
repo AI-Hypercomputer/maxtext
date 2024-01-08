@@ -26,7 +26,7 @@ import numpy as np
 
 import pyconfig
 import max_utils
-from input_pipeline import create_data_iterator_with_tokenizer
+from tokenizer import load_tokenizer
 from layers import models
 
 import checkpointing
@@ -183,7 +183,9 @@ def decode_loop(config, state=None):
 
   # Model and Optimizer definition
   model = Transformer(config, mesh = mesh)
-  _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
+  vocab_path=os.path.join(config.assets_path, config.vocab_relative_path)
+  sp_tokenizer = load_tokenizer(vocab_path=vocab_path,
+                                vocab_size=config.vocab_size)
   state, state_mesh_annotations, _ = max_utils.setup_decode_state(
     model, config, rng, mesh, checkpoint_manager
   )
