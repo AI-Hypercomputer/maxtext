@@ -101,7 +101,14 @@ Slice = namedtuple('Slice', ['name', 'slice_num', 'num_workers', 'version'])
 
 def ip_address_from_machine_name(slice):
   slice_name = slice.name
-  return '10.130.0.74'
+  command = [
+      "gcloud", "compute", "tpus", "describe", slice_name,
+      "--flatten=networkEndpoints[]", "--format=csv[no-heading](networkEndpoints.ipAddress)",
+      f"--project={args.PROJECT}", f"--zone={args.ZONE}"
+  ]
+  completed_command = subprocess.run(command, capture_output=True, check=True)
+  ip_address = completed_command.stdout.decode().strip().split('\n')[0]
+  return ip_address
 
 def get_slices():
   """ Returns a list of slices matching TPU_PREFIX """
