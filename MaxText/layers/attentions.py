@@ -365,6 +365,22 @@ class AttentionOp(nn.Module):
     """
     return kv_shape[:-3] + tuple(kv_shape[i] for i in [-2, -1, -3])
   
+  def _get_cache(self, cache_logical_shape, dtype):
+    kv_cache_layout = ('cache_batch', 'cache_heads', 'cache_kv', 'cache_sequence')
+    cached_key = self.variable('cache', 'cached_key',
+                               nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
+                               self.cached_kv_shape(cache_logical_shape), dtype)
+    cached_value = self.variable('cache', 'cached_value',
+                                 nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
+                                 self.cached_kv_shape(cache_logical_shape), dtype)
+    cached_segment_id = self.variable('cache', 'cache_segment_id',
+                  nn.with_logical_partitioning(jnp.zeros, ('cache_batch', 'cache_sequence')),
+                  (cache_logical_shape[0], self.max_target_length), jnp.int32)
+    cache_index = self.variable('cache', 'cache_index',
+                          nn.with_logical_partitioning(jnp.zeros, ()),
+                          (1,), jnp.int32)
+    return cached_key, cached_value, cached_segment_id, cache_index
+
   def kv_cache_prefill(self,
                         key: Array,
                         value: Array,
@@ -382,22 +398,14 @@ class AttentionOp(nn.Module):
         tuple of key, value, decoder_segment_id.
 
       """
+      assert key.dtype == value.dtype, "Key and Value Dtypes should match."
       cache_logical_shape = (key.shape[0], self.max_target_length, key.shape[2], key.shape[3])
       _, sequence, _, _ = key.shape
 
-      cached_key = self.variable('cache', 'cached_key', jnp.zeros,
-                                self.cached_kv_shape(cache_logical_shape), key.dtype)
+      cached_key, cached_value, cached_segment_id, cache_index = self._get_cache(cache_logical_shape, key.dtype)
       cached_key.value *= 0 # we might be prefilling something that already exists!
-      cached_value = self.variable('cache', 'cached_value', jnp.zeros,
-                                  self.cached_kv_shape(cache_logical_shape), value.dtype)
       cached_value.value *= 0 # we might be prefilling something that already exists!
-      cached_segment_id = self.variable('cache', 'cache_segment_id',
-                          jnp.zeros,
-                          (key.shape[0], self.max_target_length), jnp.int32)
       cached_segment_id.value *= 0
-      cache_index = self.variable('cache', 'cache_index',
-                                  lambda: jnp.array(0, jnp.int32))
-
       cache_index.value = jnp.array(sequence)
 
       key_shaped_for_cache = self.move_kvlen_axis(key)
@@ -433,15 +441,8 @@ class AttentionOp(nn.Module):
       is_initialized = self.has_variable('cache', 'cached_key')
       if not is_initialized:
         raise ValueError("Error, we can't do autoregression if we haven't seeded the KV Cache.")
-      cached_key = self.variable('cache', 'cached_key', jnp.zeros,
-                          self.cached_kv_shape(cache_logical_shape), key.dtype)
-      cached_value = self.variable('cache', 'cached_value', jnp.zeros,
-                                  self.cached_kv_shape(cache_logical_shape), value.dtype)
-      cache_index = self.variable('cache', 'cache_index',
-                                  lambda: jnp.array(0, jnp.int32))
-      cached_segment_id = self.variable('cache', 'cache_segment_id',
-                          jnp.zeros,
-                          (key.shape[0], self.max_target_length), jnp.int32)
+
+      cached_key, cached_value, cached_segment_id, cache_index = self._get_cache(cache_logical_shape, key.dtype)
       _, _, _, length = cached_key.value.shape
 
       # Create a OHE of the current index. NOTE: the index is increased below.
