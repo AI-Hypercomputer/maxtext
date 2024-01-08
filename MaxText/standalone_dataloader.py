@@ -17,7 +17,6 @@
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
 import jax
-from jax import random
 import os
 
 import max_logging
@@ -37,8 +36,7 @@ def data_load_loop(config, state=None):
   """Main data loader loop.
     Loads batches of data for each training step.
   """
-  init_rng = random.PRNGKey(config.init_weights_seed)
-  _, _, _, _, _, _, data_iterator, state = setup_train_loop(config, init_rng)
+  _, _, _, _, _, _, _, data_iterator, state = setup_train_loop(config)
 
   example_batch = None
 
