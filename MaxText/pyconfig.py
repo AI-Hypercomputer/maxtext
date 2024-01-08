@@ -130,8 +130,8 @@ class _HyperParameters():
     raw_keys['overwrite_ckpt_step'] = math.ceil(4000.0 * 1536 / global_batch_size)
 
     # hack
-    raw_keys['gradient_clipping_threshold'] = 1.
-    raw_keys['adam_b1'] = 0.9999
+    raw_keys['gradient_clipping_threshold'] = 0.
+    raw_keys['adam_b1'] = 0.9
     raw_keys['adam_b2'] = 0.95
     raw_keys['adam_eps'] = 1.e-8
     raw_keys['adam_weight_decay'] = 0.1
