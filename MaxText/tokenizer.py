@@ -32,7 +32,7 @@ Features = Dict[str, tf.Tensor]
 
 def _load_sentencepiece_tokenizer(model_path: str,
                                   add_bos: bool = False,
-                                  add_eos: bool = True,
+                                  add_eos: bool = False,
                                   reverse: bool = False):
   """Load a tf-text SentencePiece tokenizer from given model filepath."""
   max_logging.log(f"Model path: {model_path}")
