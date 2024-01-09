@@ -81,7 +81,8 @@ class DecoderLayer(nn.Module):
       dtype=cfg.dtype,
       dropout_rate=cfg.dropout_rate,
       name='self_attention',
-      use_int8=cfg.int8_training)
+      use_int8=cfg.int8_training,
+      config=cfg)
 
 
     attention_lnx = attention_layer(

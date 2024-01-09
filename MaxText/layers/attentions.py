@@ -553,6 +553,7 @@ class Attention(nn.Module):
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
   float32_logits: bool = False  # computes logits in float32 for stability.
   use_int8: bool = False
+  config: Config = None
   
 
   query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
@@ -578,10 +579,11 @@ class Attention(nn.Module):
       kernel_axes=('embed', 'heads', 'kv'),
       dtype=self.dtype,
       name='query',
-      use_int8=self.use_int8)(inputs_q)
+      use_int8=self.use_int8,
+      local_aqt_shards=self.config.local_aqt_shards_query_proj)(inputs_q)
     return query_proj
 
-  def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:
+  def kv_projection(self, inputs_kv: Array, proj_name: str, local_aqt_shards: int) -> Array:
     """Projection for Key and Value.
 
     Args:
@@ -605,7 +607,8 @@ class Attention(nn.Module):
         kernel_axes=('embed', 'heads', 'kv'),
         dtype=self.dtype,
         name=proj_name,
-        use_int8=self.use_int8)(inputs_kv)
+        use_int8=self.use_int8,
+        local_aqt_shards=local_aqt_shards)(inputs_kv)
     return kv_proj
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
@@ -616,7 +619,8 @@ class Attention(nn.Module):
       kernel_axes=('heads', 'kv', 'embed'),
       dtype=self.dtype,
       name='out',
-      use_int8=self.use_int8)(out)
+      use_int8=self.use_int8,
+      local_aqt_shards=self.config.local_aqt_shards_attention_out_proj)(out)
     return out_proj
 
   def key_rotary(self, key: Array, inputs_positions: Array):
@@ -659,8 +663,8 @@ class Attention(nn.Module):
     """
     # apply projection.
     query = self.query_projection(inputs_q)
-    key = self.kv_projection(inputs_kv, proj_name='key')
-    value = self.kv_projection(inputs_kv, proj_name='value')
+    key = self.kv_projection(inputs_kv, proj_name='key', local_aqt_shards=self.config.local_aqt_shards_key_proj)
+    value = self.kv_projection(inputs_kv, proj_name='value', local_aqt_shards=self.config.local_aqt_shards_value_proj)
 
     # apply ROPE
     query = LLaMARotaryEmbedding(
