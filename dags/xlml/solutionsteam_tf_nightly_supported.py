@@ -20,63 +20,65 @@ from configs import composer_env
 from configs.vm_resource import TpuVersion, Project, Zone, RuntimeVersion, V5_NETWORKS, V5E_SUBNETWORKS, V5P_SUBNETWORKS
 from configs.xlml.tensorflow import solutionsteam_tf_nightly_supported_config as tf_config
 from configs.xlml.tensorflow import common
+from airflow.operators.dummy import DummyOperator
 
 
 # Run once a day at 6 am UTC (10 pm PST)
 SCHEDULED_TIME = "0 6 * * *" if composer_env.is_prod_env() else None
 
 
-# TODO(ranran): remove concurrency param when we have enough v2-8 capacity for Keras
 with models.DAG(
     dag_id="tf_nightly_supported",
     schedule=SCHEDULED_TIME,
     tags=["solutions_team", "tf", "nightly", "supported", "xlml"],
     start_date=datetime.datetime(2023, 8, 16),
-    concurrency=6,
     catchup=False,
 ) as dag:
-  # Keras
-  tf_keras_v2_8 = [
-      tf_config.get_tf_keras_config(
-          tpu_version=TpuVersion.V2,
-          tpu_cores=8,
-          tpu_zone=Zone.US_CENTRAL1_C.value,
-          time_out_in_min=common.FEATURE_TIMEOUT.get(feature),
-          test_feature=feature,
-          test_name=name,
-      ).run()
-      for feature, name in common.FEATURE_NAME.items()
-  ]
+  # Keras - tests run in sequence order
+  tf_keras_v2_8 = [DummyOperator(task_id="tf_nightly_keras_v2-8")]
+  for feature, name in common.FEATURE_NAME.items():
+    test = tf_config.get_tf_keras_config(
+        tpu_version=TpuVersion.V2,
+        tpu_cores=8,
+        tpu_zone=Zone.US_CENTRAL1_C.value,
+        time_out_in_min=common.FEATURE_TIMEOUT.get(feature),
+        test_feature=feature,
+        test_name=name,
+    ).run()
+    tf_keras_v2_8[-1] >> test
+    tf_keras_v2_8.append(test)
 
-  tf_keras_v5e_4 = [
-      tf_config.get_tf_keras_config(
-          project_name=Project.TPU_PROD_ENV_AUTOMATED.value,
-          tpu_version=TpuVersion.V5E,
-          tpu_cores=4,
-          tpu_zone=Zone.US_EAST1_C.value,
-          time_out_in_min=common.FEATURE_TIMEOUT.get(feature),
-          test_feature=feature,
-          test_name=name,
-          network=V5_NETWORKS,
-          subnetwork=V5E_SUBNETWORKS,
-      ).run()
-      for feature, name in common.FEATURE_NAME.items()
-  ]
+  tf_keras_v5e_4 = [DummyOperator(task_id="tf_nightly_keras_v5litepod-4")]
+  for feature, name in common.FEATURE_NAME.items():
+    test = tf_config.get_tf_keras_config(
+        project_name=Project.TPU_PROD_ENV_AUTOMATED.value,
+        tpu_version=TpuVersion.V5E,
+        tpu_cores=4,
+        tpu_zone=Zone.US_EAST1_C.value,
+        time_out_in_min=common.FEATURE_TIMEOUT.get(feature),
+        test_feature=feature,
+        test_name=name,
+        network=V5_NETWORKS,
+        subnetwork=V5E_SUBNETWORKS,
+    ).run()
+    tf_keras_v5e_4[-1] >> test
+    tf_keras_v5e_4.append(test)
 
-  tf_keras_v5p_8 = [
-      tf_config.get_tf_keras_config(
-          project_name=Project.TPU_PROD_ENV_AUTOMATED.value,
-          tpu_version=TpuVersion.V5P,
-          tpu_cores=8,
-          tpu_zone=Zone.US_EAST5_A.value,
-          time_out_in_min=common.FEATURE_TIMEOUT.get(feature),
-          test_feature=feature,
-          test_name=name,
-          network=V5_NETWORKS,
-          subnetwork=V5P_SUBNETWORKS,
-      ).run()
-      for feature, name in common.FEATURE_NAME.items()
-  ]
+  tf_keras_v5p_8 = [DummyOperator(task_id="tf_nightly_keras_v5p-8")]
+  for feature, name in common.FEATURE_NAME.items():
+    test = tf_config.get_tf_keras_config(
+        project_name=Project.TPU_PROD_ENV_AUTOMATED.value,
+        tpu_version=TpuVersion.V5P,
+        tpu_cores=8,
+        tpu_zone=Zone.US_EAST5_A.value,
+        time_out_in_min=common.FEATURE_TIMEOUT.get(feature),
+        test_feature=feature,
+        test_name=name,
+        network=V5_NETWORKS,
+        subnetwork=V5P_SUBNETWORKS,
+    ).run()
+    tf_keras_v5p_8[-1] >> test
+    tf_keras_v5p_8.append(test)
 
   # ResNet
   tf_resnet_v2_8 = tf_config.get_tf_resnet_config(
