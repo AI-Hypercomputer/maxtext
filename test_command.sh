@@ -28,13 +28,14 @@ DATETIME=$(date +%Y-%m-%d-%H-%M-%S)
 RUN_NAME=${USER}-mxla-steptime-debug-${ACCELERATOR_TYPE}-${NODE_COUNT}slices-${DATETIME}
 python3 multihost_runner.py --TPU_PREFIX=$TPU_NAME \
 --COMMAND="bash setup.sh MODE=nightly; \
-LIBTPU_INIT_ARGS=\"xla_tpu_use_megascale_host_reduction=true\"
+megascale_crash_on_stale_unmatched_keys=true megascale_transport_type=grpc tpu_link_up_check_timeout=15s xla_tpu_use_megascale_host_reduction=true \
 XLA_FLAGS=\"--xla_dump_to=/tmp/xla_dump/\" \
 python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME \
 base_output_directory=gs://tonyjohnchen-mxla-debug/ dataset_path=gs://max-datasets-rogue \
+dataset_type=synthetic \
 per_device_batch_size=6 reuse_example_batch=1 \
-steps=50 enable_checkpointing=false enable_profiler=true profile_start_step=0 gcs_metrics=false \
-attention=mha int8_training=false;"
+global_parameter_scale=1 \
+steps=50 enable_checkpointing=false enable_profiler=true profile_start_step=0 gcs_metrics=false;"
 
 # DATETIME=$(date +%Y-%m-%d-%H-%M-%S)
 # RUN_NAME=${USER}-offload-collective-${ACCELERATOR_TYPE}-${NODE_COUNT}slices-${DATETIME}
