@@ -42,7 +42,6 @@ def int8_dot_general(aqt_rng: Optional[common_types.PRNGKey], local_aqt_shards=0
         drhs_accumulator_dtype = jnp.int32,
       )
   else:
-    print("\n\n\n Using local AQT! \n\n")
     aqt_config = config.config_v3(
       fwd_bits=8,
       dlhs_bits=8,
