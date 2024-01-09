@@ -8,16 +8,18 @@ import sys
 from etils import epath
 from etils import epath
 from jax import sharding
+from jax import numpy as jnp
 from orbax.checkpoint import pytree_checkpoint_handler
 from orbax.checkpoint import type_handlers
 from typing import cast
 
+N = 128
 pytree = {
-      'a': np.arange(32).reshape((4, 8)) * 1,
-      'b': np.arange(16).reshape((4, 4)) * 2,
+      'a': np.arange(N*8).reshape((N, 8)) * 1,
+      'b': np.arange(N*4).reshape((N, 4)) * 2,
       'c': {
-          'a': np.arange(32).reshape((4, 8)) * 3,
-          'e': np.arange(16).reshape((4, 4)) * 4,
+          'a': np.arange(N*8).reshape((N, 8)) * 3,
+          'e': np.arange(N*4).reshape((N, 4)) * 4,
       },
   }
 
@@ -111,14 +113,9 @@ def main(args):
   # restored = mngr.restore(mngr.latest_step())
   # print(restored)
 
-  empty_state =  jax.tree_util.tree_map(np.zeros_like, train_state)
   empty_state = jax.tree_util.tree_map(
-      create_sharded_array,
-      empty_state,
-      mesh_tree,
-      axes_tree,
-      is_leaf=is_leaf
-  )
+          lambda x: x, train_state, is_leaf=is_leaf
+      )
 
   if args.restore_method == 'singleslice':
     type_handlers.register_type_handler(jax.Array,
