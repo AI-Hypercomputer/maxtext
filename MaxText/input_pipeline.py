@@ -141,7 +141,9 @@ def preprocessing_pipeline(
     dataset = dataset.padded_batch(
         batch_size // jax.process_count(),
         padded_shapes={'inputs': max_length, 'targets': max_length},
-        padding_values={'inputs': 0, 'targets': 0},
+        # padding_values={'inputs': 0, 'targets': 0},
+        # drop_remainder=drop_remainder)
+        padding_values={'inputs': tf.constant(0, dtype=tf.int64), 'targets': tf.constant(0, dtype=tf.int64)},
         drop_remainder=drop_remainder)
 
   if prefetch_size:
@@ -181,6 +183,61 @@ def get_datasets(
   eval_ds = normalize_features(eval_ds)
 
   return train_ds, eval_ds
+
+def count_records_dataset(tfRecordDataset):
+  """Count the number of records in a TFRecordDataset."""
+  count = 0
+  for record in tfRecordDataset:
+      count += 1
+      break
+  return count
+
+def get_lg_datasets(
+  config: ml_collections.ConfigDict,
+  read_config = None,
+):
+  """Load and return dataset of batched examples for use during training."""
+  # Training dataset.
+  # lg_dataset_path = config.dataset_path
+  max_logging.log(f"Trying to read training data from path: {config.file_pattern_for_train_data}")
+  # train_ds = tf.data.TFRecordDataset.list_files(config.file_pattern_for_train_data) 
+  # train_ds = train_ds.map(tf.data.TFRecordDataset)
+  # train_ds = tf.data.TFRecordDataset(config.file_pattern_for_train_data)
+  train_ds = tf.data.TFRecordDataset(tf.data.Dataset.list_files(config.file_pattern_for_train_data))
+
+  def parse_example(example_proto, is_train):
+    max_seq_length = config.max_target_length if is_train else config.max_eval_target_length
+    output = [('text', tf.io.VarLenFeature(tf.int64))]
+    feature_description = dict(output)
+    parsed_example = tf.io.parse_single_example(example_proto, feature_description)
+    parsed_example["text"] = tf.sparse.to_dense(parsed_example["text"])  
+    return parsed_example 
+
+  max_logging.log(f"Training dataset has: {count_records_dataset(train_ds)} entries" )
+  parse_example_partial = functools.partial(parse_example, is_train=True)
+  train_ds = train_ds.map(parse_example_partial) 
+  # shard the dataset as soon as it is loaded
+  train_ds = train_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
+  train_ds = normalize_features(train_ds)
+
+  # Evaluation dataset.
+  if config.file_pattern_for_eval_data:
+    max_logging.log(f"Trying to read eval data from path: {config.file_pattern_for_eval_data}")
+    # eval_ds = tf.data.TFRecordDataset.list_files(config.file_pattern_for_eval_data) 
+    # eval_ds = eval_ds.map(tf.data.TFRecordDataset)
+    # eval_ds = tf.data.TFRecordDataset(config.file_pattern_for_eval_data)
+    eval_ds = tf.data.TFRecordDataset(tf.data.Dataset.list_files(config.file_pattern_for_eval_data))
+    max_logging.log(f"Eval dataset has: {count_records_dataset(eval_ds)} entries")
+    parse_example_partial = functools.partial(parse_example, is_train=False)
+    eval_ds = eval_ds.map(parse_example_partial)
+    eval_ds = eval_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
+    eval_ds = normalize_features(eval_ds)
+  else:
+    eval_ds = train_ds
+    max_logging.log(f"Reusing training dataset as eval dataset")
+
+  return train_ds, eval_ds
+
 
 def preprocess_dataset(config: ml_collections.ConfigDict,
                         global_mesh,
@@ -249,6 +306,77 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
   return train_iter, eval_iter, predict_iter, sp_tokenizer
 
 
+def preprocess_lg_dataset(config: ml_collections.ConfigDict,
+                        global_mesh,
+                        train_ds, eval_ds,
+                        vocab_path: Optional[str] = None,
+                        data_shuffle_seed = 0,):
+  """Pre-process the dataset and return iterators"""
+  
+  # Skipping tokenizer since the data in hand is already tokenized
+  # if vocab_path is None:
+  #   vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
+
+  # # Load tokenizer
+  # sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
+  #                                         vocab_size=config.vocab_size)
+
+  # # Tokenize data.
+  # train_ds = train_ds.map(
+  #     tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
+  # eval_ds = eval_ds.map(
+  #     tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
+
+  # Set global batch size.
+  global_batch_size_to_load = config.global_batch_size_to_load
+
+  if config.eval_per_device_batch_size > 0:
+    eval_batch_size = config.eval_per_device_batch_size * global_mesh.size
+  else:
+    eval_batch_size = global_batch_size_to_load
+
+  def filter_keys(record):
+    return {'inputs': record['inputs'], 'targets': record['targets']}
+  train_ds = train_ds.map(filter_keys,num_parallel_calls=tf.data.AUTOTUNE)
+  eval_ds = eval_ds.map(filter_keys,num_parallel_calls=tf.data.AUTOTUNE)
+
+  train_iter = preprocessing_pipeline(
+      train_ds,
+      global_batch_size_to_load,
+      global_mesh,
+      shuffle=config.enable_data_shuffling,
+      num_epochs=None,
+      pack_examples=True,
+      max_length=config.max_target_length,
+      shift=True,
+      data_sharding = config.data_sharding,
+      data_shuffle_seed = data_shuffle_seed,)
+
+  eval_iter = preprocessing_pipeline(
+      eval_ds,
+      eval_batch_size,
+      global_mesh,
+      shuffle=config.enable_data_shuffling,
+      pack_examples=False,
+      max_length=config.max_eval_target_length,
+      shift=False,
+      data_sharding = config.data_sharding,
+      data_shuffle_seed = data_shuffle_seed,)
+
+  predict_iter = preprocessing_pipeline(
+      eval_ds,
+      eval_batch_size,
+      global_mesh,
+      shuffle=config.enable_data_shuffling,
+      pack_examples=False,
+      max_length=config.max_predict_length,
+      shift=False,
+      drop_remainder=False,
+      data_sharding = config.data_sharding,
+      data_shuffle_seed = data_shuffle_seed,)
+
+  return train_iter, eval_iter, predict_iter#, sp_tokenizer
+
 def make_c4_train_iterator_and_tokenizer(config, mesh):
   """ Make train iterator and tokenizer for C4 dataset"""
   read_config = tfds.ReadConfig(
@@ -266,6 +394,27 @@ def make_c4_train_iterator_and_tokenizer(config, mesh):
     data_shuffle_seed = config.data_shuffle_seed,
   )
   return train_iter, sp_tokenizer
+
+
+def make_lg_train_iterator_and_tokenizer(config, mesh):
+  """ Make train iterator and tokenizer for lg dataset"""
+  read_config = tfds.ReadConfig(
+    shuffle_seed = config.data_shuffle_seed,
+  )
+  # train_ds, eval_ds = get_datasets(
+  train_ds, eval_ds = get_lg_datasets(
+    config=config,
+    read_config = read_config,
+  )
+  train_iter, _, _ = preprocess_lg_dataset(
+    config,
+    mesh,
+    train_ds, eval_ds,
+    vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
+    data_shuffle_seed = config.data_shuffle_seed,
+  )
+  return train_iter
+
 
 class SyntheticDataIterator():
   """Creates a synthetic data iterator for performance testing work"""
@@ -305,6 +454,8 @@ def create_data_iterator_with_tokenizer(config, mesh):
     return SyntheticDataIterator(config, mesh), None
   elif config.dataset_type == "c4":
     return make_c4_train_iterator_and_tokenizer(config, mesh)
+  elif config.dataset_type == "lg":
+    return make_lg_train_iterator_and_tokenizer(config, mesh)
   else:
     assert False, "dataset type not implemented"
 

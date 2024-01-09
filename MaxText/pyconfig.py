@@ -137,6 +137,8 @@ class _HyperParameters():
 
     raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = \
       calculate_global_batch_sizes(raw_keys)
+    
+    file_pattern_for_train_data = raw_keys['file_pattern_for_train_data']
 
     validate_attention_type(raw_keys['attention'])
 
