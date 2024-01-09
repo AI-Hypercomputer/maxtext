@@ -175,8 +175,7 @@ def train_step(model, config, state, data, dropout_rng):
 
   """
   # inputs, targets, segments, positions = apply_args
-  rng1, gen_aqt_rng = jax.random.split(dropout_rng)
-  aqt_rng, rng2 = jax.random.split(gen_aqt_rng)
+  rng1, aqt_rng = jax.random.split(dropout_rng)
 
   # decimate proportion of data when per_device_batch_size<1
   for k, v in data.items():
@@ -209,20 +208,20 @@ def train_step(model, config, state, data, dropout_rng):
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
-  return new_state, metrics, rng2
+  return new_state, metrics
 
-def setup_train_loop(config):
+def setup_train_loop(config, init_rng):
   """ Set up prerequisites for the training loop -
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
       Set up data iterator and tokenizer, initialize the model.
 
   Args:
     config
+    init_rng
 
   Returns:
     writer: Summary writer for tensorboard
     checkpoint_manager: Orbax checkpointer
-    nextrng: key used in train_step for dropout
     state_mesh_annotations: the mesh annotations for the train state 
     model:
     mesh: 
@@ -237,9 +236,6 @@ def setup_train_loop(config):
       config.async_checkpointing,
       config.checkpoint_period,
   )
-  # Initial PRNG Keys
-  init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
-
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
@@ -253,7 +249,7 @@ def setup_train_loop(config):
 
   state, state_mesh_annotations = max_utils.setup_training_state(model, tx, config, init_rng, mesh, checkpoint_manager)
 
-  return ( writer, checkpoint_manager, nextrng, state_mesh_annotations, model,
+  return ( writer, checkpoint_manager, state_mesh_annotations, model,
           mesh, learning_rate_schedule, data_iterator, state)
 
 
@@ -265,8 +261,9 @@ def train_loop(config, state=None):
     ckpt_path:
   Returns:
   """
-  ( writer, checkpoint_manager, nextrng, state_mesh_annotations, model,
-  mesh, learning_rate_schedule, data_iterator, state) = setup_train_loop(config)
+  init_rng = random.PRNGKey(config.init_weights_seed)
+  ( writer, checkpoint_manager, state_mesh_annotations, model,
+  mesh, learning_rate_schedule, data_iterator, state) = setup_train_loop(config, init_rng)
 
   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
     train_step,
@@ -305,13 +302,16 @@ def train_loop(config, state=None):
   if config.enable_profiler and first_profiling_step >= config.steps:
     raise ValueError("Profiling requested but initial profiling step set past training final step")
   last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1, first_profiling_step, config.steps - 1)
+
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
 
     example_batch = load_next_batch(data_iterator, example_batch, config)
+
+    nextrng = jax.random.fold_in(init_rng, step)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      state, metrics, nextrng = p_train_step(
+      state, metrics = p_train_step(
           state, example_batch, nextrng
       )
 
