@@ -19,6 +19,7 @@ run_name: ""
 # Types of models supported.
 # default model (palm like model with no overrides in config)
 model_name: "default"
+rms_norm_epsilon: 1.e-06
 
 # At most one of load_parameters_path and load_from_other_directory should be set.
 #   * load_parameters_path is used when you only care about the parameters, not the optimizer state or
@@ -145,9 +146,12 @@ learning_rate_schedule_steps: -1 # By default the length of the schedule is set 
 max_target_length: 2048 # Maximum sequence length
 max_prefill_predict_length: 64 # Maximum length for the prefill when doing autoregression
 eos_id: 2  # sentencepiece default
-prompt: "I love to " # Prompt for language model sampling.
+prompt: "I love to" # Prompt for language model sampling.
 load_from_prefill_dir: False # If true, decode.py doesn't "prefill" but just reads from directory
 prefill_cache_dir: "" # If set and load_from_prefill_dir, decode.py reads from directory. If set, decode.py writes to directory
+add_bos: False
+add_eos: True
+autoregressive_decode_assert: ""
 
 enable_profiler: False
 # Skip first n steps for profiling, to omit things like compilation and to give
