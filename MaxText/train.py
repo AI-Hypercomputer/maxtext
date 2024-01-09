@@ -291,7 +291,6 @@ def train_loop(config, state=None):
       static_argnums=static_argnums,
       donate_argnums=donate_argnums)
 
-  example_batch = None
   last_step_completion = datetime.datetime.now()
 
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
@@ -303,18 +302,19 @@ def train_loop(config, state=None):
     raise ValueError("Profiling requested but initial profiling step set past training final step")
   last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1, first_profiling_step, config.steps - 1)
 
+  nextrng = jax.random.fold_in(init_rng, start_step)
+  example_batch = load_next_batch(data_iterator, None, config)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
 
-    example_batch = load_next_batch(data_iterator, example_batch, config)
-
-    nextrng = jax.random.fold_in(init_rng, step)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics = p_train_step(
           state, example_batch, nextrng
       )
 
+    example_batch = load_next_batch(data_iterator, example_batch, config)
+    nextrng = jax.random.fold_in(init_rng, step+1)
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
     write_metrics(writer, metrics, step, config)
