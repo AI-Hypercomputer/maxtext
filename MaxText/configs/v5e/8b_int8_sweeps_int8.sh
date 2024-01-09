@@ -19,6 +19,13 @@ export PLATFORM="gce"
 export PER_DEVICE_BATCH_SIZE=4
 export GLOBAL_PARAMETER_SCALE=8
 export INT8_TRAINING=true
+# Shards: 0 will use ttf when int8 is true (bf16 when false), else ttt (setting to 1 is basicaly non-local)
+export local_aqt_shards_mlp1=0 
+export local_aqt_shards_mlp2=0
+export local_aqt_shards_query_proj=0
+export local_aqt_shards_key_proj=0
+export local_aqt_shards_value_proj=0
+export local_aqt_shards_attention_out_proj=0
 
 # Set environment variables
 for ARGUMENT in "$@"; do
