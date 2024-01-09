@@ -338,7 +338,7 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
   train_ds = train_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
   train_ds = rekey(train_ds, {'inputs': None, 'targets': 'text'})
 
-  # eval_ds = eval_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
+  eval_ds = eval_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
   eval_ds = rekey(eval_ds, {'inputs': None, 'targets': 'ids'})
   
   # sp_tokenizer = tokenizer.load_tokenizer(vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
@@ -356,7 +356,7 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
 
   shuffle_buffer_size = 10000
   data_shuffle_seed = 0
-  train_ds = train_ds.shuffle(shuffle_buffer_size, seed = 1375)
+  train_ds = train_ds.shuffle(shuffle_buffer_size, seed = 4321)
   train_ds = sequence_packing.pack_dataset(train_ds, config.max_target_length)
   eval_ds = sequence_packing.pack_dataset(eval_ds, config.max_target_length)
 
@@ -373,16 +373,13 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
   
   train_ds = train_ds.map(map_fn, num_parallel_calls=AUTOTUNE)
   eval_ds = eval_ds.map(map_fn, num_parallel_calls=AUTOTUNE)
-  batch_size = int(config.per_device_batch_size * mesh.size )
-  assert (
-        batch_size % mesh.size == 0
-    ), 'Batch size should be divisible number of global devices.'
+  train_batch_size = int(config.per_device_batch_size * mesh.size )
+  eval_batch_size = int(config.eval_per_device_batch_size * mesh.size) if config.eval_per_device_batch_size else train_batch_size
   
-  train_ds = train_ds.batch(batch_size // jax.process_count(), drop_remainder=True)
+  train_ds = train_ds.batch(train_batch_size // jax.process_count(), drop_remainder=True)
   # ensure array split in an equal division for each device
-  eval_ds = _pad_to_batch_size(eval_ds, batch_size)
-  eval_ds = eval_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
-  eval_ds = eval_ds.batch(batch_size // jax.process_count(), drop_remainder=False)
+  eval_ds = _pad_to_batch_size(eval_ds, eval_batch_size // jax.process_count())
+  eval_ds = eval_ds.batch(eval_batch_size // jax.process_count(), drop_remainder=False)
   
   # self.reset_for_eval=True: We are running eval over exactly one epoch.
   # We explicitly cache the entire epoch (in memory) to ensure that it is the
@@ -393,7 +390,7 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
   # `reshuffle_each_iteration=True`. In general, there is no guarantee that
   # the underlying eval dataset stays unchanged across different iterations
   # of epochs.
-  # eval_ds = eval_ds.cache()
+  eval_ds = eval_ds.cache()
   train_ds = train_ds.prefetch(AUTOTUNE)
   eval_ds = eval_ds.prefetch(AUTOTUNE)
 
