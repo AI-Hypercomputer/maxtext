@@ -67,6 +67,7 @@ class DecoderLayer(nn.Module):
     lnx = RMSNorm(
         dtype=cfg.dtype,
         name='pre_self_attention_norm',
+        epsilon=cfg.rms_norm_epsilon,
         kernel_axes=('embed',))(inputs)
     lnx = nn.with_logical_constraint(
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
@@ -145,6 +146,16 @@ class Decoder(nn.Module):
   shared_embedding: nn.Module
   mesh: Mesh
 
+  def get_decoder_layer(self):
+    if self.config.model_name == "default":
+      return DecoderLayer
+    elif self.config.model_name[0:6] == "llama2":
+      from layers import llama2
+      return llama2.LlamaDecoderLayer
+    else:
+      raise ValueError(f"Incorrect model name {self.config.model_name=}")
+
+
   @nn.compact
   def __call__(self,
                decoder_input_tokens,
@@ -164,7 +175,7 @@ class Decoder(nn.Module):
             y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
 
-    BlockLayer = DecoderLayer
+    BlockLayer = self.get_decoder_layer()
 
     if cfg.remat_policy != 'none':
       if cfg.remat_policy == 'minimal':
@@ -228,7 +239,7 @@ class Decoder(nn.Module):
             model_mode,
         )
 
-    y = RMSNorm(dtype=cfg.dtype, name='decoder_norm', kernel_axes=('embed',))(y)
+    y = RMSNorm(dtype=cfg.dtype, name='decoder_norm', epsilon=cfg.rms_norm_epsilon,kernel_axes=('embed',))(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
         y, deterministic=deterministic
     )
@@ -290,7 +301,7 @@ class Transformer(nn.Module):
       raise ValueError(
         f'During autoregressive decoding we assume the tokens are in the active sequence'
         f' which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}.')
-    
+
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,

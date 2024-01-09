@@ -70,13 +70,13 @@ def encode_strings(strs, max_len, tokenizer, mesh):
 
   for i, s in enumerate(strs):
     toks = tokenizer.tokenize(s).numpy()
-    assert toks.shape[0] < max_len, f"We aren't able to tokenize input {i}, it is too long"
-    prompt = toks[:-1] # Remove EOS token in prompt.
+    assert toks.shape[0] <= max_len, f"We aren't able to tokenize input {i}, it is too long"
+    prompt = toks
     start_index = max_len - prompt.shape[0]
     tokenized_batch[i, start_index:] = prompt
-    padded_start_index = start_index - 1
+    padded_start_index = start_index
     segment_ids[i, padded_start_index:] = common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
-    positions[i, padded_start_index:] = np.arange(len(prompt)+1)
+    positions[i, padded_start_index:] = np.arange(len(prompt))
   return jax.device_put(tokenized_batch, jax.sharding.NamedSharding(mesh, P())),\
          jax.device_put(positions, jax.sharding.NamedSharding(mesh, P())),\
          jax.device_put(segment_ids, jax.sharding.NamedSharding(mesh, P()))
@@ -173,6 +173,8 @@ def prefill_or_load(config, model, state, rng, sp_tokenizer, mesh, state_mesh_sh
 
 def decode_loop(config, state=None):
   """Decoding loop for the Transformer model."""
+  assert config.add_eos is False,\
+    "For decoding, we must set add_eos=False"
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir,
                                                                      config.enable_checkpointing,
                                                                      config.async_checkpointing,
@@ -220,8 +222,10 @@ def decode_loop(config, state=None):
                                 first_profiling_step, config.max_target_length - 1)
 
   outputs = []
+  #add the new_id which is the first generated token to outputs
+  outputs = [new_id]
 
-  for step in range(config.max_prefill_predict_length, config.max_target_length):
+  for step in range(config.max_prefill_predict_length, config.max_target_length-1):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
     new_position, new_cache, new_id = p_ar_predict_step(new_id, new_position, new_cache, state, rng)
@@ -232,11 +236,16 @@ def decode_loop(config, state=None):
 
   new_text, _ = decode_tokens([int(x[0,0]) for x in outputs], sp_tokenizer)
   max_logging.log(f"Completion: `{config.prompt}` -> `{new_text}`")
+  if config.autoregressive_decode_assert != "":
+    assert new_text==config.autoregressive_decode_assert, \
+    f"generated text mismatch {new_text=} {config.autoregressive_decode_assert=}"
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
   os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+
+
   decode_loop(pyconfig.config)
 
 if __name__ == "__main__":
