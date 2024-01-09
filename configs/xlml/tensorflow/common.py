@@ -17,6 +17,43 @@
 from typing import Tuple
 
 
+# Keras API
+AAA_CONNECTION = "aaa_connection"
+CUSTOM_LAYERS_MODEL = "custom_layers_model"
+CUSTOM_TRAINING_LOOP = "custom_training_loop"
+FEATURE_COLUMN = "feature_column"
+RNN = "rnn"
+UPSAMPLE = "upsample"
+SAVE_AND_LOAD_LOCAL_DRIVER = "save_and_load_io_device_local_drive"
+SAVE_AND_LOAD_FEATURE = "save_and_load.feature"
+TRAIN_AND_EVALUATE = "train_and_evaluate"
+TRANSFER_LEARNING = "transfer_learning"
+FEATURE_NAME = {
+    AAA_CONNECTION: "connection",
+    CUSTOM_LAYERS_MODEL: "custom_layers",
+    CUSTOM_TRAINING_LOOP: "ctl",
+    FEATURE_COLUMN: "feature_column",
+    RNN: "rnn",
+    UPSAMPLE: "upsample",
+    SAVE_AND_LOAD_LOCAL_DRIVER: "save_load_localhost",
+    SAVE_AND_LOAD_FEATURE: "save_and_load",
+    TRAIN_AND_EVALUATE: "train_and_evaluate",
+    TRANSFER_LEARNING: "transfer_learning",
+}
+FEATURE_TIMEOUT = {
+    AAA_CONNECTION: 60,
+    CUSTOM_LAYERS_MODEL: 60,
+    CUSTOM_TRAINING_LOOP: 60,
+    FEATURE_COLUMN: 120,
+    RNN: 60,
+    UPSAMPLE: 60,
+    SAVE_AND_LOAD_LOCAL_DRIVER: 120,
+    SAVE_AND_LOAD_FEATURE: 120,
+    TRAIN_AND_EVALUATE: 180,
+    TRANSFER_LEARNING: 60,
+}
+
+
 def set_up_pjrt_nightly() -> Tuple[str]:
   """Common set up for PJRT nightly tests."""
   return (

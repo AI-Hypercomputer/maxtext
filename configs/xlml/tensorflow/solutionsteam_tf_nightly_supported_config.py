@@ -31,6 +31,7 @@ def get_tf_keras_config(
     project_name: str = Project.CLOUD_ML_AUTO_SOLUTIONS.value,
     runtime_version: str = RuntimeVersion.TPU_VM_TF_2150_PJRT.value,
     is_pod: bool = False,
+    is_pjrt: bool = True,
     network: str = "default",
     subnetwork: str = "default",
 ) -> task.TpuQueuedResourceTask:
@@ -46,7 +47,7 @@ def get_tf_keras_config(
   # Add default_var to pass DAG check
   # TODO(ranran): replace Variable.get() to XCOM when it applies
   tpu_name = Variable.get(benchmark_id, default_var=None) if is_pod else "local"
-  env_variable = export_env_variable(is_pod)
+  env_variable = export_env_variable(is_pod, is_pjrt)
   skipped_tag = "--tags=-failspod" if is_pod else ""
   run_model_cmds = (
       "sudo chmod -R 777 /tmp/",
@@ -93,6 +94,7 @@ def get_tf_resnet_config(
     network: str = "default",
     subnetwork: str = "default",
     is_pod: bool = False,
+    is_pjrt: bool = True,
     imagenet_dir: str = gcs_bucket.IMAGENET_DIR,
     tfds_data_dir: str = gcs_bucket.TFDS_DATA_DIR,
     global_batch_size: int = 4096,
@@ -131,7 +133,7 @@ def get_tf_resnet_config(
   # Add default_var to pass DAG check
   # TODO(ranran): replace Variable.get() to XCOM when it applies
   tpu_name = Variable.get(benchmark_id, default_var=None) if is_pod else "local"
-  env_variable = export_env_variable(is_pod)
+  env_variable = export_env_variable(is_pod, is_pjrt)
   run_model_cmds = (
       "sudo chmod -R 777 /tmp/",
       (
@@ -168,10 +170,12 @@ def get_tf_resnet_config(
   )
 
 
-def export_env_variable(is_pod: bool) -> str:
+def export_env_variable(is_pod: bool, is_pjrt: bool) -> str:
   """Export environment variables for training if any."""
-  return (
-      "export TPU_LOAD_LIBRARY=0"
-      if is_pod
-      else "export NEXT_PLUGGABLE_DEVICE_USE_C_API=true && export TF_PLUGGABLE_DEVICE_LIBRARY_PATH=/lib/libtpu.so"
-  )
+  if is_pod:
+    return "export TPU_LOAD_LIBRARY=0"
+  elif is_pjrt:
+    return "export NEXT_PLUGGABLE_DEVICE_USE_C_API=true && export TF_PLUGGABLE_DEVICE_LIBRARY_PATH=/lib/libtpu.so"
+  else:
+    # dummy command
+    return "echo"

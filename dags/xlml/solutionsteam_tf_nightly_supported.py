@@ -19,6 +19,7 @@ from airflow import models
 from configs import composer_env
 from configs.vm_resource import TpuVersion, Project, Zone, RuntimeVersion, V5_NETWORKS, V5E_SUBNETWORKS, V5P_SUBNETWORKS
 from configs.xlml.tensorflow import solutionsteam_tf_nightly_supported_config as tf_config
+from configs.xlml.tensorflow import common
 
 
 # Run once a day at 6 am UTC (10 pm PST)
@@ -34,55 +35,17 @@ with models.DAG(
     concurrency=6,
     catchup=False,
 ) as dag:
-  # Keras API
-  AAA_CONNECTION = "aaa_connection"
-  CUSTOM_LAYERS_MODEL = "custom_layers_model"
-  CUSTOM_TRAINING_LOOP = "custom_training_loop"
-  FEATURE_COLUMN = "feature_column"
-  RNN = "rnn"
-  UPSAMPLE = "upsample"
-  SAVE_AND_LOAD_LOCAL_DRIVER = "save_and_load_io_device_local_drive"
-  SAVE_AND_LOAD_FEATURE = "save_and_load.feature"
-  TRAIN_AND_EVALUATE = "train_and_evaluate"
-  TRANSFER_LEARNING = "transfer_learning"
-
-  feature_name = {
-      AAA_CONNECTION: "connection",
-      CUSTOM_LAYERS_MODEL: "custom_layers",
-      CUSTOM_TRAINING_LOOP: "ctl",
-      FEATURE_COLUMN: "feature_column",
-      RNN: "rnn",
-      UPSAMPLE: "upsample",
-      SAVE_AND_LOAD_LOCAL_DRIVER: "save_load_localhost",
-      SAVE_AND_LOAD_FEATURE: "save_and_load",
-      TRAIN_AND_EVALUATE: "train_and_evaluate",
-      TRANSFER_LEARNING: "transfer_learning",
-  }
-
-  feature_timeout = {
-      AAA_CONNECTION: 60,
-      CUSTOM_LAYERS_MODEL: 60,
-      CUSTOM_TRAINING_LOOP: 60,
-      FEATURE_COLUMN: 120,
-      RNN: 60,
-      UPSAMPLE: 60,
-      SAVE_AND_LOAD_LOCAL_DRIVER: 120,
-      SAVE_AND_LOAD_FEATURE: 120,
-      TRAIN_AND_EVALUATE: 180,
-      TRANSFER_LEARNING: 60,
-  }
-
   # Keras
   tf_keras_v2_8 = [
       tf_config.get_tf_keras_config(
           tpu_version=TpuVersion.V2,
           tpu_cores=8,
           tpu_zone=Zone.US_CENTRAL1_C.value,
-          time_out_in_min=feature_timeout.get(feature),
+          time_out_in_min=common.FEATURE_TIMEOUT.get(feature),
           test_feature=feature,
           test_name=name,
       ).run()
-      for feature, name in feature_name.items()
+      for feature, name in common.FEATURE_NAME.items()
   ]
 
   tf_keras_v5e_4 = [
@@ -91,13 +54,13 @@ with models.DAG(
           tpu_version=TpuVersion.V5E,
           tpu_cores=4,
           tpu_zone=Zone.US_EAST1_C.value,
-          time_out_in_min=feature_timeout.get(feature),
+          time_out_in_min=common.FEATURE_TIMEOUT.get(feature),
           test_feature=feature,
           test_name=name,
           network=V5_NETWORKS,
           subnetwork=V5E_SUBNETWORKS,
       ).run()
-      for feature, name in feature_name.items()
+      for feature, name in common.FEATURE_NAME.items()
   ]
 
   tf_keras_v5p_8 = [
@@ -106,13 +69,13 @@ with models.DAG(
           tpu_version=TpuVersion.V5P,
           tpu_cores=8,
           tpu_zone=Zone.US_EAST5_A.value,
-          time_out_in_min=feature_timeout.get(feature),
+          time_out_in_min=common.FEATURE_TIMEOUT.get(feature),
           test_feature=feature,
           test_name=name,
           network=V5_NETWORKS,
           subnetwork=V5P_SUBNETWORKS,
       ).run()
-      for feature, name in feature_name.items()
+      for feature, name in common.FEATURE_NAME.items()
   ]
 
   # ResNet
