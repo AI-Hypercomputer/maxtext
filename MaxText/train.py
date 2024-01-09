@@ -202,7 +202,7 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
     if config.stable_cross_entropy_loss:
       xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
     else:
-      xent = -jnp.sum(nn.log_softmax(logits) * one_hot_targets, axis=-1)
+      xent = -jnp.sum(jax.nn.log_softmax(logits) * one_hot_targets, axis=-1, dtype=jnp.float32)
     xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
     # Mask out paddings at the end of each example.
     padding_mask = data['targets_segmentation'] != 0
