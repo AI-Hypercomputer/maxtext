@@ -7,7 +7,6 @@ flax
 ml-collections
 numpy
 optax
-portpicker
 protobuf==3.20.3
 pylint
 pytest
