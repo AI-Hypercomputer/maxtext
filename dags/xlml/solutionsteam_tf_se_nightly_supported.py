@@ -110,8 +110,65 @@ with models.DAG(
       runtime_version=RuntimeVersion.TPU_VM_TF_2150_POD_SE.value,
   ).run()
 
+  # DLRM
+  tf_dlrm_v2_8 = tf_config.get_tf_dlrm_config(
+      tpu_version=TpuVersion.V2,
+      tpu_cores=8,
+      tpu_zone=Zone.US_CENTRAL1_C.value,
+      time_out_in_min=60,
+      bottom_mlp=[512, 256, 16],
+      embedding_dim=16,
+      train_steps=10000,
+      extraFlags="--mode=train",
+      is_pjrt=False,
+      runtime_version=RuntimeVersion.TPU_VM_TF_2150_SE.value,
+  ).run()
+
+  tf_dlrm_v2_32 = tf_config.get_tf_dlrm_config(
+      tpu_version=TpuVersion.V2,
+      tpu_cores=32,
+      tpu_zone=Zone.US_CENTRAL1_A.value,
+      time_out_in_min=60,
+      bottom_mlp=[512, 256, 64],
+      embedding_dim=64,
+      train_steps=256054,
+      extraFlags="--mode=train_and_eval",
+      is_pod=True,
+      is_pjrt=False,
+      runtime_version=RuntimeVersion.TPU_VM_TF_2150_POD_SE.value,
+  ).run()
+
+  tf_dlrm_v4_8 = tf_config.get_tf_dlrm_config(
+      tpu_version=TpuVersion.V4,
+      tpu_cores=8,
+      tpu_zone=Zone.US_CENTRAL2_B.value,
+      time_out_in_min=60,
+      bottom_mlp=[512, 256, 64],
+      embedding_dim=64,
+      train_steps=10000,
+      extraFlags="--mode=train",
+      is_pjrt=False,
+      runtime_version=RuntimeVersion.TPU_VM_TF_2150_SE.value,
+  ).run()
+
+  tf_dlrm_v4_32 = tf_config.get_tf_dlrm_config(
+      tpu_version=TpuVersion.V4,
+      tpu_cores=32,
+      tpu_zone=Zone.US_CENTRAL2_B.value,
+      time_out_in_min=60,
+      bottom_mlp=[512, 256, 128],
+      embedding_dim=128,
+      train_steps=256054,
+      extraFlags="--mode=train_and_eval",
+      is_pod=True,
+      is_pjrt=False,
+      runtime_version=RuntimeVersion.TPU_VM_TF_2150_POD_SE.value,
+  ).run()
+
   # Test dependencies
   tf_keras_v2_8
   tf_resnet_v2_8 >> tf_resnet_v2_32
   tf_resnet_v3_8 >> tf_resnet_v3_32
   tf_resnet_v4_8 >> tf_resnet_v4_32
+  tf_dlrm_v2_8 >> tf_dlrm_v2_32
+  tf_dlrm_v4_8 >> tf_dlrm_v4_32
