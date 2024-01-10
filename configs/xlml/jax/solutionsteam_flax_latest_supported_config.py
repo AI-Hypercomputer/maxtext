@@ -24,7 +24,6 @@ from configs.vm_resource import TpuVersion, Project, RuntimeVersion
 
 PROJECT_NAME = Project.CLOUD_ML_AUTO_SOLUTIONS.value
 RUNTIME_IMAGE = RuntimeVersion.TPU_UBUNTU2204_BASE.value
-IS_TPU_RESERVED = True
 
 
 def get_flax_resnet_config(
@@ -38,6 +37,7 @@ def get_flax_resnet_config(
     network: str = "default",
     subnetwork: str = "default",
     extraFlags: str = "",
+    is_tpu_reserved: bool = True,
 ) -> task.TpuQueuedResourceTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=project_name,
@@ -62,7 +62,7 @@ def get_flax_resnet_config(
           version=tpu_version,
           cores=tpu_cores,
           runtime_version=runtime_version,
-          reserved=IS_TPU_RESERVED,
+          reserved=is_tpu_reserved,
           network=network,
           subnetwork=subnetwork,
       ),
@@ -121,6 +121,7 @@ def get_flax_vit_config(
     subnetwork: str = "default",
     num_train_epochs: int = 3,
     extraFlags: str = "",
+    is_tpu_reserved: bool = True,
 ) -> task.TpuQueuedResourceTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=project_name,
@@ -136,7 +137,7 @@ def get_flax_vit_config(
           version=tpu_version,
           cores=tpu_cores,
           runtime_version=runtime_version,
-          reserved=IS_TPU_RESERVED,
+          reserved=is_tpu_reserved,
           network=network,
           subnetwork=subnetwork,
       ),
@@ -164,6 +165,7 @@ def get_flax_vit_conv_config(
     network: str = "default",
     subnetwork: str = "default",
     extraFlags: str = "",
+    is_tpu_reserved: bool = True,
 ) -> task.TpuQueuedResourceTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=project_name,
@@ -194,7 +196,7 @@ def get_flax_vit_conv_config(
           version=tpu_version,
           cores=tpu_cores,
           runtime_version=runtime_version,
-          reserved=IS_TPU_RESERVED,
+          reserved=is_tpu_reserved,
           network=network,
           subnetwork=subnetwork,
       ),
@@ -229,6 +231,7 @@ def get_flax_gpt2_config(
     network: str = "default",
     subnetwork: str = "default",
     extraFlags: str = "",
+    is_tpu_reserved: bool = True,
 ) -> task.TpuQueuedResourceTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=project_name,
@@ -268,7 +271,7 @@ def get_flax_gpt2_config(
           version=tpu_version,
           cores=tpu_cores,
           runtime_version=runtime_version,
-          reserved=IS_TPU_RESERVED,
+          reserved=is_tpu_reserved,
           network=network,
           subnetwork=subnetwork,
       ),
@@ -297,6 +300,7 @@ def get_flax_sd_config(
     subnetwork: str = "default",
     resolution: int = 512,
     extraFlags: str = "",
+    is_tpu_reserved: bool = True,
 ) -> task.TpuQueuedResourceTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=project_name,
@@ -330,7 +334,7 @@ def get_flax_sd_config(
           version=tpu_version,
           cores=tpu_cores,
           runtime_version=runtime_version,
-          reserved=IS_TPU_RESERVED,
+          reserved=is_tpu_reserved,
           network=network,
           subnetwork=subnetwork,
       ),
@@ -353,6 +357,7 @@ def get_flax_bart_config(
     tpu_zone: str,
     time_out_in_min: int,
     extraFlags: str = "",
+    is_tpu_reserved: bool = True,
 ) -> task.TpuQueuedResourceTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=PROJECT_NAME,
@@ -383,7 +388,7 @@ def get_flax_bart_config(
           version=tpu_version,
           cores=tpu_cores,
           runtime_version=RUNTIME_IMAGE,
-          reserved=IS_TPU_RESERVED,
+          reserved=is_tpu_reserved,
       ),
       test_name="flax_bart_wiki",
       set_up_cmds=set_up_cmds,
@@ -406,6 +411,7 @@ def get_flax_bert_config(
     task_name: str,
     num_train_epochs: int = 1,
     extraFlags: str = "",
+    is_tpu_reserved: bool = True,
 ) -> task.TpuQueuedResourceTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=PROJECT_NAME,
@@ -433,7 +439,7 @@ def get_flax_bert_config(
           version=tpu_version,
           cores=tpu_cores,
           runtime_version=RUNTIME_IMAGE,
-          reserved=IS_TPU_RESERVED,
+          reserved=is_tpu_reserved,
       ),
       test_name=f"flax_bert_{task_name}",
       set_up_cmds=set_up_cmds,
@@ -456,6 +462,7 @@ def get_flax_wmt_config(
     num_train_steps: int,
     data_dir: str = gcs_bucket.TFDS_DATA_DIR,
     extraFlags: str = "",
+    is_tpu_reserved: bool = True,
 ) -> task.TpuQueuedResourceTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=PROJECT_NAME,
@@ -486,7 +493,7 @@ def get_flax_wmt_config(
           version=tpu_version,
           cores=tpu_cores,
           runtime_version=RUNTIME_IMAGE,
-          reserved=IS_TPU_RESERVED,
+          reserved=is_tpu_reserved,
       ),
       test_name="flax_wmt_translate",
       set_up_cmds=set_up_cmds,

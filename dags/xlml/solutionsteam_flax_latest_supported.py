@@ -73,6 +73,7 @@ with models.DAG(
       tpu_cores=32,
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
+      is_tpu_reserved=False,
   ).run()
 
   jax_resnet_v5e_4 = flax_config.get_flax_resnet_config(
@@ -141,6 +142,7 @@ with models.DAG(
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
       extraFlags=" ".join(jax_vit_conv_extra_flags),
+      is_tpu_reserved=False,
   ).run()
 
   jax_vit_v5e_4 = flax_config.get_flax_vit_config(
@@ -174,6 +176,7 @@ with models.DAG(
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=120,
       extraFlags=" ".join(jax_gpt2_extra_flags),
+      is_tpu_reserved=False,
   ).run()
 
   jax_gpt2_v5e_4 = flax_config.get_flax_gpt2_config(
@@ -203,6 +206,7 @@ with models.DAG(
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
       num_train_epochs=1,
+      is_tpu_reserved=False,
   ).run()
 
   jax_sd_v5e_4 = flax_config.get_flax_sd_config(
@@ -241,6 +245,7 @@ with models.DAG(
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
       extraFlags=" ".join(jax_bart_v4_32_extra_flags),
+      is_tpu_reserved=False,
   ).run()
 
   # BERT
@@ -268,6 +273,7 @@ with models.DAG(
       time_out_in_min=60,
       task_name="mnli",
       extraFlags=" ".join(jax_bert_v4_mnli_extra_flags),
+      is_tpu_reserved=False,
   ).run()
 
   jax_bert_mrpc_extra_flags = [
@@ -294,6 +300,7 @@ with models.DAG(
       time_out_in_min=60,
       task_name="mrpc",
       extraFlags=" ".join(jax_bert_v4_mrpc_extra_flags),
+      is_tpu_reserved=False,
   ).run()
 
   # WMT
