@@ -172,7 +172,6 @@ class _HyperParameters():
     if raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and raw_keys["compile_topology_num_slices"]==-1:
       max_utils.initialize_jax_distributed_system()
 
-    raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
     if raw_keys["run_name"] == "":
       raw_keys["run_name"] = os.environ.get("JOBSET_NAME") #using XPK default
     run_name = raw_keys["run_name"]
@@ -181,9 +180,6 @@ class _HyperParameters():
       raw_keys["tensorboard_dir"] = os.path.join(base_output_directory, run_name, "tensorboard", "")
       raw_keys["checkpoint_dir"] = os.path.join(base_output_directory, run_name, "checkpoints", "")
       raw_keys["metrics_dir"] = os.path.join(base_output_directory, run_name, "metrics", "")
-
-    raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
-    raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
     if raw_keys["learning_rate_schedule_steps"]==-1:
       raw_keys["learning_rate_schedule_steps"] = raw_keys["steps"]
@@ -199,6 +195,14 @@ class _HyperParameters():
 
     raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = \
       calculate_global_batch_sizes(raw_keys)
+
+    # Write raw_keys to GCS before type conversions
+    max_utils.write_config_raw_keys_for_gcs(raw_keys)
+
+    # Type conversions
+    raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
+    raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
+    raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
     validate_keys(raw_keys)
 
@@ -287,6 +291,8 @@ class HyperParameters(): # pylint: disable=missing-class-docstring
   def __setattr__(self, attr, value):
     raise ValueError
 
+  def get_keys(self):
+    return _config.keys
 
 def initialize(argv, **kwargs):
   global _config, config

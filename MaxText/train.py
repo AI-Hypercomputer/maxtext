@@ -315,6 +315,11 @@ def train_loop(config, state=None):
   max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
   per_device_tflops = calculate_training_tflops(num_model_parameters, config)
 
+  # Write train config params, num model params, and XLA flags to tensorboard
+  max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
+  max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
+  max_utils.add_config_to_summary_writer(config, writer)
+
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != '':
     print("Loading the compiled function...", flush=True)
