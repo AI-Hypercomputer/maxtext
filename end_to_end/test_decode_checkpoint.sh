@@ -103,7 +103,7 @@ run_name=${run_id}-decode-steps-50 \
 base_output_directory=${base_output_directory} \
 dataset_path=${dataset_path} \
 load_parameters_path=${base_output_directory}/${decode_ckpt_run_id}/checkpoints/0/default \
-attention=dot_product ici_tensor_parallelism=${ici_tensor_parallelism} steps=50 \
+attention=dot_product ici_tensor_parallelism=${ici_tensor_parallelism} steps=50 add_eos=False \
 metrics_file=/tmp/${run_id}_metrics.txt async_checkpointing=false max_target_length=128 per_device_batch_size=1 \
 ${model_params} \
 
