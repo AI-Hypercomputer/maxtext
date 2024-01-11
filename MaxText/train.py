@@ -289,6 +289,13 @@ def train_loop(config, state=None):
   max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
   per_device_tflops = calculate_training_tflops(num_model_parameters, config)
 
+  # Write train config params, num model params, and XLA flags to tensorboard
+  if jax.process_index() == 0:
+    writer.add_text("num_model_parameters", str(num_model_parameters))
+    writer.add_text("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"] )
+    for key, value in config.get_keys().items():
+      writer.add_text(key, str(value))
+
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != '':
     print("Loading the compiled function...", flush=True)
@@ -359,6 +366,9 @@ def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   config = pyconfig.config
   validate_train_config(config)
+  if config.gcs_train_config and jax.process_index() == 0:
+    max_utils.write_train_config_for_gcs(config)
+
   if jax.__version__ <= '0.4.23':
     cc.initialize_cache(os.path.expanduser(config.jax_cache_dir))
   else:

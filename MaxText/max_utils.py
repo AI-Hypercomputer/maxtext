@@ -29,6 +29,7 @@ from jax.experimental import mesh_utils
 
 
 import json
+import yaml
 import flax
 from flax.training import train_state
 from flax import linen as nn
@@ -39,6 +40,9 @@ import os
 from typing import Tuple
 
 from google.cloud import storage
+
+def _tuples_to_lists(t):
+  return list(_tuples_to_lists(x) for x in t) if isinstance(t, tuple) else t
 
 def find_nans_and_infs(pytree):
   def finder(x):
@@ -114,6 +118,23 @@ def write_metrics_for_gcs(metrics, step, config, running_metrics):
     max_logging.log(f"File {metrics_filename} moved successfully!")
     running_metrics = [] # reset running_metrics to empty list
   return running_metrics
+
+def write_train_config_for_gcs(config):
+  """Writes train config to gcs"""
+  config_dict = dict(config.get_keys())
+  config_dict["dtype"] = str(config_dict["dtype"])
+  config_dict["logical_axis_rules"] = _tuples_to_lists(config_dict["logical_axis_rules"])
+  config_dict["data_sharding"] = _tuples_to_lists(config_dict["data_sharding"])
+
+  train_config_filename = "train_config.yml"
+  with open(train_config_filename, 'w', encoding="utf8") as train_config_for_gcs:
+    yaml.dump(config_dict, train_config_for_gcs)
+  train_config_for_gcs.close()
+
+  gcs_filename=os.path.join(config.base_output_directory, config.run_name, train_config_filename)
+  max_logging.log(f"Moving file {train_config_filename} to GCS...")
+  upload_blob(gcs_filename, train_config_filename)
+  max_logging.log(f"File {train_config_filename} moved successfully!")
 
 def parse_gcs_bucket_and_prefix(destination_gcs_name):
   path_parts = destination_gcs_name.replace("gs://", "").split("/")
