@@ -261,7 +261,7 @@ def init_initial_state(model, tx, config, is_training, key):
                           jnp.ones(input_shape),
                           jnp.ones(input_shape),
                           jnp.ones(input_shape),
-                          jnp.ones(input_shape),  # hack
+                          decoder_positions=jnp.ones(input_shape),
                           )
   if is_training:
     return init_training_state(model.apply, model_vars['params'], tx)

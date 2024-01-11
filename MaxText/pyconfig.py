@@ -106,8 +106,12 @@ class _HyperParameters():
       else:
         raw_keys[k] = raw_data_from_yaml[k]
 
-    _HyperParameters.user_init(raw_keys)
+
+    # We initialize the jax distributed system here because it must be done before device backend is initialized.
+    if raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and raw_keys["compile_topology_num_slices"]==-1:
+      max_utils.initialize_jax_distributed_system()
     _HyperParameters.update_model_vars(raw_keys)
+    _HyperParameters.user_init(raw_keys)
     self.keys = raw_keys
 
   def _load_kwargs(self, argv: list[str], **kwargs):
@@ -117,6 +121,42 @@ class _HyperParameters():
 
   @staticmethod
   def update_model_vars(raw_keys):
+    # model params
+    raw_keys.update({
+      'base_num_decoder_layers': 96,
+      'base_emb_dim': 12288,
+      'base_num_heads': 96,
+      'base_mlp_dim': 49152,
+      'head_dim': 128,
+      'max_target_length': 2048,
+      'max_trainable_pe_max_seq_len': 16384,
+      'mlp_activations': ['gelu'],
+    })
+
+    # model structure
+    raw_keys.update({
+      'embed_lookup_style': 'matmul',
+      'use_position_embedding': True,
+      'use_bias_linear': True,
+      'use_pre_norm_mlp': True,
+      'apply_padding_mask_mlp': True,
+      'add_skip_connection_mlp': True,
+      'use_bias_layer_norm': True,
+      'use_mean_center_layer_norm': True,
+      'reductions_in_fp32_layer_norm': False,
+      'epsilon_layer_norm': 1.e-5,
+      'use_rotary_position_emb': False,
+      'use_qk_norm': False,
+      'logits_norm': False,
+      'stable_cross_entropy_loss': False,
+      'query_scale_style': 'post',
+      'skip_connection_style_decoder': 'GPT3',
+    })
+
+    # data
+    raw_keys['dataset_type'] = "c4_mlperf"
+
+    # optimizer and schedule
     global_batch_size = calculate_global_batch_sizes(raw_keys)[1]
     if global_batch_size <= 3584:
       raw_keys['learning_rate'] = 2e-5
@@ -129,21 +169,22 @@ class _HyperParameters():
     raw_keys['warmup_steps_fraction'] = warmup_steps / decay_end_step
     raw_keys['overwrite_ckpt_step'] = math.ceil(4000.0 * 1536 / global_batch_size)
 
-    # hack
     raw_keys['gradient_clipping_threshold'] = 1.
     raw_keys['adam_b1'] = 0.9
     raw_keys['adam_b2'] = 0.95
     raw_keys['adam_eps'] = 1.e-8
     raw_keys['adam_weight_decay'] = 0.1
 
+    # checkpoints
+    raw_keys['save_period'] = 10000
+
+    raw_keys['target_valid_loss'] = 2.69
+
+
 
   @staticmethod
   def user_init(raw_keys):
     '''Transformations between the config data and configs used at runtime'''
-
-    # We initialize the jax distributed system here because it must be done before device backend is initialized.
-    if raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and raw_keys["compile_topology_num_slices"]==-1:
-      max_utils.initialize_jax_distributed_system()
 
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
     if raw_keys["run_name"] == "":

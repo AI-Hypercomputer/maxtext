@@ -50,7 +50,7 @@ base_mlp_dim: 8192
 base_num_decoder_layers: 16
 head_dim: 256
 # activation functions are .
-mlp_activations: ["gelu"]
+mlp_activations: ["relu"]
 dropout_rate: 0
 logits_via_embedding: True  # NOTE: this is True just for testing.
 # proj, minimal, full, or none
@@ -102,7 +102,7 @@ ici_tensor_parallelism: 1
 # Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_path: ""
-vocab_size: 32_768 # powers of 2 for sharding
+vocab_size: 50304 # powers of 2 for sharding
 assets_path: "assets"
 vocab_relative_path: "tokenizer"  # Assumes we're allowed
 dataset_name: 'c4/en:3.0.1'
@@ -183,7 +183,7 @@ embed_lookup_style: 'index'
 
 # whether to add position_embedding
 use_position_embedding: False
-max_trainable_pe_max_seq_len: 16384
+max_trainable_pe_max_seq_len: None
 overwrite_ckpt_step: -1
 
 # whether to add bias in all linear layers in Transformer
@@ -238,3 +238,5 @@ skip_connection_style_decoder: T5
 compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
 compile_topology: '' # Target hardware version, e.g. 'v5e-256'
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
+
+target_valid_loss: None

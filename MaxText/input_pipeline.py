@@ -296,7 +296,7 @@ def _pad_to_batch_size(ds: tf.data.Dataset,  batch_size: int, num_examples: int 
         num_examples += 1
 
       return num_examples
-        
+
     local_num = _get_num_examples(ds)
   local_num_batches = (local_num + batch_size - 1) // batch_size
   # Find the max number of batches required across all Jax processes.
@@ -311,8 +311,8 @@ def _pad_to_batch_size(ds: tf.data.Dataset,  batch_size: int, num_examples: int 
       '%d extra entries to get %d batches.', local_num, pad_num, num_batches)
   # Repeat a random example to make the last batch full.
   def _add_pad(x):
-      x['targets_segmentation'] *= 0
-      return x
+    x['targets_segmentation'] *= 0
+    return x
   pad_ds = ds.take(1).map(_add_pad).repeat(pad_num)
   return ds.concatenate(pad_ds)
 
@@ -340,7 +340,6 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
 
   eval_ds = eval_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
   eval_ds = rekey(eval_ds, {'inputs': None, 'targets': 'ids'})
-  
   # sp_tokenizer = tokenizer.load_tokenizer(vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
   #                                         vocab_size=config.vocab_size)
   sp_tokenizer = tokenizer.load_tokenizer(
@@ -350,13 +349,12 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
   # tokenize
   train_ds = train_ds.map(
       tokenizer.TokenizeOp(sp_tokenizer, data_keys=('targets',)), num_parallel_calls=AUTOTUNE)
-  
+
   train_ds = reduce_concat_tokens(train_ds, feature_key='targets', batch_size=4096)
   train_ds = split_tokens_to_targets_length(train_ds, config.max_target_length)
 
   shuffle_buffer_size = 10000
-  data_shuffle_seed = 0
-  train_ds = train_ds.shuffle(shuffle_buffer_size, seed = 4321)
+  train_ds = train_ds.shuffle(shuffle_buffer_size, seed=config.data_shuffle_seed)
   train_ds = sequence_packing.pack_dataset(train_ds, config.max_target_length)
   eval_ds = sequence_packing.pack_dataset(eval_ds, config.max_target_length)
 
@@ -364,23 +362,23 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
   pad_id = 0
 
   def map_fn(x):
-      x["inputs"] = x["targets"]
-      x["inputs_position"] = x["targets_position"]
-      x["inputs_segmentation"] = x["targets_segmentation"]
-      x["targets"] = _shift_left_and_pad(x["targets"], eos_id)
-      x["targets_segmentation"] *= tf.cast(x["targets"] != eos_id, x["targets_position"].dtype) * tf.cast(x["targets"] != pad_id, x["targets_position"].dtype)
-      return x
-  
+    x["inputs"] = x["targets"]
+    x["inputs_position"] = x["targets_position"]
+    x["inputs_segmentation"] = x["targets_segmentation"]
+    x["targets"] = _shift_left_and_pad(x["targets"], eos_id)
+    x["targets_segmentation"] *= tf.cast(x["targets"] != eos_id, x["targets_position"].dtype) * tf.cast(x["targets"] != pad_id, x["targets_position"].dtype)
+    return x
+
   train_ds = train_ds.map(map_fn, num_parallel_calls=AUTOTUNE)
   eval_ds = eval_ds.map(map_fn, num_parallel_calls=AUTOTUNE)
   train_batch_size = int(config.per_device_batch_size * mesh.size )
   eval_batch_size = int(config.eval_per_device_batch_size * mesh.size) if config.eval_per_device_batch_size else train_batch_size
-  
+
   train_ds = train_ds.batch(train_batch_size // jax.process_count(), drop_remainder=True)
   # ensure array split in an equal division for each device
   eval_ds = _pad_to_batch_size(eval_ds, eval_batch_size // jax.process_count())
   eval_ds = eval_ds.batch(eval_batch_size // jax.process_count(), drop_remainder=False)
-  
+
   # self.reset_for_eval=True: We are running eval over exactly one epoch.
   # We explicitly cache the entire epoch (in memory) to ensure that it is the
   # same across different iterations. Note that this is needed not only
@@ -394,13 +392,11 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
   train_ds = train_ds.prefetch(AUTOTUNE)
   eval_ds = eval_ds.prefetch(AUTOTUNE)
 
-  train_multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(train_ds, mesh)
-  # eval_multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(eval_ds, mesh)
+  train_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(train_ds, mesh)
+  eval_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(eval_ds, mesh)
 
   # Return multi-host jax.Array prep iterator
-  return train_multihost_gen, eval_ds, sp_tokenizer
-  
-
+  return train_multihost_gen, eval_multihost_gen, sp_tokenizer
 
 def get_datasets(
   config: ml_collections.ConfigDict,
@@ -441,17 +437,15 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
     vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
 
   # Load tokenizer
-  # hack
   sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
-                                          vocab_size=50257)
+                                          vocab_size=config.vocab_size)
 
   # Tokenize data.
   train_ds = train_ds.map(
       tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
-  
-  # hack skip eval
-  # eval_ds = eval_ds.map(
-  #     tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
+
+  eval_ds = eval_ds.map(
+      tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
 
   # Set global batch size.
   global_batch_size_to_load = config.global_batch_size_to_load
