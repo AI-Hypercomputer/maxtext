@@ -247,6 +247,7 @@ def setup_initial_state(model, iterator, tx, config, rng, mesh, checkpoint_manag
 
   Args:
     model: the flax model to initialize
+    iterator: the data iterator for input pipeline
     tx: the optax.GradientTransformation
     config: config object
     rng: jax.prng key

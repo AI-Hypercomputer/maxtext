@@ -46,7 +46,7 @@ def data_load_loop(config, state=None):
   start_step = get_first_step(state)
   example_batch = load_next_batch(data_iterator, example_batch, config, None)
   jax.block_until_ready(example_batch)
-  
+
   first_end = datetime.datetime.now()
   time_to_load_first_batch = first_end-start
   max_logging.log(f"First step completed in {time_to_load_first_batch} seconds")
