@@ -33,7 +33,6 @@ from layers import embeddings
 
 Mesh = jax.sharding.Mesh
 Attention = attentions.Attention
-LLaMARotaryEmbedding = embeddings.LLaMARotaryEmbedding
 
 
 class AttentionTest(unittest.TestCase):

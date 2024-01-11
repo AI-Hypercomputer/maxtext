@@ -43,6 +43,11 @@ import sys
 
 jax.config.update('jax_platform_name', 'cpu')
 
+def permute_to_match_maxtext_rope(arr):
+  evens = arr[..., ::2]
+  odds = arr[..., 1::2]
+  return jax.numpy.concatenate((evens, odds), axis=arr.ndim-1)
+
 MODEL_PARAMS_DICT = {
     '70b': {
         'num_layers': 80,
@@ -172,6 +177,8 @@ def convert(base_model_path, maxtext_model_path, model_size):
     wq = np.reshape(wq, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
     wk = np.reshape(wk, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
     wv = np.reshape(wv, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
+    wq = permute_to_match_maxtext_rope(wq)
+    wk = permute_to_match_maxtext_rope(wk)
 
     w_post = np.concatenate(
         [
@@ -223,10 +230,6 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
   jax_weights['decoder']['decoder']['self_attention'] = self_attention
 
-
-
-
-
   layer_weight['mlp']['wi_0']['kernel'] = np.array(layer_weight['mlp']['wi_0']['kernel'])
   layer_weight['mlp']['wi_1']['kernel'] = np.array(layer_weight['mlp']['wi_1']['kernel'])
   layer_weight['mlp']['wo']['kernel'] = np.array(layer_weight['mlp']['wo']['kernel'])
@@ -250,8 +253,6 @@ def convert(base_model_path, maxtext_model_path, model_size):
   #convert all weights to jax.numpy
   jax_weights = jax.tree_map(jnp.array, jax_weights)
 
-  print(f"jax_weights = {jax_weights}")
-
   #dummy configs for the checkpoint_manager
   step_number_to_save_new_ckpt = 0
   enable_checkpointing=True
@@ -272,10 +273,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
     params=jax_weights,
     tx=None, # type: ignore
     opt_state={}
-)
-
-
-  print(f"Trainstate after replacing params with jax_weights={state_new}")
+  )
 
   if checkpoint_manager is not None:
     if checkpoint_manager.save(step_number_to_save_new_ckpt, state_new):
