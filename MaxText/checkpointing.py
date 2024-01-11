@@ -126,6 +126,7 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
     else:
       return type_handlers.RestoreArgs()
 
+  # Set restore_args based whether to load data iterator
   if load_parameters_path != "" or not load_data_iterator_from_checkpoint:
     restore_args = jax.tree_util.tree_map(map_to_pspec,
                                           abstract_unboxed_pre_state,
@@ -136,36 +137,42 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
                                           state_mesh_annotations)
     restore_args = {'default':restore_state, 'iter':iterator}
 
-  # When load_from_other_directory is set, only load params
-  if load_parameters_path != "":
-    max_logging.log(f"restoring state from first_checkpoint_path {load_parameters_path}")
+  # Get step to load
+  if load_from_other_directory != "" and load_from_other_directory_step != -1:
+    step = load_from_other_directory_step
+  else:
+    step = checkpoint_manager.latest_step()
+
+  # if load_from_other_directory is set, load from it.
+  # Otherwise, load from checkpoint_dir (base_output_directory/checkpoints)
+  if step is not None:
+    if load_data_iterator_from_checkpoint:
+      if load_from_other_directory != "":
+        p = epath.Path(load_from_other_directory)
+        iter_path = epath.Path(p / str(step) / 'iter')
+      else:
+        iter_path = epath.Path(checkpoint_manager.directory / str(step) / 'iter')
+
+      if not iter_path.exists():
+        raise FileNotFoundError(f"Data iterator path not found: {iter_path}. Please set load_data_iterator_from_checkpoint to False if loading is not intended.")
+
+      max_logging.log(f"restoring step {step} state from {checkpoint_manager.directory} and data iterator from {iter_path}")
+      return checkpoint_manager.restore(step, {'default':abstract_unboxed_pre_state,'iter':iterator},
+                                      {"restore_args" : restore_args}), None
+    else:
+      max_logging.log(f"restoring step {step} state from {checkpoint_manager.directory}")
+      return checkpoint_manager.restore(step, abstract_unboxed_pre_state,
+                              {"restore_args" : restore_args}), None
+
+  # load params only from load_parameters_path
+  elif load_parameters_path != "":
+    max_logging.log(f"restoring params from load_parameters_path {load_parameters_path}")
     p = epath.Path(load_parameters_path)
     checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
     return None, checkpointer.restore(p,
                                       item=abstract_unboxed_pre_state,
                                       restore_args=restore_args).params
 
-  if load_from_other_directory != "" and load_from_other_directory_step != -1:
-    step = load_from_other_directory_step
   else:
-    step = checkpoint_manager.latest_step()
-    if step is None:
-      max_logging.log("No existing checkpoints found, not restoring checkpoint.")
-      return None, None
-
-  if load_data_iterator_from_checkpoint:
-    if load_from_other_directory != "":
-      p = epath.Path(load_from_other_directory)
-      iter_path = epath.Path(p / str(step) / 'iter')
-    else:
-      iter_path = epath.Path(checkpoint_manager.directory / str(step) / 'iter')
-
-    if not iter_path.exists():
-      raise FileNotFoundError(f"Data iterator path not found: {iter_path}. Please set load_data_iterator_from_checkpoint to False if loading is not intended.")
-    max_logging.log(f"restoring step {step} state from {checkpoint_manager.directory} and data iterator from {iter_path}")
-    return checkpoint_manager.restore(step, {'default':abstract_unboxed_pre_state,'iter':iterator},
-                                    {"restore_args" : restore_args}), None
-  else:
-    max_logging.log(f"restoring step {step} state from {checkpoint_manager.directory}")
-    return checkpoint_manager.restore(step, abstract_unboxed_pre_state,
-                            {"restore_args" : restore_args}), None
+    max_logging.log("No existing checkpoints found, not restoring checkpoint.")
+    return None, None

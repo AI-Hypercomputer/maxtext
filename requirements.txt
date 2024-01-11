@@ -1,4 +1,4 @@
-orbax-checkpoint==0.4.1
+orbax-checkpoint
 absl-py
 array-record
 argparse
