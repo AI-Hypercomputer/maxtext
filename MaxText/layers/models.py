@@ -280,6 +280,7 @@ class DecoderLayer(nn.Module):
         use_rotary_position_emb=cfg.use_rotary_position_emb,
         use_qk_norm=cfg.use_qk_norm,
         query_scale_style=cfg.query_scale_style,
+        combined_qkv=cfg.combined_qkv,
         name='self_attention',
         config=cfg,
         mesh=mesh)(

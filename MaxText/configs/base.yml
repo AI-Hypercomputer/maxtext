@@ -240,3 +240,5 @@ compile_topology: '' # Target hardware version, e.g. 'v5e-256'
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
 
 target_valid_loss: None
+
+combined_qkv: False

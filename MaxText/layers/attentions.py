@@ -257,6 +257,7 @@ class MultiHeadDotProductAttention(nn.Module):
   use_rotary_position_emb: bool = True
   use_qk_norm: bool = True
   query_scale_style: str = 'init'
+  combined_qkv: bool = False
 
   def apply_attention(
       self,
@@ -398,31 +399,44 @@ class MultiHeadDotProductAttention(nn.Module):
     """
     cfg = self.config
 
-    projection = functools.partial(
-        DenseGeneral,
-        axis=-1,
-        features=(self.num_heads, self.head_dim),
-        kernel_axes=('embed', 'heads', 'kv'),
-        dtype=self.dtype,
-        use_bias=cfg.use_bias_linear,
-        config=cfg)
 
     depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
-    if self.query_scale_style == 'init':
-      # NOTE: T5 does not explicitly rescale the attention logits by
-      #       1/sqrt(depth_kq)!  This is folded into the initializers of the
-      #       linear transformations, which is equivalent under Adafactor.
-      def query_init(*args):
-        # pylint: disable=no-value-for-parameter
-        return self.kernel_init(*args) / depth_scaling
+    if self.combined_qkv:
+      combined_projection = functools.partial(
+          DenseGeneral,
+          axis=-1,
+          features=(self.num_heads, self.head_dim, 3),
+          kernel_axes=('embed', 'heads', 'kv', 'qkv'),
+          dtype=self.dtype,
+          use_bias=cfg.use_bias_linear,
+          config=cfg)
 
-      # Project inputs_q to multi-headed q/k/v
-      # dimensions are then [batch, length, num_heads, head_dim]
-      query = projection(kernel_init=query_init, name='query')(inputs_q)
+      # batch, length, heads, kv, 3 -> 3, batch, length, heads, kv
+      query, key, value = jnp.moveaxis(combined_projection(kernel_init=self.kernel_init, name='combined_qkv')(inputs_q), 0, -1)
     else:
-      query = projection(kernel_init=self.kernel_init, name='query')(inputs_q)
-    key = projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
-    value = projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
+      projection = functools.partial(
+          DenseGeneral,
+          axis=-1,
+          features=(self.num_heads, self.head_dim),
+          kernel_axes=('embed', 'heads', 'kv'),
+          dtype=self.dtype,
+          use_bias=cfg.use_bias_linear,
+          config=cfg)
+      if self.query_scale_style == 'init':
+        # NOTE: T5 does not explicitly rescale the attention logits by
+        #       1/sqrt(depth_kq)!  This is folded into the initializers of the
+        #       linear transformations, which is equivalent under Adafactor.
+        def query_init(*args):
+          # pylint: disable=no-value-for-parameter
+          return self.kernel_init(*args) / depth_scaling
+
+        # Project inputs_q to multi-headed q/k/v
+        # dimensions are then [batch, length, num_heads, head_dim]
+        query = projection(kernel_init=query_init, name='query')(inputs_q)
+      else:
+        query = projection(kernel_init=self.kernel_init, name='query')(inputs_q)
+      key = projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
+      value = projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
 
     # Apply RoPE if True
     if self.use_rotary_position_emb:
