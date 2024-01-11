@@ -17,6 +17,7 @@
 # pylint: disable=bare-except, consider-using-generator
 """ Common Max Utils needed by multiple modules"""
 import checkpointing
+import common_types
 import functools
 
 import max_logging
@@ -24,7 +25,7 @@ import max_logging
 import numpy as np
 import jax
 import jax.numpy as jnp
-from jax.experimental import mesh_utils, multihost_utils
+from jax.experimental import mesh_utils
 
 
 import json
@@ -35,8 +36,6 @@ from flax.linen import partitioning as nn_partitioning
 
 import optax
 import os
-import portpicker
-import socket
 from typing import Tuple
 
 from google.cloud import storage
@@ -116,44 +115,13 @@ def upload_blob(destination_gcs_name, source_file_name):
   blob.upload_from_filename(source_file_name)
 
 def initialize_jax_distributed_system():
-  """ The jax distributed system is necessary for certain tasks such as asynchronous checkpointing in multihost settings.
-  Automatic arguments are chosen on cloud TPU starting with Jax 0.4.21
-  If are you in a different environment, e.g. GPUs, you will need to provide the appropriate arguments, see
-  https://jax.readthedocs.io/en/latest/_autosummary/jax.distributed.initialize.html
-  If you are unable to start the jax distributed system, you may remove the initialization attempt and instead use a
-  synchronous checkpointer (or no checkpointer) with async_checkpointing=False
-  (or enable_checkpointing=False to not use a checkpointer at all) """
+  """ The best recipe to initialize the Jax Distributed System has varied over time. We keep a layer of
+      indirection in MaxText to avoid breaking the call sites unnecessarily.
 
-  def legacy_distribute_initialize():
-    """Calls jax.distribute.initialize() with appropriate multihost/multislice arguments.
-    This 'legacy' implementation uses the device backend (e.g. TPU backend), which
-    is forbidden starting in Jax version 0.4.21. The jax distributed system should be
-    initialized before the device backend, this is enforced starting with version 0.4.21."""
-
-    def gen_local_ip():
-      hostname = socket.gethostname()
-      return socket.gethostbyname(hostname)
-
-    def gen_local_ip_nums():
-      return [int(num) for num in gen_local_ip().split(':')[-1].split('.')]
-
-    def get_coordinator_ip():
-      local_ip_nums = jax.numpy.array(gen_local_ip_nums())
-      coordinator_ip_nums = multihost_utils.broadcast_one_to_all(local_ip_nums)
-      coordinator_ip_strings = [str(num) for num in list(coordinator_ip_nums)]
-      return '.'.join(coordinator_ip_strings)
-
-    port = multihost_utils.broadcast_one_to_all(jax.numpy.array(portpicker.pick_unused_port()))
-    coordinator_address = get_coordinator_ip() + ':' + str(port)
-    jax.distributed.initialize(coordinator_address=coordinator_address,
-                              num_processes=jax.process_count(),
-                              process_id=jax.process_index())
-
+      Currently jax.distributed.initialize() fully works as expected!
+  """
   max_logging.log("Attempting to initialize the jax distributed system...")
-  if jax.__version__ >= '0.4.21':
-    jax.distributed.initialize()
-  else:
-    legacy_distribute_initialize()
+  jax.distributed.initialize()
   max_logging.log("Jax distributed system initialized!")
 
 def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
@@ -187,14 +155,15 @@ def create_device_mesh(config, devices=None, logging=True):
     num_slices = 1
   num_devices_per_slice = num_devices//num_slices
   max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
-  assert len(devices) > 1, "You must have at least two devices"
 
   multi_slice_env = num_slices > 1
 
   dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism,
-                     config.dcn_sequence_parallelism, config.dcn_tensor_parallelism]
+                     config.dcn_sequence_parallelism, config.dcn_tensor_parallelism,
+                     config.dcn_autoregressive_parallelism]
   ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism,
-                     config.ici_sequence_parallelism, config.ici_tensor_parallelism]
+                     config.ici_sequence_parallelism, config.ici_tensor_parallelism,
+                     config.ici_autoregressive_parallelism]
 
   # Find possible unspecified parallelisms
   ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, 'ICI')
@@ -210,19 +179,19 @@ def create_device_mesh(config, devices=None, logging=True):
 
   return mesh
 
-def unbox_logicallypartioned_trainstate(
-    boxed_train_state: train_state.TrainState):
-  """ Unboxes the flax.LogicallyPartitioned pieces in a train state.
+def unbox_logicallypartioned(
+    boxed_pytree):
+  """ Unboxes the flax.LogicallyPartitioned pieces
 
     Args:
-      boxed_train_state: a train state that includes LogicallyPartitioned
+      boxed_pytree: a pytree that includes LogicallyPartitioned
         leaves.
     Returns:
-      a TrainState where all all LogicallyPartitioned leaves have been unboxed.
+      a pytree where all all LogicallyPartitioned leaves have been unboxed.
   """
   return jax.tree_util.tree_map(lambda x: x.unbox() if \
         isinstance(x, flax.linen.spmd.LogicallyPartitioned) \
-        else x, boxed_train_state, \
+        else x, boxed_pytree, \
         is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned))
 
 def init_decode_state(apply_fn, params):
@@ -324,7 +293,7 @@ def setup_initial_state(model, iterator, tx, config, rng, mesh, checkpoint_manag
         state = state.replace(params = raw_params)
     raw_params = None
 
-  state = unbox_logicallypartioned_trainstate(state)
+  state = unbox_logicallypartioned(state)
   return state, state_mesh_annotations, iterator
 
 
@@ -452,16 +421,38 @@ def _cross_entropy_with_logits_bwd(
 cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
                                  _cross_entropy_with_logits_bwd)
 
-# TODO: This function should be moved to maxtext_utils.py after refactoring b/308500675
 def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   """ Get a shaped abstraction of the state (including optimizer)"""
   init_state_partial = functools.partial(init_initial_state, model, tx,
                                               config, is_training)
   abstract_state = jax.eval_shape(init_state_partial, rng)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
-  unboxed_abstract_state = unbox_logicallypartioned_trainstate(abstract_state)
+  unboxed_abstract_state = unbox_logicallypartioned(abstract_state)
 
   # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return unboxed_abstract_state, state_mesh_annotations
+
+def get_kv_cache_annotations(model, config, rng, mesh):
+  """ Get a shaped abstraction of the state (including optimizer)"""
+
+  def init_kv_cache(model, config):
+    input_shape = (
+      config.global_batch_size_to_load,
+      config.max_target_length
+    )
+
+    model_vars = model.init({'params': rng, 'dropout': rng, 'aqt': rng},
+                          jnp.ones(input_shape),
+                          jnp.ones(input_shape),
+                          model_mode=common_types.MODEL_MODE_PREFILL)
+    return model_vars['cache']
+
+  init_kv_cache_partial = functools.partial(init_kv_cache, model,
+                                              config)
+  abstract_state = jax.eval_shape(init_kv_cache_partial)
+  state_logical_annotations = nn.get_partition_spec(abstract_state)
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  return state_mesh_annotations

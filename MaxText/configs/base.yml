@@ -19,6 +19,7 @@ run_name: ""
 # Types of models supported.
 # default model (palm like model with no overrides in config)
 model_name: "default"
+rms_norm_epsilon: 1.e-06
 
 # At most one of load_parameters_path and load_from_other_directory should be set.
 #   * load_parameters_path is used when you only care about the parameters, not the optimizer state, 
@@ -74,7 +75,7 @@ base_output_directory: ""
 jax_cache_dir: "~/jax_cache"
 
 # Parallelism
-mesh_axes: ['data', 'fsdp', 'sequence', 'tensor']
+mesh_axes: ['data', 'fsdp', 'sequence', 'tensor', 'autoregressive']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp']],
                       ['activation_heads', ['tensor','sequence']],
@@ -83,12 +84,17 @@ logical_axis_rules: [
                       ['activation_mlp', 'tensor'],
                       ['activation_kv', 'tensor'],
                       ['activation_vocab', ['tensor', 'sequence']],
-                      ['mlp', 'tensor'],
-                      ['vocab', 'tensor'],
+                      ['mlp', ['tensor','autoregressive']],
+                      ['vocab', ['tensor', 'autoregressive']],
                       ['embed', ['fsdp', 'sequence']],
-                      ['heads', 'tensor'],
+                      ['heads', ['tensor', 'autoregressive']],
+                      ['kv', []],
+                      ['cache_batch', []],
+                      ['cache_heads', ['autoregressive']],
+                      ['cache_kv', []],
+                      ['cache_sequence', []],
                     ]
-data_sharding: [['data', 'fsdp', 'sequence', 'tensor']]
+data_sharding: [['data', 'fsdp', 'sequence', 'tensor', 'autoregressive']]
 
 # One axis for each parallelism type may hold a placeholder (-1)
 # value to auto-shard based on available slices and devices.
@@ -96,13 +102,14 @@ data_sharding: [['data', 'fsdp', 'sequence', 'tensor']]
 # and product of the ICI axes should equal number of devices per slice.
 dcn_data_parallelism: -1  # recommended DCN axis to be auto-sharded
 dcn_fsdp_parallelism: 1
-dcn_sequence_parallelism: 1
-dcn_tensor_parallelism: 1
+dcn_sequence_parallelism: 1  # never recommended
+dcn_tensor_parallelism: 1 # never recommeneded
+dcn_autoregressive_parallelism: 1 # never recommended
 ici_data_parallelism: 1
-ici_fsdp_parallelism: -1  # recommended ICI axis to be auto-sharded
+ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
 ici_sequence_parallelism: 1
 ici_tensor_parallelism: 1
-
+ici_autoregressive_parallelism: 1
 
 # Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
@@ -147,9 +154,12 @@ learning_rate_schedule_steps: -1 # By default the length of the schedule is set 
 max_target_length: 2048 # Maximum sequence length
 max_prefill_predict_length: 64 # Maximum length for the prefill when doing autoregression
 eos_id: 2  # sentencepiece default
-prompt: "I love to " # Prompt for language model sampling.
+prompt: "I love to" # Prompt for language model sampling.
 load_from_prefill_dir: False # If true, decode.py doesn't "prefill" but just reads from directory
 prefill_cache_dir: "" # If set and load_from_prefill_dir, decode.py reads from directory. If set, decode.py writes to directory
+add_bos: False
+add_eos: True
+autoregressive_decode_assert: ""
 
 enable_profiler: False
 # Skip first n steps for profiling, to omit things like compilation and to give

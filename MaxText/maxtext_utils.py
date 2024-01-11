@@ -39,7 +39,7 @@ def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations
   data_sharding = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
   in_shardings = (state_mesh_shardings, data_sharding, None) # State, batch, rng
-  out_shardings = (state_mesh_shardings, None, None) # State, metrics, rng
+  out_shardings = (state_mesh_shardings, None) # State, metrics
   static_argnums = () # We partial out the static argnums of model and config
   donate_argnums = 0 # This is the index of the state - we allow the compiler to make use of this memory.
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums

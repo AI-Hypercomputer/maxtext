@@ -17,7 +17,10 @@
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
 import jax
+from jax import random
 import os
+
+import max_logging
 
 from typing import Sequence
 import datetime
@@ -34,23 +37,26 @@ def data_load_loop(config, state=None):
   """Main data loader loop.
     Loads batches of data for each training step.
   """
-  _, _, _, _, _, _, _, data_iterator, state = setup_train_loop(config)
+  init_rng = random.PRNGKey(config.init_weights_seed)
+  _, _, _, _, _, _, data_iterator, state = setup_train_loop(config, init_rng)
 
   example_batch = None
 
   start = datetime.datetime.now()
   start_step = get_first_step(state)
   example_batch = load_next_batch(data_iterator, example_batch, config, None)
+  jax.block_until_ready(example_batch)
+  
   first_end = datetime.datetime.now()
   time_to_load_first_batch = first_end-start
-  print("First step completed in ",time_to_load_first_batch ," seconds")
+  max_logging.log(f"First step completed in {time_to_load_first_batch} seconds")
 
   for _ in np.arange(start_step+1, config.steps):
     example_batch = load_next_batch(data_iterator, example_batch, config, None)
 
   jax.block_until_ready(example_batch) # wait until the last batch is read
   end = datetime.datetime.now()
-  print(config.steps," batches loaded in ", end-start ," seconds, on host ", jax.process_index())
+  max_logging.log(f"{config.steps} batches loaded in {end-start} seconds, on host {jax.process_index()}")
   return state
 
 
@@ -62,9 +68,9 @@ def main(argv: Sequence[str]) -> None:
   config = pyconfig.config
   validate_train_config(config)
   cc.initialize_cache(os.path.expanduser(config.jax_cache_dir))
-  print(f"Found {jax.device_count()} devices.")
-  print(f"Found {jax.process_count()} processes.")
-  print(f"Found {jax.devices()} devices.")
+  max_logging.log(f"Found {jax.device_count()} devices.")
+  max_logging.log(f"Found {jax.process_count()} processes.")
+  max_logging.log(f"Found {jax.devices()} devices.")
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   data_load_loop(config)
 

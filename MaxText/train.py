@@ -182,8 +182,7 @@ def train_step(model, config, state, data, dropout_rng):
 
   """
   # inputs, targets, segments, positions = apply_args
-  rng1, gen_aqt_rng = jax.random.split(dropout_rng)
-  aqt_rng, rng2 = jax.random.split(gen_aqt_rng)
+  rng1, aqt_rng = jax.random.split(dropout_rng)
 
   # decimate proportion of data when per_device_batch_size<1
   for k, v in data.items():
@@ -216,20 +215,20 @@ def train_step(model, config, state, data, dropout_rng):
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
-  return new_state, metrics, rng2
+  return new_state, metrics
 
-def setup_train_loop(config):
+def setup_train_loop(config, init_rng):
   """ Set up prerequisites for the training loop -
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
       Set up data iterator and tokenizer, initialize the model.
 
   Args:
     config
+    init_rng
 
   Returns:
     writer: Summary writer for tensorboard
     checkpoint_manager: Orbax checkpointer
-    nextrng: key used in train_step for dropout
     state_mesh_annotations: the mesh annotations for the train state 
     model:
     mesh: 
@@ -259,9 +258,6 @@ def setup_train_loop(config):
         config.checkpoint_period,
     )
 
-  # Initial PRNG Keys
-  init_rng, nextrng = random.split(random.PRNGKey(config.init_weights_seed), 2)
-
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
@@ -276,7 +272,7 @@ def setup_train_loop(config):
   state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(model, data_iterator, tx, config,
                                                                                 init_rng, mesh, checkpoint_manager)
 
-  return ( writer, checkpoint_manager, nextrng, state_mesh_annotations, model,
+  return ( writer, checkpoint_manager, state_mesh_annotations, model,
           mesh, learning_rate_schedule, data_iterator, state)
 
 
@@ -288,8 +284,9 @@ def train_loop(config, state=None):
     ckpt_path:
   Returns:
   """
-  ( writer, checkpoint_manager, nextrng, state_mesh_annotations, model,
-  mesh, learning_rate_schedule, data_iterator, state) = setup_train_loop(config)
+  init_rng = random.PRNGKey(config.init_weights_seed)
+  ( writer, checkpoint_manager, state_mesh_annotations, model,
+  mesh, learning_rate_schedule, data_iterator, state) = setup_train_loop(config, init_rng)
 
   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
     train_step,
@@ -317,7 +314,6 @@ def train_loop(config, state=None):
       static_argnums=static_argnums,
       donate_argnums=donate_argnums)
 
-  example_batch = None
   last_step_completion = datetime.datetime.now()
 
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
@@ -348,16 +344,20 @@ def train_loop(config, state=None):
       config.checkpoint_period
     )
 
+  nextrng = jax.random.fold_in(init_rng, start_step)
+  example_batch = load_next_batch(data_iterator, None, config, mesh)
+
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
 
-    example_batch = load_next_batch(data_iterator, example_batch, config, mesh)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      state, metrics, nextrng = p_train_step(
+      state, metrics = p_train_step(
           state, example_batch, nextrng
       )
 
+    example_batch = load_next_batch(data_iterator, example_batch, config, mesh)
+    nextrng = jax.random.fold_in(init_rng, step+1)
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
     write_metrics(writer, metrics, step, config)
