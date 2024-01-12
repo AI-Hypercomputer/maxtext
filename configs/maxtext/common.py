@@ -12,22 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The file of test owners."""
+"""Utilities to construct common configs."""
 
-# XLML - JAX/FLAX
-SHIVA_S = "Shiva S."
+from typing import Tuple
 
-# XLML - PAX
-GERSON_K = "Gerson K."
+UPGRADE_PIP = "pip install --upgrade pip"
 
-# XLML - TensorFlow
-ERIC_L = "Eric L."
-CHANDRA_D = "Chandra D."
-GAGIK_A = "Gagik A."
-RAN_R = "Ran R."
 
-# PYTORCH
-PEI_Z = "Pei Z."
-
-# Maxtext
-Tony_C = "Tony C."
+def download_maxtext() -> Tuple[str]:
+  """Common set up for flax repo."""
+  return (
+      UPGRADE_PIP,
+      "git clone https://github.com/google/maxtext.git /tmp/maxtext",
+  )
