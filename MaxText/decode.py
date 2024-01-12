@@ -189,7 +189,9 @@ def decode_loop(config, state=None):
   model = Transformer(config, mesh = mesh)
   vocab_path=os.path.join(config.assets_path, config.vocab_relative_path)
   sp_tokenizer = load_tokenizer(vocab_path=vocab_path,
-                                vocab_size=config.vocab_size)
+                                vocab_size=config.vocab_size,
+                                add_bos=config.add_bos,
+                                add_eos=config.add_eos)
   state, state_mesh_annotations, _ = max_utils.setup_decode_state(
     model, config, rng, mesh, checkpoint_manager
   )

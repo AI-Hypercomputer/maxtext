@@ -385,7 +385,9 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
 
   # Load tokenizer
   sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
-                                          vocab_size=config.vocab_size)
+                                          vocab_size=config.vocab_size,
+                                          add_bos=config.add_bos,
+                                          add_eos=config.add_eos)
 
   # Set global batch size.
   global_batch_size_to_load = config.global_batch_size_to_load
