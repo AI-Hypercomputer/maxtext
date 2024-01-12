@@ -638,6 +638,5 @@ class MultiHeadDotProductAttention(nn.Module):
         name='out',
         use_bias=cfg.use_bias_linear,
         config=cfg,
-        use_int8=self.use_int8,
-        local_aqt_shards=self.config.local_aqt_shards_attention_out_proj)(x)
+        )(x)
     return out
