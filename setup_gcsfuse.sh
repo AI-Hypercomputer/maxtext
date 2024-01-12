@@ -55,6 +55,3 @@ echo "Mounting $DATASET_GCS_BUCKET to $MOUNT_PATH"
 gcsfuse --implicit-dirs --http-client-timeout=5s --max-conns-per-host=2000 \
         --debug_fuse_errors --debug_fuse --debug_gcs --debug_invariants --debug_mutex \
         --log-file=$HOME/gcsfuse.json "$DATASET_GCS_BUCKET" "$MOUNT_PATH"
-
-echo "Installing requirements for grain"
-pip3 install -r requirements-grain.txt

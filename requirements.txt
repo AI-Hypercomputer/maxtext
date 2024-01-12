@@ -1,9 +1,12 @@
-orbax-checkpoint
+# need a new grain release to be use newer orbax-checkpoint
+orbax-checkpoint==0.4.1
 absl-py
 argparse
+array-record
 aqtp
 cloud-tpu-diagnostics
 google-cloud-storage
+grain-nightly==0.0.3
 flax
 ml-collections
 numpy
