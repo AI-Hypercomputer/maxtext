@@ -199,14 +199,11 @@ def preprocessing_pipeline(
 
 def preprocessing_pipeline_pygrain(
   dataset,
-  grain_worker_count,
+  config,
   vocab_path,
   batch_size: int,
   global_mesh,
-  shuffle: bool,
   num_epochs: Optional[int] = 1,
-  pack_examples: bool = True,
-  max_length: int = 512,
   shift: bool = True,
   drop_remainder: bool = True,
   data_shuffle_seed = 0,
@@ -219,16 +216,18 @@ def preprocessing_pipeline_pygrain(
   operations = []
   operations.append(pygrain_operations.ParseFeatures())
   operations.append(pygrain_operations.NormalizeFeatures())
-  operations.append(pygrain_tokenizer.TokenizeAndTrim(["inputs","targets"], max_length, vocab_path))
+  operations.append(pygrain_tokenizer.TokenizeAndTrim(["inputs","targets"],
+                                                      config.max_target_length, vocab_path,
+                                                      config.add_bos, config.add_eos))
 
   # Pack and Batch examples.
-  if pack_examples:
+  if config.pack_examples:
     operations.append(pygrain.experimental.PackAndBatchOperation(
                         batch_size=batch_size // jax.process_count(),
-                        length_struct={'inputs':max_length,'targets':max_length}))
+                        length_struct={'inputs':config.max_target_length,'targets':config.max_target_length}))
     operations.append(pygrain_operations.ReformatPacking())
   else:
-    operations.append(pygrain_operations.PadToMaxLength(max_length))
+    operations.append(pygrain_operations.PadToMaxLength(config.max_target_length))
     operations.append(pygrain.Batch(batch_size=batch_size // jax.process_count(), drop_remainder=drop_remainder))
 
   # Shift inputs for teacher-forced training
@@ -241,7 +240,7 @@ def preprocessing_pipeline_pygrain(
     shard_options=pygrain.ShardOptions(
       shard_index = jax.process_index(), shard_count = jax.process_count(), drop_remainder = True
     ),
-    shuffle = shuffle,
+    shuffle = config.enable_data_shuffling,
     seed = data_shuffle_seed
   )
 
@@ -249,7 +248,7 @@ def preprocessing_pipeline_pygrain(
       data_source = dataset,
       operations = operations,
       sampler = index_sampler,
-      worker_count=grain_worker_count,
+      worker_count=config.grain_worker_count,
   )
 
   data_iter = iter(dataloader)
@@ -385,7 +384,9 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
 
   # Load tokenizer
   sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
-                                          vocab_size=config.vocab_size)
+                                          vocab_size=config.vocab_size,
+                                          add_bos=config.add_bos,
+                                          add_eos=config.add_eos)
 
   # Set global batch size.
   global_batch_size_to_load = config.global_batch_size_to_load
@@ -397,39 +398,26 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
 
   train_iter = preprocessing_pipeline_pygrain(
       train_ds,
-      config.grain_worker_count,
+      config,
       vocab_path,
       global_batch_size_to_load,
       global_mesh,
-      shuffle=config.enable_data_shuffling,
-      num_epochs=1,
-      pack_examples=config.pack_examples,
-      max_length=config.max_target_length,
-      shift=True,
       data_shuffle_seed = data_shuffle_seed,)
 
   eval_iter = preprocessing_pipeline_pygrain(
       eval_ds,
-      config.grain_worker_count,
+      config,
       vocab_path,
       eval_batch_size,
       global_mesh,
-      shuffle=config.enable_data_shuffling,
-      pack_examples=config.pack_examples,
-      max_length=config.max_target_length,
-      shift=True,
       data_shuffle_seed = data_shuffle_seed,)
 
   predict_iter = preprocessing_pipeline_pygrain(
       eval_ds,
-      config.grain_worker_count,
+      config,
       vocab_path,
       eval_batch_size,
       global_mesh,
-      shuffle=config.enable_data_shuffling,
-      pack_examples=config.pack_examples,
-      max_length=config.max_target_length,
-      shift=True,
       data_shuffle_seed = data_shuffle_seed,)
 
   return train_iter, eval_iter, predict_iter, sp_tokenizer

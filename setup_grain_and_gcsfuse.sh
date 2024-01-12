@@ -37,6 +37,7 @@ if [[ $GCS_BUCKET == gs://* ]] ; then
 fi
 
 if ! command -v gcsfuse &> /dev/null ; then
+  echo "gcsfuse not installed, installing ..."
   apt-get update -y && \
   apt-get install -y lsb-release && \
   apt-get install -y gnupg && \
@@ -50,8 +51,10 @@ fi
 
 mkdir -p $MOUNT_PATH
 
-# gcsfuse --implicit-dirs "$DATASET_GCS_BUCKET" "$MOUNT_PATH"
-
+echo "Mounting $DATASET_GCS_BUCKET to $MOUNT_PATH"
 gcsfuse --implicit-dirs --http-client-timeout=5s --max-conns-per-host=2000 \
         --debug_fuse_errors --debug_fuse --debug_gcs --debug_invariants --debug_mutex \
         --log-file=$HOME/gcsfuse.json "$DATASET_GCS_BUCKET" "$MOUNT_PATH"
+
+echo "Installing requirements for grain"
+pip3 install -r requirements-grain.txt

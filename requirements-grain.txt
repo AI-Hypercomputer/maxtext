@@ -1,0 +1,3 @@
+orbax-checkpoint==0.4.1
+array-record
+grain-nightly==0.0.3

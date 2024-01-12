@@ -156,11 +156,11 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
       if not iter_path.exists():
         raise FileNotFoundError(f"Data iterator path not found: {iter_path}. Please set load_data_iterator_from_checkpoint to False if loading is not intended.")
 
-      max_logging.log(f"restoring step {step} state from {checkpoint_manager.directory} and data iterator from {iter_path}")
+      max_logging.log(f"restoring state from {checkpoint_manager.directory} and data iterator from {iter_path} step {step} ")
       return checkpoint_manager.restore(step, {'default':abstract_unboxed_pre_state,'iter':iterator},
                                       {"restore_args" : restore_args}), None
     else:
-      max_logging.log(f"restoring step {step} state from {checkpoint_manager.directory}")
+      max_logging.log(f"restoring state from {checkpoint_manager.directory} step {step} ")
       return checkpoint_manager.restore(step, abstract_unboxed_pre_state,
                               {"restore_args" : restore_args}), None
 
