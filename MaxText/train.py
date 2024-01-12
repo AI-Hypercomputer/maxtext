@@ -279,22 +279,24 @@ def train_loop(config, state=None):
 
   state, state_mesh_annotations = max_utils.setup_training_state(model, tx, config, init_rng, mesh, checkpoint_manager)
 
-  # hack overwrite state
-  def map_fn(key_path, value):
-    key_path_str = jax.tree_util.keystr(key_path)
-    if key_path_str in  (".step", ".opt_state[0].count", ".opt_state[1].count", "opt_state.count", ".opt_state[<flat index 0>]"):
-      max_logging.log(f"overwrite step: {key_path_str}")
-      return jnp.array(config.overwrite_ckpt_step, dtype=value.dtype)
-    elif key_path_str in (".params['decoder']['decoder']['pre_self_attention_norm']['scale']",  ".params['decoder']['decoder']['mlp']['mlp_layer_norm']['scale']", ".params['decoder']['decoder_norm']['scale']"):
-      max_logging.log(f"replaced {key_path_str}")
-      with jax.spmd_mode('allow_all'):
-        return value - 1.
-    else:
-      return value
 
-  state = jax.tree_util.tree_map_with_path(map_fn, state)
+  if config.enable_eval_step:
+    # hack overwrite state
+    def map_fn(key_path, value):
+      key_path_str = jax.tree_util.keystr(key_path)
+      if key_path_str in  (".step", ".opt_state[0].count", ".opt_state[1].count", "opt_state.count", ".opt_state[<flat index 0>]"):
+        max_logging.log(f"overwrite step: {key_path_str}")
+        return jnp.array(config.overwrite_ckpt_step, dtype=value.dtype)
+      elif key_path_str in (".params['decoder']['decoder']['pre_self_attention_norm']['scale']",  ".params['decoder']['decoder']['mlp']['mlp_layer_norm']['scale']", ".params['decoder']['decoder_norm']['scale']"):
+        max_logging.log(f"replaced {key_path_str}")
+        with jax.spmd_mode('allow_all'):
+          return value - 1.
+      else:
+        return value
+
+    state = jax.tree_util.tree_map_with_path(map_fn, state)
+
   start_step = get_first_step(state) # this is the start_step for training
-
   eval_interval = math.ceil(24567 / config.global_batch_size_to_train_on)
   if jax.process_index() == 0:
     mllogger = mllog.get_mllogger()
@@ -418,7 +420,7 @@ def train_loop(config, state=None):
     if config.gcs_metrics and jax.process_index() == 0:
       running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
 
-    if step > start_step and step % eval_interval == 0:
+    if config.enable_eval_step and step > start_step and step % eval_interval == 0:
       valid_cum_loss = 0
       valid_cum_weights = 0
       for batch in eval_data_iterator:
@@ -432,7 +434,7 @@ def train_loop(config, state=None):
         valid_cum_weights += batch_valid_cum_weights
 
       weighted_mean_valid_loss = valid_cum_loss / (valid_cum_weights + 1e-8)
-      max_logging.log(f"average loss after {start_step}: weighted_mean={weighted_mean_valid_loss}, total_weights={valid_cum_weights}")
+      max_logging.log(f"average loss after {step}: weighted_mean={weighted_mean_valid_loss}, total_weights={valid_cum_weights}")
       if jax.process_index() == 0:
         current_epoch_num = step * config.global_batch_size_to_train_on * config.max_target_length
         first_epoch_num = current_epoch_num - eval_frequency_tokens

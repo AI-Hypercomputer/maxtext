@@ -183,7 +183,7 @@ embed_lookup_style: 'index'
 
 # whether to add position_embedding
 use_position_embedding: False
-max_trainable_pe_max_seq_len: None
+max_trainable_pe_max_seq_len: 2048
 overwrite_ckpt_step: -1
 
 # whether to add bias in all linear layers in Transformer
@@ -239,6 +239,7 @@ compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g.
 compile_topology: '' # Target hardware version, e.g. 'v5e-256'
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
 
-target_valid_loss: None
+target_valid_loss: 0
 
 combined_qkv: False
+enable_eval_step: False

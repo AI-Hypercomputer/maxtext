@@ -411,8 +411,9 @@ class MultiHeadDotProductAttention(nn.Module):
           use_bias=cfg.use_bias_linear,
           config=cfg)
 
-      # batch, length, heads, kv, 3 -> 3, batch, length, heads, kv
-      query, key, value = jnp.moveaxis(combined_projection(kernel_init=self.kernel_init, name='combined_qkv')(inputs_q), 0, -1)
+      # batch, length, heads, kv, 3
+      combined_qkv = combined_projection(kernel_init=self.kernel_init, name='combined_qkv')(inputs_q)
+      query, key, value = combined_qkv[..., 0], combined_qkv[..., 1], combined_qkv[..., 2]
     else:
       projection = functools.partial(
           DenseGeneral,
