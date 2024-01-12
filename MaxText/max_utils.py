@@ -47,11 +47,20 @@ def l2norm_pytree(x):
   ) ** 0.5
 
 def calculate_num_params_from_pytree(params):
-  # NOMUTANTS -- false alert, verified test exists.
   params_sizes = jax.tree_util.tree_map(jax.numpy.size, params)
   total_parameters = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes)
   assert total_parameters >= 0
   return total_parameters
+
+def calculate_bytes_from_pytree(params):
+  params_bytes = jax.tree_util.tree_map(lambda x : x.nbytes, params)
+  total_bytes = jax.tree_util.tree_reduce(lambda x, y: x + y, params_bytes)
+  return total_bytes
+
+def summarize_size_from_pytree(params):
+  num_params = calculate_num_params_from_pytree(params)
+  num_bytes = calculate_bytes_from_pytree(params)
+  return num_params, num_bytes, num_bytes/num_params
 
 def activate_profiler(config):
   if jax.process_index() == 0 and config.enable_profiler:
