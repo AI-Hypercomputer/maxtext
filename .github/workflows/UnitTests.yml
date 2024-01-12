@@ -23,8 +23,8 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
   schedule:
-    # Run the job every 60 mins
-    - cron:  '*/60 * * * *'
+    # Run the job every 2 hours
+    - cron:  '*/120 * * * *'
 
 jobs:
   # IF YOU MODIFY THIS, YOU SHOULD ALSO ADD CORRESPONDING MODICATIONS TO 'gpu' job
