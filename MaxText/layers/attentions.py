@@ -258,6 +258,7 @@ class MultiHeadDotProductAttention(nn.Module):
   use_qk_norm: bool = True
   query_scale_style: str = 'init'
   combined_qkv: bool = False
+  use_int8:bool = False
 
   def apply_attention(
       self,
@@ -412,7 +413,7 @@ class MultiHeadDotProductAttention(nn.Module):
           config=cfg)
 
       # batch, length, heads, kv, 3
-      combined_qkv = combined_projection(kernel_init=self.kernel_init, name='combined_qkv')(inputs_q)
+      combined_qkv = combined_projection(kernel_init=self.kernel_init, name='combined_qkv',  use_int8=self.use_int8, local_aqt_shards=self.config.local_aqt_shards_qkv_proj)(inputs_q)
       query, key, value = combined_qkv[..., 0], combined_qkv[..., 1], combined_qkv[..., 2]
     else:
       projection = functools.partial(
@@ -433,11 +434,11 @@ class MultiHeadDotProductAttention(nn.Module):
 
         # Project inputs_q to multi-headed q/k/v
         # dimensions are then [batch, length, num_heads, head_dim]
-        query = projection(kernel_init=query_init, name='query')(inputs_q)
+        query = projection(kernel_init=query_init, name='query', use_int8=self.use_int8, local_aqt_shards=self.config.local_aqt_shards_query_proj)(inputs_q)
       else:
-        query = projection(kernel_init=self.kernel_init, name='query')(inputs_q)
-      key = projection(kernel_init=self.kernel_init, name='key')(inputs_kv)
-      value = projection(kernel_init=self.kernel_init, name='value')(inputs_kv)
+        query = projection(kernel_init=self.kernel_init, name='query', use_int8=self.use_int8, local_aqt_shards=self.config.local_aqt_shards_query_proj)(inputs_q)
+      key = projection(kernel_init=self.kernel_init, name='key', use_int8=self.use_int8, local_aqt_shards=self.config.local_aqt_shards_key_proj)(inputs_kv)
+      value = projection(kernel_init=self.kernel_init, name='value', use_int8=self.use_int8, local_aqt_shards=self.config.local_aqt_shards_value_proj)(inputs_kv)
 
     # Apply RoPE if True
     if self.use_rotary_position_emb:
@@ -636,6 +637,7 @@ class MultiHeadDotProductAttention(nn.Module):
         dtype=self.dtype,
         name='out',
         use_bias=cfg.use_bias_linear,
-        config=cfg)(
-            x)
+        config=cfg,
+        use_int8=self.use_int8,
+        local_aqt_shards=self.config.local_aqt_shards_attention_out_proj)(x)
     return out

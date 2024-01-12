@@ -82,6 +82,8 @@ class DenseGeneral(nn.Module):
   kernel_axes: Tuple[str, ...] = ()
   use_bias: bool = False
   bias_init: NdInitializer = initializers.default_bias_init
+  use_int8: bool = False
+  local_aqt_shards: int = 0
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -100,7 +102,7 @@ class DenseGeneral(nn.Module):
         return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
       else:
         aqt_rng = self.make_rng('aqt')
-        aqt_dot_general = quantizations.int8_dot_general(aqt_rng)
+        aqt_dot_general = quantizations.int8_dot_general(aqt_rng, self.local_aqt_shards)
         return aqt_dot_general(
             inputs, kernel, ((axis, contract_ind), ((), ()))
         )
@@ -196,7 +198,9 @@ class MlpBlock(nn.Module):
           kernel_axes=('embed', 'mlp'),
           name=dense_name,
           use_bias=cfg.use_bias_linear,
+          use_int8=cfg.int8_training,
           config=cfg,
+          local_aqt_shards=cfg.local_aqt_shards_mlp1,
       )(inputs)
       x = _convert_to_activation_function(act_fn)(x)
       activations.append(x)
@@ -225,6 +229,8 @@ class MlpBlock(nn.Module):
         name='wo',
         use_bias=cfg.use_bias_linear,
         config=cfg,
+        use_int8=cfg.int8_training,
+        local_aqt_shards=cfg.local_aqt_shards_mlp2,
     )(x)
 
     if self.apply_padding_mask and padding_mask is not None:
