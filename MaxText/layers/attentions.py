@@ -41,7 +41,7 @@ Mesh = common_types.Mesh
 PRNGKey = common_types.PRNGKey
 
 DenseGeneral = linears.DenseGeneral
-LLaMARotaryEmbedding = embeddings.LLaMARotaryEmbedding
+RotaryEmbedding = embeddings.RotaryEmbedding
 NdInitializer = initializers.NdInitializer
 
 AxisNames = common_types.AxisNames
@@ -621,7 +621,7 @@ class Attention(nn.Module):
 
   def key_rotary(self, key: Array, inputs_positions: Array):
     """Apply Rotary Embedding to key."""
-    key = LLaMARotaryEmbedding(
+    key = RotaryEmbedding(
       embedding_dims=self.head_dim,
       name='key_rotary')(inputs=key, position=inputs_positions)
     return key
@@ -663,7 +663,7 @@ class Attention(nn.Module):
     value = self.kv_projection(inputs_kv, proj_name='value')
 
     # apply ROPE
-    query = LLaMARotaryEmbedding(
+    query = RotaryEmbedding(
         embedding_dims=self.head_dim, name='query_rotary'
     )(inputs=query, position=inputs_positions)
     key = self.key_rotary(key, inputs_positions)

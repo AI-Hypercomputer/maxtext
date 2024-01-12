@@ -35,7 +35,6 @@ Mesh = common_types.Mesh
 ScanIn = common_types.ScanIn
 
 Embed = embeddings.Embed
-LLaMARotaryEmbedding = embeddings.LLaMARotaryEmbedding
 Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
 
