@@ -31,6 +31,8 @@ class TokenizeAndTrim(grain.MapTransform):
   feature_names: str | Sequence[str]
   sequence_length: int | Sequence[int]
   model_path: str
+  add_bos: bool
+  add_eos: bool
 
   def __post_init__(self):
     self._processor = None
@@ -46,6 +48,7 @@ class TokenizeAndTrim(grain.MapTransform):
       with self._initialize_processor_lock:
         if self._processor is None:  # Ensures only one thread initializes SPP.
           self._processor = SentencePieceProcessor()
+          self._processor.Init(add_bos=self.add_bos, add_eos=self.add_eos)
           self._processor.load(self.model_path)
     for feature_name, sequence_length in zip(
         self.feature_names, self.sequence_length, strict=True

@@ -1,4 +1,5 @@
-orbax-checkpoint
+# need a new grain release to for newer orbax version
+orbax-checkpoint==0.4.1
 absl-py
 array-record
 argparse

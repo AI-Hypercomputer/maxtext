@@ -199,8 +199,10 @@ def preprocessing_pipeline(
 
 def preprocessing_pipeline_pygrain(
   dataset,
+  vocab_path: list,
+  add_bos: bool,
+  add_eos: bool,
   grain_worker_count,
-  vocab_path,
   batch_size: int,
   global_mesh,
   shuffle: bool,
@@ -219,7 +221,9 @@ def preprocessing_pipeline_pygrain(
   operations = []
   operations.append(pygrain_operations.ParseFeatures())
   operations.append(pygrain_operations.NormalizeFeatures())
-  operations.append(pygrain_tokenizer.TokenizeAndTrim(["inputs","targets"], max_length, vocab_path))
+  operations.append(pygrain_tokenizer.TokenizeAndTrim(["inputs","targets"],
+                                                      max_length, vocab_path,
+                                                      add_bos, add_eos))
 
   # Pack and Batch examples.
   if pack_examples:
@@ -399,39 +403,42 @@ def preprocess_dataset_pygrain(config: ml_collections.ConfigDict,
 
   train_iter = preprocessing_pipeline_pygrain(
       train_ds,
-      config.grain_worker_count,
       vocab_path,
+      config.add_bos,
+      config.add_eos,
+      config.grain_worker_count,
       global_batch_size_to_load,
       global_mesh,
       shuffle=config.enable_data_shuffling,
       num_epochs=1,
       pack_examples=config.pack_examples,
       max_length=config.max_target_length,
-      shift=True,
       data_shuffle_seed = data_shuffle_seed,)
 
   eval_iter = preprocessing_pipeline_pygrain(
       eval_ds,
-      config.grain_worker_count,
       vocab_path,
+      config.add_bos,
+      config.add_eos,
+      config.grain_worker_count,
       eval_batch_size,
       global_mesh,
       shuffle=config.enable_data_shuffling,
       pack_examples=config.pack_examples,
       max_length=config.max_target_length,
-      shift=True,
       data_shuffle_seed = data_shuffle_seed,)
 
   predict_iter = preprocessing_pipeline_pygrain(
       eval_ds,
-      config.grain_worker_count,
       vocab_path,
+      config.add_bos,
+      config.add_eos,
+      config.grain_worker_count,
       eval_batch_size,
       global_mesh,
       shuffle=config.enable_data_shuffling,
       pack_examples=config.pack_examples,
       max_length=config.max_target_length,
-      shift=True,
       data_shuffle_seed = data_shuffle_seed,)
 
   return train_iter, eval_iter, predict_iter, sp_tokenizer
