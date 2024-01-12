@@ -17,7 +17,7 @@
 
 set -e
 
-FOLDERS_TO_FORMAT=("apis" "configs" "dags" "implementations")
+FOLDERS_TO_FORMAT=("dags" "xlml")
 
 for folder in "${FOLDERS_TO_FORMAT[@]}"
 do

@@ -29,4 +29,4 @@ jobs:
       run: pip install -r .github/requirements.txt
 
     - name: Run tests
-      run: python3 -m unittest discover implementations "*_test.py"
+      run: python3 -m unittest discover xlml "*_test.py"

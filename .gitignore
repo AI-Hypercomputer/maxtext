@@ -9,4 +9,4 @@ __pycache__
 *.tfstate.*
 
 # Compiled JSonnet templates
-configs/jsonnet/*
+dags/jsonnet/*

@@ -13,6 +13,6 @@
 # limitations under the License.
 
 export PYTHONPATH=$PWD
-export XLMLTEST_CONFIGS=$PWD/configs/jsonnet/
+export XLMLTEST_CONFIGS=$PWD/dags/jsonnet/
 
 find dags -name '*.py' |  xargs -n 1 -t python

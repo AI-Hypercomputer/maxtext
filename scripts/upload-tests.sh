@@ -17,7 +17,7 @@
 set -e
 
 GCS_DAGS_FOLDER=$1
-FOLDERS_TO_UPLOAD=("apis" "configs" "dags" "implementations")
+FOLDERS_TO_UPLOAD=("dags" "xlml")
 
 # TODO(ranran): handle tests from Jsonnet
 for folder in "${FOLDERS_TO_UPLOAD[@]}"

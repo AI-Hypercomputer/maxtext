@@ -27,7 +27,7 @@ Guidelines](https://opensource.google/conduct/).
 
 ### Code Style
 
-We use the automatice code formatter [Pyink](https://github.com/google/pyink), which is a fork of the [Black](https://github.com/psf/black) formatter with a few different behaviors tailored towards Google internal repository.
+We use the code formatter [Pyink](https://github.com/google/pyink), which is a fork of the [Black](https://github.com/psf/black) formatter with a few different behaviors tailored towards Google internal repository.
 
 #### Step 1: Install Pyink.
 
