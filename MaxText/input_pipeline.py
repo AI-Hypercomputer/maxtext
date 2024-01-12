@@ -201,7 +201,7 @@ def preprocessing_pipeline_pygrain(
   vocab_path,
   add_bos: bool,
   add_eos: bool,
-  grain_worker_count,
+  grain_worker_count: int,
   batch_size: int,
   global_mesh,
   shuffle: bool,

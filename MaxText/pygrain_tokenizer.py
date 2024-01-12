@@ -48,13 +48,12 @@ class TokenizeAndTrim(grain.MapTransform):
       with self._initialize_processor_lock:
         if self._processor is None:  # Ensures only one thread initializes SPP.
           self._processor = SentencePieceProcessor()
-          self._processor.Init(add_bos=self.add_bos, add_eos=self.add_eos)
           self._processor.load(self.model_path)
     for feature_name, sequence_length in zip(
         self.feature_names, self.sequence_length, strict=True
     ):
       text = features[feature_name]
-      token_ids = self._processor.EncodeAsIds(text)
+      token_ids = self._processor.EncodeAsIds(text, add_bos=self.add_bos, add_eos=self.add_eos)
       token_ids = token_ids[:sequence_length]
       features[feature_name] = np.asarray(token_ids, dtype=np.int32)
     return features
