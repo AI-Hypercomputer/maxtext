@@ -123,7 +123,6 @@ def add_annotations(ds):
 
 def preprocessing_pipeline(
   dataset,
-  dataset_type,
   batch_size: int,
   global_mesh,
   shuffle: bool,
@@ -191,7 +190,7 @@ def preprocessing_pipeline(
   if prefetch_size:
     dataset = dataset.prefetch(prefetch_size)
 
-  multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(dataset_type, dataset, global_mesh)
+  multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(dataset, global_mesh)
 
   # Return multi-host jax.Array prep iterator
   return multihost_gen
@@ -199,7 +198,7 @@ def preprocessing_pipeline(
 
 def preprocessing_pipeline_pygrain(
   dataset,
-  vocab_path: list,
+  vocab_path,
   add_bos: bool,
   add_eos: bool,
   grain_worker_count,
@@ -343,7 +342,6 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
 
   train_iter = preprocessing_pipeline(
       train_ds,
-      config.dataset_type,
       global_batch_size_to_load,
       global_mesh,
       shuffle=config.enable_data_shuffling,
@@ -355,7 +353,6 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
 
   eval_iter = preprocessing_pipeline(
       eval_ds,
-      config.dataset_type,
       eval_batch_size,
       global_mesh,
       shuffle=config.enable_data_shuffling,
@@ -366,7 +363,6 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
 
   predict_iter = preprocessing_pipeline(
       eval_ds,
-      config.dataset_type,
       eval_batch_size,
       global_mesh,
       shuffle=config.enable_data_shuffling,
