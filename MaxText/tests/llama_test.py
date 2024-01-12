@@ -76,9 +76,14 @@ def apply_rotary_emb(
 
   return xq_out.astype(dtype), xk_out.astype(dtype)
 
-class LlamaRoPETest(unittest.TestCase):
+def permute_to_match_maxtext_rope(arr):
+  evens = arr[..., ::2]
+  odds = arr[..., 1::2]
+  return jax.numpy.concatenate((evens, odds), axis=arr.ndim-1)
+
+class RoPETest(unittest.TestCase):
   """Test for the RoPE implementation """
-  def test_llama_rope(self):
+  def test_rope(self):
     dim_per_head = 128
     seq_len = 8
 
@@ -100,8 +105,8 @@ class LlamaRoPETest(unittest.TestCase):
     position = jnp.arange(seq_length, dtype=jnp.float32)[jnp.newaxis, :]
 
     # Calculate RoPE embeddings from MaxText implementation
-    query_proj = embeddings.LLaMARotaryEmbedding(embedding_dims = dim_per_head)(x_q, position = position)
-    key_proj = embeddings.LLaMARotaryEmbedding(embedding_dims = dim_per_head)(x_k, position = position)
+    query_proj = embeddings.RotaryEmbedding(embedding_dims = dim_per_head)(permute_to_match_maxtext_rope(x_q), position = position)
+    key_proj = embeddings.RotaryEmbedding(embedding_dims = dim_per_head)(permute_to_match_maxtext_rope(x_k), position = position)
 
     # Compare results
     self.assertTrue(jax.numpy.allclose(llama_output[0], query_proj, rtol=1e-01, atol=1e-04, equal_nan=False))

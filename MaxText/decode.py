@@ -19,6 +19,7 @@
 import functools
 from typing import Sequence
 
+import datetime
 import flax
 import orbax
 
@@ -138,7 +139,6 @@ def compute_prefill(config, model, state, rng, sp_tokenizer, mesh, state_mesh_sh
   prefill_output, prefill_cache = p_prefill_predict_step(tokenized_prompts, prompt_decoder_positions,\
                                                         prompt_decoder_segment_ids, state, rng)
   indices = jax.numpy.argmax(prefill_output, axis=2)
-  match_input_and_output_stream(tokenized_prompts[0, :], np.array(indices[0,:]), sp_tokenizer)
 
   last_index = indices[:, -1:]
   return prefill_cache, last_index, prompt_decoder_positions[:, -1:]+1
@@ -205,8 +205,9 @@ def decode_loop(config, state=None):
   kv_cache_annotations = max_utils.get_kv_cache_annotations(model, config, rng, mesh)
 
   assert state.opt_state == {}, "non null opt_state in checkpoint"
-  num_params = max_utils.calculate_num_params_from_pytree(state.params)
-  max_logging.log(f"Number of model params={num_params/10**9:.3f} billion")
+  num_params, bytes_params, bytes_per_param = max_utils.summarize_size_from_pytree(state.params)
+  max_logging.log(f"Number of model params={num_params/10**9:.3f} billion, memory usage={bytes_params/2**30:.3f}GB, "
+                  f"bytes per param={bytes_per_param:.3f}")
 
   state_mesh_shardings = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
@@ -216,6 +217,12 @@ def decode_loop(config, state=None):
 
   prefill_cache, new_id, new_position = prefill_or_load(config, model, state, rng, sp_tokenizer,\
                                                    mesh, state_mesh_shardings, kv_cache_mesh_shardings)
+  num_cache, bytes_cache, bytes_per_cache = max_utils.summarize_size_from_pytree(prefill_cache)
+  max_logging.log(f"Number of cache entries={num_cache/10**9:.3f} billion, memory usage={bytes_cache/2**30:.3f}GB, "
+                  f"bytes per cache={bytes_per_cache:.3f}")
+
+  total_memory_GB = (bytes_params + bytes_cache)/2**30
+  max_logging.log(f"Total memory (for cache and params) {total_memory_GB:.3f} GB")
 
   partial_ar_predict_step = functools.partial(ar_predict_single_token, model=model)
   partial_ar_predict_step.__name__ = "partial_ar_predict_step"
@@ -232,11 +239,15 @@ def decode_loop(config, state=None):
   last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1,
                                 first_profiling_step, config.max_target_length - 1)
 
-  outputs = []
   #add the new_id which is the first generated token to outputs
   outputs = [new_id]
 
-  for step in range(config.max_prefill_predict_length, config.max_target_length-1):
+  new_position, new_cache, new_id = p_ar_predict_step(new_id, new_position, new_cache, state, rng)
+  outputs.append(new_id)
+  jax.block_until_ready(new_cache)
+
+  starttime = datetime.datetime.now()
+  for step in range(config.max_prefill_predict_length + 1, config.max_target_length-1):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
     new_position, new_cache, new_id = p_ar_predict_step(new_id, new_position, new_cache, state, rng)
@@ -244,12 +255,25 @@ def decode_loop(config, state=None):
     if step == last_profiling_step:
       jax.block_until_ready(outputs)
       max_utils.deactivate_profiler(config)
+  endtime = datetime.datetime.now()
 
   new_text, _ = decode_tokens([int(x[0,0]) for x in outputs], sp_tokenizer)
   max_logging.log(f"Completion: `{config.prompt}` -> `{new_text}`")
   if config.autoregressive_decode_assert != "":
     assert new_text==config.autoregressive_decode_assert, \
     f"generated text mismatch {new_text=} {config.autoregressive_decode_assert=}"
+
+  steps = config.max_target_length-1 - (config.max_prefill_predict_length+1)
+  elapsed_time = (endtime-starttime).total_seconds()
+  seqs = config.per_device_batch_size * jax.device_count()
+
+  per_step_time = elapsed_time/steps
+  memory_bandwidth_per_device_GB_per_sec = total_memory_GB/(elapsed_time/steps)/jax.device_count()
+  max_logging.log(f"Did {steps} steps in {elapsed_time:.3f} seconds for {seqs} sequences with a total memory footprint of "
+                  f"{total_memory_GB:.3f} GB")
+  max_logging.log(f"Therefore, a per-generate time of {per_step_time:.4f} seconds, a throughput of {seqs/per_step_time:.1f} "
+                  f"tok/s and {memory_bandwidth_per_device_GB_per_sec:.1f} GB/s/device")
+
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
