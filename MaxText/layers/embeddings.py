@@ -102,8 +102,8 @@ class Embed(nn.Module):
     return jnp.dot(query, jnp.asarray(self.embedding, dtype).T)
 
 
-class LLaMARotaryEmbedding(nn.Module):
-  """LLaMA variant of ROPE where inputs are split in a different way.
+class RotaryEmbedding(nn.Module):
+  """RoPE
 
   Attributes:
     min_timescale: Start of the geometric index. Determines the periodicity of
@@ -167,8 +167,9 @@ class LLaMARotaryEmbedding(nn.Module):
     sin = jnp.sin(sinusoid_inp)
     cos = jnp.cos(sinusoid_inp)
     reshape_tensor = inputs.astype(jnp.float32).reshape(
-        *inputs.shape[:-1], -1, 2
+        *inputs.shape[:-1], 2, -1
     )
+    reshape_tensor = jax.numpy.swapaxes(reshape_tensor, -1, -2)
     first_half = reshape_tensor[..., 0]
     second_half = reshape_tensor[..., 1]
     first_part = first_half * cos - second_half * sin
