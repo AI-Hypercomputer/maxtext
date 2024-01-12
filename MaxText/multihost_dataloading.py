@@ -62,9 +62,8 @@ def _form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
   return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
 
 
-def get_batch_sharded_data_pipeline(
-  dataset_type, dataset: tf.data.Dataset, global_mesh: Mesh
-) -> Callable[[], jax.Array]:
+def get_batch_sharded_data_pipeline(dataset: tf.data.Dataset,
+                                    global_mesh: Mesh) -> Callable[[], jax.Array]:
   """Each device loads batch_size/num_devices,
   To do this, each host first loads batch_size/num_hosts, then shards that
   equally across it's devices.
@@ -73,13 +72,8 @@ def get_batch_sharded_data_pipeline(
   Returns:
     sharded_dataset: per_host dataset
   """
-  if dataset_type == 'c4':
-    dataset = iter(dataset.as_numpy_iterator())
-  elif dataset_type == 'c4-array_record':
-    dataset = iter(dataset)
-  else:
-    raise ValueError('Unknow dataset_type, must be c4, c4-array_record or synthetic')
 
+  dataset = iter(dataset.as_numpy_iterator())
   multihost_generator = partial(get_next_batch_sharded, dataset, global_mesh)
 
   return multihost_generator
