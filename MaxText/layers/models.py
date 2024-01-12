@@ -282,6 +282,7 @@ class DecoderLayer(nn.Module):
         query_scale_style=cfg.query_scale_style,
         combined_qkv=cfg.combined_qkv,
         name='self_attention',
+        use_int8=cfg.int8_training,
         config=cfg,
         mesh=mesh)(
             lnx,
@@ -487,7 +488,9 @@ class Decoder(nn.Module):
           dtype=jnp.float32,  # Use float32 for stabiliity.
           kernel_axes=('embed', 'vocab'),
           name='logits_dense',
-          config=cfg)(y)
+          config=cfg,
+          use_int8=cfg.int8_training,
+          )(y)
     logits = nn.with_logical_constraint(
         logits, ('activation_batch', 'activation_length', 'activation_vocab'))
     return logits

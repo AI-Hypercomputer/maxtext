@@ -41,6 +41,15 @@ gcs_metrics: False
 dtype: "bfloat16"
 int8_training: False
 
+local_aqt_shards_mlp1: 0
+local_aqt_shards_mlp2: 0
+local_aqt_shards_qkv_proj: 0
+local_aqt_shards_query_proj: 0
+local_aqt_shards_key_proj: 0
+local_aqt_shards_value_proj: 0
+local_aqt_shards_attention_out_proj: 1
+ 
+
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
 # then you should explicitly set base_embed_dim, base_num_heads, base_mlp_dim, base_num_decoder_layers and/or head_dim.
 global_parameter_scale: 1

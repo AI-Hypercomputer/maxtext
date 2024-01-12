@@ -407,7 +407,7 @@ def train_loop(config, state=None):
   running_gcs_metrics = [] if config.gcs_metrics else None
 
   first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
- 
+
   if jax.process_index() == 0:
     mllogger.end(mllog.constants.INIT_STOP)
     mllogger.start(mllog.constants.RUN_START)
