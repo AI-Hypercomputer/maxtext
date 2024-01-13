@@ -108,7 +108,7 @@ parser.add_argument(
 args = parser.parse_args()
 
 def main(_argv: Sequence[str]) -> None:
-  cc.initialize_cache(os.path.expanduser("~/jax_cache_2"))
+  cc.set_cache_dir(os.path.expanduser("~/jax_cache_2"))
 
   def activate_profiler(profiler_path):
     if profiler_path:
