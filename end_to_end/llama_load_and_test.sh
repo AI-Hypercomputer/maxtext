@@ -1,5 +1,6 @@
 set -e
 idx=$(date +%Y-%m-%d-%H-%M)
+
 #TODO(internal bug -- migrate to XLML)
 #pip install torch
 #gsutil cp -r gs://maxtext-llama/llama2-7b/meta-ckpt /tmp/

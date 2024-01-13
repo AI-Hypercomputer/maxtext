@@ -345,7 +345,6 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   pyconfig.initialize(argv)
-  print(f"Found {jax.device_count()} devices.")
   config = pyconfig.config
   validate_train_config(config)
   cc.initialize_cache(os.path.expanduser(config.jax_cache_dir))
