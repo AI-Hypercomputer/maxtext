@@ -184,7 +184,16 @@ class Decoder(nn.Module):
     y = y.astype(cfg.dtype)
 
     if cfg.use_positional_embedding:
-      y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
+      if cfg.trainable_position_size:
+        y += Embed(
+          num_embeddings=cfg.trainable_position_size,
+          features=cfg.emb_dim,
+          dtype=cfg.dtype,
+          embedding_init=nn.initializers.normal(stddev=1.0),
+          name='position_embedder',
+          config=cfg)(decoder_positions)
+      else:
+        y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
 
     BlockLayer = self.get_decoder_layer()
 

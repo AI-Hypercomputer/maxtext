@@ -67,6 +67,7 @@ base_num_kv_heads: 8
 base_mlp_dim: 8192
 base_num_decoder_layers: 16
 head_dim: 256
+
 # activation functions are .
 mlp_activations: ["relu"]
 dropout_rate: 0
@@ -200,6 +201,7 @@ stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds
 use_iota_embed: False
 # use positional embedding
 use_positional_embedding: False
+trainable_position_size: 0  # enable gpt3 position embedding with a positive trainable_position_size
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
