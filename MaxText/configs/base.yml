@@ -56,6 +56,9 @@ base_num_kv_heads: 8
 base_mlp_dim: 8192
 base_num_decoder_layers: 16
 head_dim: 256
+
+trainable_position_size: 0  # enable gpt3 position embedding with a positive trainable_position_size
+
 # activation functions are .
 mlp_activations: ["relu"]
 dropout_rate: 0
