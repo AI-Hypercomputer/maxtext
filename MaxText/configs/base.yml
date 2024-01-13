@@ -69,7 +69,7 @@ record_internal_nn_metrics: 0
 
 # Output directory
 # Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
-base_output_directory: ""
+base_output_directory: "gs://dishaw-bucket-01/"
 
 # Jax cache directory
 jax_cache_dir: "~/jax_cache"
@@ -107,7 +107,7 @@ ici_tensor_parallelism: 1
 
 # Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
-dataset_path: ""
+dataset_path: "gs://dishaw-bucket-datasets/"
 vocab_size: 32_768 # powers of 2 for sharding
 assets_path: "assets"
 vocab_relative_path: "tokenizer"  # Assumes we're allowed
@@ -188,3 +188,6 @@ use_iota_embed: False
 compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
 compile_topology: '' # Target hardware version, e.g. 'v5e-256'
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
+
+# Goodput parameters
+enable_goodput_metrics: True

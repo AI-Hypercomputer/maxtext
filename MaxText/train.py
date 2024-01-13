@@ -53,6 +53,8 @@ from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
+import goodput
+
 Transformer = models.Transformer
 
 
@@ -310,10 +312,13 @@ def train_loop(config, state=None):
       max_utils.activate_profiler(config)
 
     example_batch = load_next_batch(data_iterator, example_batch, config)
+    step_start_time = datetime.datetime.now()
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics, nextrng = p_train_step(
           state, example_batch, nextrng
       )
+    step_stop_time = datetime.datetime.now()
+    goodput.goodput_log_step_time(config, step, step_stop_time - step_start_time)
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
@@ -356,9 +361,13 @@ def main(argv: Sequence[str]) -> None:
       stack_trace_to_cloud = config.stack_trace_to_cloud,
       stack_trace_interval_seconds = config.stack_trace_interval_seconds))
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
+  job_start_time = datetime.datetime.now()
   with diagnostic.diagnose(diagnostic_config):
     train_loop(config)
-
+  job_end_time = datetime.datetime.now()
+  goodput.goodput_log_job_runtime(config, job_end_time - job_start_time)
+  total_goodput = goodput.get_job_goodput(config)
+  max_logging.log(f"Total job goodput: {total_goodput:.2f}%")
 
 if __name__ == "__main__":
   app.run(main)
