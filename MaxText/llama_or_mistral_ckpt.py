@@ -63,7 +63,7 @@ MODEL_PARAMS_DICT = {
         'dims_per_head': 128,
         'vocab': 32000,
         'num_gpus': 1,
-        'combined_qkv': True,
+        'fused_qkv': True,
     },
     'llama2-7b': {
         'num_layers': 32,

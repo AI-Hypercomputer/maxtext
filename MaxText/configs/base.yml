@@ -17,7 +17,7 @@
 run_name: ""
 
 model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!
-rms_norm_epsilon: 1.e-06
+normalization_layer_epsilon: 1.e-06
 
 ################################## CHECKPOINTING ################################## 
 # Checkpointing makes the following choices in the following order, starting with (1):
@@ -71,6 +71,9 @@ head_dim: 256
 mlp_activations: ["relu"]
 dropout_rate: 0
 logits_via_embedding: True  # NOTE: this is True just for testing.
+normalize_embedding_logits: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
+logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
+
 # proj, minimal, full, or none
 remat_policy: 'full'
 scan_layers: True
@@ -185,6 +188,7 @@ gradient_clipping_threshold: 1.0
 
 # AdamW optimizer parameters
 # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
+opt_type: "adamw"  # one of "adam_pax" or "adamw"
 adam_b1: 0.9 # Exponential decay rate to track the first moment of past gradients.
 adam_b2: 0.95 # Exponential decay rate to track the second moment of past gradients.
 adam_eps: 1.e-8 # A small constant applied to denominator outside of the square root.
@@ -199,7 +203,8 @@ stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds
 # Use iota operator in Embed
 use_iota_embed: False
 # use positional embedding
-use_positional_embedding: False
+use_untrainable_positional_embedding: False
+trainable_position_size: -1  # enable gpt3 position embedding with a positive trainable_position_size
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.

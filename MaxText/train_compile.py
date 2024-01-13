@@ -29,6 +29,7 @@ from jax.sharding import Mesh
 from jax.experimental.serialize_executable import serialize
 from flax.linen import partitioning as nn_partitioning
 import maxtext_utils
+import optimizers
 import max_utils
 import pyconfig
 from layers import models
@@ -69,7 +70,7 @@ def get_shaped_inputs(topology_mesh, config):
   model = Transformer(config, topology_mesh)
   # The learning_rate_schedule is baked into the compiled object.
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
-  tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
+  tx = optimizers.get_optimizer(config, learning_rate_schedule)
 
   # Shaped RNG keys
   _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)

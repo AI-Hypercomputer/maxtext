@@ -25,7 +25,6 @@ from jax.experimental.serialize_executable import deserialize_and_load
 import pickle
 import functools
 from input_pipeline import input_pipeline_interface
-import optax
 
 
 
@@ -46,17 +45,6 @@ def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations
 
 def get_functional_train_step(train_step, model, config):
   return functools.partial(train_step, model, config)
-
-def get_optimizer(config, learning_rate_schedule):
-  """ Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2 """
-  return optax.adamw(
-    learning_rate_schedule,
-    b1=config.adam_b1,
-    b2=config.adam_b2,
-    eps=config.adam_eps,
-    eps_root=config.adam_eps_root,
-    weight_decay=config.adam_weight_decay,
-  )
 
 def load_compiled(config, partial_train, state):
   """ # Loading a serialized compiled train step function."""
