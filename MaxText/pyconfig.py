@@ -30,6 +30,10 @@ import jax
 
 from typing import Any, Union
 
+_MAX_PREFIX = "M_"
+def yaml_key_to_env_key(s: str) -> str:
+  return _MAX_PREFIX + s.upper()
+
 def string_to_bool(s: str) -> bool:
   if s.lower() == "true":
     return True
@@ -61,9 +65,17 @@ def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any],list[Any]]:
 
 class _HyperParameters():
   # pylint: disable=missing-class-docstring
+  def _validate_env_variables(self, raw_data_from_yaml):
+    for environment_var in os.environ:
+      if environment_var[:len(_MAX_PREFIX)] == _MAX_PREFIX:
+        proposed_key = environment_var[len(_MAX_PREFIX):].lower()
+        if proposed_key not in raw_data_from_yaml:
+          raise ValueError(f"We received env {environment_var} but it doesn't match a key, so it is aassumed a mistake")
+
   def __init__(self, argv: list[str], **kwargs):
     with open(argv[1], "r", encoding="utf-8") as yaml_file:
       raw_data_from_yaml = yaml.safe_load(yaml_file)
+    self._validate_env_variables(raw_data_from_yaml)
     raw_data_from_cmd_line = self._load_kwargs(argv, **kwargs)
 
     for k in raw_data_from_cmd_line:
@@ -74,28 +86,43 @@ class _HyperParameters():
 
     raw_keys = OrderedDict()
     for k in raw_data_from_yaml:
-      if k in raw_data_from_cmd_line and not isinstance(raw_data_from_cmd_line[k], type(raw_data_from_yaml[k])) and \
-                                         type(raw_data_from_yaml[k]) not in _yaml_types_to_parser:
+      if k in raw_data_from_cmd_line and yaml_key_to_env_key(k) in os.environ:
+        raise ValueError(f"You are passing overrides by both CLI and ENV for `{k}`. This isn't allowed.")
+
+      if not k in raw_data_from_cmd_line and not yaml_key_to_env_key(k) in os.environ:
+        raw_keys[k] = raw_data_from_yaml[k]
+        continue
+
+      if k in raw_data_from_cmd_line:
+        new_proposal = raw_data_from_cmd_line[k]
+      else:
+        new_proposal = os.environ.get(yaml_key_to_env_key(k))
+
+      if (not isinstance(new_proposal, type(raw_data_from_yaml[k]))) and \
+                                       (type(raw_data_from_yaml[k]) not in _yaml_types_to_parser):
         raise ValueError(
             f"For key '{k}', type {type(raw_data_from_yaml[k])} not in {_yaml_types_to_parser.keys()}, can't pass"
-            " at the command line"
+            " at the CLI or ENV"
         )
 
-      if k in raw_data_from_cmd_line and isinstance(raw_data_from_cmd_line[k], type(raw_data_from_yaml[k])):
-        raw_keys[k] = raw_data_from_cmd_line[k] # take the raw data, no type conversion
-      elif k in raw_data_from_cmd_line:
+      if isinstance(new_proposal, type(raw_data_from_yaml[k])):
+        raw_keys[k] = new_proposal # take the raw data, no type conversion
+      else:
         try:
           raw_keys[k] = _yaml_types_to_parser[type(raw_data_from_yaml[k])](
-              raw_data_from_cmd_line[k]
+              new_proposal
           )  # take the command line value, but type it like the config value.
         except ValueError as e:
-          raise ValueError(f"Couldn't parse value from command line '{raw_data_from_cmd_line[k]}' for key '{k}'") from e
-      else:
-        raw_keys[k] = raw_data_from_yaml[k]
+          raise ValueError(f"Couldn't parse value from CLI or ENV '{new_proposal}' for key '{k}'") from e
 
     _HyperParameters.update_model_vars(raw_keys)
     _HyperParameters.user_init(raw_keys)
+
     self.keys = raw_keys
+    keys = [k for k in raw_keys] # pylint: disable=unnecessary-comprehension
+    keys.sort()
+    for k in keys:
+      max_logging.log(f"Config param {k}: {raw_keys[k]}")
 
   def _load_kwargs(self, argv: list[str], **kwargs):
     args_dict = dict(a.split("=") for a in argv[2:])
