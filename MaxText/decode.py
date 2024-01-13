@@ -263,13 +263,15 @@ def decode_loop(config, state=None):
   max_logging.log(f"Therefore, a per-generate time of {per_step_time:.4f} seconds, a throughput of {seqs/per_step_time:.1f} "
                   f"tok/s and {memory_bandwidth_per_device_GB_per_sec:.1f} GB/s/device")
 
+def validate_config(config):
+  assert config.load_full_state_path == "", "Decode doesn't operate on full states! Convert to parameter checkpoint first."
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
   os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
-
+  validate_config(pyconfig.config)
   decode_loop(pyconfig.config)
 
 if __name__ == "__main__":

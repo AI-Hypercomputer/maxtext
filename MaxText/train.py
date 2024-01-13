@@ -55,7 +55,6 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 Transformer = models.Transformer
 
-
 def validate_train_config(config):
   """ Validates the configuration is set correctly for train.py"""
 
@@ -64,13 +63,6 @@ def validate_train_config(config):
     max_logging.log("WARNING: 'dataset_path' might be pointing your local file system")
   if not config.base_output_directory.startswith('gs://'):
     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
-
-  assert ((config.load_parameters_path=="" and config.load_from_other_directory=="") or
-    config.enable_checkpointing), "You must set enable_checkpointing to load a checkpoint"
-  assert config.load_parameters_path=="" or config.load_from_other_directory=="",\
-  "At most one of load_parameters_path or load_from_other_directory should be set"
-  assert config.load_from_other_directory_step==-1 or config.load_from_other_directory!="",\
-  "You must specify the loading directory if you specify the loading step"
   assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive interger."
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B

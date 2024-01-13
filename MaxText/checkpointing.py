@@ -56,9 +56,8 @@ def create_orbax_checkpoint_manager(
 
 
 def load_state_if_possible(checkpoint_manager: CheckpointManager,
-                           first_checkpoint_path: str,
-                           load_from_other_directory: str,
-                           load_from_other_directory_step: int,
+                           load_parameters_from_path: str,
+                           load_full_state_from_path: str,
                            abstract_unboxed_pre_state: train_state.TrainState,
                            mesh,
                            state_mesh_annotations):
@@ -67,9 +66,10 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
   Args:
     checkpoint_manager: if the checkpoint_manager has a valid checkpoint, return
       that TrainState. This enables a full reload of a run in progress.
-    first_checkpoint_path: if there is no checkpoint in the checkpoint manager,
-      return the Params from the first_checkpoint_path if they exist. This
-      enables loading just the parameters and is intended for finetuning.
+    load_parameters_from_path: if there is no checkpoint in the checkpoint manager,
+      load parameters from a parameter checkpoint at this path.
+    load_full_state_from_path: if there is no checkpoint in the checkpoint manager,
+      load full state from a full state checkpoint at this path.
     abstract_unboxed_pre_state: an unboxed, abstract TrainState that Orbax
       matches type against.
     mesh: a physical TPU mesh
@@ -101,25 +101,25 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
         {latest_step}")
     return checkpoint_manager.restore(latest_step, abstract_unboxed_pre_state,
                                       {"restore_args" : restore_args}), None
-  elif first_checkpoint_path != "":
-    max_logging.log(f"restoring state from first_checkpoint_path {first_checkpoint_path}")
-    p = epath.Path(first_checkpoint_path)
+  elif load_parameters_from_path != "":
+    max_logging.log(f"restoring params from {load_parameters_from_path=}")
+    p = epath.Path(load_parameters_from_path)
     checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
-    return None, checkpointer.restore(p,
-                                      item=abstract_unboxed_pre_state,
-                                      restore_args=restore_args).params
-  elif load_from_other_directory != "":
-    p = epath.Path(load_from_other_directory)
-    checkpointer_loader = Checkpointer(checkpoint.PyTreeCheckpointHandler())
-    mngr_loader = CheckpointManager(p, checkpointer_loader, options=CheckpointManagerOptions(create=True))
-    if load_from_other_directory_step == -1:
-      step = mngr_loader.latest_step()
-      max_logging.log(f"restoring state from {load_from_other_directory} latest step {step}")
-    else:
-      step = load_from_other_directory_step
-      max_logging.log(f"restoring state from {load_from_other_directory} step {step}")
-    return mngr_loader.restore(step, abstract_unboxed_pre_state,
-                                      {"restore_args" : restore_args}), None
+    restore_args_param_train_state = train_state.TrainState(step = restore_args.step, params = restore_args.params,\
+                                                            tx=None, apply_fn=None, opt_state = {})
+    abstract_param_train_state = train_state.TrainState(step = abstract_unboxed_pre_state.step,\
+                                                        params = abstract_unboxed_pre_state.params,\
+                                                        tx=None, apply_fn=None, opt_state = {})
+    full_restored_state = checkpointer.restore(p, item = abstract_param_train_state,\
+                                               restore_args = restore_args_param_train_state)
+    return None, full_restored_state.params
+  elif load_full_state_from_path != "":
+    max_logging.log(f"restoring full state from {load_full_state_from_path=}")
+    p = epath.Path(load_full_state_from_path)
+    checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
+    return checkpointer.restore(p,
+                                item=abstract_unboxed_pre_state,
+                                restore_args=restore_args), None
   else:
     max_logging.log("No existing checkpoints found, not restoring checkpoint.")
     return None, None

@@ -21,20 +21,30 @@ run_name: ""
 model_name: "default"
 rms_norm_epsilon: 1.e-06
 
-# At most one of load_parameters_path and load_from_other_directory should be set.
-#   * load_parameters_path is used when you only care about the parameters, not the optimizer state or
-#      the step count
-#   * load_from_other_directory is used when you want to use a saved checkpoint from a different directory
-#        (corresponding to a different run_name), and save new metrics and checkpoints to a new directory.
-#   * If neither is provided then the most recent checkpoint saved under the current run_name is loaded if
-#        any exists, else the model initializes randomly.
-# If we aren't resuming from an existing checkpoint, load parameters from this path if provided.
+################################## CHECKPOINTING ################################## 
+# Checkpointing makes the following choices in the following order, starting with (1):
+#   (1) If there is already a checkpoint for this run_name, we load the latest entire checkpoint.
+#     This ensures if we're resuming a run after preemption or hardware failure we lose minimum state.
+#   (2) Same priority and mutually exclusive -- you can't set both!
+#      * If load_parameters_path is set, we load a parameter checkpoint from that path.
+#      * If load_full_state_path is set, we load a full state checkpoint from that path.
+#   (3) We don't load a checkpoint and initialize state instead!
+
+# Loads a just parameters from a specific directory
+# e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/default/NUMBER or NUMBER/default
 load_parameters_path: ""
-# Loads a full checkpoint including optimizer state and step count from a directory other than [run_name]
-# e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints
-load_from_other_directory: ""
-# Which step to load from other directory, defaults to latest step
-load_from_other_directory_step: -1
+# Loads a full checkpoint including optimizer state and step count from a specific directory
+# e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/default/NUMBER or NUMBER/default
+load_full_state_path: ""
+
+# If enable_checkpointing is true, an asynchronous checkpointer will be used if
+# async_checkpointing is true, else a synchronous one is used. If you have
+# problems with the checkpointer we recommend trying the synchronous one.
+enable_checkpointing: True
+async_checkpointing: True
+checkpoint_period: 10_000
+############################### END CHECKPOINTING ##################################
+
 
 reuse_example_batch: 0 # for testing TPU performance, this options repeated uses the same batch.
 
@@ -159,13 +169,6 @@ enable_profiler: False
 skip_first_n_steps_for_profiler: 1
 # Profile for a small number of steps to avoid a large profile file size.
 profiler_steps: 5
-
-# If enable_checkpointing is true, an asynchronous checkpointer will be used if
-# async_checkpointing is true, else a synchronous one is used. If you have
-# problems with the checkpointer we recommend trying the sychronous one.
-enable_checkpointing: True
-async_checkpointing: True
-checkpoint_period: 10_000
 
 # When dropout is false the model is a deterministic function of the 
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
