@@ -43,8 +43,7 @@ load_full_state_path: ""
 enable_checkpointing: True
 async_checkpointing: True
 checkpoint_period: 10_000
-############################### END CHECKPOINTING ##################################
-
+############################### END CHECKPOINTING #######################################
 
 reuse_example_batch: 0 # for testing TPU performance, this options repeated uses the same batch.
 
