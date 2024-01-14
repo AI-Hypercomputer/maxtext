@@ -44,12 +44,13 @@ gcs_metrics: False
 # Activation dtypes.
 dtype: "bfloat16"
 int8_training: False
-local_aqt_shards_mlp1: 0
-local_aqt_shards_mlp2: 0
-local_aqt_shards_query_proj: 0
-local_aqt_shards_key_proj: 0
-local_aqt_shards_value_proj: 0
-local_aqt_shards_attention_out_proj: 1
+# -1 for TTF, 0 for non-local TTT, any positive for local TTT
+local_aqt_shards_mlp1: -1
+local_aqt_shards_mlp2: -1
+local_aqt_shards_query_proj: -1
+local_aqt_shards_key_proj: -1
+local_aqt_shards_value_proj: -1
+local_aqt_shards_attention_out_proj: -1
 
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,

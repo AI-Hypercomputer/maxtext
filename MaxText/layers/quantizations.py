@@ -29,7 +29,13 @@ def int8_dot_general(aqt_rng: Optional[common_types.PRNGKey], local_aqt_shards=0
   if aqt_rng is None:
     raise ValueError('aqt_rng cannot be None.')
 
-  if local_aqt_shards == 0:
+  if local_aqt_shards > 0:
+    local_aqt_config = LocalAqt(local_aqt_shards)
+  else:
+    local_aqt_config = None
+
+  # use TTF if -1
+  if local_aqt_shards == -1:
    aqt_config = config.config_v3(
         fwd_bits=8,
         dlhs_bits=8,
@@ -48,7 +54,7 @@ def int8_dot_general(aqt_rng: Optional[common_types.PRNGKey], local_aqt_shards=0
       drhs_bits=8,
       rng_type='jax.uniform',
       dlhs_local_aqt = None,
-      drhs_local_aqt = LocalAqt(local_aqt_shards),
+      drhs_local_aqt = local_aqt_config,
       fwd_accumulator_dtype = jnp.int32,
       dlhs_accumulator_dtype = jnp.int32,
       drhs_accumulator_dtype = jnp.int32,
