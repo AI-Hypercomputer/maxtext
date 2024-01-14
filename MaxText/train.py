@@ -360,7 +360,7 @@ def train_loop(config, state=None):
     abstract_state, state_mesh_annotations =  max_utils.get_abstract_state(model, tx, config, init_rng, mesh)
     # Shaped batch
     shaped_batch = get_shaped_batch(config)
-    func_input_args = (abstract_state, shaped_batch, shaped_rng)
+    func_input_args = (abstract_state, next(train_data_iterator), shaped_rng)
     func_input_kwargs = {}
 
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -374,6 +374,7 @@ def train_loop(config, state=None):
     p_train_step = p_train_step_lower.compile()
 
     if eval_data_iterator:
+      func_input_args = (abstract_state, next(eval_data_iterator), shaped_rng)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         p_eval_step_lower = jax.jit(
           functional_eval,
@@ -407,7 +408,7 @@ def train_loop(config, state=None):
   running_gcs_metrics = [] if config.gcs_metrics else None
 
   first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
- 
+
   if jax.process_index() == 0:
     mllogger.end(mllog.constants.INIT_STOP)
     mllogger.start(mllog.constants.RUN_START)
