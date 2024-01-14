@@ -111,14 +111,14 @@ class MultiHostDataLoadIterator:
   def __init__(self, dataset: tf.data.Dataset, global_mesh: Mesh):
     self.dataset = dataset
     self.global_mesh = global_mesh
-    self._iterator = iter(self.dataset.as_numpy_iterator())
+    self._multihost_generator = get_batch_sharded_data_pipeline(self.dataset, self.global_mesh)
 
   def reset(self):
-    self._iterator = iter(self.dataset.as_numpy_iterator())
+    self._multihost_generator = get_batch_sharded_data_pipeline(self.dataset, self.global_mesh)
 
   def __iter__(self):
     self.reset()
     return self
 
   def __next__(self):
-    return get_next_batch_sharded(self._iterator, self.global_mesh)
+    return self._multihost_generator()

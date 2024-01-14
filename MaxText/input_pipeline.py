@@ -325,13 +325,14 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
 
   read_config = tfds.ReadConfig(
     shuffle_seed = config.data_shuffle_seed,
+    skip_prefetch = True,
   )
   # load
   # train_ds_builder = tfds.builder(config.dataset_name)
-  train_ds_builder = tfds.builder('c4/en:3.0.4')
-  train_ds = train_ds_builder.as_dataset(split='train2', read_config = read_config, shuffle_files=False)
+  train_ds_builder = tfds.builder('c4/en:3.0.4', try_gcs=True)
+  train_ds = train_ds_builder.as_dataset(split='train2', read_config = read_config, shuffle_files=True)
 
-  eval_ds_builder = tfds.builder('c4/en:3.0.5')
+  eval_ds_builder = tfds.builder('c4/en:3.0.5', try_gcs=True)
   eval_ds = eval_ds_builder.as_dataset(split='validation_tokenized_5662seqs', read_config = read_config, shuffle_files=False)
 
   # shard the dataset as soon as it is loaded
