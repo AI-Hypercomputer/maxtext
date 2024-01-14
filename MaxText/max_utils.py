@@ -250,9 +250,15 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   is_training = False
   return setup_initial_state(model, None, config, rng, mesh, checkpoint_manager, is_training)
 
+def validate_params_f32(params):
+  assert all(jax.tree_util.tree_flatten(jax.tree_map(lambda x : x.dtype == jnp.float32, params))[0]),\
+      "During training we expect the params to be all f32. This assert is just to prevent accidents."
+
 def setup_training_state(model, tx, config, rng, mesh, checkpoint_manager):
   is_training = True
-  return setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_training)
+  state = setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_training)
+  validate_params_f32(state.params)
+  return state
 
 def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_training=True):
   """ We initialize the model and optimizer state, and optionally load from a
