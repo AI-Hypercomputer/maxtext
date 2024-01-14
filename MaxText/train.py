@@ -39,7 +39,7 @@ import maxtext_utils
 import max_logging
 import pyconfig
 
-from input_pipeline import create_data_iterator_with_tokenizer, SyntheticDataIterator
+from input_pipeline import create_data_iterator_with_tokenizer, get_shaped_batch
 from layers import models
 
 import jax.numpy as jnp
@@ -353,6 +353,37 @@ def train_loop(config, state=None):
     # Need to pass train signature and state to determine i/o shapes of train_state for now.
     p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
     print("Loaded compiled function!", flush=True)
+  elif config.pre_compile:
+    # pre compile graph
+    shaped_rng = jax.ShapeDtypeStruct(nextrng.shape, nextrng.dtype)
+    # Shaped state
+    abstract_state, state_mesh_annotations =  max_utils.get_abstract_state(model, tx, config, init_rng, mesh)
+    # Shaped batch
+    shaped_batch = get_shaped_batch(config)
+    func_input_args = (abstract_state, shaped_batch, shaped_rng)
+    func_input_kwargs = {}
+
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      p_train_step_lower = jax.jit(
+        functional_train,
+        in_shardings=in_shard_train,
+        out_shardings=out_shard_train,
+        static_argnums=static_argnums_train,
+        donate_argnums=donate_argnums_train).lower(*func_input_args, **func_input_kwargs)
+
+    p_train_step = p_train_step_lower.compile()
+
+    if eval_data_iterator:
+      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        p_eval_step_lower = jax.jit(
+          functional_eval,
+          in_shardings=in_shard_eval,
+          out_shardings=out_shard_eval,
+          static_argnums=static_argnums_eval,
+          donate_argnums=donate_argnums_eval,
+        ).lower(*func_input_args, **func_input_kwargs)
+
+      p_eval_step = p_eval_step_lower.compile()
   else:
     p_train_step = jax.jit(
       functional_train,
@@ -360,23 +391,14 @@ def train_loop(config, state=None):
       out_shardings=out_shard_train,
       static_argnums=static_argnums_train,
       donate_argnums=donate_argnums_train)
-  if eval_data_iterator:
-    p_eval_step = jax.jit(
-      functional_eval,
-      in_shardings=in_shard_eval,
-      out_shardings=out_shard_eval,
-      static_argnums=static_argnums_eval,
-      donate_argnums=donate_argnums_eval,
-    )
-
-  # pre compile graph
-  synthetic_data_batch = SyntheticDataIterator(config, mesh)()
-  # eval first since state_copy will be donated in train_step
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    # have to use copy and put p_eval_step first since p_train_step will consume the tensor buffer with donate_argnums feature
-    state_copy = jax.tree_map(lambda x: x.copy(), state)
-    p_eval_step(state_copy, synthetic_data_batch, nextrng)
-    p_train_step(state_copy, synthetic_data_batch, nextrng)
+    if eval_data_iterator:
+      p_eval_step = jax.jit(
+        functional_eval,
+        in_shardings=in_shard_eval,
+        out_shardings=out_shard_eval,
+        static_argnums=static_argnums_eval,
+        donate_argnums=donate_argnums_eval,
+      )
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
