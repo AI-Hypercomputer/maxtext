@@ -128,7 +128,7 @@ class AttentionOp(nn.Module):
       output_mask = None
 
     return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
-  
+
   def apply_attention(self,
       query: Array,
       key: Array,
@@ -279,6 +279,8 @@ class AttentionOp(nn.Module):
 
     attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
     if attn_mask is not None:
+      # negative value in attn_mask is float32 and convert to float32 before softmax for stability
+      attn_weights = attn_weights.astype(jnp.float32)
       attn_weights += attn_mask
 
     # Normalize the attention weights across `kv_length` dimension.
@@ -685,6 +687,116 @@ class Attention(nn.Module):
                                num_kv_heads=self.num_kv_heads,
                                dtype=self.dtype)
     
+    out = attention_op(query, key, value, decoder_segment_ids, model_mode)
+
+    out = nn.with_logical_constraint(out, self.out_axis_names)
+
+    # apply output projection,  output dim is set to the input dim.
+    out = self.out_projection(inputs_q.shape[-1], out)
+    return out
+
+
+class GPT3MultiHeadAttention(nn.Module):
+  """Multi-head attention in gpt3.
+
+    Attributes:
+      num_heads: number of attention heads. Features (i.e. inputs_q.shape[-1])
+        should be divisible by the number of heads.
+      head_dim: dimension of each head.
+      dtype: the dtype of the computation.
+      dropout_rate: dropout rate
+      kernel_init: initializer for the kernel of the Dense layers.
+      float32_logits: bool, if True then compute logits in float32 to avoid
+        numerical issues with bfloat16.
+      combined_qkv: whether to combine query, key and value into one projection.
+      use_int8: bool, if true accelerate in int8.
+      use_bias: whether to add bias in linear transformation.
+  """
+
+  num_heads: int
+  head_dim: int
+  max_target_length: int
+  mesh: Mesh
+  attention_kernel: str
+  dtype: DType = jnp.float32
+  dropout_rate: float = 0.
+  kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
+  float32_logits: bool = False  # computes logits in float32 for stability.
+  combined_qkv: bool = True
+  use_int8: bool = False
+  use_bias: bool = True
+
+  query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  key_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  value_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+
+  def out_projection(self, output_dim: int, out: Array) -> Array:
+    out_proj = DenseGeneral(
+      features=output_dim,
+      axis=(-2, -1),
+      kernel_init=self.kernel_init,
+      kernel_axes=('heads', 'kv', 'embed'),
+      dtype=self.dtype,
+      use_bias=self.use_bias,
+      name='out',
+      use_int8=self.use_int8)(out)
+    return out_proj
+
+  @nn.compact
+  def __call__(self,
+               inputs_q: Array,
+               decoder_segment_ids: Array | None = None,
+               *,
+               model_mode: str = common_types.MODEL_MODE_TRAIN,
+               deterministic: bool = False):
+    if self.combined_qkv:
+      combined_qkv = DenseGeneral(
+          features=(self.num_heads, self.head_dim, 3),
+          axis=-1,
+          kernel_init=self.kernel_init,
+          kernel_axes=('embed', 'heads', 'kv', 'combined_qkv'),
+          dtype=self.dtype,
+          use_bias=self.use_bias,
+          name='combined_qkv',
+          use_int8=self.use_int8,
+          )(inputs_q)
+      query, key, value = combined_qkv[..., 0], combined_qkv[..., 1], combined_qkv[..., 2]
+    else:
+      projection = functools.partial(
+        DenseGeneral,
+        features=(self.num_heads, self.head_dim),
+        axis=-1,
+        kernel_init=self.kernel_init,
+        kernel_axes=('embed', 'heads', 'kv'),
+        dtype=self.dtype,
+        use_bias=self.use_bias,
+        use_int8=self.use_int8,
+        )
+      query = projection(name='query')(inputs_q)
+      key = projection(name='query')(inputs_q)
+      value = projection(name='query')(inputs_q)
+
+    depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
+    query /= depth_scaling
+
+    # annotate with sharding constraint.
+    query = nn.with_logical_constraint(query, self.query_axis_names)
+    query = checkpoint_name(query, 'query_proj')
+    key = nn.with_logical_constraint(key, self.key_axis_names)
+    key = checkpoint_name(key, 'key_proj')
+    value = nn.with_logical_constraint(value, self.value_axis_names)
+    value = checkpoint_name(value, 'value_proj')
+
+    attention_op = AttentionOp(mesh=self.mesh,
+                               attention_kernel=self.attention_kernel,
+                               max_target_length=self.max_target_length,
+                               float32_logits=self.float32_logits,
+                               use_int8=self.use_int8,
+                               num_query_heads=self.num_heads,
+                               num_kv_heads=self.num_heads,
+                               dtype=self.dtype)
+
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)
 
     out = nn.with_logical_constraint(out, self.out_axis_names)
