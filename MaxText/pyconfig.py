@@ -65,7 +65,7 @@ def validate_keys(keys):
 
 def validate_model_name(s: str) -> bool:
   # currently supported models
-  valid_model_names= ('default', 'llama2-7b', 'mistral-7b', 'gamma-7b','gamma-2b')
+  valid_model_names= ('default', 'llama2-7b', 'mistral-7b', 'gamma-7b','gamma-2b', 'gpt3-175b', 'gpt3-dummy')
   if s not in valid_model_names:
     raise ValueError(
       "Invalid model name was passed. Valid options ", valid_model_names
@@ -173,6 +173,7 @@ class _HyperParameters():
 
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys['global_parameter_scale'])
     raw_keys['emb_dim'] = 2**emb_scale * raw_keys['base_emb_dim']
+    raw_keys['num_heads'] = 2**num_head_scale * raw_keys['base_num_heads']
     raw_keys['num_query_heads'] = 2**num_head_scale * raw_keys['base_num_query_heads']
     raw_keys['num_kv_heads'] = 2**num_head_scale * raw_keys['base_num_kv_heads']
     raw_keys['mlp_dim'] = 2**mlp_dim_scale * raw_keys['base_mlp_dim']
@@ -193,7 +194,8 @@ class _HyperParameters():
     max_logging.log(f"Running Model: {raw_keys['model_name']}")
 
     if raw_keys['model_name'] != 'default':
-      file_path = f"MaxText/configs/models/{raw_keys['model_name']}.yml"
+      dir_path = os.path.dirname(os.path.realpath(__file__))
+      file_path = os.path.join(dir_path, f"configs/models/{raw_keys['model_name']}.yml")
       with open(file_path, 'r', encoding="utf-8") as file:
         model_vars = yaml.safe_load(file)
       raw_keys = validate_and_update_keys(raw_keys, model_vars)

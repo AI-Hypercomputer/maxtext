@@ -72,7 +72,7 @@ class Gpt3DecoderLayer(nn.Module):
 
     lnx_layer_norm = models.LayerNorm(
         dtype=cfg.dtype,
-        name='pre_self_attention_layer_norm',
+        name='pre_self_attention_norm',
         kernel_axes=('embed',),
         epsilon=cfg.norm_epsilon,
         reductions_in_fp32=False,
@@ -85,6 +85,7 @@ class Gpt3DecoderLayer(nn.Module):
 
     # Self-attention block
     attention_layer = Gpt3MultiHeadAttention(
+      config=cfg,
       num_heads=cfg.num_heads,
       dtype=cfg.dtype,
       head_dim=cfg.head_dim,
