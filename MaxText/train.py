@@ -182,10 +182,12 @@ def train_step(model, config, state, data, dropout_rng):
     data[k] = v[:config.global_batch_size_to_train_on,:]
 
   def loss_fn(params):
+    padding_mask = data['targets_segmentation'] != 0
     logits, intermediate_outputs = model.apply({'params': params},
                          data['inputs'],
                          data['inputs_position'],
                          decoder_segment_ids=data['inputs_segmentation'],
+                         padding_mask=data['targets_segmentation'] != 0,
                          enable_dropout=config.enable_dropout,
                          rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
     one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)

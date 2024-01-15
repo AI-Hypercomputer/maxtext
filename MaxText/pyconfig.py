@@ -51,7 +51,7 @@ def validate_attention_type(s: str) -> bool:
     )
 
 def validate_model_name(s: str) -> bool:
-  valid_model_names= ('default', 'llama2-7b') # currently supported models
+  valid_model_names= ('default', 'llama2-7b', 'gpt3-175b', 'gpt3-dummy') # currently supported models
   if s not in valid_model_names:
     raise ValueError(
       "Invalid model name was passed. Valid options ", valid_model_names
@@ -115,6 +115,10 @@ class _HyperParameters():
         except ValueError as e:
           raise ValueError(f"Couldn't parse value from CLI or ENV '{new_proposal}' for key '{k}'") from e
 
+    # We initialize the jax distributed system here because it must be done before device backend is initialized.
+    if raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and raw_keys["compile_topology_num_slices"]==-1:
+      max_utils.initialize_jax_distributed_system()
+
     _HyperParameters.update_model_vars(raw_keys)
     _HyperParameters.user_init(raw_keys)
 
@@ -132,10 +136,6 @@ class _HyperParameters():
   @staticmethod
   def user_init(raw_keys):
     '''Transformations between the config data and configs used at runtime'''
-
-    # We initialize the jax distributed system here because it must be done before device backend is initialized.
-    if raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and raw_keys["compile_topology_num_slices"]==-1:
-      max_utils.initialize_jax_distributed_system()
 
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
     if raw_keys["run_name"] == "":
@@ -157,6 +157,7 @@ class _HyperParameters():
 
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys['global_parameter_scale'])
     raw_keys['emb_dim'] = 2**emb_scale * raw_keys['base_emb_dim']
+    raw_keys['num_heads'] = 2**num_head_scale * raw_keys['base_num_heads']
     raw_keys['num_query_heads'] = 2**num_head_scale * raw_keys['base_num_query_heads']
     raw_keys['num_kv_heads'] = 2**num_head_scale * raw_keys['base_num_kv_heads']
     raw_keys['mlp_dim'] = 2**mlp_dim_scale * raw_keys['base_mlp_dim']
@@ -192,6 +193,46 @@ class _HyperParameters():
         'add_eos': False
       }
       raw_keys = validate_and_update_keys(raw_keys, llama2_7b_model_vars)
+    elif raw_keys['model_name'] == 'gpt3-175b':
+      max_logging.log(f"Running Model: {raw_keys['model_name']}")
+      gpt3_175b_model_vars = {
+        'base_emb_dim': 12288,
+        'base_num_heads': 96,
+        'base_mlp_dim': 49152,
+        'base_num_decoder_layers': 96,
+        'head_dim': 128,
+        'trainable_position_size': 16384,
+        'mlp_activations': ['gelu'],
+        'vocab_size': 50304,
+        'enable_dropout': False,
+        'logits_via_embedding': True,
+        'norm_epsilon': 1e-05,
+        'use_iota_embed': True,
+        'add_bos': False,
+        'add_eos': False,
+      }
+      raw_keys = validate_and_update_keys(raw_keys, gpt3_175b_model_vars)
+    elif raw_keys['model_name'] == 'gpt3-dummy':
+      max_logging.log(f"Running Model: {raw_keys['model_name']}")
+      gpt3_dummy_model_vars = {
+        'base_emb_dim': 16,
+        'base_num_heads': 2,
+        'base_mlp_dim': 64,
+        'base_num_decoder_layers': 1,
+        'head_dim': 8,
+        'trainable_position_size': 2048,
+        'mlp_activations': ['gelu'],
+        'vocab_size': 1024,
+        'enable_dropout': False,
+        'logits_via_embedding': True,
+        'norm_epsilon': 1e-05,
+        'use_iota_embed': True,
+        'add_bos': False,
+        'add_eos': False,
+        'dtype': "float32",
+        'attention': "dot_product",
+      }
+      raw_keys = validate_and_update_keys(raw_keys, gpt3_dummy_model_vars)
 
 def validate_and_update_keys(raw_keys, model_keys):
   ''' Validate and update model specific config keys

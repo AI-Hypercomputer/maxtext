@@ -51,6 +51,7 @@ int8_training: False
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
 global_parameter_scale: 1
 base_emb_dim: 2560
+base_num_heads: 8
 base_num_query_heads: 8
 base_num_kv_heads: 8
 base_mlp_dim: 8192
@@ -68,7 +69,6 @@ remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
 attention: 'flash' # Supported attention: dot_product, flash, gpu_flash_xla, gpu_flash_triton
-
 record_internal_nn_metrics: 0
 
 # Output directory
