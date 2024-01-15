@@ -76,7 +76,7 @@ class LlamaDecoderLayer(nn.Module):
         dtype=cfg.dtype,
         name='pre_self_attention_layer_norm',
         kernel_axes=('embed',),
-        epsilon=cfg.rms_norm_epsilon
+        epsilon=cfg.norm_epsilon
         )
     lnx = lnx_rms(inputs)
 
@@ -112,7 +112,7 @@ class LlamaDecoderLayer(nn.Module):
     # Fully Connected
     hidden_states = models.RMSNorm(
         dtype=cfg.dtype, name='post_self_attention_layer_norm', kernel_axes=('embed',),
-        epsilon=cfg.rms_norm_epsilon,
+        epsilon=cfg.norm_epsilon,
         )(intermediate_inputs)
     hidden_states = nn.with_logical_constraint(hidden_states, ('activation_batch', 'activation_length', 'activation_embed'))
 

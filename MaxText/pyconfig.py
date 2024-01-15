@@ -187,7 +187,7 @@ class _HyperParameters():
         'attention':'dot_product',
         'vocab_relative_path':'tokenizer.llama2',
         'logits_via_embedding': False,
-        'rms_norm_epsilon': 1e-05,
+        'norm_epsilon': 1e-05,
         'add_bos': True,
         'add_eos': False
       }
