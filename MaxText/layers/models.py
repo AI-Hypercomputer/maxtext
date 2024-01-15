@@ -20,6 +20,7 @@ from typing import Callable, Optional
 
 
 from flax import linen as nn
+import functools
 import jax
 import jax.numpy as jnp
 import common_types
@@ -37,6 +38,7 @@ ScanIn = common_types.ScanIn
 Embed = embeddings.Embed
 Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
+LayerNorm = normalizations.LayerNorm
 PositionalEmbedding = embeddings.PositionalEmbedding
 
 #------------------------------------------------------------------------------
@@ -54,6 +56,7 @@ class DecoderLayer(nn.Module):
                inputs,
                decoder_segment_ids,
                decoder_positions,
+               padding_mask,
                deterministic,
                model_mode,
               ):
@@ -160,6 +163,18 @@ class Decoder(nn.Module):
     elif self.config.decoder_block == "gamma":
       from layers import gamma
       return gamma.GammaDecoderLayer
+    elif self.config.model_name.startswith("gpt3"):
+      from layers import gpt3
+      return gpt3.Gpt3DecoderLayer
+    else:
+      raise ValueError(f"Incorrect model name {self.config.model_name=}")
+
+  def get_norm_layer(self):
+    if self.config.model_name == "default" or \
+        self.config.model_name.startswith(("llama2", "mistral", "gamma")):
+      return RMSNorm
+    elif self.config.model_name.startswith("gpt3"):
+      return functools.partial(LayerNorm, reductions_in_fp32=False, use_bias=True)
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
@@ -169,6 +184,7 @@ class Decoder(nn.Module):
                decoder_input_tokens,
                decoder_positions,
                decoder_segment_ids=None,
+               padding_mask=None,
                deterministic=False,
                model_mode=common_types.MODEL_MODE_TRAIN,
               ):
@@ -213,7 +229,7 @@ class Decoder(nn.Module):
           BlockLayer,
           prevent_cse=not cfg.scan_layers,
           policy=policy,
-          static_argnums=(-1, -2, -3, -4, -5),
+          static_argnums=(-1, -2, -3, -4, -5, -6),
       )
     if cfg.scan_layers:
       initializing = self.is_mutable_collection('params')
@@ -238,6 +254,7 @@ class Decoder(nn.Module):
               nn.broadcast,
               nn.broadcast,
               nn.broadcast,
+              nn.broadcast,
           ),
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'},
@@ -245,6 +262,7 @@ class Decoder(nn.Module):
           y,
           decoder_segment_ids,
           decoder_positions,
+          padding_mask,
           deterministic,
           model_mode,
       )
@@ -254,11 +272,13 @@ class Decoder(nn.Module):
             y,
             decoder_segment_ids,
             decoder_positions,
+            padding_mask,
             deterministic,
             model_mode,
         )
 
-    y = RMSNorm(dtype=cfg.dtype, name='decoder_norm', epsilon=cfg.norm_epsilon,kernel_axes=('embed',))(y)
+    norm_layer = self.get_norm_layer()
+    y = norm_layer(dtype=cfg.dtype, name='decoder_norm', epsilon=cfg.norm_epsilon, kernel_axes=('embed',))(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
         y, deterministic=deterministic
     )
@@ -273,7 +293,7 @@ class Decoder(nn.Module):
     else:
       logits = linears.DenseGeneral(
           cfg.vocab_size,
-          dtype=jnp.float32,  # Use float32 for stabiliity.
+          dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
           kernel_axes=('embed', 'vocab'),
           name='logits_dense',
           use_int8=cfg.int8_training)(y)
@@ -297,7 +317,7 @@ class Transformer(nn.Module):
         num_embeddings=cfg.vocab_size,
         features=cfg.emb_dim,
         dtype=cfg.dtype,
-        attend_dtype=jnp.float32,  # for logit training stability
+        attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
         embedding_init=nn.initializers.normal(stddev=1.0),
         name='token_embedder',
         config=cfg,
@@ -312,6 +332,7 @@ class Transformer(nn.Module):
       decoder_input_tokens,
       decoder_positions,
       decoder_segment_ids=None,
+      padding_mask=None,
       enable_dropout=True,
       model_mode=common_types.MODEL_MODE_TRAIN
   ):
@@ -326,6 +347,7 @@ class Transformer(nn.Module):
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
+        padding_mask=padding_mask,
         deterministic=not enable_dropout,
         model_mode=model_mode,
     )
