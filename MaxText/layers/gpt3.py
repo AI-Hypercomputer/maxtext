@@ -28,7 +28,6 @@ from flax import linen as nn
 import jax.numpy as jnp
 # from jax.experimental.pallas.ops.tpu import flash_attention
 from layers import attentions
-from layers import embeddings
 from layers import linears
 from layers import normalizations
 
@@ -40,19 +39,17 @@ Array = common_types.Array
 Config = common_types.Config
 DType = common_types.DType
 Mesh = common_types.Mesh
-ScanIn = common_types.ScanIn
 
-Embed = embeddings.Embed
-Attention = attentions.Attention
-RMSNorm = normalizations.RMSNorm
+GPT3MultiHeadAttention = attentions.GPT3MultiHeadAttention
+LayerNorm = normalizations.LayerNorm
 
 
 #-----------------------------------------
-# The Decoder Layer specific for Llama2
+# The Decoder Layer specific for GPT3
 #-----------------------------------------
 
 
-class LlamaDecoderLayer(nn.Module):
+class GPT3DecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
   config: models.Config
   mesh: Mesh
@@ -73,49 +70,43 @@ class LlamaDecoderLayer(nn.Module):
         inputs, ('activation_batch', 'activation_length', 'activation_embed'))
 
 
-    lnx_rms = models.RMSNorm(
+    lnx_layer_norm = models.LayerNorm(
         dtype=cfg.dtype,
         name='pre_self_attention_layer_norm',
         kernel_axes=('embed',),
-        epsilon=cfg.norm_epsilon
+        epsilon=cfg.norm_epsilon,
+        reductions_in_fp32=False,
+        use_bias=True,
         )
-    lnx = lnx_rms(inputs)
+    lnx = lnx_layer_norm(inputs)
 
     lnx = nn.with_logical_constraint(
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
     # Self-attention block
-    attention_layer = Attention(
-      num_query_heads=cfg.num_query_heads,
-      num_kv_heads=cfg.num_kv_heads,
+    attention_layer = GPT3MultiHeadAttention(
+      num_heads=cfg.num_heads,
+      dtype=cfg.dtype,
       head_dim=cfg.head_dim,
       max_target_length=cfg.max_target_length,
       attention_kernel=cfg.attention,
       mesh=mesh,
-      dtype=cfg.dtype,
       dropout_rate=cfg.dropout_rate,
       name='self_attention',
+      combined_qkv=True,
+      use_bias=True,
       use_int8=cfg.int8_training)
 
     attention_lnx = attention_layer(
             lnx,
-            lnx,
-            decoder_positions,
             decoder_segment_ids=decoder_segment_ids,
-            deterministic=deterministic,
-            model_mode=model_mode)
+            model_mode=model_mode,
+            deterministic=deterministic)
 
     attention_lnx = nn.with_logical_constraint(
         attention_lnx,
         ('activation_batch', 'activation_length', 'activation_embed'))
-    intermediate_inputs = inputs + attention_lnx
-
-    # Fully Connected
-    hidden_states = models.RMSNorm(
-        dtype=cfg.dtype, name='post_self_attention_layer_norm', kernel_axes=('embed',),
-        epsilon=cfg.norm_epsilon,
-        )(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, ('activation_batch', 'activation_length', 'activation_embed'))
+    attention_lnx += inputs
 
     # MLP block.
     mlp_lnx = linears.MlpBlock(
@@ -124,14 +115,17 @@ class LlamaDecoderLayer(nn.Module):
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         name='mlp',
+        use_bias=True,
+        use_pre_norm=True,
+        apply_padding_mask=True,
+        add_skip_connection=True,
         config=cfg,
-    )(hidden_states, deterministic=deterministic)
+    )(attention_lnx, padding_mask=padding_mask, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(
         mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')
     )
 
-
-    layer_output = mlp_lnx + intermediate_inputs
+    layer_output = mlp_lnx
 
     layer_output = nn.Dropout(
         rate=cfg.dropout_rate, broadcast_dims=(-2,))(
