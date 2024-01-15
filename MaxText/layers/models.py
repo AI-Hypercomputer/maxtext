@@ -250,8 +250,10 @@ class Decoder(nn.Module):
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
       logits = self.shared_embedding.attend(y)
-      # Correctly normalize pre-softmax logits for this shared case.
-      logits = logits / jnp.sqrt(y.shape[-1])
+      # skip normalizing pre-softmax logits in gpt3 implementation
+      if not self.config.model_name.startswith("gpt3"):
+        # Correctly normalize pre-softmax logits for this shared case.
+        logits = logits / jnp.sqrt(y.shape[-1])
     else:
       logits = linears.DenseGeneral(
           cfg.vocab_size,
