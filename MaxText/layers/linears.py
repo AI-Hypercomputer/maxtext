@@ -16,13 +16,14 @@
 
 import functools
 import operator
-from typing import Any, Callable, Iterable, Sequence, Tuple, Union
+from typing import Any, Callable, Iterable, Sequence, Tuple, Union, Optional
 
 import flax.linen as nn
 from jax import lax
 import jax.numpy as jnp
 import common_types
 from layers import initializers
+from layers import normalizations
 from layers import quantizations
 import numpy as np
 
@@ -33,6 +34,8 @@ NdInitializer = initializers.NdInitializer
 
 nd_dense_init = initializers.nd_dense_init
 bias_init = initializers.default_bias_init
+
+LayerNorm = normalizations.LayerNorm
 
 
 def _convert_to_activation_function(
@@ -148,7 +151,10 @@ class MlpBlock(nn.Module):
     deterministic: Whether the dropout layers should be deterministic.
     intermediate_dropout_rate: Dropout rate used after the intermediate layers.
     dtype: Type for the dense layer.
-    use_bias: whether to add bias in all feedforward layers
+    use_bias: whether to add bias in all feedforward layers.
+    use_pre_norm: whether to add pre layer norm in mlp layers.
+    apply_packing_mask: whether to apply packing mask in mlp layers.
+    add_skip_connection: whether to add add residual connection in mlp layers.
   """
 
   config: Config
@@ -158,11 +164,26 @@ class MlpBlock(nn.Module):
   intermediate_dropout_rate: float = 0.1
   dtype: Any = jnp.float32
   use_bias: bool = False
+  use_pre_norm: bool = False
+  add_skip_connection: bool = False
+  apply_padding_mask: bool = False
 
   @nn.compact
-  def __call__(self, inputs, decode: bool = False, deterministic: bool = False):
+  def __call__(self, inputs, padding_mask: Optional[Array] = None, decode: bool = False, deterministic: bool = False):
     """Applies Transformer MlpBlock module."""
     cfg = self.config
+    if self.add_skip_connection:
+      residual = inputs
+
+    if self.use_pre_norm:
+      inputs = LayerNorm(
+        name='mlp_layer_norm',
+        dtype=cfg.dtype,
+        kernel_axes=('embed',),
+        use_bias=self.use_bias,
+        reductions_in_fp32=False,
+        epsilon=cfg.norm_epsilon,
+        )(inputs)
 
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
@@ -183,6 +204,12 @@ class MlpBlock(nn.Module):
 
     # Take elementwise product of above intermediate activations.
     x = functools.reduce(operator.mul, activations)
+
+    if self.apply_padding_mask and padding_mask is not None:
+      # from [B, L] to [B, L, D]
+      padding_mask = jnp.expand_dims(padding_mask, axis=-1)
+      x *= padding_mask
+
     # Apply dropout and final dense output projection.
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
         x, deterministic=deterministic
@@ -199,4 +226,9 @@ class MlpBlock(nn.Module):
         use_int8=cfg.int8_training,
         use_bias=self.use_bias,
     )(x)
+
+    if self.apply_padding_mask and padding_mask is not None:
+      output *= padding_mask
+    if self.add_skip_connection:
+      output += residual
     return output
