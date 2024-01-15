@@ -67,7 +67,7 @@ class DecoderLayer(nn.Module):
     lnx = RMSNorm(
         dtype=cfg.dtype,
         name='pre_self_attention_norm',
-        epsilon=cfg.rms_norm_epsilon,
+        epsilon=cfg.norm_epsilon,
         kernel_axes=('embed',))(inputs)
     lnx = nn.with_logical_constraint(
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
@@ -258,7 +258,7 @@ class Decoder(nn.Module):
             model_mode,
         )
 
-    y = RMSNorm(dtype=cfg.dtype, name='decoder_norm', epsilon=cfg.rms_norm_epsilon,kernel_axes=('embed',))(y)
+    y = RMSNorm(dtype=cfg.dtype, name='decoder_norm', epsilon=cfg.norm_epsilon,kernel_axes=('embed',))(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
         y, deterministic=deterministic
     )
