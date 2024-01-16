@@ -162,7 +162,7 @@ def preprocessing_pipeline(
   if prefetch_size:
     dataset = dataset.prefetch(prefetch_size)
 
-  multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(dataset, global_mesh)
+  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataset, global_mesh)
 
   # Return multi-host jax.Array prep iterator
   return multihost_gen
@@ -266,4 +266,3 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       data_shuffle_seed = data_shuffle_seed,)
 
   return train_iter, eval_iter, predict_iter, sp_tokenizer
-

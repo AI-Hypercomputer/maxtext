@@ -71,7 +71,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
     expected_shape = [jax.device_count(), self.config.max_target_length]
     # For training we pack multiple short examples in one example.
     # *_position and *_segmentation indicate the boundaries.
-    batch = self.train_iter()
+    batch = next(self.train_iter)
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
         'inputs': expected_shape,
         'inputs_position': expected_shape,
@@ -84,7 +84,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
   def test_eval_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
-    batch = self.eval_iter()
+    batch = next(self.eval_iter)
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
        'inputs': expected_shape,
        'targets': expected_shape,
@@ -93,7 +93,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
   def test_predict_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
-    batch = self.predict_iter()
+    batch = next(self.predict_iter)
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
         'inputs': expected_shape,
         'targets': expected_shape,
@@ -112,10 +112,10 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
 
   def test_batch_determinism(self):
-    batch1 = self.train_iter()
+    batch1 = next(self.train_iter)
     self.train_ds, _ = self._get_datasets()
     train_iter2, _, _= self._get_preprocessed_datasets()
-    batch2 = train_iter2()
+    batch2 = next(train_iter2)
     self.assertTrue(tf.reduce_all(tf.equal(batch1['inputs'], batch2['inputs'])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1['targets'], batch2['targets'])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1['inputs_segmentation'], batch2['inputs_segmentation'])))

@@ -23,8 +23,23 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
-from input_pipeline import _tfds_data_processing
+from input_pipeline import _tfds_data_processing, _tfds_data_processing_c4_mlperf
 
+def make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
+  """ Make train iterator and tokenizer for customized C4 dataset for mlperf gpt3 training."""
+  train_ds, eval_ds = _tfds_data_processing_c4_mlperf.get_datasets(
+    config=config,
+  )
+  train_iter, eval_iter, sp_tokenizer = _tfds_data_processing_c4_mlperf.preprocess_dataset(
+    config,
+    mesh,
+    train_ds, eval_ds,
+    vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
+    data_shuffle_seed=config.data_shuffle_seed,
+    add_bos=add_bos,
+    add_eos=add_eos
+  )
+  return train_iter, eval_iter, sp_tokenizer
 
 def make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
   """ Make train iterator and tokenizer for C4 dataset"""
@@ -44,7 +59,7 @@ def make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
     add_bos = add_bos,
     add_eos = add_eos
   )
-  return train_iter, sp_tokenizer
+  return train_iter, None, sp_tokenizer
 
 class SyntheticDataIterator():
   """Creates a synthetic data iterator for performance testing work"""
@@ -57,7 +72,11 @@ class SyntheticDataIterator():
     self.data_generator = jax.jit(SyntheticDataIterator.raw_generate_synthetic_data,
         out_shardings=data_pspec_shardings,
         static_argnums=0)
-  def __call__(self):
+
+  def __iter__(self):
+    return self
+
+  def __next__(self):
     with self.mesh:
       return self.data_generator(self.config)
 
@@ -81,9 +100,12 @@ class SyntheticDataIterator():
 
 def create_data_iterator_with_tokenizer(config, mesh, add_bos = True, add_eos = True):
   if config.dataset_type == "synthetic":
-    return SyntheticDataIterator(config, mesh), None
+    return SyntheticDataIterator(config, mesh), None, None
   elif config.dataset_type == "c4":
     return make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos)
+  elif config.dataset_type == "c4_mlperf":
+    print("Overwrite both add_bos and add_eos to False")
+    return make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, add_bos=False, add_eos=False)
   else:
     assert False, "dataset type not implemented"
 
