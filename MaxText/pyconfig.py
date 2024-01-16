@@ -51,7 +51,7 @@ def validate_attention_type(s: str) -> bool:
     )
 
 def validate_model_name(s: str) -> bool:
-  valid_model_names= ('default', 'llama2-7b') # currently supported models
+  valid_model_names= ('default', 'llama2-7b', 'llama2-1b') # currently supported models
   if s not in valid_model_names:
     raise ValueError(
       "Invalid model name was passed. Valid options ", valid_model_names
@@ -182,6 +182,26 @@ class _HyperParameters():
         'base_num_kv_heads': 32,
         'base_mlp_dim': 11008,
         'base_num_decoder_layers': 32,
+        'head_dim': 128,
+        'mlp_activations': ['silu','linear'],
+        'vocab_size': 32000,
+        'enable_dropout': False,
+        'attention':'dot_product',
+        'vocab_relative_path':'tokenizer.llama2',
+        'logits_via_embedding': False,
+        'rms_norm_epsilon': 1e-05,
+        'add_bos': True,
+        'add_eos': False
+      }
+      raw_keys = validate_and_update_keys(raw_keys, llama2_7b_model_vars)
+    elif raw_keys['model_name'] == 'llama2-1b':
+      max_logging.log(f"Running Model: {raw_keys['model_name']}")
+      llama2_7b_model_vars = {
+        'base_emb_dim': 2048,
+        'base_num_query_heads': 16,
+        'base_num_kv_heads': 16,
+        'base_mlp_dim': 8192,
+        'base_num_decoder_layers': 16,
         'head_dim': 128,
         'mlp_activations': ['silu','linear'],
         'vocab_size': 32000,
