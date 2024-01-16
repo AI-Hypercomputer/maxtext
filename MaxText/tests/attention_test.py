@@ -55,6 +55,7 @@ class AttentionTest(unittest.TestCase):
     self.dtype = self.cfg.dtype
 
     self._attention_as_mha_generic = Attention(
+        config=self.cfg,
         num_query_heads=self.num_query_heads,
         num_kv_heads=self.num_kv_heads,
         head_dim=self.head_dim,
@@ -189,6 +190,7 @@ class AttentionTest(unittest.TestCase):
     )
 
     attention_as_mha_flash = Attention(
+        config=self.cfg,
         num_query_heads=self.num_query_heads,
         num_kv_heads=self.num_kv_heads,
         head_dim=self.head_dim,
@@ -232,6 +234,7 @@ class AttentionTest(unittest.TestCase):
   def test_multiquery_attention(self):
     """Test equalvant between MHA and Flash MHA."""
     attention_as_mqa = Attention(
+        config=self.cfg,
         num_query_heads=self.num_query_heads,
         num_kv_heads=1,
         head_dim=self.head_dim,

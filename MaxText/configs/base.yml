@@ -65,6 +65,9 @@ remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
 attention: 'flash' # Supported attention: dot_product, flash, gpu_flash_xla, gpu_flash_triton
+# Combine matmuls for QKV and MLP
+fused_qkv: False
+fused_mlp: False
 
 record_internal_nn_metrics: 0
 
