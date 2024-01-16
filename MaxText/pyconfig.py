@@ -50,6 +50,13 @@ def validate_attention_type(s: str) -> bool:
       "Invalid attention type was passed. Valid options ", valid_attention_types
     )
 
+def validate_opt_type(s: str) -> bool:
+  valid_opt_types= ('adamw', 'adam_pax')
+  if s not in valid_opt_types:
+    raise ValueError(
+      "Invalid opt_type was passed. Valid options ", valid_opt_types
+    )
+
 def validate_model_name(s: str) -> bool:
   valid_model_names= ('default', 'llama2-7b', 'gpt3-175b', 'gpt3-dummy') # currently supported models
   if s not in valid_model_names:
@@ -167,6 +174,7 @@ class _HyperParameters():
       calculate_global_batch_sizes(raw_keys)
 
     validate_attention_type(raw_keys['attention'])
+    validate_opt_type(raw_keys['opt_type'])
 
   @staticmethod
   def update_model_vars(raw_keys):
@@ -210,6 +218,7 @@ class _HyperParameters():
         'use_iota_embed': True,
         'add_bos': False,
         'add_eos': False,
+        'opt_type': 'adam_pax',
       }
       raw_keys = validate_and_update_keys(raw_keys, gpt3_175b_model_vars)
     elif raw_keys['model_name'] == 'gpt3-dummy':
@@ -231,6 +240,7 @@ class _HyperParameters():
         'add_eos': False,
         'dtype': "float32",
         'attention': "dot_product",
+        'opt_type': 'adam_pax',
       }
       raw_keys = validate_and_update_keys(raw_keys, gpt3_dummy_model_vars)
 
