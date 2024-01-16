@@ -355,6 +355,7 @@ def train_loop(config, state=None):
     print("Loaded compiled function!", flush=True)
   elif config.pre_compile:
     # pre compile graph
+    max_logging.log("pre_compile activated")
     shaped_rng = jax.ShapeDtypeStruct(nextrng.shape, nextrng.dtype)
     # Shaped state
     abstract_state, state_mesh_annotations =  max_utils.get_abstract_state(model, tx, config, init_rng, mesh)
@@ -423,6 +424,7 @@ def train_loop(config, state=None):
       state, metrics, nextrng = p_train_step(
           state, example_batch, nextrng
       )
+    jax.block_until_ready(state)
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
