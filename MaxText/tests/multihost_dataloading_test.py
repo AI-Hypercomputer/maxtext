@@ -53,12 +53,17 @@ class MultihostDataloadingTest(unittest.TestCase):
     dataset = tf.data.Dataset.from_tensor_slices(global_data)
     dataset = dataset.repeat()
     dataset = dataset.batch(batch_size)
-    self.data_iter = iter(dataset.as_numpy_iterator())
+    data_iter = iter(dataset.as_numpy_iterator())
+    self.multihost_gen = (
+      multihost_dataloading.MultiHostDataLoadIterator(
+          data_iter, self.mesh
+      )
+    )
 
   @pytest.mark.tpu
-  def test_get_next_batch_sharded(self):
-    first_batch = multihost_dataloading.get_next_batch_sharded(self.data_iter, self.mesh)
-    sec_batch = multihost_dataloading.get_next_batch_sharded(self.data_iter, self.mesh)
+  def test_batch_sharded_data_pipeline(self):
+    first_batch = next(self.multihost_gen)
+    sec_batch = next(self.multihost_gen)
     self.assertTrue(not np.array_equal(first_batch, sec_batch, equal_nan=True))
 
 

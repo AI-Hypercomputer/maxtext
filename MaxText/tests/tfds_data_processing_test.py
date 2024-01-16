@@ -27,7 +27,6 @@ import tensorflow_datasets as tfds
 
 import pyconfig
 from input_pipeline import _tfds_data_processing
-from multihost_dataloading import get_next_batch_sharded
 
 
 class TfdsDataProcessingTest(unittest.TestCase):
@@ -74,7 +73,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
     expected_shape = [jax.device_count(), self.config.max_target_length]
     # For training we pack multiple short examples in one example.
     # *_position and *_segmentation indicate the boundaries.
-    batch = get_next_batch_sharded(self.train_iter, self.mesh)
+    batch = next(self.train_iter)
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
         'inputs': expected_shape,
         'inputs_position': expected_shape,
@@ -87,7 +86,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
   def test_eval_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
-    batch = get_next_batch_sharded(self.eval_iter, self.mesh)
+    batch = next(self.eval_iter)
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
        'inputs': expected_shape,
        'targets': expected_shape,
@@ -96,7 +95,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
   def test_predict_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
-    batch = get_next_batch_sharded(self.predict_iter, self.mesh)
+    batch = next(self.predict_iter)
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
         'inputs': expected_shape,
         'targets': expected_shape,
@@ -115,16 +114,29 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
 
   def test_batch_determinism(self):
-    batch1 = get_next_batch_sharded(self.train_iter, self.mesh)
+    batch1 = next(self.train_iter)
     self.train_ds, _ = self._get_datasets()
     train_iter2, _, _= self._get_preprocessed_datasets()
-    batch2 = get_next_batch_sharded(train_iter2, self.mesh)
+    batch2 = next(train_iter2)
     self.assertTrue(tf.reduce_all(tf.equal(batch1['inputs'], batch2['inputs'])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1['targets'], batch2['targets'])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1['inputs_segmentation'], batch2['inputs_segmentation'])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1['targets_segmentation'], batch2['targets_segmentation'])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1['inputs_position'], batch2['inputs_position'])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1['targets_position'], batch2['targets_position'])))
+
+  def test_for_loop_repeatable(self):
+    def get_first_batch(iterator):
+      batch = None
+      for batch in iterator:
+        break
+      return batch
+
+    eval_batch1 = get_first_batch(self.eval_iter)
+    eval_batch2 = get_first_batch(self.eval_iter)
+    self.assertTrue((eval_batch1['inputs']==eval_batch2['inputs']).all())
+    self.assertTrue((eval_batch1['targets']==eval_batch2['targets']).all())
+
 
 if __name__ == '__main__':
   unittest.main()

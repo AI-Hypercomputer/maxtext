@@ -28,6 +28,8 @@ import tokenizer
 from input_pipeline import _grain_operations
 from input_pipeline import _grain_tokenizer
 
+import multihost_dataloading
+
 def get_datasets(
   config: ml_collections.ConfigDict
 ):
@@ -169,6 +171,7 @@ def preprocessing_pipeline(
       worker_count=grain_worker_count,
   )
 
-  data_iter = iter(dataloader)
+  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
 
-  return data_iter
+  # Return multi-host jax.Array prep iterator
+  return multihost_gen

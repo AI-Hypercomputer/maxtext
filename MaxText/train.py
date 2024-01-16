@@ -40,7 +40,6 @@ import optimizers
 import pyconfig
 
 from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer
-from multihost_dataloading import get_next_batch_sharded
 from layers import models
 
 import jax.numpy as jnp
@@ -90,10 +89,8 @@ def load_next_batch(train_iter, example_batch, config, mesh):
 
   if config.reuse_example_batch and example_batch is not None:
     return example_batch
-  elif config.dataset_type=='synthetic':
-    return next(train_iter)
   else:
-    return get_next_batch_sharded(train_iter, mesh)
+    return next(train_iter)
 
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   """Records scalar metrics to be written to tensorboard"""
