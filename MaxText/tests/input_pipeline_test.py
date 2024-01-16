@@ -68,7 +68,7 @@ class InputPipelineTest(unittest.TestCase):
     expected_shape = [2, self.config.max_target_length]
     # For training we pack multiple short examples in one example.
     # *_position and *_segmentation indicate the boundaries.
-    batch = self.train_iter()
+    batch = next(self.train_iter)
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
         'inputs': expected_shape,
         'inputs_position': expected_shape,
@@ -81,7 +81,7 @@ class InputPipelineTest(unittest.TestCase):
 
   def test_eval_ds(self):
     expected_shape = [2, self.config.max_target_length]
-    batch = self.eval_iter()
+    batch = next(self.eval_iter)
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
        'inputs': expected_shape,
        'targets': expected_shape,
