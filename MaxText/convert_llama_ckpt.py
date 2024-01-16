@@ -17,10 +17,14 @@ Usage:
 
 Get LLaMA pytorch_vars from Meta
 
+model_size = "7b"
+base_model_path = "/home/wendy/mistral-7B-v0.1"
+maxtext_model_path = "gs://character-ai-us-central1/ckpt_wendy/mistral-7B-v0.1-maxtext"
+
 Example cmd:
 To save a ckpt
-python3 MaxText/convert_llama_ckpt.py --base-model-path <path/to/meta/ckpt> \
-    --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size 7b
+python3 MaxText/convert_llama_ckpt.py --base-model-path "/home/wendy/mistral-7B-v0.1" \
+    --maxtext-model-path "gs://character-ai-us-central1/ckpt_wendy/mistral-7B-v0.1-maxtext" --model-size 7b
 
 For large size model (e.g. 70B model), this script requires large memory VM.
 The script load and save weights in a single pass.
@@ -68,11 +72,11 @@ MODEL_PARAMS_DICT = {
     '7b': {
         'num_layers': 32,
         'num_heads': 32,
-        'num_kv_heads': 32,
+        'num_kv_heads': 8,
         'dims_per_head': 128,
         'vocab': 32000,
         'base_emb_dim': 4096,
-        'base_mlp_dim': 11008,
+        'base_mlp_dim': 14336,
     },
 }
 
