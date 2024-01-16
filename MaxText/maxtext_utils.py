@@ -46,6 +46,24 @@ def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations
 def get_functional_train_step(train_step, model, config):
   return functools.partial(train_step, model, config)
 
+def get_functional_eval_with_signature(eval_step, mesh, state_mesh_annotations, model, config):
+  """ Get the shardings (both state and data) for eval_step """
+  functional_eval = get_functional_eval_step(eval_step, model, config)
+  functional_eval.__name__ = "eval_step"
+  data_pspec = P(*config.data_sharding)
+  state_mesh_shardings = jax.tree_map(
+      lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
+  data_sharding = jax.tree_map(
+      lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+  in_shardings = (state_mesh_shardings, data_sharding, None) # State, batch, rng
+  out_shardings = None # metrics
+  static_argnums = () # We partial out the static argnums of model, config
+  donate_argnums = () # state will be kept instead of being donated in eval_step
+  return functional_eval, in_shardings, out_shardings, static_argnums, donate_argnums
+
+def get_functional_eval_step(eval_step, model, config):
+  return functools.partial(eval_step, model, config)
+
 def load_compiled(config, partial_train, state):
   """ # Loading a serialized compiled train step function."""
   # Currently partial_train and state  are needed to reconstruct
