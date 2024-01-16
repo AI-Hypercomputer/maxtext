@@ -154,7 +154,7 @@ class _HyperParameters():
     })
 
     # data
-    raw_keys['dataset_type'] = "c4_mlperf"
+    # raw_keys['dataset_type'] = "c4_mlperf"
 
     # optimizer and schedule
     global_batch_size = calculate_global_batch_sizes(raw_keys)[1]
