@@ -105,3 +105,21 @@ def get_next_batch_sharded(
   input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh = global_mesh), local_data)
 
   return input_gdas
+
+
+class MultiHostDataLoadIterator:
+  """fold get_batch_sharded_data_pipeline into a iterator class"""
+  def __init__(self, dataset: tf.data.Dataset, global_mesh: Mesh):
+    self.dataset = dataset
+    self.global_mesh = global_mesh
+    self._multihost_generator = get_batch_sharded_data_pipeline(self.dataset, self.global_mesh)
+
+  def reset(self):
+    self._multihost_generator = get_batch_sharded_data_pipeline(self.dataset, self.global_mesh)
+
+  def __iter__(self):
+    self.reset()
+    return self
+
+  def __next__(self):
+    return self._multihost_generator()
