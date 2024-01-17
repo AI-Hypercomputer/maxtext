@@ -330,7 +330,7 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
   # load
   # train_ds_builder = tfds.builder(config.dataset_name)
   train_ds_builder = tfds.builder('c4/en:3.0.4', try_gcs=True)
-  train_ds = train_ds_builder.as_dataset(split='train2', read_config = read_config, shuffle_files=True)
+  train_ds = train_ds_builder.as_dataset(split='train2', read_config = read_config, shuffle_files=False)
 
   eval_ds_builder = tfds.builder('c4/en:3.0.5', try_gcs=True)
   eval_ds = eval_ds_builder.as_dataset(split='validation_tokenized_5662seqs', read_config = read_config, shuffle_files=False)
@@ -379,6 +379,7 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
   else:
     eval_batch_size = global_batch_size_to_load
 
+  train_ds = train_ds.prefetch(AUTOTUNE)
   train_ds = train_ds.batch(train_batch_size // jax.process_count(), drop_remainder=True)
   # ensure array split in an equal division for each device
   eval_ds = _pad_to_batch_size(eval_ds, eval_batch_size // jax.process_count())
