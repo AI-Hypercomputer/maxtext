@@ -15,7 +15,7 @@
 """Utilities to construct configs for maxtext DAG."""
 
 from xlml.apis import gcp_config, metric_config, task, test_config
-from dags import test_owner
+from dags import test_owner, gcs_bucket
 from dags.multipod.configs import common
 from dags.vm_resource import TpuVersion, Project, RuntimeVersion
 import datetime
@@ -29,11 +29,13 @@ def get_maxtext_nightly_config(
     tpu_cores: int,
     tpu_zone: str,
     time_out_in_min: int,
+    test_name: str,
     project_name: str = PROJECT_NAME,
     runtime_version: str = RUNTIME_IMAGE,
     network: str = "default",
     subnetwork: str = "default",
     is_tpu_reserved: bool = True,
+    num_slices: int = 1,
 ) -> task.TpuQueuedResourceTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=project_name,
@@ -41,7 +43,9 @@ def get_maxtext_nightly_config(
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
   current_datetime = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-  run_name = f"1slice-{tpu_version}_{tpu_cores}-maxtext-nightly-{current_datetime}"
+  run_name = (
+      f"{num_slices}slice-{tpu_version}_{tpu_cores}-maxtext-nightly-{current_datetime}"
+  )
 
   set_up_cmds = common.download_maxtext()
   run_model_cmds = (
@@ -49,7 +53,7 @@ def get_maxtext_nightly_config(
           "cd /tmp/maxtext && bash setup.sh MODE=nightly;"
           f' JAX_PLATFORM_NAME=TPU XLA_FLAGS="--xla_dump_to=/tmp/xla_dump/" RUN_NAME="{run_name}" &&'
           " python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME"
-          " base_output_directory=gs://tonyjohnchen-maxtext-nightly/"
+          f" base_output_directory={gcs_bucket.XLML_OUTPUT_DIR}/maxtext/nightly"
           " dataset_path=gs://max-datasets-rogue dataset_type=synthetic"
           " per_device_batch_size=6 reuse_example_batch=1 global_parameter_scale=1 metrics_file='metrics.txt'"
           " steps=50 enable_checkpointing=false enable_profiler=true gcs_metrics=true;"
@@ -65,11 +69,12 @@ def get_maxtext_nightly_config(
           network=network,
           subnetwork=subnetwork,
       ),
-      test_name="maxtext_nightly",
+      test_name=test_name,
       set_up_cmds=set_up_cmds,
       run_model_cmds=run_model_cmds,
       time_out_in_min=time_out_in_min,
       task_owner=test_owner.Tony_C,
+      num_slices=num_slices,
   )
 
   return task.TpuQueuedResourceTask(

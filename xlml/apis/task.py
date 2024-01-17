@@ -104,6 +104,7 @@ class TpuQueuedResourceTask(BaseTask):
           self.task_gcp_config,
           ssh_keys,
           self.tpu_create_timeout,
+          self.task_test_config.num_slices,
       )
       queued_resource_op >> tpu.ssh_tpu.override(task_id="setup")(
           queued_resource_name,

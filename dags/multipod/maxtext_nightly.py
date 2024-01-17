@@ -21,8 +21,8 @@ from dags.vm_resource import TpuVersion, Zone
 from dags.multipod.configs import maxtext_gce_config
 
 
-# Run once a day at 2 am UTC (6 pm PST)
-SCHEDULED_TIME = "0 2 * * *" if composer_env.is_prod_env() else None
+# Run once a day at 10 am UTC (2 am PST)
+SCHEDULED_TIME = "0 10 * * *" if composer_env.is_prod_env() else None
 
 
 with models.DAG(
@@ -32,13 +32,52 @@ with models.DAG(
     start_date=datetime.datetime(2024, 1, 10),
     catchup=False,
 ) as dag:
+  default_test_name = "maxtext-nightly"
+
   # Maxtext
-  maxtext_nightly_v4_8 = maxtext_gce_config.get_maxtext_nightly_config(
+  maxtext_nightly_1slice_v4_8 = maxtext_gce_config.get_maxtext_nightly_config(
       tpu_version=TpuVersion.V4,
       tpu_cores=8,
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
+      is_tpu_reserved=False,
+      test_name=default_test_name,
   ).run()
 
-  # Test dependencies
-  maxtext_nightly_v4_8
+  maxtext_nightly_2slice_v4_8 = maxtext_gce_config.get_maxtext_nightly_config(
+      tpu_version=TpuVersion.V4,
+      tpu_cores=8,
+      tpu_zone=Zone.US_CENTRAL2_B.value,
+      time_out_in_min=60,
+      is_tpu_reserved=False,
+      num_slices=2,
+      test_name=default_test_name,
+  ).run()
+
+  maxtext_nightly_4slice_v4_8 = maxtext_gce_config.get_maxtext_nightly_config(
+      tpu_version=TpuVersion.V4,
+      tpu_cores=8,
+      tpu_zone=Zone.US_CENTRAL2_B.value,
+      time_out_in_min=60,
+      is_tpu_reserved=False,
+      num_slices=4,
+      test_name=default_test_name,
+  ).run()
+
+  maxtext_nightly_8slice_v4_8 = maxtext_gce_config.get_maxtext_nightly_config(
+      tpu_version=TpuVersion.V4,
+      tpu_cores=8,
+      tpu_zone=Zone.US_CENTRAL2_B.value,
+      time_out_in_min=60,
+      is_tpu_reserved=False,
+      num_slices=8,
+      test_name=default_test_name,
+  ).run()
+
+  # Test dependencie
+  (
+      maxtext_nightly_1slice_v4_8
+      >> maxtext_nightly_2slice_v4_8
+      >> maxtext_nightly_4slice_v4_8
+      >> maxtext_nightly_8slice_v4_8
+  )
