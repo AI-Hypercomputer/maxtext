@@ -47,7 +47,7 @@ def data_load_loop(config, state=None):
   example_batch = load_next_batch(data_iterator, example_batch, config)
   jax.block_until_ready(example_batch)
   first_end = datetime.datetime.now()
-  time_to_load_first_batch = first_end-start
+  time_to_load_first_batch = (first_end-start).total_seconds()
   max_logging.log(f"First step completed in {time_to_load_first_batch} seconds")
 
   for _ in np.arange(start_step+1, config.steps):
@@ -55,7 +55,7 @@ def data_load_loop(config, state=None):
 
   jax.block_until_ready(example_batch) # wait until the last batch is read
   end = datetime.datetime.now()
-  max_logging.log(f"{config.steps} batches loaded in {end-start} seconds, on host {jax.process_index()}")
+  max_logging.log(f"Rest {config.steps-1} batches loaded in {(end-first_end).total_seconds()} seconds, on host {jax.process_index()}")
   return state
 
 
