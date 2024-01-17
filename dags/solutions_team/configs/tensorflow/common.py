@@ -63,12 +63,11 @@ def set_up_pjrt_nightly() -> Tuple[str]:
   )
 
 
-# TODO(ranran): migrate repo `tf2-api-tests` from xl-ml-test to cloud-ml-auto-solutions project
 def set_up_tensorflow_keras() -> Tuple[str]:
   """Common set up for tensorflow Keras tests."""
   return (
       "pip install --upgrade --force-reinstall tf-keras-nightly",
-      "export PATH=$PATH:/root/google-cloud-sdk/bin && cd /tmp && sudo gcloud source repos clone tf2-api-tests --project=xl-ml-test",
+      "export PATH=$PATH:/root/google-cloud-sdk/bin && cd /tmp && sudo gcloud source repos clone tf2-api-tests --project=cloud-ml-auto-solutions",
       "cd /tmp/tf2-api-tests && pip install behave matplotlib",
   )
 
