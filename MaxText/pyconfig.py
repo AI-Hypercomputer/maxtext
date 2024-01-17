@@ -31,6 +31,9 @@ import jax
 from typing import Any, Union
 
 _MAX_PREFIX = "M_"
+_LLAMA2_7B = "llama2-7b"
+_MISTRAL_7B = "mistral-7b"
+
 def yaml_key_to_env_key(s: str) -> str:
   return _MAX_PREFIX + s.upper()
 
@@ -51,7 +54,8 @@ def validate_attention_type(s: str) -> bool:
     )
 
 def validate_model_name(s: str) -> bool:
-  valid_model_names= ('default', 'llama2-7b') # currently supported models
+  # currently supported models
+  valid_model_names = ('default', _LLAMA2_7B, _MISTRAL_7B)
   if s not in valid_model_names:
     raise ValueError(
       "Invalid model name was passed. Valid options ", valid_model_names
@@ -174,8 +178,8 @@ class _HyperParameters():
     ''' Update model config variables
     '''
     validate_model_name(raw_keys['model_name'])
-    if raw_keys['model_name'] == 'llama2-7b':
-      max_logging.log(f"Running Model: {raw_keys['model_name']}")
+    max_logging.log(f"Running Model: {raw_keys['model_name']}")
+    if raw_keys['model_name'] == _LLAMA2_7B:
       llama2_7b_model_vars = {
         'base_emb_dim': 4096,
         'base_num_query_heads': 32,
@@ -194,6 +198,25 @@ class _HyperParameters():
         'add_eos': False
       }
       raw_keys = validate_and_update_keys(raw_keys, llama2_7b_model_vars)
+    elif raw_keys['model_name'] == _MISTRAL_7B:
+      mistral_7b_model_vars = {
+          'base_emb_dim': 4096,
+          'base_num_query_heads': 32,
+          'base_num_kv_heads': 8,
+          'base_mlp_dim': 14336,
+          'base_num_decoder_layers': 32,
+          'head_dim': 128,
+          'mlp_activations': ['silu', 'linear'],
+          'vocab_size': 32000,
+          'enable_dropout': False,
+          'attention': 'dot_product',
+          'vocab_relative_path': 'tokenizer.model',
+          'logits_via_embedding': False,
+          'rms_norm_epsilon': 1e-05,
+          'add_bos': True,
+          'add_eos': False
+      }
+      raw_keys = validate_and_update_keys(raw_keys, mistral_7b_model_vars)
 
 def validate_and_update_keys(raw_keys, model_keys):
   ''' Validate and update model specific config keys
