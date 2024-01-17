@@ -26,6 +26,7 @@ from layers import initializers
 from layers import quantizations
 from layers import normalizations
 import numpy as np
+from jax.ad_checkpoint import checkpoint_name
 
 Array = common_types.Array
 Config = common_types.Config
@@ -207,6 +208,8 @@ class MlpBlock(nn.Module):
 
     # Take elementwise product of above intermediate activations.
     x = functools.reduce(operator.mul, activations)
+    # https://github.com/google/praxis/blob/77675370d1150fccda0862a0ac7d1808d4bce9bf/praxis/layers/transformers.py#L477C5-L477C47
+    x = checkpoint_name(x, 'ffn1')
     if padding_mask is not None:
       # from [B, L] to [B, L, D]
       padding_mask = jnp.expand_dims(padding_mask, axis=-1)
@@ -232,6 +235,7 @@ class MlpBlock(nn.Module):
         use_int8=cfg.int8_training,
         local_aqt_shards=cfg.local_aqt_shards_mlp2,
     )(x)
+    output = checkpoint_name(output, 'ffn2')
 
     if self.apply_padding_mask and padding_mask is not None:
       output *= padding_mask

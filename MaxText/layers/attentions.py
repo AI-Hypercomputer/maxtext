@@ -414,6 +414,7 @@ class MultiHeadDotProductAttention(nn.Module):
 
       # batch, length, heads, kv, 3
       combined_qkv = combined_projection(kernel_init=self.kernel_init, name='combined_qkv',  use_int8=self.use_int8, local_aqt_shards=self.config.local_aqt_shards_qkv_proj)(inputs_q)
+      combined_qkv = checkpoint_name(combined_qkv, 'combined_qkv_proj')
       query, key, value = combined_qkv[..., 0], combined_qkv[..., 1], combined_qkv[..., 2]
     else:
       projection = functools.partial(
@@ -640,4 +641,6 @@ class MultiHeadDotProductAttention(nn.Module):
         config=cfg,
         use_int8=self.use_int8,
         local_aqt_shards=self.config.local_aqt_shards_attention_out_proj)(x)
+    # https://github.com/google/praxis/blob/77675370d1150fccda0862a0ac7d1808d4bce9bf/praxis/layers/multi_query_attention.py#L833
+    out = checkpoint_name(out, 'out_proj')
     return out
