@@ -51,7 +51,7 @@ def validate_attention_type(s: str) -> bool:
     )
 
 def validate_model_name(s: str) -> bool:
-  valid_model_names= ('default', 'llama2-7b') # currently supported models
+  valid_model_names= ('default', 'llama2-7b', 'llama2-8x7b') # currently supported models
   if s not in valid_model_names:
     raise ValueError(
       "Invalid model name was passed. Valid options ", valid_model_names
@@ -161,6 +161,7 @@ class _HyperParameters():
     raw_keys['num_kv_heads'] = 2**num_head_scale * raw_keys['base_num_kv_heads']
     raw_keys['mlp_dim'] = 2**mlp_dim_scale * raw_keys['base_mlp_dim']
     raw_keys['num_decoder_layers'] = 2**layer_scale * raw_keys['base_num_decoder_layers']
+    raw_keys['num_experts'] = raw_keys['num_experts']
 
     raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = \
       calculate_global_batch_sizes(raw_keys)
@@ -189,7 +190,32 @@ class _HyperParameters():
         'logits_via_embedding': False,
         'rms_norm_epsilon': 1e-05,
         'add_bos': True,
-        'add_eos': False
+        'add_eos': False,
+      }
+      raw_keys = validate_and_update_keys(raw_keys, llama2_7b_model_vars)
+    if raw_keys['model_name'] == 'llama2-8x7b':
+      max_logging.log(f"Running Model: {raw_keys['model_name']}")
+      llama2_7b_model_vars = {
+        #'base_emb_dim': 4096,
+        'base_emb_dim': 256,
+        'base_num_query_heads': 32,
+        'base_num_kv_heads': 8,
+        'base_mlp_dim': 14336,
+        #'base_num_decoder_layers': 32,
+        'base_num_decoder_layers': 4,
+        'head_dim': 128,
+        'mlp_activations': ['silu','linear'],
+        'vocab_size': 32000,
+        'enable_dropout': False,
+        'attention':'dot_product',
+        'vocab_relative_path':'tokenizer.model',
+        'logits_via_embedding': False,
+        'rms_norm_epsilon': 1e-05,
+        'add_bos': True,
+        'add_eos': False,
+        'num_experts': 4,
+        'num_experts_per_tok': 2,
+        'scan_layers': False
       }
       raw_keys = validate_and_update_keys(raw_keys, llama2_7b_model_vars)
 
