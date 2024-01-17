@@ -1,12 +1,14 @@
 import argparse
 import jax
 import numpy as np
+import string
 import os
 import orbax.checkpoint as ocp
 import sys
 
 from etils import epath
 from etils import epath
+from functools import reduce
 from jax import sharding
 from jax import numpy as jnp
 from jax._src import sharding_impls
@@ -14,77 +16,67 @@ from orbax.checkpoint import pytree_checkpoint_handler
 from orbax.checkpoint import type_handlers
 from typing import cast
 
+LETTERS = list(string.ascii_lowercase)
 
 def setup_sharded_pytree(
-    replicate_data: bool = False,
-    data_dim: int = 2,
-    num_slices: int = 1
+    shape
 ):
-  """Creates a PyTree of sharded arrays for testing."""
+  """Creates a mesh with given shapes."""
 
   devices = jax.devices()
   num_devices = len(devices)
+  assert num_devices == reduce(lambda x, y: x * y, shape, 1)
+
   devices = np.asarray(devices)
 
-  data_axis_name = 'x'
-
-  mesh_2d = jax.sharding.Mesh(
-      devices.reshape(data_dim, num_devices // data_dim),
-      (data_axis_name, 'y')
+  dim = len(shape)
+  # import pdb; pdb.set_trace()
+  mesh = jax.sharding.Mesh(
+      devices.reshape(shape),
+      LETTERS[-dim:]
   )
-  if replicate_data:
-    mesh_axes_2d = jax.sharding.PartitionSpec('y')
-  else:
-    mesh_axes_2d = jax.sharding.PartitionSpec(data_axis_name, 'y')
-
-  return mesh_2d, mesh_axes_2d
+  return mesh
 
 
-def get_single_replica_pids(sharding):
-  """ Get device IDs that correspond to 0th replica_axis_name """
-  replica_id_map = sharding_impls.device_replica_id_map(sharding, sharding.mesh.devices.shape)
-  # print('replica_id_map', replica_id_map)
-  rep0_pids = set([d.process_index for d, rep_id in replica_id_map.items() if rep_id == 0])
-  print('===== rep 0 IDS =====', rep0_pids)
-  return rep0_pids
+def is_single_data_replica(rep0_pids):
+  return jax.local_devices()[0].process_index in rep0_pids
+
+
+def get_replica_pids(rep_id, mesh):
+  replica_devices = np.take(mesh.devices, rep_id, axis=0).flatten()
+  # replica_devices_flattened = replica_devices.flatten()
+  return set([d.process_index for d in replica_devices])
 
 
 def main(args):
 
-  mesh_2d, mesh_axes_2d = setup_sharded_pytree(
-    replicate_data=args.replicate_data,
-    data_dim=args.data_dim,
-    # num_slices=args.num_slices  # can be found with jax.devices though
+  mesh = setup_sharded_pytree(
+    shape=args.mesh_shape,
     )
-  sharding = jax.sharding.NamedSharding(mesh_2d, mesh_axes_2d)
-  print('***** mesh shape ****', mesh_2d.devices.shape)
-  get_single_replica_pids(sharding)
+
+  print('***** mesh shape ****', mesh.devices.shape)
+  replica0_pids = get_replica_pids(0, mesh)
+
+  print('--- replica0_pids ---', replica0_pids)
+  print(f'host id {jax.process_index()} is in replica0',
+        # is_single_data_replica(replica0_devices)
+        is_single_data_replica(replica0_pids)
+        )
 
   return
 
 
 def parser(args):
   parser = argparse.ArgumentParser()
-  parser.add_argument(
-    '--replicate-data',
-    type=bool,
-    default=True,
-    help='whether to replicate or shard data axis'
-    )
 
   parser.add_argument(
-    '--data-dim',
+    '--mesh-shape',
     type=int,
-    default=2,
-    help='dimension of data axis'
+    nargs="+",
+    default=None,
+    help='dimension of data mesh'
   )
 
-  parser.add_argument(
-    '--num-slices',
-    type=int,
-    default=1,
-    help='dimension of data axis'
-  )
   return parser.parse_args(args)
 
 if __name__ == '__main__':
