@@ -108,7 +108,10 @@ parser.add_argument(
 args = parser.parse_args()
 
 def main(_argv: Sequence[str]) -> None:
-  cc.set_cache_dir(os.path.expanduser("~/jax_cache_2"))
+  if jax.__version__ <= '0.4.23':
+    cc.initialize_cache(os.path.expanduser("~/jax_cache_2"))
+  else:
+    cc.set_cache_dir(os.path.expanduser("~/jax_cache_2"))
 
   def activate_profiler(profiler_path):
     if profiler_path:
