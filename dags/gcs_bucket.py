@@ -15,10 +15,9 @@
 """GCS bucket for data."""
 
 # GCS bucket for training data
-# TODO(ranran): migrate data to `cloud-ml-auto-solutions` project
-CRITEO_DIR = "gs://xl-ml-test-us-central2/data/criteo/terabyte_processed_shuffled"
-IMAGENET_DIR = "gs://xl-ml-test-us-central2/data/imagenet"
-TFDS_DATA_DIR = "gs://xl-ml-test-us-central2/tfds-data"
+CRITEO_DIR = "gs://ml-auto-solutions/data/criteo/terabyte_processed_shuffled"
+IMAGENET_DIR = "gs://ml-auto-solutions/data/imagenet"
+TFDS_DATA_DIR = "gs://ml-auto-solutions/data/tfds-data"
 PAX_DIR = "gs://cloud-tpu-checkpoints/pax"
 
 # GCS bucket for output
