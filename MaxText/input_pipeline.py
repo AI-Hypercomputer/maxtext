@@ -372,8 +372,12 @@ def make_mlperf_c4_train_iterator_and_tokenizer(config, mesh):
 
   train_ds = train_ds.map(map_fn, num_parallel_calls=AUTOTUNE)
   eval_ds = eval_ds.map(map_fn, num_parallel_calls=AUTOTUNE)
-  train_batch_size = int(config.per_device_batch_size * mesh.size )
-  eval_batch_size = int(config.eval_per_device_batch_size * mesh.size) if config.eval_per_device_batch_size else train_batch_size
+  global_batch_size_to_load = config.global_batch_size_to_load
+  train_batch_size = global_batch_size_to_load
+  if config.eval_per_device_batch_size > 0:
+    eval_batch_size = config.eval_per_device_batch_size * mesh.size
+  else:
+    eval_batch_size = global_batch_size_to_load
 
   train_ds = train_ds.batch(train_batch_size // jax.process_count(), drop_remainder=True)
   # ensure array split in an equal division for each device
