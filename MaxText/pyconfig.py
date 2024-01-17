@@ -79,9 +79,9 @@ class _HyperParameters():
       if environment_var[:len(_MAX_PREFIX)] == _MAX_PREFIX:
         proposed_key = environment_var[len(_MAX_PREFIX):].lower()
         if proposed_key not in raw_data_from_yaml:
-          raise ValueError(f"We received env `{environment_var}` but it doesn't match a key, so it is aassumed a mistake")
-        if proposed_key.upper() != proposed_key:
-          raise ValueError(f"We received env `{proposed_key}` but it isn't all uppercase.")
+          raise ValueError(f"We received env `{environment_var}` but it doesn't match a key, so it is assumed a mistake.")
+        if not environment_var[len(_MAX_PREFIX):].isupper():
+          raise ValueError(f"We received env `{environment_var}` but it isn't all uppercase.")
 
   def __init__(self, argv: list[str], **kwargs):
     with open(argv[1], "r", encoding="utf-8") as yaml_file:
