@@ -25,7 +25,8 @@ from jax import random
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
 from jax.experimental.pallas.ops import attention as pallas_attention
-from jax.experimental.pallas.ops.tpu import flash_attention as tpu_flash_attention
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 import jax.numpy as jnp
 
 import common_types
@@ -187,12 +188,9 @@ class AttentionOp(nn.Module):
     query = jnp.transpose(query, axes=(0, 2, 1, 3))
     key = jnp.transpose(key, axes=(0, 2, 1, 3))
     value = jnp.transpose(value, axes=(0, 2, 1, 3))
-    if not(query.shape[1] == key.shape[1] == value.shape[1]):
-      raise ValueError(f"The flash attention kernel requires Q, K and V to have the same number of heads"
-                       "{query.shape=} {key.shape=}, {value.shape=}")
 
     if decoder_segment_ids is not None:
-      decoder_segment_ids = tpu_flash_attention.SegmentIds(
+      decoder_segment_ids = splash_attention_kernel.SegmentIds(
           decoder_segment_ids, decoder_segment_ids
       )
     axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
@@ -217,27 +215,26 @@ class AttentionOp(nn.Module):
         assert (
             query.shape[2]
             == decoder_segment_ids.q.shape[1]
-        ), 'Sharding along sequence dimension not allowed in flash attention'
-      return tpu_flash_attention.flash_attention(
-          query,
-          key,
-          value,
-          causal=True,
-          segment_ids=decoder_segment_ids,
-          block_sizes=tpu_flash_attention.BlockSizes(
-              block_q=min(512, query.shape[2]),
-              block_k_major=min(512, key.shape[2]),
-              block_k=min(512, key.shape[2]),
-              block_b=min(2, query.shape[0]),
-              block_q_major_dkv=min(512, query.shape[2]),
-              block_k_major_dkv=min(512, key.shape[2]),
-              block_q_dkv=min(512, query.shape[2]),
-              block_k_dkv=min(512, key.shape[2]),
-              block_q_dq=min(1024, query.shape[2]),
-              block_k_dq=min(256, key.shape[2]),
-              block_k_major_dq=min(512, key.shape[2]),
-          ),
+        ), 'Sharding along sequence dimension not allowed in tpu kernel attention'
+      block_sizes = splash_attention_kernel.BlockSizes(
+                                                  block_q=min(512, query.shape[2]),
+                                                  block_kv_compute=min(512, key.shape[2]),
+                                                  block_kv=min(512, key.shape[2]),
+                                                  block_q_dkv=min(512, query.shape[2]),
+                                                  block_kv_dkv=min(512, key.shape[2]),
+                                                  block_kv_dkv_compute=min(512, query.shape[2]),
+                                                  block_q_dq=min(512, query.shape[2]),
+                                                  block_kv_dq=min(512, query.shape[2]),
       )
+
+      masks = [splash_attention_mask.CausalMask( shape=(query.shape[2],query.shape[2])) for i in range(query.shape[1])]
+      multi_head_mask = splash_attention_mask.MultiHeadMask(masks=masks)
+      splash_kernel = splash_attention_kernel.make_splash_mha(mask = multi_head_mask,
+                                                              head_shards = 1,
+                                                              q_seq_shards = 1,
+                                                              block_sizes = block_sizes)
+      
+      return jax.vmap(splash_kernel)(query,key,value, segment_ids = decoder_segment_ids)
 
     devices_in_data_fsdp = self.mesh.shape['data'] * self.mesh.shape['fsdp']
     assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
