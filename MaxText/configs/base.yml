@@ -154,6 +154,8 @@ add_eos: True
 autoregressive_decode_assert: ""
 
 enable_profiler: False
+# If set to true, upload all profiler xplane results from all hosts. Otherwise, only upload the xplane reuslt from the first host.
+upload_all_profiler_results: False
 # Skip first n steps for profiling, to omit things like compilation and to give
 # the iteration time a chance to stabilize.
 skip_first_n_steps_for_profiler: 1
