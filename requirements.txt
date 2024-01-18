@@ -17,4 +17,3 @@ tensorflow-text
 tensorboardx
 tensorflow
 tensorboard-plugin-profile
-torch

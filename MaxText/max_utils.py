@@ -163,7 +163,6 @@ def create_device_mesh(config, devices=None):
   except:
     num_slices = 1
   num_devices_per_slice = num_devices//num_slices
-  max_logging.log(f"{num_devices=}, {num_slices=}, and {num_devices_per_slice=}")
 
   multi_slice_env = num_slices > 1
 
