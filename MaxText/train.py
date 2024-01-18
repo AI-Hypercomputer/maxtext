@@ -424,8 +424,9 @@ def train_loop(config, state=None):
           state, example_batch, nextrng
       )
     new_time = datetime.datetime.now()
-    record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
-    write_metrics(writer, metrics, step, config)
+    # record_scalar_metrics(metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step))
+    # write_metrics(writer, metrics, step, config)
+    max_logging.log(f"completed step: {step}, seconds: {(new_time - last_step_completion).total_seconds():.3f}, metrics: {metrics}")
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
