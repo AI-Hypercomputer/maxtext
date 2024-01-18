@@ -72,6 +72,7 @@ class DecoderLayer(nn.Module):
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
     attention_layer = Attention(
+      config = self.config,
       num_query_heads=cfg.num_query_heads,
       num_kv_heads=cfg.num_kv_heads,
       head_dim=cfg.head_dim,
@@ -220,7 +221,7 @@ class Decoder(nn.Module):
           ),
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'},
-      )(config=cfg, mesh=mesh, name='decoder')(
+      )(config=cfg, mesh=mesh, name='layers')(
           y,
           decoder_segment_ids,
           decoder_positions,

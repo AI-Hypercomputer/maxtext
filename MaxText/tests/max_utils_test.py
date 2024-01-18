@@ -77,7 +77,7 @@ class MaxUtilsInitState(unittest.TestCase):
   def test_init_decode_state(self):
     decode_state = max_utils.init_decode_state(
       self.model.apply, self.params
-      )
+    )
     self.assertEqual(decode_state.apply_fn, self.model.apply)
     output = decode_state.apply_fn(self.params, self.input)
     self.assertEqual(output.tolist(), self.output.tolist())
