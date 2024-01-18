@@ -69,11 +69,11 @@ def summarize_size_from_pytree(params):
   return num_params, num_bytes, num_bytes/num_params
 
 def activate_profiler(config):
-  if jax.process_index() == 0 and config.enable_profiler:
+  if config.enable_profiler and (config.upload_all_profiler_results or jax.process_index() == 0):
     jax.profiler.start_trace(config.tensorboard_dir)
 
 def deactivate_profiler(config):
-  if jax.process_index() == 0 and config.enable_profiler:
+  if config.enable_profiler and (config.upload_all_profiler_results or jax.process_index() == 0):
     jax.profiler.stop_trace()
 
 def _prepare_metrics_for_json(metrics, step, run_name):
