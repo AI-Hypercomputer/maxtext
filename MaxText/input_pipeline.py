@@ -530,7 +530,11 @@ class SyntheticDataIterator():
     self.data_generator = jax.jit(SyntheticDataIterator.raw_generate_synthetic_data,
         out_shardings=data_pspec_shardings,
         static_argnums=0)
-  def __call__(self):
+
+  def __iter__(self):
+    return self
+
+  def __next__(self):
     with self.mesh:
       return self.data_generator(self.config)
 
