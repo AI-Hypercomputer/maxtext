@@ -1,3 +1,15 @@
+"""" Test saving and restoring a simple pytree.
+
+You can specify different ways for restoring and different meshes
+
+Example run
+
+python3 pedagogical_examples/test_single_slice_mesh2.py \
+  --path gs://your_path  \
+  --restore-method singleslice \
+  --mesh-shape 2 2 \
+  --tree-size 16
+"""
 import argparse
 import jax
 import numpy as np
@@ -137,10 +149,14 @@ def main(args):
                                       override=True)
     print('Restoring with single slice')
     def _create_restore_args(data, mesh, pspec):
-      rep0_pids, rep0_ids = get_replica_pids(0, mesh)
+      replica_index = 0
+      rep0_pids, rep0_ids = get_replica_pids(replica_index, mesh)
+      # import pdb; pdb.set_trace()
+      slice_devices = mesh.devices[replica_index:replica_index+1]
+      slice_mesh = jax.sharding.Mesh(slice_devices, mesh.axis_names)
       return type_handlers.SingleSliceArrayRestoreArgs(
           sharding=jax.sharding.NamedSharding(mesh, pspec),
-          single_slice_sharding=jax.sharding.NamedSharding(mesh, pspec),
+          single_slice_sharding=jax.sharding.NamedSharding(slice_mesh, pspec),
           single_replica_ids = rep0_ids,
           single_replica_pids = rep0_pids,
           replica_axis_name=data_axis_name,
