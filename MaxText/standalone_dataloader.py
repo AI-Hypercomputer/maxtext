@@ -31,6 +31,7 @@ import pyconfig
 from train import validate_train_config, get_first_step, load_next_batch, setup_train_loop
 
 from jax.experimental.compilation_cache import compilation_cache as cc
+from jax.experimental import multihost_utils
 
 
 def data_load_loop(config, state=None):
@@ -42,8 +43,9 @@ def data_load_loop(config, state=None):
 
   example_batch = None
 
-  start = datetime.datetime.now()
   start_step = get_first_step(state)
+  multihost_utils.sync_global_devices('data_load_loop:get_first_step')
+  start = datetime.datetime.now()
   example_batch = load_next_batch(data_iterator, example_batch, config)
   jax.block_until_ready(example_batch)
   first_end = datetime.datetime.now()
@@ -55,7 +57,8 @@ def data_load_loop(config, state=None):
 
   jax.block_until_ready(example_batch) # wait until the last batch is read
   end = datetime.datetime.now()
-  max_logging.log(f"Rest {config.steps-1} batches loaded in {(end-first_end).total_seconds()} seconds, on host {jax.process_index()}")
+  max_logging.log(f"Rest {config.steps-1} batches loaded in {(end-first_end).total_seconds()} seconds, "
+                  f"on host {jax.process_index()}")
   return state
 
 
