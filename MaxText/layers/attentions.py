@@ -542,6 +542,7 @@ class Attention(nn.Module):
       use_int8: bool, if true accelerate in int8
   """
     
+  config: Config
   num_query_heads: int
   num_kv_heads: int
   head_dim: int
@@ -608,6 +609,20 @@ class Attention(nn.Module):
         use_int8=self.use_int8)(inputs_kv)
     return kv_proj
 
+  def qkv_projection(self, inputs: Array, proj_name: str):
+    """ Fused QKV projection"""
+
+    qkv_proj = DenseGeneral(
+      features=(3, self.num_query_heads, self.head_dim),
+      axis = -1,
+      kernel_init=self.kernel_init,
+        kernel_axes=('embed','qkv', 'heads', 'kv'),
+        dtype=self.dtype,
+        name=proj_name,
+        use_int8=self.use_int8)(inputs)
+    query, key, value = qkv_proj[:,:,0,...], qkv_proj[:,:,1,...], qkv_proj[:,:,2,...] 
+    return query, key, value
+
   def out_projection(self, output_dim: int, out: Array) -> Array:
     out_proj = DenseGeneral(
       features=output_dim,
@@ -658,9 +673,12 @@ class Attention(nn.Module):
       output of shape `[batch, length, q_features]`.
     """
     # apply projection.
-    query = self.query_projection(inputs_q)
-    key = self.kv_projection(inputs_kv, proj_name='key')
-    value = self.kv_projection(inputs_kv, proj_name='value')
+    if self.config.fused_qkv:
+      query, key, value = self.qkv_projection(inputs_q, proj_name='qkv_proj')
+    else:
+      query = self.query_projection(inputs_q)
+      key = self.kv_projection(inputs_kv, proj_name='key')
+      value = self.kv_projection(inputs_kv, proj_name='value')
 
     # apply ROPE
     query = RotaryEmbedding(

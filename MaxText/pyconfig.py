@@ -46,12 +46,21 @@ def string_to_bool(s: str) -> bool:
 
 _yaml_types_to_parser = {str : str, int : int, float : float, bool : string_to_bool}
 
-def validate_attention_type(s: str) -> bool:
+def validate_attention_type(s: str) -> None:
   valid_attention_types = ('dot_product', 'flash', 'gpu_flash_xla', 'gpu_flash_triton')
   if s not in valid_attention_types: # currently supported attention
     raise ValueError(
       "Invalid attention type was passed. Valid options ", valid_attention_types
     )
+
+def validate_keys(keys):
+  validate_attention_type(keys['attention'])
+
+  assert ((keys["load_parameters_path"]=="" and keys["load_full_state_path"]=="") or
+    keys["enable_checkpointing"]), "You must set enable_checkpointing to load a checkpoint"
+  assert keys["load_parameters_path"]=="" or keys["load_full_state_path"]=="",\
+    "At most one of `load_parameters_path` or `load_full_state_path` should be set"
+
 
 def validate_model_name(s: str) -> bool:
   # currently supported models
@@ -74,9 +83,9 @@ class _HyperParameters():
       if environment_var[:len(_MAX_PREFIX)] == _MAX_PREFIX:
         proposed_key = environment_var[len(_MAX_PREFIX):].lower()
         if proposed_key not in raw_data_from_yaml:
-          raise ValueError(f"We received env `{environment_var}` but it doesn't match a key, so it is aassumed a mistake")
-        if proposed_key.upper() != proposed_key:
-          raise ValueError(f"We received env `{proposed_key}` but it isn't all uppercase.")
+          raise ValueError(f"We received env `{environment_var}` but it doesn't match a key, so it is assumed a mistake.")
+        if not environment_var[len(_MAX_PREFIX):].isupper():
+          raise ValueError(f"We received env `{environment_var}` but it isn't all uppercase.")
 
   def __init__(self, argv: list[str], **kwargs):
     with open(argv[1], "r", encoding="utf-8") as yaml_file:
@@ -170,6 +179,8 @@ class _HyperParameters():
 
     raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = \
       calculate_global_batch_sizes(raw_keys)
+
+    validate_keys(raw_keys)
 
     validate_attention_type(raw_keys['attention'])
 

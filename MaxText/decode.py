@@ -32,7 +32,6 @@ import max_utils
 from input_pipeline import create_data_iterator_with_tokenizer
 from layers import models
 
-import checkpointing
 import common_types
 
 import jax
@@ -175,10 +174,6 @@ def decode_loop(config, state=None):
   """Decoding loop for the Transformer model."""
   assert config.add_eos is False,\
     "For decoding, we must set add_eos=False"
-  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir,
-                                                                     config.enable_checkpointing,
-                                                                     config.async_checkpointing,
-                                                                     config.checkpoint_period)
   rng = random.PRNGKey(0)
 
   # Mesh definition
@@ -189,7 +184,7 @@ def decode_loop(config, state=None):
   model = Transformer(config, mesh = mesh)
   _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
   state, state_mesh_annotations = max_utils.setup_decode_state(
-    model, config, rng, mesh, checkpoint_manager
+    model, config, rng, mesh, None
   )
   kv_cache_annotations = max_utils.get_kv_cache_annotations(model, config, rng, mesh)
 
@@ -263,13 +258,16 @@ def decode_loop(config, state=None):
   max_logging.log(f"Therefore, a per-generate time of {per_step_time:.4f} seconds, a throughput of {seqs/per_step_time:.1f} "
                   f"tok/s and {memory_bandwidth_per_device_GB_per_sec:.1f} GB/s/device")
 
+def validate_config(config):
+  assert config.load_full_state_path == "", "Decode doesn't operate on full states! Convert to parameter checkpoint first."\
+                                            "Using generate_param_only_checkpoint."
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
   os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
-
+  validate_config(pyconfig.config)
   decode_loop(pyconfig.config)
 
 if __name__ == "__main__":

@@ -117,7 +117,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
   jax_weights = {
       'decoder': {
-          'decoder': {
+          'layers': {
              'mlp': {}, 
              'pre_self_attention_layer_norm' : {},
              'post_self_attention_layer_norm' : {}, 
@@ -238,7 +238,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
   #scale the query weights
   self_attention['query']['kernel'] = self_attention['query']['kernel']/np.sqrt(head_dim)
 
-  jax_weights['decoder']['decoder']['self_attention'] = self_attention
+  jax_weights['decoder']['layers']['self_attention'] = self_attention
 
   layer_weight['mlp']['wi_0']['kernel'] = np.array(layer_weight['mlp']['wi_0']['kernel'])
   layer_weight['mlp']['wi_1']['kernel'] = np.array(layer_weight['mlp']['wi_1']['kernel'])
@@ -256,9 +256,9 @@ def convert(base_model_path, maxtext_model_path, model_size):
                                     layer_weight['post_self_attention_layer_norm']['scale'],
                                     axes=(1, 0))
 
-  jax_weights['decoder']['decoder']['mlp'] = layer_weight['mlp']
-  jax_weights['decoder']['decoder']['pre_self_attention_layer_norm'] = layer_weight['pre_self_attention_layer_norm']
-  jax_weights['decoder']['decoder']['post_self_attention_layer_norm'] = layer_weight['post_self_attention_layer_norm']
+  jax_weights['decoder']['layers']['mlp'] = layer_weight['mlp']
+  jax_weights['decoder']['layers']['pre_self_attention_layer_norm'] = layer_weight['pre_self_attention_layer_norm']
+  jax_weights['decoder']['layers']['post_self_attention_layer_norm'] = layer_weight['post_self_attention_layer_norm']
 
   #convert all weights to jax.numpy
   jax_weights = jax.tree_map(jnp.array, jax_weights)

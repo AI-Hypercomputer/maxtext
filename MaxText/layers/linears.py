@@ -150,18 +150,31 @@ class MlpBlock(nn.Module):
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
     activations = []
-    for idx, act_fn in enumerate(self.activations):
-      dense_name = 'wi' if len(self.activations) == 1 else f'wi_{idx}'
+    if cfg.fused_mlp:
       x = DenseGeneral(
-          self.intermediate_dim,
-          dtype=self.dtype,
-          kernel_init=self.kernel_init,
-          kernel_axes=('embed', 'mlp'),
-          name=dense_name,
-          use_int8=cfg.int8_training,
+            (len(self.activations), self.intermediate_dim),
+            dtype=self.dtype,
+            kernel_init=self.kernel_init,
+            kernel_axes=('embed', 'num_activations', 'mlp'),
+            name='wi',
+            use_int8=cfg.int8_training,
       )(inputs)
-      x = _convert_to_activation_function(act_fn)(x)
-      activations.append(x)
+      for idx, act_fn in enumerate(self.activations):
+        y = _convert_to_activation_function(act_fn)(x[:,:,idx,...])
+        activations.append(y)
+    else:
+      for idx, act_fn in enumerate(self.activations):
+        dense_name = 'wi' if len(self.activations) == 1 else f'wi_{idx}'
+        x = DenseGeneral(
+            self.intermediate_dim,
+            dtype=self.dtype,
+            kernel_init=self.kernel_init,
+            kernel_axes=('embed', 'mlp'),
+            name=dense_name,
+            use_int8=cfg.int8_training,
+        )(inputs)
+        x = _convert_to_activation_function(act_fn)(x)
+        activations.append(x)
 
     # Take elementwise product of above intermediate activations.
     x = functools.reduce(operator.mul, activations)
