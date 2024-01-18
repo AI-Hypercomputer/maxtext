@@ -197,10 +197,10 @@ class _HyperParameters():
     elif raw_keys['model_name'] == 'llama2-1b':
       max_logging.log(f"Running Model: {raw_keys['model_name']}")
       llama2_7b_model_vars = {
-        'base_emb_dim': 2048,
+        'base_emb_dim': 2048, # 2048 # 
         'base_num_query_heads': 16,
         'base_num_kv_heads': 16,
-        'base_mlp_dim': 8192,
+        'base_mlp_dim': 6144,
         'base_num_decoder_layers': 16,
         'head_dim': 128,
         'mlp_activations': ['silu','linear'],

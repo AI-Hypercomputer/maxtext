@@ -347,7 +347,7 @@ def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   config = pyconfig.config
   validate_train_config(config)
-  cc.set_cache_dir(os.path.expanduser(config.jax_cache_dir))
+  #cc.initialize_cache(os.path.expanduser(config.jax_cache_dir))
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   debug_config = debug_configuration.DebugConfig(
     stack_trace_config = stack_trace_configuration.StackTraceConfig(
