@@ -14,6 +14,10 @@ RUN curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyri
 # Install the Google Cloud SDK
 RUN apt-get update && apt-get install -y google-cloud-sdk
 
+# Install kubectl and gke-gcloud-auth-plugin components needed for KubernetesPodOperator
+RUN apt-get install -y kubectl
+RUN apt-get install -y google-cloud-sdk-gke-gcloud-auth-plugin
+
 # Set the default Python version to 3.10
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.10 1
 
