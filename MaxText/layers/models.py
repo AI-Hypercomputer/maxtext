@@ -301,6 +301,10 @@ class DecoderLayer(nn.Module):
     if self.skip_connection_style == "GPT3":
       lnx = attention_lnx + inputs
 
+    lnx = nn.with_logical_constraint(
+        lnx,
+        ('activation_batch', 'activation_length', 'activation_embed'))
+
     # MLP block.
     mlp_lnx = linears.MlpBlock(
         intermediate_dim=cfg.mlp_dim,

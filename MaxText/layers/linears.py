@@ -186,6 +186,9 @@ class MlpBlock(nn.Module):
         reductions_in_fp32=cfg.reductions_in_fp32_layer_norm,
         epsilon=cfg.epsilon_layer_norm,
         )(inputs)
+    inputs = nn.with_logical_constraint(
+        inputs, ('activation_batch', 'activation_length', 'activation_embed')
+    )
 
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
@@ -242,5 +245,7 @@ class MlpBlock(nn.Module):
 
     if self.add_skip_connection:
       output += residual
+    output = nn.with_logical_constraint(
+        output, ('activation_batch', 'activation_length', 'activation_embed'))
 
     return output
