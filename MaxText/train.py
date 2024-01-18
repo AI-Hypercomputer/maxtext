@@ -416,9 +416,6 @@ def train_loop(config, state=None):
     eval_frequency_tokens = eval_interval * config.global_batch_size_to_train_on * config.max_target_length
 
   for step in np.arange(start_step, config.steps):
-    if step == start_step:
-      max_utils.activate_profiler(config)
-
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
     example_batch = load_next_batch(train_data_iterator, example_batch, config)
@@ -426,10 +423,6 @@ def train_loop(config, state=None):
       state, metrics, nextrng = p_train_step(
           state, example_batch, nextrng
       )
-    jax.block_until_ready(state)
-    if step == start_step:
-      max_utils.deactivate_profiler(config)
-
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
     write_metrics(writer, metrics, step, config)
