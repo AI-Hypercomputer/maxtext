@@ -252,4 +252,4 @@ target_valid_loss: 0
 
 combined_qkv: False
 enable_eval_step: False
-pre_compile: True
+pre_compile: False
