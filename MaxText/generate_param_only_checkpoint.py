@@ -124,7 +124,7 @@ def generate_decode_checkpoint(config):
       config.async_checkpointing,
       config.checkpoint_period,
   )
-  # Read training state from config.load_paramaters_path
+  # Read training state from config.load_parameters_path
   max_logging.log(f"Read training checkpoint from: {config.load_full_state_path}")
   training_state, training_state_annotations = _read_train_checkpoint(config, checkpoint_manager, mesh)
   assert training_state.opt_state != {}, "missing opt_state in training checkpoint"

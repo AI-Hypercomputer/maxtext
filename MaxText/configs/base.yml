@@ -119,7 +119,7 @@ data_sharding: [['data', 'fsdp', 'sequence', 'tensor', 'autoregressive']]
 dcn_data_parallelism: -1  # recommended DCN axis to be auto-sharded
 dcn_fsdp_parallelism: 1
 dcn_sequence_parallelism: 1  # never recommended
-dcn_tensor_parallelism: 1 # never recommeneded
+dcn_tensor_parallelism: 1 # never recommended
 dcn_autoregressive_parallelism: 1 # never recommended
 ici_data_parallelism: 1
 ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
