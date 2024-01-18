@@ -31,6 +31,7 @@ import jax
 from typing import Any, Union
 
 _MAX_PREFIX = "M_"
+_DEFAULT = "default"
 _LLAMA2_7B = "llama2-7b"
 _MISTRAL_7B = "mistral-7b"
 
@@ -64,7 +65,7 @@ def validate_keys(keys):
 
 def validate_model_name(s: str) -> bool:
   # currently supported models
-  valid_model_names = ('default', _LLAMA2_7B, _MISTRAL_7B)
+  valid_model_names = (_DEFAULT, _LLAMA2_7B, _MISTRAL_7B)
   if s not in valid_model_names:
     raise ValueError(
       "Invalid model name was passed. Valid options ", valid_model_names
@@ -190,10 +191,12 @@ class _HyperParameters():
     '''
     validate_model_name(raw_keys['model_name'])
     max_logging.log(f"Running Model: {raw_keys['model_name']}")
-    file_path = f"MaxText/configs/models/{raw_keys['model_name']}.yml"
-    with open(file_path, 'r') as file:
-      model_vars = yaml.safe_load(file)
-    raw_keys = validate_and_update_keys(raw_keys, model_vars)
+
+    if raw_keys['model_name'] != _DEFAULT:
+      file_path = f"MaxText/configs/models/{raw_keys['model_name']}.yml"
+      with open(file_path, 'r', encoding="utf-8") as file:
+        model_vars = yaml.safe_load(file)
+      raw_keys = validate_and_update_keys(raw_keys, model_vars)
 
 
 def validate_and_update_keys(raw_keys, model_keys):

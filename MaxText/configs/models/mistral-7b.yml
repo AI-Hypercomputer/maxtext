@@ -26,6 +26,6 @@ enable_dropout: False
 attention: "dot_product"
 vocab_relative_path: "tokenizer.model"
 logits_via_embedding: False
-rms_norm_epsilon: 1e-05
+rms_norm_epsilon: 1.0e-5
 add_bos: True
 add_eos: False

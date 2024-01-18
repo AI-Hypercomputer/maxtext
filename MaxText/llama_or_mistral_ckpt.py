@@ -19,7 +19,7 @@ Get LLaMA pytorch_vars from Meta
 
 Example cmd:
 To save a ckpt
-python3 MaxText/llama_mistral_ckpt_converter.py --base-model-path <path/to/meta/ckpt> \
+python3 MaxText/llama_or_mistral_ckpt.py --base-model-path <path/to/meta/ckpt> \
     --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size llama2-7b
 
 For large size model (e.g. 70B model), this script requires large memory VM.
