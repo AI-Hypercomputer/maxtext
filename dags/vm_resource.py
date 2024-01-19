@@ -30,14 +30,20 @@ class Project(enum.Enum):
 
 
 class Zone(enum.Enum):
-  US_CENTRAL1_A = "us-central1-a"  # reservation for v2-32 in cloud-ml-auto-solutions
-  US_CENTRAL2_B = (  # reservation for v4-8 & v4-32 in cloud-ml-auto-solutions
-      "us-central2-b"
-  )
-  US_CENTRAL1_C = "us-central1-c"  # reservation for v2-8 in cloud-ml-auto-solutions
-  US_EAST1_C = "us-east1-c"  # reservation for v5e in tpu-prod-env-automated
-  US_EAST1_D = "us-east1-d"  # reservation for v3-8 & v3-32 in cloud-ml-auto-solutions
-  US_EAST5_A = "us-east5-a"  # reservation for v5p in tpu-prod-env-automated
+  # reserved/on-demand v2-32 in cloud-ml-auto-solutions
+  US_CENTRAL1_A = "us-central1-a"
+  # on-demand v3-8 in cloud-ml-auto-solutions
+  US_CENTRAL1_B = "us-central1-b"
+  # reserved v4-8 & v4-32 in cloud-ml-auto-solutions
+  US_CENTRAL2_B = "us-central2-b"
+  # reserved/on-demand v2-8 in cloud-ml-auto-solutions
+  US_CENTRAL1_C = "us-central1-c"
+  # reserved v5e in tpu-prod-env-automated
+  US_EAST1_C = "us-east1-c"
+  # reserved v3-8 & reserved/on-demand v3-32 in cloud-ml-auto-solutions
+  US_EAST1_D = "us-east1-d"
+  # reserved v5p in tpu-prod-env-automated
+  US_EAST5_A = "us-east5-a"
 
 
 class TpuVersion(enum.Enum):

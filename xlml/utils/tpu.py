@@ -34,6 +34,7 @@ import google.longrunning.operations_pb2 as operations
 from xlml.utils import ssh
 import paramiko
 from airflow.models import Variable
+from google.protobuf.duration_pb2 import Duration
 
 
 @task
@@ -88,7 +89,6 @@ def create_queued_resource(
       )
 
     queued_resource = tpu_api.QueuedResource(
-        # TODO(wcromar): Implement `validUntilDuration` based on `timeout`
         # TODO(ranran): enable configuration via `AcceleratorConfig`
         tpu=tpu_api.QueuedResource.Tpu(
             node_spec=[
@@ -114,6 +114,9 @@ def create_queued_resource(
         ),
         guaranteed=tpu_api.QueuedResource.Guaranteed(
             reserved=accelerator.reserved,
+        ),
+        queueing_policy=tpu_api.QueuedResource.QueueingPolicy(
+            valid_until_duration=Duration(seconds=int(timeout.total_seconds())),
         ),
     )
 
