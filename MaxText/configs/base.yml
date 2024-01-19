@@ -19,21 +19,34 @@ run_name: ""
 # Types of models supported.
 # default model (palm like model with no overrides in config)
 model_name: "default"
+rms_norm_epsilon: 1.e-06
 
-# At most one of load_parameters_path and load_from_other_directory should be set.
-#   * load_parameters_path is used when you only care about the parameters, not the optimizer state or
-#      the step count
-#   * load_from_other_directory is used when you want to use a saved checkpoint from a different directory
-#        (corresponding to a different run_name), and save new metrics and checkpoints to a new directory.
-#   * If neither is provided then the most recent checkpoint saved under the current run_name is loaded if
-#        any exists, else the model initializes randomly.
-# If we aren't resuming from an existing checkpoint, load parameters from this path if provided.
+################################## CHECKPOINTING ################################## 
+# Checkpointing makes the following choices in the following order, starting with (1):
+#   (1) If there is already a checkpoint for this run_name, we load the latest entire checkpoint.
+#     This ensures if we're resuming a run after preemption or hardware failure we lose minimum state.
+#   (2) Same priority and mutually exclusive -- you can't set both!
+#      * If load_parameters_path is set, we load a parameter only checkpoint from that path.
+#      * If load_full_state_path is set, we load a full state checkpoint from that path.
+#   (3) We don't load a checkpoint and initialize state instead!
+
+# Loads a just parameters from a specific directory
+# e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/default/NUMBER or NUMBER/default
 load_parameters_path: ""
-# Loads a full checkpoint including optimizer state and step count from a directory other than [run_name]
-# e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints
-load_from_other_directory: ""
-# Which step to load from other directory, defaults to latest step
-load_from_other_directory_step: -1
+# Loads a full checkpoint including optimizer state and step count from a specific directory
+# e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/default/NUMBER or NUMBER/default
+load_full_state_path: ""
+
+# If enable_checkpointing is true, an asynchronous checkpointer will be used if
+# async_checkpointing is true, else a synchronous one is used. If you have
+# problems with the checkpointer we recommend trying the synchronous one.
+enable_checkpointing: True
+async_checkpointing: True
+checkpoint_period: 10_000
+
+force_unroll: False # during generate_param_only_checkpoint should we unroll the loop?
+############################### END CHECKPOINTING ##################################
+
 
 reuse_example_batch: 0 # for testing TPU performance, this options repeated uses the same batch.
 
@@ -64,6 +77,9 @@ remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
 attention: 'flash' # Supported attention: dot_product, flash, gpu_flash_xla, gpu_flash_triton
+# Combine matmuls for QKV and MLP
+fused_qkv: False
+fused_mlp: False
 
 record_internal_nn_metrics: 0
 
@@ -75,7 +91,7 @@ base_output_directory: ""
 jax_cache_dir: "~/jax_cache"
 
 # Parallelism
-mesh_axes: ['data', 'fsdp', 'sequence', 'tensor']
+mesh_axes: ['data', 'fsdp', 'sequence', 'tensor', 'autoregressive']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp']],
                       ['activation_heads', ['tensor','sequence']],
@@ -84,12 +100,17 @@ logical_axis_rules: [
                       ['activation_mlp', 'tensor'],
                       ['activation_kv', 'tensor'],
                       ['activation_vocab', ['tensor', 'sequence']],
-                      ['mlp', 'tensor'],
-                      ['vocab', 'tensor'],
+                      ['mlp', ['tensor','autoregressive']],
+                      ['vocab', ['tensor', 'autoregressive']],
                       ['embed', ['fsdp', 'sequence']],
-                      ['heads', 'tensor'],
+                      ['heads', ['tensor', 'autoregressive']],
+                      ['kv', []],
+                      ['cache_batch', []],
+                      ['cache_heads', ['autoregressive']],
+                      ['cache_kv', []],
+                      ['cache_sequence', []],
                     ]
-data_sharding: [['data', 'fsdp', 'sequence', 'tensor']]
+data_sharding: [['data', 'fsdp', 'sequence', 'tensor', 'autoregressive']]
 
 # One axis for each parallelism type may hold a placeholder (-1)
 # value to auto-shard based on available slices and devices.
@@ -97,13 +118,14 @@ data_sharding: [['data', 'fsdp', 'sequence', 'tensor']]
 # and product of the ICI axes should equal number of devices per slice.
 dcn_data_parallelism: -1  # recommended DCN axis to be auto-sharded
 dcn_fsdp_parallelism: 1
-dcn_sequence_parallelism: 1
-dcn_tensor_parallelism: 1
+dcn_sequence_parallelism: 1  # never recommended
+dcn_tensor_parallelism: 1 # never recommeneded
+dcn_autoregressive_parallelism: 1 # never recommended
 ici_data_parallelism: 1
-ici_fsdp_parallelism: -1  # recommended ICI axis to be auto-sharded
+ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
 ici_sequence_parallelism: 1
 ici_tensor_parallelism: 1
-
+ici_autoregressive_parallelism: 1
 
 # Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
@@ -121,8 +143,8 @@ dataset_type: c4 # must be c4 or synthetic
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
-log_period: 100
-save_period: 10_000
+log_period: 100 # Flushes Tensorboard
+
 # We take inspiration from Llama2's learning rate (LR) schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
 # Learning rate schedule has either two or three parts:
 # 1) Linear warmup from 0 to [learning_rate] over steps 0 to [learning_rate_schedule_steps * warmup_steps_fraction]
@@ -136,32 +158,24 @@ learning_rate_schedule_steps: -1 # By default the length of the schedule is set 
 # However you may choose a longer schedule (learning_rate_schedule_steps > steps), in which case the training will end before 
 # dropping fully down. Or you may choose a shorter schedule, where the unspecified steps will have a learning rate of 0.
 
-# Maximum length cutoff for training examples.
-max_target_length: 2048
-# Maximum length cutoff for held-out evaluation examples.
-max_eval_target_length: 512
-
-# Maximum length cutoff for predicted tokens.
-max_predict_length: 64
-# Sampling temperature for language model inference.
-sampling_temperature: 0.6
-# Top k cutoff for logit sampling. If 0 then no top-k cutoff is used.
-sampling_top_k: 20
+max_target_length: 2048 # Maximum sequence length
+max_prefill_predict_length: 64 # Maximum length for the prefill when doing autoregression
 eos_id: 2  # sentencepiece default
-# Prompt for language model sampling.
-prompt: "I love to "
+prompt: "I love to" # Prompt for language model sampling.
+load_from_prefill_dir: False # If true, decode.py doesn't "prefill" but just reads from directory
+prefill_cache_dir: "" # If set and load_from_prefill_dir, decode.py reads from directory. If set, decode.py writes to directory
+add_bos: False
+add_eos: True
+autoregressive_decode_assert: ""
 
 enable_profiler: False
+# If set to true, upload all profiler xplane results from all hosts. Otherwise, only upload the xplane reuslt from the first host.
+upload_all_profiler_results: False
 # Skip first n steps for profiling, to omit things like compilation and to give
 # the iteration time a chance to stabilize.
 skip_first_n_steps_for_profiler: 1
 # Profile for a small number of steps to avoid a large profile file size.
 profiler_steps: 5
-# If enable_checkpointing is true, an asynchronous checkpointer will be used if
-# async_checkpointing is true, else a synchronous one is used. If you have
-# problems with the checkpointer we recommend trying the sychronous one.
-enable_checkpointing: True
-async_checkpointing: True
 
 # When dropout is false the model is a deterministic function of the 
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
@@ -188,6 +202,8 @@ stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds
 
 # Use iota operator in Embed
 use_iota_embed: False
+# use positional embedding
+use_positional_embedding: False
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.

@@ -17,6 +17,8 @@
 import sys
 import unittest
 
+import common_types
+
 from flax.core import freeze
 import jax
 import jax.numpy as jnp
@@ -31,7 +33,6 @@ from layers import embeddings
 
 Mesh = jax.sharding.Mesh
 Attention = attentions.Attention
-LLaMARotaryEmbedding = embeddings.LLaMARotaryEmbedding
 
 
 class AttentionTest(unittest.TestCase):
@@ -54,9 +55,11 @@ class AttentionTest(unittest.TestCase):
     self.dtype = self.cfg.dtype
 
     self._attention_as_mha_generic = Attention(
+        config=self.cfg,
         num_query_heads=self.num_query_heads,
         num_kv_heads=self.num_kv_heads,
         head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
         mesh=self.mesh,
         attention_kernel = "dot_product",
         dtype=self.dtype,
@@ -74,8 +77,6 @@ class AttentionTest(unittest.TestCase):
             (self.global_batch_size, self.max_target_length)),
     )
 
-
-
   def get_data(self, dtype):
     lnx = jax.random.normal(
         self.rng,
@@ -88,13 +89,95 @@ class AttentionTest(unittest.TestCase):
 
     return lnx, decoder_segment_ids, decoder_positions
 
+  def get_structured_data(self, dtype):
+    lnx = jax.random.normal(
+        self.rng,
+        shape=(self.global_batch_size, self.max_target_length, self.embed_dim),
+        dtype=dtype,
+    )
+
+    decoder_positions = jnp.stack([
+          jnp.arange(self.max_target_length, dtype=jnp.int32)
+          for _ in range(self.global_batch_size)
+    ])
+
+    decoder_segment_ids = jax.numpy.zeros((self.global_batch_size, self.max_target_length))\
+                          + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+
+    return lnx, decoder_segment_ids, decoder_positions
+  
+  @pytest.mark.tpu
+  def test_autoregression(self):
+    prefill_length = 16
+    decode_total_length = 64
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(
+        self.dtype)
+    
+    mha_full = self._attention_as_mha_generic.apply(
+        self._attention_as_mha_generic_variable,
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_TRAIN,
+        rngs={'aqt': self.rng},
+    )
+    
+    lnx_prefill = lnx[:, 0:prefill_length, :]
+    decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
+    decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
+    
+    mha_prefill, output_cache = self._attention_as_mha_generic.apply(
+        self._attention_as_mha_generic_variable,
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_PREFILL,
+        rngs={'aqt': self.rng},
+        mutable=["cache"]
+    )
+
+    self.assertTrue(
+        jax.numpy.allclose(
+            mha_prefill, mha_full[:,:prefill_length,:], rtol=1e-02, atol=1e-02, equal_nan=False
+        )
+    )
+
+    for idx in range(prefill_length, decode_total_length):
+      lnx_idx = lnx[:, idx:idx+1, :]
+      decoder_positions_idx = decoder_positions[:, idx:idx+1]
+      self._attention_as_mha_generic_variable.update(output_cache)
+      mha_idx, output_cache = self._attention_as_mha_generic.apply(
+        self._attention_as_mha_generic_variable,
+        lnx_idx,
+        lnx_idx,
+        inputs_positions=decoder_positions_idx,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+        rngs={'aqt': self.rng},
+        mutable=["cache"]
+      )
+
+      mha_full_this_idx = mha_full[:,idx:idx+1,:]
+      self.assertTrue(
+        mha_full_this_idx.shape == mha_idx.shape
+      )
+      self.assertTrue(
+        jax.numpy.allclose(
+            mha_full_this_idx, mha_idx, rtol=1e-02, atol=1e-02, equal_nan=False
+        )
+      )
+
   @pytest.mark.tpu
   def test_attention(self):
     """Test equalvant between MHA and Flash MHA."""
 
     lnx, decoder_segment_ids, decoder_positions = self.get_data(
         self.dtype)
-    
+
     mha_generic_output = self._attention_as_mha_generic.apply(
         self._attention_as_mha_generic_variable,
         lnx,
@@ -102,14 +185,16 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_positions,
         inputs_positions=decoder_segment_ids,
         deterministic=True,
-        decode=False,
+        model_mode=common_types.MODEL_MODE_TRAIN,
         rngs={'aqt': self.rng},
     )
 
     attention_as_mha_flash = Attention(
+        config=self.cfg,
         num_query_heads=self.num_query_heads,
         num_kv_heads=self.num_kv_heads,
         head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
         mesh=self.mesh,
         attention_kernel = "flash",
         dtype=self.dtype,
@@ -134,7 +219,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_positions,
         inputs_positions=decoder_segment_ids,
         deterministic=True,
-        decode=False,
+        model_mode=common_types.MODEL_MODE_TRAIN,
         rngs={'aqt': self.rng},
     )
 
@@ -144,12 +229,16 @@ class AttentionTest(unittest.TestCase):
         )
     )
 
+
   @pytest.mark.tpu
   def test_multiquery_attention(self):
+    """Test equalvant between MHA and Flash MHA."""
     attention_as_mqa = Attention(
+        config=self.cfg,
         num_query_heads=self.num_query_heads,
         num_kv_heads=1,
         head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
         mesh=self.mesh,
         attention_kernel = "dot_product",
         dtype=self.dtype,
@@ -177,7 +266,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_positions,
         inputs_positions=decoder_segment_ids,
         deterministic=True,
-        decode=False,
+        model_mode=common_types.MODEL_MODE_TRAIN,
         rngs={'aqt': self.rng},
     )
 
@@ -207,7 +296,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_positions,
         inputs_positions=decoder_segment_ids,
         deterministic=True,
-        decode=False,
+        model_mode=common_types.MODEL_MODE_TRAIN,
         rngs={'aqt': self.rng},
     )
 

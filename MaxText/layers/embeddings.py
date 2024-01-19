@@ -30,6 +30,7 @@ Initializer = initializers.Initializer
 default_embed_init = initializers.default_embed_init
 with_logical_partitioning = nn.with_logical_partitioning
 
+_MAX_WAVELENGTH = 10_000
 
 class Embed(nn.Module):
   """A parameterized function from integers [0, n) to d-dimensional vectors.
@@ -102,8 +103,8 @@ class Embed(nn.Module):
     return jnp.dot(query, jnp.asarray(self.embedding, dtype).T)
 
 
-class LLaMARotaryEmbedding(nn.Module):
-  """LLaMA variant of ROPE where inputs are split in a different way.
+class RotaryEmbedding(nn.Module):
+  """RoPE
 
   Attributes:
     min_timescale: Start of the geometric index. Determines the periodicity of
@@ -167,8 +168,9 @@ class LLaMARotaryEmbedding(nn.Module):
     sin = jnp.sin(sinusoid_inp)
     cos = jnp.cos(sinusoid_inp)
     reshape_tensor = inputs.astype(jnp.float32).reshape(
-        *inputs.shape[:-1], -1, 2
+        *inputs.shape[:-1], 2, -1
     )
+    reshape_tensor = jax.numpy.swapaxes(reshape_tensor, -1, -2)
     first_half = reshape_tensor[..., 0]
     second_half = reshape_tensor[..., 1]
     first_part = first_half * cos - second_half * sin
@@ -180,3 +182,28 @@ class LLaMARotaryEmbedding(nn.Module):
         *first_part.shape[:-1], -1
     )
     return x_out
+
+
+class PositionalEmbedding(nn.Module):
+  embedding_dims: int
+  max_wavelength: int = _MAX_WAVELENGTH
+
+  def __call__(
+      self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
+      input_embedding: jax.Array,
+      position: jax.Array,
+  ) -> jax.Array:
+    num_timescales = self.embedding_dims // 2
+    log_timescale_increment = jnp.log(float(self.max_wavelength)) / jnp.maximum(
+        jnp.asarray(num_timescales, dtype=jnp.float32) - 1, 1
+    )
+    inv_timescales = jnp.exp(
+        jnp.arange(num_timescales, dtype=jnp.float32) * -log_timescale_increment
+    )
+    position = position[:, :, jnp.newaxis]
+    inv_timescales = inv_timescales[jnp.newaxis, jnp.newaxis, :]
+    scaled_time = position * inv_timescales
+    signal = jnp.concatenate([jnp.sin(scaled_time), jnp.cos(scaled_time)], axis = -1)
+    # signal = jnp.pad(signal, [[0, jnp.mod(self.embedding_dims, 2)]])
+    position_embedding = signal.astype(jnp.float32)
+    return input_embedding + position_embedding

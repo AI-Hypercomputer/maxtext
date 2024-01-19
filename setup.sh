@@ -183,7 +183,8 @@ elif [[ $MODE == "head" ]]; then
     cd $HOME && git clone https://github.com/openxla/xla
     cd $HOME && git clone https://github.com/google/jax.git
     cd $HOME/jax
-    python3 build/build.py --enable_tpu --bazel_options="--override_repository=xla=$HOME/xla"
+    pip3 install numpy wheel build
+    python3 build/build.py --bazel_options="--override_repository=xla=$HOME/xla"
     pip3 install dist/jaxlib-*-cp*-manylinux2014_x86_64.whl --force-reinstall --no-deps
     echo "Installing nightly tensorboard plugin profile"
     pip3 install tbp-nightly --upgrade

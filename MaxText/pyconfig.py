@@ -30,6 +30,10 @@ import jax
 
 from typing import Any, Union
 
+_MAX_PREFIX = "M_"
+def yaml_key_to_env_key(s: str) -> str:
+  return _MAX_PREFIX + s.upper()
+
 def string_to_bool(s: str) -> bool:
   if s.lower() == "true":
     return True
@@ -39,15 +43,24 @@ def string_to_bool(s: str) -> bool:
 
 _yaml_types_to_parser = {str : str, int : int, float : float, bool : string_to_bool}
 
-def validate_attention_type(s: str) -> bool:
+def validate_attention_type(s: str) -> None:
   valid_attention_types = ('dot_product', 'flash', 'gpu_flash_xla', 'gpu_flash_triton')
   if s not in valid_attention_types: # currently supported attention
     raise ValueError(
       "Invalid attention type was passed. Valid options ", valid_attention_types
     )
 
+def validate_keys(keys):
+  validate_attention_type(keys['attention'])
+
+  assert ((keys["load_parameters_path"]=="" and keys["load_full_state_path"]=="") or
+    keys["enable_checkpointing"]), "You must set enable_checkpointing to load a checkpoint"
+  assert keys["load_parameters_path"]=="" or keys["load_full_state_path"]=="",\
+    "At most one of `load_parameters_path` or `load_full_state_path` should be set"
+
+
 def validate_model_name(s: str) -> bool:
-  valid_model_names= ('default',) # currently supported models
+  valid_model_names= ('default', 'llama2-7b', 'gamma-7b','gamma-2b') # currently supported models
   if s not in valid_model_names:
     raise ValueError(
       "Invalid model name was passed. Valid options ", valid_model_names
@@ -61,9 +74,19 @@ def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any],list[Any]]:
 
 class _HyperParameters():
   # pylint: disable=missing-class-docstring
+  def _validate_env_variables(self, raw_data_from_yaml):
+    for environment_var in os.environ:
+      if environment_var[:len(_MAX_PREFIX)] == _MAX_PREFIX:
+        proposed_key = environment_var[len(_MAX_PREFIX):].lower()
+        if proposed_key not in raw_data_from_yaml:
+          raise ValueError(f"We received env `{environment_var}` but it doesn't match a key, so it is assumed a mistake.")
+        if not environment_var[len(_MAX_PREFIX):].isupper():
+          raise ValueError(f"We received env `{environment_var}` but it isn't all uppercase.")
+
   def __init__(self, argv: list[str], **kwargs):
     with open(argv[1], "r", encoding="utf-8") as yaml_file:
       raw_data_from_yaml = yaml.safe_load(yaml_file)
+    self._validate_env_variables(raw_data_from_yaml)
     raw_data_from_cmd_line = self._load_kwargs(argv, **kwargs)
 
     for k in raw_data_from_cmd_line:
@@ -74,28 +97,43 @@ class _HyperParameters():
 
     raw_keys = OrderedDict()
     for k in raw_data_from_yaml:
-      if k in raw_data_from_cmd_line and not isinstance(raw_data_from_cmd_line[k], type(raw_data_from_yaml[k])) and \
-                                         type(raw_data_from_yaml[k]) not in _yaml_types_to_parser:
+      if k in raw_data_from_cmd_line and yaml_key_to_env_key(k) in os.environ:
+        raise ValueError(f"You are passing overrides by both CLI and ENV for `{k}`. This isn't allowed.")
+
+      if not k in raw_data_from_cmd_line and not yaml_key_to_env_key(k) in os.environ:
+        raw_keys[k] = raw_data_from_yaml[k]
+        continue
+
+      if k in raw_data_from_cmd_line:
+        new_proposal = raw_data_from_cmd_line[k]
+      else:
+        new_proposal = os.environ.get(yaml_key_to_env_key(k))
+
+      if (not isinstance(new_proposal, type(raw_data_from_yaml[k]))) and \
+                                       (type(raw_data_from_yaml[k]) not in _yaml_types_to_parser):
         raise ValueError(
             f"For key '{k}', type {type(raw_data_from_yaml[k])} not in {_yaml_types_to_parser.keys()}, can't pass"
-            " at the command line"
+            " at the CLI or ENV"
         )
 
-      if k in raw_data_from_cmd_line and isinstance(raw_data_from_cmd_line[k], type(raw_data_from_yaml[k])):
-        raw_keys[k] = raw_data_from_cmd_line[k] # take the raw data, no type conversion
-      elif k in raw_data_from_cmd_line:
+      if isinstance(new_proposal, type(raw_data_from_yaml[k])):
+        raw_keys[k] = new_proposal # take the raw data, no type conversion
+      else:
         try:
           raw_keys[k] = _yaml_types_to_parser[type(raw_data_from_yaml[k])](
-              raw_data_from_cmd_line[k]
+              new_proposal
           )  # take the command line value, but type it like the config value.
         except ValueError as e:
-          raise ValueError(f"Couldn't parse value from command line '{raw_data_from_cmd_line[k]}' for key '{k}'") from e
-      else:
-        raw_keys[k] = raw_data_from_yaml[k]
+          raise ValueError(f"Couldn't parse value from CLI or ENV '{new_proposal}' for key '{k}'") from e
 
     _HyperParameters.update_model_vars(raw_keys)
     _HyperParameters.user_init(raw_keys)
+
     self.keys = raw_keys
+    keys = [k for k in raw_keys] # pylint: disable=unnecessary-comprehension
+    keys.sort()
+    for k in keys:
+      max_logging.log(f"Config param {k}: {raw_keys[k]}")
 
   def _load_kwargs(self, argv: list[str], **kwargs):
     args_dict = dict(a.split("=") for a in argv[2:])
@@ -138,6 +176,8 @@ class _HyperParameters():
     raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = \
       calculate_global_batch_sizes(raw_keys)
 
+    validate_keys(raw_keys)
+
     validate_attention_type(raw_keys['attention'])
 
   @staticmethod
@@ -145,18 +185,58 @@ class _HyperParameters():
     ''' Update model config variables
     '''
     validate_model_name(raw_keys['model_name'])
-    if raw_keys['model_name'] == 'llama-7b':
+    if raw_keys['model_name'] == 'llama2-7b':
       max_logging.log(f"Running Model: {raw_keys['model_name']}")
-      llama_7b_model_vars = {
+      llama2_7b_model_vars = {
         'base_emb_dim': 4096,
-        'num_query_heads': 32,
-        'num_kv_heads': 32,
+        'base_num_query_heads': 32,
+        'base_num_kv_heads': 32,
         'base_mlp_dim': 11008,
         'base_num_decoder_layers': 32,
         'head_dim': 128,
-        'mlp_activations': ['silu'],
+        'mlp_activations': ['silu','linear'],
+        'vocab_size': 32000,
+        'enable_dropout': False,
+        'attention':'dot_product',
+        'vocab_relative_path':'tokenizer.llama2',
+        'logits_via_embedding': False,
+        'rms_norm_epsilon': 1e-05,
+        'add_bos': True,
+        'add_eos': False
       }
-      raw_keys = validate_and_update_keys(raw_keys, llama_7b_model_vars)
+      raw_keys = validate_and_update_keys(raw_keys, llama2_7b_model_vars)
+    if raw_keys['model_name'] == 'gamma-7b':
+      max_logging.log(f"Running Model: {raw_keys['model_name']}")
+      gamma_7b_model_vars = {
+        'base_emb_dim': 3072,
+        'base_num_query_heads': 16,
+        'base_num_kv_heads': 16,
+        'base_mlp_dim': 24576,
+        'base_num_decoder_layers': 28,
+        'head_dim': 256,
+        'mlp_activations': ['gelu', 'linear'],
+        'vocab_size': 256128,
+        'vocab_relative_path': 'tokenizer.gamma',
+        'add_bos': True,
+        'add_eos': False,
+      }
+      raw_keys = validate_and_update_keys(raw_keys, gamma_7b_model_vars)
+    if raw_keys['model_name'] == 'gamma-2b':
+      max_logging.log(f"Running Model: {raw_keys['model_name']}")
+      gamma_2b_model_vars = {
+        'base_emb_dim': 2048,
+        'base_num_query_heads': 8,
+        'base_num_kv_heads': 1,
+        'base_mlp_dim': 16384,
+        'base_num_decoder_layers': 18,
+        'head_dim': 256,
+        'mlp_activations': ['gelu', 'linear'],
+        'vocab_size': 256128,
+        'vocab_relative_path': 'tokenizer.gamma',
+        'add_bos': True,
+        'add_eos': False,
+      }
+      raw_keys = validate_and_update_keys(raw_keys, gamma_2b_model_vars)
 
 def validate_and_update_keys(raw_keys, model_keys):
   ''' Validate and update model specific config keys

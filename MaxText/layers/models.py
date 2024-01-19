@@ -35,9 +35,9 @@ Mesh = common_types.Mesh
 ScanIn = common_types.ScanIn
 
 Embed = embeddings.Embed
-LLaMARotaryEmbedding = embeddings.LLaMARotaryEmbedding
 Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
+PositionalEmbedding = embeddings.PositionalEmbedding
 
 #------------------------------------------------------------------------------
 # The network: Decoder & Transformer Definitions
@@ -55,8 +55,8 @@ class DecoderLayer(nn.Module):
                decoder_segment_ids,
                decoder_positions,
                deterministic,
-               decode,
-               max_decode_length):
+               model_mode,
+              ):
     cfg = self.config
     mesh = self.mesh
 
@@ -67,14 +67,17 @@ class DecoderLayer(nn.Module):
     lnx = RMSNorm(
         dtype=cfg.dtype,
         name='pre_self_attention_norm',
+        epsilon=cfg.rms_norm_epsilon,
         kernel_axes=('embed',))(inputs)
     lnx = nn.with_logical_constraint(
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
     attention_layer = Attention(
+      config = self.config,
       num_query_heads=cfg.num_query_heads,
       num_kv_heads=cfg.num_kv_heads,
       head_dim=cfg.head_dim,
+      max_target_length=cfg.max_target_length,
       attention_kernel=cfg.attention,
       mesh=mesh,
       dtype=cfg.dtype,
@@ -89,7 +92,7 @@ class DecoderLayer(nn.Module):
       decoder_positions,
       decoder_segment_ids=decoder_segment_ids,
       deterministic=deterministic,
-      decode=decode)
+      model_mode=model_mode)
 
     attention_lnx = nn.with_logical_constraint(
         attention_lnx,
@@ -144,14 +147,27 @@ class Decoder(nn.Module):
   shared_embedding: nn.Module
   mesh: Mesh
 
+  def get_decoder_layer(self):
+    if self.config.model_name == "default":
+      return DecoderLayer
+    elif self.config.model_name[0:7] == "llama2-":
+      from layers import llama2
+      return llama2.LlamaDecoderLayer
+    elif self.config.model_name[0:6] == "gamma-":
+      from layers import gamma
+      return gamma.GammaDecoderLayer
+    else:
+      raise ValueError(f"Incorrect model name {self.config.model_name=}")
+
+
   @nn.compact
   def __call__(self,
                decoder_input_tokens,
                decoder_positions,
                decoder_segment_ids=None,
                deterministic=False,
-               decode=False,
-               max_decode_length=None):
+               model_mode=common_types.MODEL_MODE_TRAIN,
+              ):
     cfg = self.config
     mesh = self.mesh
     assert decoder_input_tokens.ndim == 2  # [batch, len]
@@ -163,7 +179,10 @@ class Decoder(nn.Module):
             y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
 
-    BlockLayer = DecoderLayer
+    if cfg.use_positional_embedding:
+      y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
+
+    BlockLayer = self.get_decoder_layer()
 
     if cfg.remat_policy != 'none':
       if cfg.remat_policy == 'minimal':
@@ -206,31 +225,27 @@ class Decoder(nn.Module):
               nn.broadcast,
               nn.broadcast,
               nn.broadcast,
-              nn.broadcast,
           ),
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'},
-      )(config=cfg, mesh=mesh, name='decoder')(
+      )(config=cfg, mesh=mesh, name='layers')(
           y,
           decoder_segment_ids,
           decoder_positions,
           deterministic,
-          decode,
-          max_decode_length,
+          model_mode,
       )
     else:
       for lyr in range(cfg.num_decoder_layers):
-        # [batch, length, emb_dim] -> [batch, length, emb_dim]
         y = BlockLayer(config=cfg, mesh=mesh, name=f'layers_{lyr}')(
             y,
             decoder_segment_ids,
             decoder_positions,
             deterministic,
-            decode,
-            max_decode_length,
+            model_mode,
         )
 
-    y = RMSNorm(dtype=cfg.dtype, name='decoder_norm', kernel_axes=('embed',))(y)
+    y = RMSNorm(dtype=cfg.dtype, name='decoder_norm', epsilon=cfg.rms_norm_epsilon,kernel_axes=('embed',))(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
         y, deterministic=deterministic
     )
@@ -284,21 +299,20 @@ class Transformer(nn.Module):
       decoder_positions,
       decoder_segment_ids=None,
       enable_dropout=True,
-      decode=False,
-      max_decode_length=None):
+      model_mode=common_types.MODEL_MODE_TRAIN
+  ):
     """Applies Transformer decoder-branch on encoded-input and target."""
 
-    if decoder_segment_ids is not None:
-      if decode:
-        raise ValueError(
-            'During decoding, packing should not be used but '
-            '`decoder_segment_ids` was passed to `Transformer.decode`.')
+    if decoder_segment_ids is not None and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      raise ValueError(
+        f'During autoregressive decoding we assume the tokens are in the active sequence'
+        f' which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}.')
 
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=not enable_dropout,
-        decode=decode,
-        max_decode_length=max_decode_length)
+        model_mode=model_mode,
+    )
     return logits

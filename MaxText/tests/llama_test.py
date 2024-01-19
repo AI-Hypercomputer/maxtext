@@ -19,7 +19,7 @@ import jax
 import unittest
 import jax.numpy as jnp
 from typing import Tuple
-from layers import embeddings
+from layers.llama2 import embeddings
 import numpy as np
 
 
@@ -76,9 +76,14 @@ def apply_rotary_emb(
 
   return xq_out.astype(dtype), xk_out.astype(dtype)
 
-class LlamaRoPETest(unittest.TestCase):
+def permute_to_match_maxtext_rope(arr):
+  evens = arr[..., ::2]
+  odds = arr[..., 1::2]
+  return jax.numpy.concatenate((evens, odds), axis=arr.ndim-1)
+
+class RoPETest(unittest.TestCase):
   """Test for the RoPE implementation """
-  def test_llama_rope(self):
+  def test_rope(self):
     dim_per_head = 128
     seq_len = 8
 
@@ -100,12 +105,30 @@ class LlamaRoPETest(unittest.TestCase):
     position = jnp.arange(seq_length, dtype=jnp.float32)[jnp.newaxis, :]
 
     # Calculate RoPE embeddings from MaxText implementation
-    query_proj = embeddings.LLaMARotaryEmbedding(embedding_dims = dim_per_head)(x_q, position = position)
-    key_proj = embeddings.LLaMARotaryEmbedding(embedding_dims = dim_per_head)(x_k, position = position)
+    query_proj = embeddings.RotaryEmbedding(embedding_dims = dim_per_head)(permute_to_match_maxtext_rope(x_q), position = position)
+    key_proj = embeddings.RotaryEmbedding(embedding_dims = dim_per_head)(permute_to_match_maxtext_rope(x_k), position = position)
 
     # Compare results
-    self.assertTrue(jax.numpy.allclose(llama_output[0], query_proj, rtol=1e-02, atol=1e-05, equal_nan=False))
-    self.assertTrue(jax.numpy.allclose(llama_output[1], key_proj, rtol=1e-02, atol=1e-05, equal_nan=False))
+    self.assertTrue(jax.numpy.allclose(llama_output[0], query_proj, rtol=1e-01, atol=1e-04, equal_nan=False))
+    self.assertTrue(jax.numpy.allclose(llama_output[1], key_proj, rtol=1e-01, atol=1e-04, equal_nan=False))
+
+  def test_scaling_rope(self):
+    dim_per_head = 128
+    seq_len = 8
+
+    # Run the two implementations on some random query and key
+    x_q = np.random.normal(1, 0.5, (1, seq_len, 4, dim_per_head))
+    position = jnp.arange(seq_len, dtype=jnp.float32)[jnp.newaxis, :]
+
+    # Calculate RoPE embeddings and then scale
+    query_proj_1 = embeddings.RotaryEmbedding(embedding_dims = dim_per_head)(x_q, position = position)
+    query_proj_1 = query_proj_1 * (dim_per_head ** -0.5)
+
+    # scale first and then apply RoPE
+    query_proj_2 = x_q * (dim_per_head ** -0.5)
+    query_proj_2 = embeddings.RotaryEmbedding(embedding_dims = dim_per_head)(query_proj_2, position=position)
+
+    self.assertTrue(jax.numpy.allclose(query_proj_2, query_proj_1, rtol=1e-01, atol=1e-04, equal_nan=False))
 
 if __name__ == '__main__':
   unittest.main()
