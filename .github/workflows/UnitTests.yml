@@ -24,9 +24,33 @@ on:
   workflow_dispatch:
   schedule:
     # Run the job every 2 hours
-    - cron:  '*/120 * * * *'
+    - cron:  '0 */2 * * *'
 
 jobs:
+  cpu:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-20.04]
+        python-version: ['3.10']
+    steps:
+    - uses: actions/checkout@v3
+    - name: setup python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install Dependencies
+      run: |
+        pip install pytype
+        pip install pylint
+    - name: Typecheck the code with pytype
+      run: |
+        pytype --jobs auto --disable import-error MaxText/
+    - name: Analysing the code with pylint
+      run: |
+        pylint MaxText/
+
+
   # IF YOU MODIFY THIS, YOU SHOULD ALSO ADD CORRESPONDING MODICATIONS TO 'gpu' job
   tpu:
     strategy:
@@ -43,12 +67,6 @@ jobs:
     - name: Install dependencies
       run: |
         bash docker_build_dependency_image.sh
-    - name: Typecheck the code with pytype
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c "pytype --jobs auto --disable import-error MaxText/"
-    - name: Analysing the code with pylint
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c "pylint MaxText/"
     - name: Test with pytest
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c 'cd MaxText;python3 -m pytest'
@@ -88,6 +106,10 @@ jobs:
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
         'bash end_to_end/mistral_load_and_test.sh'
+    - name: Test Gamma decode.py
+      run: |
+        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
+        'bash end_to_end/test_gamma.sh'
   
   # IF YOU MODIFY THIS, YOU SHOULD ALSO ADD CORRESPONDING MODICATIONS TO 'tpu' job
   gpu:
@@ -105,12 +127,6 @@ jobs:
     - name: Install dependencies
       run: |
         bash docker_build_dependency_image.sh DEVICE=gpu
-    - name: Typecheck the code with pytype
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c "pytype --jobs auto --disable import-error MaxText/"
-    - name: Analysing the code with pylint
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c "pylint MaxText/"
     - name: Test with pytest
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c 'cd MaxText;python3 -m pytest -m "not tpu"'
