@@ -101,8 +101,8 @@ Slice = namedtuple('Slice', ['name', 'slice_num', 'num_workers', 'version'])
 def ip_address_from_machine_name(slice):
   slice_name = slice.name
   command = [
-      "gcloud", "compute", "tpus", "describe", slice_name,
-      "--flatten=networkEndpoints[]", "--format=csv[no-heading](networkEndpoints.ipAddress)",
+      "gcloud", "compute", "instances", "describe", slice_name,
+      "--flatten=networkInterfaces[]", "--format=csv[no-heading](networkInterfaces.networkIP)",
       f"--project={args.PROJECT}", f"--zone={args.ZONE}"
   ]
   completed_command = subprocess.run(command, capture_output=True, check=True)
@@ -112,14 +112,14 @@ def ip_address_from_machine_name(slice):
 def get_slices():
   """ Returns a list of slices matching TPU_PREFIX """
   command = [
-      "gcloud", "alpha", "compute", "tpus", "tpu-vm", "list",
-      f"--filter=name~{args.TPU_PREFIX}", "--format=csv(name,accelerator_type)",
-      f"--project={args.PROJECT}", f"--zone={args.ZONE}"
+      "gcloud", "compute", "instances", "list",
+      f"--filter=name~{args.TPU_PREFIX}", "--format=csv(name,machine_type)",
+      f"--project={args.PROJECT}"#, f"--zone={args.ZONE}"
   ]
   try:
     completed_command = subprocess.run(command, capture_output=True, check=True)
   except subprocess.CalledProcessError as e:
-    print(f"Error occurred trying to find TPU slices named {args.TPU_PREFIX} or matching regex \n {args.TPU_PREFIX}-[0-9]+ "
+    print(f"Error occurred trying to find CPU slices named {args.TPU_PREFIX} or matching regex \n {args.TPU_PREFIX}-[0-9]+ "
      f"in project {args.PROJECT} zone {args.ZONE}")
     print(f"Error is:\n {e.stderr}")
     return []
@@ -132,7 +132,7 @@ def get_slices():
   if num_slices > 0:
     print(f"{num_slices} slices found.", flush=True)
   else:
-    print(f"No TPUs found with name {args.TPU_PREFIX} or matching regex {args.TPU_PREFIX}-[0-9]+ "
+    print(f"No CPUs found with name {args.TPU_PREFIX} or matching regex {args.TPU_PREFIX}-[0-9]+ "
     "in project {args.PROJECT} and zone {args.ZONE}.")
     return []
 
@@ -140,8 +140,8 @@ def get_slices():
   slice_versions = [instance.split(',')[1] for instance in instance_list]
   # Get number of workers in any slice (assume same worker count for all slices.)
   command = [
-      "gcloud", "compute", "tpus", "describe", slice_names[0],
-      "--flatten=networkEndpoints[]", "--format=csv[no-heading](networkEndpoints.ipAddress)",
+      "gcloud", "compute", "instances", "describe", slice_names[0],
+      "--flatten=networkInterfaces[]", "--format=csv[no-heading](networkInterfaces.networkIP)",
       f"--project={args.PROJECT}", f"--zone={args.ZONE}"
   ]
   completed_command = subprocess.run(command, capture_output=True, check=True)
@@ -212,7 +212,7 @@ def scps(slices, run_name_dir, zip_name):
   for cur_slice in slices:
     for worker_num in range(cur_slice.num_workers):
       command = [
-          "gcloud", "compute", "tpus", "tpu-vm", "scp", f"--worker={worker_num}", zip_path,
+          "gcloud", "compute", "scp", zip_path,
           f"{cur_slice.name}:~/", "--strict-host-key-checking=no", f"--project={args.PROJECT}", f"--zone={args.ZONE}"
       ]
       if args.INTERNAL_IP:
@@ -258,7 +258,7 @@ def execute_main_command(main_command, slices, local_log_dir, zip_name, coordina
         remote_command_list = [cd_command, write_kill_script_command , kill_existing_command , export_coordinator_vars_command, main_command]
       remote_command_list_str = " && ".join(remote_command_list)
       gcloud_command=[
-          "gcloud", "alpha", "compute", "tpus", "tpu-vm", "ssh", cur_slice.name, f"--worker={worker_num}",
+          "gcloud", "compute", "ssh", cur_slice.name,
           "--command", remote_command_list_str, "--strict-host-key-checking=no",
           f"--project={args.PROJECT}", f"--zone={args.ZONE}"]
       if args.INTERNAL_IP:
