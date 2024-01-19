@@ -60,7 +60,7 @@ def validate_keys(keys):
 
 
 def validate_model_name(s: str) -> bool:
-  valid_model_names= ('default', 'llama2-7b') # currently supported models
+  valid_model_names= ('default', 'llama2-7b', 'gamma-7b','gamma-2b') # currently supported models
   if s not in valid_model_names:
     raise ValueError(
       "Invalid model name was passed. Valid options ", valid_model_names
@@ -205,6 +205,38 @@ class _HyperParameters():
         'add_eos': False
       }
       raw_keys = validate_and_update_keys(raw_keys, llama2_7b_model_vars)
+    if raw_keys['model_name'] == 'gamma-7b':
+      max_logging.log(f"Running Model: {raw_keys['model_name']}")
+      gamma_7b_model_vars = {
+        'base_emb_dim': 3072,
+        'base_num_query_heads': 16,
+        'base_num_kv_heads': 16,
+        'base_mlp_dim': 24576,
+        'base_num_decoder_layers': 28,
+        'head_dim': 256,
+        'mlp_activations': ['gelu', 'linear'],
+        'vocab_size': 256128,
+        'vocab_relative_path': 'tokenizer.gamma',
+        'add_bos': True,
+        'add_eos': False,
+      }
+      raw_keys = validate_and_update_keys(raw_keys, gamma_7b_model_vars)
+    if raw_keys['model_name'] == 'gamma-2b':
+      max_logging.log(f"Running Model: {raw_keys['model_name']}")
+      gamma_2b_model_vars = {
+        'base_emb_dim': 2048,
+        'base_num_query_heads': 8,
+        'base_num_kv_heads': 1,
+        'base_mlp_dim': 16384,
+        'base_num_decoder_layers': 18,
+        'head_dim': 256,
+        'mlp_activations': ['gelu', 'linear'],
+        'vocab_size': 256128,
+        'vocab_relative_path': 'tokenizer.gamma',
+        'add_bos': True,
+        'add_eos': False,
+      }
+      raw_keys = validate_and_update_keys(raw_keys, gamma_2b_model_vars)
 
 def validate_and_update_keys(raw_keys, model_keys):
   ''' Validate and update model specific config keys
