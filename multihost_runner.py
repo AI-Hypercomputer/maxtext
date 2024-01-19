@@ -66,32 +66,32 @@ def default_run_name():
   now = datetime.now()
   return now.strftime("%Y-%m-%d-%H-%M-%S")
 
-parser = argparse.ArgumentParser(description='TPU configuration options')
-parser.add_argument('--TPU_PREFIX', type=str, default=None, required=True,
-                    help="Prefix of worker TPU's. E.g. if TPU's are named user-0 and user-1, \
-                          TPU_PREFIX should be set as user")
+parser = argparse.ArgumentParser(description='CPU configuration options')
+parser.add_argument('--CPU_PREFIX', type=str, default=None, required=True,
+                    help="Prefix of worker CPU's. E.g. if CPU's are named user-0 and user-1, \
+                          CPU_PREFIX should be set as user")
 parser.add_argument('--PROJECT', type=str, default=None,
                     help='GCE project name, defaults to gcloud config project')
 parser.add_argument('--ZONE', type=str, default=None,
                     help='GCE zone, e.g. us-central2-b, defaults to gcloud config compute/zone')
 parser.add_argument('--SCRIPT_DIR', type=str, default=os.getcwd(),
-                    help="The local location of the directory to copy to the TPUs and run the main command from. \
+                    help="The local location of the directory to copy to the CPUs and run the main command from. \
                           Defaults to current working directory.")
 parser.add_argument('--COMMAND', type=str, default=None, required=True,
-                    help="Main command to run on each TPU. \
-                          This command is run from a copied version of SCRIPT_DIR on each TPU worker.")
+                    help="Main command to run on each CPU. \
+                          This command is run from a copied version of SCRIPT_DIR on each CPU worker.")
 parser.add_argument('--RUN_NAME', type=str, default=default_run_name(),
-                    help="Name for the code directory on the TPU")
+                    help="Name for the code directory on the CPU")
 parser.add_argument('--USE_EXISTING_FOLDER', type=str, default="False",
-                    help='If true, use the existing code directory on the TPU')
+                    help='If true, use the existing code directory on the CPU')
 parser.add_argument('--INTERNAL_IP', type=str, default="False",
-                    help="Set true if running script locally from a TPU or GCE instance, false otherwise.")
+                    help="Set true if running script locally from a CPU or GCE instance, false otherwise.")
 args = parser.parse_args()
 args.USE_EXISTING_FOLDER = args.USE_EXISTING_FOLDER.lower() == "true"
 args.INTERNAL_IP = args.INTERNAL_IP.lower() == "true"
 
-if not args.TPU_PREFIX:
-  raise ValueError("--TPU_PREFIX must be a non-empty string specifying your TPU slice names.")
+if not args.CPU_PREFIX:
+  raise ValueError("--CPU_PREFIX must be a non-empty string specifying your CPU slice names.")
 
 if args.USE_EXISTING_FOLDER is True and not args.RUN_NAME:
   raise ValueError("When USE_EXISTING_FOLDER is true, RUN_NAME must be specified.")
@@ -110,29 +110,29 @@ def ip_address_from_machine_name(slice):
   return ip_address
 
 def get_slices():
-  """ Returns a list of slices matching TPU_PREFIX """
+  """ Returns a list of slices matching CPU_PREFIX """
   command = [
       "gcloud", "compute", "instances", "list",
-      f"--filter=name~{args.TPU_PREFIX}", "--format=csv(name,machine_type)",
+      f"--filter=name~{args.CPU_PREFIX}", "--format=csv(name,machine_type)",
       f"--project={args.PROJECT}"#, f"--zone={args.ZONE}"
   ]
   try:
     completed_command = subprocess.run(command, capture_output=True, check=True)
   except subprocess.CalledProcessError as e:
-    print(f"Error occurred trying to find CPU slices named {args.TPU_PREFIX} or matching regex \n {args.TPU_PREFIX}-[0-9]+ "
+    print(f"Error occurred trying to find CPU slices named {args.CPU_PREFIX} or matching regex \n {args.CPU_PREFIX}-[0-9]+ "
      f"in project {args.PROJECT} zone {args.ZONE}")
     print(f"Error is:\n {e.stderr}")
     return []
   instances = completed_command.stdout.decode()
   instance_list = instances.strip().split('\n')
-  instance_list = filter_instances(instance_list[1:], args.TPU_PREFIX) # First row is headers
+  instance_list = filter_instances(instance_list[1:], args.CPU_PREFIX) # First row is headers
   num_slices = len(instance_list)
   slices = [None for _ in range(num_slices)]
 
   if num_slices > 0:
     print(f"{num_slices} slices found.", flush=True)
   else:
-    print(f"No CPUs found with name {args.TPU_PREFIX} or matching regex {args.TPU_PREFIX}-[0-9]+ "
+    print(f"No CPUs found with name {args.CPU_PREFIX} or matching regex {args.CPU_PREFIX}-[0-9]+ "
     "in project {args.PROJECT} and zone {args.ZONE}.")
     return []
 
@@ -172,9 +172,9 @@ def write_kill_script(kill_processes_script_name):
 
 def kill_existing_processes_str():
   return """#!/bin/bash
-_TPU_VERSION_NAME="${1}"
+_CPU_VERSION_NAME="${1}"
 device_name="accel"
-if [[ "${_TPU_VERSION_NAME}" =~ ^v5.* ]]; then
+if [[ "${_CPU_VERSION_NAME}" =~ ^v5.* ]]; then
   device_name="vfio/"
 fi
 echo "Searching for existing processes on device ${device_name}..."
@@ -185,22 +185,22 @@ if [[ -n "${pids}" ]]; then
     echo "Killing process ${pid}..."
     kill -9 "${pid}"
     tail --pid="${pid}" -f /dev/null
-    echo "Existing process ${pid} on your TPU was killed successfully!"
+    echo "Existing process ${pid} on your CPU was killed successfully!"
   done
-  echo "All existing processes killed, so your TPU is ready to use!"
+  echo "All existing processes killed, so your CPU is ready to use!"
 else
-  echo "No existing processes found, so your TPU is ready to use!"
+  echo "No existing processes found, so your CPU is ready to use!"
 fi
 sudo rm -f /tmp/libtpu_lockfile"""
 
 def scps(slices, run_name_dir, zip_name):
-  """ Zip the script directory, scp it to the TPUs, and unzip it there. """
+  """ Zip the script directory, scp it to the CPUs, and unzip it there. """
   original_working_directory = os.getcwd()
   os.chdir(args.SCRIPT_DIR) # To tar script_dir, it is most convenient to cd there.
 
   # Zip script directory
   # Save the zip both to the logging directory, and the script directory.
-  # It will be removed from the script directory after the transfer to the TPUs
+  # It will be removed from the script directory after the transfer to the CPUs
   os.makedirs(run_name_dir, exist_ok=True)
   zip_path = os.path.join(run_name_dir, zip_name)
   command = ["tar","--exclude=tmp", "-czf", zip_path, "./"]
@@ -383,7 +383,7 @@ def main() -> None:
   ##### Step 1: Get the workers #####
   slices = get_slices()
   if not slices:
-    print(f"Failed to retrieve slices {args.TPU_PREFIX} in project {args.PROJECT} zone {args.ZONE}", flush=True)
+    print(f"Failed to retrieve slices {args.CPU_PREFIX} in project {args.PROJECT} zone {args.ZONE}", flush=True)
     return 1
 
   local_log_dir = os.path.join("/tmp", args.RUN_NAME, "")
@@ -394,7 +394,7 @@ def main() -> None:
   coordinator_address = str(coord_IP) + ':' + str(port)
 
   if args.USE_EXISTING_FOLDER is False:
-    ##### Step 2 when using a new folder: Zip code and move it to the TPUs #####
+    ##### Step 2 when using a new folder: Zip code and move it to the CPUs #####
     return_code = scps(slices, local_log_dir, zip_name)
     if return_code > 0:
       print(f"Moving the directory {args.SCRIPT_DIR} to the VMs failed with error code {return_code}")
