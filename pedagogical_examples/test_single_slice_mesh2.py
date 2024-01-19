@@ -102,11 +102,33 @@ def setup_sharded_pytree(
   return pytree, mesh_tree, axes_tree, data_axis_name
 
 
+def check_trees_equal(tree1, tree2):
+  def check_same(key, v1, v2):
+     assert jax.numpy.allclose(
+            v1, v2, rtol=1e-06, atol=1e-06
+        ), 'Error!!! Restored values are not close enough'
+  jax.tree_util.tree_map_with_path(check_same, tree1, tree2)
+  print('Hooray, values are close enough!')
+
+
 def get_replica_pids(rep_id, mesh):
+  print(f' I am host {jax.process_index()} w/ local devices ',
+        [d.id for d in jax.local_devices()])
   replica_devices = np.take(mesh.devices, rep_id, axis=0).flatten()
   pids = set([d.process_index for d in replica_devices])
   ids = set([d.id for d in replica_devices])
-  return pids, ids
+  return ids, pids
+
+
+def is_sharding_valid(single_replica_ids, single_replica_pids):
+  if jax.process_index() in single_replica_pids:
+    loc_devieces_in_replica = single_replica_ids.intersection(set([d.id for d in jax.local_devices()]))
+    print(f' host ID is {jax.process_index()}, '
+          f'num of devices in replica 0 is {len(loc_devieces_in_replica)}')
+    assert len(loc_devieces_in_replica) == 4, (
+      ' !!! Provided sharding is not valid. There is a host with part'
+      ' of devices outside of replica 0')
+
 
 
 def main(args):
@@ -147,18 +169,25 @@ def main(args):
     type_handlers.register_type_handler(jax.Array,
                                       type_handlers.SingleSliceArrayHandler(),
                                       override=True)
-    print('Restoring with single slice')
+    print('Restoring with single slice', jax.process_index())
+
     def _create_restore_args(data, mesh, pspec):
       replica_index = 0
-      rep0_pids, rep0_ids = get_replica_pids(replica_index, mesh)
+      rep0_ids, rep0_pids = get_replica_pids(replica_index, mesh)
+
+      is_sharding_valid(rep0_ids, rep0_pids)
       # import pdb; pdb.set_trace()
       slice_devices = mesh.devices[replica_index:replica_index+1]
       slice_mesh = jax.sharding.Mesh(slice_devices, mesh.axis_names)
+      ss_sharding = jax.sharding.NamedSharding(slice_mesh, pspec)
+      print('single slice pids', rep0_pids)
+      print('single slice devices', rep0_ids)
+      # print(ss_sharding)
       return type_handlers.SingleSliceArrayRestoreArgs(
           sharding=jax.sharding.NamedSharding(mesh, pspec),
-          single_slice_sharding=jax.sharding.NamedSharding(slice_mesh, pspec),
-          single_replica_ids = rep0_ids,
-          single_replica_pids = rep0_pids,
+          single_slice_sharding=ss_sharding,
+          single_replica_ids=rep0_ids,
+          single_replica_pids=rep0_pids,
           replica_axis_name=data_axis_name,
           global_shape=data.shape,
           dtype=data.dtype,
@@ -170,7 +199,7 @@ def main(args):
       mesh_tree,
       axes_tree
       )
-
+    # sys.exit()
     restored = mngr.restore(
       mngr.latest_step(),
       items=empty_state,
@@ -210,18 +239,11 @@ def main(args):
     raise ValueError(f'Wrong value for restore-method is passed. Must be one '
                      'of ["singleslice", "arrayrestore", "orig"]')
 
-  # print('restored', restored)
   print('--------------')
   check_trees_equal(train_state, restored)
-  # print(jax.tree_util.tree_map(lambda x: x.sharding, restored))
 
-def check_trees_equal(tree1, tree2):
-  def check_same(key, v1, v2):
-     assert jax.numpy.allclose(
-            v1, v2, rtol=1e-06, atol=1e-06
-        )
-  jax.tree_util.tree_map_with_path(check_same, tree1, tree2)
-  print('Hooray, values are close enough!')
+  return
+
 
 def parser(args):
   parser = argparse.ArgumentParser()
