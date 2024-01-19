@@ -150,10 +150,14 @@ class Decoder(nn.Module):
   def get_decoder_layer(self):
     if self.config.model_name == "default":
       return DecoderLayer
-    elif self.config.model_name[0:7] == "llama2-":
+    elif self.config.model_name.startswith("llama2"):
       from layers import llama2
       return llama2.LlamaDecoderLayer
-    elif self.config.model_name[0:6] == "gamma-":
+    elif self.config.model_name.startswith("mistral"):
+      # TODO(ranran): update to Mistral with sliding window attention
+      from layers import llama2
+      return llama2.LlamaDecoderLayer
+    elif self.config.model_name.startswith("gamma"):
       from layers import gamma
       return gamma.GammaDecoderLayer
     else:
