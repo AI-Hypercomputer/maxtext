@@ -79,3 +79,4 @@ class ClusterName(enum.Enum):
 
 class DockerImage(enum.Enum):
   XPK_JAX_TEST = "gcr.io/cloud-ml-auto-solutions/xpk_jax_test:latest"
+  XPK_MAXTEXT_TEST = "gcr.io/tpu-prod-env-multipod/xpk_maxtext_test:latest"

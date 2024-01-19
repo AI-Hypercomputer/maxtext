@@ -62,6 +62,9 @@ def run_workload(
       f"gcloud config set compute/zone {zone}",
       "git clone https://github.com/google/xpk.git /tmp/xpk",
       "cd /tmp/xpk",
+      "apt-get update && apt-get install -y google-cloud-sdk",
+      "apt-get install -y kubectl",
+      "apt-get install -y google-cloud-sdk-gke-gcloud-auth-plugin",
       (
           "python3 xpk.py workload create"
           f" --cluster={cluster_name} --workload={workload_id} --command='{run_cmds}'"

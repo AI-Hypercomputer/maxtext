@@ -26,7 +26,7 @@ SCHEDULED_TIME = "0 10 * * *" if composer_env.is_prod_env() else None
 
 
 with models.DAG(
-    dag_id="maxtext_test",
+    dag_id="maxtext_nightly",
     schedule=SCHEDULED_TIME,
     tags=["multipod_team", "maxtext"],
     start_date=datetime.datetime(2024, 1, 10),

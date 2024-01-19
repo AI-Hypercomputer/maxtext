@@ -220,7 +220,7 @@ class TpuXpkTask(BaseTask):
           workload_id=workload_id,
           docker_image=self.task_test_config.docker_image,
           accelerator_type=self.task_test_config.accelerator.name,
-          run_cmds=self.task_test_config.run_model_cmds,
+          run_cmds=self.task_test_config.test_script,
           task_owner=self.task_test_config.task_owner,
           startup_timeout=self.task_test_config.startup_time_out_in_sec,
           num_slices=self.task_test_config.num_slices,

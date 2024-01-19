@@ -41,6 +41,8 @@ def get_maxtext_nightly_config(
       project_name=project_name,
       zone=tpu_zone,
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
+      dataset_project=project_name,
+      composer_project=project_name,
   )
   current_datetime = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
   run_name = (
