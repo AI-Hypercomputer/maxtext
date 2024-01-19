@@ -14,7 +14,7 @@ for ARGUMENT in "$@"; do
 done
 
 if [[ -z "$CPU_PREFIX" ]]; then
-        echo -e "\n\nError: You must provide a cpu prefix.\n\n"
+        echo -e "Error: You must provide a cpu prefix."
         exit 1
 fi
 
@@ -24,11 +24,7 @@ fi
 
 for ((i = 0; i < $NUM_NODES; i++))
 do
-    echo "\n\nCreating node $CPU_PREFIX-$i...\n\n"
+    echo "Creating node $CPU_PREFIX-$i..."
     gcloud compute instances create $CPU_PREFIX-$i --boot-disk-size=100 --machine-type=n2-standard-64 --image-project=ubuntu-os-cloud --image=ubuntu-2204-jammy-v20240112 --scopes=cloud-platform,compute-rw,logging-write,monitoring-read,monitoring-write,storage-full
-    wait $!
-    echo "\n\nNode $CPU_PREFIX-$i created!\n\n"
+    echo "Node $CPU_PREFIX-$i created!"
 done
-
-wait $!
-python3 multihost_runner.py --CPU_PREFIX=prii-cpu-create-test --COMMAND="sudo apt update; sudo apt install python3-pip; bash setup.sh"
