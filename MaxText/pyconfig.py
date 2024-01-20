@@ -54,8 +54,16 @@ def validate_attention_type(s: str) -> None:
       "Invalid attention type was passed. Valid options ", valid_attention_types
     )
 
+def validate_opt_type(s: str) -> None:
+  valid_opt_types= ('adamw', 'adam_pax')
+  if s not in valid_opt_types:
+    raise ValueError(
+      "Invalid opt_type was passed. Valid options ", valid_opt_types
+    )
+
 def validate_keys(keys):
   validate_attention_type(keys['attention'])
+  validate_opt_type(keys['opt_type'])
 
   assert ((keys["load_parameters_path"]=="" and keys["load_full_state_path"]=="") or
     keys["enable_checkpointing"]), "You must set enable_checkpointing to load a checkpoint"
@@ -183,8 +191,6 @@ class _HyperParameters():
       calculate_global_batch_sizes(raw_keys)
 
     validate_keys(raw_keys)
-
-    validate_attention_type(raw_keys['attention'])
 
   @staticmethod
   def update_model_vars(raw_keys):
