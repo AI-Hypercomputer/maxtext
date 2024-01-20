@@ -1,6 +1,7 @@
 apache-airflow-providers-sendgrid
 fabric
 google-cloud-bigquery
+google-cloud-compute
 google-cloud-storage
 google-cloud-container
 google-cloud-tpu>=1.16.0

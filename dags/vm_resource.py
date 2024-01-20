@@ -29,6 +29,14 @@ class Project(enum.Enum):
   TPU_PROD_ENV_AUTOMATED = "tpu-prod-env-automated"
 
 
+class ImageProject(enum.Enum):
+  DEEP_LEARNING_PLATFORM_RELEASE = "deeplearning-platform-release"
+
+
+class ImageFamily(enum.Enum):
+  COMMON_CU121_DEBIAN_11 = "common-cu121-debian-11"
+
+
 class Zone(enum.Enum):
   # reserved/on-demand v2-32 in cloud-ml-auto-solutions
   US_CENTRAL1_A = "us-central1-a"
@@ -46,12 +54,26 @@ class Zone(enum.Enum):
   US_EAST5_A = "us-east5-a"
 
 
+class MachineVersion(enum.Enum):
+  N1_STANDARD_32 = "n1-standard-32"
+  A2_HIGHGPU_4G = "a2-highgpu-4g"
+  A3_HIGHGPU_8G = "a3-highgpu-8g"
+  G2_STAND_4 = "g2-standard-4"
+
+
 class TpuVersion(enum.Enum):
   V2 = "2"
   V3 = "3"
   V4 = "4"
   V5E = "5litepod"
   V5P = "5p"
+
+
+class GpuVersion(enum.Enum):
+  L4 = "nvidia-l4"
+  A100 = "nvidia-tesla-a100"
+  H100 = "nvidia-h100-80gb"
+  V100 = "nvidia-tesla-v100"
 
 
 class RuntimeVersion(enum.Enum):

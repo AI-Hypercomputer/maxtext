@@ -44,12 +44,12 @@ When Composer updates to a recent Python version, we can use dataclasses.
 """
 
 import abc
+import attrs
+from dags.vm_resource import TpuVersion
 import json
 import os
 import shlex
 from typing import Any, Generic, Iterable, List, Optional, TypeVar
-import attrs
-from dags.vm_resource import TpuVersion
 
 
 class Accelerator(abc.ABC):
@@ -62,7 +62,6 @@ class Accelerator(abc.ABC):
     raise NotImplementedError
 
 
-# TODO(wcromar): GPU implementation
 @attrs.define
 class Tpu(Accelerator):
   """Represents a single Cloud TPU instance.
@@ -88,6 +87,30 @@ class Tpu(Accelerator):
   def name(self):
     """Name of this TPU type in the Cloud TPU API (e.g. 'v4-8')."""
     return f'v{self.version.value}-{self.cores}'
+
+
+@attrs.define
+class Gpu(Accelerator):
+  """Represents a single Cloud GPU instance.
+
+  Attributes:
+    machine_type: The host type of the GPU. E.g., `a2-highgpu-1g`.
+    image_family: Family of the image.
+    count: Number of the GPU devices.
+    accelerator_type: Type of the accelerator. E.g., `nvidia-test-v100`.
+    runtime_version: Runtime image version.
+  """
+
+  machine_type: str
+  image_family: str
+  count: int
+  accelerator_type: str
+  runtime_version: str
+
+  @property
+  def name(self):
+    """Name of this GPU type in the Cloud GPU API (e.g. 'a2-highgpu-1g')."""
+    return self.accelerator_type
 
 
 A = TypeVar('A', bound=Accelerator)
@@ -151,6 +174,33 @@ class TpuVmTest(TestConfig[Tpu]):
         if self.num_slices == 1
         else f'{self.test_name}-{self.num_slices}x{self.accelerator.name}'
     )
+
+  @property
+  def setup_script(self) -> Optional[str]:
+    return '\n'.join(self.set_up_cmds)
+
+  @property
+  def test_script(self) -> str:
+    return '\n'.join(self.run_model_cmds)
+
+
+@attrs.define
+class GpuVmTest(TestConfig[Gpu]):
+  """Test config that runs on a single Cloud GPU VM instance.
+
+  Attributes:
+    test_name: Unique name for this test/model.
+    set_up_cmds: List of commands to run once when GPU is created.
+    run_model_cmds: List of commands to run the model under test.
+  """
+
+  test_name: str
+  set_up_cmds: Iterable[str]
+  run_model_cmds: Iterable[str]
+
+  @property
+  def benchmark_id(self) -> str:
+    return f'{self.test_name}-{self.accelerator.name}'
 
   @property
   def setup_script(self) -> Optional[str]:
