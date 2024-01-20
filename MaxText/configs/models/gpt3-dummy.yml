@@ -32,3 +32,4 @@ use_iota_embed: True
 fused_qkv: True
 add_bos: False
 add_eos: False
+opt_type: "adam_pax"
