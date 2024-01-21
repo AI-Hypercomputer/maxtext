@@ -148,20 +148,20 @@ class Decoder(nn.Module):
   mesh: Mesh
 
   def get_decoder_layer(self):
-    if self.config.model_name == "default":
+    if self.config.decoder_block == "default":
       return DecoderLayer
-    elif self.config.model_name.startswith("llama2"):
+    elif self.config.decoder_block == "llama2":
       from layers import llama2
       return llama2.LlamaDecoderLayer
-    elif self.config.model_name.startswith("mistral"):
+    elif self.config.decoder_block == "mistral":
       # TODO(ranran): update to Mistral with sliding window attention
       from layers import llama2
       return llama2.LlamaDecoderLayer
-    elif self.config.model_name.startswith("gamma"):
+    elif self.config.decoder_block == "gamma":
       from layers import gamma
       return gamma.GammaDecoderLayer
     else:
-      raise ValueError(f"Incorrect model name {self.config.model_name=}")
+      raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
 
   @nn.compact

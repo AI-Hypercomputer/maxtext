@@ -16,9 +16,7 @@
 # If there is already a checkpoint under this run, that checkpoint will auto-resume.
 run_name: ""
 
-# Types of models supported.
-# default model (palm like model with no overrides in config)
-model_name: "default"
+model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!
 rms_norm_epsilon: 1.e-06
 
 ################################## CHECKPOINTING ################################## 
@@ -58,6 +56,7 @@ gcs_metrics: False
 dtype: "bfloat16"
 int8_training: False
 
+decoder_block: "default" # which style of DecoderBlock to use.
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
