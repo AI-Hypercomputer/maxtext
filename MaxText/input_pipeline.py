@@ -501,10 +501,10 @@ def make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos, 
     skip_prefetch = True,
   )
   train_ds_builder = tfds.builder(config.dataset_name)
-  train_ds = train_ds_builder.as_dataset(split='train2', read_config = read_config, shuffle_files=True)
+  train_ds = train_ds_builder.as_dataset(split='train2', read_config=read_config, shuffle_files=True)
 
   eval_ds_builder = tfds.builder(config.eval_dataset_name)
-  eval_ds = eval_ds_builder.as_dataset(split='validation_tokenized_5662seqs', read_config = read_config, shuffle_files=False)
+  eval_ds = eval_ds_builder.as_dataset(split='validation_tokenized_5662seqs', read_config=read_config, shuffle_files=False)
 
   # shard the dataset as soon as it is loaded
   train_ds = train_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
