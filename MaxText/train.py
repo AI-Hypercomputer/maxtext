@@ -376,6 +376,19 @@ def train_loop(config, state=None):
   maxtext_utils.init_mllog(config, start_step)
   nextrng = jax.random.fold_in(init_rng, start_step)
   example_batch = load_next_batch(data_iterator, None, config)
+
+  if eval_data_iterator and config.eval_interval > 0:
+    cumulative_metrics = {"total_loss": 0., "total_weights": 0.}
+    for eval_batch in eval_data_iterator:
+      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        _, metrics = p_eval_step(
+          state, eval_batch, nextrng
+        )
+      cumulative_metrics['total_loss'] += float(metrics['scalar']['evaluation/total_loss'])
+      cumulative_metrics['total_weights'] += float(metrics['scalar']['evaluation/total_weights'])
+    eval_loss = cumulative_metrics['total_loss'] / (cumulative_metrics['total_weights'] + EPS)
+    max_logging.log(f"average loss at start_step {start_step}: eval_loss={eval_loss}, total_weights={cumulative_metrics['total_weights']}")
+
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
