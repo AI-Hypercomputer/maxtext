@@ -219,3 +219,5 @@ compile_topology: '' # Target hardware version, e.g. 'v5e-256'
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
 
 stable_cross_entropy_loss: True
+target_eval_loss: 0.
+eval_interval: 0

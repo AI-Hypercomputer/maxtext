@@ -34,3 +34,11 @@ add_bos: False
 add_eos: False
 opt_type: "adam_pax"
 stable_cross_entropy_loss: False
+gradient_clipping_threshold: 1.
+adam_b1: 0.9
+adam_b2: 0.95
+adam_eps: 1.e-8
+adam_weight_decay: 0.1
+dataset_type: "c4_mlperf"
+checkpoint_period: 10_000
+target_eval_loss: 2.69

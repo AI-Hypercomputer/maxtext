@@ -139,6 +139,10 @@ class _HyperParameters():
         except ValueError as e:
           raise ValueError(f"Couldn't parse value from CLI or ENV '{new_proposal}' for key '{k}'") from e
 
+    # We initialize the jax distributed system here because it must be done before device backend is initialized.
+    if raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and raw_keys["compile_topology_num_slices"]==-1:
+      max_utils.initialize_jax_distributed_system()
+
     _HyperParameters.update_model_vars(raw_keys)
     _HyperParameters.user_init(raw_keys)
 
@@ -156,10 +160,6 @@ class _HyperParameters():
   @staticmethod
   def user_init(raw_keys):
     '''Transformations between the config data and configs used at runtime'''
-
-    # We initialize the jax distributed system here because it must be done before device backend is initialized.
-    if raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and raw_keys["compile_topology_num_slices"]==-1:
-      max_utils.initialize_jax_distributed_system()
 
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
     if raw_keys["run_name"] == "":
@@ -193,6 +193,24 @@ class _HyperParameters():
     validate_keys(raw_keys)
 
   @staticmethod
+  def configure_gpt3_task(raw_keys):
+    '''dynamically configure gpt3 task based on training rules'''
+    # follow https://github.com/google/paxml/blob/19db52eed85ae0d2365339b83a97cd0b873bbf73/paxml/tasks/lm/params/c4.py#L280
+    #   according to training_rules of mlperf gpt3 training
+    global_batch_size = calculate_global_batch_sizes(raw_keys)[1]
+    if global_batch_size <= 3584:
+      raw_keys['learning_rate'] = 2e-5
+    else:
+      raw_keys['learning_rate'] = 3e-5
+    warmup_steps = math.ceil(265.0 * 1536 / global_batch_size - 1e-6)
+    decay_end_step = math.ceil(108600.0 * 1536 / global_batch_size - 1e-6)
+    raw_keys['learning_rate_schedule_steps'] = decay_end_step
+    raw_keys['warmup_steps_fraction'] = warmup_steps / decay_end_step
+    raw_keys['overwrite_ckpt_step'] = math.ceil(4000.0 * 1536 / global_batch_size)
+    global_batch_size_to_train_on = calculate_global_batch_sizes(raw_keys)[1]
+    raw_keys['eval_interval'] = math.ceil(24567 / global_batch_size_to_train_on)
+
+  @staticmethod
   def update_model_vars(raw_keys):
     ''' Update model config variables
     '''
@@ -205,6 +223,10 @@ class _HyperParameters():
       with open(file_path, 'r', encoding="utf-8") as file:
         model_vars = yaml.safe_load(file)
       raw_keys = validate_and_update_keys(raw_keys, model_vars)
+
+    # pytype: disable=attribute-error
+    if raw_keys['model_name'].startswith("gpt3"):
+      _HyperParameters.configure_gpt3_task(raw_keys)
 
 
 def validate_and_update_keys(raw_keys, model_keys):

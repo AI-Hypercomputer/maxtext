@@ -182,7 +182,6 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
                          data['inputs_position'],
                          decoder_segment_ids=data['inputs_segmentation'],
                          padding_mask=padding_mask,
-                         padding_mask=data['targets_segmentation'] != 0,
                          enable_dropout=config.enable_dropout if is_train else False,
                          rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
     one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
@@ -303,6 +302,7 @@ def train_loop(config, state=None):
   ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
   mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state) = setup_train_loop(config)
 
+  # pylint: disable=line-too-long
   functional_train, in_shard, out_shard, static_argnums_train, donate_argnums_train = maxtext_utils.get_functional_train_with_signature(
     train_step,
     mesh,
@@ -362,6 +362,7 @@ def train_loop(config, state=None):
     raise ValueError("Profiling requested but initial profiling step set past training final step")
   last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1, first_profiling_step, config.steps - 1)
 
+  maxtext_utils.init_mllog(config, start_step)
   nextrng = jax.random.fold_in(init_rng, start_step)
   example_batch = load_next_batch(data_iterator, None, config)
   for step in np.arange(start_step, config.steps):
@@ -380,8 +381,7 @@ def train_loop(config, state=None):
     write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
 
-    if config.eval_interval > 0 and step % config.eval_interval == 0:
-      assert eval_data_iterator
+    if eval_data_iterator and config.eval_interval > 0 and step % config.eval_interval == 0:
       cumulative_metrics = {"total_loss": 0., "total_weights": 0.}
       for eval_batch in eval_data_iterator:
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -391,7 +391,11 @@ def train_loop(config, state=None):
         cumulative_metrics['total_loss'] += float(metrics['scalar']['evaluation/total_loss'])
         cumulative_metrics['total_weights'] += float(metrics['scalar']['evaluation/total_weights'])
       eval_loss = cumulative_metrics['total_loss'] / (cumulative_metrics['total_weights'] + EPS)
-      max_logging.log(f"average loss after {step}: eval_loss={eval_loss}, total_weights={cumulative_metrics['total_weights']}")
+      max_logging.log(
+        f"average loss after {step}: eval_loss={eval_loss}, total_weights={cumulative_metrics['total_weights']}")
+
+      if maxtext_utils.is_early_stop_mllog(config, step, eval_loss):
+        break
 
     if checkpoint_manager is not None:
       if checkpoint_manager.save(step, state):
