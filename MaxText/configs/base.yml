@@ -217,3 +217,5 @@ compile_topology_num_slices: -1 # Number of target slices, set to a positive int
 stable_cross_entropy_loss: True
 target_eval_loss: 0.
 eval_interval: 0
+
+overwrite_ckpt_step: -1
