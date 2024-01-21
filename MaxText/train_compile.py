@@ -128,7 +128,8 @@ def main(argv: Sequence[str]) -> None:
     topology_mesh,
     state_mesh_annotations,
     model,
-    config
+    config,
+    is_train=True,
   )
 
   # Compile

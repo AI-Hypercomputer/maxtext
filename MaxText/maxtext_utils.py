@@ -27,13 +27,14 @@ import functools
 import input_pipeline
 import optax
 import jax.numpy as jnp
+import mllog
 
 
 
-def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config):
+def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config, is_train):
   """ Get the shardings (both state and data) for train_step """
-  functional_train = get_functional_train_step(train_step, model, config)
-  functional_train.__name__ = "train_step"
+  functional_train = get_functional_train_step(train_step, model, config, is_train)
+  functional_train.__name__ = "train_step" if is_train else "eval_step"
   data_pspec = P(*config.data_sharding)
   state_mesh_shardings = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
@@ -41,12 +42,13 @@ def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations
       lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
   in_shardings = (state_mesh_shardings, data_sharding, None) # State, batch, rng
   out_shardings = (state_mesh_shardings, None) # State, metrics
-  static_argnums = () # We partial out the static argnums of model and config
-  donate_argnums = 0 # This is the index of the state - we allow the compiler to make use of this memory.
+  static_argnums = () # We partial out the static argnums of model, config and is_train
+  # This is the index of the state - we allow the compiler to make use of this memory is_train
+  donate_argnums = 0 if is_train else ()
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
 
-def get_functional_train_step(train_step, model, config):
-  return functools.partial(train_step, model, config)
+def get_functional_train_step(train_step, model, config, is_train):
+  return functools.partial(train_step, model, config, is_train=is_train)
 
 def get_optimizer(config, learning_rate_schedule):
   """create optimizer"""

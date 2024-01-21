@@ -33,3 +33,4 @@ fused_qkv: True
 add_bos: False
 add_eos: False
 opt_type: "adam_pax"
+stable_cross_entropy_loss: False
