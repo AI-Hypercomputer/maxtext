@@ -36,7 +36,7 @@ def data_load_loop(config, state=None):
   """Main data loader loop.
     Loads batches of data for each training step.
   """
-  _, _, _, _, _, _, _, data_iterator, state = setup_train_loop(config)
+  _, _, _, _, _, _, _, data_iterator, _, state = setup_train_loop(config)
 
   example_batch = None
 

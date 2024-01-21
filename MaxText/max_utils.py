@@ -347,6 +347,16 @@ def create_learning_rate_schedule(config):
 
   return optax.join_schedules(pieces, boundaries)
 
+def compute_cross_entropy_with_logits(config, logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float = 0.):
+  if config.stable_cross_entropy_loss:
+    xent, _ = cross_entropy_with_logits(logits, targets, z_loss)
+  else:
+    assert z_loss == 0.
+    # vanilla cross entropy loss with float32 logits for stability
+    logits = logits.astype(jnp.float32)
+    targets = targets.astype(jnp.float32)
+    xent = -jnp.sum(nn.log_softmax(logits) * targets, axis=-1)
+  return xent
 
 # Cross entropy implementation is taken from original T5X codebase:
 # https://github.com/google-research/t5x/blob/ace831eea1e2742b4299cd1a9af7e4f302038351/t5x/losses.py#L25-L101

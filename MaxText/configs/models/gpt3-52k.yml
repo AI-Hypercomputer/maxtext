@@ -32,3 +32,4 @@ use_iota_embed: True
 fused_qkv: True
 opt_type: "adam_pax"
 decoder_block: "gpt3"
+stable_cross_entropy_loss: False
