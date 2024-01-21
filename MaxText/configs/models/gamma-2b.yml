@@ -25,3 +25,4 @@ vocab_size: 256128
 vocab_relative_path: "tokenizer.gamma"
 add_bos: True
 add_eos: False
+decoder_block: "gamma"
