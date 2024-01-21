@@ -54,6 +54,7 @@ from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 Transformer = models.Transformer
+EPS = 1e-8
 
 def validate_train_config(config):
   """ Validates the configuration is set correctly for train.py"""
@@ -177,7 +178,7 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = layer["activation_mean"][0]
       output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
 
-def train_step(model, config, state, data, dropout_rng):
+def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
   """
 
   Args:
@@ -196,33 +197,55 @@ def train_step(model, config, state, data, dropout_rng):
   rng1, aqt_rng = jax.random.split(dropout_rng)
 
   # decimate proportion of data when per_device_batch_size<1
-  for k, v in data.items():
-    data[k] = v[:config.global_batch_size_to_train_on,:]
+  if is_train:
+    for k, v in data.items():
+      data[k] = v[:config.global_batch_size_to_train_on,:]
 
-  def loss_fn(params):
+  def loss_fn(params, is_train=True):
     logits, intermediate_outputs = model.apply({'params': params},
                          data['inputs'],
                          data['inputs_position'],
                          decoder_segment_ids=data['inputs_segmentation'],
-                         enable_dropout=config.enable_dropout,
+                         enable_dropout=config.enable_dropout if is_train else False,
                          rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
     one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
     xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
     xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
     # Mask out paddings at the end of each example.
     xent = xent * (data['targets_segmentation'] != 0)
-    return jnp.sum(xent)/jnp.sum(data['targets_segmentation'] != 0), intermediate_outputs
+    total_loss = jnp.sum(xent)
+    total_weights = jnp.sum(data['targets_segmentation'] != 0)
+    loss = total_loss / (total_weights + EPS)
+    aux = {
+      'intermediate_outputs': intermediate_outputs,
+      'total_loss': total_loss,
+      'total_weights': total_weights,
+    }
+    return loss, aux
 
-  grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
-  if config.gradient_clipping_threshold > 0:
-    grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
+  if is_train:
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    (loss, aux), raw_grads = grad_fn(state.params)
+    intermediate_outputs = aux['intermediate_outputs']
+
+    if config.gradient_clipping_threshold > 0:
+      grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
+    else:
+      grads = raw_grads
+    new_state = state.apply_gradients(grads=grads)
+    metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm': max_utils.l2norm_pytree(grads),
+              'learning/raw_grad_norm': max_utils.l2norm_pytree(raw_grads),
+              'learning/param_norm': max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
   else:
-    grads = raw_grads
-  new_state = state.apply_gradients(grads=grads)
-  metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm': max_utils.l2norm_pytree(grads),
-             'learning/raw_grad_norm': max_utils.l2norm_pytree(raw_grads),
-             'learning/param_norm': max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
+    loss, aux = loss_fn(state.params, is_train=False)
+    total_loss = aux['total_loss']
+    total_weights = aux['total_weights']
+    metrics = {'scalar':
+               {'evaluation/loss': loss,
+                'evaluation/total_loss': total_loss,
+                'evaluation/total_weights': total_weights}}
+    new_state = state
+
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
@@ -283,13 +306,13 @@ def setup_train_loop(config):
     state: the initialized train state
   """
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
-  data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh, add_bos=True, add_eos=True)
+  data_iterator, eval_data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations = max_utils.setup_training_state(model,
           tx, config, init_rng, mesh, checkpoint_manager)
 
   return ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
-          mesh, learning_rate_schedule, data_iterator, state)
+          mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state)
 
 
 def train_loop(config, state=None):
@@ -301,15 +324,28 @@ def train_loop(config, state=None):
   Returns:
   """
   ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
-  mesh, learning_rate_schedule, data_iterator, state) = setup_train_loop(config)
+  mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state) = setup_train_loop(config)
 
-  functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
+  functional_train, in_shard, out_shard, static_argnums_train, donate_argnums_train = maxtext_utils.get_functional_train_with_signature(
     train_step,
     mesh,
     state_mesh_annotations,
     model,
-    config
+    config,
+    is_train=True,
   )
+
+  if eval_data_iterator:
+    # in_shard & out_shard is the same between functional_train and functional_eval
+    functional_eval, _, _, static_argnums_eval, donate_argnums_eval = maxtext_utils.get_functional_train_with_signature(
+      train_step,
+      mesh,
+      state_mesh_annotations,
+      model,
+      config,
+      is_train=False,
+    )
+
 
   num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
   max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
@@ -331,8 +367,17 @@ def train_loop(config, state=None):
       functional_train,
       in_shardings=in_shard,
       out_shardings=out_shard,
-      static_argnums=static_argnums,
-      donate_argnums=donate_argnums)
+      static_argnums=static_argnums_train,
+      donate_argnums=donate_argnums_train)
+
+    if eval_data_iterator:
+      p_eval_step = jax.jit(
+        functional_eval,
+        in_shardings=in_shard,
+        out_shardings=out_shard,
+        static_argnums=static_argnums_eval,
+        donate_argnums=donate_argnums_eval,
+      )
 
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
@@ -370,6 +415,19 @@ def train_loop(config, state=None):
         sys.exit()
 
     write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
+
+    if config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
+      assert eval_data_iterator
+      cumulative_eval_metrics = {"total_loss": 0., "total_weights": 0.}
+      for eval_batch in eval_data_iterator:
+        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          _, eval_metrics = p_eval_step(
+            state, eval_batch, nextrng
+          )
+        cumulative_eval_metrics['total_loss'] += float(eval_metrics['scalar']['evaluation/total_loss'])
+        cumulative_eval_metrics['total_weights'] += float(eval_metrics['scalar']['evaluation/total_weights'])
+      eval_loss = cumulative_eval_metrics['total_loss'] / (cumulative_eval_metrics['total_weights'] + EPS)
+      max_logging.log(f"average loss after {step=}: {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
 
     if step == last_profiling_step:
       max_utils.deactivate_profiler(config)

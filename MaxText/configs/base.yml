@@ -219,3 +219,5 @@ decode_sampling_strategy: "greedy" # decode_sampling_strategy should be one of g
 decode_sampling_nucleus_p: -1 # set if you're doing nucleus / top-p
 decode_sampling_top_k: 0 # set if you're doing top-k
 decode_sampling_temperature: 1.
+
+eval_interval: -1  # the specific number of train step between eval_step
