@@ -19,3 +19,4 @@ tensorflow>=2.13.0
 tensorflow-datasets
 tensorboardx
 tensorboard-plugin-profile
+git+https://github.com/mlperf/logging.git

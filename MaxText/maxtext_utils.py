@@ -27,7 +27,6 @@ import functools
 from input_pipeline import input_pipeline_interface
 
 
-
 def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config, is_train):
   """ Get the shardings (both state and data) for train_step """
   functional_train = get_functional_train_step(train_step, model, config, is_train)

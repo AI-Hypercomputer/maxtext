@@ -149,13 +149,21 @@ class _HyperParameters():
     self._validate_env_variables(raw_data_from_yaml)
 
     raw_keys = OrderedDict()
+
     keys_from_env_and_command_line = self._update_from_env_and_command_line(raw_keys, raw_data_from_yaml, argv, **kwargs)
     max_logging.log(
         f"Updating keys from env and command line: {keys_from_env_and_command_line}")
+
     keys_from_model = _HyperParameters.update_model_vars(raw_keys)
     max_logging.log(f"Updating keys from model: {keys_from_model}")
     validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
 
+    # We initialize the jax distributed system here because it must be done before device backend is initialized.
+    if raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and raw_keys["compile_topology_num_slices"]==-1:
+      max_utils.initialize_jax_distributed_system()
+
+    if raw_keys['model_name'] == "gpt3-175b":
+      _HyperParameters.configure_gpt3_task(raw_keys)
     _HyperParameters.user_init(raw_keys)
 
     self.keys = raw_keys
@@ -204,10 +212,31 @@ class _HyperParameters():
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
+    # enable mllog for mlperf submission compliance
+    raw_keys['enable_mllog'] = raw_keys['model_name'] in ("gpt3-175b", "gpt3-52k")
+
     validate_keys(raw_keys)
 
   @staticmethod
-  def update_model_vars(raw_keys) -> list[str]:
+  def configure_gpt3_task(raw_keys):
+    '''dynamically configure gpt3 task based on training rules'''
+    # follow https://github.com/google/paxml/blob/19db52eed85ae0d2365339b83a97cd0b873bbf73/paxml/tasks/lm/params/c4.py#L280
+    #   according to training_rules of mlperf gpt3 training
+    global_batch_size = calculate_global_batch_sizes(raw_keys)[1]
+    if global_batch_size <= 3584:
+      raw_keys['learning_rate'] = 2e-5
+    else:
+      raw_keys['learning_rate'] = 3e-5
+    warmup_steps = math.ceil(265.0 * 1536 / global_batch_size - 1e-6)
+    decay_end_step = math.ceil(108600.0 * 1536 / global_batch_size - 1e-6)
+    raw_keys['learning_rate_schedule_steps'] = decay_end_step
+    raw_keys['warmup_steps_fraction'] = warmup_steps / decay_end_step
+    raw_keys['overwrite_ckpt_step'] = math.ceil(4000.0 * 1536 / global_batch_size)
+    global_batch_size_to_train_on = calculate_global_batch_sizes(raw_keys)[1]
+    raw_keys['eval_interval'] = math.ceil(24567 / global_batch_size_to_train_on)
+
+  @staticmethod
+  def update_model_vars(raw_keys):
     ''' Update model config variables
     '''
     validate_model_name(raw_keys['model_name'])

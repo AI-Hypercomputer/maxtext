@@ -326,6 +326,7 @@ def train_loop(config, state=None):
   ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
   mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state) = setup_train_loop(config)
 
+  # pylint: disable=line-too-long
   functional_train, in_shard, out_shard, static_argnums_train, donate_argnums_train = maxtext_utils.get_functional_train_with_signature(
     train_step,
     mesh,
@@ -390,6 +391,10 @@ def train_loop(config, state=None):
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
+  if config.enable_mllog:
+    # pylint: disable=import-outside-toplevel
+    import mllog_utils
+    mllog_utils.init(config, start_step)
 
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
@@ -428,6 +433,10 @@ def train_loop(config, state=None):
         cumulative_eval_metrics['total_weights'] += float(eval_metrics['scalar']['evaluation/total_weights'])
       eval_loss = cumulative_eval_metrics['total_loss'] / (cumulative_eval_metrics['total_weights'] + EPS)
       max_logging.log(f"average loss after {step=}: {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
+      if config.enable_mllog:
+        mllog_utils.early_stop_check(config, step, eval_loss)
+      if eval_loss <= config.target_eval_loss:
+        break
 
     if step == last_profiling_step:
       max_utils.deactivate_profiler(config)
