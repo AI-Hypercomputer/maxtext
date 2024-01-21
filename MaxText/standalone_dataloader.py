@@ -38,7 +38,7 @@ def data_load_loop(config, state=None):
   """Main data loader loop.
     Loads batches of data for each training step.
   """
-  _, _, _, _, _, _, _, data_iterator, state = setup_train_loop(config)
+  _, _, _, _, _, _, _, data_iterator, _, state = setup_train_loop(config)
 
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
