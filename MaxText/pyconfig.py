@@ -31,6 +31,10 @@ import jax
 from typing import Any, Union
 
 _MAX_PREFIX = "M_"
+_DEFAULT = "default"
+_LLAMA2_7B = "llama2-7b"
+_MISTRAL_7B = "mistral-7b"
+
 def yaml_key_to_env_key(s: str) -> str:
   return _MAX_PREFIX + s.upper()
 
@@ -43,15 +47,25 @@ def string_to_bool(s: str) -> bool:
 
 _yaml_types_to_parser = {str : str, int : int, float : float, bool : string_to_bool}
 
-def validate_attention_type(s: str) -> bool:
+def validate_attention_type(s: str) -> None:
   valid_attention_types = ('dot_product', 'flash', 'gpu_flash_xla', 'gpu_flash_triton')
   if s not in valid_attention_types: # currently supported attention
     raise ValueError(
       "Invalid attention type was passed. Valid options ", valid_attention_types
     )
 
+def validate_keys(keys):
+  validate_attention_type(keys['attention'])
+
+  assert ((keys["load_parameters_path"]=="" and keys["load_full_state_path"]=="") or
+    keys["enable_checkpointing"]), "You must set enable_checkpointing to load a checkpoint"
+  assert keys["load_parameters_path"]=="" or keys["load_full_state_path"]=="",\
+    "At most one of `load_parameters_path` or `load_full_state_path` should be set"
+
+
 def validate_model_name(s: str) -> bool:
-  valid_model_names= ('default', 'llama2-7b') # currently supported models
+  # currently supported models
+  valid_model_names= ('default', 'llama2-7b', 'mistral-7b', 'gamma-7b','gamma-2b')
   if s not in valid_model_names:
     raise ValueError(
       "Invalid model name was passed. Valid options ", valid_model_names
@@ -70,9 +84,9 @@ class _HyperParameters():
       if environment_var[:len(_MAX_PREFIX)] == _MAX_PREFIX:
         proposed_key = environment_var[len(_MAX_PREFIX):].lower()
         if proposed_key not in raw_data_from_yaml:
-          raise ValueError(f"We received env `{environment_var}` but it doesn't match a key, so it is aassumed a mistake")
-        if proposed_key.upper() != proposed_key:
-          raise ValueError(f"We received env `{proposed_key}` but it isn't all uppercase.")
+          raise ValueError(f"We received env `{environment_var}` but it doesn't match a key, so it is assumed a mistake.")
+        if not environment_var[len(_MAX_PREFIX):].isupper():
+          raise ValueError(f"We received env `{environment_var}` but it isn't all uppercase.")
 
   def __init__(self, argv: list[str], **kwargs):
     with open(argv[1], "r", encoding="utf-8") as yaml_file:
@@ -167,6 +181,8 @@ class _HyperParameters():
     raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = \
       calculate_global_batch_sizes(raw_keys)
 
+    validate_keys(raw_keys)
+
     validate_attention_type(raw_keys['attention'])
 
   @staticmethod
@@ -174,26 +190,14 @@ class _HyperParameters():
     ''' Update model config variables
     '''
     validate_model_name(raw_keys['model_name'])
-    if raw_keys['model_name'] == 'llama2-7b':
-      max_logging.log(f"Running Model: {raw_keys['model_name']}")
-      llama2_7b_model_vars = {
-        'base_emb_dim': 4096,
-        'base_num_query_heads': 32,
-        'base_num_kv_heads': 32,
-        'base_mlp_dim': 11008,
-        'base_num_decoder_layers': 32,
-        'head_dim': 128,
-        'mlp_activations': ['silu','linear'],
-        'vocab_size': 32000,
-        'enable_dropout': False,
-        'attention':'dot_product',
-        'vocab_relative_path':'tokenizer.llama2',
-        'logits_via_embedding': False,
-        'rms_norm_epsilon': 1e-05,
-        'add_bos': True,
-        'add_eos': False
-      }
-      raw_keys = validate_and_update_keys(raw_keys, llama2_7b_model_vars)
+    max_logging.log(f"Running Model: {raw_keys['model_name']}")
+
+    if raw_keys['model_name'] != 'default':
+      file_path = f"MaxText/configs/models/{raw_keys['model_name']}.yml"
+      with open(file_path, 'r', encoding="utf-8") as file:
+        model_vars = yaml.safe_load(file)
+      raw_keys = validate_and_update_keys(raw_keys, model_vars)
+
 
 def validate_and_update_keys(raw_keys, model_keys):
   ''' Validate and update model specific config keys

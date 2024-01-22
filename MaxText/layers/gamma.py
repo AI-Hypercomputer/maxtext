@@ -14,47 +14,41 @@
  limitations under the License.
  """
 
-"""Transformer model definition."""
-# pylint: disable=arguments-differ
-# pylint: disable=no-name-in-module
-
-from jax.sharding import Mesh
-
-
-
 from flax import linen as nn
-
-
+import common_types
 import jax.numpy as jnp
-# from jax.experimental.pallas.ops.tpu import flash_attention
+
+from layers import normalizations
 from layers import attentions
+from layers import initializers
 from layers import embeddings
 from layers import linears
-from layers import normalizations
-
-from layers import models
-
-import common_types
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-Mesh = common_types.Mesh
-ScanIn = common_types.ScanIn
 
 Embed = embeddings.Embed
-Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
+NdInitializer = initializers.NdInitializer
+Attention = attentions.Attention
+MlpBlock = linears.MlpBlock
+Config = common_types.Config
+AxisNames = common_types.AxisNames
+Mesh = common_types.Mesh
+ScanIn = common_types.ScanIn
+DType = common_types.DType
+Array = common_types.Array
+BATCH = common_types.BATCH
+LENGTH = common_types.LENGTH
+HEAD = common_types.HEAD
+D_KV = common_types.D_KV
+DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
 
-#-----------------------------------------
-# The Decoder Layer specific for Llama2
-#-----------------------------------------
+nd_dense_init = initializers.nd_dense_init
 
 
-class LlamaDecoderLayer(nn.Module):
+# Decoder and Model definitions
+class GammaDecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
-  config: models.Config
+  config: Config
   mesh: Mesh
 
   @nn.compact
@@ -64,28 +58,23 @@ class LlamaDecoderLayer(nn.Module):
                decoder_positions,
                deterministic,
                model_mode,
-               ):
+              ):
     cfg = self.config
     mesh = self.mesh
-
     inputs = nn.with_logical_constraint(
         inputs, ('activation_batch', 'activation_length', 'activation_embed'))
 
-
-    lnx_rms = models.RMSNorm(
+    # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
+    lnx = RMSNorm(
         dtype=cfg.dtype,
-        name='pre_self_attention_layer_norm',
-        kernel_axes=('embed',),
-        epsilon=cfg.rms_norm_epsilon
-        )
-    lnx = lnx_rms(inputs)
+        name='pre_self_attention_norm',
+        kernel_axes=('embed',))(inputs)
 
     lnx = nn.with_logical_constraint(
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
-    # Self-attention block
     attention_layer = Attention(
-      config = cfg,
+      config=cfg,
       num_query_heads=cfg.num_query_heads,
       num_kv_heads=cfg.num_kv_heads,
       head_dim=cfg.head_dim,
@@ -95,48 +84,47 @@ class LlamaDecoderLayer(nn.Module):
       dtype=cfg.dtype,
       dropout_rate=cfg.dropout_rate,
       name='self_attention',
+      float32_logits = True,
       use_int8=cfg.int8_training)
 
     attention_lnx = attention_layer(
-            lnx,
-            lnx,
-            decoder_positions,
-            decoder_segment_ids=decoder_segment_ids,
-            deterministic=deterministic,
-            model_mode=model_mode)
+      lnx,
+      lnx,
+      decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      deterministic=deterministic,
+      model_mode=model_mode)
 
     attention_lnx = nn.with_logical_constraint(
         attention_lnx,
         ('activation_batch', 'activation_length', 'activation_embed'))
-    intermediate_inputs = inputs + attention_lnx
-
-    # Fully Connected
-    hidden_states = models.RMSNorm(
-        dtype=cfg.dtype, name='post_self_attention_layer_norm', kernel_axes=('embed',),
-        epsilon=cfg.rms_norm_epsilon,
-        )(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, ('activation_batch', 'activation_length', 'activation_embed'))
+    attention_lnx += inputs
+    residual = attention_lnx
+    attn_output = RMSNorm(
+        dtype=cfg.dtype,
+        name='pre_ffw_norm',
+        kernel_axes=('embed',))(attention_lnx)
 
     # MLP block.
-    mlp_lnx = linears.MlpBlock(
+    mlp_lnx = MlpBlock(
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         name='mlp',
         config=cfg,
-    )(hidden_states, deterministic=deterministic)
+    )(attn_output, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(
         mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')
     )
 
+    next_layer_addition = mlp_lnx + residual
 
-    layer_output = mlp_lnx + intermediate_inputs
+    next_layer_addition_dropped_out = nn.Dropout(
+        rate=cfg.dropout_rate, broadcast_dims=(-2,)
+    )(next_layer_addition, deterministic=deterministic)
 
-    layer_output = nn.Dropout(
-        rate=cfg.dropout_rate, broadcast_dims=(-2,))(
-            layer_output, deterministic=deterministic)
-
+    layer_output = next_layer_addition_dropped_out
     layer_output = nn.with_logical_constraint(
         layer_output,
         ('activation_batch', 'activation_length', 'activation_embed'),

@@ -54,14 +54,14 @@ class TokenizerTest(unittest.TestCase):
     os.remove(cls.tokenizer_path)
 
   def test_tokenize(self):
-    source_tokenizer = tokenizer.load_tokenizer('../assets/tokenizer', self.vocab_size)
-    test_tokenizer = tokenizer.load_tokenizer(self.tokenizer_path, self.vocab_size)
+    source_tokenizer = tokenizer.load_tokenizer('../assets/tokenizer')
+    test_tokenizer = tokenizer.load_tokenizer(self.tokenizer_path)
     text = 'This is a test'
     self.assertTrue((np.asarray(source_tokenizer.tokenize(text)) & np.asarray(test_tokenizer.tokenize(text))).all())
 
   def test_detokenize(self):
-    source_tokenizer = tokenizer.load_tokenizer('../assets/tokenizer', self.vocab_size)
-    test_tokenizer = tokenizer.load_tokenizer(self.tokenizer_path, self.vocab_size)
+    source_tokenizer = tokenizer.load_tokenizer('../assets/tokenizer')
+    test_tokenizer = tokenizer.load_tokenizer(self.tokenizer_path)
     tokens = [66,12,10,698,2]
     self.assertEqual(np.asarray(source_tokenizer.detokenize(tokens)),np.asarray(test_tokenizer.detokenize(tokens)))
 
