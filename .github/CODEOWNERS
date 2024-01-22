@@ -1,0 +1,13 @@
+# @RissyRan and @will-cromar will be the default owners for everything in
+# the repo, unless a later match takes precedence.
+* @RissyRan @will-cromar
+
+dags/solutions_team/configs/flax @sshahrokhi
+
+dags/solutions_team/configs/pax @gkroiz
+
+dags/solutions_team/configs/tensorflow @chandrasekhard2 @EricLeFort
+
+dags/pytorch_xla @will-cromar
+
+dags/multipod @jonb377
