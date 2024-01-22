@@ -40,10 +40,16 @@ from typing import Tuple
 
 from google.cloud import storage
 
+def find_nans_and_infs(pytree):
+  def finder(x):
+    return jnp.any(jnp.isinf(x) | jnp.isnan(x))
+  bad_pytree = jax.tree_map(finder, pytree)
+  return jax.tree_util.tree_flatten(bad_pytree)
+
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
   return jax.tree_util.tree_reduce(
-      lambda x, y: x + jax.numpy.sum(y ** 2), x, initializer=0.0
+      lambda x, y: x + jax.numpy.sum(jax.numpy.square(y)), x, initializer=0.0
   ) ** 0.5
 
 def calculate_num_params_from_pytree(params):
@@ -63,11 +69,11 @@ def summarize_size_from_pytree(params):
   return num_params, num_bytes, num_bytes/num_params
 
 def activate_profiler(config):
-  if jax.process_index() == 0 and config.enable_profiler:
+  if config.enable_profiler and (config.upload_all_profiler_results or jax.process_index() == 0):
     jax.profiler.start_trace(config.tensorboard_dir)
 
 def deactivate_profiler(config):
-  if jax.process_index() == 0 and config.enable_profiler:
+  if config.enable_profiler and (config.upload_all_profiler_results or jax.process_index() == 0):
     jax.profiler.stop_trace()
 
 def _prepare_metrics_for_json(metrics, step, run_name):
@@ -276,8 +282,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_tra
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
-                                                config.load_from_other_directory,
-                                                config.load_from_other_directory_step,
+                                                config.load_full_state_path,
                                                 unboxed_abstract_state,
                                                 mesh,
                                                 state_mesh_annotations)

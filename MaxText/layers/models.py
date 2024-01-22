@@ -37,6 +37,7 @@ ScanIn = common_types.ScanIn
 Embed = embeddings.Embed
 Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
+PositionalEmbedding = embeddings.PositionalEmbedding
 
 #------------------------------------------------------------------------------
 # The network: Decoder & Transformer Definitions
@@ -72,6 +73,7 @@ class DecoderLayer(nn.Module):
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
     attention_layer = Attention(
+      config = self.config,
       num_query_heads=cfg.num_query_heads,
       num_kv_heads=cfg.num_kv_heads,
       head_dim=cfg.head_dim,
@@ -148,9 +150,16 @@ class Decoder(nn.Module):
   def get_decoder_layer(self):
     if self.config.model_name == "default":
       return DecoderLayer
-    elif self.config.model_name[0:6] == "llama2":
+    elif self.config.model_name.startswith("llama2"):
       from layers import llama2
       return llama2.LlamaDecoderLayer
+    elif self.config.model_name.startswith("mistral"):
+      # TODO(ranran): update to Mistral with sliding window attention
+      from layers import llama2
+      return llama2.LlamaDecoderLayer
+    elif self.config.model_name.startswith("gamma"):
+      from layers import gamma
+      return gamma.GammaDecoderLayer
     else:
       raise ValueError(f"Incorrect model name {self.config.model_name=}")
 
@@ -173,6 +182,9 @@ class Decoder(nn.Module):
         rate=cfg.dropout_rate, broadcast_dims=(-2,))(
             y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
+
+    if cfg.use_positional_embedding:
+      y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
 
     BlockLayer = self.get_decoder_layer()
 
@@ -220,7 +232,7 @@ class Decoder(nn.Module):
           ),
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'},
-      )(config=cfg, mesh=mesh, name='decoder')(
+      )(config=cfg, mesh=mesh, name='layers')(
           y,
           decoder_segment_ids,
           decoder_positions,
@@ -229,7 +241,6 @@ class Decoder(nn.Module):
       )
     else:
       for lyr in range(cfg.num_decoder_layers):
-        # [batch, length, emb_dim] -> [batch, length, emb_dim]
         y = BlockLayer(config=cfg, mesh=mesh, name=f'layers_{lyr}')(
             y,
             decoder_segment_ids,

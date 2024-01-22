@@ -55,7 +55,6 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 Transformer = models.Transformer
 
-
 def validate_train_config(config):
   """ Validates the configuration is set correctly for train.py"""
 
@@ -64,13 +63,6 @@ def validate_train_config(config):
     max_logging.log("WARNING: 'dataset_path' might be pointing your local file system")
   if not config.base_output_directory.startswith('gs://'):
     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
-
-  assert ((config.load_parameters_path=="" and config.load_from_other_directory=="") or
-    config.enable_checkpointing), "You must set enable_checkpointing to load a checkpoint"
-  assert config.load_parameters_path=="" or config.load_from_other_directory=="",\
-  "At most one of load_parameters_path or load_from_other_directory should be set"
-  assert config.load_from_other_directory_step==-1 or config.load_from_other_directory!="",\
-  "You must specify the loading directory if you specify the loading step"
   assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive interger."
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
@@ -210,25 +202,24 @@ def train_step(model, config, state, data, dropout_rng):
 
   return new_state, metrics
 
-def setup_train_loop(config, init_rng):
-  """ Set up prerequisites for the training loop -
-      checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
-      Set up data iterator and tokenizer, initialize the model.
+def setup_mesh_and_model(config):
+  """ Set up the mesh and the model for training
 
   Args:
     config
-    init_rng
 
   Returns:
+    init_rng: RNG key
     writer: Summary writer for tensorboard
     checkpoint_manager: Orbax checkpointer
     state_mesh_annotations: the mesh annotations for the train state 
     model:
     mesh: 
     learning_rate_schedule:
-    data_iterator: 
-    state: the initialized train state
+    tx:
   """
+
+  init_rng = random.PRNGKey(config.init_weights_seed)
   writer = SummaryWriter(config.tensorboard_dir)
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       config.checkpoint_dir,
@@ -244,12 +235,34 @@ def setup_train_loop(config, init_rng):
   model = Transformer(config, mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
+  return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
 
+def setup_train_loop(config):
+  """ Set up prerequisites for the training loop -
+      checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
+      Set up data iterator and tokenizer, initialize the model.
+
+  Args:
+    config
+
+  Returns:
+    init_rng:
+    writer: Summary writer for tensorboard
+    checkpoint_manager: Orbax checkpointer
+    state_mesh_annotations: the mesh annotations for the train state 
+    model:
+    mesh: 
+    learning_rate_schedule:
+    data_iterator: 
+    state: the initialized train state
+  """
+  init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  state, state_mesh_annotations = max_utils.setup_training_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  state, state_mesh_annotations = max_utils.setup_training_state(model,
+          tx, config, init_rng, mesh, checkpoint_manager)
 
-  return ( writer, checkpoint_manager, state_mesh_annotations, model,
+  return ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
           mesh, learning_rate_schedule, data_iterator, state)
 
 
@@ -261,9 +274,8 @@ def train_loop(config, state=None):
     ckpt_path:
   Returns:
   """
-  init_rng = random.PRNGKey(config.init_weights_seed)
-  ( writer, checkpoint_manager, state_mesh_annotations, model,
-  mesh, learning_rate_schedule, data_iterator, state) = setup_train_loop(config, init_rng)
+  ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
+  mesh, learning_rate_schedule, data_iterator, state) = setup_train_loop(config)
 
   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
     train_step,
@@ -347,7 +359,10 @@ def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   config = pyconfig.config
   validate_train_config(config)
-  cc.initialize_cache(os.path.expanduser(config.jax_cache_dir))
+  if jax.__version__ <= '0.4.23':
+    cc.initialize_cache(os.path.expanduser(config.jax_cache_dir))
+  else:
+    cc.set_cache_dir(os.path.expanduser(config.jax_cache_dir))
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   debug_config = debug_configuration.DebugConfig(
     stack_trace_config = stack_trace_configuration.StackTraceConfig(

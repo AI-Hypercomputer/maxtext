@@ -152,6 +152,9 @@ def main(argv: Sequence[str]) -> None:
     save_compiled(compiled, config.compiled_trainstep_file)
     print(f"Successfully saved compiled object as {config.compiled_trainstep_file}")
   print("Finished train_compile.py successfully!", flush=True)
+  print(f"Cost analysis: {compiled.cost_analysis()}")
+  print(f"Memory analysis: {compiled.memory_analysis()}")
+
 
 if __name__ == "__main__":
   app.run(main)

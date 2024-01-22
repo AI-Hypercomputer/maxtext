@@ -87,6 +87,7 @@ class LlamaDecoderLayer(nn.Module):
 
     # Self-attention block
     attention_layer = Attention(
+      config = cfg,
       num_query_heads=cfg.num_query_heads,
       num_kv_heads=cfg.num_kv_heads,
       head_dim=cfg.head_dim,

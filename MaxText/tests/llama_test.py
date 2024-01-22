@@ -112,6 +112,24 @@ class RoPETest(unittest.TestCase):
     self.assertTrue(jax.numpy.allclose(llama_output[0], query_proj, rtol=1e-01, atol=1e-04, equal_nan=False))
     self.assertTrue(jax.numpy.allclose(llama_output[1], key_proj, rtol=1e-01, atol=1e-04, equal_nan=False))
 
+  def test_scaling_rope(self):
+    dim_per_head = 128
+    seq_len = 8
+
+    # Run the two implementations on some random query and key
+    x_q = np.random.normal(1, 0.5, (1, seq_len, 4, dim_per_head))
+    position = jnp.arange(seq_len, dtype=jnp.float32)[jnp.newaxis, :]
+
+    # Calculate RoPE embeddings and then scale
+    query_proj_1 = embeddings.RotaryEmbedding(embedding_dims = dim_per_head)(x_q, position = position)
+    query_proj_1 = query_proj_1 * (dim_per_head ** -0.5)
+
+    # scale first and then apply RoPE
+    query_proj_2 = x_q * (dim_per_head ** -0.5)
+    query_proj_2 = embeddings.RotaryEmbedding(embedding_dims = dim_per_head)(query_proj_2, position=position)
+
+    self.assertTrue(jax.numpy.allclose(query_proj_2, query_proj_1, rtol=1e-01, atol=1e-04, equal_nan=False))
+
 if __name__ == '__main__':
   unittest.main()
 
