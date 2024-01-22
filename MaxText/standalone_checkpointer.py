@@ -104,7 +104,9 @@ def add_entropy_to_checkpoint(state):
 
 
 def main(argv: Sequence[str]) -> None:
-  jax.config.update("jax_cpu_enable_gloo_collectives", True)
+  jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
+  jax.config.update('jax_cpu_enable_gloo_collectives', True)
+  jax.distributed.initialize(coordinator_address=os.environ.get("JAX_COORDINATOR_ADDRESS"), process_id=int(os.environ.get("JAX_PROCESS_ID")), num_processes=int(os.environ.get("JAX_PROCESS_COUNT")))
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   pyconfig.initialize(argv)
   config = pyconfig.config
