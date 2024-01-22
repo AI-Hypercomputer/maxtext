@@ -57,6 +57,9 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
   if [[ ${DEVICE} == "gpu" ]]; then
     docker build --network host -f ./maxtext_gpu_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
   fi
+  if [[ ${DEVICE} == "cpu" ]]; then
+    docker build --network host -f ./maxtext_cpu_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+  fi
 else
   docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
   docker build --network host --build-arg CUSTOM_LIBTPU=true -f ./maxtext_libtpu_path.Dockerfile -t ${LOCAL_IMAGE_NAME} .
