@@ -31,6 +31,10 @@ import jax
 from typing import Any, Union
 
 _MAX_PREFIX = "M_"
+_DEFAULT = "default"
+_LLAMA2_7B = "llama2-7b"
+_MISTRAL_7B = "mistral-7b"
+
 def yaml_key_to_env_key(s: str) -> str:
   return _MAX_PREFIX + s.upper()
 
@@ -60,7 +64,8 @@ def validate_keys(keys):
 
 
 def validate_model_name(s: str) -> bool:
-  valid_model_names= ('default', 'llama2-7b', 'gamma-7b','gamma-2b') # currently supported models
+  # currently supported models
+  valid_model_names= ('default', 'llama2-7b', 'mistral-7b', 'gamma-7b','gamma-2b')
   if s not in valid_model_names:
     raise ValueError(
       "Invalid model name was passed. Valid options ", valid_model_names
@@ -185,58 +190,14 @@ class _HyperParameters():
     ''' Update model config variables
     '''
     validate_model_name(raw_keys['model_name'])
-    if raw_keys['model_name'] == 'llama2-7b':
-      max_logging.log(f"Running Model: {raw_keys['model_name']}")
-      llama2_7b_model_vars = {
-        'base_emb_dim': 4096,
-        'base_num_query_heads': 32,
-        'base_num_kv_heads': 32,
-        'base_mlp_dim': 11008,
-        'base_num_decoder_layers': 32,
-        'head_dim': 128,
-        'mlp_activations': ['silu','linear'],
-        'vocab_size': 32000,
-        'enable_dropout': False,
-        'attention':'dot_product',
-        'vocab_relative_path':'tokenizer.llama2',
-        'logits_via_embedding': False,
-        'rms_norm_epsilon': 1e-05,
-        'add_bos': True,
-        'add_eos': False
-      }
-      raw_keys = validate_and_update_keys(raw_keys, llama2_7b_model_vars)
-    if raw_keys['model_name'] == 'gamma-7b':
-      max_logging.log(f"Running Model: {raw_keys['model_name']}")
-      gamma_7b_model_vars = {
-        'base_emb_dim': 3072,
-        'base_num_query_heads': 16,
-        'base_num_kv_heads': 16,
-        'base_mlp_dim': 24576,
-        'base_num_decoder_layers': 28,
-        'head_dim': 256,
-        'mlp_activations': ['gelu', 'linear'],
-        'vocab_size': 256128,
-        'vocab_relative_path': 'tokenizer.gamma',
-        'add_bos': True,
-        'add_eos': False,
-      }
-      raw_keys = validate_and_update_keys(raw_keys, gamma_7b_model_vars)
-    if raw_keys['model_name'] == 'gamma-2b':
-      max_logging.log(f"Running Model: {raw_keys['model_name']}")
-      gamma_2b_model_vars = {
-        'base_emb_dim': 2048,
-        'base_num_query_heads': 8,
-        'base_num_kv_heads': 1,
-        'base_mlp_dim': 16384,
-        'base_num_decoder_layers': 18,
-        'head_dim': 256,
-        'mlp_activations': ['gelu', 'linear'],
-        'vocab_size': 256128,
-        'vocab_relative_path': 'tokenizer.gamma',
-        'add_bos': True,
-        'add_eos': False,
-      }
-      raw_keys = validate_and_update_keys(raw_keys, gamma_2b_model_vars)
+    max_logging.log(f"Running Model: {raw_keys['model_name']}")
+
+    if raw_keys['model_name'] != 'default':
+      file_path = f"MaxText/configs/models/{raw_keys['model_name']}.yml"
+      with open(file_path, 'r', encoding="utf-8") as file:
+        model_vars = yaml.safe_load(file)
+      raw_keys = validate_and_update_keys(raw_keys, model_vars)
+
 
 def validate_and_update_keys(raw_keys, model_keys):
   ''' Validate and update model specific config keys
