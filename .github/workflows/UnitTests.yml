@@ -28,11 +28,14 @@ on:
 
 jobs:
   cpu:
-    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-20.04]
+        device-type: [n2-standard-64]
+        os: [ubuntu-22.04]
         python-version: ['3.10']
+    name: "CPU test (${{ matrix.device-type }})"
+    runs-on: ["self-hosted", "cpu", "${{ matrix.device-type }}", "${{ matrix.os }}"]
     steps:
     - uses: actions/checkout@v3
     - name: setup python
@@ -49,6 +52,32 @@ jobs:
     - name: Analysing the code with pylint
       run: |
         pylint MaxText/
+    - name: Cleanup old docker images
+      run: |
+        docker system prune --all --force
+    - name: Install dependencies
+      run: |
+        bash docker_build_dependency_image.sh DEVICE=cpu
+    - name: Test with pytest
+      run: |
+        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c 'cd MaxText;python3 -m pytest -m "not tpu"'
+    - name: Test train.py
+      run: |
+        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
+        'JAX_PLATFORMS=cpu python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 enable_checkpointing=false attention=dot_product'
+    - name: Test decode.py
+      run: |
+        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
+        'JAX_PLATFORMS=cpu python3 MaxText/decode.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 attention=dot_product enable_checkpointing=false max_target_length=128 per_device_batch_size=1 add_eos=False'
+    - name: Test standalone_dataloader.py
+      run: |
+        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
+        'JAX_PLATFORMS=cpu python3 MaxText/standalone_dataloader.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=100 enable_checkpointing=false'  
+    - name: Test standalone_checkpointer.py
+      run: |
+        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
+        'JAX_PLATFORMS=cpu python3 MaxText/standalone_checkpointer.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=200 checkpoint_period=50 enable_checkpointing=True async_checkpointing=False'  
+
 
 
   # IF YOU MODIFY THIS, YOU SHOULD ALSO ADD CORRESPONDING MODICATIONS TO 'gpu' job
@@ -146,39 +175,3 @@ jobs:
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
         'python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset int8_training=true steps=2 enable_checkpointing=false attention=dot_product'
-
-
-  cpu:
-      strategy:
-        fail-fast: false
-        matrix:
-          device-type: ["n2-standard-64"]
-      name: "CPU test (${{ matrix.device-type }})"
-      runs-on: ["self-hosted", "cpu", "${{ matrix.device-type }}"]
-      steps:
-      - uses: actions/checkout@v3
-      - name: Cleanup old docker images
-        run: |
-          docker system prune --all --force
-      - name: Install dependencies
-        run: |
-          bash docker_build_dependency_image.sh DEVICE=cpu
-      - name: Test with pytest
-        run: |
-          docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c 'cd MaxText;python3 -m pytest -m "not tpu"'
-      - name: Test train.py
-        run: |
-          docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
-          'python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 enable_checkpointing=false attention=dot_product'
-      - name: Test decode.py
-        run: |
-          docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
-          'python3 MaxText/decode.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 attention=dot_product enable_checkpointing=false max_target_length=128 per_device_batch_size=1 add_eos=False'
-      - name: Test standalone_dataloader.py
-        run: |
-          docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
-          'python3 MaxText/standalone_dataloader.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=100 enable_checkpointing=false'  
-      - name: Test standalone_checkpointer.py
-        run: |
-          docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
-          'python3 MaxText/standalone_checkpointer.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=200 checkpoint_period=50 enable_checkpointing=True async_checkpointing=False'  

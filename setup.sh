@@ -129,6 +129,15 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
             echo "Installing stable jax, jaxlib, libtpu for NVIDIA gpu"
             pip3 install -U "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
         fi
+    elif [[ $DEVICE == "cpu" ]]; then 
+        echo "Installing stable jax, jaxlib for cpu"
+        if [[ -n "$JAX_VERSION" ]]; then
+            echo "Installing stable jax, jaxlib ${JAX_VERSION}"
+            pip3 install jax[cpu]==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+        else
+            echo "Installing stable jax, jaxlib, libtpu for cpu"
+            pip3 install jax[cpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+        fi
     fi
 elif [[ $MODE == "nightly" ]]; then 
 # Nightly mode
