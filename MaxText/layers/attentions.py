@@ -70,6 +70,7 @@ class AttentionOp(nn.Module):
   mesh: Mesh
   attention_kernel: str
   max_target_length: int
+  max_prefill_predict_length: int
   use_int8: bool
   num_query_heads: int
   num_kv_heads: int
@@ -381,6 +382,62 @@ class AttentionOp(nn.Module):
                           (1,), jnp.int32)
     return cached_key, cached_value, cached_segment_id, cache_index
 
+
+  def _get_prefill_cache(self, cache_logical_shape, dtype):
+    kv_cache_layout = ('cache_batch', 'cache_heads', 'cache_kv', 'cache_sequence')
+    cached_key = self.variable('cache', 'cached_key',
+                               nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
+                               self.cached_kv_shape(cache_logical_shape), dtype)
+    cached_value = self.variable('cache', 'cached_value',
+                                 nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
+                                 self.cached_kv_shape(cache_logical_shape), dtype)
+    cached_segment_id = self.variable('cache', 'cache_segment_id',
+                  nn.with_logical_partitioning(jnp.zeros, ('cache_batch', 'cache_sequence')),
+                  (cache_logical_shape[0], self.max_prefill_predict_length), jnp.int32)
+    cache_index = self.variable('cache', 'cache_index',
+                          nn.with_logical_partitioning(jnp.zeros, ()),
+                          (1,), jnp.int32)
+
+    return cached_key, cached_value, cached_segment_id, cache_index
+    
+  def kv_cache(
+      self,
+      key: Array,
+      value: Array,
+      decoder_segment_ids: Array,
+      model_mode: str
+  ) -> tuple[Array, Array, Array]:
+    """KV cache takes the current state and updates the state accordingly.
+
+    The key and value have dimension [batch, length, num_heads, head_dim],
+    but we cache them as [batch, num_heads, head_dim, length] as a TPU
+    fusion optimization. This also enables the "scatter via one-hot
+    broadcast" trick, which means we do a one-hot broadcast instead of a
+    scatter/gather operations, resulting in a 3-4x speedup in practice.
+
+    Args:
+      key: in shape [b, s, n, d].
+      value: in shape [b, s, n, d].
+      model_mode: model mode controlling model
+
+    Returns:
+      tuple of key, value with cached,
+
+    """
+    if key.shape != value.shape:
+      raise ValueError(f"Can't KV cache with mismatched shapes {key.shape=}, {value.shape=}")
+
+    if model_mode == common_types.MODEL_MODE_TRAIN:
+      return key, value, decoder_segment_ids
+    elif model_mode == common_types.MODEL_MODE_PREFILL:
+      return self.kv_cache_prefill(key, value, decoder_segment_ids)
+    elif model_mode == common_types.MODEL_MODE_PREFILL_NEW:
+      return self.kv_cache_prefill_new(key, value, decoder_segment_ids)
+    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      return self.kv_cache_autoregressive(key, value, decoder_segment_ids)
+    else:
+      raise ValueError(f"Model Mode isn't supported! {model_mode=}")
+
   def kv_cache_prefill(self,
                         key: Array,
                         value: Array,
@@ -403,14 +460,52 @@ class AttentionOp(nn.Module):
       _, sequence, _, _ = key.shape
 
       cached_key, cached_value, cached_segment_id, cache_index = self._get_cache(cache_logical_shape, key.dtype)
-      cached_key.value *= 0 # we might be prefilling something that already exists!
-      cached_value.value *= 0 # we might be prefilling something that already exists!
+
+      # we might be prefilling something that already exists!
+      cached_key.value *= 0 
+      cached_value.value *= 0 
       cached_segment_id.value *= 0
       cache_index.value = jnp.array(sequence)
 
       key_shaped_for_cache = self.move_kvlen_axis(key)
       value_shaped_for_cache = self.move_kvlen_axis(value)
-        
+      cached_key.value = cached_key.value.at[:, :, :, 0:sequence].set(key_shaped_for_cache)
+      cached_value.value = cached_value.value.at[:, :, :, 0:sequence].set(value_shaped_for_cache)
+      cached_segment_id.value = cached_segment_id.value.at[:, 0:sequence].set(decoder_segment_ids)
+      return key, value, decoder_segment_ids
+
+  def kv_cache_prefill_new(self,
+                        key: Array,
+                        value: Array,
+                        decoder_segment_ids: Array,
+                       ):
+      """In prefill mode, we zero out the existing cache, run the computation and 
+      prepare the cache as necessary.
+
+      Args:
+        key: in shape [b, p, n, d].
+        value: in shape [b, p, n, d].
+        decoder_segment_ids: [b, p] -- marking segment ids for tokens
+
+      Returns:
+        tuple of key, value, decoder_segment_id.
+
+      """
+      assert key.dtype == value.dtype, "Key and Value Dtypes should match."
+      cache_logical_shape = (key.shape[0], self.max_prefill_predict_length, key.shape[2], key.shape[3])
+
+      _, sequence, _, _ = key.shape
+      cached_key, cached_value, cached_segment_id, cache_index = self._get_prefill_cache(cache_logical_shape, key.dtype)
+
+      # we might be prefilling something that already exists!
+      cached_key.value *= 0 
+      cached_value.value *= 0 
+      cached_segment_id.value *= 0
+      cache_index.value = jnp.array(sequence)
+
+      key_shaped_for_cache = self.move_kvlen_axis(key)
+      value_shaped_for_cache = self.move_kvlen_axis(value)
+      
       cached_key.value = cached_key.value.at[:, :, :, 0:sequence].set(key_shaped_for_cache)
       cached_value.value = cached_value.value.at[:, :, :, 0:sequence].set(value_shaped_for_cache)
       cached_segment_id.value = cached_segment_id.value.at[:, 0:sequence].set(decoder_segment_ids)
@@ -474,47 +569,10 @@ class AttentionOp(nn.Module):
 
       return key, value, cached_segment_id.value
 
-  def kv_cache(
-      self,
-      key: Array,
-      value: Array,
-      decoder_segment_ids: Array,
-      model_mode: str
-  ) -> tuple[Array, Array, Array]:
-    """KV cache takes the current state and updates the state accordingly.
-
-    The key and value have dimension [batch, length, num_heads, head_dim],
-    but we cache them as [batch, num_heads, head_dim, length] as a TPU
-    fusion optimization. This also enables the "scatter via one-hot
-    broadcast" trick, which means we do a one-hot broadcast instead of a
-    scatter/gather operations, resulting in a 3-4x speedup in practice.
-
-    Args:
-      key: in shape [b, s, n, d].
-      value: in shape [b, s, n, d].
-      model_mode: model mode controlling model
-
-    Returns:
-      tuple of key, value with cached,
-
-    """
-    if key.shape != value.shape:
-      raise ValueError(f"Can't KV cache with mismatched shapes {key.shape=}, {value.shape=}")
-
-    if model_mode == common_types.MODEL_MODE_TRAIN:
-      return key, value, decoder_segment_ids
-    elif model_mode == common_types.MODEL_MODE_PREFILL:
-      return self.kv_cache_prefill(key, value, decoder_segment_ids)
-    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      return self.kv_cache_autoregressive(key, value, decoder_segment_ids)
-    else:
-      raise ValueError(f"Model Mode isn't supported! {model_mode=}")
 
   @nn.compact
   def __call__(self, query, key, value, decoder_segment_ids, model_mode):
     key_to_use, value_to_use, decoder_segment_ids_to_use = self.kv_cache(key, value, decoder_segment_ids, model_mode)
-
-    # Apply attention.
     out = self.apply_attention(
         query,
         key_to_use,
@@ -547,6 +605,7 @@ class Attention(nn.Module):
   num_kv_heads: int
   head_dim: int
   max_target_length: int
+  max_prefill_predict_length: int
   mesh: Mesh
   attention_kernel: str
   dtype: DType = jnp.float32
@@ -697,6 +756,7 @@ class Attention(nn.Module):
     attention_op = AttentionOp(mesh=self.mesh,
                                attention_kernel=self.attention_kernel,
                                max_target_length=self.max_target_length,
+                               max_prefill_predict_length=self.max_prefill_predict_length,
                                float32_logits=self.float32_logits,
                                use_int8=self.use_int8,
                                num_query_heads=self.num_query_heads,

@@ -444,16 +444,36 @@ def get_kv_cache_annotations(model, config, rng, mesh):
       config.global_batch_size_to_load,
       config.max_target_length
     )
+    model_vars = model.init({'params': rng, 'dropout': rng, 'aqt': rng},
+                            jnp.ones(input_shape),
+                            jnp.ones(input_shape),
+                            model_mode=common_types.MODEL_MODE_PREFILL)
+    return model_vars['cache']
 
+  init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
+  abstract_state = jax.eval_shape(init_kv_cache_partial)
+  state_logical_annotations = nn.get_partition_spec(abstract_state)
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  return state_mesh_annotations
+
+
+def get_kv_cache_prefill_annotations(model, config, rng, mesh):
+  """ Get a shaped abstraction of the state (including optimizer)"""
+
+  def init_kv_prefill_cache(model, config):
+    input_shape = (
+      config.global_batch_size_to_load,
+      config.max_prefill_predict_length
+    )
     model_vars = model.init({'params': rng, 'dropout': rng, 'aqt': rng},
                           jnp.ones(input_shape),
                           jnp.ones(input_shape),
                           model_mode=common_types.MODEL_MODE_PREFILL)
     return model_vars['cache']
 
-  init_kv_cache_partial = functools.partial(init_kv_cache, model,
-                                              config)
-  abstract_state = jax.eval_shape(init_kv_cache_partial)
+  init_kv_cache_prefill_partial = functools.partial(init_kv_prefill_cache, model, config)
+  abstract_state = jax.eval_shape(init_kv_cache_prefill_partial)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
