@@ -157,11 +157,7 @@ class Decoder(nn.Module):
       # TODO(ranran): update to Mistral with sliding window attention
       from layers import llama2
       return llama2.LlamaDecoderLayer
-    elif self.config.model_name.startswith("mixtral"):
-      # TODO(ranran): update to Mixtral with sliding window attention
-      from layers import llama2
-      return llama2.LlamaDecoderLayer
-    elif self.config.model_name.startswith("gamma"):
+    elif self.config.decoder_block == "gamma":
       from layers import gamma
       return gamma.GammaDecoderLayer
     else:
