@@ -65,7 +65,7 @@ def validate_keys(keys):
 
 def validate_model_name(s: str) -> bool:
   # currently supported models
-  valid_model_names= ('default', 'llama2-7b', 'mistral-7b', 'gamma-7b','gamma-2b')
+  valid_model_names= ('default', 'llama2-7b', 'mistral-7b', 'gamma-7b','gamma-2b', 'llama2-1b')
   if s not in valid_model_names:
     raise ValueError(
       "Invalid model name was passed. Valid options ", valid_model_names
