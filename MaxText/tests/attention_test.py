@@ -50,6 +50,7 @@ class AttentionTest(unittest.TestCase):
     self.num_kv_heads = self.cfg.num_kv_heads
     self.num_query_heads = self.cfg.num_query_heads
     self.max_target_length = self.cfg.max_target_length
+    self.max_prefill_predict_length = self.cfg.max_prefill_predict_length
     self.head_dim = self.cfg.head_dim
     self.embed_dim = self.cfg.base_emb_dim
     self.dtype = self.cfg.dtype
@@ -60,8 +61,9 @@ class AttentionTest(unittest.TestCase):
         num_kv_heads=self.num_kv_heads,
         head_dim=self.head_dim,
         max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
         mesh=self.mesh,
-        attention_kernel = "dot_product",
+        attention_kernel="dot_product",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
         name='self_attention',
@@ -195,6 +197,7 @@ class AttentionTest(unittest.TestCase):
         num_kv_heads=self.num_kv_heads,
         head_dim=self.head_dim,
         max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
         mesh=self.mesh,
         attention_kernel = "flash",
         dtype=self.dtype,
@@ -239,6 +242,7 @@ class AttentionTest(unittest.TestCase):
         num_kv_heads=1,
         head_dim=self.head_dim,
         max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
         mesh=self.mesh,
         attention_kernel = "dot_product",
         dtype=self.dtype,

@@ -80,6 +80,7 @@ attention: 'flash' # Supported attention: dot_product, flash, gpu_flash_xla, gpu
 # Combine matmuls for QKV and MLP
 fused_qkv: False
 fused_mlp: False
+combined_kv_cache: True
 
 record_internal_nn_metrics: 0
 

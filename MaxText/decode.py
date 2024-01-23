@@ -84,8 +84,10 @@ def encode_strings(strs, max_len, tokenizer, mesh):
 def prefill_predict_step(inputs, input_positions, decoder_segment_ids,
                  state,
                  rngkey,
-                 model=None):
+                 model=None,
+                 combined_kv_cache=True):
   """Prefill KV Cache and output logits"""
+  model_mode = common_types.MODEL_MODE_PREFILL if combined_kv_cache else common_types.MODEL_MODE_PREFILL_SPLIT
   flat_logits, new_vars = model.apply(
     {
         "params": state.params
@@ -94,27 +96,7 @@ def prefill_predict_step(inputs, input_positions, decoder_segment_ids,
     input_positions,
     decoder_segment_ids=decoder_segment_ids,
     enable_dropout=False,
-    model_mode=common_types.MODEL_MODE_PREFILL,
-    rngs={'aqt': rngkey},
-    mutable=["cache"]
-  )
-
-  return flat_logits, new_vars['cache']
-
-def prefill_predict_step_new(inputs, input_positions, decoder_segment_ids,
-                 state,
-                 rngkey,
-                 model=None):
-  """Prefill KV Cache and output logits"""
-  flat_logits, new_vars = model.apply(
-    {
-        "params": state.params
-    },
-    inputs,
-    input_positions,
-    decoder_segment_ids=decoder_segment_ids,
-    enable_dropout=False,
-    model_mode=common_types.MODEL_MODE_PREFILL_NEW,
+    model_mode=model_mode,
     rngs={'aqt': rngkey},
     mutable=["cache"]
   )
@@ -147,7 +129,8 @@ def compute_prefill(config, model, state, rng, sp_tokenizer, mesh, state_mesh_sh
   tokenized_prompts, prompt_decoder_positions, prompt_decoder_segment_ids  = encode_strings(tokenized_prompt,\
       config.max_prefill_predict_length, sp_tokenizer, mesh)
 
-  partial_prefill_predict_step = functools.partial(prefill_predict_step, model=model)
+  partial_prefill_predict_step = functools.partial(prefill_predict_step, model=model, 
+                                                   combined_kv_cache=config.combined_kv_cache)
   p_prefill_predict_step = jax.jit(
       partial_prefill_predict_step,
       in_shardings=(replicated_sharding, replicated_sharding, replicated_sharding, state_mesh_shardings, None),
@@ -159,37 +142,14 @@ def compute_prefill(config, model, state, rng, sp_tokenizer, mesh, state_mesh_sh
   indices = jax.numpy.argmax(prefill_output, axis=2)
 
   last_index = indices[:, -1:]
-  pos = prompt_decoder_positions[:, -1:] + 1
-  return prefill_cache, last_index, pos
-
-def compute_prefill_new(config, model, state, rng, sp_tokenizer, mesh, state_mesh_shardings,
-                    kv_cache_mesh_shardings):
-  """Compute the necessary prefill state."""
-  replicated_sharding = jax.sharding.NamedSharding(mesh, P(None))
-  tokenized_prompt = ['I love to', 'I would like to', 'I think', 'I want to']
-
-  # Encode the demo prompt -- to measure performance we encode it multiple times.
-  tokenized_prompts, prompt_decoder_positions, prompt_decoder_segment_ids  = encode_strings(tokenized_prompt,\
-      config.max_prefill_predict_length, sp_tokenizer, mesh)
-  partial_prefill_predict_step = functools.partial(prefill_predict_step_new, model=model)
-  p_prefill_predict_step = jax.jit(
-      partial_prefill_predict_step,
-      in_shardings=(replicated_sharding, replicated_sharding, replicated_sharding, state_mesh_shardings, None),
-      out_shardings=(replicated_sharding, kv_cache_mesh_shardings)
-  )
-
-  prefill_output, prefill_cache = p_prefill_predict_step(tokenized_prompts, prompt_decoder_positions,\
-                                                        prompt_decoder_segment_ids, state, rng)
-  indices = jax.numpy.argmax(prefill_output, axis=2)
-  last_index = indices[:, -1:]
-  pos = prompt_decoder_positions[:, -1:] + 1
-  return prefill_cache, last_index, pos
+  prompt_decoder_position = prompt_decoder_positions[:, -1:] + 1  
+  return prefill_cache, last_index, prompt_decoder_position
 
 def prefill_or_load(config, model, state, rng, sp_tokenizer, mesh, state_mesh_shardings,
                     kv_cache_mesh_shardings):
   """We either load the necessary prefill state or generate it.  """
-  orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
   if config.load_from_prefill_dir:
+    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
     kv_cache_restore_args = jax.tree_map(lambda sharding: orbax.checkpoint.type_handlers.ArrayRestoreArgs(sharding=sharding),
                                          kv_cache_mesh_shardings)
     next_token_restore_args = orbax.checkpoint.type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=P(None))
@@ -199,22 +159,15 @@ def prefill_or_load(config, model, state, rng, sp_tokenizer, mesh, state_mesh_sh
     blob["cache"] = jax.tree_map(lambda x : flax.linen.spmd.LogicallyPartitioned(x, mesh.axis_names), blob["cache"])
     max_logging.log(f"Restored prefill cache from {config.prefill_cache_dir}")
     return blob["cache"], blob["next_token"], blob["pos"]
-  else:
-    cache, next_token, pos = compute_prefill(config, model, state, rng, sp_tokenizer, mesh,
-                                             state_mesh_shardings, kv_cache_mesh_shardings)
-    max_logging.log(f"Computed prefill cache {config.prefill_cache_dir}")
 
-    if config.prefill_cache_dir != "":
-      blob = {"cache":cache, "next_token":next_token, "pos":pos}
-      orbax_checkpointer.save(config.prefill_cache_dir, max_utils.unbox_logicallypartioned(blob))
-      max_logging.log(f"Wrote prefill cache to {config.prefill_cache_dir}")
-    return cache, next_token, pos
+  cache, next_token, pos = compute_prefill(config, model, state, rng, sp_tokenizer, mesh,
+                                           state_mesh_shardings, kv_cache_mesh_shardings)
+  max_logging.log(f"Computed prefill cache {config.prefill_cache_dir}")
 
-def prefill_or_load_new(config, model, state, rng, sp_tokenizer, mesh, state_mesh_shardings,
-                    kv_cache_mesh_shardings):
-  """We either load the necessary prefill state or generate it.  """
-  cache, next_token, pos = compute_prefill_new(config, model, state, rng, sp_tokenizer, mesh,
-                                            state_mesh_shardings, kv_cache_mesh_shardings)
+  if config.prefill_cache_dir != "":
+    blob = {"cache":cache, "next_token":next_token, "pos":pos}
+    orbax_checkpointer.save(config.prefill_cache_dir, max_utils.unbox_logicallypartioned(blob))
+    max_logging.log(f"Wrote prefill cache to {config.prefill_cache_dir}")
   return cache, next_token, pos
 
 
@@ -231,8 +184,8 @@ def decode_loop(config, state=None):
   model = Transformer(config, mesh=mesh)
   _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
   state, state_mesh_annotations = max_utils.setup_decode_state(model, config, rng, mesh, None)
+  
   kv_cache_annotations = max_utils.get_kv_cache_annotations(model, config, rng, mesh)
-  kv_cache_prefill_annotations = max_utils.get_kv_cache_prefill_annotations(model, config, rng, mesh)
 
   assert state.opt_state == {}, "non null opt_state in checkpoint"
   num_params, bytes_params, bytes_per_param = max_utils.summarize_size_from_pytree(state.params)
@@ -246,13 +199,9 @@ def decode_loop(config, state=None):
   # TODO Pate: change kv_cache_mesh_shardings to kv_cache_mesh_prefill_shardings and kv_cache_mesh_generate_shardings
   kv_cache_mesh_shardings = jax.tree_map(
     lambda p: jax.sharding.NamedSharding(mesh, p), kv_cache_annotations)
-  kv_cache_mesh_prefill_shardings = jax.tree_map(
-    lambda p: jax.sharding.NamedSharding(mesh, p), kv_cache_prefill_annotations)
 
   prefill_cache, new_id, new_position = prefill_or_load(config, model, state, rng, sp_tokenizer,\
                                                    mesh, state_mesh_shardings, kv_cache_mesh_shardings)
-  prefill_cache_new, new_id_new, new_position_new = prefill_or_load_new(config, model, state, rng, sp_tokenizer,\
-                                                   mesh, state_mesh_shardings, kv_cache_mesh_prefill_shardings)
   num_cache, bytes_cache, bytes_per_cache = max_utils.summarize_size_from_pytree(prefill_cache)
   max_logging.log(f"Number of cache entries={num_cache/10**9:.3f} billion, memory usage={bytes_cache/2**30:.3f}GB, "
                   f"bytes per cache={bytes_per_cache:.3f}")

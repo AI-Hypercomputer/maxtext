@@ -430,9 +430,9 @@ class AttentionOp(nn.Module):
     if model_mode == common_types.MODEL_MODE_TRAIN:
       return key, value, decoder_segment_ids
     elif model_mode == common_types.MODEL_MODE_PREFILL:
-      return self.kv_cache_prefill(key, value, decoder_segment_ids)
-    elif model_mode == common_types.MODEL_MODE_PREFILL_NEW:
-      return self.kv_cache_prefill_new(key, value, decoder_segment_ids)
+      return self.kv_cache_prefill(key, value, decoder_segment_ids, combined_kv_cache=True)
+    elif model_mode == common_types.MODEL_MODE_PREFILL_SPLIT:
+      return self.kv_cache_prefill(key, value, decoder_segment_ids, combined_kv_cache=False)
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       return self.kv_cache_autoregressive(key, value, decoder_segment_ids)
     else:
@@ -442,6 +442,7 @@ class AttentionOp(nn.Module):
                         key: Array,
                         value: Array,
                         decoder_segment_ids: Array,
+                        combined_kv_cache: bool,
                        ):
       """In prefill mode, we zero out the existing cache, run the computation and 
       prepare the cache as necessary.
@@ -456,7 +457,10 @@ class AttentionOp(nn.Module):
 
       """
       assert key.dtype == value.dtype, "Key and Value Dtypes should match."
-      cache_logical_shape = (key.shape[0], self.max_target_length, key.shape[2], key.shape[3])
+      if combined_kv_cache:
+        cache_logical_shape = (key.shape[0], self.max_target_length, key.shape[2], key.shape[3])
+      else:
+        cache_logical_shape = (key.shape[0], self.max_prefill_predict_length, key.shape[2], key.shape[3])
       _, sequence, _, _ = key.shape
 
       cached_key, cached_value, cached_segment_id, cache_index = self._get_cache(cache_logical_shape, key.dtype)
@@ -469,43 +473,10 @@ class AttentionOp(nn.Module):
 
       key_shaped_for_cache = self.move_kvlen_axis(key)
       value_shaped_for_cache = self.move_kvlen_axis(value)
-      cached_key.value = cached_key.value.at[:, :, :, 0:sequence].set(key_shaped_for_cache)
-      cached_value.value = cached_value.value.at[:, :, :, 0:sequence].set(value_shaped_for_cache)
-      cached_segment_id.value = cached_segment_id.value.at[:, 0:sequence].set(decoder_segment_ids)
-      return key, value, decoder_segment_ids
+      # key:                  ShapedArray(bfloat16[4,16,8,256]
+      # key_shaped_for_cache: ShapedArray(bfloat16[4,8,256,16]
+      # (4, 16, 8, 256) -> (4, 8, 256, 16)
 
-  def kv_cache_prefill_new(self,
-                        key: Array,
-                        value: Array,
-                        decoder_segment_ids: Array,
-                       ):
-      """In prefill mode, we zero out the existing cache, run the computation and 
-      prepare the cache as necessary.
-
-      Args:
-        key: in shape [b, p, n, d].
-        value: in shape [b, p, n, d].
-        decoder_segment_ids: [b, p] -- marking segment ids for tokens
-
-      Returns:
-        tuple of key, value, decoder_segment_id.
-
-      """
-      assert key.dtype == value.dtype, "Key and Value Dtypes should match."
-      cache_logical_shape = (key.shape[0], self.max_prefill_predict_length, key.shape[2], key.shape[3])
-
-      _, sequence, _, _ = key.shape
-      cached_key, cached_value, cached_segment_id, cache_index = self._get_prefill_cache(cache_logical_shape, key.dtype)
-
-      # we might be prefilling something that already exists!
-      cached_key.value *= 0 
-      cached_value.value *= 0 
-      cached_segment_id.value *= 0
-      cache_index.value = jnp.array(sequence)
-
-      key_shaped_for_cache = self.move_kvlen_axis(key)
-      value_shaped_for_cache = self.move_kvlen_axis(value)
-      
       cached_key.value = cached_key.value.at[:, :, :, 0:sequence].set(key_shaped_for_cache)
       cached_value.value = cached_value.value.at[:, :, :, 0:sequence].set(value_shaped_for_cache)
       cached_segment_id.value = cached_segment_id.value.at[:, 0:sequence].set(decoder_segment_ids)
