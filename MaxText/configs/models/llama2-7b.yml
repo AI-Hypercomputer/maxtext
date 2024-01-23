@@ -29,3 +29,4 @@ logits_via_embedding: False
 rms_norm_epsilon: 1.0e-5
 add_bos: True
 add_eos: False
+decoder_block: "llama2"

@@ -184,8 +184,8 @@ def train_step(model, config, state, data, dropout_rng):
     xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
     xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
     # Mask out paddings at the end of each example.
-    xent = xent * (data['inputs_segmentation'] != 0)
-    return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
+    xent = xent * (data['targets_segmentation'] != 0)
+    return jnp.sum(xent)/jnp.sum((data['targets_segmentation'] != 0)), intermediate_outputs
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
