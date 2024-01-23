@@ -178,6 +178,7 @@ class _HyperParameters():
     raw_keys['mlp_dim'] = 2**mlp_dim_scale * raw_keys['base_mlp_dim']
     raw_keys['num_decoder_layers'] = 2**layer_scale * raw_keys['base_num_decoder_layers']
     raw_keys['num_experts'] = raw_keys['num_experts']
+    raw_keys['num_experts_per_tok'] = raw_keys['num_experts_per_tok']
 
     raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = \
       calculate_global_batch_sizes(raw_keys)
@@ -198,7 +199,6 @@ class _HyperParameters():
       with open(file_path, 'r', encoding="utf-8") as file:
         model_vars = yaml.safe_load(file)
       raw_keys = validate_and_update_keys(raw_keys, model_vars)
-
 
 
 def validate_and_update_keys(raw_keys, model_keys):
