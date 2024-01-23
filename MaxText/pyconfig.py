@@ -204,14 +204,14 @@ class _HyperParameters():
         'base_num_decoder_layers': 16,
         'head_dim': 128,
         'mlp_activations': ['silu','linear'],
-        'vocab_size': 32000,
+        # 'vocab_size': 32000,
         'enable_dropout': False,
         'attention':'dot_product',
-        'vocab_relative_path':'tokenizer.llama2',
+        # 'vocab_relative_path':'tokenizer.llama2',
         'logits_via_embedding': False,
         'rms_norm_epsilon': 1e-05,
-        'add_bos': True,
-        'add_eos': False
+        # 'add_bos': True,
+        #'add_eos': False
       }
       raw_keys = validate_and_update_keys(raw_keys, llama2_7b_model_vars)
 
