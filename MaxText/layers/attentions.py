@@ -304,7 +304,7 @@ class AttentionOp(nn.Module):
     # convert attn_weights to jnp.float32 for 2 reasons
     #   1) stability for the softmax function
     #   2) DEFAULT_MASK_VALUE is float32 based
-    # attn_weights = attn_weights.astype(jnp.float32)
+    attn_weights = attn_weights.astype(jnp.float32)
     attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
