@@ -110,9 +110,16 @@ def get_pax_lm_config(
   job_log_dir = f"{log_dir}/{model_name}-{short_id}"
   set_up_cmds = get_setup_cmds(pax_version, ckp_path, job_log_dir)
 
+  runtime_version = get_runtime_version(pax_version, tpu_version)
+
+  if runtime_version == RuntimeVersion.TPU_VM_V4_BASE.value:
+    package_version = "python3.8"
+  else:
+    package_version = "python3.10"
+
   run_model_cmds = (
       (
-          "python3 .local/lib/python3.8/site-packages/paxml/main.py"
+          f"python3 .local/lib/{package_version}/site-packages/paxml/main.py"
           f" --exp={exp_path} --job_log_dir={job_log_dir} {extraFlags}"
       ),
   )
@@ -121,7 +128,7 @@ def get_pax_lm_config(
       test_config.Tpu(
           version=tpu_version,
           cores=tpu_cores,
-          runtime_version=get_runtime_version(pax_version, tpu_version),
+          runtime_version=runtime_version,
           reserved=True,
           network=network,
           subnetwork=subnetwork,
