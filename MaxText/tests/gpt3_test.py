@@ -45,7 +45,7 @@ def init_random_model_vars(model, rng, example_batch):
   def _replace_initialization(key, value):
     keystr = jax.tree_util.keystr(key)
     # replace zero initializer to ensure strong test cases
-    #   including LayerNorm scale, LayerNorm bias, and DenseGeneral bias
+    #   including Gpt3LayerNorm scale, Gpt3LayerNorm bias, and DenseGeneral bias
     if "scale" in keystr or "bias" in keystr:
       value = jax.nn.initializers.normal(1.0)(rng, value.shape, dtype=value.dtype)
     return value
@@ -63,7 +63,7 @@ class GPT3(unittest.TestCase):
       attention="dot_product",
       run_name='test',
       enable_checkpointing=False,
-      model_name='gpt3-dummy',
+      model_name='gpt3-52k',
       dtype='float32',
     )
 

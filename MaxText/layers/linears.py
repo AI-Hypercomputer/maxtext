@@ -35,7 +35,7 @@ NdInitializer = initializers.NdInitializer
 nd_dense_init = initializers.nd_dense_init
 bias_init = initializers.default_bias_init
 
-LayerNorm = normalizations.LayerNorm
+RMSNorm = normalizations.RMSNorm
 
 
 def _convert_to_activation_function(
@@ -168,6 +168,15 @@ class MlpBlock(nn.Module):
   add_skip_connection: bool = False
   apply_padding_mask: bool = False
 
+  def get_norm_layer(self):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gamma"):
+      return RMSNorm
+    elif self.config.decoder_block == "gpt3":
+      from layers import gpt3
+      return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=self.use_bias)
+    else:
+      raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
+
   @nn.compact
   def __call__(self, inputs, padding_mask: Optional[Array] = None, decode: bool = False, deterministic: bool = False):
     """Applies Transformer MlpBlock module."""
@@ -176,13 +185,11 @@ class MlpBlock(nn.Module):
       residual = inputs
 
     if self.use_pre_norm:
-      inputs = LayerNorm(
+      inputs = self.get_norm_layer()(
         name='mlp_layer_norm',
         dtype=cfg.dtype,
         kernel_axes=('embed',),
-        use_bias=self.use_bias,
-        reductions_in_fp32=False,
-        epsilon=cfg.norm_epsilon,
+        epsilon=cfg.normalization_layer_epsilon,
         )(inputs)
 
     # Iterate over specified MLP input activation functions.

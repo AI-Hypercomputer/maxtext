@@ -38,7 +38,6 @@ ScanIn = common_types.ScanIn
 Embed = embeddings.Embed
 Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
-LayerNorm = normalizations.LayerNorm
 PositionalEmbedding = embeddings.PositionalEmbedding
 
 #------------------------------------------------------------------------------
@@ -70,7 +69,7 @@ class DecoderLayer(nn.Module):
     lnx = RMSNorm(
         dtype=cfg.dtype,
         name='pre_self_attention_norm',
-        epsilon=cfg.norm_epsilon,
+        epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=('embed',))(inputs)
     lnx = nn.with_logical_constraint(
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
@@ -163,21 +162,20 @@ class Decoder(nn.Module):
     elif self.config.decoder_block == "gamma":
       from layers import gamma
       return gamma.GammaDecoderLayer
-    elif self.config.model_name.startswith("gpt3"):
+    elif self.config.decoder_block == "gpt3":
       from layers import gpt3
       return gpt3.Gpt3DecoderLayer
     else:
-      raise ValueError(f"Incorrect model name {self.config.model_name=}")
-
-  def get_norm_layer(self):
-    if self.config.model_name == "default" or \
-        self.config.model_name.startswith(("llama2", "mistral", "gamma")):
-      return RMSNorm
-    elif self.config.model_name.startswith("gpt3"):
-      return functools.partial(LayerNorm, reductions_in_fp32=False, use_bias=True)
-    else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
+  def get_norm_layer(self):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gamma"):
+      return RMSNorm
+    elif self.config.decoder_block == "gpt3":
+      from layers import gpt3
+      return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=True)
+    else:
+      raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   @nn.compact
   def __call__(self,
@@ -277,8 +275,12 @@ class Decoder(nn.Module):
             model_mode,
         )
 
-    norm_layer = self.get_norm_layer()
-    y = norm_layer(dtype=cfg.dtype, name='decoder_norm', epsilon=cfg.norm_epsilon, kernel_axes=('embed',))(y)
+    y = self.get_norm_layer()(
+      dtype=cfg.dtype,
+      name='decoder_norm',
+      epsilon=cfg.normalization_layer_epsilon,
+      kernel_axes=('embed',),
+      )(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
         y, deterministic=deterministic
     )
@@ -287,7 +289,7 @@ class Decoder(nn.Module):
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
       logits = self.shared_embedding.attend(y)
-      if self.config.norm_logits_via_embedding:
+      if self.config.normalize_embedding_logits:
         # Correctly normalize pre-softmax logits for this shared case.
         logits = logits / jnp.sqrt(y.shape[-1])
     else:

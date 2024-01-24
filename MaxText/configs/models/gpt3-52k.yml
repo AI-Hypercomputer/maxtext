@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# model config for gpt3-dummy, i.e. a fake and small model for testing purpose only
+# model config for gpt3-52k, i.e. a fake and small model for testing purpose only
 
 base_emb_dim: 16
-base_num_heads: 2
+base_num_query_heads: 2
+base_num_kv_heads: 2
 base_mlp_dim: 64
 base_num_decoder_layers: 1
 head_dim: 8
@@ -25,11 +26,12 @@ mlp_activations: ["gelu"]
 vocab_size: 1024
 enable_dropout: False
 logits_via_embedding: True
-norm_logits_via_embedding: False
+normalize_embedding_logits: False
 logits_dot_in_fp32: False
-norm_epsilon: 1.e-05
+normalization_layer_epsilon: 1.e-05
 use_iota_embed: True
 fused_qkv: True
 add_bos: False
 add_eos: False
 opt_type: "adam_pax"
+decoder_block: "gpt3"

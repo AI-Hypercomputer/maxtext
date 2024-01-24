@@ -14,10 +14,10 @@
 # pylint: disable=line-too-long
 """Convert weights from a paxml gpt3 model to a MaxText one.
 
-Test cmd for gpt3-dummy:
+Test cmd for gpt3-52k:
 python MaxText/convert_gpt3_ckpt_from_paxml.py \
   --paxml-ckpt-path=gs://maxtext-gpt3/ckpt_test/paxml/checkpoints/checkpoint_00000000/state \
-  --maxtext-model-name=gpt3-dummy \
+  --maxtext-model-name=gpt3-52k \
   --run-name=$RUN_NAME \
   --base-output-directory=$BASE_OUTPUT_DIR
 
@@ -219,7 +219,7 @@ if __name__ == "__main__":
                       type=str,
                       default="gs://mlperf-llm-public2/gpt3_spmd1x64x24_tpuv4-3072_v84_20221101/checkpoints/checkpoint_00004000",
                       required=True)
-  parser.add_argument('--maxtext-model-name', choices=['gpt3-175b', 'gpt3-dummy'],  type=str, required=True)
+  parser.add_argument('--maxtext-model-name', choices=['gpt3-175b', 'gpt3-52k'],  type=str, required=True)
   parser.add_argument('--base-output-directory', type=str, required=True)
   parser.add_argument('--run-name', type=str, required=True)
 
