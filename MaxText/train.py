@@ -257,7 +257,7 @@ def setup_train_loop(config):
     state: the initialized train state
   """
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
-  data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
+  data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh, add_bos=True, add_eos=True)
 
   state, state_mesh_annotations = max_utils.setup_training_state(model,
           tx, config, init_rng, mesh, checkpoint_manager)

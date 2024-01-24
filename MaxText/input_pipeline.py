@@ -18,7 +18,6 @@
 
 import os
 from typing import Optional
-import functools
 
 import ml_collections
 import tensorflow as tf
@@ -65,6 +64,11 @@ def shift_inputs_tf(x, segment_ids=None, axis=1):
 def shift_data(x, axis=0, segmented=True):
   segment_ids = x['inputs_segmentation'] if segmented else None
   x['inputs'] = shift_inputs_tf(x['inputs'], segment_ids=segment_ids, axis=axis)
+  return x
+
+def shift_data_by_truncation(x):
+  x['inputs'] = x['inputs'][:-1]
+  x['targets'] = x['targets'][1:]
   return x
 
 
@@ -114,8 +118,16 @@ def preprocessing_pipeline(
 ):
   """Shuffle and batch/pack the given dataset."""
 
+  def truncate_to_max_allowable_length(x, max_length):
+    x['inputs'] = x['inputs'][:max_length]
+    x['targets'] = x['targets'][:max_length]
+    return x
+
+
   if max_length > 0:
-    dataset = length_trim(dataset, max_len=max_length)
+    # We can take upto max_length+1 because there would be truncation by 1 token
+    # for both inputs and targets
+    dataset = dataset.map(lambda x: truncate_to_max_allowable_length(x, max_length+1))
 
   # Shuffle and repeat.
   if shuffle:
@@ -123,17 +135,17 @@ def preprocessing_pipeline(
 
   dataset = dataset.repeat(num_epochs)
 
-  # Perform greedy sequence packing
-  if pack_examples:
-    dataset = sequence_packing.pack_dataset(dataset, max_length)
 
   # Shift inputs for teacher-forced training
   if shift:
     dataset = dataset.map(
-      functools.partial(shift_data, axis=0, segmented=pack_examples),
+      shift_data_by_truncation,
       num_parallel_calls=tf.data.AUTOTUNE,
       deterministic=True)
 
+  # Perform greedy sequence packing
+  if pack_examples:
+    dataset = sequence_packing.pack_dataset(dataset, max_length)
   assert (
         batch_size % global_mesh.size == 0
     ), 'Batch size should be divisible number of global devices.'
@@ -191,15 +203,18 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
                         global_mesh,
                         train_ds, eval_ds,
                         vocab_path: Optional[str] = None,
-                        data_shuffle_seed = 0,):
+                        data_shuffle_seed = 0,
+                        add_bos = True,
+                        add_eos = True
+                        ):
   """Pre-process the dataset and return iterators"""
   if vocab_path is None:
     vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
 
   # Load tokenizer
   sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
-                                          add_bos=config.add_bos,
-                                          add_eos=config.add_eos)
+                                          add_bos=add_bos,
+                                          add_eos=add_eos)
 
   # Tokenize data.
   train_ds = train_ds.map(
@@ -255,7 +270,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
   return train_iter, eval_iter, predict_iter, sp_tokenizer
 
 
-def make_c4_train_iterator_and_tokenizer(config, mesh):
+def make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
   """ Make train iterator and tokenizer for C4 dataset"""
   read_config = tfds.ReadConfig(
     shuffle_seed = config.data_shuffle_seed,
@@ -270,6 +285,8 @@ def make_c4_train_iterator_and_tokenizer(config, mesh):
     train_ds, eval_ds,
     vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
     data_shuffle_seed = config.data_shuffle_seed,
+    add_bos = add_bos,
+    add_eos = add_eos
   )
   return train_iter, sp_tokenizer
 
@@ -306,11 +323,11 @@ class SyntheticDataIterator():
                                                     dtype=jax.numpy.int32)
     return output
 
-def create_data_iterator_with_tokenizer(config, mesh):
+def create_data_iterator_with_tokenizer(config, mesh, add_bos = True, add_eos = True):
   if config.dataset_type == "synthetic":
     return SyntheticDataIterator(config, mesh), None
   elif config.dataset_type == "c4":
-    return make_c4_train_iterator_and_tokenizer(config, mesh)
+    return make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos)
   else:
     assert False, "dataset type not implemented"
 
