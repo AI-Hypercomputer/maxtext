@@ -17,7 +17,7 @@
 run_name: ""
 
 model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!
-norm_epsilon: 1.e-06
+normalization_layer_epsilon: 1.e-06
 
 ################################## CHECKPOINTING ################################## 
 # Checkpointing makes the following choices in the following order, starting with (1):
@@ -62,18 +62,16 @@ decoder_block: "default" # which style of DecoderBlock to use.
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
 global_parameter_scale: 1
 base_emb_dim: 2560
-base_num_heads: 8
 base_num_query_heads: 8
 base_num_kv_heads: 8
 base_mlp_dim: 8192
 base_num_decoder_layers: 16
 head_dim: 256
-
 # activation functions are .
 mlp_activations: ["relu"]
 dropout_rate: 0
 logits_via_embedding: True  # NOTE: this is True just for testing.
-norm_logits_via_embedding: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
+normalize_embedding_logits: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 
 # proj, minimal, full, or none
@@ -206,7 +204,7 @@ stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds
 use_iota_embed: False
 # use positional embedding
 use_positional_embedding: False
-trainable_position_size: 0  # enable gpt3 position embedding with a positive trainable_position_size
+trainable_position_size: -1  # enable gpt3 position embedding with a positive trainable_position_size
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
