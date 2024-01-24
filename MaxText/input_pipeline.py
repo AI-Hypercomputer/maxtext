@@ -79,6 +79,19 @@ def normalize_features(ds):
       _normalize_features,
       num_parallel_calls=AUTOTUNE)
 
+def length_trim(ds, max_len):
+  """"Trim to Max length"""
+  def _trim_fn(features):
+    if tf.shape(features['inputs'])[0] > max_len:
+      features['inputs'] = features['inputs'][:max_len]
+    if tf.shape(features['targets'])[0] > max_len:
+      features['targets'] = features['targets'][:max_len]
+    return features
+
+  return ds.map(
+    _trim_fn,
+    num_parallel_calls=AUTOTUNE
+  )
 
 # -----------------------------------------------------------------------------
 # Main dataset preparation.
@@ -101,16 +114,8 @@ def preprocessing_pipeline(
 ):
   """Shuffle and batch/pack the given dataset."""
 
-  # Max length filter.
-  def length_filter(max_len):
-    def filter_fn(x):
-      source, target = x['inputs'], x['targets']
-      l = tf.maximum(tf.shape(source)[0], tf.shape(target)[0])
-      return tf.less(l, max_len + 1)
-    return filter_fn
-
   if max_length > 0:
-    dataset = dataset.filter(length_filter(max_length))
+    dataset = length_trim(dataset, max_len=max_length)
 
   # Shuffle and repeat.
   if shuffle:
