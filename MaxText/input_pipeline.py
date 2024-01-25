@@ -481,35 +481,15 @@ def make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, shuffle_buffer_siz
     )
 
   os.environ["TFDS_DATA_DIR"] = "gs://mlperf-llm-public2"
-
-  if jax.process_count() > 1024:
-    train_read_config = tfds.ReadConfig(
-      shuffle_seed = config.data_shuffle_seed,
-      skip_prefetch = True,
-      input_context=tf.distribute.InputContext(
-        input_pipeline_id=(jax.process_index() // (jax.process_count() // 1024)) % 1024,  # Worker id
-        num_input_pipelines=1024,  # Total number of workers
-      ),
-    )
-  else:
-    train_read_config = tfds.ReadConfig(
-      shuffle_seed = config.data_shuffle_seed,
-      skip_prefetch = True,
-      input_context=tf.distribute.InputContext(
-        input_pipeline_id=jax.process_index(),  # Worker id
-        num_input_pipelines=jax.process_count(),  # Total number of workers
-      ),
-    )
-
-  eval_read_config = tfds.ReadConfig(
+  read_config = tfds.ReadConfig(
     shuffle_seed = config.data_shuffle_seed,
     skip_prefetch = True,
   )
   train_ds_builder = tfds.builder('c4/en:3.0.4')
-  train_ds = train_ds_builder.as_dataset(split='train2', read_config = train_read_config, shuffle_files=False)
+  train_ds = train_ds_builder.as_dataset(split='train2', read_config = read_config, shuffle_files=True)
 
   eval_ds_builder = tfds.builder('c4/en:3.0.5', try_gcs=True)
-  eval_ds = eval_ds_builder.as_dataset(split='validation_tokenized_5662seqs', read_config = eval_read_config, shuffle_files=False)
+  eval_ds = eval_ds_builder.as_dataset(split='validation_tokenized_5662seqs', read_config = read_config, shuffle_files=False)
 
   # shard the dataset as soon as it is loaded
   train_ds = train_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
