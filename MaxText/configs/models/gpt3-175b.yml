@@ -31,7 +31,5 @@ logits_dot_in_fp32: False
 normalization_layer_epsilon: 1.e-05
 use_iota_embed: True
 fused_qkv: True
-add_bos: False
-add_eos: False
 opt_type: "adam_pax"
 decoder_block: "gpt3"
