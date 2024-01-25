@@ -68,12 +68,17 @@ def checkpoint_loop(config, state=None):
   checkpoint_load_end = datetime.datetime.now()
   if state is not None: # Checkpoint was available for restore
     if jax.process_index() == 0:
-      max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint restored in : {checkpoint_load_end - checkpoint_load_start}")
+      max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint restored in: "
+                      f"{(checkpoint_load_end-checkpoint_load_start).total_seconds()}")
   else: # Checkpoint was unavailable, state needs to be initialized
     state, state_mesh_annotations = max_utils.setup_training_state(model,
           tx, config, init_rng, mesh, checkpoint_manager)
+    num_params, bytes_params, bytes_per_param = max_utils.summarize_size_from_pytree(state.params)
+    max_logging.log(f"Number of model params={num_params/10**9:.3f} billion, memory usage={bytes_params/2**30:.3f}GB, "
+                    f"bytes per param={bytes_per_param:.3f}")
 
   start_step = get_first_step(state) # this is the start_step for training
+  ckpt_save_time = []
   for step in np.arange(start_step, config.steps):
     if checkpoint_manager is not None:
       start_time = datetime.datetime.now()
@@ -83,7 +88,17 @@ def checkpoint_loop(config, state=None):
         checkpoint_manager.wait_until_finished()
         end_time = datetime.datetime.now()
         if jax.process_index() == 0:
-          max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint saved in {end_time - start_time} ,step {step}, on host 0")
+          ckpt_save_time.append((end_time-start_time).total_seconds())
+          max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint saved in {(end_time-start_time).total_seconds()}, "
+                          f"step {step}, on host 0")
+
+  if jax.process_index() == 0 and config.upload_metrics_to_gcs:
+    csv_file = f"{config.run_name}.csv"
+    csv_header = ["step", "ckpt_save_time"]
+    # Update the raw metrics CSV file to GCS.
+    max_utils.upload_csv(csv_file, csv_header, ckpt_save_time, config.gcs_csv_folder)
+    if config.write_metrics_to_bq:
+      max_utils.create_big_query_table(csv_file, config)
 
   writer.close()
   return state

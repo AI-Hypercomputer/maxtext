@@ -36,9 +36,11 @@ from flax.linen import partitioning as nn_partitioning
 
 import optax
 import os
+import csv
 from typing import Tuple
 
 from google.cloud import storage
+from google.cloud import bigquery
 
 def find_nans_and_infs(pytree):
   def finder(x):
@@ -128,6 +130,51 @@ def upload_blob(destination_gcs_name, source_file_name):
   bucket = storage_client.get_bucket(bucket_name)
   blob = bucket.blob(prefix_name)
   blob.upload_from_filename(source_file_name)
+
+def upload_csv(csv_file, header, data, gcs_folder):
+  """Create a CSV file and upload to a GCS location"""
+  gcs_path = os.path.join(gcs_folder, csv_file)
+  with open(csv_file, 'w', encoding="utf-8", newline='') as file:
+    writer = csv.writer(file)
+    writer.writerow(header)
+
+    for i, t in enumerate(data):
+      writer.writerow([i, t])
+  upload_blob(gcs_path, csv_file)
+
+def download_blob(source_gcs_name, destination_file_name):
+  """Downloads a file from a GCS location and save to a local file"""
+  bucket_name, prefix_name = parse_gcs_bucket_and_prefix(source_gcs_name)
+  storage_client = storage.Client()
+  bucket = storage_client.get_bucket(bucket_name)
+  blob = bucket.blob(prefix_name)
+  # Download the file to a destination
+  blob.download_to_filename(destination_file_name)
+
+def create_big_query_table(csv_file, config):
+  """Create a big query table from a CSV file stored in GCS"""
+  # Download key.json auth file from GCS.
+  auth_file = "key.json"
+  download_blob(config.key_json_gcs_path, auth_file)
+  table_id = f"{config.tess_project}.{config.bq_dataset}.{config.run_name}"
+
+  # Create/update a big qurey table with the metrics CSV file from GCS.
+  client = bigquery.Client.from_service_account_json(auth_file, project=config.tess_project)
+  job_config = bigquery.LoadJobConfig(
+    autodetect=True,
+    # The source format defaults to CSV, so the line below is optional.
+    source_format=bigquery.SourceFormat.CSV,
+    # WRITE_TRUNCATE will erase existing data before writing new data.
+    write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+  )
+  gcs_source = os.path.join(config.gcs_csv_folder, csv_file)
+  load_job = client.load_table_from_uri(
+    gcs_source, table_id, job_config=job_config
+  )  # Make an API request.
+
+  load_job.result()  # Waits for the job to complete.
+  destination_table = client.get_table(table_id)  # Make an API request.
+  max_logging.log(f"Biq query: successfully created table from GCS: {destination_table}")
 
 def initialize_jax_distributed_system():
   """ The best recipe to initialize the Jax Distributed System has varied over time. We keep a layer of

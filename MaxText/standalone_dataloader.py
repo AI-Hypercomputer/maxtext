@@ -20,6 +20,7 @@ import jax
 import os
 
 import max_logging
+import max_utils
 
 from typing import Sequence
 import datetime
@@ -40,6 +41,7 @@ def data_load_loop(config, state=None):
   _, _, _, _, _, _, _, data_iterator, state = setup_train_loop(config)
 
   example_batch = None
+  batch_load_time = []
 
   start_step = get_first_step(state)
   multihost_utils.sync_global_devices('data_load_loop:get_first_step')
@@ -48,17 +50,29 @@ def data_load_loop(config, state=None):
   jax.block_until_ready(example_batch)
   first_end = datetime.datetime.now()
   time_to_load_first_batch = (first_end-start).total_seconds()
+  batch_load_time.append(time_to_load_first_batch)
   max_logging.log(f"First step completed in {time_to_load_first_batch} seconds")
 
   for _ in np.arange(start_step+1, config.steps):
+    multihost_utils.sync_global_devices('data_load_loop:loading_batch')
+    batch_start = datetime.datetime.now()
     example_batch = load_next_batch(data_iterator, example_batch, config)
+    batch_end = datetime.datetime.now()
+    batch_load_time.append((batch_end-batch_start).total_seconds())
 
   jax.block_until_ready(example_batch) # wait until the last batch is read
   end = datetime.datetime.now()
   max_logging.log(f"Rest {config.steps-1} batches loaded in {(end-first_end).total_seconds()} seconds, "
                   f"on host {jax.process_index()}")
-  return state
 
+  if jax.process_index() == 0 and config.upload_metrics_to_gcs:
+    csv_file = f"{config.run_name}.csv"
+    csv_header = ["step", "batch_load_time"]
+    # Update the raw metrics CSV file to GCS.
+    max_utils.upload_csv(csv_file, csv_header, batch_load_time, config.gcs_csv_folder)
+    if config.write_metrics_to_bq:
+      max_utils.create_big_query_table(csv_file, config)
+  return state
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update('jax_default_prng_impl', 'unsafe_rbg')

@@ -210,3 +210,11 @@ use_positional_embedding: False
 compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
 compile_topology: '' # Target hardware version, e.g. 'v5e-256'
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
+
+# For GCS Tessellattion
+tess_project: "" # Project to write metrics files and big query tables.
+write_metrics_to_bq: False # Create/update the big query table based on the metrics csv file stored in GCS.
+upload_metrics_to_gcs: False # Upload the metrics CSV file to GCS.
+gcs_csv_folder: "" # Folder of the metrics csv files stored in GCS.
+key_json_gcs_path: "" # GCS path to the key.json file that is authenticated to create big query tables.
+bq_dataset: "" # Name of big query dataset that tables will be created in.
