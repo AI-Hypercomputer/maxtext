@@ -788,11 +788,12 @@ class Gpt3MultiHeadAttention(nn.Module):
       name=proj_name,
       use_int8=self.use_int8,
       use_bias=self.use_bias,
+      local_aqt_shards=self.config.local_aqt_shards_qkv_proj
       )(inputs)
     query, key, value = qkv_proj[:,:,0,...], qkv_proj[:,:,1,...], qkv_proj[:,:,2,...]
     return query, key, value
 
-  def projection(self, inputs: Array, proj_name: str) -> Array:
+  def projection(self, inputs: Array, local_aqt_shards: int, proj_name: str) -> Array:
     """individual projection for one of q, k and v."""
     proj = DenseGeneral(
       features=(self.num_heads, self.head_dim),
@@ -803,6 +804,7 @@ class Gpt3MultiHeadAttention(nn.Module):
       name=proj_name,
       use_int8=self.use_int8,
       use_bias=self.use_bias,
+      local_aqt_shards=local_aqt_shards,
       )(inputs)
     return proj
 
@@ -817,6 +819,7 @@ class Gpt3MultiHeadAttention(nn.Module):
       name='out',
       use_int8=self.use_int8,
       use_bias=self.use_bias,
+      local_aqt_shards=self.config.local_aqt_shards_attention_out_proj,
       )(out)
     return out_proj
 
@@ -830,9 +833,9 @@ class Gpt3MultiHeadAttention(nn.Module):
     if self.fused_qkv:
       query, key, value = self.qkv_projection(inputs_q, proj_name='qkv_proj')
     else:
-      query = self.projection(inputs_q, proj_name='query')
-      key = self.projection(inputs_q, proj_name='key')
-      value = self.projection(inputs_q, proj_name='value')
+      query = self.projection(inputs_q, local_aqt_shards=self.config.local_aqt_shards_query_proj, proj_name='query')
+      key = self.projection(inputs_q, local_aqt_shards=self.config.local_aqt_shards_key_proj, proj_name='key')
+      value = self.projection(inputs_q, local_aqt_shards=self.config.local_aqt_shards_value_proj, proj_name='value')
 
     depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
     query /= depth_scaling

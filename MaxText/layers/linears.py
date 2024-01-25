@@ -82,6 +82,7 @@ class DenseGeneral(nn.Module):
   kernel_axes: Tuple[str, ...] = ()
   use_int8: bool = False
   use_bias: bool = False
+  local_aqt_shards: int = 0
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -100,7 +101,7 @@ class DenseGeneral(nn.Module):
         return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
       else:
         aqt_rng = self.make_rng('aqt')
-        aqt_dot_general = quantizations.int8_dot_general(aqt_rng)
+        aqt_dot_general = quantizations.int8_dot_general(aqt_rng, self.local_aqt_shards)
         return aqt_dot_general(
             inputs, kernel, ((axis, contract_ind), ((), ()))
         )
@@ -197,6 +198,7 @@ class MlpBlock(nn.Module):
             name='wi',
             use_int8=cfg.int8_training,
             use_bias=self.use_bias,
+            local_aqt_shards=cfg.local_aqt_shards_mlp1,
       )(inputs)
       for idx, act_fn in enumerate(self.activations):
         y = _convert_to_activation_function(act_fn)(x[:,:,idx,...])
@@ -212,6 +214,7 @@ class MlpBlock(nn.Module):
             name=dense_name,
             use_int8=cfg.int8_training,
             use_bias=self.use_bias,
+            local_aqt_shards=cfg.local_aqt_shards_mlp2,
         )(inputs)
         x = _convert_to_activation_function(act_fn)(x)
         activations.append(x)
