@@ -17,6 +17,7 @@
 import functools
 
 from aqt.jax.v2 import config as aqt_config
+from aqt.jax.v2.config import LocalAqt
 from aqt.jax.v2.flax import aqt_flax
 from common_types import Config
 from dataclasses import dataclass
@@ -26,7 +27,7 @@ import jax.numpy as jnp
 AQT_INT8_CONFIG = aqt_config.config_v3(
   fwd_bits=8,
   dlhs_bits=8,
-  drhs_bits=None,
+  drhs_bits=8,
   rng_type='jax.uniform',
   dlhs_local_aqt=None,
   drhs_local_aqt=None,
@@ -60,17 +61,27 @@ class AqtQuantization:
     )
     return aqt_einsum
 
-def _get_quant_config(quant_str: str):
+def _get_quant_config(quant_str: str, local_aqt_scale):
   if not quant_str:
     return None
   if quant_str == "int8":
-    return AQT_INT8_CONFIG
+    return aqt_config.config_v3(
+      fwd_bits=8,
+      dlhs_bits=8,
+      drhs_bits=8,
+      rng_type='jax.uniform',
+      dlhs_local_aqt=None,
+      drhs_local_aqt=LocalAqt(local_aqt_scale),
+      fwd_accumulator_dtype=jnp.int32,
+      dlhs_accumulator_dtype=jnp.int32,
+      drhs_accumulator_dtype=jnp.int32,
+      )
   raise ValueError(f'Invalid value configured for quantization {quant_str}.')
 
 
 def configure_quantization(config: Config, quant_mode_str: str = 'train'):
   """ Configure quantization based on user config and quant mode."""
-  quant_cfg = _get_quant_config(config.quantization)
+  quant_cfg = _get_quant_config(config.quantization, config.local_aqt_scale)
   if quant_cfg:
     if quant_mode_str == 'train':
       return AqtQuantization(quant_cfg, aqt_flax.QuantMode.TRAIN)
@@ -81,5 +92,3 @@ def configure_quantization(config: Config, quant_mode_str: str = 'train'):
     else:
       raise ValueError(f'Invalid quantization mode {quant_mode_str}.')
   return None
-
-
