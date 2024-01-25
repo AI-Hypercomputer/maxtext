@@ -219,3 +219,11 @@ target_eval_loss: 0.
 eval_interval: 0
 
 overwrite_ckpt_step: -1
+
+local_aqt_shards_mlp1: 1
+local_aqt_shards_mlp2: 1
+local_aqt_shards_qkv_proj: 1
+local_aqt_shards_query_proj: 1
+local_aqt_shards_key_proj: 1
+local_aqt_shards_value_proj: 1
+local_aqt_shards_attention_out_proj: 1
