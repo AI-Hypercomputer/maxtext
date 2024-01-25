@@ -162,6 +162,7 @@ class Gpt3MultiHeadAttention(nn.Module):
       quant=self.quant,
       use_bias=self.use_bias,
       )(inputs)
+    qkv_proj = checkpoint_name(qkv_proj, 'qkv_proj')
     query, key, value = qkv_proj[:,:,0,...], qkv_proj[:,:,1,...], qkv_proj[:,:,2,...]
     return query, key, value
 
@@ -234,6 +235,8 @@ class Gpt3MultiHeadAttention(nn.Module):
 
     # apply output projection,  output dim is set to the input dim.
     out = self.out_projection(inputs_q.shape[-1], out)
+    # https://github.com/google/praxis/blob/77675370d1150fccda0862a0ac7d1808d4bce9bf/praxis/layers/multi_query_attention.py#L833
+    out = checkpoint_name(out, 'out_proj')
     return out
 
 

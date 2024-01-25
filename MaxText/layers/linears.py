@@ -26,6 +26,7 @@ from layers import initializers
 from layers import normalizations
 from layers import quantizations
 import numpy as np
+from jax.ad_checkpoint import checkpoint_name
 
 Array = common_types.Array
 Config = common_types.Config
@@ -220,6 +221,8 @@ class MlpBlock(nn.Module):
 
     # Take elementwise product of above intermediate activations.
     x = functools.reduce(operator.mul, activations)
+    # https://github.com/google/praxis/blob/77675370d1150fccda0862a0ac7d1808d4bce9bf/praxis/layers/transformers.py#L477C5-L477C47
+    x = checkpoint_name(x, 'ffn1')
     # Apply dropout and final dense output projection.
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
         x, deterministic=deterministic
@@ -236,4 +239,6 @@ class MlpBlock(nn.Module):
         quant=self.quant,
         use_bias=self.use_bias,
     )(x)
+
+    output = checkpoint_name(output, 'ffn2')
     return output
