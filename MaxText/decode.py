@@ -172,8 +172,6 @@ def prefill_or_load(config, model, state, rng, sp_tokenizer, mesh, state_mesh_sh
 
 def decode_loop(config, state=None):
   """Decoding loop for the Transformer model."""
-  assert config.add_eos is False,\
-    "For decoding, we must set add_eos=False"
   rng = random.PRNGKey(0)
 
   # Mesh definition
@@ -182,7 +180,7 @@ def decode_loop(config, state=None):
 
   # Model and Optimizer definition
   model = Transformer(config, mesh = mesh)
-  _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
+  _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh, add_bos = True, add_eos=False)
   state, state_mesh_annotations = max_utils.setup_decode_state(
     model, config, rng, mesh, None
   )

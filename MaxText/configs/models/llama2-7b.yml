@@ -23,10 +23,7 @@ head_dim: 128
 mlp_activations: ["silu","linear"]
 vocab_size: 32000
 enable_dropout: False
-attention: "dot_product"
 vocab_relative_path: "tokenizer.llama2"
 logits_via_embedding: False
 rms_norm_epsilon: 1.0e-5
-add_bos: True
-add_eos: False
 decoder_block: "llama2"
