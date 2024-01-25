@@ -161,8 +161,8 @@ class Decoder(nn.Module):
       return llama2.LlamaDecoderLayer
     elif self.config.decoder_block == "mistral":
       # TODO(ranran): update to Mistral with sliding window attention
-      from layers import llama2
-      return llama2.LlamaDecoderLayer
+      from layers import mistral
+      return mistral.MistralDecoderLayer
     elif self.config.decoder_block == "gamma":
       from layers import gamma
       return gamma.GammaDecoderLayer
