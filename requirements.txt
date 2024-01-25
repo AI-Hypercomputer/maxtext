@@ -2,6 +2,7 @@ orbax-checkpoint
 absl-py
 aqtp
 cloud-tpu-diagnostics
+google-cloud-bigquery
 google-cloud-storage
 flax
 ml-collections
