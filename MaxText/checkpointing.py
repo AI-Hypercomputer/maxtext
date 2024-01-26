@@ -85,7 +85,7 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
   def map_to_pspec(data, pspec):
     if isinstance(data, (jax.Array, jax.ShapeDtypeStruct)) \
           and pspec is not None:
-      return type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
+      return type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec, dtype = data.dtype)
     else:
       return type_handlers.RestoreArgs()
   restore_args = jax.tree_util.tree_map(map_to_pspec,
