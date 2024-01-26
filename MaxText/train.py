@@ -208,6 +208,16 @@ def train_step(model, config, state, data, dropout_rng):
 
   return new_state, metrics, rng2
 
+
+def check_trees_equal(tree1, tree2):
+  def check_same(key, v1, v2):
+     assert jax.numpy.allclose(
+            v1, v2, rtol=1e-06, atol=1e-06
+        )
+  jax.tree_util.tree_map_with_path(check_same, tree1, tree2)
+  print('Hooray, values are close enough!')
+
+
 def train_loop(config, state=None):
   """Main Training loop.
 
@@ -286,10 +296,20 @@ def train_loop(config, state=None):
     write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
 
+
+
     if checkpoint_manager is not None:
       if checkpoint_manager.save(step, state):
         max_logging.log(f"saved a checkpoint at step {step}")
       # Upon preemption, exit when and only when all ongoing saves are complete.
+      if step == 5:
+        print('====== At step 5!!! =====')
+        # print(state.params)
+        print('----------------------------------------------------')
+        state_check, _ = max_utils.setup_training_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+        # print(state_check.params)
+        check_trees_equal(state.params, state_check.params)
+        sys.exit()
       if checkpoint_manager.reached_preemption(step):
         checkpoint_manager.wait_until_finished()
         sys.exit()

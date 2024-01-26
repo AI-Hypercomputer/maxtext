@@ -64,11 +64,29 @@ def _find_zeroth_idx(array):
   return idx[0]
 
 
-def _slice_devices(device_array):
-  ### slices are assumed to be restricted to the first axis
+def _replica_devices(device_array):
+  ### replicas are assumed to be restricted to the first axis
   zeroth_idx =  _find_zeroth_idx(device_array)
-  sliced_result = device_array[zeroth_idx : zeroth_idx + 1, :, :]
-  return sliced_result
+  replica_result = device_array[zeroth_idx : zeroth_idx + 1, :, :]
+  return replica_result
+
+
+def get_replica_pids(rep_id, mesh):
+  replica_devices = np.take(mesh.devices, rep_id, axis=0).flatten()
+  pids = set([d.process_index for d in replica_devices])
+  ids = set([d.id for d in replica_devices])
+  return pids, ids
+
+
+def is_sharding_valid(single_replica_ids, single_replica_pids):
+  if jax.process_index() in single_replica_pids:
+    loc_devieces_in_replica = single_replica_ids.intersection(set([d.id for d in jax.local_devices()]))
+    # print(f' host ID is {jax.process_index()}, '
+    #       f'num of devices in replica 0 is {len(loc_devieces_in_replica)}')
+    assert len(loc_devieces_in_replica) == 4, (
+      ' !!! Provided sharding is not valid. There is a host with part'
+      ' of devices outside of replica 0')
+
 
 def load_state_if_possible(checkpoint_manager: CheckpointManager,
                            first_checkpoint_path: str,
@@ -77,7 +95,7 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
                            abstract_unboxed_pre_state: train_state.TrainState,
                            mesh,
                            state_mesh_annotations,
-                           enable_single_slice_checkpointing: bool
+                           enable_single_replica_checkpointing: bool
                            ):
   """Loads TrainState as possible from the inputs.
 
@@ -105,15 +123,19 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
   def map_to_pspec(data, pspec):
     if isinstance(data, (jax.Array, jax.ShapeDtypeStruct)) \
           and pspec is not None:
-      if enable_single_slice_checkpointing:
+      if enable_single_replica_checkpointing:
         type_handlers.register_type_handler(jax.Array,
-                                            type_handlers.SingleSliceArrayHandler(),
+                                            type_handlers.SingleReplicaArrayHandler(),
                                             override=True)
-        slice_devices = _slice_devices(mesh.devices)
-        slice_mesh = jax.sharding.Mesh(slice_devices, mesh.axis_names)
-        return type_handlers.SingleSliceArrayRestoreArgs(
+        replica_devices = _replica_devices(mesh.devices)
+        replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
+        rep0_pids, rep0_ids = get_replica_pids(0, mesh)
+        is_sharding_valid(rep0_ids, rep0_pids)
+        return type_handlers.SingleReplicaArrayRestoreArgs(
           sharding=jax.sharding.NamedSharding(mesh, pspec),
-          single_slice_sharding=jax.sharding.NamedSharding(slice_mesh, pspec),
+          single_replica_sharding=jax.sharding.NamedSharding(replica_mesh, pspec),
+          single_replica_ids=rep0_ids,
+          single_replica_pids=rep0_pids,
           replica_axis_name='data',
           global_shape=data.shape,
           dtype=data.dtype,

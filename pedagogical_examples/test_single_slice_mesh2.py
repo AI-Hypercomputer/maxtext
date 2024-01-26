@@ -4,10 +4,10 @@ You can specify different ways for restoring and different meshes
 
 Example run
 
-python3 pedagogical_examples/test_single_slice_mesh2.py \
+python3 pedagogical_examples/test_single_replica_mesh2.py \
   --path gs://your_path  \
-  --restore-method singleslice \
-  --mesh-shape 2 2 \
+  --restore-method singlereplica \
+  --mesh-shape 1 4 \
   --tree-size 16
 """
 import argparse
@@ -130,6 +130,19 @@ def is_sharding_valid(single_replica_ids, single_replica_pids):
       ' of devices outside of replica 0')
 
 
+def _find_zeroth_idx(array):
+  for idx, val in np.ndenumerate(array):
+    if val.process_index == jax.process_index():
+      break
+  return idx[0]
+
+
+def _replica_devices(device_array):
+  ### replicas are assumed to be restricted to the first axis
+  zeroth_idx =  _find_zeroth_idx(device_array)
+  replica_result = device_array[zeroth_idx : zeroth_idx + 1]
+  return replica_result
+
 
 def main(args):
 
@@ -165,29 +178,24 @@ def main(args):
           lambda x: x, train_state, is_leaf=is_leaf
       )
 
-  if args.restore_method == 'singleslice':
+  if args.restore_method == 'singlereplica':
     type_handlers.register_type_handler(jax.Array,
-                                      type_handlers.SingleSliceArrayHandler(),
+                                      type_handlers.SingleReplicaArrayHandler(),
                                       override=True)
-    print('Restoring with single slice', jax.process_index())
+    print('Restoring with single replica', jax.process_index())
 
     def _create_restore_args(data, mesh, pspec):
       replica_index = 0
       rep0_ids, rep0_pids = get_replica_pids(replica_index, mesh)
 
-      is_sharding_valid(rep0_ids, rep0_pids)
-      # import pdb; pdb.set_trace()
-      slice_devices = mesh.devices[replica_index:replica_index+1]
-      slice_mesh = jax.sharding.Mesh(slice_devices, mesh.axis_names)
-      ss_sharding = jax.sharding.NamedSharding(slice_mesh, pspec)
-      print('single slice pids', rep0_pids)
-      print('single slice devices', rep0_ids)
-      # print(ss_sharding)
-      return type_handlers.SingleSliceArrayRestoreArgs(
-          sharding=jax.sharding.NamedSharding(mesh, pspec),
-          single_slice_sharding=ss_sharding,
+      replica_devices = _replica_devices(mesh.devices)
+      replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
+      ss_sharding = jax.sharding.NamedSharding(replica_mesh, pspec)
+      return type_handlers.SingleReplicaArrayRestoreArgs(
           single_replica_ids=rep0_ids,
           single_replica_pids=rep0_pids,
+          sharding=jax.sharding.NamedSharding(mesh, pspec),
+          single_replica_sharding=ss_sharding,
           replica_axis_name=data_axis_name,
           global_shape=data.shape,
           dtype=data.dtype,
@@ -204,7 +212,7 @@ def main(args):
       mngr.latest_step(),
       items=empty_state,
       restore_kwargs={'restore_args':
-        cast(type_handlers.SingleSliceArrayRestoreArgs, restore_args)}
+        cast(type_handlers.SingleReplicaArrayRestoreArgs, restore_args)}
       )
   elif args.restore_method == 'arrayrestore':
     print('Restoring with ArrayRestoreArgs')
@@ -237,9 +245,12 @@ def main(args):
     )
   else:
     raise ValueError(f'Wrong value for restore-method is passed. Must be one '
-                     'of ["singleslice", "arrayrestore", "orig"]')
+                     'of ["singlereplica", "arrayrestore", "orig"]')
 
-  print('--------------')
+  # print(train_state)
+  # print('--------------')
+  # print(restored)
+
   check_trees_equal(train_state, restored)
 
   return

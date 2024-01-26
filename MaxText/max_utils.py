@@ -186,7 +186,7 @@ def create_device_mesh(config, devices=None, logging=True):
   except:
     num_slices = 1
   num_devices_per_slice = num_devices//num_slices
-  max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
+  # max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
   assert len(devices) > 1, "You must have at least two devices"
 
   multi_slice_env = num_slices > 1
@@ -205,8 +205,8 @@ def create_device_mesh(config, devices=None, logging=True):
   else:
     mesh = mesh_utils.create_device_mesh(ici_parallelism, devices)
 
-  if logging:
-    max_logging.log(f"Decided on mesh: {mesh}")
+  # if logging:
+  #   max_logging.log(f"Decided on mesh: {mesh}")
 
   return mesh
 
@@ -301,7 +301,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_tra
                                                 unboxed_abstract_state,
                                                 mesh,
                                                 state_mesh_annotations,
-                                                config.enable_single_slice_checkpointing
+                                                config.enable_single_replica_checkpointing
                                                 )
 
     state_mesh_shardings = jax.tree_map(

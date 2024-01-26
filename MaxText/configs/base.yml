@@ -152,7 +152,7 @@ enable_profiler: False
 enable_checkpointing: True
 async_checkpointing: True
 # on large number of pods one of the pods reads the ckpt then broadcasts to all
-enable_single_slice_checkpointing: False
+enable_single_replica_checkpointing: False
 
 # When dropout is false the model is a deterministic function of the
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
