@@ -86,30 +86,25 @@ class GPT3(unittest.TestCase):
   @pytest.mark.tpu
   def test_logits_numerically(self):
     # ground truth values are calculated from paxml after loading above model_vars
-    per_example_xent_truth = jnp.array([[31.976467, 25.806253, 17.311134, 45.362663, 35.573364]], dtype=jnp.float32)
-    padding_mask = self.example_batch['targets_segmentation'] != 0
+    # note we expect all xents are the same except the padding one since:
+    #    paxml applies padding in mlp layer
+    #    while maxtext implementaiton applies padding in attention mask instead
+    # the two implementation are equivalent in valid non-padding tokens
+    per_example_xent_truth = jnp.array([[31.976467, 25.806253, 17.311134, 45.362663, 0.]], dtype=jnp.float32)
     logits, _ = self.model.apply(self.model_vars,
                          self.example_batch['inputs'],
                          self.example_batch['inputs_position'],
                          decoder_segment_ids=self.example_batch['inputs_segmentation'],
-                         padding_mask=padding_mask,
                          enable_dropout=self.cfg.enable_dropout,
                          rngs={'dropout': self.rng, 'aqt': self.rng}, mutable='intermediates')
 
     one_hot_targets = jax.nn.one_hot(self.example_batch['targets'], self.cfg.vocab_size)
     per_example_xent = -jnp.sum(jax.nn.log_softmax(logits) * one_hot_targets, axis=-1, dtype=jnp.float32)
+    # Mask out paddings at the end of each example.
+    per_example_xent = per_example_xent * (self.example_batch['targets_segmentation'] != 0)
 
     self.assertTrue(
         jax.numpy.allclose(
             per_example_xent, per_example_xent_truth, rtol=1e-06, atol=1e-06
         )
     )
-
-
-
-
-
-
-
-
-

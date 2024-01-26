@@ -37,6 +37,7 @@ import checkpointing
 import max_utils
 import maxtext_utils
 import max_logging
+import optimizers
 import pyconfig
 
 from input_pipeline import create_data_iterator_with_tokenizer
@@ -174,20 +175,18 @@ def train_step(model, config, state, data, dropout_rng):
     data[k] = v[:config.global_batch_size_to_train_on,:]
 
   def loss_fn(params):
-    padding_mask = data['targets_segmentation'] != 0
     logits, intermediate_outputs = model.apply({'params': params},
                          data['inputs'],
                          data['inputs_position'],
                          decoder_segment_ids=data['inputs_segmentation'],
-                         padding_mask=padding_mask,
                          enable_dropout=config.enable_dropout,
                          rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
     one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
     xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
     xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
     # Mask out paddings at the end of each example.
-    xent = xent * padding_mask
-    return jnp.sum(xent)/jnp.size(padding_mask), intermediate_outputs
+    xent = xent * (data['targets_segmentation'] != 0)
+    return jnp.sum(xent)/jnp.sum(data['targets_segmentation'] != 0), intermediate_outputs
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
@@ -236,7 +235,7 @@ def setup_mesh_and_model(config):
   # Model and Optimizer definition
   model = Transformer(config, mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
-  tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
+  tx = optimizers.get_optimizer(config, learning_rate_schedule)
   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
 
 def setup_train_loop(config):

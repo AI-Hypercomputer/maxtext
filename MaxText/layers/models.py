@@ -55,7 +55,6 @@ class DecoderLayer(nn.Module):
                inputs,
                decoder_segment_ids,
                decoder_positions,
-               padding_mask,
                deterministic,
                model_mode,
               ):
@@ -182,7 +181,6 @@ class Decoder(nn.Module):
                decoder_input_tokens,
                decoder_positions,
                decoder_segment_ids=None,
-               padding_mask=None,
                deterministic=False,
                model_mode=common_types.MODEL_MODE_TRAIN,
               ):
@@ -197,17 +195,17 @@ class Decoder(nn.Module):
             y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
 
-    if cfg.use_positional_embedding:
-      if cfg.trainable_position_size:
-        y += Embed(
-          num_embeddings=cfg.trainable_position_size,
-          features=cfg.emb_dim,
-          dtype=cfg.dtype,
-          embedding_init=nn.initializers.normal(stddev=1.0),
-          name='position_embedder',
-          config=cfg)(decoder_positions)
-      else:
+    if cfg.use_untrainable_positional_embedding:
         y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
+
+    if cfg.trainable_position_size > 0:
+      y += Embed(
+        num_embeddings=cfg.trainable_position_size,
+        features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        embedding_init=nn.initializers.normal(stddev=1.0),
+        name='position_embedder',
+        config=cfg)(decoder_positions)
 
     BlockLayer = self.get_decoder_layer()
 
@@ -227,7 +225,7 @@ class Decoder(nn.Module):
           BlockLayer,
           prevent_cse=not cfg.scan_layers,
           policy=policy,
-          static_argnums=(-1, -2, -3, -4, -5, -6),
+          static_argnums=(-1, -2, -3, -4, -5),
       )
     if cfg.scan_layers:
       initializing = self.is_mutable_collection('params')
@@ -252,7 +250,6 @@ class Decoder(nn.Module):
               nn.broadcast,
               nn.broadcast,
               nn.broadcast,
-              nn.broadcast,
           ),
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'},
@@ -260,7 +257,6 @@ class Decoder(nn.Module):
           y,
           decoder_segment_ids,
           decoder_positions,
-          padding_mask,
           deterministic,
           model_mode,
       )
@@ -270,7 +266,6 @@ class Decoder(nn.Module):
             y,
             decoder_segment_ids,
             decoder_positions,
-            padding_mask,
             deterministic,
             model_mode,
         )
@@ -334,7 +329,6 @@ class Transformer(nn.Module):
       decoder_input_tokens,
       decoder_positions,
       decoder_segment_ids=None,
-      padding_mask=None,
       enable_dropout=True,
       model_mode=common_types.MODEL_MODE_TRAIN
   ):
@@ -349,7 +343,6 @@ class Transformer(nn.Module):
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
-        padding_mask=padding_mask,
         deterministic=not enable_dropout,
         model_mode=model_mode,
     )

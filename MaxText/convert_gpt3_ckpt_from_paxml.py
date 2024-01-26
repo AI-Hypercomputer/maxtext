@@ -33,7 +33,7 @@ python MaxText/convert_gpt3_ckpt_from_paxml.py \
   --base-output-directory=$BASE_OUTPUT_DIR
 """
 import max_utils
-import maxtext_utils
+import optimizers
 import pyconfig
 import os
 from jax import random
@@ -90,7 +90,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
 
   model = Transformer(config=cfg, mesh=mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(cfg)
-  tx = maxtext_utils.get_optimizer(cfg, learning_rate_schedule)
+  tx = optimizers.get_optimizer(cfg, learning_rate_schedule)
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
     cfg.checkpoint_dir,

@@ -245,7 +245,6 @@ class Gpt3DecoderLayer(nn.Module):
                inputs,
                decoder_segment_ids,
                decoder_positions,
-               padding_mask,
                deterministic,
                model_mode,
                ):
@@ -306,15 +305,13 @@ class Gpt3DecoderLayer(nn.Module):
         name='mlp',
         use_bias=True,
         use_pre_norm=True,
-        apply_padding_mask=True,
-        add_skip_connection=True,
         config=cfg,
-    )(attention_lnx, padding_mask=padding_mask, deterministic=deterministic)
+    )(attention_lnx, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(
         mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')
     )
 
-    layer_output = mlp_lnx
+    layer_output = attention_lnx + mlp_lnx
 
     layer_output = nn.Dropout(
         rate=cfg.dropout_rate, broadcast_dims=(-2,))(

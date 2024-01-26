@@ -24,6 +24,30 @@ import optax
 import jax.numpy as jnp
 
 
+def get_optimizer(config, learning_rate_schedule):
+  """create optimizer"""
+  if config.opt_type == "adamw":
+    # Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
+    return optax.adamw(
+      learning_rate_schedule,
+      b1=config.adam_b1,
+      b2=config.adam_b2,
+      eps=config.adam_eps,
+      eps_root=config.adam_eps_root,
+      weight_decay=config.adam_weight_decay,
+    )
+  elif config.opt_type == "adam_pax":
+    return adam_pax(
+      learning_rate_schedule,
+      beta1=config.adam_b1,
+      beta2=config.adam_b2,
+      epsilon=config.adam_eps,
+      epsilon_root=config.adam_eps_root,
+      weight_decay=config.adam_weight_decay,
+    )
+  else:
+    raise ValueError(f"{config.opt_type=} is not a supported.")
+
 def adam_pax(
     learning_rate_fn: optax.Schedule,
     beta1: float,
