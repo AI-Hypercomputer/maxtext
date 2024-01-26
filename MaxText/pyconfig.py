@@ -31,9 +31,6 @@ import jax
 from typing import Any, Union
 
 _MAX_PREFIX = "M_"
-_DEFAULT = "default"
-_LLAMA2_7B = "llama2-7b"
-_MISTRAL_7B = "mistral-7b"
 
 def yaml_key_to_env_key(s: str) -> str:
   return _MAX_PREFIX + s.upper()
@@ -62,7 +59,6 @@ def validate_keys(keys):
   assert keys["load_parameters_path"]=="" or keys["load_full_state_path"]=="",\
     "At most one of `load_parameters_path` or `load_full_state_path` should be set"
 
-
 def validate_model_name(s: str) -> bool:
   # currently supported models
   valid_model_names= ('default', 'llama2-7b', 'mistral-7b', 'gamma-7b','gamma-2b')
@@ -70,6 +66,13 @@ def validate_model_name(s: str) -> bool:
     raise ValueError(
       "Invalid model name was passed. Valid options ", valid_model_names
     )
+
+def validate_no_keys_overwritten_twice(keys1: list[str], keys2: list[str]):
+  overwritten_keys = [k for k in keys1 if k in keys2]
+  if overwritten_keys:
+    raise ValueError(
+        f"Keys {overwritten_keys} are overwritten from both the model" 
+        " and the environment/command line. This isn't allowed.")
 
 _config = None
 config = None
@@ -88,11 +91,16 @@ class _HyperParameters():
         if not environment_var[len(_MAX_PREFIX):].isupper():
           raise ValueError(f"We received env `{environment_var}` but it isn't all uppercase.")
 
-  def __init__(self, argv: list[str], **kwargs):
-    with open(argv[1], "r", encoding="utf-8") as yaml_file:
-      raw_data_from_yaml = yaml.safe_load(yaml_file)
-    self._validate_env_variables(raw_data_from_yaml)
+  def _load_kwargs(self, argv: list[str], **kwargs):
+    args_dict = dict(a.split("=") for a in argv[2:])
+    args_dict.update(kwargs)
+    return args_dict
+
+  def _update_from_env_and_command_line(self, raw_keys, raw_data_from_yaml, argv, **kwargs) -> list[str]:
+    ''' Update model config from environemnt and command line
+    '''
     raw_data_from_cmd_line = self._load_kwargs(argv, **kwargs)
+    updated_keys = []
 
     for k in raw_data_from_cmd_line:
       if k not in raw_data_from_yaml:
@@ -100,38 +108,54 @@ class _HyperParameters():
             f"Key {k} was passed at the command line but isn't in config."
         )
 
-    raw_keys = OrderedDict()
     for k in raw_data_from_yaml:
       if k in raw_data_from_cmd_line and yaml_key_to_env_key(k) in os.environ:
-        raise ValueError(f"You are passing overrides by both CLI and ENV for `{k}`. This isn't allowed.")
+        raise ValueError(
+            f"You are passing overrides by both CLI and ENV for `{k}`. This isn't allowed.")
 
       if not k in raw_data_from_cmd_line and not yaml_key_to_env_key(k) in os.environ:
         raw_keys[k] = raw_data_from_yaml[k]
         continue
 
+      updated_keys.append(k)
       if k in raw_data_from_cmd_line:
         new_proposal = raw_data_from_cmd_line[k]
       else:
         new_proposal = os.environ.get(yaml_key_to_env_key(k))
 
       if (not isinstance(new_proposal, type(raw_data_from_yaml[k]))) and \
-                                       (type(raw_data_from_yaml[k]) not in _yaml_types_to_parser):
+              (type(raw_data_from_yaml[k]) not in _yaml_types_to_parser):
         raise ValueError(
             f"For key '{k}', type {type(raw_data_from_yaml[k])} not in {_yaml_types_to_parser.keys()}, can't pass"
             " at the CLI or ENV"
         )
 
       if isinstance(new_proposal, type(raw_data_from_yaml[k])):
-        raw_keys[k] = new_proposal # take the raw data, no type conversion
+        raw_keys[k] = new_proposal  # take the raw data, no type conversion
       else:
         try:
           raw_keys[k] = _yaml_types_to_parser[type(raw_data_from_yaml[k])](
               new_proposal
           )  # take the command line value, but type it like the config value.
         except ValueError as e:
-          raise ValueError(f"Couldn't parse value from CLI or ENV '{new_proposal}' for key '{k}'") from e
+          raise ValueError(
+              f"Couldn't parse value from CLI or ENV '{new_proposal}' for key '{k}'") from e
 
-    _HyperParameters.update_model_vars(raw_keys)
+    return updated_keys
+
+  def __init__(self, argv: list[str], **kwargs):
+    with open(argv[1], "r", encoding="utf-8") as yaml_file:
+      raw_data_from_yaml = yaml.safe_load(yaml_file)
+    self._validate_env_variables(raw_data_from_yaml)
+
+    raw_keys = OrderedDict()
+    keys_from_env_and_command_line = self._update_from_env_and_command_line(raw_keys, raw_data_from_yaml, argv, **kwargs)
+    max_logging.log(
+        f"Updating keys from env and command line: {keys_from_env_and_command_line}")
+    keys_from_model = _HyperParameters.update_model_vars(raw_keys)
+    max_logging.log(f"Updating keys from model: {keys_from_model}")
+    validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
+
     _HyperParameters.user_init(raw_keys)
 
     self.keys = raw_keys
@@ -139,11 +163,6 @@ class _HyperParameters():
     keys.sort()
     for k in keys:
       max_logging.log(f"Config param {k}: {raw_keys[k]}")
-
-  def _load_kwargs(self, argv: list[str], **kwargs):
-    args_dict = dict(a.split("=") for a in argv[2:])
-    args_dict.update(kwargs)
-    return args_dict
 
   @staticmethod
   def user_init(raw_keys):
@@ -186,18 +205,20 @@ class _HyperParameters():
     validate_attention_type(raw_keys['attention'])
 
   @staticmethod
-  def update_model_vars(raw_keys):
+  def update_model_vars(raw_keys) -> list[str]:
     ''' Update model config variables
     '''
     validate_model_name(raw_keys['model_name'])
     max_logging.log(f"Running Model: {raw_keys['model_name']}")
 
+    updated_keys = []
     if raw_keys['model_name'] != 'default':
       file_path = f"MaxText/configs/models/{raw_keys['model_name']}.yml"
       with open(file_path, 'r', encoding="utf-8") as file:
         model_vars = yaml.safe_load(file)
+        updated_keys = list(model_vars.keys())
       raw_keys = validate_and_update_keys(raw_keys, model_vars)
-
+    return updated_keys
 
 def validate_and_update_keys(raw_keys, model_keys):
   ''' Validate and update model specific config keys
@@ -212,7 +233,6 @@ def validate_and_update_keys(raw_keys, model_keys):
     else:
       raw_keys[k] = model_keys[k]
   return raw_keys
-
 
 def get_individual_scales(scale):
   '''Choose appropriate scales for individual dimensions based on global scale
