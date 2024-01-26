@@ -39,9 +39,9 @@ def create_orbax_checkpoint_manager(
   max_logging.log("Creating checkpoint manager...")
   p = epath.Path(checkpoint_dir)
   if use_async:
-    checkpointer = AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler())
+    checkpointer = AsyncCheckpointer(checkpoint.StandardCheckpointHandler())
   else:
-    checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
+    checkpointer = Checkpointer(checkpoint.StandardCheckpointHandler())
 
   mngr = CheckpointManager(
       p,
@@ -82,16 +82,6 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
      At most one will be non-None. Both can be None if neither checkpoint is
      set.
   """
-  def map_to_pspec(data, pspec):
-    if isinstance(data, (jax.Array, jax.ShapeDtypeStruct)) \
-          and pspec is not None:
-      return type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
-    else:
-      return type_handlers.RestoreArgs()
-  restore_args = jax.tree_util.tree_map(map_to_pspec,
-                                        abstract_unboxed_pre_state,
-                                        state_mesh_annotations)
-
   if checkpoint_manager is not None:
     max_logging.log("checkpoint manager exists so trying to load this run's existing checkpoint")
 
@@ -99,30 +89,25 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
     if latest_step is not None:
       max_logging.log(f"restoring state from this run's directory latest step \
           {latest_step}")
-      return checkpoint_manager.restore(latest_step, abstract_unboxed_pre_state,
-                                        {"restore_args" : restore_args}), None
+      return checkpoint_manager.restore(latest_step, abstract_unboxed_pre_state), None
     else:
       max_logging.log("failed to find preexisting checkpoint for this run")
 
   if load_parameters_from_path != "":
     max_logging.log(f"restoring params from {load_parameters_from_path=}")
     p = epath.Path(load_parameters_from_path)
-    checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
-    restore_args_param_train_state = train_state.TrainState(step = restore_args.step, params = restore_args.params,\
-                                                            tx=None,  opt_state = {}, apply_fn=None) # type: ignore
+    checkpointer = Checkpointer(checkpoint.StandardCheckpointHandler())
     abstract_param_train_state = train_state.TrainState(step = abstract_unboxed_pre_state.step,\
                                                         params = abstract_unboxed_pre_state.params,\
                                                         tx=None,opt_state = {}, apply_fn=None) # type: ignore
-    full_restored_state = checkpointer.restore(p, item = abstract_param_train_state,\
-                                               restore_args = restore_args_param_train_state)
+    full_restored_state = checkpointer.restore(p, item = abstract_param_train_state)
     return None, full_restored_state.params
   elif load_full_state_from_path != "":
     max_logging.log(f"restoring full state from {load_full_state_from_path=}")
     p = epath.Path(load_full_state_from_path)
-    checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
+    checkpointer = Checkpointer(checkpoint.StandardCheckpointHandler())
     return checkpointer.restore(p,
-                                item=abstract_unboxed_pre_state,
-                                restore_args=restore_args), None
+                                item=abstract_unboxed_pre_state), None
   else:
     max_logging.log("No existing checkpoints found, not restoring checkpoint.")
     return None, None
