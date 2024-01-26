@@ -62,7 +62,6 @@ class LlamaDecoderLayer(nn.Module):
                inputs,
                decoder_segment_ids,
                decoder_positions,
-               padding_mask,
                deterministic,
                model_mode,
                ):

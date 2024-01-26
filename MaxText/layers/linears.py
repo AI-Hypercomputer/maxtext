@@ -153,8 +153,6 @@ class MlpBlock(nn.Module):
     dtype: Type for the dense layer.
     use_bias: whether to add bias in all feedforward layers.
     use_pre_norm: whether to add pre layer norm in mlp layers.
-    apply_packing_mask: whether to apply packing mask in mlp layers.
-    add_skip_connection: whether to add add residual connection in mlp layers.
   """
 
   config: Config
@@ -165,8 +163,6 @@ class MlpBlock(nn.Module):
   dtype: Any = jnp.float32
   use_bias: bool = False
   use_pre_norm: bool = False
-  add_skip_connection: bool = False
-  apply_padding_mask: bool = False
 
   def get_norm_layer(self):
     if self.config.decoder_block in ("default", "llama2", "mistral", "gamma"):
@@ -178,11 +174,9 @@ class MlpBlock(nn.Module):
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   @nn.compact
-  def __call__(self, inputs, padding_mask: Optional[Array] = None, decode: bool = False, deterministic: bool = False):
+  def __call__(self, inputs, decode: bool = False, deterministic: bool = False):
     """Applies Transformer MlpBlock module."""
     cfg = self.config
-    if self.add_skip_connection:
-      residual = inputs
 
     if self.use_pre_norm:
       inputs = self.get_norm_layer()(
@@ -225,12 +219,6 @@ class MlpBlock(nn.Module):
 
     # Take elementwise product of above intermediate activations.
     x = functools.reduce(operator.mul, activations)
-
-    if self.apply_padding_mask and padding_mask is not None:
-      # from [B, L] to [B, L, D]
-      padding_mask = jnp.expand_dims(padding_mask, axis=-1)
-      x *= padding_mask
-
     # Apply dropout and final dense output projection.
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
         x, deterministic=deterministic
@@ -247,9 +235,4 @@ class MlpBlock(nn.Module):
         use_int8=cfg.int8_training,
         use_bias=self.use_bias,
     )(x)
-
-    if self.apply_padding_mask and padding_mask is not None:
-      output *= padding_mask
-    if self.add_skip_connection:
-      output += residual
     return output

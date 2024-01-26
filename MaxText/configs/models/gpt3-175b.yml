@@ -20,7 +20,6 @@ base_num_kv_heads: 96
 base_mlp_dim: 49152
 base_num_decoder_layers: 96
 head_dim: 128
-use_positional_embedding: True
 trainable_position_size: 16384
 mlp_activations: ["gelu"]
 vocab_size: 50304

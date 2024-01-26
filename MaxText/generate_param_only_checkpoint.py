@@ -29,7 +29,7 @@ import checkpointing
 import jax
 import max_logging
 import max_utils
-import maxtext_utils
+import optimizers
 import pyconfig
 
 from absl import app
@@ -77,7 +77,7 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
   model = Transformer(config, mesh)
   rng = random.PRNGKey(0)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
-  tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
+  tx = optimizers.get_optimizer(config, learning_rate_schedule)
   state, state_mesh_notations = max_utils.setup_training_state(
     model, tx, config, rng, mesh, checkpoint_manager
   )
