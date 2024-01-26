@@ -399,6 +399,9 @@ def train_loop(config, state=None):
       )
 
     example_batch = load_next_batch(data_iterator, example_batch, config)
+    if step == last_profiling_step:
+      max_utils.deactivate_profiler(config)
+
     nextrng = jax.random.fold_in(init_rng, step+1)
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
@@ -434,9 +437,6 @@ def train_loop(config, state=None):
 
     if config.gcs_metrics and jax.process_index() == 0:
       running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
-
-    if step == last_profiling_step:
-      max_utils.deactivate_profiler(config)
 
   writer.close()
   return state
