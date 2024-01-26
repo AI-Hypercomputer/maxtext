@@ -61,7 +61,7 @@ def validate_keys(keys):
 
 def validate_model_name(s: str) -> bool:
   # currently supported models
-  valid_model_names= ('default', 'llama2-7b', 'mistral-7b', 'gamma-7b','gamma-2b')
+  valid_model_names= ('default', 'llama2-7b', 'mistral-7b', 'mixtral-8x7b', 'gamma-7b','gamma-2b')
   if s not in valid_model_names:
     raise ValueError(
       "Invalid model name was passed. Valid options ", valid_model_names
@@ -196,6 +196,8 @@ class _HyperParameters():
     raw_keys['num_kv_heads'] = 2**num_head_scale * raw_keys['base_num_kv_heads']
     raw_keys['mlp_dim'] = 2**mlp_dim_scale * raw_keys['base_mlp_dim']
     raw_keys['num_decoder_layers'] = 2**layer_scale * raw_keys['base_num_decoder_layers']
+    raw_keys['num_experts'] = raw_keys['num_experts']
+    raw_keys['num_experts_per_tok'] = raw_keys['num_experts_per_tok']
 
     raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = \
       calculate_global_batch_sizes(raw_keys)

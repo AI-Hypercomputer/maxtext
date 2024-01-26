@@ -146,6 +146,8 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
       parallelism axis. At most one axis can be unspecified."
 
     determined_val = target_product/np.product(parallelism_vals)*-1
+    max_logging.log(f"determined val: {determined_val}")
+    max_logging.log(f"target: {target_product}")
 
     assert determined_val >= 1 and determined_val.is_integer, f"Unspecified value unable to be determined with the given\
       {parallelism_type} parallelism values"
@@ -168,6 +170,8 @@ def create_device_mesh(config, devices=None):
     num_slices = 1 + max([d.slice_index for d in devices])
   except:
     num_slices = 1
+  max_logging.log(f"num_devices {num_devices}")
+  max_logging.log(f"num_slices {num_slices}")
   num_devices_per_slice = num_devices//num_slices
 
   multi_slice_env = num_slices > 1

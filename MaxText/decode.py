@@ -48,6 +48,11 @@ cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 Transformer = models.Transformer
 
+def replicate_globally(np_array, mesh):
+  arrays = [jax.device_put(np_array, dev) for dev in mesh.local_devices]
+  return jax.make_array_from_single_device_arrays(np_array.shape, jax.sharding.NamedSharding(mesh, P()), arrays)
+
+
 def match_input_and_output_stream(prompt, outputs, tokenizer):
   for i in range(len(prompt)):
     prompt_mini = prompt[0:i+1]
@@ -77,9 +82,12 @@ def encode_strings(strs, max_len, tokenizer, mesh):
     padded_start_index = start_index
     segment_ids[i, padded_start_index:] = common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     positions[i, padded_start_index:] = np.arange(len(prompt))
-  return jax.device_put(tokenized_batch, jax.sharding.NamedSharding(mesh, P())),\
-         jax.device_put(positions, jax.sharding.NamedSharding(mesh, P())),\
-         jax.device_put(segment_ids, jax.sharding.NamedSharding(mesh, P()))
+  #return jax.device_put(tokenized_batch, jax.sharding.NamedSharding(mesh, P())),\
+  #       jax.device_put(positions, jax.sharding.NamedSharding(mesh, P())),\
+  #       jax.device_put(segment_ids, jax.sharding.NamedSharding(mesh, P()))
+  return replicate_globally(tokenized_batch, mesh),\
+         replicate_globally(positions, mesh),\
+         replicate_globally(segment_ids, mesh),
 
 def prefill_predict_step(inputs, input_positions, decoder_segment_ids,
                  state,
@@ -195,66 +203,65 @@ def decode_loop(config, state=None):
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
   kv_cache_mesh_shardings = jax.tree_map(
     lambda p: jax.sharding.NamedSharding(mesh, p), kv_cache_annotations)
-  replicated_sharding = jax.sharding.NamedSharding(mesh, P(None))
+  with jax.spmd_mode('allow_all'):
+    replicated_sharding = jax.sharding.NamedSharding(mesh, P(None))
 
-  prefill_cache, new_id, new_position = prefill_or_load(config, model, state, rng, sp_tokenizer,\
-                                                   mesh, state_mesh_shardings, kv_cache_mesh_shardings)
-  num_cache, bytes_cache, bytes_per_cache = max_utils.summarize_size_from_pytree(prefill_cache)
-  max_logging.log(f"Number of cache entries={num_cache/10**9:.3f} billion, memory usage={bytes_cache/2**30:.3f}GB, "
-                  f"bytes per cache={bytes_per_cache:.3f}")
+    prefill_cache, new_id, new_position = prefill_or_load(config, model, state, rng, sp_tokenizer,\
+                                                    mesh, state_mesh_shardings, kv_cache_mesh_shardings)
+    num_cache, bytes_cache, bytes_per_cache = max_utils.summarize_size_from_pytree(prefill_cache)
+    max_logging.log(f"Number of cache entries={num_cache/10**9:.3f} billion, memory usage={bytes_cache/2**30:.3f}GB, "
+                    f"bytes per cache={bytes_per_cache:.3f}")
 
-  total_memory_GB = (bytes_params + bytes_cache)/2**30
-  max_logging.log(f"Total memory (for cache and params) {total_memory_GB:.3f} GB")
+    total_memory_GB = (bytes_params + bytes_cache)/2**30
+    max_logging.log(f"Total memory (for cache and params) {total_memory_GB:.3f} GB")
 
-  partial_ar_predict_step = functools.partial(ar_predict_single_token, model=model)
-  partial_ar_predict_step.__name__ = "partial_ar_predict_step"
-  p_ar_predict_step = jax.jit(
-      partial_ar_predict_step,
-      in_shardings=(replicated_sharding, replicated_sharding, kv_cache_mesh_shardings, state_mesh_shardings, None),
-      out_shardings=(replicated_sharding, kv_cache_mesh_shardings, replicated_sharding),
-      donate_argnums=2
-  )
+    partial_ar_predict_step = functools.partial(ar_predict_single_token, model=model)
+    partial_ar_predict_step.__name__ = "partial_ar_predict_step"
+    p_ar_predict_step = jax.jit(
+        partial_ar_predict_step,
+        in_shardings=(replicated_sharding, replicated_sharding, kv_cache_mesh_shardings, state_mesh_shardings, None),
+        out_shardings=(replicated_sharding, kv_cache_mesh_shardings, replicated_sharding),
+        donate_argnums=2
+    )
 
-  new_cache = prefill_cache
-  outputs = []
-  first_profiling_step = config.max_prefill_predict_length + config.skip_first_n_steps_for_profiler
-  last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1,
-                                first_profiling_step, config.max_target_length - 1)
+    new_cache = prefill_cache
+    outputs = []
+    first_profiling_step = config.max_prefill_predict_length + config.skip_first_n_steps_for_profiler
+    last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1,
+                                  first_profiling_step, config.max_target_length - 1)
 
-  #add the new_id which is the first generated token to outputs
-  outputs = [new_id]
 
-  new_position, new_cache, new_id = p_ar_predict_step(new_id, new_position, new_cache, state, rng)
-  outputs.append(new_id)
-  jax.block_until_ready(new_cache)
-
-  starttime = datetime.datetime.now()
-  for step in range(config.max_prefill_predict_length + 1, config.max_target_length-1):
-    if step == first_profiling_step:
-      max_utils.activate_profiler(config)
     new_position, new_cache, new_id = p_ar_predict_step(new_id, new_position, new_cache, state, rng)
     outputs.append(new_id)
-    if step == last_profiling_step:
-      jax.block_until_ready(outputs)
-      max_utils.deactivate_profiler(config)
-  endtime = datetime.datetime.now()
+    jax.block_until_ready(new_cache)
 
-  new_text, _ = decode_tokens([int(x[0,0]) for x in outputs], sp_tokenizer)
-  max_logging.log(f"Completion: `{config.prompt}` -> `{new_text}`")
-  if config.autoregressive_decode_assert != "":
-    assert new_text==config.autoregressive_decode_assert, \
-    f"generated text mismatch {new_text=} {config.autoregressive_decode_assert=}"
+    starttime = datetime.datetime.now()
+    for step in range(config.max_prefill_predict_length + 1, config.max_target_length-1):
+      if step == first_profiling_step:
+        max_utils.activate_profiler(config)
+      new_position, new_cache, new_id = p_ar_predict_step(new_id, new_position, new_cache, state, rng)
+      outputs.append(new_id)
+      if step == last_profiling_step:
+        jax.block_until_ready(outputs)
+        max_utils.deactivate_profiler(config)
+    endtime = datetime.datetime.now()
 
-  steps = config.max_target_length-1 - (config.max_prefill_predict_length+1)
-  elapsed_time = (endtime-starttime).total_seconds()
-  seqs = config.per_device_batch_size * jax.device_count()
+    new_text, _ = decode_tokens([int(x[0,0]) for x in outputs], sp_tokenizer)
+    max_logging.log(f"Completion: `{config.prompt}` -> `{new_text}`")
+    if config.autoregressive_decode_assert != "":
+      assert new_text==config.autoregressive_decode_assert, \
+      f"generated text mismatch {new_text=} {config.autoregressive_decode_assert=}"
 
-  per_step_time = elapsed_time/steps
-  memory_bandwidth_per_device_GB_per_sec = total_memory_GB/(elapsed_time/steps)/jax.device_count()
-  max_logging.log(f"Did {steps} steps in {elapsed_time:.3f} seconds for {seqs} sequences with a total memory footprint of "
-                  f"{total_memory_GB:.3f} GB")
-  max_logging.log(f"Therefore, a per-generate time of {per_step_time:.4f} seconds, a throughput of {seqs/per_step_time:.1f} "
-                  f"tok/s and {memory_bandwidth_per_device_GB_per_sec:.1f} GB/s/device")
+    steps = config.max_target_length-1 - (config.max_prefill_predict_length+1)
+    elapsed_time = (endtime-starttime).total_seconds()
+    seqs = config.per_device_batch_size * jax.device_count()
+
+    per_step_time = elapsed_time/steps
+    memory_bandwidth_per_device_GB_per_sec = total_memory_GB/(elapsed_time/steps)/jax.device_count()
+    max_logging.log(f"Did {steps} steps in {elapsed_time:.3f} seconds for {seqs} sequences with a total memory footprint of "
+                    f"{total_memory_GB:.3f} GB")
+    max_logging.log(f"Therefore, a per-generate time of {per_step_time:.4f} seconds, a throughput of {seqs/per_step_time:.1f} "
+                    f"tok/s and {memory_bandwidth_per_device_GB_per_sec:.1f} GB/s/device")
 
 def validate_config(config):
   assert config.load_full_state_path == "", "Decode doesn't operate on full states! Convert to parameter checkpoint first."\
