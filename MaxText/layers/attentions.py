@@ -413,7 +413,8 @@ class AttentionOp(nn.Module):
         
       cached_key.value = cached_key.value.at[:, :, :, 0:sequence].set(key_shaped_for_cache)
       cached_value.value = cached_value.value.at[:, :, :, 0:sequence].set(value_shaped_for_cache)
-      cached_segment_id.value = cached_segment_id.value.at[:, 0:sequence].set(decoder_segment_ids)
+      if decoder_segment_ids is not None:
+        cached_segment_id.value = cached_segment_id.value.at[:, 0:sequence].set(decoder_segment_ids)
       return key, value, decoder_segment_ids
 
   def kv_cache_autoregressive(self,
