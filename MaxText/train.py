@@ -282,6 +282,7 @@ def setup_train_loop(config):
     state: the initialized train state
   """
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+  max_utils.activate_profiler(config)
   data_iterator, eval_data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
   state, state_mesh_annotations = max_utils.setup_training_state(model,
@@ -376,21 +377,7 @@ def train_loop(config, state=None):
   maxtext_utils.init_mllog(config, start_step)
   nextrng = jax.random.fold_in(init_rng, start_step)
 
-  # Start profiler on the very first dataload
-  max_utils.activate_profiler(config)
   example_batch = load_next_batch(data_iterator, None, config)
-
-  if eval_data_iterator and config.eval_interval > 0:
-    cumulative_metrics = {"total_loss": 0., "total_weights": 0.}
-    for eval_batch in eval_data_iterator:
-      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        _, metrics = p_eval_step(
-          state, eval_batch, nextrng
-        )
-      cumulative_metrics['total_loss'] += float(metrics['scalar']['evaluation/total_loss'])
-      cumulative_metrics['total_weights'] += float(metrics['scalar']['evaluation/total_weights'])
-    eval_loss = cumulative_metrics['total_loss'] / (cumulative_metrics['total_weights'] + EPS)
-    max_logging.log(f"average loss at start_step {start_step}: eval_loss={eval_loss}, total_weights={cumulative_metrics['total_weights']}")
 
   for step in np.arange(start_step, config.steps):
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -407,22 +394,6 @@ def train_loop(config, state=None):
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
     write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
-
-    if eval_data_iterator and config.eval_interval > 0 and step % config.eval_interval == 0:
-      cumulative_metrics = {"total_loss": 0., "total_weights": 0.}
-      for eval_batch in eval_data_iterator:
-        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-          _, metrics = p_eval_step(
-            state, eval_batch, nextrng
-          )
-        cumulative_metrics['total_loss'] += float(metrics['scalar']['evaluation/total_loss'])
-        cumulative_metrics['total_weights'] += float(metrics['scalar']['evaluation/total_weights'])
-      eval_loss = cumulative_metrics['total_loss'] / (cumulative_metrics['total_weights'] + EPS)
-      max_logging.log(
-        f"average loss after {step}: eval_loss={eval_loss}, total_weights={cumulative_metrics['total_weights']}")
-
-      if maxtext_utils.is_early_stop_mllog(config, step, eval_loss):
-        break
 
     if checkpoint_manager is not None:
       if checkpoint_manager.save(step, state):
