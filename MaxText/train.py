@@ -398,9 +398,9 @@ def train_loop(config, state=None):
           state, example_batch, nextrng
       )
 
-    example_batch = load_next_batch(data_iterator, example_batch, config)
     if step == last_profiling_step:
       max_utils.deactivate_profiler(config)
+    example_batch = load_next_batch(data_iterator, example_batch, config)
 
     nextrng = jax.random.fold_in(init_rng, step+1)
     new_time = datetime.datetime.now()
