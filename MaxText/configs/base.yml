@@ -165,6 +165,8 @@ max_prefill_predict_length: 64 # Maximum length for the prefill when doing autor
 prompt: "I love to" # Prompt for language model sampling.
 load_from_prefill_dir: False # If true, decode.py doesn't "prefill" but just reads from directory
 prefill_cache_dir: "" # If set and load_from_prefill_dir, decode.py reads from directory. If set, decode.py writes to directory
+add_bos: True
+add_eos: True
 autoregressive_decode_assert: ""
 
 enable_profiler: False

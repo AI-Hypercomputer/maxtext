@@ -45,3 +45,5 @@ adam_eps: 1.e-8
 adam_weight_decay: 0.1
 checkpoint_period: 10_000
 target_eval_loss: 2.69
+add_bos: False
+add_eos: False

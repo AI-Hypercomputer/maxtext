@@ -346,8 +346,6 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
                         train_ds, eval_ds,
                         vocab_path: Optional[str] = None,
                         data_shuffle_seed = 0,
-                        add_bos = True,
-                        add_eos = True
                         ):
   """Pre-process the dataset and return iterators"""
   if vocab_path is None:
@@ -355,8 +353,8 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
 
   # Load tokenizer
   sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
-                                          add_bos=add_bos,
-                                          add_eos=add_eos)
+                                          add_bos=config.add_bos,
+                                          add_eos=config.add_eos)
 
   # Tokenize data.
   train_ds = train_ds.map(
@@ -412,7 +410,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
   return train_iter, eval_iter, predict_iter, sp_tokenizer
 
 
-def make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
+def make_c4_train_iterator_and_tokenizer(config, mesh):
   """ Make train iterator and tokenizer for C4 dataset"""
   read_config = tfds.ReadConfig(
     shuffle_seed = config.data_shuffle_seed,
@@ -426,9 +424,7 @@ def make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
     mesh,
     train_ds, eval_ds,
     vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
-    data_shuffle_seed = config.data_shuffle_seed,
-    add_bos = add_bos,
-    add_eos = add_eos
+    data_shuffle_seed=config.data_shuffle_seed,
   )
   return train_iter, None, sp_tokenizer
 
@@ -473,9 +469,9 @@ def create_data_iterator_with_tokenizer(config, mesh):
   if config.dataset_type == "synthetic":
     return SyntheticDataIterator(config, mesh), None, None
   elif config.dataset_type == "c4":
-    return make_c4_train_iterator_and_tokenizer(config, mesh, add_bos=True, add_eos=True)
+    return make_c4_train_iterator_and_tokenizer(config, mesh)
   elif config.dataset_type == "c4_mlperf":
-    return make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, add_bos=False, add_eos=True)
+    return make_c4_mlperf_train_iterator_and_tokenizer(config, mesh)
   else:
     assert False, "dataset type not implemented"
 
@@ -492,7 +488,7 @@ def get_shaped_batch(config):
   shaped_batch['targets_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   return shaped_batch
 
-def make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos, shuffle_buffer_size=128):
+def make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, shuffle_buffer_size=128):
   """ Make train iterator and tokenizer for C4 mlperf dataset"""
 
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
@@ -511,8 +507,8 @@ def make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos, 
   train_ds = rekey(train_ds, {'inputs': None, 'targets': 'text'})
   sp_tokenizer = tokenizer.load_tokenizer(
     vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
-    add_bos=add_bos,
-    add_eos=add_eos,
+    add_bos=config.add_bos,
+    add_eos=config.add_eos,
     )
 
   # tokenize

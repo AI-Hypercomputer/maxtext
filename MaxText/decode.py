@@ -180,7 +180,7 @@ def decode_loop(config, state=None):
 
   # Model and Optimizer definition
   model = Transformer(config, mesh = mesh)
-  _, _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh, add_bos = True, add_eos=False)
+  _, _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
   state, state_mesh_annotations = max_utils.setup_decode_state(
     model, config, rng, mesh, None
   )
