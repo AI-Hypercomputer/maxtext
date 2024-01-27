@@ -85,7 +85,7 @@ def checkpoint_loop(config, state=None):
         if jax.process_index() == 0:
           max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint saved in {end_time - start_time} ,step {step}, on host 0")
 
-  writer.close()
+  max_utils.close_summary_writer(writer)
   return state
 
 def main(argv: Sequence[str]) -> None:
