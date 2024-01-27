@@ -27,6 +27,8 @@ from absl import app
 import numpy as np
 
 import pyconfig
+from jax.sharding import Mesh
+import max_utils
 from train import validate_train_config, get_first_step, load_next_batch, setup_train_loop
 
 from jax.experimental.compilation_cache import compilation_cache as cc
@@ -38,18 +40,20 @@ def data_load_loop(config, state=None):
   """
   _, _, _, _, _, _, _, data_iterator, state = setup_train_loop(config)
 
+  devices_array = max_utils.create_device_mesh(config)
+  mesh = Mesh(devices_array, config.mesh_axes)
   example_batch = None
 
   start = datetime.datetime.now()
   start_step = get_first_step(state)
-  example_batch = load_next_batch(data_iterator, example_batch, config)
+  example_batch = load_next_batch(data_iterator, example_batch, config, mesh)
   jax.block_until_ready(example_batch)
   first_end = datetime.datetime.now()
   time_to_load_first_batch = first_end-start
   max_logging.log(f"First step completed in {time_to_load_first_batch} seconds")
 
   for _ in np.arange(start_step+1, config.steps):
-    example_batch = load_next_batch(data_iterator, example_batch, config)
+    example_batch = load_next_batch(data_iterator, example_batch, config, mesh)
 
   jax.block_until_ready(example_batch) # wait until the last batch is read
   end = datetime.datetime.now()

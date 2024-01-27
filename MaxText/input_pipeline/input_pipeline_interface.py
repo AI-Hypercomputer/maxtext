@@ -24,6 +24,7 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
 from input_pipeline import _tfds_data_processing
+from input_pipeline import _grain_data_processing
 
 
 def make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
@@ -46,6 +47,22 @@ def make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
   )
   return train_iter, sp_tokenizer
 
+def make_grain_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
+  """ Make train iterator and tokenizer for C4 dataset"""
+  train_ds, eval_ds = _grain_data_processing.get_datasets(
+    config=config
+  )
+  train_iter, _, _, sp_tokenizer = _grain_data_processing.preprocess_dataset(
+    config,
+    mesh,
+    train_ds, eval_ds,
+    vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
+    data_shuffle_seed = config.data_shuffle_seed,
+    add_bos = add_bos,
+    add_eos = add_eos
+  )
+  return train_iter, sp_tokenizer
+
 class SyntheticDataIterator():
   """Creates a synthetic data iterator for performance testing work"""
   def __init__(self, config, mesh):
@@ -57,7 +74,7 @@ class SyntheticDataIterator():
     self.data_generator = jax.jit(SyntheticDataIterator.raw_generate_synthetic_data,
         out_shardings=data_pspec_shardings,
         static_argnums=0)
-  def __call__(self):
+  def __next__(self):
     with self.mesh:
       return self.data_generator(self.config)
 
@@ -84,6 +101,8 @@ def create_data_iterator_with_tokenizer(config, mesh, add_bos = True, add_eos = 
     return SyntheticDataIterator(config, mesh), None
   elif config.dataset_type == "c4":
     return make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos)
+  elif config.dataset_type == "c4-array_record":
+    return make_grain_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos)
   else:
     assert False, "dataset type not implemented"
 

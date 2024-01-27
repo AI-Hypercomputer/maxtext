@@ -27,7 +27,7 @@ import tensorflow_datasets as tfds
 
 import pyconfig
 from input_pipeline import _tfds_data_processing
-
+from multihost_dataloading import get_next_batch_sharded
 
 
 class TfdsDataProcessingTest(unittest.TestCase):
@@ -43,10 +43,13 @@ class TfdsDataProcessingTest(unittest.TestCase):
                         enable_checkpointing=False)
     os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
     self.config = pyconfig.config
+    self.mesh_shape_1d = (len(jax.devices()),)
+    self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)    
     self.read_config = tfds.ReadConfig(
       shuffle_seed = self.config.data_shuffle_seed,
     )
     self.read_config.add_tfds_id = True
+    
     self.train_ds, self.eval_ds = self._get_datasets()
     self.train_iter, self.eval_iter, self.predict_iter = self._get_preprocessed_datasets()
 
@@ -71,7 +74,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
     expected_shape = [jax.device_count(), self.config.max_target_length]
     # For training we pack multiple short examples in one example.
     # *_position and *_segmentation indicate the boundaries.
-    batch = self.train_iter()
+    batch = get_next_batch_sharded(self.train_iter, self.mesh)
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
         'inputs': expected_shape,
         'inputs_position': expected_shape,
@@ -84,7 +87,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
   def test_eval_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
-    batch = self.eval_iter()
+    batch = get_next_batch_sharded(self.eval_iter, self.mesh)
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
        'inputs': expected_shape,
        'targets': expected_shape,
@@ -93,7 +96,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
   def test_predict_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
-    batch = self.predict_iter()
+    batch = get_next_batch_sharded(self.predict_iter, self.mesh)
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
         'inputs': expected_shape,
         'targets': expected_shape,
@@ -112,10 +115,10 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
 
   def test_batch_determinism(self):
-    batch1 = self.train_iter()
+    batch1 = get_next_batch_sharded(self.train_iter, self.mesh)
     self.train_ds, _ = self._get_datasets()
     train_iter2, _, _= self._get_preprocessed_datasets()
-    batch2 = train_iter2()
+    batch2 = get_next_batch_sharded(train_iter2, self.mesh)
     self.assertTrue(tf.reduce_all(tf.equal(batch1['inputs'], batch2['inputs'])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1['targets'], batch2['targets'])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1['inputs_segmentation'], batch2['inputs_segmentation'])))
