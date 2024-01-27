@@ -480,7 +480,7 @@ def make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, shuffle_buffer_siz
      "gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model \n",
     )
 
-  os.environ["TFDS_DATA_DIR"] = "gs://mlperf-llm-public2"
+  os.environ["TFDS_DATA_DIR"] = "gs://mlperf-exp-uw1-cp0"
   read_config = tfds.ReadConfig(
     shuffle_seed = config.data_shuffle_seed,
     skip_prefetch = True,
