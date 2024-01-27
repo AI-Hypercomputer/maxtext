@@ -22,7 +22,7 @@ base_num_decoder_layers: 96
 head_dim: 128
 trainable_position_size: 16384
 mlp_activations: ["gelu"]
-vocab_size: 50304
+vocab_size: 51200
 enable_dropout: False
 logits_via_embedding: True
 normalize_embedding_logits: False
