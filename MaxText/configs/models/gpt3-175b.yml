@@ -37,7 +37,6 @@ dataset_name: "c4/en:3.0.4"
 eval_dataset_name: "c4/en:3.0.5"
 assets_path: "gs://mlperf-llm-public2/vocab"
 vocab_relative_path: "c4_en_301_5Mexp2_spm.model"
-stable_cross_entropy_loss: False
 gradient_clipping_threshold: 1.
 adam_b1: 0.9
 adam_b2: 0.95
