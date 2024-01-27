@@ -23,9 +23,9 @@ fi
 if [[ $PLATFORM == "gce" ]]; then
     # Set up network for running on gce
     echo "Setting up network for GCE"
-    bash rto_setup.sh
+    sudo bash rto_setup.sh
 else
     # Set up network for running on gke
     echo "Setting up network for GKE"
-    bash gke_rto_setup.sh
+    bash rto_setup.sh
 fi
