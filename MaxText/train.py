@@ -281,7 +281,9 @@ def setup_train_loop(config):
     state: the initialized train state
   """
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+  max_utils.activate_profiler(config)
   data_iterator, eval_data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
+  eval_data_iterator = None
 
   state, state_mesh_annotations = max_utils.setup_training_state(model,
           tx, config, init_rng, mesh, checkpoint_manager)
@@ -389,8 +391,6 @@ def train_loop(config, state=None):
     max_logging.log(f"average loss at start_step {start_step}: eval_loss={eval_loss}, total_weights={cumulative_metrics['total_weights']}")
 
   for step in np.arange(start_step, config.steps):
-    if step == first_profiling_step:
-      max_utils.activate_profiler(config)
 
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics = p_train_step(
