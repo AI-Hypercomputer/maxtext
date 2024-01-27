@@ -20,8 +20,8 @@ from dags import composer_env
 from dags.pytorch_xla.configs import pytorchxla_torchbench_config as config
 import dags.vm_resource as resource
 
-# Schudule the job to run once per two days at 5:00PM UTC.
-SCHEDULED_TIME = "0 17 */2 * *" if composer_env.is_prod_env() else None
+# Schudule the job to run everyday at 3:00AM PST (11:00AM UTC).
+SCHEDULED_TIME = "0 11 * * *" if composer_env.is_prod_env() else None
 
 
 with models.DAG(
@@ -79,7 +79,7 @@ with models.DAG(
       image_project=resource.ImageProject.DEEP_LEARNING_PLATFORM_RELEASE,
       image_family=resource.ImageFamily.COMMON_CU121_DEBIAN_11,
       accelerator_type=resource.GpuVersion.V100,
-      count=4,
+      count=1,
       gpu_zone=resource.Zone.US_CENTRAL1_C,
       model_name=model,
       time_out_in_min=1600,
@@ -88,11 +88,11 @@ with models.DAG(
 
   # Running on A100 GPU
   config.get_torchbench_gpu_config(
-      machine_type=resource.MachineVersion.A2_HIGHGPU_4G,
+      machine_type=resource.MachineVersion.A2_HIGHGPU_1G,
       image_project=resource.ImageProject.DEEP_LEARNING_PLATFORM_RELEASE,
       image_family=resource.ImageFamily.COMMON_CU121_DEBIAN_11,
       accelerator_type=resource.GpuVersion.A100,
-      count=4,
+      count=1,
       gpu_zone=resource.Zone.US_CENTRAL1_C,
       model_name=model,
       time_out_in_min=1600,

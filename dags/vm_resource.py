@@ -56,6 +56,7 @@ class Zone(enum.Enum):
 
 class MachineVersion(enum.Enum):
   N1_STANDARD_32 = "n1-standard-32"
+  A2_HIGHGPU_1G = "a2-highgpu-1g"
   A2_HIGHGPU_4G = "a2-highgpu-4g"
   A3_HIGHGPU_8G = "a3-highgpu-8g"
   G2_STAND_4 = "g2-standard-4"
