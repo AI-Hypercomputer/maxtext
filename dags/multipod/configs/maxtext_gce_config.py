@@ -53,12 +53,12 @@ def get_maxtext_nightly_config(
   run_model_cmds = (
       (
           "cd /tmp/maxtext && bash setup.sh MODE=nightly;"
-          f' JAX_PLATFORM_NAME=TPU XLA_FLAGS="--xla_dump_to=/tmp/xla_dump/" RUN_NAME="{run_name}" &&'
-          " python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME"
+          " JAX_PLATFORM_NAME=TPU XLA_FLAGS='--xla_dump_to=/tmp/xla_dump/'"
+          f" python3 MaxText/train.py MaxText/configs/base.yml run_name={run_name}"
           f" base_output_directory={gcs_bucket.XLML_OUTPUT_DIR}/maxtext/nightly"
           " dataset_path=gs://max-datasets-rogue dataset_type=synthetic"
           " per_device_batch_size=6 reuse_example_batch=1 global_parameter_scale=1 metrics_file='metrics.txt'"
-          " steps=50 enable_checkpointing=false enable_profiler=true gcs_metrics=true;"
+          " steps=50 enable_checkpointing=false enable_profiler=true gcs_metrics=true"
       ),
   )
 

@@ -22,7 +22,7 @@ import airflow
 from airflow.models.taskmixin import DAGNode
 from airflow.utils.task_group import TaskGroup
 from xlml.apis import gcp_config, metric_config, test_config
-from xlml.utils import gpu, metric, ssh, tpu, xpk
+from xlml.utils import gpu, metric, ssh, tpu, xpk, startup_script
 
 
 class BaseTask(abc.ABC):
@@ -73,8 +73,33 @@ class TpuQueuedResourceTask(BaseTask):
       run_model = self.run_model(queued_resource, ssh_keys)
       post_process = self.post_process()
       clean_up = self.clean_up(queued_resource)
-
       provision >> run_model >> post_process >> clean_up
+
+    return group
+
+  def run_with_startup_script(self) -> DAGNode:
+    """Run a test job on GCE with startup script.
+
+    Returns:
+      A task group with the following tasks chained:
+      provision_with_startup_script (create_queued_resource_request + wait_for_ready_queued_resource + check_if_startup_script_end),
+      post_process and clean_up.
+    """
+
+    use_startup_script = True
+
+    with TaskGroup(
+        group_id=self.task_test_config.benchmark_id, prefix_group_id=True
+    ) as group:
+      (
+          provision_with_startup_script,
+          queued_resource,
+          ssh_keys,
+      ) = self.provision_with_startup_script()
+      post_process = self.post_process(use_startup_script)
+      clean_up = self.clean_up(queued_resource)
+
+      provision_with_startup_script >> post_process >> clean_up
 
     return group
 
@@ -100,11 +125,10 @@ class TpuQueuedResourceTask(BaseTask):
 
       queued_resource_op, queued_resource_name = tpu.create_queued_resource(
           tpu_name,
-          self.task_test_config.accelerator,
           self.task_gcp_config,
           ssh_keys,
           self.tpu_create_timeout,
-          self.task_test_config.num_slices,
+          self.task_test_config,
       )
       queued_resource_op >> tpu.ssh_tpu.override(task_id="setup")(
           queued_resource_name,
@@ -112,6 +136,39 @@ class TpuQueuedResourceTask(BaseTask):
           self.task_test_config.setup_script,
           ssh_keys,
           self.all_workers,
+      )
+
+    return group, queued_resource_name, ssh_keys
+
+  def provision_with_startup_script(
+      self,
+  ) -> Tuple[DAGNode, airflow.XComArg, airflow.XComArg]:
+    """Provision a TPU accelerator via a Queued Resource.
+
+    Generates a random TPU name and SSH keys, creates a Queued Resource, and
+    runs the test config's setup script on the TPU when it is ready.
+
+    Returns:
+      A DAG node that will provision a TPU, an XCom value for the qualified
+      queued resource name, and an XCom value for the SSH keys.
+
+    Raises:
+      AirflowTaskTimeout: An error occurs when execution_timeout is breached.
+    """
+    with TaskGroup(group_id="provision_with_startup_script") as group:
+      with TaskGroup(group_id="initialize"):
+        tpu_name = tpu.generate_tpu_name(
+            self.task_test_config.benchmark_id, self.tpu_name_env_var
+        )
+        ssh_keys = ssh.generate_ssh_keys()
+
+      queued_resource_op, queued_resource_name = tpu.create_queued_resource(
+          tpu_name,
+          self.task_gcp_config,
+          ssh_keys,
+          self.tpu_create_timeout,
+          self.task_test_config,
+          use_startup_script=True,
       )
 
     return group, queued_resource_name, ssh_keys
@@ -131,6 +188,7 @@ class TpuQueuedResourceTask(BaseTask):
     Returns:
       A DAG node that executes the model test.
     """
+
     return tpu.ssh_tpu.override(
         task_id="run_model",
         execution_timeout=datetime.timedelta(
@@ -145,7 +203,7 @@ class TpuQueuedResourceTask(BaseTask):
         self.all_workers,
     )
 
-  def post_process(self) -> DAGNode:
+  def post_process(self, use_startup_script: bool = False) -> DAGNode:
     """Process metrics and metadata, and insert them into BigQuery tables.
 
     Returns:
@@ -158,6 +216,7 @@ class TpuQueuedResourceTask(BaseTask):
           self.task_test_config,
           self.task_metric_config,
           self.task_gcp_config,
+          use_startup_script,
       )
       return group
 

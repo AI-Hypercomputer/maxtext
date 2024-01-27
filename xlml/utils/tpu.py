@@ -31,7 +31,7 @@ import google.api_core.exceptions
 import google.auth
 import google.cloud.tpu_v2alpha1 as tpu_api
 import google.longrunning.operations_pb2 as operations
-from xlml.utils import ssh
+from xlml.utils import ssh, startup_script
 import paramiko
 from airflow.models import Variable
 from google.protobuf.duration_pb2 import Duration
@@ -50,11 +50,11 @@ def generate_tpu_name(
 
 def create_queued_resource(
     tpu_name: airflow.XComArg,
-    accelerator: test_config.Tpu,
     gcp: gcp_config.GCPConfig,
     ssh_keys: airflow.XComArg,
     timeout: datetime.timedelta,
-    num_slices: int,
+    task_test_config: test_config,
+    use_startup_script: bool = False,
 ) -> Tuple[TaskGroup, airflow.XComArg]:
   """Request a QueuedResource and wait until the nodes are created.
 
@@ -79,14 +79,27 @@ def create_queued_resource(
     parent = f'projects/{gcp.project_name}/locations/{gcp.zone}'
 
     # Determine node_id and multiNodeParams based on num_slices
-    if num_slices == 1:
+    if task_test_config.num_slices == 1:
       node_id = tpu_name
       multi_node_params = None
     else:
       node_id = None
       multi_node_params = tpu_api.types.QueuedResource.Tpu.NodeSpec.MultiNodeParams(
-          node_count=num_slices, node_id_prefix=tpu_name
+          node_count=task_test_config.num_slices, node_id_prefix=tpu_name
       )
+
+    startup_script_command = ''
+
+    if use_startup_script:
+      main_command = '\n'.join(
+          task_test_config.set_up_cmds + task_test_config.run_model_cmds
+      )
+      startup_script_command = startup_script.generate_startup_script(main_command)
+
+    metadata = {
+        'ssh-keys': f'ml-auto-solutions:{ssh_keys.public}',
+        'startup-script': startup_script_command,
+    }
 
     queued_resource = tpu_api.QueuedResource(
         # TODO(ranran): enable configuration via `AcceleratorConfig`
@@ -97,23 +110,21 @@ def create_queued_resource(
                     multi_node_params=multi_node_params,
                     parent=parent,
                     node=tpu_api.Node(
-                        accelerator_type=accelerator.name,
+                        accelerator_type=task_test_config.accelerator.name,
                         description='noteardown',
-                        runtime_version=accelerator.runtime_version,
+                        runtime_version=task_test_config.accelerator.runtime_version,
                         network_config=tpu_api.NetworkConfig(
-                            network=accelerator.network,
-                            subnetwork=accelerator.subnetwork,
+                            network=task_test_config.accelerator.network,
+                            subnetwork=task_test_config.accelerator.subnetwork,
                             enable_external_ips=True,
                         ),
-                        metadata={
-                            'ssh-keys': f'ml-auto-solutions:{ssh_keys.public}',
-                        },
+                        metadata=metadata,
                     ),
                 )
             ],
         ),
         guaranteed=tpu_api.QueuedResource.Guaranteed(
-            reserved=accelerator.reserved,
+            reserved=task_test_config.accelerator.reserved,
         ),
         queueing_policy=tpu_api.QueuedResource.QueueingPolicy(
             valid_until_duration=Duration(seconds=int(timeout.total_seconds())),
@@ -151,9 +162,31 @@ def create_queued_resource(
     else:
       raise RuntimeError(f'Bad queued resource state {state.name}')
 
+  def check_if_startup_script_end(
+      queued_resource: airflow.XComArg, ssh_keys: airflow.XComArg
+  ):
+    check_script = startup_script.monitor_startup_script()
+
+    return ssh_tpu.override(
+        task_id='check_if_startup_script_end',
+        execution_timeout=datetime.timedelta(minutes=task_test_config.time_out_in_min),
+        owner=task_test_config.task_owner,
+    )(
+        queued_resource,
+        check_script,
+        ssh_keys,
+        False,
+    )
+
   with TaskGroup(group_id='create_queued_resource') as tg:
     qualified_name = create_queued_resource_request(tpu_name, ssh_keys)
-    wait_for_ready_queued_resource(qualified_name)
+
+    if use_startup_script:
+      wait_for_ready_queued_resource(qualified_name) >> check_if_startup_script_end(
+          qualified_name, ssh_keys
+      )
+    else:
+      wait_for_ready_queued_resource(qualified_name)
 
   return tg, qualified_name
 
