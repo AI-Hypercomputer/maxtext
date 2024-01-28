@@ -164,6 +164,7 @@ class _HyperParameters():
 
     if raw_keys['model_name'] == "gpt3-175b":
       _HyperParameters.configure_gpt3_task(raw_keys)
+      _HyperParameters.configure_local_aqt(raw_keys)
     _HyperParameters.user_init(raw_keys)
 
     self.keys = raw_keys
@@ -224,6 +225,23 @@ class _HyperParameters():
       raw_keys['overwrite_ckpt_step'] = math.ceil(4000.0 * 1536 / global_batch_size)
     global_batch_size_to_train_on = calculate_global_batch_sizes(raw_keys)[1]
     raw_keys['eval_interval'] = math.ceil(24567 / global_batch_size_to_train_on)
+
+  @staticmethod
+  def configure_local_aqt(raw_keys):
+    devices = jax.devices()
+    try:
+      num_slices = 1 + max([d.slice_index for d in devices])
+    except:
+      num_slices = 1
+
+    max_logging.log(f"Updating local_aqt as {num_slices=}\n")
+    raw_keys['local_aqt_shards_mlp1'] = num_slices
+    raw_keys['local_aqt_shards_mlp2'] = num_slices
+    raw_keys['local_aqt_shards_qkv_proj'] = num_slices
+    raw_keys['local_aqt_shards_query_proj'] = num_slices
+    raw_keys['local_aqt_shards_key_proj'] = num_slices
+    raw_keys['local_aqt_shards_value_proj'] = num_slices
+    raw_keys['local_aqt_shards_attention_out_proj'] = num_slices
 
   @staticmethod
   def update_model_vars(raw_keys):
