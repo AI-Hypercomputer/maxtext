@@ -234,7 +234,11 @@ class _HyperParameters():
     except:
       num_slices = 1
 
-    max_logging.log(f"Updating local_aqt as {num_slices=}\n")
+    local_aqt_scale = num_slices
+    if raw_keys['ici_data_parallelism'] > 1:
+      local_aqt_scale = num_slices * raw_keys['ici_data_parallelism']
+
+    max_logging.log(f"Updating local_aqt as {local_aqt_scale=}\n")
     raw_keys['local_aqt_shards_mlp1'] = num_slices
     raw_keys['local_aqt_shards_mlp2'] = num_slices
     raw_keys['local_aqt_shards_qkv_proj'] = num_slices
