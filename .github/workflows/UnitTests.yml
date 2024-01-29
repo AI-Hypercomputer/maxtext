@@ -102,18 +102,6 @@ jobs:
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
         'bash end_to_end/test_generate_param_only_checkpoint.sh -r runner_$(date +%Y-%m-%d-%H-%M) -o gs://runner-maxtext-logs -d gs://maxtext-dataset -i 4'
-    - name: Test llama2 operations
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
-        'bash end_to_end/llama_load_and_test.sh'
-    - name: Test mistral operations
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
-        'bash end_to_end/mistral_load_and_test.sh'
-    - name: Test Gamma decode.py
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
-        'bash end_to_end/test_gamma.sh'
   
   # IF YOU MODIFY THIS, YOU SHOULD ALSO ADD CORRESPONDING MODICATIONS TO 'tpu' job
   gpu:

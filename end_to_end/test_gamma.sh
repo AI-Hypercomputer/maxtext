@@ -1,3 +1,4 @@
+#!/bin/bash
 set -e
 idx=$(date +%Y-%m-%d-%H-%M)
 # convert 2.5B checkpoint
