@@ -29,7 +29,7 @@ import numpy as np
 
 import pyconfig
 import max_utils
-from input_pipeline import create_data_iterator_with_tokenizer
+from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer
 from layers import models
 
 import common_types

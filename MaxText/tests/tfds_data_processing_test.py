@@ -22,34 +22,37 @@ from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
 import unittest
+import tensorflow as tf
 import tensorflow_datasets as tfds
 
 import pyconfig
-import input_pipeline
-
-# By default, XLA presents all the CPU cores as one device. This flag splits up cores in 2 CPU devices.
-os.environ["XLA_FLAGS"] = '--xla_force_host_platform_device_count=2'
-jax.config.update('jax_platform_name', 'cpu')
+from input_pipeline import _tfds_data_processing
 
 
-class InputPipelineTest(unittest.TestCase):
+
+class TfdsDataProcessingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    pyconfig.initialize(sys.argv + ['configs/base.yml'], per_device_batch_size=1, run_name='test', mesh_axes = ['data'],
+    pyconfig.initialize([sys.argv[0], 'configs/base.yml'], per_device_batch_size=1, run_name='test', mesh_axes = ['data'],
                         logical_axis_rules = [['batch', 'data']],
                         data_sharding = ['data'],
+                        base_output_directory = "gs://max-experiments/",
+                        dataset_path = "gs://maxtext-dataset/",
+                        assets_path = "../assets",
                         enable_checkpointing=False)
     os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
     self.config = pyconfig.config
-    self.read_config = tfds.ReadConfig()
+    self.read_config = tfds.ReadConfig(
+      shuffle_seed = self.config.data_shuffle_seed,
+    )
     self.read_config.add_tfds_id = True
     self.train_ds, self.eval_ds = self._get_datasets()
     self.train_iter, self.eval_iter, self.predict_iter = self._get_preprocessed_datasets()
 
   def _get_datasets(self):
     print("Sharding dataset in ", jax.process_count(), " shards")
-    train_ds, eval_ds = input_pipeline.get_datasets(
+    train_ds, eval_ds = _tfds_data_processing.get_datasets(
             config=self.config, read_config = self.read_config)
     return train_ds, eval_ds
 
@@ -57,7 +60,7 @@ class InputPipelineTest(unittest.TestCase):
     mesh_shape_1d = (len(jax.devices()),)
     mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), self.config.mesh_axes)
 
-    train_iter, eval_iter, test_iter, _ = input_pipeline.preprocess_dataset(
+    train_iter, eval_iter, test_iter, _ = _tfds_data_processing.preprocess_dataset(
               self.config,
               mesh,
               self.train_ds, self.eval_ds,
@@ -65,7 +68,7 @@ class InputPipelineTest(unittest.TestCase):
     return train_iter, eval_iter, test_iter
 
   def test_train_ds(self):
-    expected_shape = [2, self.config.max_target_length]
+    expected_shape = [jax.device_count(), self.config.max_target_length]
     # For training we pack multiple short examples in one example.
     # *_position and *_segmentation indicate the boundaries.
     batch = self.train_iter()
@@ -80,7 +83,7 @@ class InputPipelineTest(unittest.TestCase):
 
 
   def test_eval_ds(self):
-    expected_shape = [2, self.config.max_target_length]
+    expected_shape = [jax.device_count(), self.config.max_target_length]
     batch = self.eval_iter()
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
        'inputs': expected_shape,
@@ -89,7 +92,7 @@ class InputPipelineTest(unittest.TestCase):
 
 
   def test_predict_ds(self):
-    expected_shape = [2, self.config.max_target_length]
+    expected_shape = [jax.device_count(), self.config.max_target_length]
     batch = self.predict_iter()
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
         'inputs': expected_shape,
@@ -107,6 +110,18 @@ class InputPipelineTest(unittest.TestCase):
 
     self.assertCountEqual(train_ds1['tfds_id'], train_ds2['tfds_id'])
 
+
+  def test_batch_determinism(self):
+    batch1 = self.train_iter()
+    self.train_ds, _ = self._get_datasets()
+    train_iter2, _, _= self._get_preprocessed_datasets()
+    batch2 = train_iter2()
+    self.assertTrue(tf.reduce_all(tf.equal(batch1['inputs'], batch2['inputs'])))
+    self.assertTrue(tf.reduce_all(tf.equal(batch1['targets'], batch2['targets'])))
+    self.assertTrue(tf.reduce_all(tf.equal(batch1['inputs_segmentation'], batch2['inputs_segmentation'])))
+    self.assertTrue(tf.reduce_all(tf.equal(batch1['targets_segmentation'], batch2['targets_segmentation'])))
+    self.assertTrue(tf.reduce_all(tf.equal(batch1['inputs_position'], batch2['inputs_position'])))
+    self.assertTrue(tf.reduce_all(tf.equal(batch1['targets_position'], batch2['targets_position'])))
 
 if __name__ == '__main__':
   unittest.main()
