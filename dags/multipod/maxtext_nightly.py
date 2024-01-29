@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A DAG to run all supported ML models with the latest JAX/FLAX version."""
+"""A DAG to run MaxText tests with nightly version."""
 
 import datetime
 from airflow import models
@@ -28,7 +28,7 @@ SCHEDULED_TIME = "0 10 * * *" if composer_env.is_prod_env() else None
 with models.DAG(
     dag_id="maxtext_nightly",
     schedule=SCHEDULED_TIME,
-    tags=["multipod_team", "maxtext"],
+    tags=["multipod_team", "maxtext", "nightly"],
     start_date=datetime.datetime(2024, 1, 10),
     catchup=False,
 ) as dag:

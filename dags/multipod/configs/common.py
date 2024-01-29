@@ -15,13 +15,24 @@
 """Utilities to construct common configs."""
 
 from typing import Tuple
+import enum
 
 UPGRADE_PIP = "pip install --upgrade pip"
 
 
+class SetupMode(enum.Enum):
+  STABLE = "stable"
+  NIGHTLY = "nightly"
+
+
 def download_maxtext() -> Tuple[str]:
-  """Common set up for flax repo."""
+  """Download MaxText repo."""
   return (
       UPGRADE_PIP,
       "git clone https://github.com/google/maxtext.git /tmp/maxtext",
   )
+
+
+def setup_maxtext(mode: SetupMode) -> Tuple[str]:
+  """Common set up for MaxText repo."""
+  return download_maxtext() + (f"cd /tmp/maxtext && bash setup.sh MODE={mode.value}",)

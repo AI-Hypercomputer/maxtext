@@ -75,7 +75,54 @@ def get_maxtext_nightly_config(
       set_up_cmds=set_up_cmds,
       run_model_cmds=run_model_cmds,
       time_out_in_min=time_out_in_min,
-      task_owner=test_owner.Tony_C,
+      task_owner=test_owner.TONY_C,
+      num_slices=num_slices,
+  )
+
+  return task.TpuQueuedResourceTask(
+      task_test_config=job_test_config,
+      task_gcp_config=job_gcp_config,
+  )
+
+
+def get_maxtext_end_to_end_test_config(
+    tpu_version: TpuVersion,
+    tpu_cores: int,
+    tpu_zone: str,
+    time_out_in_min: int,
+    test_name: str,
+    test_script: str,
+    test_mode: common.SetupMode,
+    project_name: str = PROJECT_NAME,
+    runtime_version: str = RUNTIME_IMAGE,
+    network: str = "default",
+    subnetwork: str = "default",
+    is_tpu_reserved: bool = True,
+    num_slices: int = 1,
+) -> task.TpuQueuedResourceTask:
+  job_gcp_config = gcp_config.GCPConfig(
+      project_name=project_name,
+      zone=tpu_zone,
+      dataset_name=metric_config.DatasetOption.XLML_DATASET,
+  )
+
+  set_up_cmds = common.setup_maxtext(test_mode)
+  run_model_cmds = (f"cd /tmp/maxtext && bash end_to_end/{test_script}.sh",)
+
+  job_test_config = test_config.TpuVmTest(
+      test_config.Tpu(
+          version=tpu_version,
+          cores=tpu_cores,
+          runtime_version=runtime_version,
+          reserved=is_tpu_reserved,
+          network=network,
+          subnetwork=subnetwork,
+      ),
+      test_name=test_name,
+      set_up_cmds=set_up_cmds,
+      run_model_cmds=run_model_cmds,
+      time_out_in_min=time_out_in_min,
+      task_owner=test_owner.JON_B,
       num_slices=num_slices,
   )
 
