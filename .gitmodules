@@ -1,3 +1,0 @@
-[submodule "ml-testing-accelerators"]
-	path = ml-testing-accelerators
-	url = https://github.com/GoogleCloudPlatform/ml-testing-accelerators.git

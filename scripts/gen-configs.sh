@@ -15,4 +15,4 @@
 # Compile legacy JSonnet templates into JSON
 
 rm -rf dags/jsonnet
-jsonnet -J ./ml-testing-accelerators --create-output-dirs --multi dags/jsonnet ml-testing-accelerators/tests/all_tests.jsonnet
+jsonnet -J ./dags/legacy_test --create-output-dirs --multi dags/jsonnet dags/legacy_test/tests/all_tests.jsonnet
