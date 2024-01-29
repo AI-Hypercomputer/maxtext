@@ -24,7 +24,7 @@ from jax.experimental.serialize_executable import deserialize_and_load
 
 import pickle
 import functools
-import input_pipeline
+from input_pipeline import input_pipeline_interface
 import optax
 
 
@@ -75,7 +75,7 @@ def load_compiled(config, partial_train, state):
     return in_tree_recreated, out_tree_recreated
 
   serialized_compiled = load_serialized_compiled(config.compiled_trainstep_file)
-  shaped_batch = input_pipeline.get_shaped_batch(config)
+  shaped_batch = input_pipeline_interface.get_shaped_batch(config)
   example_rng = jax.random.PRNGKey(0)
   shaped_input_args = (state, shaped_batch, example_rng)
   shaped_input_kwargs = {}
