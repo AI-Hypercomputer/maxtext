@@ -31,7 +31,6 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import numpy as np
 import optax
-from tensorboardX import SummaryWriter
 
 import checkpointing
 import max_utils
@@ -220,7 +219,7 @@ def setup_mesh_and_model(config):
   """
 
   init_rng = random.PRNGKey(config.init_weights_seed)
-  writer = SummaryWriter(config.tensorboard_dir)
+  writer = max_utils.initialize_summary_writer(config)
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       config.checkpoint_dir,
       config.enable_checkpointing,
@@ -349,7 +348,7 @@ def train_loop(config, state=None):
     if step == last_profiling_step:
       max_utils.deactivate_profiler(config)
 
-  writer.close()
+  max_utils.close_summary_writer(writer)
   return state
 
 def main(argv: Sequence[str]) -> None:
