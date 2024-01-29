@@ -442,7 +442,7 @@ def get_kv_cache_annotations(model, config, rng, mesh):
   def init_kv_cache(model, config):
     input_shape = (
       config.global_batch_size_to_load,
-      config.max_target_length
+      config.max_prefill_predict_length
     )
 
     model_vars = model.init({'params': rng, 'dropout': rng, 'aqt': rng},

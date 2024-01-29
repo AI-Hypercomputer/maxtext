@@ -73,6 +73,7 @@ class AttentionOp(nn.Module):
   use_int8: bool
   num_query_heads: int
   num_kv_heads: int
+  max_prefill_predict_length: int = -1 
   float32_logits: bool = False
   flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
   dtype: DType = jnp.float32
@@ -142,12 +143,12 @@ class AttentionOp(nn.Module):
       if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
         raise ValueError("""Decode not supported with flash attention.
                             Use `dot_product` instead.""")
-      return self.tpu_flash_attention(query, key, value, decoder_segment_ids)
+      return self.tpu_flash_attention(query, key, value, decoder_segment_ids), None
     elif self.attention_kernel == 'gpu_flash_xla' or self.attention_kernel == 'gpu_flash_triton':
       if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
         raise ValueError("""Decode not supported with flash attention.
                             Use `dot_product` instead.""")
-      return self.gpu_flash_attention(query, key, value)
+      return self.gpu_flash_attention(query, key, value), None
     else:
       raise ValueError(f'Unexpected attention kernel {self.attention_kernel=}.')
 
@@ -193,6 +194,7 @@ class AttentionOp(nn.Module):
             query.shape[2]
             == decoder_segment_ids.q.shape[1]
         ), 'Sharding along sequence dimension not allowed in flash attention'
+      assert query.shape[2] >= 128, "Flash only supports seq_len >= 128"
       return tpu_flash_attention.flash_attention(
           query,
           key,
@@ -282,10 +284,16 @@ class AttentionOp(nn.Module):
       attn_weights += attn_mask
 
     # Normalize the attention weights across `kv_length` dimension.
-    attn_weights = jax.nn.softmax(attn_weights).astype(self.dtype)
+    attn_weights_softmaxed = jax.nn.softmax(attn_weights).astype(self.dtype)
+
+    summed_exponentials_summed = jnp.sum(jnp.exp(attn_weights), axis=-1, keepdims=True) # TODO: this will cause numerical problems (ask Sholto)
+    summed_exponentials_swapped = jnp.moveaxis(summed_exponentials_summed, -2, 1) # [B, S, Q_GROUPS, KV_HEADS, 1]
+    summed_exponentials_out = jnp.reshape(summed_exponentials_swapped, (summed_exponentials_swapped.shape[0], summed_exponentials_swapped.shape[1], summed_exponentials_swapped.shape[2] * summed_exponentials_swapped.shape[3], 1)) # [B, S, QUERY]
+    return_val = self.wv_product(attn_weights_softmaxed, value, aqt_rng)
+
 
     # Take the linear combination of `value`.
-    return self.wv_product(attn_weights, value, aqt_rng)
+    return return_val, summed_exponentials_out
 
   def qk_product(self, query: Array, key: Array) -> Array:
     """Query-Key product.
@@ -314,8 +322,8 @@ class AttentionOp(nn.Module):
     """weighted value product.
     
     Args:
-      attn_weights: Computed results of qk_einsum, in shape of [b, n, t, s].
-      value: Value projection, in shape of [b, s, d] for multi-head attention.
+      attn_weights: Computed results of qk_einsum, in shape of [b, n, t, s]. ###TODO FIX THIS COMMENT BECAUSE IT DOESN'T KNOW ABOUT GQA
+      value: Value projection, in shape of [b, s, d] for multi-head attention. ###TODO FIX THIS COMMENT BECAUSE IT DOESN'T KNOW ABOUT GQA
       aqt_rng: A PRNGKey for aqt ops.
 
     Returns:
@@ -365,18 +373,33 @@ class AttentionOp(nn.Module):
     """
     return kv_shape[:-3] + tuple(kv_shape[i] for i in [-2, -1, -3])
   
-  def _get_cache(self, cache_logical_shape, dtype):
+  def _get_prefill_cache(self, batch, heads, kv_head_size, dtype):
     kv_cache_layout = ('cache_batch', 'cache_heads', 'cache_kv', 'cache_sequence')
-    cached_key = self.variable('cache', 'cached_key',
+    cache_logical_shape = (batch, self.max_prefill_predict_length, heads, kv_head_size)
+    cached_key = self.variable('cache', 'cached_prefill_key',
                                nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
                                self.cached_kv_shape(cache_logical_shape), dtype)
-    cached_value = self.variable('cache', 'cached_value',
+    cached_value = self.variable('cache', 'cached_prefill_value',
                                  nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
                                  self.cached_kv_shape(cache_logical_shape), dtype)
-    cached_segment_id = self.variable('cache', 'cache_segment_id',
+    cached_segment_id = self.variable('cache', 'cache_prefill_segment_id',
                   nn.with_logical_partitioning(jnp.zeros, ('cache_batch', 'cache_sequence')),
-                  (cache_logical_shape[0], self.max_target_length), jnp.int32)
-    cache_index = self.variable('cache', 'cache_index',
+                  (cache_logical_shape[0], self.max_prefill_predict_length), jnp.int32)
+    return cached_key, cached_value, cached_segment_id
+
+  def _get_ar_cache(self, batch, heads, kv_head_size, dtype):
+    kv_cache_layout = ('cache_batch', 'cache_heads', 'cache_kv', 'cache_sequence')
+    cache_logical_shape = (batch, self.max_target_length - self.max_prefill_predict_length, heads, kv_head_size)
+    cached_key = self.variable('cache', 'cached_ar_key',
+                               nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
+                               self.cached_kv_shape(cache_logical_shape), dtype)
+    cached_value = self.variable('cache', 'cached_ar_value',
+                                 nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
+                                 self.cached_kv_shape(cache_logical_shape), dtype)
+    cached_segment_id = self.variable('cache', 'cache_ar_segment_id',
+                  nn.with_logical_partitioning(jnp.zeros, ('cache_batch', 'cache_sequence')),
+                  (cache_logical_shape[0], self.max_target_length - self.max_prefill_predict_length), jnp.int32)
+    cache_index = self.variable('cache', 'cache_ar_index',
                           nn.with_logical_partitioning(jnp.zeros, ()),
                           (1,), jnp.int32)
     return cached_key, cached_value, cached_segment_id, cache_index
@@ -395,26 +418,24 @@ class AttentionOp(nn.Module):
         decoder_segment_ids: [b, s] -- marking segment ids for tokens
 
       Returns:
-        tuple of key, value, decoder_segment_id.
+        key, value, decoder_segment_id.
 
       """
+      batch, sequence, heads, kv_head_size = key.shape
       assert key.dtype == value.dtype, "Key and Value Dtypes should match."
-      cache_logical_shape = (key.shape[0], self.max_target_length, key.shape[2], key.shape[3])
-      _, sequence, _, _ = key.shape
-
-      cached_key, cached_value, cached_segment_id, cache_index = self._get_cache(cache_logical_shape, key.dtype)
-      cached_key.value *= 0 # we might be prefilling something that already exists!
-      cached_value.value *= 0 # we might be prefilling something that already exists!
-      cached_segment_id.value *= 0
-      cache_index.value = jnp.array(sequence)
+      assert self.max_prefill_predict_length == sequence, "Set prefill length must match prefill sequence"
+      
+      cached_prefill_key, cached_prefill_value, cached_prefill_segment_id = self._get_prefill_cache(batch, heads, kv_head_size, key.dtype)
+      self._get_ar_cache(batch, heads, kv_head_size, key.dtype) # initialize it now
 
       key_shaped_for_cache = self.move_kvlen_axis(key)
       value_shaped_for_cache = self.move_kvlen_axis(value)
         
-      cached_key.value = cached_key.value.at[:, :, :, 0:sequence].set(key_shaped_for_cache)
-      cached_value.value = cached_value.value.at[:, :, :, 0:sequence].set(value_shaped_for_cache)
+      cached_prefill_key.value = key_shaped_for_cache
+      cached_prefill_value.value = value_shaped_for_cache
       if decoder_segment_ids is not None:
-        cached_segment_id.value = cached_segment_id.value.at[:, 0:sequence].set(decoder_segment_ids)
+        cached_prefill_segment_id.value = decoder_segment_ids
+
       return key, value, decoder_segment_ids
 
   def kv_cache_autoregressive(self,
@@ -435,45 +456,48 @@ class AttentionOp(nn.Module):
       Raises:
         ValueError: when key/value shape is not [batch, 1, num_heads, heads_dim].
       """
-      cache_logical_shape = (key.shape[0], self.max_target_length, key.shape[2], key.shape[3])
-      _, sequence, _, _ = key.shape
+      batch, sequence, heads, kv_head_size = key.shape
       if sequence != 1:
         raise ValueError(f"Sequence length should be 1 during autoregression, got {sequence=}")
-      is_initialized = self.has_variable('cache', 'cached_key')
+      is_initialized = self.has_variable('cache', 'cache_ar_index')
       if not is_initialized:
         raise ValueError("Error, we can't do autoregression if we haven't seeded the KV Cache.")
 
-      cached_key, cached_value, cached_segment_id, cache_index = self._get_cache(cache_logical_shape, key.dtype)
-      _, _, _, length = cached_key.value.shape
+      cached_ar_key, cached_ar_value, cached_ar_segment_id, cache_ar_index = self._get_ar_cache(batch, heads, kv_head_size, key.dtype)
 
-      # Create a OHE of the current index. NOTE: the index is increased below.
-      cur_index = cache_index.value
-      one_hot_indices = jax.nn.one_hot(cur_index, length, dtype=key.dtype)
-      one_hot_indices_int32 = jax.nn.one_hot(cur_index, length, dtype=jnp.int32)
+      if True: ### TODO: PUT THIS INTO FUNCTION
+        _, _, _, length = cached_ar_key.value.shape
 
-      # In order to update the key, value caches with the current key and
-      # value, we move the length axis to the back, similar to what we did for
-      # the cached ones above.
-      # Note these are currently the key and value of a single position, since
-      # we feed one position at a time.
-      one_token_key = self.move_kvlen_axis(key)
-      one_token_value = self.move_kvlen_axis(value)
+        # Create a OHE of the current index. NOTE: the index is increased below.
+        cur_index = cache_ar_index.value
+        one_hot_indices = jax.nn.one_hot(cur_index, length, dtype=key.dtype)
+        one_hot_indices_int32 = jax.nn.one_hot(cur_index, length, dtype=jnp.int32)
 
-      # Update key, value caches with our new 1d spatial slices.
-      # We implement an efficient scatter into the cache via one-hot
-      # broadcast and addition.
-      key = cached_key.value + one_token_key * one_hot_indices
-      value = cached_value.value + one_token_value * one_hot_indices
-      cached_key.value = key
-      cached_value.value = value
-      cached_segment_id.value = cached_segment_id.value + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR * one_hot_indices_int32
-      cache_index.value = cache_index.value + 1
+        # In order to update the key, value caches with the current key and
+        # value, we move the length axis to the back, similar to what we did for
+        # the cached ones above.
+        # Note these are currently the key and value of a single position, since
+        # we feed one position at a time.
+        one_token_key = self.move_kvlen_axis(key)
+        one_token_value = self.move_kvlen_axis(value)
 
-      # Move the keys and values back to their original shapes.
-      key = self.revert_kvlen_axis(key)
-      value = self.revert_kvlen_axis(value)
+        # Update key, value caches with our new 1d spatial slices.
+        # We implement an efficient scatter into the cache via one-hot
+        # broadcast and addition.
+        ar_key = cached_ar_key.value + one_token_key * one_hot_indices
+        ar_value = cached_ar_value.value + one_token_value * one_hot_indices
+        cached_ar_key.value = ar_key
+        cached_ar_value.value = ar_value
+        cached_ar_segment_id.value = cached_ar_segment_id.value + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR * one_hot_indices_int32
+        cache_ar_index.value = cache_ar_index.value + 1 ###### TODO: THIS REALLY SHOULD AUTOWRAP https://jax.readthedocs.io/en/latest/_autosummary/jax.numpy.mod.html
 
-      return key, value, cached_segment_id.value
+        # Move the keys and values back to their original shapes.
+        ar_key = self.revert_kvlen_axis(ar_key)
+        ar_value = self.revert_kvlen_axis(ar_value)
+
+      cached_prefill_key, cached_prefill_value, cached_prefill_segment_id = self._get_prefill_cache(self.max_target_length, heads, kv_head_size, key.dtype)
+
+      return (self.revert_kvlen_axis(cached_prefill_key.value), self.revert_kvlen_axis(cached_prefill_value.value), cached_prefill_segment_id.value), (ar_key, ar_value, cached_ar_segment_id.value)
 
   def kv_cache(
       self,
@@ -496,16 +520,17 @@ class AttentionOp(nn.Module):
       model_mode: model mode controlling model
 
     Returns:
-      tuple of key, value with cached,
+      two tuples of (k, v, decoder_segments) -- either can be Nones
 
     """
     if key.shape != value.shape:
       raise ValueError(f"Can't KV cache with mismatched shapes {key.shape=}, {value.shape=}")
+    
 
     if model_mode == common_types.MODEL_MODE_TRAIN:
-      return key, value, decoder_segment_ids
+      return (key, value, decoder_segment_ids), None
     elif model_mode == common_types.MODEL_MODE_PREFILL:
-      return self.kv_cache_prefill(key, value, decoder_segment_ids)
+      return self.kv_cache_prefill(key, value, decoder_segment_ids), None
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       return self.kv_cache_autoregressive(key, value, decoder_segment_ids)
     else:
@@ -513,17 +538,28 @@ class AttentionOp(nn.Module):
 
   @nn.compact
   def __call__(self, query, key, value, decoder_segment_ids, model_mode):
-    key_to_use, value_to_use, decoder_segment_ids_to_use = self.kv_cache(key, value, decoder_segment_ids, model_mode)
+    cache1, cache2 = self.kv_cache(key, value, decoder_segment_ids, model_mode)
 
     # Apply attention.
-    out = self.apply_attention(
+    out1, w1 = self.apply_attention(
         query,
-        key_to_use,
-        value_to_use,
-        decoder_segment_ids_to_use,
+        cache1[0],
+        cache1[1],
+        cache1[2],
         model_mode=model_mode,
     )
-    return out
+    if cache2 is not None:
+      ### TOTALLY WRONG, NEED TO DO A MINI-FLASH
+      out2, w2 = self.apply_attention(
+        query,
+        cache2[0],
+        cache2[1],
+        cache2[2],
+        model_mode=model_mode,
+      )
+
+      return (out1*w1 + out2*w2) / (w1+w2)
+    return out1
 
 class Attention(nn.Module):
   """ Generic Attention.
@@ -536,6 +572,8 @@ class Attention(nn.Module):
       mesh: Mesh, device mesh
       attention_kernel: str, guidance on if we should use an attention kernel
       dtype: the dtype of the computation.
+      max_target_length: maximum target length
+      max_prefill_predict_length: size of the maximum prefill
       dropout_rate: dropout rate
       kernel_init: initializer for the kernel of the Dense layers.
       float32_logits: bool, if True then compute logits in float32 to avoid
@@ -551,6 +589,7 @@ class Attention(nn.Module):
   mesh: Mesh
   attention_kernel: str
   dtype: DType = jnp.float32
+  max_prefill_predict_length: int = -1
   dropout_rate: float = 0.
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
   float32_logits: bool = False  # computes logits in float32 for stability.
@@ -698,6 +737,7 @@ class Attention(nn.Module):
     attention_op = AttentionOp(mesh=self.mesh,
                                attention_kernel=self.attention_kernel,
                                max_target_length=self.max_target_length,
+                               max_prefill_predict_length=self.max_prefill_predict_length,
                                float32_logits=self.float32_logits,
                                use_int8=self.use_int8,
                                num_query_heads=self.num_query_heads,

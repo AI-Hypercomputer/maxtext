@@ -29,7 +29,7 @@ import pyconfig
 from layers import models
 
 Mesh = jax.sharding.Mesh
-
+MAX_PREFILL_PREDICT_LENGTH = 4 
 
 class TestModel(unittest.TestCase):
   """Test the Whole Model """
@@ -37,7 +37,7 @@ class TestModel(unittest.TestCase):
     super().setUp()
     pyconfig.initialize([sys.argv[0], 'configs/base.yml'], per_device_batch_size = 1.0, run_name='test',
                          enable_checkpointing=False, base_num_decoder_layers=2, attention="dot_product",
-                         max_target_length=16, base_emb_dim=256, base_num_query_heads=2, base_num_kv_heads=2)
+                         max_target_length=16, base_emb_dim=256, base_num_query_heads=2, base_num_kv_heads=2, max_prefill_predict_length=4)
     self.cfg = pyconfig.config
     self.rng = jax.random.PRNGKey(0)
 
@@ -60,7 +60,7 @@ class TestModel(unittest.TestCase):
   
   @pytest.mark.tpu
   def test_train_vs_prefill_and_autoregress(self):
-    PREFILL_RANGE = 4
+    PREFILL_RANGE = MAX_PREFILL_PREDICT_LENGTH
 
     devices_array = max_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
