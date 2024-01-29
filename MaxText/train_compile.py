@@ -37,7 +37,7 @@ from absl import app
 import pickle
 import accelerator_to_spec_map
 import train
-import input_pipeline
+from input_pipeline import input_pipeline_interface
 
 Transformer = models.Transformer
 
@@ -79,7 +79,7 @@ def get_shaped_inputs(topology_mesh, config):
   abstract_state, state_mesh_annotations =  max_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
 
   # Shaped batch
-  shaped_batch = input_pipeline.get_shaped_batch(config)
+  shaped_batch = input_pipeline_interface.get_shaped_batch(config)
 
   shaped_train_args = (abstract_state, shaped_batch, shaped_rng)
   shaped_train_kwargs = {}

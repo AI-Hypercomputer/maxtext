@@ -39,7 +39,7 @@ import maxtext_utils
 import max_logging
 import pyconfig
 
-from input_pipeline import create_data_iterator_with_tokenizer
+from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer
 from layers import models
 
 import jax.numpy as jnp
