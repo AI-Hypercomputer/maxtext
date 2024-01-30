@@ -348,7 +348,7 @@ def setup_train_loop(config):
           tx, config, init_rng, mesh, checkpoint_manager)
 
   return ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
-          mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state)
+          mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state, tx)
 
 
 def train_loop(config, state=None):
@@ -360,7 +360,8 @@ def train_loop(config, state=None):
   Returns:
   """
   ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
-  mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state) = setup_train_loop(config)
+  mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state, tx) = setup_train_loop(config)
+
   # pylint: disable=line-too-long
   functional_train, in_shard_train, out_shard_train, static_argnums_train, donate_argnums_train = maxtext_utils.get_functional_train_with_signature(
     train_step,
@@ -396,6 +397,37 @@ def train_loop(config, state=None):
     # Need to pass train signature and state to determine i/o shapes of train_state for now.
     p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
     print("Loaded compiled function!", flush=True)
+  elif config.pre_compile:
+    # pre compile graph
+    shaped_rng = jax.ShapeDtypeStruct(init_rng.shape, init_rng.dtype)
+    # Shaped state
+    abstract_state, state_mesh_annotations, _ =  max_utils.get_abstract_state(model, tx, config, init_rng, mesh)
+    # Shaped batch
+    func_input_args = (abstract_state, next(data_iterator), shaped_rng)
+    func_input_kwargs = {}
+
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      p_train_step_lower = jax.jit(
+        functional_train,
+        in_shardings=in_shard_train,
+        out_shardings=out_shard_train,
+        static_argnums=static_argnums_train,
+        donate_argnums=donate_argnums_train).lower(*func_input_args, **func_input_kwargs)
+
+    p_train_step = p_train_step_lower.compile()
+
+    if eval_data_iterator:
+      func_input_args = (abstract_state, next(eval_data_iterator), shaped_rng)
+      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        p_eval_step_lower = jax.jit(
+          functional_eval,
+          in_shardings=in_shard_eval,
+          out_shardings=out_shard_eval,
+          static_argnums=static_argnums_eval,
+          donate_argnums=donate_argnums_eval,
+        ).lower(*func_input_args, **func_input_kwargs)
+
+      p_eval_step = p_eval_step_lower.compile()
   else:
     p_train_step = jax.jit(
       functional_train,
