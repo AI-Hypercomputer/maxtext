@@ -293,12 +293,14 @@ def get_flax_sd_config(
     tpu_cores: int,
     tpu_zone: str,
     time_out_in_min: int,
-    num_train_epochs: int,
+    num_train_epochs: int = 1,
+    train_batch_size: int = 1,
+    model_name: str = "stabilityai/stable-diffusion-2-1",
     project_name: str = PROJECT_NAME,
     runtime_version: str = RUNTIME_IMAGE,
     network: str = "default",
     subnetwork: str = "default",
-    resolution: int = 512,
+    resolution: int = 256,
     extraFlags: str = "",
     is_tpu_reserved: bool = True,
 ) -> task.TpuQueuedResourceTask:
@@ -320,12 +322,12 @@ def get_flax_sd_config(
       (
           "cd /tmp/diffusers/examples/text_to_image && JAX_PLATFORM_NAME=TPU"
           " python3 train_text_to_image_flax.py"
-          " --pretrained_model_name_or_path='duongna/stable-diffusion-v1-4-flax'"
+          f" --pretrained_model_name_or_path={model_name}"
           f" --dataset_name='lambdalabs/pokemon-blip-captions' --resolution={resolution}"
-          " --center_crop --random_flip --train_batch_size=8"
+          f" --center_crop --random_flip --train_batch_size={train_batch_size}"
           f" --num_train_epochs={num_train_epochs} --learning_rate=1e-05"
           f" --max_grad_norm=1 --output_dir={work_dir} --cache_dir /tmp"
-          f" {extraFlags}"
+          f" --mixed_precision=bf16 --from_pt {extraFlags}"
       ),
   )
 

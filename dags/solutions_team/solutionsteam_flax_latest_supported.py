@@ -191,13 +191,12 @@ with models.DAG(
       extraFlags=" ".join(jax_gpt2_extra_flags),
   ).run()
 
-  # Stable Diffusion
+  # Stable Diffusion v2.1
   jax_sd_v4_8 = flax_config.get_flax_sd_config(
       tpu_version=TpuVersion.V4,
       tpu_cores=8,
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
-      num_train_epochs=1,
   ).run()
 
   jax_sd_v4_32 = flax_config.get_flax_sd_config(
@@ -205,21 +204,29 @@ with models.DAG(
       tpu_cores=32,
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
-      num_train_epochs=1,
       is_tpu_reserved=False,
   ).run()
 
-  jax_sd_v5e_4 = flax_config.get_flax_sd_config(
-      tpu_version=TpuVersion.V5E,
-      tpu_cores=4,
-      tpu_zone=Zone.US_EAST1_C.value,
+  jax_sd_v5p_8 = flax_config.get_flax_sd_config(
+      tpu_version=TpuVersion.V5P,
+      tpu_cores=8,
+      tpu_zone=Zone.US_EAST5_A.value,
       project_name=Project.TPU_PROD_ENV_AUTOMATED.value,
-      runtime_version=RuntimeVersion.V2_ALPHA_TPUV5_LITE.value,
+      runtime_version=RuntimeVersion.V2_ALPHA_TPUV5.value,
       network=V5_NETWORKS,
-      subnetwork=V5E_SUBNETWORKS,
+      subnetwork=V5P_SUBNETWORKS,
       time_out_in_min=60,
-      resolution=128,
-      num_train_epochs=1,
+  ).run()
+
+  jax_sd_v5p_32 = flax_config.get_flax_sd_config(
+      tpu_version=TpuVersion.V5P,
+      tpu_cores=32,
+      tpu_zone=Zone.US_EAST5_A.value,
+      project_name=Project.TPU_PROD_ENV_AUTOMATED.value,
+      runtime_version=RuntimeVersion.V2_ALPHA_TPUV5.value,
+      network=V5_NETWORKS,
+      subnetwork=V5P_SUBNETWORKS,
+      time_out_in_min=60,
   ).run()
 
   # BART
@@ -338,7 +345,7 @@ with models.DAG(
   jax_gpt2_v4_8 >> jax_gpt2_v4_32
   jax_gpt2_v5e_4
   jax_sd_v4_8 >> jax_sd_v4_32
-  jax_sd_v5e_4
+  jax_sd_v5p_8 >> jax_sd_v5p_32
   jax_bart_v4_8 >> jax_bart_conv_v4_32
   jax_bert_mnli_v4_8 >> jax_bert_mnli_conv_v4_32
   jax_bert_mrpc_v4_8 >> jax_bert_mrpc_conv_v4_32
