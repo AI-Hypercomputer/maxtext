@@ -53,6 +53,7 @@ from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
+import input_pipeline
 
 Transformer = models.Transformer
 EPS = 1e-8
@@ -287,7 +288,7 @@ def setup_train_loop(config):
           tx, config, init_rng, mesh, checkpoint_manager)
 
   return ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
-          mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state)
+          mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state, tx)
 
 
 def train_loop(config, state=None):
@@ -299,7 +300,7 @@ def train_loop(config, state=None):
   Returns:
   """
   ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
-  mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state) = setup_train_loop(config)
+  mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state, tx) = setup_train_loop(config)
 
   # pylint: disable=line-too-long
   functional_train, in_shard, out_shard, static_argnums_train, donate_argnums_train = maxtext_utils.get_functional_train_with_signature(
@@ -333,6 +334,39 @@ def train_loop(config, state=None):
     # Need to pass train signature and state to determine i/o shapes of train_state for now.
     p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
     print("Loaded compiled function!", flush=True)
+  elif config.pre_compile:
+    # pre compile graph
+    shaped_rng = jax.ShapeDtypeStruct(init_rng.shape, init_rng.dtype)
+    # Shaped state
+    abstract_state, state_mesh_annotations =  max_utils.get_abstract_state(model, tx, config, init_rng, mesh)
+    # Shaped batch
+    func_input_args = (abstract_state, next(data_iterator), shaped_rng)
+    func_input_kwargs = {}
+
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      p_train_step_lower = jax.jit(
+        functional_train,
+        in_shardings=in_shard,
+        out_shardings=out_shard,
+        static_argnums=static_argnums_train,
+        donate_argnums=donate_argnums_train).lower(*func_input_args, **func_input_kwargs)
+
+    p_train_step = p_train_step_lower.compile()
+    data_iterator.reset()
+
+    if eval_data_iterator:
+      func_input_args = (abstract_state, next(eval_data_iterator), shaped_rng)
+      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        p_eval_step_lower = jax.jit(
+          functional_eval,
+          in_shardings=in_shard,
+          out_shardings=out_shard,
+          static_argnums=static_argnums_eval,
+          donate_argnums=donate_argnums_eval,
+        ).lower(*func_input_args, **func_input_kwargs)
+
+      p_eval_step = p_eval_step_lower.compile()
+      eval_data_iterator.reset()
   else:
     p_train_step = jax.jit(
       functional_train,
@@ -375,18 +409,6 @@ def train_loop(config, state=None):
   maxtext_utils.init_mllog(config, start_step)
   nextrng = jax.random.fold_in(init_rng, start_step)
   example_batch = load_next_batch(data_iterator, None, config)
-
-  if eval_data_iterator and config.eval_interval > 0:
-    cumulative_metrics = {"total_loss": 0., "total_weights": 0.}
-    for eval_batch in eval_data_iterator:
-      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        _, metrics = p_eval_step(
-          state, eval_batch, nextrng
-        )
-      cumulative_metrics['total_loss'] += float(metrics['scalar']['evaluation/total_loss'])
-      cumulative_metrics['total_weights'] += float(metrics['scalar']['evaluation/total_weights'])
-    eval_loss = cumulative_metrics['total_loss'] / (cumulative_metrics['total_weights'] + EPS)
-    max_logging.log(f"average loss at start_step {start_step}: eval_loss={eval_loss}, total_weights={cumulative_metrics['total_weights']}")
 
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
