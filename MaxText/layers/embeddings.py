@@ -100,7 +100,11 @@ class Embed(nn.Module):
       in NLP models.
     """
     dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
-    return jnp.dot(query, jnp.asarray(self.embedding, dtype).T)
+    temp = nn.with_logical_constraint(jnp.asarray(self.embedding, dtype).T, ('embed', 'vocab'))
+    res = jnp.dot(query, temp)
+    res = nn.with_logical_constraint(
+        res, ('activation_batch', 'activation_length', 'activation_vocab'))
+    return res
 
 
 class RotaryEmbedding(nn.Module):

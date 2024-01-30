@@ -66,7 +66,7 @@ def main(raw_args=None) -> None:
       + 1
   )
   hidden_dim, embed_dim = (
-        params['transformer']['layer_0']['mlp']['linear'].shape
+        params['transformer']['layer_0']['mlp']['linear']['w'].shape
     )
   num_heads, head_dim, _ = (
       params['transformer']['layer_0']['attn']['attn_vec_einsum']['w'].shape
@@ -137,13 +137,15 @@ def main(raw_args=None) -> None:
       self_attention['value']['kernel'] = params['transformer'][in_layer_name]['attn']['qkv_einsum']['w'][2].transpose((1, 0, 2))
     self_attention['out']['kernel'] = params['transformer'][in_layer_name]['attn']['attn_vec_einsum']['w']
     # mlp
-    layer_weight['mlp']['wi_0']['kernel'] = params['transformer'][in_layer_name]['mlp']['gating_einsum'][0]
-    layer_weight['mlp']['wi_1']['kernel'] = params['transformer'][in_layer_name]['mlp']['gating_einsum'][1]
-    layer_weight['mlp']['wo']['kernel'] = params['transformer'][in_layer_name]['mlp']['linear']
+    layer_weight['mlp']['wi_0']['kernel'] = params['transformer'][in_layer_name]['mlp']['gating_einsum']['w'][0]
+    layer_weight['mlp']['wi_1']['kernel'] = params['transformer'][in_layer_name]['mlp']['gating_einsum']['w'][1]
+    layer_weight['mlp']['wo']['kernel'] = params['transformer'][in_layer_name]['mlp']['linear']['w']
     layer_weight['pre_self_attention_norm']['scale'] = params['transformer'][in_layer_name]['pre_attention_norm']['scale'] + 1
     layer_weight['pre_ffw_norm']['scale'] = params['transformer'][in_layer_name]['pre_ffw_norm']['scale'] + 1
     layer_weight['self_attention'] = copy.deepcopy(self_attention)
     jax_weights['decoder']['layers_' + str(layer_idx)] = copy.deepcopy(layer_weight)
+
+  jax_weights = jax.tree_map(jnp.array, jax_weights)
 
   enable_checkpointing=True
   async_checkpointing=False

@@ -190,6 +190,8 @@ class Decoder(nn.Module):
 
     # [batch, length] -> [batch, length, emb_dim]
     y = self.shared_embedding(decoder_input_tokens.astype('int32'))
+    y = nn.with_logical_constraint(
+          y, ('activation_batch', 'activation_length', 'activation_embed'))
     y = nn.Dropout(
         rate=cfg.dropout_rate, broadcast_dims=(-2,))(
             y, deterministic=deterministic)
@@ -269,6 +271,8 @@ class Decoder(nn.Module):
             deterministic,
             model_mode,
         )
+        y = nn.with_logical_constraint(
+          y, ('activation_batch', 'activation_length', 'activation_embed'))
 
     y = self.get_norm_layer()(
       dtype=cfg.dtype,
@@ -279,11 +283,14 @@ class Decoder(nn.Module):
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
         y, deterministic=deterministic
     )
-
+    y = nn.with_logical_constraint(
+        y, ('activation_batch', 'activation_length', 'activation_embed'))
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
       logits = self.shared_embedding.attend(y)
+      logits = nn.with_logical_constraint(
+        logits, ('activation_batch', 'activation_length', 'activation_vocab'))
       if self.config.normalize_embedding_logits:
         # Correctly normalize pre-softmax logits for this shared case.
         logits = logits / jnp.sqrt(y.shape[-1])
