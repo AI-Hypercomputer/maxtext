@@ -209,9 +209,10 @@ def train_step(model, config, state, data, dropout_rng, is_train: bool = True):
     else:
       grads = raw_grads
     new_state = state.apply_gradients(grads=grads)
-    metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm': max_utils.l2norm_pytree(grads),
-              'learning/raw_grad_norm': max_utils.l2norm_pytree(raw_grads),
-              'learning/param_norm': max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
+    # metrics = {'scalar': {'learning/loss': loss, 'learning/grad_norm': max_utils.l2norm_pytree(grads),
+    #           'learning/raw_grad_norm': max_utils.l2norm_pytree(raw_grads),
+    #           'learning/param_norm': max_utils.l2norm_pytree(new_state.params)}, 'scalars': {}}
+    metrics = {'scalar': {'learning/loss': loss}, 'scalars': {}}
   else:
     loss, aux = loss_fn(state.params, is_train=False)
     total_loss = aux['total_loss']
@@ -419,8 +420,12 @@ def train_loop(config, state=None):
     example_batch = load_next_batch(data_iterator, example_batch, config)
     nextrng = jax.random.fold_in(init_rng, step+1)
     new_time = datetime.datetime.now()
-    record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
-    write_metrics(writer, metrics, step, config)
+    step_time_delta = new_time - last_step_completion
+    max_logging.log(f"completed step: {step}, seconds: {step_time_delta.total_seconds()}, "
+          f"TFLOP/s/device: {per_device_tflops / step_time_delta.total_seconds()}, "
+          f"loss: {metrics['scalar']['learning/loss']:.3f}")
+    # record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
+    # write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
 
     if eval_data_iterator and config.eval_interval > 0 and step % config.eval_interval == 0:
