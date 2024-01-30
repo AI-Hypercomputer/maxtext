@@ -1,0 +1,26 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug MaxText Decode",
+      "type": "python",
+      "request": "launch",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "python": "python3",
+      "program": "${workspaceFolder}/MaxText/decode.py",
+      "args": ["MaxText/configs/base.yml", 
+               "run_name=runner_$(date +%Y-%m-%d-%H-%M)", 
+               "base_output_directory=gs://patemotter-maxtext-out",
+               "dataset_path=gs://patemotter-maxtext-dataset",
+               "steps=2",
+               "ici_tensor_parallelism=4", 
+               "attention=dot_product",
+               "enable_checkpointing=false", 
+               "max_target_length=9", 
+               "max_prefill_predict_length=6", 
+               "per_device_batch_size=1", 
+               "add_eos=false"]
+    }
+  ]
+}
