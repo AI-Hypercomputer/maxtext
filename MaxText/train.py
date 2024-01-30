@@ -59,7 +59,7 @@ Transformer = models.Transformer
 EPS = 1e-8
 
 def validate_train_config(config):
-  """ Validates the configuration is set correctly for train.py"""
+  """ Validates the configuration is set correctly for train.py."""
 
   assert config.run_name, "Erroring out, need a real run_name"
   if not config.dataset_path.startswith('gs://'):

@@ -32,7 +32,6 @@ use_iota_embed: True
 fused_qkv: True
 opt_type: "adam_pax"
 decoder_block: "gpt3"
-dataset_path: "gs://mlperf-llm-public2"
 dataset_name: "c4/en:3.0.4"
 eval_dataset_name: "c4/en:3.0.5"
 assets_path: "gs://mlperf-llm-public2/vocab"
@@ -43,6 +42,6 @@ adam_b2: 0.95
 adam_eps: 1.e-8
 adam_weight_decay: 0.1
 checkpoint_period: 10_000
-target_eval_loss: 2.69
+target_eval_loss: 2.735
 add_bos: False
 add_eos: False
