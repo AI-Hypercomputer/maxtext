@@ -84,6 +84,7 @@ class GammaDecoderLayer(nn.Module):
       dtype=cfg.dtype,
       dropout_rate=cfg.dropout_rate,
       name='self_attention',
+      float32_qk_product = True,
       float32_logits = True,
       use_int8=cfg.int8_training)
 

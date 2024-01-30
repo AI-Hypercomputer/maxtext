@@ -16,13 +16,14 @@
 
 import functools
 import operator
-from typing import Any, Callable, Iterable, Sequence, Tuple, Union
+from typing import Any, Callable, Iterable, Sequence, Tuple, Union, Optional
 
 import flax.linen as nn
 from jax import lax
 import jax.numpy as jnp
 import common_types
 from layers import initializers
+from layers import normalizations
 from layers import quantizations
 import numpy as np
 
@@ -32,6 +33,9 @@ DType = common_types.DType
 NdInitializer = initializers.NdInitializer
 
 nd_dense_init = initializers.nd_dense_init
+bias_init = initializers.default_bias_init
+
+RMSNorm = normalizations.RMSNorm
 
 
 def _convert_to_activation_function(
@@ -61,13 +65,14 @@ def _canonicalize_tuple(x):
 
 
 class DenseGeneral(nn.Module):
-  """A linear transformation (without bias) with flexible axes.
+  """A linear transformation with flexible axes.
 
   Attributes:
     features: tuple with numbers of output features.
     axis: tuple with axes to apply the transformation on.
     dtype: the dtype of the computation (default: float32).
     kernel_init: initializer function for the weight matrix.
+    use_bias: whether to add bias in linear transformation
   """
 
   features: Union[Iterable[int], int]
@@ -76,6 +81,7 @@ class DenseGeneral(nn.Module):
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
   kernel_axes: Tuple[str, ...] = ()
   use_int8: bool = False
+  use_bias: bool = False
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -119,7 +125,19 @@ class DenseGeneral(nn.Module):
     kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(axis)))
-    return compute_dot_general(inputs, kernel, axis, contract_ind)
+    output = compute_dot_general(inputs, kernel, axis, contract_ind)
+
+    if self.use_bias:
+      bias_axes, bias_shape = self.kernel_axes[-len(features):], kernel_shape[-len(features):]
+      bias = self.param(
+          'bias',
+          nn.with_logical_partitioning(bias_init, bias_axes),
+          bias_shape,
+          jnp.float32,
+      )
+      bias = jnp.asarray(bias, self.dtype)
+      output += bias
+    return output
 
 
 class MlpBlock(nn.Module):
@@ -133,6 +151,8 @@ class MlpBlock(nn.Module):
     deterministic: Whether the dropout layers should be deterministic.
     intermediate_dropout_rate: Dropout rate used after the intermediate layers.
     dtype: Type for the dense layer.
+    use_bias: whether to add bias in all feedforward layers.
+    use_pre_norm: whether to add pre layer norm in mlp layers.
   """
 
   config: Config
@@ -141,11 +161,30 @@ class MlpBlock(nn.Module):
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
   intermediate_dropout_rate: float = 0.1
   dtype: Any = jnp.float32
+  use_bias: bool = False
+  use_pre_norm: bool = False
+
+  def get_norm_layer(self):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gamma"):
+      return RMSNorm
+    elif self.config.decoder_block == "gpt3":
+      from layers import gpt3
+      return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=self.use_bias)
+    else:
+      raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   @nn.compact
   def __call__(self, inputs, decode: bool = False, deterministic: bool = False):
     """Applies Transformer MlpBlock module."""
     cfg = self.config
+
+    if self.use_pre_norm:
+      inputs = self.get_norm_layer()(
+        name='mlp_layer_norm',
+        dtype=cfg.dtype,
+        kernel_axes=('embed',),
+        epsilon=cfg.normalization_layer_epsilon,
+        )(inputs)
 
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
@@ -158,6 +197,7 @@ class MlpBlock(nn.Module):
             kernel_axes=('embed', 'num_activations', 'mlp'),
             name='wi',
             use_int8=cfg.int8_training,
+            use_bias=self.use_bias,
       )(inputs)
       for idx, act_fn in enumerate(self.activations):
         y = _convert_to_activation_function(act_fn)(x[:,:,idx,...])
@@ -172,6 +212,7 @@ class MlpBlock(nn.Module):
             kernel_axes=('embed', 'mlp'),
             name=dense_name,
             use_int8=cfg.int8_training,
+            use_bias=self.use_bias,
         )(inputs)
         x = _convert_to_activation_function(act_fn)(x)
         activations.append(x)
@@ -192,5 +233,6 @@ class MlpBlock(nn.Module):
         kernel_axes=('mlp', 'embed'),
         name='wo',
         use_int8=cfg.int8_training,
+        use_bias=self.use_bias,
     )(x)
     return output
