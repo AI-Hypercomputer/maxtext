@@ -1,4 +1,4 @@
-orbax-checkpoint
+orbax-checkpoint==0.4.8
 absl-py
 aqtp
 cloud-tpu-diagnostics

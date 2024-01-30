@@ -36,7 +36,7 @@ import checkpointing
 import max_utils
 import maxtext_utils
 import max_logging
-from maxtext import optimizers
+import optimizers
 import pyconfig
 
 from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer

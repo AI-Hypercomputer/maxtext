@@ -272,7 +272,7 @@ UserFacingNameToSystemCharacteristics = {
         'tpu', 'v5:4x4x236', 'megacore', (2, 2, 1), 3776
     ),
     'v5p-7680': SystemCharacteristics(
-        'tpu', 'v5:12x16x20', 'megacore', (2, 2, 1), 3840
+        'tpu', 'v5:8x20x24', 'megacore', (2, 2, 1), 3840
     ),
     'v5p-7808': SystemCharacteristics(
         'tpu', 'v5:4x4x244', 'megacore', (2, 2, 1), 3904
@@ -361,8 +361,11 @@ UserFacingNameToSystemCharacteristics = {
     'v5p-12160': SystemCharacteristics(
         'tpu', 'v5:4x20x76', 'megacore', (2, 2, 1), 6080
     ),
+    # 'v5p-12288': SystemCharacteristics(
+    #     'tpu', 'v5:16x16x24', 'megacore', (2, 2, 1), 6144
+    # ),
     'v5p-12288': SystemCharacteristics(
-        'tpu', 'v5:16x16x24', 'megacore', (2, 2, 1), 6144
+        'tpu', 'v5:8x24x32', 'megacore', (2, 2, 1), 6144
     ),
     'v5p-13824': SystemCharacteristics(
         'tpu', 'v5:12x24x24', 'megacore', (2, 2, 1), 6912
