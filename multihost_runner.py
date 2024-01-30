@@ -46,6 +46,7 @@ from datetime import datetime
 import portpicker
 import os
 import re
+import getpass
 
 ##### Define flags #####
 def get_project():
@@ -70,6 +71,8 @@ parser = argparse.ArgumentParser(description='CPU configuration options')
 parser.add_argument('--CPU_PREFIX', type=str, default=None, required=True,
                     help="Prefix of worker CPU's. E.g. if CPU's are named user-0 and user-1, \
                           CPU_PREFIX should be set as user")
+parser.add_argument('--ACCESS_VM_VIA_BEYONDCORP', type=str, default=False,
+                    help="Set true if ssh and scp to the VMs is to be done via go/gce-beyondcorp-ssh")
 parser.add_argument('--PROJECT', type=str, default=None,
                     help='GCE project name, defaults to gcloud config project')
 parser.add_argument('--ZONE', type=str, default=None,
@@ -211,12 +214,17 @@ def scps(slices, run_name_dir, zip_name):
   worker_list = []
   for cur_slice in slices:
     for worker_num in range(cur_slice.num_workers):
-      command = [
+      if args.ACCESS_VM_VIA_BEYONDCORP is False:
+        command = [
           "gcloud", "compute", "scp", zip_path,
           f"{cur_slice.name}:~/", "--strict-host-key-checking=no", f"--project={args.PROJECT}", f"--zone={args.ZONE}"
-      ]
-      if args.INTERNAL_IP:
-        command.append("--internal-ip")
+        ]
+        if args.INTERNAL_IP:
+          command.append("--internal-ip")
+      else:
+        user = getpass.getuser()
+        dest = user+"_google_com@nic0."+cur_slice.name+"."+args.ZONE+".c."+args.PROJECT+".internal.gcpnode.com"
+        command = ["scp", "-o", "StrictHostKeyChecking=no", zip_path, f"{dest}:~/"]
       commands.append(command)
       worker_list.append([cur_slice.slice_num, worker_num])
   return_code, _ = run_commands(commands, 0, "SCP", worker_list)
@@ -257,15 +265,20 @@ def execute_main_command(main_command, slices, local_log_dir, zip_name, coordina
       else:
         remote_command_list = [cd_command, write_kill_script_command , kill_existing_command , export_coordinator_vars_command, main_command]
       remote_command_list_str = " && ".join(remote_command_list)
-      gcloud_command=[
-          "gcloud", "compute", "ssh", cur_slice.name,
-          "--command", remote_command_list_str, "--strict-host-key-checking=no",
-          f"--project={args.PROJECT}", f"--zone={args.ZONE}"]
-      if args.INTERNAL_IP:
-        gcloud_command.append("--internal-ip")
-      commands.append(gcloud_command)
+      if args.ACCESS_VM_VIA_BEYONDCORP is False:
+        gcloud_command=[
+            "ssh", cur_slice.name,
+            "--command", remote_command_list_str, "--strict-host-key-checking=no",
+            f"--project={args.PROJECT}", f"--zone={args.ZONE}"]
+        if args.INTERNAL_IP:
+          gcloud_command.append("--internal-ip")
+        commands.append(gcloud_command)
+      else:
+        user = getpass.getuser()
+        dest = user+"_google_com@nic0."+cur_slice.name+"."+args.ZONE+".c."+args.PROJECT+".internal.gcpnode.com"
+        command = ["ssh", "-o", "StrictHostKeyChecking=no", dest, remote_command_list_str]  
+        commands.append(command)
       worker_list.append([slice_num, worker_num])
-
   return_code, return_codes = run_commands(commands, 0, "MAIN COMMAND", worker_list, output_logs=output_logs)
   if return_code > 0:
     failure_index = next((i for i, x in enumerate(return_codes) if x), None)
@@ -297,7 +310,9 @@ def run_commands(commands, id_to_print, jobname, worker_list, is_shell=False, ou
       output_log = None
     else:
       output_log = subprocess.DEVNULL
-
+    if args.ACCESS_VM_VIA_BEYONDCORP is True:
+      # add time so VM access can be provided with security key for every ssh and scp request.
+      time.sleep(3)
     children.append(subprocess.Popen(command, stdout=output_log, stderr=output_log, shell=is_shell))
 
   while True:
