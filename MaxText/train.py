@@ -422,8 +422,12 @@ def train_loop(config, state=None):
     example_batch = load_next_batch(data_iterator, example_batch, config)
     nextrng = jax.random.fold_in(init_rng, step+1)
     new_time = datetime.datetime.now()
-    record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
-    write_metrics(writer, metrics, step, config)
+    step_time_delta = new_time - last_step_completion
+    max_logging.log(f"completed step: {step}, seconds: {step_time_delta.total_seconds()}, "
+          f"TFLOP/s/device: {per_device_tflops / step_time_delta.total_seconds()}, "
+          f"loss: {metrics['scalar']['learning/loss']:.3f}")
+    # record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
+    # write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
 
     if eval_data_iterator and config.eval_interval > 0 and step % config.eval_interval == 0:
