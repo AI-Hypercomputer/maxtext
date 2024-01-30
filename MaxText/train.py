@@ -395,7 +395,7 @@ def train_loop(config, state=None):
       key_path_str = jax.tree_util.keystr(key_path)
       if key_path_str in  (".step", ".opt_state[0].count", ".opt_state[1].count", ".opt_state.count", ".opt_state[<flat index 0>]"):
         max_logging.log(f"overwrite step: {key_path_str}")
-        return jnp.array(config.overwrite_ckpt_step, dtype=value.dtype)
+        return jnp.array(config.overwrite_ckpt_step, dtype=jnp.int32)
       else:
         return value
 
@@ -430,7 +430,7 @@ def train_loop(config, state=None):
     # write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
 
-    if eval_data_iterator and config.eval_interval > 0 and step % config.eval_interval == 0:
+    if eval_data_iterator and config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
       cumulative_metrics = {"total_loss": 0., "total_weights": 0.}
       for eval_batch in eval_data_iterator:
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
