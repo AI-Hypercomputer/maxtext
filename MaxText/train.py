@@ -36,7 +36,7 @@ import checkpointing
 import max_utils
 import maxtext_utils
 import max_logging
-from maxtext import optimizers
+import optimizers
 import pyconfig
 
 from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer
@@ -109,7 +109,7 @@ def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
 
 
 def write_metrics(writer, metrics, step, config):
-  """Writes metrics to tensorboard"""
+  """ Writes metrics to tensorboard"""
   with jax.spmd_mode('allow_all'):
     if jax.process_index() == 0:
       for metric_name in metrics.get("scalar",[]):
