@@ -352,7 +352,6 @@ def train_loop(config, state=None):
         donate_argnums=donate_argnums_train).lower(*func_input_args, **func_input_kwargs)
 
     p_train_step = p_train_step_lower.compile()
-    data_iterator.reset()
 
     if eval_data_iterator:
       func_input_args = (abstract_state, next(eval_data_iterator), shaped_rng)
@@ -366,7 +365,6 @@ def train_loop(config, state=None):
         ).lower(*func_input_args, **func_input_kwargs)
 
       p_eval_step = p_eval_step_lower.compile()
-      eval_data_iterator.reset()
   else:
     p_train_step = jax.jit(
       functional_train,
