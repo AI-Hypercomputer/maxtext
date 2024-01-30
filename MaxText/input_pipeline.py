@@ -497,18 +497,8 @@ def make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, shuffle_buffer_siz
     skip_prefetch = True,
   )
 
-  train_read_config = tfds.ReadConfig(
-    shuffle_seed = config.data_shuffle_seed,
-    skip_prefetch = True,
-    input_context = tf.distribute.InputContext(
-      input_pipeline_id=jax.process_index() * 512 // jax.process_count(),
-      num_input_pipelines=512,  # Total number of workers
-    ),
-  )
-
   train_ds_builder = tfds.builder(config.dataset_name)
-  train_ds_builder.download_and_prepare()
-  train_ds = train_ds_builder.as_dataset(split='train2', read_config=train_read_config, shuffle_files=True)
+  train_ds = train_ds_builder.as_dataset(split='train2', read_config=read_config, shuffle_files=True)
 
   eval_ds_builder = tfds.builder(config.eval_dataset_name)
   eval_ds = eval_ds_builder.as_dataset(split='validation_tokenized_5662seqs', read_config=read_config, shuffle_files=False)
