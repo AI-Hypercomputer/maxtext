@@ -228,3 +228,5 @@ local_aqt_shards_key_proj: 1
 local_aqt_shards_value_proj: 1
 local_aqt_shards_attention_out_proj: 1
 local_aqt_scale: -1
+
+pre_compile: True
