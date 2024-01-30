@@ -228,24 +228,28 @@ class _HyperParameters():
 
   @staticmethod
   def configure_local_aqt(raw_keys):
-    devices = jax.devices()
-    try:
-      num_slices = 1 + max([d.slice_index for d in devices])
-    except:
-      num_slices = 1
+    if raw_keys['local_aqt_scale'] == -1:
+      devices = jax.devices()
+      try:
+        num_slices = 1 + max([d.slice_index for d in devices])
+      except:
+        num_slices = 1
 
-    local_aqt_scale = num_slices
-    if raw_keys['ici_data_parallelism'] > 1:
-      local_aqt_scale = num_slices * raw_keys['ici_data_parallelism']
+      local_aqt_scale = num_slices
+      if raw_keys['ici_data_parallelism'] > 1:
+        local_aqt_scale = num_slices * raw_keys['ici_data_parallelism']
+    else:
+      local_aqt_scale = raw_keys['local_aqt_scale']
 
     max_logging.log(f"Updating local_aqt as {local_aqt_scale=}\n")
-    raw_keys['local_aqt_shards_mlp1'] = num_slices
-    raw_keys['local_aqt_shards_mlp2'] = num_slices
-    raw_keys['local_aqt_shards_qkv_proj'] = num_slices
-    raw_keys['local_aqt_shards_query_proj'] = num_slices
-    raw_keys['local_aqt_shards_key_proj'] = num_slices
-    raw_keys['local_aqt_shards_value_proj'] = num_slices
-    raw_keys['local_aqt_shards_attention_out_proj'] = num_slices
+    raw_keys['local_aqt_shards_mlp1'] = local_aqt_scale
+    raw_keys['local_aqt_shards_mlp2'] = local_aqt_scale
+    raw_keys['local_aqt_shards_qkv_proj'] = local_aqt_scale
+    raw_keys['local_aqt_shards_query_proj'] = local_aqt_scale
+    raw_keys['local_aqt_shards_key_proj'] = local_aqt_scale
+    raw_keys['local_aqt_shards_value_proj'] = local_aqt_scale
+    raw_keys['local_aqt_shards_attention_out_proj'] = local_aqt_scale
+
 
   @staticmethod
   def update_model_vars(raw_keys):
