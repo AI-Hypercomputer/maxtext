@@ -266,89 +266,37 @@ class AttentionOp(nn.Module):
 
   def apply_attention_dot(
       self,
-      query: Array, # (4, 1, 8, 256)
-      key: Array,   # (4, 6, 8, 256)
-      value: Array, # (4, 6, 8, 256)
+      query: Array, 
+      key: Array,   
+      value: Array, 
       decoder_segment_ids: Array | None,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
   ) -> Array:
     """Apply Attention."""
     aqt_rng = self.make_rng('aqt')
 
-    # Sholto code is based on qkv being shaped (qbatch, qlen, num_heads, d_qkv) (4, 1, 8, 256)
-    # Returns:
-    #   local_out: unnormalized for this chunk          (qbatch, qlen, num_heads, d_qkv)
-    #   local_max: max of exponentials for this chunk   (qbatch, qlen, num_heads, 1)
-    #   local_sum: sum of exponentials / exp(local_max) (qbatch, qlen, num_heads, 1)
-
-    # Casting logits and softmax computation for float32 for model stability.
     if self.float32_logits:
       query = query.astype(jnp.float32)
       key = key.astype(jnp.float32)
 
-    # QK Product, a.k.a `attn_weights`: [batch, num_kv_heads, num_query_heads_per_kv_head, q_length, kv_length]
     attn_weights = self.qk_product(query, key)
-    # (4, 8, 1, 1, 6)
-
     attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
-    # (4, 1, 1, 1, 6)
-    if attn_mask is not None:
-      attn_weights += attn_mask
-
-    # Normalize the attention weights across `kv_length` dimension.
-    attn_weights_softmaxed = jax.nn.softmax(attn_weights).astype(self.dtype) # (4, 8, 1, 1, 6)
-    summed_exponentials_summed = jnp.sum(jnp.exp(attn_weights), axis=-1, keepdims=True) # (4, 8, 1, 1, 1)
-    summed_exponentials_swapped = jnp.moveaxis(summed_exponentials_summed, -2, 1) # (4, 1, 8, 1, 1)
-    summed_exponentials_out = jnp.reshape(summed_exponentials_swapped, (summed_exponentials_swapped.shape[0], 
-                                                                        summed_exponentials_swapped.shape[1], 
-                                                                        summed_exponentials_swapped.shape[2] * summed_exponentials_swapped.shape[3], 
-                                                                        1)) 
-    # (4, 1, 8, 1)
-
-    return_val = self.wv_product(attn_weights_softmaxed, value, aqt_rng) # (4, 1, 8, 256)
-    # return return_val, summed_exponentials_out  # (4, 1, 8, 256), (4, 1, 8, 1)
-
-  ##########################################################################
-
-    # Sholto code is based on qkv being shaped (qbatch, qlen, num_heads, d_qkv)
-    # Returns:
-    #   local_out: unnormalized for this chunk          (qbatch, qlen, num_heads, d_qkv)  | (4, 1, 8, 256)
-    #   local_max: max of exponentials for this chunk   (qbatch, qlen, num_heads, 1)      | (4, 1, 8, 1) 
-    #   local_sum: sum of exponentials / exp(local_max) (qbatch, qlen, num_heads, 1)      | (4, 1, 8, 1)
-
-    # Query is shape: (4, 1, 8, 256)
-    # Casting logits and softmax computation for float32 for model stability.
-    if self.float32_logits:
-      query = query.astype(jnp.float32)
-      key = key.astype(jnp.float32)
-
-    # QK Product, a.k.a `attn_weights`: [batch, num_kv_heads, num_query_heads_per_kv_head, q_length, kv_length]
-    attn_weights = self.qk_product(query, key) # (4, 8, 1, 1, 6)
-    attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode) # (4, 1, 1, 1, 6)
     if attn_mask is not None:
       attn_weights += attn_mask
     
-    # ------------------------------------------------------------------------------------------
-    local_max = jnp.max(attn_weights, axis=-1, keepdims=True) # (4, 8, 1, 1, 1)
-    local_exps = exp2(attn_weights - local_max)               # (4, 8, 1, 1, 6)
-    local_sum = jnp.sum(local_exps, axis=-1, keepdims=True)   # (4, 8, 1, 1, 1)
+    # TODO(Pate): This mini-flash method does not currently work as expected
+    # Based on https://github.com/google-research/google-research/blob/master/scaling_transformer_inference_efficiency/attention.py
+    local_max = jnp.max(attn_weights, axis=-1, keepdims=True)
+    local_exps = exp2(attn_weights - local_max)
+    local_sum = jnp.sum(local_exps, axis=-1, keepdims=True)
 
-    local_sum = jnp.moveaxis(local_sum, -2, 1)    # (4, 1, 8, 1, 1)
-    # local_sum = jnp.swapaxes(local_sum, -2, 1)  # (4, 1, 1, 8, 1)
+    local_sum = jnp.moveaxis(local_sum, -2, 1)
+    local_max = jnp.moveaxis(local_max, -2, 1)
 
-    local_max = jnp.moveaxis(local_max, -2, 1)    # (4, 1, 8, 1, 1)
-    # local_max = jnp.swapaxes(local_max, -2, 1)  # (4, 1, 1, 8, 1)
+    local_max = jnp.reshape(local_max, (local_max.shape[0], local_max.shape[1], local_max.shape[2] * local_max.shape[3], 1)) 
+    local_sum = jnp.reshape(local_sum, (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1)) 
 
-    # (4, 1, 8, 1)
-    local_max = jnp.reshape(local_max, 
-                            (local_max.shape[0], local_max.shape[1], local_max.shape[2] * local_max.shape[3], 1)) 
-    # (4, 1, 8, 1)
-    local_sum = jnp.reshape(local_sum, 
-                            (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1)) 
-
-    local_out = self.wv_product(local_exps, value, aqt_rng) # (4, 1, 8, 256)
-
-    # (4, 1, 8, 256), (4, 1, 8, 1), (4, 1, 8, 1)
+    local_out = self.wv_product(local_exps, value, aqt_rng)
     return local_out, local_max, local_sum
 
 
@@ -364,32 +312,34 @@ class AttentionOp(nn.Module):
     Returns:
       results in shape [b, n_kv, n // n_kv,  t, s].
     """
-    b, t, n, d = query.shape
-    n_kv = key.shape[-2]
-    assert n_kv == self.num_kv_heads
-    query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
-    return jnp.einsum('btkgd,bskd->bkgts', query, key)
+    b, t, n, d = query.shape  
+    n_kv = key.shape[-2]      # (4, 6, 8, 256
+    assert n_kv == self.num_kv_heads  # 8 == 8
+    query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d)) # (4, 1, 8, 1, 256)
+    result = jnp.einsum('btkgd,bskd->bkgts', query, key) # (4, 8, 1, 1, 6)
+    return result # (4, 8, 1, 1, 6)
 
 
   def wv_product(
       self,
-      attn_weights: Array,
-      value: Array,
+      attn_weights: Array,  # (4, 8, 1, 1, 6) -> (batch, n_kv, groups, q_len, k_len)
+      value: Array,         # (4, 6, 8, 256) -> (batch, v_len, n_kv, kv_dim)
       aqt_rng: PRNGKey | None) -> Array:
     """weighted value product.
     
     Args:
-      attn_weights: Computed results of qk_einsum, in shape of [b, n, t, s]. ###TODO FIX THIS COMMENT BECAUSE IT DOESN'T KNOW ABOUT GQA
-      value: Value projection, in shape of [b, s, d] for multi-head attention. ###TODO FIX THIS COMMENT BECAUSE IT DOESN'T KNOW ABOUT GQA
+      attn_weights: Computed results of qk_einsum, in shape [batch_size, num_kv_heads, group_size, q_len, k_len]. 
+      value: Value projection, in shape of [batch_size, v_len, num_kv_heads, kv_dim].
       aqt_rng: A PRNGKey for aqt ops.
 
     Returns:
-      result in shape [b, t, n, d]
+      result in shape [batch_size, q_len, num_kv_heads * group_size, kv_dim]
     """
     einsum = _maybe_aqt_einsum(self.use_int8, aqt_rng)
-    out = einsum('bkgts,bskd->btkgd', attn_weights, value)
-    b, t, n_kv, g, d = out.shape
-    return jnp.reshape(out, (b, t, n_kv * g, d))
+    out = einsum('bkgts,bskd->btkgd', attn_weights, value)  # (4, 1, 8, 1, 256)
+    b, t, n_kv, g, d = out.shape  # (4, 1, 8, 1, 256)
+    result = jnp.reshape(out, (b, t, n_kv * g, d))  # (4, 1, 8 * 1, 256)
+    return result   # (4, 1, 8, 256)
 
   def revert_kvlen_axis(self, kv):
     """Revert key/value length axis.
@@ -494,11 +444,46 @@ class AttentionOp(nn.Module):
         cached_prefill_segment_id.value = decoder_segment_ids
 
       return key, value, decoder_segment_ids
+  
+  
+  # TODO(Pate): Docstring
+  def get_one_hot_indices(self, 
+                          length: int, 
+                          cur_index: int, 
+                          dtype: type,
+                         ):
+    one_hot_indices = jax.nn.one_hot(cur_index, length, dtype=dtype)
+    one_hot_indices_int32 = jax.nn.one_hot(cur_index, length, dtype=jnp.int32)
+    return one_hot_indices, one_hot_indices_int32
+  
 
+  # TODO(Pate): Docstring and types
+  def update_ar_key_value(self, 
+                                 key,
+                                 value,
+                                 cached_ar_key, 
+                                 cached_ar_value, 
+                                 one_hot_indices,
+                                ):
+    # In order to update the key, value caches with the current key and
+    # value, we move the length axis to the back
+    one_token_key = self.move_kvlen_axis(key)
+    one_token_value = self.move_kvlen_axis(value)
+
+    # We implement an efficient scatter into the cache via one-hot broadcast and addition.
+    ar_key = cached_ar_key.value + one_token_key * one_hot_indices
+    ar_value = cached_ar_value.value + one_token_value * one_hot_indices
+    cached_ar_key.value = ar_key
+    cached_ar_value.value = ar_value
+
+    # Move the keys and values back to their original shapes.
+    return self.revert_kvlen_axis(ar_key), self.revert_kvlen_axis(ar_value)
+    
+
+  # TODO(Pate): Docstring and types
   def kv_cache_autoregressive(self,
                               key: Array,
                               value: Array,
-                              decoder_segment_ids: Array,
                              ):
       """In autoregressive mode, we update the cache for this entry and 
          then return the full cache.
@@ -509,7 +494,7 @@ class AttentionOp(nn.Module):
         decoder_segment_ids: [b, 1] -- marking segment ids for tokens
 
       Returns:
-        tuple of key, value with cached,
+        tuple of (key, value, segment_id) for both prefill and ar cache,
       Raises:
         ValueError: when key/value shape is not [batch, 1, num_heads, heads_dim].
       """
@@ -521,40 +506,21 @@ class AttentionOp(nn.Module):
         raise ValueError("Error, we can't do autoregression if we haven't seeded the KV Cache.")
 
       cached_ar_key, cached_ar_value, cached_ar_segment_id, cache_ar_index = self._get_ar_cache(batch, heads, kv_head_size, key.dtype)
+      _, _, _, length = cached_ar_key.value.shape
 
-      if True: ### TODO: PUT THIS INTO FUNCTION
-        _, _, _, length = cached_ar_key.value.shape
+      # Create a OHE of the current index. NOTE: the index is increased below.
+      one_hot_indices, one_hot_indices_int32 = self.get_one_hot_indices(length, cache_ar_index.value, key.dtype)
 
-        # Create a OHE of the current index. NOTE: the index is increased below.
-        cur_index = cache_ar_index.value
-        one_hot_indices = jax.nn.one_hot(cur_index, length, dtype=key.dtype)
-        one_hot_indices_int32 = jax.nn.one_hot(cur_index, length, dtype=jnp.int32)
+      # Update key, value caches with our new 1d spatial slices.
+      ar_key, ar_value = self.update_ar_key_value(key, value, cached_ar_key, cached_ar_value, one_hot_indices)
+      cached_ar_segment_id.value = cached_ar_segment_id.value + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR * one_hot_indices_int32
+      cache_ar_index.value = jnp.mod(cache_ar_index.value + 1, self.max_target_length)
 
-        # In order to update the key, value caches with the current key and
-        # value, we move the length axis to the back, similar to what we did for
-        # the cached ones above.
-        # Note these are currently the key and value of a single position, since
-        # we feed one position at a time.
-        one_token_key = self.move_kvlen_axis(key)
-        one_token_value = self.move_kvlen_axis(value)
-
-        # Update key, value caches with our new 1d spatial slices.
-        # We implement an efficient scatter into the cache via one-hot
-        # broadcast and addition.
-        ar_key = cached_ar_key.value + one_token_key * one_hot_indices
-        ar_value = cached_ar_value.value + one_token_value * one_hot_indices
-        cached_ar_key.value = ar_key
-        cached_ar_value.value = ar_value
-        cached_ar_segment_id.value = cached_ar_segment_id.value + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR * one_hot_indices_int32
-        cache_ar_index.value = cache_ar_index.value + 1 ###### TODO: THIS REALLY SHOULD AUTOWRAP https://jax.readthedocs.io/en/latest/_autosummary/jax.numpy.mod.html
-
-        # Move the keys and values back to their original shapes.
-        ar_key = self.revert_kvlen_axis(ar_key)
-        ar_value = self.revert_kvlen_axis(ar_value)
-
+      # Prep are return both prefill and ar caches
       cached_prefill_key, cached_prefill_value, cached_prefill_segment_id = self._get_prefill_cache(self.max_target_length, heads, kv_head_size, key.dtype)
+      cached_prefill =  self.revert_kvlen_axis(cached_prefill_key.value), self.revert_kvlen_axis(cached_prefill_value.value), cached_prefill_segment_id.value
+      return cached_prefill, (ar_key, ar_value, cached_ar_segment_id.value)
 
-      return (self.revert_kvlen_axis(cached_prefill_key.value), self.revert_kvlen_axis(cached_prefill_value.value), cached_prefill_segment_id.value), (ar_key, ar_value, cached_ar_segment_id.value)
 
   def kv_cache(
       self,
@@ -589,15 +555,16 @@ class AttentionOp(nn.Module):
     elif model_mode == common_types.MODEL_MODE_PREFILL:
       return self.kv_cache_prefill(key, value, decoder_segment_ids), None
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      return self.kv_cache_autoregressive(key, value, decoder_segment_ids)
+      return self.kv_cache_autoregressive(key, value)
     else:
       raise ValueError(f"Model Mode isn't supported! {model_mode=}")
 
   @nn.compact
   def __call__(self, query, key, value, decoder_segment_ids, model_mode):
-    # query: (4, 1, 8, 256) == (qbatch, qlen, num_heads, d_qkv)
     prefill_kv_cache, ar_kv_cache = self.kv_cache(key, value, decoder_segment_ids, model_mode)
 
+    # TODO(Pate): This mini-flash method does not currently work as expected
+    # Based on https://github.com/google-research/google-research/blob/master/scaling_transformer_inference_efficiency/attention.py
     local_out1, local_max1, local_sum1 = self.apply_attention(
       query,
       prefill_kv_cache[0],
