@@ -19,10 +19,11 @@ from airflow import models
 from dags import composer_env
 from dags.vm_resource import TpuVersion, Zone
 from dags.multipod.configs import maxtext_gce_config
+from dags.multipod.configs.common import SetupMode, Platform
 
 
-# Run once a day at 10 am UTC (2 am PST)
-SCHEDULED_TIME = "0 10 * * *" if composer_env.is_prod_env() else None
+# Run once a day at 9 am UTC (1 am PST)
+SCHEDULED_TIME = "0 9 * * *" if composer_env.is_prod_env() else None
 
 
 with models.DAG(
@@ -34,6 +35,7 @@ with models.DAG(
 ) as dag:
   default_test_name = "maxtext-nightly"
 
+  test_mode = SetupMode.NIGHTLY
   # Maxtext
   maxtext_nightly_1slice_v4_8 = maxtext_gce_config.get_maxtext_nightly_config(
       tpu_version=TpuVersion.V4,
@@ -42,6 +44,7 @@ with models.DAG(
       time_out_in_min=60,
       is_tpu_reserved=False,
       test_name=default_test_name,
+      test_mode=test_mode,
   ).run()
 
   maxtext_nightly_2slice_v4_8 = maxtext_gce_config.get_maxtext_nightly_config(
@@ -52,6 +55,7 @@ with models.DAG(
       is_tpu_reserved=False,
       num_slices=2,
       test_name=default_test_name,
+      test_mode=test_mode,
   ).run()
 
   maxtext_nightly_4slice_v4_8 = maxtext_gce_config.get_maxtext_nightly_config(
@@ -62,6 +66,7 @@ with models.DAG(
       is_tpu_reserved=False,
       num_slices=4,
       test_name=default_test_name,
+      test_mode=test_mode,
   ).run()
 
   maxtext_nightly_8slice_v4_8 = maxtext_gce_config.get_maxtext_nightly_config(
@@ -72,6 +77,7 @@ with models.DAG(
       is_tpu_reserved=False,
       num_slices=8,
       test_name=default_test_name,
+      test_mode=test_mode,
   ).run()
 
   # Test dependencie

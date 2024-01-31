@@ -21,6 +21,7 @@ from airflow import models
 from dags import composer_env
 from dags.vm_resource import TpuVersion, Zone
 from dags.multipod.configs import maxtext_gce_config
+from dags.multipod.configs.common import SetupMode, Platform
 
 with models.DAG(
     dag_id="maxtext_nightly_startup_script_example_dag",
@@ -31,6 +32,8 @@ with models.DAG(
 ) as dag:
   default_test_name = "maxtext-nightly-startup-script"
 
+  test_mode = SetupMode.NIGHTLY
+
   # Maxtext
   maxtext_nightly_1slice_v4_8_startup_script = (
       maxtext_gce_config.get_maxtext_nightly_config(
@@ -39,7 +42,9 @@ with models.DAG(
           tpu_zone=Zone.US_CENTRAL2_B.value,
           time_out_in_min=60,
           is_tpu_reserved=False,
+          automated_test=False,
           test_name=default_test_name,
+          test_mode=test_mode,
       ).run_with_startup_script()
   )
 
@@ -50,8 +55,10 @@ with models.DAG(
           tpu_zone=Zone.US_CENTRAL2_B.value,
           time_out_in_min=60,
           is_tpu_reserved=False,
+          automated_test=False,
           num_slices=8,
           test_name=default_test_name,
+          test_mode=test_mode,
       ).run_with_startup_script()
   )
 

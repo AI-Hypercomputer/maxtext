@@ -25,6 +25,11 @@ class SetupMode(enum.Enum):
   NIGHTLY = "nightly"
 
 
+class Platform(enum.Enum):
+  GCE = "gce"
+  GKE = "gke"
+
+
 def download_maxtext() -> Tuple[str]:
   """Download MaxText repo."""
   return (
@@ -33,6 +38,8 @@ def download_maxtext() -> Tuple[str]:
   )
 
 
-def setup_maxtext(mode: SetupMode) -> Tuple[str]:
+def setup_maxtext(mode: SetupMode, platform: Platform) -> Tuple[str]:
   """Common set up for MaxText repo."""
-  return download_maxtext() + (f"cd /tmp/maxtext && bash setup.sh MODE={mode.value}",)
+  return download_maxtext() + (
+      f"cd /tmp/maxtext && bash setup.sh MODE={mode.value} && bash preflight.sh PLATFORM={platform.value}",
+  )
