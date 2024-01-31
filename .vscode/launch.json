@@ -19,8 +19,7 @@
                "enable_checkpointing=false", 
                "max_target_length=9", 
                "max_prefill_predict_length=6", 
-               "per_device_batch_size=1", 
-               "add_eos=false"]
+               "per_device_batch_size=1"]
     }
   ]
 }
