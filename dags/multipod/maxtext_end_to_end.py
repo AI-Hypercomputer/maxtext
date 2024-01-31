@@ -35,7 +35,7 @@ with models.DAG(
     catchup=False,
 ) as dag:
   test_name_prefix = "maxtext"
-  test_models = ["llama2", "mistral", "gamma"]
+  test_models = ["llama2", "mistral", "gamma", "gpt3"]
   test_modes = [SetupMode.STABLE, SetupMode.NIGHTLY]
 
   for model in test_models:
