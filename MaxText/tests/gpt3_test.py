@@ -18,6 +18,7 @@
 """ Tests for GPT3 """
 import sys
 import jax
+import os
 import unittest
 import max_utils
 from jax.sharding import Mesh
