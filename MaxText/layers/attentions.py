@@ -58,6 +58,10 @@ shard_map = shard_map.shard_map
 dynamic_vector_slice_in_dim = jax.vmap(
     lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
 
+def exp2(x):
+  two = jnp.float32(2.0)
+  return lax.pow(two.astype(x.dtype), x)
+
 def _maybe_aqt_einsum(int8_training, aqt_rng):
   """Maybe overwrite dot general with aqt_dot_general."""
   if not int8_training:
@@ -143,12 +147,12 @@ class AttentionOp(nn.Module):
       if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
         raise ValueError("""Decode not supported with flash attention.
                             Use `dot_product` instead.""")
-      return self.tpu_flash_attention(query, key, value, decoder_segment_ids), None
+      return self.tpu_flash_attention(query, key, value, decoder_segment_ids), None, None
     elif self.attention_kernel == 'gpu_flash_xla' or self.attention_kernel == 'gpu_flash_triton':
       if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
         raise ValueError("""Decode not supported with flash attention.
                             Use `dot_product` instead.""")
-      return self.gpu_flash_attention(query, key, value), None
+      return self.gpu_flash_attention(query, key, value), None, None
     else:
       raise ValueError(f'Unexpected attention kernel {self.attention_kernel=}.')
 
@@ -262,14 +266,20 @@ class AttentionOp(nn.Module):
 
   def apply_attention_dot(
       self,
-      query: Array,
-      key: Array,
-      value: Array,
+      query: Array, # (4, 1, 8, 256)
+      key: Array,   # (4, 6, 8, 256)
+      value: Array, # (4, 6, 8, 256)
       decoder_segment_ids: Array | None,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
   ) -> Array:
     """Apply Attention."""
     aqt_rng = self.make_rng('aqt')
+
+    # Sholto code is based on qkv being shaped (qbatch, qlen, num_heads, d_qkv) (4, 1, 8, 256)
+    # Returns:
+    #   local_out: unnormalized for this chunk          (qbatch, qlen, num_heads, d_qkv)
+    #   local_max: max of exponentials for this chunk   (qbatch, qlen, num_heads, 1)
+    #   local_sum: sum of exponentials / exp(local_max) (qbatch, qlen, num_heads, 1)
 
     # Casting logits and softmax computation for float32 for model stability.
     if self.float32_logits:
@@ -278,22 +288,69 @@ class AttentionOp(nn.Module):
 
     # QK Product, a.k.a `attn_weights`: [batch, num_kv_heads, num_query_heads_per_kv_head, q_length, kv_length]
     attn_weights = self.qk_product(query, key)
+    # (4, 8, 1, 1, 6)
 
     attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
+    # (4, 1, 1, 1, 6)
     if attn_mask is not None:
       attn_weights += attn_mask
 
     # Normalize the attention weights across `kv_length` dimension.
-    attn_weights_softmaxed = jax.nn.softmax(attn_weights).astype(self.dtype)
+    attn_weights_softmaxed = jax.nn.softmax(attn_weights).astype(self.dtype) # (4, 8, 1, 1, 6)
+    summed_exponentials_summed = jnp.sum(jnp.exp(attn_weights), axis=-1, keepdims=True) # (4, 8, 1, 1, 1)
+    summed_exponentials_swapped = jnp.moveaxis(summed_exponentials_summed, -2, 1) # (4, 1, 8, 1, 1)
+    summed_exponentials_out = jnp.reshape(summed_exponentials_swapped, (summed_exponentials_swapped.shape[0], 
+                                                                        summed_exponentials_swapped.shape[1], 
+                                                                        summed_exponentials_swapped.shape[2] * summed_exponentials_swapped.shape[3], 
+                                                                        1)) 
+    # (4, 1, 8, 1)
 
-    summed_exponentials_summed = jnp.sum(jnp.exp(attn_weights), axis=-1, keepdims=True) # TODO: this will cause numerical problems (ask Sholto)
-    summed_exponentials_swapped = jnp.moveaxis(summed_exponentials_summed, -2, 1) # [B, S, Q_GROUPS, KV_HEADS, 1]
-    summed_exponentials_out = jnp.reshape(summed_exponentials_swapped, (summed_exponentials_swapped.shape[0], summed_exponentials_swapped.shape[1], summed_exponentials_swapped.shape[2] * summed_exponentials_swapped.shape[3], 1)) # [B, S, QUERY]
-    return_val = self.wv_product(attn_weights_softmaxed, value, aqt_rng)
+    return_val = self.wv_product(attn_weights_softmaxed, value, aqt_rng) # (4, 1, 8, 256)
+    # return return_val, summed_exponentials_out  # (4, 1, 8, 256), (4, 1, 8, 1)
 
+  ##########################################################################
 
-    # Take the linear combination of `value`.
-    return return_val, summed_exponentials_out
+    # Sholto code is based on qkv being shaped (qbatch, qlen, num_heads, d_qkv)
+    # Returns:
+    #   local_out: unnormalized for this chunk          (qbatch, qlen, num_heads, d_qkv)  | (4, 1, 8, 256)
+    #   local_max: max of exponentials for this chunk   (qbatch, qlen, num_heads, 1)      | (4, 1, 8, 1) 
+    #   local_sum: sum of exponentials / exp(local_max) (qbatch, qlen, num_heads, 1)      | (4, 1, 8, 1)
+
+    # Query is shape: (4, 1, 8, 256)
+    # Casting logits and softmax computation for float32 for model stability.
+    if self.float32_logits:
+      query = query.astype(jnp.float32)
+      key = key.astype(jnp.float32)
+
+    # QK Product, a.k.a `attn_weights`: [batch, num_kv_heads, num_query_heads_per_kv_head, q_length, kv_length]
+    attn_weights = self.qk_product(query, key) # (4, 8, 1, 1, 6)
+    attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode) # (4, 1, 1, 1, 6)
+    if attn_mask is not None:
+      attn_weights += attn_mask
+    
+    # ------------------------------------------------------------------------------------------
+    local_max = jnp.max(attn_weights, axis=-1, keepdims=True) # (4, 8, 1, 1, 1)
+    local_exps = exp2(attn_weights - local_max)               # (4, 8, 1, 1, 6)
+    local_sum = jnp.sum(local_exps, axis=-1, keepdims=True)   # (4, 8, 1, 1, 1)
+
+    local_sum = jnp.moveaxis(local_sum, -2, 1)    # (4, 1, 8, 1, 1)
+    # local_sum = jnp.swapaxes(local_sum, -2, 1)  # (4, 1, 1, 8, 1)
+
+    local_max = jnp.moveaxis(local_max, -2, 1)    # (4, 1, 8, 1, 1)
+    # local_max = jnp.swapaxes(local_max, -2, 1)  # (4, 1, 1, 8, 1)
+
+    # (4, 1, 8, 1)
+    local_max = jnp.reshape(local_max, 
+                            (local_max.shape[0], local_max.shape[1], local_max.shape[2] * local_max.shape[3], 1)) 
+    # (4, 1, 8, 1)
+    local_sum = jnp.reshape(local_sum, 
+                            (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1)) 
+
+    local_out = self.wv_product(local_exps, value, aqt_rng) # (4, 1, 8, 256)
+
+    # (4, 1, 8, 256), (4, 1, 8, 1), (4, 1, 8, 1)
+    return local_out, local_max, local_sum
+
 
   def qk_product(self, query: Array, key: Array) -> Array:
     """Query-Key product.
@@ -538,28 +595,43 @@ class AttentionOp(nn.Module):
 
   @nn.compact
   def __call__(self, query, key, value, decoder_segment_ids, model_mode):
-    cache1, cache2 = self.kv_cache(key, value, decoder_segment_ids, model_mode)
+    # query: (4, 1, 8, 256) == (qbatch, qlen, num_heads, d_qkv)
+    prefill_kv_cache, ar_kv_cache = self.kv_cache(key, value, decoder_segment_ids, model_mode)
 
-    # Apply attention.
-    out1, w1 = self.apply_attention(
-        query,
-        cache1[0],
-        cache1[1],
-        cache1[2],
-        model_mode=model_mode,
+    local_out1, local_max1, local_sum1 = self.apply_attention(
+      query,
+      prefill_kv_cache[0],
+      prefill_kv_cache[1],
+      prefill_kv_cache[2],
+      model_mode=model_mode,
     )
-    if cache2 is not None:
-      ### TOTALLY WRONG, NEED TO DO A MINI-FLASH
-      out2, w2 = self.apply_attention(
-        query,
-        cache2[0],
-        cache2[1],
-        cache2[2],
-        model_mode=model_mode,
-      )
+    if ar_kv_cache is None:
+      return local_out1
 
-      return (out1*w1 + out2*w2) / (w1+w2)
-    return out1
+    local_out2, local_max2, local_sum2  = self.apply_attention(
+      query,
+      ar_kv_cache[0],
+      ar_kv_cache[1],
+      ar_kv_cache[2],
+      model_mode=model_mode,
+    )
+
+    local_outs = [local_out1, local_out2]
+    local_maxes = [local_max1, local_max2]
+    local_sums = [local_sum1, local_sum2]
+
+    global_max = functools.reduce(jnp.maximum, local_maxes)
+    global_sum = sum([
+      exp2(local_max - global_max) * local_sum
+      for (local_sum, local_max) in zip(local_sums, local_maxes)
+    ])
+
+    attn_out = 0
+    for local_max, local_out in zip(local_maxes, local_outs):
+      local_normalizer = exp2(local_max - global_max) / global_sum
+      attn_out += local_normalizer * local_out
+    return attn_out
+
 
 class Attention(nn.Module):
   """ Generic Attention.
