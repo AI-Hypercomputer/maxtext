@@ -225,6 +225,7 @@ class AttentionTest(unittest.TestCase):
         rngs={'aqt': self.rng},
     )
 
+    print(f"max gap: {jnp.max(jnp.abs(mha_generic_output - mha_generic_flash_output))}")
     self.assertTrue(
         jax.numpy.allclose(
             mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False

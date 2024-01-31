@@ -59,7 +59,8 @@ dynamic_vector_slice_in_dim = jax.vmap(
     lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
 
 def exp2(x):
-  two = jnp.float32(2.0)
+  two = jnp.float32(2.71828)
+
   return lax.pow(two.astype(x.dtype), x)
 
 def _maybe_aqt_einsum(int8_training, aqt_rng):
@@ -294,7 +295,7 @@ class AttentionOp(nn.Module):
     local_max = jnp.moveaxis(local_max, -2, 1)
 
     local_max = jnp.reshape(local_max, (local_max.shape[0], local_max.shape[1], local_max.shape[2] * local_max.shape[3], 1)) 
-    local_sum = jnp.reshape(local_sum, (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1)) 
+    local_sum = jnp.reshape(local_sum, (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1))
 
     local_out = self.wv_product(local_exps, value, aqt_rng)
     return local_out, local_max, local_sum
@@ -573,6 +574,8 @@ class AttentionOp(nn.Module):
       model_mode=model_mode,
     )
     if ar_kv_cache is None:
+      if local_sum1 is not None:
+        return local_out1 / local_sum1
       return local_out1
 
     local_out2, local_max2, local_sum2  = self.apply_attention(
