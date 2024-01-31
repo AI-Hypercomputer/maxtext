@@ -95,6 +95,9 @@ base_output_directory: ""
 # Jax cache directory
 jax_cache_dir: "~/jax_cache"
 
+# Hardware
+hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu' and 'cpu'
+
 # Parallelism
 mesh_axes: ['data', 'fsdp', 'sequence', 'tensor', 'autoregressive']
 logical_axis_rules: [

@@ -37,8 +37,6 @@ from train import setup_mesh_and_model, get_first_step, validate_train_config
 
 from layers import models
 
-from jax.experimental.compilation_cache import compilation_cache as cc
-
 Transformer = models.Transformer
 
 def checkpoint_loop(config, state=None):
@@ -55,7 +53,7 @@ def checkpoint_loop(config, state=None):
   unboxed_abstract_state, state_mesh_annotations = max_utils.get_abstract_state(model, tx,
                                                 config, init_rng, mesh, is_training=True)
   # A barrier to sync all hosts before starting to restore checkpoint
-  jax.experimental.multihost_utils.sync_global_devices("dummy1")
+  jax.experimental.multihost_utils.sync_global_devices("Barrier before load")
   checkpoint_load_start = datetime.datetime.now()
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     state, _ = checkpointing.load_state_if_possible(checkpoint_manager,
@@ -78,7 +76,7 @@ def checkpoint_loop(config, state=None):
     if checkpoint_manager is not None:
       start_time = datetime.datetime.now()
       # A barrier to sync all hosts before starting to save checkpoint
-      jax.experimental.multihost_utils.sync_global_devices("dummy2")
+      jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
       if checkpoint_manager.save(step, state):
         checkpoint_manager.wait_until_finished()
         end_time = datetime.datetime.now()
@@ -89,13 +87,11 @@ def checkpoint_loop(config, state=None):
   return state
 
 def main(argv: Sequence[str]) -> None:
-  jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
+  jax.config.update('jax_cpu_enable_gloo_collectives', True)
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-  os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   pyconfig.initialize(argv)
   config = pyconfig.config
   validate_train_config(config)
-  cc.initialize_cache(os.path.expanduser(config.jax_cache_dir))
   print(f"Found {jax.device_count()} devices.")
   print(f"Found {jax.process_count()} processes.")
   print(f"Found {jax.devices()} devices.")

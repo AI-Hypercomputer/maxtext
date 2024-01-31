@@ -19,6 +19,8 @@
 import checkpointing
 import common_types
 import functools
+import time
+import socket
 
 import max_logging
 
@@ -166,15 +168,59 @@ def upload_blob(destination_gcs_name, source_file_name):
   blob = bucket.blob(prefix_name)
   blob.upload_from_filename(source_file_name)
 
-def initialize_jax_distributed_system():
+def maybe_initialize_jax_distributed_system(raw_keys):
   """ The best recipe to initialize the Jax Distributed System has varied over time. We keep a layer of
       indirection in MaxText to avoid breaking the call sites unnecessarily.
 
       Currently jax.distributed.initialize() fully works as expected!
+      
+      For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
   """
-  max_logging.log("Attempting to initialize the jax distributed system...")
-  jax.distributed.initialize()
-  max_logging.log("Jax distributed system initialized!")
+  if (raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"]
+                and raw_keys["compile_topology_num_slices"]==-1):
+    max_logging.log("Attempting to initialize the jax distributed system...")
+    jax.distributed.initialize()
+    max_logging.log("Jax distributed system initialized!")
+  elif is_cpu_backend(raw_keys):
+    max_logging.log("Attempting to initialize the jax distributed system for CPU backend...")
+    initialize_jax_for_cpu()
+    max_logging.log("Jax distributed system initialized on CPUs!")
+
+
+
+def initialize_jax_for_cpu():
+  """Jax distributed initialize for CPUs. Includes retries until the coordinator is ready.
+  """
+  if os.environ.get("JAX_COORDINATOR_ADDRESS") is not None:
+    coordinator_address = os.environ.get("JAX_COORDINATOR_ADDRESS")
+    coordinator_found = False
+    lookup_attempt = 1
+    max_coordinator_lookups = 50
+    while not coordinator_found and lookup_attempt <= max_coordinator_lookups:
+      try:
+        ip_address = socket.gethostbyname(coordinator_address)
+        coordinator_found = True
+      except socket.gaierror:
+        print(f"Failed to recognize coordinator address {coordinator_address} on attempt {lookup_attempt}, retrying...")
+        lookup_attempt += 1
+        time.sleep(5)
+
+    ip_address = socket.gethostbyname(coordinator_address)
+    coordinator_address = ip_address + ":1234" # JAX coordinator port used in XPK
+    # Env variables to be set in XPK or otherwise
+    job_index = int(os.environ.get("JOB_INDEX"))
+    job_completion_index = int(os.environ.get("JOB_COMPLETION_INDEX"))
+    processes_in_job = int(os.environ.get("PROCESSES_IN_JOB"))
+    pid = job_index * processes_in_job + job_completion_index
+    max_logging.log(f" Jax process id is {pid} ")
+    # Explicit initialize is needed only for CPUs
+    jax.distributed.initialize(coordinator_address=coordinator_address,
+                              process_id=pid,
+                              num_processes=int(os.environ.get("JAX_PROCESS_COUNT")))
+
+def is_cpu_backend(raw_keys):
+  """Determine whether Maxtext is intended to run on a CPU backend."""
+  return raw_keys["hardware"] == 'cpu'
 
 def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
   """Evaluates unspecified DCN/ICI parallelism values"""
