@@ -341,7 +341,10 @@ def train_loop(config, state=None):
     # Shaped state
     abstract_state, state_mesh_annotations =  max_utils.get_abstract_state(model, tx, config, init_rng, mesh)
     # Shaped batch
-    func_input_args = (abstract_state, next(data_iterator), shaped_rng)
+    data = next(data_iterator)
+    for k, v in data.items():
+      data[k] = v[:config.global_batch_size_to_train_on,:]
+    func_input_args = (abstract_state, data, shaped_rng)
     func_input_kwargs = {}
 
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
