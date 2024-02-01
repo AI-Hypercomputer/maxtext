@@ -369,6 +369,7 @@ def train_loop(config, state=None):
     if step == last_profiling_step:
       max_utils.deactivate_profiler(config)
 
+  write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config) # final step metrics
   max_utils.close_summary_writer(writer)
   return state
 
