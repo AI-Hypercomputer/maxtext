@@ -31,7 +31,7 @@ export LIBTPU_INIT_ARGS="--xla_tpu_enable_async_collective_fusion_fuse_all_gathe
 python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
     steps=20 per_device_batch_size=2 enable_checkpointing=false\
     enable_profiler=false remat_policy=full global_parameter_scale=512\
-    ici_fsdp_parallelism=-1 ici_tensor_parallelism=16\
+    ici_fsdp_parallelism=-1 ici_tensor_parallelism=8\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\
     dataset_path=$DATASET_PATH use_iota_embed=true reuse_example_batch=1\
     dataset_type=synthetic gcs_metrics=true attention='flash' int8_training=false
