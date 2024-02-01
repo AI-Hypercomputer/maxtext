@@ -406,7 +406,8 @@ def get_gke_job_status(benchmark_id: str) -> bigquery.JobStatus:
 
 
 def get_gce_job_status(
-    task_test_config: test_config.TestConfig[test_config.Tpu], use_startup_script: bool
+    task_test_config: test_config.TestConfig[test_config.Accelerator],
+    use_startup_script: bool,
 ) -> bigquery.JobStatus:
   """Get job status for the GCE run.
 
@@ -424,10 +425,19 @@ def get_gce_job_status(
 
   # GCE SSH method
   if not use_startup_script:
-    # check wait status to see if wait_for_ready_queued_resource step is successful
-    wait_task = current_dag.get_task(
-        task_id=f"{benchmark_id}.provision.create_queued_resource.wait_for_ready_queued_resource"
-    )
+    if isinstance(task_test_config.accelerator, test_config.Tpu):
+      # check wait status to see if wait_for_ready_queued_resource step is successful
+      wait_task = current_dag.get_task(
+          task_id=f"{benchmark_id}.provision.create_queued_resource.wait_for_ready_queued_resource"
+      )
+    elif isinstance(task_test_config.accelerator, test_config.Gpu):
+      wait_task = current_dag.get_task(
+          task_id=f"{benchmark_id}.provision.create_resource"
+      )
+    else:
+      raise NotImplementedError(
+          f"Unable to get task for {type(task_test_config.accelerator)}."
+      )
     wait_ti = TaskInstance(wait_task, execution_date)
     wait_state = wait_ti.current_state()
 
@@ -491,7 +501,7 @@ def get_gce_job_status(
 @task
 def process_metrics(
     base_id: str,
-    task_test_config: test_config.TestConfig[test_config.Tpu],
+    task_test_config: test_config.TestConfig[test_config.Accelerator],
     task_metric_config: metric_config.MetricConfig,
     task_gcp_config: gcp_config.GCPConfig,
     use_startup_script: bool = False,

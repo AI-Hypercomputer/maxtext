@@ -75,7 +75,7 @@ with models.DAG(
 
   # Running on V100 GPU
   config.get_torchbench_gpu_config(
-      machine_type=resource.MachineVersion.N1_STANDARD_32,
+      machine_type=resource.MachineVersion.N1_STANDARD_8,
       image_project=resource.ImageProject.DEEP_LEARNING_PLATFORM_RELEASE,
       image_family=resource.ImageFamily.COMMON_CU121_DEBIAN_11,
       accelerator_type=resource.GpuVersion.V100,
@@ -100,13 +100,15 @@ with models.DAG(
   ).run()
 
   # Running on H100 GPU
+  # Note: H100 must use ssd.
   config.get_torchbench_gpu_config(
       machine_type=resource.MachineVersion.A3_HIGHGPU_8G,
       image_project=resource.ImageProject.DEEP_LEARNING_PLATFORM_RELEASE,
       image_family=resource.ImageFamily.COMMON_CU121_DEBIAN_11,
       accelerator_type=resource.GpuVersion.H100,
       count=8,
-      gpu_zone=resource.Zone.US_CENTRAL1_C,
+      gpu_zone=resource.Zone.US_CENTRAL1_A,
+      nvidia_driver_version="535.86.10",
       model_name=model,
       time_out_in_min=1600,
       extraFlags=" ".join(torchbench_extra_flags),

@@ -221,6 +221,7 @@ def create_instance(
   return instance_client.get(project=project_id, zone=zone, instance=instance_name)
 
 
+# TODO(piz): Remove wait_for_extended_operation and use dag sensor instead.
 def wait_for_extended_operation(
     operation: ExtendedOperation, verbose_name: str = "operation", timeout: int = 300
 ) -> Any:
@@ -304,7 +305,7 @@ def create_resource(
     The ip address of the GPU VM.
   """
   image = get_image_from_family(project=image_project, family=image_family)
-  disk_type = f"zones/{gcp.zone}/diskTypes/pd-standard"
+  disk_type = f"zones/{gcp.zone}/diskTypes/pd-ssd"
   disks = [disk_from_image(disk_type, 100, True, image.self_link)]
   metadata = create_metadata({
       # "install-nvidia-driver": "True",
@@ -372,6 +373,7 @@ def ssh_host(ip_address: str, cmds: Iterable[str], ssh_keys: ssh.SshKeys) -> Non
   ssh_group.run(cmds)
 
 
+# TODO(piz): Check why sometime GPU instance doesn't get deleted.
 @task_group
 def delete_resource(instance_name: airflow.XComArg, project_id: str, zone: str):
   @task(trigger_rule="all_done")
