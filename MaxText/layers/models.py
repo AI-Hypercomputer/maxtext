@@ -293,7 +293,7 @@ class Decoder(nn.Module):
           dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
           kernel_axes=('embed', 'vocab'),
           name='logits_dense',
-          use_int8=cfg.int8_training)(y)
+          use_int8=False)(y) # !!!! This used to be use_int8=cfg.int8_training
     logits = nn.with_logical_constraint(
         logits, ('activation_batch', 'activation_length', 'activation_vocab'))
     return logits
