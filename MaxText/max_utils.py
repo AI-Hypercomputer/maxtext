@@ -29,6 +29,7 @@ from jax.experimental import mesh_utils
 
 
 import json
+import yaml
 import flax
 from flax.training import train_state
 from flax import linen as nn
@@ -104,6 +105,17 @@ def write_metrics_locally(metrics, step, config, file):
   if step == config.steps - 1:
     file.close()
 
+def add_config_to_summary_writer(config, summary_writer):
+  """Writes config params to tensorboard"""
+  if jax.process_index() == 0:
+    for key, value in config.get_keys().items():
+      add_text_to_summary_writer(key, str(value), summary_writer)
+
+def add_text_to_summary_writer(key, value, summary_writer):
+  """Writes given key-value pair to tensorboard as text/summary"""
+  if jax.process_index() == 0:
+    summary_writer.add_text(key, value)
+
 def write_metrics_for_gcs(metrics, step, config, running_metrics):
   """Writes metrics to gcs"""
   metrics_dict_step = _prepare_metrics_for_json(metrics, step, config.run_name)
@@ -122,6 +134,23 @@ def write_metrics_for_gcs(metrics, step, config, running_metrics):
     max_logging.log(f"File {metrics_filename} moved successfully!")
     running_metrics = [] # reset running_metrics to empty list
   return running_metrics
+
+def write_config_raw_keys_for_gcs(raw_keys):
+  """Writes config raw keys to GCS"""
+  if not raw_keys["save_config_to_gcs"] or jax.process_index() != 0:
+    return
+  max_logging.log("Writing config to GCS...")
+
+  raw_keys_dict = dict(raw_keys)
+  filename = "config.yml"
+  with open(filename, 'w', encoding="utf8") as config_for_gcs:
+    yaml.dump(raw_keys_dict, config_for_gcs)
+  config_for_gcs.close()
+
+  gcs_filename=os.path.join(raw_keys["base_output_directory"], raw_keys["run_name"], filename)
+  max_logging.log(f"Moving file {filename} to GCS...")
+  upload_blob(gcs_filename, filename)
+  max_logging.log(f"File {filename} moved successfully!")
 
 def parse_gcs_bucket_and_prefix(destination_gcs_name):
   path_parts = destination_gcs_name.replace("gs://", "").split("/")
