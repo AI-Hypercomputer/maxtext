@@ -225,7 +225,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
     layer_weight['post_self_attention_layer_norm']['scale'].append(post_self_attention_layernorm)
     print(f" layer = {layer_idx} complete", flush=True)
   
-  jax.tree_map(lambda x : del x, pytorch_vars)
+  del pytorch_vars[:]
   del pytorch_vars
   print("pytorch_vars deleted")
   gc.collect()
