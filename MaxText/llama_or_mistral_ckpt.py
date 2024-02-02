@@ -135,7 +135,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
         },
        'token_embedder':{
               'embedding': np.concatenate([copy.deepcopy(var['tok_embeddings.weight'].type(torch.float16).numpy()) 
-                                           for var in pytorch_vars], axis=1)[:vocab_size,:])
+                                           for var in pytorch_vars], axis=1)[:vocab_size,:]
 
        }
 
