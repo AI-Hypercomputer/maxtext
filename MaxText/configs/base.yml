@@ -211,3 +211,8 @@ trainable_position_size: -1  # enable gpt3 position embedding with a positive tr
 compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
 compile_topology: '' # Target hardware version, e.g. 'v5e-256'
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
+
+decode_sampling_strategy: "greedy" # decode_sampling_strategy should be one of greedy, weighted, nucleus, or topk
+decode_sampling_nucleus_p: -1 # set if you're doing nucleus / top-p
+decode_sampling_top_k: 0 # set if you're doing top-k
+decode_sampling_temperature: 1.
