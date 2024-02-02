@@ -1,0 +1,22 @@
+[rwitten@t1v-n-fb8b7a9c-w-0 2024-02-05 16:52:31] ~/maxtext (rwitten_remat_memories) python3 offload.py 
+2024-02-05 16:52:37.503268: I external/xla/xla/pjrt/pjrt_c_api_client.cc:137] PjRtCApiClient created.
+jax.devices()=[TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0), TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0), TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0)], jax.__version__='0.4.24.dev20240205+5c5e8f032', jaxlib.__version__='0.4.24.dev20240205'
+Traceback (most recent call last):
+  File "/home/rwitten/maxtext/offload.py", line 32, in <module>
+    value, grads = f_with_grad(np.arange(16.))
+jax._src.source_info_util.JaxStackTraceBeforeTransformation: ValueError: Unknown memory_kind: pinned_host
+
+The preceding stack trace is the source of the JAX operation that, once transformed by JAX, triggered the following exception.
+
+--------------------
+
+The above exception was the direct cause of the following exception:
+
+jax.errors.SimplifiedTraceback: For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/rwitten/maxtext/offload.py", line 32, in <module>
+    value, grads = f_with_grad(np.arange(16.))
+ValueError: Unknown memory_kind: pinned_host

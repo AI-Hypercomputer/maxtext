@@ -140,6 +140,28 @@ class DecoderLayer(nn.Module):
     else:
       return layer_output
 
+from jax._src.lax import lax
+
+from jax.ad_checkpoint import Offloadable
+from jax.ad_checkpoint import Saveable
+from jax.ad_checkpoint import Recompute
+
+
+def dot_with_no_batch_dims_saveable_offloaded(prim, *_, **params) -> bool:
+  # This is a useful heuristic for transformers.
+  if prim is lax.dot_general_p:
+    (_, _), (lhs_b, rhs_b) = params['dimension_numbers']
+    if not lhs_b and not rhs_b:
+      return Offloadable(src='tpu_hbm', dst='pinned_host')
+  return Recompute
+
+def dot_with_no_batch_dims_saveable_reimplement(prim, *_, **params) -> bool:
+  # This is a useful heuristic for transformers.
+  if prim is lax.dot_general_p:
+    (_, _), (lhs_b, rhs_b) = params['dimension_numbers']
+    if not lhs_b and not rhs_b:
+      return Saveable
+  return Recompute
 
 class Decoder(nn.Module):
   """A stack of decoder layers as a part of an encoder-decoder architecture."""
@@ -190,7 +212,9 @@ class Decoder(nn.Module):
 
     if cfg.remat_policy != 'none':
       if cfg.remat_policy == 'minimal':
-        policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
+        policy = dot_with_no_batch_dims_saveable_offloaded
+      elif cfg.remat_policy == 'reimplement':
+        policy = dot_with_no_batch_dims_saveable_reimplement
       elif cfg.remat_policy == 'proj':
         policy = jax.checkpoint_policies.save_only_these_names(
             'query_proj', 'value_proj', 'key_proj'
