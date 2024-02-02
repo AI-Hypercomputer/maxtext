@@ -31,10 +31,11 @@ from layers import attentions
 from layers import embeddings
 from layers import linears
 from layers import normalizations
-
 from layers import models
+from layers import quantizations
 
 import common_types
+from typing import Optional
 
 Array = common_types.Array
 Config = common_types.Config
@@ -45,7 +46,7 @@ ScanIn = common_types.ScanIn
 Embed = embeddings.Embed
 Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
-
+Quant = quantizations.AqtQuantization
 
 #-----------------------------------------
 # The Decoder Layer specific for Llama2
@@ -56,6 +57,7 @@ class LlamaDecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
   config: models.Config
   mesh: Mesh
+  quant: Optional[Quant] = None
 
   @nn.compact
   def __call__(self,
@@ -95,7 +97,7 @@ class LlamaDecoderLayer(nn.Module):
       dtype=cfg.dtype,
       dropout_rate=cfg.dropout_rate,
       name='self_attention',
-      use_int8=cfg.int8_training)
+      quant=self.quant)
 
     attention_lnx = attention_layer(
             lnx,
@@ -125,6 +127,7 @@ class LlamaDecoderLayer(nn.Module):
         dtype=cfg.dtype,
         name='mlp',
         config=cfg,
+        quant=self.quant,
     )(hidden_states, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(
         mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')

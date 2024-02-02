@@ -30,7 +30,7 @@ import numpy as np
 import pyconfig
 import max_utils
 from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer
-from layers import models
+from layers import models, quantizations
 
 import common_types
 
@@ -42,6 +42,7 @@ from jax.sharding import Mesh
 from jax.experimental.compilation_cache import compilation_cache as cc
 
 import max_logging
+
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
@@ -95,7 +96,7 @@ def prefill_predict_step(inputs, input_positions, decoder_segment_ids,
     decoder_segment_ids=decoder_segment_ids,
     enable_dropout=False,
     model_mode=common_types.MODEL_MODE_PREFILL,
-    rngs={'aqt': rngkey},
+    rngs={'params': rngkey},
     mutable=["cache"]
   )
 
@@ -112,7 +113,7 @@ def ar_predict_single_token(token_input, token_position, kv_cache, state, rngkey
     token_position,
     enable_dropout=False,
     model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-    rngs={'aqt': rngkey},
+    rngs={'params': rngkey},
     mutable=["cache"])
   new_flat_cache = new_vars["cache"]
   return token_position+1, new_flat_cache, jax.numpy.argmax(flat_logits, axis=2)
@@ -179,7 +180,8 @@ def decode_loop(config, state=None):
   mesh = Mesh(devices_array, config.mesh_axes)
 
   # Model and Optimizer definition
-  model = Transformer(config, mesh = mesh)
+  quant = quantizations.configure_quantization(config)
+  model = Transformer(config, mesh = mesh, quant=quant)
   _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh, add_bos = True, add_eos=False)
   state, state_mesh_annotations = max_utils.setup_decode_state(
     model, config, rng, mesh, None

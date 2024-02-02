@@ -19,7 +19,7 @@
 # pylint: disable=no-name-in-module
 
 
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 
 from jax.sharding import Mesh
 from jax import lax
@@ -32,10 +32,12 @@ from layers import attentions
 from layers import initializers
 from layers import linears
 from layers import models
-
-AttentionOp = attentions.AttentionOp
+from layers import quantizations
 
 import common_types
+
+AttentionOp = attentions.AttentionOp
+Quant = quantizations.AqtQuantization
 
 Array = common_types.Array
 Config = common_types.Config
@@ -119,7 +121,7 @@ class Gpt3MultiHeadAttention(nn.Module):
       float32_logits: bool, if True then cast logits to float32 before softmax to avoid
         numerical issues with bfloat16.
       fused_qkv: whether to fuse query, key and value into one projection.
-      use_int8: bool, if true accelerate in int8.
+      quant: Quant, stores quantization parameters, defaults to None implying no quantization.
       use_bias: whether to add bias in linear transformation.
   """
 
@@ -135,8 +137,8 @@ class Gpt3MultiHeadAttention(nn.Module):
   float32_qk_product: bool = False  # computes logits in float32 for stability.
   float32_logits: bool = True  # cast logits in float32 for stability.
   fused_qkv: bool = True
-  use_int8: bool = False
   use_bias: bool = True
+  quant: Optional[Quant] = None
 
   query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
   key_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
@@ -153,7 +155,7 @@ class Gpt3MultiHeadAttention(nn.Module):
       kernel_axes=('embed', 'qkv', 'heads', 'kv'),
       dtype=self.dtype,
       name=proj_name,
-      use_int8=self.use_int8,
+      quant=self.quant,
       use_bias=self.use_bias,
       )(inputs)
     query, key, value = qkv_proj[:,:,0,...], qkv_proj[:,:,1,...], qkv_proj[:,:,2,...]
@@ -168,7 +170,7 @@ class Gpt3MultiHeadAttention(nn.Module):
       kernel_axes=('embed', 'heads', 'kv'),
       dtype=self.dtype,
       name=proj_name,
-      use_int8=self.use_int8,
+      quant=self.quant,
       use_bias=self.use_bias,
       )(inputs)
     return proj
@@ -182,7 +184,7 @@ class Gpt3MultiHeadAttention(nn.Module):
       kernel_axes=('heads', 'kv', 'embed'),
       dtype=self.dtype,
       name='out',
-      use_int8=self.use_int8,
+      quant=self.quant,
       use_bias=self.use_bias,
       )(out)
     return out_proj
@@ -217,7 +219,7 @@ class Gpt3MultiHeadAttention(nn.Module):
                                max_target_length=self.max_target_length,
                                float32_qk_product=self.float32_qk_product,
                                float32_logits=self.float32_logits,
-                               use_int8=self.use_int8,
+                               quant=self.quant,
                                num_query_heads=self.num_heads,
                                num_kv_heads=self.num_heads,
                                dtype=self.dtype)
@@ -239,6 +241,7 @@ class Gpt3DecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
   config: models.Config
   mesh: Mesh
+  quant: Optional[Quant] = None
 
   @nn.compact
   def __call__(self,
@@ -283,7 +286,7 @@ class Gpt3DecoderLayer(nn.Module):
       name='self_attention',
       fused_qkv=cfg.fused_qkv,
       use_bias=True,
-      use_int8=cfg.int8_training)
+      quant=self.quant)
 
     attention_lnx = attention_layer(
             lnx,
@@ -306,6 +309,7 @@ class Gpt3DecoderLayer(nn.Module):
         use_bias=True,
         use_pre_norm=True,
         config=cfg,
+        quant=self.quant
     )(attention_lnx, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(
         mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')

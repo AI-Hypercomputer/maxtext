@@ -53,7 +53,10 @@ from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
+from layers import quantizations
+
 Transformer = models.Transformer
+
 
 def validate_train_config(config):
   """ Validates the configuration is set correctly for train.py"""
@@ -205,7 +208,7 @@ def train_step(model, config, state, data, dropout_rng):
                          data['inputs_position'],
                          decoder_segment_ids=data['inputs_segmentation'],
                          enable_dropout=config.enable_dropout,
-                         rngs={'dropout': rng1, 'aqt': aqt_rng}, mutable='intermediates')
+                         rngs={'dropout': rng1, 'params': aqt_rng}, mutable='intermediates')
     one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
     xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
     xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
@@ -238,9 +241,9 @@ def setup_mesh_and_model(config):
     init_rng: RNG key
     writer: Summary writer for tensorboard
     checkpoint_manager: Orbax checkpointer
-    state_mesh_annotations: the mesh annotations for the train state 
+    state_mesh_annotations: the mesh annotations for the train state
     model:
-    mesh: 
+    mesh:
     learning_rate_schedule:
     tx:
   """
@@ -258,7 +261,8 @@ def setup_mesh_and_model(config):
   mesh = Mesh(devices_array, config.mesh_axes)
 
   # Model and Optimizer definition
-  model = Transformer(config, mesh)
+  quant = quantizations.configure_quantization(config)
+  model = Transformer(config, mesh, quant=quant)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
@@ -275,11 +279,11 @@ def setup_train_loop(config):
     init_rng:
     writer: Summary writer for tensorboard
     checkpoint_manager: Orbax checkpointer
-    state_mesh_annotations: the mesh annotations for the train state 
+    state_mesh_annotations: the mesh annotations for the train state
     model:
-    mesh: 
+    mesh:
     learning_rate_schedule:
-    data_iterator: 
+    data_iterator:
     state: the initialized train state
   """
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
