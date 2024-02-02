@@ -31,12 +31,12 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import numpy as np
 import optax
-from tensorboardX import SummaryWriter
 
 import checkpointing
 import max_utils
 import maxtext_utils
 import max_logging
+import optimizers
 import pyconfig
 
 from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer
@@ -107,9 +107,35 @@ def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   })
   metrics['scalar'].update({'learning/current_learning_rate': lr })
 
+_buffered_step = None
+_buffered_metrics = None
+def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config):
+  """Entry point for all metrics writing in Train's Main.
+     TODO: would be better as a Class in the future (that initialized all state!)
 
-def write_metrics(writer, metrics, step, config):
-  """Writes metrics to tensorboard"""
+     To avoid introducing an unnecessary dependency, we "double buffer" -- we hold
+     onto the last metrics and step and only publish when we receive a new metrics and step.
+     The logic is that this ensures that Jax is able to queues train_steps and we
+     don't block when turning "lazy" Jax arrays into real Python numbers.
+  """
+  global _buffered_step, _buffered_metrics
+
+  if _buffered_metrics is not None:
+    if _buffered_step is None:
+      raise ValueError(f"When writing metrics, {_buffered_step=} was none")
+    write_metrics_to_tensorboard(writer, _buffered_metrics, _buffered_step, config)
+
+    if config.metrics_file:
+      max_utils.write_metrics_locally(_buffered_metrics, _buffered_step, config, local_metrics_file)
+
+    if config.gcs_metrics and jax.process_index() == 0:
+      running_gcs_metrics = max_utils.write_metrics_for_gcs(_buffered_metrics, _buffered_step, config, running_gcs_metrics)
+
+  _buffered_step = step
+  _buffered_metrics = metrics
+
+def write_metrics_to_tensorboard(writer, metrics, step, config):
+  """ Writes metrics to tensorboard"""
   with jax.spmd_mode('allow_all'):
     if jax.process_index() == 0:
       for metric_name in metrics.get("scalar",[]):
@@ -185,7 +211,7 @@ def train_step(model, config, state, data, dropout_rng):
     xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
     # Mask out paddings at the end of each example.
     xent = xent * (data['targets_segmentation'] != 0)
-    return jnp.sum(xent)/jnp.sum((data['targets_segmentation'] != 0)), intermediate_outputs
+    return jnp.sum(xent)/jnp.sum(data['targets_segmentation'] != 0), intermediate_outputs
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
@@ -220,7 +246,7 @@ def setup_mesh_and_model(config):
   """
 
   init_rng = random.PRNGKey(config.init_weights_seed)
-  writer = SummaryWriter(config.tensorboard_dir)
+  writer = max_utils.initialize_summary_writer(config)
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       config.checkpoint_dir,
       config.enable_checkpointing,
@@ -234,7 +260,7 @@ def setup_mesh_and_model(config):
   # Model and Optimizer definition
   model = Transformer(config, mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
-  tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
+  tx = optimizers.get_optimizer(config, learning_rate_schedule)
   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
 
 def setup_train_loop(config):
@@ -303,8 +329,6 @@ def train_loop(config, state=None):
       static_argnums=static_argnums,
       donate_argnums=donate_argnums)
 
-  last_step_completion = datetime.datetime.now()
-
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
@@ -314,22 +338,22 @@ def train_loop(config, state=None):
     raise ValueError("Profiling requested but initial profiling step set past training final step")
   last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1, first_profiling_step, config.steps - 1)
 
-  nextrng = jax.random.fold_in(init_rng, start_step)
-  example_batch = load_next_batch(data_iterator, None, config)
+  example_batch = None
+  last_step_completion = datetime.datetime.now()
+
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
 
+    example_batch = load_next_batch(data_iterator, example_batch, config)
+    nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics = p_train_step(
           state, example_batch, nextrng
       )
 
-    example_batch = load_next_batch(data_iterator, example_batch, config)
-    nextrng = jax.random.fold_in(init_rng, step+1)
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
-    write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
@@ -340,16 +364,13 @@ def train_loop(config, state=None):
         checkpoint_manager.wait_until_finished()
         sys.exit()
 
-    if config.metrics_file:
-      max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
-
-    if config.gcs_metrics and jax.process_index() == 0:
-      running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
+    write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
 
     if step == last_profiling_step:
       max_utils.deactivate_profiler(config)
 
-  writer.close()
+  write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config) # final step metrics
+  max_utils.close_summary_writer(writer)
   return state
 
 def main(argv: Sequence[str]) -> None:

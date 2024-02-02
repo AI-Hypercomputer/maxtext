@@ -61,7 +61,7 @@ def validate_keys(keys):
 
 def validate_model_name(s: str) -> bool:
   # currently supported models
-  valid_model_names= ('default', 'llama2-7b', 'mistral-7b', 'gamma-7b','gamma-2b')
+  valid_model_names = ('default', 'llama2-7b', 'mistral-7b', 'gamma-7b','gamma-2b', 'gpt3-175b', 'gpt3-52k')
   if s not in valid_model_names:
     raise ValueError(
       "Invalid model name was passed. Valid options ", valid_model_names
@@ -202,8 +202,6 @@ class _HyperParameters():
 
     validate_keys(raw_keys)
 
-    validate_attention_type(raw_keys['attention'])
-
   @staticmethod
   def update_model_vars(raw_keys) -> list[str]:
     ''' Update model config variables
@@ -213,7 +211,8 @@ class _HyperParameters():
 
     updated_keys = []
     if raw_keys['model_name'] != 'default':
-      file_path = f"MaxText/configs/models/{raw_keys['model_name']}.yml"
+      dir_path = os.path.dirname(os.path.realpath(__file__))
+      file_path = os.path.join(dir_path, f"configs/models/{raw_keys['model_name']}.yml")
       with open(file_path, 'r', encoding="utf-8") as file:
         model_vars = yaml.safe_load(file)
         updated_keys = list(model_vars.keys())

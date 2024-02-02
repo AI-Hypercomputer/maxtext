@@ -20,6 +20,7 @@ from typing import Callable, Optional
 
 
 from flax import linen as nn
+import functools
 import jax
 import jax.numpy as jnp
 import common_types
@@ -67,7 +68,7 @@ class DecoderLayer(nn.Module):
     lnx = RMSNorm(
         dtype=cfg.dtype,
         name='pre_self_attention_norm',
-        epsilon=cfg.rms_norm_epsilon,
+        epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=('embed',))(inputs)
     lnx = nn.with_logical_constraint(
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
@@ -160,9 +161,20 @@ class Decoder(nn.Module):
     elif self.config.decoder_block == "gamma":
       from layers import gamma
       return gamma.GammaDecoderLayer
+    elif self.config.decoder_block == "gpt3":
+      from layers import gpt3
+      return gpt3.Gpt3DecoderLayer
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
+  def get_norm_layer(self):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gamma"):
+      return RMSNorm
+    elif self.config.decoder_block == "gpt3":
+      from layers import gpt3
+      return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=True)
+    else:
+      raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   @nn.compact
   def __call__(self,
@@ -183,8 +195,17 @@ class Decoder(nn.Module):
             y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
 
-    if cfg.use_positional_embedding:
-      y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
+    if cfg.use_untrainable_positional_embedding:
+        y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
+
+    if cfg.trainable_position_size > 0:
+      y += Embed(
+        num_embeddings=cfg.trainable_position_size,
+        features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        embedding_init=nn.initializers.normal(stddev=1.0),
+        name='position_embedder',
+        config=cfg)(decoder_positions)
 
     BlockLayer = self.get_decoder_layer()
 
@@ -249,7 +270,12 @@ class Decoder(nn.Module):
             model_mode,
         )
 
-    y = RMSNorm(dtype=cfg.dtype, name='decoder_norm', epsilon=cfg.rms_norm_epsilon,kernel_axes=('embed',))(y)
+    y = self.get_norm_layer()(
+      dtype=cfg.dtype,
+      name='decoder_norm',
+      epsilon=cfg.normalization_layer_epsilon,
+      kernel_axes=('embed',),
+      )(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
         y, deterministic=deterministic
     )
@@ -258,15 +284,16 @@ class Decoder(nn.Module):
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
       logits = self.shared_embedding.attend(y)
-      # Correctly normalize pre-softmax logits for this shared case.
-      logits = logits / jnp.sqrt(y.shape[-1])
+      if self.config.normalize_embedding_logits:
+        # Correctly normalize pre-softmax logits for this shared case.
+        logits = logits / jnp.sqrt(y.shape[-1])
     else:
       logits = linears.DenseGeneral(
           cfg.vocab_size,
-          dtype=jnp.float32,  # Use float32 for stabiliity.
+          dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
           kernel_axes=('embed', 'vocab'),
           name='logits_dense',
-          use_int8=cfg.int8_training)(y)
+          use_int8=False)(y) # We do not quantize the logits matmul.
     logits = nn.with_logical_constraint(
         logits, ('activation_batch', 'activation_length', 'activation_vocab'))
     return logits
@@ -287,7 +314,7 @@ class Transformer(nn.Module):
         num_embeddings=cfg.vocab_size,
         features=cfg.emb_dim,
         dtype=cfg.dtype,
-        attend_dtype=jnp.float32,  # for logit training stability
+        attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
         embedding_init=nn.initializers.normal(stddev=1.0),
         name='token_embedder',
         config=cfg,

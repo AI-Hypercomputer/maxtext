@@ -37,6 +37,7 @@ from flax.linen import partitioning as nn_partitioning
 import optax
 import os
 from typing import Tuple
+from tensorboardX import writer
 
 from google.cloud import storage
 
@@ -75,6 +76,13 @@ def activate_profiler(config):
 def deactivate_profiler(config):
   if config.enable_profiler and (config.upload_all_profiler_results or jax.process_index() == 0):
     jax.profiler.stop_trace()
+
+def initialize_summary_writer(config):
+  return writer.SummaryWriter(config.tensorboard_dir) if jax.process_index() == 0 else None
+
+def close_summary_writer(summary_writer):
+  if jax.process_index() == 0:
+    summary_writer.close()
 
 def _prepare_metrics_for_json(metrics, step, run_name):
   """Converts metric dictionary into json supported types (e.g. float)"""
@@ -240,8 +248,8 @@ def init_initial_state(model, tx, config, is_training, key):
       config.max_target_length
   )
   model_vars = model.init({'params': key, 'dropout': key, 'aqt': key},
-                          jnp.ones(input_shape),
-                          jnp.ones(input_shape))
+                          jnp.ones(input_shape, dtype=jnp.int32),
+                          jnp.ones(input_shape, dtype=jnp.int32))
   if is_training:
     return init_training_state(model.apply, model_vars['params'], tx)
   return init_decode_state(model.apply, model_vars['params'])
