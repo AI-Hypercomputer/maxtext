@@ -344,7 +344,8 @@ def convert(base_model_path, maxtext_model_path, model_size):
     opt_state={}
   )
   
-  jax.tree_map(lambda x : del x, jax_weights)
+  for key in jax_weights.keys():
+    del jax_weights[key]
   del jax_weights
 
   if checkpoint_manager is not None:
