@@ -233,7 +233,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
     new_x = np.array(x)
     del x
     return new_x
-  
+
 
   self_attention['query']['kernel'] = npify_and_delete(self_attention['query']['kernel'])
   print("self_attention['query']['kernel'] complete", flush=True)
@@ -243,6 +243,19 @@ def convert(base_model_path, maxtext_model_path, model_size):
   print(" self_attention['value']['kernel'] complete", flush=True)
   self_attention['out']['kernel'] = npify_and_delete(self_attention['out']['kernel'])
   print("self_attention['out']['kernel'] complete", flush=True)
+
+  
+  layer_weight['mlp']['wi_0']['kernel'] = npify_and_delete(layer_weight['mlp']['wi_0']['kernel'])
+  layer_weight['mlp']['wi_1']['kernel'] = npify_and_delete(layer_weight['mlp']['wi_1']['kernel'])
+  layer_weight['mlp']['wo']['kernel'] = npify_and_delete(layer_weight['mlp']['wo']['kernel'])
+  layer_weight['pre_self_attention_layer_norm']['scale'] = npify_and_delete(layer_weight['pre_self_attention_layer_norm']['scale'])
+  layer_weight['post_self_attention_layer_norm']['scale'] = npify_and_delete(layer_weight['post_self_attention_layer_norm']['scale'])
+
+  gc.collect()
+  print("npify_and_delete complete", flush=True)
+  print("gc called for npify_and_delete", flush=True)
+  print("gc called", flush=True)
+
   self_attention['query']['kernel'] = np.transpose(self_attention['query']['kernel'],axes=(1, 0, 2, 3))
   print("self_attention['query']['kernel'] transpose complete", flush=True)
   self_attention['key']['kernel'] = np.transpose(self_attention['key']['kernel'],axes=(1, 0, 2, 3))
@@ -259,22 +272,18 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
   jax_weights['decoder']['layers']['self_attention'] = self_attention
   print("complete self attention assignment ", flush=True)
-  gc.collect()
-  print("gc called", flush=True)
-
-  layer_weight['mlp']['wi_0']['kernel'] = npify_and_delete(layer_weight['mlp']['wi_0']['kernel'])
-  layer_weight['mlp']['wi_1']['kernel'] = npify_and_delete(layer_weight['mlp']['wi_1']['kernel'])
-  layer_weight['mlp']['wo']['kernel'] = npify_and_delete(layer_weight['mlp']['wo']['kernel'])
-  layer_weight['pre_self_attention_layer_norm']['scale'] = npify_and_delete(layer_weight['pre_self_attention_layer_norm']['scale'])
-  layer_weight['post_self_attention_layer_norm']['scale'] = npify_and_delete(layer_weight['post_self_attention_layer_norm']['scale'])
 
 
-  print("npify_and_delete complete", flush=True)
+
+    
   del pytorch_vars[:]
   del pytorch_vars
   print("pytorch_vars deleted", flush=True)
   gc.collect()
   print("gc called", flush=True)
+
+  
+  
 
   #swap the layer index
   layer_weight['mlp']['wi_0']['kernel'] = np.transpose(layer_weight['mlp']['wi_0']['kernel'],axes=(1, 0, 2))
