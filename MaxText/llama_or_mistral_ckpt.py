@@ -343,6 +343,9 @@ def convert(base_model_path, maxtext_model_path, model_size):
     tx=None, # type: ignore
     opt_state={}
   )
+  
+  jax.tree_map(lambda x : del x, jax_weights)
+  del jax_weights
 
   if checkpoint_manager is not None:
     if checkpoint_manager.save(step_number_to_save_new_ckpt, state_new):

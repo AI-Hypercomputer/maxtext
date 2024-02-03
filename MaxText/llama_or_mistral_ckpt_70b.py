@@ -330,7 +330,10 @@ def convert(base_model_path, maxtext_model_path, model_size):
   enable_checkpointing=True
   async_checkpointing=False
   save_interval_steps=1
+  
 
+  gc.set_threshold(*thresholds)
+  print("recovered old gc thresholds:", thresholds)
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       maxtext_model_path,
