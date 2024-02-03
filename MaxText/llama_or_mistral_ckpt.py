@@ -106,6 +106,12 @@ def convert(base_model_path, maxtext_model_path, model_size):
   base_num_kv_heads = model_params['num_kv_heads']
   vocab_size = model_params['vocab']
 
+  thresholds = gc.get_threshold()
+  print("Current thresholds:", thresholds)
+
+  # Decrease the thresholds to trigger garbage collection faster
+  new_thresholds = (100, 10, 10)  # Example values, adjust as needed
+  gc.set_threshold(*new_thresholds)
 
   print(f'Loading the base model from {base_model_path}')
   # Skip any hidden files for checkpoints
@@ -246,10 +252,15 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
   
   layer_weight['mlp']['wi_0']['kernel'] = npify_and_delete(layer_weight['mlp']['wi_0']['kernel'])
+  print("layer_weight['mlp']['wi_0']['kernel'] complete", flush=True)
   layer_weight['mlp']['wi_1']['kernel'] = npify_and_delete(layer_weight['mlp']['wi_1']['kernel'])
+  print("layer_weight['mlp']['wi_1']['kernel'] complete", flush=True)
   layer_weight['mlp']['wo']['kernel'] = npify_and_delete(layer_weight['mlp']['wo']['kernel'])
+  print("layer_weight['mlp']['wo']['kernel'] complete", flush=True)
   layer_weight['pre_self_attention_layer_norm']['scale'] = npify_and_delete(layer_weight['pre_self_attention_layer_norm']['scale'])
+  print("layer_weight['pre_self_attention_layer_norm']['scale'] complete", flush=True)
   layer_weight['post_self_attention_layer_norm']['scale'] = npify_and_delete(layer_weight['post_self_attention_layer_norm']['scale'])
+  print("post_self_attention_layer_norm']['scale'] complete", flush=True)
 
   gc.collect()
   print("npify_and_delete complete", flush=True)
