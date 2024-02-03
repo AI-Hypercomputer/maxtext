@@ -260,7 +260,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
   jax_weights['decoder']['layers']['self_attention'] = self_attention
   print("complete self attention assignment ", flush=True)
   gc.collect()
-  print("gc called")
+  print("gc called", flush=True)
 
   layer_weight['mlp']['wi_0']['kernel'] = npify_and_delete(layer_weight['mlp']['wi_0']['kernel'])
   layer_weight['mlp']['wi_1']['kernel'] = npify_and_delete(layer_weight['mlp']['wi_1']['kernel'])
@@ -272,8 +272,9 @@ def convert(base_model_path, maxtext_model_path, model_size):
   print("npify_and_delete complete", flush=True)
   del pytorch_vars[:]
   del pytorch_vars
-  print("pytorch_vars deleted")
+  print("pytorch_vars deleted", flush=True)
   gc.collect()
+  print("gc called", flush=True)
 
   #swap the layer index
   layer_weight['mlp']['wi_0']['kernel'] = np.transpose(layer_weight['mlp']['wi_0']['kernel'],axes=(1, 0, 2))
@@ -300,6 +301,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
   #jax_weights = jax.tree_map(jnp.array, jax_weights)
   jax_weights = jax.tree_map(jnpify_and_delete, jax_weights)
   print("jax_weights jnp conversion complete", flush=True)
+  gc.collect()
   #dummy configs for the checkpoint_manager
   step_number_to_save_new_ckpt = 0
   enable_checkpointing=True
