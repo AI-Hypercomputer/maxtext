@@ -110,7 +110,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
   print("Current thresholds:", thresholds)
 
   # Decrease the thresholds to trigger garbage collection faster
-  new_thresholds = (100, 10, 10)  # Example values, adjust as needed
+  new_thresholds = (10, 10, 10)  # Example values, adjust as needed
   gc.set_threshold(*new_thresholds)
 
   print(f'Loading the base model from {base_model_path}')
@@ -321,7 +321,22 @@ def convert(base_model_path, maxtext_model_path, model_size):
   #jax_weights = jax.tree_map(jnp.array, jax_weights)
   jax_weights = jax.tree_map(jnpify_and_delete, jax_weights)
   print("jax_weights jnp conversion complete", flush=True)
+
+  state_new = train_state.TrainState(
+    step=0,
+    apply_fn=None,
+    params=jax_weights,
+    tx=None, # type: ignore
+    opt_state={}
+  )
+  
+  def delete_tensor(tensor):
+    del tensor
+
+  jax_weights = jax.tree_map(delete_tensor, jax_weights)
+  del jax_weights
   gc.collect()
+  
   #dummy configs for the checkpoint_manager
   step_number_to_save_new_ckpt = 0
   enable_checkpointing=True
@@ -336,17 +351,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
       save_interval_steps
   )
 
-  state_new = train_state.TrainState(
-    step=0,
-    apply_fn=None,
-    params=jax_weights,
-    tx=None, # type: ignore
-    opt_state={}
-  )
-  
-  for key in jax_weights.keys():
-    del jax_weights[key]
-  del jax_weights
+
 
   if checkpoint_manager is not None:
     if checkpoint_manager.save(step_number_to_save_new_ckpt, state_new):
