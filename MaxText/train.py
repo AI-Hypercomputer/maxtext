@@ -406,11 +406,10 @@ def train_loop(config, state=None):
   last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1, first_profiling_step, config.steps - 1)
 
   maxtext_utils.init_mllog(config, start_step)
+  max_utils.activate_profiler(config)
   nextrng = jax.random.fold_in(init_rng, start_step)
   example_batch = load_next_batch(data_iterator, None, config)
   for step in np.arange(start_step, config.steps):
-    if step == first_profiling_step:
-      max_utils.activate_profiler(config)
 
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics = p_train_step(
