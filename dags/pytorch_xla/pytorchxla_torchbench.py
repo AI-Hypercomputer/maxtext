@@ -93,7 +93,7 @@ with models.DAG(
       image_family=resource.ImageFamily.COMMON_CU121_DEBIAN_11,
       accelerator_type=resource.GpuVersion.A100,
       count=1,
-      gpu_zone=resource.Zone.US_CENTRAL1_C,
+      gpu_zone=resource.Zone.US_CENTRAL1_F,
       model_name=model,
       time_out_in_min=1600,
       extraFlags=" ".join(torchbench_extra_flags),
