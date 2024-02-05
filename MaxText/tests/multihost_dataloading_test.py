@@ -45,7 +45,7 @@ class MultihostDataloadingTest(unittest.TestCase):
     global_data_shape = PartitionSpec(batch_size, config.max_target_length)
     data_sharding = ('data',)
     mesh_shape_1d = (len(jax.devices()),)
-    mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), config.mesh_axes)
+    self.mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), config.mesh_axes)
     data_axes = PartitionSpec('data',)
     # creating 2 batches of data
     global_data = np.arange(np.prod(global_data_shape)*2).reshape((batch_size * 2, config.max_target_length))
@@ -53,16 +53,12 @@ class MultihostDataloadingTest(unittest.TestCase):
     dataset = tf.data.Dataset.from_tensor_slices(global_data)
     dataset = dataset.repeat()
     dataset = dataset.batch(batch_size)
-    self.multihost_gen = (
-      multihost_dataloading.get_batch_sharded_data_pipeline(
-          dataset, mesh
-      )
-    )
+    self.data_iter = iter(dataset.as_numpy_iterator())
 
   @pytest.mark.tpu
-  def test_batch_sharded_data_pipeline(self):
-    first_batch = self.multihost_gen()
-    sec_batch = self.multihost_gen()
+  def test_get_next_batch_sharded(self):
+    first_batch = multihost_dataloading.get_next_batch_sharded(self.data_iter, self.mesh)
+    sec_batch = multihost_dataloading.get_next_batch_sharded(self.data_iter, self.mesh)
     self.assertTrue(not np.array_equal(first_batch, sec_batch, equal_nan=True))
 
 
