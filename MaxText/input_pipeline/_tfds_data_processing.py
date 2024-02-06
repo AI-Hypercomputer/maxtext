@@ -25,6 +25,7 @@ import tensorflow_datasets as tfds
 import jax
 
 import tokenizer
+import multihost_dataloading
 import sequence_packing
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
@@ -161,7 +162,10 @@ def preprocessing_pipeline(
   if prefetch_size:
     dataset = dataset.prefetch(prefetch_size)
 
-  return iter(dataset.as_numpy_iterator())
+  multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(dataset, global_mesh)
+
+  # Return multi-host jax.Array prep iterator
+  return multihost_gen
 
 
 def get_datasets(

@@ -22,7 +22,6 @@ https://github.com/sholtodouglas/multihost_dataloading
 """
 from functools import lru_cache, partial  # pylint: disable=g-importing-member
 from typing import Callable, Any
-from collections.abc import Iterator
 import tensorflow as tf  # pylint: disable=g-import-not-at-top
 import time
 import numpy as np
@@ -63,9 +62,25 @@ def _form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
   return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
 
 
+def get_batch_sharded_data_pipeline(
+  dataset: tf.data.Dataset, global_mesh: Mesh
+) -> Callable[[], jax.Array]:
+  """Each device loads batch_size/num_devices,
+  To do this, each host first loads batch_size/num_hosts, then shards that
+  equally across it's devices.
+  Args:
+    dataset: tf dataset over all files
+  Returns:
+    sharded_dataset: per_host dataset
+  """
+  dataset = iter(dataset.as_numpy_iterator())
+  multihost_generator = partial(get_next_batch_sharded, dataset, global_mesh)
+
+  return multihost_generator
+
 
 def get_next_batch_sharded(
-  local_dataset: Iterator, global_mesh: Mesh
+  local_dataset: tf.data.Dataset, global_mesh: Mesh
 ) -> jax.Array:
   """Splits the host loaded data equally over all devices."""
 
@@ -77,7 +92,7 @@ def get_next_batch_sharded(
   while not loaded_data_success and data_load_attempts < MAX_DATA_LOAD_ATTEMPTS:
     data_load_attempts += 1
     try:
-      local_data = next(local_dataset)
+      local_data = local_dataset.next()
       loaded_data_success = True
     except tf.errors.FailedPreconditionError:
       max_logging.log("Failed to get next data batch, retrying")
@@ -85,7 +100,7 @@ def get_next_batch_sharded(
 
   # Try one last time, if this fails we will see the full stack trace.
   if not loaded_data_success:
-    local_data = next(local_dataset)
+    local_data = local_dataset.next()
 
   input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh = global_mesh), local_data)
 

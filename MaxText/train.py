@@ -40,7 +40,6 @@ import optimizers
 import pyconfig
 
 from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer
-from multihost_dataloading import get_next_batch_sharded
 from layers import models
 
 import jax.numpy as jnp
@@ -85,13 +84,13 @@ def get_first_step(state):
     return int(state.step)
 
 
-def load_next_batch(train_iter, example_batch, config, mesh):
+def load_next_batch(train_iter, example_batch, config):
   """Loads the next batch. Can keep reusing the same batch for performance reasons """
 
   if config.reuse_example_batch and example_batch is not None:
     return example_batch
   else:
-    return get_next_batch_sharded(train_iter, mesh)
+    return train_iter()
 
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   """Records scalar metrics to be written to tensorboard"""
@@ -351,7 +350,7 @@ def train_loop(config, state=None):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
 
-    example_batch = load_next_batch(data_iterator, example_batch, config, mesh)
+    example_batch = load_next_batch(data_iterator, example_batch, config)
     nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics = p_train_step(

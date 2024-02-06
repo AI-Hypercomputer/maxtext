@@ -2,11 +2,9 @@ jax>=0.4.23
 jaxlib>=0.4.23
 orbax-checkpoint>=0.5.2
 absl-py
-array-record
 aqtp
 cloud-tpu-diagnostics
 google-cloud-storage
-grain-nightly
 flax>=0.8.0
 ml-collections
 numpy
