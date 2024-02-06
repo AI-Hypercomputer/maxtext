@@ -24,7 +24,7 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
 from input_pipeline import _tfds_data_processing
-from input_pipeline import _grain_data_processing
+# from input_pipeline import _grain_data_processing
 
 
 def make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
@@ -101,8 +101,6 @@ def create_data_iterator_with_tokenizer(config, mesh, add_bos = True, add_eos = 
     return SyntheticDataIterator(config, mesh), None
   elif config.dataset_type == "c4":
     return make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos)
-  elif config.dataset_type == "c4-array_record":
-    return make_grain_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos)
   else:
     assert False, "dataset type not implemented"
 
