@@ -497,25 +497,39 @@ def make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, shuffle_buffer_siz
     skip_prefetch = True,
   )
 
-  assert jax.process_count() % 512 == 0
-  train_read_config = tfds.ReadConfig(
-    shuffle_seed = config.data_shuffle_seed,
-    skip_prefetch = True,
-    input_context = tf.distribute.InputContext(
-      input_pipeline_id=jax.process_index() * 512 // jax.process_count(),
-      num_input_pipelines=512,  # Total number of workers
-    ),
-  )
+  if jax.process_count() % 512 == 0:
+    train_read_config = tfds.ReadConfig(
+      shuffle_seed = config.data_shuffle_seed,
+      skip_prefetch = True,
+      input_context = tf.distribute.InputContext(
+        input_pipeline_id=jax.process_index() * 512 // jax.process_count(),
+        num_input_pipelines=512,  # Total number of workers
+      ),
+    )
 
-  train_ds_builder = tfds.builder(config.dataset_name)
-  train_ds_builder.download_and_prepare()
-  train_ds = train_ds_builder.as_dataset(split='train2', read_config=train_read_config, shuffle_files=True)
+    train_ds_builder = tfds.builder(config.dataset_name)
+    train_ds_builder.download_and_prepare()
+    train_ds = train_ds_builder.as_dataset(split='train2', read_config=train_read_config, shuffle_files=True)
+    # shard the dataset as soon as it is loaded
+    train_ds = train_ds.shard(num_shards = jax.process_count() // 512, index = jax.process_index() % (jax.process_count() // 512))
+
+  else:
+    train_read_config = tfds.ReadConfig(
+      shuffle_seed = config.data_shuffle_seed,
+      skip_prefetch = True,
+      input_context = tf.distribute.InputContext(
+        input_pipeline_id=jax.process_index(),
+        num_input_pipelines=jax.process_count(),  # Total number of workers
+      ),
+    )
+
+    train_ds_builder = tfds.builder(config.dataset_name)
+    train_ds_builder.download_and_prepare()
+    train_ds = train_ds_builder.as_dataset(split='train2', read_config=train_read_config, shuffle_files=True)
 
   eval_ds_builder = tfds.builder(config.eval_dataset_name)
   eval_ds = eval_ds_builder.as_dataset(split='validation_tokenized_5662seqs', read_config=read_config, shuffle_files=False)
 
-  # shard the dataset as soon as it is loaded
-  train_ds = train_ds.shard(num_shards = jax.process_count() // 512, index = jax.process_index() % (jax.process_count() // 512))
   train_ds = rekey(train_ds, {'inputs': None, 'targets': 'text'})
   sp_tokenizer = tokenizer.load_tokenizer(
     vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
