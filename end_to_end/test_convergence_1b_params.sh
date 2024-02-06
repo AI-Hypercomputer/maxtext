@@ -1,7 +1,15 @@
 #!/bin/bash
 
 echo "Running test_convergence_1b_params.sh"
-# Run this on 64 chips to achieve a loss value of ~2.6 (v4-128)
+
+
+# !!!!!!! DO NOT SUBMIT: Update value !!!!!!! 
+# !!!!!!! DO NOT SUBMIT: Update value !!!!!!! 
+# !!!!!!! DO NOT SUBMIT: Update value !!!!!!! 
+# !!!!!!! DO NOT SUBMIT: Update value !!!!!!! 
+
+
+# Run this on 64 chips to achieve a loss value of xxx (v4-128)
 #
 # Command Flags:
 # OUTPUT_PATH (Required, unless base_output_directory is already set in base.yml)
@@ -10,7 +18,7 @@ echo "Running test_convergence_1b_params.sh"
 # LOSS_THRESHOLD (Optional, default is 100.0 )
 #
 # Example to invoke this script:
-# bash end_to_end/test_convergence_1b_params.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>" LOSS_THRESHOLD=100.0
+# bash end_to_end/test_convergence_1b_params.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>" ASSETS_PATH="gs://<your_assets_path>" LOSS_THRESHOLD=100.0
 
 # Stop execution if any command exits with error
 set -e
@@ -24,8 +32,8 @@ for ARGUMENT in "$@"; do
 done
 
 TRAIN_CMD="python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
-        steps=20400 per_device_batch_size=8.0 learning_rate=1e-4 enable_checkpointing=false \
-        max_target_length=2048 global_parameter_scale=1 \
+        steps=20400 per_device_batch_size=8.0 learning_rate=3e-4 enable_checkpointing=false \
+        model_name="llama2-1b" assets_path=$ASSETS_PATH\
         enable_profiler=false metrics_file=metrics.txt base_output_directory=$OUTPUT_PATH\
         dataset_path=$DATASET_PATH log_period=150 enable_data_shuffling=false"
 
