@@ -146,10 +146,10 @@ resource "google_composer_environment" "example_environment" {
 
     workloads_config {
       scheduler {
-        cpu        = 2
-        memory_gb  = 8
+        cpu        = 4
+        memory_gb  = 13
         storage_gb = 10
-        count      = 4
+        count      = 2
       }
       web_server {
         cpu        = 2
@@ -157,8 +157,8 @@ resource "google_composer_environment" "example_environment" {
         storage_gb = 10
       }
       worker {
-        cpu        = 2
-        memory_gb  = 8
+        cpu        = 8
+        memory_gb  = 13
         storage_gb = 10
         min_count  = 1
         max_count  = 100
