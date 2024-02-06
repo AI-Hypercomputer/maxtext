@@ -239,9 +239,12 @@ def execute_main_command(main_command, slices, local_log_dir, zip_name):
       if args.USE_EXISTING_FOLDER is False:
         remote_command_list = [mkdir_command , mv_zip_command , cd_command , unzip_command ,
                         write_kill_script_command , kill_existing_command , main_command]
+        remote_command_list = [write_kill_script_command , kill_existing_command , main_command]
       else:
         remote_command_list = [cd_command, write_kill_script_command , kill_existing_command , main_command]
       remote_command_list_str = " && ".join(remote_command_list)
+      detached_session = f"ds_{cur_slice.slice_num:04d}_worker_{worker_num:04d}"
+      remote_command_list_str = f"sudo screen -dmS {detached_session} bash -c 'echo hello | tee {output_filename}; exec bash'"
       gcloud_command=[
           "gcloud", "alpha", "compute", "tpus", "tpu-vm", "ssh", cur_slice.name, f"--worker={worker_num}",
           "--command", remote_command_list_str, "--strict-host-key-checking=no",
@@ -374,12 +377,13 @@ def main() -> None:
   local_log_dir = os.path.join("/tmp", args.RUN_NAME, "")
   zip_name = "script_dir_zip_" + args.RUN_NAME + ".tar.gz"
 
-  if args.USE_EXISTING_FOLDER is False:
-    ##### Step 2 when using a new folder: Zip code and move it to the TPUs #####
-    return_code = scps(slices, local_log_dir, zip_name)
-    if return_code > 0:
-      print(f"Moving the directory {args.SCRIPT_DIR} to the VMs failed with error code {return_code}")
-      return return_code
+  if 0:
+    if args.USE_EXISTING_FOLDER is False:
+      ##### Step 2 when using a new folder: Zip code and move it to the TPUs #####
+      return_code = scps(slices, local_log_dir, zip_name)
+      if return_code > 0:
+        print(f"Moving the directory {args.SCRIPT_DIR} to the VMs failed with error code {return_code}")
+        return return_code
 
   ##### Step 3: Unzip if using a new folder, kill existing processes, and run #####
   print(f"Running main command, logs located in: {local_log_dir}", flush=True)

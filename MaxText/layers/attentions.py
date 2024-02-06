@@ -82,12 +82,12 @@ def apply_mask_to_logits(logits: Array, mask: Array):
   """
   return jnp.where((mask >= DEFAULT_MASK_VALUE * 0.5), logits, DEFAULT_MASK_VALUE)
 
-def _maybe_aqt_einsum(int8_training, aqt_rng):
+def _maybe_aqt_einsum(int8_training, aqt_rng, config):
   """Maybe overwrite dot general with aqt_dot_general."""
   if not int8_training:
     return jnp.einsum
   else:
-    aqt_dot_general = quantizations.int8_dot_general(aqt_rng)
+    aqt_dot_general = quantizations.int8_dot_general(aqt_rng, config)
     return functools.partial(jnp.einsum, _dot_general=aqt_dot_general)
 
 class AttentionOp(nn.Module):
@@ -101,6 +101,7 @@ class AttentionOp(nn.Module):
   float32_logits: bool = False
   flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
   dtype: DType = jnp.float32
+  config: Config = None
 
   def check_attention_inputs(
     self,
@@ -349,7 +350,7 @@ class AttentionOp(nn.Module):
     Returns:
       result in shape [b, t, n, d]
     """
-    einsum = _maybe_aqt_einsum(self.use_int8, aqt_rng)
+    einsum = _maybe_aqt_einsum(self.use_int8, aqt_rng, self.config)
     out = einsum('bkgts,bskd->btkgd', attn_weights, value)
     b, t, n_kv, g, d = out.shape
     return jnp.reshape(out, (b, t, n_kv * g, d))
@@ -611,7 +612,8 @@ class Attention(nn.Module):
       kernel_axes=('embed', 'heads', 'kv'),
       dtype=self.dtype,
       name='query',
-      use_int8=self.use_int8)(inputs_q)
+      use_int8=self.use_int8,
+      config=self.config)(inputs_q)
     return query_proj
 
   def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:
@@ -638,7 +640,8 @@ class Attention(nn.Module):
         kernel_axes=('embed', 'heads', 'kv'),
         dtype=self.dtype,
         name=proj_name,
-        use_int8=self.use_int8)(inputs_kv)
+        use_int8=self.use_int8,
+        config=self.config)(inputs_kv)
     return kv_proj
 
   def qkv_projection(self, inputs: Array, proj_name: str):
@@ -651,7 +654,8 @@ class Attention(nn.Module):
         kernel_axes=('embed', 'qkv', 'heads', 'kv'),
         dtype=self.dtype,
         name=proj_name,
-        use_int8=self.use_int8)(inputs)
+        use_int8=self.use_int8,
+        config=self.config)(inputs)
     query, key, value = qkv_proj[:,:,0,...], qkv_proj[:,:,1,...], qkv_proj[:,:,2,...] 
     return query, key, value
 
@@ -663,7 +667,8 @@ class Attention(nn.Module):
       kernel_axes=('heads', 'kv', 'embed'),
       dtype=self.dtype,
       name='out',
-      use_int8=self.use_int8)(out)
+      use_int8=self.use_int8,
+      config=self.config)(out)
     return out_proj
 
   def key_rotary(self, key: Array, inputs_positions: Array):
@@ -734,7 +739,8 @@ class Attention(nn.Module):
                                use_int8=self.use_int8,
                                num_query_heads=self.num_query_heads,
                                num_kv_heads=self.num_kv_heads,
-                               dtype=self.dtype)
+                               dtype=self.dtype,
+                               config=self.config)
     
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)
 
