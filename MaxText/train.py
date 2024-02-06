@@ -284,6 +284,7 @@ def setup_train_loop(config):
     state: the initialized train state
   """
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+  max_utils.activate_profiler(config)
   data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh, add_bos=True, add_eos=True)
 
   state, state_mesh_annotations = max_utils.setup_training_state(model,
@@ -348,9 +349,6 @@ def train_loop(config, state=None):
   last_step_completion = datetime.datetime.now()
 
   for step in np.arange(start_step, config.steps):
-    if step == first_profiling_step:
-      max_utils.activate_profiler(config)
-
     example_batch = load_next_batch(data_iterator, example_batch, config, mesh)
     nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
