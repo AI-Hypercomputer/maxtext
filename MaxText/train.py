@@ -341,7 +341,7 @@ def train_loop(config, state=None):
     # Shaped state
     abstract_state, state_mesh_annotations =  max_utils.get_abstract_state(model, tx, config, init_rng, mesh)
     # Shaped batch
-    func_input_args = (abstract_state, data_iterator.take_first_example_batch(), shaped_rng)
+    func_input_args = (abstract_state, next(data_iterator), shaped_rng)
     func_input_kwargs = {}
 
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -355,7 +355,7 @@ def train_loop(config, state=None):
     p_train_step = p_train_step_lower.compile()
 
     if eval_data_iterator:
-      func_input_args = (abstract_state, eval_data_iterator.take_first_example_batch(), shaped_rng)
+      func_input_args = (abstract_state, next(eval_data_iterator), shaped_rng)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         p_eval_step_lower = jax.jit(
           functional_eval,
