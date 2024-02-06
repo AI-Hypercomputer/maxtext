@@ -17,6 +17,7 @@
 import functools
 from typing import Optional
 
+from aqt.jax.v2.config import LocalAqt
 from aqt.jax.v2 import aqt_dot_general as aqt
 from aqt.jax.v2 import config
 import jax.numpy as jnp
@@ -50,7 +51,7 @@ def int8_dot_general(aqt_rng: Optional[common_types.PRNGKey], maxtext_config: Op
         drhs_bits=8,
         rng_type='jax.uniform',
         dlhs_local_aqt=None,
-        drhs_local_aqt=None,
+        drhs_local_aqt = LocalAqt(maxtext_config.local_aqt_shards),
         fwd_accumulator_dtype=jnp.int32,
         dlhs_accumulator_dtype=jnp.int32,
         drhs_accumulator_dtype=jnp.int32,
