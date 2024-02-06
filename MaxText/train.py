@@ -90,6 +90,8 @@ def load_next_batch(train_iter, example_batch, config, mesh):
 
   if config.reuse_example_batch and example_batch is not None:
     return example_batch
+  elif config.dataset_type=='synthetic':
+    return next(train_iter)
   else:
     return get_next_batch_sharded(train_iter, mesh)
 
