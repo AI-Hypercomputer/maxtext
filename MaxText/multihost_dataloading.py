@@ -114,6 +114,11 @@ class MultiHostDataLoadIterator:
     self.global_mesh = global_mesh
     self._multihost_generator = get_batch_sharded_data_pipeline(self.dataset, self.global_mesh)
 
+  def take_first_example_batch(self):
+    local_data = self.dataset.take(1).as_numpy_iterator().next()
+    input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh = self.global_mesh), local_data)
+    return input_gdas
+
   def reset(self):
     self._multihost_generator = get_batch_sharded_data_pipeline(self.dataset, self.global_mesh)
 
