@@ -54,8 +54,17 @@ FEATURE_TIMEOUT = {
 }
 
 
-def set_up_pjrt_nightly() -> Tuple[str]:
-  """Common set up for PJRT nightly tests."""
+def set_up_se_nightly() -> Tuple[str]:
+  """Adjust grpc_tpu_worker for SE tests"""
+  return (
+      "sudo sed -i 's/TF_DOCKER_URL=.*/TF_DOCKER_URL=gcr.io\/cloud-tpu-v2-images-dev\/grpc_tpu_worker:nightly\"/' /etc/systemd/system/tpu-runtime.service",
+      "sudo systemctl daemon-reload && sudo systemctl restart tpu-runtime",
+      "cat /etc/systemd/system/tpu-runtime.service",
+  )
+
+
+def install_tf_nightly() -> Tuple[str]:
+  """Install tf nightly + libtpu."""
   return (
       "pip install tensorflow-text-nightly",
       "sudo gsutil -m cp gs://cloud-tpu-v2-images-dev-artifacts/tensorflow/tf-nightly/latest/*.whl /tmp/ && pip install /tmp/tf*.whl --force",

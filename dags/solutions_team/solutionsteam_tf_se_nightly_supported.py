@@ -26,7 +26,6 @@ from airflow.operators.dummy import DummyOperator
 # Run once a day at 4 pm UTC (8 am PST)
 SCHEDULED_TIME = "0 16 * * *" if composer_env.is_prod_env() else None
 
-
 with models.DAG(
     dag_id="tf_se_nightly_supported",
     schedule=SCHEDULED_TIME,
@@ -45,7 +44,7 @@ with models.DAG(
         test_feature=feature,
         test_name=name,
         is_pjrt=False,
-        runtime_version=RuntimeVersion.TPU_VM_TF_2150_SE.value,
+        runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY.value,
     ).run()
     tf_keras_v2_8[-1] >> test
     tf_keras_v2_8.append(test)
@@ -58,7 +57,7 @@ with models.DAG(
       time_out_in_min=60,
       global_batch_size=1024,
       is_pjrt=False,
-      runtime_version=RuntimeVersion.TPU_VM_TF_2150_SE.value,
+      runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY.value,
   ).run()
 
   tf_resnet_v2_32 = tf_config.get_tf_resnet_config(
@@ -69,7 +68,7 @@ with models.DAG(
       global_batch_size=1024,
       is_pod=True,
       is_pjrt=False,
-      runtime_version=RuntimeVersion.TPU_VM_TF_2150_POD_SE.value,
+      runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY_POD.value,
   ).run()
 
   tf_resnet_v3_8 = tf_config.get_tf_resnet_config(
@@ -78,7 +77,7 @@ with models.DAG(
       tpu_zone=Zone.US_EAST1_D.value,
       time_out_in_min=60,
       is_pjrt=False,
-      runtime_version=RuntimeVersion.TPU_VM_TF_2150_SE.value,
+      runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY.value,
   ).run()
 
   tf_resnet_v3_32 = tf_config.get_tf_resnet_config(
@@ -88,7 +87,7 @@ with models.DAG(
       time_out_in_min=60,
       is_pod=True,
       is_pjrt=False,
-      runtime_version=RuntimeVersion.TPU_VM_TF_2150_POD_SE.value,
+      runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY_POD.value,
   ).run()
 
   tf_resnet_v4_8 = tf_config.get_tf_resnet_config(
@@ -97,9 +96,8 @@ with models.DAG(
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
       is_pjrt=False,
-      runtime_version=RuntimeVersion.TPU_VM_TF_2150_SE.value,
+      runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY.value,
   ).run()
-
   tf_resnet_v4_32 = tf_config.get_tf_resnet_config(
       tpu_version=TpuVersion.V4,
       tpu_cores=32,
@@ -107,9 +105,8 @@ with models.DAG(
       time_out_in_min=60,
       is_pod=True,
       is_pjrt=False,
-      runtime_version=RuntimeVersion.TPU_VM_TF_2150_POD_SE.value,
+      runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY_POD.value,
   ).run()
-
   # DLRM
   tf_dlrm_v2_8 = tf_config.get_tf_dlrm_config(
       tpu_version=TpuVersion.V2,
@@ -121,7 +118,7 @@ with models.DAG(
       train_steps=10000,
       extraFlags="--mode=train",
       is_pjrt=False,
-      runtime_version=RuntimeVersion.TPU_VM_TF_2150_SE.value,
+      runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY.value,
   ).run()
 
   tf_dlrm_v2_32 = tf_config.get_tf_dlrm_config(
@@ -135,7 +132,7 @@ with models.DAG(
       extraFlags="--mode=train_and_eval",
       is_pod=True,
       is_pjrt=False,
-      runtime_version=RuntimeVersion.TPU_VM_TF_2150_POD_SE.value,
+      runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY_POD.value,
   ).run()
 
   tf_dlrm_v4_8 = tf_config.get_tf_dlrm_config(
@@ -148,7 +145,7 @@ with models.DAG(
       train_steps=10000,
       extraFlags="--mode=train",
       is_pjrt=False,
-      runtime_version=RuntimeVersion.TPU_VM_TF_2150_SE.value,
+      runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY.value,
   ).run()
 
   tf_dlrm_v4_32 = tf_config.get_tf_dlrm_config(
@@ -162,7 +159,7 @@ with models.DAG(
       extraFlags="--mode=train_and_eval",
       is_pod=True,
       is_pjrt=False,
-      runtime_version=RuntimeVersion.TPU_VM_TF_2150_POD_SE.value,
+      runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY_POD.value,
   ).run()
 
   # Test dependencies

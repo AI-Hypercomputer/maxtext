@@ -109,7 +109,7 @@ with models.DAG(
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
       is_pod=True,
-      runtime_version=RuntimeVersion.TPU_VM_TF_2150_POD_PJRT.value,
+      runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY_POD.value,
   ).run()
 
   tf_resnet_v5e_4 = tf_config.get_tf_resnet_config(
@@ -133,7 +133,7 @@ with models.DAG(
       network=V5_NETWORKS,
       subnetwork=V5E_SUBNETWORKS,
       is_pod=True,
-      runtime_version=RuntimeVersion.TPU_VM_TF_2150_POD_PJRT.value,
+      runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY_POD.value,
   ).run()
 
   tf_resnet_v5p_8 = tf_config.get_tf_resnet_config(
@@ -155,7 +155,7 @@ with models.DAG(
       network=V5_NETWORKS,
       subnetwork=V5P_SUBNETWORKS,
       is_pod=True,
-      runtime_version=RuntimeVersion.TPU_VM_TF_2150_POD_PJRT.value,
+      runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY_POD.value,
   ).run()
 
   # Test dependencies
