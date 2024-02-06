@@ -35,18 +35,19 @@ TRAIN_CMD="python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
         steps=20400 per_device_batch_size=8.0 learning_rate=3e-4 enable_checkpointing=false \
         model_name="llama2-1b" assets_path=$ASSETS_PATH\
         enable_profiler=false metrics_file=metrics.txt base_output_directory=$OUTPUT_PATH\
+        dataset_type=$DATASET_TYPE\
         dataset_path=$DATASET_PATH log_period=150 enable_data_shuffling=false"
 
-if [ -n "$DATASET_TYPE" ] && [ "$DATASET_TYPE" == "c4-array_record" ]
-then
-    echo "Using c4-array_record dataset type"
-    if [ ! -d $DATASET_PATH ]
-    then
-        echo "$DATASET_PATH does not exist, or is not a local path. Please use setup_gcsfuse.sh to mount your GCS bucket when DATASET_TYPE is c4-array_record"
-        exit
-    fi
-    TRAIN_CMD+=" dataset_type=c4-array_record dataset_name=array-record/c4/en/3.0.1 eval_dataset_name=array-record/c4/en/3.0.1"
-fi
+# if [ -n "$DATASET_TYPE" ] && [ "$DATASET_TYPE" == "c4-array_record" ]
+# then
+#     echo "Using c4-array_record dataset type"
+#     if [ ! -d $DATASET_PATH ]
+#     then
+#         echo "$DATASET_PATH does not exist, or is not a local path. Please use setup_gcsfuse.sh to mount your GCS bucket when DATASET_TYPE is c4-array_record"
+#         exit
+#     fi
+#     TRAIN_CMD+=" dataset_type=c4-array_record dataset_name=array-record/c4/en/3.0.1 eval_dataset_name=array-record/c4/en/3.0.1"
+# fi
 
 # Train
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"

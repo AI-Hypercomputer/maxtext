@@ -17,6 +17,7 @@
 """Input pipeline for a LM1B dataset."""
 
 import os
+import functools
 from typing import Optional
 
 import ml_collections
@@ -94,6 +95,103 @@ def length_trim(ds, max_len):
     num_parallel_calls=AUTOTUNE
   )
 
+def rekey(ds, key_map=None):
+  """normalization with key mapping"""
+  def _rekey(x, key_map=None):
+    """Replace the feature keys according to the mapping in `key_map`.
+    For example, if the dataset returns examples of the format:
+    {'foo': 'something', 'bar': 'something else', 'zoo': 'others'}
+    and key_map = {'boo': 'foo', 'spar': 'bar', 'zoo': None} then this function will return
+    examples with the format
+    {'boo': 'something', 'spar': 'something else'}
+    If a mapping is to None, then the key will be dropped.
+    Args:
+      x: an example to process.
+      key_map: dictionary mapping new keys to original keys
+    Returns:
+      A preprocessed example with the format listed above.
+    """
+    if key_map:
+      return {
+          new_key: x[old_key]
+          for new_key, old_key in key_map.items() if old_key
+      }
+    return x
+
+  return ds.map(
+      functools.partial(_rekey, key_map=key_map),
+      num_parallel_calls=AUTOTUNE)
+
+def reduce_concat_tokens(dataset,
+                         feature_key='targets',
+                         batch_size=128,
+                         ):
+  """Token-preprocessor to concatenate multiple unrelated documents.
+  If we want to generate examples of exactly the right length,
+  (to avoid wasting space on padding), then we use this function, folowed by
+  split_tokens.
+  Args:
+    dataset: a tf.data.Dataset with dictionaries containing the key feature_key.
+    feature_key: an string
+    batch_size: an integer - how many documents to concatenate into one
+  Returns:
+    a dataset
+  """
+  dataset = dataset.map(
+      lambda x: {feature_key: x[feature_key]}, num_parallel_calls=AUTOTUNE)
+  dataset = dataset.padded_batch(batch_size, padded_shapes={feature_key: [-1]})
+  def _my_fn(x):
+    tokens = tf.reshape(x[feature_key], [-1])
+    # strip padding
+    tokens = tf.boolean_mask(tokens, tf.cast(tokens, tf.bool))
+    return {feature_key: tokens}
+
+  return dataset.map(_my_fn, num_parallel_calls=AUTOTUNE)
+
+def split_tokens(dataset,
+                 max_tokens_per_segment=128,
+                 feature_key='targets',
+                 ):
+  """Split examples into multiple examples each.
+  The intended use case is to break up long examples for use in unsupervised
+  transfer-learning.
+  This function is generally preceded by select_random_chunk.
+  Args:
+    dataset: a tf.data.Dataset with dictionaries containing the key feature_key.
+    max_tokens_per_segment: an integer, the maximum number of tokens in each
+      segment. Only the final segment may be shorter.
+    feature_key: a string, the feature to split
+  Returns:
+    a dataset
+  """
+  def _split_tokens(x):
+    """Split one token sequence into multiple multiple."""
+    tokens = x[feature_key]
+    n_tokens = tf.size(tokens)
+    length = max_tokens_per_segment
+
+    # Pad to a multiple of length, then use tf.reshape to split up the tokens
+    # into num_segments segments each of the given length.
+    num_segments = tf.cast(
+        tf.math.ceil(tf.cast(n_tokens, tf.float32) / tf.cast(length, tf.float32)),
+        tf.int32)
+    padding = num_segments * length - tf.size(tokens)
+    tokens = tf.pad(tokens, [[0, padding]])
+    return tf.reshape(tokens, [-1, length])
+
+  def _strip_padding(x):
+    return {feature_key: tf.boolean_mask(x, tf.cast(x, tf.bool))}
+
+  # Filter empty examples.
+  dataset = dataset.filter(lambda x: tf.not_equal(tf.size(x[feature_key]), 0))
+  dataset = dataset.map(_split_tokens, num_parallel_calls=AUTOTUNE)
+  dataset = dataset.unbatch()
+  return dataset.map(
+      _strip_padding, num_parallel_calls=AUTOTUNE)
+
+def split_tokens_to_targets_length(dataset, sequence_length):
+  return split_tokens(dataset, max_tokens_per_segment=sequence_length)
+
 # -----------------------------------------------------------------------------
 # Main dataset preparation.
 # -----------------------------------------------------------------------------
@@ -112,19 +210,28 @@ def preprocessing_pipeline(
   drop_remainder: bool = True,
   prefetch_size = tf.data.experimental.AUTOTUNE,
   data_shuffle_seed = 0,
+  mlperf_pack: bool = False,
 ):
   """Shuffle and batch/pack the given dataset."""
+  if mlperf_pack:
+    # inputs and targets are the same, drop inputs for reduce_concat_tokens and add it back later
+    # todo: drop duplicated keys and add inputs back only necessary
+    dataset = rekey(dataset, {'inputs': None, 'targets': 'targets'})
+    dataset = reduce_concat_tokens(dataset, feature_key='targets', batch_size=4096)
 
-  def truncate_to_max_allowable_length(x, max_length):
-    x['inputs'] = x['inputs'][:max_length]
-    x['targets'] = x['targets'][:max_length]
-    return x
+    # add 1 more for later teaching force shift
+    dataset = split_tokens_to_targets_length(dataset, max_length + 1)
+    dataset = rekey(dataset, {'inputs': 'targets', 'targets': 'targets'})
+  else:
+    def truncate_to_max_allowable_length(x, max_length):
+      x['inputs'] = x['inputs'][:max_length]
+      x['targets'] = x['targets'][:max_length]
+      return x
 
-
-  if max_length > 0:
-    # We can take upto max_length+1 because there would be truncation by 1 token
-    # for both inputs and targets
-    dataset = dataset.map(lambda x: truncate_to_max_allowable_length(x, max_length+1))
+    if max_length > 0:
+      # We can take upto max_length+1 because there would be truncation by 1 token
+      # for both inputs and targets
+      dataset = dataset.map(lambda x: truncate_to_max_allowable_length(x, max_length+1))
 
   # Shuffle and repeat.
   if shuffle:
@@ -199,7 +306,8 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
                         vocab_path: Optional[str] = None,
                         data_shuffle_seed = 0,
                         add_bos = True,
-                        add_eos = True
+                        add_eos = True,
+                        mlperf_pack = False,
                         ):
   """Pre-process the dataset and return iterators"""
   if vocab_path is None:
@@ -238,7 +346,9 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       pack_examples=True,
       max_length=config.max_target_length,
       shift=True,
-      data_shuffle_seed = data_shuffle_seed,)
+      data_shuffle_seed = data_shuffle_seed,
+      mlperf_pack=mlperf_pack,
+      )
 
   eval_iter = preprocessing_pipeline(
       eval_ds,
@@ -248,7 +358,9 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       pack_examples=False,
       max_length=config.max_target_length,
       shift=False,
-      data_shuffle_seed = data_shuffle_seed,)
+      data_shuffle_seed = data_shuffle_seed,
+      mlperf_pack=mlperf_pack,
+      )
 
   predict_iter = preprocessing_pipeline(
       eval_ds,
@@ -259,7 +371,9 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       max_length=config.max_target_length,
       shift=False,
       drop_remainder=False,
-      data_shuffle_seed = data_shuffle_seed,)
+      data_shuffle_seed = data_shuffle_seed,
+      mlperf_pack=mlperf_pack,
+      )
 
   return train_iter, eval_iter, predict_iter, sp_tokenizer
 

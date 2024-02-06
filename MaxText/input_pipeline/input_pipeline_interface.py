@@ -26,6 +26,26 @@ from jax.sharding import PartitionSpec as P
 from input_pipeline import _tfds_data_processing
 # from input_pipeline import _grain_data_processing
 
+def make_c4_pack_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
+  """ Make train iterator and tokenizer for C4 dataset"""
+  read_config = tfds.ReadConfig(
+    shuffle_seed = config.data_shuffle_seed,
+  )
+  train_ds, eval_ds = _tfds_data_processing.get_datasets(
+    config=config,
+    read_config = read_config,
+  )
+  train_iter, _, _, sp_tokenizer = _tfds_data_processing.preprocess_dataset(
+    config,
+    mesh,
+    train_ds, eval_ds,
+    vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
+    data_shuffle_seed = config.data_shuffle_seed,
+    add_bos = add_bos,
+    add_eos = add_eos,
+    mlperf_pack=True,
+  )
+  return train_iter, sp_tokenizer
 
 def make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
   """ Make train iterator and tokenizer for C4 dataset"""
@@ -101,6 +121,8 @@ def create_data_iterator_with_tokenizer(config, mesh, add_bos = True, add_eos = 
     return SyntheticDataIterator(config, mesh), None
   elif config.dataset_type == "c4":
     return make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos)
+  elif config.dataset_type == "c4_pack":
+    return make_c4_pack_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos)
   else:
     assert False, "dataset type not implemented"
 
