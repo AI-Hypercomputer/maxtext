@@ -61,7 +61,7 @@ def validate_keys(keys):
 
 def validate_model_name(s: str) -> bool:
   # currently supported models
-  valid_model_names = ('default', 'llama2-7b', 'llama2-1b', 'mistral-7b', 'gamma-7b','gamma-2b', 'gpt3-175b', 'gpt3-52k')
+  valid_model_names = ('default', 'llama2-7b', 'llama2-1b', 'llama2-1b-copy', 'mistral-7b', 'gamma-7b','gamma-2b', 'gpt3-175b', 'gpt3-52k')
   if s not in valid_model_names:
     raise ValueError(
       "Invalid model name was passed. Valid options ", valid_model_names
@@ -203,6 +203,13 @@ class _HyperParameters():
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
+
+    assert raw_keys["local_aqt_shards"]==0 or (raw_keys["local_aqt_shards_mlp_1"]==0 and raw_keys["local_aqt_shards_mlp_2"]==0 and raw_keys["local_aqt_shards_proj_qkv"]==0 and raw_keys["local_aqt_shards_proj_out"]==0)
+    if raw_keys["local_aqt_shards"] > 0:
+      raw_keys["local_aqt_shards_mlp_1"]=raw_keys["local_aqt_shards"]
+      raw_keys["local_aqt_shards_mlp_2"]=raw_keys["local_aqt_shards"]
+      raw_keys["local_aqt_shards_proj_qkv"]=raw_keys["local_aqt_shards"]
+      raw_keys["local_aqt_shards_proj_out"]=raw_keys["local_aqt_shards"]
 
     validate_keys(raw_keys)
 

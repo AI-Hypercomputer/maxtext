@@ -24,15 +24,13 @@ import jax.numpy as jnp
 import common_types
 
 
-def int8_dot_general(aqt_rng: Optional[common_types.PRNGKey], maxtext_config: Optional[common_types.Config]):
+def int8_dot_general(aqt_rng: Optional[common_types.PRNGKey], local_aqt_shards: Optional[int]):
   """Rewrite dot_general to aqt int8 quantized dot_general."""
   if aqt_rng is None:
     raise ValueError('aqt_rng cannot be None.')
 
-  if maxtext_config is None:
-    raise ValueError('config cannot be None.')
 
-  if maxtext_config.local_aqt_shards == 0:
+  if local_aqt_shards is None or local_aqt_shards == 0:
     aqt_cfg = config.config_v3(
         fwd_bits=8,
         dlhs_bits=8,
@@ -51,7 +49,7 @@ def int8_dot_general(aqt_rng: Optional[common_types.PRNGKey], maxtext_config: Op
         drhs_bits=8,
         rng_type='jax.uniform',
         dlhs_local_aqt=None,
-        drhs_local_aqt = LocalAqt(maxtext_config.local_aqt_shards),
+        drhs_local_aqt = LocalAqt(local_aqt_shards),
         fwd_accumulator_dtype=jnp.int32,
         dlhs_accumulator_dtype=jnp.int32,
         drhs_accumulator_dtype=jnp.int32,
