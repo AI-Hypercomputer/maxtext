@@ -37,6 +37,7 @@ import checkpointing
 import max_utils
 import maxtext_utils
 import max_logging
+import mllog_utils
 import optimizers
 import pyconfig
 
@@ -300,6 +301,7 @@ def train_loop(config, state=None):
     ckpt_path:
   Returns:
   """
+  mllog_utils.init_start()
   ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
   mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state, tx) = setup_train_loop(config)
 
@@ -408,7 +410,9 @@ def train_loop(config, state=None):
     raise ValueError("Profiling requested but initial profiling step set past training final step")
   last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1, first_profiling_step, config.steps - 1)
 
-  maxtext_utils.init_mllog(config, start_step)
+  mllog_utils.init_print(config, start_step)
+  mllog_utils.init_stop()
+  mllog_utils.run_start()
   nextrng = jax.random.fold_in(init_rng, start_step)
   example_batch = load_next_batch(data_iterator, None, config)
   for step in np.arange(start_step, config.steps):
@@ -431,22 +435,6 @@ def train_loop(config, state=None):
     # write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
 
-    if eval_data_iterator and config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
-      cumulative_metrics = {"total_loss": 0., "total_weights": 0.}
-      for eval_batch in eval_data_iterator:
-        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-          _, metrics = p_eval_step(
-            state, eval_batch, nextrng
-          )
-        cumulative_metrics['total_loss'] += float(metrics['scalar']['evaluation/total_loss'])
-        cumulative_metrics['total_weights'] += float(metrics['scalar']['evaluation/total_weights'])
-      eval_loss = cumulative_metrics['total_loss'] / (cumulative_metrics['total_weights'] + EPS)
-      max_logging.log(
-        f"average loss after {step}: eval_loss={eval_loss}, total_weights={cumulative_metrics['total_weights']}")
-
-      if maxtext_utils.is_early_stop_mllog(config, step, eval_loss):
-        break
-
     if checkpoint_manager is not None:
       if checkpoint_manager.save(step, state):
         max_logging.log(f"saved a checkpoint at step {step}")
@@ -460,6 +448,25 @@ def train_loop(config, state=None):
 
     if config.gcs_metrics and jax.process_index() == 0:
       running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
+
+    if eval_data_iterator and config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
+      cumulative_metrics = {"total_loss": 0., "total_weights": 0.}
+      for eval_batch in eval_data_iterator:
+        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          _, metrics = p_eval_step(
+            state, eval_batch, nextrng
+          )
+        cumulative_metrics['total_loss'] += float(metrics['scalar']['evaluation/total_loss'])
+        cumulative_metrics['total_weights'] += float(metrics['scalar']['evaluation/total_weights'])
+      eval_loss = cumulative_metrics['total_loss'] / (cumulative_metrics['total_weights'] + EPS)
+      max_logging.log(
+        f"average loss after {step}: eval_loss={eval_loss}, total_weights={cumulative_metrics['total_weights']}")
+
+      mllog_utils.early_stop_check(config, step, eval_loss)
+      if eval_loss <= config.target_eval_loss:
+        max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
+        max_utils.deactivate_profiler(config)
+        break
 
     if step == last_profiling_step:
       max_utils.deactivate_profiler(config)
