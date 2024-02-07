@@ -233,11 +233,12 @@ def decode_loop(config, state=None):
 
   starttime = datetime.datetime.now()
   steps = range(config.max_prefill_predict_length + 1, config.max_target_length)
+  rngs = [random.PRNGKey(i) for i in range(config.max_target_length)]
   for step in steps:
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
-    new_position, new_cache, next_logit, selected_id = p_ar_predict_step(next_logit, new_position, new_cache, state, rng)
-    rng = jax.random.fold_in(rng, step)
+    new_position, new_cache, next_logit, selected_id = p_ar_predict_step(next_logit, new_position, new_cache,\
+                                                                         state, rngs[step])
     outputs.append(selected_id)
     if step == last_profiling_step:
       jax.block_until_ready(outputs)
