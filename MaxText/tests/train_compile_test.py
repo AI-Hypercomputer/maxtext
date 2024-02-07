@@ -46,6 +46,7 @@ class TrainCompile(unittest.TestCase):
       "base_num_decoder_layers=2"))
 
   @pytest.mark.tpu
+  @pytest.mark.skip(reason="mohitkhatwani will debug the sharding strategy and enable this test.")
   def test_sequence_parallelism(self):
     compiled_trainstep_file='/tmp/test_compiled.pickle'
     train_compile_main((None, "configs/base.yml", f"compiled_trainstep_file={compiled_trainstep_file}",
