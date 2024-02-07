@@ -488,6 +488,25 @@ def get_shaped_batch(config):
   shaped_batch['targets_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   return shaped_batch
 
+def get_shaped_batch_eval(config, mesh):
+  """ Return the shape of the batch - this is what eval_shape would return for the
+  output of create_data_iterator_with_tokenizer, but eval_shape doesn't work, see b/306901078."""
+  global_batch_size_to_load = config.global_batch_size_to_load
+  if config.eval_per_device_batch_size > 0:
+    eval_batch_size = config.eval_per_device_batch_size * mesh.size
+  else:
+    eval_batch_size = global_batch_size_to_load
+  batch_shape = (eval_batch_size, config.max_target_length)
+
+  shaped_batch = {}
+  shaped_batch['inputs'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  shaped_batch['inputs_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  shaped_batch['inputs_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  shaped_batch['targets'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  shaped_batch['targets_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  shaped_batch['targets_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  return shaped_batch
+
 def make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, shuffle_buffer_size=128):
   """ Make train iterator and tokenizer for C4 mlperf dataset"""
 
@@ -497,25 +516,24 @@ def make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, shuffle_buffer_siz
     skip_prefetch = True,
   )
 
-  assert jax.process_count() % 512 == 0
   train_read_config = tfds.ReadConfig(
     shuffle_seed = config.data_shuffle_seed,
     skip_prefetch = True,
     input_context = tf.distribute.InputContext(
-      input_pipeline_id=jax.process_index() * 512 // jax.process_count(),
-      num_input_pipelines=512,  # Total number of workers
+      input_pipeline_id=jax.process_index(),
+      num_input_pipelines=jax.process_count(),
     ),
   )
 
   train_ds_builder = tfds.builder(config.dataset_name)
   train_ds_builder.download_and_prepare()
+  # distributed file read
   train_ds = train_ds_builder.as_dataset(split='train2', read_config=train_read_config, shuffle_files=True)
 
   eval_ds_builder = tfds.builder(config.eval_dataset_name)
   eval_ds = eval_ds_builder.as_dataset(split='validation_tokenized_5662seqs', read_config=read_config, shuffle_files=False)
 
   # shard the dataset as soon as it is loaded
-  train_ds = train_ds.shard(num_shards = jax.process_count() // 512, index = jax.process_index() % (jax.process_count() // 512))
   train_ds = rekey(train_ds, {'inputs': None, 'targets': 'text'})
   sp_tokenizer = tokenizer.load_tokenizer(
     vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
