@@ -267,7 +267,7 @@ def execute_main_command(main_command, slices, local_log_dir, zip_name, coordina
       remote_command_list_str = " && ".join(remote_command_list)
       if args.ACCESS_VM_VIA_BEYONDCORP is False:
         gcloud_command=[
-            "ssh", cur_slice.name,
+            "gcloud", "compute", "ssh", cur_slice.name,
             "--command", remote_command_list_str, "--strict-host-key-checking=no",
             f"--project={args.PROJECT}", f"--zone={args.ZONE}"]
         if args.INTERNAL_IP:
