@@ -18,7 +18,6 @@ import functools
 from typing import Optional
 
 from aqt.jax.v2 import aqt_dot_general as aqt
-from aqt.jax.v2 import aqt_quantizer
 from aqt.jax.v2 import config
 import jax.numpy as jnp
 import common_types
