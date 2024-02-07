@@ -38,9 +38,7 @@ def int8_dot_general(aqt_rng: Optional[common_types.PRNGKey]):
       drhs_local_aqt=None,
       fwd_accumulator_dtype=jnp.int32,
       dlhs_accumulator_dtype=jnp.int32,
-      drhs_accumulator_dtype=jnp.int32,
+      drhs_accumulator_dtype=None,
   )
-  aqt_dot_general = aqt.make_dot_general(aqt_cfg)
-  context = aqt_quantizer.Context(key=aqt_rng, train_step=None)
-  aqt_dot_general = functools.partial(aqt_dot_general, context=context)
-  return aqt_dot_general
+  aqt_cfg = config.set_context(aqt_cfg, key=aqt_rng, train_step=None)
+  return aqt.make_dot_general(aqt_cfg)
