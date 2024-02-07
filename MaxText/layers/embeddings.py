@@ -178,9 +178,7 @@ class RotaryEmbedding(nn.Module):
     if self.cast_as_fprop_dtype:
       first_part = first_part.astype(self.fprop_dtype)
       second_part = second_part.astype(self.fprop_dtype)
-    x_out = jnp.stack((first_part, second_part), axis=-1).reshape(
-        *first_part.shape[:-1], -1
-    )
+    x_out = jnp.concatenate((first_part, second_part), axis=-1)
     return x_out
 
 
