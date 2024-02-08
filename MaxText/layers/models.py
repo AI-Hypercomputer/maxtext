@@ -27,7 +27,7 @@ import common_types
 from layers import attentions
 from layers import embeddings
 from layers import linears
-from layers import normalizations
+from layers import normalizations, quantizations
 
 Array = common_types.Array
 Config = common_types.Config
@@ -39,6 +39,7 @@ Embed = embeddings.Embed
 Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
 PositionalEmbedding = embeddings.PositionalEmbedding
+Quant = quantizations.AqtQuantization
 
 #------------------------------------------------------------------------------
 # The network: Decoder & Transformer Definitions
@@ -49,6 +50,7 @@ class DecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
   config: Config
   mesh: Mesh
+  quant: Optional[Quant] = None
 
   @nn.compact
   def __call__(self,
@@ -84,7 +86,7 @@ class DecoderLayer(nn.Module):
       dtype=cfg.dtype,
       dropout_rate=cfg.dropout_rate,
       name='self_attention',
-      use_int8=cfg.int8_training)
+      quant=self.quant)
 
 
     attention_lnx = attention_layer(
@@ -107,6 +109,7 @@ class DecoderLayer(nn.Module):
         dtype=cfg.dtype,
         name='mlp',
         config=cfg,
+        quant=self.quant,
     )(lnx, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(
         mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')
@@ -147,6 +150,7 @@ class Decoder(nn.Module):
   config: Config
   shared_embedding: nn.Module
   mesh: Mesh
+  quant: Optional[Quant] = None
 
   def get_decoder_layer(self):
     if self.config.decoder_block == "default":
@@ -243,7 +247,6 @@ class Decoder(nn.Module):
           split_rngs={
               'params': True,
               'dropout': cfg.enable_dropout,
-              'aqt': cfg.int8_training,
           },
           in_axes=(
               nn.broadcast,
@@ -253,7 +256,7 @@ class Decoder(nn.Module):
           ),
           length=cfg.num_decoder_layers,
           metadata_params={nn.PARTITION_NAME: 'layers'},
-      )(config=cfg, mesh=mesh, name='layers')(
+      )(config=cfg, mesh=mesh, name='layers', quant=self.quant)(
           y,
           decoder_segment_ids,
           decoder_positions,
@@ -262,7 +265,8 @@ class Decoder(nn.Module):
       )
     else:
       for lyr in range(cfg.num_decoder_layers):
-        y = BlockLayer(config=cfg, mesh=mesh, name=f'layers_{lyr}')(
+        y = BlockLayer(config=cfg, mesh=mesh, name=f'layers_{lyr}',
+                       quant=self.quant)(
             y,
             decoder_segment_ids,
             decoder_positions,
@@ -293,7 +297,7 @@ class Decoder(nn.Module):
           dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
           kernel_axes=('embed', 'vocab'),
           name='logits_dense',
-          use_int8=False)(y) # We do not quantize the logits matmul.
+          quant=self.quant)(y) # We do not quantize the logits matmul.
     logits = nn.with_logical_constraint(
         logits, ('activation_batch', 'activation_length', 'activation_vocab'))
     return logits
@@ -304,6 +308,7 @@ class Transformer(nn.Module):
   # pylint: disable=attribute-defined-outside-init
   config: Config
   mesh: Mesh
+  quant: Optional[Quant] = None
 
   def setup(self):
     """Initialize shared_embedding & decoder layers."""
@@ -321,7 +326,8 @@ class Transformer(nn.Module):
     )
 
     self.decoder = Decoder(
-        config=cfg, shared_embedding=self.shared_embedding, mesh=mesh
+        config=cfg, shared_embedding=self.shared_embedding,
+        mesh=mesh, quant=self.quant
     )
 
   def __call__(
