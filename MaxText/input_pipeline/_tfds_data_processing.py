@@ -18,17 +18,13 @@
 
 import os
 from typing import Optional
-import functools
 
 import ml_collections
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import jax
-import jax.numpy as jnp
-from jax.sharding import PartitionSpec as P
 
 import tokenizer
-import multihost_dataloading
 import sequence_packing
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
@@ -67,6 +63,11 @@ def shift_data(x, axis=0, segmented=True):
   x['inputs'] = shift_inputs_tf(x['inputs'], segment_ids=segment_ids, axis=axis)
   return x
 
+def shift_data_by_truncation(x):
+  x['inputs'] = x['inputs'][:-1]
+  x['targets'] = x['targets'][1:]
+  return x
+
 
 def normalize_features(ds):
   """Normalize text feature keys."""
@@ -79,6 +80,19 @@ def normalize_features(ds):
       _normalize_features,
       num_parallel_calls=AUTOTUNE)
 
+def length_trim(ds, max_len):
+  """"Trim to Max length"""
+  def _trim_fn(features):
+    if tf.shape(features['inputs'])[0] > max_len:
+      features['inputs'] = features['inputs'][:max_len]
+    if tf.shape(features['targets'])[0] > max_len:
+      features['targets'] = features['targets'][:max_len]
+    return features
+
+  return ds.map(
+    _trim_fn,
+    num_parallel_calls=AUTOTUNE
+  )
 
 # -----------------------------------------------------------------------------
 # Main dataset preparation.
@@ -101,16 +115,16 @@ def preprocessing_pipeline(
 ):
   """Shuffle and batch/pack the given dataset."""
 
-  # Max length filter.
-  def length_filter(max_len):
-    def filter_fn(x):
-      source, target = x['inputs'], x['targets']
-      l = tf.maximum(tf.shape(source)[0], tf.shape(target)[0])
-      return tf.less(l, max_len + 1)
-    return filter_fn
+  def truncate_to_max_allowable_length(x, max_length):
+    x['inputs'] = x['inputs'][:max_length]
+    x['targets'] = x['targets'][:max_length]
+    return x
+
 
   if max_length > 0:
-    dataset = dataset.filter(length_filter(max_length))
+    # We can take upto max_length+1 because there would be truncation by 1 token
+    # for both inputs and targets
+    dataset = dataset.map(lambda x: truncate_to_max_allowable_length(x, max_length+1))
 
   # Shuffle and repeat.
   if shuffle:
@@ -118,17 +132,17 @@ def preprocessing_pipeline(
 
   dataset = dataset.repeat(num_epochs)
 
-  # Perform greedy sequence packing
-  if pack_examples:
-    dataset = sequence_packing.pack_dataset(dataset, max_length)
 
   # Shift inputs for teacher-forced training
   if shift:
     dataset = dataset.map(
-      functools.partial(shift_data, axis=0, segmented=pack_examples),
+      shift_data_by_truncation,
       num_parallel_calls=tf.data.AUTOTUNE,
       deterministic=True)
 
+  # Perform greedy sequence packing
+  if pack_examples:
+    dataset = sequence_packing.pack_dataset(dataset, max_length)
   assert (
         batch_size % global_mesh.size == 0
     ), 'Batch size should be divisible number of global devices.'
@@ -147,10 +161,7 @@ def preprocessing_pipeline(
   if prefetch_size:
     dataset = dataset.prefetch(prefetch_size)
 
-  multihost_gen = multihost_dataloading.get_batch_sharded_data_pipeline(dataset, global_mesh)
-
-  # Return multi-host jax.Array prep iterator
-  return multihost_gen
+  return iter(dataset.as_numpy_iterator())
 
 
 def get_datasets(
@@ -186,16 +197,18 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
                         global_mesh,
                         train_ds, eval_ds,
                         vocab_path: Optional[str] = None,
-                        data_shuffle_seed = 0,):
+                        data_shuffle_seed = 0,
+                        add_bos = True,
+                        add_eos = True
+                        ):
   """Pre-process the dataset and return iterators"""
   if vocab_path is None:
     vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
 
   # Load tokenizer
   sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
-                                          vocab_size=config.vocab_size,
-                                          add_bos=config.add_bos,
-                                          add_eos=config.add_eos)
+                                          add_bos=add_bos,
+                                          add_eos=add_eos)
 
   # Tokenize data.
   train_ds = train_ds.map(
@@ -250,75 +263,3 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
 
   return train_iter, eval_iter, predict_iter, sp_tokenizer
 
-
-def make_c4_train_iterator_and_tokenizer(config, mesh):
-  """ Make train iterator and tokenizer for C4 dataset"""
-  read_config = tfds.ReadConfig(
-    shuffle_seed = config.data_shuffle_seed,
-  )
-  train_ds, eval_ds = get_datasets(
-    config=config,
-    read_config = read_config,
-  )
-  train_iter, _, _, sp_tokenizer = preprocess_dataset(
-    config,
-    mesh,
-    train_ds, eval_ds,
-    vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
-    data_shuffle_seed = config.data_shuffle_seed,
-  )
-  return train_iter, sp_tokenizer
-
-class SyntheticDataIterator():
-  """Creates a synthetic data iterator for performance testing work"""
-  def __init__(self, config, mesh):
-    self.mesh = mesh
-    self.config = config
-    data_pspec = P(*config.data_sharding)
-    data_pspec_shardings = jax.tree_map(
-        lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
-    self.data_generator = jax.jit(SyntheticDataIterator.raw_generate_synthetic_data,
-        out_shardings=data_pspec_shardings,
-        static_argnums=0)
-  def __call__(self):
-    with self.mesh:
-      return self.data_generator(self.config)
-
-  @staticmethod
-  def raw_generate_synthetic_data(config):
-    """Generates a single batch of syntehtic data"""
-    output = {}
-    output['inputs'] = jax.numpy.zeros( (config.global_batch_size_to_load, config.max_target_length),
-                                       dtype=jax.numpy.int32)
-    output['inputs_position'] = jax.numpy.zeros( (config.global_batch_size_to_load, config.max_target_length),
-                                                dtype=jax.numpy.int32)
-    output['inputs_segmentation'] = jax.numpy.ones( (config.global_batch_size_to_load, config.max_target_length),
-                                                   dtype=jax.numpy.int32)
-    output['targets'] = jax.numpy.zeros( (config.global_batch_size_to_load, config.max_target_length),
-                                        dtype=jax.numpy.int32)
-    output['targets_position'] = jax.numpy.zeros( (config.global_batch_size_to_load, config.max_target_length),
-                                                 dtype=jax.numpy.int32)
-    output['targets_segmentation'] = jax.numpy.ones( (config.global_batch_size_to_load, config.max_target_length),
-                                                    dtype=jax.numpy.int32)
-    return output
-
-def create_data_iterator_with_tokenizer(config, mesh):
-  if config.dataset_type == "synthetic":
-    return SyntheticDataIterator(config, mesh), None
-  elif config.dataset_type == "c4":
-    return make_c4_train_iterator_and_tokenizer(config, mesh)
-  else:
-    assert False, "dataset type not implemented"
-
-def get_shaped_batch(config):
-  """ Return the shape of the batch - this is what eval_shape would return for the
-  output of create_data_iterator_with_tokenizer, but eval_shape doesn't work, see b/306901078."""
-  batch_shape = (config.global_batch_size_to_load, config.max_target_length)
-  shaped_batch = {}
-  shaped_batch['inputs'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  shaped_batch['inputs_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  shaped_batch['inputs_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  shaped_batch['targets'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  shaped_batch['targets_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  shaped_batch['targets_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  return shaped_batch

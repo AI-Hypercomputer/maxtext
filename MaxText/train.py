@@ -31,15 +31,16 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import numpy as np
 import optax
-from tensorboardX import SummaryWriter
 
 import checkpointing
 import max_utils
 import maxtext_utils
 import max_logging
+import optimizers
 import pyconfig
 
-from input_pipeline import create_data_iterator_with_tokenizer
+from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer
+from multihost_dataloading import get_next_batch_sharded
 from layers import models
 
 import jax.numpy as jnp
@@ -55,7 +56,6 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 Transformer = models.Transformer
 
-
 def validate_train_config(config):
   """ Validates the configuration is set correctly for train.py"""
 
@@ -64,13 +64,6 @@ def validate_train_config(config):
     max_logging.log("WARNING: 'dataset_path' might be pointing your local file system")
   if not config.base_output_directory.startswith('gs://'):
     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
-
-  assert ((config.load_parameters_path=="" and config.load_from_other_directory=="") or
-    config.enable_checkpointing), "You must set enable_checkpointing to load a checkpoint"
-  assert config.load_parameters_path=="" or config.load_from_other_directory=="",\
-  "At most one of load_parameters_path or load_from_other_directory should be set"
-  assert config.load_from_other_directory_step==-1 or config.load_from_other_directory!="",\
-  "You must specify the loading directory if you specify the loading step"
   assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive interger."
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
@@ -92,13 +85,15 @@ def get_first_step(state):
     return int(state.step)
 
 
-def load_next_batch(train_iter, example_batch, config):
+def load_next_batch(train_iter, example_batch, config, mesh):
   """Loads the next batch. Can keep reusing the same batch for performance reasons """
 
   if config.reuse_example_batch and example_batch is not None:
     return example_batch
+  elif config.dataset_type=='synthetic':
+    return next(train_iter)
   else:
-    return train_iter()
+    return get_next_batch_sharded(train_iter, mesh)
 
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   """Records scalar metrics to be written to tensorboard"""
@@ -115,9 +110,35 @@ def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   })
   metrics['scalar'].update({'learning/current_learning_rate': lr })
 
+_buffered_step = None
+_buffered_metrics = None
+def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config):
+  """Entry point for all metrics writing in Train's Main.
+     TODO: would be better as a Class in the future (that initialized all state!)
 
-def write_metrics(writer, metrics, step, config):
-  """Writes metrics to tensorboard"""
+     To avoid introducing an unnecessary dependency, we "double buffer" -- we hold
+     onto the last metrics and step and only publish when we receive a new metrics and step.
+     The logic is that this ensures that Jax is able to queues train_steps and we
+     don't block when turning "lazy" Jax arrays into real Python numbers.
+  """
+  global _buffered_step, _buffered_metrics
+
+  if _buffered_metrics is not None:
+    if _buffered_step is None:
+      raise ValueError(f"When writing metrics, {_buffered_step=} was none")
+    write_metrics_to_tensorboard(writer, _buffered_metrics, _buffered_step, config)
+
+    if config.metrics_file:
+      max_utils.write_metrics_locally(_buffered_metrics, _buffered_step, config, local_metrics_file)
+
+    if config.gcs_metrics and jax.process_index() == 0:
+      running_gcs_metrics = max_utils.write_metrics_for_gcs(_buffered_metrics, _buffered_step, config, running_gcs_metrics)
+
+  _buffered_step = step
+  _buffered_metrics = metrics
+
+def write_metrics_to_tensorboard(writer, metrics, step, config):
+  """ Writes metrics to tensorboard"""
   with jax.spmd_mode('allow_all'):
     if jax.process_index() == 0:
       for metric_name in metrics.get("scalar",[]):
@@ -192,8 +213,8 @@ def train_step(model, config, state, data, dropout_rng):
     xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
     xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
     # Mask out paddings at the end of each example.
-    xent = xent * (data['inputs_segmentation'] != 0)
-    return jnp.sum(xent)/jnp.size(xent), intermediate_outputs
+    xent = xent * (data['targets_segmentation'] != 0)
+    return jnp.sum(xent)/jnp.sum(data['targets_segmentation'] != 0), intermediate_outputs
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (loss, intermediate_outputs), raw_grads = grad_fn(state.params)
@@ -210,26 +231,25 @@ def train_step(model, config, state, data, dropout_rng):
 
   return new_state, metrics
 
-def setup_train_loop(config, init_rng):
-  """ Set up prerequisites for the training loop -
-      checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
-      Set up data iterator and tokenizer, initialize the model.
+def setup_mesh_and_model(config):
+  """ Set up the mesh and the model for training
 
   Args:
     config
-    init_rng
 
   Returns:
+    init_rng: RNG key
     writer: Summary writer for tensorboard
     checkpoint_manager: Orbax checkpointer
     state_mesh_annotations: the mesh annotations for the train state 
     model:
     mesh: 
     learning_rate_schedule:
-    data_iterator: 
-    state: the initialized train state
+    tx:
   """
-  writer = SummaryWriter(config.tensorboard_dir)
+
+  init_rng = random.PRNGKey(config.init_weights_seed)
+  writer = max_utils.initialize_summary_writer(config)
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       config.checkpoint_dir,
       config.enable_checkpointing,
@@ -243,13 +263,35 @@ def setup_train_loop(config, init_rng):
   # Model and Optimizer definition
   model = Transformer(config, mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
-  tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
+  tx = optimizers.get_optimizer(config, learning_rate_schedule)
+  return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
 
-  data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
+def setup_train_loop(config):
+  """ Set up prerequisites for the training loop -
+      checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
+      Set up data iterator and tokenizer, initialize the model.
 
-  state, state_mesh_annotations = max_utils.setup_training_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+  Args:
+    config
 
-  return ( writer, checkpoint_manager, state_mesh_annotations, model,
+  Returns:
+    init_rng:
+    writer: Summary writer for tensorboard
+    checkpoint_manager: Orbax checkpointer
+    state_mesh_annotations: the mesh annotations for the train state 
+    model:
+    mesh: 
+    learning_rate_schedule:
+    data_iterator: 
+    state: the initialized train state
+  """
+  init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+  data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh, add_bos=True, add_eos=True)
+
+  state, state_mesh_annotations = max_utils.setup_training_state(model,
+          tx, config, init_rng, mesh, checkpoint_manager)
+
+  return ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
           mesh, learning_rate_schedule, data_iterator, state)
 
 
@@ -261,9 +303,8 @@ def train_loop(config, state=None):
     ckpt_path:
   Returns:
   """
-  init_rng = random.PRNGKey(config.init_weights_seed)
-  ( writer, checkpoint_manager, state_mesh_annotations, model,
-  mesh, learning_rate_schedule, data_iterator, state) = setup_train_loop(config, init_rng)
+  ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
+  mesh, learning_rate_schedule, data_iterator, state) = setup_train_loop(config)
 
   functional_train, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
     train_step,
@@ -276,6 +317,11 @@ def train_loop(config, state=None):
   num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
   max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
   per_device_tflops = calculate_training_tflops(num_model_parameters, config)
+
+  # Write train config params, num model params, and XLA flags to tensorboard
+  max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
+  max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
+  max_utils.add_config_to_summary_writer(config, writer)
 
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != '':
@@ -291,8 +337,6 @@ def train_loop(config, state=None):
       static_argnums=static_argnums,
       donate_argnums=donate_argnums)
 
-  last_step_completion = datetime.datetime.now()
-
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
@@ -302,22 +346,22 @@ def train_loop(config, state=None):
     raise ValueError("Profiling requested but initial profiling step set past training final step")
   last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1, first_profiling_step, config.steps - 1)
 
-  nextrng = jax.random.fold_in(init_rng, start_step)
-  example_batch = load_next_batch(data_iterator, None, config)
+  example_batch = None
+  last_step_completion = datetime.datetime.now()
+
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
 
+    example_batch = load_next_batch(data_iterator, example_batch, config, mesh)
+    nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics = p_train_step(
           state, example_batch, nextrng
       )
 
-    example_batch = load_next_batch(data_iterator, example_batch, config)
-    nextrng = jax.random.fold_in(init_rng, step+1)
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
-    write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
@@ -328,16 +372,13 @@ def train_loop(config, state=None):
         checkpoint_manager.wait_until_finished()
         sys.exit()
 
-    if config.metrics_file:
-      max_utils.write_metrics_locally(metrics, step, config, local_metrics_file)
-
-    if config.gcs_metrics and jax.process_index() == 0:
-      running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics, step, config, running_gcs_metrics)
+    write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
 
     if step == last_profiling_step:
       max_utils.deactivate_profiler(config)
 
-  writer.close()
+  write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config) # final step metrics
+  max_utils.close_summary_writer(writer)
   return state
 
 def main(argv: Sequence[str]) -> None:
@@ -345,10 +386,12 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   pyconfig.initialize(argv)
-  print(f"Found {jax.device_count()} devices.")
   config = pyconfig.config
   validate_train_config(config)
-  cc.initialize_cache(os.path.expanduser(config.jax_cache_dir))
+  if jax.__version__ <= '0.4.23':
+    cc.initialize_cache(os.path.expanduser(config.jax_cache_dir))
+  else:
+    cc.set_cache_dir(os.path.expanduser(config.jax_cache_dir))
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   debug_config = debug_configuration.DebugConfig(
     stack_trace_config = stack_trace_configuration.StackTraceConfig(

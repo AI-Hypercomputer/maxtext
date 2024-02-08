@@ -16,25 +16,35 @@
 # If there is already a checkpoint under this run, that checkpoint will auto-resume.
 run_name: ""
 
-# Types of models supported.
-# default model (palm like model with no overrides in config)
-model_name: "default"
-rms_norm_epsilon: 1.e-06
+model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!
+normalization_layer_epsilon: 1.e-06
 
-# At most one of load_parameters_path and load_from_other_directory should be set.
-#   * load_parameters_path is used when you only care about the parameters, not the optimizer state or
-#      the step count
-#   * load_from_other_directory is used when you want to use a saved checkpoint from a different directory
-#        (corresponding to a different run_name), and save new metrics and checkpoints to a new directory.
-#   * If neither is provided then the most recent checkpoint saved under the current run_name is loaded if
-#        any exists, else the model initializes randomly.
-# If we aren't resuming from an existing checkpoint, load parameters from this path if provided.
+################################## CHECKPOINTING ################################## 
+# Checkpointing makes the following choices in the following order, starting with (1):
+#   (1) If there is already a checkpoint for this run_name, we load the latest entire checkpoint.
+#     This ensures if we're resuming a run after preemption or hardware failure we lose minimum state.
+#   (2) Same priority and mutually exclusive -- you can't set both!
+#      * If load_parameters_path is set, we load a parameter only checkpoint from that path.
+#      * If load_full_state_path is set, we load a full state checkpoint from that path.
+#   (3) We don't load a checkpoint and initialize state instead!
+
+# Loads a just parameters from a specific directory
+# e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/default/NUMBER or NUMBER/default
 load_parameters_path: ""
-# Loads a full checkpoint including optimizer state and step count from a directory other than [run_name]
-# e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints
-load_from_other_directory: ""
-# Which step to load from other directory, defaults to latest step
-load_from_other_directory_step: -1
+# Loads a full checkpoint including optimizer state and step count from a specific directory
+# e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/default/NUMBER or NUMBER/default
+load_full_state_path: ""
+
+# If enable_checkpointing is true, an asynchronous checkpointer will be used if
+# async_checkpointing is true, else a synchronous one is used. If you have
+# problems with the checkpointer we recommend trying the synchronous one.
+enable_checkpointing: True
+async_checkpointing: True
+checkpoint_period: 10_000
+
+force_unroll: False # during generate_param_only_checkpoint should we unroll the loop?
+############################### END CHECKPOINTING ##################################
+
 
 reuse_example_batch: 0 # for testing TPU performance, this options repeated uses the same batch.
 
@@ -42,10 +52,14 @@ metrics_file: "" # for testing, local file that stores scalar metrics. If empty,
 # If true save metrics such as loss and TFLOPS to GCS in {base_output_directory}/{run_name}/metrics/
 gcs_metrics: False
 
+# If true save config to GCS in {base_output_directory}/{run_name}/
+save_config_to_gcs: False
+
 # Activation dtypes.
 dtype: "bfloat16"
 int8_training: False
 
+decoder_block: "default" # which style of DecoderBlock to use.
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
@@ -60,11 +74,17 @@ head_dim: 256
 mlp_activations: ["relu"]
 dropout_rate: 0
 logits_via_embedding: True  # NOTE: this is True just for testing.
+normalize_embedding_logits: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
+logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
+
 # proj, minimal, full, or none
 remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
 attention: 'flash' # Supported attention: dot_product, flash, gpu_flash_xla, gpu_flash_triton
+# Combine matmuls for QKV and MLP
+fused_qkv: False
+fused_mlp: False
 
 record_internal_nn_metrics: 0
 
@@ -126,6 +146,9 @@ eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
 dataset_type: c4 # must be c4 or synthetic
 
+# Setting for grain
+grain_worker_count: 4
+
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
 log_period: 100 # Flushes Tensorboard
@@ -145,27 +168,19 @@ learning_rate_schedule_steps: -1 # By default the length of the schedule is set 
 
 max_target_length: 2048 # Maximum sequence length
 max_prefill_predict_length: 64 # Maximum length for the prefill when doing autoregression
-eos_id: 2  # sentencepiece default
 prompt: "I love to" # Prompt for language model sampling.
 load_from_prefill_dir: False # If true, decode.py doesn't "prefill" but just reads from directory
 prefill_cache_dir: "" # If set and load_from_prefill_dir, decode.py reads from directory. If set, decode.py writes to directory
-add_bos: False
-add_eos: True
 autoregressive_decode_assert: ""
 
 enable_profiler: False
+# If set to true, upload all profiler xplane results from all hosts. Otherwise, only upload the xplane reuslt from the first host.
+upload_all_profiler_results: False
 # Skip first n steps for profiling, to omit things like compilation and to give
 # the iteration time a chance to stabilize.
 skip_first_n_steps_for_profiler: 1
 # Profile for a small number of steps to avoid a large profile file size.
 profiler_steps: 5
-
-# If enable_checkpointing is true, an asynchronous checkpointer will be used if
-# async_checkpointing is true, else a synchronous one is used. If you have
-# problems with the checkpointer we recommend trying the sychronous one.
-enable_checkpointing: True
-async_checkpointing: True
-checkpoint_period: 10_000
 
 # When dropout is false the model is a deterministic function of the 
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
@@ -179,6 +194,7 @@ gradient_clipping_threshold: 1.0
 
 # AdamW optimizer parameters
 # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
+opt_type: "adamw"  # one of "adam_pax" or "adamw"
 adam_b1: 0.9 # Exponential decay rate to track the first moment of past gradients.
 adam_b2: 0.95 # Exponential decay rate to track the second moment of past gradients.
 adam_eps: 1.e-8 # A small constant applied to denominator outside of the square root.
@@ -192,9 +208,17 @@ stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds
 
 # Use iota operator in Embed
 use_iota_embed: False
+# use positional embedding
+use_untrainable_positional_embedding: False
+trainable_position_size: -1  # enable gpt3 position embedding with a positive trainable_position_size
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
 compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
 compile_topology: '' # Target hardware version, e.g. 'v5e-256'
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
+
+decode_sampling_strategy: "greedy" # decode_sampling_strategy should be one of greedy, weighted, nucleus, or topk
+decode_sampling_nucleus_p: -1 # set if you're doing nucleus / top-p
+decode_sampling_top_k: 0 # set if you're doing top-k
+decode_sampling_temperature: 1.

@@ -85,8 +85,10 @@ def pack_dataset(dataset: tf.data.Dataset,
   # Setting batch_size=length ensures that the concatenated sequences (if they
   # have length >=1) are sufficient to fill at least one packed example.
   batch_size = max(key2length.values())
+  # We pad with a negative value instead of the default 0 because 0 is a
+  # valid token for some tokenizers for e.g., representing unknown value
   dataset = dataset.padded_batch(
-      batch_size, padded_shapes={k: [-1] for k in keys})
+      batch_size, padded_shapes={k: [-1] for k in keys}, padding_values=-1)
   dataset = _pack_with_tf_ops(dataset, keys, key2length)
 
   # Set the Tensor shapes correctly since they get lost in the process.
@@ -154,7 +156,8 @@ def _pack_with_tf_ops(dataset: tf.data.Dataset, keys: List[str],
       one_example = {}
       for k in keys:
         val = tf.cast(x[k][i], tf.int32)
-        val = val[:tf.reduce_sum(tf.cast(tf.not_equal(val, 0), tf.int32))]
+        # We consider only the valid tokens i.e., token_id != -1
+        val = val[:tf.reduce_sum(tf.cast(tf.not_equal(val, -1), tf.int32))]
         one_example[k] = val
       for k in keys:
         can_append = tf.logical_and(

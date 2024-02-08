@@ -29,6 +29,7 @@ from jax.experimental import mesh_utils
 
 
 import json
+import yaml
 import flax
 from flax.training import train_state
 from flax import linen as nn
@@ -37,13 +38,20 @@ from flax.linen import partitioning as nn_partitioning
 import optax
 import os
 from typing import Tuple
+from tensorboardX import writer
 
 from google.cloud import storage
+
+def find_nans_and_infs(pytree):
+  def finder(x):
+    return jnp.any(jnp.isinf(x) | jnp.isnan(x))
+  bad_pytree = jax.tree_map(finder, pytree)
+  return jax.tree_util.tree_flatten(bad_pytree)
 
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
   return jax.tree_util.tree_reduce(
-      lambda x, y: x + jax.numpy.sum(y ** 2), x, initializer=0.0
+      lambda x, y: x + jax.numpy.sum(jax.numpy.square(y)), x, initializer=0.0
   ) ** 0.5
 
 def calculate_num_params_from_pytree(params):
@@ -63,12 +71,19 @@ def summarize_size_from_pytree(params):
   return num_params, num_bytes, num_bytes/num_params
 
 def activate_profiler(config):
-  if jax.process_index() == 0 and config.enable_profiler:
+  if config.enable_profiler and (config.upload_all_profiler_results or jax.process_index() == 0):
     jax.profiler.start_trace(config.tensorboard_dir)
 
 def deactivate_profiler(config):
-  if jax.process_index() == 0 and config.enable_profiler:
+  if config.enable_profiler and (config.upload_all_profiler_results or jax.process_index() == 0):
     jax.profiler.stop_trace()
+
+def initialize_summary_writer(config):
+  return writer.SummaryWriter(config.tensorboard_dir) if jax.process_index() == 0 else None
+
+def close_summary_writer(summary_writer):
+  if jax.process_index() == 0:
+    summary_writer.close()
 
 def _prepare_metrics_for_json(metrics, step, run_name):
   """Converts metric dictionary into json supported types (e.g. float)"""
@@ -90,6 +105,17 @@ def write_metrics_locally(metrics, step, config, file):
   if step == config.steps - 1:
     file.close()
 
+def add_config_to_summary_writer(config, summary_writer):
+  """Writes config params to tensorboard"""
+  if jax.process_index() == 0:
+    for key, value in config.get_keys().items():
+      add_text_to_summary_writer(key, str(value), summary_writer)
+
+def add_text_to_summary_writer(key, value, summary_writer):
+  """Writes given key-value pair to tensorboard as text/summary"""
+  if jax.process_index() == 0:
+    summary_writer.add_text(key, value)
+
 def write_metrics_for_gcs(metrics, step, config, running_metrics):
   """Writes metrics to gcs"""
   metrics_dict_step = _prepare_metrics_for_json(metrics, step, config.run_name)
@@ -108,6 +134,23 @@ def write_metrics_for_gcs(metrics, step, config, running_metrics):
     max_logging.log(f"File {metrics_filename} moved successfully!")
     running_metrics = [] # reset running_metrics to empty list
   return running_metrics
+
+def write_config_raw_keys_for_gcs(raw_keys):
+  """Writes config raw keys to GCS"""
+  if not raw_keys["save_config_to_gcs"] or jax.process_index() != 0:
+    return
+  max_logging.log("Writing config to GCS...")
+
+  raw_keys_dict = dict(raw_keys)
+  filename = "config.yml"
+  with open(filename, 'w', encoding="utf8") as config_for_gcs:
+    yaml.dump(raw_keys_dict, config_for_gcs)
+  config_for_gcs.close()
+
+  gcs_filename=os.path.join(raw_keys["base_output_directory"], raw_keys["run_name"], filename)
+  max_logging.log(f"Moving file {filename} to GCS...")
+  upload_blob(gcs_filename, filename)
+  max_logging.log(f"File {filename} moved successfully!")
 
 def parse_gcs_bucket_and_prefix(destination_gcs_name):
   path_parts = destination_gcs_name.replace("gs://", "").split("/")
@@ -153,7 +196,7 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
 
   return parallelism_vals
 
-def create_device_mesh(config, devices=None, logging=True):
+def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas """
   if devices is None:
     devices = jax.devices()
@@ -163,7 +206,6 @@ def create_device_mesh(config, devices=None, logging=True):
   except:
     num_slices = 1
   num_devices_per_slice = num_devices//num_slices
-  max_logging.log(f"Devices: {devices} (num_devices: {num_devices})")
 
   multi_slice_env = num_slices > 1
 
@@ -183,8 +225,7 @@ def create_device_mesh(config, devices=None, logging=True):
   else:
     mesh = mesh_utils.create_device_mesh(ici_parallelism, devices)
 
-  if logging:
-    max_logging.log(f"Decided on mesh: {mesh}")
+  max_logging.log(f"Num_devices: {num_devices}, shape {mesh.shape}")
 
   return mesh
 
@@ -236,8 +277,8 @@ def init_initial_state(model, tx, config, is_training, key):
       config.max_target_length
   )
   model_vars = model.init({'params': key, 'dropout': key, 'aqt': key},
-                          jnp.ones(input_shape),
-                          jnp.ones(input_shape))
+                          jnp.ones(input_shape, dtype=jnp.int32),
+                          jnp.ones(input_shape, dtype=jnp.int32))
   if is_training:
     return init_training_state(model.apply, model_vars['params'], tx)
   return init_decode_state(model.apply, model_vars['params'])
@@ -274,8 +315,7 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_tra
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
                                                 config.load_parameters_path,
-                                                config.load_from_other_directory,
-                                                config.load_from_other_directory_step,
+                                                config.load_full_state_path,
                                                 unboxed_abstract_state,
                                                 mesh,
                                                 state_mesh_annotations)

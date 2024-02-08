@@ -19,7 +19,7 @@ This directory contains high performance model configurations for different gene
 
 These configurations do 3 things:
 * Sets various XLA compiler flags as `LIBTPU_INIT_ARGS` to optimize runtime performance.
-* Runs [rto_setup.sh](https://github.com/google/maxtext/blob/main/rto_setup.sh) or [gke_rto_setup.sh](https://github.com/google/maxtext/blob/main/gke_rto_setup.sh) to optimize communication protocols for network performance. 
+* Runs [rto_setup.sh](https://github.com/google/maxtext/blob/main/rto_setup.sh) to optimize communication protocols for network performance. 
 (This only needs to be run once on each worker)
 * Runs [train.py](https://github.com/google/maxtext/blob/main/MaxText/train.py) with specific hyper-parameters (batch size, etc.)
 

@@ -11,7 +11,7 @@
  limitations under the License.
  """
 
-r"""Convert weights from a llama model to a MaxText one.
+r"""Convert weights from a Llama or Mistral model to a MaxText one.
 
 Usage:
 
@@ -19,8 +19,8 @@ Get LLaMA pytorch_vars from Meta
 
 Example cmd:
 To save a ckpt
-python3 MaxText/convert_llama_ckpt.py --base-model-path <path/to/meta/ckpt> \
-    --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size 7b
+python3 MaxText/llama_or_mistral_ckpt.py --base-model-path <path/to/meta/ckpt> \
+    --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size llama2-7b
 
 For large size model (e.g. 70B model), this script requires large memory VM.
 The script load and save weights in a single pass.
@@ -49,23 +49,23 @@ def permute_to_match_maxtext_rope(arr):
   return jax.numpy.concatenate((evens, odds), axis=arr.ndim-1)
 
 MODEL_PARAMS_DICT = {
-    '70b': {
+    'llama2-70b': {
         'num_layers': 80,
         'num_heads': 64,
         'num_kv_heads': 8,
         'dims_per_head': 128,
         'vocab': 32000,
     },
-    '13b': {
+    'llama2-13b': {
         'num_layers': 40,
         'num_heads': 40,
         'num_kv_heads': 40,
         'dims_per_head': 128,
         'vocab': 32000,
         'num_gpus': 1,
-        'combined_qkv': True,
+        'fused_qkv': True,
     },
-    '7b': {
+    'llama2-7b': {
         'num_layers': 32,
         'num_heads': 32,
         'num_kv_heads': 32,
@@ -74,20 +74,29 @@ MODEL_PARAMS_DICT = {
         'base_emb_dim': 4096,
         'base_mlp_dim': 11008,
     },
+    'mistral-7b': {
+        'num_layers': 32,
+        'num_heads': 32,
+        'num_kv_heads': 8,
+        'dims_per_head': 128,
+        'vocab': 32000,
+        'base_emb_dim': 4096,
+        'base_mlp_dim': 14336,
+    },
 }
 
 
 def convert(base_model_path, maxtext_model_path, model_size):
   """
-  Function to convert the Meta checkpoint at base_model_path into Orbax checkpoint
+  Function to convert the checkpoint at base_model_path into Orbax checkpoint
   for MaxText and save at maxtext_model_path
 
   Attributes:
-  base_model_path: Meta checkpoint path
+  base_model_path: checkpoint path
   maxtext_model_path: Path to save the MaxText checkpoint to
-  model_size: Llama2 model size, 7B, 13B, 70B
+  model_size: llama2-7b to 70b or mistral-7b
   """
-  """Convert from Llama to maxtext."""
+  """Convert model to maxtext."""
   model_params = MODEL_PARAMS_DICT[model_size]
   base_num_decoder_layers = model_params['num_layers']
   base_num_query_heads = model_params['num_heads']
@@ -97,7 +106,8 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
 
   print(f'Loading the base model from {base_model_path}')
-  ckpt_paths = sorted(pathlib.Path(base_model_path).glob('*.pth'))
+  # Skip any hidden files for checkpoints
+  ckpt_paths = sorted(pathlib.Path(base_model_path).glob('[!.]*.pth'))
   pytorch_vars = {}
   for i, ckpt_path in enumerate(ckpt_paths):
     print(f'Loading checkpoint {i+1} of {len(ckpt_paths)} ...')
@@ -107,7 +117,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
   jax_weights = {
       'decoder': {
-          'decoder': {
+          'layers': {
              'mlp': {}, 
              'pre_self_attention_layer_norm' : {},
              'post_self_attention_layer_norm' : {}, 
@@ -228,7 +238,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
   #scale the query weights
   self_attention['query']['kernel'] = self_attention['query']['kernel']/np.sqrt(head_dim)
 
-  jax_weights['decoder']['decoder']['self_attention'] = self_attention
+  jax_weights['decoder']['layers']['self_attention'] = self_attention
 
   layer_weight['mlp']['wi_0']['kernel'] = np.array(layer_weight['mlp']['wi_0']['kernel'])
   layer_weight['mlp']['wi_1']['kernel'] = np.array(layer_weight['mlp']['wi_1']['kernel'])
@@ -246,9 +256,9 @@ def convert(base_model_path, maxtext_model_path, model_size):
                                     layer_weight['post_self_attention_layer_norm']['scale'],
                                     axes=(1, 0))
 
-  jax_weights['decoder']['decoder']['mlp'] = layer_weight['mlp']
-  jax_weights['decoder']['decoder']['pre_self_attention_layer_norm'] = layer_weight['pre_self_attention_layer_norm']
-  jax_weights['decoder']['decoder']['post_self_attention_layer_norm'] = layer_weight['post_self_attention_layer_norm']
+  jax_weights['decoder']['layers']['mlp'] = layer_weight['mlp']
+  jax_weights['decoder']['layers']['pre_self_attention_layer_norm'] = layer_weight['pre_self_attention_layer_norm']
+  jax_weights['decoder']['layers']['post_self_attention_layer_norm'] = layer_weight['post_self_attention_layer_norm']
 
   #convert all weights to jax.numpy
   jax_weights = jax.tree_map(jnp.array, jax_weights)

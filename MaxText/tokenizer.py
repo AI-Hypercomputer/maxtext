@@ -42,14 +42,10 @@ def _load_sentencepiece_tokenizer(model_path: str,
       model=sp_model, add_bos=add_bos, add_eos=add_eos, reverse=reverse)
   return sp_tokenizer
 
-def load_tokenizer(vocab_path: str, vocab_size: int,add_bos=False, add_eos=True):
+def load_tokenizer(vocab_path: str, add_bos=False, add_eos=True):
   """Loads the tokenizer at `vocab_path` or trains a one from `dataset`."""
   try:
     sp_tokenizer = _load_sentencepiece_tokenizer(vocab_path, add_bos, add_eos)
-    sp_size = int(sp_tokenizer.vocab_size())
-    if sp_size != vocab_size:
-      raise ValueError(f'Existing sentencepiece vocabulary size {sp_size} '
-                       f'does not match specified vocab size {vocab_size}.')
     return sp_tokenizer
   except (tf.errors.NotFoundError, tf.errors.InvalidArgumentError):
     logging.info('SentencePiece vocab not found, Run train_tokenizer.py')

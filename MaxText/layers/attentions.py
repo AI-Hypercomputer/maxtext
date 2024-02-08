@@ -58,6 +58,30 @@ shard_map = shard_map.shard_map
 dynamic_vector_slice_in_dim = jax.vmap(
     lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
 
+def apply_mask_to_logits(logits: Array, mask: Array):
+  """Applies a floating-point mask to a set of logits.
+
+  The mask is represented as a tensor with some dtype where 0 represents true and values
+  below a large negative number (here set to
+  get_large_negative_number(logits.dtype) / 2) represent false. Applying the mask
+  leaves the logits alone in the true case and replaces them by
+  get_large_negative_number(logits.dtype) in the false case. Previously, this was
+  done by adding the logits to the mask; however, this leads to a bad fusion
+  decision in the compiler that saves the values in memory rather than
+  just the predicate. This implementation avoids that problem.
+
+  from https://github.com/google/praxis/blob/4712a6b9ee13e224b86e235ff55f7c6bab9fbab3/praxis/py_utils.py#L706
+
+  Args:
+    logits: A JTensor of logit values.
+    mask: A JTensor of mask values with the encoding described in the
+      function documentation.
+
+  Returns:
+    Masked logits.
+  """
+  return jnp.where((mask >= DEFAULT_MASK_VALUE * 0.5), logits, DEFAULT_MASK_VALUE)
+
 def _maybe_aqt_einsum(int8_training, aqt_rng):
   """Maybe overwrite dot general with aqt_dot_general."""
   if not int8_training:
@@ -73,6 +97,7 @@ class AttentionOp(nn.Module):
   use_int8: bool
   num_query_heads: int
   num_kv_heads: int
+  float32_qk_product: bool = False
   float32_logits: bool = False
   flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
   dtype: DType = jnp.float32
@@ -128,7 +153,7 @@ class AttentionOp(nn.Module):
       output_mask = None
 
     return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
-  
+
   def apply_attention(self,
       query: Array,
       key: Array,
@@ -269,17 +294,20 @@ class AttentionOp(nn.Module):
     """Apply Attention."""
     aqt_rng = self.make_rng('aqt')
 
-    # Casting logits and softmax computation for float32 for model stability.
-    if self.float32_logits:
+    # Casting qk_product and softmaxt computation for float32 for model stability.
+    if self.float32_qk_product:
       query = query.astype(jnp.float32)
       key = key.astype(jnp.float32)
 
     # QK Product, a.k.a `attn_weights`: [batch, num_kv_heads, num_query_heads_per_kv_head, q_length, kv_length]
     attn_weights = self.qk_product(query, key)
 
+    # Casting softmaxt computation for float32 for model stability.
+    if self.float32_logits:
+      attn_weights = attn_weights.astype(jnp.float32)
     attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
     if attn_mask is not None:
-      attn_weights += attn_mask
+      attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
 
     # Normalize the attention weights across `kv_length` dimension.
     attn_weights = jax.nn.softmax(attn_weights).astype(self.dtype)
@@ -413,7 +441,8 @@ class AttentionOp(nn.Module):
         
       cached_key.value = cached_key.value.at[:, :, :, 0:sequence].set(key_shaped_for_cache)
       cached_value.value = cached_value.value.at[:, :, :, 0:sequence].set(value_shaped_for_cache)
-      cached_segment_id.value = cached_segment_id.value.at[:, 0:sequence].set(decoder_segment_ids)
+      if decoder_segment_ids is not None:
+        cached_segment_id.value = cached_segment_id.value.at[:, 0:sequence].set(decoder_segment_ids)
       return key, value, decoder_segment_ids
 
   def kv_cache_autoregressive(self,
@@ -537,11 +566,14 @@ class Attention(nn.Module):
       dtype: the dtype of the computation.
       dropout_rate: dropout rate
       kernel_init: initializer for the kernel of the Dense layers.
-      float32_logits: bool, if True then compute logits in float32 to avoid
+      float32_qk_product: bool, if True then compute logits via float32 qk_product to avoid
+        numerical issues with bfloat16.
+      float32_logits: bool, if True then cast logits to float32 before softmax to avoid
         numerical issues with bfloat16.
       use_int8: bool, if true accelerate in int8
   """
     
+  config: Config
   num_query_heads: int
   num_kv_heads: int
   head_dim: int
@@ -551,7 +583,8 @@ class Attention(nn.Module):
   dtype: DType = jnp.float32
   dropout_rate: float = 0.
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
-  float32_logits: bool = False  # computes logits in float32 for stability.
+  float32_qk_product: bool = False  # computes logits in float32 for stability.
+  float32_logits: bool = False  # cast logits in float32 for stability.
   use_int8: bool = False
   
 
@@ -608,6 +641,20 @@ class Attention(nn.Module):
         use_int8=self.use_int8)(inputs_kv)
     return kv_proj
 
+  def qkv_projection(self, inputs: Array, proj_name: str):
+    """ Fused QKV projection"""
+
+    qkv_proj = DenseGeneral(
+      features=(3, self.num_query_heads, self.head_dim),
+      axis = -1,
+      kernel_init=self.kernel_init,
+        kernel_axes=('embed', 'qkv', 'heads', 'kv'),
+        dtype=self.dtype,
+        name=proj_name,
+        use_int8=self.use_int8)(inputs)
+    query, key, value = qkv_proj[:,:,0,...], qkv_proj[:,:,1,...], qkv_proj[:,:,2,...] 
+    return query, key, value
+
   def out_projection(self, output_dim: int, out: Array) -> Array:
     out_proj = DenseGeneral(
       features=output_dim,
@@ -658,9 +705,12 @@ class Attention(nn.Module):
       output of shape `[batch, length, q_features]`.
     """
     # apply projection.
-    query = self.query_projection(inputs_q)
-    key = self.kv_projection(inputs_kv, proj_name='key')
-    value = self.kv_projection(inputs_kv, proj_name='value')
+    if self.config.fused_qkv:
+      query, key, value = self.qkv_projection(inputs_q, proj_name='qkv_proj')
+    else:
+      query = self.query_projection(inputs_q)
+      key = self.kv_projection(inputs_kv, proj_name='key')
+      value = self.kv_projection(inputs_kv, proj_name='value')
 
     # apply ROPE
     query = RotaryEmbedding(
@@ -679,6 +729,7 @@ class Attention(nn.Module):
     attention_op = AttentionOp(mesh=self.mesh,
                                attention_kernel=self.attention_kernel,
                                max_target_length=self.max_target_length,
+                               float32_qk_product=self.float32_qk_product,
                                float32_logits=self.float32_logits,
                                use_int8=self.use_int8,
                                num_query_heads=self.num_query_heads,

@@ -1,9 +1,13 @@
-orbax-checkpoint
+jax>=0.4.23
+jaxlib>=0.4.23
+orbax-checkpoint>=0.5.2
 absl-py
+array-record
 aqtp
 cloud-tpu-diagnostics
 google-cloud-storage
-flax
+grain-nightly
+flax>=0.8.0
 ml-collections
 numpy
 optax
@@ -12,8 +16,8 @@ pylint
 pytest
 pytype
 sentencepiece==0.1.97
+tensorflow-text>=2.13.0
+tensorflow>=2.13.0
 tensorflow-datasets
-tensorflow-text
 tensorboardx
-tensorflow
 tensorboard-plugin-profile

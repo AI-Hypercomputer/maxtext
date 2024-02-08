@@ -29,10 +29,10 @@ import numpy as np
 
 import pyconfig
 import max_utils
-from input_pipeline import create_data_iterator_with_tokenizer
+import inference_utils
+from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer
 from layers import models
 
-import checkpointing
 import common_types
 
 import jax
@@ -102,21 +102,25 @@ def prefill_predict_step(inputs, input_positions, decoder_segment_ids,
 
   return flat_logits, new_vars['cache']
 
-def ar_predict_single_token(token_input, token_position, kv_cache, state, rngkey, model):
+def ar_predict_single_token(previous_logits, token_position, kv_cache, state, rngkey, model, config):
   """Predict one token, return new cache"""
+
+  new_token = inference_utils.sampling(previous_logits, rngkey, config.decode_sampling_strategy,\
+                                       topk=config.decode_sampling_top_k, nucleus_topp=config.decode_sampling_nucleus_p,
+                                       temperature=config.decode_sampling_temperature)
   flat_logits, new_vars = model.apply(
     {
         "params": state.params,
         "cache": kv_cache
     },
-    token_input,
+    new_token,
     token_position,
     enable_dropout=False,
     model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
     rngs={'aqt': rngkey},
     mutable=["cache"])
   new_flat_cache = new_vars["cache"]
-  return token_position+1, new_flat_cache, jax.numpy.argmax(flat_logits, axis=2)
+  return token_position+1, new_flat_cache, flat_logits, new_token
 
 def compute_prefill(config, model, state, rng, sp_tokenizer, mesh, state_mesh_shardings,
                     kv_cache_mesh_shardings):
@@ -138,10 +142,8 @@ def compute_prefill(config, model, state, rng, sp_tokenizer, mesh, state_mesh_sh
 
   prefill_output, prefill_cache = p_prefill_predict_step(tokenized_prompts, prompt_decoder_positions,\
                                                         prompt_decoder_segment_ids, state, rng)
-  indices = jax.numpy.argmax(prefill_output, axis=2)
 
-  last_index = indices[:, -1:]
-  return prefill_cache, last_index, prompt_decoder_positions[:, -1:]+1
+  return prefill_cache, prefill_output[:, -1:], prompt_decoder_positions[:, -1:]+1
 
 def prefill_or_load(config, model, state, rng, sp_tokenizer, mesh, state_mesh_shardings,
                     kv_cache_mesh_shardings):
@@ -156,29 +158,23 @@ def prefill_or_load(config, model, state, rng, sp_tokenizer, mesh, state_mesh_sh
     blob = orbax_checkpointer.restore(config.prefill_cache_dir, restore_args=restore_args)
     blob["cache"] = jax.tree_map(lambda x : flax.linen.spmd.LogicallyPartitioned(x, mesh.axis_names), blob["cache"])
     max_logging.log(f"Restored prefill cache from {config.prefill_cache_dir}")
-    return blob["cache"], blob["next_token"], blob["pos"]
+    return blob["cache"], blob["last_logit"], blob["pos"]
   else:
-    cache, next_token, pos = compute_prefill(config, model, state, rng, sp_tokenizer, mesh,
+    cache, last_logit, pos = compute_prefill(config, model, state, rng, sp_tokenizer, mesh,
                                              state_mesh_shardings, kv_cache_mesh_shardings)
     max_logging.log(f"Computed prefill cache {config.prefill_cache_dir}")
 
     if config.prefill_cache_dir != "":
-      blob = {"cache":cache, "next_token":next_token, "pos":pos}
+      blob = {"cache":cache, "last_logit":last_logit, "pos":pos}
       orbax_checkpointer.save(config.prefill_cache_dir, max_utils.unbox_logicallypartioned(blob))
       max_logging.log(f"Wrote prefill cache to {config.prefill_cache_dir}")
-    return cache, next_token, pos
+    return cache, last_logit, pos
 
 
 
 
 def decode_loop(config, state=None):
   """Decoding loop for the Transformer model."""
-  assert config.add_eos is False,\
-    "For decoding, we must set add_eos=False"
-  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(config.checkpoint_dir,
-                                                                     config.enable_checkpointing,
-                                                                     config.async_checkpointing,
-                                                                     config.checkpoint_period)
   rng = random.PRNGKey(0)
 
   # Mesh definition
@@ -187,9 +183,9 @@ def decode_loop(config, state=None):
 
   # Model and Optimizer definition
   model = Transformer(config, mesh = mesh)
-  _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh)
+  _, sp_tokenizer = create_data_iterator_with_tokenizer(config, mesh, add_bos = True, add_eos=False)
   state, state_mesh_annotations = max_utils.setup_decode_state(
-    model, config, rng, mesh, checkpoint_manager
+    model, config, rng, mesh, None
   )
   kv_cache_annotations = max_utils.get_kv_cache_annotations(model, config, rng, mesh)
 
@@ -204,7 +200,7 @@ def decode_loop(config, state=None):
     lambda p: jax.sharding.NamedSharding(mesh, p), kv_cache_annotations)
   replicated_sharding = jax.sharding.NamedSharding(mesh, P(None))
 
-  prefill_cache, new_id, new_position = prefill_or_load(config, model, state, rng, sp_tokenizer,\
+  prefill_cache, next_logit, new_position = prefill_or_load(config, model, state, rng, sp_tokenizer,\
                                                    mesh, state_mesh_shardings, kv_cache_mesh_shardings)
   num_cache, bytes_cache, bytes_per_cache = max_utils.summarize_size_from_pytree(prefill_cache)
   max_logging.log(f"Number of cache entries={num_cache/10**9:.3f} billion, memory usage={bytes_cache/2**30:.3f}GB, "
@@ -213,12 +209,12 @@ def decode_loop(config, state=None):
   total_memory_GB = (bytes_params + bytes_cache)/2**30
   max_logging.log(f"Total memory (for cache and params) {total_memory_GB:.3f} GB")
 
-  partial_ar_predict_step = functools.partial(ar_predict_single_token, model=model)
+  partial_ar_predict_step = functools.partial(ar_predict_single_token, model=model, config=config)
   partial_ar_predict_step.__name__ = "partial_ar_predict_step"
   p_ar_predict_step = jax.jit(
       partial_ar_predict_step,
       in_shardings=(replicated_sharding, replicated_sharding, kv_cache_mesh_shardings, state_mesh_shardings, None),
-      out_shardings=(replicated_sharding, kv_cache_mesh_shardings, replicated_sharding),
+      out_shardings=(replicated_sharding, kv_cache_mesh_shardings, replicated_sharding, replicated_sharding),
       donate_argnums=2
   )
 
@@ -229,18 +225,20 @@ def decode_loop(config, state=None):
                                 first_profiling_step, config.max_target_length - 1)
 
   #add the new_id which is the first generated token to outputs
-  outputs = [new_id]
+  outputs = []
 
-  new_position, new_cache, new_id = p_ar_predict_step(new_id, new_position, new_cache, state, rng)
-  outputs.append(new_id)
+  new_position, new_cache, next_logit, selected_id = p_ar_predict_step(next_logit, new_position, new_cache, state, rng)
+  outputs.append(selected_id)
   jax.block_until_ready(new_cache)
 
   starttime = datetime.datetime.now()
-  for step in range(config.max_prefill_predict_length + 1, config.max_target_length-1):
+  steps = range(config.max_prefill_predict_length + 1, config.max_target_length)
+  for step in steps:
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
-    new_position, new_cache, new_id = p_ar_predict_step(new_id, new_position, new_cache, state, rng)
-    outputs.append(new_id)
+    new_position, new_cache, next_logit, selected_id = p_ar_predict_step(next_logit, new_position, new_cache, state, rng)
+    rng = jax.random.fold_in(rng, step)
+    outputs.append(selected_id)
     if step == last_profiling_step:
       jax.block_until_ready(outputs)
       max_utils.deactivate_profiler(config)
@@ -252,24 +250,27 @@ def decode_loop(config, state=None):
     assert new_text==config.autoregressive_decode_assert, \
     f"generated text mismatch {new_text=} {config.autoregressive_decode_assert=}"
 
-  steps = config.max_target_length-1 - (config.max_prefill_predict_length+1)
+  num_steps = len(steps)
   elapsed_time = (endtime-starttime).total_seconds()
   seqs = config.per_device_batch_size * jax.device_count()
 
-  per_step_time = elapsed_time/steps
-  memory_bandwidth_per_device_GB_per_sec = total_memory_GB/(elapsed_time/steps)/jax.device_count()
-  max_logging.log(f"Did {steps} steps in {elapsed_time:.3f} seconds for {seqs} sequences with a total memory footprint of "
-                  f"{total_memory_GB:.3f} GB")
+  per_step_time = elapsed_time/num_steps
+  memory_bandwidth_per_device_GB_per_sec = total_memory_GB/(elapsed_time/num_steps)/jax.device_count()
+  max_logging.log(f"Did {num_steps} steps in {elapsed_time:.3f} seconds for {seqs} sequences"
+                  f" with a total memory footprint of {total_memory_GB:.3f} GB")
   max_logging.log(f"Therefore, a per-generate time of {per_step_time:.4f} seconds, a throughput of {seqs/per_step_time:.1f} "
                   f"tok/s and {memory_bandwidth_per_device_GB_per_sec:.1f} GB/s/device")
 
+def validate_config(config):
+  assert config.load_full_state_path == "", "Decode doesn't operate on full states! Convert to parameter checkpoint first."\
+                                            "Using generate_param_only_checkpoint."
 
 def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
   os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
-
+  validate_config(pyconfig.config)
   decode_loop(pyconfig.config)
 
 if __name__ == "__main__":

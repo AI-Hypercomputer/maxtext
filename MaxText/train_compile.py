@@ -29,6 +29,7 @@ from jax.sharding import Mesh
 from jax.experimental.serialize_executable import serialize
 from flax.linen import partitioning as nn_partitioning
 import maxtext_utils
+import optimizers
 import max_utils
 import pyconfig
 from layers import models
@@ -37,7 +38,7 @@ from absl import app
 import pickle
 import accelerator_to_spec_map
 import train
-import input_pipeline
+from input_pipeline import input_pipeline_interface
 
 Transformer = models.Transformer
 
@@ -69,7 +70,7 @@ def get_shaped_inputs(topology_mesh, config):
   model = Transformer(config, topology_mesh)
   # The learning_rate_schedule is baked into the compiled object.
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
-  tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
+  tx = optimizers.get_optimizer(config, learning_rate_schedule)
 
   # Shaped RNG keys
   _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)
@@ -79,7 +80,7 @@ def get_shaped_inputs(topology_mesh, config):
   abstract_state, state_mesh_annotations =  max_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
 
   # Shaped batch
-  shaped_batch = input_pipeline.get_shaped_batch(config)
+  shaped_batch = input_pipeline_interface.get_shaped_batch(config)
 
   shaped_train_args = (abstract_state, shaped_batch, shaped_rng)
   shaped_train_kwargs = {}
@@ -152,6 +153,9 @@ def main(argv: Sequence[str]) -> None:
     save_compiled(compiled, config.compiled_trainstep_file)
     print(f"Successfully saved compiled object as {config.compiled_trainstep_file}")
   print("Finished train_compile.py successfully!", flush=True)
+  print(f"Cost analysis: {compiled.cost_analysis()}")
+  print(f"Memory analysis: {compiled.memory_analysis()}")
+
 
 if __name__ == "__main__":
   app.run(main)
