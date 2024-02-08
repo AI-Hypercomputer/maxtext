@@ -97,7 +97,7 @@ class _HyperParameters():
     return args_dict
 
   def _update_from_env_and_command_line(self, raw_keys, raw_data_from_yaml, argv, **kwargs) -> list[str]:
-    ''' Update model config from environemnt and command line
+    ''' Update model config from environment and command line
     '''
     raw_data_from_cmd_line = self._load_kwargs(argv, **kwargs)
     updated_keys = []
@@ -169,8 +169,7 @@ class _HyperParameters():
     '''Transformations between the config data and configs used at runtime'''
 
     # We initialize the jax distributed system here because it must be done before device backend is initialized.
-    if raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and raw_keys["compile_topology_num_slices"]==-1:
-      max_utils.initialize_jax_distributed_system()
+    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
 
     if raw_keys["run_name"] == "":
       raw_keys["run_name"] = os.environ.get("JOBSET_NAME") #using XPK default

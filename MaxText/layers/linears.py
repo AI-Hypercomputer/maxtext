@@ -36,7 +36,7 @@ nd_dense_init = initializers.nd_dense_init
 bias_init = initializers.default_bias_init
 
 RMSNorm = normalizations.RMSNorm
-
+Quant = quantizations.AqtQuantization
 
 def _convert_to_activation_function(
     fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
@@ -73,6 +73,7 @@ class DenseGeneral(nn.Module):
     dtype: the dtype of the computation (default: float32).
     kernel_init: initializer function for the weight matrix.
     use_bias: whether to add bias in linear transformation
+    quant: quantization config, defaults to None implying no quantization.
   """
 
   features: Union[Iterable[int], int]
@@ -80,7 +81,7 @@ class DenseGeneral(nn.Module):
   dtype: DType = jnp.float32
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
   kernel_axes: Tuple[str, ...] = ()
-  use_int8: bool = False
+  quant: Optional[Quant] = None
   use_bias: bool = False
 
   @nn.compact
@@ -96,14 +97,12 @@ class DenseGeneral(nn.Module):
 
     def compute_dot_general(inputs, kernel, axis, contract_ind):
       """Computes a dot_general operation that may be quantized."""
-      if not self.use_int8:
-        return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
-      else:
-        aqt_rng = self.make_rng('aqt')
-        aqt_dot_general = quantizations.int8_dot_general(aqt_rng)
-        return aqt_dot_general(
-            inputs, kernel, ((axis, contract_ind), ((), ()))
-        )
+      dot_general = lax.dot_general
+      if self.quant:
+        dot_general_cls = self.quant.dot_general_cls()
+        dot_general = dot_general_cls()
+      return dot_general(
+        inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
 
     features = _canonicalize_tuple(self.features)
     axis = _canonicalize_tuple(self.axis)
@@ -153,6 +152,7 @@ class MlpBlock(nn.Module):
     dtype: Type for the dense layer.
     use_bias: whether to add bias in all feedforward layers.
     use_pre_norm: whether to add pre layer norm in mlp layers.
+    quant: Optional quantization config, no quantization if None.
   """
 
   config: Config
@@ -163,6 +163,7 @@ class MlpBlock(nn.Module):
   dtype: Any = jnp.float32
   use_bias: bool = False
   use_pre_norm: bool = False
+  quant: Optional[Quant] = None
 
   def get_norm_layer(self):
     if self.config.decoder_block in ("default", "llama2", "mistral", "gamma"):
@@ -196,7 +197,7 @@ class MlpBlock(nn.Module):
             kernel_init=self.kernel_init,
             kernel_axes=('embed', 'num_activations', 'mlp'),
             name='wi',
-            use_int8=cfg.int8_training,
+            quant=self.quant,
             use_bias=self.use_bias,
       )(inputs)
       for idx, act_fn in enumerate(self.activations):
@@ -211,7 +212,7 @@ class MlpBlock(nn.Module):
             kernel_init=self.kernel_init,
             kernel_axes=('embed', 'mlp'),
             name=dense_name,
-            use_int8=cfg.int8_training,
+            quant=self.quant,
             use_bias=self.use_bias,
         )(inputs)
         x = _convert_to_activation_function(act_fn)(x)
@@ -232,7 +233,7 @@ class MlpBlock(nn.Module):
         kernel_init=self.kernel_init,
         kernel_axes=('mlp', 'embed'),
         name='wo',
-        use_int8=cfg.int8_training,
+        quant=self.quant,
         use_bias=self.use_bias,
     )(x)
     return output

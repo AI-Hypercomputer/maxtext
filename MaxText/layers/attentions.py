@@ -43,6 +43,7 @@ PRNGKey = common_types.PRNGKey
 DenseGeneral = linears.DenseGeneral
 RotaryEmbedding = embeddings.RotaryEmbedding
 NdInitializer = initializers.NdInitializer
+Quant = quantizations.AqtQuantization
 
 AxisNames = common_types.AxisNames
 BATCH = common_types.BATCH
@@ -82,25 +83,21 @@ def apply_mask_to_logits(logits: Array, mask: Array):
   """
   return jnp.where((mask >= DEFAULT_MASK_VALUE * 0.5), logits, DEFAULT_MASK_VALUE)
 
-def _maybe_aqt_einsum(int8_training, aqt_rng):
+def _maybe_aqt_einsum(quant: Quant):
   """Maybe overwrite dot general with aqt_dot_general."""
-  if not int8_training:
-    return jnp.einsum
-  else:
-    aqt_dot_general = quantizations.int8_dot_general(aqt_rng)
-    return functools.partial(jnp.einsum, _dot_general=aqt_dot_general)
+  return jnp.einsum if quant is None else quant.einsum()
 
 class AttentionOp(nn.Module):
   mesh: Mesh
   attention_kernel: str
   max_target_length: int
-  use_int8: bool
   num_query_heads: int
   num_kv_heads: int
   float32_qk_product: bool = False
   float32_logits: bool = False
   flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
   dtype: DType = jnp.float32
+  quant: Optional[Quant] = None
 
   def check_attention_inputs(
     self,
@@ -262,7 +259,7 @@ class AttentionOp(nn.Module):
       bwd_pass_impl = "triton"
     else:
       raise ValueError(f"Can't convert {self.attention_kernel } to a bwd_pass_impl")
-  
+
     axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
     segment_axis_names = nn.logical_to_mesh_axes((BATCH, LENGTH))
 
@@ -292,8 +289,6 @@ class AttentionOp(nn.Module):
       model_mode: str = common_types.MODEL_MODE_TRAIN,
   ) -> Array:
     """Apply Attention."""
-    aqt_rng = self.make_rng('aqt')
-
     # Casting qk_product and softmaxt computation for float32 for model stability.
     if self.float32_qk_product:
       query = query.astype(jnp.float32)
@@ -313,14 +308,14 @@ class AttentionOp(nn.Module):
     attn_weights = jax.nn.softmax(attn_weights).astype(self.dtype)
 
     # Take the linear combination of `value`.
-    return self.wv_product(attn_weights, value, aqt_rng)
+    return self.wv_product(attn_weights, value)
 
   def qk_product(self, query: Array, key: Array) -> Array:
     """Query-Key product.
-    
+
     Args:
       query: Query projection, in shape of [b, t, n, d], where b: batch size, t:
-        query length, n: number of heads, d: project dimension. 
+        query length, n: number of heads, d: project dimension.
       key: Key projection in shape of [b, s, n_kv, d] for where s: key length, n_kv is
         kv heads (sometimes k). The number of group for query is n // n_kv (sometimes g).
 
@@ -337,19 +332,17 @@ class AttentionOp(nn.Module):
   def wv_product(
       self,
       attn_weights: Array,
-      value: Array,
-      aqt_rng: PRNGKey | None) -> Array:
+      value: Array) -> Array:
     """weighted value product.
-    
+
     Args:
       attn_weights: Computed results of qk_einsum, in shape of [b, n, t, s].
       value: Value projection, in shape of [b, s, d] for multi-head attention.
-      aqt_rng: A PRNGKey for aqt ops.
 
     Returns:
       result in shape [b, t, n, d]
     """
-    einsum = _maybe_aqt_einsum(self.use_int8, aqt_rng)
+    einsum = _maybe_aqt_einsum(self.quant)
     out = einsum('bkgts,bskd->btkgd', attn_weights, value)
     b, t, n_kv, g, d = out.shape
     return jnp.reshape(out, (b, t, n_kv * g, d))
@@ -359,7 +352,7 @@ class AttentionOp(nn.Module):
 
     Args:
       kv: in shape [b, ..., n, d, s].
-    
+
     Returns:
       reshaped kv as [b, ..., s, n, d]
     """
@@ -370,7 +363,7 @@ class AttentionOp(nn.Module):
 
     Args:
       kv: in shape [b, ..., s, n, d].
-    
+
     Returns:
       reshaped kv as [b, ..., n, d, s]
     """
@@ -387,12 +380,12 @@ class AttentionOp(nn.Module):
 
     Args:
       kv_shape: shape of key or value for caching, as [b, ..., s, n, d].
-    
+
     Returns:
       Swapped kv_shape as [b, ..., n, d, s] for cache.
     """
     return kv_shape[:-3] + tuple(kv_shape[i] for i in [-2, -1, -3])
-  
+
   def _get_cache(self, cache_logical_shape, dtype):
     kv_cache_layout = ('cache_batch', 'cache_heads', 'cache_kv', 'cache_sequence')
     cached_key = self.variable('cache', 'cached_key',
@@ -414,7 +407,7 @@ class AttentionOp(nn.Module):
                         value: Array,
                         decoder_segment_ids: Array,
                        ):
-      """In prefill mode, we zero out the existing cache, run the computation and 
+      """In prefill mode, we zero out the existing cache, run the computation and
       prepare the cache as necessary.
 
       Args:
@@ -438,7 +431,7 @@ class AttentionOp(nn.Module):
 
       key_shaped_for_cache = self.move_kvlen_axis(key)
       value_shaped_for_cache = self.move_kvlen_axis(value)
-        
+
       cached_key.value = cached_key.value.at[:, :, :, 0:sequence].set(key_shaped_for_cache)
       cached_value.value = cached_value.value.at[:, :, :, 0:sequence].set(value_shaped_for_cache)
       if decoder_segment_ids is not None:
@@ -450,7 +443,7 @@ class AttentionOp(nn.Module):
                               value: Array,
                               decoder_segment_ids: Array,
                              ):
-      """In autoregressive mode, we update the cache for this entry and 
+      """In autoregressive mode, we update the cache for this entry and
          then return the full cache.
 
       Args:
@@ -570,9 +563,9 @@ class Attention(nn.Module):
         numerical issues with bfloat16.
       float32_logits: bool, if True then cast logits to float32 before softmax to avoid
         numerical issues with bfloat16.
-      use_int8: bool, if true accelerate in int8
+      quant: Quant, stores quantization parameters, defaults to None implying no quantization.
   """
-    
+
   config: Config
   num_query_heads: int
   num_kv_heads: int
@@ -585,8 +578,8 @@ class Attention(nn.Module):
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
   float32_qk_product: bool = False  # computes logits in float32 for stability.
   float32_logits: bool = False  # cast logits in float32 for stability.
-  use_int8: bool = False
-  
+  quant: Optional[Quant] = None
+
 
   query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
   key_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
@@ -611,7 +604,7 @@ class Attention(nn.Module):
       kernel_axes=('embed', 'heads', 'kv'),
       dtype=self.dtype,
       name='query',
-      use_int8=self.use_int8)(inputs_q)
+      quant=self.quant)(inputs_q)
     return query_proj
 
   def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:
@@ -638,7 +631,7 @@ class Attention(nn.Module):
         kernel_axes=('embed', 'heads', 'kv'),
         dtype=self.dtype,
         name=proj_name,
-        use_int8=self.use_int8)(inputs_kv)
+        quant=self.quant)(inputs_kv)
     return kv_proj
 
   def qkv_projection(self, inputs: Array, proj_name: str):
@@ -651,8 +644,8 @@ class Attention(nn.Module):
         kernel_axes=('embed', 'qkv', 'heads', 'kv'),
         dtype=self.dtype,
         name=proj_name,
-        use_int8=self.use_int8)(inputs)
-    query, key, value = qkv_proj[:,:,0,...], qkv_proj[:,:,1,...], qkv_proj[:,:,2,...] 
+        quant=self.quant)(inputs)
+    query, key, value = qkv_proj[:,:,0,...], qkv_proj[:,:,1,...], qkv_proj[:,:,2,...]
     return query, key, value
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
@@ -663,7 +656,7 @@ class Attention(nn.Module):
       kernel_axes=('heads', 'kv', 'embed'),
       dtype=self.dtype,
       name='out',
-      use_int8=self.use_int8)(out)
+      quant=self.quant)(out)
     return out_proj
 
   def key_rotary(self, key: Array, inputs_positions: Array):
@@ -731,11 +724,11 @@ class Attention(nn.Module):
                                max_target_length=self.max_target_length,
                                float32_qk_product=self.float32_qk_product,
                                float32_logits=self.float32_logits,
-                               use_int8=self.use_int8,
+                               quant=self.quant,
                                num_query_heads=self.num_query_heads,
                                num_kv_heads=self.num_kv_heads,
                                dtype=self.dtype)
-    
+
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)
 
     out = nn.with_logical_constraint(out, self.out_axis_names)
