@@ -152,6 +152,7 @@ def dot_with_no_batch_dims_saveable_offloaded(prim, *_, **params) -> bool:
   if prim is lax.dot_general_p:
     (_, _), (lhs_b, rhs_b) = params['dimension_numbers']
     if not lhs_b and not rhs_b:
+      print('offloadable!')
       return Offloadable(src='tpu_hbm', dst='pinned_host')
   return Recompute
 
