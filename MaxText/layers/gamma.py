@@ -23,6 +23,9 @@ from layers import attentions
 from layers import initializers
 from layers import embeddings
 from layers import linears
+from layers import quantizations
+
+from typing import Optional
 
 Embed = embeddings.Embed
 RMSNorm = normalizations.RMSNorm
@@ -43,6 +46,7 @@ DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
 
 nd_dense_init = initializers.nd_dense_init
+Quant = quantizations.AqtQuantization
 
 
 # Decoder and Model definitions
@@ -50,6 +54,7 @@ class GammaDecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
   config: Config
   mesh: Mesh
+  quant: Optional[Quant] = None
 
   @nn.compact
   def __call__(self,
@@ -86,7 +91,7 @@ class GammaDecoderLayer(nn.Module):
       name='self_attention',
       float32_qk_product = True,
       float32_logits = True,
-      use_int8=cfg.int8_training)
+      quant=self.quant)
 
     attention_lnx = attention_layer(
       lnx,
@@ -114,6 +119,7 @@ class GammaDecoderLayer(nn.Module):
         dtype=cfg.dtype,
         name='mlp',
         config=cfg,
+        quant=self.quant,
     )(attn_output, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(
         mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')
