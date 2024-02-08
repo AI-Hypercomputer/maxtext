@@ -27,21 +27,14 @@ from absl import app
 import numpy as np
 
 import pyconfig
-from jax.sharding import Mesh
-import max_utils
 from train import validate_train_config, get_first_step, load_next_batch, setup_train_loop
-
-from jax.experimental.compilation_cache import compilation_cache as cc
 
 
 def data_load_loop(config, state=None):
   """Main data loader loop.
     Loads batches of data for each training step.
   """
-  _, _, _, _, _, _, _, data_iterator, state = setup_train_loop(config)
-
-  devices_array = max_utils.create_device_mesh(config)
-  mesh = Mesh(devices_array, config.mesh_axes)
+  _, _, _, _, _, mesh, _, data_iterator, state = setup_train_loop(config)
   example_batch = None
 
   start = datetime.datetime.now()
@@ -50,25 +43,25 @@ def data_load_loop(config, state=None):
   jax.block_until_ready(example_batch)
   first_end = datetime.datetime.now()
   time_to_load_first_batch = first_end-start
-  max_logging.log(f"First step completed in {time_to_load_first_batch} seconds")
+  if jax.process_index() == 0:
+    max_logging.log(f"STANDALONE DATALOADER : First step completed in {time_to_load_first_batch} seconds, on host 0")
 
   for _ in np.arange(start_step+1, config.steps):
     example_batch = load_next_batch(data_iterator, example_batch, config, mesh)
 
   jax.block_until_ready(example_batch) # wait until the last batch is read
   end = datetime.datetime.now()
-  max_logging.log(f"{config.steps} batches loaded in {end-start} seconds, on host {jax.process_index()}")
+  if jax.process_index() == 0:
+    max_logging.log(f"STANDALONE DATALOADER : {config.steps} batches loaded in {end-start} seconds, on host 0")
   return state
 
 
 def main(argv: Sequence[str]) -> None:
-  jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
-  os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  jax.config.update('jax_cpu_enable_gloo_collectives', True)
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   pyconfig.initialize(argv)
   config = pyconfig.config
   validate_train_config(config)
-  cc.initialize_cache(os.path.expanduser(config.jax_cache_dir))
   max_logging.log(f"Found {jax.device_count()} devices.")
   max_logging.log(f"Found {jax.process_count()} processes.")
   max_logging.log(f"Found {jax.devices()} devices.")
