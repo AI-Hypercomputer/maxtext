@@ -19,7 +19,7 @@ run_name: ""
 model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!
 normalization_layer_epsilon: 1.e-06
 
-################################## CHECKPOINTING ################################## 
+################################## CHECKPOINTING ##################################
 # Checkpointing makes the following choices in the following order, starting with (1):
 #   (1) If there is already a checkpoint for this run_name, we load the latest entire checkpoint.
 #     This ensures if we're resuming a run after preemption or hardware failure we lose minimum state.
@@ -57,10 +57,10 @@ save_config_to_gcs: False
 
 # Activation dtypes.
 dtype: "bfloat16"
-int8_training: False
+quantization: ""
 
 decoder_block: "default" # which style of DecoderBlock to use.
-# Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes 
+# Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
 global_parameter_scale: 1
@@ -158,12 +158,12 @@ log_period: 100 # Flushes Tensorboard
 # 1) Linear warmup from 0 to [learning_rate] over steps 0 to [learning_rate_schedule_steps * warmup_steps_fraction]
 # 2) Cosine decay from [learning_rate] to [learning_rate * cosine_learning_rate_final_fraction] from warmup to learning_rate_schedule_steps
 # 3) Constant learning rate of 0 from learning_rate_schedule_steps to steps.
-# The zero learning rate section can be used to more accurately measure the fully trained model's performance. 
+# The zero learning rate section can be used to more accurately measure the fully trained model's performance.
 learning_rate: 3.e-5
-cosine_learning_rate_final_fraction: 0.1 
+cosine_learning_rate_final_fraction: 0.1
 warmup_steps_fraction: 0.1
 learning_rate_schedule_steps: -1 # By default the length of the schedule is set to the number of steps.
-# However you may choose a longer schedule (learning_rate_schedule_steps > steps), in which case the training will end before 
+# However you may choose a longer schedule (learning_rate_schedule_steps > steps), in which case the training will end before
 # dropping fully down. Or you may choose a shorter schedule, where the unspecified steps will have a learning rate of 0.
 
 max_target_length: 2048 # Maximum sequence length
@@ -182,7 +182,7 @@ skip_first_n_steps_for_profiler: 1
 # Profile for a small number of steps to avoid a large profile file size.
 profiler_steps: 5
 
-# When dropout is false the model is a deterministic function of the 
+# When dropout is false the model is a deterministic function of the
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
 enable_dropout: True
 enable_data_shuffling: True
