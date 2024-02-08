@@ -49,12 +49,20 @@ def create_sharded_array(arr, mesh, mesh_axes):
 
 
 def make_pytree(N):
+  # pytree = {
+  #       'a': np.arange(N*8).reshape((8, N)) * 1,
+  #       'b': np.arange(N*4).reshape((4, N)) * 2,
+  #       'c': {
+  #           'a': np.arange(N*8).reshape((8, N)) * 3,
+  #           'e': np.arange(N*4).reshape((4, N)) * 4,
+  #       },
+  #   }
   pytree = {
-        'a': np.arange(N*8).reshape((8, N)) * 1,
-        'b': np.arange(N*4).reshape((4, N)) * 2,
+        'a': np.arange(N*N).reshape((N, N)) * 1,
+        'b': np.arange(N*4*N).reshape((4*N, N)) * 2,
         'c': {
-            'a': np.arange(N*8).reshape((8, N)) * 3,
-            'e': np.arange(N*4).reshape((4, N)) * 4,
+            'a': np.arange(N*N).reshape((N, N)) * 3,
+            'e': np.arange(N*4*N).reshape((4*N, N)) * 4,
         },
     }
   return pytree
@@ -63,6 +71,7 @@ def make_pytree(N):
 def setup_sharded_pytree(
     pytree_N,
     shape: List,
+    replica_idx: int = 0,
 ):
   """Creates a PyTree of sharded arrays for testing."""
 
@@ -72,12 +81,13 @@ def setup_sharded_pytree(
   devices = np.asarray(devices)
 
   dim = len(shape)
-  data_axis_name = LETTERS[-dim]
+  data_axis_name = LETTERS[-dim + replica_idx]
   mesh = jax.sharding.Mesh(
       devices.reshape(shape), LETTERS[-dim:]
   )
-  # mesh_axes = jax.sharding.PartitionSpec(LETTERS[-dim+1:])
+
   mesh_axes = jax.sharding.PartitionSpec(None, LETTERS[-dim+1:])
+
   print('-------pspec', mesh_axes)
   mesh_tree = {
       'a': mesh,
@@ -109,25 +119,6 @@ def check_trees_equal(tree1, tree2):
         ), 'Error!!! Restored values are not close enough'
   jax.tree_util.tree_map_with_path(check_same, tree1, tree2)
   print('Hooray, values are close enough!')
-
-
-def get_replica_pids(rep_id, mesh):
-  print(f' I am host {jax.process_index()} w/ local devices ',
-        [d.id for d in jax.local_devices()])
-  replica_devices = np.take(mesh.devices, rep_id, axis=0).flatten()
-  pids = set([d.process_index for d in replica_devices])
-  ids = set([d.id for d in replica_devices])
-  return ids, pids
-
-
-def is_sharding_valid(single_replica_ids, single_replica_pids):
-  if jax.process_index() in single_replica_pids:
-    loc_devieces_in_replica = single_replica_ids.intersection(set([d.id for d in jax.local_devices()]))
-    print(f' host ID is {jax.process_index()}, '
-          f'num of devices in replica 0 is {len(loc_devieces_in_replica)}')
-    assert len(loc_devieces_in_replica) == 4, (
-      ' !!! Provided sharding is not valid. There is a host with part'
-      ' of devices outside of replica 0')
 
 
 def _find_zeroth_idx(array):
@@ -182,21 +173,16 @@ def main(args):
     type_handlers.register_type_handler(jax.Array,
                                       type_handlers.SingleReplicaArrayHandler(),
                                       override=True)
-    print('Restoring with single replica', jax.process_index())
+    # print('Restoring with single replica', jax.process_index())
 
     def _create_restore_args(data, mesh, pspec):
-      replica_index = 0
-      rep0_ids, rep0_pids = get_replica_pids(replica_index, mesh)
-
       replica_devices = _replica_devices(mesh.devices)
       replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
       ss_sharding = jax.sharding.NamedSharding(replica_mesh, pspec)
       return type_handlers.SingleReplicaArrayRestoreArgs(
-          single_replica_ids=rep0_ids,
-          single_replica_pids=rep0_pids,
           sharding=jax.sharding.NamedSharding(mesh, pspec),
           single_replica_sharding=ss_sharding,
-          replica_axis_name=data_axis_name,
+          replica_axis_index=0,
           global_shape=data.shape,
           dtype=data.dtype,
       )
@@ -207,7 +193,7 @@ def main(args):
       mesh_tree,
       axes_tree
       )
-    # sys.exit()
+
     restored = mngr.restore(
       mngr.latest_step(),
       items=empty_state,
@@ -246,10 +232,6 @@ def main(args):
   else:
     raise ValueError(f'Wrong value for restore-method is passed. Must be one '
                      'of ["singlereplica", "arrayrestore", "orig"]')
-
-  # print(train_state)
-  # print('--------------')
-  # print(restored)
 
   check_trees_equal(train_state, restored)
 

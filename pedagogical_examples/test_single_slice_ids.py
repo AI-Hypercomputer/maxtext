@@ -13,7 +13,7 @@ from orbax.checkpoint import pytree_checkpoint_handler
 from orbax.checkpoint import type_handlers
 from typing import cast
 
-N = 128
+N = 16
 pytree = {
       'a': np.arange(N*8).reshape((N, 8)) * 1,
       'b': np.arange(N*4).reshape((N, 4)) * 2,
@@ -84,11 +84,9 @@ def setup_sharded_pytree(
   return pytree, mesh_tree, axes_tree, data_axis_name
 
 
-def get_replica_pids(rep_id, mesh):
+def get_replica_ids(rep_id, mesh):
   replica_devices = np.take(mesh.devices, rep_id, axis=0).flatten()
-  pids = set([d.process_index for d in replica_devices])
-  ids = set([d.id for d in replica_devices])
-  return pids, ids
+  return set([d.id for d in replica_devices])
 
 
 
@@ -129,11 +127,10 @@ def main(args):
                                       override=True)
     print('Restoring with single slice')
     def _create_restore_args(data, mesh, pspec):
-      rep0_pids, rep0_ids = get_replica_pids(0, mesh)
+      rep0_pids = get_replica_pids(0, mesh)
       return type_handlers.SingleSliceArrayRestoreArgs(
           sharding=jax.sharding.NamedSharding(mesh, pspec),
           single_slice_sharding=jax.sharding.NamedSharding(mesh, pspec),
-          single_replica_ids = rep0_ids,
           single_replica_pids = rep0_pids,
           replica_axis_name=data_axis_name,
           global_shape=data.shape,

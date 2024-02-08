@@ -3,6 +3,7 @@ import jax
 import numpy as np
 import os
 import orbax.checkpoint as ocp
+import string
 import sys
 
 from etils import epath
@@ -11,17 +12,10 @@ from jax import sharding
 from jax import numpy as jnp
 from orbax.checkpoint import pytree_checkpoint_handler
 from orbax.checkpoint import type_handlers
-from typing import cast
+from typing import cast, List
 
-N = 128
-pytree = {
-      'a': np.arange(N*8).reshape((N, 8)) * 1,
-      'b': np.arange(N*4).reshape((N, 4)) * 2,
-      'c': {
-          'a': np.arange(N*8).reshape((N, 8)) * 3,
-          'e': np.arange(N*4).reshape((N, 4)) * 4,
-      },
-  }
+
+LETTERS = list(string.ascii_lowercase)
 
 
 def is_leaf(x):
@@ -42,39 +36,51 @@ def create_sharded_array(arr, mesh, mesh_axes):
   )
 
 
+def make_pytree(N):
+  pytree = {
+        'a': np.arange(N*8).reshape((8, N)) * 1,
+        'b': np.arange(N*4).reshape((4, N)) * 2,
+        'c': {
+            'a': np.arange(N*8).reshape((8, N)) * 3,
+            'e': np.arange(N*4).reshape((4, N)) * 4,
+        },
+    }
+  return pytree
+
+
 def setup_sharded_pytree(
-    pytree: pytree_checkpoint_handler.PyTree,
-    reverse_devices: bool = False,
+    pytree_N,
+    shape: List,
 ):
   """Creates a PyTree of sharded arrays for testing."""
 
+  pytree = make_pytree(pytree_N)
   devices = jax.devices()
   num_devices = len(devices)
-  if reverse_devices:
-    devices = np.asarray(list(reversed(devices)))
-  else:
-    devices = np.asarray(devices)
+  devices = np.asarray(devices)
 
-  data_axis_name = 'x'
-  mesh_2d = jax.sharding.Mesh(
-      devices.reshape((2, num_devices // 2)), (data_axis_name, 'y')
+  dim = len(shape)
+  data_axis_name = LETTERS[-dim]
+  mesh = jax.sharding.Mesh(
+      devices.reshape(shape), LETTERS[-dim:]
   )
-  mesh_axes_2d = jax.sharding.PartitionSpec('y')
-
+  # mesh_axes = jax.sharding.PartitionSpec(LETTERS[-dim+1:])
+  mesh_axes = jax.sharding.PartitionSpec(None, LETTERS[-dim+1:])
+  print('-------pspec', mesh_axes)
   mesh_tree = {
-      'a': mesh_2d,
-      'b': mesh_2d,
+      'a': mesh,
+      'b': mesh,
       'c': {
-          'a': mesh_2d,
-          'e': mesh_2d,
+          'a': mesh,
+          'e': mesh,
       },
   }
   axes_tree = {
-      'a': mesh_axes_2d,
-      'b': mesh_axes_2d,
+      'a': mesh_axes,
+      'b': mesh_axes,
       'c': {
-          'a': mesh_axes_2d,
-          'e': mesh_axes_2d,
+          'a': mesh_axes,
+          'e': mesh_axes,
       },
   }
 
@@ -91,10 +97,12 @@ def get_replica_pids(rep_id, mesh):
   return pids, ids
 
 
-
 def main(args):
 
-  train_state, mesh_tree, axes_tree, data_axis_name = setup_sharded_pytree(pytree)
+  train_state, mesh_tree, axes_tree, data_axis_name = setup_sharded_pytree(
+    args.tree_size,
+    args.mesh_shape
+    )
 
   path = epath.Path(args.path)
 
@@ -117,7 +125,7 @@ def main(args):
   #   train_state = train_fn(train_state)
   #   mngr.save(step, train_state)
   mngr.save(0, train_state)
-  print('state after training', train_state)
+  # print('state after training', train_state)
 
   empty_state = jax.tree_util.tree_map(
           lambda x: x, train_state, is_leaf=is_leaf
@@ -186,10 +194,18 @@ def main(args):
     raise ValueError(f'Wrong value for restore-method is passed. Must be one '
                      'of ["singleslice", "arrayrestore", "orig"]')
 
-  print('restored', restored)
+  # print('restored', restored)
   print('--------------')
-  print(jax.tree_util.tree_map(lambda x: x.sharding, restored))
+  check_trees_equal(train_state, restored)
+  # print(jax.tree_util.tree_map(lambda x: x.sharding, restored))
 
+def check_trees_equal(tree1, tree2):
+  def check_same(key, v1, v2):
+     assert jax.numpy.allclose(
+            v1, v2, rtol=1e-06, atol=1e-06
+        )
+  jax.tree_util.tree_map_with_path(check_same, tree1, tree2)
+  print('Hooray, values are close enough!')
 
 def parser(args):
   parser = argparse.ArgumentParser()
@@ -201,10 +217,25 @@ def parser(args):
     )
 
   parser.add_argument(
+    '--tree-size',
+    type=int,
+    default=16,
+    help='length of the array to construc the pytree from'
+    )
+
+  parser.add_argument(
     '--path',
     type=str,
     default='/tmp/checkpoint_manager/',
     help='whether save ckpt in new folder or reuse the path'
+  )
+
+  parser.add_argument(
+    '--mesh-shape',
+    type=int,
+    nargs="+",
+    default=None,
+    help='dimension of data mesh'
   )
 
   return parser.parse_args(args)
