@@ -27,3 +27,4 @@ vocab_relative_path: "tokenizer.llama2"
 logits_via_embedding: False
 normalization_layer_epsilon: 1.0e-5
 decoder_block: "llama2"
+attention: "dot_product"
