@@ -266,6 +266,15 @@ def setup_train_loop(config):
           mesh, learning_rate_schedule, data_iterator, state)
 
 
+def fwd_bwd_jaxprs(f, *example_args):
+  fwd_jaxpr, (y_shape, res_shape) = jax.make_jaxpr(
+              lambda *args: jax.vjp(f, *args), return_shape=True)(*example_args)
+  bwd_jaxpr = jax.make_jaxpr(lambda res, outs: res(outs))(res_shape, y_shape)
+  print("Forward JaxPR \n {fwd_jaxpr} End Forward JaxPR\n\n")
+  print("Backward JaxPR \n {fwd_jaxpr} End Forward JaxPR\n\n")
+
+  return fwd_jaxpr, bwd_jaxpr
+
 def train_loop(config, state=None):
   """Main Training loop.
   Args:
@@ -316,11 +325,14 @@ def train_loop(config, state=None):
 
   nextrng = jax.random.fold_in(init_rng, start_step)
   example_batch = load_next_batch(data_iterator, None, config)
+  pr = jax.make_jaxpr(functional_train)(state, example_batch, nextrng)
+  print(pr)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
 
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+
       state, metrics = p_train_step(
           state, example_batch, nextrng
       )
@@ -356,6 +368,7 @@ def main(argv: Sequence[str]) -> None:
   jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true --xla_tpu_pipeline_memory_host_transfers=true"
+  #os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS","") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true  --xla_tpu_pipeline_memory_host_transfers=false"
   jax.config.update('jax_enable_memories', True)
   jax.config.update('jax_traceback_filtering', "off")
 
