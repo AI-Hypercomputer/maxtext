@@ -40,8 +40,6 @@ from flax.training import train_state
 import max_logging
 import torch
 import sys
-import gc
-import copy
 
 jax.config.update('jax_platform_name', 'cpu')
 
@@ -106,19 +104,13 @@ def convert(base_model_path, maxtext_model_path, model_size):
   base_num_kv_heads = model_params['num_kv_heads']
   vocab_size = model_params['vocab']
 
-  thresholds = gc.get_threshold()
-  print("Current thresholds:", thresholds)
-
-  # Decrease the thresholds to trigger garbage collection faster
-  new_thresholds = (100, 10, 10)  # Example values, adjust as needed
-  gc.set_threshold(*new_thresholds)
 
   print(f'Loading the base model from {base_model_path}')
   # Skip any hidden files for checkpoints
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob('[!.]*.pth'))
   pytorch_vars = {}
   for i, ckpt_path in enumerate(ckpt_paths):
-    print(f'Loading checkpoint {i+1} of {len(ckpt_paths)} ...', flush = True)
+    print(f'Loading checkpoint {i+1} of {len(ckpt_paths)} ...')
     checkpoint = torch.load(ckpt_path, map_location='cpu')
     pytorch_vars[int(ckpt_path.name.split('.', maxsplit=2)[1])] = checkpoint
   pytorch_vars = [pytorch_vars[i] for i in sorted(list(pytorch_vars.keys()))]
@@ -132,15 +124,15 @@ def convert(base_model_path, maxtext_model_path, model_size):
              'self_attention' : {},            
           },
           'decoder_norm': {
-              'scale': copy.deepcopy(pytorch_vars[0]['norm.weight'].type(torch.float16)).numpy()
+              'scale': pytorch_vars[0]['norm.weight'].type(torch.float16).numpy()
               },
          'logits_dense':{
-              'kernel': np.concatenate([copy.deepcopy(var['output.weight'].type(torch.float16).numpy()) 
+              'kernel': np.concatenate([var['output.weight'].type(torch.float16).numpy() 
                                         for var in pytorch_vars], axis=0).transpose()[:, :vocab_size]
               }
         },
        'token_embedder':{
-              'embedding': np.concatenate([copy.deepcopy(var['tok_embeddings.weight'].type(torch.float16).numpy()) 
+              'embedding': np.concatenate([var['tok_embeddings.weight'].type(torch.float16).numpy() 
                                            for var in pytorch_vars], axis=1)[:vocab_size,:]
 
        }
@@ -209,10 +201,10 @@ def convert(base_model_path, maxtext_model_path, model_size):
     w_post = np.reshape(w_post, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
 
 
-    self_attention['query']['kernel'] = wq
-    self_attention['key']['kernel'] = wk
-    self_attention['value']['kernel'] = wv
-    self_attention['out']['kernel'] = w_post
+    self_attention['query']['kernel'].append(wq)
+    self_attention['key']['kernel'].append(wk)
+    self_attention['value']['kernel'].append(wv)
+    self_attention['out']['kernel'].append(w_post)
 
     wi_0 = np.concatenate([var[f'layers.{layer_idx}.feed_forward.w1.weight'].type(torch.float16).numpy()
                            for var in pytorch_vars], axis=0).transpose()
@@ -225,80 +217,34 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
 
 
-    layer_weight['mlp']['wi_0']['kernel'] = wi_0
-    layer_weight['mlp']['wi_1']['kernel'] = wi_1
-    layer_weight['mlp']['wo']['kernel'] = wo
-    layer_weight['pre_self_attention_layer_norm']['scale'] = pre_self_attention_layernorm
-    layer_weight['post_self_attention_layer_norm']['scale'] = post_self_attention_layernorm
-
-    layer_weight['self_attention'] = copy.deepcopy(self_attention)
-    jax_weights['decoder']['layers_' + str(layer_idx)] = copy.deepcopy(layer_weight)
-    print(f" layer = {layer_idx} complete", flush=True)
-  
-
-  
-
-  def npify_and_delete(x):
-    new_x = np.array(x)
-    del x
-    return new_x
+    layer_weight['mlp']['wi_0']['kernel'].append(wi_0)
+    layer_weight['mlp']['wi_1']['kernel'].append(wi_1)
+    layer_weight['mlp']['wo']['kernel'].append(wo)
+    layer_weight['pre_self_attention_layer_norm']['scale'].append(pre_self_attention_layernorm)
+    layer_weight['post_self_attention_layer_norm']['scale'].append(post_self_attention_layernorm)
 
 
-  self_attention['query']['kernel'] = npify_and_delete(self_attention['query']['kernel'])
-  print("self_attention['query']['kernel'] complete", flush=True)
-  self_attention['key']['kernel'] = npify_and_delete(self_attention['key']['kernel'])
-  print("self_attention['key']['kernel'] complete", flush=True)
-  self_attention['value']['kernel'] = npify_and_delete(self_attention['value']['kernel'])
-  print(" self_attention['value']['kernel'] complete", flush=True)
-  self_attention['out']['kernel'] = npify_and_delete(self_attention['out']['kernel'])
-  print("self_attention['out']['kernel'] complete", flush=True)
-
-  
-  layer_weight['mlp']['wi_0']['kernel'] = npify_and_delete(layer_weight['mlp']['wi_0']['kernel'])
-  print("layer_weight['mlp']['wi_0']['kernel'] complete", flush=True)
-  layer_weight['mlp']['wi_1']['kernel'] = npify_and_delete(layer_weight['mlp']['wi_1']['kernel'])
-  print("layer_weight['mlp']['wi_1']['kernel'] complete", flush=True)
-  layer_weight['mlp']['wo']['kernel'] = npify_and_delete(layer_weight['mlp']['wo']['kernel'])
-  print("layer_weight['mlp']['wo']['kernel'] complete", flush=True)
-  layer_weight['pre_self_attention_layer_norm']['scale'] = npify_and_delete(layer_weight['pre_self_attention_layer_norm']['scale'])
-  print("layer_weight['pre_self_attention_layer_norm']['scale'] complete", flush=True)
-  layer_weight['post_self_attention_layer_norm']['scale'] = npify_and_delete(layer_weight['post_self_attention_layer_norm']['scale'])
-  print("post_self_attention_layer_norm']['scale'] complete", flush=True)
-
-  gc.collect()
-  print("npify_and_delete complete", flush=True)
-  print("gc called for npify_and_delete", flush=True)
-  print("gc called", flush=True)
-
+  self_attention['query']['kernel'] = np.array(self_attention['query']['kernel'])
+  self_attention['key']['kernel'] = np.array(self_attention['key']['kernel'])
+  self_attention['value']['kernel'] = np.array(self_attention['value']['kernel'])
+  self_attention['out']['kernel'] = np.array(self_attention['out']['kernel'])
   self_attention['query']['kernel'] = np.transpose(self_attention['query']['kernel'],axes=(1, 0, 2, 3))
-  print("self_attention['query']['kernel'] transpose complete", flush=True)
   self_attention['key']['kernel'] = np.transpose(self_attention['key']['kernel'],axes=(1, 0, 2, 3))
-  print("self_attention['key']['kernel'] transpose  complete", flush=True)
   self_attention['value']['kernel'] = np.transpose(self_attention['value']['kernel'],axes=(1, 0, 2, 3))
-  print("self_attention['value']['kernel'] transpose complete", flush=True)
   #layers, base_num_query_heads * head_dim, base_num_query_heads, head_dim =>
   #base_num_query_heads, layers,head_dim, base_num_query_heads * head_dim
   self_attention['out']['kernel'] = np.transpose(self_attention['out']['kernel'],axes=(2, 0, 3, 1))
-  print("complete self_attention['out']['kernel'] transpose", flush=True)
+
   #scale the query weights
   self_attention['query']['kernel'] = self_attention['query']['kernel']/np.sqrt(head_dim)
-  print("complete self_attention['query']['kernel'] scaling", flush=True)
 
   jax_weights['decoder']['layers']['self_attention'] = self_attention
-  print("complete self attention assignment ", flush=True)
 
-
-
-    
-  del pytorch_vars[:]
-  del pytorch_vars
-  print("pytorch_vars deleted", flush=True)
-  gc.collect()
-  print("gc called", flush=True)
-
-  
-  
-
+  layer_weight['mlp']['wi_0']['kernel'] = np.array(layer_weight['mlp']['wi_0']['kernel'])
+  layer_weight['mlp']['wi_1']['kernel'] = np.array(layer_weight['mlp']['wi_1']['kernel'])
+  layer_weight['mlp']['wo']['kernel'] = np.array(layer_weight['mlp']['wo']['kernel'])
+  layer_weight['pre_self_attention_layer_norm']['scale'] = np.array(layer_weight['pre_self_attention_layer_norm']['scale'])
+  layer_weight['post_self_attention_layer_norm']['scale'] = np.array(layer_weight['post_self_attention_layer_norm']['scale'])
   #swap the layer index
   layer_weight['mlp']['wi_0']['kernel'] = np.transpose(layer_weight['mlp']['wi_0']['kernel'],axes=(1, 0, 2))
   layer_weight['mlp']['wi_1']['kernel'] = np.transpose(layer_weight['mlp']['wi_1']['kernel'],axes=(1, 0, 2))
@@ -309,31 +255,20 @@ def convert(base_model_path, maxtext_model_path, model_size):
   layer_weight['post_self_attention_layer_norm']['scale'] = np.transpose(
                                     layer_weight['post_self_attention_layer_norm']['scale'],
                                     axes=(1, 0))
-  print("complete layer weight", flush=True)
+
   jax_weights['decoder']['layers']['mlp'] = layer_weight['mlp']
   jax_weights['decoder']['layers']['pre_self_attention_layer_norm'] = layer_weight['pre_self_attention_layer_norm']
   jax_weights['decoder']['layers']['post_self_attention_layer_norm'] = layer_weight['post_self_attention_layer_norm']
-  
-  print("about to start jnp conversion", flush=True)
+
   #convert all weights to jax.numpy
-  def jnpify_and_delete(x):
-    out_x = jnp.array(x)
-    del x
-    return out_x
-  
-  #jax_weights = jax.tree_map(jnp.array, jax_weights)
-  jax_weights = jax.tree_map(jnpify_and_delete, jax_weights)
-  print("jax_weights jnp conversion complete", flush=True)
-  gc.collect()
+  jax_weights = jax.tree_map(jnp.array, jax_weights)
+
   #dummy configs for the checkpoint_manager
   step_number_to_save_new_ckpt = 0
   enable_checkpointing=True
   async_checkpointing=False
   save_interval_steps=1
-  
 
-  gc.set_threshold(*thresholds)
-  print("recovered old gc thresholds:", thresholds)
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       maxtext_model_path,
