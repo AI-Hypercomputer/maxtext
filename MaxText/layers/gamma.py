@@ -84,6 +84,7 @@ class GammaDecoderLayer(nn.Module):
       num_kv_heads=cfg.num_kv_heads,
       head_dim=cfg.head_dim,
       max_target_length=cfg.max_target_length,
+      max_prefill_predict_length=cfg.max_prefill_predict_length,
       attention_kernel=cfg.attention,
       mesh=mesh,
       dtype=cfg.dtype,
