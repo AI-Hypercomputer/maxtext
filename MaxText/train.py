@@ -53,7 +53,8 @@ from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
-import goodput
+import goodputpoc
+import time
 
 Transformer = models.Transformer
 
@@ -302,6 +303,7 @@ def train_loop(config, state=None):
   local_metrics_file = open(config.metrics_file, 'a', encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
+  goodput_recorder = goodputpoc.GoodputRecorder(config.run_name, "")
   start_step = get_first_step(state) # this is the start_step for training
   first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
   if config.enable_profiler and first_profiling_step >= config.steps:
@@ -312,15 +314,13 @@ def train_loop(config, state=None):
       max_utils.activate_profiler(config)
 
     example_batch = load_next_batch(data_iterator, example_batch, config)
-    step_start_time = datetime.datetime.now()
+    goodput_recorder.record_step_start_time(step, last_step_completion)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics, nextrng = p_train_step(
           state, example_batch, nextrng
       )
-    step_stop_time = datetime.datetime.now()
-    goodput.goodput_log_step_time(config, step, step_stop_time - step_start_time)
-
     new_time = datetime.datetime.now()
+    goodput_recorder.record_step_end_time(step, new_time)
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
     write_metrics(writer, metrics, step, config)
     last_step_completion = new_time
@@ -362,11 +362,17 @@ def main(argv: Sequence[str]) -> None:
       stack_trace_interval_seconds = config.stack_trace_interval_seconds))
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
   job_start_time = datetime.datetime.now()
+  goodput_recorder = goodputpoc.GoodputRecorder(config.run_name, "")
+  goodput_recorder.record_job_start_time(job_start_time)
   with diagnostic.diagnose(diagnostic_config):
     train_loop(config)
   job_end_time = datetime.datetime.now()
-  goodput.goodput_log_job_runtime(config, job_end_time - job_start_time)
-  total_goodput = goodput.get_job_goodput(config)
+  goodput_recorder.record_job_end_time(job_end_time)
+  # total_goodput = goodput.get_job_goodput(config)
+  # max_logging.log(f"Total job goodput: {total_goodput:.2f}%")
+  time.sleep(5)
+  goodput_calculator = goodputpoc.GoodputCalculator(config.run_name)
+  total_goodput = goodput_calculator.get_job_goodput()
   max_logging.log(f"Total job goodput: {total_goodput:.2f}%")
 
 if __name__ == "__main__":
