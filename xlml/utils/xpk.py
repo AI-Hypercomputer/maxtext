@@ -24,6 +24,7 @@ import google.auth
 import google.auth.transport.requests
 from google.cloud import container_v1
 from kubernetes import client as k8s_client
+from kubernetes.client import models as k8s_models
 
 
 @task
@@ -58,13 +59,15 @@ def run_workload(
 
   cmds = (
       "set -x",
-      f"gcloud config set project {cluster_project}",
-      f"gcloud config set compute/zone {zone}",
       "git clone https://github.com/google/xpk.git /tmp/xpk",
       "cd /tmp/xpk",
-      "apt-get update && apt-get install -y google-cloud-sdk",
+      "curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg",
+      'echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list',
+      "apt-get update && apt-get install -y google-cloud-cli",
       "apt-get install -y kubectl",
-      "apt-get install -y google-cloud-sdk-gke-gcloud-auth-plugin",
+      "apt-get install -y google-cloud-cli-gke-gcloud-auth-plugin",
+      f"gcloud config set project {cluster_project}",
+      f"gcloud config set compute/zone {zone}",
       (
           "python3 xpk.py workload create"
           f" --cluster={cluster_name} --workload={workload_id} --command='{run_cmds}'"
@@ -78,11 +81,14 @@ def run_workload(
       cmds=["/bin/bash", "-c"],
       arguments=[";".join(cmds)],
       namespace="composer-user-workloads",
-      image=docker_image,
+      image="python:3.10",
       config_file="/home/airflow/composer_kube_config",
       kubernetes_conn_id="kubernetes_default",
       startup_timeout_seconds=startup_timeout,
       owner=task_owner,
+      container_resources=k8s_models.V1ResourceRequirements(
+          limits={"ephemeral-storage": "10G"},
+      ),
   )
 
 
