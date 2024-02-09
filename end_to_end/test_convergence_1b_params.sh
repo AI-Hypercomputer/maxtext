@@ -23,11 +23,13 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
-TRAIN_CMD="python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
-        steps=20400 per_device_batch_size=8.0 learning_rate=1e-4 enable_checkpointing=false \
+# Missing run name!! # relying on xpk
+TRAIN_CMD="python3 MaxText/train.py MaxText/configs/base.yml\
+        steps=20400 per_device_batch_size=8.0 learning_rate=3e-4 enable_checkpointing=false \
         max_target_length=2048 global_parameter_scale=1 \
         enable_profiler=false metrics_file=metrics.txt base_output_directory=$OUTPUT_PATH\
-        dataset_path=$DATASET_PATH log_period=150 enable_data_shuffling=false"
+        dataset_path=$DATASET_PATH log_period=150 enable_data_shuffling=false assets_path=$ASSETS_PATH model_name=llama2-1b-copy\
+        quantization=int8"
 
 if [ -n "$DATASET_TYPE" ] && [ "$DATASET_TYPE" == "c4-array_record" ]
 then
