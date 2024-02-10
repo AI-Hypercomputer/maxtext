@@ -39,7 +39,7 @@ class AttentionTest(unittest.TestCase):
   """Test for the Attention """
   def setUp(self):
     super().setUp()
-    pyconfig.initialize([sys.argv[0], 'configs/base.yml'], per_device_batch_size = 1.0, run_name='test', enable_checkpointing=False)
+    pyconfig.initialize([sys.argv[0], 'configs/base.yml'], per_device_batch_size = 1.0, run_name='test', enable_checkpointing=False, max_target_length=128, max_prefill_predict_length=16 )
     self.cfg = pyconfig.config
     self.rng = jax.random.PRNGKey(0)
 
@@ -60,6 +60,7 @@ class AttentionTest(unittest.TestCase):
         num_kv_heads=self.num_kv_heads,
         head_dim=self.head_dim,
         max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
         mesh=self.mesh,
         attention_kernel = "dot_product",
         dtype=self.dtype,
@@ -108,8 +109,8 @@ class AttentionTest(unittest.TestCase):
   
   @pytest.mark.tpu
   def test_autoregression(self):
-    prefill_length = 16
-    decode_total_length = 64
+    prefill_length = self.cfg.max_prefill_predict_length
+    decode_total_length = self.cfg.max_target_length
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(
         self.dtype)
     
@@ -195,6 +196,7 @@ class AttentionTest(unittest.TestCase):
         num_kv_heads=num_kv_heads,
         head_dim=self.head_dim,
         max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
         mesh=self.mesh,
         attention_kernel = "dot_product",
         dtype=self.dtype,
@@ -229,6 +231,7 @@ class AttentionTest(unittest.TestCase):
         num_kv_heads=num_kv_heads,
         head_dim=self.head_dim,
         max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
         mesh=self.mesh,
         attention_kernel = "flash",
         dtype=self.dtype,

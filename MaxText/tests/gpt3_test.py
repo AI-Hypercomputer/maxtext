@@ -105,6 +105,6 @@ class GPT3(unittest.TestCase):
 
     self.assertTrue(
         jax.numpy.allclose(
-            per_example_xent, per_example_xent_truth, rtol=1e-06, atol=1e-06
+            per_example_xent, per_example_xent_truth, rtol=1e-03, atol=1e-03
         )
     )

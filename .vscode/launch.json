@@ -1,0 +1,36 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug MaxText Decode",
+      "type": "python",
+      "request": "launch",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "python": "python3",
+      "program": "${workspaceFolder}/MaxText/decode.py",
+      "args": ["MaxText/configs/base.yml", 
+               "run_name=runner_$(date +%Y-%m-%d-%H-%M)", 
+               "base_output_directory=gs://test-maxtext-output",
+               "dataset_path=gs://test-maxtext-dataset",
+               "steps=2",
+               "attention=dot_product",
+               "enable_checkpointing=false"]
+    },
+    {
+      "name": "Debug MaxText Train",
+      "type": "python",
+      "request": "launch",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "python": "python3",
+      "program": "${workspaceFolder}/MaxText/train.py",
+      "args": ["MaxText/configs/base.yml", 
+               "run_name=runner_$(date +%Y-%m-%d-%H-%M)", 
+               "base_output_directory=gs://test-maxtext-output",
+               "dataset_path=gs://test-maxtext-dataset",
+               "steps=2",
+               "enable_checkpointing=false"]
+    }
+  ]
+}
