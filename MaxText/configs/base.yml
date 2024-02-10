@@ -65,11 +65,11 @@ decoder_block: "default" # which style of DecoderBlock to use.
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
 global_parameter_scale: 1
 base_emb_dim: 2560
-base_num_query_heads: 8
-base_num_kv_heads: 8
+base_num_query_heads: 16
+base_num_kv_heads: 16
 base_mlp_dim: 8192
 base_num_decoder_layers: 16
-head_dim: 256
+head_dim: 128
 # activation functions are .
 mlp_activations: ["relu"]
 dropout_rate: 0
@@ -81,7 +81,7 @@ logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedd
 remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
-attention: 'flash' # Supported attention: dot_product, flash, gpu_flash_xla, gpu_flash_triton
+attention: 'dot_product' # Supported attention: dot_product, flash, gpu_flash_xla, gpu_flash_triton, cudnn_flash_te
 # Combine matmuls for QKV and MLP
 fused_qkv: False
 fused_mlp: False
@@ -225,3 +225,7 @@ decode_sampling_strategy: "greedy" # decode_sampling_strategy should be one of g
 decode_sampling_nucleus_p: -1 # set if you're doing nucleus / top-p
 decode_sampling_top_k: 0 # set if you're doing top-k
 decode_sampling_temperature: 1.
+
+# enabling slurm for multiprocess in gpus
+# It must be turned on while using SLURM
+multiprocess_gpu: False

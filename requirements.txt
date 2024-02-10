@@ -3,7 +3,7 @@ jaxlib>=0.4.23
 orbax-checkpoint>=0.5.2
 absl-py
 array-record
-aqtp
+aqtp>=0.5.0
 cloud-tpu-diagnostics
 google-cloud-storage
 grain-nightly
@@ -21,3 +21,4 @@ tensorflow>=2.13.0
 tensorflow-datasets
 tensorboardx
 tensorboard-plugin-profile
+transformer-engine
