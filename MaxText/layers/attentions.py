@@ -298,6 +298,7 @@ class AttentionOp(nn.Module):
 
     # QK Product, a.k.a `attn_weights`: [batch, num_kv_heads, num_query_heads_per_kv_head, q_length, kv_length]
     attn_weights = self.qk_product(query, key)
+    attn_weights = checkpoint_name(attn_weights, 'logits')
 
     # Casting softmaxt computation for float32 for model stability.
     if self.float32_logits:
@@ -348,7 +349,7 @@ class AttentionOp(nn.Module):
     """
     einsum = _maybe_aqt_einsum(self.use_int8, aqt_rng)
     out = einsum('bkgts,bskd->btkgd', attn_weights, value)
-    out = checkpoint_name(out, 'wv_prod')
+    # out = checkpoint_name(out, 'wv_prod')
     b, t, n_kv, g, d = out.shape
     return jnp.reshape(out, (b, t, n_kv * g, d))
 
