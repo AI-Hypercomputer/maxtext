@@ -233,6 +233,9 @@ class Gpt3MultiHeadAttention(nn.Module):
     # apply output projection,  output dim is set to the input dim.
     out = self.out_projection(inputs_q.shape[-1], out)
     # https://github.com/google/praxis/blob/77675370d1150fccda0862a0ac7d1808d4bce9bf/praxis/layers/multi_query_attention.py#L833
+    out = nn.with_logical_constraint(
+        out, ('activation_batch', 'activation_length', 'activation_embed')
+    )
     out = checkpoint_name(out, 'out_proj')
     return out
 
