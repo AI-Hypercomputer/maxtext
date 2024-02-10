@@ -59,6 +59,7 @@ def init_print(config, start_step):
     mllogger.event(mllog.constants.MAX_SEQUENCE_LENGTH, config.max_target_length)
     mllogger.event(mllog.constants.GRADIENT_ACCUMULATION_STEPS, 1)
     mllogger.event(mllog.constants.EVAL_SAMPLES, 24567)
+    mllogger.event(mllog.constants.SEED, config.data_shuffle_seed)
 
 def early_stop_check(config, step, eval_loss):
   """an early stop function with mllog for mlperf sumbission compliance check."""

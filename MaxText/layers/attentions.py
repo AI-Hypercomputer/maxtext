@@ -349,7 +349,7 @@ class AttentionOp(nn.Module):
     """
     einsum = _maybe_aqt_einsum(self.use_int8, aqt_rng)
     out = einsum('bkgts,bskd->btkgd', attn_weights, value)
-    # out = checkpoint_name(out, 'wv_prod')
+    out = checkpoint_name(out, 'wv_prod')
     b, t, n_kv, g, d = out.shape
     return jnp.reshape(out, (b, t, n_kv * g, d))
 
