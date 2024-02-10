@@ -279,7 +279,7 @@ def get_tf_dlrm_config(
       "sudo chmod -R 777 /tmp/",
       (
           f"cd /usr/share/tpu/models && {env_variable} &&"
-          " PYTHONPATH='.' python3 official/recommendation/ranking/train.py"
+          " TF_USE_LEGACY_KERAS=1 PYTHONPATH='.' python3 official/recommendation/ranking/train.py"
           f" --tpu={tpu_name} --model_dir=/tmp/output {extraFlags}"
           " --params_override='%s'" % str(params_override)
       ),
