@@ -50,7 +50,7 @@ fi
 
 training_ckpt_run_id=${run_id}-ckpt-train-steps-5
 decode_ckpt_run_id=${run_id}-decode-ckpt-train-steps-5
-model_params="base_emb_dim=384 base_num_query_heads=8 base_num_kv_heads=8 base_mlp_dim=192 base_num_decoder_layers=8 head_dim=128"
+model_params="base_emb_dim=384 base_num_query_heads=8 base_num_kv_heads=8 base_mlp_dim=192 base_num_decoder_layers=8 head_dim=64"
 
 echo
 echo "Create a test training checkpoint"
