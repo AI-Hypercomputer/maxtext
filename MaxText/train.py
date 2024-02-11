@@ -410,6 +410,18 @@ def train_loop(config, state=None):
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
+  if eval_data_iterator:
+    assert eval_data_iterator
+    cumulative_eval_metrics = {"total_loss": 0., "total_weights": 0.}
+    for eval_batch in eval_data_iterator:
+      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        eval_metrics = p_eval_step(
+          state, eval_batch, init_rng
+        )
+      cumulative_eval_metrics['total_loss'] += float(eval_metrics['scalar']['evaluation/total_loss'])
+      cumulative_eval_metrics['total_weights'] += float(eval_metrics['scalar']['evaluation/total_weights'])
+    eval_loss = cumulative_eval_metrics['total_loss'] / (cumulative_eval_metrics['total_weights'] + EPS)
+    max_logging.log(f"average loss start_step {start_step=}: {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
 
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
