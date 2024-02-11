@@ -410,6 +410,19 @@ def train_loop(config, state=None):
     raise ValueError("Profiling requested but initial profiling step set past training final step")
   last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1, first_profiling_step, config.steps - 1)
 
+  if eval_data_iterator:
+    cumulative_metrics = {"total_loss": 0., "total_weights": 0.}
+    for eval_batch in eval_data_iterator:
+      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        _, metrics = p_eval_step(
+          state, eval_batch, init_rng
+        )
+      cumulative_metrics['total_loss'] += float(metrics['scalar']['evaluation/total_loss'])
+      cumulative_metrics['total_weights'] += float(metrics['scalar']['evaluation/total_weights'])
+    eval_loss = cumulative_metrics['total_loss'] / (cumulative_metrics['total_weights'] + EPS)
+    max_logging.log(
+      f"average loss at {start_step=}: eval_loss={eval_loss}, total_weights={cumulative_metrics['total_weights']}")
+
   mllog_utils.init_print(config, start_step)
   mllog_utils.init_stop()
   mllog_utils.run_start()
