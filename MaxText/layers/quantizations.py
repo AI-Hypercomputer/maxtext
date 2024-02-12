@@ -61,7 +61,7 @@ class AqtQuantization:
     return aqt_einsum
 
 def _get_quant_config(quant_str: str):
-  if not quant_str:
+  if not quant_str or quant_str.lower()=="none":
     return None
   if quant_str == "int8":
     return AQT_INT8_CONFIG

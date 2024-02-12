@@ -59,6 +59,12 @@ save_config_to_gcs: False
 dtype: "bfloat16"
 quantization: ""
 
+local_aqt_shards_mlp_1: 0
+local_aqt_shards_mlp_2: 0
+local_aqt_shards_proj_qkv: 0
+local_aqt_shards_proj_out: 0
+local_aqt_shards: 0
+
 decoder_block: "default" # which style of DecoderBlock to use.
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,

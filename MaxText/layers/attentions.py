@@ -720,7 +720,8 @@ class Attention(nn.Module):
       kernel_axes=('embed', 'heads', 'kv'),
       dtype=self.dtype,
       name='query',
-      quant=self.quant)(inputs_q)
+      quant=self.quant,
+      local_aqt_shards=self.config.local_aqt_shards_proj_qkv)(inputs_q)
     return query_proj
 
   def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:

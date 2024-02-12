@@ -83,6 +83,7 @@ class DenseGeneral(nn.Module):
   kernel_axes: Tuple[str, ...] = ()
   quant: Optional[Quant] = None
   use_bias: bool = False
+  local_aqt_shards: int = 0
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -99,7 +100,7 @@ class DenseGeneral(nn.Module):
       """Computes a dot_general operation that may be quantized."""
       dot_general = lax.dot_general
       if self.quant:
-        dot_general_cls = self.quant.dot_general_cls()
+        dot_general_cls = self.quant.dot_general_cls(local_aqt_shards)
         dot_general = dot_general_cls()
       return dot_general(
         inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)

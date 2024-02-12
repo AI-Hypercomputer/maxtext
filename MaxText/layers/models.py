@@ -298,7 +298,7 @@ class Decoder(nn.Module):
           dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
           kernel_axes=('embed', 'vocab'),
           name='logits_dense',
-          quant=self.quant)(y) # We do not quantize the logits matmul.
+          quant='')(y) # We do not quantize the logits matmul.
     logits = nn.with_logical_constraint(
         logits, ('activation_batch', 'activation_length', 'activation_vocab'))
     return logits
