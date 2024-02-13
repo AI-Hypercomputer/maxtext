@@ -24,7 +24,8 @@ from dags.vm_resource import TpuVersion, Zone, Project, RuntimeVersion
 from dags.multipod.configs import maxtext_sweep_gce_config
 from dags.multipod.configs import common
 
-
+# Set concurrency to number of workers otherwise tasks may time out
+# if there are more concurrent tasks running at a time than number of workers
 with models.DAG(
     dag_id="maxtext_sweep_gce_example_dag",
     schedule=None,
@@ -34,11 +35,12 @@ with models.DAG(
     concurrency=2,
 ) as dag:
   # MaxText set up and run commands
+  base_output_directory = "gs://maxtext-experiments-multipod"
   base_set_up_cmds = common.download_maxtext()
   base_run_model_cmds = [
       "cd /tmp/maxtext",
       "bash setup.sh MODE=stable",
-      "python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=gs://maxtext-experiments-multipod/ dataset_path=gs://max-datasets-rogue enable_checkpointing=false global_parameter_scale=1 steps=10",
+      f"python3 MaxText/train.py MaxText/configs/base.yml base_output_directory={base_output_directory} dataset_path=gs://max-datasets-rogue enable_checkpointing=false global_parameter_scale=1 steps=10",
   ]
 
   # Get list of MaxText GCE QueuedResource jobs
@@ -51,6 +53,7 @@ with models.DAG(
       tpu_version=TpuVersion.V4,
       tpu_cores=8,
       runtime_version=RuntimeVersion.TPU_UBUNTU2204_BASE.value,
+      base_output_directory=base_output_directory,
       num_slices=[1],
       run_name_prefix="maxtext-1b",
       base_set_up_cmds=base_set_up_cmds,
@@ -60,4 +63,4 @@ with models.DAG(
 
   # Run jobs
   for test in maxtext_sweep_gce_test:
-    test.run()
+    test.run_with_run_name_generation()

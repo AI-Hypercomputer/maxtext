@@ -60,12 +60,15 @@ class SummaryConfig:
     exclude_tag_patterns: The matching patterns of tags that will be excluded.
       No tag is excluded by default. This pattern has higher prioirty to
       include_tag_pattern.
+    use_regex_file_location: Whether to use file_location as a regex to get the
+      file in GCS.
   """
 
   file_location: str
   aggregation_strategy: AggregationStrategy
   include_tag_patterns: Optional[Iterable[str]] = None
   exclude_tag_patterns: Optional[Iterable[str]] = None
+  use_regex_file_location: bool = False
 
 
 @dataclasses.dataclass

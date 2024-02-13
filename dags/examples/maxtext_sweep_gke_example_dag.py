@@ -24,7 +24,8 @@ from dags import test_owner
 from dags.vm_resource import TpuVersion, Zone, Project, ClusterName, DockerImage
 from dags.multipod.configs import maxtext_sweep_gke_config
 
-
+# Set concurrency to number of workers otherwise tasks may time out
+# if there are more concurrent tasks running at a time than number of workers
 with models.DAG(
     dag_id="maxtext_sweep_gke_example_dag",
     schedule=None,
@@ -34,8 +35,9 @@ with models.DAG(
     concurrency=2,
 ) as dag:
   # MaxText set up and run commands
+  base_output_directory = "gs://maxtext-experiments-multipod"
   base_run_model_cmds = [
-      "python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=gs://maxtext-experiments-multipod/ dataset_path=gs://max-datasets-rogue enable_checkpointing=false global_parameter_scale=16 steps=10",
+      f"python3 MaxText/train.py MaxText/configs/base.yml base_output_directory={base_output_directory} dataset_path=gs://max-datasets-rogue enable_checkpointing=false global_parameter_scale=16 steps=10",
   ]
 
   # Get list of MaxText GKE XPK jobs
@@ -45,6 +47,7 @@ with models.DAG(
       cluster_name=ClusterName.V4_128_MULTISLICE_CLUSTER.value,
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
+      base_output_directory=base_output_directory,
       tpu_version=TpuVersion.V4,
       tpu_cores=128,
       num_slices=[1],
@@ -56,4 +59,4 @@ with models.DAG(
 
   # Run jobs
   for test in maxtext_sweep_gke_test:
-    test.run()
+    test.run_with_run_name_generation()

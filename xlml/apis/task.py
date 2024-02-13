@@ -22,7 +22,7 @@ import airflow
 from airflow.models.taskmixin import DAGNode
 from airflow.utils.task_group import TaskGroup
 from xlml.apis import gcp_config, metric_config, test_config
-from xlml.utils import gpu, metric, ssh, tpu, xpk, startup_script
+from xlml.utils import gpu, metric, name_format, ssh, tpu, xpk, startup_script
 
 
 class BaseTask(abc.ABC):
@@ -74,6 +74,39 @@ class TpuQueuedResourceTask(BaseTask):
       post_process = self.post_process()
       clean_up = self.clean_up(queued_resource)
       provision >> run_model >> post_process >> clean_up
+
+    return group
+
+  def run_with_run_name_generation(self) -> DAGNode:
+    """Generate a unique run name and tensorboard file location, then run a test job.
+
+    Returns:
+      A task group with the following tasks chained: generate_run_name, generate_tb_file_location, provision, run_model,
+      post_process and clean_up.
+    """
+    with TaskGroup(
+        group_id=self.task_test_config.benchmark_id, prefix_group_id=True
+    ) as group:
+      run_name = name_format.generate_run_name(self.task_test_config.benchmark_id)
+      tb_file_location = name_format.generate_tb_file_location(
+          run_name, self.task_metric_config.tensorboard_summary.file_location
+      )
+
+      # Set run_name in run_model_cmds
+      new_run_model_cmds = [f"export M_RUN_NAME={run_name}"]
+      for cmd in self.task_test_config.run_model_cmds:
+        new_run_model_cmds.append(cmd)
+      self.task_test_config.run_model_cmds = new_run_model_cmds
+
+      # Update tensorboard file location
+      self.task_metric_config.tensorboard_summary.file_location = tb_file_location
+
+      provision, queued_resource, ssh_keys = self.provision()
+      run_model = self.run_model(queued_resource, ssh_keys)
+      post_process = self.post_process()
+      clean_up = self.clean_up(queued_resource)
+
+      run_name >> tb_file_location >> provision >> run_model >> post_process >> clean_up
 
     return group
 
@@ -258,6 +291,34 @@ class TpuXpkTask(BaseTask):
     """
     with TaskGroup(group_id=self.task_test_config.benchmark_id) as group:
       self.run_model() >> self.post_process()
+
+    return group
+
+  def run_with_run_name_generation(self) -> DAGNode:
+    """Generate a unique run name and tensorboard file location, then run a test job within a docker image.
+
+    Returns:
+      A task group with the following tasks chained: generate_run_name, generate_tb_file_location, run provision, run_model,
+      post_process.
+    """
+    with TaskGroup(
+        group_id=self.task_test_config.benchmark_id, prefix_group_id=True
+    ) as group:
+      run_name = name_format.generate_run_name(self.task_test_config.benchmark_id)
+      tb_file_location = name_format.generate_tb_file_location(
+          run_name, self.task_metric_config.tensorboard_summary.file_location
+      )
+
+      # Set run_name in run_model_cmds
+      new_run_model_cmds = [f"export M_RUN_NAME={run_name}"]
+      for cmd in self.task_test_config.run_model_cmds:
+        new_run_model_cmds.append(cmd)
+      self.task_test_config.run_model_cmds = new_run_model_cmds
+
+      # Update tensorboard file location
+      self.task_metric_config.tensorboard_summary.file_location = tb_file_location
+
+      run_name >> tb_file_location >> self.run_model() >> self.post_process()
 
     return group
 

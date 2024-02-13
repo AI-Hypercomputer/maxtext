@@ -23,7 +23,9 @@ import re
 from typing import Dict, Iterable, List, Optional
 import uuid
 from absl import logging
+import airflow
 from airflow.decorators import task
+from airflow.exceptions import AirflowFailException
 from airflow.models import TaskInstance
 from airflow.operators.python import get_current_context
 from xlml.apis import gcp_config, test_config
@@ -35,6 +37,7 @@ import jsonlines
 import numpy as np
 import tensorflow as tf
 from tensorflow.core.util import event_pb2
+from urllib.parse import urlparse
 
 
 @dataclasses.dataclass
@@ -109,6 +112,11 @@ def read_from_tb(
         metrics[value.tag].append(TensorBoardScalar(float(t), event.step))
       elif value_type == "text":
         metadata[value.tag] = bytes(value.tensor.string_val[0]).decode("utf-8")
+      elif value.HasField("simple_value"):
+        # simple_value indicates the value is a float:
+        # https://github.com/tensorflow/tensorflow/blob/4dacf3f/tensorflow/core/framework/summary.proto#L122
+        scalar = TensorBoardScalar(value.simple_value, event.step)
+        metrics.setdefault(value.tag, []).append(scalar)
       else:
         logging.info(f"Discarding data point {value.tag} with type {value_type}.")
 
@@ -220,7 +228,15 @@ def process_tensorboard_summary(
     a list of MetadataHistoryRow ofr a test run in a test job.
   """
   uuid = generate_row_uuid(base_id, 0)
-  file_location = summary_config.file_location
+
+  if isinstance(summary_config.file_location, airflow.XComArg):
+    file_location = summary_config.file_location.resolve(get_current_context())
+  else:
+    file_location = summary_config.file_location
+
+  if summary_config.use_regex_file_location:
+    file_location = get_gcs_file_location_with_regex(file_location)
+
   aggregation_strategy = summary_config.aggregation_strategy
   include_tag_patterns = summary_config.include_tag_patterns
   exclude_tag_patterns = summary_config.exclude_tag_patterns
@@ -249,6 +265,35 @@ def process_tensorboard_summary(
     )
 
   return [metric_history_rows], [metadata_history_rows]
+
+
+def get_gcs_file_location_with_regex(file_location: str) -> str:
+  """
+  Get a file from GCS given a regex in the form of `gs://<your_bucket>/<your_file_path_regex>`.
+  Does not support bucket name or path regex. Only supports file name regex.
+
+  Args:
+    file_location: File location regex in the form of `gs://<your_bucket>/<path>/<your_file_name_regex>`.
+
+  Returns:
+    The file location of the first file that fits the given regex.
+  """
+  storage_client = storage.Client()
+
+  url = urlparse(file_location)
+  bucket_name = url.netloc
+  file_path = url.path.strip("/")
+  file_path_regex = re.compile(file_path)
+  prefix = "/".join(file_path.split("/")[:-1])
+
+  all_blobs_names = [
+      b.name for b in storage_client.list_blobs(bucket_name, prefix=prefix)
+  ]
+
+  try:
+    return f"gs://{bucket_name}/{next(filter(file_path_regex.match, all_blobs_names))}"
+  except StopIteration:
+    raise AirflowFailException(f"No objects matched supplied regex: {file_location}")
 
 
 # TODO(qinwen): implement profile metrics & upload to Vertex AI TensorBoard
@@ -329,6 +374,50 @@ def add_airflow_metadata(
     )
 
     metadata[index].extend(airflow_meta)
+  return metadata
+
+
+def add_test_config_metadata(
+    base_id: str,
+    task_test_config: test_config.TestConfig[test_config.Accelerator],
+    task_gcp_config: gcp_config.GCPConfig,
+    metadata: List[List[bigquery.MetricHistoryRow]],
+) -> List[List[bigquery.MetricHistoryRow]]:
+  for index in range(len(metadata)):
+    uuid = generate_row_uuid(base_id, index)
+    test_config_meta = []
+
+    test_config_meta.append(
+        bigquery.MetadataHistoryRow(
+            job_uuid=uuid,
+            metadata_key="accelerator",
+            metadata_value=task_test_config.accelerator.name,
+        )
+    )
+    test_config_meta.append(
+        bigquery.MetadataHistoryRow(
+            job_uuid=uuid,
+            metadata_key="project",
+            metadata_value=task_gcp_config.project_name,
+        )
+    )
+    if hasattr(task_test_config, "num_slices"):
+      test_config_meta.append(
+          bigquery.MetadataHistoryRow(
+              job_uuid=uuid,
+              metadata_key="num_slices",
+              metadata_value=task_test_config.num_slices,
+          )
+      )
+      test_config_meta.append(
+          bigquery.MetadataHistoryRow(
+              job_uuid=uuid,
+              metadata_key="multislice_topology",
+              metadata_value=f"{task_test_config.num_slices}x{task_test_config.accelerator.name}",
+          )
+      )
+    metadata[index].extend(test_config_meta)
+
   return metadata
 
 
@@ -531,6 +620,10 @@ def process_metrics(
   # add default airflow metadata
   metadata_history_rows_list = add_airflow_metadata(
       base_id, task_gcp_config.composer_project, metadata_history_rows_list
+  )
+
+  metadata_history_rows_list = add_test_config_metadata(
+      base_id, task_test_config, task_gcp_config, metadata_history_rows_list
   )
 
   # append profile metrics to metric_history_rows_list if any
