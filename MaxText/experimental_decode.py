@@ -18,7 +18,6 @@ I.e. ['Ċ', 'Ə', 'ɖ'] when converted back with chr()
 import sys
 sys.path.append("/home/rwitten/disaggregation/")
 import jax
-jax.config.update('jax_platform_name', 'cpu')
 import jax.numpy as jnp
 import numpy as np
 
@@ -36,17 +35,16 @@ def main(config):
   engine = myengine.TestEngine(config)
   params = engine.load_params()
 
-  text = 'AB'
+  text = config.prompt
   metadata = engine.get_tokenizer()
   vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
   tokens, true_length = token_utils.tokenize_and_pad(text, vocab, is_bos=True)
   prefill_result = engine.prefill(
-      params=params, padded_tokens=tokens, true_length=3
+      params=params, padded_tokens=tokens, true_length=true_length
   )
   slot=1
 
   decode_state = engine.init_decode_state()
-  breakpoint()
   decode_state = engine.insert(
       prefix=prefill_result, decode_state=decode_state, slot=slot
   )
@@ -58,6 +56,7 @@ def main(config):
   tokenizer = token_utils.load_vocab(
       metadata.path, metadata.extra_ids
   ).tokenizer
+  breakpoint()
   # Char for 266
   tok, _, _ = sampled_tokens.get_result_at_slot(slot)
   assert tokenizer.IdToPiece(int(tok.item())) == 'Ċ'

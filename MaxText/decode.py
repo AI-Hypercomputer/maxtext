@@ -203,6 +203,7 @@ def decode_loop(config, state=None):
 
   prefill_cache, next_logit, new_position = prefill_or_load(config, model, state, rng, sp_tokenizer,\
                                                    mesh, state_mesh_shardings, kv_cache_mesh_shardings)
+  breakpoint()
   num_cache, bytes_cache, bytes_per_cache = max_utils.summarize_size_from_pytree(prefill_cache)
   max_logging.log(f"Number of cache entries={num_cache/10**9:.3f} billion, memory usage={bytes_cache/2**30:.3f}GB, "
                   f"bytes per cache={bytes_per_cache:.3f}")
