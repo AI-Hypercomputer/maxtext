@@ -126,7 +126,7 @@ resource "google_composer_environment" "example_environment" {
       image_version = "composer-2.4.6-airflow-2.6.3"
       airflow_config_overrides = {
         core-allowed_deserialization_classes = ".*"
-        scheduler-min_file_process_interval = "120"
+        scheduler-min_file_process_interval  = "120"
       }
       # Note: keep this in sync with .github/requirements.txt
       pypi_packages = {

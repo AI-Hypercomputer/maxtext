@@ -1,7 +1,8 @@
 variable "bigquery_datasets" {
   type = list(object({
-    id       = string
-    location = string
+    id        = string
+    location  = string
+    env_stage = string
   }))
 }
 
@@ -11,6 +12,7 @@ variable "bigquery_tables" {
     table_id       = string
     schema_id      = string
     partition_type = string
+    env_stage      = string
   }))
 }
 
@@ -26,7 +28,7 @@ resource "google_bigquery_dataset" "dataset_setup" {
   location   = each.value.location
 
   labels = {
-    env = "prod"
+    env = each.value.env_stage
   }
 }
 
@@ -42,7 +44,7 @@ resource "google_bigquery_table" "table_setup" {
   }
 
   labels = {
-    env = "prod"
+    env = each.value.env_stage
   }
   depends_on = [
     google_bigquery_dataset.dataset_setup,

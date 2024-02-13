@@ -355,24 +355,19 @@ def generate_process_id() -> str:
   return str(uuid.uuid4())
 
 
-def is_valid_entry() -> bool:
-  """Define if entries are valid to insert into the table.
+def update_dataset_name_if_needed(
+    prod_dataset_name: metric_config.DatasetOption,
+) -> str:
+  """Update the dataset name based on stage (if needed).
 
-  Only scheduled runs from the prod composer environment are allowed.
+  All data from prod env will be sent to benchmark_dataset or xlml_dataset;
+  the rest will be sent to dev_benchmark_dataset or dev_xlml_dataset.
   """
-  # if it's a non-prod run, no entries are inserted
+
   if not composer_env.is_prod_env():
-    logging.info("This is a non-prod run, and no entries are inserted into tables.")
-    return False
-
-  # if it's a manual run, no entries are inserted
-  context = get_current_context()
-  run_id = context["run_id"]
-  if run_id.startswith("manual"):
-    logging.info("This is a manual run, and no entries are inserted into tables.")
-    return False
-
-  return True
+    logging.info("This is a non-prod run, and send all data to dev dataset.")
+    return f"dev_{prod_dataset_name.value}"
+  return prod_dataset_name.value
 
 
 def get_gke_job_status(benchmark_id: str) -> bigquery.JobStatus:
@@ -551,8 +546,10 @@ def process_metrics(
         metric_history_rows_list[index].extend(profile_history_rows_list[index])
 
   test_run_rows = []
+
+  dataset_name = update_dataset_name_if_needed(task_gcp_config.dataset_name)
   bigquery_metric = bigquery.BigQueryMetricClient(
-      task_gcp_config.dataset_project, task_gcp_config.dataset_name.value
+      task_gcp_config.dataset_project, dataset_name
   )
 
   if hasattr(task_test_config, "cluster_name"):
@@ -576,6 +573,4 @@ def process_metrics(
     test_run_rows.append(test_run_row)
 
   print("Test run rows:", test_run_rows)
-
-  if is_valid_entry():
-    bigquery_metric.insert(test_run_rows)
+  bigquery_metric.insert(test_run_rows)
