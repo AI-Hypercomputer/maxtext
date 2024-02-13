@@ -25,6 +25,7 @@ from absl import logging
 import airflow
 from airflow.decorators import task, task_group
 from airflow.utils.task_group import TaskGroup
+from airflow.operators.python import get_current_context
 from xlml.apis import gcp_config, test_config
 import fabric
 import google.api_core.exceptions
@@ -272,6 +273,19 @@ def delete_queued_resource(qualified_name: airflow.XComArg):
   wait_for_queued_resource_deletion(qr_op_name)
 
 
+def kill_process_by_pid() -> str:
+  return f"""accelerator_type=\${{1}}
+  if [[ \${{accelerator_type}} =~ ^v5.* ]] 
+  then
+    device_name=vfio/*
+  else 
+    device_name=accel*
+  fi
+  echo \\"Terminating all processes utilizing the TPU (if any).\\"
+  sudo lsof -t /dev/\${{device_name}} | xargs -r kill -9
+  """
+
+
 @task
 def ssh_tpu(
     qualified_name: str,
@@ -315,4 +329,18 @@ def ssh_tpu(
           )
       },
   )
+
+  context = get_current_context()
+  if context['task_instance'].try_number > 1:
+    # kill TPU process by pid (if any) to avoid `TPU in use` error in retry
+    tmp_file = '/tmp/kill_process.sh'
+    accelerator_type = nodes[0].accelerator_type
+    script = kill_process_by_pid()
+    kill_process_cmds = (
+        f'set -x; sudo echo "{script}" > {tmp_file}',
+        f'bash {tmp_file} {accelerator_type}',
+    )
+    ssh_group.run(';'.join(kill_process_cmds))
+
+  # run provided commands
   ssh_group.run(cmds)
