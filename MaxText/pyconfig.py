@@ -158,6 +158,11 @@ class _HyperParameters():
     max_logging.log(f"Updating keys from model: {keys_from_model}")
     validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
 
+    # We initialize the jax distributed system here because it must be done before device backend is initialized.
+    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+
+    if raw_keys['model_name'] == "gpt3-175b":
+      _HyperParameters.configure_gpt3_task(raw_keys)
     _HyperParameters.user_init(raw_keys)
 
     self.keys = raw_keys
@@ -169,10 +174,6 @@ class _HyperParameters():
   @staticmethod
   def user_init(raw_keys):
     '''Transformations between the config data and configs used at runtime'''
-
-    # We initialize the jax distributed system here because it must be done before device backend is initialized.
-    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
-
     if raw_keys["run_name"] == "":
       raw_keys["run_name"] = os.environ.get("JOBSET_NAME") #using XPK default
     run_name = raw_keys["run_name"]
@@ -208,7 +209,24 @@ class _HyperParameters():
     validate_keys(raw_keys)
 
   @staticmethod
-  def update_model_vars(raw_keys) -> list[str]:
+  def configure_gpt3_task(raw_keys):
+    '''dynamically configure gpt3 task based on training rules'''
+    # follow https://github.com/google/paxml/blob/19db52eed85ae0d2365339b83a97cd0b873bbf73/paxml/tasks/lm/params/c4.py#L280
+    #   according to training_rules of mlperf gpt3 training
+    global_batch_size = calculate_global_batch_sizes(raw_keys)[1]
+    if global_batch_size <= 3584:
+      raw_keys['learning_rate'] = 2e-5
+    else:
+      raw_keys['learning_rate'] = 3e-5
+    warmup_steps = math.ceil(265.0 * 1536 / global_batch_size - 1e-6)
+    decay_end_step = math.ceil(108600.0 * 1536 / global_batch_size - 1e-6)
+    raw_keys['learning_rate_schedule_steps'] = decay_end_step
+    raw_keys['warmup_steps_fraction'] = warmup_steps / decay_end_step
+    global_batch_size_to_train_on = calculate_global_batch_sizes(raw_keys)[1]
+    raw_keys['eval_interval'] = math.ceil(24567 / global_batch_size_to_train_on)
+
+  @staticmethod
+  def update_model_vars(raw_keys):
     ''' Update model config variables
     '''
     validate_model_name(raw_keys['model_name'])
