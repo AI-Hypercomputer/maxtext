@@ -44,3 +44,4 @@ checkpoint_period: 10_000
 target_eval_loss: 2.69
 add_bos: False
 add_eos: False
+stable_cross_entropy_loss: True
