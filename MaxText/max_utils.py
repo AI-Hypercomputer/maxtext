@@ -327,13 +327,16 @@ def init_initial_state(model, tx, config, is_training, key):
 
 def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   is_training = False
-  return setup_initial_state(model, None, config, rng, mesh, checkpoint_manager, is_training)
+  state, state_mesh_annotations, _ = setup_initial_state(model, None, None, config,
+                                                         rng, mesh, checkpoint_manager,
+                                                         is_training)
+  return state, state_mesh_annotations
 
-def setup_training_state(model, tx, config, rng, mesh, checkpoint_manager):
+def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
   is_training = True
-  return setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_training)
+  return setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager, is_training)
 
-def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_training=True):
+def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager, is_training=True):
   """ We initialize the model and optimizer state, and optionally load from a
   checkpoint as necessary.
 
@@ -351,20 +354,23 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_tra
     state_mesh_annotations: the mesh annotations for the train state
   """
 
-  unboxed_abstract_state, state_mesh_annotations = get_abstract_state(model, tx, config, rng, mesh, is_training)
+  unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(model, tx, config,
+                                                                                            rng, mesh, is_training)
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
+    restored, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
+                                                data_iterator,
                                                 config.load_parameters_path,
                                                 config.load_full_state_path,
                                                 unboxed_abstract_state,
-                                                mesh,
-                                                state_mesh_annotations)
+                                                config.dataset_type)
 
-    state_mesh_shardings = jax.tree_map(
-        lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
-    if not state:
+    if restored:
+      if 'iter' in restored and restored['iter'] is not None:
+        data_iterator.local_iterator = restored['iter']
+      state = restored['default']
+    else:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       state = jax.jit(
           init_state_partial,
@@ -373,10 +379,9 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_tra
       )(rng)
       if raw_params: # If we loaded a partial state, we need to merge it.
         state = state.replace(params = raw_params)
-    raw_params = None
 
   state = unbox_logicallypartioned(state)
-  return state, state_mesh_annotations
+  return state, state_mesh_annotations, data_iterator
 
 
 # Learning Rate Schedule
@@ -504,16 +509,26 @@ cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
 
 def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   """ Get a shaped abstraction of the state (including optimizer)"""
-  init_state_partial = functools.partial(init_initial_state, model, tx,
-                                              config, is_training)
-  abstract_state = jax.eval_shape(init_state_partial, rng)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  unboxed_abstract_state = unbox_logicallypartioned(abstract_state)
+  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
 
+  abstract_state = jax.eval_shape(init_state_partial, rng)
+
+  state_logical_annotations = nn.get_partition_spec(abstract_state)
+
+  state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh,
+                                                     config.logical_axis_rules)
+
+  abstract_sharded_state = jax.jit(
+      init_state_partial,
+      in_shardings=None,
+      out_shardings=state_mesh_shardings
+  ).eval_shape(rng)
+
+  unboxed_abstract_sharded_state = unbox_logicallypartioned(abstract_sharded_state)
   # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return unboxed_abstract_state, state_mesh_annotations
+  return unboxed_abstract_sharded_state, state_mesh_annotations, state_mesh_shardings
 
 def get_kv_cache_annotations(model, config, rng, mesh):
   """ Get a shaped abstraction of the state (including optimizer)"""
