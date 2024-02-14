@@ -38,6 +38,7 @@ from jax.sharding import Mesh
 from jax import random
 from typing import Sequence
 from layers import models
+from train import save_checkpoint
 
 Transformer = models.Transformer
 
@@ -78,8 +79,8 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
   rng = random.PRNGKey(0)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
-  state, state_mesh_notations = max_utils.setup_training_state(
-    model, tx, config, rng, mesh, checkpoint_manager
+  state, state_mesh_notations, _ = max_utils.setup_training_state(
+    model, None, tx, config, rng, mesh, checkpoint_manager
   )
   num_params = max_utils.calculate_num_params_from_pytree(state.params)
   max_logging.log(f"In input checkpoint Number of model params={num_params/10**9:.3f} billion")
@@ -90,7 +91,7 @@ def _save_decode_checkpoint(config, state, checkpoint_manager):
   with jax.spmd_mode('allow_all'):
     decode_state = max_utils.init_decode_state(None, jax.tree_map(lambda x : x.astype(jax.numpy.bfloat16), state.params))
   if checkpoint_manager is not None:
-    if checkpoint_manager.save(0, decode_state):
+    if save_checkpoint(checkpoint_manager, 0, decode_state):
       max_logging.log(f"saved an decode checkpoint at {config.checkpoint_dir}")
     # Upon preemption, exit when and only when all ongoing saves are complete.
     if checkpoint_manager.reached_preemption(0):

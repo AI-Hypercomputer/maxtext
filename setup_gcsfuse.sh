@@ -31,9 +31,9 @@ if [[ -z ${DATASET_GCS_BUCKET} || -z ${MOUNT_PATH} ]]; then
   exit 1
 fi
 
-if [[ $GCS_BUCKET == gs://* ]] ; then
-    echo "Remove gs:// from GCS bucket name"
-    exit 1
+if [[ "$DATASET_GCS_BUCKET" =~ gs:\/\/ ]] ; then
+    DATASET_GCS_BUCKET="${DATASET_GCS_BUCKET/gs:\/\//}"
+    echo "Removed gs:// from GCS bucket name, GCS bucket is $DATASET_GCS_BUCKET"
 fi
 
 if ! command -v sudo &> /dev/null ; then
@@ -50,6 +50,11 @@ if ! command -v gcsfuse &> /dev/null ; then
   curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
   sudo apt-get update -y && sudo apt-get -y install gcsfuse
   sudo rm -rf /var/lib/apt/lists/*
+fi
+
+if [[ -d ${MOUNT_PATH} ]]; then
+  echo "$MOUNT_PATH exists, removing..."
+  fusermount -u $MOUNT_PATH || rm -rf $MOUNT_PATH
 fi
 
 mkdir -p $MOUNT_PATH
