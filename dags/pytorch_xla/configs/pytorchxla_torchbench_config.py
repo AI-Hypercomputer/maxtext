@@ -162,7 +162,15 @@ def set_up_torchbench_gpu(model_name: str, nvidia_driver_version: str) -> Tuple[
 
   docker_cmds_ls = (
       "apt-get update && apt-get install -y libgl1",
+      "apt install -y liblapack-dev libopenblas-dev",
+      # Below are the required dependencies for building detectron2_* models.
+      "wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/libcusparse-dev-12-1_12.1.0.106-1_amd64.deb",
+      "wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/libcusolver-dev-12-1_11.4.5.107-1_amd64.deb",
+      "wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/libcublas-dev-12-1_12.1.3.1-1_amd64.deb",
+      "dpkg -i libcusparse* libcusolver* libcublas*",
+      # Below are the dependencies for benchmark data processing:
       "pip3 install --user numpy pandas",
+      # torch related dependencies
       "pip3 install --user --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121",
       "cd /tmp/ && git clone https://github.com/pytorch/benchmark.git",
       f" cd benchmark && {model_install_cmds()}",
@@ -172,7 +180,6 @@ def set_up_torchbench_gpu(model_name: str, nvidia_driver_version: str) -> Tuple[
   docker_cmds = "\n".join(docker_cmds_ls)
 
   return (
-      "sudo apt-get update",
       *get_nvidia_driver_install_cmd(nvidia_driver_version),
       "sudo apt-get install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common",
       "distribution=$(. /etc/os-release;echo $ID$VERSION_ID)",
