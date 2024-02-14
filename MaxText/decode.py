@@ -16,38 +16,38 @@
 
 # pylint: disable=g-bad-todo, abstract-method, consider-using-with
 """Training loop and Decoding of the model."""
+
+
 import functools
 from typing import Sequence
-
 import datetime
 import flax
 import orbax
-
 import os
 from absl import app
 import numpy as np
-
 import pyconfig
 import max_utils
 import inference_utils
 from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer
 from layers import models, quantizations
-
 import common_types
-
 import jax
 from jax import random
 from jax.sharding import PartitionSpec as P
 from jax.sharding import Mesh
-
 from jax.experimental.compilation_cache import compilation_cache as cc
-
 import max_logging
-
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
 Transformer = models.Transformer
+
+
+def replicate_globally(np_array, mesh):
+  arrays = [jax.device_put(np_array, dev) for dev in mesh.local_devices]
+  sharding = jax.sharding.NamedSharding(mesh, P())
+  return jax.make_array_from_single_device_arrays(np_array.shape, sharding, arrays)
 
 def match_input_and_output_stream(prompt, outputs, tokenizer):
   for i in range(len(prompt)):
@@ -78,9 +78,9 @@ def encode_strings(strs, max_len, tokenizer, mesh):
     padded_start_index = start_index
     segment_ids[i, padded_start_index:] = common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     positions[i, padded_start_index:] = np.arange(len(prompt))
-  return jax.device_put(tokenized_batch, jax.sharding.NamedSharding(mesh, P())),\
-         jax.device_put(positions, jax.sharding.NamedSharding(mesh, P())),\
-         jax.device_put(segment_ids, jax.sharding.NamedSharding(mesh, P()))
+  return replicate_globally(tokenized_batch, mesh), \
+      replicate_globally(positions, mesh), \
+      replicate_globally(segment_ids, mesh)
 
 def prefill_predict_step(inputs, input_positions, decoder_segment_ids,
                  state,
@@ -143,7 +143,10 @@ def compute_prefill(config, model, state, rng, sp_tokenizer, mesh, state_mesh_sh
   prefill_output, prefill_cache = p_prefill_predict_step(tokenized_prompts, prompt_decoder_positions,\
                                                         prompt_decoder_segment_ids, state, rng)
 
-  return prefill_cache, prefill_output[:, -1:], prompt_decoder_positions[:, -1:]+1
+  with jax.spmd_mode('allow_all'):
+    updated_prompt_decoder_positions = prompt_decoder_positions[:, -1:] + 1
+
+  return prefill_cache, prefill_output[:, -1:], updated_prompt_decoder_positions
 
 def prefill_or_load(config, model, state, rng, sp_tokenizer, mesh, state_mesh_shardings,
                     kv_cache_mesh_shardings):
@@ -170,9 +173,6 @@ def prefill_or_load(config, model, state, rng, sp_tokenizer, mesh, state_mesh_sh
       max_logging.log(f"Wrote prefill cache to {config.prefill_cache_dir}")
     return cache, last_logit, pos
 
-
-
-
 def decode_loop(config, state=None):
   """Decoding loop for the Transformer model."""
   rng = random.PRNGKey(0)
@@ -198,7 +198,7 @@ def decode_loop(config, state=None):
   state_mesh_shardings = jax.tree_map(
       lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
   kv_cache_mesh_shardings = jax.tree_map(
-    lambda p: jax.sharding.NamedSharding(mesh, p), kv_cache_annotations)
+      lambda p: jax.sharding.NamedSharding(mesh, p), kv_cache_annotations)
   replicated_sharding = jax.sharding.NamedSharding(mesh, P(None))
 
   prefill_cache, next_logit, new_position = prefill_or_load(config, model, state, rng, sp_tokenizer,\
@@ -220,12 +220,10 @@ def decode_loop(config, state=None):
   )
 
   new_cache = prefill_cache
-  outputs = []
   first_profiling_step = config.max_prefill_predict_length + config.skip_first_n_steps_for_profiler
   last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1,
                                 first_profiling_step, config.max_target_length - 1)
 
-  #add the new_id which is the first generated token to outputs
   outputs = []
 
   new_position, new_cache, next_logit, selected_id = p_ar_predict_step(next_logit, new_position, new_cache, state, rng)
@@ -245,7 +243,7 @@ def decode_loop(config, state=None):
       max_utils.deactivate_profiler(config)
   endtime = datetime.datetime.now()
 
-  new_text, _ = decode_tokens([int(x[0,0]) for x in outputs], sp_tokenizer)
+  new_text, _ = decode_tokens([int(x[0, 0]) for x in outputs], sp_tokenizer)
   max_logging.log(f"Completion: `{config.prompt}` -> `{new_text}`")
   if config.autoregressive_decode_assert != "":
     assert new_text==config.autoregressive_decode_assert, \
