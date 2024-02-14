@@ -17,7 +17,7 @@
 run_name: ""
 
 model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!
-normalization_layer_epsilon: 1.e-06
+normalization_layer_epsilon: 1.e-05
 
 ################################## CHECKPOINTING ##################################
 # Checkpointing makes the following choices in the following order, starting with (1):
@@ -59,21 +59,20 @@ save_config_to_gcs: False
 dtype: "bfloat16"
 quantization: ""
 
-decoder_block: "default" # which style of DecoderBlock to use.
+decoder_block: "llama2" # which style of DecoderBlock to use.
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
 global_parameter_scale: 1
-base_emb_dim: 2560
-base_num_query_heads: 8
-base_num_kv_heads: 8
-base_mlp_dim: 8192
+base_emb_dim: 2048
+base_num_query_heads: 16
+base_num_kv_heads: 16
+base_mlp_dim: 7168
 base_num_decoder_layers: 16
-head_dim: 256
-# activation functions are .
-mlp_activations: ["relu"]
+head_dim: 128
+mlp_activations: ["silu", "linear"]
 dropout_rate: 0
-logits_via_embedding: True  # NOTE: this is True just for testing.
+logits_via_embedding: False
 normalize_embedding_logits: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 
@@ -138,9 +137,9 @@ ici_autoregressive_parallelism: 1
 # Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_path: ""
-vocab_size: 32_768 # powers of 2 for sharding
+vocab_size: 32_000 # powers of 2 for sharding
 assets_path: "assets"
-vocab_relative_path: "tokenizer"  # Assumes we're allowed
+vocab_relative_path: "tokenizer.llama2"  # Assumes we're allowed
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
