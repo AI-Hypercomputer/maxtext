@@ -138,8 +138,7 @@ ici_autoregressive_parallelism: 1
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_path: ""
 vocab_size: 32_000 # powers of 2 for sharding
-assets_path: "assets"
-vocab_relative_path: "tokenizer.llama2"  # Assumes we're allowed
+tokenizer_path: "assets/tokenizer.llama2"
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'

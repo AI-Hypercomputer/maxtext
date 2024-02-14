@@ -216,20 +216,11 @@ def get_datasets(
 
 def preprocess_dataset(config: ml_collections.ConfigDict,
                        global_mesh,
-                       train_ds, eval_ds,
-                       vocab_path: Optional[str] = None,
+                       train_ds, eval_ds, sp_tokenizer,
                        data_shuffle_seed: int = 0,
-                       add_bos: bool = True,
-                       add_eos: bool = True,
                        shuffle_buffer_size: int = 128,
                        ):
   """Pre-process the dataset and return iterators for mlperf training."""
-  sp_tokenizer = tokenizer.load_tokenizer(
-    vocab_path=vocab_path,
-    add_bos=add_bos,
-    add_eos=add_eos,
-    )
-
   # tokenize
   train_ds = train_ds.map(
       tokenizer.TokenizeOp(sp_tokenizer, data_keys=('targets',)), num_parallel_calls=AUTOTUNE)
@@ -282,4 +273,4 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
   eval_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(eval_ds, global_mesh)
 
   # Return multi-host jax.Array prep iterator
-  return train_multihost_gen, eval_multihost_gen, sp_tokenizer
+  return train_multihost_gen, eval_multihost_gen
