@@ -48,6 +48,7 @@ def main(config):
   decode_state = engine.insert(
       prefix=prefill_result, decode_state=decode_state, slot=slot
   )
+  breakpoint()
   decode_state, sampled_tokens = engine.generate(
       params=params, decode_state=decode_state
   )
@@ -56,7 +57,7 @@ def main(config):
   tokenizer = token_utils.load_vocab(
       metadata.path, metadata.extra_ids
   ).tokenizer
-  breakpoint()
+  sys.exit(0)
   # Char for 266
   tok, _, _ = sampled_tokens.get_result_at_slot(slot)
   assert tokenizer.IdToPiece(int(tok.item())) == 'Ċ'

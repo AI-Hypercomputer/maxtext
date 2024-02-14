@@ -108,6 +108,7 @@ def ar_predict_single_token(previous_logits, token_position, kv_cache, state, rn
   new_token = inference_utils.sampling(previous_logits, rngkey, config.decode_sampling_strategy,\
                                        topk=config.decode_sampling_top_k, nucleus_topp=config.decode_sampling_nucleus_p,
                                        temperature=config.decode_sampling_temperature)
+  print(f"{new_token.shape=}, {previous_logits.shape=}")
   flat_logits, new_vars = model.apply(
     {
         "params": state.params,

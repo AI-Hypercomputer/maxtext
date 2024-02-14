@@ -123,7 +123,8 @@ class TestEngine(engine_api.Engine):
       mutable=["cache"]
     )
     next_pos = jnp.full((1,1), true_length, dtype = jnp.int32)
-    return {"logits" : flat_logits[:, -1, :], "cache" : new_vars['cache'], "next_pos" : next_pos}
+    selected_logits = jax.lax.dynamic_slice(flat_logits, (0, true_length,0), (flat_logits.shape[0], 1, flat_logits.shape[2]))
+    return {"logits" : selected_logits, "cache" : new_vars['cache'], "next_pos" : next_pos}
 
   
 
@@ -164,18 +165,12 @@ class TestEngine(engine_api.Engine):
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
 
     def copy(partial_cache, full_cache):
-      if partial_cache.shape[target_idx] == 1 and full_cache.shape[target_idx] == jax.device_count() * self.config.per_device_batch_size:
-        if target_idx == 0:
-          full_cache = full_cache.at[slot:slot+1, ...].set(partial_cache)
-        elif target_idx == 1:
-          full_cache = full_cache.at[:, slot:slot+1, ...].set(partial_cache)
-        else:
-          raise ValueError("Not implemented, I (@rwitten) couldn't find a nice impl") #TODO(fix)
-      return full_cache
-    
+      print(f"{partial_cache.dtype} {full_cache.dtype}")
+      return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, target_idx)
+        
     inserted_cache = jax.tree_map(copy, unboxed_prefix['cache'], decode_state['cache'])
-    inserted_logits = decode_state['logits'].at[slot:slot+1].set(unboxed_prefix['logits'])
-    inserted_next_pos = decode_state['next_pos'].at[slot:slot+1, ...].set(unboxed_prefix['next_pos'])
+    inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state['logits'], unboxed_prefix['logits'], slot, 0)
+    inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state['next_pos'], unboxed_prefix['next_pos'], slot, 0)
 
     return {'logits' : inserted_logits, 'cache' : inserted_cache, 'next_pos' : inserted_next_pos }
 
@@ -192,23 +187,24 @@ class TestEngine(engine_api.Engine):
     """Initialises any state which a generation step transforms."""
 
     def init(abstract_params):
-      x = jnp.ones( (int(self.config.per_device_batch_size * jax.device_count()), self.config.max_prefill_predict_length))
+      x = jnp.ones( (int(self.config.per_device_batch_size * jax.device_count()), self.config.max_prefill_predict_length),
+                   dtype=jnp.int32)
       _, cache = self.model.apply(
         {
             "params": abstract_params
         },
         x,
         x,
-        decoder_segment_ids=jnp.zeros(x.shape) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR,
+        decoder_segment_ids=jnp.zeros(x.shape, dtype=jnp.int32) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR,
         enable_dropout=False,
         model_mode=common_types.MODEL_MODE_PREFILL,
         rngs={'params': self.rng},
         mutable=["cache"]
       )
 
-      return {"logits" : jnp.zeros((int(self.config.per_device_batch_size * jax.device_count()), self.config.vocab_size)),
+      return {"logits" : jnp.zeros((int(self.config.per_device_batch_size * jax.device_count()), 1, self.config.vocab_size)),
               "cache" : cache["cache"],
-              "next_pos" : jnp.zeros((int(self.config.per_device_batch_size * jax.device_count()), 1))
+              "next_pos" : jnp.zeros((int(self.config.per_device_batch_size * jax.device_count()), 1), dtype=jnp.int32)
               }
 
     abstract_outputs = jax.eval_shape(init, self.abstract_params)
@@ -224,7 +220,6 @@ class TestEngine(engine_api.Engine):
       return jax.tree_map( lambda x : jnp.zeros(x.shape, x.dtype), abstract_outputs)
     
     zeroed = max_utils.unbox_logicallypartioned(initialize())
-
     return zeroed
 
   @property
