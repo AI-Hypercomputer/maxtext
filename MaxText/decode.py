@@ -60,6 +60,7 @@ def match_input_and_output_stream(prompt, outputs, tokenizer):
     print(f"{prompt_mini_str} -> {output_mini_str}")
 
 def decode_tokens(toks, tokenizer):
+  breakpoint()
   return tokenizer.detokenize(toks).numpy().decode("utf-8"), len(toks)
 
 def encode_strings(strs, max_len, tokenizer, mesh):
@@ -133,6 +134,7 @@ def compute_prefill(config, model, state, rng, sp_tokenizer, mesh, state_mesh_sh
   # Encode the demo prompt -- to measure performance we encode it multiple times.
   tokenized_prompts, prompt_decoder_positions, prompt_decoder_segment_ids  = encode_strings(tokenized_prompt,\
       config.max_prefill_predict_length, sp_tokenizer, mesh)
+  print(f"{tokenized_prompts[0,:]=}")
 
   partial_prefill_predict_step = functools.partial(prefill_predict_step, model=model)
   p_prefill_predict_step = jax.jit(
@@ -204,7 +206,6 @@ def decode_loop(config, state=None):
 
   prefill_cache, next_logit, new_position = prefill_or_load(config, model, state, rng, sp_tokenizer,\
                                                    mesh, state_mesh_shardings, kv_cache_mesh_shardings)
-  breakpoint()
   num_cache, bytes_cache, bytes_per_cache = max_utils.summarize_size_from_pytree(prefill_cache)
   max_logging.log(f"Number of cache entries={num_cache/10**9:.3f} billion, memory usage={bytes_cache/2**30:.3f}GB, "
                   f"bytes per cache={bytes_per_cache:.3f}")
@@ -240,6 +241,7 @@ def decode_loop(config, state=None):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
     new_position, new_cache, next_logit, selected_id = p_ar_predict_step(next_logit, new_position, new_cache, state, rng)
+    print(selected_id)
     rng = jax.random.fold_in(rng, step)
     outputs.append(selected_id)
     if step == last_profiling_step:

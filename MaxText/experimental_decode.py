@@ -38,7 +38,9 @@ def main(config):
   text = config.prompt
   metadata = engine.get_tokenizer()
   vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
-  tokens, true_length = token_utils.tokenize_and_pad(text, vocab, is_bos=True)
+  tokenizer = vocab.tokenizer
+  tokens, true_length = token_utils.tokenize_and_pad(text, vocab, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+
   prefill_result = engine.prefill(
       params=params, padded_tokens=tokens, true_length=true_length
   )
@@ -48,31 +50,25 @@ def main(config):
   decode_state = engine.insert(
       prefix=prefill_result, decode_state=decode_state, slot=slot
   )
-  breakpoint()
-  decode_state, sampled_tokens = engine.generate(
-      params=params, decode_state=decode_state
-  )
 
-  metadata = engine.get_tokenizer()
-  tokenizer = token_utils.load_vocab(
-      metadata.path, metadata.extra_ids
-  ).tokenizer
-  sys.exit(0)
-  # Char for 266
-  tok, _, _ = sampled_tokens.get_result_at_slot(slot)
-  assert tokenizer.IdToPiece(int(tok.item())) == 'Ċ'
-  decode_state, sampled_tokens = engine.generate(
+  #breakpoint()
+
+  steps = range(config.max_prefill_predict_length, config.max_target_length)
+  sampled_tokens_list = []
+  for i in steps:
+    decode_state, sampled_tokens = engine.generate(
       params=params, decode_state=decode_state
-  )
-  # Char for 399
-  tok, _, _ = sampled_tokens.get_result_at_slot(slot)
-  assert tokenizer.IdToPiece(int(tok.item())) == 'Ə'
-  _, sampled_tokens = engine.generate(
-      params=params, decode_state=decode_state
-  )
-  # Char for 598
-  tok, _, _ = sampled_tokens.get_result_at_slot(slot)
-  assert tokenizer.IdToPiece(int(tok.item())) == 'ɖ'
+    )
+    sampled_tokens_list.append(sampled_tokens)
+
+  results = [sampled_tokens.get_result_at_slot(slot)[0].item() for sampled_tokens in sampled_tokens_list]
+  output = tokenizer.detokenize(results)
+  print(f"Input `{text}` -> `{output}`")
+
+  if config.autoregressive_decode_assert != "":
+    assert output==config.autoregressive_decode_assert, \
+    f"generated text mismatch {output=} {config.autoregressive_decode_assert=}"
+  
 
 if __name__ == "__main__":
   jax.config.update('jax_default_prng_impl', 'unsafe_rbg')

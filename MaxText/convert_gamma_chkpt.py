@@ -145,6 +145,8 @@ def main(raw_args=None) -> None:
     layer_weight['self_attention'] = copy.deepcopy(self_attention)
     jax_weights['decoder']['layers_' + str(layer_idx)] = copy.deepcopy(layer_weight)
 
+  jax_weights = jax.tree_map(jnp.array, jax_weights)
+  
   enable_checkpointing=True
   async_checkpointing=False
   save_interval_steps=1

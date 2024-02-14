@@ -107,23 +107,31 @@ class TestEngine(engine_api.Engine):
 
     if existing_prefix:
       raise ValueError("We don't know what to do with existing_prefix")
+  
+    input = jnp.expand_dims(padded_tokens, 0) # [BATCh, SEQUENCE]
+    positions = jnp.expand_dims(jnp.arange(0, input.shape[1]), 0)
+
     
-    input = jnp.expand_dims(padded_tokens, 0)
-    positions = jnp.expand_dims(jnp.arange(0, input.shape[0]), 0)
+    zero_to_n = jnp.arange(0, padded_tokens.shape[0])
+    ones_to_keep = zero_to_n < true_length
+    one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    sequence_indicator = jnp.expand_dims(one_d_output, 0)
+
     flat_logits, new_vars = self.model.apply(
       {
           "params": params
       },
       input,
       positions,
-      decoder_segment_ids=jnp.full(input.shape, common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR, dtype = jnp.int32), #TODO(only the first true_length should be in active sequence)
+      decoder_segment_ids=sequence_indicator,
       enable_dropout=False,
       model_mode=common_types.MODEL_MODE_PREFILL,
       rngs={'params': self.rng},
       mutable=["cache"]
     )
+
     next_pos = jnp.full((1,1), true_length, dtype = jnp.int32)
-    selected_logits = jax.lax.dynamic_slice(flat_logits, (0, true_length,0), (flat_logits.shape[0], 1, flat_logits.shape[2]))
+    selected_logits = jax.lax.dynamic_slice(flat_logits, (0, true_length-1,0), (flat_logits.shape[0], 1, flat_logits.shape[2]))
     return {"logits" : selected_logits, "cache" : new_vars['cache'], "next_pos" : next_pos}
 
   
@@ -150,9 +158,20 @@ class TestEngine(engine_api.Engine):
       mutable=["cache"]
     )
 
-    #TODO: give them their outputs
+    result = engine_api.ResultTokens(
+        data=jnp.concatenate((new_token, decode_state["next_pos"]), axis=1),
+        # Tokens are shape [batch, speculations], so when we concatenate
+        # tokens, validity and length along their index 1 dimension then they
+        # occupy 0:speculations.
+        tokens_idx=(0, 1),
+        # Validity occupies the same amount of space, but next in line.
+        valid_idx=(1, 1),
+        # And lengths is rank 1.
+        length_idx=(1, 2), 
+        samples_per_slot=1,
+    )
 
-    return {"logits" : out_logits, "cache" : new_vars["cache"], "next_pos" : decode_state["next_pos"]+1}, None
+    return {"logits" : out_logits, "cache" : new_vars["cache"], "next_pos" : decode_state["next_pos"]+1}, result
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def insert(
@@ -165,7 +184,6 @@ class TestEngine(engine_api.Engine):
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
 
     def copy(partial_cache, full_cache):
-      print(f"{partial_cache.dtype} {full_cache.dtype}")
       return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, target_idx)
         
     inserted_cache = jax.tree_map(copy, unboxed_prefix['cache'], decode_state['cache'])
