@@ -55,6 +55,7 @@ from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 from layers import quantizations
+from cuda_api import cudaProfilerStart, cudaProfilerStop
 
 Transformer = models.Transformer
 EPS = 1e-8
@@ -416,6 +417,11 @@ def train_loop(config, state=None):
       max_utils.activate_profiler(config)
 
     example_batch = load_next_batch(data_iterator, example_batch, config)
+    if step == 6 and jax.process_index() == 0:
+      cudaProfilerStart()
+
+    if step == 8 and jax.process_index() == 0:
+      cudaProfilerStop()
     nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics = p_train_step(
