@@ -27,7 +27,7 @@ import tensorflow_datasets as tfds
 
 import pyconfig
 from input_pipeline import _tfds_data_processing
-
+from input_pipeline import input_pipeline_interface
 
 class TfdsDataProcessingTest(unittest.TestCase):
 
@@ -38,7 +38,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
                         data_sharding = ['data'],
                         base_output_directory = "gs://max-experiments/",
                         dataset_path = "gs://maxtext-dataset/",
-                        assets_path = "../assets",
+                        tokenizer_path = "../assets/tokenizer",
                         enable_checkpointing=False)
     os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
     self.config = pyconfig.config
@@ -61,12 +61,11 @@ class TfdsDataProcessingTest(unittest.TestCase):
   def _get_preprocessed_datasets(self):
     mesh_shape_1d = (len(jax.devices()),)
     mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), self.config.mesh_axes)
-
-    train_iter, eval_iter, test_iter, _ = _tfds_data_processing.preprocess_dataset(
+    sp_tokenizer = input_pipeline_interface.get_tokenizer(self.config.tokenizer_path)
+    train_iter, eval_iter, test_iter = _tfds_data_processing.preprocess_dataset(
               self.config,
               mesh,
-              self.train_ds, self.eval_ds,
-              vocab_path=os.path.join(self.config.assets_path, self.config.vocab_relative_path))
+              self.train_ds, self.eval_ds, sp_tokenizer)
     return train_iter, eval_iter, test_iter
 
   def test_train_ds(self):

@@ -26,20 +26,26 @@ from jax.sharding import PartitionSpec as P
 from input_pipeline import _tfds_data_processing
 from input_pipeline import _grain_data_processing
 from input_pipeline import _tfds_data_processing_c4_mlperf
+import tokenizer
+
+def get_tokenizer(tokenizer_path, add_bos=True, add_eos=True):
+  # Load tokenizer
+  sp_tokenizer = tokenizer.load_tokenizer(tokenizer_path=tokenizer_path,
+                                          add_bos=add_bos,
+                                          add_eos=add_eos)
+  return sp_tokenizer
 
 def make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
   """ Make train iterator and tokenizer for customized C4 dataset for mlperf gpt3 training."""
   train_ds, eval_ds = _tfds_data_processing_c4_mlperf.get_datasets(
     config=config,
   )
-  train_iter, eval_iter, sp_tokenizer = _tfds_data_processing_c4_mlperf.preprocess_dataset(
+  sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
+  train_iter, eval_iter = _tfds_data_processing_c4_mlperf.preprocess_dataset(
     config,
     mesh,
-    train_ds, eval_ds,
-    vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
-    data_shuffle_seed=config.data_shuffle_seed,
-    add_bos=add_bos,
-    add_eos=add_eos
+    train_ds, eval_ds, sp_tokenizer,
+    data_shuffle_seed=config.data_shuffle_seed
   )
   return train_iter, eval_iter, sp_tokenizer
 
@@ -52,14 +58,12 @@ def make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
     config=config,
     read_config = read_config,
   )
-  train_iter, _, _, sp_tokenizer = _tfds_data_processing.preprocess_dataset(
+  sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
+  train_iter, _, _ = _tfds_data_processing.preprocess_dataset(
     config,
     mesh,
-    train_ds, eval_ds,
-    vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
+    train_ds, eval_ds, sp_tokenizer,
     data_shuffle_seed = config.data_shuffle_seed,
-    add_bos = add_bos,
-    add_eos = add_eos
   )
   return train_iter, None, sp_tokenizer
 
@@ -68,11 +72,12 @@ def make_grain_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
   train_ds, eval_ds = _grain_data_processing.get_datasets(
     config=config
   )
-  train_iter, _, _, sp_tokenizer = _grain_data_processing.preprocess_dataset(
+  sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
+  train_iter, _, _ = _grain_data_processing.preprocess_dataset(
     config,
     mesh,
     train_ds, eval_ds,
-    vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
+    vocab_path=config.tokenizer_path,
     data_shuffle_seed = config.data_shuffle_seed,
     add_bos = add_bos,
     add_eos = add_eos
@@ -118,7 +123,7 @@ class SyntheticDataIterator():
 
 def create_data_iterator_with_tokenizer(config, mesh, add_bos = True, add_eos = True):
   if config.dataset_type == "synthetic":
-    return SyntheticDataIterator(config, mesh), None, None
+    return SyntheticDataIterator(config, mesh), None, get_tokenizer(config.tokenizer_path, add_bos, add_eos)
   elif config.dataset_type == "c4":
     return make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos)
   elif config.dataset_type == "c4-array_record":

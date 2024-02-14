@@ -199,21 +199,10 @@ def get_datasets(
 
 def preprocess_dataset(config: ml_collections.ConfigDict,
                         global_mesh,
-                        train_ds, eval_ds,
-                        vocab_path: Optional[str] = None,
+                        train_ds, eval_ds, sp_tokenizer,
                         data_shuffle_seed = 0,
-                        add_bos = True,
-                        add_eos = True
                         ):
   """Pre-process the dataset and return iterators"""
-  if vocab_path is None:
-    vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
-
-  # Load tokenizer
-  sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
-                                          add_bos=add_bos,
-                                          add_eos=add_eos)
-
   # Tokenize data.
   train_ds = train_ds.map(
       tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
@@ -266,4 +255,4 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       drop_remainder=False,
       data_shuffle_seed = data_shuffle_seed,)
 
-  return train_iter, eval_iter, predict_iter, sp_tokenizer
+  return train_iter, eval_iter, predict_iter

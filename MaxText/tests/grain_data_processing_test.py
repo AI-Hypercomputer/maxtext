@@ -46,7 +46,7 @@ class GrainDataProcessingTest(unittest.TestCase):
                             data_sharding = ['data'],
                             base_output_directory = "gs://max-experiments/",
                             dataset_path = "../../gcsfuse",
-                            assets_path = "../assets",
+                            tokenizer_path = "../assets/tokenizer",
                             enable_checkpointing=False,
                             dataset_type="c4-array_record",
                             dataset_name='array-record/c4/en/3.0.1',
@@ -70,11 +70,11 @@ class GrainDataProcessingTest(unittest.TestCase):
         # mesh_shape_1d = (len(jax.devices()),)
         # mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), self.config.mesh_axes)
 
-        train_iter, eval_iter, test_iter, _ = _grain_data_processing.preprocess_dataset(
+        train_iter, eval_iter, test_iter = _grain_data_processing.preprocess_dataset(
                 self.config,
                 self.mesh,
                 self.train_ds, self.eval_ds,
-                vocab_path=os.path.join(self.config.assets_path, self.config.vocab_relative_path))
+                vocab_path=self.config.tokenizer_path)
         return train_iter, eval_iter, test_iter
 
     def test_train_ds(self):
