@@ -101,18 +101,20 @@ jax_cache_dir: "~/jax_cache"
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu' and 'cpu'
 
 # Parallelism
-mesh_axes: ['data', 'fsdp', 'sequence', 'tensor', 'autoregressive']
+mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']
 logical_axis_rules: [
-                      ['activation_batch', ['data', 'fsdp']],
+                      ['activation_batch', ['data', 'fsdp', 'fsdp_transpose',]],
                       ['activation_heads', ['tensor','sequence']],
                       ['activation_length', 'sequence'],
                       ['activation_embed', 'tensor'],
                       ['activation_mlp', 'tensor'],
                       ['activation_kv', 'tensor'],
                       ['activation_vocab', ['tensor', 'sequence']],
-                      ['mlp', ['tensor','autoregressive']],
+                      ['activation_vocab', 'tensor'],
+                      ['activation_vocab', 'sequence'],
+                      ['mlp', ['fsdp_transpose', 'tensor', 'autoregressive']],
                       ['vocab', ['tensor', 'autoregressive']],
-                      ['embed', ['fsdp', 'sequence']],
+                      ['embed', ['fsdp', 'fsdp_transpose', 'sequence']],
                       ['heads', ['tensor', 'autoregressive']],
                       ['kv', []],
                       ['cache_batch', []],
@@ -120,7 +122,7 @@ logical_axis_rules: [
                       ['cache_kv', []],
                       ['cache_sequence', []],
                     ]
-data_sharding: [['data', 'fsdp', 'sequence', 'tensor', 'autoregressive']]
+data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']]
 
 # One axis for each parallelism type may hold a placeholder (-1)
 # value to auto-shard based on available slices and devices.
@@ -128,11 +130,13 @@ data_sharding: [['data', 'fsdp', 'sequence', 'tensor', 'autoregressive']]
 # and product of the ICI axes should equal number of devices per slice.
 dcn_data_parallelism: -1  # recommended DCN axis to be auto-sharded
 dcn_fsdp_parallelism: 1
+dcn_fsdp_transpose_parallelism: 1
 dcn_sequence_parallelism: 1  # never recommended
 dcn_tensor_parallelism: 1 # never recommeneded
 dcn_autoregressive_parallelism: 1 # never recommended
 ici_data_parallelism: 1
 ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
+ici_fsdp_transpose_parallelism: 1
 ici_sequence_parallelism: 1
 ici_tensor_parallelism: 1
 ici_autoregressive_parallelism: 1
