@@ -51,8 +51,6 @@ def main(config):
       prefix=prefill_result, decode_state=decode_state, slot=slot
   )
 
-  #breakpoint()
-
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list = []
   for i in steps:

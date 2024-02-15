@@ -56,7 +56,7 @@ class Embed(nn.Module):
         'embedding',
         with_logical_partitioning(self.embedding_init, ('vocab', 'embed')),
         (self.num_embeddings, self.features),
-        jnp.float32,
+        jnp.bfloat16, #TODO(BAD)
     )
 
   def __call__(self, inputs: Array) -> Array:

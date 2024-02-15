@@ -160,9 +160,11 @@ class AttentionOp(nn.Module):
       decoder_segment_ids: Array | None,
       model_mode: str):
     self.check_attention_inputs(query, key, value)
-    if self.attention_kernel == "dot_product":
+    if self.attention_kernel == 'dot_product' or\
+          (self.attention_kernel == 'recommended' and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE):
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
-    elif self.attention_kernel == 'flash':
+    elif self.attention_kernel == 'flash' or\
+          self.attention_kernel == 'recommended':
       if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
         raise ValueError("""Decode not supported with flash attention.
                             Use `dot_product` instead.""")

@@ -117,7 +117,7 @@ class DenseGeneral(nn.Module):
         'kernel',
         nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
         kernel_shape,
-        jnp.float32,
+        jnp.bfloat16, #TODO(BAD)
         kernel_in_axis,
         kernel_out_axis,
     )
@@ -132,7 +132,7 @@ class DenseGeneral(nn.Module):
           'bias',
           nn.with_logical_partitioning(bias_init, bias_axes),
           bias_shape,
-          jnp.float32,
+          jnp.bfloat16,
       )
       bias = jnp.asarray(bias, self.dtype)
       output += bias

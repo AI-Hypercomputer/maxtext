@@ -136,7 +136,7 @@ class TestEngine(engine_api.Engine):
 
   
 
-  @functools.partial(jax.jit, static_argnums=(0,))
+  @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def generate(
       self, params: Params, decode_state: DecodeState
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
@@ -185,10 +185,14 @@ class TestEngine(engine_api.Engine):
 
     def copy(partial_cache, full_cache):
       return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, target_idx)
-        
+
     inserted_cache = jax.tree_map(copy, unboxed_prefix['cache'], decode_state['cache'])
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state['logits'], unboxed_prefix['logits'], slot, 0)
+    #inserted_logits = decode_state['logits'] #### TODO DIRTY THING TO ENABLE DONATION
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state['next_pos'], unboxed_prefix['next_pos'], slot, 0)
+    
+    inserted_logits = jax.lax.with_sharding_constraint(inserted_logits, self.replicated_sharding) ##We don't want to give this a sharding by accident
+    inserted_next_pos = jax.lax.with_sharding_constraint(inserted_next_pos, self.replicated_sharding) ##We don't want to give this a sharding by accident
 
     return {'logits' : inserted_logits, 'cache' : inserted_cache, 'next_pos' : inserted_next_pos }
 
