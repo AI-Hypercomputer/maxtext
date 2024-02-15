@@ -10,3 +10,11 @@ __pycache__
 
 # Compiled JSonnet templates
 dags/jsonnet/*
+
+# Standalone Airflow instance
+airflow-webserver.pid
+airflow.cfg
+airflow.db
+standalone_admin_password.txt
+webserver_config.py
+logs
