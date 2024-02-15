@@ -1,0 +1,2 @@
+python MaxText/experimental_decode_time_autoregress.py MaxText/configs/base.yml model_name=gamma-7b run_name=runner_2024-02-14-06-18 max_prefill_predict_length=1024 max_target_length=2048 dataset_path=gs://maxtext-dataset async_checkpointing=false scan_layers=false per_device_batch_size=24 base_output_directory=gs://runner-maxtext-logs ici_autoregressive_parallelism=4 assets_path=gs://maxtext-gamma/gamma steps=40 enable_profiler=true
+

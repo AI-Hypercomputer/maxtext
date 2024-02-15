@@ -383,46 +383,16 @@ class AttentionOp(nn.Module):
     return result
 
   def revert_kvlen_axis(self, kv):
-    """Revert key/value length axis.
-
-    Args:
-      kv: in shape [b, ..., n, d, s].
-
-    Returns:
-      reshaped kv as [b, ..., s, n, d]
-    """
-    return jnp.moveaxis(kv, -1, -3)
+    return kv
 
   def move_kvlen_axis(self, kv):
-    """Move key/value length axis to the end.
-
-    Args:
-      kv: in shape [b, ..., s, n, d].
-
-    Returns:
-      reshaped kv as [b, ..., n, d, s]
-    """
-    return jnp.moveaxis(kv, -3, -1)
+    return kv
 
   def cached_kv_shape(self, kv_shape):
-    """Cached KV shape.
-
-    The key and value have dimension [batch, length, num_heads, head_dim], but
-    we cache them as [batch, num_heads, head_dim, length] as a TPU fusion
-    optimization. This also enables the "scatter via one-hot broadcast" trick,
-    which means we do a one-hot broadcast instead of a scatter/gather
-    operations, resulting in a 3-4x speedup in practice.
-
-    Args:
-      kv_shape: shape of key or value for caching, as [b, ..., s, n, d].
-
-    Returns:
-      Swapped kv_shape as [b, ..., n, d, s] for cache.
-    """
-    return kv_shape[:-3] + tuple(kv_shape[i] for i in [-2, -1, -3])
+    return kv_shape
 
   def _get_prefill_cache(self, batch, heads, kv_head_size, dtype):
-    kv_cache_layout = ('cache_batch', 'cache_heads', 'cache_kv', 'cache_sequence')
+    kv_cache_layout = ('cache_batch', 'cache_sequence', 'cache_heads', 'cache_kv',)
     cache_logical_shape = (batch, self.max_prefill_predict_length, heads, kv_head_size)
     cached_key = self.variable('cache', 'cached_prefill_key',
                                nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
@@ -436,7 +406,7 @@ class AttentionOp(nn.Module):
     return cached_key, cached_value, cached_segment_id
 
   def _get_ar_cache(self, batch, heads, kv_head_size, dtype):
-    kv_cache_layout = ('cache_batch', 'cache_heads', 'cache_kv', 'cache_sequence')
+    kv_cache_layout = ('cache_batch', 'cache_sequence', 'cache_heads', 'cache_kv', )
     cache_logical_shape = (batch, self.max_target_length - self.max_prefill_predict_length, heads, kv_head_size)
     cached_key = self.variable('cache', 'cached_ar_key',
                                nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
@@ -493,7 +463,7 @@ class AttentionOp(nn.Module):
                           one_token_value: Array,
                           cached_ar_key: nn.Variable, 
                           cached_ar_value: nn.Variable, 
-                          one_hot_indices: Array) -> tuple[Array, Array]:
+                          one_hot_index: int) -> tuple[Array, Array]:
     """Adds a single token's results to the ar kv cache 
 
     Args:
@@ -501,7 +471,7 @@ class AttentionOp(nn.Module):
         one_token_value (Array): Value of one token to add to the cache
         cached_ar_key (nn.Variable): Cached keys to add new token key to
         cached_ar_value (nn.Variable): Cached values to add new token value to
-        one_hot_indices (Array): Location of the new token within the cache
+        one_hot_index (int): Location of the new token within the cache
 
     Returns:
         tuple[Array, Array]: Updated caches for key and value with new token info added
@@ -511,9 +481,11 @@ class AttentionOp(nn.Module):
     one_token_key = self.move_kvlen_axis(one_token_key)
     one_token_value = self.move_kvlen_axis(one_token_value)
 
-    # We implement an efficient scatter into the cache via one-hot broadcast and addition.
-    ar_key = cached_ar_key.value + one_token_key * one_hot_indices
-    ar_value = cached_ar_value.value + one_token_value * one_hot_indices
+    ar_key = jax.lax.dynamic_update_index_in_dim(cached_ar_key.value, one_token_key, 1, 0) #TODO SEQ INDEX
+    ar_value = jax.lax.dynamic_update_index_in_dim(cached_ar_key.value, one_token_key, 1, 0) ## TODO, NOT INSERTING INTO REAL INDEX
+
+    ar_key = nn.with_logical_constraint(ar_key, ('cache_batch', 'cache_sequence', 'cache_heads', 'cache_kv',)) #TODO DUPE
+    ar_value = nn.with_logical_constraint(ar_value, ('cache_batch', 'cache_sequence', 'cache_heads', 'cache_kv',))
     cached_ar_key.value = ar_key
     cached_ar_value.value = ar_value
 
@@ -546,20 +518,24 @@ class AttentionOp(nn.Module):
         raise ValueError("Error, we can't do autoregression if we haven't seeded the KV Cache.")
 
       cached_ar_key, cached_ar_value, cached_ar_segment_id, cache_ar_index = self._get_ar_cache(batch, heads, kv_head_size, key.dtype)
-      _, _, _, length = cached_ar_key.value.shape
+      _, length, _, _  = cached_ar_key.value.shape
 
       # Create a OHE of the current index. NOTE: the index is increased below.
-      one_hot_indices = jax.nn.one_hot(cache_ar_index.value, length, dtype=key.dtype)
       one_hot_indices_int32 = jax.nn.one_hot(cache_ar_index.value, length, dtype=jnp.int32)
+      cached_ar_segment_id.value = cached_ar_segment_id.value + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR * one_hot_indices_int32
 
       # Update key, value caches with our new 1d spatial slices.
-      ar_key, ar_value = self.update_ar_key_value(key, value, cached_ar_key, cached_ar_value, one_hot_indices)
-      cached_ar_segment_id.value = cached_ar_segment_id.value + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR * one_hot_indices_int32
+      ar_key, ar_value = self.update_ar_key_value(key, value, cached_ar_key, cached_ar_value, cache_ar_index.value.astype(int))
+      
       cache_ar_index.value = jnp.mod(cache_ar_index.value + 1, self.max_target_length)
 
       # Prep are return both prefill and ar caches
       cached_prefill_key, cached_prefill_value, cached_prefill_segment_id = self._get_prefill_cache(self.max_target_length, heads, kv_head_size, key.dtype)
       cached_prefill =  self.revert_kvlen_axis(cached_prefill_key.value), self.revert_kvlen_axis(cached_prefill_value.value), cached_prefill_segment_id.value
+
+      ar_key = nn.with_logical_constraint(ar_key, ('cache_batch', 'cache_sequence', 'cache_heads', 'cache_kv',))
+      ar_value = nn.with_logical_constraint(ar_value, ('cache_batch', 'cache_sequence', 'cache_heads', 'cache_kv',))
+
       return cached_prefill, (ar_key, ar_value, cached_ar_segment_id.value)
 
 

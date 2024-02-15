@@ -48,22 +48,35 @@ def main(config):
   decode_state = engine.init_decode_state()
   slot=0
 
-  ### just to make sure we don't OOM TODO(FIX)
+  print("first")
+  print(f"{decode_state['cache']['decoder']['layers_0']['self_attention']['AttentionOp_0']['cached_ar_value'].shape=}")
+  print(f"{decode_state['cache']['decoder']['layers_0']['self_attention']['AttentionOp_0']['cached_ar_value'].addressable_shards[0].data.shape=}")
+
   prefill_result = engine.prefill(
       params=params, padded_tokens=tokens, true_length=true_length
   )
   decode_state = engine.insert(
       prefill_result, decode_state, slot=slot
   )
-  ### making sure we don't OOM
+
+  print("second")
+  print(f"{decode_state['cache']['decoder']['layers_0']['self_attention']['AttentionOp_0']['cached_ar_value'].shape=}")
+  print(f"{decode_state['cache']['decoder']['layers_0']['self_attention']['AttentionOp_0']['cached_ar_value'].addressable_shards[0].data.shape=}")
 
   #WARM IT UP START
   decode_state, sampled_tokens = engine.generate(
       params, decode_state
   )
+  print("third")
+  print(f"{decode_state['cache']['decoder']['layers_0']['self_attention']['AttentionOp_0']['cached_ar_value'].shape=}")
+  print(f"{decode_state['cache']['decoder']['layers_0']['self_attention']['AttentionOp_0']['cached_ar_value'].addressable_shards[0].data.shape=}")
+
   decode_state, sampled_tokens = engine.generate(
       params, decode_state
   )
+  print("fourth")
+  print(f"{decode_state['cache']['decoder']['layers_0']['self_attention']['AttentionOp_0']['cached_ar_value'].shape=}")
+  print(f"{decode_state['cache']['decoder']['layers_0']['self_attention']['AttentionOp_0']['cached_ar_value'].addressable_shards[0].data.shape=}")
   #WARM IT UP END
 
   num_params, bytes_params, bytes_per_param = max_utils.summarize_size_from_pytree(params)

@@ -48,14 +48,14 @@ def main(config):
 
   decode_state = engine.init_decode_state()
   decode_state = engine.insert(
-      prefix=prefill_result, decode_state=decode_state, slot=slot
+      prefill_result, decode_state, slot=slot
   )
 
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list = []
   for i in steps:
     decode_state, sampled_tokens = engine.generate(
-      params=params, decode_state=decode_state
+      params, decode_state
     )
     sampled_tokens_list.append(sampled_tokens)
 
