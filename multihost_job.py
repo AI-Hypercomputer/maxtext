@@ -84,6 +84,7 @@ def print_flags(args):
   print(f"Bucket name           (--BUCKET_NAME)           = {args.BUCKET_NAME}")
   print(f"Bucket dir            (--BUCKET_DIR)            = {args.BUCKET_DIR}")
   print(f"Run name              (--RUN_NAME)              = {args.RUN_NAME}")
+  print(f"Reset                 (--RESET)                 = {args.RESET}")
   print(f"Extra CQR args        (--CQR_EXTRA_ARGS)        = {args.CQR_EXTRA_ARGS}")
   print(f"Command to run        (--COMMAND)               = {args.COMMAND}")
   print(f"Enable Autocheckpoint (--ENABLE_AUTOCHECKPOINT) = {args.ENABLE_AUTOCHECKPOINT}\n")
