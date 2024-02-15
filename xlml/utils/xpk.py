@@ -58,7 +58,7 @@ def run_workload(
   """
 
   cmds = (
-      "set -x",
+      "set -xue",
       "git clone https://github.com/google/xpk.git /tmp/xpk",
       "cd /tmp/xpk",
       "curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg",

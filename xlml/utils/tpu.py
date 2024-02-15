@@ -337,7 +337,7 @@ def ssh_tpu(
     accelerator_type = nodes[0].accelerator_type
     script = kill_process_by_pid()
     kill_process_cmds = (
-        f'set -x; sudo echo "{script}" > {tmp_file}',
+        f'set -xue; sudo echo "{script}" > {tmp_file}',
         f'bash {tmp_file} {accelerator_type}',
     )
     ssh_group.run(';'.join(kill_process_cmds))

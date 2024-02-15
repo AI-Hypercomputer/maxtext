@@ -177,11 +177,11 @@ class TpuVmTest(TestConfig[Tpu]):
 
   @property
   def setup_script(self) -> Optional[str]:
-    return '\n'.join(self.set_up_cmds)
+    return '\n'.join(('set -xue', *self.set_up_cmds))
 
   @property
   def test_script(self) -> str:
-    return '\n'.join(self.run_model_cmds)
+    return '\n'.join(('set -xue', *self.run_model_cmds))
 
 
 @attrs.define
@@ -204,11 +204,11 @@ class GpuVmTest(TestConfig[Gpu]):
 
   @property
   def setup_script(self) -> Optional[str]:
-    return '\n'.join(self.set_up_cmds)
+    return '\n'.join(('set -xue', *self.set_up_cmds))
 
   @property
   def test_script(self) -> str:
-    return '\n'.join(self.run_model_cmds)
+    return '\n'.join(('set -xue', *self.run_model_cmds))
 
 
 @attrs.define
@@ -243,11 +243,11 @@ class TpuGkeTest(TestConfig[Tpu]):
 
   @property
   def setup_script(self) -> Optional[str]:
-    return ';'.join(self.set_up_cmds)
+    return ';'.join(('set -xue', *self.set_up_cmds))
 
   @property
   def test_script(self) -> str:
-    return ';'.join(self.run_model_cmds)
+    return ';'.join(('set -xue', *self.run_model_cmds))
 
 
 @attrs.define

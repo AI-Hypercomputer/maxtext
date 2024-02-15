@@ -37,9 +37,11 @@ def get_flax_resnet_xpk_config(
   )
 
   run_model_cmds = (
-      "python3 /tmp/flax/examples/imagenet/main.py"
-      " --config=/tmp/flax/examples/imagenet/configs/tpu.py"
-      " --workdir=/tmp/imagenet --config.num_epochs=1"
+      (
+          "python3 /tmp/flax/examples/imagenet/main.py"
+          " --config=/tmp/flax/examples/imagenet/configs/tpu.py"
+          " --workdir=/tmp/imagenet --config.num_epochs=1"
+      ),
   )
 
   job_test_config = test_config.TpuGkeTest(
