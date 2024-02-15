@@ -232,11 +232,12 @@ def decode_loop(config, state=None):
 
   starttime = datetime.datetime.now()
   steps = range(config.max_prefill_predict_length + 1, config.max_target_length)
+  rngs = [random.PRNGKey(i) for i in range(config.max_target_length)]
   for step in steps:
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
-    new_position, new_cache, next_logit, selected_id = p_ar_predict_step(next_logit, new_position, new_cache, state, rng)
-    rng = jax.random.fold_in(rng, step)
+    new_position, new_cache, next_logit, selected_id = p_ar_predict_step(next_logit, new_position, new_cache,\
+                                                                         state, rngs[step])
     outputs.append(selected_id)
     if step == last_profiling_step:
       jax.block_until_ready(outputs)
@@ -250,12 +251,12 @@ def decode_loop(config, state=None):
     f"generated text mismatch {new_text=} {config.autoregressive_decode_assert=}"
 
   num_steps = len(steps)
-  elapsed_time = (endtime-starttime).total_seconds()
+  elapsed_time = (endtime-starttime).total_seconds() * 1000
   seqs = config.per_device_batch_size * jax.device_count()
 
   per_step_time = elapsed_time/num_steps
   memory_bandwidth_per_device_GB_per_sec = total_memory_GB/(elapsed_time/num_steps)/jax.device_count()
-  max_logging.log(f"Did {num_steps} steps in {elapsed_time:.3f} seconds for {seqs} sequences"
+  max_logging.log(f"Did {num_steps} steps in {elapsed_time:.3f} milliseconds for {seqs} sequences"
                   f" with a total memory footprint of {total_memory_GB:.3f} GB")
   max_logging.log(f"Therefore, a per-generate time of {per_step_time:.4f} seconds, a throughput of {seqs/per_step_time:.1f} "
                   f"tok/s and {memory_bandwidth_per_device_GB_per_sec:.1f} GB/s/device")

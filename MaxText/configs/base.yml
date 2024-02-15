@@ -63,6 +63,7 @@ decoder_block: "llama2" # which style of DecoderBlock to use.
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
+weight_dtype: float32
 global_parameter_scale: 1
 base_emb_dim: 2048
 base_num_query_heads: 16
