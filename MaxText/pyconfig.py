@@ -187,6 +187,14 @@ class _HyperParameters():
     if raw_keys["steps"]==-1:
       raw_keys["steps"] = raw_keys["learning_rate_schedule_steps"]
 
+    assert not(raw_keys["local_aqt_shards"] > 0 and (raw_keys["local_aqt_shards_mlp_1"] > 0 or raw_keys["local_aqt_shards_mlp_2"] > 0 or raw_keys["local_aqt_shards_proj_qkv"] > 0 or raw_keys["local_aqt_shards_proj_out"] > 0))
+
+    if raw_keys["local_aqt_shards"] > 0:
+      raw_keys["local_aqt_shards_mlp_1"] = raw_keys["local_aqt_shards"]
+      raw_keys["local_aqt_shards_mlp_2"] = raw_keys["local_aqt_shards"]
+      raw_keys["local_aqt_shards_proj_qkv"] = raw_keys["local_aqt_shards"]
+      raw_keys["local_aqt_shards_proj_out"] = raw_keys["local_aqt_shards"]
+
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys['global_parameter_scale'])
     raw_keys['emb_dim'] = 2**emb_scale * raw_keys['base_emb_dim']
     raw_keys['num_query_heads'] = 2**num_head_scale * raw_keys['base_num_query_heads']

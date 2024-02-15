@@ -37,7 +37,7 @@ AQT_INT8_CONFIG = aqt_config.config_v3(
 )
 
 def get_aqt_config(local_aqt_shards):
-  # print(f"called get_aqt_config with shard count {local_aqt_shards}")
+  print(f"called get_aqt_config with shard count {local_aqt_shards}")
   if local_aqt_shards == 0:
       return aqt_config.config_v3(
         fwd_bits=8,

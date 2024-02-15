@@ -129,6 +129,26 @@ def run_create_resources(startup_script_file, args):
   captured_output = subprocess.run(command, check=False, shell=True, capture_output=True)
   return captured_output
 
+def run_reset_resources(startup_script_file, args):
+  """ Run the Create Queued Resources (CQR) request """
+  # pylint: disable=line-too-long
+  # Reset the startup script on each host
+  print("Reseting startup script on each slice...", flush=True)
+  print(args.RUN_NAME)
+  print(startup_script_file)
+  captured_output = subprocess.run(["bash", "reset_startup_script.sh", args.RUN_NAME, args.PROJECT, args.ZONE, startup_script_file], check=False, capture_output=True)
+  if captured_output.returncode != 0:
+    print(f"\n\n Resetting startup script failed with ERROR returncode {captured_output.returncode}.\n")
+    print("Reset error \n" + captured_output.stderr.decode())
+    return 1
+  print("Startup script reset!", flush=True)
+
+  command = f"gcloud alpha compute tpus queued-resources reset {args.RUN_NAME} --project {args.PROJECT} --zone {args.ZONE} --quiet"
+  print("Reseting queued resource...", flush=True)
+  captured_output = subprocess.run(command, check=False, shell=True, capture_output=True)
+  print("Queued resource reset!!!", flush=True)
+  return captured_output
+
 def write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file, args):
   """ Write the startup script locally into a file to be passed to the CQR command. """
   startup_script = f"""#!/bin/bash
@@ -136,8 +156,8 @@ mkdir -p {args.RUN_NAME}
 cd {args.RUN_NAME}
 {get_env_command_str(args.NUM_SLICES)}
 {setup_ops_str(args.RUN_NAME, log_name)}
-sudo python3 -m virtualenv venv
-source venv/bin/activate
+# sudo python3 -m virtualenv venv
+# source venv/bin/activate
 ulimit -n 100000
 (({download_from_gcs(zip_gcs_path)}
 tar xzf {zip_name}
@@ -171,11 +191,12 @@ This worker will immediately send its logs to GCS."""
 
 def create_kill_command_str(args):
   # pylint: disable=line-too-long
-  return f"""if [[ $SLICE_ID -eq 0 && $WORKER_ID -eq 0 ]]; then
-  echo "This worker (slice 0 worker 0) will wait 10 minutes before tearing down the job to allow other workers to gracefully exit."
-  sleep 600
-  gcloud alpha compute tpus queued-resources delete {args.RUN_NAME} --force --quiet --project={args.PROJECT} --zone={args.ZONE}
-  fi"""
+  return ""
+  # return f"""if [[ $SLICE_ID -eq 0 && $WORKER_ID -eq 0 ]]; then
+  # echo "This worker (slice 0 worker 0) will wait 10 minutes before tearing down the job to allow other workers to gracefully exit."
+  # sleep 600
+  # gcloud alpha compute tpus queued-resources delete {args.RUN_NAME} --force --quiet --project={args.PROJECT} --zone={args.ZONE}
+  # fi"""
 
 def download_from_gcs(zip_gcs_path):
   return f"""
@@ -223,7 +244,7 @@ def install_ops_script_str(run_name, log_name):
     done
   fi
   sudo chmod 777 /etc/google-cloud-ops-agent/config.yaml
-  sudo echo \\"{create_ops_config_str(run_name, log_name)}\\" >> /etc/google-cloud-ops-agent/config.yaml
+  sudo echo \\"{create_ops_config_str(run_name, log_name)}\\" > /etc/google-cloud-ops-agent/config.yaml
   sudo service google-cloud-ops-agent restart
 """
 
@@ -286,6 +307,8 @@ def main(raw_args=None) -> None:
                       --CQR_EXTRA_ARGS="--reserved --service-account=my-service-account-email-address')
   parser.add_argument('--ENABLE_AUTOCHECKPOINT', type=bool, default=False,
                       help='Whether to enable the Autocheckpoint feature')
+  parser.add_argument('--RESET', type=bool, default=False,
+                      help='Whether to reset or create anew')
   args = parser.parse_args(raw_args)
 
 
@@ -326,7 +349,11 @@ def main(raw_args=None) -> None:
   write_startup_script(zip_gcs_path, zip_name, log_name, bucket_path, startup_script_file, args)
 
   print("Running CQR command...")
-  captured_output = run_create_resources(startup_script_file, args)
+  if args.RESET:
+    captured_output = run_reset_resources(startup_script_file, args)
+  else:
+    captured_output = run_create_resources(startup_script_file, args)
+
   if captured_output.returncode != 0:
     print(f"\n\nCreate resource request returned with ERROR returncode {captured_output.returncode}.\n")
     print("Create resource error:\n" + captured_output.stderr.decode())
