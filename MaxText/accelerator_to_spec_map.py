@@ -284,7 +284,7 @@ UserFacingNameToSystemCharacteristics = {
         'tpu', 'v5:12x12x28', 'megacore', (2, 2, 1), 4032
     ),
     'v5p-8192': SystemCharacteristics(
-        'tpu', 'v5:16x16x16', 'megacore', (2, 2, 1), 4096
+        'tpu', 'v5:8x16x32', 'megacore', (2, 2, 1), 4096
     ),
     'v5p-8320': SystemCharacteristics(
         'tpu', 'v5:4x20x52', 'megacore', (2, 2, 1), 4160
@@ -374,3 +374,6 @@ UserFacingNameToSystemCharacteristics = {
 
 def get_system_characteristics(user_facing_name):
   return UserFacingNameToSystemCharacteristics.get(user_facing_name)
+
+def get_all():
+  return UserFacingNameToSystemCharacteristics

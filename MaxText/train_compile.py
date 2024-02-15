@@ -52,7 +52,10 @@ def validate_config(config):
 
 def get_topology_mesh(config):
   """ Get the target hardware devices, and create configured mesh with them """
+  # print(accelerator_to_spec_map.get_all().keys())
+  # print(f"{config.compile_topology=}")
   target_hardware = accelerator_to_spec_map.get_system_characteristics(config.compile_topology)
+  print(f"{target_hardware=}")
   topology_devices = get_topology_desc(
       platform=target_hardware.platform,
       topology_name=target_hardware.topology_name,
