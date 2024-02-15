@@ -100,7 +100,7 @@ class DenseGeneral(nn.Module):
       """Computes a dot_general operation that may be quantized."""
       dot_general = lax.dot_general
       if self.quant:
-        dot_general_cls = self.quant.dot_general_cls(local_aqt_shards)
+        dot_general_cls = self.quant.dot_general_cls(self.local_aqt_shards)
         dot_general = dot_general_cls()
       return dot_general(
         inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
@@ -200,6 +200,7 @@ class MlpBlock(nn.Module):
             name='wi',
             quant=self.quant,
             use_bias=self.use_bias,
+            local_aqt_shards=self.config.local_aqt_shards_mlp_1
       )(inputs)
       for idx, act_fn in enumerate(self.activations):
         y = _convert_to_activation_function(act_fn)(x[:,:,idx,...])
@@ -215,6 +216,7 @@ class MlpBlock(nn.Module):
             name=dense_name,
             quant=self.quant,
             use_bias=self.use_bias,
+            local_aqt_shards=self.config.local_aqt_shards_mlp_1
         )(inputs)
         x = _convert_to_activation_function(act_fn)(x)
         activations.append(x)
@@ -236,5 +238,6 @@ class MlpBlock(nn.Module):
         name='wo',
         quant=self.quant,
         use_bias=self.use_bias,
+        local_aqt_shards=self.config.local_aqt_shards_mlp_2
     )(x)
     return output

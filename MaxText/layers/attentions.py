@@ -748,7 +748,8 @@ class Attention(nn.Module):
         kernel_axes=('embed', 'heads', 'kv'),
         dtype=self.dtype,
         name=proj_name,
-        quant=self.quant)(inputs_kv)
+        quant=self.quant,
+        local_aqt_shards=self.config.local_aqt_shards_proj_qkv)(inputs_kv)
     return kv_proj
 
   def qkv_projection(self, inputs: Array, proj_name: str):
@@ -761,7 +762,8 @@ class Attention(nn.Module):
         kernel_axes=('embed', 'qkv', 'heads', 'kv'),
         dtype=self.dtype,
         name=proj_name,
-        quant=self.quant)(inputs)
+        quant=self.quant,
+        local_aqt_shards=self.config.local_aqt_shards_proj_qkv)(inputs)
     query, key, value = qkv_proj[:,:,0,...], qkv_proj[:,:,1,...], qkv_proj[:,:,2,...]
     return query, key, value
 
@@ -773,7 +775,8 @@ class Attention(nn.Module):
       kernel_axes=('heads', 'kv', 'embed'),
       dtype=self.dtype,
       name='out',
-      quant=self.quant)(out)
+      quant=self.quant,
+      local_aqt_shards=self.config.local_aqt_shards_proj_out)(out)
     return out_proj
 
   def key_rotary(self, key: Array, inputs_positions: Array):

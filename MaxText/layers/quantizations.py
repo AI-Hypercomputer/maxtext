@@ -23,6 +23,7 @@ from dataclasses import dataclass
 import jax.numpy as jnp
 
 
+# NOTE: This config is not effective, it is kept for API reasons
 AQT_INT8_CONFIG = aqt_config.config_v3(
   fwd_bits=8,
   dlhs_bits=8,
@@ -35,6 +36,32 @@ AQT_INT8_CONFIG = aqt_config.config_v3(
   drhs_accumulator_dtype=None,
 )
 
+def get_aqt_config(local_aqt_shards):
+  # print(f"called get_aqt_config with shard count {local_aqt_shards}")
+  if local_aqt_shards == 0:
+      return aqt_config.config_v3(
+        fwd_bits=8,
+        dlhs_bits=8,
+        drhs_bits=None,
+        rng_type='jax.uniform',
+        dlhs_local_aqt=None,
+        drhs_local_aqt=None,
+        fwd_accumulator_dtype=jnp.int32,
+        dlhs_accumulator_dtype=jnp.int32,
+        drhs_accumulator_dtype=None,
+      )
+  else:
+    return aqt_config.config_v3(
+      fwd_bits=8,
+      dlhs_bits=8,
+      drhs_bits=8,
+      rng_type='jax.uniform',
+      dlhs_local_aqt=None,
+      drhs_local_aqt=aqt_config.LocalAqt(local_aqt_shards),
+      fwd_accumulator_dtype=jnp.int32,
+      dlhs_accumulator_dtype=jnp.int32,
+      drhs_accumulator_dtype=jnp.int32,
+    )
 
 @dataclass
 class AqtQuantization:
@@ -42,19 +69,21 @@ class AqtQuantization:
   quant_dg: aqt_config.DotGeneral
   quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
 
-  def dot_general_cls(self):
+  def dot_general_cls(self, local_aqt_shards):
     """ Returns dot_general configured with aqt params. """
+    aqt_cfg=get_aqt_config(local_aqt_shards)
     aqt_dg_cls = functools.partial(
       aqt_flax.AqtDotGeneral,
-      self.quant_dg,
+      aqt_cfg,
       rhs_quant_mode=self.quant_mode
       )
     return aqt_dg_cls
 
-  def einsum(self):
+  def einsum(self, local_aqt_shards):
     """ Returns einsum configured with aqt params """
+    aqt_cfg=get_aqt_config(local_aqt_shards)
     aqt_einsum = functools.partial(aqt_flax.AqtEinsum(
-      cfg=self.quant_dg,
+      cfg=aqt_cfg,
       lhs_quant_mode=self.quant_mode
       )
     )
