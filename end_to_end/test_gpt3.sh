@@ -13,4 +13,4 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=${RUN_NAME} model_nam
     steps=10 per_device_batch_size=6 enable_checkpointing=true async_checkpointing=false\
     enable_profiler=false remat_policy=full\
     max_target_length=2048 base_output_directory=${OUTPUT_PATH}\
-    dataset_type=synthetic
+    dataset_type=synthetic attention=dot_product

@@ -15,9 +15,8 @@ export M_ASYNC_CHECKPOINTING=false
 
 # Load after directly from parameter checkpoint
 python3 MaxText/decode.py MaxText/configs/base.yml load_parameters_path=${base_ckpt_path} run_name=runner_direct_${idx} per_device_batch_size=1 model_name='llama2-7b' ici_tensor_parallelism=4 max_prefill_predict_length=4  max_target_length=16 prompt="I love to" autoregressive_decode_assert="read. I love to write. I love to share." attention=dot_product
-
 #TODO(Training with Llama is not complete)
-python3 MaxText/train.py MaxText/configs/base.yml load_parameters_path=${base_ckpt_path} run_name=runner_${idx}  per_device_batch_size=1 model_name='llama2-7b' ici_tensor_parallelism=4 steps=10 max_target_length=1024 per_device_batch_size=1
+python3 MaxText/train.py MaxText/configs/base.yml load_parameters_path=${base_ckpt_path} run_name=runner_${idx}  per_device_batch_size=1 model_name='llama2-7b' ici_tensor_parallelism=4 steps=10 max_target_length=1024 per_device_batch_size=1 attention=dot_product
 
 # generate parameter checkpoint from Llama's "fine-tuning" run
 unset M_LOAD_PARAMETERS_PATH
