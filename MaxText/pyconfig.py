@@ -94,7 +94,7 @@ class _HyperParameters():
           raise ValueError(f"We received env `{environment_var}` but it isn't all uppercase.")
 
   def _load_kwargs(self, argv: list[str], **kwargs):
-    args_dict = dict(a.split("=") for a in argv[2:])
+    args_dict = dict(a.split("=", 1) for a in argv[2:])
     args_dict.update(kwargs)
     return args_dict
 
