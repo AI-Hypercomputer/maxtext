@@ -17,10 +17,9 @@
 import datetime
 from airflow import models
 from dags import composer_env
-from dags.vm_resource import TpuVersion, Zone
+from dags.vm_resource import TpuVersion, Zone, Project, V5_NETWORKS, V5P_SUBNETWORKS, RuntimeVersion
 from dags.multipod.configs import maxtext_gce_config
 from dags.multipod.configs.common import SetupMode, Platform
-
 
 # Run once a day at 9 am UTC (1 am PST)
 SCHEDULED_TIME = "0 9 * * *" if composer_env.is_prod_env() else None
@@ -34,9 +33,9 @@ with models.DAG(
     catchup=False,
 ) as dag:
   default_test_name = "maxtext-nightly"
-
   test_mode = SetupMode.NIGHTLY
-  # Maxtext
+
+  # v4 Maxtext test
   maxtext_nightly_1slice_v4_8 = maxtext_gce_config.get_maxtext_nightly_config(
       tpu_version=TpuVersion.V4,
       tpu_cores=8,
@@ -80,10 +79,81 @@ with models.DAG(
       test_mode=test_mode,
   ).run()
 
+  # v5p Maxtext test
+  v5p_project_name = Project.TPU_PROD_ENV_AUTOMATED.value
+  v5p_network = V5_NETWORKS
+  v5p_subnetwork = V5P_SUBNETWORKS
+  v5p_runtime_version = RuntimeVersion.V2_ALPHA_TPUV5.value
+
+  maxtext_nightly_1slice_v5p_8 = maxtext_gce_config.get_maxtext_nightly_config(
+      tpu_version=TpuVersion.V5P,
+      tpu_cores=8,
+      tpu_zone=Zone.US_EAST5_A.value,
+      runtime_version=v5p_runtime_version,
+      project_name=v5p_project_name,
+      time_out_in_min=60,
+      is_tpu_reserved=True,
+      test_name=default_test_name,
+      test_mode=test_mode,
+      network=v5p_network,
+      subnetwork=v5p_subnetwork,
+  ).run()
+
+  maxtext_nightly_2slice_v5p_8 = maxtext_gce_config.get_maxtext_nightly_config(
+      tpu_version=TpuVersion.V5P,
+      tpu_cores=8,
+      num_slices=2,
+      tpu_zone=Zone.US_EAST5_A.value,
+      runtime_version=v5p_runtime_version,
+      project_name=v5p_project_name,
+      time_out_in_min=60,
+      is_tpu_reserved=True,
+      test_name=default_test_name,
+      test_mode=test_mode,
+      network=v5p_network,
+      subnetwork=v5p_subnetwork,
+  ).run()
+
+  maxtext_nightly_4slice_v5p_8 = maxtext_gce_config.get_maxtext_nightly_config(
+      tpu_version=TpuVersion.V5P,
+      tpu_cores=8,
+      num_slices=4,
+      tpu_zone=Zone.US_EAST5_A.value,
+      runtime_version=v5p_runtime_version,
+      project_name=v5p_project_name,
+      time_out_in_min=60,
+      is_tpu_reserved=True,
+      test_name=default_test_name,
+      test_mode=test_mode,
+      network=v5p_network,
+      subnetwork=v5p_subnetwork,
+  ).run()
+
+  maxtext_nightly_8slice_v5p_8 = maxtext_gce_config.get_maxtext_nightly_config(
+      tpu_version=TpuVersion.V5P,
+      tpu_cores=8,
+      num_slices=8,
+      tpu_zone=Zone.US_EAST5_A.value,
+      runtime_version=v5p_runtime_version,
+      project_name=v5p_project_name,
+      time_out_in_min=60,
+      is_tpu_reserved=True,
+      test_name=default_test_name,
+      test_mode=test_mode,
+      network=v5p_network,
+      subnetwork=v5p_subnetwork,
+  ).run()
+
   # Test dependencie
   (
       maxtext_nightly_1slice_v4_8
       >> maxtext_nightly_2slice_v4_8
       >> maxtext_nightly_4slice_v4_8
       >> maxtext_nightly_8slice_v4_8
+  )
+  (
+      maxtext_nightly_1slice_v5p_8
+      >> maxtext_nightly_2slice_v5p_8
+      >> maxtext_nightly_4slice_v5p_8
+      >> maxtext_nightly_8slice_v5p_8
   )
