@@ -264,7 +264,7 @@ class Gpt3DecoderLayer(nn.Module):
     lnx_layer_norm = Gpt3LayerNorm(
         dtype=cfg.dtype,
         name='pre_self_attention_norm',
-        kernel_axes=('embed',),
+        kernel_axes=('norm',),
         epsilon=cfg.normalization_layer_epsilon,
         reductions_in_fp32=False,
         use_bias=True,

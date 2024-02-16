@@ -279,7 +279,7 @@ class Decoder(nn.Module):
       dtype=cfg.dtype,
       name='decoder_norm',
       epsilon=cfg.normalization_layer_epsilon,
-      kernel_axes=('embed',),
+      kernel_axes=('norm',),
       )(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
         y, deterministic=deterministic
