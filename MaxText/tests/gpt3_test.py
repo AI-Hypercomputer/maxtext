@@ -60,7 +60,6 @@ class GPT3(unittest.TestCase):
     super().setUp()
     pyconfig.initialize(
       [sys.argv[0], 'configs/base.yml'],
-      attention="dot_product",
       run_name='test',
       enable_checkpointing=False,
       model_name='gpt3-52k',
