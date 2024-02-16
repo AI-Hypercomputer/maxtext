@@ -123,11 +123,11 @@ class GoodputRecorder:
       return
     if start_time is None:
       start_time = datetime.datetime.now()
-    timestamp = start_time.timestamp()
+    start_timestamp = start_time.timestamp()
     step_start_time_dict = {
         _JOB_NAME: self.job_run_name,
         _STEP_COUNT: int(step),
-        _STEP_START_TIME: float(timestamp),
+        _STEP_START_TIME: float(start_timestamp),
     }
     self._cloud_logger.write_cloud_logging_entry(step_start_time_dict)
 
@@ -158,10 +158,10 @@ class GoodputRecorder:
       return
     if start_time is None:
       start_time = datetime.datetime.now()
-    timestamp = start_time.timestamp()
+    start_timestamp = start_time.timestamp()
     job_run_start_dict = {
         _JOB_NAME: self.job_run_name,
-        _JOB_RUN_START_TIME: float(timestamp),
+        _JOB_RUN_START_TIME: float(start_timestamp),
     }
     self._cloud_logger.write_cloud_logging_entry(job_run_start_dict)
 
@@ -175,10 +175,10 @@ class GoodputRecorder:
       return
     if end_time is None:
       end_time = datetime.datetime.now()
-    timestamp = end_time.timestamp()
+    end_timestamp = end_time.timestamp()
     job_run_end_dict = {
         _JOB_NAME: self.job_run_name,
-        _JOB_RUN_END_TIME: float(timestamp),
+        _JOB_RUN_END_TIME: float(end_timestamp),
     }
     self._cloud_logger.write_cloud_logging_entry(job_run_end_dict)
 
@@ -333,9 +333,8 @@ class GoodputCalculator:
       total_job_time = total_job_end_time - total_job_start_time
     elif total_job_start_time is not None:
       # If the job did not complete, use current time to compute total job time.
-      curr_time = datetime.datetime.now()
-      curr_timestamp = curr_time.timestamp()
-      total_job_time = curr_timestamp - total_job_start_time
+      curr_time = datetime.datetime.now().timestamp()
+      total_job_time = curr_time - total_job_start_time
 
     return total_job_time
 

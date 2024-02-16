@@ -366,8 +366,6 @@ def main(argv: Sequence[str]) -> None:
   with diagnostic.diagnose(diagnostic_config):
     train_loop(config)
   goodput_recorder.record_job_end_time()
-  # total_goodput = goodput.get_job_goodput(config)
-  # max_logging.log(f"Total job goodput: {total_goodput:.2f}%")
   time.sleep(5)
   goodput_calculator = goodputpoc.GoodputCalculator(config.run_name, logger_name)
   total_goodput = goodput_calculator.get_job_goodput()
