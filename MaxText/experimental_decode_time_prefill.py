@@ -43,7 +43,8 @@ def main(config):
   metadata = engine.get_tokenizer()
   vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
   tokenizer = vocab.tokenizer
-  tokens, true_length = token_utils.tokenize_and_pad(text, vocab, is_bos=True)
+  tokens, true_length = token_utils.tokenize_and_pad(text, vocab, is_bos=True, prefill_lengths=[1024])
+  print(f"Prompt tokenized to size {tokens.size}")
 
   decode_state = engine.init_decode_state()
   slot=0
@@ -63,6 +64,9 @@ def main(config):
   start = datetime.datetime.now()
 
   for i in range(config.steps):
+    print(f"{engine.prefill._cache_size()}=")
+    print(f"{engine.insert._cache_size()}=")
+
     prefill_result = engine.prefill(
         params=params, padded_tokens=tokens, true_length=true_length
     )

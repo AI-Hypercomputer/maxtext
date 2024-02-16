@@ -160,8 +160,10 @@ class AttentionOp(nn.Module):
       decoder_segment_ids: Array | None,
       model_mode: str):
     self.check_attention_inputs(query, key, value)
+    length = query.shape[-3]
     if self.attention_kernel == 'dot_product' or\
-          (self.attention_kernel == 'recommended' and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE):
+          (self.attention_kernel == 'recommended' and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE) or\
+          (self.attention_kernel == 'recommended' and length < 128):
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
     elif self.attention_kernel == 'flash' or\
           self.attention_kernel == 'recommended':
@@ -391,7 +393,8 @@ class AttentionOp(nn.Module):
     Returns:
       reshaped kv as [b, ..., s, n, d]
     """
-    return jnp.moveaxis(kv, -1, -3)
+    return jax.numpy.moveaxis(kv, (0,1,2,3), (1,2,0,3))
+
 
   def move_kvlen_axis(self, kv):
     """Move key/value length axis to the end.
@@ -402,7 +405,7 @@ class AttentionOp(nn.Module):
     Returns:
       reshaped kv as [b, ..., n, d, s]
     """
-    return jnp.moveaxis(kv, -3, -1)
+    return jax.numpy.moveaxis(kv, (0,1,2,3), (2,0,1,3))
 
   def cached_kv_shape(self, kv_shape):
     """Cached KV shape.
@@ -419,10 +422,10 @@ class AttentionOp(nn.Module):
     Returns:
       Swapped kv_shape as [b, ..., n, d, s] for cache.
     """
-    return kv_shape[:-3] + tuple(kv_shape[i] for i in [-2, -1, -3])
+    return (kv_shape[1], kv_shape[2], kv_shape[0], kv_shape[3])
 
   def _get_prefill_cache(self, batch, heads, kv_head_size, dtype):
-    kv_cache_layout = ('cache_batch', 'cache_heads', 'cache_kv', 'cache_sequence')
+    kv_cache_layout = ('cache_sequence', 'cache_heads', 'cache_batch', 'cache_kv', )
     cache_logical_shape = (batch, self.max_prefill_predict_length, heads, kv_head_size)
     cached_key = self.variable('cache', 'cached_prefill_key',
                                nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
@@ -436,7 +439,7 @@ class AttentionOp(nn.Module):
     return cached_key, cached_value, cached_segment_id
 
   def _get_ar_cache(self, batch, heads, kv_head_size, dtype):
-    kv_cache_layout = ('cache_batch', 'cache_heads', 'cache_kv', 'cache_sequence')
+    kv_cache_layout = ('cache_sequence', 'cache_heads', 'cache_batch', 'cache_kv', )
     cache_logical_shape = (batch, self.max_target_length - self.max_prefill_predict_length, heads, kv_head_size)
     cached_key = self.variable('cache', 'cached_ar_key',
                                nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
@@ -506,6 +509,7 @@ class AttentionOp(nn.Module):
     Returns:
         tuple[Array, Array]: Updated caches for key and value with new token info added
     """
+    return self.revert_kvlen_axis(cached_ar_key.value), self.revert_kvlen_axis(cached_ar_value.value) ### TODO(BIG DEAL)
     # In order to update the key, value caches with the current key and
     # value, we move the length axis to the back
     one_token_key = self.move_kvlen_axis(one_token_key)
@@ -516,6 +520,9 @@ class AttentionOp(nn.Module):
     ar_value = cached_ar_value.value + one_token_value * one_hot_indices
     cached_ar_key.value = ar_key
     cached_ar_value.value = ar_value
+
+    ar_key = nn.with_logical_constraint(ar_key, ('cache_sequence', 'cache_heads', 'cache_batch', 'cache_kv',)) #TODO DUPE
+    ar_value = nn.with_logical_constraint(ar_value, ('cache_sequence', 'cache_heads', 'cache_batch', 'cache_kv',))
 
     # Move the keys and values back to their original shapes.
     return self.revert_kvlen_axis(ar_key), self.revert_kvlen_axis(ar_value)
@@ -546,10 +553,11 @@ class AttentionOp(nn.Module):
         raise ValueError("Error, we can't do autoregression if we haven't seeded the KV Cache.")
 
       cached_ar_key, cached_ar_value, cached_ar_segment_id, cache_ar_index = self._get_ar_cache(batch, heads, kv_head_size, key.dtype)
-      _, _, _, length = cached_ar_key.value.shape
+      length, _, _, _ = cached_ar_key.value.shape
 
       # Create a OHE of the current index. NOTE: the index is increased below.
-      one_hot_indices = jax.nn.one_hot(cache_ar_index.value, length, dtype=key.dtype)
+      one_hot_indices_squeezed = jax.numpy.squeeze(jax.nn.one_hot(cache_ar_index.value, length, dtype=key.dtype), axis=0)
+      one_hot_indices = jnp.expand_dims(one_hot_indices_squeezed,axis=(1,2,3))
       one_hot_indices_int32 = jax.nn.one_hot(cache_ar_index.value, length, dtype=jnp.int32)
 
       # Update key, value caches with our new 1d spatial slices.

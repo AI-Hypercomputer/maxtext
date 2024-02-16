@@ -48,7 +48,7 @@ def main(config):
   decode_state = engine.init_decode_state()
   slot=0
 
-  ### just to make sure we don't OOM TODO(FIX)
+  ### just to make sure we don't OOM
   prefill_result = engine.prefill(
       params=params, padded_tokens=tokens, true_length=true_length
   )

@@ -3,8 +3,8 @@ import json
 CUTOFF_INPUT = 1024
 CUTOFF_OUTPUT = 1024
 
-prefill_bucket_size_to_ms = {128 : 11.60, 256: 15.72, 512 : 25.35, 1024: 46.35}
-system_time_per_decode_token_ms = 43.12/96
+prefill_bucket_size_to_ms = {128 : 11.60, 256: 15.72, 512 : 25.35, 1024: 46.35} #UPDATE(??)
+system_time_per_decode_token_ms = 33.47/96 #UPDATE(IS IT TRUE?)
 
 def next_power_of_2(x):  
     return 1 if x == 0 else 2**(x - 1).bit_length()
