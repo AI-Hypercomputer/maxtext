@@ -93,6 +93,10 @@ There are three patterns for running MaxText with more than one host.
 2. [GCE] [Running Maxtext with Multihost Jobs](getting_started/Run_MaxText_via_multihost_jobs.md) - Long Running Production Jobs with Queued Resources
 3. [GCE] [Running Maxtext with Multihost Runner](getting_started/Run_MaxText_via_multihost_runner.md) -  Fast experiments via multiple ssh connections.
 
+## Getting Starting: Preflight Optimizations
+
+Once you've gotten workloads running, there are important optimizations you might want to put on your cluster. Please check the doc [PREFLIGHT.md](https://github.com/google/maxtext/blob/main/PREFLIGHT.md)
+
 # Runtime Performance Results
 
 ## TPU v4
