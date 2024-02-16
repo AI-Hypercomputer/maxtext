@@ -185,6 +185,8 @@ def set_up_torchbench_gpu(model_name: str, nvidia_driver_version: str) -> Tuple[
       "curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -",
       "curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list",
       "sudo apt-get install -y nvidia-container-toolkit",
+      # Stabilize clock freqs
+      "sudo nvidia-smi --lock-gpu-clocks=1200,1200",
       "sudo systemctl restart docker",
       "sudo nvidia-smi -pm 1",
       (
