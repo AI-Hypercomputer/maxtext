@@ -240,7 +240,7 @@ def is_cpu_backend(raw_keys):
   return raw_keys["hardware"] == 'cpu'
 
 def is_gpu_backend(raw_keys):
-  """Determine whether Maxtext is intended to run on a CPU backend."""
+  """Determine whether Maxtext is intended to run on a GPU backend."""
   return raw_keys["hardware"] == 'gpu'
 
 def get_coordinator_ip_address():
