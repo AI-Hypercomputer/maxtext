@@ -171,6 +171,8 @@ class TestEngine(engine_api.Engine):
         samples_per_slot=1,
     )
 
+    out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding) ##We don't want to give this a sharding by accident
+
     return {"logits" : out_logits, "cache" : new_vars["cache"], "next_pos" : decode_state["next_pos"]+1}, result
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
