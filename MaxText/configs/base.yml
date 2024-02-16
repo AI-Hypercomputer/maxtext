@@ -101,6 +101,10 @@ jax_cache_dir: "~/jax_cache"
 # Hardware
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu' and 'cpu'
 
+# Jax Initilization configuration
+process_id: -1
+local_device_id: -1
+
 # Parallelism
 mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']
 logical_axis_rules: [

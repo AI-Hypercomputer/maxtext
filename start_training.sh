@@ -1,0 +1,98 @@
+#! /bin/bash
+set -e
+set -u
+set -o pipefail
+
+: "${NNODES:?Must set NNODES}"
+: "${NODE_RANK:?Must set NODE_RANK}"
+: "${JAX_COORDINATOR_PORT:?Must set JAX_COORDINATOR_PORT}"
+: "${JAX_COORDINATOR_ADDRESS:?Must set JAX_COORDINATOR_ADDRESS}"
+: "${GPUS_PER_NODE:?Must set GPUS_PER_NODE}"
+: "${RUN_NAME:?Must set RUN_NAME}"
+
+
+export GPUS_PER_NODE=$GPUS_PER_NODE
+export JAX_COORDINATOR_PORT=$JAX_COORDINATOR_PORT
+export JAX_COORDINATOR_ADDRESS=$JAX_COORDINATOR_ADDRESS
+export JAX_NUM_PROCESSES=$((NNODES * GPUS_PER_NODE))
+
+set_nccl_gpudirect_tcpx_specific_configuration() {
+  if [[ "$USE_GPUDIRECT_TCPX" == "yes" ]]; then
+    echo "Using GPUDirect-TCPX"
+    export NCCL_CROSS_NIC=0
+    export NCCL_ALGO=Ring
+    export NCCL_PROTO=Simple
+    export NCCL_DEBUG=INFO
+    export NCCL_NET_GDR_LEVEL=PIX
+    export NCCL_P2P_PXN_LEVEL=0
+    export NCCL_DEBUG_SUBSYS=INIT,GRAPH,ENV,TUNING,NET,VERSION
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/tcpx/lib64"
+    export NCCL_GPUDIRECTTCPX_FORCE_ACK=0
+    export NCCL_GPUDIRECTTCPX_TX_COMPLETION_NANOSLEEP=1000
+    export NCCL_DYNAMIC_CHUNK_SIZE=524288
+    export NCCL_P2P_NET_CHUNKSIZE=524288
+    export NCCL_P2P_PCI_CHUNKSIZE=524288
+    export NCCL_P2P_NVL_CHUNKSIZE=1048576
+    export NCCL_NSOCKS_PERTHREAD=4
+    export NCCL_SOCKET_NTHREADS=1
+    export NCCL_MAX_NCHANNELS=12
+    export NCCL_MIN_NCHANNELS=12
+    export NCCL_GPUDIRECTTCPX_PROGRAM_FLOW_STEERING_WAIT_MICROS=1000000
+    export NCCL_SOCKET_IFNAME=eth0
+    export NCCL_GPUDIRECTTCPX_TX_BINDINGS="eth1:8-21,112-125;eth2:8-21,112-125;eth3:60-73,164-177;eth4:60-73,164-177"
+    export NCCL_GPUDIRECTTCPX_RX_BINDINGS="eth1:22-35,124-139;eth2:22-35,124-139;eth3:74-87,178-191;eth4:74-87,178-191"
+    export NCCL_GPUDIRECTTCPX_SOCKET_IFNAME=eth1,eth2,eth3,eth4
+    export NCCL_GPUDIRECTTCPX_CTRL_DEV=eth0
+  else
+    echo "NOT using TCPX"
+  fi
+}
+
+echo "LD_LIBRARY_PATH ${LD_LIBRARY_PATH}"
+
+set_nccl_gpudirect_tcpx_specific_configuration
+
+wait_all_success_or_exit() {
+  # https://www.baeldung.com/linux/background-process-get-exit-code
+  local pids=("$@")
+  while [[ ${#pids[@]} -ne 0 ]]; do
+    all_success="true"
+    for pid in "${pids[@]}"; do
+      code=$(non_blocking_wait "$pid")
+      if [[ $code -ne 127 ]]; then
+        if [[ $code -ne 0 ]]; then
+          echo "PID $pid failed with exit code $code"
+          exit "$code"
+        fi
+      else
+        all_success="false"
+      fi
+    done
+    if [[ $all_success == "true" ]]; then
+      echo "All pids succeeded"
+      break
+    fi
+    sleep 5
+  done
+}
+non_blocking_wait() {
+  # https://www.baeldung.com/linux/background-process-get-exit-code
+  local pid=$1
+  local code=127 # special code to indicate not-finished
+  if [[ ! -d "/proc/$pid" ]]; then
+    wait "$pid"
+    code=$?
+  fi
+  echo $code
+}
+
+PIDS=()
+for ((LOCAL_DEVICE_ID=0; LOCAL_DEVICE_ID <= $((GPUS_PER_NODE - 1)); LOCAL_DEVICE_ID++)); do
+   PROCESS_ID=$(($GPUS_PER_NODE*$NODE_RANK + $LOCAL_DEVICE_ID))
+   python MaxText/train.py MaxText/configs/base.yml run_name=${RUN_NAME}_$(date +%Y-%m-%d-%H-%M) local_device_id=$LOCAL_DEVICE_ID process_id=$PROCESS_ID &
+   PID=$!
+   PIDS+=($PID)
+   echo "Launched MaxText/train.py for local_device_id: $LOCAL_DEVICE_ID process_id: $PROCESS_ID and PID $PID"
+done
+
+wait_all_success_or_exit "${PIDS[@]}"

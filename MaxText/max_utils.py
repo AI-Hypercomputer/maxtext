@@ -181,12 +181,29 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system...")
     jax.distributed.initialize()
     max_logging.log("Jax distributed system initialized!")
+  elif is_gpu_backend(raw_keys):
+    max_logging.log("Attempting to initialize the jax distributed system for GPU backend...")
+    initialize_jax_for_gpu(raw_keys)
+    max_logging.log("Jax distributed system initialized on GPU!")
   elif is_cpu_backend(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for CPU backend...")
     initialize_jax_for_cpu()
     max_logging.log("Jax distributed system initialized on CPUs!")
 
+def initialize_jax_for_gpu(raw_keys):
+  """Jax distributed initialize for GPUs. Includes retries until the coordinator is ready.
+  """
+  coordinator_ip_address = get_coordinator_ip_address()
+  coordinator_port = str(os.getenv("JAX_COORDINATOR_PORT"))
 
+  jax.distributed.initialize(
+      coordinator_address=f"{coordinator_ip_address}:{coordinator_port}",
+      num_processes=int(os.getenv("JAX_NUM_PROCESSES")),
+      process_id=raw_keys["process_id"],
+      local_device_ids=raw_keys["local_device_id"],
+  )
+
+  max_logging.log(f"JAX global devices: {jax.devices()}")
 
 def initialize_jax_for_cpu():
   """Jax distributed initialize for CPUs. Includes retries until the coordinator is ready.
@@ -221,6 +238,28 @@ def initialize_jax_for_cpu():
 def is_cpu_backend(raw_keys):
   """Determine whether Maxtext is intended to run on a CPU backend."""
   return raw_keys["hardware"] == 'cpu'
+
+def is_gpu_backend(raw_keys):
+  """Determine whether Maxtext is intended to run on a CPU backend."""
+  return raw_keys["hardware"] == 'gpu'
+
+def get_coordinator_ip_address():
+  """Get coordinator IP Address with retries"""
+  coordinator_address = os.environ.get("JAX_COORDINATOR_ADDRESS")
+  coordinator_found = False
+  lookup_attempt = 1
+  max_coordinator_lookups = 50
+  while not coordinator_found and lookup_attempt <= max_coordinator_lookups:
+    try:
+      coordinator_ip_address = socket.gethostbyname(coordinator_address)
+      coordinator_found = True
+    except socket.gaierror:
+      max_logging.log(f"Failed to recognize coordinator address {coordinator_address} on attempt {lookup_attempt}, retrying...")
+      lookup_attempt += 1
+      time.sleep(5)
+
+  max_logging.log(f"Coordinator IP address: {coordinator_ip_address}")
+  return coordinator_ip_address
 
 def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
   """Evaluates unspecified DCN/ICI parallelism values"""
