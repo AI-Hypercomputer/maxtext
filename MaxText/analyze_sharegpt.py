@@ -3,8 +3,10 @@ import json
 CUTOFF_INPUT = 1024
 CUTOFF_OUTPUT = 1024
 
-prefill_bucket_size_to_ms = {128 : 11.60, 256: 15.72, 512 : 25.35, 1024: 46.35} #UPDATE(??)
-system_time_per_decode_token_ms = 33.47/96 #UPDATE(IS IT TRUE?)
+#prefill_bucket_size_to_ms = {128 : 11.60, 256: 15.72, 512 : 25.35, 1024: 46.35} #UPDATE(??)
+prefill_bucket_size_to_ms = {64 : 14.02, 128:18.29, 256:23.59, 512:35.28, 1024: 60.28} #UPDATE(??)
+
+system_time_per_decode_token_ms = 34/96 
 
 def next_power_of_2(x):  
     return 1 if x == 0 else 2**(x - 1).bit_length()
@@ -47,6 +49,8 @@ for convo in kept_convos:
     total_generate_system_ms += generate_system_ms
 
 total_time_ms = total_prefill_system_ms + total_generate_system_ms
+input_tokens = sum([c[0] for c in kept_convos])
+
 output_tokens = sum([c[1] for c in kept_convos])
 print(f"Output tokens {output_tokens} in {total_time_ms/1000:.2f} seconds, for {output_tokens/(total_time_ms/1000):.2f} out tok/s")
 
@@ -54,3 +58,18 @@ total_prefill_sec = total_prefill_system_ms/1000
 total_generate_sec = total_generate_system_ms/1000
 
 print(f"Total time {total_time_ms/1000:.2f} seconds, split {total_prefill_sec=:.2f} seconds and {total_generate_sec=:.2f} seconds")
+
+idealized_prefill_sec = 1.1 * input_tokens/1024 * prefill_bucket_size_to_ms[1024] / 1000
+
+prefill_savings_sec = total_prefill_sec-idealized_prefill_sec
+
+
+idealized_generate_sec = total_generate_sec/2 # (Roughly save 75% on KV cache high cost on the rest)
+generate_savings_sec = total_generate_sec - idealized_generate_sec
+
+print(f"we think prefill will take {total_prefill_sec=:.2f}, we could get it to {idealized_prefill_sec=:.2f} so we'd save {prefill_savings_sec=:.2f} seconds ")
+print(f"with sparsity we could go from  {total_generate_sec=:.2f}, we could get it to {idealized_generate_sec=:.2f} so we'd save {generate_savings_sec=:.2f} seconds ")
+
+idealized_overall_time = idealized_generate_sec + idealized_prefill_sec
+
+print(f"Idealized out tokens {output_tokens} in {idealized_overall_time:.2f} seconds, for {output_tokens/idealized_overall_time:.2f} out tok/s")

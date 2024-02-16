@@ -519,8 +519,8 @@ class AttentionOp(nn.Module):
     one_hot_indices = one_hot_indices.astype(int)
 
     # We implement an efficient scatter into the cache via one-hot broadcast and addition.
-    ar_key = jax.lax.dynamic_update_index_in_dim(ar_key, one_token_key, 0, 1) # TODO(FIX DUS TO WORK)
-    ar_value = jax.lax.dynamic_update_index_in_dim(ar_value, one_token_key, 0, 1) # TODO(FIX DUS TO WORK)
+    ar_key = jax.lax.dynamic_update_index_in_dim(ar_key, one_token_key, jnp.squeeze(one_hot_indices), 0)
+    ar_value = jax.lax.dynamic_update_index_in_dim(ar_value, one_token_key, jnp.squeeze(one_hot_indices), 0)
     ar_key = nn.with_logical_constraint(ar_key, ('cache_sequence', 'cache_heads', 'cache_batch', 'cache_kv',)) #TODO DUPE
     ar_value = nn.with_logical_constraint(ar_value, ('cache_sequence', 'cache_heads', 'cache_batch', 'cache_kv',))
     cached_ar_key.value = ar_key

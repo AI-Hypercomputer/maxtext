@@ -43,7 +43,7 @@ def main(config):
   metadata = engine.get_tokenizer()
   vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
   tokenizer = vocab.tokenizer
-  tokens, true_length = token_utils.tokenize_and_pad(text, vocab, is_bos=True)
+  tokens, true_length = token_utils.tokenize_and_pad(text, vocab, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
 
   decode_state = engine.init_decode_state()
   slot=0
