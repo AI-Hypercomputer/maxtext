@@ -152,7 +152,7 @@ local volumes = import 'templates/volumes.libsonnet';
         mkdir -p ~/.cache/huggingface/accelerate/
         cat > ~/.cache/huggingface/accelerate/default_config.yaml << 'HF_CONFIG_EOF'
         compute_environment: LOCAL_MACHINE
-        distributed_type: TPU
+        distributed_type: XLA
         downcast_bf16: 'no'
         machine_rank: 0
         main_training_function: main
