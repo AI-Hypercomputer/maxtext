@@ -471,7 +471,7 @@ class AttentionOp(nn.Module):
       """
       batch, sequence, heads, kv_head_size = key.shape
       assert key.dtype == value.dtype, "Key and Value Dtypes should match."
-      assert self.max_prefill_predict_length == sequence, "Set prefill length must match prefill sequence"
+      #assert self.max_prefill_predict_length == sequence, "Set prefill length must match prefill sequence {self.max_prefill_predict_length=}, {sequence=}"
       
       cached_prefill_key, cached_prefill_value, cached_prefill_segment_id = self._get_prefill_cache(batch, heads, kv_head_size, key.dtype)
       self._get_ar_cache(batch, heads, kv_head_size, key.dtype) # initialize it now

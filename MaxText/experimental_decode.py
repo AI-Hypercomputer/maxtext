@@ -39,23 +39,25 @@ def main(config):
   metadata = engine.get_tokenizer()
   vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
   tokenizer = vocab.tokenizer
-  tokens, true_length = token_utils.tokenize_and_pad(text, vocab, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+  tokens, true_length = token_utils.tokenize_and_pad(text, vocab, is_bos=True)
+  assert tokens.size <= config.max_prefill_predict_length, "can't take too many tokens"
 
   prefill_result = engine.prefill(
       params=params, padded_tokens=tokens, true_length=true_length
   )
+  breakpoint()
   slot=1
 
   decode_state = engine.init_decode_state()
   decode_state = engine.insert(
-      prefix=prefill_result, decode_state=decode_state, slot=slot
+      prefill_result, decode_state, slot=slot
   )
 
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list = []
   for i in steps:
     decode_state, sampled_tokens = engine.generate(
-      params=params, decode_state=decode_state
+      params, decode_state
     )
     sampled_tokens_list.append(sampled_tokens)
 
