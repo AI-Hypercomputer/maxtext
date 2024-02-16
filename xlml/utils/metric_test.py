@@ -353,10 +353,19 @@ class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
         composer_project="test_project",
     )
 
+    task_metric_config = metric_config.MetricConfig(
+        tensorboard_summary=metric_config.SummaryConfig(
+            file_location="test_file_location",
+            aggregation_strategy=metric_config.AggregationStrategy.MEDIAN,
+            use_regex_file_location=True,
+        ),
+    )
+
     actual_value = metric.add_test_config_metadata(
         base_id,
         task_test_config,
         task_gcp_config,
+        task_metric_config,
         raw_meta,
     )
     print("actual_value", actual_value)
@@ -389,6 +398,13 @@ class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
             job_uuid=uuid,
             metadata_key="topology",
             metadata_value="1xv4-8",
+        )
+    )
+    expected_value[0].append(
+        bigquery.MetadataHistoryRow(
+            job_uuid=uuid,
+            metadata_key="metric_aggregation_strategy",
+            metadata_value="MEDIAN",
         )
     )
     self.assert_metric_and_dimension_equal([], [], actual_value, expected_value)

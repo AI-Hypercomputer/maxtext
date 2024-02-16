@@ -17,14 +17,14 @@
 from xlml.apis import gcp_config, metric_config, task, test_config
 from dags.vm_resource import TpuVersion
 import itertools
-from typing import List, Iterable
+from typing import List, Iterable, Dict, Any
 
 
 def get_maxtext_sweep_gke_config(
     test_owner: str,
     tpu_version: TpuVersion,
     num_slices: List[int],
-    sweep_params: {},
+    sweep_params: Dict[str, List[Any]],
     tpu_cores: int,
     tpu_zone: str,
     time_out_in_min: int,
@@ -36,6 +36,7 @@ def get_maxtext_sweep_gke_config(
     base_run_model_cmds: Iterable[str],
     base_set_up_cmds: Iterable[str] = None,
     dataset_name: metric_config.DatasetOption = metric_config.DatasetOption.BENCHMARK_DATASET,
+    metric_aggregation_strategy: metric_config.AggregationStrategy = metric_config.AggregationStrategy.MEDIAN,
 ) -> List[task.TpuXpkTask]:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=project_name,
@@ -85,7 +86,7 @@ def get_maxtext_sweep_gke_config(
     job_metric_config = metric_config.MetricConfig(
         tensorboard_summary=metric_config.SummaryConfig(
             file_location=base_output_directory,
-            aggregation_strategy=metric_config.AggregationStrategy.MEDIAN,
+            aggregation_strategy=metric_aggregation_strategy,
             use_regex_file_location=True,
         ),
     )

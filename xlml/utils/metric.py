@@ -381,6 +381,7 @@ def add_test_config_metadata(
     base_id: str,
     task_test_config: test_config.TestConfig[test_config.Accelerator],
     task_gcp_config: gcp_config.GCPConfig,
+    task_metric_config: metric_config.MetricConfig,
     metadata: List[List[bigquery.MetricHistoryRow]],
 ) -> List[List[bigquery.MetricHistoryRow]]:
   for index in range(len(metadata)):
@@ -414,6 +415,14 @@ def add_test_config_metadata(
               job_uuid=uuid,
               metadata_key="multislice_topology",
               metadata_value=f"{task_test_config.num_slices}x{task_test_config.accelerator.name}",
+          )
+      )
+    if task_metric_config is not None and task_metric_config.tensorboard_summary:
+      test_config_meta.append(
+          bigquery.MetadataHistoryRow(
+              job_uuid=uuid,
+              metadata_key="metric_aggregation_strategy",
+              metadata_value=task_metric_config.tensorboard_summary.aggregation_strategy.name,
           )
       )
     metadata[index].extend(test_config_meta)
@@ -623,7 +632,11 @@ def process_metrics(
   )
 
   metadata_history_rows_list = add_test_config_metadata(
-      base_id, task_test_config, task_gcp_config, metadata_history_rows_list
+      base_id,
+      task_test_config,
+      task_gcp_config,
+      task_metric_config,
+      metadata_history_rows_list,
   )
 
   # append profile metrics to metric_history_rows_list if any
