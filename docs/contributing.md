@@ -33,11 +33,11 @@ We use the code formatter [Pyink](https://github.com/google/pyink), which is a f
 
 *For Googlers:*
 
-Run `sudo apt install pipx; pipx install pyink` on your Cloudtop to install Pyink.
+Run `sudo apt install pipx; pipx install pyink==23.10.0` on your Cloudtop to install Pyink.
 
 *For external contributors:*
 
-Run `pip install pyink` on your machine to install Pyink.
+Run `pip install pyink==23.10.0` on your machine to install Pyink.
 
 #### Step 2: Format codes.
 
