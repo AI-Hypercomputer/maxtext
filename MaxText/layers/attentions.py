@@ -509,20 +509,24 @@ class AttentionOp(nn.Module):
     Returns:
         tuple[Array, Array]: Updated caches for key and value with new token info added
     """
-    return self.revert_kvlen_axis(cached_ar_key.value), self.revert_kvlen_axis(cached_ar_value.value) ### TODO(BIG DEAL)
     # In order to update the key, value caches with the current key and
     # value, we move the length axis to the back
     one_token_key = self.move_kvlen_axis(one_token_key)
     one_token_value = self.move_kvlen_axis(one_token_value)
 
+    ar_key = cached_ar_key.value
+    ar_value = cached_ar_value.value
+    one_hot_indices = one_hot_indices.astype(int)
+
     # We implement an efficient scatter into the cache via one-hot broadcast and addition.
-    ar_key = cached_ar_key.value + one_token_key * one_hot_indices
-    ar_value = cached_ar_value.value + one_token_value * one_hot_indices
+    ar_key = jax.lax.dynamic_update_index_in_dim(ar_key, one_token_key, 0, 1) # TODO(FIX DUS TO WORK)
+    ar_value = jax.lax.dynamic_update_index_in_dim(ar_value, one_token_key, 0, 1) # TODO(FIX DUS TO WORK)
+    ar_key = nn.with_logical_constraint(ar_key, ('cache_sequence', 'cache_heads', 'cache_batch', 'cache_kv',)) #TODO DUPE
+    ar_value = nn.with_logical_constraint(ar_value, ('cache_sequence', 'cache_heads', 'cache_batch', 'cache_kv',))
     cached_ar_key.value = ar_key
     cached_ar_value.value = ar_value
 
-    ar_key = nn.with_logical_constraint(ar_key, ('cache_sequence', 'cache_heads', 'cache_batch', 'cache_kv',)) #TODO DUPE
-    ar_value = nn.with_logical_constraint(ar_value, ('cache_sequence', 'cache_heads', 'cache_batch', 'cache_kv',))
+
 
     # Move the keys and values back to their original shapes.
     return self.revert_kvlen_axis(ar_key), self.revert_kvlen_axis(ar_value)
@@ -556,12 +560,14 @@ class AttentionOp(nn.Module):
       length, _, _, _ = cached_ar_key.value.shape
 
       # Create a OHE of the current index. NOTE: the index is increased below.
-      one_hot_indices_squeezed = jax.numpy.squeeze(jax.nn.one_hot(cache_ar_index.value, length, dtype=key.dtype), axis=0)
-      one_hot_indices = jnp.expand_dims(one_hot_indices_squeezed,axis=(1,2,3))
       one_hot_indices_int32 = jax.nn.one_hot(cache_ar_index.value, length, dtype=jnp.int32)
 
+      key = nn.with_logical_constraint(key, (BATCH, LENGTH, HEAD, D_KV))
+      value = nn.with_logical_constraint(value, (BATCH, LENGTH, HEAD, D_KV))
+
+
       # Update key, value caches with our new 1d spatial slices.
-      ar_key, ar_value = self.update_ar_key_value(key, value, cached_ar_key, cached_ar_value, one_hot_indices)
+      ar_key, ar_value = self.update_ar_key_value(key, value, cached_ar_key, cached_ar_value, cache_ar_index.value)
       cached_ar_segment_id.value = cached_ar_segment_id.value + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR * one_hot_indices_int32
       cache_ar_index.value = jnp.mod(cache_ar_index.value + 1, self.max_target_length)
 
