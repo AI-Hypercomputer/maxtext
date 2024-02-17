@@ -177,7 +177,7 @@ class AttentionOp(nn.Module):
       if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
         raise ValueError("""Decode not supported with flash attention.
                             Use `dot_product` instead.""")
-      return self.cudnn_flash_attention(query, key, value)
+      return self.cudnn_flash_attention(query, key, value), None, None
     else:
       raise ValueError(f'Unexpected attention kernel {self.attention_kernel=}.')
 
