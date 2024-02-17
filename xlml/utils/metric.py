@@ -165,6 +165,23 @@ def download_object_from_gcs(source_location: str, destination_location: str) ->
   logging.info(f"Download JSON Lines file to: {destination_location}")
 
 
+def delete_object_from_gcs(source_location: str) -> None:
+  """Delete object from GCS bucket.
+
+  Args:
+    source_location: The full path of a file in GCS.
+  """
+
+  storage_client = storage.Client()
+  bucket_name = source_location.split("/")[2]
+  object_name = "/".join(source_location.split("/")[3:])
+
+  bucket = storage_client.bucket(bucket_name)
+  blob = bucket.blob(object_name)
+  blob.delete()
+  logging.info(f"Deleted bucket file: {source_location}")
+
+
 def process_json_lines(
     base_id: str,
     file_location: str,
@@ -680,3 +697,6 @@ def process_metrics(
 
   print("Test run rows:", test_run_rows)
   bigquery_metric.insert(test_run_rows)
+
+  if task_metric_config.clean_up_gcs:
+    delete_object_from_gcs(task_metric_config.json_lines.file_location)
