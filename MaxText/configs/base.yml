@@ -81,7 +81,7 @@ logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedd
 remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
-attention: 'dot_product' # Supported attention: dot_product, flash, gpu_flash_xla, gpu_flash_triton, cudnn_flash_te
+attention: 'dot_product' # Supported attention: dot_product, flash, cudnn_flash_te
 # Combine matmuls for QKV and MLP
 fused_qkv: False
 fused_mlp: False
@@ -96,7 +96,7 @@ base_output_directory: ""
 jax_cache_dir: "~/jax_cache"
 
 # Hardware
-hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu' and 'cpu'
+hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
 # Parallelism
 mesh_axes: ['data', 'fsdp', 'sequence', 'tensor', 'autoregressive']
@@ -225,7 +225,3 @@ decode_sampling_strategy: "greedy" # decode_sampling_strategy should be one of g
 decode_sampling_nucleus_p: -1 # set if you're doing nucleus / top-p
 decode_sampling_top_k: 0 # set if you're doing top-k
 decode_sampling_temperature: 1.
-
-# enabling slurm for multiprocess in gpus
-# It must be turned on while using SLURM
-multiprocess_gpu: False

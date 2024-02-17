@@ -794,6 +794,7 @@ class Attention(nn.Module):
                                quant=self.quant,
                                num_query_heads=self.num_query_heads,
                                num_kv_heads=self.num_kv_heads,
+                               dropout_rate = self.dropout_rate,
                                dtype=self.dtype)
 
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)
