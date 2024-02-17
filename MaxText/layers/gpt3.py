@@ -113,6 +113,9 @@ class Gpt3MultiHeadAttention(nn.Module):
       num_heads: number of attention heads. Features (i.e. inputs_q.shape[-1])
         should be divisible by the number of heads.
       head_dim: dimension of each head.
+      max_target_length: maximum length of output
+      max_prefill_predict_length: size of the maximum prefill
+      mesh: device mesh
       dtype: the dtype of the computation.
       dropout_rate: dropout rate
       kernel_init: initializer for the kernel of the Dense layers.
@@ -129,6 +132,7 @@ class Gpt3MultiHeadAttention(nn.Module):
   num_heads: int
   head_dim: int
   max_target_length: int
+  max_prefill_predict_length: int
   mesh: Mesh
   attention_kernel: str
   dtype: DType = jnp.float32
@@ -280,6 +284,7 @@ class Gpt3DecoderLayer(nn.Module):
       dtype=cfg.dtype,
       head_dim=cfg.head_dim,
       max_target_length=cfg.max_target_length,
+      max_prefill_predict_length=cfg.max_prefill_predict_length,
       attention_kernel=cfg.attention,
       mesh=mesh,
       dropout_rate=cfg.dropout_rate,

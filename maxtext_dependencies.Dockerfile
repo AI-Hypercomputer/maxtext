@@ -1,5 +1,5 @@
 # Use Python 3.10 as the base image
-FROM python:3.10-slim
+FROM python:3.10-slim-bullseye
 
 # Install system dependencies and Git
 RUN apt-get update && apt-get install -y curl gnupg git

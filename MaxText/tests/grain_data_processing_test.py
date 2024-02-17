@@ -25,7 +25,6 @@ import unittest
 
 import pyconfig
 from input_pipeline import _grain_data_processing
-from multihost_dataloading import get_next_batch_sharded
 
 if os.path.exists("../../gcsfuse"):
     os.system("fusermount -u ../../gcsfuse")
@@ -47,7 +46,7 @@ class GrainDataProcessingTest(unittest.TestCase):
                             data_sharding = ['data'],
                             base_output_directory = "gs://max-experiments/",
                             dataset_path = "../../gcsfuse",
-                            assets_path = "../assets",
+                            tokenizer_path = "../assets/tokenizer",
                             enable_checkpointing=False,
                             dataset_type="c4-array_record",
                             dataset_name='array-record/c4/en/3.0.1',
@@ -71,18 +70,18 @@ class GrainDataProcessingTest(unittest.TestCase):
         # mesh_shape_1d = (len(jax.devices()),)
         # mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), self.config.mesh_axes)
 
-        train_iter, eval_iter, test_iter, _ = _grain_data_processing.preprocess_dataset(
+        train_iter, eval_iter, test_iter = _grain_data_processing.preprocess_dataset(
                 self.config,
                 self.mesh,
                 self.train_ds, self.eval_ds,
-                vocab_path=os.path.join(self.config.assets_path, self.config.vocab_relative_path))
+                vocab_path=self.config.tokenizer_path)
         return train_iter, eval_iter, test_iter
 
     def test_train_ds(self):
         expected_shape = [jax.device_count(), self.config.max_target_length]
         # For training we pack multiple short examples in one example.
         # *_position and *_segmentation indicate the boundaries.
-        batch = get_next_batch_sharded(self.train_iter, self.mesh)
+        batch = next(self.train_iter)
         self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
             'inputs': expected_shape,
             'inputs_position': expected_shape,
@@ -94,7 +93,7 @@ class GrainDataProcessingTest(unittest.TestCase):
 
     def test_eval_ds(self):
         expected_shape = [jax.device_count(), self.config.max_target_length]
-        batch = get_next_batch_sharded(self.eval_iter, self.mesh)
+        batch = next(self.eval_iter)
         self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
             'inputs': expected_shape,
             'inputs_position': expected_shape,
@@ -107,7 +106,7 @@ class GrainDataProcessingTest(unittest.TestCase):
 
     def test_predict_ds(self):
         expected_shape = [jax.device_count(), self.config.max_target_length]
-        batch = get_next_batch_sharded(self.predict_iter, self.mesh)
+        batch = next(self.predict_iter)
         self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
             'inputs': expected_shape,
             'inputs_position': expected_shape,
@@ -128,6 +127,19 @@ class GrainDataProcessingTest(unittest.TestCase):
         self.assertTrue((batch1['targets_segmentation']==batch2['targets_segmentation']).all())
         self.assertTrue((batch1['inputs_position']==batch2['inputs_position']).all())
         self.assertTrue((batch1['targets_position']==batch2['targets_position']).all())
+
+    def test_for_loop_repeatable(self):
+        def get_first_batch(iterator):
+            batch = None
+            for batch in iterator:
+                break
+            return batch
+
+        eval_batch1 = get_first_batch(self.eval_iter)
+        eval_batch2 = get_first_batch(self.eval_iter)
+        self.assertTrue((eval_batch1['inputs']==eval_batch2['inputs']).all())
+        self.assertTrue((eval_batch1['targets']==eval_batch2['targets']).all())
+
 
 if __name__ == '__main__':
   unittest.main()

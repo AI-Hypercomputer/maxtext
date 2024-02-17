@@ -22,5 +22,6 @@ base_num_decoder_layers: 18
 head_dim: 256
 mlp_activations: ["gelu","linear"]
 vocab_size: 256128
-vocab_relative_path: "tokenizer.gamma"
 decoder_block: "gamma"
+normalization_layer_epsilon: 1.e-06
+logits_via_embedding: True

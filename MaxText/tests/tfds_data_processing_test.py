@@ -27,8 +27,7 @@ import tensorflow_datasets as tfds
 
 import pyconfig
 from input_pipeline import _tfds_data_processing
-from multihost_dataloading import get_next_batch_sharded
-
+from input_pipeline import input_pipeline_interface
 
 class TfdsDataProcessingTest(unittest.TestCase):
 
@@ -39,7 +38,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
                         data_sharding = ['data'],
                         base_output_directory = "gs://max-experiments/",
                         dataset_path = "gs://maxtext-dataset/",
-                        assets_path = "../assets",
+                        tokenizer_path = "../assets/tokenizer",
                         enable_checkpointing=False)
     os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
     self.config = pyconfig.config
@@ -62,19 +61,18 @@ class TfdsDataProcessingTest(unittest.TestCase):
   def _get_preprocessed_datasets(self):
     mesh_shape_1d = (len(jax.devices()),)
     mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), self.config.mesh_axes)
-
-    train_iter, eval_iter, test_iter, _ = _tfds_data_processing.preprocess_dataset(
+    sp_tokenizer = input_pipeline_interface.get_tokenizer(self.config.tokenizer_path)
+    train_iter, eval_iter, test_iter = _tfds_data_processing.preprocess_dataset(
               self.config,
               mesh,
-              self.train_ds, self.eval_ds,
-              vocab_path=os.path.join(self.config.assets_path, self.config.vocab_relative_path))
+              self.train_ds, self.eval_ds, sp_tokenizer)
     return train_iter, eval_iter, test_iter
 
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
     # For training we pack multiple short examples in one example.
     # *_position and *_segmentation indicate the boundaries.
-    batch = get_next_batch_sharded(self.train_iter, self.mesh)
+    batch = next(self.train_iter)
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
         'inputs': expected_shape,
         'inputs_position': expected_shape,
@@ -87,7 +85,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
   def test_eval_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
-    batch = get_next_batch_sharded(self.eval_iter, self.mesh)
+    batch = next(self.eval_iter)
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
        'inputs': expected_shape,
        'targets': expected_shape,
@@ -96,7 +94,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
   def test_predict_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
-    batch = get_next_batch_sharded(self.predict_iter, self.mesh)
+    batch = next(self.predict_iter)
     self.assertEqual({k: list(v.shape) for k, v in batch.items()}, {
         'inputs': expected_shape,
         'targets': expected_shape,
@@ -115,16 +113,29 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
 
   def test_batch_determinism(self):
-    batch1 = get_next_batch_sharded(self.train_iter, self.mesh)
+    batch1 = next(self.train_iter)
     self.train_ds, _ = self._get_datasets()
     train_iter2, _, _= self._get_preprocessed_datasets()
-    batch2 = get_next_batch_sharded(train_iter2, self.mesh)
+    batch2 = next(train_iter2)
     self.assertTrue(tf.reduce_all(tf.equal(batch1['inputs'], batch2['inputs'])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1['targets'], batch2['targets'])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1['inputs_segmentation'], batch2['inputs_segmentation'])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1['targets_segmentation'], batch2['targets_segmentation'])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1['inputs_position'], batch2['inputs_position'])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1['targets_position'], batch2['targets_position'])))
+
+  def test_for_loop_repeatable(self):
+    def get_first_batch(iterator):
+      batch = None
+      for batch in iterator:
+        break
+      return batch
+
+    eval_batch1 = get_first_batch(self.eval_iter)
+    eval_batch2 = get_first_batch(self.eval_iter)
+    self.assertTrue((eval_batch1['inputs']==eval_batch2['inputs']).all())
+    self.assertTrue((eval_batch1['targets']==eval_batch2['targets']).all())
+
 
 if __name__ == '__main__':
   unittest.main()

@@ -12,17 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# model config for gpt3-52k, i.e. a fake and small model for testing purpose only
+# model config for gpt3-6b
 
-base_emb_dim: 16
-base_num_query_heads: 2
-base_num_kv_heads: 2
-base_mlp_dim: 64
-base_num_decoder_layers: 1
-head_dim: 8
-trainable_position_size: 2048
+base_emb_dim: 3072
+base_num_query_heads: 12
+base_num_kv_heads: 12
+base_mlp_dim: 12288
+base_num_decoder_layers: 48
+head_dim: 256
+max_target_length: 1024
+trainable_position_size: 16384
 mlp_activations: ["gelu"]
-vocab_size: 1024
+vocab_size: 32768
 enable_dropout: False
 logits_via_embedding: True
 normalize_embedding_logits: False
@@ -37,4 +38,3 @@ adam_b1: 0.9
 adam_b2: 0.95
 adam_eps: 1.e-8
 adam_weight_decay: 0.1
-attention: "dot_product"  # head_dim 8 is too small for splash/flash attention

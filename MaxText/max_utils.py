@@ -256,11 +256,11 @@ def create_device_mesh(config, devices=None):
   multi_slice_env = num_slices > 1
 
   dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism,
-                     config.dcn_sequence_parallelism, config.dcn_tensor_parallelism,
-                     config.dcn_autoregressive_parallelism]
+                     config.dcn_fsdp_transpose_parallelism, config.dcn_sequence_parallelism,
+                     config.dcn_tensor_parallelism, config.dcn_autoregressive_parallelism]
   ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism,
-                     config.ici_sequence_parallelism, config.ici_tensor_parallelism,
-                     config.ici_autoregressive_parallelism]
+                     config.ici_fsdp_transpose_parallelism, config.ici_sequence_parallelism,
+                     config.ici_tensor_parallelism, config.ici_autoregressive_parallelism]
 
   # Find possible unspecified parallelisms
   ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, 'ICI')
@@ -525,7 +525,7 @@ def get_kv_cache_annotations(model, config, rng, mesh):
   def init_kv_cache(model, config):
     input_shape = (
       config.global_batch_size_to_load,
-      config.max_target_length
+      config.max_prefill_predict_length
     )
 
     model_vars = model.init({'params': rng, 'dropout': rng, 'aqt': rng},

@@ -14,10 +14,10 @@ export M_ASYNC_CHECKPOINTING=false
 #python3 MaxText/llama_or_mistral_ckpt.py --base-model-path /tmp/meta-ckpt --model-size llama2-7b --maxtext-model-path gs://maxtext-llama/test/${idx}/decode-ckpt-maxtext/
 
 # Load after directly from parameter checkpoint
-python3 MaxText/decode.py MaxText/configs/base.yml load_parameters_path=${base_ckpt_path} run_name=runner_direct_${idx} per_device_batch_size=1 model_name='llama2-7b' assets_path=gs://maxtext-llama/llama2-7b ici_tensor_parallelism=4 max_prefill_predict_length=4  max_target_length=16 prompt="I love to" autoregressive_decode_assert="read. I love to write. I love to share." attention=dot_product
+python3 MaxText/decode.py MaxText/configs/base.yml load_parameters_path=${base_ckpt_path} run_name=runner_direct_${idx} per_device_batch_size=1 model_name='llama2-7b' ici_tensor_parallelism=4 max_prefill_predict_length=4  max_target_length=16 prompt="I love to" autoregressive_decode_assert="read. I love to write. I love to share." attention=dot_product
 
 #TODO(Training with Llama is not complete)
-python3 MaxText/train.py MaxText/configs/base.yml load_parameters_path=${base_ckpt_path} run_name=runner_${idx}  per_device_batch_size=1 model_name='llama2-7b' assets_path=gs://maxtext-llama/llama2-7b ici_tensor_parallelism=4 steps=10 max_target_length=1024 per_device_batch_size=1
+python3 MaxText/train.py MaxText/configs/base.yml load_parameters_path=${base_ckpt_path} run_name=runner_${idx}  per_device_batch_size=1 model_name='llama2-7b' ici_tensor_parallelism=4 steps=10 max_target_length=1024 per_device_batch_size=1
 
 # generate parameter checkpoint from Llama's "fine-tuning" run
 unset M_LOAD_PARAMETERS_PATH
@@ -27,4 +27,4 @@ python3 MaxText/generate_param_only_checkpoint.py MaxText/configs/base.yml load_
 export new_ckpt_path=${M_BASE_OUTPUT_DIRECTORY}/${PARAMETER_CHECKPOINT_RUN}/checkpoints/0/default
 
 # Load fine-tuned parameter checkpoint into decode.py
-python3 MaxText/decode.py MaxText/configs/base.yml load_parameters_path=${new_ckpt_path} run_name=runner_direct_${idx} per_device_batch_size=1 model_name='llama2-7b' assets_path=gs://maxtext-llama/llama2-7b ici_tensor_parallelism=4 max_prefill_predict_length=4  max_target_length=16 prompt="I love to" autoregressive_decode_assert="read. I love to write. I love to share." attention=dot_product scan_layers=false
+python3 MaxText/decode.py MaxText/configs/base.yml load_parameters_path=${new_ckpt_path} run_name=runner_direct_${idx} per_device_batch_size=1 model_name='llama2-7b' ici_tensor_parallelism=4 max_prefill_predict_length=4  max_target_length=16 prompt="I love to" autoregressive_decode_assert="read. I love to write. I love to share." attention=dot_product scan_layers=false

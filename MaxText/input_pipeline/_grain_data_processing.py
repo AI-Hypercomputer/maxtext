@@ -28,6 +28,8 @@ import tokenizer
 from input_pipeline import _grain_operations
 from input_pipeline import _grain_tokenizer
 
+import multihost_dataloading
+
 def get_datasets(
   config: ml_collections.ConfigDict
 ):
@@ -52,14 +54,6 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
                         add_eos = True
                         ):
   """Use grain to pre-process the dataset and return iterators"""
-  if vocab_path is None:
-    vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
-
-  # Load tokenizer
-  sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
-                                          add_bos=add_bos,
-                                          add_eos=add_eos)
-
   # Set global batch size.
   global_batch_size_to_load = config.global_batch_size_to_load
 
@@ -108,7 +102,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       max_length=config.max_target_length,
       data_shuffle_seed=data_shuffle_seed)
 
-  return train_iter, eval_iter, predict_iter, sp_tokenizer
+  return train_iter, eval_iter, predict_iter
 
 def preprocessing_pipeline(
   dataset,
@@ -169,6 +163,7 @@ def preprocessing_pipeline(
       worker_count=grain_worker_count,
   )
 
-  data_iter = iter(dataloader)
+  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
 
-  return data_iter
+  # Return multi-host jax.Array prep iterator
+  return multihost_gen

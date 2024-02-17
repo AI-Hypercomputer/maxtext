@@ -24,6 +24,7 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 import jax
 
+import multihost_dataloading
 import tokenizer
 import sequence_packing
 
@@ -161,7 +162,10 @@ def preprocessing_pipeline(
   if prefetch_size:
     dataset = dataset.prefetch(prefetch_size)
 
-  return iter(dataset.as_numpy_iterator())
+  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataset, global_mesh)
+
+  # Return multi-host jax.Array prep iterator
+  return multihost_gen
 
 
 def get_datasets(
@@ -187,7 +191,7 @@ def get_datasets(
   # eval_data = get_raw_dataset(eval_ds_builder, config.eval_split)
   eval_ds = eval_ds_builder.as_dataset(split=config.eval_split,
                                           read_config = read_config,
-                                          shuffle_files=config.enable_data_shuffling)
+                                          shuffle_files=False)
   eval_ds = eval_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
   eval_ds = normalize_features(eval_ds)
 
@@ -195,21 +199,10 @@ def get_datasets(
 
 def preprocess_dataset(config: ml_collections.ConfigDict,
                         global_mesh,
-                        train_ds, eval_ds,
-                        vocab_path: Optional[str] = None,
+                        train_ds, eval_ds, sp_tokenizer,
                         data_shuffle_seed = 0,
-                        add_bos = True,
-                        add_eos = True
                         ):
   """Pre-process the dataset and return iterators"""
-  if vocab_path is None:
-    vocab_path = os.path.expanduser('~/lm1b_sentencepiece_model')
-
-  # Load tokenizer
-  sp_tokenizer = tokenizer.load_tokenizer(vocab_path=vocab_path,
-                                          add_bos=add_bos,
-                                          add_eos=add_eos)
-
   # Tokenize data.
   train_ds = train_ds.map(
       tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
@@ -244,10 +237,11 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       eval_ds,
       eval_batch_size,
       global_mesh,
-      shuffle=config.enable_data_shuffling,
+      shuffle=False,
       pack_examples=False,
       max_length=config.max_target_length,
       shift=False,
+      drop_remainder=False,
       data_shuffle_seed = data_shuffle_seed,)
 
   predict_iter = preprocessing_pipeline(
@@ -261,5 +255,4 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       drop_remainder=False,
       data_shuffle_seed = data_shuffle_seed,)
 
-  return train_iter, eval_iter, predict_iter, sp_tokenizer
-
+  return train_iter, eval_iter, predict_iter
