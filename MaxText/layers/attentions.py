@@ -168,11 +168,6 @@ class AttentionOp(nn.Module):
         raise ValueError("""Decode not supported with flash attention.
                             Use `dot_product` instead.""")
       return self.tpu_flash_attention(query, key, value, decoder_segment_ids), None, None
-    elif self.attention_kernel == 'gpu_flash_xla' or self.attention_kernel == 'gpu_flash_triton':
-      if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-        raise ValueError("""Decode not supported with flash attention.
-                            Use `dot_product` instead.""")
-      return self.gpu_flash_attention(query, key, value)
     elif self.attention_kernel == 'cudnn_flash_te':
       if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
         raise ValueError("""Decode not supported with flash attention.
@@ -248,41 +243,6 @@ class AttentionOp(nn.Module):
     x = wrap_flash_attention(query, key, value, decoder_segment_ids)
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
     return x
-
-  def gpu_flash_attention(
-      self,
-      query: Array,
-      key: Array,
-      value: Array,
-  ) -> Array:
-    """GPU Flash Attention."""
-    b, n, s, h = key.shape # pylint: disable=unused-variable
-    if self.attention_kernel == "gpu_flash_xla":
-      bwd_pass_impl = "xla"
-    elif self.attention_kernel == "gpu_flash_triton":
-      bwd_pass_impl = "triton"
-    else:
-      raise ValueError(f"Can't convert {self.attention_kernel } to a bwd_pass_impl")
-
-    axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
-    segment_axis_names = nn.logical_to_mesh_axes((BATCH, LENGTH))
-
-    @functools.partial(
-        shard_map,
-        mesh = self.mesh,
-        in_specs = (
-          axis_names,
-          axis_names,
-          axis_names,
-          segment_axis_names),
-        out_specs = axis_names,
-        check_rep=False)
-    def wrap_gpu_flash_attention(query, key, value):
-      return pallas_attention.mha(
-        query, key, value, sm_scale=1.0 / math.sqrt(h), backward_pass_impl=bwd_pass_impl,
-        num_stages = 1, causal = True, segment_ids = None
-      )
-    return wrap_gpu_flash_attention(query, key, value)
   
   def compute_local_attention(self, 
                               attn_weights: Array, 
