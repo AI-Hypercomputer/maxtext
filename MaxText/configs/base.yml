@@ -84,7 +84,7 @@ logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedd
 remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
-attention: 'flash' # Supported attention: dot_product, flash, gpu_flash_xla, gpu_flash_triton
+attention: 'dot_product' # Supported attention: dot_product, flash, gpu_flash_xla, gpu_flash_triton, cudnn_flash_te
 # Combine matmuls for QKV and MLP
 fused_qkv: False
 fused_mlp: False
@@ -239,3 +239,7 @@ decode_sampling_temperature: 1.
 
 eval_interval: -1  # the specific number of train step between eval_step
 target_eval_loss: 0.  # early stop once reaching target eval_loss
+
+# enabling slurm for multiprocess in gpus
+# It must be turned on while using SLURM
+multiprocess_gpu: False
