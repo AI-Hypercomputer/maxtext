@@ -45,7 +45,6 @@ def main(config):
   prefill_result = engine.prefill(
       params=params, padded_tokens=tokens, true_length=true_length
   )
-  breakpoint()
   slot=1
 
   decode_state = engine.init_decode_state()

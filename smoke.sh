@@ -1,0 +1,1 @@
+python MaxText/experimental_decode.py MaxText/configs/base.yml  per_device_batch_size=1 run_name=runner_2024-02-14-06-18 max_prefill_predict_length=16 max_target_length=48 dataset_path=gs://maxtext-dataset steps=10 async_checkpointing=false scan_layers=true attention=dot_product 'prompt=I love to'  autoregressive_decode_assert=" travel and I love to write about it ADVERSE"
