@@ -183,11 +183,17 @@ class TestEngine(engine_api.Engine):
       decode_state: DecodeState,
       slot: int,
   ) -> DecodeState:
-    target_idx = 0 if self.config.scan_layers == False else self.config.param_scan_axis
+    target_idx = 2 if self.config.scan_layers == False else self.config.param_scan_axis
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
 
     def copy(partial_cache, full_cache):
-      return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, target_idx)
+      if len(full_cache.shape) == 4:
+        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, target_idx)
+      elif len(full_cache.shape) == 2:
+        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, 0)
+      else:
+        return full_cache
+      
 
     inserted_cache = jax.tree_map(copy, unboxed_prefix['cache'], decode_state['cache'])
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state['logits'], unboxed_prefix['logits'], slot, 0)
