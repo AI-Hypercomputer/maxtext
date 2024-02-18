@@ -119,8 +119,8 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
   def test_setup_initial_state(self):
     rng = random.PRNGKey(0)
     tx = optax.adam(learning_rate=0.001)
-    state, _ = max_utils.setup_initial_state(
-      self.model, tx, self.config, rng, self.mesh, None)
+    state, _, _ = max_utils.setup_initial_state(
+      self.model, None, tx, self.config, rng, self.mesh, None)
     self.assertEqual(state.tx, tx)
     self.assertNotEqual(state.opt_state, {})
 

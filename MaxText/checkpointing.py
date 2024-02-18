@@ -16,21 +16,22 @@
 
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
+from typing import Optional, Union
 from etils import epath
-import jax
-from orbax import checkpoint
-from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, Checkpointer, AsyncCheckpointer
-from orbax.checkpoint import type_handlers
+from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions
+import orbax.checkpoint
+import grain.python as grain
 
 import max_logging
-
+from multihost_dataloading import MultiHostDataLoadIterator
 from flax.training import train_state
 
 def create_orbax_checkpoint_manager(
     checkpoint_dir: str,
     enable_checkpointing: bool,
     use_async: bool,
-    save_interval_steps: int
+    save_interval_steps: int,
+    dataset_type: Optional[str] = 'c4'
 ):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -38,17 +39,21 @@ def create_orbax_checkpoint_manager(
     return None
   max_logging.log("Creating checkpoint manager...")
   p = epath.Path(checkpoint_dir)
-  if use_async:
-    checkpointer = AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler())
+
+  if dataset_type=='c4-array_record':
+    item_names = ('default', 'iter')
+  elif dataset_type=='c4':
+    item_names = ('default',)
   else:
-    checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
+    raise ValueError(f"Unknown dataset_type {dataset_type}. dataset_type must be c4, c4-array_record or synthetic")
 
   mngr = CheckpointManager(
       p,
-      checkpointer,
-      options=CheckpointManagerOptions(
+      item_names = item_names,
+      options = CheckpointManagerOptions(
           create=True,
-          save_interval_steps=save_interval_steps
+          save_interval_steps=save_interval_steps,
+          enable_async_checkpointing=use_async,
       )
   )
   max_logging.log("Checkpoint manager created!")
@@ -56,11 +61,11 @@ def create_orbax_checkpoint_manager(
 
 
 def load_state_if_possible(checkpoint_manager: CheckpointManager,
+                           data_iterator: Union[MultiHostDataLoadIterator, None],
                            load_parameters_from_path: str,
                            load_full_state_from_path: str,
                            abstract_unboxed_pre_state: train_state.TrainState,
-                           mesh,
-                           state_mesh_annotations):
+                           dataset_type: Optional[str] = 'c4'):
   """Loads TrainState as possible from the inputs.
 
   Args:
@@ -82,47 +87,46 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
      At most one will be non-None. Both can be None if neither checkpoint is
      set.
   """
-  def map_to_pspec(data, pspec):
-    if isinstance(data, (jax.Array, jax.ShapeDtypeStruct)) \
-          and pspec is not None:
-      return type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec, dtype = data.dtype)
-    else:
-      return type_handlers.RestoreArgs()
-  restore_args = jax.tree_util.tree_map(map_to_pspec,
-                                        abstract_unboxed_pre_state,
-                                        state_mesh_annotations)
 
   if checkpoint_manager is not None:
     max_logging.log("checkpoint manager exists so trying to load this run's existing checkpoint")
 
     latest_step = checkpoint_manager.latest_step()
     if latest_step is not None:
-      max_logging.log(f"restoring state from this run's directory latest step \
+      max_logging.log(f"restoring from this run's directory latest step \
           {latest_step}")
-      return checkpoint_manager.restore(latest_step, abstract_unboxed_pre_state,
-                                        {"restore_args" : restore_args}), None
-    else:
-      max_logging.log("failed to find preexisting checkpoint for this run")
+      if dataset_type == 'c4-array_record' and data_iterator is not None:
+        return checkpoint_manager.restore(latest_step,
+                                      args=orbax.checkpoint.args.Composite(
+                                      default=orbax.checkpoint.args.StandardRestore(abstract_unboxed_pre_state),
+                                      iter=grain.PyGrainCheckpointRestore(data_iterator.local_iterator)
+                                    )), None
+      elif dataset_type == 'c4':
+        return checkpoint_manager.restore(latest_step,
+                                      args=orbax.checkpoint.args.Composite(
+                                      default=orbax.checkpoint.args.StandardRestore(abstract_unboxed_pre_state),
+                                    )), None
+      else:
+        raise ValueError(f"Unknown dataset_type {dataset_type}. dataset_type must be c4, c4-array_record or synthetic")
 
   if load_parameters_from_path != "":
     max_logging.log(f"restoring params from {load_parameters_from_path=}")
     p = epath.Path(load_parameters_from_path)
-    checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
-    restore_args_param_train_state = train_state.TrainState(step = restore_args.step, params = restore_args.params,\
-                                                            tx=None,  opt_state = {}, apply_fn=None) # type: ignore
-    abstract_param_train_state = train_state.TrainState(step = abstract_unboxed_pre_state.step,\
-                                                        params = abstract_unboxed_pre_state.params,\
-                                                        tx=None,opt_state = {}, apply_fn=None) # type: ignore
-    full_restored_state = checkpointer.restore(p, item = abstract_param_train_state,\
-                                               restore_args = restore_args_param_train_state)
-    return None, full_restored_state.params
+    ckptr = orbax.checkpoint.PyTreeCheckpointer()
+    metadata = ckptr.metadata(p)
+    restore_args = orbax.checkpoint.checkpoint_utils.construct_restore_args(metadata)
+    restored = ckptr.restore(p, item = {'params': metadata['params']}, transforms={},
+                             restore_args = {'params': restore_args['params']})
+
+    return None, restored['params']
+
   elif load_full_state_from_path != "":
     max_logging.log(f"restoring full state from {load_full_state_from_path=}")
     p = epath.Path(load_full_state_from_path)
-    checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
-    return checkpointer.restore(p,
-                                item=abstract_unboxed_pre_state,
-                                restore_args=restore_args), None
+    ckptr = orbax.checkpoint.StandardCheckpointer()
+    restored = ckptr.restore(p, args=orbax.checkpoint.args.StandardRestore(abstract_unboxed_pre_state))
+    return  {'default': restored, 'iter': None}, None
+
   else:
     max_logging.log("No existing checkpoints found, not restoring checkpoint.")
     return None, None
