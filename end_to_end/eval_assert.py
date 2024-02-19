@@ -63,7 +63,7 @@ def test_final_loss(metrics_file, target_loss):
     assert avg_final_loss < target_loss
     print('Final loss test passed.')
 
-def test_checkpointing(metrics_file, target, dataset_type):
+def test_checkpointing(metrics_file, target):
   """Asserts over loss values from loaded checkpoint"""
   metrics_file_saved = 'saved_' + metrics_file
   metrics_file_restored = 'restored_' + metrics_file
@@ -76,12 +76,7 @@ def test_checkpointing(metrics_file, target, dataset_type):
     # step in saved checkpoint to loss of first step in restored checkpoint
     print("saved loss: ", saved_loss)
     print("restored loss: ", restored_loss)
-    if dataset_type=='c4':
-      assert isclose(saved_loss, restored_loss, rel_tol=0.1)
-    elif dataset_type=='c4-array_record':
-      assert saved_loss==restored_loss
-    else:
-      raise ValueError(f"Unknown dataset_type {dataset_type}. dataset_type must be c4, c4-array_record or synthetic")
+    assert isclose(saved_loss, restored_loss, rel_tol=0.1)
     print('checkpointing test passed.')
 
 def test_determinism(metrics_file, target):
@@ -114,9 +109,7 @@ def main(argv: Sequence[str]) -> None:
   if test_scenario == 'metrics_average':
     assert_metric_average(*test_vars)
   elif test_scenario == 'checkpoint_save_restore':
-    test_checkpointing(*test_vars, dataset_type='c4')
-  elif test_scenario == 'grain_checkpoint_save_restore':
-    test_checkpointing(*test_vars, dataset_type='c4-array_record')
+    test_checkpointing(*test_vars)
   elif test_scenario == 'determinism':
     test_determinism(*test_vars)
   elif test_scenario == 'vocab_creation':

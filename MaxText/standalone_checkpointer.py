@@ -33,7 +33,7 @@ import checkpointing
 import max_utils
 import max_logging
 import pyconfig
-from train import setup_mesh_and_model, get_first_step, validate_train_config, save_checkpoint
+from train import setup_mesh_and_model, get_first_step, validate_train_config
 
 from layers import models
 
@@ -50,24 +50,25 @@ def checkpoint_loop(config, state=None):
   """
   init_rng, writer, checkpoint_manager, mesh, model, _, tx = setup_mesh_and_model(config)
 
-  unboxed_abstract_state, _, _ = max_utils.get_abstract_state(model, tx,
+  unboxed_abstract_state, state_mesh_annotations = max_utils.get_abstract_state(model, tx,
                                                 config, init_rng, mesh, is_training=True)
   # A barrier to sync all hosts before starting to restore checkpoint
   jax.experimental.multihost_utils.sync_global_devices("Barrier before load")
   checkpoint_load_start = datetime.datetime.now()
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     state, _ = checkpointing.load_state_if_possible(checkpoint_manager,
-                                                None,
                                                 config.load_parameters_path,
                                                 config.load_full_state_path,
-                                                unboxed_abstract_state)
+                                                unboxed_abstract_state,
+                                                mesh,
+                                                state_mesh_annotations)
   jax.block_until_ready(state)
   checkpoint_load_end = datetime.datetime.now()
   if state is not None: # Checkpoint was available for restore
     if jax.process_index() == 0:
       max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint restored in : {checkpoint_load_end - checkpoint_load_start}")
   else: # Checkpoint was unavailable, state needs to be initialized
-    state, _, _ = max_utils.setup_training_state(model, None,
+    state, state_mesh_annotations = max_utils.setup_training_state(model,
           tx, config, init_rng, mesh, checkpoint_manager)
 
   start_step = get_first_step(state) # this is the start_step for training
@@ -76,7 +77,7 @@ def checkpoint_loop(config, state=None):
       start_time = datetime.datetime.now()
       # A barrier to sync all hosts before starting to save checkpoint
       jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
-      if save_checkpoint(checkpoint_manager, step, state):
+      if checkpoint_manager.save(step, state):
         checkpoint_manager.wait_until_finished()
         end_time = datetime.datetime.now()
         if jax.process_index() == 0:
