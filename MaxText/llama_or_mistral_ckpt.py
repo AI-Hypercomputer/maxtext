@@ -38,7 +38,6 @@ import jax
 import jax.numpy as jnp
 from flax.training import train_state
 import max_logging
-from train import save_checkpoint
 import torch
 import sys
 
@@ -375,7 +374,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
   )
 
   if checkpoint_manager is not None:
-    if save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
+    if checkpoint_manager.save(step_number_to_save_new_ckpt, state_new):
       max_logging.log(
           f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
     # Upon preemption, exit when and only when all ongoing saves are complete.

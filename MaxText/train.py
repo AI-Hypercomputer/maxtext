@@ -29,11 +29,9 @@ from typing import Sequence
 from absl import app
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
-import grain.python as grain
 import jax
 import numpy as np
 import optax
-import orbax.checkpoint
 
 import checkpointing
 import max_utils
@@ -161,18 +159,6 @@ def write_metrics_to_tensorboard(writer, metrics, step, config):
       )
       writer.flush()
 
-def save_checkpoint(checkpoint_manager, step, state, dataset_type='c4', data_iterator=None):
-  """Wrapper for saving checkpoint"""
-  if dataset_type == 'c4':
-    return checkpoint_manager.save(step, args=orbax.checkpoint.args.Composite(
-                                                    default=orbax.checkpoint.args.StandardSave(state)))
-  elif dataset_type == 'c4-array_record':
-    return checkpoint_manager.save(step, args=orbax.checkpoint.args.Composite(
-                                                    default=orbax.checkpoint.args.StandardSave(state),
-                                                    iter=grain.PyGrainCheckpointSave(data_iterator.local_iterator)
-                                                    ))
-  else:
-    raise ValueError(f"Unknown dataset_type {dataset_type}. dataset_type must be c4, c4-array_record or synthetic")
 # -----------------------------------------------------------------------------
 # Top-level Functions
 # -----------------------------------------------------------------------------
@@ -311,7 +297,6 @@ def setup_mesh_and_model(config):
       config.enable_checkpointing,
       config.async_checkpointing,
       config.checkpoint_period,
-      config.dataset_type,
   )
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
@@ -346,7 +331,7 @@ def setup_train_loop(config):
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
   data_iterator, eval_data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(model, data_iterator,
+  state, state_mesh_annotations = max_utils.setup_training_state(model,
           tx, config, init_rng, mesh, checkpoint_manager)
 
   return ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
@@ -442,9 +427,8 @@ def train_loop(config, state=None):
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
-      if save_checkpoint(checkpoint_manager, step, state, config.dataset_type, data_iterator):
+      if checkpoint_manager.save(step, state):
         max_logging.log(f"saved a checkpoint at step {step}")
-
       # Upon preemption, exit when and only when all ongoing saves are complete.
       if checkpoint_manager.reached_preemption(step):
         checkpoint_manager.wait_until_finished()
@@ -472,8 +456,6 @@ def train_loop(config, state=None):
     if step == last_profiling_step:
       max_utils.deactivate_profiler(config)
 
-  if checkpoint_manager is not None:
-    checkpoint_manager.wait_until_finished()
   write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config) # final step metrics
   max_utils.close_summary_writer(writer)
   return state

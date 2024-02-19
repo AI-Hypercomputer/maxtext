@@ -49,7 +49,6 @@ import jax
 import gc
 import max_logging
 from psutil import Process
-from train import save_checkpoint
 import argparse
 
 def fmt_size(num_bytes: int) -> str:
@@ -100,7 +99,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
     cfg.checkpoint_period,
   )
 
-  state, _, _ = max_utils.setup_training_state(model, None, tx, cfg, init_rng, mesh, checkpoint_manager)
+  state, _ = max_utils.setup_training_state(model, tx, cfg, init_rng, mesh, checkpoint_manager)
   max_logging.log("start")
   check_memory()
 
@@ -204,7 +203,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   max_logging.log("converted state finished")
   check_memory()
 
-  if save_checkpoint(checkpoint_manager, converted_state.step, converted_state):
+  if checkpoint_manager.save(converted_state.step, converted_state):
     max_logging.log(f"saved a checkpoint at step {converted_state.step}")
   # Upon preemption, exit when and only when all ongoing saves are complete.
   if checkpoint_manager.reached_preemption(converted_state.step):
