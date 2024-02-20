@@ -156,14 +156,15 @@ class Gpt3MultiHeadAttention(nn.Module):
       features=(3, self.num_heads, self.head_dim),
       axis = -1,
       kernel_init=self.kernel_init,
-      kernel_axes=('embed', 'qkv', 'heads', 'kv'),
+      kernel_axes=('qkv', 'embed', 'heads', 'kv'),
       dtype=self.dtype,
       name=proj_name,
       quant=self.quant,
       use_bias=self.use_bias,
+      fused_qkv=True,
       )(inputs)
     qkv_proj = checkpoint_name(qkv_proj, 'qkv_proj')
-    query, key, value = qkv_proj[:,:,0,...], qkv_proj[:,:,1,...], qkv_proj[:,:,2,...]
+    query, key, value = qkv_proj
     return query, key, value
 
   def projection(self, inputs: Array, proj_name: str) -> Array:
