@@ -88,7 +88,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   devices_array = max_utils.create_device_mesh(cfg)
   mesh = Mesh(devices_array, cfg.mesh_axes)
 
-  model = Transformer(config=cfg, mesh=mesh)
+  model = Transformer(cfg, mesh)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(cfg)
   tx = optimizers.get_optimizer(cfg, learning_rate_schedule)
 

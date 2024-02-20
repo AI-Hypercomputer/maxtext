@@ -67,19 +67,28 @@ def _get_quant_config(quant_str: str):
     return AQT_INT8_CONFIG
   raise ValueError(f'Invalid value configured for quantization {quant_str}.')
 
+def in_convert_mode(quant):
+  return quant and (quant.quant_mode == aqt_flax.QuantMode.CONVERT)
+
+def in_serve_mode(quant):
+  return quant and (quant.quant_mode == aqt_flax.QuantMode.SERVE)
+
+def get_quant_mode(quant_mode_str: str = 'train'):
+  """ Set quant mode."""
+  if quant_mode_str == 'train':
+    return aqt_flax.QuantMode.TRAIN
+  elif quant_mode_str == 'serve':
+    return aqt_flax.QuantMode.SERVE
+  elif quant_mode_str == 'convert':
+    return aqt_flax.QuantMode.CONVERT
+  else:
+    raise ValueError(f'Invalid quantization mode {quant_mode_str}.')
+  return None
 
 def configure_quantization(config: Config, quant_mode_str: str = 'train'):
   """ Configure quantization based on user config and quant mode."""
   quant_cfg = _get_quant_config(config.quantization)
   if quant_cfg:
-    if quant_mode_str == 'train':
-      return AqtQuantization(quant_cfg, aqt_flax.QuantMode.TRAIN)
-    elif quant_mode_str == 'serve':
-      return AqtQuantization(quant_cfg, aqt_flax.QuantMode.SERVE)
-    elif quant_mode_str == 'convert':
-      return AqtQuantization(quant_cfg, aqt_flax.QuantMode.CONVERT)
-    else:
-      raise ValueError(f'Invalid quantization mode {quant_mode_str}.')
+    quant_mode = get_quant_mode(quant_mode_str)
+    return AqtQuantization(quant_dg=quant_cfg, quant_mode=quant_mode)
   return None
-
-

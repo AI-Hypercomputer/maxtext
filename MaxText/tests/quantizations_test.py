@@ -59,6 +59,12 @@ def _apply(quant_str=""):
 class QuantizationTest(unittest.TestCase):
   """Tests for quantization."""
 
+  def test_in_quant_mode(self):
+    quant = _configure_quantization(quant_str="int8", mode_str='convert')
+    self.assertTrue(quantizations.in_convert_mode(quant))
+    self.assertFalse(quantizations.in_serve_mode(quant))
+
+
   def test_configure_quantization_is_null(self):
     for quant_mode in ["train", "serve", "convert"]:
       quant = _configure_quantization(quant_str="", mode_str=quant_mode)
