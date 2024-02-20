@@ -27,6 +27,7 @@ from layers import normalizations
 from layers import quantizations
 import numpy as np
 from jax.ad_checkpoint import checkpoint_name
+from flax.linen import partitioning as nn_partitioning
 
 Array = common_types.Array
 Config = common_types.Config
@@ -37,6 +38,7 @@ nd_dense_init = initializers.nd_dense_init
 bias_init = initializers.default_bias_init
 
 RMSNorm = normalizations.RMSNorm
+param_with_axes = nn_partitioning.param_with_axes
 
 
 def _convert_to_activation_function(
@@ -79,7 +81,9 @@ class DenseGeneral(nn.Module):
   features: Union[Iterable[int], int]
   axis: Union[Iterable[int], int] = -1
   dtype: DType = jnp.float32
-  kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
+  kernel_init: NdInitializer = nn.initializers.variance_scaling(
+      1.0, 'fan_in', 'truncated_normal'
+  )
   kernel_axes: Tuple[str, ...] = ()
   use_int8: bool = False
   use_bias: bool = False
@@ -114,30 +118,38 @@ class DenseGeneral(nn.Module):
     axis = _normalize_axes(axis, inputs.ndim)
 
     kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
-    kernel_in_axis = np.arange(len(axis))
-    kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
-    kernel = self.param(
-        'kernel',
-        nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
-        kernel_shape,
-        jnp.float32,
-        kernel_in_axis,
-        kernel_out_axis,
+
+    kernel_param_shape = (
+        np.prod([inputs.shape[ax] for ax in axis]),
+        np.prod(features),
     )
+
+    kernel = param_with_axes(
+        'kernel',
+        self.kernel_init,
+        kernel_param_shape,
+        jnp.float32,
+        axes=self.kernel_axes,
+    )
+
     kernel = jnp.asarray(kernel, self.dtype)
+    kernel = jnp.reshape(kernel, kernel_shape)
 
     contract_ind = tuple(range(0, len(axis)))
     output = compute_dot_general(inputs, kernel, axis, contract_ind)
 
     if self.use_bias:
       bias_axes, bias_shape = self.kernel_axes[-len(features):], kernel_shape[-len(features):]
-      bias = self.param(
+      bias_param_shape = np.product(bias_shape)
+      bias = param_with_axes(
           'bias',
-          nn.with_logical_partitioning(bias_init, bias_axes),
-          bias_shape,
+          bias_init,
+          bias_param_shape,
           jnp.float32,
+          axes=bias_axes,
       )
       bias = jnp.asarray(bias, self.dtype)
+      bias = jnp.reshape(bias, bias_shape)
       output += bias
     return output
 
@@ -160,7 +172,9 @@ class MlpBlock(nn.Module):
   config: Config
   intermediate_dim: int = 2048
   activations: Sequence[Union[str, Callable[..., Any]]] = ('relu',)
-  kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
+  kernel_init: NdInitializer = nn.initializers.variance_scaling(
+      1.0, 'fan_in', 'truncated_normal'
+  )
   intermediate_dropout_rate: float = 0.1
   dtype: Any = jnp.float32
   use_bias: bool = False

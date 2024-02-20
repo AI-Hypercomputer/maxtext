@@ -580,7 +580,9 @@ class Attention(nn.Module):
   attention_kernel: str
   dtype: DType = jnp.float32
   dropout_rate: float = 0.
-  kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
+  kernel_init: NdInitializer = nn.initializers.variance_scaling(
+      1.0, 'fan_in', 'truncated_normal'
+  )
   float32_qk_product: bool = False  # computes logits in float32 for stability.
   float32_logits: bool = False  # cast logits in float32 for stability.
   use_int8: bool = False

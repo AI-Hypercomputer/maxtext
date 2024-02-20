@@ -131,7 +131,9 @@ class Gpt3MultiHeadAttention(nn.Module):
   attention_kernel: str
   dtype: DType = jnp.float32
   dropout_rate: float = 0.
-  kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
+  kernel_init: NdInitializer = nn.initializers.variance_scaling(
+      1.0, 'fan_in', 'truncated_normal'
+  )
   float32_qk_product: bool = False  # computes logits in float32 for stability.
   float32_logits: bool = True  # cast logits in float32 for stability.
   fused_qkv: bool = True
@@ -147,10 +149,10 @@ class Gpt3MultiHeadAttention(nn.Module):
     """ Fused QKV projection"""
 
     qkv_proj = DenseGeneral(
-      features=(3, self.num_heads, self.head_dim),
+      features=(self.num_heads, self.head_dim, 3),
       axis = -1,
       kernel_init=self.kernel_init,
-      kernel_axes=('embed', 'qkv', 'heads', 'kv'),
+      kernel_axes=('embed', 'joined_kv'),
       dtype=self.dtype,
       name=proj_name,
       use_int8=self.use_int8,
@@ -158,7 +160,7 @@ class Gpt3MultiHeadAttention(nn.Module):
       local_aqt_shards=self.config.local_aqt_shards_qkv_proj
       )(inputs)
     qkv_proj = checkpoint_name(qkv_proj, 'qkv_proj')
-    query, key, value = qkv_proj[:,:,0,...], qkv_proj[:,:,1,...], qkv_proj[:,:,2,...]
+    query, key, value = qkv_proj[..., 0], qkv_proj[..., 1], qkv_proj[..., 2]
     return query, key, value
 
   def projection(self, inputs: Array, local_aqt_shards: int, proj_name: str) -> Array:
@@ -167,7 +169,7 @@ class Gpt3MultiHeadAttention(nn.Module):
       features=(self.num_heads, self.head_dim),
       axis=-1,
       kernel_init=self.kernel_init,
-      kernel_axes=('embed', 'heads', 'kv'),
+      kernel_axes=('embed', 'joined_kv'),
       dtype=self.dtype,
       name=proj_name,
       use_int8=self.use_int8,
@@ -182,7 +184,7 @@ class Gpt3MultiHeadAttention(nn.Module):
       features=output_dim,
       axis=(-2, -1),
       kernel_init=self.kernel_init,
-      kernel_axes=('heads', 'kv', 'embed'),
+      kernel_axes=('joined_kv', 'embed'),
       dtype=self.dtype,
       name='out',
       use_int8=self.use_int8,
