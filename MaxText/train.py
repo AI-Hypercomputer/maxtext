@@ -404,6 +404,14 @@ def train_loop(config, state=None):
         return value
 
     state = jax.tree_util.tree_map_with_path(map_fn, state)
+
+  max_logging.log("param shape:")
+  # print param shape
+  def print_shape(key_path, value):
+    key_path_str = jax.tree_util.keystr(key_path)
+    max_logging.log(f"{key_path_str}: {value.shape}")
+  jax.tree_util.tree_map_with_path(print_shape, state.params)
+
   start_step = get_first_step(state) # this is the start_step for training
   first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
   if config.enable_profiler and first_profiling_step >= config.steps:
