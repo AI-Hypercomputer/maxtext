@@ -92,10 +92,8 @@ class MetricConfig:
     json_lines: The config for JSON Lines input.
     tensorboard_summary: The config for TensorBoard summary input.
     profile: The config for profile input.
-    clean_up_gcs: Clean up the gcs bucket when finish metric processing.
   """
 
   json_lines: Optional[JSONLinesConfig] = None
   tensorboard_summary: Optional[SummaryConfig] = None
   profile: Optional[ProfileConfig] = None
-  clean_up_gcs: Optional[bool] = False
