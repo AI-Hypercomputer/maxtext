@@ -24,12 +24,16 @@ echo "Running 52b.sh"
 #
 # Example to invoke this script:
 # bash MaxText/configs/v4/52b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>" PLATFORM="gke"
+#
+# Example to AOT compile:
+# bash MaxText/configs/v4/52b.sh EXECUTABLE=train_compile.py M_COMPILE_TOPOLOGY=v4-384 M_COMPILE_TOPOLOGY_NUM_SLICES=2
 
 
 # Stop execution if any command exits with error
 set -e
 
 export PLATFORM="gce"
+export EXECUTABLE="train.py" # or train_compile.py
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -42,8 +46,8 @@ bash preflight.sh PLATFORM=$PLATFORM
 
 # Train
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true TPU_MEGACORE=MEGACORE_DENSE"
-python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
+python3 MaxText/$EXECUTABLE MaxText/configs/base.yml run_name=$RUN_NAME\
     enable_profiler=true enable_checkpointing=false steps=10\
-    ici_fsdp_parallelism=192 ici_tensor_parallelism=1 per_device_batch_size=10 remat_policy=full\
+    ici_fsdp_parallelism=192 ici_tensor_parallelism=1 per_device_batch_size=8 remat_policy=full\
     base_num_decoder_layers=32 base_emb_dim=12288 base_mlp_dim=49152 base_num_query_heads=32 base_num_kv_heads=32 learning_rate=1e-8\
     base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH
