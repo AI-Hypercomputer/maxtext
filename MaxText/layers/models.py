@@ -163,9 +163,9 @@ class Decoder(nn.Module):
       # TODO(ranran): update to Mistral with sliding window attention
       from layers import mistral
       return mistral.MistralDecoderLayer
-    elif self.config.decoder_block == "gamma":
-      from layers import gamma
-      return gamma.GammaDecoderLayer
+    elif self.config.decoder_block == "gemma":
+      from layers import gemma
+      return gemma.GemmaDecoderLayer
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
       return gpt3.Gpt3DecoderLayer
@@ -173,7 +173,7 @@ class Decoder(nn.Module):
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "gamma"):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
