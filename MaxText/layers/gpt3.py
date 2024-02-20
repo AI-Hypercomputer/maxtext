@@ -147,18 +147,19 @@ class Gpt3MultiHeadAttention(nn.Module):
     """ Fused QKV projection"""
 
     qkv_proj = DenseGeneral(
-      features=(3, self.num_heads, self.head_dim),
+      features=(self.num_heads, self.head_dim * 3),
       axis = -1,
       kernel_init=self.kernel_init,
-      kernel_axes=('embed', 'qkv', 'heads', 'kv'),
+      kernel_axes=('embed', 'heads', 'kv'),
       dtype=self.dtype,
       name=proj_name,
       use_int8=self.use_int8,
       use_bias=self.use_bias,
       local_aqt_shards=self.config.local_aqt_shards_qkv_proj
       )(inputs)
+    qkv_proj = qkv_proj.reshape(*qkv_proj.shape[:-1], -1, 3)
     qkv_proj = checkpoint_name(qkv_proj, 'qkv_proj')
-    query, key, value = qkv_proj[:,:,0,...], qkv_proj[:,:,1,...], qkv_proj[:,:,2,...]
+    query, key, value = qkv_proj[..., 0], qkv_proj[..., 1], qkv_proj[..., 2]
     return query, key, value
 
   def projection(self, inputs: Array, local_aqt_shards: int, proj_name: str) -> Array:
