@@ -84,6 +84,7 @@ class DenseGeneral(nn.Module):
   use_int8: bool = False
   use_bias: bool = False
   local_aqt_shards: int = 0
+  fused_qkv: bool = False
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -113,30 +114,54 @@ class DenseGeneral(nn.Module):
     inputs = jnp.asarray(inputs, self.dtype)
     axis = _normalize_axes(axis, inputs.ndim)
 
-    kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
-    kernel_in_axis = np.arange(len(axis))
-    kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
-    kernel = self.param(
-        'kernel',
-        nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
-        kernel_shape,
-        jnp.float32,
-        kernel_in_axis,
-        kernel_out_axis,
-    )
-    kernel = jnp.asarray(kernel, self.dtype)
+    if not self.fused_qkv:
+      kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
+      kernel_in_axis = np.arange(len(axis))
+      kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
+      kernel = self.param(
+          'kernel',
+          nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
+          kernel_shape,
+          jnp.float32,
+          kernel_in_axis,
+          kernel_out_axis,
+      )
+      kernel = jnp.asarray(kernel, self.dtype)
 
-    contract_ind = tuple(range(0, len(axis)))
-    output = compute_dot_general(inputs, kernel, axis, contract_ind)
+      contract_ind = tuple(range(0, len(axis)))
+      output = compute_dot_general(inputs, kernel, axis, contract_ind)
+    else:
+      kernel_shape = features[0:1] + tuple(inputs.shape[ax] for ax in axis) + features[1:]
+      kernel_in_axis = tuple(np.arange(1, len(axis) + 1))
+      kernel_out_axis = (0, ) + tuple(np.arange(len(axis) + 1, len(axis) + 1 + len(features) - 1))
+      kernel = self.param(
+          'kernel',
+          nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
+          kernel_shape,
+          jnp.float32,
+          kernel_in_axis,
+          kernel_out_axis,
+      )
+      kernel = jnp.asarray(kernel, self.dtype)
+
+      batch_eqn = "BL"
+      eqn = f'{batch_eqn}D,KDNH->K{batch_eqn}NH'
+      output = jnp.einsum(eqn, inputs, kernel)
 
     if self.use_bias:
-      bias_axes, bias_shape = self.kernel_axes[-len(features):], kernel_shape[-len(features):]
+      if not self.fused_qkv:
+        bias_axes, bias_shape = self.kernel_axes[-len(features):], kernel_shape[-len(features):]
+      else:
+        bias_axes, bias_shape = self.kernel_axes[0:1] + self.kernel_axes[-len(features)+1:], kernel_shape[0:1] + kernel_shape[-len(features)+1:]
       bias = self.param(
           'bias',
           nn.with_logical_partitioning(bias_init, bias_axes),
           bias_shape,
           jnp.float32,
       )
+      if self.fused_qkv:
+        batch_dims = (1, 2)
+        bias = jnp.expand_dims(bias, batch_dims)
       bias = jnp.asarray(bias, self.dtype)
       output += bias
     return output
