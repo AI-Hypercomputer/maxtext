@@ -66,6 +66,9 @@ UserFacingNameToSystemCharacteristics = {
     'v4-256': SystemCharacteristics(
       'tpu', 'v4:4x4x8', 'megacore', (2, 2, 1), 128
     ),
+    'v4-384': SystemCharacteristics(
+      'tpu', 'v4:4x4x12', 'megacore', (2, 2, 1), 192
+    ),
     'v4-512': SystemCharacteristics(
       'tpu', 'v4:4x8x8', 'megacore', (2, 2, 1), 256
     ),

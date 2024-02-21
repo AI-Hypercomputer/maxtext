@@ -163,9 +163,9 @@ class Decoder(nn.Module):
       # TODO(ranran): update to Mistral with sliding window attention
       from layers import mistral
       return mistral.MistralDecoderLayer
-    elif self.config.decoder_block == "gamma":
-      from layers import gamma
-      return gamma.GammaDecoderLayer
+    elif self.config.decoder_block == "gemma":
+      from layers import gemma
+      return gemma.GemmaDecoderLayer
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
       return gpt3.Gpt3DecoderLayer
@@ -173,7 +173,7 @@ class Decoder(nn.Module):
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "gamma"):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
@@ -297,8 +297,7 @@ class Decoder(nn.Module):
           cfg.vocab_size,
           dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
           kernel_axes=('embed', 'vocab'),
-          name='logits_dense',
-          quant=self.quant)(y) # We do not quantize the logits matmul.
+          name='logits_dense')(y) # We do not quantize the logits matmul.
     logits = nn.with_logical_constraint(
         logits, ('activation_batch', 'activation_length', 'activation_vocab'))
     return logits

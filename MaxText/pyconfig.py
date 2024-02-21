@@ -62,7 +62,7 @@ def validate_keys(keys):
 def validate_model_name(s: str) -> bool:
   # currently supported models
   valid_model_names = ('default', 'llama2-7b', 'llama2-70b', 'mistral-7b',
-                       'mixtral-8x7b', 'gamma-7b','gamma-2b',
+                       'mixtral-8x7b', 'gemma-7b','gemma-2b',
                        'gpt3-175b', 'gpt3-22b', 'gpt3-6b', 'gpt3-52k')
   if s not in valid_model_names:
     raise ValueError(
