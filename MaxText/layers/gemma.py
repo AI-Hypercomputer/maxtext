@@ -50,7 +50,7 @@ Quant = quantizations.AqtQuantization
 
 
 # Decoder and Model definitions
-class GammaDecoderLayer(nn.Module):
+class GemmaDecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
   config: Config
   mesh: Mesh
