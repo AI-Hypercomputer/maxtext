@@ -167,12 +167,30 @@ class DenseGeneral(nn.Module):
       batch_eqn = "BL"
       eqn = f'{batch_eqn}NH,DNH->{batch_eqn}D'
       output = jnp.einsum(eqn, inputs, kernel)
+    elif self.layer_type == "ff":
+      assert len(axis) == 1
+      assert len(features) == 1
+      kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
+      kernel_in_axis = np.arange(len(axis))
+      kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
+      kernel = self.param(
+          'kernel',
+          nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
+          kernel_shape,
+          jnp.float32,
+          kernel_in_axis,
+          kernel_out_axis,
+      )
+      kernel = jnp.asarray(kernel, self.dtype)
+      # https://github.com/google/praxis/blob/cb24d5e9a351b76b10253547e7cbac3872d8c86c/praxis/layers/linears.py#L109
+      output = jnp.einsum('...y,yz->...z', inputs, kernel)
+
     else:
       raise ValueError(f"invalid {self.layer_type=}")
 
 
     if self.use_bias:
-      if self.layer_type=="default":
+      if self.layer_type=="default" or self.layer_type=="ff" :
         bias_axes, bias_shape = self.kernel_axes[-len(features):], kernel_shape[-len(features):]
       elif self.layer_type=="fused_qkv":
         bias_axes, bias_shape = self.kernel_axes[0:1] + self.kernel_axes[-len(features)+1:], kernel_shape[0:1] + kernel_shape[-len(features)+1:]
@@ -273,6 +291,7 @@ class MlpBlock(nn.Module):
             use_int8=cfg.int8_training,
             use_bias=self.use_bias,
             local_aqt_shards=cfg.local_aqt_shards_mlp2,
+            layer_type="ff",
         )(inputs)
         x = _convert_to_activation_function(act_fn)(x)
         activations.append(x)
@@ -296,6 +315,7 @@ class MlpBlock(nn.Module):
         name='wo',
         use_int8=cfg.int8_training,
         use_bias=self.use_bias,
+        layer_type="ff",
     )(x)
 
     output = checkpoint_name(output, 'ffn2')
