@@ -156,7 +156,7 @@ class Gpt3MultiHeadAttention(nn.Module):
       use_int8=self.use_int8,
       use_bias=self.use_bias,
       local_aqt_shards=self.config.local_aqt_shards_qkv_proj,
-      fused_qkv=True,
+      layer_type="fused_qkv",
       )(inputs)
     qkv_proj = checkpoint_name(qkv_proj, 'qkv_proj')
     query, key, value = qkv_proj
@@ -183,12 +183,13 @@ class Gpt3MultiHeadAttention(nn.Module):
       features=output_dim,
       axis=(-2, -1),
       kernel_init=self.kernel_init,
-      kernel_axes=('heads', 'kv', 'embed'),
+      kernel_axes=('embed', 'heads', 'kv'),
       dtype=self.dtype,
       name='out',
       use_int8=self.use_int8,
       use_bias=self.use_bias,
       local_aqt_shards=self.config.local_aqt_shards_attention_out_proj,
+      layer_type="attention_out",
       )(out)
     return out_proj
 

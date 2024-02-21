@@ -84,7 +84,7 @@ class DenseGeneral(nn.Module):
   use_int8: bool = False
   use_bias: bool = False
   local_aqt_shards: int = 0
-  fused_qkv: bool = False
+  layer_type: str = "default"
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -114,7 +114,7 @@ class DenseGeneral(nn.Module):
     inputs = jnp.asarray(inputs, self.dtype)
     axis = _normalize_axes(axis, inputs.ndim)
 
-    if not self.fused_qkv:
+    if self.layer_type == "default":
       kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
       kernel_in_axis = np.arange(len(axis))
       kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
@@ -130,7 +130,7 @@ class DenseGeneral(nn.Module):
 
       contract_ind = tuple(range(0, len(axis)))
       output = compute_dot_general(inputs, kernel, axis, contract_ind)
-    else:
+    elif self.layer_type == "fused_qkv":
       kernel_shape = features[0:1] + tuple(inputs.shape[ax] for ax in axis) + features[1:]
       kernel_in_axis = tuple(np.arange(1, len(axis) + 1))
       kernel_out_axis = (0, ) + tuple(np.arange(len(axis) + 1, len(axis) + 1 + len(features) - 1))
@@ -144,22 +144,49 @@ class DenseGeneral(nn.Module):
       )
       kernel = jnp.asarray(kernel, self.dtype)
 
+      # ref: https://github.com/google/praxis/blob/7b4e27ec71ea31db9ab84fdb8daefcc86ca84655/praxis/layers/attentions.py#L913
       batch_eqn = "BL"
       eqn = f'{batch_eqn}D,KDNH->K{batch_eqn}NH'
       output = jnp.einsum(eqn, inputs, kernel)
 
+    elif self.layer_type == "attention_out":
+      kernel_shape = features + tuple(inputs.shape[ax] for ax in axis)
+      kernel_in_axis = tuple(np.arange(len(features), len(axis) + len(features)))
+      kernel_out_axis = tuple(np.arange(len(features)))
+      kernel = self.param(
+          'kernel',
+          nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
+          kernel_shape,
+          jnp.float32,
+          kernel_in_axis,
+          kernel_out_axis,
+      )
+      kernel = jnp.asarray(kernel, self.dtype)
+
+      # ref: https://github.com/google/praxis/blob/7b4e27ec71ea31db9ab84fdb8daefcc86ca84655/praxis/layers/attentions.py#L769
+      batch_eqn = "BL"
+      eqn = f'{batch_eqn}NH,DNH->{batch_eqn}D'
+      output = jnp.einsum(eqn, inputs, kernel)
+    else:
+      raise ValueError(f"invalid {self.layer_type=}")
+
+
     if self.use_bias:
-      if not self.fused_qkv:
+      if self.layer_type=="default":
         bias_axes, bias_shape = self.kernel_axes[-len(features):], kernel_shape[-len(features):]
-      else:
+      elif self.layer_type=="fused_qkv":
         bias_axes, bias_shape = self.kernel_axes[0:1] + self.kernel_axes[-len(features)+1:], kernel_shape[0:1] + kernel_shape[-len(features)+1:]
+      elif self.layer_type=="attention_out":
+        bias_axes, bias_shape = self.kernel_axes[:len(features)], kernel_shape[:len(features)]
+      else:
+        raise ValueError(f"invalid {self.layer_type=}")
       bias = self.param(
           'bias',
           nn.with_logical_partitioning(bias_init, bias_axes),
           bias_shape,
           jnp.float32,
       )
-      if self.fused_qkv:
+      if self.layer_type=="fused_qkv":
         batch_dims = (1, 2)
         bias = jnp.expand_dims(bias, batch_dims)
       bias = jnp.asarray(bias, self.dtype)
