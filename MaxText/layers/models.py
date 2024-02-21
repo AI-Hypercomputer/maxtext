@@ -305,10 +305,11 @@ class Decoder(nn.Module):
 
 class Transformer(nn.Module):
   """An decoder-only Transformer model."""
+  # Make new attributes required, so that all Transformer dependencies (train, decode, compile, etc) will error instead of silently use defaults.
   # pylint: disable=attribute-defined-outside-init
   config: Config
   mesh: Mesh
-  quant: Optional[Quant] = None
+  quant: Quant
 
   def setup(self):
     """Initialize shared_embedding & decoder layers."""
