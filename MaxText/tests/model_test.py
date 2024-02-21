@@ -27,6 +27,7 @@ import pytest
 import pyconfig
 
 from layers import models
+from layers import quantizations
 
 Mesh = jax.sharding.Mesh
 MAX_PREFILL_PREDICT_LENGTH = 4 
@@ -64,7 +65,8 @@ class TestModel(unittest.TestCase):
 
     devices_array = max_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
-    model = models.Transformer(config = self.cfg, mesh = mesh)
+    quant = quantizations.configure_quantization(self.cfg)
+    model = models.Transformer(config = self.cfg, mesh = mesh, quant=quant)
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
