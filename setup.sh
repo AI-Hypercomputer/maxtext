@@ -31,11 +31,11 @@ set -e
 if command -v sudo >/dev/null 2>&1; then
     # sudo is available, use it
     # install numactl for numa binding.
-    sudo apt update && sudo apt install numactl   
+    sudo apt update && sudo apt install -y numactl   
 else
     # sudo is not available, run the script without sudo
     # install numactl for numa binding.
-    apt update && apt install numactl   
+    apt update && apt install -y numactl   
 fi
 
 # Set environment variables
