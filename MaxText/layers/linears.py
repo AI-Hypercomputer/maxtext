@@ -240,6 +240,10 @@ class MlpBlock(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
         )(inputs)
 
+    inputs = nn.with_logical_constraint(
+      inputs,
+      ('activation_batch', 'activation_length', 'activation_embed'))
+
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
     activations = []
