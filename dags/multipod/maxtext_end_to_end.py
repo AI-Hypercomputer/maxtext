@@ -38,7 +38,7 @@ with models.DAG(
   test_models = {
       "llama2": ["test_llama2", "llama_finetuning_test"],
       "mistral": ["test_mistral"],
-      "gamma": ["test_gamma"],
+      "gemma": ["test_gemma"],
       "gpt3": ["test_gpt3"],
   }
   test_modes = [SetupMode.STABLE, SetupMode.NIGHTLY]
