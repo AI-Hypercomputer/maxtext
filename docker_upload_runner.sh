@@ -25,7 +25,7 @@
 
 set -e
 
-export LOCAL_IMAGE_NAME=maxtext_base_image
+export LOCAL_IMAGE_NAME=maxtext_flash
 export PROJECT=$(gcloud config get-value project)
 
 # Set environment variables
