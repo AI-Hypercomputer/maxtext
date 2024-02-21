@@ -123,7 +123,7 @@ resource "google_composer_environment" "example_environment" {
   config {
     environment_size = "ENVIRONMENT_SIZE_MEDIUM"
     software_config {
-      image_version = "composer-2.4.6-airflow-2.6.3"
+      image_version = "composer-2.6.1-airflow-2.6.3"
       airflow_config_overrides = {
         core-allowed_deserialization_classes = ".*"
         scheduler-min_file_process_interval  = "120"
