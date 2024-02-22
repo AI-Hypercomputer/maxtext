@@ -141,20 +141,31 @@ local tpus = import 'templates/tpus.libsonnet';
 
   local gpu = self.gpu,
   gpu:: common.GpuMixin {
+    local config = self,
+
     cpu: '7.0',
     memory: '40Gi',
 
-    // Disable XLA metrics report on GPU
     command+: [
+      '--pjrt_distributed',
       '--nometrics_debug',
+      '--num_epochs=2',
     ],
     flags+: {
       modelDir: null,
     },
+
+    jobTemplate+:: {
+      spec+: {
+        completionMode: 'Indexed',
+        completions: config.accelerator.num_hosts,
+        parallelism: config.accelerator.num_hosts,
+      }
+    },
   },
-  local v100x4 = self.v100x4,
-  v100x4:: gpu {
-    accelerator: gpus.teslaV100 { count: 4 },
+  local v100x2x2 = self.v100x2x2,
+  v100x2x2:: gpu {
+    accelerator: gpus.teslaV100 { count: 2, num_hosts: 2 },
   },
 
   local pjrt_ddp = self.pjrt_ddp,
@@ -194,6 +205,7 @@ local tpus = import 'templates/tpus.libsonnet';
   },
 
   configs: [
+    resnet50 + fake_data + v100x2x2 + timeouts.Hours(3),
     // PJRT
     resnet50 + fake_data + v2_8 + timeouts.Hours(3) + pjrt,
     resnet50 + fake_data + v3_8 + timeouts.Hours(2) + pjrt,

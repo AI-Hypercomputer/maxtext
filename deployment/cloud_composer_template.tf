@@ -141,6 +141,7 @@ resource "google_composer_environment" "example_environment" {
         # google-cloud-container            = ""
         # tensorflow-cpu                    = ""
         # apache-airflow-providers-cncf-kubernetes = ""
+        # kubernetes                        = ""
       }
     }
 

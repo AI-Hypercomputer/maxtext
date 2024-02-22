@@ -18,11 +18,14 @@ local base = import 'base.libsonnet';
   GPUSpec:: base.BaseAccelerator {
     local gpu = self,
 
-    name: '%(version)s-x%(count)d' % gpu,
+    name: '%(version)s-x%(count)dx%(num_hosts)d' % gpu,
     type: 'gpu',
     version: error 'Must specify GPUSpec `version`',
     count: 1,
     replicas: gpu.count,
+    num_hosts: 1,
+    // Label used in GCE API
+    accelerator_type: error 'Must specify GPUSpec `accelerator_type',
 
     // Ignore TPU settings.
     PodTemplate(_):: {
@@ -43,8 +46,6 @@ local base = import 'base.libsonnet';
     },
   },
 
-  teslaK80: self.GPUSpec { version: 'k80' },
-  teslaV100: self.GPUSpec { version: 'v100' },
-  teslaA100: self.GPUSpec { version: 'a100' },
-  teslaT4: self.GPUSpec { version: 't4' },
+  teslaV100: self.GPUSpec { version: 'v100', accelerator_type: 'nvidia-tesla-v100' },
+  teslaA100: self.GPUSpec { version: 'a100', accelerator_type: 'nvidia-tesla-a100' },
 }

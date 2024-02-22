@@ -32,6 +32,13 @@ US_CENTRAL2_B = gcp_config.GCPConfig(
     metric_config.DatasetOption.XLML_DATASET,
 )
 
+US_CENTRAL1 = gcp_config.GCPConfig(
+    Project.CLOUD_ML_AUTO_SOLUTIONS.value,
+    # HACK: use region in place of zone, since clusters are regional
+    zone="us-central1",
+    dataset_name=...,
+)
+
 
 with models.DAG(
     dag_id="pytorchxla-torchvision",
@@ -59,3 +66,9 @@ with models.DAG(
 
   mnist_v2_8 >> resnet_v2_8
   mnist_v2_8 >> resnet_v4_8
+
+  resnet_v100_2x2 = task.GpuGkeTask(
+      test_config.JSonnetGpuTest.from_pytorch("pt-nightly-resnet50-mp-fake-v100-x2x2"),
+      US_CENTRAL1,
+      "gpu-uc1",
+  ).run()

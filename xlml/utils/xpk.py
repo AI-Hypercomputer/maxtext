@@ -14,17 +14,13 @@
 
 """Utilities to run workloads with xpk (https://github.com/google/xpk)."""
 
-import base64
-from tempfile import NamedTemporaryFile
 import uuid
 from absl import logging
 from airflow.decorators import task
 from airflow.providers.cncf.kubernetes.operators.kubernetes_pod import KubernetesPodOperator
-import google.auth
-import google.auth.transport.requests
-from google.cloud import container_v1
 from kubernetes import client as k8s_client
 from kubernetes.client import models as k8s_models
+from xlml.utils import gke
 
 
 @task
@@ -97,24 +93,10 @@ def wait_for_workload_completion(
     workload_id: str, project_id: str, region: str, cluster_name: str
 ) -> bool:
   """Check the workload status."""
-
-  # Get cluster configuration
-  container_client = container_v1.ClusterManagerClient()
-  cluster_path = f"projects/{project_id}/locations/{region}/clusters/{cluster_name}"
-  response = container_client.get_cluster(name=cluster_path)
-  creds, _ = google.auth.default()
-  auth_req = google.auth.transport.requests.Request()
-  creds.refresh(auth_req)
-  configuration = k8s_client.Configuration()
-  configuration.host = f"https://{response.endpoint}"
-  with NamedTemporaryFile(delete=False) as ca_cert:
-    ca_cert.write(base64.b64decode(response.master_auth.cluster_ca_certificate))
-  configuration.ssl_ca_cert = ca_cert.name
-  configuration.api_key_prefix["authorization"] = "Bearer"
-  configuration.api_key["authorization"] = creds.token
+  client = gke.get_authenticated_client(project_id, region, cluster_name)
 
   # Initilize the client
-  core_api = k8s_client.CoreV1Api(k8s_client.ApiClient(configuration))
+  core_api = k8s_client.CoreV1Api(client)
   logging.info("Successful initilize k8s client from cluster response.")
 
   # Get pods for the workload

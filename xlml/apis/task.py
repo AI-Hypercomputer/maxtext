@@ -17,12 +17,13 @@
 import abc
 import dataclasses
 import datetime
-from typing import Optional, Tuple
+import shlex
+from typing import Any, Dict, Optional, Tuple
 import airflow
 from airflow.models.taskmixin import DAGNode
 from airflow.utils.task_group import TaskGroup
 from xlml.apis import gcp_config, metric_config, test_config
-from xlml.utils import gpu, metric, name_format, ssh, tpu, xpk, startup_script
+from xlml.utils import gpu, metric, name_format, ssh, tpu, xpk, gke, startup_script
 
 
 class BaseTask(abc.ABC):
@@ -503,3 +504,122 @@ class GpuCreateResourceTask(BaseTask):
       AirflowTaskTimeout: An error occurs when execution_timeout is breached.
     """
     return gpu.delete_resource.override(group_id="clean_up")(resource, project_id, zone)
+
+
+# TODO(ranran): This class is big. Let's move it to a new file.
+@dataclasses.dataclass
+class GpuGkeTask(BaseTask):
+  """This is a class to set up tasks for GPU on a GKE cluster.
+
+  Attributes:
+    image_project: the project that an image belongs to.
+    image_family: the family group that an image belongs to.
+    cluster_name: Name of the GCP cluster.
+    job_create_timeout: Amount of time to wait for all pods to become active.
+  """
+
+  task_test_config: test_config.JSonnetGpuTest
+  task_gcp_config: gcp_config.GCPConfig
+  cluster_name: str
+  job_create_timeout: datetime.timedelta = datetime.timedelta(minutes=10)
+  # TODO(wcromar): job history metrics
+  # task_metric_config: Optional[metric_config.MetricConfig] = None
+
+  def run(self) -> DAGNode:
+    """Run a test job.
+
+    Returns:
+      A task group that runs the given test config on a GKE cluster.
+    """
+    with TaskGroup(
+        group_id=self.task_test_config.benchmark_id, prefix_group_id=True
+    ) as group:
+      job_body = self._get_job_manifest()
+      gke.run_job.override(group_id="run_model")(
+          job_body, self.task_gcp_config, self.cluster_name, self.job_create_timeout
+      )
+
+    return group
+
+  def _get_job_manifest(self):
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "generateName": f"{self.task_test_config.benchmark_id}-",
+            "labels": {
+                "accelerator": self.task_test_config.accelerator.name,
+                "benchmarkId": self.task_test_config.benchmark_id,
+            },
+        },
+        "spec": {
+            "activeDeadlineSeconds": int(
+                datetime.timedelta(
+                    minutes=self.task_test_config.time_out_in_min or 60
+                ).total_seconds()
+            ),
+            "backoffLimit": 0,
+            "completionMode": "Indexed",
+            "completions": self.task_test_config.num_hosts,
+            "parallelism": self.task_test_config.num_hosts,
+            "template": {
+                "metadata": {
+                    # Matches `headless-svc` in GKE cluster. See deployments directory.
+                    "labels": {"headless-svc": "true"},
+                },
+                "spec": {
+                    "subdomain": "headless-svc",
+                    "nodeSelector": {
+                        "cloud.google.com/gke-accelerator": self.task_test_config.accelerator.accelerator_type,
+                    },
+                    "restartPolicy": "Never",
+                    "containers": [
+                        {
+                            "name": "main",
+                            "image": self.task_test_config.docker_image,
+                            "imagePullPolicy": "Always",
+                            "command": shlex.split(self.task_test_config.setup_script),
+                            "args": shlex.split(self.task_test_config.test_script),
+                            "resources": {
+                                "limits": {
+                                    "nvidia.com/gpu": self.task_test_config.accelerator.count,
+                                }
+                            },
+                            "env": [
+                                {
+                                    "name": "POD_NAME",
+                                    "valueFrom": {
+                                        "fieldRef": {"fieldPath": "metadata.name"}
+                                    },
+                                },
+                                {
+                                    "name": "POD_NAMESPACE",
+                                    "valueFrom": {
+                                        "fieldRef": {"fieldPath": "metadata.namespace"}
+                                    },
+                                },
+                                {
+                                    "name": "JOB_NAME",
+                                    "valueFrom": {
+                                        "fieldRef": {
+                                            "fieldPath": "metadata.labels['job-name']"
+                                        }
+                                    },
+                                },
+                            ],
+                            "volumeMounts": [
+                                {
+                                    "mountPath": "/dev/shm",
+                                    "name": "dshm",
+                                    "readOnly": False,
+                                },
+                            ],
+                        },
+                    ],
+                    "volumes": [
+                        {"emptyDir": {"medium": "Memory"}, "name": "dshm"},
+                    ],
+                },
+            },
+        },
+    }
