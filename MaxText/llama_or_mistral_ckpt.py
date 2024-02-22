@@ -371,7 +371,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
       opt_state={}
   )
 
-  checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler(use_zarr3=True))
+  checkpointer = Checkpointer(ocp.PyTreeCheckpointHandler(use_zarr3=True))
 
   checkpoint_manager = CheckpointManager(
       maxtext_model_path,
