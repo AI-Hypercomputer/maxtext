@@ -356,7 +356,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
   jax_weights = jax.tree_map(jnp.array, jax_weights)
 
   # dummy configs for the checkpoint_manager
-#   step_number_to_save_new_ckpt = 0
+  step_number_to_save_new_ckpt = 0
 #   enable_checkpointing = True
   async_checkpointing = False
   save_interval_steps = 1
@@ -387,7 +387,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
   if checkpoint_manager is not None:
     # if checkpoint_manager.save(step_number_to_save_new_ckpt, state_new):
-    if checkpoint_manager.save(args=ocp.args.PyTreeSave(state_new, save_args)):
+    if checkpoint_manager.save(step_number_to_save_new_ckpt, args=ocp.args.PyTreeSave(state_new, save_args)):
       max_logging.log(
           f"saved a checkpoint at step {checkpoint_manager.latest_step}")
     # Upon preemption, exit when and only when all ongoing saves are complete.
