@@ -98,6 +98,7 @@ class AttentionOp(nn.Module):
   max_prefill_predict_length: int = -1 
   float32_logits: bool = False
   flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
+  dropout_rate: float = 0.
   dtype: DType = jnp.float32
   quant: Optional[Quant] = None
 
@@ -167,11 +168,11 @@ class AttentionOp(nn.Module):
         raise ValueError("""Decode not supported with flash attention.
                             Use `dot_product` instead.""")
       return self.tpu_flash_attention(query, key, value, decoder_segment_ids), None, None
-    elif self.attention_kernel == 'gpu_flash_xla' or self.attention_kernel == 'gpu_flash_triton':
+    elif self.attention_kernel == 'cudnn_flash_te':
       if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
         raise ValueError("""Decode not supported with flash attention.
                             Use `dot_product` instead.""")
-      return self.gpu_flash_attention(query, key, value), None, None
+      return self.cudnn_flash_attention(query, key, value), None, None
     else:
       raise ValueError(f'Unexpected attention kernel {self.attention_kernel=}.')
 
@@ -242,41 +243,6 @@ class AttentionOp(nn.Module):
     x = wrap_flash_attention(query, key, value, decoder_segment_ids)
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
     return x
-
-  def gpu_flash_attention(
-      self,
-      query: Array,
-      key: Array,
-      value: Array,
-  ) -> Array:
-    """GPU Flash Attention."""
-    b, n, s, h = key.shape # pylint: disable=unused-variable
-    if self.attention_kernel == "gpu_flash_xla":
-      bwd_pass_impl = "xla"
-    elif self.attention_kernel == "gpu_flash_triton":
-      bwd_pass_impl = "triton"
-    else:
-      raise ValueError(f"Can't convert {self.attention_kernel } to a bwd_pass_impl")
-
-    axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
-    segment_axis_names = nn.logical_to_mesh_axes((BATCH, LENGTH))
-
-    @functools.partial(
-        shard_map,
-        mesh = self.mesh,
-        in_specs = (
-          axis_names,
-          axis_names,
-          axis_names,
-          segment_axis_names),
-        out_specs = axis_names,
-        check_rep=False)
-    def wrap_gpu_flash_attention(query, key, value):
-      return pallas_attention.mha(
-        query, key, value, sm_scale=1.0 / math.sqrt(h), backward_pass_impl=bwd_pass_impl,
-        num_stages = 1, causal = True, segment_ids = None
-      )
-    return wrap_gpu_flash_attention(query, key, value)
   
   def compute_local_attention(self, 
                               attn_weights: Array, 
@@ -316,6 +282,70 @@ class AttentionOp(nn.Module):
 
     local_out = self.wv_product(local_exps, value)
     return local_out, local_max, local_sum
+
+  def cudnn_flash_attention(
+    self,
+    query: Array,
+    key: Array,
+    value: Array,
+  ) -> Array:
+    """
+    CUDNN Flash Attention with Transformer Engine.
+    It is an unstable API. In future release, the API can get changed
+    A stable flash attention API will be included soon. Currently,
+    1. It does not support GQA, num_query_heads == num_kv_heads
+    2. It supports head_dim till 128
+    GQA support with head_dim=256 will be added soon 
+    """
+    
+    batch, s_q, n_heads, head_dim = query.shape # pylint: disable=unused-variable
+    _, s_kv, _, _ = key.shape
+
+    import transformer_engine.jax.fused_attn as fused_attn
+    from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLayout
+    from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
+    import os
+
+    is_self_attn = True # (inputs_q is inputs_kv)
+    is_gqa = False # (self.num_heads != self.num_gqa_groups)
+    is_qkvpack = (is_self_attn and not is_gqa)
+    qkv_layout = QKVLayout.BS3HD if is_self_attn else QKVLayout.BSHD_BS2HD
+    attn_mask_type = AttnMaskType.CAUSAL_MASK
+    attn_bias_type = AttnBiasType.NO_BIAS
+
+    enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0"))
+
+    has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout,
+                                                            attn_bias_type, 
+                                                            attn_mask_type,
+                                                            self.dropout_rate, self.num_query_heads,
+                                                            self.num_kv_heads, s_q,
+                                                            s_kv, head_dim)
+    
+    if not enable_fused_attn:
+      raise ValueError("Please enable NVTE_FUSED_ATTN: export NVTE_FUSED_ATTN=1")
+      
+    if not has_fused_attn_kernel:
+      raise ValueError("""Flash attention is not supported for current config i.e. head_dim, seq_len, n_heads etc. 
+      Please see transformer_engine/common/fused_attn/fused_attn.cpp:NVTE_Fused_Attn_Backend for details""")
+
+    q = jnp.reshape(query, (*query.shape[:2], 1, *query.shape[-2:]))
+    k = jnp.reshape(key, (*query.shape[:2], 1, *query.shape[-2:]))
+    v = jnp.reshape(value, (*query.shape[:2], 1, *query.shape[-2:]))
+    qkv = jnp.concatenate((q, k, v), axis=2) # to make it (b, s, 3, h, d)
+
+    out = fused_attn.self_fused_attn(
+        qkv=qkv,
+        bias=None,
+        mask=jnp.zeros((batch, 1, s_q, s_kv)),  # no padding
+        seed=None,
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        scaling_factor=1.0/math.sqrt(head_dim),
+        dropout_probability=self.dropout_rate,
+        is_training=True)
+  
+    return out
 
   def apply_attention_dot(
       self,
@@ -374,8 +404,7 @@ class AttentionOp(nn.Module):
     Returns:
       result in shape [batch_size, q_len, num_kv_heads * group_size, kv_dim]
     """
-    einsum = _maybe_aqt_einsum(self.quant)
-    out = einsum('bkgts,bskd->btkgd', attn_weights, value)
+    out = jnp.einsum('bkgts,bskd->btkgd', attn_weights, value)
     b, t, n_kv, g, d = out.shape
     result = jnp.reshape(out, (b, t, n_kv * g, d))
     return result
@@ -844,6 +873,7 @@ class Attention(nn.Module):
                                quant=self.quant,
                                num_query_heads=self.num_query_heads,
                                num_kv_heads=self.num_kv_heads,
+                               dropout_rate = self.dropout_rate,
                                dtype=self.dtype)
 
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)
