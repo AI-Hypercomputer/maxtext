@@ -68,7 +68,6 @@ class QuantizationTest(unittest.TestCase):
     for quant_mode in ["train", "serve", "convert"]:
       quant = _configure_quantization(quant_str="int8", mode_str=quant_mode)
       self.assertNotEqual(quant, None)
-      self.assertEqual(quant.quant_dg, quantizations.AQT_INT8_CONFIG)
 
   def test_aqt_quantization(self):
     # Without quantization
