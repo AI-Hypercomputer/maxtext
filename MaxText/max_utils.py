@@ -14,7 +14,6 @@
  limitations under the License.
  """
 
-# pylint: disable=bare-except, consider-using-generator
 """ Common Max Utils needed by multiple modules"""
 import checkpointing
 import common_types
@@ -247,10 +246,7 @@ def create_device_mesh(config, devices=None):
   if devices is None:
     devices = jax.devices()
   num_devices = len(devices)
-  try:
-    num_slices = 1 + max([d.slice_index for d in devices])
-  except:
-    num_slices = 1
+  num_slices = config.num_slices
   num_devices_per_slice = num_devices//num_slices
 
   multi_slice_env = num_slices > 1
