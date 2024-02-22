@@ -40,6 +40,9 @@ from flax.training import train_state
 import max_logging
 import torch
 import sys
+from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, Checkpointer, AsyncCheckpointer
+from orbax import checkpoint as ocp
+
 
 jax.config.update('jax_platform_name', 'cpu')
 
@@ -124,7 +127,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
     print(f'Loading checkpoint {i+1} of {len(ckpt_paths)} ...')
     checkpoint = torch.load(ckpt_path, map_location='cpu')
     pytorch_vars[int(ckpt_path.name.split('.', maxsplit=2)[1])] = checkpoint
-    pytorch_vars = [pytorch_vars[i] for i in sorted(list(pytorch_vars.keys()))]
+  pytorch_vars = [pytorch_vars[i] for i in sorted(list(pytorch_vars.keys()))]
 
   layer_key = 'gate' if num_experts else 'mlp'
   jax_weights = {
@@ -354,16 +357,11 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
   # dummy configs for the checkpoint_manager
   step_number_to_save_new_ckpt = 0
-  enable_checkpointing = True
+#   enable_checkpointing = True
   async_checkpointing = False
   save_interval_steps = 1
 
-  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      maxtext_model_path,
-      enable_checkpointing,
-      async_checkpointing,
-      save_interval_steps
-  )
+  
 
   state_new = train_state.TrainState(
       step=0,
@@ -373,10 +371,26 @@ def convert(base_model_path, maxtext_model_path, model_size):
       opt_state={}
   )
 
+#   checkpointer = Checkpointer(ocp.PyTreeCheckpointHandler(use_zarr3=True))s
+  checkpointer = AsyncCheckpointer(ocp.PyTreeCheckpointHandler(use_zarr3=True))
+
+  checkpoint_manager = CheckpointManager(
+      maxtext_model_path,
+      checkpointer,
+      options=CheckpointManagerOptions(
+          create=True,
+          save_interval_steps=save_interval_steps,
+          enable_async_checkpointing=async_checkpointing,
+      )
+  )
+
+  save_args = jax.tree_map(lambda x: ocp.SaveArgs(chunk_byte_size=10737418240), state_new) # set all to 10MB chunk sizes
+
   if checkpoint_manager is not None:
-    if checkpoint_manager.save(step_number_to_save_new_ckpt, state_new):
+    # if checkpoint_manager.save(step_number_to_save_new_ckpt, state_new):
+    if checkpoint_manager.save(step_number_to_save_new_ckpt, args=ocp.args.PyTreeSave(state_new, save_args)):
       max_logging.log(
-          f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
+          f"saved a checkpoint at step {checkpoint_manager.latest_step}")
     # Upon preemption, exit when and only when all ongoing saves are complete.
     if checkpoint_manager.reached_preemption(0):
       checkpoint_manager.wait_until_finished()
