@@ -163,7 +163,7 @@ def write_metrics_to_tensorboard(writer, metrics, step, config):
 
 def save_checkpoint(checkpoint_manager, step, state, dataset_type='c4', data_iterator=None):
   """Wrapper for saving checkpoint"""
-  if dataset_type == 'c4':
+  if dataset_type in {'c4', 'gg_mlperf'}:
     return checkpoint_manager.save(step, args=orbax.checkpoint.args.Composite(
                                                     default=orbax.checkpoint.args.StandardSave(state)))
   elif dataset_type == 'c4-array_record':
@@ -496,6 +496,9 @@ def main(argv: Sequence[str]) -> None:
       stack_trace_to_cloud = config.stack_trace_to_cloud,
       stack_trace_interval_seconds = config.stack_trace_interval_seconds))
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
+  print(f"Found {jax.device_count()} devices.")
+  print(f"Found {jax.process_count()} processes.")
+  print(f"Found {jax.devices()} devices.")
   with diagnostic.diagnose(diagnostic_config):
     train_loop(config)
 

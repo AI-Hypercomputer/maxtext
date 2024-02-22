@@ -42,7 +42,7 @@ def create_orbax_checkpoint_manager(
 
   if dataset_type=='c4-array_record':
     item_names = ('default', 'iter')
-  elif dataset_type=='c4':
+  elif dataset_type in {'c4', 'gg_mlperf'}:
     item_names = ('default',)
   else:
     raise ValueError(f"Unknown dataset_type {dataset_type}. dataset_type must be c4, c4-array_record or synthetic")

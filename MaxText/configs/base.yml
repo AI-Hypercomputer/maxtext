@@ -234,4 +234,5 @@ decode_sampling_top_k: 0 # set if you're doing top-k
 decode_sampling_temperature: 1.
 
 eval_interval: -1  # the specific number of train step between eval_step
+eval_dataset_size: -1
 target_eval_loss: 0.  # early stop once reaching target eval_loss
