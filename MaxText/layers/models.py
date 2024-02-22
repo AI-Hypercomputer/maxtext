@@ -220,9 +220,17 @@ class Decoder(nn.Module):
     if cfg.remat_policy != 'none':
       if cfg.remat_policy == 'minimal':
         policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
-      elif cfg.remat_policy == 'proj':
+      elif cfg.remat_policy == 'save_dot_except_mlpwi':
         policy = jax.checkpoint_policies.save_only_these_names(
-            'query_proj', 'value_proj', 'key_proj'
+            'query_proj', 'value_proj', 'key_proj', 'qkv_proj', 'out_proj', 'mlpwo',
+        )
+      elif cfg.remat_policy == 'save_dot_except_mlp':
+        policy = jax.checkpoint_policies.save_only_these_names(
+            'query_proj', 'value_proj', 'key_proj', 'qkv_proj', 'out_proj',
+        )
+      elif cfg.remat_policy == 'save_qkv_proj':
+        policy = jax.checkpoint_policies.save_only_these_names(
+            'query_proj', 'value_proj', 'key_proj', 'qkv_proj',
         )
       elif cfg.remat_policy == 'minimal_offloaded':
         policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host")

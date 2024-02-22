@@ -797,6 +797,7 @@ class Attention(nn.Module):
         weight_dtype=self.weight_dtype,
         name=proj_name,
         quant=self.quant)(inputs)
+    qkv_proj = checkpoint_name(qkv_proj, 'qkv_proj')
     query, key, value = qkv_proj[:,:,0,...], qkv_proj[:,:,1,...], qkv_proj[:,:,2,...]
     return query, key, value
 
@@ -890,4 +891,5 @@ class Attention(nn.Module):
 
     # apply output projection,  output dim is set to the input dim.
     out = self.out_projection(inputs_q.shape[-1], out)
+    out = checkpoint_name(out, 'out_proj')
     return out
