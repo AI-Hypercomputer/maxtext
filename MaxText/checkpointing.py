@@ -42,10 +42,8 @@ def create_orbax_checkpoint_manager(
 
   if dataset_type=='c4-array_record':
     item_names = ('default', 'iter')
-  elif dataset_type in {'c4', 'gg_mlperf'}:
-    item_names = ('default',)
   else:
-    raise ValueError(f"Unknown dataset_type {dataset_type}. dataset_type must be c4, c4-array_record or synthetic")
+    item_names = ('default',)
 
   mngr = CheckpointManager(
       p,
@@ -101,22 +99,19 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
                                       default=orbax.checkpoint.args.StandardRestore(abstract_unboxed_pre_state),
                                       iter=grain.PyGrainCheckpointRestore(data_iterator.local_iterator)
                                     )), None
-      elif dataset_type == 'c4':
+      else:
         return checkpoint_manager.restore(latest_step,
                                       args=orbax.checkpoint.args.Composite(
                                       default=orbax.checkpoint.args.StandardRestore(abstract_unboxed_pre_state),
                                     )), None
-      else:
-        raise ValueError(f"Unknown dataset_type {dataset_type}. dataset_type must be c4, c4-array_record or synthetic")
 
   if load_parameters_from_path != "":
     max_logging.log(f"restoring params from {load_parameters_from_path=}")
     p = epath.Path(load_parameters_from_path)
     ckptr = orbax.checkpoint.PyTreeCheckpointer()
-    metadata = ckptr.metadata(p)
-    restore_args = orbax.checkpoint.checkpoint_utils.construct_restore_args(metadata)
-    restored = ckptr.restore(p, item = {'params': metadata['params']}, transforms={},
-                             restore_args = {'params': restore_args['params']})
+    restore_args = orbax.checkpoint.checkpoint_utils.construct_restore_args(abstract_unboxed_pre_state.params)
+    restored = ckptr.restore(p, item = {'params': abstract_unboxed_pre_state.params}, transforms={},
+                             restore_args = {'params': restore_args})
 
     return None, restored['params']
 
@@ -125,7 +120,7 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
     p = epath.Path(load_full_state_from_path)
     ckptr = orbax.checkpoint.StandardCheckpointer()
     restored = ckptr.restore(p, args=orbax.checkpoint.args.StandardRestore(abstract_unboxed_pre_state))
-    return  {'default': restored, 'iter': None}, None
+    return  {'default': restored}, None
 
   else:
     max_logging.log("No existing checkpoints found, not restoring checkpoint.")

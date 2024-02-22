@@ -163,16 +163,14 @@ def write_metrics_to_tensorboard(writer, metrics, step, config):
 
 def save_checkpoint(checkpoint_manager, step, state, dataset_type='c4', data_iterator=None):
   """Wrapper for saving checkpoint"""
-  if dataset_type in {'c4', 'gg_mlperf'}:
-    return checkpoint_manager.save(step, args=orbax.checkpoint.args.Composite(
-                                                    default=orbax.checkpoint.args.StandardSave(state)))
-  elif dataset_type == 'c4-array_record':
+  if dataset_type == 'c4-array_record':
     return checkpoint_manager.save(step, args=orbax.checkpoint.args.Composite(
                                                     default=orbax.checkpoint.args.StandardSave(state),
                                                     iter=grain.PyGrainCheckpointSave(data_iterator.local_iterator)
                                                     ))
   else:
-    raise ValueError(f"Unknown dataset_type {dataset_type}. dataset_type must be c4, c4-array_record or synthetic")
+    return checkpoint_manager.save(step, args=orbax.checkpoint.args.Composite(
+                                                    default=orbax.checkpoint.args.StandardSave(state)))
 # -----------------------------------------------------------------------------
 # Top-level Functions
 # -----------------------------------------------------------------------------

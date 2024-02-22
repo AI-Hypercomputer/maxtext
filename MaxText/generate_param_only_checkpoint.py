@@ -37,7 +37,7 @@ from etils import epath
 from jax.sharding import Mesh
 from jax import random
 from typing import Sequence
-from layers import models
+from layers import models, quantizations
 from train import save_checkpoint
 
 Transformer = models.Transformer
@@ -75,7 +75,8 @@ def _possibly_unroll_params(config, training_state, training_state_annotations, 
 def _read_train_checkpoint(config, checkpoint_manager, mesh):
   """Read training checkpoint at path defined by load_full_state_path."""
   # Model and Optimizer definition
-  model = Transformer(config, mesh)
+  quant = quantizations.configure_quantization(config)
+  model = Transformer(config, mesh, quant)
   rng = random.PRNGKey(0)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)

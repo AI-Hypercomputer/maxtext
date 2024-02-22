@@ -14,7 +14,6 @@
  limitations under the License.
  """
 
-# pylint: disable=bare-except, consider-using-generator
 """ Common Max Utils needed by multiple modules"""
 import checkpointing
 import common_types
@@ -247,10 +246,7 @@ def create_device_mesh(config, devices=None):
   if devices is None:
     devices = jax.devices()
   num_devices = len(devices)
-  try:
-    num_slices = 1 + max([d.slice_index for d in devices])
-  except:
-    num_slices = 1
+  num_slices = config.num_slices
   num_devices_per_slice = num_devices//num_slices
 
   multi_slice_env = num_slices > 1
@@ -310,7 +306,7 @@ def init_training_state(apply_fn, params, tx):
     )
   return state
 
-def init_initial_state(model, params, tx, config, is_training, key):
+def init_initial_state(model, tx, config, is_training, key):
   """
   We pass in "static" objects like model, tx, config as JAX compares them by
   object hash, and instantiating them inside causes pjit top-level annotations
@@ -325,11 +321,9 @@ def init_initial_state(model, params, tx, config, is_training, key):
   model_vars = model.init({'params': key, 'dropout': key, 'aqt': key},
                           jnp.ones(input_shape, dtype=jnp.int32),
                           jnp.ones(input_shape, dtype=jnp.int32))
-  if not params:
-    params = model_vars['params']
   if is_training:
-    return init_training_state(model.apply, params, tx)
-  return init_decode_state(model.apply, params)
+    return init_training_state(model.apply, model_vars['params'], tx)
+  return init_decode_state(model.apply, model_vars['params'])
 
 def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   is_training = False
@@ -377,12 +371,14 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
         data_iterator.local_iterator = restored['iter']
       state = restored['default']
     else:
-      init_state_partial = functools.partial(init_initial_state, model, raw_params, tx, config, is_training)
+      init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       state = jax.jit(
           init_state_partial,
           in_shardings=None,
           out_shardings=state_mesh_shardings
       )(rng)
+      if raw_params: # If we loaded a partial state, we need to merge it.
+        state = state.replace(params = raw_params)
 
   state = unbox_logicallypartioned(state)
   return state, state_mesh_annotations, data_iterator
@@ -513,7 +509,7 @@ cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
 
 def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   """ Get a shaped abstraction of the state (including optimizer)"""
-  init_state_partial = functools.partial(init_initial_state, model, None, tx, config, is_training)
+  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
 
   abstract_state = jax.eval_shape(init_state_partial, rng)
 

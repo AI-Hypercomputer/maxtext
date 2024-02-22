@@ -1,3 +1,9 @@
+#!/bin/bash
+
+# This script is designed for internal use within Google. External users can adapt it by:
+#  - Updating GCS paths (gs://) to your accessible locations.
+#  - Using the checkpoint generated from train.py or available one in open source (https://llama.meta.com/llama-downloads/).
+
 set -e
 idx=$(date +%Y-%m-%d-%H-%M)
 

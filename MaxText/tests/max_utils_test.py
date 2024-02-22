@@ -26,6 +26,7 @@ import optax
 import pyconfig
 import unittest
 from layers import models
+from layers import quantizations
 
 Transformer = models.Transformer
 
@@ -107,7 +108,8 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
     self.config = pyconfig.config
     devices_array = max_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
-    self.model = Transformer(self.config, mesh=self.mesh)
+    quant = quantizations.configure_quantization(self.config)
+    self.model = Transformer(self.config, mesh=self.mesh, quant=quant)
 
   def test_setup_decode_state(self):
     rng = random.PRNGKey(0)

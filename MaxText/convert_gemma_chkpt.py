@@ -12,7 +12,7 @@
  """
 # pylint: disable=line-too-long
 """
-Convert orbax Gamma checkpoint to MaxText compatible checkpoint.
+Convert orbax Gemma checkpoint to MaxText compatible checkpoint.
 """
 
 import jax
