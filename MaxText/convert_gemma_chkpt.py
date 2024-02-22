@@ -31,6 +31,7 @@ import max_logging
 import orbax
 
 import checkpointing
+from train import save_checkpoint
 
 Params = dict[str, Any]
 
@@ -186,7 +187,7 @@ def main(raw_args=None) -> None:
   )
 
   if checkpoint_manager is not None:
-    if checkpoint_manager.save(0, state_new):
+    if save_checkpoint(checkpoint_manager, 0, state_new):
       max_logging.log("saved a checkpoint at step 0")
     # Upon preemption, exit when and only when all ongoing saves are complete.
     if checkpoint_manager.reached_preemption(0):

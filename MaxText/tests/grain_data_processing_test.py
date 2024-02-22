@@ -26,10 +26,6 @@ import unittest
 import pyconfig
 from input_pipeline import _grain_data_processing
 
-if os.path.exists("../../gcsfuse"):
-    os.system("fusermount -u ../../gcsfuse")
-    os.rmdir("../../gcsfuse")
-# os.mkdir("../gcsfuse")
 exit_code = os.system("bash ../setup_gcsfuse.sh DATASET_GCS_BUCKET=maxtext-dataset MOUNT_PATH=../../gcsfuse")
 if exit_code != 0:
     raise ValueError(f"Running setup_gcsfuse.sh failed with exit code: {exit_code}")

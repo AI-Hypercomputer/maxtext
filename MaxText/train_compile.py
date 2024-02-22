@@ -79,7 +79,7 @@ def get_shaped_inputs(topology_mesh, config):
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
 
   # Shaped state
-  abstract_state, state_mesh_annotations =  max_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
+  abstract_state, state_mesh_annotations, _ =  max_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
 
   # Shaped batch
   shaped_batch = input_pipeline_interface.get_shaped_batch(config)
