@@ -31,24 +31,33 @@ Each pass, load and save partial weights (subset of all weight variables).
 import argparse
 import pathlib
 
-import numpy as np
-
 import checkpointing
+
 import jax
 import jax.numpy as jnp
+
+jax.config.update('jax_platform_name', 'cpu')
+
 from flax.training import train_state
 import max_logging
 from train import save_checkpoint
 import torch
 import sys
+import ctypes
 
-jax.config.update('jax_platform_name', 'cpu')
 
 def permute_to_match_maxtext_rope(arr):
   evens = arr[..., ::2]
   odds = arr[..., 1::2]
-  return jax.numpy.concatenate((evens, odds), axis=arr.ndim-1)
+  return jnp.concatenate((evens, odds), axis=arr.ndim-1)
 
+def torch_to_jax(dd):
+    torch_jax_dtype_map = {
+        torch.bfloat16: jnp.bfloat16,
+        torch.float32: jnp.float32,
+        torch.float16: jnp.float16,
+    }
+    return jnp.frombuffer(bytes(ctypes.cast(dd.data_ptr(), ctypes.POINTER(ctypes.c_ubyte * (dd.numel() * (torch.finfo(dd.dtype).bits // 8)))).contents), dtype=torch_jax_dtype_map[dd.dtype]).reshape(tuple(dd.shape))
 
 MODEL_PARAMS_DICT = {
     'llama2-70b': {
@@ -150,15 +159,14 @@ def convert(base_model_path, maxtext_model_path, model_size):
               'self_attention': {},
           },
           'decoder_norm': {
-              'scale': pytorch_vars[0]['norm.weight'].type(torch.float16).numpy()
+              'scale': torch_to_jax(pytorch_vars[0]['norm.weight'])
           },
           'logits_dense': {
-              'kernel': new_logits_dense.type(torch.float16).numpy().transpose()
+              'kernel': torch_to_jax(new_logits_dense).transpose()
           }
       },
       'token_embedder': {
-          'embedding': new_embedding.type(torch.float16).numpy()
-
+          'embedding': torch_to_jax(new_embedding)
       }
 
   }
@@ -219,104 +227,93 @@ def convert(base_model_path, maxtext_model_path, model_size):
   }
 
   for layer_idx in range(base_num_decoder_layers):
-    wq = np.concatenate([var[f'layers.{layer_idx}.attention.wq.weight'].type(torch.float16).numpy()
+    wq = jnp.concatenate([torch_to_jax(var[f'layers.{layer_idx}.attention.wq.weight'])
                          for var in pytorch_vars], axis=0).transpose()
-    wk = np.concatenate([var[f'layers.{layer_idx}.attention.wk.weight'].type(torch.float16).numpy()
+    wk = jnp.concatenate([torch_to_jax(var[f'layers.{layer_idx}.attention.wk.weight'])
                          for var in pytorch_vars], axis=0).transpose()
-    wv = np.concatenate([var[f'layers.{layer_idx}.attention.wv.weight'].type(torch.float16).numpy()
+    wv = jnp.concatenate([torch_to_jax(var[f'layers.{layer_idx}.attention.wv.weight'])
                          for var in pytorch_vars], axis=0).transpose()
 
-    wq = np.reshape(wq, [base_num_query_heads * head_dim,
+    wq = wq.reshape([base_num_query_heads * head_dim,
                     base_num_query_heads, head_dim])
-    wk = np.reshape(wk, [base_num_query_heads * head_dim,
+    wk = wk.reshape([base_num_query_heads * head_dim,
                     base_num_kv_heads, head_dim])
-    wv = np.reshape(wv, [base_num_query_heads * head_dim,
+    wv = wv.reshape([base_num_query_heads * head_dim,
                     base_num_kv_heads, head_dim])
     wq = permute_to_match_maxtext_rope(wq)
     wk = permute_to_match_maxtext_rope(wk)
 
-    w_post = np.concatenate(
+    w_post = jnp.concatenate(
         [
-            var[f'layers.{layer_idx}.attention.wo.weight'].type(
-                torch.float16).numpy()
+            torch_to_jax(var[f'layers.{layer_idx}.attention.wo.weight'])
             for var in pytorch_vars
         ],
         axis=1,
     )
 
-    w_post = np.reshape(
-        w_post, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
+    w_post = w_post.reshape([base_num_query_heads * head_dim, base_num_query_heads, head_dim])
 
     self_attention['query']['kernel'].append(wq)
     self_attention['key']['kernel'].append(wk)
     self_attention['value']['kernel'].append(wv)
     self_attention['out']['kernel'].append(w_post)
-    pre_self_attention_layernorm = pytorch_vars[0][f'layers.{layer_idx}.attention_norm.weight'].type(
-        torch.float16).numpy()
-    post_self_attention_layernorm = pytorch_vars[0][f'layers.{layer_idx}.ffn_norm.weight'].type(
-        torch.float16).numpy()
+    pre_self_attention_layernorm = torch_to_jax(pytorch_vars[0][f'layers.{layer_idx}.attention_norm.weight'])
+    post_self_attention_layernorm = torch_to_jax(pytorch_vars[0][f'layers.{layer_idx}.ffn_norm.weight'])
     layer_weight['pre_self_attention_layer_norm']['scale'].append(
         pre_self_attention_layernorm)
     layer_weight['post_self_attention_layer_norm']['scale'].append(
         post_self_attention_layernorm)
 
     if num_experts is None:
-      wi_0 = np.concatenate([var[f'layers.{layer_idx}.feed_forward.w1.weight'].type(torch.float16).numpy()
+      wi_0 = jnp.concatenate([torch_to_jax(var[f'layers.{layer_idx}.feed_forward.w1.weight'])
                              for var in pytorch_vars], axis=0).transpose()
-      wi_1 = np.concatenate([var[f'layers.{layer_idx}.feed_forward.w3.weight'].type(torch.float16).numpy()
+      wi_1 = jnp.concatenate([torch_to_jax(var[f'layers.{layer_idx}.feed_forward.w3.weight'])
                              for var in pytorch_vars], axis=0).transpose()
-      wo = np.concatenate([var[f'layers.{layer_idx}.feed_forward.w2.weight'].type(torch.float16).numpy()
+      wo = jnp.concatenate([torch_to_jax(var[f'layers.{layer_idx}.feed_forward.w2.weight'])
                            for var in pytorch_vars], axis=1).transpose()
       layer_weight['mlp']['wi_0']['kernel'].append(wi_0)
       layer_weight['mlp']['wi_1']['kernel'].append(wi_1)
       layer_weight['mlp']['wo']['kernel'].append(wo)
     else:
-      gate = np.concatenate([var[f'layers.{layer_idx}.feed_forward.gate.weight'].type(torch.float16).numpy()
+      gate = jnp.concatenate([torch_to_jax(var[f'layers.{layer_idx}.feed_forward.gate.weight'])
                              for var in pytorch_vars], axis=0).transpose()
       layer_weight['gate']['kernel'].append(gate)
       for k in range(num_experts):
-        wi_0 = np.concatenate([var[f'layers.{layer_idx}.feed_forward.experts.{k}.w1.weight'].type(torch.float16).numpy()
+        wi_0 = jnp.concatenate([torch_to_jax(var[f'layers.{layer_idx}.feed_forward.experts.{k}.w1.weight'])
                                for var in pytorch_vars], axis=0).transpose()
-        wi_1 = np.concatenate([var[f'layers.{layer_idx}.feed_forward.experts.{k}.w3.weight'].type(torch.float16).numpy()
+        wi_1 = jnp.concatenate([torch_to_jax(var[f'layers.{layer_idx}.feed_forward.experts.{k}.w3.weight'])
                                for var in pytorch_vars], axis=0).transpose()
-        wo = np.concatenate([var[f'layers.{layer_idx}.feed_forward.experts.{k}.w2.weight'].type(torch.float16).numpy()
+        wo = jnp.concatenate([torch_to_jax(var[f'layers.{layer_idx}.feed_forward.experts.{k}.w2.weight'])
                              for var in pytorch_vars], axis=1).transpose()
         layer_weight[f'mlp_{k}']['wi_0']['kernel'].append(wi_0)
         layer_weight[f'mlp_{k}']['wi_1']['kernel'].append(wi_1)
         layer_weight[f'mlp_{k}']['wo']['kernel'].append(wo)
 
-  self_attention['query']['kernel'] = np.array(
-      self_attention['query']['kernel'])
-  self_attention['key']['kernel'] = np.array(self_attention['key']['kernel'])
-  self_attention['value']['kernel'] = np.array(
-      self_attention['value']['kernel'])
-  self_attention['out']['kernel'] = np.array(self_attention['out']['kernel'])
-  self_attention['query']['kernel'] = np.transpose(
-      self_attention['query']['kernel'], axes=(1, 0, 2, 3))
-  self_attention['key']['kernel'] = np.transpose(
-      self_attention['key']['kernel'], axes=(1, 0, 2, 3))
-  self_attention['value']['kernel'] = np.transpose(
-      self_attention['value']['kernel'], axes=(1, 0, 2, 3))
+  self_attention['query']['kernel'] = jnp.array(self_attention['query']['kernel'])
+  self_attention['key']['kernel'] = jnp.array(self_attention['key']['kernel'])
+  self_attention['value']['kernel'] = jnp.array(self_attention['value']['kernel'])
+  self_attention['out']['kernel'] = jnp.array(self_attention['out']['kernel'])
+  self_attention['query']['kernel'] = jnp.transpose(self_attention['query']['kernel'], axes=(1, 0, 2, 3))
+  self_attention['key']['kernel'] = jnp.transpose(self_attention['key']['kernel'], axes=(1, 0, 2, 3))
+  self_attention['value']['kernel'] = jnp.transpose(self_attention['value']['kernel'], axes=(1, 0, 2, 3))
   # layers, base_num_query_heads * head_dim, base_num_query_heads, head_dim =>
   # base_num_query_heads, layers,head_dim, base_num_query_heads * head_dim
-  self_attention['out']['kernel'] = np.transpose(
-      self_attention['out']['kernel'], axes=(2, 0, 3, 1))
+  self_attention['out']['kernel'] = jnp.transpose(self_attention['out']['kernel'], axes=(2, 0, 3, 1))
 
   # scale the query weights
-  self_attention['query']['kernel'] = self_attention['query']['kernel'] / \
-      np.sqrt(head_dim)
+  self_attention['query']['kernel'] = self_attention['query']['kernel'] / jnp.sqrt(head_dim)
 
   jax_weights['decoder']['layers']['self_attention'] = self_attention
 
   # self attention layer norm and swap the layer index
-  layer_weight['pre_self_attention_layer_norm']['scale'] = np.array(
+  layer_weight['pre_self_attention_layer_norm']['scale'] = jnp.array(
       layer_weight['pre_self_attention_layer_norm']['scale'])
-  layer_weight['post_self_attention_layer_norm']['scale'] = np.array(
+  layer_weight['post_self_attention_layer_norm']['scale'] = jnp.array(
       layer_weight['post_self_attention_layer_norm']['scale'])
-  layer_weight['pre_self_attention_layer_norm']['scale'] = np.transpose(
+  layer_weight['pre_self_attention_layer_norm']['scale'] = jnp.transpose(
       layer_weight['pre_self_attention_layer_norm']['scale'],
       axes=(1, 0))
-  layer_weight['post_self_attention_layer_norm']['scale'] = np.transpose(
+  layer_weight['post_self_attention_layer_norm']['scale'] = jnp.transpose(
       layer_weight['post_self_attention_layer_norm']['scale'],
       axes=(1, 0))
 
@@ -324,45 +321,45 @@ def convert(base_model_path, maxtext_model_path, model_size):
   jax_weights['decoder']['layers']['post_self_attention_layer_norm'] = layer_weight['post_self_attention_layer_norm']
 
   if num_experts is None:
-    layer_weight['mlp']['wi_0']['kernel'] = np.array(
+    layer_weight['mlp']['wi_0']['kernel'] = jnp.array(
         layer_weight['mlp']['wi_0']['kernel'])
-    layer_weight['mlp']['wi_1']['kernel'] = np.array(
+    layer_weight['mlp']['wi_1']['kernel'] = jnp.array(
         layer_weight['mlp']['wi_1']['kernel'])
-    layer_weight['mlp']['wo']['kernel'] = np.array(
+    layer_weight['mlp']['wo']['kernel'] = jnp.array(
         layer_weight['mlp']['wo']['kernel'])
     # swap the layer index
-    layer_weight['mlp']['wi_0']['kernel'] = np.transpose(
+    layer_weight['mlp']['wi_0']['kernel'] = jnp.transpose(
         layer_weight['mlp']['wi_0']['kernel'], axes=(1, 0, 2))
-    layer_weight['mlp']['wi_1']['kernel'] = np.transpose(
+    layer_weight['mlp']['wi_1']['kernel'] = jnp.transpose(
         layer_weight['mlp']['wi_1']['kernel'], axes=(1, 0, 2))
-    layer_weight['mlp']['wo']['kernel'] = np.transpose(
+    layer_weight['mlp']['wo']['kernel'] = jnp.transpose(
         layer_weight['mlp']['wo']['kernel'], axes=(1, 0, 2))
 
     jax_weights['decoder']['layers']['mlp'] = layer_weight['mlp']
   else:
-    layer_weight['gate']['kernel'] = np.array(layer_weight['gate']['kernel'])
-    layer_weight['gate']['kernel'] = np.transpose(
+    layer_weight['gate']['kernel'] = jnp.array(layer_weight['gate']['kernel'])
+    layer_weight['gate']['kernel'] = jnp.transpose(
         layer_weight['gate']['kernel'], axes=(1, 0, 2))
     jax_weights['decoder']['layers']['gate'] = layer_weight['gate']
     for k in range(num_experts):
-      layer_weight[f'mlp_{k}']['wi_0']['kernel'] = np.array(
+      layer_weight[f'mlp_{k}']['wi_0']['kernel'] = jnp.array(
           layer_weight[f'mlp_{k}']['wi_0']['kernel'])
-      layer_weight[f'mlp_{k}']['wi_1']['kernel'] = np.array(
+      layer_weight[f'mlp_{k}']['wi_1']['kernel'] = jnp.array(
           layer_weight[f'mlp_{k}']['wi_1']['kernel'])
-      layer_weight[f'mlp_{k}']['wo']['kernel'] = np.array(
+      layer_weight[f'mlp_{k}']['wo']['kernel'] = jnp.array(
           layer_weight[f'mlp_{k}']['wo']['kernel'])
       # swap the layer index
-      layer_weight[f'mlp_{k}']['wi_0']['kernel'] = np.transpose(
+      layer_weight[f'mlp_{k}']['wi_0']['kernel'] = jnp.transpose(
           layer_weight[f'mlp_{k}']['wi_0']['kernel'], axes=(1, 0, 2))
-      layer_weight[f'mlp_{k}']['wi_1']['kernel'] = np.transpose(
+      layer_weight[f'mlp_{k}']['wi_1']['kernel'] = jnp.transpose(
           layer_weight[f'mlp_{k}']['wi_1']['kernel'], axes=(1, 0, 2))
-      layer_weight[f'mlp_{k}']['wo']['kernel'] = np.transpose(
+      layer_weight[f'mlp_{k}']['wo']['kernel'] = jnp.transpose(
           layer_weight[f'mlp_{k}']['wo']['kernel'], axes=(1, 0, 2))
 
       jax_weights['decoder']['layers'][f'mlp_{k}'] = layer_weight[f'mlp_{k}']
 
   # convert all weights to jax.numpy
-  jax_weights = jax.tree_map(jnp.array, jax_weights)
+#   jax_weights = jax.tree_map(jnp.array, jax_weights)
 
   # dummy configs for the checkpoint_manager
   step_number_to_save_new_ckpt = 0

@@ -30,18 +30,11 @@ tokenizer_path: "assets/llama_add_chinese_other.model"
 dataset_type: "gg_mlperf"
 eval_dataset_size: 1024
 
-# base_emb_dim: 4096
-# base_num_query_heads: 20
-# base_num_kv_heads: 20
-# base_mlp_dim: 8192
-# base_num_decoder_layers: 20
-# head_dim: 128
-# mlp_activations: ["silu", "linear"]
-# vocab_size: 137728
-# enable_dropout: False
-# logits_via_embedding: False
-# normalization_layer_epsilon: 1.0e-5
-# decoder_block: "llama2"
-# tokenizer_path: "assets/llama_add_chinese_other.model"
-# dataset_type: "gg_mlperf"
-# eval_dataset_size: 1024
+weight_dtype: "bfloat16"
+
+opt_type: lion
+adam_b1: 0.95
+adam_b2: 0.98
+adam_weight_decay: 0.01
+learning_rate: 3.e-5
+

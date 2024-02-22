@@ -28,7 +28,7 @@ def get_optimizer(config, learning_rate_schedule):
   """create optimizer"""
   if config.opt_type == "adamw":
     # Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
-    return optax.adamw(
+    optimizer = optax.adamw(
       learning_rate_schedule,
       b1=config.adam_b1,
       b2=config.adam_b2,
@@ -36,8 +36,15 @@ def get_optimizer(config, learning_rate_schedule):
       eps_root=config.adam_eps_root,
       weight_decay=config.adam_weight_decay,
     )
+  elif config.opt_type == "lion":
+    optimizer = optax.lion(
+      learning_rate_schedule,
+      b1=config.adam_b1,
+      b2=config.adam_b2,
+      weight_decay=config.adam_weight_decay,
+    )
   elif config.opt_type == "adam_pax":
-    return adam_pax(
+    optimizer = adam_pax(
       learning_rate_schedule,
       beta1=config.adam_b1,
       beta2=config.adam_b2,
@@ -47,6 +54,13 @@ def get_optimizer(config, learning_rate_schedule):
     )
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")
+
+  if config.gradient_accumulation_steps > 1:
+    optimizer = optax.MultiSteps(
+        optimizer, config.gradient_accumulation_steps
+    )
+
+  return optimizer
 
 def adam_pax(
     learning_rate_fn: optax.Schedule,

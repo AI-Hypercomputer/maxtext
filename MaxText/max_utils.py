@@ -411,6 +411,15 @@ def create_learning_rate_schedule(config):
   cos_steps = config.learning_rate_schedule_steps - warmup_steps
   constant_zero_steps = config.steps - config.learning_rate_schedule_steps
 
+  if config.gradient_accumulation_steps > 1:
+    warmup_steps = warmup_steps // config.gradient_accumulation_steps
+    cos_steps = cos_steps // config.gradient_accumulation_steps
+    constant_zero_steps = constant_zero_steps // config.gradient_accumulation_steps
+  
+  print(f"warmup_steps: {warmup_steps}")
+  print(f"cos_steps: {cos_steps}")
+  print(f"constant_zero_steps: {constant_zero_steps}")
+
   warmup_schedule = optax.linear_schedule(
       init_value=0.0,
       end_value=lr,
