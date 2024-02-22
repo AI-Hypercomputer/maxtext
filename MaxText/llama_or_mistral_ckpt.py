@@ -124,7 +124,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
     print(f'Loading checkpoint {i+1} of {len(ckpt_paths)} ...')
     checkpoint = torch.load(ckpt_path, map_location='cpu')
     pytorch_vars[int(ckpt_path.name.split('.', maxsplit=2)[1])] = checkpoint
-    pytorch_vars = [pytorch_vars[i] for i in sorted(list(pytorch_vars.keys()))]
+  pytorch_vars = [pytorch_vars[i] for i in sorted(list(pytorch_vars.keys()))]
 
   layer_key = 'gate' if num_experts else 'mlp'
   jax_weights = {
