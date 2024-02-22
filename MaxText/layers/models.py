@@ -222,6 +222,11 @@ class Decoder(nn.Module):
         policy = jax.checkpoint_policies.save_only_these_names(
             'query_proj', 'value_proj', 'key_proj', 'qkv_proj', 'out_proj', 'ffn1', 'ffn2', 'wv_prod',
         )
+      elif cfg.remat_policy == "save_dot_except_logits_ffn1":
+        # https://github.com/google/praxis/blob/77675370d1150fccda0862a0ac7d1808d4bce9bf/praxis/layers/checkpoint_policy.py#L94
+        policy = jax.checkpoint_policies.save_only_these_names(
+            'query_proj', 'value_proj', 'key_proj', 'qkv_proj', 'out_proj', 'ffn2', 'wv_prod',
+        )
       elif cfg.remat_policy == 'proj':
         policy = jax.checkpoint_policies.save_only_these_names(
             'query_proj', 'value_proj', 'key_proj', 'qkv_proj',
