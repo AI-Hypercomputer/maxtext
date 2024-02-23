@@ -86,7 +86,7 @@ logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedd
 remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
-attention: 'flash' # Supported attention: dot_product, flash, gpu_flash_xla, gpu_flash_triton
+attention: 'flash' # Supported attention: dot_product, flash, cudnn_flash_te
 # Combine matmuls for QKV and MLP
 fused_qkv: False
 fused_mlp: False
@@ -101,7 +101,7 @@ base_output_directory: ""
 jax_cache_dir: "~/jax_cache"
 
 # Hardware
-hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu' and 'cpu'
+hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
 # Parallelism
 mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']
