@@ -344,3 +344,31 @@ def ssh_tpu(
 
   # run provided commands
   ssh_group.run(cmds)
+
+
+@task
+def clean_up_idle_queued_resources(project_name: str, zones: Iterable[str]) -> None:
+  """Clean up queued resources in FAILED or SUSPENDED states.
+
+  Args:
+   project_name: The project of resources.
+   zones: Available zones to clean up for the project.
+  """
+  creds, _ = google.auth.default()
+  client = tpu_api.TpuClient(credentials=creds)
+
+  logging.info(f'Cleaning up resources in project {project_name}.')
+  for zone in zones:
+    logging.info(f'Checking in zone {zone.value}.')
+    parent = f'projects/{project_name}/locations/{zone.value}'
+    request = tpu_api.types.ListQueuedResourcesRequest(parent=parent)
+    responses = client.list_queued_resources(request)
+
+    for qr in responses:
+      state = qr.state.state
+      if (
+          state == tpu_api.QueuedResourceState.State.FAILED
+          or state == tpu_api.QueuedResourceState.State.SUSPENDED
+      ):
+        logging.info(f'Deleting {qr.name} in {state.name} status.')
+        client.delete_queued_resource(name=qr.name)
