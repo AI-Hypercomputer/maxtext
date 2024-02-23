@@ -40,7 +40,7 @@ with models.DAG(
       tpu_version=TpuVersion.V4,
       tpu_cores=8,
       tpu_zone=Zone.US_CENTRAL2_B.value,
-      time_out_in_min=180,
+      time_out_in_min=600,
       log_dir=f"{log_dir_prefix}/c4spmd1b_pretraining/v4-8",
       pax_version=pax_config.PaxVersion.NIGHTLY,
       exp_path=c4spmd1b_pretraining_exp_path,
@@ -121,31 +121,31 @@ with models.DAG(
       extraFlags=" ".join(pax_transformer_adam_extra_flags),
   ).run()
 
-  pax_nightly_lmtransformeradam_v5p_4 = pax_config.get_pax_lm_config(
+  pax_nightly_lmtransformeradam_v5p_8 = pax_config.get_pax_lm_config(
       project_name=Project.TPU_PROD_ENV_AUTOMATED.value,
       tpu_version=TpuVersion.V5P,
-      tpu_cores=4,
+      tpu_cores=8,
       tpu_zone=Zone.US_EAST5_A.value,
       time_out_in_min=60,
-      log_dir=f"{log_dir_prefix}/lmtransformeradam/v5p-4",
+      log_dir=f"{log_dir_prefix}/lmtransformeradam/v5p-8",
       exp_path=lmtransformeradam_exp_path,
       pax_version=pax_config.PaxVersion.NIGHTLY,
-      model_name="lmtransformer",
+      model_name="lmtransformeradam",
       extraFlags=" ".join(pax_transformer_adam_extra_flags),
       network=V5_NETWORKS,
       subnetwork=V5P_SUBNETWORKS,
   ).run()
 
-  pax_nightly_lmtransformeradam_v5p_16 = pax_config.get_pax_lm_config(
+  pax_nightly_lmtransformeradam_v5p_32 = pax_config.get_pax_lm_config(
       project_name=Project.TPU_PROD_ENV_AUTOMATED.value,
       tpu_version=TpuVersion.V5P,
-      tpu_cores=16,
+      tpu_cores=32,
       tpu_zone=Zone.US_EAST5_A.value,
       time_out_in_min=60,
-      log_dir=f"{log_dir_prefix}/lmtransformeradam/v5p-4",
+      log_dir=f"{log_dir_prefix}/lmtransformeradam/v5p-32",
       exp_path=lmtransformeradam_exp_path,
       pax_version=pax_config.PaxVersion.NIGHTLY,
-      model_name="lmtransformer",
+      model_name="lmtransformeradam",
       extraFlags=" ".join(pax_transformer_adam_extra_flags),
       network=V5_NETWORKS,
       subnetwork=V5P_SUBNETWORKS,
@@ -160,7 +160,7 @@ with models.DAG(
       log_dir=f"{log_dir_prefix}/lmtransformeradam/v5litepod-4",
       exp_path=lmtransformeradam_exp_path,
       pax_version=pax_config.PaxVersion.NIGHTLY,
-      model_name="lmtransformer",
+      model_name="lmtransformeradam",
       extraFlags=" ".join(pax_transformer_adam_extra_flags),
       network=V5_NETWORKS,
       subnetwork=V5E_SUBNETWORKS,
@@ -175,7 +175,7 @@ with models.DAG(
       log_dir=f"{log_dir_prefix}/lmtransformeradam/v5litepod-16",
       exp_path=lmtransformeradam_exp_path,
       pax_version=pax_config.PaxVersion.NIGHTLY,
-      model_name="lmtransformer",
+      model_name="lmtransformeradam",
       extraFlags=" ".join(pax_transformer_adam_extra_flags),
       network=V5_NETWORKS,
       subnetwork=V5E_SUBNETWORKS,
@@ -186,5 +186,5 @@ with models.DAG(
   pax_nightly_lmcloudspmdadam_v4_16
   pax_nightly_lmspmd2b_v4_8 >> pax_nightly_lmspmd2b_ckpt_v4_8
   pax_nightly_lmtransformeradam_v4_8 >> pax_nightly_lmtransformeradam_v4_16
-  pax_nightly_lmtransformeradam_v5p_4 >> pax_nightly_lmtransformeradam_v5p_16
+  pax_nightly_lmtransformeradam_v5p_8 >> pax_nightly_lmtransformeradam_v5p_32
   pax_nightly_lmtransformeradam_v5e_4 >> pax_nightly_lmtransformeradam_v5e_16

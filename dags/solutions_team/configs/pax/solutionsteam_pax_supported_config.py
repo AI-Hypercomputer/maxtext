@@ -56,7 +56,7 @@ def get_setup_cmds(
         "pip install --upgrade pip",
         "pip install praxis*.whl",
         "pip install paxml*.whl",
-        "sudo pip uninstall --yes jax jaxlib libtpu-nightly",
+        "pip uninstall --yes jax jaxlib libtpu-nightly",
         "pip install git+https://github.com/google/jax.git",
         (
             "pip install --pre -U jaxlib -f"
