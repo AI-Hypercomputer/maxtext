@@ -104,6 +104,7 @@ logical_axis_rules: [
                       ['activation_vocab', ['tensor', 'sequence']],
                       ['mlp', ['tensor','autoregressive']],
                       ['vocab', ['tensor', 'autoregressive']],
+                      ['replicate', []],
                       ['embed', ['fsdp', 'sequence']],
                       ['heads', ['tensor', 'autoregressive']],
                       ['kv', []],
@@ -230,3 +231,5 @@ local_aqt_shards_attention_out_proj: 1
 local_aqt_scale: -1
 
 pre_compile: True
+
+replicate_positional_embedding: False

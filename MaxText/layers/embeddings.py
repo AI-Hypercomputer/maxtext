@@ -50,14 +50,23 @@ class Embed(nn.Module):
   dtype: DType = jnp.float32
   attend_dtype: Optional[DType] = None
   embedding_init: Initializer = default_embed_init
+  replicate_vocab_dim: bool = False
 
   def setup(self):
-    self.embedding = self.param(
-        'embedding',
-        with_logical_partitioning(self.embedding_init, ('vocab', 'embed')),
-        (self.num_embeddings, self.features),
-        jnp.float32,
-    )
+    if self.replicate_vocab_dim:
+      self.embedding = self.param(
+          'embedding',
+          with_logical_partitioning(self.embedding_init, ('replicate', 'embed')),
+          (self.num_embeddings, self.features),
+          jnp.float32,
+      )
+    else:
+      self.embedding = self.param(
+          'embedding',
+          with_logical_partitioning(self.embedding_init, ('vocab', 'embed')),
+          (self.num_embeddings, self.features),
+          jnp.float32,
+      )
 
   def __call__(self, inputs: Array) -> Array:
     """Embeds the inputs along the last dimension.

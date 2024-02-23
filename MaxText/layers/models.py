@@ -205,7 +205,9 @@ class Decoder(nn.Module):
         dtype=cfg.dtype,
         embedding_init=nn.initializers.normal(stddev=1.0),
         name='position_embedder',
-        config=cfg)(decoder_positions)
+        config=cfg,
+        replicate_vocab_dim=cfg.replicate_positional_embedding,
+        )(decoder_positions)
 
     BlockLayer = self.get_decoder_layer()
 
