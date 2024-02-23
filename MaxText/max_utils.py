@@ -172,7 +172,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
       indirection in MaxText to avoid breaking the call sites unnecessarily.
 
       Currently jax.distributed.initialize() fully works as expected!
-      
+
       For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
   """
   if (raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"]
@@ -324,6 +324,11 @@ def init_initial_state(model, tx, config, is_training, key):
   if is_training:
     return init_training_state(model.apply, model_vars['params'], tx)
   return init_decode_state(model.apply, model_vars['params'])
+
+def load_decode_model_vars(model, config, rng, mesh):
+  state, _ = setup_decode_state(model, config, rng, mesh, None)
+  model_vars = {'params': state.params}
+  return model_vars
 
 def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   is_training = False
@@ -552,3 +557,14 @@ def get_kv_cache_annotations(model, config, rng, mesh):
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return state_mesh_annotations
+
+
+def print_pytree_shape(print_str, ptree):
+  print("\n")
+  print(print_str)
+  print(jax.tree_util.tree_map(lambda x : x.shape, ptree))
+
+def print_model_vars(print_str, model_vars):
+  for k in model_vars:
+    print(f'{print_str} key{k}:')
+    print(f'\t {model_vars[k]}')

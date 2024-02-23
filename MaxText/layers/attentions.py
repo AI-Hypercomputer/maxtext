@@ -374,8 +374,7 @@ class AttentionOp(nn.Module):
     Returns:
       result in shape [batch_size, q_len, num_kv_heads * group_size, kv_dim]
     """
-    einsum = _maybe_aqt_einsum(self.quant)
-    out = einsum('bkgts,bskd->btkgd', attn_weights, value)
+    out = jnp.einsum('bkgts,bskd->btkgd', attn_weights, value)
     b, t, n_kv, g, d = out.shape
     result = jnp.reshape(out, (b, t, n_kv * g, d))
     return result
