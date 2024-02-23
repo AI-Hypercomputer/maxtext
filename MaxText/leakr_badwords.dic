@@ -1,5 +1,0 @@
-;; Bad words to let go as Warning
-
-fileutil;1;
-lamda;1;
-$RE:(^|[\W])((?i)gluon(?-i))($|[\W]);1;Use regex as gluon is a substring of a username
