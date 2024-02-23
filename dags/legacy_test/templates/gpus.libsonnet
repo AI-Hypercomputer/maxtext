@@ -23,9 +23,12 @@ local base = import 'base.libsonnet';
     version: error 'Must specify GPUSpec `version`',
     count: 1,
     replicas: gpu.count,
+    // Processes to spawn per host with torchrun. Set to 1 for SPMD.
+    processes: gpu.count,
     num_hosts: 1,
     // Label used in GCE API
     accelerator_type: error 'Must specify GPUSpec `accelerator_type',
+    size: gpu.count * gpu.num_hosts,
 
     // Ignore TPU settings.
     PodTemplate(_):: {

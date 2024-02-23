@@ -122,6 +122,13 @@ local volumes = import 'templates/volumes.libsonnet';
     local config = self,
     imageTag+: '_cuda_12.1',
 
+    # TODO(wcromar): Merge TPU VM setup script with GPU entrypoint
+    tpuSettings+: {
+      tpuVmExports+: |||
+        export PJRT_DEVICE=CUDA
+      |||,
+    },
+
     entrypoint: [
       'bash',
       '-cxue',
@@ -137,17 +144,17 @@ local volumes = import 'templates/volumes.libsonnet';
         wget https://github.com/pytorch/xla/archive/refs/heads/master.tar.gz -O - | tar xzf -
         mv xla-master pytorch/xla
 
-        export PJRT_DEVICE=CUDA
+        %s
 
         # Run whatever is in `command` here
         "${@:0}"
-      |||,
+      ||| % config.tpuSettings.tpuVmExports,
     ],
     command: [
       'torchrun',
       '--nnodes=%d' % config.accelerator.num_hosts,
       '--node_rank=$(JOB_COMPLETION_INDEX)',
-      '--nproc_per_node=%d' % config.accelerator.count,
+      '--nproc_per_node=%d' % config.accelerator.processes,
       '--rdzv_endpoint=$(JOB_NAME)-0.headless-svc:12355',
     ] + super.command[1:],
 

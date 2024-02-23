@@ -163,9 +163,23 @@ local tpus = import 'templates/tpus.libsonnet';
       }
     },
   },
+  local v100x2 = self.v100x2,
+  v100x2:: gpu {
+    accelerator: gpus.teslaV100 { count: 2 },
+  },
   local v100x2x2 = self.v100x2x2,
   v100x2x2:: gpu {
     accelerator: gpus.teslaV100 { count: 2, num_hosts: 2 },
+  },
+
+  local plugin = self.plugin,
+  plugin:: {
+    modelName+: '-plugin',
+    tpuSettings+: {
+      tpuVmExports+: |||
+        export XLA_REGISTER_INSTALLED_PLUGINS=1
+      |||,
+    },
   },
 
   local pjrt_ddp = self.pjrt_ddp,
@@ -188,24 +202,30 @@ local tpus = import 'templates/tpus.libsonnet';
   pjrt:: common.PyTorchTpuVmMixin + tpuVm {
     modelName: 'resnet50-pjrt',
   },
-  local spmd(sharding) = self.spmd(sharding),
-  spmd(sharding):: pjrt {
+  local spmd(sharding, replica_batch_size=128) = self.spmd(sharding, replica_batch_size),
+  spmd(sharding, replica_batch_size):: {
     // Include sharding spec in the test name
     modelName: std.join('-', ['resnet50-spmd'] + sharding),
     trainScript: 'pytorch/xla/test/spmd/test_train_spmd_imagenet.py',
     command+: ['--sharding=' + std.join(',', sharding)],
     // Keep the same global batch size. In SPMD, the global batch size is
     // divided across all devices.
-    batch_size: self.accelerator.size * 128,
+    batch_size: self.accelerator.size * replica_batch_size,
     tpuSettings+: {
       tpuVmExports+: |||
         export XLA_USE_SPMD=1
       |||,
     },
+    accelerator+: {
+      processes: 1,
+    },
   },
 
   configs: [
+    resnet50 + fake_data + v100x2 + timeouts.Hours(3) + plugin,
+    resnet50 + fake_data + v100x2x2 + timeouts.Hours(3) + plugin,
     resnet50 + fake_data + v100x2x2 + timeouts.Hours(3),
+    resnet50 + fake_data + v100x2x2 + timeouts.Hours(4) + spmd(['batch'], 32),
     // PJRT
     resnet50 + fake_data + v2_8 + timeouts.Hours(3) + pjrt,
     resnet50 + fake_data + v3_8 + timeouts.Hours(2) + pjrt,
@@ -219,7 +239,7 @@ local tpus = import 'templates/tpus.libsonnet';
     resnet50 + fake_data + v4_32 + timeouts.Hours(2) + pjrt,
     resnet50 + convergence + v4_32 + timeouts.Hours(24) + pjrt,
     // SPMD
-    resnet50 + functional + v4_8 + timeouts.Hours(2) + spmd(['batch']),
-    resnet50 + functional + v4_8 + timeouts.Hours(2) + spmd(['spatial']),
+    resnet50 + functional + v4_8 + timeouts.Hours(2) + pjrt + spmd(['batch']),
+    resnet50 + functional + v4_8 + timeouts.Hours(2) + pjrt + spmd(['spatial']),
   ],
 }
