@@ -79,6 +79,11 @@ def validate_no_keys_overwritten_twice(keys1: list[str], keys2: list[str]):
 _config = None
 config = None
 
+def print_system_information():
+  max_logging.log(f"System Information: Jax Version: {jax.__version__}")
+  max_logging.log(f"System Information: Jaxlib Version: {jax.lib.__version__}")
+  max_logging.log(f"System Information: Jax Backend: {jax.lib.xla_bridge.get_backend().platform_version}")
+
 def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any],list[Any]]:
   return tuple(_lists_to_tuples(x) for x in l) if isinstance(l, list) else l
 
@@ -197,6 +202,8 @@ class _HyperParameters():
 
     raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = \
       calculate_global_batch_sizes(raw_keys)
+
+    print_system_information()
 
     # Write raw_keys to GCS before type conversions
     max_utils.write_config_raw_keys_for_gcs(raw_keys)

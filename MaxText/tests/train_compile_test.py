@@ -39,6 +39,15 @@ class TrainCompile(unittest.TestCase):
       "base_num_decoder_layers=2"))
 
   @pytest.mark.tpu
+  def test_minimal_offloaded_v5e(self):
+    compiled_trainstep_file='/tmp/test_compiled_v5e_offload.pickle'
+    train_compile_main((None, "configs/base.yml", f"compiled_trainstep_file={compiled_trainstep_file}",
+      "compile_topology=v5e-256", "compile_topology_num_slices=1", "per_device_batch_size=1", "ici_fsdp_parallelism=16",
+      "ici_tensor_parallelism=16", "max_target_length=2048",
+      "fused_qkv=true", "fused_mlp=true", "remat_policy=minimal_offloaded",
+      "use_iota_embed=true", "global_parameter_scale=128"))
+
+  @pytest.mark.tpu
   def test_save_compiled_v5p_two_slices(self):
     compiled_trainstep_file='/tmp/test_compiled_v5p_two_slices.pickle'
     train_compile_main((None, "configs/base.yml", f"compiled_trainstep_file={compiled_trainstep_file}",
