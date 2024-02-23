@@ -291,6 +291,14 @@ def decode_loop(model, model_vars, sp_tokenizer, rng, prompts):
   for step in steps:
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
+    
+    if step == 6 and jax.process_index() == 0:
+      cudaProfilerStart()
+      print("====================step 6=================")
+    if step == 8 and jax.process_index() == 0:
+      cudaProfilerStop()
+      print("=====================step 8================")
+
     new_position, new_cache, next_logit, selected_id = decode_ar_one_step(
     config, model, model_vars, new_cache, new_position, next_logit, rngs[step],
     kv_cache_mesh_shardings, replicated_sharding)

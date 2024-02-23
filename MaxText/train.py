@@ -44,7 +44,7 @@ import pyconfig
 
 from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer
 from layers import models
-
+from cuda_api import cudaProfilerStart, cudaProfilerStop
 import jax.numpy as jnp
 from jax import random
 from jax.sharding import Mesh
@@ -429,6 +429,12 @@ def train_loop(config, state=None):
       max_utils.activate_profiler(config)
 
     example_batch = load_next_batch(data_iterator, example_batch, config)
+    if step == 6 and jax.process_index() == 0:
+      cudaProfilerStart()
+
+    if step == 8 and jax.process_index() == 0:
+      cudaProfilerStop()
+
     nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics = p_train_step(
