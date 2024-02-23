@@ -293,9 +293,9 @@ def decode_loop(model, model_vars, sp_tokenizer, rng, prompts):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
     
-    if step == 10 and jax.process_index() == 0:
+    if step == 8 and jax.process_index() == 0:
       cudaProfilerStart()
-      print("====================step 10=================")
+      print("====================step 8=================")
     if step == 10 and jax.process_index() == 0:
       cudaProfilerStop()
       print("=====================step 10================")
