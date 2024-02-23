@@ -71,18 +71,13 @@ def get_setup_cmds(
     raise RuntimeError(f"Please specify set up cmds for: {pax_version.value}.")
 
 
-def get_runtime_version(pax_version: PaxVersion, tpu_version: TpuVersion) -> str:
+def get_runtime_version(tpu_version: TpuVersion) -> str:
   if tpu_version is TpuVersion.V5E:
     return RuntimeVersion.V2_ALPHA_TPUV5_LITE.value
   elif tpu_version is TpuVersion.V5P:
     return RuntimeVersion.V2_ALPHA_TPUV5.value
   else:
-    if pax_version is PaxVersion.STABLE:
-      return RuntimeVersion.TPU_VM_V4_BASE.value
-    elif pax_version is PaxVersion.NIGHTLY:
-      return RuntimeVersion.TPU_UBUNTU2204_BASE.value
-    else:
-      raise RuntimeError(f"Please specify runtime version for: {pax_version.value}.")
+    return RuntimeVersion.TPU_UBUNTU2204_BASE.value
 
 
 def get_pax_lm_config(
@@ -110,7 +105,7 @@ def get_pax_lm_config(
   job_log_dir = f"{log_dir}/{model_name}-{short_id}"
   set_up_cmds = get_setup_cmds(pax_version, ckp_path, job_log_dir)
 
-  runtime_version = get_runtime_version(pax_version, tpu_version)
+  runtime_version = get_runtime_version(tpu_version)
 
   if runtime_version == RuntimeVersion.TPU_VM_V4_BASE.value:
     package_version = "python3.8"
