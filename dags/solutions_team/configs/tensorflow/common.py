@@ -1,4 +1,4 @@
-# Copyright 2023 Google LLC
+# Copyright 2024 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -54,6 +54,10 @@ FEATURE_TIMEOUT = {
 }
 
 
+CMD_PRINT_TF_VERSION = "python3 -c \"import tensorflow; print('Running using TensorFlow Version: ' + tensorflow.__version__)\""
+CMD_INSTALL_KERAS_NIGHTLY = "pip install --upgrade --force-reinstall tf-keras-nightly"
+
+
 def set_up_se_nightly() -> Tuple[str]:
   """Adjust grpc_tpu_worker for SE tests"""
   return (
@@ -69,13 +73,33 @@ def install_tf_nightly() -> Tuple[str]:
       "pip install tensorflow-text-nightly",
       "sudo gsutil -m cp gs://cloud-tpu-v2-images-dev-artifacts/tensorflow/tf-nightly/latest/*.whl /tmp/ && pip install /tmp/tf*.whl --force",
       "sudo gsutil -m cp gs://cloud-tpu-v2-images-dev-artifacts/libtpu/latest/libtpu.so /lib/",
+      CMD_PRINT_TF_VERSION,
+  )
+
+
+def install_tf_2_16() -> Tuple[str]:
+  """Install tf 2.16 + libtpu."""
+  return (
+      "pip install tensorflow-text-nightly",
+      "sudo gsutil -m cp gs://cloud-tpu-v2-images-dev-artifacts/tensorflow/2.16/2024-02-20/*.whl /tmp/ && pip install /tmp/tf*.whl --force",
+      "sudo gsutil -m cp gs://cloud-tpu-v2-images-dev-artifacts/libtpu/1.10.0/rc0/libtpu.so /lib/",
+      CMD_PRINT_TF_VERSION,
   )
 
 
 def set_up_tensorflow_keras() -> Tuple[str]:
   """Common set up for tensorflow Keras tests."""
   return (
-      "pip install --upgrade --force-reinstall tf-keras-nightly",
+      CMD_INSTALL_KERAS_NIGHTLY,
+      "export PATH=$PATH:/root/google-cloud-sdk/bin && cd /tmp && sudo gcloud source repos clone tf2-api-tests --project=cloud-ml-auto-solutions",
+      "cd /tmp/tf2-api-tests && pip install behave matplotlib",
+  )
+
+
+def set_up_tensorflow_2_16_keras() -> Tuple[str]:
+  """Common set up for tensorflow Keras 2.16 tests."""
+  return (
+      "pip install --upgrade --force-reinstall tf-keras==2.16.0rc0",
       "export PATH=$PATH:/root/google-cloud-sdk/bin && cd /tmp && sudo gcloud source repos clone tf2-api-tests --project=cloud-ml-auto-solutions",
       "cd /tmp/tf2-api-tests && pip install behave matplotlib",
   )
@@ -87,5 +111,15 @@ def set_up_google_tensorflow_models() -> Tuple[str]:
       "sudo mkdir -p /usr/share/tpu && cd /usr/share/tpu && git clone https://github.com/tensorflow/models.git",
       "pip install -r /usr/share/tpu/models/official/requirements.txt",
       "pip install tensorflow-recommenders --no-deps",
-      "pip install --upgrade --force-reinstall tf-keras-nightly",
+      CMD_INSTALL_KERAS_NIGHTLY,
+  )
+
+
+def set_up_google_tensorflow_2_16_models() -> Tuple[str]:
+  """Common set up for tensorflow models."""
+  return (
+      "sudo mkdir -p /usr/share/tpu && cd /usr/share/tpu && git clone -b r2.16.0 https://github.com/tensorflow/models.git",
+      "pip install -r /usr/share/tpu/models/official/requirements.txt",
+      "pip install tensorflow-recommenders --no-deps",
+      "pip install --upgrade --force-reinstall tf-keras==2.16.0rc0",
   )
