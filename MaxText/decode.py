@@ -38,6 +38,7 @@ from jax.sharding import PartitionSpec as P
 from jax.sharding import Mesh
 from jax.experimental.compilation_cache import compilation_cache as cc
 import max_logging
+from cuda_api import cudaProfilerStart, cudaProfilerStop
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 cc.initialize_cache(os.path.expanduser("~/jax_cache"))
 
@@ -292,12 +293,12 @@ def decode_loop(model, model_vars, sp_tokenizer, rng, prompts):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
     
-    if step == 6 and jax.process_index() == 0:
+    if step == 10 and jax.process_index() == 0:
       cudaProfilerStart()
-      print("====================step 6=================")
-    if step == 8 and jax.process_index() == 0:
+      print("====================step 10=================")
+    if step == 10 and jax.process_index() == 0:
       cudaProfilerStop()
-      print("=====================step 8================")
+      print("=====================step 10================")
 
     new_position, new_cache, next_logit, selected_id = decode_ar_one_step(
     config, model, model_vars, new_cache, new_position, next_logit, rngs[step],
