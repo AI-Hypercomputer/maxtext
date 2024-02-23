@@ -20,7 +20,6 @@ from dags import composer_env
 from dags.vm_resource import TpuVersion, Project, Zone, RuntimeVersion, V5_NETWORKS, V5E_SUBNETWORKS, V5P_SUBNETWORKS
 from dags.solutions_team.configs.tensorflow import solutionsteam_tf_nightly_supported_config as tf_config
 from dags.solutions_team.configs.tensorflow import common
-from airflow.operators.dummy import DummyOperator
 
 
 # Run once a day at 6 am UTC (10 pm PST)
@@ -35,7 +34,7 @@ with models.DAG(
     catchup=False,
 ) as dag:
   # Keras - tests run in sequence order
-  tf_keras_v2_8 = [DummyOperator(task_id="tf_nightly_keras_v2-8")]
+  tf_keras_v2_8 = []
   for feature, name in common.FEATURE_NAME.items():
     test = tf_config.get_tf_keras_config(
         tpu_version=TpuVersion.V2,
@@ -45,10 +44,11 @@ with models.DAG(
         test_feature=feature,
         test_name=name,
     ).run()
-    tf_keras_v2_8[-1] >> test
+    if tf_keras_v2_8:
+      tf_keras_v2_8[-1] >> test
     tf_keras_v2_8.append(test)
 
-  tf_keras_v5e_4 = [DummyOperator(task_id="tf_nightly_keras_v5litepod-4")]
+  tf_keras_v5e_4 = []
   for feature, name in common.FEATURE_NAME.items():
     test = tf_config.get_tf_keras_config(
         project_name=Project.TPU_PROD_ENV_AUTOMATED.value,
@@ -61,10 +61,11 @@ with models.DAG(
         network=V5_NETWORKS,
         subnetwork=V5E_SUBNETWORKS,
     ).run()
-    tf_keras_v5e_4[-1] >> test
+    if tf_keras_v5e_4:
+      tf_keras_v5e_4[-1] >> test
     tf_keras_v5e_4.append(test)
 
-  tf_keras_v5p_8 = [DummyOperator(task_id="tf_nightly_keras_v5p-8")]
+  tf_keras_v5p_8 = []
   for feature, name in common.FEATURE_NAME.items():
     test = tf_config.get_tf_keras_config(
         project_name=Project.TPU_PROD_ENV_AUTOMATED.value,
@@ -77,7 +78,8 @@ with models.DAG(
         network=V5_NETWORKS,
         subnetwork=V5P_SUBNETWORKS,
     ).run()
-    tf_keras_v5p_8[-1] >> test
+    if tf_keras_v5p_8:
+      tf_keras_v5p_8[-1] >> test
     tf_keras_v5p_8.append(test)
 
   # ResNet

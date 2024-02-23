@@ -20,7 +20,6 @@ from dags import composer_env
 from dags.vm_resource import TpuVersion, Zone, RuntimeVersion, V5_NETWORKS, V5E_SUBNETWORKS, V5P_SUBNETWORKS
 from dags.solutions_team.configs.tensorflow import solutionsteam_tf_nightly_supported_config as tf_config
 from dags.solutions_team.configs.tensorflow import common
-from airflow.operators.dummy import DummyOperator
 
 
 # Run once a day at 4 pm UTC (8 am PST)
@@ -34,7 +33,7 @@ with models.DAG(
     catchup=False,
 ) as dag:
   # Keras - tests run in sequence order
-  tf_keras_v2_8 = [DummyOperator(task_id="tf_se_nightly_keras_v2-8")]
+  tf_keras_v2_8 = []
   for feature, name in common.FEATURE_NAME.items():
     test = tf_config.get_tf_keras_config(
         tpu_version=TpuVersion.V2,
@@ -46,7 +45,8 @@ with models.DAG(
         is_pjrt=False,
         runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY.value,
     ).run()
-    tf_keras_v2_8[-1] >> test
+    if tf_keras_v2_8:
+      tf_keras_v2_8[-1] >> test
     tf_keras_v2_8.append(test)
 
   # ResNet
