@@ -216,3 +216,6 @@ In the save step of example 2 above we included exporting the compiler flag `LIB
 ## Supported Open Models
 
 MaxText supports training and inference of various open models. Follow user guides under [getting started](https://github.com/google/maxtext/tree/main/getting_started) section to know more. 
+
+* [Gemma](https://ai.google.dev/gemma): a family of open-weights Large Language Model (LLM) by [Google DeepMind](https://deepmind.google/), based on Gemini research and technology. \
+You can run decode and finetuning using instructions mentioned [here](https://github.com/google/maxtext/blob/main/getting_started/Run_Gemma.md).
