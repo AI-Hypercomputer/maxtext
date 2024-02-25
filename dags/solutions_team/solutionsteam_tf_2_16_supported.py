@@ -20,7 +20,6 @@ from dags import composer_env
 from dags.vm_resource import TpuVersion, Project, Zone, RuntimeVersion, V5_NETWORKS, V5E_SUBNETWORKS, V5P_SUBNETWORKS
 from dags.solutions_team.configs.tensorflow import solutionsteam_tf_2_16_supported_config as tf_config
 from dags.solutions_team.configs.tensorflow import common
-from airflow.operators.dummy import DummyOperator
 
 
 # Run once a day at 6 pm UTC (10 am PST)
@@ -28,14 +27,14 @@ SCHEDULED_TIME = "0 18 * * *" if composer_env.is_prod_env() else None
 
 
 with models.DAG(
-    dag_id="tf_nightly_supported",
+    dag_id="tf_2_16_nightly_supported",
     schedule=SCHEDULED_TIME,
     tags=["solutions_team", "tf", "2.16", "supported", "xlml"],
     start_date=datetime.datetime(2023, 8, 16),
     catchup=False,
 ) as dag:
   # Keras - tests run in sequence order
-  tf_keras_v2_8 = [DummyOperator(task_id="tf_nightly_keras_v2-8")]
+  tf_keras_v2_8 = []
   for feature, name in common.FEATURE_NAME.items():
     test = tf_config.get_tf_keras_config(
         tpu_version=TpuVersion.V2,
@@ -46,10 +45,11 @@ with models.DAG(
         test_name=name,
         runtime_version=RuntimeVersion.V2_ALPHA_TPUV5.value,
     ).run()
-    tf_keras_v2_8[-1] >> test
+    if tf_keras_v2_8:
+      tf_keras_v2_8[-1] >> test
     tf_keras_v2_8.append(test)
 
-  tf_keras_v5e_4 = [DummyOperator(task_id="tf_nightly_keras_v5litepod-4")]
+  tf_keras_v5e_4 = []
   for feature, name in common.FEATURE_NAME.items():
     test = tf_config.get_tf_keras_config(
         project_name=Project.TPU_PROD_ENV_AUTOMATED.value,
@@ -63,10 +63,11 @@ with models.DAG(
         subnetwork=V5E_SUBNETWORKS,
         runtime_version=RuntimeVersion.V2_ALPHA_TPUV5_LITE.value,
     ).run()
-    tf_keras_v5e_4[-1] >> test
+    if tf_keras_v5e_4:
+      tf_keras_v5e_4[-1] >> test
     tf_keras_v5e_4.append(test)
 
-  tf_keras_v5p_8 = [DummyOperator(task_id="tf_nightly_keras_v5p-8")]
+  tf_keras_v5p_8 = []
   for feature, name in common.FEATURE_NAME.items():
     test = tf_config.get_tf_keras_config(
         project_name=Project.TPU_PROD_ENV_AUTOMATED.value,
@@ -80,7 +81,8 @@ with models.DAG(
         subnetwork=V5P_SUBNETWORKS,
         runtime_version=RuntimeVersion.V2_ALPHA_TPUV5.value,
     ).run()
-    tf_keras_v5p_8[-1] >> test
+    if tf_keras_v5p_8:
+      tf_keras_v5p_8[-1] >> test
     tf_keras_v5p_8.append(test)
 
   # ResNet
