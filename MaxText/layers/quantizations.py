@@ -22,20 +22,6 @@ from common_types import Config
 from dataclasses import dataclass
 import jax.numpy as jnp
 
-
-AQT_INT8_CONFIG = aqt_config.config_v3(
-  fwd_bits=8,
-  dlhs_bits=8,
-  drhs_bits=None,
-  rng_type='jax.uniform',
-  dlhs_local_aqt=None,
-  drhs_local_aqt=None,
-  fwd_accumulator_dtype=jnp.int32,
-  dlhs_accumulator_dtype=jnp.int32,
-  drhs_accumulator_dtype=None,
-)
-
-
 @dataclass
 class AqtQuantization:
   """ Configures AQT quantization github.com/google/aqt. """
@@ -60,26 +46,54 @@ class AqtQuantization:
     )
     return aqt_einsum
 
-def _get_quant_config(quant_str: str):
-  if not quant_str:
+def _get_quant_config(config):
+  if not config.quantization or config.quantization == '':
     return None
-  if quant_str == "int8":
-    return AQT_INT8_CONFIG
-  raise ValueError(f'Invalid value configured for quantization {quant_str}.')
+  elif config.quantization == "int8":
+    if config.quantization_local_shard_count == 0:
+      drhs_bits = None
+      drhs_accumulator_dtype = None
+      drhs_local_aqt=None
+    else:
+      drhs_bits = 8
+      drhs_accumulator_dtype = jnp.int32
+      drhs_local_aqt = aqt_config.LocalAqt(config.quantization_local_shard_count)
+    return aqt_config.config_v3(
+      fwd_bits=8,
+      dlhs_bits=8,
+      drhs_bits=drhs_bits,
+      rng_type='jax.uniform',
+      dlhs_local_aqt=None,
+      drhs_local_aqt=drhs_local_aqt,
+      fwd_accumulator_dtype=jnp.int32,
+      dlhs_accumulator_dtype=jnp.int32,
+      drhs_accumulator_dtype=drhs_accumulator_dtype,
+    )
+  else:
+    raise ValueError(f'Invalid value configured for quantization {config.quantization}.')
 
+def in_convert_mode(quant):
+  return quant and (quant.quant_mode == aqt_flax.QuantMode.CONVERT)
+
+def in_serve_mode(quant):
+  return quant and (quant.quant_mode == aqt_flax.QuantMode.SERVE)
+
+def get_quant_mode(quant_mode_str: str = 'train'):
+  """ Set quant mode."""
+  if quant_mode_str == 'train':
+    return aqt_flax.QuantMode.TRAIN
+  elif quant_mode_str == 'serve':
+    return aqt_flax.QuantMode.SERVE
+  elif quant_mode_str == 'convert':
+    return aqt_flax.QuantMode.CONVERT
+  else:
+    raise ValueError(f'Invalid quantization mode {quant_mode_str}.')
+  return None
 
 def configure_quantization(config: Config, quant_mode_str: str = 'train'):
   """ Configure quantization based on user config and quant mode."""
-  quant_cfg = _get_quant_config(config.quantization)
+  quant_cfg = _get_quant_config(config)
   if quant_cfg:
-    if quant_mode_str == 'train':
-      return AqtQuantization(quant_cfg, aqt_flax.QuantMode.TRAIN)
-    elif quant_mode_str == 'serve':
-      return AqtQuantization(quant_cfg, aqt_flax.QuantMode.SERVE)
-    elif quant_mode_str == 'convert':
-      return AqtQuantization(quant_cfg, aqt_flax.QuantMode.CONVERT)
-    else:
-      raise ValueError(f'Invalid quantization mode {quant_mode_str}.')
+    quant_mode = get_quant_mode(quant_mode_str)
+    return AqtQuantization(quant_dg=quant_cfg, quant_mode=quant_mode)
   return None
-
-

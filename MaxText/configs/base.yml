@@ -58,6 +58,8 @@ save_config_to_gcs: False
 # Activation dtypes.
 dtype: "bfloat16"
 quantization: ""
+# Shard the range finding operation for quantization. By default this is set to number of slices.
+quantization_local_shard_count: -1
 
 decoder_block: "llama2" # which style of DecoderBlock to use.
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
@@ -84,7 +86,7 @@ logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedd
 remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
-attention: 'flash' # Supported attention: dot_product, flash, gpu_flash_xla, gpu_flash_triton
+attention: 'flash' # Supported attention: dot_product, flash, cudnn_flash_te
 # Combine matmuls for QKV and MLP
 fused_qkv: False
 fused_mlp: False
@@ -99,7 +101,7 @@ base_output_directory: ""
 jax_cache_dir: "~/jax_cache"
 
 # Hardware
-hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu' and 'cpu'
+hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
 # Parallelism
 mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']
@@ -142,6 +144,10 @@ ici_fsdp_transpose_parallelism: 1
 ici_sequence_parallelism: 1
 ici_tensor_parallelism: 1
 ici_autoregressive_parallelism: 1
+
+# The number of TPU slices is automatically determined, you should not set this explicitly. For ahead of time compilation,
+# you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
+num_slices: -1
 
 # Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
