@@ -28,7 +28,7 @@ on:
 
 jobs:
   build_images:
-    runs-on: ubuntu-latest
+    runs-on: ["self-hosted", "tpu", "${{ matrix.device-type }}"]
     steps:
     - uses: actions/checkout@v3
     - name: build jax stable image
