@@ -43,8 +43,8 @@ jobs:
         bash docker_build_dependency_image.sh LOCAL_IMAGE_NAME=$local_image_name MODE=stable &&
         docker tag ${local_image_name} gcr.io/$project/${cloud_image_name}:latest
         docker push gcr.io/$project/${cloud_image_name}:latest
-   - name: Test build_and_upload.sh
-      run: |
+    - name: Test build_and_upload.sh
+      run : |
         bash build_and_upload.sh
         
  
