@@ -213,47 +213,34 @@ class MlpBlock(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
         )(inputs)
 
+    inputs = nn.with_logical_constraint(
+        inputs, ('activation_batch', 'activation_length', 'activation_embed')
+    )
+
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
-    activations = []
-    if cfg.fused_mlp:
-      x = DenseGeneral(
-            (len(self.activations), self.intermediate_dim),
-            dtype=self.dtype,
-            kernel_init=self.kernel_init,
-            kernel_axes=('embed', 'num_activations', 'mlp'),
-            name='wi',
-            use_int8=cfg.int8_training,
-            use_bias=self.use_bias,
-            local_aqt_shards=cfg.local_aqt_shards_mlp1,
-      )(inputs)
-      for idx, act_fn in enumerate(self.activations):
-        y = _convert_to_activation_function(act_fn)(x[:,:,idx,...])
-        activations.append(y)
-    else:
-      for idx, act_fn in enumerate(self.activations):
-        dense_name = 'wi' if len(self.activations) == 1 else f'wi_{idx}'
-        x = DenseGeneral(
-            self.intermediate_dim,
-            dtype=self.dtype,
-            kernel_init=self.kernel_init,
-            kernel_axes=('embed', 'mlp'),
-            name=dense_name,
-            use_int8=cfg.int8_training,
-            use_bias=self.use_bias,
-            local_aqt_shards=cfg.local_aqt_shards_mlp2,
-        )(inputs)
-        x = _convert_to_activation_function(act_fn)(x)
-        activations.append(x)
+    dense_name = 'wi'
+    x = DenseGeneral(
+        self.intermediate_dim,
+        dtype=self.dtype,
+        kernel_init=self.kernel_init,
+        kernel_axes=('embed', 'mlp'),
+        name=dense_name,
+        use_int8=cfg.int8_training,
+        use_bias=self.use_bias,
+        local_aqt_shards=cfg.local_aqt_shards_mlp2,
+    )(inputs)
+    x = nn.with_logical_constraint(
+        x, ('activation_batch', 'activation_length', 'activation_mlp')
+    )
+    x = _convert_to_activation_function(self.activations[0])(x)
+    x = nn.with_logical_constraint(
+        x, ('activation_batch', 'activation_length', 'activation_mlp')
+    )
 
-    # Take elementwise product of above intermediate activations.
-    x = functools.reduce(operator.mul, activations)
     # https://github.com/google/praxis/blob/77675370d1150fccda0862a0ac7d1808d4bce9bf/praxis/layers/transformers.py#L477C5-L477C47
     x = checkpoint_name(x, 'ffn1')
     # Apply dropout and final dense output projection.
-    x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
-        x, deterministic=deterministic
-    )  # Broadcast along length.
     x = nn.with_logical_constraint(
         x, ('activation_batch', 'activation_length', 'activation_mlp')
     )
