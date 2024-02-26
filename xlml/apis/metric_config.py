@@ -37,6 +37,10 @@ class AggregationStrategy(enum.Enum):
   MEDIAN = enum.auto()
 
 
+class SshEnvVars(enum.Enum):
+  GCS_OUTPUT = "GCS_OUTPUT"
+
+
 @dataclasses.dataclass
 class JSONLinesConfig:
   """This is a class to set up JSON Lines config.
@@ -97,3 +101,4 @@ class MetricConfig:
   json_lines: Optional[JSONLinesConfig] = None
   tensorboard_summary: Optional[SummaryConfig] = None
   profile: Optional[ProfileConfig] = None
+  use_runtime_generated_filename: bool = False

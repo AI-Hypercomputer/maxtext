@@ -23,7 +23,7 @@ import airflow
 from airflow.models.taskmixin import DAGNode
 from airflow.utils.task_group import TaskGroup
 from xlml.apis import gcp_config, metric_config, test_config
-from xlml.utils import gpu, metric, name_format, ssh, tpu, xpk, gke, startup_script
+from xlml.utils import gpu, metric, name_format, ssh, tpu, xpk, gke
 
 
 class BaseTask(abc.ABC):
@@ -55,8 +55,8 @@ class TpuQueuedResourceTask(BaseTask):
   # TODO(wcromar): make these attributes less verbose
   task_test_config: test_config.TestConfig[test_config.Tpu]
   task_gcp_config: gcp_config.GCPConfig
-  tpu_create_timeout: datetime.timedelta = datetime.timedelta(minutes=60)
   task_metric_config: Optional[metric_config.MetricConfig] = None
+  tpu_create_timeout: datetime.timedelta = datetime.timedelta(minutes=60)
   tpu_name_env_var: bool = False
   all_workers: bool = True
 
@@ -70,9 +70,18 @@ class TpuQueuedResourceTask(BaseTask):
     with TaskGroup(
         group_id=self.task_test_config.benchmark_id, prefix_group_id=True
     ) as group:
-      provision, queued_resource, ssh_keys = self.provision()
-      run_model = self.run_model(queued_resource, ssh_keys)
-      post_process = self.post_process()
+      provision, queued_resource, ssh_keys, gcs_location = self.provision()
+      # If you already specify `task_metric_config.json_lines` value in the test config script,
+      # then `gcs_location` will take no effect.
+      if (
+          self.task_metric_config
+          and self.task_metric_config.use_runtime_generated_filename
+      ):
+        env_variable = {f"{metric_config.SshEnvVars.GCS_OUTPUT.value}": gcs_location}
+      else:
+        env_variable = None
+      run_model = self.run_model(queued_resource, ssh_keys, env_variable)
+      post_process = self.post_process(file_location=gcs_location)
       clean_up = self.clean_up(queued_resource)
       provision >> run_model >> post_process >> clean_up
 
@@ -102,7 +111,7 @@ class TpuQueuedResourceTask(BaseTask):
       # Update tensorboard file location
       self.task_metric_config.tensorboard_summary.file_location = tb_file_location
 
-      provision, queued_resource, ssh_keys = self.provision()
+      provision, queued_resource, ssh_keys, gcs_location = self.provision()
       run_model = self.run_model(queued_resource, ssh_keys)
       post_process = self.post_process()
       clean_up = self.clean_up(queued_resource)
@@ -130,14 +139,16 @@ class TpuQueuedResourceTask(BaseTask):
           queued_resource,
           ssh_keys,
       ) = self.provision_with_startup_script()
-      post_process = self.post_process(use_startup_script)
+      post_process = self.post_process(use_startup_script=use_startup_script)
       clean_up = self.clean_up(queued_resource)
 
       provision_with_startup_script >> post_process >> clean_up
 
     return group
 
-  def provision(self) -> Tuple[DAGNode, airflow.XComArg, airflow.XComArg]:
+  def provision(
+      self,
+  ) -> Tuple[DAGNode, airflow.XComArg, airflow.XComArg, airflow.XComArg]:
     """Provision a TPU accelerator via a Queued Resource.
 
     Generates a random TPU name and SSH keys, creates a Queued Resource, and
@@ -156,6 +167,9 @@ class TpuQueuedResourceTask(BaseTask):
             self.task_test_config.benchmark_id, self.tpu_name_env_var
         )
         ssh_keys = ssh.generate_ssh_keys()
+        output_location = name_format.generate_gcs_file_location(
+            self.task_test_config.benchmark_id
+        )
 
       queued_resource_op, queued_resource_name = tpu.create_queued_resource(
           tpu_name,
@@ -171,8 +185,7 @@ class TpuQueuedResourceTask(BaseTask):
           ssh_keys,
           self.all_workers,
       )
-
-    return group, queued_resource_name, ssh_keys
+    return group, queued_resource_name, ssh_keys, output_location
 
   def provision_with_startup_script(
       self,
@@ -212,6 +225,7 @@ class TpuQueuedResourceTask(BaseTask):
       # TODO(wcromar): Is there a way to annotate the type of the XCom arg?
       queued_resource: airflow.XComArg,
       ssh_keys: airflow.XComArg,
+      env: Optional[airflow.XComArg] = None,
   ) -> DAGNode:
     """Run the TPU test in `task_test_config`.
 
@@ -235,9 +249,12 @@ class TpuQueuedResourceTask(BaseTask):
         self.task_test_config.test_script,
         ssh_keys,
         self.all_workers,
+        env,
     )
 
-  def post_process(self, use_startup_script: bool = False) -> DAGNode:
+  def post_process(
+      self, use_startup_script: bool = False, file_location: Optional[str] = None
+  ) -> DAGNode:
     """Process metrics and metadata, and insert them into BigQuery tables.
 
     Returns:
@@ -250,7 +267,8 @@ class TpuQueuedResourceTask(BaseTask):
           self.task_test_config,
           self.task_metric_config,
           self.task_gcp_config,
-          use_startup_script,
+          use_startup_script=use_startup_script,
+          file_location=file_location,
       )
       return group
 
@@ -402,9 +420,18 @@ class GpuCreateResourceTask(BaseTask):
     with TaskGroup(
         group_id=self.task_test_config.benchmark_id, prefix_group_id=True
     ) as group:
-      provision, ip_address, instance_name, ssh_keys = self.provision()
-      run_model = self.run_model(ip_address, ssh_keys)
-      post_process = self.post_process()
+      provision, ip_address, instance_name, ssh_keys, gcs_location = self.provision()
+      # If you already specify `task_metric_config.json_lines` value in the test config script,
+      # then `gcs_location` will take no effect.
+      if (
+          self.task_metric_config
+          and self.task_metric_config.use_runtime_generated_filename
+      ):
+        env_variable = {f"{metric_config.SshEnvVars.GCS_OUTPUT.value}": gcs_location}
+      else:
+        env_variable = None
+      run_model = self.run_model(ip_address, ssh_keys, env_variable)
+      post_process = self.post_process(gcs_location)
       clean_up = self.clean_up(
           instance_name, self.task_gcp_config.project_name, self.task_gcp_config.zone
       )
@@ -413,7 +440,9 @@ class GpuCreateResourceTask(BaseTask):
 
   def provision(
       self,
-  ) -> Tuple[DAGNode, airflow.XComArg, airflow.XComArg, airflow.XComArg]:
+  ) -> Tuple[
+      DAGNode, airflow.XComArg, airflow.XComArg, airflow.XComArg, airflow.XComArg
+  ]:
     """Provision a GPU accelerator via a resource creation.
 
     Generates a random GPU name and SSH keys, creates a VM Resource, and
@@ -431,6 +460,9 @@ class GpuCreateResourceTask(BaseTask):
       with TaskGroup(group_id="initialize"):
         gpu_name = gpu.generate_gpu_name()
         ssh_keys = ssh.generate_ssh_keys()
+        gcs_location = name_format.generate_gcs_file_location(
+            self.task_test_config.benchmark_id
+        )
 
       ip_address = gpu.create_resource.override(task_id="create_resource")(
           gpu_name,
@@ -441,17 +473,20 @@ class GpuCreateResourceTask(BaseTask):
           ssh_keys,
       )
 
-      gpu.ssh_host.override(task_id="setup")(
+      create_resource = gpu.ssh_host.override(task_id="setup")(
           ip_address,
           self.task_test_config.setup_script,
           ssh_keys,
       )
-    return group, ip_address, gpu_name, ssh_keys
+
+      ip_address >> create_resource
+    return group, ip_address, gpu_name, ssh_keys, gcs_location
 
   def run_model(
       self,
       resource: airflow.XComArg,
       ssh_keys: airflow.XComArg,
+      env: Optional[airflow.XComArg] = None,
   ) -> DAGNode:
     """Run the GPU test in `task_test_config`.
 
@@ -472,9 +507,12 @@ class GpuCreateResourceTask(BaseTask):
         resource,
         self.task_test_config.test_script,
         ssh_keys,
+        env,
     )
 
-  def post_process(self) -> DAGNode:
+  def post_process(
+      self, result_file_location: Optional[airflow.XComArg] = None
+  ) -> DAGNode:
     """Process metrics and metadata, and insert them into BigQuery tables.
 
     Returns:
@@ -487,6 +525,7 @@ class GpuCreateResourceTask(BaseTask):
           self.task_test_config,
           self.task_metric_config,
           self.task_gcp_config,
+          file_location=result_file_location,
       )
       return group
 

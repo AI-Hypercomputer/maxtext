@@ -15,10 +15,11 @@
 import datetime
 import os
 from airflow.decorators import task
+from dags import gcs_bucket
 
 
 @task
-def generate_run_name(benchmark_id) -> str:
+def generate_run_name(benchmark_id: str) -> str:
   """Generates a unique run name by appending the current datetime to benchmark_id.
 
   Args:
@@ -39,3 +40,17 @@ def generate_tb_file_location(run_name: str, base_output_directory: str) -> str:
   return os.path.join(
       base_output_directory, run_name, "tensorboard", "events.out.tfevents.*"
   )
+
+
+@task
+def generate_gcs_file_location(benchmark_id: str) -> str:
+  """Generates result file location in GCS.
+
+  Args:
+    benchmark_id: Benchmark id of the test
+
+  Returns:
+    gsc file name with location
+  """
+  current_datetime = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+  return f"{gcs_bucket.BENCHMARK_OUTPUT_DIR}/{benchmark_id}-{current_datetime}/metric_report.jsonl"

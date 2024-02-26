@@ -82,7 +82,7 @@ def get_torchbench_tpu_config(
 
   set_up_cmds = set_up_torchbench_tpu(model_name)
   local_output_location = "~/xla/benchmarks/output/metric_report.jsonl"
-  gcs_location = f"{gcs_bucket.BENCHMARK_OUTPUT_DIR}/torchbench_config/{tpu_version}/{int(datetime.datetime.now().timestamp())}/metric_report_tpu.jsonl"
+
   if not model_name or model_name.lower() == "all":
     run_filter = " "
   else:
@@ -95,7 +95,7 @@ def get_torchbench_tpu_config(
       ),
       "rm -rf ~/xla/benchmarks/output/metric_report.jsonl",
       "python ~/xla/benchmarks/result_analyzer.py --output-format=jsonl",
-      f"gsutil cp {local_output_location} {gcs_location}",
+      f"gsutil cp {local_output_location} ${metric_config.SshEnvVars.GCS_OUTPUT.value}",
   )
 
   test_name = f"torchbench_{model_name}" if model_name else "torchbench_all"
@@ -115,11 +115,7 @@ def get_torchbench_tpu_config(
       task_owner=test_owner.PEI_Z,
   )
 
-  job_metric_config = metric_config.MetricConfig(
-      json_lines=metric_config.JSONLinesConfig(
-          file_location=gcs_location,
-      )
-  )
+  job_metric_config = metric_config.MetricConfig(use_runtime_generated_filename=True)
 
   return task.TpuQueuedResourceTask(
       task_test_config=job_test_config,
@@ -221,7 +217,6 @@ def get_torchbench_gpu_config(
 
   set_up_cmds = set_up_torchbench_gpu(model_name, nvidia_driver_version)
   local_output_location = "/tmp/xla/benchmarks/output/metric_report.jsonl"
-  gcs_location = f"{gcs_bucket.BENCHMARK_OUTPUT_DIR}/torchbench_config/{accelerator_type}/{int(datetime.datetime.now().timestamp())}/metric_report_gpu.jsonl"
 
   if not model_name or model_name.lower() == "all":
     run_filter = " "
@@ -245,7 +240,7 @@ def get_torchbench_gpu_config(
           "sudo docker cp $(sudo docker ps | awk 'NR==2 { print $1 }')"
           f":{local_output_location} ./"
       ),
-      f"gsutil cp metric_report.jsonl {gcs_location}",
+      f"gsutil cp metric_report.jsonl ${metric_config.SshEnvVars.GCS_OUTPUT.value}",
   )
 
   test_name = f"torchbench_{model_name}" if model_name else "torchbench_all"
@@ -264,11 +259,7 @@ def get_torchbench_gpu_config(
       task_owner=test_owner.PEI_Z,
   )
 
-  job_metric_config = metric_config.MetricConfig(
-      json_lines=metric_config.JSONLinesConfig(
-          file_location=gcs_location,
-      )
-  )
+  job_metric_config = metric_config.MetricConfig(use_runtime_generated_filename=True)
 
   return task.GpuCreateResourceTask(
       image_project.value,

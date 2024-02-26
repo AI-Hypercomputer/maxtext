@@ -18,7 +18,7 @@ import datetime
 import io
 import itertools
 import os
-from typing import Iterable, Optional, Tuple
+from typing import Dict, Iterable, Optional, Tuple
 import uuid
 
 from absl import logging
@@ -292,6 +292,7 @@ def ssh_tpu(
     cmds: Iterable[str],
     ssh_keys: ssh.SshKeys,
     all_workers: bool,
+    env: Dict[str, str] = None,
 ) -> None:
   """SSH TPU and run commands in multi process.
 
@@ -301,6 +302,7 @@ def ssh_tpu(
    ssh_keys: The SSH key pair to use for authentication.
    all_workers: The flag to define if run commands on all workers or worker 0
      only.
+   env: environment variables to be pass to the ssh runner session using dict.
   """
   creds, _ = google.auth.default()
   client = tpu_api.TpuClient(credentials=creds)
@@ -343,7 +345,7 @@ def ssh_tpu(
     ssh_group.run(';'.join(kill_process_cmds))
 
   # run provided commands
-  ssh_group.run(cmds)
+  ssh_group.run(cmds, env=env)
 
 
 @task

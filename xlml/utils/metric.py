@@ -162,7 +162,9 @@ def download_object_from_gcs(source_location: str, destination_location: str) ->
   bucket = storage_client.bucket(bucket_name)
   blob = bucket.blob(object_name)
   blob.download_to_filename(destination_location)
-  logging.info(f"Download JSON Lines file to: {destination_location}")
+  logging.info(
+      f"Download JSON Lines file from {source_location} to {destination_location}"
+  )
 
 
 def process_json_lines(
@@ -595,9 +597,10 @@ def get_gce_job_status(
 def process_metrics(
     base_id: str,
     task_test_config: test_config.TestConfig[test_config.Accelerator],
-    task_metric_config: metric_config.MetricConfig,
+    task_metric_config: Optional[metric_config.MetricConfig],
     task_gcp_config: gcp_config.GCPConfig,
     use_startup_script: bool = False,
+    file_location: Optional[str] = None,
 ) -> None:
   benchmark_id = task_test_config.benchmark_id
   current_time = datetime.datetime.now()
@@ -607,10 +610,14 @@ def process_metrics(
   profile_history_rows_list = []
 
   # process metrics, metadata, and profile
-  if task_metric_config is not None:
+  if task_metric_config:
     if task_metric_config.json_lines:
       metric_history_rows_list, metadata_history_rows_list = process_json_lines(
           base_id, task_metric_config.json_lines.file_location
+      )
+    elif task_metric_config.use_runtime_generated_filename:
+      metric_history_rows_list, metadata_history_rows_list = process_json_lines(
+          base_id, file_location
       )
     if task_metric_config.tensorboard_summary:
       (
