@@ -20,7 +20,7 @@ export XLA_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enabl
                 --xla_disable_hlo_passes=rematerialization"
 
 
-echo $XLA_FLAGS
+#echo $XLA_FLAGS
 
 # this is for llama-2-7b
 #RUN_SETTINGS="flash_maxtext/MaxText/train.py flash_maxtext/MaxText/configs/base.yml dataset_path=gs://maxtext-dataset\
@@ -29,11 +29,11 @@ echo $XLA_FLAGS
 #     attention=cudnn_flash_te async_checkpointing=False base_output_directory=gs://ninacai-sandbox enable_profiler=True steps=30"
 
 RUN_SETTINGS="flash_maxtext/MaxText/decode.py flash_maxtext/MaxText/configs/base.yml load_parameters_path=gs://maxtext-llama/test/2024-01-15-06-49/decode-ckpt-maxtext/0/default run_name=runner_2024-02-09-20-02  per_device_batch_size=1 model_name=llama2-7b tokenizer_path=gs://maxtext-llama/llama2-7b/tokenizer.llama2 max_prefill_predict_length=64  max_target_length=128  attention=dot_product dataset_path=gs://maxtext-dataset steps=10 async_checkpointing=false ici_autoregressive_parallelism=1"
-#RUN_SETTINGS="flash_maxtext/MaxText/decode.py flash_maxtext/MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 ici_tensor_parallelism=4 attention=dot_product enable_checkpointing=false max_target_length=128 per_device_batch_size=1"
 
 echo "Command: nsys profile -s none -o nsys_profile.out --force-overwrite true --capture-range=cudaProfilerApi --capture-range-end=stop python3 $RUN_SETTINGS"
 #nsys profile -s none -o nsys_profile.out --force-overwrite true --capture-range=cudaProfilerApi --capture-range-end=stop python3 $RUN_SETTINGS
-python3 $RUN_SETTINGS
+
+python3 $RUN_SETTINGS 
 
 set +e
 
