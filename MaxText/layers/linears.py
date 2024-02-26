@@ -243,11 +243,20 @@ class MlpBlock(nn.Module):
             use_bias=self.use_bias,
             local_aqt_shards=cfg.local_aqt_shards_mlp2,
         )(inputs)
+        x = nn.with_logical_constraint(
+            x, ('activation_batch', 'activation_length', 'activation_mlp')
+        )
         x = _convert_to_activation_function(act_fn)(x)
+        x = nn.with_logical_constraint(
+            x, ('activation_batch', 'activation_length', 'activation_mlp')
+        )
         activations.append(x)
 
     # Take elementwise product of above intermediate activations.
     x = functools.reduce(operator.mul, activations)
+    x = nn.with_logical_constraint(
+        x, ('activation_batch', 'activation_length', 'activation_mlp')
+    )
     # https://github.com/google/praxis/blob/77675370d1150fccda0862a0ac7d1808d4bce9bf/praxis/layers/transformers.py#L477C5-L477C47
     x = checkpoint_name(x, 'ffn1')
     # Apply dropout and final dense output projection.
