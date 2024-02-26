@@ -78,9 +78,9 @@ jobs:
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
         'python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 enable_checkpointing=false'
-    # - name: Test build_and_upload.sh
-    #   run: |
-    #     bash build_and_upload.sh
+    - name: Test build_and_upload.sh
+      run: |
+        bash build_and_upload.sh
     # - name: Test train.py with per_device_batch_size < 1
     #   run: |
     #     docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
