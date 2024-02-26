@@ -38,3 +38,8 @@ adam_b2: 0.98
 adam_weight_decay: 0.01
 learning_rate: 3.e-5
 
+# opt_type: tiger
+# adam_b1: 0.965
+# # adam_b2: 0.95
+# adam_weight_decay: 0.01
+# learning_rate: 3.e-5

@@ -71,8 +71,7 @@ def get_shaped_inputs(topology_mesh, config):
   quant = quantizations.configure_quantization(config)
   model = Transformer(config, topology_mesh, quant=quant)
   # The learning_rate_schedule is baked into the compiled object.
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
-  tx = optimizers.get_optimizer(config, learning_rate_schedule)
+  tx, _ = optimizers.get_optimizer(config)
 
   # Shaped RNG keys
   _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)

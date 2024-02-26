@@ -90,8 +90,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   mesh = Mesh(devices_array, cfg.mesh_axes)
 
   model = Transformer(config=cfg, mesh=mesh)
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(cfg)
-  tx = optimizers.get_optimizer(cfg, learning_rate_schedule)
+  tx, _ = optimizers.get_optimizer(cfg)
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
     cfg.checkpoint_dir,

@@ -18,14 +18,88 @@
 """Utils that are only interesting to MaxText. """
 
 import jax
-
+import re
 
 import optax
+from optax._src import utils
 import jax.numpy as jnp
 
+from max_utils import create_learning_rate_schedule
 
-def get_optimizer(config, learning_rate_schedule):
-  """create optimizer"""
+def tree_path_to_string(path, sep=None):
+  keys = []
+  for key in path:
+    if isinstance(key, jax.tree_util.SequenceKey):
+      keys.append(str(key.idx))
+    elif isinstance(key, jax.tree_util.DictKey):
+      keys.append(str(key.key))
+    elif isinstance(key, jax.tree_util.GetAttrKey):
+      keys.append(str(key.name))
+    elif isinstance(key, jax.tree_util.FlattenedIndexKey):
+      keys.append(str(key.key))
+    else:
+      keys.append(str(key))
+  if sep is None:
+    return tuple(keys)
+  return sep.join(keys)
+
+def named_tree_map(f, tree, *rest, is_leaf=None, sep=None):
+  """ An extended version of jax.tree_util.tree_map, where the mapped function
+      f takes both the name (path) and the tree leaf as input.
+  """
+  return jax.tree_util.tree_map_with_path(
+    lambda path, x, *r: f(tree_path_to_string(path, sep=sep), x, *r),
+    tree, *rest,
+    is_leaf=is_leaf
+  )
+
+def get_weight_decay_mask(exclusions):
+  """ Return a weight decay mask function that computes the pytree masks
+      according to the given exclusion rules.
+  """
+  def decay(name, _):
+    for rule in exclusions:
+      if re.search(rule, name) is not None:
+        print((name, "not use weight_decay"))
+        return False
+      
+    print((name, "use weight_decay"))
+    return True
+
+  def weight_decay_mask(params):
+    return named_tree_map(decay, params, sep='/')
+  
+  return weight_decay_mask
+
+
+def get_optimizer(config):
+
+  if config.opt_type == "tiger":
+    learning_rate_schedule = create_learning_rate_schedule(
+      config, 
+      step_reduction=1,
+      update_step=config.gradient_accumulation_steps,
+    )
+    optimizer = tiger_pax(
+      learning_rate_schedule,
+      beta=config.adam_b1,
+      weight_decay=config.adam_weight_decay,
+      mask=get_weight_decay_mask([
+        "norm",
+        "scale",
+        "bias",
+      ]),
+    )
+    return optimizer, learning_rate_schedule
+
+  """other optimizer"""
+
+  learning_rate_schedule = create_learning_rate_schedule(
+    config, 
+    step_reduction=config.gradient_accumulation_steps,
+    update_step=1,
+  )
+
   if config.opt_type == "adamw":
     # Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
     optimizer = optax.adamw(
@@ -35,6 +109,11 @@ def get_optimizer(config, learning_rate_schedule):
       eps=config.adam_eps,
       eps_root=config.adam_eps_root,
       weight_decay=config.adam_weight_decay,
+      mask=get_weight_decay_mask([
+        "norm",
+        "scale",
+        "bias",
+      ]),
     )
   elif config.opt_type == "lion":
     optimizer = optax.lion(
@@ -42,6 +121,11 @@ def get_optimizer(config, learning_rate_schedule):
       b1=config.adam_b1,
       b2=config.adam_b2,
       weight_decay=config.adam_weight_decay,
+      mask=get_weight_decay_mask([
+        "norm",
+        "scale",
+        "bias",
+      ]),
     )
   elif config.opt_type == "adam_pax":
     optimizer = adam_pax(
@@ -60,7 +144,42 @@ def get_optimizer(config, learning_rate_schedule):
         optimizer, config.gradient_accumulation_steps
     )
 
-  return optimizer
+  return optimizer, learning_rate_schedule
+
+
+def tiger_pax(
+  learning_rate: optax.Schedule,
+  beta: float,
+  mu_dtype = None,
+  weight_decay: float = 1e-3,
+  mask = None,
+):
+  
+  mu_dtype = utils.canonicalize_dtype(mu_dtype)
+
+  def init_fn(params):
+    mu = jax.tree_util.tree_map(  # moment
+        lambda t: jnp.zeros_like(t, dtype=mu_dtype), params)
+    return optax.ScaleByLionState(count=jnp.zeros([], jnp.int32), mu=mu)
+
+  def update_fn(
+    updates, 
+    state: optax.ScaleByLionState, 
+    params=None
+  ):
+    del params
+    mu = optax.update_moment(updates, state.mu, beta, 1)
+    mu = utils.cast_tree(mu, mu_dtype)
+    updates_new = jax.tree_util.tree_map(lambda m: jnp.sign(m), mu)
+    count_inc = optax.safe_int32_increment(state.count)
+    return updates_new, optax.ScaleByLionState(count=count_inc, mu=mu)
+
+  return optax.chain(
+    optax.GradientTransformation(init_fn, update_fn),
+    optax.add_decayed_weights(weight_decay, mask),
+    optax.scale_by_learning_rate(learning_rate),
+  )
+  
 
 def adam_pax(
     learning_rate_fn: optax.Schedule,

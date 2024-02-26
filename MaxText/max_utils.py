@@ -28,7 +28,7 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
 
-
+import math
 import json
 import yaml
 import flax
@@ -387,7 +387,11 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
 # Learning Rate Schedule
 # -----------------------------------------------------------------------------
 
-def create_learning_rate_schedule(config):
+def create_learning_rate_schedule(
+  config, 
+  step_reduction=1,
+  update_step=1,
+):
   """Creates a warmup and cosine decay learning rate schedule:
   We take inspiration from Llama2's learning rate (LR) schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
   Learning rate schedule has either two or three parts:
@@ -411,10 +415,10 @@ def create_learning_rate_schedule(config):
   cos_steps = config.learning_rate_schedule_steps - warmup_steps
   constant_zero_steps = config.steps - config.learning_rate_schedule_steps
 
-  if config.gradient_accumulation_steps > 1:
-    warmup_steps = warmup_steps // config.gradient_accumulation_steps
-    cos_steps = cos_steps // config.gradient_accumulation_steps
-    constant_zero_steps = constant_zero_steps // config.gradient_accumulation_steps
+  if step_reduction > 1:
+    warmup_steps = math.ceil(warmup_steps / step_reduction)
+    cos_steps = math.ceil(cos_steps / step_reduction)
+    constant_zero_steps = math.ceil(constant_zero_steps / step_reduction)
   
   print(f"warmup_steps: {warmup_steps}")
   print(f"cos_steps: {cos_steps}")
@@ -432,13 +436,21 @@ def create_learning_rate_schedule(config):
   boundaries=[
    warmup_steps,
    warmup_steps + cos_steps,
-   ]
+  ]
 
   if constant_zero_steps > 0:
     pieces.append(constant_schedule)
     boundaries.append(warmup_steps + cos_steps + constant_zero_steps)
 
-  return optax.join_schedules(pieces, boundaries)
+  _final_schedule = optax.join_schedules(pieces, boundaries)
+
+  def final_schedule(step):
+    lr = _final_schedule(step)
+    lr = lr * ((step % update_step) == (update_step-1))
+    jax.debug.print("learning rate step = {step}, learning_rate = {lr}", step=step, lr=lr)
+    return lr
+
+  return final_schedule
 
 
 # Cross entropy implementation is taken from original T5X codebase:
