@@ -84,7 +84,7 @@ class DenseGeneral(nn.Module):
   use_int8: bool = False
   use_bias: bool = False
   local_aqt_shards: int = 0
-  fused_qkv: bool = False
+  type: str = "default"
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -114,7 +114,7 @@ class DenseGeneral(nn.Module):
     inputs = jnp.asarray(inputs, self.dtype)
     axis = _normalize_axes(axis, inputs.ndim)
 
-    if not self.fused_qkv:
+    if self.type in ("default", "ffn2"):
       kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
       kernel_in_axis = np.arange(len(axis))
       kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
@@ -130,7 +130,7 @@ class DenseGeneral(nn.Module):
 
       contract_ind = tuple(range(0, len(axis)))
       output = compute_dot_general(inputs, kernel, axis, contract_ind)
-    else:
+    elif self.type == "fused_qkv":
       kernel_shape = features[0:1] + tuple(inputs.shape[ax] for ax in axis) + features[1:]
       kernel_in_axis = tuple(np.arange(1, len(axis) + 1))
       kernel_out_axis = (0, ) + tuple(np.arange(len(axis) + 1, len(axis) + 1 + len(features) - 1))
@@ -147,19 +147,27 @@ class DenseGeneral(nn.Module):
       batch_eqn = "BL"
       eqn = f'{batch_eqn}D,KDNH->K{batch_eqn}NH'
       output = jnp.einsum(eqn, inputs, kernel)
+    else:
+      raise ValueError (f"{self.type=} not implemented")
 
     if self.use_bias:
-      if not self.fused_qkv:
+      if self.type == "default":
         bias_axes, bias_shape = self.kernel_axes[-len(features):], kernel_shape[-len(features):]
-      else:
+      elif self.type == "fused_qkv":
         bias_axes, bias_shape = self.kernel_axes[0:1] + self.kernel_axes[-len(features)+1:], kernel_shape[0:1] + kernel_shape[-len(features)+1:]
+      elif self.type == "ffn2":
+        # shard ffn2 bias in mlp dimension
+        bias_axes, bias_shape = self.kernel_axes[len(features):], kernel_shape[-len(features):]
+      else:
+        raise ValueError (f"{self.type=} not implemented")
+
       bias = self.param(
           'bias',
           nn.with_logical_partitioning(bias_init, bias_axes),
           bias_shape,
           jnp.float32,
       )
-      if self.fused_qkv:
+      if self.type == "fused_qkv":
         batch_dims = (1, 2)
         bias = jnp.expand_dims(bias, batch_dims)
       bias = jnp.asarray(bias, self.dtype)
@@ -265,6 +273,7 @@ class MlpBlock(nn.Module):
         name='wo',
         use_int8=cfg.int8_training,
         use_bias=self.use_bias,
+        type="ffn2",
     )(x)
 
     output = checkpoint_name(output, 'ffn2')
