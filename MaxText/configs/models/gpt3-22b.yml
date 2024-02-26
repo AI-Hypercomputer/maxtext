@@ -38,3 +38,11 @@ adam_b1: 0.9
 adam_b2: 0.95
 adam_eps: 1.e-8
 adam_weight_decay: 0.1
+hardware: "gpu"
+steps: 30
+run_name: ""
+base_output_directory: "gs://runner-maxtext-logs"
+dataset_path: "gs://maxtext-dataset"
+enable_checkpointing: False
+local_device_id: -1
+process_id: -1

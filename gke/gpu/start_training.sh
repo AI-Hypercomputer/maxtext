@@ -126,7 +126,24 @@ set -e
 PIDS=()
 for ((LOCAL_DEVICE_ID=0; LOCAL_DEVICE_ID <= $((GPUS_PER_NODE - 1)); LOCAL_DEVICE_ID++)); do
    PROCESS_ID=$(($GPUS_PER_NODE*$NODE_RANK + $LOCAL_DEVICE_ID))
-   LOCAL_DEVICE_ID=$LOCAL_DEVICE_ID PROCESS_ID=$PROCESS_ID python MaxText/train.py MaxText/configs/base.yml hardware=gpu run_name=${RUN_NAME}_$(date +%Y-%m-%d-%H-%M) &
+   echo "LOCAL_DEVICE_ID=$LOCAL_DEVICE_ID PROCESS_ID=$PROCESS_ID  python MaxText/train.py MaxText/configs/base.yml hardware=gpu \
+      run_name=${RUN_NAME}_$(date +%Y-%m-%d-%H-%M) base_output_directory=gs://runner-maxtext-logs \
+      dataset_path=gs://maxtext-dataset steps=30 enable_checkpointing=False \
+      base_emb_dim=6144 base_num_query_heads=24 base_num_kv_heads=24 base_mlp_dim=24576 \
+      base_num_decoder_layers=48 head_dim=256 max_target_length=1024 trainable_position_size=16384 \
+      mlp_activations=['gelu'] vocab_size=32768 enable_dropout=False logits_via_embedding=True \
+      normalize_embedding_logits=False logits_dot_in_fp32=False normalization_layer_epsilon=1.e-05 \
+      use_iota_embed=True fused_qkv=True opt_type='adam_pax' decoder_block='gpt3' \
+      gradient_clipping_threshold=1. adam_b1=0.9 adam_b2=0.95 adam_eps=1.e-8 adam_weight_decay=0.1 &"
+   LOCAL_DEVICE_ID=$LOCAL_DEVICE_ID PROCESS_ID=$PROCESS_ID python MaxText/train.py MaxText/configs/base.yml hardware=gpu \
+      run_name=${RUN_NAME}_$(date +%Y-%m-%d-%H-%M) base_output_directory=gs://runner-maxtext-logs \
+      dataset_path=gs://maxtext-dataset steps=30 enable_checkpointing=False \
+      base_emb_dim=6144 base_num_query_heads=24 base_num_kv_heads=24 base_mlp_dim=24576 \
+      base_num_decoder_layers=48 head_dim=256 max_target_length=1024 trainable_position_size=16384 \
+      vocab_size=32768 enable_dropout=False logits_via_embedding=True \
+      normalize_embedding_logits=False logits_dot_in_fp32=False normalization_layer_epsilon=1.e-05 \
+      use_iota_embed=True fused_qkv=True opt_type="adam_pax" decoder_block="gpt3" \
+      gradient_clipping_threshold=1. adam_b1=0.9 adam_b2=0.95 adam_eps=1.e-8 adam_weight_decay=0.1 attention=dot_product &
    PID=$!
    PIDS+=($PID)
    echo "Launched MaxText/train.py for local_device_id: $LOCAL_DEVICE_ID process_id: $PROCESS_ID and PID $PID"
