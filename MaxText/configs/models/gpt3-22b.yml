@@ -46,3 +46,5 @@ dataset_path: "gs://maxtext-dataset"
 enable_checkpointing: False
 local_device_id: -1
 process_id: -1
+ici_fsdp_parallelism: -1
+dcn_fsdp_parallelism: -1

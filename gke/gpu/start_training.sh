@@ -143,7 +143,8 @@ for ((LOCAL_DEVICE_ID=0; LOCAL_DEVICE_ID <= $((GPUS_PER_NODE - 1)); LOCAL_DEVICE
       vocab_size=32768 enable_dropout=False logits_via_embedding=True \
       normalize_embedding_logits=False logits_dot_in_fp32=False normalization_layer_epsilon=1.e-05 \
       use_iota_embed=True fused_qkv=True opt_type="adam_pax" decoder_block="gpt3" \
-      gradient_clipping_threshold=1. adam_b1=0.9 adam_b2=0.95 adam_eps=1.e-8 adam_weight_decay=0.1 attention=dot_product &
+      gradient_clipping_threshold=1. adam_b1=0.9 adam_b2=0.95 adam_eps=1.e-8 adam_weight_decay=0.1 attention=dot_product \
+      ici_fsdp_parallelism=-1, dcn_fsdp_parallelism=-1 &
    PID=$!
    PIDS+=($PID)
    echo "Launched MaxText/train.py for local_device_id: $LOCAL_DEVICE_ID process_id: $PROCESS_ID and PID $PID"
