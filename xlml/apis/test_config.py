@@ -289,14 +289,20 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
       exports: str,
       test_command: List[str],
       reserved: bool,
+      network: str,
+      subnetwork: str,
   ):
     return JSonnetTpuVmTest(
         test_name=test['testName'],
         accelerator=Tpu(
-            version=TpuVersion(str(test['accelerator']['version'])),
+            version=TpuVersion(
+                str(test['accelerator']['version']) + test['accelerator']['variant']
+            ),
             cores=test['accelerator']['size'],
             runtime_version=test['tpuSettings']['softwareVersion'],
             reserved=reserved,
+            network=network,
+            subnetwork=subnetwork,
         ),
         setup=setup,
         exports=exports,
@@ -306,7 +312,9 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
     )
 
   @staticmethod
-  def from_jax(test_name: str, reserved_tpu: bool = True):
+  def from_jax(
+      test_name: str, reserved_tpu: bool = True, network='default', subnetwork='default'
+  ):
     """Parses a compiled legacy JSonnet config test from `tests/jax`."""
     test = _load_compiled_jsonnet(test_name)
     return JSonnetTpuVmTest._from_json_helper(
@@ -316,10 +324,14 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
         exports='',
         test_command=['bash', '-c', test['runTest']],
         reserved=reserved_tpu,
+        network=network,
+        subnetwork=subnetwork,
     )
 
   @staticmethod
-  def from_pytorch(test_name: str, reserved_tpu: bool = True):
+  def from_pytorch(
+      test_name: str, reserved_tpu: bool = True, network='default', subnetwork='default'
+  ):
     """Parses a compiled legacy JSonnet test config from `tests/pytorch`."""
     test = _load_compiled_jsonnet(test_name)
     return JSonnetTpuVmTest._from_json_helper(
@@ -330,6 +342,8 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
         exports=test['tpuSettings']['tpuVmExports'],
         test_command=test['command'],
         reserved=reserved_tpu,
+        network=network,
+        subnetwork=subnetwork,
     )
 
   @property
@@ -373,7 +387,7 @@ class JSonnetGpuTest(TestConfig[Gpu]):
   num_hosts: int = 1
 
   @staticmethod
-  def from_pytorch(test_name: str):
+  def from_pytorch(test_name: str, network='default', subnetwork='default'):
     """Parses a compiled legacy JSonnet test config from `tests/pytorch`."""
     test = _load_compiled_jsonnet(test_name)
 

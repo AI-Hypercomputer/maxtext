@@ -71,4 +71,11 @@ local base = import 'base.libsonnet';
   v4_8: self.TpuSpec { version: 4, size: 8 },
   v4_16: self.TpuSpec { version: 4, size: 16 },
   v4_32: self.TpuSpec { version: 4, size: 32 },
+  v5litepod_4: self.TpuSpec { version: 5, variant: 'litepod', size: 4 },
+  v5litepod_8: self.TpuSpec { version: 5, variant: 'litepod', size: 8 },
+  v5litepod_16: self.TpuSpec { version: 5, variant: 'litepod', size: 16 },
+  v5litepod_32: self.TpuSpec { version: 5, variant: 'litepod', size: 32 },
+  v5litepod_64: self.TpuSpec { version: 5, variant: 'litepod', size: 64 },
+  v5litepod_128: self.TpuSpec { version: 5, variant: 'litepod', size: 128 },
+  v5litepod_256: self.TpuSpec { version: 5, variant: 'litepod', size: 256 },
 }

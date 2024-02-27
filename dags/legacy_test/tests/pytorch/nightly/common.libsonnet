@@ -122,7 +122,7 @@ local volumes = import 'templates/volumes.libsonnet';
     local config = self,
     imageTag+: '_cuda_12.1',
 
-    # TODO(wcromar): Merge TPU VM setup script with GPU entrypoint
+    // TODO(wcromar): Merge TPU VM setup script with GPU entrypoint
     tpuSettings+: {
       tpuVmExports+: |||
         export PJRT_DEVICE=CUDA

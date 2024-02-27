@@ -24,21 +24,14 @@ local tpus = import 'templates/tpus.libsonnet';
   resnet50:: common.PyTorchTest {
     modelName: 'resnet50-mp',
     trainScript: 'pytorch/xla/test/test_train_mp_imagenet.py',
-    batch_size: null,
     command: [
       'python3',
       self.trainScript,
       '--model=resnet50',
       '--log_steps=200',
-    ] + (
-      if self.flags.modelDir != null then [
-        '--logdir=%s' % self.flags.modelDir,
-      ] else []
-    ) + (
-      if self.batch_size != null then [
-        '--batch_size=%s' % self.batch_size,
-      ] else []
-    ),
+    ] + if self.flags.modelDir != null then [
+      '--logdir=%s' % self.flags.modelDir,
+    ] else [],
     flags:: {
       modelDir: '$(MODEL_DIR)',
     },
@@ -131,12 +124,18 @@ local tpus = import 'templates/tpus.libsonnet';
   v4_8:: {
     accelerator: tpus.v4_8,
     // Keep same global batch size as v3
-    batch_size: 256,
+    command+: ['--batch_size=256'],
   },
   local v4_32 = self.v4_32,
   v4_32:: {
     accelerator: tpus.v4_32,
-    batch_size: 256,
+    command+: ['--batch_size=256'],
+  },
+
+  local v5litepod_4 = self.v5litepod_4,
+  v5litepod_4:: {
+    accelerator: tpus.v5litepod_4,
+    command+: ['--batch_size=256'],
   },
 
   local gpu = self.gpu,
@@ -160,7 +159,7 @@ local tpus = import 'templates/tpus.libsonnet';
         completionMode: 'Indexed',
         completions: config.accelerator.num_hosts,
         parallelism: config.accelerator.num_hosts,
-      }
+      },
     },
   },
   local v100x2 = self.v100x2,
@@ -207,10 +206,12 @@ local tpus = import 'templates/tpus.libsonnet';
     // Include sharding spec in the test name
     modelName: std.join('-', ['resnet50-spmd'] + sharding),
     trainScript: 'pytorch/xla/test/spmd/test_train_spmd_imagenet.py',
-    command+: ['--sharding=' + std.join(',', sharding)],
-    // Keep the same global batch size. In SPMD, the global batch size is
-    // divided across all devices.
-    batch_size: self.accelerator.size * replica_batch_size,
+    command+: [
+      '--sharding=' + std.join(',', sharding),
+      // Keep the same global batch size. In SPMD, the global batch size is
+      // divided across all devices.
+      '--batch_size=%d' % (self.accelerator.size * replica_batch_size),
+    ],
     tpuSettings+: {
       tpuVmExports+: |||
         export XLA_USE_SPMD=1
@@ -238,6 +239,7 @@ local tpus = import 'templates/tpus.libsonnet';
     resnet50 + convergence_ddp + v4_8 + timeouts.Hours(14) + pjrt + pjrt_ddp,
     resnet50 + fake_data + v4_32 + timeouts.Hours(2) + pjrt,
     resnet50 + convergence + v4_32 + timeouts.Hours(24) + pjrt,
+    resnet50 + fake_data + v5litepod_4 + timeouts.Hours(2) + pjrt,
     // SPMD
     resnet50 + functional + v4_8 + timeouts.Hours(2) + pjrt + spmd(['batch']),
     resnet50 + functional + v4_8 + timeouts.Hours(2) + pjrt + spmd(['spatial']),
