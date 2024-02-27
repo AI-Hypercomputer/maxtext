@@ -130,13 +130,13 @@ set -e
 PIDS=()
 for ((LOCAL_DEVICE_ID=0; LOCAL_DEVICE_ID <= $((GPUS_PER_NODE - 1)); LOCAL_DEVICE_ID++)); do
    PROCESS_ID=$(($GPUS_PER_NODE*$NODE_RANK + $LOCAL_DEVICE_ID))
-  #  LOCAL_DEVICE_ID=$LOCAL_DEVICE_ID PROCESS_ID=$PROCESS_ID python MaxText/train.py MaxText/configs/base.yml dataset_path=gs://maxtext-dataset\
-  #   load_parameters_path=gs://maxtext-llama/test/yooh-2024-0123-1440/decode-ckpt-maxtext/0/default\
-  #   run_name=runner_$(date +%Y-%m-%d-%H-%M) model_name=llama2-7b attention=cudnn_flash_te async_checkpointing=False\
-  #   base_output_directory=gs://runner-maxtext-logs enable_profiler=True steps=30 &
+   LOCAL_DEVICE_ID=$LOCAL_DEVICE_ID PROCESS_ID=$PROCESS_ID python MaxText/train.py MaxText/configs/base.yml dataset_path=gs://maxtext-dataset\
+    load_parameters_path=gs://maxtext-llama/test/yooh-2024-0123-1440/decode-ckpt-maxtext/0/default\
+    run_name=runner_$(date +%Y-%m-%d-%H-%M) model_name=llama2-7b attention=cudnn_flash_te async_checkpointing=False\
+    base_output_directory=gs://runner-maxtext-logs enable_profiler=True steps=30 &
    PID=$!
    PIDS+=($PID)
    echo "Launched MaxText/train.py for local_device_id: $LOCAL_DEVICE_ID process_id: $PROCESS_ID and PID $PID"
 done
-killall5 -9
+# killall5 -9
 wait_all_success_or_exit "${PIDS[@]}"
