@@ -1,0 +1,55 @@
+# Copyright 2023 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
+
+name: Build Images
+
+on:
+  schedule:
+    # Run the job daily at 10PM PST (6AM UTC)
+    - cron:  '0 6 * * *'
+
+jobs:
+  build_images:
+    strategy:
+      fail-fast: false
+      matrix:
+        device-type: ["v4-8"]
+    runs-on: ["self-hosted", "tpu", "${{ matrix.device-type }}"]
+    steps:
+    - uses: actions/checkout@v3
+    - name: build jax stable image
+      run : |
+        project=tpu-prod-env-multipod
+        local_image_name=maxtext_local_jax_stable
+        cloud_image_name=maxtext_jax_stable
+        bash docker_build_fake_image.sh LOCAL_IMAGE_NAME=$local_image_name MODE=stable &&
+        docker tag ${local_image_name} gcr.io/$project/${cloud_image_name}:latest
+        gcloud auth configure-docker --quiet
+        docker push gcr.io/$project/${cloud_image_name}:latest
+        image_date=$(date +%Y-%m-%d)
+        docker push gcr.io/$project/${cloud_image_name}:${image_date}
+    - name: build jax stable image
+      run : |
+        project=tpu-prod-env-multipod
+        local_image_name=maxtext_local_jax_nightly
+        cloud_image_name=maxtext_jax_nightly
+        bash docker_build_fake_image.sh LOCAL_IMAGE_NAME=$local_image_name MODE=nightly &&
+        docker tag ${local_image_name} gcr.io/$project/${cloud_image_name}:latest
+        gcloud auth configure-docker --quiet
+        docker push gcr.io/$project/${cloud_image_name}:latest
+        image_date=$(date +%Y-%m-%d)
+        docker push gcr.io/$project/${cloud_image_name}:${image_date}
