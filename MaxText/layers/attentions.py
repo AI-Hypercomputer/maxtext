@@ -795,7 +795,14 @@ class Attention(nn.Module):
         dtype=self.dtype,
         name=proj_name,
         quant=self.quant)(inputs)
+    qkv_proj = nn.with_logical_constraint(qkv_proj, (BATCH, LENGTH, "RANDOM", HEAD, D_KV))
+    print(f"{qkv_proj.shape=}, {HEAD=}")
     query, key, value = qkv_proj[:,:,0,...], qkv_proj[:,:,1,...], qkv_proj[:,:,2,...]
+    query = nn.with_logical_constraint(query, (BATCH, LENGTH, HEAD, D_KV))
+    key = nn.with_logical_constraint(key, (BATCH, LENGTH, HEAD, D_KV))
+    value = nn.with_logical_constraint(value, (BATCH, LENGTH, HEAD, D_KV))
+
+
     return query, key, value
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
@@ -855,11 +862,15 @@ class Attention(nn.Module):
       key = self.kv_projection(inputs_kv, proj_name='key')
       value = self.kv_projection(inputs_kv, proj_name='value')
 
+    query = nn.with_logical_constraint(query, self.query_axis_names)
+    key = nn.with_logical_constraint(key, self.key_axis_names)
+    value = nn.with_logical_constraint(value, self.value_axis_names)
+
     # apply ROPE
-    query = RotaryEmbedding(
-        embedding_dims=self.head_dim, name='query_rotary'
-    )(inputs=query, position=inputs_positions)
-    key = self.key_rotary(key, inputs_positions)
+    #query = RotaryEmbedding(
+    #    embedding_dims=self.head_dim, name='query_rotary'
+    #)(inputs=query, position=inputs_positions)
+    #key = self.key_rotary(key, inputs_positions)
 
     # annotate with sharding constraint.
     query = nn.with_logical_constraint(query, self.query_axis_names)

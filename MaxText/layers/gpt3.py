@@ -234,6 +234,7 @@ class Gpt3MultiHeadAttention(nn.Module):
 
     # apply output projection,  output dim is set to the input dim.
     out = self.out_projection(inputs_q.shape[-1], out)
+    print(out.shape)
     return out
 
 
