@@ -25,4 +25,4 @@ fi
 python3 MaxText/decode.py MaxText/configs/base.yml run_name=$RUN_NAME\
     steps=50 enable_checkpointing=False metrics_file=/tmp/${RUN_NAME}_metrics.txt \
     base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH \
-    attention=dot_product ici_tensor_parallelism=${ICI_TENSOR_PARALLELISM} add_eos=False
+    attention=dot_product ici_tensor_parallelism=${ICI_TENSOR_PARALLELISM}

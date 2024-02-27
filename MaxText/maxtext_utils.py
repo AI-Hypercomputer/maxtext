@@ -24,8 +24,7 @@ from jax.experimental.serialize_executable import deserialize_and_load
 
 import pickle
 import functools
-import input_pipeline
-import optax
+from input_pipeline import input_pipeline_interface
 
 
 
@@ -47,16 +46,23 @@ def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations
 def get_functional_train_step(train_step, model, config):
   return functools.partial(train_step, model, config)
 
-def get_optimizer(config, learning_rate_schedule):
-  """ Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2 """
-  return optax.adamw(
-    learning_rate_schedule,
-    b1=config.adam_b1,
-    b2=config.adam_b2,
-    eps=config.adam_eps,
-    eps_root=config.adam_eps_root,
-    weight_decay=config.adam_weight_decay,
-  )
+def get_functional_eval_with_signature(eval_step, mesh, state_mesh_annotations, model, config):
+  """ Get the shardings (both state and data) for eval_step """
+  functional_eval = get_functional_eval_step(eval_step, model, config)
+  functional_eval.__name__ = "eval_step"
+  data_pspec = P(*config.data_sharding)
+  state_mesh_shardings = jax.tree_map(
+      lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
+  data_sharding = jax.tree_map(
+      lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+  in_shardings = (state_mesh_shardings, data_sharding, None) # State, batch, rng
+  out_shardings = None # metrics
+  static_argnums = () # We partial out the static argnums of model, config
+  donate_argnums = () # state will be kept instead of being donated in eval_step
+  return functional_eval, in_shardings, out_shardings, static_argnums, donate_argnums
+
+def get_functional_eval_step(eval_step, model, config):
+  return functools.partial(eval_step, model, config)
 
 def load_compiled(config, partial_train, state):
   """ # Loading a serialized compiled train step function."""
@@ -75,7 +81,7 @@ def load_compiled(config, partial_train, state):
     return in_tree_recreated, out_tree_recreated
 
   serialized_compiled = load_serialized_compiled(config.compiled_trainstep_file)
-  shaped_batch = input_pipeline.get_shaped_batch(config)
+  shaped_batch = input_pipeline_interface.get_shaped_batch(config)
   example_rng = jax.random.PRNGKey(0)
   shaped_input_args = (state, shaped_batch, example_rng)
   shaped_input_kwargs = {}

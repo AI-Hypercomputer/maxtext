@@ -1,0 +1,40 @@
+# Copyright 2023 Google LLC
+#
+# Licensed under the Apache License Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing software
+# distributed under the License is distributed on an "AS IS" BASIS
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# model config for gpt3-22b
+
+base_emb_dim: 6144
+base_num_query_heads: 24
+base_num_kv_heads: 24
+base_mlp_dim: 24576
+base_num_decoder_layers: 48
+head_dim: 256
+max_target_length: 1024
+trainable_position_size: 16384
+mlp_activations: ["gelu"]
+vocab_size: 32768
+enable_dropout: False
+logits_via_embedding: True
+normalize_embedding_logits: False
+logits_dot_in_fp32: False
+normalization_layer_epsilon: 1.e-05
+use_iota_embed: True
+fused_qkv: True
+opt_type: "adam_pax"
+decoder_block: "gpt3"
+gradient_clipping_threshold: 1.
+adam_b1: 0.9
+adam_b2: 0.95
+adam_eps: 1.e-8
+adam_weight_decay: 0.1

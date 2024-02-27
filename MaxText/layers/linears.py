@@ -16,13 +16,15 @@
 
 import functools
 import operator
-from typing import Any, Callable, Iterable, Sequence, Tuple, Union
+from typing import Any, Callable, Iterable, Sequence, Tuple, Union, Optional
 
 import flax.linen as nn
+import jax
 from jax import lax
 import jax.numpy as jnp
 import common_types
 from layers import initializers
+from layers import normalizations
 from layers import quantizations
 import numpy as np
 
@@ -32,7 +34,10 @@ DType = common_types.DType
 NdInitializer = initializers.NdInitializer
 
 nd_dense_init = initializers.nd_dense_init
+bias_init = initializers.default_bias_init
 
+RMSNorm = normalizations.RMSNorm
+Quant = quantizations.AqtQuantization
 
 def _convert_to_activation_function(
     fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
@@ -61,13 +66,15 @@ def _canonicalize_tuple(x):
 
 
 class DenseGeneral(nn.Module):
-  """A linear transformation (without bias) with flexible axes.
+  """A linear transformation with flexible axes.
 
   Attributes:
     features: tuple with numbers of output features.
     axis: tuple with axes to apply the transformation on.
     dtype: the dtype of the computation (default: float32).
     kernel_init: initializer function for the weight matrix.
+    use_bias: whether to add bias in linear transformation
+    quant: quantization config, defaults to None implying no quantization.
   """
 
   features: Union[Iterable[int], int]
@@ -75,7 +82,8 @@ class DenseGeneral(nn.Module):
   dtype: DType = jnp.float32
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
   kernel_axes: Tuple[str, ...] = ()
-  use_int8: bool = False
+  quant: Optional[Quant] = None
+  use_bias: bool = False
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -90,14 +98,12 @@ class DenseGeneral(nn.Module):
 
     def compute_dot_general(inputs, kernel, axis, contract_ind):
       """Computes a dot_general operation that may be quantized."""
-      if not self.use_int8:
-        return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
-      else:
-        aqt_rng = self.make_rng('aqt')
-        aqt_dot_general = quantizations.int8_dot_general(aqt_rng)
-        return aqt_dot_general(
-            inputs, kernel, ((axis, contract_ind), ((), ()))
-        )
+      dot_general = lax.dot_general
+      if self.quant:
+        dot_general_cls = self.quant.dot_general_cls()
+        dot_general = dot_general_cls()
+      return dot_general(
+        inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
 
     features = _canonicalize_tuple(self.features)
     axis = _canonicalize_tuple(self.axis)
@@ -112,14 +118,26 @@ class DenseGeneral(nn.Module):
         'kernel',
         nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
         kernel_shape,
-        jnp.float32,
+        self.dtype,
         kernel_in_axis,
         kernel_out_axis,
     )
     kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(axis)))
-    return compute_dot_general(inputs, kernel, axis, contract_ind)
+    output = compute_dot_general(inputs, kernel, axis, contract_ind)
+
+    if self.use_bias:
+      bias_axes, bias_shape = self.kernel_axes[-len(features):], kernel_shape[-len(features):]
+      bias = self.param(
+          'bias',
+          nn.with_logical_partitioning(bias_init, bias_axes),
+          bias_shape,
+          jnp.float32,
+      )
+      bias = jnp.asarray(bias, self.dtype)
+      output += bias
+    return output
 
 
 class MlpBlock(nn.Module):
@@ -133,6 +151,9 @@ class MlpBlock(nn.Module):
     deterministic: Whether the dropout layers should be deterministic.
     intermediate_dropout_rate: Dropout rate used after the intermediate layers.
     dtype: Type for the dense layer.
+    use_bias: whether to add bias in all feedforward layers.
+    use_pre_norm: whether to add pre layer norm in mlp layers.
+    quant: Optional quantization config, no quantization if None.
   """
 
   config: Config
@@ -141,11 +162,31 @@ class MlpBlock(nn.Module):
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
   intermediate_dropout_rate: float = 0.1
   dtype: Any = jnp.float32
+  use_bias: bool = False
+  use_pre_norm: bool = False
+  quant: Optional[Quant] = None
+
+  def get_norm_layer(self):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
+      return RMSNorm
+    elif self.config.decoder_block == "gpt3":
+      from layers import gpt3
+      return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=self.use_bias)
+    else:
+      raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   @nn.compact
   def __call__(self, inputs, decode: bool = False, deterministic: bool = False):
     """Applies Transformer MlpBlock module."""
     cfg = self.config
+
+    if self.use_pre_norm:
+      inputs = self.get_norm_layer()(
+        name='mlp_layer_norm',
+        dtype=cfg.dtype,
+        kernel_axes=('embed',),
+        epsilon=cfg.normalization_layer_epsilon,
+        )(inputs)
 
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
@@ -157,7 +198,8 @@ class MlpBlock(nn.Module):
             kernel_init=self.kernel_init,
             kernel_axes=('embed', 'num_activations', 'mlp'),
             name='wi',
-            use_int8=cfg.int8_training,
+            quant=self.quant,
+            use_bias=self.use_bias,
       )(inputs)
       for idx, act_fn in enumerate(self.activations):
         y = _convert_to_activation_function(act_fn)(x[:,:,idx,...])
@@ -171,7 +213,8 @@ class MlpBlock(nn.Module):
             kernel_init=self.kernel_init,
             kernel_axes=('embed', 'mlp'),
             name=dense_name,
-            use_int8=cfg.int8_training,
+            quant=self.quant,
+            use_bias=self.use_bias,
         )(inputs)
         x = _convert_to_activation_function(act_fn)(x)
         activations.append(x)
@@ -191,6 +234,63 @@ class MlpBlock(nn.Module):
         kernel_init=self.kernel_init,
         kernel_axes=('mlp', 'embed'),
         name='wo',
-        use_int8=cfg.int8_training,
+        quant=self.quant,
+        use_bias=self.use_bias,
     )(x)
     return output
+
+
+class MoeBlock(nn.Module):
+  """Mixture of Experts (MoE) block.
+
+  Attributes:
+    num_experts: Number of experts.
+    num_experts_per_tok: Number of experts for each token.
+    kernel_init: Kernel function, passed to the dense layers.
+    kernel_axes: Tuple with axes to apply kernel function.
+    dtype: Type for the dense layer.
+  """
+
+  config: Config
+  num_experts: int
+  num_experts_per_tok: int
+  kernel_init: NdInitializer
+  kernel_axes: Tuple[str, ...]
+  dtype: DType = jnp.float32
+
+  @nn.compact
+  def __call__(self, inputs, deterministic: bool = False):
+    gate_logits = DenseGeneral(            
+            self.num_experts,
+            dtype=self.dtype,
+            kernel_init=self.kernel_init,
+            kernel_axes=self.kernel_axes,
+            name='gate')(inputs)
+      
+    weights, selected_experts = lax.top_k(gate_logits, self.num_experts_per_tok)
+    weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1)    
+    mlp_lnx = jnp.zeros_like(inputs)
+    weights = weights.astype(self.dtype)
+    mlp_lnx = nn.with_logical_constraint(
+            mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')
+        )
+
+    # TODO(ranran): have a better solution to remove the loop here
+    for k in range(self.num_experts):
+        weights_exp = jnp.sum(jnp.multiply(selected_experts==k, weights), axis=-1)
+        mlp_lnx_exp = MlpBlock(
+          intermediate_dim=self.config.mlp_dim,
+          activations=self.config.mlp_activations,
+          intermediate_dropout_rate=self.config.dropout_rate,
+          dtype=self.dtype,
+          name=f'mlp_{k}',
+          config=self.config,
+          )(inputs, deterministic=deterministic)
+        
+        mlp_lnx_exp = nn.with_logical_constraint(
+            mlp_lnx_exp, ('activation_batch', 'activation_length', 'activation_embed')
+        )
+        mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
+        mlp_lnx += mlp_lnx_exp
+    
+    return mlp_lnx

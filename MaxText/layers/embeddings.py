@@ -56,7 +56,7 @@ class Embed(nn.Module):
         'embedding',
         with_logical_partitioning(self.embedding_init, ('vocab', 'embed')),
         (self.num_embeddings, self.features),
-        jnp.float32,
+        self.config.weight_dtype,
     )
 
   def __call__(self, inputs: Array) -> Array:
@@ -100,7 +100,7 @@ class Embed(nn.Module):
       in NLP models.
     """
     dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
-    return jnp.dot(query, jnp.asarray(self.embedding, dtype).T)
+    return jnp.dot(query, jnp.asarray(self.embedding, jnp.bfloat16).T)
 
 
 class RotaryEmbedding(nn.Module):
@@ -163,24 +163,16 @@ class RotaryEmbedding(nn.Module):
         * (self.max_timescale / self.min_timescale) ** fraction
     )
     position = position[:, :, jnp.newaxis, jnp.newaxis]
-    timescale = timescale[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
     sinusoid_inp = position / timescale
     sin = jnp.sin(sinusoid_inp)
     cos = jnp.cos(sinusoid_inp)
-    reshape_tensor = inputs.astype(jnp.float32).reshape(
-        *inputs.shape[:-1], 2, -1
-    )
-    reshape_tensor = jax.numpy.swapaxes(reshape_tensor, -1, -2)
-    first_half = reshape_tensor[..., 0]
-    second_half = reshape_tensor[..., 1]
+    first_half, second_half = jnp.split(inputs, 2, axis=-1)
     first_part = first_half * cos - second_half * sin
     second_part = second_half * cos + first_half * sin
     if self.cast_as_fprop_dtype:
       first_part = first_part.astype(self.fprop_dtype)
       second_part = second_part.astype(self.fprop_dtype)
-    x_out = jnp.stack((first_part, second_part), axis=-1).reshape(
-        *first_part.shape[:-1], -1
-    )
+    x_out = jnp.concatenate((first_part, second_part), axis=-1)
     return x_out
 
 

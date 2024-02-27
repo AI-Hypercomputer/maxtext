@@ -29,15 +29,17 @@ from jax.sharding import Mesh
 from jax.experimental.serialize_executable import serialize
 from flax.linen import partitioning as nn_partitioning
 import maxtext_utils
+import optimizers
 import max_utils
 import pyconfig
 from layers import models
+from layers import quantizations
 from typing import Sequence
 from absl import app
 import pickle
 import accelerator_to_spec_map
 import train
-import input_pipeline
+from input_pipeline import input_pipeline_interface
 
 Transformer = models.Transformer
 
@@ -66,20 +68,21 @@ def get_topology_mesh(config):
 def get_shaped_inputs(topology_mesh, config):
   """ Get shaped abstractions of inputs to train_step: state, batch and rng """
   # Construct the model and optimizier to get shaped versions of the state
-  model = Transformer(config, topology_mesh)
+  quant = quantizations.configure_quantization(config)
+  model = Transformer(config, topology_mesh, quant=quant)
   # The learning_rate_schedule is baked into the compiled object.
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
-  tx = maxtext_utils.get_optimizer(config, learning_rate_schedule)
+  tx = optimizers.get_optimizer(config, learning_rate_schedule)
 
   # Shaped RNG keys
   _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
 
   # Shaped state
-  abstract_state, state_mesh_annotations =  max_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
+  abstract_state, state_mesh_annotations, _ =  max_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
 
   # Shaped batch
-  shaped_batch = input_pipeline.get_shaped_batch(config)
+  shaped_batch = input_pipeline_interface.get_shaped_batch(config)
 
   shaped_train_args = (abstract_state, shaped_batch, shaped_rng)
   shaped_train_kwargs = {}

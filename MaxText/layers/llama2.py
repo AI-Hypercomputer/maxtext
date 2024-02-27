@@ -18,23 +18,19 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from jax.sharding import Mesh
-
-
-
 from flax import linen as nn
-
-
+from jax.sharding import Mesh
 import jax.numpy as jnp
 # from jax.experimental.pallas.ops.tpu import flash_attention
 from layers import attentions
 from layers import embeddings
 from layers import linears
 from layers import normalizations
-
 from layers import models
+from layers import quantizations
 
 import common_types
+from typing import Optional
 
 Array = common_types.Array
 Config = common_types.Config
@@ -45,7 +41,7 @@ ScanIn = common_types.ScanIn
 Embed = embeddings.Embed
 Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
-
+Quant = quantizations.AqtQuantization
 
 #-----------------------------------------
 # The Decoder Layer specific for Llama2
@@ -56,6 +52,7 @@ class LlamaDecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
   config: models.Config
   mesh: Mesh
+  quant: Optional[Quant] = None
 
   @nn.compact
   def __call__(self,
@@ -76,7 +73,7 @@ class LlamaDecoderLayer(nn.Module):
         dtype=cfg.dtype,
         name='pre_self_attention_layer_norm',
         kernel_axes=('embed',),
-        epsilon=cfg.rms_norm_epsilon
+        epsilon=cfg.normalization_layer_epsilon,
         )
     lnx = lnx_rms(inputs)
 
@@ -90,12 +87,13 @@ class LlamaDecoderLayer(nn.Module):
       num_kv_heads=cfg.num_kv_heads,
       head_dim=cfg.head_dim,
       max_target_length=cfg.max_target_length,
+      max_prefill_predict_length=cfg.max_prefill_predict_length,
       attention_kernel=cfg.attention,
       mesh=mesh,
       dtype=cfg.dtype,
       dropout_rate=cfg.dropout_rate,
       name='self_attention',
-      use_int8=cfg.int8_training)
+      quant=self.quant)
 
     attention_lnx = attention_layer(
             lnx,
@@ -113,7 +111,7 @@ class LlamaDecoderLayer(nn.Module):
     # Fully Connected
     hidden_states = models.RMSNorm(
         dtype=cfg.dtype, name='post_self_attention_layer_norm', kernel_axes=('embed',),
-        epsilon=cfg.rms_norm_epsilon,
+        epsilon=cfg.normalization_layer_epsilon,
         )(intermediate_inputs)
     hidden_states = nn.with_logical_constraint(hidden_states, ('activation_batch', 'activation_length', 'activation_embed'))
 
@@ -125,6 +123,7 @@ class LlamaDecoderLayer(nn.Module):
         dtype=cfg.dtype,
         name='mlp',
         config=cfg,
+        quant=self.quant,
     )(hidden_states, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(
         mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')

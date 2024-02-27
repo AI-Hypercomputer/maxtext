@@ -21,7 +21,7 @@ from train import main as train_main
 from absl.testing import absltest
 
 class Train(unittest.TestCase):
-  """Smoke test"""
+  """Smoke test G3 only"""
 
   def test_tiny_config(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")
@@ -29,7 +29,7 @@ class Train(unittest.TestCase):
       f"base_output_directory=gs://runner-maxtext-logs", "run_name=runner_test",
       r"dataset_path=gs://maxtext-dataset",
       "base_emb_dim=8", "base_num_query_heads=4", "base_num_kv_heads=4", "base_mlp_dim=32",
-      "base_num_decoder_layers=8", "head_dim=16", "per_device_batch_size=2",
+      "base_num_decoder_layers=8", "head_dim=128", "per_device_batch_size=2",
       "max_target_length=1024", "dataset_type=synthetic", "steps=10",
       "enable_checkpointing=False"])
 

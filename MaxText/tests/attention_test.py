@@ -39,7 +39,7 @@ class AttentionTest(unittest.TestCase):
   """Test for the Attention """
   def setUp(self):
     super().setUp()
-    pyconfig.initialize([sys.argv[0], 'configs/base.yml'], per_device_batch_size = 1.0, run_name='test', enable_checkpointing=False)
+    pyconfig.initialize([sys.argv[0], 'configs/base.yml'], per_device_batch_size = 1.0, run_name='test', enable_checkpointing=False, max_target_length=128, max_prefill_predict_length=16 )
     self.cfg = pyconfig.config
     self.rng = jax.random.PRNGKey(0)
 
@@ -60,6 +60,7 @@ class AttentionTest(unittest.TestCase):
         num_kv_heads=self.num_kv_heads,
         head_dim=self.head_dim,
         max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
         mesh=self.mesh,
         attention_kernel = "dot_product",
         dtype=self.dtype,
@@ -108,8 +109,8 @@ class AttentionTest(unittest.TestCase):
   
   @pytest.mark.tpu
   def test_autoregression(self):
-    prefill_length = 16
-    decode_total_length = 64
+    prefill_length = self.cfg.max_prefill_predict_length
+    decode_total_length = self.cfg.max_target_length
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(
         self.dtype)
     
@@ -172,14 +173,49 @@ class AttentionTest(unittest.TestCase):
       )
 
   @pytest.mark.tpu
-  def test_attention(self):
-    """Test equalvant between MHA and Flash MHA."""
+  def test_tpu_kernel_attention_mha(self):
+    self.tpu_kernel_attention_helper(self.num_kv_heads)
+
+  @pytest.mark.tpu
+  def test_tpu_kernel_attention_gqa(self):
+    self.tpu_kernel_attention_helper(self.num_kv_heads // 2)
+
+  @pytest.mark.tpu
+  def test_tpu_kernel_attention_mqa(self):
+    self.tpu_kernel_attention_helper(1)
+
+  def tpu_kernel_attention_helper(self, num_kv_heads):
+    """Test equalvant between dot_product and TPU accelerated"""
 
     lnx, decoder_segment_ids, decoder_positions = self.get_data(
         self.dtype)
 
-    mha_generic_output = self._attention_as_mha_generic.apply(
-        self._attention_as_mha_generic_variable,
+    attention_as_mha_generic = Attention(
+        config=self.cfg,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
+        mesh=self.mesh,
+        attention_kernel = "dot_product",
+        dtype=self.dtype,
+        dropout_rate=self.cfg.dropout_rate,
+        name='self_attention',
+    )
+
+    attention_as_mha_generic_variable = attention_as_mha_generic.init(
+        {'params': self.rng, 'aqt': self.rng},
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones(
+            (self.global_batch_size, self.max_target_length)),
+    )
+
+    mha_generic_output = attention_as_mha_generic.apply(
+        attention_as_mha_generic_variable,
         lnx,
         lnx,
         decoder_segment_ids=decoder_positions,
@@ -192,9 +228,10 @@ class AttentionTest(unittest.TestCase):
     attention_as_mha_flash = Attention(
         config=self.cfg,
         num_query_heads=self.num_query_heads,
-        num_kv_heads=self.num_kv_heads,
+        num_kv_heads=num_kv_heads,
         head_dim=self.head_dim,
         max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
         mesh=self.mesh,
         attention_kernel = "flash",
         dtype=self.dtype,
@@ -226,83 +263,6 @@ class AttentionTest(unittest.TestCase):
     self.assertTrue(
         jax.numpy.allclose(
             mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False
-        )
-    )
-
-
-  @pytest.mark.tpu
-  def test_multiquery_attention(self):
-    """Test equalvant between MHA and Flash MHA."""
-    attention_as_mqa = Attention(
-        config=self.cfg,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=1,
-        head_dim=self.head_dim,
-        max_target_length=self.max_target_length,
-        mesh=self.mesh,
-        attention_kernel = "dot_product",
-        dtype=self.dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        name='self_attention',
-    )
-
-    attention_as_mqa_variable = attention_as_mqa.init(
-        {'params': self.rng, 'aqt': self.rng},
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length)),
-    )
-
-    lnx, decoder_segment_ids, decoder_positions = self.get_data(
-        self.dtype)
-
-    mqa_generic_output = attention_as_mqa.apply(
-        attention_as_mqa_variable,
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_positions,
-        inputs_positions=decoder_segment_ids,
-        deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
-        rngs={'aqt': self.rng},
-    )
-
-    attention_as_mha_generic_variable = self._attention_as_mha_generic.init(
-        {'params': self.rng, 'aqt': self.rng},
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length)),
-    )
-
-    new_key_kernel = jax.numpy.repeat(attention_as_mqa_variable['params']['key']['kernel'].value, self.num_kv_heads, axis=1)
-    attention_as_mha_generic_variable['params']['key']['kernel'] = attention_as_mha_generic_variable['params']['key']['kernel'].replace(value = new_key_kernel)
-    new_value_kernel = jax.numpy.repeat(attention_as_mqa_variable['params']['value']['kernel'].value, self.num_kv_heads, axis=1)
-    attention_as_mha_generic_variable['params']['value']['kernel'] = attention_as_mha_generic_variable['params']['value']['kernel'].replace(value = new_value_kernel)
-    new_out_kernel = attention_as_mqa_variable['params']['out']['kernel'].value
-    attention_as_mha_generic_variable['params']['out']['kernel'] = attention_as_mha_generic_variable['params']['out']['kernel'].replace(value = new_out_kernel)
-    new_query_kernel = attention_as_mqa_variable['params']['query']['kernel'].value
-    attention_as_mha_generic_variable['params']['query']['kernel'] = attention_as_mha_generic_variable['params']['query']['kernel'].replace(value = new_query_kernel)
-
-    mha_generic = self._attention_as_mha_generic.apply(
-        attention_as_mha_generic_variable,
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_positions,
-        inputs_positions=decoder_segment_ids,
-        deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
-        rngs={'aqt': self.rng},
-    )
-
-    self.assertTrue(
-        jax.numpy.allclose(
-            mqa_generic_output, mha_generic, rtol=1e-06, atol=1e-06, equal_nan=False
         )
     )
 
