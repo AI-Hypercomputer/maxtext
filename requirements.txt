@@ -9,6 +9,7 @@ google-cloud-storage
 grain-nightly
 flax>=0.8.0
 ml-collections
+ml-goodput-measurement
 numpy
 optax
 protobuf==3.20.3
