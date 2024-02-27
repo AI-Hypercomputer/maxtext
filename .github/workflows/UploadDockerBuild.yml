@@ -40,20 +40,22 @@ jobs:
         project=tpu-prod-env-multipod
         local_image_name=maxtext_local_jax_stable
         cloud_image_name=maxtext_jax_stable
-        bash docker_build_fake_image.sh LOCAL_IMAGE_NAME=$local_image_name MODE=stable &&
-        docker tag ${local_image_name} gcr.io/$project/${cloud_image_name}:latest
+        bash docker_build_fake_image.sh LOCAL_IMAGE_NAME=$local_image_name MODE=stable
         gcloud auth configure-docker --quiet
+        docker tag ${local_image_name} gcr.io/$project/${cloud_image_name}:latest
         docker push gcr.io/$project/${cloud_image_name}:latest
         image_date=$(date +%Y-%m-%d)
+        docker tag ${local_image_name} gcr.io/$project/${cloud_image_name}:${image_date}
         docker push gcr.io/$project/${cloud_image_name}:${image_date}
-    - name: build jax stable image
+    - name: build jax nightly image
       run : |
         project=tpu-prod-env-multipod
         local_image_name=maxtext_local_jax_nightly
         cloud_image_name=maxtext_jax_nightly
-        bash docker_build_fake_image.sh LOCAL_IMAGE_NAME=$local_image_name MODE=nightly &&
-        docker tag ${local_image_name} gcr.io/$project/${cloud_image_name}:latest
+        bash docker_build_fake_image.sh LOCAL_IMAGE_NAME=$local_image_name MODE=nightly
         gcloud auth configure-docker --quiet
+        docker tag ${local_image_name} gcr.io/$project/${cloud_image_name}:latest
         docker push gcr.io/$project/${cloud_image_name}:latest
         image_date=$(date +%Y-%m-%d)
+        docker tag ${local_image_name} gcr.io/$project/${cloud_image_name}:${image_date}
         docker push gcr.io/$project/${cloud_image_name}:${image_date}
