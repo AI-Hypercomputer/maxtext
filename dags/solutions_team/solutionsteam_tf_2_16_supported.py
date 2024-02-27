@@ -22,8 +22,8 @@ from dags.solutions_team.configs.tensorflow import solutionsteam_tf_2_16_support
 from dags.solutions_team.configs.tensorflow import common
 
 
-# Run once a day at 6 pm UTC (10 am PST)
-SCHEDULED_TIME = "0 18 * * *" if composer_env.is_prod_env() else None
+# Release tests only need to run once, they can be run manually as needed
+SCHEDULED_TIME = None
 
 
 with models.DAG(

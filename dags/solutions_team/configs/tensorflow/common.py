@@ -81,7 +81,7 @@ def install_tf_2_16() -> Tuple[str]:
   """Install tf 2.16 + libtpu."""
   return (
       "pip install tensorflow-text-nightly",
-      "sudo gsutil -m cp gs://cloud-tpu-v2-images-dev-artifacts/tensorflow/2.16/2024-02-20/*.whl /tmp/ && pip install /tmp/tf*.whl --force",
+      "sudo gsutil -m cp gs://cloud-tpu-v2-images-dev-artifacts/tensorflow/2.16/2024-02-20/t*.whl /tmp/ && pip install /tmp/t*.whl --force",
       "sudo gsutil -m cp gs://cloud-tpu-v2-images-dev-artifacts/libtpu/1.10.0/rc0/libtpu.so /lib/",
       CMD_PRINT_TF_VERSION,
   )
