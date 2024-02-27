@@ -63,9 +63,31 @@ with models.DAG(
       ),
       US_CENTRAL1_C,
   ).run()
-  resnet_v4_8 = task.TpuQueuedResourceTask(
+  resnet_v3_8_tests = [
+      task.TpuQueuedResourceTask(
+          test_config.JSonnetTpuVmTest.from_pytorch(test),
+          US_CENTRAL1_C,
+      ).run()
+      for test in (
+          "pt-nightly-resnet50-pjrt-fake-v3-8-1vm",
+          "pt-nightly-resnet50-pjrt-ddp-fake-v3-8-1vm",
+      )
+  ]
+  resnet_v4_8_tests = [
+      task.TpuQueuedResourceTask(
+          test_config.JSonnetTpuVmTest.from_pytorch(test),
+          US_CENTRAL2_B,
+      ).run()
+      for test in (
+          "pt-nightly-resnet50-pjrt-fake-v4-8-1vm",
+          "pt-nightly-resnet50-pjrt-ddp-fake-v4-8-1vm",
+          "pt-nightly-resnet50-spmd-batch-func-v4-8-1vm",
+          "pt-nightly-resnet50-spmd-spatial-func-v4-8-1vm",
+      )
+  ]
+  resnet_v4_32 = task.TpuQueuedResourceTask(
       test_config.JSonnetTpuVmTest.from_pytorch(
-          "pt-nightly-resnet50-pjrt-fake-v4-8-1vm"
+          "pt-nightly-resnet50-pjrt-fake-v4-32-1vm"
       ),
       US_CENTRAL2_B,
   ).run()
@@ -78,7 +100,8 @@ with models.DAG(
       US_EAST1_C,
   ).run()
 
-  mnist_v2_8 >> (resnet_v2_8, resnet_v4_8, resnet_v5lp_4)
+  mnist_v2_8 >> (resnet_v2_8, *resnet_v4_8_tests, resnet_v4_32, resnet_v5lp_4)
+  resnet_v2_8 >> resnet_v3_8_tests
 
   resnet_v100_2x2 = task.GpuGkeTask(
       test_config.JSonnetGpuTest.from_pytorch("pt-nightly-resnet50-mp-fake-v100-x2x2"),
