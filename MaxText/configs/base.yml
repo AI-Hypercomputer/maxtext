@@ -228,3 +228,8 @@ decode_sampling_temperature: 1.
 
 eval_interval: -1  # the specific number of train step between eval_step
 target_eval_loss: 0.  # early stop once reaching target eval_loss
+
+# For GCS Tessellattion
+mode: "" # Benchmark mode, either read or write.
+gcs_csv_folder: "" # Folder of the metrics csv files stored in GCS.
+bq_dataset: "" # Name of big query dataset that tables will be created in.

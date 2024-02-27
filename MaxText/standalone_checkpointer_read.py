@@ -22,13 +22,13 @@
 
 import datetime
 import os
-import time
 
 from typing import Sequence
 from absl import app
 from flax.linen import partitioning as nn_partitioning
 import jax
 import numpy as np
+import time
 
 import checkpointing
 import max_utils
@@ -53,50 +53,36 @@ def checkpoint_loop(config, state=None):
 
   unboxed_abstract_state, state_mesh_annotations = max_utils.get_abstract_state(model, tx,
                                                 config, init_rng, mesh, is_training=True)
-  # A barrier to sync all hosts before starting to restore checkpoint
-  jax.experimental.multihost_utils.sync_global_devices("Barrier before load")
-  checkpoint_load_start = datetime.datetime.now()
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    state, _ = checkpointing.load_state_if_possible(checkpoint_manager,
-                                                config.load_parameters_path,
-                                                config.load_full_state_path,
-                                                unboxed_abstract_state,
-                                                mesh,
-                                                state_mesh_annotations)
-  jax.block_until_ready(state)
-  checkpoint_load_end = datetime.datetime.now()
-  if state is not None: # Checkpoint was available for restore
-    if jax.process_index() == 0:
+  ckpt_read_time = []
+  for step in range(config.steps):
+    # A barrier to sync all hosts before starting to restore checkpoint
+    jax.experimental.multihost_utils.sync_global_devices("Barrier before load")
+    checkpoint_load_start = datetime.datetime.now()
+    with nn_partitioning.axis_rules(config.logical_axis_rules):
+      state, _ = checkpointing.load_state_if_possible(checkpoint_manager,
+                                                  config.load_parameters_path,
+                                                  config.load_full_state_path,
+                                                  unboxed_abstract_state,
+                                                  mesh,
+                                                  state_mesh_annotations)
+    jax.block_until_ready(state)
+    checkpoint_load_end = datetime.datetime.now()
+    if state is not None: # Checkpoint was available for restore
+      time_diff = (checkpoint_load_end-checkpoint_load_start).total_seconds()
+      ckpt_read_time.append([jax.process_index(), step, time_diff])
       max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint restored in: "
-                      f"{(checkpoint_load_end-checkpoint_load_start).total_seconds()}")
-  else: # Checkpoint was unavailable, state needs to be initialized
-    state, state_mesh_annotations = max_utils.setup_training_state(model,
-          tx, config, init_rng, mesh, checkpoint_manager)
-    num_params, bytes_params, bytes_per_param = max_utils.summarize_size_from_pytree(state.params)
-    max_logging.log(f"Number of model params={num_params/10**9:.3f} billion, memory usage={bytes_params/2**30:.3f}GB, "
-                    f"bytes per param={bytes_per_param:.3f}")
-
-  start_step = get_first_step(state) # this is the start_step for training
-  ckpt_save_time = []
-  for step in np.arange(start_step, config.steps):
-    if checkpoint_manager is not None:
-      # A barrier to sync all hosts before starting to save checkpoint
-      jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
-      start_time = datetime.datetime.now()
-      if checkpoint_manager.save(step, state):
-        checkpoint_manager.wait_until_finished()
-        end_time = datetime.datetime.now()
-        ckpt_save_time.append([jax.process_index(), step, (end_time-start_time).total_seconds()])
-        max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint saved in {(end_time-start_time).total_seconds()}, "
-                        f"step {step}, on host 0")
-        time.sleep(300)
+                      f"{time_diff}")
+    else: # Checkpoint was unavailable, state needs to be initialized
+      raise Exception("Checkpoint not available")
+    max_logging.log(f"Finished step {step}, sleeping for 20s...")
+    time.sleep(20)
 
   if config.gcs_csv_folder != '':
     max_logging.log("Uploading metrics to GCS")
     csv_file = f"{config.run_name}_{jax.process_index()}.csv"
-    csv_header = ["process", "step", "ckpt_save_time"]
+    csv_header = ["process", "step", "ckpt_read_time"]
     # Update the raw metrics CSV file to GCS.
-    max_utils.upload_csv(csv_file, csv_header, ckpt_save_time, config.gcs_csv_folder)
+    max_utils.upload_csv(csv_file, csv_header, ckpt_read_time, config.gcs_csv_folder)
 
   max_utils.close_summary_writer(writer)
   return state
@@ -112,7 +98,6 @@ def main(argv: Sequence[str]) -> None:
   print(f"Found {jax.devices()} devices.")
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   checkpoint_loop(config)
-
 
 if __name__ == "__main__":
   app.run(main)
