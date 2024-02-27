@@ -17,6 +17,7 @@
 # pylint: disable=bare-except, consider-using-generator
 """ Common Max Utils needed by multiple modules"""
 import checkpointing
+import datetime
 import functools
 
 import max_logging
@@ -292,6 +293,9 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_tra
 
   unboxed_abstract_state, state_mesh_annotations = get_abstract_state(model, tx, config, rng, mesh, is_training)
 
+  # A barrier to sync all hosts before starting to restore checkpoint
+  jax.experimental.multihost_utils.sync_global_devices("Barrier before load")
+  checkpoint_load_start = datetime.datetime.now()
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
@@ -303,6 +307,10 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_tra
                                                 state_mesh_annotations,
                                                 config.enable_single_replica_checkpointing
                                                 )
+    jax.block_until_ready(state)
+    checkpoint_load_end = datetime.datetime.now()
+    if state is not None and jax.process_index() == 0: # Checkpoint was available for restore
+      max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint restored in : {checkpoint_load_end - checkpoint_load_start}")
 
     state_mesh_shardings = jax.tree_map(
         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)

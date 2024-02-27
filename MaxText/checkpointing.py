@@ -56,36 +56,40 @@ def create_orbax_checkpoint_manager(
   max_logging.log("Checkpoint manager created!")
   return mngr
 
-
-def _find_zeroth_idx(array):
+def _find_idx(array: np.ndarray, replica_axis_idx: int):
+  """Returns the index along given dimension that the current host belongs to."""
+  idx = None
   for idx, val in np.ndenumerate(array):
     if val.process_index == jax.process_index():
       break
-  return idx[0]
+  return idx[replica_axis_idx]
 
 
-def _replica_devices(device_array):
-  ### replicas are assumed to be restricted to the first axis
-  zeroth_idx =  _find_zeroth_idx(device_array)
-  replica_result = device_array[zeroth_idx : zeroth_idx + 1, :, :]
-  return replica_result
+def _replica_devices(device_array: np.ndarray, replica_axis_idx: int):
+  """Returns the devices from the replica that current host belongs to.
+
+  Replicas are assumed to be restricted to the first axis.
+
+  Args:
+    device_array: devices of the mesh that can be obtained by mesh.devices()
+    replica_axis_idx: axis dimension along which replica is taken
+
+  Returns:
+    devices inside the replica that current host is in
+  """
+  idx = _find_idx(device_array, replica_axis_idx)
+  replica_result = np.take(device_array,
+                           idx,
+                           axis=replica_axis_idx)
+  return np.expand_dims(replica_result, axis=replica_axis_idx)
 
 
-def get_replica_pids(rep_id, mesh):
+def get_replica_pids(rep_id: int, mesh: jax.sharding.Mesh):
+  """Return host and device IDs from specified replica from the mesh."""
   replica_devices = np.take(mesh.devices, rep_id, axis=0).flatten()
   pids = set([d.process_index for d in replica_devices])
   ids = set([d.id for d in replica_devices])
-  return pids, ids
-
-
-def is_sharding_valid(single_replica_ids, single_replica_pids):
-  if jax.process_index() in single_replica_pids:
-    loc_devieces_in_replica = single_replica_ids.intersection(set([d.id for d in jax.local_devices()]))
-    # print(f' host ID is {jax.process_index()}, '
-    #       f'num of devices in replica 0 is {len(loc_devieces_in_replica)}')
-    assert len(loc_devieces_in_replica) == 4, (
-      ' !!! Provided sharding is not valid. There is a host with part'
-      ' of devices outside of replica 0')
+  return ids, pids
 
 
 def load_state_if_possible(checkpoint_manager: CheckpointManager,
@@ -124,19 +128,17 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
     if isinstance(data, (jax.Array, jax.ShapeDtypeStruct)) \
           and pspec is not None:
       if enable_single_replica_checkpointing:
+        replica_axis_index = 0
         type_handlers.register_type_handler(jax.Array,
                                             type_handlers.SingleReplicaArrayHandler(),
                                             override=True)
-        replica_devices = _replica_devices(mesh.devices)
+        replica_devices = _replica_devices(mesh.devices, replica_axis_index)
         replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
-        rep0_pids, rep0_ids = get_replica_pids(0, mesh)
-        is_sharding_valid(rep0_ids, rep0_pids)
+        ss_sharding = jax.sharding.NamedSharding(replica_mesh, pspec)
         return type_handlers.SingleReplicaArrayRestoreArgs(
           sharding=jax.sharding.NamedSharding(mesh, pspec),
-          single_replica_sharding=jax.sharding.NamedSharding(replica_mesh, pspec),
-          single_replica_ids=rep0_ids,
-          single_replica_pids=rep0_pids,
-          replica_axis_name='data',
+          single_replica_sharding=ss_sharding,
+          replica_axis_index=replica_axis_index,
           global_shape=data.shape,
           dtype=data.dtype,
           )
