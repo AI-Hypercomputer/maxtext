@@ -18,6 +18,10 @@
 name: Build Images
 
 on:
+  pull_request:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
   schedule:
     # Run the job daily at 10PM PST (6AM UTC)
     - cron:  '0 6 * * *'
