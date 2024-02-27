@@ -11,3 +11,5 @@ dags/solutions_team/configs/tensorflow @chandrasekhard2 @EricLeFort
 dags/pytorch_xla @will-cromar
 
 dags/multipod @jonb377
+
+dags/mlcompass @ortibazar @sganeshb @brajiang @wlzhg

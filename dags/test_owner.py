@@ -33,3 +33,6 @@ PEI_Z = "Pei Z."
 TONY_C = "Tony C."
 JON_B = "Jon B."
 RAYMOND_Z = "Raymond Z."
+
+# MLCompass
+ORTI_B = "Orti B."
