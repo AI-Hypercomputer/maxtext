@@ -132,6 +132,8 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
             gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
         fi
     elif [[ $DEVICE == "gpu" ]]; then
+        echo "Installing NVIDIA transformer-engine"
+        NVTE_FRAMEWORK=jax pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
         echo "Installing stable jax, jaxlib for NVIDIA gpu"
         if [[ -n "$JAX_VERSION" ]]; then
             echo "Installing stable jax, jaxlib ${JAX_VERSION}"

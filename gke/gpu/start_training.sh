@@ -116,8 +116,12 @@ resolve_coordinator_ip() {
 }
 
 # HLO dump
-export XLA_FLAGS="--xla_dump_to=/tmp/xladump"
-
+export XLA_FLAGS="--xla_dump_to=/tmp/xladump --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_async_all_gather=true --xla_gpu_enable_async_reduce_scatter=true --xla_gpu_enable_triton_gemm=false
+                --xla_gpu_simplify_all_fp_conversions --xla_gpu_graph_level=0 --xla_gpu_enable_async_all_reduce=true --xla_gpu_enable_highest_priority_async_stream=true
+                --xla_gpu_all_reduce_combine_threshold_bytes=8589934592 --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592
+                --xla_gpu_enable_pipelined_all_gather=true --xla_gpu_enable_pipelined_reduce_scatter=true --xla_gpu_enable_pipelined_all_reduce=true --xla_gpu_enable_while_loop_double_buffering=true
+                --xla_gpu_enable_triton_softmax_fusion=false --xla_gpu_enable_all_gather_combine_by_dim=false --xla_gpu_enable_reduce_scatter_combine_by_dim=false
+                --xla_disable_hlo_passes=rematerialization"
 # Resolving coordinator IP
 set +e
 resolve_coordinator_ip
@@ -126,10 +130,13 @@ set -e
 PIDS=()
 for ((LOCAL_DEVICE_ID=0; LOCAL_DEVICE_ID <= $((GPUS_PER_NODE - 1)); LOCAL_DEVICE_ID++)); do
    PROCESS_ID=$(($GPUS_PER_NODE*$NODE_RANK + $LOCAL_DEVICE_ID))
-   LOCAL_DEVICE_ID=$LOCAL_DEVICE_ID PROCESS_ID=$PROCESS_ID python MaxText/train.py MaxText/configs/base.yml hardware=gpu run_name=${RUN_NAME}_$(date +%Y-%m-%d-%H-%M) &
+  #  LOCAL_DEVICE_ID=$LOCAL_DEVICE_ID PROCESS_ID=$PROCESS_ID python MaxText/train.py MaxText/configs/base.yml dataset_path=gs://maxtext-dataset\
+  #   load_parameters_path=gs://maxtext-llama/test/yooh-2024-0123-1440/decode-ckpt-maxtext/0/default\
+  #   run_name=runner_$(date +%Y-%m-%d-%H-%M) model_name=llama2-7b attention=cudnn_flash_te async_checkpointing=False\
+  #   base_output_directory=gs://runner-maxtext-logs enable_profiler=True steps=30 &
    PID=$!
    PIDS+=($PID)
    echo "Launched MaxText/train.py for local_device_id: $LOCAL_DEVICE_ID process_id: $PROCESS_ID and PID $PID"
 done
-
+killall5 -9
 wait_all_success_or_exit "${PIDS[@]}"

@@ -1,11 +1,11 @@
 cluster:
   nNodes: 2 # Configure the number of nodes
-  nodePool: "" # Configure NodePool Information
+  nodePool: "yooh-gpu-np-0" # Configure NodePool Information
 network:
   useTcpx: "yes"
   ncclPlugin: us-docker.pkg.dev/gce-ai-infra/gpudirect-tcpx/nccl-plugin-gpudirecttcpx-dev:v3.1.6_2023_10_06
   rxdmContainer: us-docker.pkg.dev/gce-ai-infra/gpudirect-tcpx/tcpgpudmarxd-dev:v2.0.9
 workload:
-  image: "" # Configure Image Name
+  image: "gcr.io/cloud-tpu-multipod-dev/yooh-llama2-7b-flash" # Configure Image Name
   port: 6002
-  runName: "" # Configure Run Name
+  runName: "yooh-llama2-7b-flash" # Configure Run Name
