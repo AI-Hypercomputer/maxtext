@@ -56,7 +56,7 @@ class Embed(nn.Module):
         'embedding',
         with_logical_partitioning(self.embedding_init, ('vocab', 'embed')),
         (self.num_embeddings, self.features),
-        jnp.float32,
+        self.config.weight_dtype,
     )
 
   def __call__(self, inputs: Array) -> Array:
@@ -100,7 +100,7 @@ class Embed(nn.Module):
       in NLP models.
     """
     dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
-    return jnp.dot(query, jnp.asarray(self.embedding, dtype).T)
+    return jnp.dot(query, jnp.asarray(self.embedding, jnp.bfloat16).T)
 
 
 class RotaryEmbedding(nn.Module):

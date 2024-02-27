@@ -33,6 +33,7 @@ import optimizers
 import max_utils
 import pyconfig
 from layers import models
+from layers import quantizations
 from typing import Sequence
 from absl import app
 import pickle
@@ -67,7 +68,8 @@ def get_topology_mesh(config):
 def get_shaped_inputs(topology_mesh, config):
   """ Get shaped abstractions of inputs to train_step: state, batch and rng """
   # Construct the model and optimizier to get shaped versions of the state
-  model = Transformer(config, topology_mesh)
+  quant = quantizations.configure_quantization(config)
+  model = Transformer(config, topology_mesh, quant=quant)
   # The learning_rate_schedule is baked into the compiled object.
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
@@ -77,7 +79,7 @@ def get_shaped_inputs(topology_mesh, config):
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
 
   # Shaped state
-  abstract_state, state_mesh_annotations =  max_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
+  abstract_state, state_mesh_annotations, _ =  max_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
 
   # Shaped batch
   shaped_batch = input_pipeline_interface.get_shaped_batch(config)

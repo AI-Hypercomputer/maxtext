@@ -163,9 +163,9 @@ class Decoder(nn.Module):
       # TODO(ranran): update to Mistral with sliding window attention
       from layers import mistral
       return mistral.MistralDecoderLayer
-    elif self.config.decoder_block == "gamma":
-      from layers import gamma
-      return gamma.GammaDecoderLayer
+    elif self.config.decoder_block == "gemma":
+      from layers import gemma
+      return gemma.GemmaDecoderLayer
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
       return gpt3.Gpt3DecoderLayer
@@ -173,7 +173,7 @@ class Decoder(nn.Module):
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "gamma"):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
@@ -244,6 +244,7 @@ class Decoder(nn.Module):
               'params': params_spec,
               'cache': cache_spec,
               'intermediates': 0,
+              'aqt':0,
           },
           split_rngs={
               'params': True,
@@ -297,8 +298,7 @@ class Decoder(nn.Module):
           cfg.vocab_size,
           dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
           kernel_axes=('embed', 'vocab'),
-          name='logits_dense',
-          quant=self.quant)(y) # We do not quantize the logits matmul.
+          name='logits_dense')(y) # We do not quantize the logits matmul.
     logits = nn.with_logical_constraint(
         logits, ('activation_batch', 'activation_length', 'activation_vocab'))
     return logits
@@ -306,10 +306,11 @@ class Decoder(nn.Module):
 
 class Transformer(nn.Module):
   """An decoder-only Transformer model."""
+  # Make new attributes required, so that all Transformer dependencies (train, decode, compile, etc) will error instead of silently use defaults.
   # pylint: disable=attribute-defined-outside-init
   config: Config
   mesh: Mesh
-  quant: Optional[Quant] = None
+  quant: Quant
 
   def setup(self):
     """Initialize shared_embedding & decoder layers."""

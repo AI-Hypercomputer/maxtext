@@ -14,7 +14,6 @@
  limitations under the License.
  """
 
-# pylint: disable=bare-except, consider-using-generator
 """ Common Max Utils needed by multiple modules"""
 import checkpointing
 import common_types
@@ -173,24 +172,63 @@ def maybe_initialize_jax_distributed_system(raw_keys):
       indirection in MaxText to avoid breaking the call sites unnecessarily.
 
       Currently jax.distributed.initialize() fully works as expected!
-      
+
       For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
   """
   if (raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"]
-                and raw_keys["compile_topology_num_slices"]==-1):
+                and raw_keys["compile_topology_num_slices"]==-1) or raw_keys["hardware"]=='gpu_multiprocess':
     max_logging.log("Attempting to initialize the jax distributed system...")
     jax.distributed.initialize()
     max_logging.log("Jax distributed system initialized!")
+  elif is_gpu_backend(raw_keys):
+    max_logging.log("Attempting to initialize the jax distributed system for GPU backend...")
+    initialize_jax_for_gpu()
+    max_logging.log("Jax distributed system initialized on GPU!")
   elif is_cpu_backend(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for CPU backend...")
     initialize_jax_for_cpu()
     max_logging.log("Jax distributed system initialized on CPUs!")
 
-
+def initialize_jax_for_gpu():
+  """Jax distributed initialize for GPUs."""
+  if os.environ.get("JAX_COORDINATOR_IP") is not None:
+    coordinator_ip = str(os.getenv("JAX_COORDINATOR_IP"))
+    coordinator_port = str(os.getenv("JAX_COORDINATOR_PORT"))
+    jax.distributed.initialize(
+        coordinator_address=f"{coordinator_ip}:{coordinator_port}",
+        num_processes=int(os.getenv("JAX_NUM_PROCESSES")),
+        process_id=int(os.getenv("PROCESS_ID")),
+        local_device_ids=int(os.getenv("LOCAL_DEVICE_ID")),
+    )
+    max_logging.log(f"JAX global devices: {jax.devices()}")
 
 def initialize_jax_for_cpu():
   """Jax distributed initialize for CPUs. Includes retries until the coordinator is ready.
   """
+  coordinator_ip_address = get_coordinator_ip_address()
+  coordinator_address = coordinator_ip_address + ":1234" # JAX coordinator port used in XPK
+  # Env variables to be set in XPK or otherwise
+  job_index = int(os.environ.get("JOB_INDEX"))
+  job_completion_index = int(os.environ.get("JOB_COMPLETION_INDEX"))
+  processes_in_job = int(os.environ.get("PROCESSES_IN_JOB"))
+  pid = job_index * processes_in_job + job_completion_index
+  max_logging.log(f" Jax process id is {pid} ")
+  # Explicit initialize is needed only for CPUs
+  jax.distributed.initialize(coordinator_address=coordinator_address,
+                            process_id=pid,
+                            num_processes=int(os.environ.get("JAX_PROCESS_COUNT")))
+
+def is_cpu_backend(raw_keys):
+  """Determine whether Maxtext is intended to run on a CPU backend."""
+  return raw_keys["hardware"] == 'cpu'
+
+def is_gpu_backend(raw_keys):
+  """Determine whether Maxtext is intended to run on a GPU backend."""
+  return raw_keys["hardware"] == 'gpu'
+
+def get_coordinator_ip_address():
+  """Get coordinator IP Address with retries"""
+  coordinator_address = ""
   if os.environ.get("JAX_COORDINATOR_ADDRESS") is not None:
     coordinator_address = os.environ.get("JAX_COORDINATOR_ADDRESS")
     coordinator_found = False
@@ -198,29 +236,16 @@ def initialize_jax_for_cpu():
     max_coordinator_lookups = 50
     while not coordinator_found and lookup_attempt <= max_coordinator_lookups:
       try:
-        ip_address = socket.gethostbyname(coordinator_address)
+        coordinator_ip_address = socket.gethostbyname(coordinator_address)
         coordinator_found = True
       except socket.gaierror:
-        print(f"Failed to recognize coordinator address {coordinator_address} on attempt {lookup_attempt}, retrying...")
+        max_logging.log(
+            f"Failed to recognize coordinator address {coordinator_address} on attempt {lookup_attempt}, retrying..."
+        )
         lookup_attempt += 1
         time.sleep(5)
-
-    ip_address = socket.gethostbyname(coordinator_address)
-    coordinator_address = ip_address + ":1234" # JAX coordinator port used in XPK
-    # Env variables to be set in XPK or otherwise
-    job_index = int(os.environ.get("JOB_INDEX"))
-    job_completion_index = int(os.environ.get("JOB_COMPLETION_INDEX"))
-    processes_in_job = int(os.environ.get("PROCESSES_IN_JOB"))
-    pid = job_index * processes_in_job + job_completion_index
-    max_logging.log(f" Jax process id is {pid} ")
-    # Explicit initialize is needed only for CPUs
-    jax.distributed.initialize(coordinator_address=coordinator_address,
-                              process_id=pid,
-                              num_processes=int(os.environ.get("JAX_PROCESS_COUNT")))
-
-def is_cpu_backend(raw_keys):
-  """Determine whether Maxtext is intended to run on a CPU backend."""
-  return raw_keys["hardware"] == 'cpu'
+  max_logging.log(f"Coordinator IP address: {coordinator_ip_address}")
+  return coordinator_ip_address
 
 def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
   """Evaluates unspecified DCN/ICI parallelism values"""
@@ -247,20 +272,17 @@ def create_device_mesh(config, devices=None):
   if devices is None:
     devices = jax.devices()
   num_devices = len(devices)
-  try:
-    num_slices = 1 + max([d.slice_index for d in devices])
-  except:
-    num_slices = 1
+  num_slices = config.num_slices
   num_devices_per_slice = num_devices//num_slices
 
   multi_slice_env = num_slices > 1
 
   dcn_parallelism = [config.dcn_data_parallelism, config.dcn_fsdp_parallelism,
-                     config.dcn_sequence_parallelism, config.dcn_tensor_parallelism,
-                     config.dcn_autoregressive_parallelism]
+                     config.dcn_fsdp_transpose_parallelism, config.dcn_sequence_parallelism,
+                     config.dcn_tensor_parallelism, config.dcn_autoregressive_parallelism]
   ici_parallelism = [config.ici_data_parallelism, config.ici_fsdp_parallelism,
-                     config.ici_sequence_parallelism, config.ici_tensor_parallelism,
-                     config.ici_autoregressive_parallelism]
+                     config.ici_fsdp_transpose_parallelism, config.ici_sequence_parallelism,
+                     config.ici_tensor_parallelism, config.ici_autoregressive_parallelism]
 
   # Find possible unspecified parallelisms
   ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, 'ICI')
@@ -329,15 +351,23 @@ def init_initial_state(model, tx, config, is_training, key):
     return init_training_state(model.apply, model_vars['params'], tx)
   return init_decode_state(model.apply, model_vars['params'])
 
+def load_decode_model_vars(model, config, rng, mesh):
+  state, _ = setup_decode_state(model, config, rng, mesh, None)
+  model_vars = {'params': state.params}
+  return model_vars
+
 def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   is_training = False
-  return setup_initial_state(model, None, config, rng, mesh, checkpoint_manager, is_training)
+  state, state_mesh_annotations, _ = setup_initial_state(model, None, None, config,
+                                                         rng, mesh, checkpoint_manager,
+                                                         is_training)
+  return state, state_mesh_annotations
 
-def setup_training_state(model, tx, config, rng, mesh, checkpoint_manager):
+def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
   is_training = True
-  return setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_training)
+  return setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager, is_training)
 
-def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_training=True):
+def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager, is_training=True):
   """ We initialize the model and optimizer state, and optionally load from a
   checkpoint as necessary.
 
@@ -355,20 +385,23 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_tra
     state_mesh_annotations: the mesh annotations for the train state
   """
 
-  unboxed_abstract_state, state_mesh_annotations = get_abstract_state(model, tx, config, rng, mesh, is_training)
+  unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(model, tx, config,
+                                                                                            rng, mesh, is_training)
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    state, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
+    restored, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
+                                                data_iterator,
                                                 config.load_parameters_path,
                                                 config.load_full_state_path,
                                                 unboxed_abstract_state,
-                                                mesh,
-                                                state_mesh_annotations)
+                                                config.dataset_type)
 
-    state_mesh_shardings = jax.tree_map(
-        lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
-    if not state:
+    if restored:
+      if 'iter' in restored and restored['iter'] is not None:
+        data_iterator.local_iterator = restored['iter']
+      state = restored['default']
+    else:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       state = jax.jit(
           init_state_partial,
@@ -377,10 +410,9 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_tra
       )(rng)
       if raw_params: # If we loaded a partial state, we need to merge it.
         state = state.replace(params = raw_params)
-    raw_params = None
 
   state = unbox_logicallypartioned(state)
-  return state, state_mesh_annotations
+  return state, state_mesh_annotations, data_iterator
 
 
 # Learning Rate Schedule
@@ -508,16 +540,26 @@ cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd,
 
 def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   """ Get a shaped abstraction of the state (including optimizer)"""
-  init_state_partial = functools.partial(init_initial_state, model, tx,
-                                              config, is_training)
-  abstract_state = jax.eval_shape(init_state_partial, rng)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  unboxed_abstract_state = unbox_logicallypartioned(abstract_state)
+  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
 
+  abstract_state = jax.eval_shape(init_state_partial, rng)
+
+  state_logical_annotations = nn.get_partition_spec(abstract_state)
+
+  state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh,
+                                                     config.logical_axis_rules)
+
+  abstract_sharded_state = jax.jit(
+      init_state_partial,
+      in_shardings=None,
+      out_shardings=state_mesh_shardings
+  ).eval_shape(rng)
+
+  unboxed_abstract_sharded_state = unbox_logicallypartioned(abstract_sharded_state)
   # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return unboxed_abstract_state, state_mesh_annotations
+  return unboxed_abstract_sharded_state, state_mesh_annotations, state_mesh_shardings
 
 def get_kv_cache_annotations(model, config, rng, mesh):
   """ Get a shaped abstraction of the state (including optimizer)"""
@@ -541,3 +583,14 @@ def get_kv_cache_annotations(model, config, rng, mesh):
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return state_mesh_annotations
+
+
+def print_pytree_shape(print_str, ptree):
+  print("\n")
+  print(print_str)
+  print(jax.tree_util.tree_map(lambda x : x.shape, ptree))
+
+def print_model_vars(print_str, model_vars):
+  for k in model_vars:
+    print(f'{print_str} key{k}:')
+    print(f'\t {model_vars[k]}')

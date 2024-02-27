@@ -14,7 +14,7 @@
  limitations under the License.
  """
 
-# pylint: disable=missing-module-docstring
+# pylint: disable=missing-module-docstring, bare-except, consider-using-generator
 from collections import OrderedDict
 
 import max_logging
@@ -45,7 +45,7 @@ def string_to_bool(s: str) -> bool:
 _yaml_types_to_parser = {str : str, int : int, float : float, bool : string_to_bool}
 
 def validate_attention_type(s: str) -> None:
-  valid_attention_types = ('dot_product', 'flash', 'gpu_flash_xla', 'gpu_flash_triton')
+  valid_attention_types = ('dot_product', 'flash', 'cudnn_flash_te')
   if s not in valid_attention_types: # currently supported attention
     raise ValueError(
       "Invalid attention type was passed. Valid options ", valid_attention_types
@@ -62,7 +62,7 @@ def validate_keys(keys):
 def validate_model_name(s: str) -> bool:
   # currently supported models
   valid_model_names = ('default', 'llama2-7b', 'llama2-70b', 'mistral-7b',
-                       'mixtral-8x7b', 'gamma-7b','gamma-2b',
+                       'mixtral-8x7b', 'gemma-7b','gemma-2b',
                        'gpt3-175b', 'gpt3-22b', 'gpt3-6b', 'gpt3-52k')
   if s not in valid_model_names:
     raise ValueError(
@@ -94,7 +94,7 @@ class _HyperParameters():
           raise ValueError(f"We received env `{environment_var}` but it isn't all uppercase.")
 
   def _load_kwargs(self, argv: list[str], **kwargs):
-    args_dict = dict(a.split("=") for a in argv[2:])
+    args_dict = dict(a.split("=", 1) for a in argv[2:])
     args_dict.update(kwargs)
     return args_dict
 
@@ -197,6 +197,8 @@ class _HyperParameters():
 
     raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = \
       calculate_global_batch_sizes(raw_keys)
+    raw_keys['num_slices'] = get_num_slices(raw_keys)
+    raw_keys['quantization_local_shard_count'] = get_quantization_local_shard_count(raw_keys)
 
     # Write raw_keys to GCS before type conversions
     max_utils.write_config_raw_keys_for_gcs(raw_keys)
@@ -297,6 +299,22 @@ def get_num_target_devices(raw_keys):
     return int(devices_per_slice * raw_keys['compile_topology_num_slices'])
   else:
     return len(jax.devices())
+
+def get_num_slices(raw_keys):
+  if int(raw_keys['compile_topology_num_slices']) > 0:
+    return raw_keys['compile_topology_num_slices']
+  else:
+    devices = jax.devices()
+    try:
+      return 1 + max([d.slice_index for d in devices])
+    except:
+      return 1
+
+def get_quantization_local_shard_count(raw_keys):
+  if raw_keys['quantization_local_shard_count'] == -1:
+    return raw_keys['num_slices']
+  else:
+    return raw_keys['quantization_local_shard_count']
 
 class HyperParameters(): # pylint: disable=missing-class-docstring
   def __init__(self):

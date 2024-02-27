@@ -118,7 +118,7 @@ class DenseGeneral(nn.Module):
         'kernel',
         nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
         kernel_shape,
-        jnp.float32,
+        self.dtype,
         kernel_in_axis,
         kernel_out_axis,
     )
@@ -167,7 +167,7 @@ class MlpBlock(nn.Module):
   quant: Optional[Quant] = None
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "gamma"):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
