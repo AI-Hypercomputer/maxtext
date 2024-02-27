@@ -159,7 +159,7 @@ class _HyperParameters():
     keys_from_env_and_command_line = self._update_from_env_and_command_line(raw_keys, raw_data_from_yaml, argv, **kwargs)
     max_logging.log(
         f"Updating keys from env and command line: {keys_from_env_and_command_line}")
-    keys_from_model = _HyperParameters.update_model_vars(raw_keys)
+    keys_from_model = _HyperParameters.update_model_vars(argv[1], raw_keys)
     max_logging.log(f"Updating keys from model: {keys_from_model}")
     validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
 
@@ -235,7 +235,7 @@ class _HyperParameters():
     raw_keys['eval_interval'] = math.ceil(24567 / global_batch_size_to_train_on)
 
   @staticmethod
-  def update_model_vars(raw_keys):
+  def update_model_vars(base_config_path, raw_keys):
     ''' Update model config variables
     '''
     validate_model_name(raw_keys['model_name'])
@@ -243,8 +243,13 @@ class _HyperParameters():
 
     updated_keys = []
     if raw_keys['model_name'] != 'default':
-      dir_path = os.path.dirname(os.path.realpath(__file__))
-      file_path = os.path.join(dir_path, f"configs/models/{raw_keys['model_name']}.yml")
+      model_name = raw_keys['model_name']
+      # First look at the model configs under base_config_path, and fallback to
+      # the python codebase if the config cannot be found.
+      file_path = os.path.join(base_config_path, f"models/{model_name}.yml")
+      if not os.path.isfile(file_path):
+        dir_path = os.path.dirname(os.path.realpath(__file__))
+        file_path = os.path.join(dir_path, f"configs/models/{model_name}.yml")
       with open(file_path, 'r', encoding="utf-8") as file:
         model_vars = yaml.safe_load(file)
         updated_keys = list(model_vars.keys())
