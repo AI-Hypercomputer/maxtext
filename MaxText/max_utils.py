@@ -180,16 +180,55 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system...")
     jax.distributed.initialize()
     max_logging.log("Jax distributed system initialized!")
+  elif is_gpu_backend(raw_keys):
+    max_logging.log("Attempting to initialize the jax distributed system for GPU backend...")
+    initialize_jax_for_gpu()
+    max_logging.log("Jax distributed system initialized on GPU!")
   elif is_cpu_backend(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for CPU backend...")
     initialize_jax_for_cpu()
     max_logging.log("Jax distributed system initialized on CPUs!")
 
-
+def initialize_jax_for_gpu():
+  """Jax distributed initialize for GPUs."""
+  if os.environ.get("JAX_COORDINATOR_IP") is not None:
+    coordinator_ip = str(os.getenv("JAX_COORDINATOR_IP"))
+    coordinator_port = str(os.getenv("JAX_COORDINATOR_PORT"))
+    jax.distributed.initialize(
+        coordinator_address=f"{coordinator_ip}:{coordinator_port}",
+        num_processes=int(os.getenv("JAX_NUM_PROCESSES")),
+        process_id=int(os.getenv("PROCESS_ID")),
+        local_device_ids=int(os.getenv("LOCAL_DEVICE_ID")),
+    )
+    max_logging.log(f"JAX global devices: {jax.devices()}")
 
 def initialize_jax_for_cpu():
   """Jax distributed initialize for CPUs. Includes retries until the coordinator is ready.
   """
+  coordinator_ip_address = get_coordinator_ip_address()
+  coordinator_address = coordinator_ip_address + ":1234" # JAX coordinator port used in XPK
+  # Env variables to be set in XPK or otherwise
+  job_index = int(os.environ.get("JOB_INDEX"))
+  job_completion_index = int(os.environ.get("JOB_COMPLETION_INDEX"))
+  processes_in_job = int(os.environ.get("PROCESSES_IN_JOB"))
+  pid = job_index * processes_in_job + job_completion_index
+  max_logging.log(f" Jax process id is {pid} ")
+  # Explicit initialize is needed only for CPUs
+  jax.distributed.initialize(coordinator_address=coordinator_address,
+                            process_id=pid,
+                            num_processes=int(os.environ.get("JAX_PROCESS_COUNT")))
+
+def is_cpu_backend(raw_keys):
+  """Determine whether Maxtext is intended to run on a CPU backend."""
+  return raw_keys["hardware"] == 'cpu'
+
+def is_gpu_backend(raw_keys):
+  """Determine whether Maxtext is intended to run on a GPU backend."""
+  return raw_keys["hardware"] == 'gpu'
+
+def get_coordinator_ip_address():
+  """Get coordinator IP Address with retries"""
+  coordinator_address = ""
   if os.environ.get("JAX_COORDINATOR_ADDRESS") is not None:
     coordinator_address = os.environ.get("JAX_COORDINATOR_ADDRESS")
     coordinator_found = False
@@ -197,29 +236,16 @@ def initialize_jax_for_cpu():
     max_coordinator_lookups = 50
     while not coordinator_found and lookup_attempt <= max_coordinator_lookups:
       try:
-        ip_address = socket.gethostbyname(coordinator_address)
+        coordinator_ip_address = socket.gethostbyname(coordinator_address)
         coordinator_found = True
       except socket.gaierror:
-        print(f"Failed to recognize coordinator address {coordinator_address} on attempt {lookup_attempt}, retrying...")
+        max_logging.log(
+            f"Failed to recognize coordinator address {coordinator_address} on attempt {lookup_attempt}, retrying..."
+        )
         lookup_attempt += 1
         time.sleep(5)
-
-    ip_address = socket.gethostbyname(coordinator_address)
-    coordinator_address = ip_address + ":1234" # JAX coordinator port used in XPK
-    # Env variables to be set in XPK or otherwise
-    job_index = int(os.environ.get("JOB_INDEX"))
-    job_completion_index = int(os.environ.get("JOB_COMPLETION_INDEX"))
-    processes_in_job = int(os.environ.get("PROCESSES_IN_JOB"))
-    pid = job_index * processes_in_job + job_completion_index
-    max_logging.log(f" Jax process id is {pid} ")
-    # Explicit initialize is needed only for CPUs
-    jax.distributed.initialize(coordinator_address=coordinator_address,
-                              process_id=pid,
-                              num_processes=int(os.environ.get("JAX_PROCESS_COUNT")))
-
-def is_cpu_backend(raw_keys):
-  """Determine whether Maxtext is intended to run on a CPU backend."""
-  return raw_keys["hardware"] == 'cpu'
+  max_logging.log(f"Coordinator IP address: {coordinator_ip_address}")
+  return coordinator_ip_address
 
 def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
   """Evaluates unspecified DCN/ICI parallelism values"""
