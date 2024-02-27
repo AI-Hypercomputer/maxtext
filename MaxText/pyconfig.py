@@ -244,9 +244,11 @@ class _HyperParameters():
     updated_keys = []
     if raw_keys['model_name'] != 'default':
       model_name = raw_keys['model_name']
-      # First look at the model configs under base_config_path, and fallback to
-      # the python codebase if the config cannot be found.
-      file_path = os.path.join(base_config_path, f"models/{model_name}.yml")
+      # First look at the model configs next to the base_config_path, and
+      # fallback to the python codebase if the config cannot be found.
+      file_path = os.path.join(
+          os.path.dirname(base_config_path), f"models/{model_name}.yml"
+      )
       if not os.path.isfile(file_path):
         dir_path = os.path.dirname(os.path.realpath(__file__))
         file_path = os.path.join(dir_path, f"configs/models/{model_name}.yml")
