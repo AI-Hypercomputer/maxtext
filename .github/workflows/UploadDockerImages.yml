@@ -40,11 +40,12 @@ jobs:
         local_image_name=maxtext_local_jax_stable
         cloud_image_name=maxtext_jax_stable
         bash docker_build_dependency_image.sh LOCAL_IMAGE_NAME=$local_image_name MODE=stable
+        docker build --build-arg BASEIMAGE=${local_image_name} -f ./maxtext_runner.Dockerfile -t ${local_image_name}_runner .
         gcloud auth configure-docker --quiet
-        docker tag ${local_image_name} gcr.io/$project/${cloud_image_name}:latest
+        docker tag ${local_image_name}_runner gcr.io/$project/${cloud_image_name}:latest
         docker push gcr.io/$project/${cloud_image_name}:latest
         image_date=$(date +%Y-%m-%d)
-        docker tag ${local_image_name} gcr.io/$project/${cloud_image_name}:${image_date}
+        docker tag ${local_image_name}_runner gcr.io/$project/${cloud_image_name}:${image_date}
         docker push gcr.io/$project/${cloud_image_name}:${image_date}
     - name: build jax nightly image
       run : |
@@ -52,9 +53,10 @@ jobs:
         local_image_name=maxtext_local_jax_nightly
         cloud_image_name=maxtext_jax_nightly
         bash docker_build_dependency_image.sh LOCAL_IMAGE_NAME=$local_image_name MODE=nightly
+        docker build --build-arg BASEIMAGE=${local_image_name} -f ./maxtext_runner.Dockerfile -t ${local_image_name}_runner .
         gcloud auth configure-docker --quiet
-        docker tag ${local_image_name} gcr.io/$project/${cloud_image_name}:latest
+        docker tag ${local_image_name}_runner gcr.io/$project/${cloud_image_name}:latest
         docker push gcr.io/$project/${cloud_image_name}:latest
         image_date=$(date +%Y-%m-%d)
-        docker tag ${local_image_name} gcr.io/$project/${cloud_image_name}:${image_date}
+        docker tag ${local_image_name}_runner gcr.io/$project/${cloud_image_name}:${image_date}
         docker push gcr.io/$project/${cloud_image_name}:${image_date}
