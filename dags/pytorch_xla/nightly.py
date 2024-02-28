@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import datetime
+from airflow.decorators import task_group
 from airflow import models
 from xlml.apis import gcp_config, metric_config, task, test_config
 from dags import composer_env
@@ -46,13 +47,8 @@ US_EAST1_C = gcp_config.GCPConfig(
 )
 
 
-with models.DAG(
-    dag_id="pytorchxla-torchvision",
-    schedule=SCHEDULED_TIME,
-    tags=["pytorchxla", "latest", "supported", "xlml"],
-    start_date=datetime.datetime(2023, 7, 12),
-    catchup=False,
-):
+@task_group
+def torchvision():
   mnist_v2_8 = task.TpuQueuedResourceTask(
       test_config.JSonnetTpuVmTest.from_pytorch("pt-nightly-mnist-pjrt-func-v2-8-1vm"),
       US_CENTRAL1_C,
@@ -136,3 +132,59 @@ with models.DAG(
   ).run()
 
   resnet_v100_2x1_plugin >> resnet_v100_2x2_plugin
+
+
+@task_group
+def huggingface():
+  accelerate_v2_8 = task.TpuQueuedResourceTask(
+      test_config.JSonnetTpuVmTest.from_pytorch("pt-nightly-accelerate-smoke-v2-8-1vm"),
+      US_CENTRAL1_C,
+  ).run()
+  accelerate_v4_8 = task.TpuQueuedResourceTask(
+      test_config.JSonnetTpuVmTest.from_pytorch("pt-nightly-accelerate-smoke-v4-8-1vm"),
+      US_CENTRAL2_B,
+  ).run()
+  diffusers_v4_8 = task.TpuQueuedResourceTask(
+      test_config.JSonnetTpuVmTest.from_pytorch(
+          "pt-nightly-hf-diffusers-func-v4-8-1vm"
+      ),
+      US_CENTRAL2_B,
+  ).run()
+
+  accelerate_v4_8 >> accelerate_v2_8
+  accelerate_v4_8 >> diffusers_v4_8
+
+  task.TpuQueuedResourceTask(
+      test_config.JSonnetTpuVmTest.from_pytorch(
+          "pt-nightly-hf-fsmt-pjrt-func-v4-8-1vm"
+      ),
+      US_CENTRAL2_B,
+  ).run()
+
+
+@task_group
+def llama():
+  llama_inference_v4_8 = task.TpuQueuedResourceTask(
+      test_config.JSonnetTpuVmTest.from_pytorch(
+          "pt-nightly-llama2-pjrt-infer-func-v4-8-1vm-1vm"
+      ),
+      US_CENTRAL2_B,
+  ).run()
+  llama_train_v4_8 = task.TpuQueuedResourceTask(
+      test_config.JSonnetTpuVmTest.from_pytorch(
+          "pt-nightly-llama2-pjrt-train-spmd-func-v4-8-1vm-1vm"
+      ),
+      US_CENTRAL2_B,
+  ).run()
+
+
+with models.DAG(
+    dag_id="pytorchxla-nightly",
+    schedule=SCHEDULED_TIME,
+    tags=["pytorchxla", "latest", "supported", "xlml"],
+    start_date=datetime.datetime(2023, 7, 12),
+    catchup=False,
+):
+  torchvision()
+  huggingface()
+  llama()
