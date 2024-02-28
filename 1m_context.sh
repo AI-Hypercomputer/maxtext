@@ -1,3 +1,8 @@
+export TPU_STDERR_LOG_LEVEL=0
+export TPU_MIN_LOG_LEVEL=0
+export TPU_VMODULE=tpu_configuration_ops_impl=3
+export TF_CPP_MIN_LOG_LEVEL=0
+
 python3 MaxText/train.py MaxText/configs/base.yml \
         per_device_batch_size=0.0078125\
         ici_sequence_parallelism=16 ici_tensor_parallelism=8\
