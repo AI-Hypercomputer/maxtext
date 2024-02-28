@@ -119,7 +119,7 @@ class DenseGeneral(nn.Module):
         'kernel',
         nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
         kernel_shape,
-        self.dtype,
+        jnp.float32,
         kernel_in_axis,
         kernel_out_axis,
     )

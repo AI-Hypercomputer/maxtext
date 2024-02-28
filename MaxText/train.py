@@ -405,6 +405,7 @@ def train_loop(config, state=None):
     shaped_rng = jax.ShapeDtypeStruct(init_rng.shape, init_rng.dtype)
     # Shaped state
     abstract_state, state_mesh_annotations, _ =  max_utils.get_abstract_state(model, tx, config, init_rng, mesh)
+
     # Shaped batch
     func_input_args = (abstract_state, train_shaped_batch, shaped_rng)
     func_input_kwargs = {}
