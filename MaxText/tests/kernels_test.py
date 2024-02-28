@@ -59,8 +59,8 @@ class RaggedAttentionTest(unittest.TestCase):
     # Expand to represent the shapes used for MHA
     k = jnp.expand_dims(k, axis=2) 
     v = jnp.expand_dims(v, axis=2)  
-    k *= jnp.ones((self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim)) 
-    v *= jnp.ones((self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim)) 
+    k *= jnp.ones((self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=q.dtype) 
+    v *= jnp.ones((self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=q.dtype) 
 
     # Swap the num_kv_heads and max_target_length dimensions to make Mosaic happy with last two dims
     k = jnp.swapaxes(k, 1, 2)
