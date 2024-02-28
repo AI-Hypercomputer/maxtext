@@ -41,6 +41,8 @@ load_full_state_path: ""
 enable_checkpointing: True
 async_checkpointing: True
 checkpoint_period: 10_000
+# enables one replica to read the ckpt then broadcast to the rest
+enable_single_replica_ckpt_restoring: False
 
 force_unroll: False # during generate_param_only_checkpoint should we unroll the loop?
 ############################### END CHECKPOINTING ##################################
@@ -63,6 +65,7 @@ decoder_block: "llama2" # which style of DecoderBlock to use.
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
+weight_dtype: float32
 global_parameter_scale: 1
 base_emb_dim: 2048
 base_num_query_heads: 16

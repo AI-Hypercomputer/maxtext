@@ -24,9 +24,16 @@ fi
 if command -v sudo >/dev/null 2>&1; then
     # sudo is available, use it
     echo "running rto_setup.sh with sudo"
+
+    # install numactl for numa binding.
+    sudo apt update && sudo apt install numactl
+
+    # apply network settings.
     sudo bash rto_setup.sh
 else
     # sudo is not available, run the script without sudo
     echo "running rto_setup.sh without sudo"
+
+    # apply network settings.
     bash rto_setup.sh
 fi

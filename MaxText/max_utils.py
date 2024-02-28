@@ -173,7 +173,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
       indirection in MaxText to avoid breaking the call sites unnecessarily.
 
       Currently jax.distributed.initialize() fully works as expected!
-      
+
       For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
   """
   if (raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"]
@@ -364,7 +364,8 @@ def setup_initial_state(model, tx, config, rng, mesh, checkpoint_manager, is_tra
                                                 config.load_full_state_path,
                                                 unboxed_abstract_state,
                                                 mesh,
-                                                state_mesh_annotations)
+                                                state_mesh_annotations,
+                                                config.enable_single_replica_ckpt_restoring)
 
     state_mesh_shardings = jax.tree_map(
         lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)

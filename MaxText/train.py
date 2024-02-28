@@ -301,7 +301,7 @@ def setup_mesh_and_model(config):
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
-
+  print('MESH shape:', mesh.shape)
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
   model = Transformer(config, mesh, quant=quant)
@@ -335,7 +335,16 @@ def setup_train_loop(config):
           tx, config, init_rng, mesh, checkpoint_manager)
 
   return ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
-          mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state)
+          mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state, tx)
+
+
+def check_trees_equal(tree1, tree2):
+  def check_same(key, v1, v2):
+     assert jax.numpy.allclose(
+            v1, v2, rtol=1e-06, atol=1e-06
+        )
+  jax.tree_util.tree_map_with_path(check_same, tree1, tree2)
+  print('Hooray, values are close enough!')
 
 
 def train_loop(config, state=None):
@@ -347,7 +356,7 @@ def train_loop(config, state=None):
   Returns:
   """
   ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
-  mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state) = setup_train_loop(config)
+  mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state, tx) = setup_train_loop(config)
   # pylint: disable=line-too-long
   functional_train, in_shard_train, out_shard_train, static_argnums_train, donate_argnums_train = maxtext_utils.get_functional_train_with_signature(
     train_step,
@@ -430,6 +439,14 @@ def train_loop(config, state=None):
       if checkpoint_manager.save(step, state):
         max_logging.log(f"saved a checkpoint at step {step}")
       # Upon preemption, exit when and only when all ongoing saves are complete.
+      if step == 5:
+        print('====== At step 5!!! =====')
+        # print(state.params)
+        print('----------------------------------------------------')
+        state_check, _ = max_utils.setup_training_state(model, tx, config, init_rng, mesh, checkpoint_manager)
+        # print(state_check.params)
+        check_trees_equal(state.params, state_check.params)
+        sys.exit()
       if checkpoint_manager.reached_preemption(step):
         checkpoint_manager.wait_until_finished()
         sys.exit()

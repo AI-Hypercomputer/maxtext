@@ -24,7 +24,7 @@ python MaxText/convert_gpt3_ckpt_from_paxml.py \
 True cmd for gpt3-175b:
 
 The script is memory demanding, requires at least 250 GiB in cpu and cumulative TPU memory of all devices should be
-  above ~4.2 TiB (175 billion param * 4 byte/param * 3 (model var and 2 opt momentums) * 2 copies in converting) 
+  above ~4.2 TiB (175 billion param * 4 byte/param * 3 (model var and 2 opt momentums) * 2 copies in converting)
 
 python MaxText/convert_gpt3_ckpt_from_paxml.py \
   --paxml-ckpt-path=gs://mlperf-llm-public2/gpt3_spmd1x64x24_tpuv4-3072_v84_20221101/checkpoints/checkpoint_00004000 \
@@ -79,7 +79,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
     'ici_fsdp_parallelism=-1', 'ici_tensor_parallelism=1',
     f'model_name={maxtext_model_name}',
     f'run_name={run_name}', f'base_output_directory={base_output_directory}',
-    'checkpoint_period=1',
+    # 'checkpoint_period=1',
     'async_checkpointing=false',
   ]
   pyconfig.initialize(base_args)

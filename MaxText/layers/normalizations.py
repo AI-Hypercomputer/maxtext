@@ -42,7 +42,7 @@ class RMSNorm(nn.Module):
         'scale',
         nn.with_logical_partitioning(self.scale_init, self.kernel_axes),
         (features,),
-        jnp.float32,
+        self.dtype,
     )
 
     scale = jnp.asarray(scale, self.dtype)

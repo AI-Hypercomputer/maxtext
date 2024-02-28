@@ -16,15 +16,15 @@
 
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
-from etils import epath
 import jax
+import numpy as np
+import max_logging
+from etils import epath
+from flax.training import train_state
 from orbax import checkpoint
 from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, Checkpointer, AsyncCheckpointer
 from orbax.checkpoint import type_handlers
 
-import max_logging
-
-from flax.training import train_state
 
 def create_orbax_checkpoint_manager(
     checkpoint_dir: str,
@@ -39,7 +39,8 @@ def create_orbax_checkpoint_manager(
   max_logging.log("Creating checkpoint manager...")
   p = epath.Path(checkpoint_dir)
   if use_async:
-    checkpointer = AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler())
+    checkpointer = AsyncCheckpointer(checkpoint.PyTreeCheckpointHandler(),
+                                     timeout_secs=900)
   else:
     checkpointer = Checkpointer(checkpoint.PyTreeCheckpointHandler())
 
@@ -55,12 +56,41 @@ def create_orbax_checkpoint_manager(
   return mngr
 
 
+def _find_idx(array: np.ndarray, replica_axis_idx: int):
+  """Returns the index along given dimension that the current host belongs to."""
+  idx = None
+  for idx, val in np.ndenumerate(array):
+    if val.process_index == jax.process_index():
+      break
+  return idx[replica_axis_idx]
+
+
+def _replica_devices(device_array: np.ndarray, replica_axis_idx: int):
+  """Returns the devices from the replica that current host belongs to.
+
+  Replicas are assumed to be restricted to the first axis.
+
+  Args:
+    device_array: devices of the mesh that can be obtained by mesh.devices()
+    replica_axis_idx: axis dimension along which replica is taken
+
+  Returns:
+    devices inside the replica that current host is in
+  """
+  idx = _find_idx(device_array, replica_axis_idx)
+  replica_result = np.take(device_array,
+                           idx,
+                           axis=replica_axis_idx)
+  return np.expand_dims(replica_result, axis=replica_axis_idx)
+
+
 def load_state_if_possible(checkpoint_manager: CheckpointManager,
                            load_parameters_from_path: str,
                            load_full_state_from_path: str,
                            abstract_unboxed_pre_state: train_state.TrainState,
                            mesh,
-                           state_mesh_annotations):
+                           state_mesh_annotations,
+                           enable_single_replica_ckpt_restoring):
   """Loads TrainState as possible from the inputs.
 
   Args:
@@ -85,9 +115,27 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
   def map_to_pspec(data, pspec):
     if isinstance(data, (jax.Array, jax.ShapeDtypeStruct)) \
           and pspec is not None:
-      return type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec, dtype = data.dtype)
-    else:
-      return type_handlers.RestoreArgs()
+      if enable_single_replica_ckpt_restoring:
+        type_handlers.register_type_handler(jax.Array,
+                                            type_handlers.SingleReplicaArrayHandler(),
+                                            override=True)
+        replica_axis_index = 0  # for maxtext data is the first dimension
+        replica_devices = _replica_devices(mesh.devices, replica_axis_index)
+        replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
+        single_replica_sharding = jax.sharding.NamedSharding(replica_mesh, pspec)
+        # print('restore_args: mesh and pspec', mesh.shape, pspec)
+        # print('restore_args: single_replica_sharding', single_replica_sharding)
+        return type_handlers.SingleReplicaArrayRestoreArgs(
+          sharding=jax.sharding.NamedSharding(mesh, pspec),
+          single_replica_sharding=single_replica_sharding,
+          replica_axis_index=replica_axis_index,
+          global_shape=data.shape,
+          dtype=data.dtype,
+          )
+      else:
+        return type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
+
+    return type_handlers.RestoreArgs()
   restore_args = jax.tree_util.tree_map(map_to_pspec,
                                         abstract_unboxed_pre_state,
                                         state_mesh_annotations)
