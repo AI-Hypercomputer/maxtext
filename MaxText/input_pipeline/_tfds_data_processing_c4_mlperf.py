@@ -194,17 +194,26 @@ def get_datasets(
 ):
   """Load and return dataset of batched examples for use during training."""
   # Training dataset.
+  train_read_config = tfds.ReadConfig(
+    shuffle_seed = config.data_shuffle_seed,
+    skip_prefetch = True,
+    input_context = tf.distribute.InputContext(
+      input_pipeline_id=jax.process_index(),
+      num_input_pipelines=jax.process_count(),
+    ),
+  )
+  # distributed file read
+  train_ds_builder = tfds.builder(config.dataset_name)
+  train_ds_builder.download_and_prepare()
+  train_ds = train_ds_builder.as_dataset(split='train2', read_config=train_read_config, shuffle_files=config.enable_data_shuffling)
+
   read_config = tfds.ReadConfig(
      shuffle_seed = config.data_shuffle_seed,
      )
-  train_ds_builder = tfds.builder(config.dataset_name)
-  train_ds = train_ds_builder.as_dataset(split='train2', read_config=read_config, shuffle_files=config.enable_data_shuffling)
-
   eval_ds_builder = tfds.builder(config.eval_dataset_name)
   eval_ds = eval_ds_builder.as_dataset(split='validation_tokenized_5662seqs', read_config=read_config, shuffle_files=False)
 
   # shard the dataset as soon as it is loaded
-  train_ds = train_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
   train_ds = rekey(train_ds, {'inputs': None, 'targets': 'text'})
 
   eval_ds = eval_ds.shard(num_shards = jax.process_count(), index = jax.process_index())

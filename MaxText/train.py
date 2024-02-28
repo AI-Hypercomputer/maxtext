@@ -42,7 +42,7 @@ import max_logging
 import optimizers
 import pyconfig
 
-from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer
+from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer, get_shaped_batch, get_shaped_batch_eval
 from layers import models
 
 import jax.numpy as jnp
@@ -399,11 +399,12 @@ def train_loop(config, state=None):
     print("Loaded compiled function!", flush=True)
   elif config.pre_compile:
     # pre compile graph
+    train_shaped_batch = get_shaped_batch(config)
     shaped_rng = jax.ShapeDtypeStruct(init_rng.shape, init_rng.dtype)
     # Shaped state
     abstract_state, state_mesh_annotations, _ =  max_utils.get_abstract_state(model, tx, config, init_rng, mesh)
     # Shaped batch
-    func_input_args = (abstract_state, next(data_iterator), shaped_rng)
+    func_input_args = (abstract_state, train_shaped_batch, shaped_rng)
     func_input_kwargs = {}
 
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -417,7 +418,8 @@ def train_loop(config, state=None):
     p_train_step = p_train_step_lower.compile()
 
     if eval_data_iterator:
-      func_input_args = (abstract_state, next(eval_data_iterator), shaped_rng)
+      eval_shaped_batch = get_shaped_batch_eval(config, mesh)
+      func_input_args = (abstract_state, eval_shaped_batch, shaped_rng)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         p_eval_step_lower = jax.jit(
           functional_eval,
