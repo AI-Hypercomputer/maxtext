@@ -132,8 +132,11 @@ class DenseGeneral(nn.Module):
       output = compute_dot_general(inputs, kernel, axis, contract_ind)
     else:
       kernel_shape = features[0:1] + tuple(inputs.shape[ax] for ax in axis) + features[1:]
-      kernel_in_axis = tuple(np.arange(1, len(axis) + 1))
-      kernel_out_axis = (0, ) + tuple(np.arange(len(axis) + 1, len(axis) + 1 + len(features) - 1))
+      # skip qkv concat dim i.e. features[0]
+      # kernel_in_axis = tuple(np.arange(1, len(axis) + 1))
+      # kernel_out_axis = tuple(np.arange(len(axis) + 1, len(axis) + 1 + len(features) - 1))
+      kernel_in_axis = (-3, )
+      kernel_out_axis =  (-1, -2)
       kernel = self.param(
           'kernel',
           nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
