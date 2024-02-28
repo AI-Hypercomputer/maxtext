@@ -26,13 +26,13 @@ SCHEDULED_TIME = "0 9 * * *" if composer_env.is_prod_env() else None
 
 
 with models.DAG(
-    dag_id="maxtext_nightly",
+    dag_id="mxla_maxtext_nightly",
     schedule=SCHEDULED_TIME,
     tags=["multipod_team", "maxtext", "nightly"],
     start_date=datetime.datetime(2024, 1, 10),
     catchup=False,
 ) as dag:
-  default_test_name = "maxtext-nightly"
+  default_test_name = "mxla-maxtext-nightly"
   test_mode = SetupMode.NIGHTLY
 
   # v4 Maxtext test
