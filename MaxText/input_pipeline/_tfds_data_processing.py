@@ -117,8 +117,8 @@ def preprocessing_pipeline(
   """Shuffle and batch/pack the given dataset."""
 
   def truncate_to_max_allowable_length(x, max_length):
-    x['inputs'] = x['inputs'][:max_length]
-    x['targets'] = x['targets'][:max_length]
+    x['inputs'] = x['inputs'].to_tensor(shape=[None,max_length])[0]
+    x['targets'] = x['targets'].to_tensor(shape=[None,max_length])[0]
     return x
 
 
@@ -126,6 +126,10 @@ def preprocessing_pipeline(
     # We can take upto max_length+1 because there would be truncation by 1 token
     # for both inputs and targets
     dataset = dataset.map(lambda x: truncate_to_max_allowable_length(x, max_length+1))
+
+  # dataset = dataset.map(lambda x: x.to_tensor(shape=[None, max_length+1]))  # Truncate to max_length+1
+
+  # import pdb; pdb.set_trace()
 
   # Shuffle and repeat.
   if shuffle:
@@ -140,13 +144,16 @@ def preprocessing_pipeline(
       shift_data_by_truncation,
       num_parallel_calls=tf.data.AUTOTUNE,
       deterministic=True)
-
+  
+  # import pdb; pdb.set_trace()
   # Perform greedy sequence packing
   if pack_examples:
     dataset = sequence_packing.pack_dataset(dataset, max_length)
   assert (
         batch_size % global_mesh.size == 0
     ), 'Batch size should be divisible number of global devices.'
+  
+  # import pdb; pdb.set_trace()
 
   # Batch examples.
   if pack_examples:
@@ -219,6 +226,7 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
   eval_ds = eval_ds.map(
       tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
+  
 
   # Set global batch size.
   global_batch_size_to_load = config.global_batch_size_to_load
@@ -243,27 +251,30 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
       max_length=config.max_target_length,
       shift=True,
       data_shuffle_seed = data_shuffle_seed,)
+  
+  print("train_iter ready")
 
-  eval_iter = preprocessing_pipeline(
-      eval_ds,
-      eval_batch_size,
-      global_mesh,
-      shuffle=False,
-      pack_examples=False,
-      max_length=config.max_target_length,
-      shift=False,
-      drop_remainder=False,
-      data_shuffle_seed = data_shuffle_seed,)
+  # eval_iter = preprocessing_pipeline(
+  #     eval_ds,
+  #     eval_batch_size,
+  #     global_mesh,
+  #     shuffle=False,
+  #     pack_examples=False,
+  #     max_length=config.max_target_length,
+  #     shift=False,
+  #     drop_remainder=False,
+  #     data_shuffle_seed = data_shuffle_seed,)
 
-  predict_iter = preprocessing_pipeline(
-      eval_ds,
-      eval_batch_size,
-      global_mesh,
-      shuffle=config.enable_data_shuffling,
-      pack_examples=False,
-      max_length=config.max_target_length,
-      shift=False,
-      drop_remainder=False,
-      data_shuffle_seed = data_shuffle_seed,)
+  # predict_iter = preprocessing_pipeline(
+  #     eval_ds,
+  #     eval_batch_size,
+  #     global_mesh,
+  #     shuffle=config.enable_data_shuffling,
+  #     pack_examples=False,
+  #     max_length=config.max_target_length,
+  #     shift=False,
+  #     drop_remainder=False,
+  #     data_shuffle_seed = data_shuffle_seed,)
 
-  return train_iter, eval_iter, predict_iter, sp_tokenizer
+  # return train_iter, eval_iter, predict_iter
+  return train_iter, None, None
