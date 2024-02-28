@@ -241,3 +241,7 @@ decode_sampling_temperature: 1.
 
 eval_interval: -1  # the specific number of train step between eval_step
 target_eval_loss: 0.  # early stop once reaching target eval_loss
+
+#lg datasets:
+file_pattern_for_train_data: ""
+file_pattern_for_eval_data: ""
