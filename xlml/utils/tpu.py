@@ -38,6 +38,9 @@ from airflow.models import Variable
 from google.protobuf.duration_pb2 import Duration
 
 
+TTL = 'ttl'
+
+
 @task
 def generate_tpu_name(
     base_tpu_name: str,
@@ -65,7 +68,8 @@ def create_queued_resource(
     gcp: GCP project/zone configuration.
     ssh_keys: XCom value for SSH keys to communicate with these TPUs.
     timeout: Amount of time to wait for TPUs to be created.
-    num_slices: Number of TPU slices.
+    task_test_config: Test config of the task.
+    use_startup_script: Indicator to use startup script.
 
   Returns:
     A TaskGroup for the entire create operation and an XCom value for the
@@ -102,6 +106,15 @@ def create_queued_resource(
         'startup-script': startup_script_command,
     }
 
+    create_tpu_timeout_in_sec = int(timeout.total_seconds())
+    run_model_timeout = int(task_test_config.time_out_in_min)
+    run_model_timeout_in_sec = run_model_timeout * 60 if run_model_timeout else 0
+    # Time to live (ttl) is tpu provision timout + tpu run model timeout + 1 hour buffer time (provision, post_process, etc)
+    ttl = create_tpu_timeout_in_sec + run_model_timeout_in_sec + 3600
+    labels = {
+        TTL: str(ttl),
+    }
+
     queued_resource = tpu_api.QueuedResource(
         # TODO(ranran): enable configuration via `AcceleratorConfig`
         tpu=tpu_api.QueuedResource.Tpu(
@@ -120,6 +133,7 @@ def create_queued_resource(
                             enable_external_ips=True,
                         ),
                         metadata=metadata,
+                        labels=labels,
                     ),
                 )
             ],
@@ -383,3 +397,39 @@ def clean_up_idle_queued_resources(project_name: str, zones: Iterable[str]) -> N
       ):
         logging.info(f'Deleting {qr.name} in {state.name} status.')
         client.delete_queued_resource(name=qr.name)
+
+
+@task
+def clean_up_idle_nodes(project_name: str, zones: Iterable[str]) -> None:
+  """Clean up TPU nodes that are expired.
+
+  Args:
+   project_name: The project of resources.
+   zones: Available zones to clean up for the project.
+  """
+  creds, _ = google.auth.default()
+  client = tpu_api.TpuClient(credentials=creds)
+
+  logging.info(f'Cleaning up nodes in project {project_name}.')
+  for zone in zones:
+    logging.info(f'Checking in zone {zone.value}.')
+    parent = f'projects/{project_name}/locations/{zone.value}'
+    request = tpu_api.types.ListNodesRequest(parent=parent)
+    responses = client.list_nodes(request)
+
+    for node in responses:
+      ttl = int(node.labels[TTL]) if TTL in node.labels else None
+      if ttl:
+        create_time = node.create_time
+        current_time = datetime.datetime.now(datetime.timezone.utc)
+        logging.info(
+            f'create_time is {create_time}, and current_time is {current_time}'
+        )
+        active_time = current_time - create_time
+        delta = active_time.seconds - ttl
+        if delta > 0:
+          datetime_delta = str(datetime.timedelta(seconds=delta))
+          logging.info(
+              f'Deleting node {node.name} due to exceeding its time to live (TTL) by {datetime_delta}.'
+          )
+          client.delete_node(name=node.name)

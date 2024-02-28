@@ -32,7 +32,7 @@ with models.DAG(
     start_date=datetime.datetime(2024, 2, 22),
     catchup=False,
 ) as dag:
-  # List tpu zones for project cloud_ml_auto_solutions to avoid permission issue
+  # List tpu zones for projects to avoid permission issue
   tpu_zones = [
       Zone.US_CENTRAL1_A,
       Zone.US_CENTRAL1_B,
@@ -40,4 +40,27 @@ with models.DAG(
       Zone.US_CENTRAL1_C,
       Zone.US_EAST1_D,
   ]
-  tpu.clean_up_idle_queued_resources(Project.CLOUD_ML_AUTO_SOLUTIONS.value, tpu_zones)
+  v5_tpu_zones = [
+      Zone.US_EAST1_C,
+      Zone.US_EAST5_A,
+  ]
+
+  # TPUs
+  node_cloud_ml_auto_solutions = tpu.clean_up_idle_nodes.override(
+      task_id="cleanup_nodes_cloud-ml-auto-solutions"
+  )(Project.CLOUD_ML_AUTO_SOLUTIONS.value, tpu_zones)
+  node_tpu_prod_env_automated = tpu.clean_up_idle_nodes.override(
+      task_id="cleanup_nodes_tpu-prod-env-automated"
+  )(Project.TPU_PROD_ENV_AUTOMATED.value, v5_tpu_zones)
+
+  # QRs
+  # clean up in tpu-prod-env-automated has been handled in script below:
+  # https://source.corp.google.com/piper///depot/google3/cloud/tpu/tools/multipod/qr_tool/qr_delete.sh;l=32
+  # No need to handle here to avoid `maximum number of DeleteNode requests per minute` error.
+  qr_cloud_ml_auto_solutions = tpu.clean_up_idle_queued_resources.override(
+      task_id="cleanup_qr_cloud-ml-auto-solutions"
+  )(Project.CLOUD_ML_AUTO_SOLUTIONS.value, tpu_zones)
+
+  # Overview dependency
+  node_cloud_ml_auto_solutions >> qr_cloud_ml_auto_solutions
+  node_tpu_prod_env_automated
