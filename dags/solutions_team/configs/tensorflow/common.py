@@ -118,7 +118,8 @@ def set_up_google_tensorflow_models() -> Tuple[str]:
 def set_up_google_tensorflow_2_16_models() -> Tuple[str]:
   """Common set up for tensorflow models."""
   return (
-      "sudo mkdir -p /usr/share/tpu && cd /usr/share/tpu && git clone -b r2.16.0 https://github.com/tensorflow/models.git",
+      "sudo mkdir -p /usr/share/tpu && cd /usr/share/tpu",
+      "sudo git clone -b r2.16.0 https://github.com/tensorflow/models.git",
       "pip install -r /usr/share/tpu/models/official/requirements.txt",
       "pip install tensorflow-recommenders --no-deps",
       "pip install --upgrade --force-reinstall tf-keras==2.16.0rc0",
