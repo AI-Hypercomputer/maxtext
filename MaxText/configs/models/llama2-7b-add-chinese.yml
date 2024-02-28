@@ -32,10 +32,7 @@ eval_dataset_size: 1024
 
 weight_dtype: "bfloat16"
 
-opt_type: lion
-adam_b1: 0.95
-adam_b2: 0.98
-adam_weight_decay: 0.01
+opt_type: sgd
 learning_rate: 3.e-5
 
 # opt_type: tiger

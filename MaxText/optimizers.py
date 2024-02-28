@@ -100,7 +100,11 @@ def get_optimizer(config):
     update_step=1,
   )
 
-  if config.opt_type == "adamw":
+  if config.opt_type == "sgd":
+    optimizer = optax.sgd(
+      learning_rate_schedule,
+    )
+  elif config.opt_type == "adamw":
     # Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
     optimizer = optax.adamw(
       learning_rate_schedule,

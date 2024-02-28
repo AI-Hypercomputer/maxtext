@@ -424,6 +424,9 @@ def create_learning_rate_schedule(
   print(f"cos_steps: {cos_steps}")
   print(f"constant_zero_steps: {constant_zero_steps}")
 
+  assert warmup_steps % update_step == 0, "warmup_steps mod update_step == 0"
+  assert cos_steps % update_step == 0, "cos_steps mod update_step == 0"
+
   warmup_schedule = optax.linear_schedule(
       init_value=0.0,
       end_value=lr,
