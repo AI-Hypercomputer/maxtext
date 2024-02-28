@@ -20,13 +20,14 @@ from __future__ import annotations
 from absl import logging
 import airflow
 from airflow.decorators import task, task_group
+import datetime
 import fabric
-from google.api_core.extended_operation import ExtendedOperation
 from google.cloud import compute_v1
 import io
 import paramiko
 import re
-from typing import Any, Dict, Iterable
+import time
+from typing import Any, Dict, Iterable, Tuple
 import uuid
 from xlml.apis import gcp_config, test_config
 from xlml.utils import ssh
@@ -87,187 +88,6 @@ def disk_from_image(
   return boot_disk
 
 
-def create_instance(
-    project_id: str,
-    zone: str,
-    instance_name: str,
-    disks: list[compute_v1.AttachedDisk],
-    machine_type: str,
-    network_link: str = "global/networks/default",
-    subnetwork_link: str = None,
-    internal_ip: str = None,
-    external_access: bool = False,
-    external_ipv4: str = None,
-    accelerators: list[compute_v1.AcceleratorConfig] = None,
-    metadata: compute_v1.Metadata = None,
-    service_account: compute_v1.ServiceAccount = None,
-    spot: bool = False,
-    instance_termination_action: str = "STOP",
-    custom_hostname: str = None,
-    delete_protection: bool = False,
-) -> compute_v1.Instance:
-  """
-  Send an instance creation request to the Compute Engine API and wait for it to complete.
-
-  Args:
-      project_id: project ID or project number of the Cloud project you want to use.
-      zone: name of the zone to create the instance in. For example: "us-west3-b"
-      instance_name: name of the new virtual machine (VM) instance.
-      disks: a list of compute_v1.AttachedDisk objects describing the disks
-          you want to attach to your new instance.
-      machine_type: machine type of the VM being created. This value uses the
-          following format: "zones/{zone}/machineTypes/{type_name}".
-          For example: "zones/europe-west3-c/machineTypes/f1-micro"
-      network_link: name of the network you want the new instance to use.
-          For example: "global/networks/default" represents the network
-          named "default", which is created automatically for each project.
-      subnetwork_link: name of the subnetwork you want the new instance to use.
-          This value uses the following format:
-          "regions/{region}/subnetworks/{subnetwork_name}"
-      internal_ip: internal IP address you want to assign to the new instance.
-          By default, a free address from the pool of available internal IP addresses of
-          used subnet will be used.
-      external_access: boolean flag indicating if the instance should have an external IPv4
-          address assigned.
-      external_ipv4: external IPv4 address to be assigned to this instance. If you specify
-          an external IP address, it must live in the same region as the zone of the instance.
-          This setting requires `external_access` to be set to True to work.
-      accelerators: a list of AcceleratorConfig objects describing the accelerators that will
-          be attached to the new instance.
-      metadata: Sets up metadata of the instance.
-      service_account: Sets up service account email address and scopes.
-      spot: boolean value indicating if the new instance should be a Spot VM or not.
-      instance_termination_action: What action should be taken once a Spot VM is terminated.
-          Possible values: "STOP", "DELETE"
-      custom_hostname: Custom hostname of the new VM instance.
-          Custom hostnames must conform to RFC 1035 requirements for valid hostnames.
-      delete_protection: boolean value indicating if the new virtual machine should be
-          protected against deletion or not.
-  Returns:
-      Instance object.
-  """
-  instance_client = compute_v1.InstancesClient()
-
-  # Use the network interface provided in the network_link argument.
-  network_interface = compute_v1.NetworkInterface()
-  network_interface.network = network_link
-  if subnetwork_link:
-    network_interface.subnetwork = subnetwork_link
-
-  if internal_ip:
-    network_interface.network_i_p = internal_ip
-
-  if external_access:
-    access = compute_v1.AccessConfig()
-    access.type_ = compute_v1.AccessConfig.Type.ONE_TO_ONE_NAT.name
-    access.name = "External NAT"
-    access.network_tier = access.NetworkTier.PREMIUM.name
-    if external_ipv4:
-      access.nat_i_p = external_ipv4
-    network_interface.access_configs = [access]
-
-  # Collect information into the Instance object.
-  instance = compute_v1.Instance()
-  instance.network_interfaces = [network_interface]
-  instance.name = instance_name
-  instance.disks = disks
-  if re.match(r"^zones/[a-z\d\-]+/machineTypes/[a-z\d\-]+$", machine_type):
-    instance.machine_type = machine_type
-  else:
-    instance.machine_type = f"zones/{zone}/machineTypes/{machine_type}"
-
-  instance.scheduling = compute_v1.Scheduling()
-  if accelerators:
-    instance.guest_accelerators = accelerators
-    instance.scheduling.on_host_maintenance = (
-        compute_v1.Scheduling.OnHostMaintenance.TERMINATE.name
-    )
-
-  if metadata:
-    instance.metadata = metadata
-
-  if service_account:
-    instance.service_accounts = [service_account]
-
-  if spot:
-    # Set the Spot VM setting
-    instance.scheduling.provisioning_model = (
-        compute_v1.Scheduling.ProvisioningModel.SPOT.name
-    )
-    instance.scheduling.instance_termination_action = instance_termination_action
-
-  if custom_hostname is not None:
-    # Set the custom hostname for the instance
-    instance.hostname = custom_hostname
-
-  if delete_protection:
-    # Set the delete protection bit
-    instance.deletion_protection = True
-
-  # Prepare the request to insert an instance.
-  request = compute_v1.InsertInstanceRequest()
-  request.zone = zone
-  request.project = project_id
-  request.instance_resource = instance
-
-  # Wait for the create operation to complete.
-  logging.info(f"Creating the {instance_name} instance in {zone}...")
-
-  operation = instance_client.insert(request=request)
-
-  wait_for_extended_operation(operation, "instance creation")
-
-  logging.info(f"Instance {instance_name} created.")
-  return instance_client.get(project=project_id, zone=zone, instance=instance_name)
-
-
-# TODO(piz): Remove wait_for_extended_operation and use dag sensor instead.
-def wait_for_extended_operation(
-    operation: ExtendedOperation, verbose_name: str = "operation", timeout: int = 300
-) -> Any:
-  """
-  Waits for the extended (long-running) operation to complete.
-
-  If the operation is successful, it will return its result.
-  If the operation ends with an error, an exception will be raised.
-  If there were any warnings during the execution of the operation
-  they will be printed to sys.stderr.
-
-  Args:
-      operation: a long-running operation you want to wait on.
-      verbose_name: (optional) a more verbose name of the operation,
-          used only during error and warning reporting.
-      timeout: how long (in seconds) to wait for operation to finish.
-          If None, wait indefinitely.
-
-  Returns:
-      Whatever the operation.result() returns.
-
-  Raises:
-      This method will raise the exception received from `operation.exception()`
-      or RuntimeError if there is no exception set, but there is an `error_code`
-      set for the `operation`.
-
-      In case of an operation taking longer than `timeout` seconds to complete,
-      a `concurrent.futures.TimeoutError` will be raised.
-  """
-  result = operation.result(timeout=timeout)
-
-  if operation.error_code:
-    logging.error(
-        f"Error during {verbose_name}: [Code: {operation.error_code}]: {operation.error_message}",
-    )
-    logging.error(f"Operation ID: {operation.name}")
-    raise operation.exception() or RuntimeError(operation.error_message)
-
-  if operation.warnings:
-    logging.warning(f"Warnings during {verbose_name}:\n")
-    for warning in operation.warnings:
-      logging.warning(f" - {warning.code}: {warning.message}")
-
-  return result
-
-
 def create_metadata(key_val: Dict[str, str]) -> compute_v1.Metadata:
   metadata = compute_v1.Metadata()
   metadata.items = [{"key": key, "value": val} for key, val in key_val.items()]
@@ -282,7 +102,7 @@ def generate_gpu_name() -> str:
   return f"gpu-{str(uuid.uuid4())}"
 
 
-@task
+@task_group
 def create_resource(
     gpu_name: airflow.XComArg,
     image_project: str,
@@ -290,7 +110,8 @@ def create_resource(
     accelerator: test_config.Gpu,
     gcp: gcp_config.GCPConfig,
     ssh_keys: airflow.XComArg,
-) -> str:
+    timeout: datetime.timedelta,
+) -> airflow.XComArg:
   """Request a resource and wait until the nodes are created.
 
   Args:
@@ -299,53 +120,167 @@ def create_resource(
     image_family: family of the image.
     accelerator: Description of GPU to create.
     gcp: GCP project/zone configuration.
-    ssh_keys: XCom value for SSH keys to communicate with these GPUs.
+    ssh_kpeys: XCom value for SSH keys to communicate with these GPUs.
+    timeout: Amount of time to wait for GPUs to be created.
 
   Returns:
     The ip address of the GPU VM.
   """
-  image = get_image_from_family(project=image_project, family=image_family)
-  disk_type = f"zones/{gcp.zone}/diskTypes/pd-ssd"
-  disks = [disk_from_image(disk_type, 100, True, image.self_link)]
-  metadata = create_metadata({
-      # "install-nvidia-driver": "True",
-      "install-nvidia-driver": "False",
-      "proxy-mode": "project_editors",
-      "ssh-keys": f"cloud-ml-auto-solutions:{ssh_keys.public}",
-  })
-  acceleratorConfig = compute_v1.AcceleratorConfig(
-      accelerator_count=accelerator.count,
-      accelerator_type=f"projects/{gcp.project_name}/zones/{gcp.zone}/acceleratorTypes/{accelerator.accelerator_type}",
-  )
-  service_account = compute_v1.ServiceAccount(
-      # email = "cloud-auto-ml-solutions@google.com",
-      scopes=["https://www.googleapis.com/auth/cloud-platform"]
-  )
-  instance = create_instance(
-      project_id=gcp.project_name,
-      zone=gcp.zone,
-      instance_name=gpu_name,
-      disks=disks,
-      machine_type=accelerator.machine_type,
-      service_account=service_account,
+  project_id = gcp.project_name
+  zone = gcp.zone
+
+  @task
+  def create_resource_request(
+      instance_name: str,
+      accelerator: test_config.Gpu,
+      ssh_keys: ssh.SshKeys,
+      instance_termination_action: str,
       external_access=True,
-      accelerators=[acceleratorConfig],
-      metadata=metadata,
+      spot: bool = False,
+      delete_protection: bool = False,
+  ) -> airflow.XComArg:
+    """
+    Send an instance creation request to the Compute Engine API and wait for it to complete.
+
+    Args:
+        instance_name: name of the new virtual machine (VM) instance.
+        accelerator: Description of GPU to create.
+        ssh_keys: XCom value for SSH keys to communicate with these GPUs.
+        instance_termination_action: What action should be taken once a Spot VM is terminated.
+            Possible values: "STOP", "DELETE"
+        external_access: boolean flag indicating if the instance should have an external IPv4
+            address assigned.
+        spot: boolean value indicating if the new instance should be a Spot VM or not.
+        delete_protection: boolean value indicating if the new virtual machine should be
+            protected against deletion or not.
+    Returns:
+        Ip address of the instance object created.
+    """
+    machine_type = accelerator.machine_type
+    image = get_image_from_family(project=image_project, family=image_family)
+    disk_type = f"zones/{gcp.zone}/diskTypes/pd-ssd"
+    disks = [disk_from_image(disk_type, 100, True, image.self_link)]
+    metadata = create_metadata({
+        "install-nvidia-driver": "False",
+        "proxy-mode": "project_editors",
+        "ssh-keys": f"cloud-ml-auto-solutions:{ssh_keys.public}",
+    })
+
+    accelerators = [
+        compute_v1.AcceleratorConfig(
+            accelerator_count=accelerator.count,
+            accelerator_type=f"projects/{gcp.project_name}/zones/{gcp.zone}/acceleratorTypes/{accelerator.accelerator_type}",
+        )
+    ]
+    service_account = compute_v1.ServiceAccount(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+
+    instance_client = compute_v1.InstancesClient()
+    network_link = "global/networks/default"
+    # Use the network interface provided in the network_link argument.
+    network_interface = compute_v1.NetworkInterface()
+    network_interface.network = network_link
+
+    if external_access:
+      access = compute_v1.AccessConfig()
+      access.type_ = compute_v1.AccessConfig.Type.ONE_TO_ONE_NAT.name
+      access.name = "External NAT"
+      access.network_tier = access.NetworkTier.PREMIUM.name
+      network_interface.access_configs = [access]
+
+    # Collect information into the Instance object.
+    instance = compute_v1.Instance()
+    instance.network_interfaces = [network_interface]
+    instance.name = instance_name
+    instance.disks = disks
+    if re.match(r"^zones/[a-z\d\-]+/machineTypes/[a-z\d\-]+$", machine_type):
+      instance.machine_type = machine_type
+    else:
+      instance.machine_type = f"zones/{zone}/machineTypes/{machine_type}"
+
+    instance.scheduling = compute_v1.Scheduling()
+    if accelerators:
+      instance.guest_accelerators = accelerators
+      instance.scheduling.on_host_maintenance = (
+          compute_v1.Scheduling.OnHostMaintenance.TERMINATE.name
+      )
+
+    if metadata:
+      instance.metadata = metadata
+
+    if service_account:
+      instance.service_accounts = [service_account]
+
+    if spot:
+      # Set the Spot VM setting
+      instance.scheduling.provisioning_model = (
+          compute_v1.Scheduling.ProvisioningModel.SPOT.name
+      )
+      instance.scheduling.instance_termination_action = instance_termination_action
+
+    if delete_protection:
+      # Set the delete protection bit
+      instance.deletion_protection = True
+
+    # Prepare the request to insert an instance.
+    request = compute_v1.InsertInstanceRequest()
+    request.zone = zone
+    request.project = project_id
+    request.instance_resource = instance
+
+    # Wait for the create operation to complete.
+    logging.info(f"Creating the {instance_name} instance in {zone}...")
+
+    operation = instance_client.insert(request=request)
+    return operation.name
+
+  @task.sensor(poke_interval=60, timeout=timeout.total_seconds(), mode="reschedule")
+  def wait_for_resource_creation(operation_name: airflow.XComArg):
+    # Retrives the delete opeartion to check the status.
+    client = compute_v1.ZoneOperationsClient()
+    request = compute_v1.GetZoneOperationRequest(
+        operation=operation_name,
+        project=project_id,
+        zone=zone,
+    )
+    operation = client.get(request=request)
+    status = operation.status.name
+    if status in ("RUNNING", "PENDING"):
+      logging.info(f"Resource create status: {status}, {operation.status_message}")
+      return False
+    else:
+      if operation.error:
+        logging.error(
+            f"Error during resource creation: [Code: {operation.http_error_status_code}]: {operation.http_error_message}",
+        )
+        raise operation.exception() or RuntimeError(operation.http_error_message)
+      elif operation.warnings:
+        logging.warning(f"Warnings during resource creation:\n")
+        for warning in operation.warnings:
+          logging.warning(f" - {warning.code}: {warning.message}")
+      return True
+
+  @task
+  def get_ip_address(instance: str) -> airflow.XComArg:
+    # It takes time to be able to use the ssh with the ip address even though the creation
+    # request is complete. We intentionally sleep for 60s to wait for the ip address to be
+    # accessible.
+    time.sleep(60)
+    instance_client = compute_v1.InstancesClient()
+    instance = instance_client.get(project=project_id, zone=zone, instance=instance)
+    if len(instance.network_interfaces) > 1:
+      logging.warning(f"GPU instance {gpu_name} has more than one network interface.")
+    return instance.network_interfaces[0].network_i_p
+
+  operation = create_resource_request(
+      instance_name=gpu_name,
+      accelerator=accelerator,
+      ssh_keys=ssh_keys,
       instance_termination_action="STOP",
   )
-  logging.info("instance info: {instance}")
-
-  ip_pattern = re.compile(r'network_i_p:\s+"([^"]+)"')
-  match = ip_pattern.search(str(instance))
-
-  # Extract the matched IP address
-  ip_address = "0.0.0.0"
-  if match:
-    ip_address = match.group(1)
-    logging.info(f"Created vm with ip address {ip_address}.")
-  else:
-    logging.error(f"No IP address found for instance: {gpu_name}.")
-    raise (f"Failed to create GPU resource {gpu_name}.")
+  ip_address = get_ip_address(gpu_name)
+  wait_for_resource_creation(operation) >> ip_address
   return ip_address
 
 
@@ -379,7 +314,6 @@ def ssh_host(
   ssh_group.run(cmds, env=env)
 
 
-# TODO(piz): Check why sometime GPU instance doesn't get deleted.
 @task_group
 def delete_resource(instance_name: airflow.XComArg, project_id: str, zone: str):
   @task(trigger_rule="all_done")
@@ -406,9 +340,7 @@ def delete_resource(instance_name: airflow.XComArg, project_id: str, zone: str):
         zone=zone,
     )
     operation = client.get(request=request)
-
     status = operation.status.name
-
     if status in ("RUNNING", "PENDING"):
       logging.info(f"Resource deletion status: {status}, {operation.status_message}")
       return False
@@ -419,7 +351,7 @@ def delete_resource(instance_name: airflow.XComArg, project_id: str, zone: str):
         )
         logging.error(f"Operation ID: {operation.name}")
         raise operation.exception() or RuntimeError(operation.http_error_message)
-      if operation.warnings:
+      elif operation.warnings:
         logging.warning(f"Warnings during resource deletion:\n")
         for warning in operation.warnings:
           logging.warning(f" - {warning.code}: {warning.message}")
