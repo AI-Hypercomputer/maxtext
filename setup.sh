@@ -31,11 +31,29 @@ set -e
 if command -v sudo >/dev/null 2>&1; then
     # sudo is available, use it
     # install numactl for numa binding.
-    sudo apt update && sudo apt install -y numactl
+    sudo apt update && \
+    sudo apt install -y numactl && \
+    sudo apt install -y lsb-release && \
+    sudo apt install -y gnupg && \
+    sudo apt install -y curl
+    export GCSFUSE_REPO=gcsfuse-`lsb_release -c -s`
+    echo "deb https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | sudo tee /etc/apt/sources.list.d/gcsfuse.list
+    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo tee /usr/share/keyrings/cloud.google.asc
+    sudo apt update -y && sudo apt -y install gcsfuse
+    sudo rm -rf /var/lib/apt/lists/*    
 else
     # sudo is not available, run the script without sudo
     # install numactl for numa binding.
-    apt update && apt install -y numactl
+    apt update && \
+    apt install -y numactl && \
+    apt install -y lsb-release && \
+    apt install -y gnupg && \
+    apt install -y curl
+    export GCSFUSE_REPO=gcsfuse-`lsb_release -c -s`
+    echo "deb https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | tee /etc/apt/sources.list.d/gcsfuse.list
+    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+    apt update -y && apt -y install gcsfuse
+    rm -rf /var/lib/apt/lists/*    
 fi
 
 # Set environment variables
