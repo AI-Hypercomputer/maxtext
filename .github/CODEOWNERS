@@ -8,7 +8,7 @@ dags/solutions_team/configs/pax @gkroiz
 
 dags/solutions_team/configs/tensorflow @chandrasekhard2 @EricLeFort
 
-dags/pytorch_xla @will-cromar
+dags/pytorch_xla @will-cromar @jonb377 @JackCaoG @vanbasten23
 
 dags/multipod @jonb377
 
