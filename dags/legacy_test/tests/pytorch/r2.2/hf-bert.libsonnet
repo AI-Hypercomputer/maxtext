@@ -18,11 +18,9 @@ local timeouts = import 'templates/timeouts.libsonnet';
 local tpus = import 'templates/tpus.libsonnet';
 
 {
-  // FSMT = FairSeq MachineTranslation
-  // Model doc: https://huggingface.co/docs/transformers/model_doc/fsmt
-  local fsmt = self.fsmt,
-  fsmt:: common.PyTorchTest {
-    modelName: 'hf-fsmt',
+  local bert = self.bert,
+  bert:: common.PyTorchTest {
+    modelName: 'hf-bert',
     volumeMap+: {
       datasets: common.datasetsVolume,
     },
@@ -58,7 +56,7 @@ local tpus = import 'templates/tpus.libsonnet';
   },
 
   configs: [
-    fsmt + functional + v4_8 + pjrt + timeouts.Hours(2),
-    fsmt + convergence + v4_8 + pjrt + timeouts.Hours(12),
+    bert + functional + v4_8 + pjrt + timeouts.Hours(2),
+    bert + convergence + v4_8 + pjrt + timeouts.Hours(12),
   ],
 }

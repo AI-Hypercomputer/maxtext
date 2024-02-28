@@ -156,7 +156,7 @@ def huggingface():
 
   task.TpuQueuedResourceTask(
       test_config.JSonnetTpuVmTest.from_pytorch(
-          "pt-nightly-hf-fsmt-pjrt-func-v4-8-1vm"
+          "pt-nightly-hf-bert-pjrt-func-v4-8-1vm"
       ),
       US_CENTRAL2_B,
   ).run()
