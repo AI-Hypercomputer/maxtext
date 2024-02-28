@@ -154,7 +154,7 @@ num_slices: -1
 dataset_path: "gs://mlperf-llm-public2"
 vocab_size: 32_000 # powers of 2 for sharding
 tokenizer_path: "assets/tokenizer.llama2"
-dataset_name: 'c4/en:3.0.1'
+dataset_name: 'c4/en:3.0.4'
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
 per_device_batch_size: 12.0
