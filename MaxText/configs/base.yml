@@ -151,7 +151,7 @@ num_slices: -1
 
 # Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
-dataset_path: ""
+dataset_path: "gs://mlperf-llm-public2"
 vocab_size: 32_000 # powers of 2 for sharding
 tokenizer_path: "assets/tokenizer.llama2"
 dataset_name: 'c4/en:3.0.1'
