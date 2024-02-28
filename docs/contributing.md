@@ -51,11 +51,13 @@ for this purpose.
 
 ### Testing Changes Locally
 
-To run a standalone Airflow server locally without uploading your changes, run the following from your copy of this repository:
+To run a dag file in a temporary local environment, use the `local-airflow.sh`:
 
 ```
 gcloud auth login --update-adc
-AIRFLOW_HOME=$PWD PYTHONPATH=. airflow standalone
+scripts/local-airflow.sh path/to/dag_file.py
 ```
+
+The script will symlink just the DAG provided to speed up parsing times.
 
 This functionality is extremely experimental, and not all DAGs are expected to work with a local standalone server. Only the Airflow server runs locally. Tests will still run in the project defined in each DAG, so use this option with caution.

@@ -18,7 +18,7 @@ import datetime
 import io
 import itertools
 import os
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Dict, Iterable, Optional, Tuple, Union
 import uuid
 
 from absl import logging
@@ -54,7 +54,7 @@ def create_queued_resource(
     gcp: gcp_config.GCPConfig,
     ssh_keys: airflow.XComArg,
     timeout: datetime.timedelta,
-    task_test_config: test_config,
+    task_test_config: Union[test_config.TpuVmTest, test_config.JSonnetTpuVmTest],
     use_startup_script: bool = False,
 ) -> Tuple[TaskGroup, airflow.XComArg]:
   """Request a QueuedResource and wait until the nodes are created.
@@ -275,10 +275,10 @@ def delete_queued_resource(qualified_name: airflow.XComArg):
 
 def kill_process_by_pid() -> str:
   return f"""accelerator_type=\${{1}}
-  if [[ \${{accelerator_type}} =~ ^v5.* ]] 
+  if [[ \${{accelerator_type}} =~ ^v5.* ]]
   then
     device_name=vfio/*
-  else 
+  else
     device_name=accel*
   fi
   echo \\"Terminating all processes utilizing the TPU (if any).\\"
@@ -316,11 +316,16 @@ def ssh_tpu(
 
   if all_workers:
     endpoints = itertools.chain.from_iterable(node.network_endpoints for node in nodes)
-    ip_addresses = [endpoint.ip_address for endpoint in endpoints]
-    logging.info(f'Connecting to IP addresses of all workers: {ip_addresses}')
   else:
-    ip_addresses = [nodes[0].network_endpoints[0].ip_address]
-    logging.info(f'Connecting to IP addresses of worker 0: {ip_addresses}')
+    endpoints = [nodes[0].network_endpoints[0]]
+
+  use_external_ips = os.getenv('XLMLTEST_SSH_EXTERNAL_IPS', '0') == '1'
+  if use_external_ips:
+    ip_addresses = [endpoint.access_config.external_ip for endpoint in endpoints]
+  else:
+    ip_addresses = [endpoint.ip_address for endpoint in endpoints]
+
+  logging.info(f'Connecting to IP addresses of workers: {ip_addresses}')
 
   pkey = paramiko.RSAKey.from_private_key(io.StringIO(ssh_keys.private))
   ssh_group = fabric.ThreadingGroup(
@@ -328,8 +333,12 @@ def ssh_tpu(
       connect_kwargs={
           'auth_strategy': paramiko.auth_strategy.InMemoryPrivateKey(
               'ml-auto-solutions', pkey
-          )
+          ),
+          # See https://stackoverflow.com/a/59453832
+          'banner_timeout': 200,
       },
+      # Proxy required on Cloudtops to connect to external IPs
+      gateway='corp-ssh-helper %h %p' if use_external_ips else None,
   )
 
   context = get_current_context()
