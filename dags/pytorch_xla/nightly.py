@@ -77,8 +77,8 @@ def torchvision():
       for test in (
           "pt-nightly-resnet50-pjrt-fake-v4-8-1vm",
           "pt-nightly-resnet50-pjrt-ddp-fake-v4-8-1vm",
-          "pt-nightly-resnet50-spmd-batch-func-v4-8-1vm",
-          "pt-nightly-resnet50-spmd-spatial-func-v4-8-1vm",
+          "pt-nightly-resnet50-spmd-batch-fake-v4-8-1vm",
+          "pt-nightly-resnet50-spmd-spatial-fake-v4-8-1vm",
       )
   ]
   resnet_v4_32 = task.TpuQueuedResourceTask(
