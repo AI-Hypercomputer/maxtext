@@ -57,7 +57,7 @@ def get_tf_keras_config(
       (
           "export PATH=$PATH:/home/ml-auto-solutions/.local/bin &&"
           f" export TPU_NAME={tpu_name} && {env_variable} &&"
-          " cd /tmp/tf2-api-tests && TF_USE_LEGACY_KERAS=1"
+          " cd /tmp/tf2-api-tests &&"
           " behave -e ipynb_checkpoints"
           f" --tags=-fails {skipped_tag} -i {test_feature}"
       ),
@@ -144,7 +144,7 @@ def get_tf_resnet_config(
       "sudo chmod -R 777 /tmp/",
       (
           f"cd /usr/share/tpu/models && {env_variable} &&"
-          " PYTHONPATH='.' TF_USE_LEGACY_KERAS=1"
+          " PYTHONPATH='.'"
           " python3 official/vision/train.py"
           f" --tpu={tpu_name} --experiment=resnet_imagenet"
           " --mode=train_and_eval --model_dir=/tmp/"
@@ -279,7 +279,7 @@ def get_tf_dlrm_config(
       "sudo chmod -R 777 /tmp/",
       (
           f"cd /usr/share/tpu/models && {env_variable} &&"
-          " TF_USE_LEGACY_KERAS=1 PYTHONPATH='.' python3 official/recommendation/ranking/train.py"
+          " PYTHONPATH='.' python3 official/recommendation/ranking/train.py"
           f" --tpu={tpu_name} --model_dir=/tmp/output {extraFlags}"
           " --params_override='%s'" % str(params_override)
       ),
@@ -311,10 +311,11 @@ def get_tf_dlrm_config(
 
 def export_env_variable(is_pod: bool, is_pjrt: bool) -> str:
   """Export environment variables for training if any."""
+  stmts = ["export WRAPT_DISABLE_EXTENSIONS=true", "export TF_USE_LEGACY_KERAS=1"]
   if is_pod:
-    return "export TPU_LOAD_LIBRARY=0"
+    stmts.append("export TPU_LOAD_LIBRARY=0")
   elif is_pjrt:
-    return "export NEXT_PLUGGABLE_DEVICE_USE_C_API=true && export TF_PLUGGABLE_DEVICE_LIBRARY_PATH=/lib/libtpu.so"
-  else:
-    # dummy command
-    return "echo"
+    stmts.append("export NEXT_PLUGGABLE_DEVICE_USE_C_API=true")
+    stmts.append("export TF_PLUGGABLE_DEVICE_LIBRARY_PATH=/lib/libtpu.so")
+
+  return " && ".join(stmts)
