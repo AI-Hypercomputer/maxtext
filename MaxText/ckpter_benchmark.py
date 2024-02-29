@@ -4,7 +4,8 @@ import time
 import csv
 import os
 
-from google.cloud import storage
+import max_utils
+
 from google.cloud import bigquery
 
 parser = argparse.ArgumentParser()
@@ -72,29 +73,6 @@ def wait_for_pods_to_finish():
     print("Checking pods status every 60s")
     time.sleep(60)
 
-def download_blob(source_gcs_name, destination_file_name):
-  """Downloads a file from a GCS location and save to a local file"""
-  bucket_name, prefix_name = parse_gcs_bucket_and_prefix(source_gcs_name)
-  storage_client = storage.Client()
-  bucket = storage_client.get_bucket(bucket_name)
-  blob = bucket.blob(prefix_name)
-  # Download the file to a destination
-  blob.download_to_filename(destination_file_name)
-
-def parse_gcs_bucket_and_prefix(destination_gcs_name):
-  path_parts = destination_gcs_name.replace("gs://", "").split("/")
-  bucket = path_parts.pop(0)
-  key = "/".join(path_parts)
-  return bucket, key
-
-def upload_blob(destination_gcs_name, source_file_name):
-  """Uploads a file to a GCS location"""
-  bucket_name, prefix_name = parse_gcs_bucket_and_prefix(destination_gcs_name)
-  storage_client = storage.Client()
-  bucket = storage_client.get_bucket(bucket_name)
-  blob = bucket.blob(prefix_name)
-  blob.upload_from_filename(source_file_name)
-
 def create_big_query_table(table_id):
   """Create a big query table from a CSV file stored in GCS"""
   client = bigquery.Client()
@@ -118,10 +96,9 @@ def aggregate_metrics():
   combine_data = []
   for n in range(NUM_PROCESSES):
     path = f"{args.gcs_metrics_dir}/{args.run_name}_{n}.csv"
-    download_blob(path, "tmp.csv")
+    max_utils.download_blob(path, "tmp.csv")
     with open("tmp.csv", mode='r', encoding="utf-8") as file:
       csv_file = csv.reader(file)
-      next(csv_file)
       for line in csv_file:
         combine_data.append(line)
   with open(GCS_METRICS_FILE, 'w', encoding="utf-8", newline='') as file:
@@ -139,7 +116,7 @@ def main() -> None:
     # Aggregate csv files from each process and combine them into one.
     aggregate_metrics()
     # Upload the combined metrics file to GCS.
-    upload_blob(f"{args.gcs_metrics_dir}/{GCS_METRICS_FILE}", GCS_METRICS_FILE)
+    max_utils.upload_blob(f"{args.gcs_metrics_dir}/{GCS_METRICS_FILE}", GCS_METRICS_FILE)
     print(f"Uploaded combined csv file to {args.gcs_metrics_dir}")
     # Create a table for the uploaded combined csv file.
     table_id = f"{TESS_PROJECT}.{args.bq_dataset}.{args.run_name}"

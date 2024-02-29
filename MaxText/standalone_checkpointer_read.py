@@ -80,9 +80,8 @@ def checkpoint_loop(config, state=None):
   if config.gcs_csv_folder != '':
     max_logging.log("Uploading metrics to GCS")
     csv_file = f"{config.run_name}_{jax.process_index()}.csv"
-    csv_header = ["process", "step", "ckpt_read_time"]
     # Update the raw metrics CSV file to GCS.
-    max_utils.upload_csv(csv_file, csv_header, ckpt_read_time, config.gcs_csv_folder)
+    max_utils.upload_csv(csv_file, ckpt_read_time, config.gcs_csv_folder)
 
   max_utils.close_summary_writer(writer)
   return state

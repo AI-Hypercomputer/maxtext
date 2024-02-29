@@ -21,6 +21,7 @@ import common_types
 import functools
 import time
 import socket
+import csv
 
 import max_logging
 
@@ -167,6 +168,23 @@ def upload_blob(destination_gcs_name, source_file_name):
   bucket = storage_client.get_bucket(bucket_name)
   blob = bucket.blob(prefix_name)
   blob.upload_from_filename(source_file_name)
+
+def upload_csv(csv_file, data, gcs_folder):
+  """Upload csv file for each process to GCS"""
+  with open(csv_file, 'w', encoding="utf-8", newline='') as file:
+    w = csv.writer(file)
+    for _, t in enumerate(data):
+      w.writerow(t)
+  upload_blob(f"{gcs_folder}/{csv_file}", csv_file)
+
+def download_blob(source_gcs_name, destination_file_name):
+  """Downloads a file from a GCS location and save to a local file"""
+  bucket_name, prefix_name = parse_gcs_bucket_and_prefix(source_gcs_name)
+  storage_client = storage.Client()
+  bucket = storage_client.get_bucket(bucket_name)
+  blob = bucket.blob(prefix_name)
+  # Download the file to a destination
+  blob.download_to_filename(destination_file_name)
 
 def maybe_initialize_jax_distributed_system(raw_keys):
   """ The best recipe to initialize the Jax Distributed System has varied over time. We keep a layer of
