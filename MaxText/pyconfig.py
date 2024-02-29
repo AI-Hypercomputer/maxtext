@@ -14,7 +14,7 @@
  limitations under the License.
  """
 
-# pylint: disable=missing-module-docstring
+# pylint: disable=missing-module-docstring, bare-except, consider-using-generator
 from collections import OrderedDict
 
 import max_logging
@@ -45,7 +45,7 @@ def string_to_bool(s: str) -> bool:
 _yaml_types_to_parser = {str : str, int : int, float : float, bool : string_to_bool}
 
 def validate_attention_type(s: str) -> None:
-  valid_attention_types = ('dot_product', 'flash', 'gpu_flash_xla', 'gpu_flash_triton')
+  valid_attention_types = ('dot_product', 'flash', 'cudnn_flash_te')
   if s not in valid_attention_types: # currently supported attention
     raise ValueError(
       "Invalid attention type was passed. Valid options ", valid_attention_types
@@ -62,7 +62,7 @@ def validate_keys(keys):
 def validate_model_name(s: str) -> bool:
   # currently supported models
   valid_model_names = ('default', 'llama2-7b', 'llama2-70b', 'mistral-7b',
-                       'mixtral-8x7b', 'gamma-7b','gamma-2b',
+                       'mixtral-8x7b', 'gemma-7b','gemma-2b',
                        'gpt3-175b', 'gpt3-22b', 'gpt3-6b', 'gpt3-52k')
   if s not in valid_model_names:
     raise ValueError(
@@ -78,6 +78,11 @@ def validate_no_keys_overwritten_twice(keys1: list[str], keys2: list[str]):
 
 _config = None
 config = None
+
+def print_system_information():
+  max_logging.log(f"System Information: Jax Version: {jax.__version__}")
+  max_logging.log(f"System Information: Jaxlib Version: {jax.lib.__version__}")
+  max_logging.log(f"System Information: Jax Backend: {jax.lib.xla_bridge.get_backend().platform_version}")
 
 def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any],list[Any]]:
   return tuple(_lists_to_tuples(x) for x in l) if isinstance(l, list) else l
@@ -154,7 +159,7 @@ class _HyperParameters():
     keys_from_env_and_command_line = self._update_from_env_and_command_line(raw_keys, raw_data_from_yaml, argv, **kwargs)
     max_logging.log(
         f"Updating keys from env and command line: {keys_from_env_and_command_line}")
-    keys_from_model = _HyperParameters.update_model_vars(raw_keys)
+    keys_from_model = _HyperParameters.update_model_vars(argv[1], raw_keys)
     max_logging.log(f"Updating keys from model: {keys_from_model}")
     validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
 
@@ -197,6 +202,10 @@ class _HyperParameters():
 
     raw_keys['global_batch_size_to_load'], raw_keys['global_batch_size_to_train_on'] = \
       calculate_global_batch_sizes(raw_keys)
+    raw_keys['num_slices'] = get_num_slices(raw_keys)
+    raw_keys['quantization_local_shard_count'] = get_quantization_local_shard_count(raw_keys)
+
+    print_system_information()
 
     # Write raw_keys to GCS before type conversions
     max_utils.write_config_raw_keys_for_gcs(raw_keys)
@@ -226,7 +235,7 @@ class _HyperParameters():
     raw_keys['eval_interval'] = math.ceil(24567 / global_batch_size_to_train_on)
 
   @staticmethod
-  def update_model_vars(raw_keys):
+  def update_model_vars(base_config_path, raw_keys):
     ''' Update model config variables
     '''
     validate_model_name(raw_keys['model_name'])
@@ -234,8 +243,15 @@ class _HyperParameters():
 
     updated_keys = []
     if raw_keys['model_name'] != 'default':
-      dir_path = os.path.dirname(os.path.realpath(__file__))
-      file_path = os.path.join(dir_path, f"configs/models/{raw_keys['model_name']}.yml")
+      model_name = raw_keys['model_name']
+      # First look at the model configs next to the base_config_path, and
+      # fallback to the python codebase if the config cannot be found.
+      file_path = os.path.join(
+          os.path.dirname(base_config_path), f"models/{model_name}.yml"
+      )
+      if not os.path.isfile(file_path):
+        dir_path = os.path.dirname(os.path.realpath(__file__))
+        file_path = os.path.join(dir_path, f"configs/models/{model_name}.yml")
       with open(file_path, 'r', encoding="utf-8") as file:
         model_vars = yaml.safe_load(file)
         updated_keys = list(model_vars.keys())
@@ -297,6 +313,22 @@ def get_num_target_devices(raw_keys):
     return int(devices_per_slice * raw_keys['compile_topology_num_slices'])
   else:
     return len(jax.devices())
+
+def get_num_slices(raw_keys):
+  if int(raw_keys['compile_topology_num_slices']) > 0:
+    return raw_keys['compile_topology_num_slices']
+  else:
+    devices = jax.devices()
+    try:
+      return 1 + max([d.slice_index for d in devices])
+    except:
+      return 1
+
+def get_quantization_local_shard_count(raw_keys):
+  if raw_keys['quantization_local_shard_count'] == -1:
+    return raw_keys['num_slices']
+  else:
+    return raw_keys['quantization_local_shard_count']
 
 class HyperParameters(): # pylint: disable=missing-class-docstring
   def __init__(self):

@@ -23,6 +23,7 @@ import max_utils
 from jax.sharding import Mesh
 from layers import models
 from layers import embeddings
+from layers import quantizations
 
 import jax.numpy as jnp
 
@@ -71,7 +72,8 @@ class GPT3(unittest.TestCase):
 
     devices_array = max_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
-    self.model = models.Transformer(config = self.cfg, mesh = mesh)
+    quant = quantizations.configure_quantization(self.cfg)
+    self.model = models.Transformer(config = self.cfg, mesh = mesh, quant = quant)
     self.example_batch = {
         'inputs': jnp.array([[11, 12, 13, 14, 15]], dtype=jnp.int32),
         'inputs_position': jnp.array([[0, 1, 2, 3, 4]], dtype=jnp.int32),

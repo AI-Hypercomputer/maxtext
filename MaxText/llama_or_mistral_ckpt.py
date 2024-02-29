@@ -38,6 +38,7 @@ import jax
 import jax.numpy as jnp
 from flax.training import train_state
 import max_logging
+from train import save_checkpoint
 import torch
 import sys
 
@@ -124,7 +125,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
     print(f'Loading checkpoint {i+1} of {len(ckpt_paths)} ...')
     checkpoint = torch.load(ckpt_path, map_location='cpu')
     pytorch_vars[int(ckpt_path.name.split('.', maxsplit=2)[1])] = checkpoint
-    pytorch_vars = [pytorch_vars[i] for i in sorted(list(pytorch_vars.keys()))]
+  pytorch_vars = [pytorch_vars[i] for i in sorted(list(pytorch_vars.keys()))]
 
   layer_key = 'gate' if num_experts else 'mlp'
   jax_weights = {
@@ -374,7 +375,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
   )
 
   if checkpoint_manager is not None:
-    if checkpoint_manager.save(step_number_to_save_new_ckpt, state_new):
+    if save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
       max_logging.log(
           f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
     # Upon preemption, exit when and only when all ongoing saves are complete.
