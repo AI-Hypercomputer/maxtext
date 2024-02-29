@@ -69,7 +69,7 @@ local utils = import 'templates/utils.libsonnet';
         echo -e '{"dim": 4096, "multiple_of": 256, "n_heads": 32, "n_layers": 32, "norm_eps": 1e-05, "vocab_size": -1}' >> params.json
 
         # save llama2 test
-        echo -e 'python3 llama/example_text_completion.py True "/home/xl-ml-test/llama/7B" /home/xl-ml-test/spiece.model --max_seq_len=2048 --max_gen_len=1000 --max_batch_size=2 --dynamo=True > output.txt' >> llama2inference.sh
+        echo -e 'python3 llama/example_text_completion.py True "/home/xl-ml-test/llama/7B" /home/xl-ml-test/spiece.model --max_seq_len=2048 --max_gen_len=1000 --max_batch_size=2 --dynamo=openxla > output.txt' >> llama2inference.sh
         echo -e 'file = open("output.txt")' >> getvalue.py
         echo -e 'content = file.readlines()' >> getvalue.py
         echo -e 'warm_line = content[-6]' >> getvalue.py
