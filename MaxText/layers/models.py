@@ -169,11 +169,14 @@ class Decoder(nn.Module):
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
       return gpt3.Gpt3DecoderLayer
+    elif self.config.decoder_block == "te_llama2":
+      from layers import te_llama2
+      return te_llama2.TEDecoderLayer
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma", "te_llama2"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
@@ -247,6 +250,7 @@ class Decoder(nn.Module):
               'cache': cache_spec,
               'intermediates': 0,
               'aqt':0,
+              'fp8_meta_collection': 0,
           },
           split_rngs={
               'params': True,
