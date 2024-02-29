@@ -55,7 +55,9 @@ FEATURE_TIMEOUT = {
 
 
 CMD_PRINT_TF_VERSION = "python3 -c \"import tensorflow; print('Running using TensorFlow Version: ' + tensorflow.__version__)\""
-CMD_INSTALL_KERAS_NIGHTLY = "pip install --upgrade --force-reinstall tf-keras-nightly"
+CMD_INSTALL_KERAS_NIGHTLY = (
+    "pip install --upgrade --no-deps --force-reinstall tf-keras-nightly"
+)
 
 
 def set_up_se_nightly() -> Tuple[str]:
@@ -108,7 +110,7 @@ def set_up_tensorflow_2_16_keras() -> Tuple[str]:
 def set_up_google_tensorflow_models() -> Tuple[str]:
   """Common set up for tensorflow models."""
   return (
-      "sudo mkdir -p /usr/share/tpu && cd /usr/share/tpu && git clone https://github.com/tensorflow/models.git",
+      'if [ ! -d "/usr/share/tpu/models" ]; then sudo mkdir -p /usr/share/tpu && cd /usr/share/tpu && git clone https://github.com/tensorflow/models.git; fi',
       "pip install -r /usr/share/tpu/models/official/requirements.txt",
       "pip install tensorflow-recommenders --no-deps",
       CMD_INSTALL_KERAS_NIGHTLY,
