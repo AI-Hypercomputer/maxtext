@@ -344,9 +344,9 @@ def init_initial_state(model, tx, config, is_training, key):
       config.global_batch_size_to_load,
       config.max_target_length
   )
-  model_vars = model.init({'params': key, 'dropout': key, 'aqt': key},
+  model_vars = model.init({'params': key, 'dropout': key, 'aqt': key, 'fp8_meta_collection': key},
                           jnp.ones(input_shape, dtype=jnp.int32),
-                          jnp.ones(input_shape, dtype=jnp.int32))
+                          jnp.ones(input_shape, dtype=jnp.int32), mutable=['intermediates', 'cache', 'params','fp8_meta_collection'])
   if is_training:
     return init_training_state(model.apply, model_vars['params'], tx)
   return init_decode_state(model.apply, model_vars['params'])
