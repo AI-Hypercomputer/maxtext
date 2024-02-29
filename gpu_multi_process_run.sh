@@ -8,7 +8,7 @@ set -o pipefail
 : "${JAX_COORDINATOR_PORT:?Must set JAX_COORDINATOR_PORT}"
 : "${JAX_COORDINATOR_ADDRESS:?Must set JAX_COORDINATOR_ADDRESS}"
 : "${GPUS_PER_NODE:?Must set GPUS_PER_NODE}"
-: "${RUN_NAME:?Must set RUN_NAME}"
+: "${COMMAND:?Must set COMMAND}"
 
 
 export GPUS_PER_NODE=$GPUS_PER_NODE
@@ -123,7 +123,7 @@ set -e
 PIDS=()
 for ((LOCAL_DEVICE_ID=0; LOCAL_DEVICE_ID <= $((GPUS_PER_NODE - 1)); LOCAL_DEVICE_ID++)); do
    PROCESS_ID=$(($GPUS_PER_NODE*$NODE_RANK + $LOCAL_DEVICE_ID))
-   LOCAL_DEVICE_ID=$LOCAL_DEVICE_ID PROCESS_ID=$PROCESS_ID python MaxText/train.py MaxText/configs/base.yml hardware=gpu run_name=${RUN_NAME}_$(date +%Y-%m-%d-%H-%M) ${ARGS} &
+   LOCAL_DEVICE_ID=$LOCAL_DEVICE_ID PROCESS_ID=$PROCESS_ID ${COMMAND} &
    PID=$!
    PIDS+=($PID)
    echo "Launched MaxText/train.py for local_device_id: $LOCAL_DEVICE_ID process_id: $PROCESS_ID and PID $PID"
