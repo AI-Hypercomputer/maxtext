@@ -16,7 +16,6 @@ If we then insert that and run three generation steps, we should see
 I.e. ['Ċ', 'Ə', 'ɖ'] when converted back with chr()
 """
 import sys
-sys.path.append("/home/rwitten/disaggregation/")
 
 import functools
 from typing import Any, Optional, Tuple
@@ -33,8 +32,8 @@ from flax.linen import partitioning as nn_partitioning
 import os
 
 import common_types
-from inference_engine import engine_api
-from inference_engine import tokenizer_pb2
+from jetstream.engine import engine_api
+from jetstream.engine import tokenizer_pb2
 
 import max_utils
 import inference_utils
@@ -159,16 +158,18 @@ class TestEngine(engine_api.Engine):
       mutable=["cache"]
     )
 
+    all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
+
     result = engine_api.ResultTokens(
-        data=jnp.concatenate((new_token, decode_state["next_pos"]), axis=1),
+        data=jnp.concatenate((new_token, all_valid, decode_state["next_pos"]), axis=1),
         # Tokens are shape [batch, speculations], so when we concatenate
         # tokens, validity and length along their index 1 dimension then they
         # occupy 0:speculations.
         tokens_idx=(0, 1),
         # Validity occupies the same amount of space, but next in line.
-        valid_idx=(1, 1),
+        valid_idx=(1, 2),
         # And lengths is rank 1.
-        length_idx=(1, 2), 
+        length_idx=(2, 3),
         samples_per_slot=1,
     )
 

@@ -16,13 +16,12 @@ If we then insert that and run three generation steps, we should see
 I.e. ['Ċ', 'Ə', 'ɖ'] when converted back with chr()
 """
 import sys
-sys.path.append("/home/rwitten/disaggregation/")
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 import myengine
-from inference_engine import token_utils
+from jetstream.engine import token_utils
 from absl.testing import absltest
 
 import os
@@ -60,7 +59,7 @@ def main(config):
     )
     sampled_tokens_list.append(sampled_tokens)
 
-  results = [sampled_tokens.get_result_at_slot(slot)[0].item() for sampled_tokens in sampled_tokens_list]
+  results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
   output = tokenizer.detokenize(results)
   print(f"Input `{text}` -> `{output}`")
 

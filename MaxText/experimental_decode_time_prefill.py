@@ -17,7 +17,6 @@ I.e. ['Ċ', 'Ə', 'ɖ'] when converted back with chr()
 """
 import datetime
 import sys
-sys.path.append("/home/rwitten/disaggregation/")
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -25,7 +24,7 @@ import numpy as np
 import max_utils
 
 import myengine
-from inference_engine import token_utils
+from jetstream.engine import token_utils
 from absl.testing import absltest
 
 import os
