@@ -50,7 +50,7 @@ local tpus = import 'templates/tpus.libsonnet';
     modelName+: '-pjrt',
     tpuSettings+: {
       tpuVmExtraSetup: |||
-        pip install tensorboardX google-cloud-storage transformers evaluate sacrebleu sacremoses
+        pip install tensorboardX google-cloud-storage transformers evaluate scikit-learn
       |||,
     },
   },
