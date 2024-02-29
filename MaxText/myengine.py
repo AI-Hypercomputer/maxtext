@@ -186,24 +186,37 @@ class TestEngine(engine_api.Engine):
       decode_state: DecodeState,
       slot: int,
   ) -> DecodeState:
-    assert self.config.scan_layers == False
-    #target_idx = 2 if self.config.scan_layers == False else self.config.param_scan_axis
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
 
-    def copy(path, partial_cache, full_cache):
-      #TODO: this only works without SCAN?
-      #print(f"{path=}: {partial_cache.shape=} {full_cache.shape=}")
-      if len(full_cache.shape) == 4:
-        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, 2)
-      elif len(full_cache.shape) == 2:
-        padded_partial_cache = jnp.concatenate([partial_cache, jnp.zeros((partial_cache.shape[0], full_cache.shape[1]-partial_cache.shape[1]), dtype=jnp.int32)], axis=1)
-        print(f"{path=}: {partial_cache.shape=} {full_cache.shape=} {padded_partial_cache.shape=}")
-        return jax.lax.dynamic_update_index_in_dim(full_cache, padded_partial_cache, slot, 0)
-      else:
-        return full_cache
+    def copy(path, partial_cache, full_cache, annotations):
+      path_key = path[-1].key
+      if path_key in ['cache_ar_index', 'cached_ar_key', 'cached_ar_value']:
+        return full_cache # we don't even zero these out because we can mask them out.
       
+      batch_idx = annotations.index("cache_batch") if "cache_batch" in annotations else -1
+      if batch_idx < 0:
+        raise ValueError(f"Batch index {batch_idx=} should be less than zero for {path_key}")
 
-    inserted_cache = jax.tree_util.tree_map_with_path(copy, unboxed_prefix['cache'], decode_state['cache'])
+      if path_key == 'cache_ar_segment_id':
+        ### goal: zero this out in case there is existing data
+        s = list(full_cache.shape)
+        s[batch_idx] = 1
+        zeros = jnp.zeros(tuple(s), dtype=jnp.int32) 
+        return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
+      elif path_key == 'cache_prefill_segment_id':
+        s = list(full_cache.shape)
+        s[batch_idx] = 1
+        zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
+        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx) ## zero out in case prefill cache is too small
+        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx) ## copy prefill cachce
+        return full_cache
+      elif path_key in ['cached_prefill_key', 'cached_prefill_value']:
+        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+      else:
+        raise ValueError(f"We don't have a strategy for inserting {path_key}")
+
+
+    inserted_cache = jax.tree_util.tree_map_with_path(copy, unboxed_prefix['cache'], decode_state['cache'], self.kv_cache_annotations)
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state['logits'], unboxed_prefix['logits'], slot, 0)
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state['next_pos'], unboxed_prefix['next_pos'], slot, 0)
     
@@ -258,15 +271,7 @@ class TestEngine(engine_api.Engine):
       return jax.tree_map( lambda x : jnp.zeros(x.shape, x.dtype), abstract_outputs)
     
     pre_zeroed = initialize()
-
-    def explain(s, x):
-      print(s)
-      try:
-        print(f"{s} -> {x.names}")
-      except:
-        print(f"{s} -> We don't know what this guy is {type(x)}")
-    jax.tree_util.tree_map_with_path(explain, pre_zeroed['cache'], is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned))
-    breakpoint()
+    self.kv_cache_annotations = jax.tree_util.tree_map(lambda x : x.names, pre_zeroed['cache'], is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned))
     zeroed = max_utils.unbox_logicallypartioned(initialize())
     return zeroed
 
