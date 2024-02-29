@@ -63,6 +63,7 @@ class TEDecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
   config: models.Config
   mesh: Mesh
+  quant: Optional[Quant] = None
 
   def generate_attention_mask(
       self,
