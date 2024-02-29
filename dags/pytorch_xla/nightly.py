@@ -47,7 +47,7 @@ US_EAST1_C = gcp_config.GCPConfig(
 )
 
 
-@task_group
+@task_group(prefix_group_id=False)
 def torchvision():
   mnist_v2_8 = task.TpuQueuedResourceTask(
       test_config.JSonnetTpuVmTest.from_pytorch("pt-nightly-mnist-pjrt-func-v2-8-1vm"),
@@ -134,7 +134,7 @@ def torchvision():
   resnet_v100_2x1_plugin >> resnet_v100_2x2_plugin
 
 
-@task_group
+@task_group(prefix_group_id=False)
 def huggingface():
   accelerate_v2_8 = task.TpuQueuedResourceTask(
       test_config.JSonnetTpuVmTest.from_pytorch("pt-nightly-accelerate-smoke-v2-8-1vm"),
@@ -162,7 +162,7 @@ def huggingface():
   ).run()
 
 
-@task_group
+@task_group(prefix_group_id=False)
 def llama():
   llama_inference_v4_8 = task.TpuQueuedResourceTask(
       test_config.JSonnetTpuVmTest.from_pytorch(
