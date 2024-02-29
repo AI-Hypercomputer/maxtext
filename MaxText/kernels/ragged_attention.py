@@ -18,7 +18,6 @@ BATCH = common_types.BATCH
 shard_map = shard_map.shard_map
 
 
-@functools.partial(jax.jit, static_argnames=["mask_value"])
 def mqa_reference(
     q: jax.Array,       
     k: jax.Array,       
@@ -111,7 +110,6 @@ def ragged_flash_attention_kernel(
     ).astype(o_ref.dtype)
 
 
-@functools.partial(jax.jit, static_argnames=["bk", "mask_value"])
 def ragged_mqa(
     q: jax.Array,
     k: jax.Array,
