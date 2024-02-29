@@ -147,8 +147,8 @@ resource "google_composer_environment" "example_environment" {
 
     workloads_config {
       scheduler {
-        cpu        = 4
-        memory_gb  = 13
+        cpu        = 28
+        memory_gb  = 80
         storage_gb = 10
         count      = 2
       }
