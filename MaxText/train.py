@@ -56,6 +56,8 @@ from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
+from te_helper import TransformerEngineHelper
+
 from layers import quantizations
 
 Transformer = models.Transformer
@@ -221,7 +223,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
                        data['inputs_position'],
                        decoder_segment_ids=data['inputs_segmentation'],
                        enable_dropout=config.enable_dropout if is_train else False,
-                       rngs={'dropout': rng1, 'params': aqt_rng}, mutable='intermediates')
+                       rngs={'dropout': rng1, 'params': aqt_rng}, mutable=['intermediates','fp8_meta_collection'])
   one_hot_targets = jax.nn.one_hot(data['targets'], config.vocab_size)
   xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
   xent = nn.with_logical_constraint(xent, ('activation_batch', 'activation_length'))
@@ -253,10 +255,11 @@ def train_step(model, config, state, data, dropout_rng):
     rng2: A new rng key that can be used in future calls.
 
   """
-  train_loss_fn = functools.partial(loss_fn, model, config, data, dropout_rng, is_train=True)
-  grad_fn = jax.value_and_grad(train_loss_fn, has_aux=True)
-  (loss, aux), raw_grads = grad_fn(state.params)
-  intermediate_outputs = aux['intermediate_outputs']
+  with TransformerEngineHelper.fp8_autocast('data', 'tensor', 'fsdp'):
+    train_loss_fn = functools.partial(loss_fn, model, config, data, dropout_rng, is_train=True)
+    grad_fn = jax.value_and_grad(train_loss_fn, has_aux=True)
+    (loss, aux), raw_grads = grad_fn(state.params)
+    intermediate_outputs = aux['intermediate_outputs']
 
   if config.gradient_clipping_threshold > 0:
     grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
@@ -430,7 +433,9 @@ def train_loop(config, state=None):
 
     example_batch = load_next_batch(data_iterator, example_batch, config)
     nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
-    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    logical_axis_rules = TransformerEngineHelper.extend_logical_axis_rules(())
+    logical_axis_rules = config.logical_axis_rules + logical_axis_rules
+    with mesh, nn_partitioning.axis_rules(logical_axis_rules):
       state, metrics = p_train_step(
           state, example_batch, nextrng
       )
@@ -494,8 +499,9 @@ def main(argv: Sequence[str]) -> None:
       stack_trace_to_cloud = config.stack_trace_to_cloud,
       stack_trace_interval_seconds = config.stack_trace_interval_seconds))
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
-  with diagnostic.diagnose(diagnostic_config):
-    train_loop(config)
+  with TransformerEngineHelper.fp8_autocast('data', 'tensor', 'fsdp'):
+    with diagnostic.diagnose(diagnostic_config):
+      train_loop(config)
 
 
 if __name__ == "__main__":
