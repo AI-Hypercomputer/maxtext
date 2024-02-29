@@ -59,10 +59,11 @@ class TestEngine(engine_api.Engine):
   """The computational core of the generative model server.
 
   Engine defines an API that models must adhere to as they plug into the
-  Wiz efficient serving infrastructure.
+  JetStream efficient serving infrastructure.
   """
 
   def __init__(self, config):
+    print("Initialized The Engine")
     self.config = config
     self.rng = jax.random.PRNGKey(0)
 
@@ -109,7 +110,7 @@ class TestEngine(engine_api.Engine):
     if existing_prefix:
       raise ValueError("We don't know what to do with existing_prefix")
   
-    input = jnp.expand_dims(padded_tokens, 0) # [BATCh, SEQUENCE]
+    input = jnp.expand_dims(padded_tokens, 0) # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(0, input.shape[1]), 0)
 
     
@@ -147,6 +148,7 @@ class TestEngine(engine_api.Engine):
     new_token = inference_utils.sampling(previous_logits, self.rng, self.config.decode_sampling_strategy,\
                                        topk=self.config.decode_sampling_top_k, nucleus_topp=self.config.decode_sampling_nucleus_p,
                                        temperature=self.config.decode_sampling_temperature)
+
     out_logits, new_vars = self.model.apply(
       {
           "params": params,
@@ -195,7 +197,7 @@ class TestEngine(engine_api.Engine):
       
       batch_idx = annotations.index("cache_batch") if "cache_batch" in annotations else -1
       if batch_idx < 0:
-        raise ValueError(f"Batch index {batch_idx=} should be less than zero for {path_key}")
+        raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got annotations={annotations}")
 
       if path_key == 'cache_ar_segment_id':
         ### goal: zero this out in case there is existing data
@@ -215,8 +217,7 @@ class TestEngine(engine_api.Engine):
       else:
         raise ValueError(f"We don't have a strategy for inserting {path_key}")
 
-
-    inserted_cache = jax.tree_util.tree_map_with_path(copy, unboxed_prefix['cache'], decode_state['cache'], self.kv_cache_annotations)
+    inserted_cache = jax.tree_util.tree_map_with_path(copy, unboxed_prefix['cache'], decode_state['cache'], self.kv_cache_annotations_named)
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state['logits'], unboxed_prefix['logits'], slot, 0)
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state['next_pos'], unboxed_prefix['next_pos'], slot, 0)
     
@@ -270,20 +271,19 @@ class TestEngine(engine_api.Engine):
     def initialize():
       return jax.tree_map( lambda x : jnp.zeros(x.shape, x.dtype), abstract_outputs)
     
-    pre_zeroed = initialize()
-    self.kv_cache_annotations = jax.tree_util.tree_map(lambda x : x.names, pre_zeroed['cache'], is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned))
+    self.kv_cache_annotations_named = jax.tree_util.tree_map(lambda x : tuple(x.names), initialize()['cache'], is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned))
     zeroed = max_utils.unbox_logicallypartioned(initialize())
     return zeroed
 
   @property
   def max_concurrent_decodes(self) -> int:
     """Free slots."""
-    return self.config.per_device_batch_size * jax.device_count()
+    return int(self.config.per_device_batch_size * jax.device_count())
 
   @property
   def max_prefill_length(self) -> int:
     """Maximum prefill length."""
-    return self.max_prefill_predict_length
+    return int(self.config.max_prefill_predict_length)
 
   @property
   def samples_per_slot(self) -> int:

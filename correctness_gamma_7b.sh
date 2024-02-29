@@ -1,0 +1,2 @@
+export M_LOAD_PARAMETERS_PATH=gs://maxtext-gamma/7b/2024-02-29-17-56/0/default
+python MaxText/experimental_decode.py MaxText/configs/base.yml assets_path=gs://maxtext-gamma/gamma  per_device_batch_size=1 run_name=runner_2024-02-29-18-00 max_prefill_predict_length=64  max_target_length=128 dataset_path=gs://maxtext-dataset steps=10 async_checkpointing=false scan_layers=false model_name=gamma-7b attention=dot_product 'prompt=I love to' 'autoregressive_decode_assert= travel and I love to eat.'

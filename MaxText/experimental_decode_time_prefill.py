@@ -63,8 +63,6 @@ def main(config):
   start = datetime.datetime.now()
 
   for i in range(config.steps):
-    print(f"{engine.prefill._cache_size()}=")
-    print(f"{engine.insert._cache_size()}=")
 
     prefill_result = engine.prefill(
         params=params, padded_tokens=tokens, true_length=true_length
