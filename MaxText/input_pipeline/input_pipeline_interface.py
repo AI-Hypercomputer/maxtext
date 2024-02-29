@@ -252,12 +252,14 @@ def make_lg_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
     read_config = read_config,
   )
 
-  sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
-  train_iter, _, _ = _tfds_data_processing.preprocess_dataset(
+  train_iter, _, _, sp_tokenizer = _tfds_data_processing.preprocess_dataset(
     config,
     mesh,
-    train_ds, eval_ds, sp_tokenizer,
+    train_ds, eval_ds,
+    vocab_path=os.path.join(config.assets_path, config.vocab_relative_path),
     data_shuffle_seed = config.data_shuffle_seed,
+    add_bos = add_bos,
+    add_eos = add_eos
   )
   return train_iter, None, sp_tokenizer
 

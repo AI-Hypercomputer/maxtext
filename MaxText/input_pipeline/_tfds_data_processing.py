@@ -277,4 +277,4 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
   #     data_shuffle_seed = data_shuffle_seed,)
 
   # return train_iter, eval_iter, predict_iter
-  return train_iter, None, None
+  return train_iter, None, None, sp_tokenizer

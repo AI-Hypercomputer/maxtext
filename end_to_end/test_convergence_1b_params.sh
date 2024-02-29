@@ -27,7 +27,7 @@ TRAIN_CMD="python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
         steps=20400 per_device_batch_size=8.0 learning_rate=3e-4 enable_checkpointing=false \
         max_target_length=2048 global_parameter_scale=1 \
         enable_profiler=false metrics_file=metrics.txt base_output_directory=$OUTPUT_PATH\
-        dataset_path=$DATASET_PATH log_period=150 enable_data_shuffling=false dataset_type=lg file_pattern_for_train_data=gs://mazumdera-test-bucket/lg/tfrecord-data/*.tfrecords"
+        dataset_path=$DATASET_PATH log_period=150 enable_data_shuffling=false assets_path=gs://maxtext-llama/llama2-7b dataset_type=lg file_pattern_for_train_data=gs://mazumdera-test-bucket/lg/tfrecord-data/*.tfrecords"
 TRAIN_CMD+=$CMD_DATA
 
 # Train
