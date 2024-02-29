@@ -423,10 +423,10 @@ def clean_up_idle_nodes(project_name: str, zones: Iterable[str]) -> None:
         create_time = node.create_time
         current_time = datetime.datetime.now(datetime.timezone.utc)
         logging.info(
-            f'create_time is {create_time}, and current_time is {current_time}'
+            f'Checking node {node.name}: create_time is {create_time}, and current_time is {current_time}'
         )
         active_time = current_time - create_time
-        delta = active_time.seconds - ttl
+        delta = active_time.total_seconds() - ttl
         if delta > 0:
           datetime_delta = str(datetime.timedelta(seconds=delta))
           logging.info(
