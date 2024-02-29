@@ -87,6 +87,10 @@ class DenseGeneral(nn.Module):
   use_bias: bool = False
   fused_qkv: bool = False
 
+  def _maybe_aqt_einsum(self, quant: Quant):
+    """Maybe overwrite dot general with aqt_dot_general."""
+    return jnp.einsum if quant is None else quant.einsum()
+
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
     """Applies a linear transformation to the inputs along multiple dimensions.
@@ -145,7 +149,7 @@ class DenseGeneral(nn.Module):
 
       batch_eqn = "BL"
       eqn = f'{batch_eqn}D,KDNH->K{batch_eqn}NH'
-      output = jnp.einsum(eqn, inputs, kernel)
+      output = self._maybe_aqt_einsum(self.quant)(eqn, inputs, kernel)
 
     if self.use_bias:
       if not self.fused_qkv:
