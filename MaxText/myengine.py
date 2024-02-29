@@ -20,6 +20,8 @@ import sys
 import functools
 from typing import Any, Optional, Tuple
 
+import flax
+
 from flax import struct
 import jax
 from layers import models, quantizations
@@ -184,21 +186,25 @@ class TestEngine(engine_api.Engine):
       decode_state: DecodeState,
       slot: int,
   ) -> DecodeState:
-    target_idx = 2 if self.config.scan_layers == False else self.config.param_scan_axis
+    assert self.config.scan_layers == False
+    #target_idx = 2 if self.config.scan_layers == False else self.config.param_scan_axis
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
 
-    def copy(partial_cache, full_cache):
+    def copy(path, partial_cache, full_cache):
+      #TODO: this only works without SCAN?
+      #print(f"{path=}: {partial_cache.shape=} {full_cache.shape=}")
       if len(full_cache.shape) == 4:
-        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, target_idx)
+        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, 2)
       elif len(full_cache.shape) == 2:
-        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, 0)
+        padded_partial_cache = jnp.concatenate([partial_cache, jnp.zeros((partial_cache.shape[0], full_cache.shape[1]-partial_cache.shape[1]), dtype=jnp.int32)], axis=1)
+        print(f"{path=}: {partial_cache.shape=} {full_cache.shape=} {padded_partial_cache.shape=}")
+        return jax.lax.dynamic_update_index_in_dim(full_cache, padded_partial_cache, slot, 0)
       else:
         return full_cache
       
 
-    inserted_cache = jax.tree_map(copy, unboxed_prefix['cache'], decode_state['cache'])
+    inserted_cache = jax.tree_util.tree_map_with_path(copy, unboxed_prefix['cache'], decode_state['cache'])
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state['logits'], unboxed_prefix['logits'], slot, 0)
-    #inserted_logits = decode_state['logits'] #### TODO DIRTY THING TO ENABLE DONATION
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state['next_pos'], unboxed_prefix['next_pos'], slot, 0)
     
     inserted_logits = jax.lax.with_sharding_constraint(inserted_logits, self.replicated_sharding) ##We don't want to give this a sharding by accident
@@ -251,6 +257,16 @@ class TestEngine(engine_api.Engine):
     def initialize():
       return jax.tree_map( lambda x : jnp.zeros(x.shape, x.dtype), abstract_outputs)
     
+    pre_zeroed = initialize()
+
+    def explain(s, x):
+      print(s)
+      try:
+        print(f"{s} -> {x.names}")
+      except:
+        print(f"{s} -> We don't know what this guy is {type(x)}")
+    jax.tree_util.tree_map_with_path(explain, pre_zeroed['cache'], is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned))
+    breakpoint()
     zeroed = max_utils.unbox_logicallypartioned(initialize())
     return zeroed
 
