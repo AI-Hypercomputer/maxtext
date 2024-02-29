@@ -39,6 +39,7 @@ import os
 from jax import random
 from jax.sharding import Mesh
 from layers.models import Transformer
+from layers import quantizations
 import checkpointing
 
 import numpy as np
@@ -89,7 +90,8 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   devices_array = max_utils.create_device_mesh(cfg)
   mesh = Mesh(devices_array, cfg.mesh_axes)
 
-  model = Transformer(cfg, mesh)
+  quant = quantizations.configure_quantization(cfg)
+  model = Transformer(cfg, mesh, quant=quant)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(cfg)
   tx = optimizers.get_optimizer(cfg, learning_rate_schedule)
 
