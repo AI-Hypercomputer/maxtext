@@ -4,9 +4,8 @@ import time
 import csv
 import os
 
-import max_utils
-
 from google.cloud import bigquery
+from google.cloud import storage
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--run_name', type=str, default="",
@@ -25,6 +24,8 @@ parser.add_argument('--bq_dataset', type=str, default="",
                     help='The Big Query dataset to store the metrics table, if not set, no bq tables will be created')
 parser.add_argument('--previous_state', type=str, default="",
                     help='The path to load checkpoints from')
+parser.add_argument('--dataset_path', type=str, default="",
+                    help='The path to read the dataset')
 args = parser.parse_args()
 
 NUM_PROCESSES=64
@@ -41,6 +42,7 @@ def construct_command():
     script = 'standalone_checkpointer_read.py'
   elif args.mode == 'write':
     script = 'standalone_checkpointer.py'
+  script = 'train.py'
   maxtext_command = (
     f'bash MaxText/configs/v5e/{args.model_size}b.sh '
     f'RUN_NAME={args.run_name} '
@@ -51,7 +53,8 @@ def construct_command():
     f'BQ_DATASET={args.bq_dataset} '
     f'PREVIOUS_STATE={args.previous_state} '
     f'OUTPUT_PATH={args.output_path} '
-    f'PLATFORM=gke'
+    f'DATASET_PATH={args.dataset_path} '
+    f'PLATFORM=gke '
   )
   xpk_command.append(maxtext_command)
   return xpk_command
@@ -96,7 +99,7 @@ def aggregate_metrics():
   combine_data = []
   for n in range(NUM_PROCESSES):
     path = f"{args.gcs_metrics_dir}/{args.run_name}_{n}.csv"
-    max_utils.download_blob(path, "tmp.csv")
+    download_blob(path, "tmp.csv")
     with open("tmp.csv", mode='r', encoding="utf-8") as file:
       csv_file = csv.reader(file)
       for line in csv_file:
@@ -108,6 +111,29 @@ def aggregate_metrics():
     for _, t in enumerate(combine_data):
       writer.writerow(t)
 
+def parse_gcs_bucket_and_prefix(destination_gcs_name):
+  path_parts = destination_gcs_name.replace("gs://", "").split("/")
+  bucket = path_parts.pop(0)
+  key = "/".join(path_parts)
+  return bucket, key
+
+def upload_blob(destination_gcs_name, source_file_name):
+  """Uploads a file to a GCS location"""
+  bucket_name, prefix_name = parse_gcs_bucket_and_prefix(destination_gcs_name)
+  storage_client = storage.Client()
+  bucket = storage_client.get_bucket(bucket_name)
+  blob = bucket.blob(prefix_name)
+  blob.upload_from_filename(source_file_name)
+
+def download_blob(source_gcs_name, destination_file_name):
+  """Downloads a file from a GCS location and save to a local file"""
+  bucket_name, prefix_name = parse_gcs_bucket_and_prefix(source_gcs_name)
+  storage_client = storage.Client()
+  bucket = storage_client.get_bucket(bucket_name)
+  blob = bucket.blob(prefix_name)
+  # Download the file to a destination
+  blob.download_to_filename(destination_file_name)
+
 def main() -> None:
   command = construct_command()
   subprocess.run(command, capture_output=True, check=True)
@@ -116,7 +142,7 @@ def main() -> None:
     # Aggregate csv files from each process and combine them into one.
     aggregate_metrics()
     # Upload the combined metrics file to GCS.
-    max_utils.upload_blob(f"{args.gcs_metrics_dir}/{GCS_METRICS_FILE}", GCS_METRICS_FILE)
+    upload_blob(f"{args.gcs_metrics_dir}/{GCS_METRICS_FILE}", GCS_METRICS_FILE)
     print(f"Uploaded combined csv file to {args.gcs_metrics_dir}")
     # Create a table for the uploaded combined csv file.
     table_id = f"{TESS_PROJECT}.{args.bq_dataset}.{args.run_name}"
