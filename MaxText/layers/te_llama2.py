@@ -32,6 +32,7 @@ from layers import attentions
 from layers import embeddings
 from layers import linears
 from layers import normalizations
+from layers import quantizations
 
 from layers import models
 
