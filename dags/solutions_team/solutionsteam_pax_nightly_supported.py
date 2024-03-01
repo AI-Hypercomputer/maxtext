@@ -53,10 +53,10 @@ with models.DAG(
       tpu_version=TpuVersion.V4,
       tpu_cores=16,
       tpu_zone=Zone.US_CENTRAL2_B.value,
-      time_out_in_min=60,
+      time_out_in_min=600,
       log_dir=f"{log_dir_prefix}/lmcloudspmdadam/v4-16",
       pax_version=pax_config.PaxVersion.NIGHTLY,
-      exp_path=c4spmd1b_pretraining_exp_path,
+      exp_path=lmcloudspmdadam_exp_path,
       model_name="lmcloudspmdadam",
   ).run()
 
