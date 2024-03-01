@@ -39,6 +39,7 @@ from transformer_engine.common.recipe import Format
 from transformer_engine.jax.flax.transformer import TransformerLayerType, TransformerLayer
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
+from typing import Optional
 
 import common_types
 
@@ -51,6 +52,7 @@ ScanIn = common_types.ScanIn
 Embed = embeddings.Embed
 Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
+Quant = quantizations.AqtQuantization
 
 
 #-----------------------------------------
