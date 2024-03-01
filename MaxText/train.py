@@ -381,6 +381,9 @@ def train_loop(config, state=None):
     )
 
 
+  num_params, bytes_params, bytes_per_param = max_utils.summarize_size_from_pytree(state.params)
+  max_logging.log(f"Number of model params={num_params/10**9:.3f} billion, memory usage={bytes_params/2**30:.3f}GB, "
+                    f"bytes per param={bytes_per_param:.3f}")
   num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
   max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
   per_device_tflops = calculate_training_tflops(num_model_parameters, config)
