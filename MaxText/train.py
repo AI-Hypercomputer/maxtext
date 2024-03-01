@@ -24,6 +24,7 @@ import datetime
 import os
 import sys
 import functools
+import pdb
 
 from typing import Sequence
 from absl import app
@@ -260,6 +261,7 @@ def train_step(model, config, state, data, dropout_rng):
 
   return new_state, metrics
 
+
 def eval_step(model, config, state, data, dropout_rng):
   """eval_step no backprop and new state compared with train_step."""
   eval_loss_fn = functools.partial(loss_fn, model, config, data, dropout_rng, is_train=False)
@@ -272,6 +274,7 @@ def eval_step(model, config, state, data, dropout_rng):
               'evaluation/total_weights': total_weights}}
 
   return metrics
+
 
 def setup_mesh_and_model(config):
   """ Set up the mesh and the model for training
@@ -309,6 +312,28 @@ def setup_mesh_and_model(config):
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
 
+
+def calc_shard_params(shard,
+                      expected_per_device_num_param,
+                      key
+                      ):
+  new_num_p = np.prod(shard.data.shape)
+
+  if new_num_p == expected_per_device_num_param:
+    print(f'Input is sharded over {jax.device_count()} devices as expected!!!')
+  else:
+    print(f'Expected {expected_per_device_num_param} params but got {new_num_p}')
+    print(f'Off by a factor of {new_num_p // expected_per_device_num_param}')
+    print('key path', key)
+
+
+def check_state_shardings(key, pytree):
+  num_params = max_utils.calculate_num_params_from_pytree(pytree)
+  expected_num_p = num_params // jax.device_count()
+  for shard in pytree.addressable_shards:
+    calc_shard_params(shard, expected_num_p, key)
+
+
 def setup_train_loop(config):
   """ Set up prerequisites for the training loop -
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
@@ -333,6 +358,11 @@ def setup_train_loop(config):
 
   state, state_mesh_annotations = max_utils.setup_training_state(model,
           tx, config, init_rng, mesh, checkpoint_manager)
+
+  print('**********************************')
+  print('CHEKCK TRAIN STATE SHARDINGS')
+
+  jax.tree_util.tree_map_with_path(check_state_shardings, state.params)
 
   return ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
           mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state, tx)
@@ -439,10 +469,11 @@ def train_loop(config, state=None):
       if checkpoint_manager.save(step, state):
         max_logging.log(f"saved a checkpoint at step {step}")
       # Upon preemption, exit when and only when all ongoing saves are complete.
-      if step == 5:
-        print('====== At step 5!!! =====')
+      if step == config.checkpoint_period:
+        print(f'====== At step {config.checkpoint_period}!!! =====')
         # print(state.params)
         print('----------------------------------------------------')
+        # import pdb;pdb.set_trace()
         state_check, _ = max_utils.setup_training_state(model, tx, config, init_rng, mesh, checkpoint_manager)
         # print(state_check.params)
         check_trees_equal(state.params, state_check.params)
