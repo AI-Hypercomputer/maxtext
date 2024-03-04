@@ -19,6 +19,8 @@
 from typing import Optional, Union
 from etils import epath
 from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions
+import jax
+import numpy as np
 import orbax.checkpoint
 import grain.python as grain
 
@@ -58,11 +60,42 @@ def create_orbax_checkpoint_manager(
   return mngr
 
 
+def _find_idx(array: np.ndarray, replica_axis_idx: int):
+  """Returns the index along given dimension that the current host belongs to."""
+  idx = None
+  for idx, val in np.ndenumerate(array):
+    if val.process_index == jax.process_index():
+      break
+  return idx[replica_axis_idx]
+
+
+def _replica_devices(device_array: np.ndarray, replica_axis_idx: int):
+  """Returns the devices from the replica that current host belongs to.
+
+  Replicas are assumed to be restricted to the first axis.
+
+  Args:
+    device_array: devices of the mesh that can be obtained by mesh.devices()
+    replica_axis_idx: axis dimension along which replica is taken
+
+  Returns:
+    devices inside the replica that current host is in
+  """
+  idx = _find_idx(device_array, replica_axis_idx)
+  replica_result = np.take(device_array,
+                           idx,
+                           axis=replica_axis_idx)
+  return np.expand_dims(replica_result, axis=replica_axis_idx)
+
+
 def load_state_if_possible(checkpoint_manager: CheckpointManager,
                            data_iterator: Union[MultiHostDataLoadIterator, None],
                            load_parameters_from_path: str,
                            load_full_state_from_path: str,
                            abstract_unboxed_pre_state: train_state.TrainState,
+                           mesh,
+                           state_mesh_annotations,
+                           enable_single_replica_ckpt_restoring: bool,
                            dataset_type: Optional[str] = 'c4'):
   """Loads TrainState as possible from the inputs.
 
@@ -100,7 +133,54 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
                                       iter=grain.PyGrainCheckpointRestore(data_iterator.local_iterator)
                                     )), None
       else:
-        return checkpoint_manager.restore(latest_step,
+        if enable_single_replica_ckpt_restoring:
+          orbax.checkpoint.type_handlers.register_type_handler(
+            jax.Array,
+            orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(),
+            override=True)
+          def  map_to_pspec(data, pspec):
+            orbax.checkpoint.type_handlers.register_type_handler(
+              jax.Array,
+              orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(),
+              override=True)
+            replica_axis_index = 0  # for maxtext data is the first dimension
+            replica_devices = _replica_devices(mesh.devices, replica_axis_index)
+            replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
+            single_replica_sharding = jax.sharding.NamedSharding(replica_mesh, pspec)
+            return orbax.checkpoint.type_handlers.SingleReplicaArrayRestoreArgs(
+              sharding=jax.sharding.NamedSharding(mesh, pspec),
+              single_replica_sharding=single_replica_sharding,
+              replica_axis_index=replica_axis_index,
+              global_shape=data.shape,
+              dtype=data.dtype,
+              )
+
+          restore_args = jax.tree_util.tree_map(map_to_pspec,
+                                                abstract_unboxed_pre_state,
+                                                state_mesh_annotations,
+                                                )
+
+          # return checkpoint_manager.restore(latest_step,
+          #                                   abstract_unboxed_pre_state,
+          #                                   restore_kwargs={"restore_args" : restore_args},
+          #                                   ), None
+          # return checkpoint_manager.restore(
+          #   latest_step,
+          #   args=orbax.checkpoint.args.Composite(state=orbax.checkpoint.args.ArrayRestore(
+          #     abstract_unboxed_pre_state,
+          #     restore_args=restore_args
+          #     ),
+          #   )
+          #   ), None
+          return checkpoint_manager.restore(
+            latest_step,
+            args=orbax.checkpoint.args.ArrayRestore(
+              abstract_unboxed_pre_state,
+              restore_args=restore_args
+              )
+            ), None
+        else:
+          return checkpoint_manager.restore(latest_step,
                                       args=orbax.checkpoint.args.Composite(
                                       default=orbax.checkpoint.args.StandardRestore(abstract_unboxed_pre_state),
                                     )), None

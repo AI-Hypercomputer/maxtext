@@ -395,7 +395,11 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
                                                 config.load_parameters_path,
                                                 config.load_full_state_path,
                                                 unboxed_abstract_state,
-                                                config.dataset_type)
+                                                mesh,
+                                                state_mesh_annotations,
+                                                config.enable_single_replica_ckpt_restoring,
+                                                config.dataset_type,
+                                                )
 
     if restored:
       if 'iter' in restored and restored['iter'] is not None:

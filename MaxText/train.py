@@ -24,6 +24,7 @@ import datetime
 import os
 import sys
 import functools
+import pdb
 
 from typing import Sequence
 from absl import app
@@ -71,6 +72,7 @@ def validate_train_config(config):
     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
   assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive interger."
 
+
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
 def calculate_training_tflops(num_model_parameters, config):
   """ Calculate training TFLOP"""
@@ -85,6 +87,7 @@ def calculate_training_tflops(num_model_parameters, config):
         f'and {100 * causal_attention_tflops/total_tflops:.2f}% attention flops')
   return total_tflops
 
+
 def get_first_step(state):
   with jax.spmd_mode('allow_all'):
     return int(state.step)
@@ -97,6 +100,7 @@ def load_next_batch(train_iter, example_batch, config):
     return example_batch
   else:
     return next(train_iter)
+
 
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
   """Records scalar metrics to be written to tensorboard"""
@@ -112,6 +116,7 @@ def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr):
           step_time_delta.total_seconds()
   })
   metrics['scalar'].update({'learning/current_learning_rate': lr })
+
 
 _buffered_step = None
 _buffered_metrics = None
@@ -140,6 +145,7 @@ def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step
   _buffered_step = step
   _buffered_metrics = metrics
 
+
 def write_metrics_to_tensorboard(writer, metrics, step, config):
   """ Writes metrics to tensorboard"""
   with jax.spmd_mode('allow_all'):
@@ -160,6 +166,7 @@ def write_metrics_to_tensorboard(writer, metrics, step, config):
           f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'"
       )
       writer.flush()
+
 
 def save_checkpoint(checkpoint_manager, step, state, dataset_type='c4', data_iterator=None):
   """Wrapper for saving checkpoint"""
@@ -192,6 +199,7 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics['scalar'][f'activ_fraction_zero/layer_{layer_num:03d}'] = layer["activation_fraction_zero"][0]
       output_metrics['scalar'][f'activ_mean/layer_{layer_num:03d}'] = layer["activation_mean"][0]
       output_metrics['scalar'][f'activ_stdev/layer_{layer_num:03d}'] = layer["activation_stdev"][0]
+
 
 def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   '''loss_fn for both train and eval.
@@ -272,6 +280,7 @@ def train_step(model, config, state, data, dropout_rng):
 
   return new_state, metrics
 
+
 def eval_step(model, config, state, data, dropout_rng):
   """eval_step no backprop and new state compared with train_step."""
   eval_loss_fn = functools.partial(loss_fn, model, config, data, dropout_rng, is_train=False)
@@ -284,6 +293,7 @@ def eval_step(model, config, state, data, dropout_rng):
               'evaluation/total_weights': total_weights}}
 
   return metrics
+
 
 def setup_mesh_and_model(config):
   """ Set up the mesh and the model for training
@@ -322,6 +332,30 @@ def setup_mesh_and_model(config):
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
 
+
+def calc_shard_params(shard,
+                      expected_per_device_num_param,
+                      key,
+                      pspec
+                      ):
+  new_num_p = np.prod(shard.data.shape)
+
+  if new_num_p == expected_per_device_num_param:
+    print(f'Input is sharded over {jax.device_count()} devices as expected!!!')
+  else:
+    print(f'Expected {expected_per_device_num_param} params but got {new_num_p}')
+    print(f'Off by a factor of {new_num_p // expected_per_device_num_param}')
+    print('key path', key)
+    print('pspec', pspec)
+
+
+def check_state_shardings(key, pytree, pspec):
+  num_params = max_utils.calculate_num_params_from_pytree(pytree)
+  expected_num_p = num_params // jax.device_count()
+  for shard in pytree.addressable_shards:
+    calc_shard_params(shard, expected_num_p, key, pspec)
+
+
 def setup_train_loop(config):
   """ Set up prerequisites for the training loop -
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
@@ -346,6 +380,12 @@ def setup_train_loop(config):
 
   state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(model, data_iterator,
           tx, config, init_rng, mesh, checkpoint_manager)
+  # pdb.set_trace()
+  print('**********************************')
+  print('CHEKCK TRAIN STATE SHARDINGS')
+
+  jax.tree_util.tree_map_with_path(check_state_shardings, state.params, state_mesh_annotations.params)
+
 
   return ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
           mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state)
