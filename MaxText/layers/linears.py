@@ -71,6 +71,7 @@ class DenseGeneral(nn.Module):
   Attributes:
     features: tuple with numbers of output features.
     axis: tuple with axes to apply the transformation on.
+    weight_dtype: the dtype of the weights (default: float32).
     dtype: the dtype of the computation (default: float32).
     kernel_init: initializer function for the weight matrix.
     use_bias: whether to add bias in linear transformation
@@ -79,6 +80,7 @@ class DenseGeneral(nn.Module):
 
   features: Union[Iterable[int], int]
   axis: Union[Iterable[int], int] = -1
+  weight_dtype: DType = jnp.float32
   dtype: DType = jnp.float32
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
   kernel_axes: Tuple[str, ...] = ()
@@ -123,7 +125,7 @@ class DenseGeneral(nn.Module):
         'kernel',
         nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
         kernel_shape,
-        self.dtype,
+        self.weight_dtype,
         kernel_in_axis,
         kernel_out_axis,
       )
@@ -155,7 +157,8 @@ class MlpBlock(nn.Module):
     kernel_init: Kernel function, passed to the dense layers.
     deterministic: Whether the dropout layers should be deterministic.
     intermediate_dropout_rate: Dropout rate used after the intermediate layers.
-    dtype: Type for the dense layer.
+    dtype: computation data type for the dense layer.
+    weight_dtype: weight data type for the dense layer.
     use_bias: whether to add bias in all feedforward layers.
     use_pre_norm: whether to add pre layer norm in mlp layers.
     quant: Optional quantization config, no quantization if None.
@@ -167,6 +170,7 @@ class MlpBlock(nn.Module):
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
   intermediate_dropout_rate: float = 0.1
   dtype: Any = jnp.float32
+  weight_dtype: Any = jnp.float32
   use_bias: bool = False
   use_pre_norm: bool = False
   quant: Optional[Quant] = None
@@ -189,6 +193,7 @@ class MlpBlock(nn.Module):
       inputs = self.get_norm_layer()(
         name='mlp_layer_norm',
         dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
         kernel_axes=('embed',),
         epsilon=cfg.normalization_layer_epsilon,
         )(inputs)
@@ -200,6 +205,7 @@ class MlpBlock(nn.Module):
       x = DenseGeneral(
             (len(self.activations), self.intermediate_dim),
             dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
             kernel_init=self.kernel_init,
             kernel_axes=('embed', 'num_activations', 'mlp'),
             name='wi',
@@ -215,6 +221,7 @@ class MlpBlock(nn.Module):
         x = DenseGeneral(
             self.intermediate_dim,
             dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
             kernel_init=self.kernel_init,
             kernel_axes=('embed', 'mlp'),
             name=dense_name,
@@ -236,6 +243,7 @@ class MlpBlock(nn.Module):
     output = DenseGeneral(
         inputs.shape[-1],
         dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
         kernel_init=self.kernel_init,
         kernel_axes=('mlp', 'embed'),
         name='wo',
@@ -288,6 +296,7 @@ class MoeBlock(nn.Module):
           activations=self.config.mlp_activations,
           intermediate_dropout_rate=self.config.dropout_rate,
           dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
           name=f'mlp_{k}',
           config=self.config,
           )(inputs, deterministic=deterministic)

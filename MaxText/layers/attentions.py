@@ -701,6 +701,7 @@ class Attention(nn.Module):
       mesh: Mesh, device mesh
       attention_kernel: str, guidance on if we should use an attention kernel
       dtype: the dtype of the computation.
+      weight_dtype: the dtype of the weights.
       max_target_length: maximum target length
       max_prefill_predict_length: size of the maximum prefill
       dropout_rate: dropout rate
@@ -720,6 +721,7 @@ class Attention(nn.Module):
   mesh: Mesh
   attention_kernel: str
   dtype: DType = jnp.float32
+  weight_dtype: DType = jnp.float32
   max_prefill_predict_length: int = -1
   dropout_rate: float = 0.
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
@@ -750,6 +752,7 @@ class Attention(nn.Module):
       kernel_init=query_init,
       kernel_axes=('embed', 'heads', 'kv'),
       dtype=self.dtype,
+      weight_dtype=self.weight_dtype,
       name='query',
       quant=self.quant)(inputs_q)
     return query_proj
@@ -777,6 +780,7 @@ class Attention(nn.Module):
         kernel_init=self.kernel_init,
         kernel_axes=('embed', 'heads', 'kv'),
         dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
         name=proj_name,
         quant=self.quant)(inputs_kv)
     return kv_proj
@@ -790,6 +794,7 @@ class Attention(nn.Module):
       kernel_init=self.kernel_init,
         kernel_axes=('embed', 'qkv', 'heads', 'kv'),
         dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
         name=proj_name,
         quant=self.quant)(inputs)
     query, key, value = qkv_proj[:,:,0,...], qkv_proj[:,:,1,...], qkv_proj[:,:,2,...]
@@ -802,6 +807,7 @@ class Attention(nn.Module):
       kernel_init=self.kernel_init,
       kernel_axes=('heads', 'kv', 'embed'),
       dtype=self.dtype,
+      weight_dtype=self.weight_dtype,
       name='out',
       quant=self.quant)(out)
     return out_proj

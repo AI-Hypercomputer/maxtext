@@ -72,6 +72,7 @@ class GemmaDecoderLayer(nn.Module):
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = RMSNorm(
         dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
         name='pre_self_attention_norm',
         kernel_axes=('embed',))(inputs)
 
@@ -88,6 +89,7 @@ class GemmaDecoderLayer(nn.Module):
       attention_kernel=cfg.attention,
       mesh=mesh,
       dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
       dropout_rate=cfg.dropout_rate,
       name='self_attention',
       float32_qk_product = True,
@@ -109,6 +111,7 @@ class GemmaDecoderLayer(nn.Module):
     residual = attention_lnx
     attn_output = RMSNorm(
         dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
         name='pre_ffw_norm',
         kernel_axes=('embed',))(attention_lnx)
 
@@ -118,6 +121,7 @@ class GemmaDecoderLayer(nn.Module):
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
         name='mlp',
         config=cfg,
         quant=self.quant,
