@@ -15,7 +15,6 @@
 """The file for helper functions and common constants."""
 
 import os
-from typing import Optional
 
 
 # Environment names

@@ -26,15 +26,15 @@ import airflow
 from airflow.decorators import task, task_group
 from airflow.utils.task_group import TaskGroup
 from airflow.operators.python import get_current_context
+from airflow.models import Variable
 from xlml.apis import gcp_config, test_config
+from xlml.utils import ssh, startup_script
 import fabric
 import google.api_core.exceptions
 import google.auth
 import google.cloud.tpu_v2alpha1 as tpu_api
 import google.longrunning.operations_pb2 as operations
-from xlml.utils import ssh, startup_script
 import paramiko
-from airflow.models import Variable
 from google.protobuf.duration_pb2 import Duration
 
 

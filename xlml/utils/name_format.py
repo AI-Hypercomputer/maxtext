@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Utility to generate names and locations."""
+
 import datetime
 import os
 from airflow.decorators import task
@@ -31,7 +33,8 @@ def generate_run_name(benchmark_id: str) -> str:
 
 @task
 def generate_tb_file_location(run_name: str, base_output_directory: str) -> str:
-  """Generates a path to the tensorboard file to be used as a regex. Assumes the file is located in <base_output_directory>/<run_name>/tensorboard/events.out.tfevents.*
+  """Generates a path to the tensorboard file to be used as a regex. Assumes the file is
+  located in <base_output_directory>/<run_name>/tensorboard/events.out.tfevents.*
 
   Args:
     run_name: run name for the tensorboard file location

@@ -24,20 +24,28 @@ V5P_SUBNETWORKS = f"{V5_NETWORKS_PREFIX}/regions/us-east5/subnetworks/mas-test"
 
 
 class Project(enum.Enum):
+  """Common GCP projects."""
+
   CLOUD_ML_AUTO_SOLUTIONS = "cloud-ml-auto-solutions"
   TPU_PROD_ENV_MULTIPOD = "tpu-prod-env-multipod"
   TPU_PROD_ENV_AUTOMATED = "tpu-prod-env-automated"
 
 
 class ImageProject(enum.Enum):
+  """Common image projects for GPU."""
+
   DEEP_LEARNING_PLATFORM_RELEASE = "deeplearning-platform-release"
 
 
 class ImageFamily(enum.Enum):
+  """Common image families for GPU."""
+
   COMMON_CU121_DEBIAN_11 = "common-cu121-debian-11"
 
 
 class Zone(enum.Enum):
+  """Common GCP zones."""
+
   # reserved/on-demand v2-32 in cloud-ml-auto-solutions
   US_CENTRAL1_A = "us-central1-a"
   # on-demand v3-8 in cloud-ml-auto-solutions
@@ -57,6 +65,8 @@ class Zone(enum.Enum):
 
 
 class MachineVersion(enum.Enum):
+  """Common machine types."""
+
   N1_STANDARD_8 = "n1-standard-8"
   N1_STANDARD_32 = "n1-standard-32"
   A2_HIGHGPU_1G = "a2-highgpu-1g"
@@ -66,6 +76,8 @@ class MachineVersion(enum.Enum):
 
 
 class TpuVersion(enum.Enum):
+  """Common TPU versions."""
+
   V2 = "2"
   V3 = "3"
   V4 = "4"
@@ -74,6 +86,8 @@ class TpuVersion(enum.Enum):
 
 
 class GpuVersion(enum.Enum):
+  """Common GPU versions."""
+
   L4 = "nvidia-l4"
   A100 = "nvidia-tesla-a100"
   H100 = "nvidia-h100-80gb"
@@ -81,6 +95,8 @@ class GpuVersion(enum.Enum):
 
 
 class RuntimeVersion(enum.Enum):
+  """Common runtime versions."""
+
   TPU_VM_TF_NIGHTLY = "tpu-vm-tf-nightly"
   TPU_VM_TF_NIGHTLY_POD = "tpu-vm-tf-nightly-pod"
   TPU_VM_TF_STABLE_SE = "tpu-vm-tf-2.16.0-se"
@@ -94,6 +110,8 @@ class RuntimeVersion(enum.Enum):
 
 
 class ClusterName(enum.Enum):
+  """Common XPK cluster names."""
+
   V4_8_CLUSTER = "mas-v4-8"
   V4_32_CLUSTER = "mas-v4-32"
   V5E_4_CLUSTER = "mas-v5e-4"
@@ -104,5 +122,7 @@ class ClusterName(enum.Enum):
 
 
 class DockerImage(enum.Enum):
+  """Common docker images."""
+
   XPK_JAX_TEST = "gcr.io/cloud-ml-auto-solutions/xpk_jax_test:latest"
   XPK_MAXTEXT_TEST = "gcr.io/tpu-prod-env-multipod/xpk_maxtext_test:latest"

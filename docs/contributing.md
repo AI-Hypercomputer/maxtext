@@ -27,21 +27,23 @@ Guidelines](https://opensource.google/conduct/).
 
 ### Code Style
 
-We use the code formatter [Pyink](https://github.com/google/pyink), which is a fork of the [Black](https://github.com/psf/black) formatter with a few different behaviors tailored towards Google internal repository.
+We use the code linter [Pylint](https://github.com/pylint-dev/pylint) and formatter [Pyink](https://github.com/google/pyink).
+* Pylint, a widely-used static code analyzer, works well with Google's internal code standards.
+* Pyink is a fork of the [Black](https://github.com/psf/black) formatter with a few different behaviors tailored towards Google internal repository.
 
-#### Step 1: Install Pyink.
+#### Step 1: Install Pylint and Pyink.
 
 *For Googlers:*
 
-Run `sudo apt install pipx; pipx install pyink==23.10.0` on your Cloudtop to install Pyink.
+Run `sudo apt install pipx; pipx install pylint==3.1.0 --force; pipx install pyink==23.10.0` on your Cloudtop to install Pylint and Pyink.
 
 *For external contributors:*
 
-Run `pip install pyink==23.10.0` on your machine to install Pyink.
+Run `pip install pylint==3.1.0; pip install pyink==23.10.0` on your machine to install Pylint and Pyink.
 
-#### Step 2: Format codes.
+#### Step 2: Clean up codes.
 
-Run `bash scripts/format-codes.sh` to format your codes.
+Run `bash scripts/code-style.sh` to clean up your codes. You will need to see `Successfully clean up all codes` in the output to avoid check failures in your PR.
 
 ### Code Reviews
 

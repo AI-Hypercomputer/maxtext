@@ -27,7 +27,7 @@ import io
 import paramiko
 import re
 import time
-from typing import Any, Dict, Iterable, Tuple
+from typing import Dict, Iterable
 import uuid
 from xlml.apis import gcp_config, test_config
 from xlml.utils import ssh
