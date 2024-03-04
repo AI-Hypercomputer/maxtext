@@ -42,7 +42,11 @@ resource "google_container_node_pool" "nvidia-v100x2" {
   project  = google_container_cluster.gpu-uc1.project
   location   = google_container_cluster.gpu-uc1.location
   cluster    = google_container_cluster.gpu-uc1.name
-  node_count = 3
+
+  autoscaling {
+    min_node_count = 2
+    max_node_count = 6
+  }
 
   node_locations = [
     "us-central1-b"
