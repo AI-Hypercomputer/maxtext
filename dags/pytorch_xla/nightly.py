@@ -32,6 +32,12 @@ US_CENTRAL2_B = gcp_config.GCPConfig(
     Zone.US_CENTRAL2_B.value,
     metric_config.DatasetOption.XLML_DATASET,
 )
+US_EAST1_D = gcp_config.GCPConfig(
+    Project.CLOUD_ML_AUTO_SOLUTIONS.value,
+    Zone.US_EAST1_D.value,
+    metric_config.DatasetOption.XLML_DATASET,
+)
+
 
 US_CENTRAL1 = gcp_config.GCPConfig(
     Project.CLOUD_ML_AUTO_SOLUTIONS.value,
@@ -63,7 +69,7 @@ def torchvision():
   resnet_v3_8_tests = [
       task.TpuQueuedResourceTask(
           test_config.JSonnetTpuVmTest.from_pytorch(test, reserved=True),
-          US_CENTRAL1_C,
+          US_EAST1_D,
       ).run()
       for test in (
           "pt-nightly-resnet50-pjrt-fake-v3-8-1vm",
