@@ -22,7 +22,7 @@ FOLDERS_TO_UPLOAD=("dags" "xlml")
 # TODO(ranran): handle tests from Jsonnet
 for folder in "${FOLDERS_TO_UPLOAD[@]}"
 do
-  gsutil -m rsync -d -r "$folder" "$GCS_DAGS_FOLDER"/"$folder"
+  gsutil -m rsync -c -d -r "$folder" "$GCS_DAGS_FOLDER"/"$folder"
 done
 
 echo "Successfully uploaded tests."
