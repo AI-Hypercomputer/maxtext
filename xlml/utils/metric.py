@@ -527,7 +527,7 @@ def get_gce_job_status(
       )
     elif isinstance(task_test_config.accelerator, test_config.Gpu):
       wait_task = current_dag.get_task(
-          task_id=f"{benchmark_id}.provision.create_resource"
+          task_id=f"{benchmark_id}.provision.create_resource.get_ip_address"
       )
     else:
       raise NotImplementedError(
