@@ -313,7 +313,7 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
 
   @staticmethod
   def from_jax(
-      test_name: str, reserved_tpu: bool = True, network='default', subnetwork='default'
+      test_name: str, reserved: bool = False, network='default', subnetwork='default'
   ):
     """Parses a compiled legacy JSonnet config test from `tests/jax`."""
     test = _load_compiled_jsonnet(test_name)
@@ -323,14 +323,14 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
         setup=test['setup'],
         exports='',
         test_command=['bash', '-c', test['runTest']],
-        reserved=reserved_tpu,
+        reserved=reserved,
         network=network,
         subnetwork=subnetwork,
     )
 
   @staticmethod
   def from_pytorch(
-      test_name: str, reserved_tpu: bool = True, network='default', subnetwork='default'
+      test_name: str, reserved: bool = False, network='default', subnetwork='default'
   ):
     """Parses a compiled legacy JSonnet test config from `tests/pytorch`."""
     test = _load_compiled_jsonnet(test_name)
@@ -341,7 +341,7 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
         + '\ncd ~\n' + test['tpuSettings']['tpuVmExtraSetup'],
         exports=test['tpuSettings']['tpuVmExports'],
         test_command=test['command'],
-        reserved=reserved_tpu,
+        reserved=reserved,
         network=network,
         subnetwork=subnetwork,
     )

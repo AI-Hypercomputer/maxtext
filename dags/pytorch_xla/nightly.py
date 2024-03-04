@@ -55,13 +55,14 @@ def torchvision():
   ).run()
   resnet_v2_8 = task.TpuQueuedResourceTask(
       test_config.JSonnetTpuVmTest.from_pytorch(
-          "pt-nightly-resnet50-pjrt-fake-v2-8-1vm"
+          "pt-nightly-resnet50-pjrt-fake-v2-8-1vm",
+          reserved=True,
       ),
       US_CENTRAL1_C,
   ).run()
   resnet_v3_8_tests = [
       task.TpuQueuedResourceTask(
-          test_config.JSonnetTpuVmTest.from_pytorch(test),
+          test_config.JSonnetTpuVmTest.from_pytorch(test, reserved=True),
           US_CENTRAL1_C,
       ).run()
       for test in (
@@ -92,6 +93,7 @@ def torchvision():
           "pt-nightly-resnet50-pjrt-fake-v5litepod-4-1vm",
           network=V5_NETWORKS,
           subnetwork=V5E_SUBNETWORKS,
+          reserved=True,
       ),
       US_EAST1_C,
   ).run()
@@ -137,7 +139,9 @@ def torchvision():
 @task_group(prefix_group_id=False)
 def huggingface():
   accelerate_v2_8 = task.TpuQueuedResourceTask(
-      test_config.JSonnetTpuVmTest.from_pytorch("pt-nightly-accelerate-smoke-v2-8-1vm"),
+      test_config.JSonnetTpuVmTest.from_pytorch(
+          "pt-nightly-accelerate-smoke-v2-8-1vm", reserved=True
+      ),
       US_CENTRAL1_C,
   ).run()
   accelerate_v4_8 = task.TpuQueuedResourceTask(
