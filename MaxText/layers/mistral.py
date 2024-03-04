@@ -71,6 +71,7 @@ class MistralDecoderLayer(nn.Module):
 
     lnx_rms = models.RMSNorm(
         dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
         name='pre_self_attention_layer_norm',
         kernel_axes=('embed',),
         epsilon=cfg.normalization_layer_epsilon
@@ -91,6 +92,7 @@ class MistralDecoderLayer(nn.Module):
       attention_kernel=cfg.attention,
       mesh=mesh,
       dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
       dropout_rate=cfg.dropout_rate,
       name='self_attention',
       quant=self.quant)
@@ -110,7 +112,10 @@ class MistralDecoderLayer(nn.Module):
 
     # Fully Connected
     hidden_states = models.RMSNorm(
-        dtype=cfg.dtype, name='post_self_attention_layer_norm', kernel_axes=('embed',),
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name='post_self_attention_layer_norm',
+        kernel_axes=('embed',),
         epsilon=cfg.normalization_layer_epsilon,
         )(intermediate_inputs)
     hidden_states = nn.with_logical_constraint(hidden_states, ('activation_batch', 'activation_length', 'activation_embed'))
@@ -129,6 +134,7 @@ class MistralDecoderLayer(nn.Module):
 
         gate_logits = linears.DenseGeneral(
             cfg.num_experts,
+            weight_dtype=cfg.weight_dtype,
             dtype=cfg.dtype,
             kernel_init=initializers.nd_dense_init(
                 1.0, 'fan_in', 'truncated_normal'),
@@ -153,6 +159,7 @@ class MistralDecoderLayer(nn.Module):
                 activations=cfg.mlp_activations,
                 intermediate_dropout_rate=cfg.dropout_rate,
                 dtype=cfg.dtype,
+                weight_dtype=cfg.weight_dtype,
                 name=f'mlp_{k}',
                 config=cfg,
             )(hidden_states, deterministic=deterministic)
@@ -167,6 +174,7 @@ class MistralDecoderLayer(nn.Module):
             activations=cfg.mlp_activations,
             intermediate_dropout_rate=cfg.dropout_rate,
             dtype=cfg.dtype,
+            weight_dtype=cfg.weight_dtype,
             name='mlp',
             config=cfg,
         )(hidden_states, deterministic=deterministic)

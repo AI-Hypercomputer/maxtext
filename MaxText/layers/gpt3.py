@@ -63,6 +63,7 @@ class Gpt3LayerNorm(nn.Module):
   """GPT3 Layer normalization operating on the last axis of the input data."""
   epsilon: float = 1e-6
   dtype: Any = jnp.float32
+  weight_dtype: Any = jnp.float32
   kernel_axes: Tuple[str, ...] = ()
   scale_init: Initializer = nn.initializers.zeros
   use_bias: bool = True
@@ -84,7 +85,7 @@ class Gpt3LayerNorm(nn.Module):
         'scale',
         nn.with_logical_partitioning(self.scale_init, self.kernel_axes),
         (features,),
-        jnp.float32,
+        self.weight_dtype
     )
 
     scale = jnp.asarray(scale, self.dtype)
@@ -95,7 +96,7 @@ class Gpt3LayerNorm(nn.Module):
         'bias',
         nn.with_logical_partitioning(initializers.default_bias_init, self.kernel_axes),
         (features,),
-        jnp.float32,
+        self.weight_dtype,
       )
       bias = jnp.asarray(bias, self.dtype)
       output += bias
@@ -136,6 +137,7 @@ class Gpt3MultiHeadAttention(nn.Module):
   mesh: Mesh
   attention_kernel: str
   dtype: DType = jnp.float32
+  weight_dtype: DType = jnp.float32
   dropout_rate: float = 0.
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'normal')
   float32_qk_product: bool = False  # computes logits in float32 for stability.
@@ -158,6 +160,7 @@ class Gpt3MultiHeadAttention(nn.Module):
       kernel_init=self.kernel_init,
       kernel_axes=('embed', 'qkv', 'heads', 'kv'),
       dtype=self.dtype,
+      weight_dtype=self.weight_dtype,
       name=proj_name,
       quant=self.quant,
       use_bias=self.use_bias,
@@ -173,6 +176,7 @@ class Gpt3MultiHeadAttention(nn.Module):
       kernel_init=self.kernel_init,
       kernel_axes=('embed', 'heads', 'kv'),
       dtype=self.dtype,
+      weight_dtype=self.weight_dtype,
       name=proj_name,
       quant=self.quant,
       use_bias=self.use_bias,
@@ -187,6 +191,7 @@ class Gpt3MultiHeadAttention(nn.Module):
       kernel_init=self.kernel_init,
       kernel_axes=('heads', 'kv', 'embed'),
       dtype=self.dtype,
+      weight_dtype=self.weight_dtype,
       name='out',
       quant=self.quant,
       use_bias=self.use_bias,
@@ -282,6 +287,7 @@ class Gpt3DecoderLayer(nn.Module):
       config=cfg,
       num_heads=cfg.num_query_heads,
       dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
       head_dim=cfg.head_dim,
       max_target_length=cfg.max_target_length,
       max_prefill_predict_length=cfg.max_prefill_predict_length,
@@ -310,6 +316,7 @@ class Gpt3DecoderLayer(nn.Module):
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
         name='mlp',
         use_bias=True,
         use_pre_norm=True,

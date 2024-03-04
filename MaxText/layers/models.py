@@ -69,6 +69,7 @@ class DecoderLayer(nn.Module):
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = RMSNorm(
         dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
         name='pre_self_attention_norm',
         epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=('embed',))(inputs)
@@ -85,6 +86,7 @@ class DecoderLayer(nn.Module):
       attention_kernel=cfg.attention,
       mesh=mesh,
       dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
       dropout_rate=cfg.dropout_rate,
       name='self_attention',
       quant=self.quant)
@@ -108,6 +110,7 @@ class DecoderLayer(nn.Module):
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
         name='mlp',
         config=cfg,
         quant=self.quant,
@@ -280,6 +283,7 @@ class Decoder(nn.Module):
 
     y = self.get_norm_layer()(
       dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
       name='decoder_norm',
       epsilon=cfg.normalization_layer_epsilon,
       kernel_axes=('embed',),
@@ -298,6 +302,7 @@ class Decoder(nn.Module):
     else:
       logits = linears.DenseGeneral(
           cfg.vocab_size,
+          weight_dtype=cfg.weight_dtype,
           dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
           kernel_axes=('embed', 'vocab'),
           name='logits_dense')(y) # We do not quantize the logits matmul.
