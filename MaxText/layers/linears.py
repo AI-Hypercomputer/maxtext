@@ -114,14 +114,19 @@ class DenseGeneral(nn.Module):
     kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
     kernel_in_axis = np.arange(len(axis))
     kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
-    kernel = self.param(
+    if quantizations.in_serve_mode(self.quant):
+      # During aqt convert state we delete kernel weight from params to save memory.
+      # Instead they are retreived from the tensors stored in the 'aqt' collection.
+      kernel = jnp.zeros(kernel_shape)
+    else:
+      kernel = self.param(
         'kernel',
         nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
         kernel_shape,
         self.dtype,
         kernel_in_axis,
         kernel_out_axis,
-    )
+      )
     kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(axis)))
@@ -260,15 +265,15 @@ class MoeBlock(nn.Module):
 
   @nn.compact
   def __call__(self, inputs, deterministic: bool = False):
-    gate_logits = DenseGeneral(            
+    gate_logits = DenseGeneral(
             self.num_experts,
             dtype=self.dtype,
             kernel_init=self.kernel_init,
             kernel_axes=self.kernel_axes,
             name='gate')(inputs)
-      
+
     weights, selected_experts = lax.top_k(gate_logits, self.num_experts_per_tok)
-    weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1)    
+    weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1)
     mlp_lnx = jnp.zeros_like(inputs)
     weights = weights.astype(self.dtype)
     mlp_lnx = nn.with_logical_constraint(
@@ -286,11 +291,11 @@ class MoeBlock(nn.Module):
           name=f'mlp_{k}',
           config=self.config,
           )(inputs, deterministic=deterministic)
-        
+
         mlp_lnx_exp = nn.with_logical_constraint(
             mlp_lnx_exp, ('activation_batch', 'activation_length', 'activation_embed')
         )
         mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
         mlp_lnx += mlp_lnx_exp
-    
+
     return mlp_lnx
