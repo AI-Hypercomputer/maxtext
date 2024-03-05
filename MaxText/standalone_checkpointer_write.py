@@ -88,6 +88,7 @@ def checkpoint_loop(config, state=None):
         ckpt_save_time.append([jax.process_index(), step, (end_time-start_time).total_seconds()])
         max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint saved in {(end_time-start_time).total_seconds()}, "
                         f"step {step}, on host 0")
+        max_logging.log("Sleep for 20s...")
         time.sleep(20)
 
   if config.gcs_csv_folder != '':

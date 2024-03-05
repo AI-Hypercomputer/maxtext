@@ -37,7 +37,7 @@ python3 MaxText/$EXECUTABLE MaxText/configs/base.yml run_name=$RUN_NAME\
     steps=$STEPS checkpoint_period=1 per_device_batch_size=1 enable_checkpointing=true async_checkpointing=false\
     enable_profiler=false remat_policy=minimal_offloaded global_parameter_scale=128\
     ici_fsdp_parallelism=16 ici_tensor_parallelism=16\
-    max_target_length=2048 base_output_directory=gs://runner-maxtext-logs\
+    max_target_length=2048 base_output_directory=gs://runner-maxtext-logs hardware=$HARDWARE\
     dataset_path=$DATASET_PATH use_iota_embed=true reuse_example_batch=1\
     attention='flash' gcs_metrics=false gcs_csv_folder=$GCS_METRICS_DIR bq_dataset=$BQ_DATASET\
     load_full_state_path=$PREVIOUS_STATE

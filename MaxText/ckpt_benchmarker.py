@@ -11,6 +11,22 @@ from google.cloud import bigquery
 parser = argparse.ArgumentParser()
 parser.add_argument('--run_name', type=str, default="",
                     help='The name of the current run')
+parser.add_argument('--xpk_dir', type=str, default="",
+                    help='The path to the xpk.py file')
+parser.add_argument('--hardware', type=str, default="",
+                    help='The hardware to run the benchmark')
+parser.add_argument('--cluster', type=str, default="",
+                    help='The cluster name to run the benchmark')
+parser.add_argument('--zone', type=str, default="",
+                    help='The zone of the cluster')
+parser.add_argument('--project', type=str, default="",
+                    help='The project of the cluster')
+parser.add_argument('--num_slices', type=str, default="",
+                    help='The number of slices')
+parser.add_argument('--device_type', type=str, default="",
+                    help='The type of the device')
+parser.add_argument('--tpu_type', type=str, default="",
+                    help='The type of TPU devices')
 parser.add_argument('--mode', type=str, default="",
                     help='Mode of the checkpointing run, either read or write')
 parser.add_argument('--model_size', type=str, default="",
@@ -33,14 +49,24 @@ NUM_PROCESSES=64
 GCS_METRICS_FILE='combined.csv'
 TESS_PROJECT='gcs-tess'
 
-def construct_command():
-  """Construct xpk command to run optimal configs for checkpointing"""
-  xpk_command = ['xpk', 'workload', 'create', '--cluster=v5e-256-bodaborg-us-west4', 
+def construct_xpk_command():
+  """Construct xpk command"""
+  xpk_command = ['python3', args.xpk_dir, 'workload', 'create', f'--cluster={args.cluster}',
                  '--base-docker-image=maxtext_base_image', f'--workload={args.run_name}',
-                 '--tpu-type=v5litepod-256', '--num-slices=1', '--zone=us-west4-a',
-                 '--project=tpu-prod-env-multipod', '--priority=high', '--command']
-  # executable = f"standalone_checkpointer_{args.mode}.py"
-  executable = 'train.py'
+                 f'--num-slices={args.num_slices}', f'--zone={args.zone}', f'--project={args.project}',
+                 '--priority=high']
+  if args.hardware == 'tpu':
+    xpk_command.append(f'--tpu-type={args.tpu_type}')
+  elif args.hardware == 'cpu':
+    xpk_command.append(f'--device-type={args.device_type}')
+  xpk_command.append('--command')
+  return xpk_command
+
+def construct_command():
+  """Construct xpk and maxtext commands to run optimal configs for checkpointing"""
+  xpk_command = construct_xpk_command()
+  executable = f"standalone_checkpointer_{args.mode}.py"
+  # executable = 'train.py'
   maxtext_command = (
     f'bash MaxText/configs/v5e/{args.model_size}b.sh '
     f'RUN_NAME={args.run_name} '
@@ -51,10 +77,15 @@ def construct_command():
     f'BQ_DATASET={args.bq_dataset} '
     f'OUTPUT_PATH={args.output_path} '
     f'DATASET_PATH={args.dataset_path} '
+    f'HARDWARE={args.hardware} '
     f'PLATFORM=gke '
   )
+  if args.hardware == 'cpu':
+    maxtext_command = 'JAX_PLATFORMS=cpu ' + maxtext_command
   if args.previous_state != '':
     maxtext_command += f'PREVIOUS_STATE={args.previous_state} '
+
+  # Combine xpk command with maxtext command.
   xpk_command.append(maxtext_command)
   return xpk_command
 
@@ -132,9 +163,6 @@ def aggregate_metrics():
     writer.writerow(header)
     for _, t in enumerate(combine_data):
       writer.writerow(t)
-
-def validate_args():
-  pass
 
 def main() -> None:
   command = construct_command()
