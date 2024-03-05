@@ -42,11 +42,11 @@ def create_orbax_checkpoint_manager(
   max_logging.log("Creating checkpoint manager...")
   p = epath.Path(checkpoint_dir)
 
-  if dataset_type=='c4-array_record':
-    item_names = ('default', 'iter')
-  else:
-    item_names = ('default',)
-
+  # if dataset_type=='c4-array_record':
+  #   item_names = ('default', 'iter')
+  # else:
+  #   item_names = ('default',)
+  item_names = ('items',)
   mngr = CheckpointManager(
       p,
       item_names = item_names,
@@ -160,29 +160,21 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
                                                 state_mesh_annotations,
                                                 )
 
-          # return checkpoint_manager.restore(latest_step,
-          #                                   abstract_unboxed_pre_state,
-          #                                   restore_kwargs={"restore_args" : restore_args},
-          #                                   ), None
-          # return checkpoint_manager.restore(
-          #   latest_step,
-          #   args=orbax.checkpoint.args.Composite(state=orbax.checkpoint.args.ArrayRestore(
-          #     abstract_unboxed_pre_state,
-          #     restore_args=restore_args
-          #     ),
-          #   )
-          #   ), None
-          return checkpoint_manager.restore(
-            latest_step,
-            args=orbax.checkpoint.args.ArrayRestore(
-              abstract_unboxed_pre_state,
-              restore_args=restore_args
-              )
-            ), None
+          return (
+            checkpoint_manager.restore(
+              latest_step,
+              args=orbax.checkpoint.args.Composite(
+                items=orbax.checkpoint.args.PyTreeRestore(
+                item=abstract_unboxed_pre_state,
+                restore_args=restore_args)
+              ),
+            ),
+            None)
         else:
           return checkpoint_manager.restore(latest_step,
                                       args=orbax.checkpoint.args.Composite(
-                                      default=orbax.checkpoint.args.StandardRestore(abstract_unboxed_pre_state),
+                                      # items=orbax.checkpoint.args.StandardRestore(abstract_unboxed_pre_state),
+                                      items=orbax.checkpoint.args.PyTreeRestore(item=abstract_unboxed_pre_state,)
                                     )), None
 
   if load_parameters_from_path != "":

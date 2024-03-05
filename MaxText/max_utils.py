@@ -404,7 +404,8 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
     if restored:
       if 'iter' in restored and restored['iter'] is not None:
         data_iterator.local_iterator = restored['iter']
-      state = restored['default']
+      # state = restored['default']
+      state = restored['items']
     else:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       state = jax.jit(
