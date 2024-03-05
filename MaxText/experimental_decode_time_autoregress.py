@@ -34,6 +34,11 @@ import sys
 import max_logging
 import maxtext_utils
 
+import gc
+
+def print_objects():
+  print(f"Objects {len(gc.get_objects())}")
+
 def main(config):
   engine = myengine.TestEngine(config)
   params = engine.load_params()
@@ -76,16 +81,29 @@ def main(config):
   max_utils.activate_profiler(config)
   start = datetime.datetime.now()
 
+  global_batch_size = jax.device_count() * config.per_device_batch_size
+
+
   for i in range(config.steps):
+    slot = int(i % (global_batch_size))
+    print(f"STEP {i} {slot}")
+
+
+    prefill_result = engine.prefill(
+      params=params, padded_tokens=tokens, true_length=true_length
+    )
+    decode_state = engine.insert(
+        prefill_result, decode_state, slot=slot
+    )
     decode_state, sampled_tokens = engine.generate(
       params, decode_state
     )
+    print_objects()
   jax.block_until_ready(decode_state)
   end = datetime.datetime.now()
   max_utils.deactivate_profiler(config)
 
   seconds_per_step = (end-start).total_seconds() / config.steps
-  global_batch_size = jax.device_count() * config.per_device_batch_size
   total_tok_per_sec = (jax.device_count() * config.per_device_batch_size) / seconds_per_step
 
   GB_per_step_per_device = (bytes_params+bytes_cache)/(2**30 * jax.device_count())

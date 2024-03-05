@@ -54,6 +54,7 @@ def main(config):
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list = []
   for i in steps:
+    print(f"HELLO {i}")
     decode_state, sampled_tokens = engine.generate(
       params, decode_state
     )

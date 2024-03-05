@@ -82,6 +82,7 @@ class TestEngine(engine_api.Engine):
     )
     self.abstract_params = jax.tree_map(lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), state.params)
     self.kv_cache_annotations = max_utils.get_kv_cache_annotations(self.model, self.config, self.rng, self._mesh)
+    self.kv_cache_shardings = jax.tree_map(lambda x : jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations)
     return state.params
 
 
@@ -132,6 +133,8 @@ class TestEngine(engine_api.Engine):
       mutable=["cache"]
     )
 
+    #jax.debug.print("prefill")
+
     next_pos = jnp.full((1,1), true_length, dtype = jnp.int32)
     selected_logits = jax.lax.dynamic_slice(flat_logits, (0, true_length-1,0), (flat_logits.shape[0], 1, flat_logits.shape[2]))
     selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
@@ -176,12 +179,15 @@ class TestEngine(engine_api.Engine):
         length_idx=(2, 3),
         samples_per_slot=1,
     )
+    #jax.debug.print("generate result {}", new_token)
 
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding) ##We don't want to give this a sharding by accident
+    new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
 
-    return {"logits" : out_logits, "cache" : new_vars["cache"], "next_pos" : decode_state["next_pos"]+1}, result
 
-  @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
+    return {"logits" : out_logits, "cache" : new_cache, "next_pos" : decode_state["next_pos"]+1}, result
+
+  @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(1, 2,))
   def insert(
       self,
       prefix: Prefix,
@@ -223,6 +229,7 @@ class TestEngine(engine_api.Engine):
     
     inserted_logits = jax.lax.with_sharding_constraint(inserted_logits, self.replicated_sharding) ##We don't want to give this a sharding by accident
     inserted_next_pos = jax.lax.with_sharding_constraint(inserted_next_pos, self.replicated_sharding) ##We don't want to give this a sharding by accident
+    inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
 
     return {'logits' : inserted_logits, 'cache' : inserted_cache, 'next_pos' : inserted_next_pos }
 
@@ -237,7 +244,6 @@ class TestEngine(engine_api.Engine):
 
   def init_decode_state(self) -> DecodeState:
     """Initialises any state which a generation step transforms."""
-
     def init(abstract_params):
       x = jnp.ones( (int(self.config.per_device_batch_size * jax.device_count()), self.config.max_prefill_predict_length),
                    dtype=jnp.int32)
@@ -271,7 +277,10 @@ class TestEngine(engine_api.Engine):
     def initialize():
       return jax.tree_map( lambda x : jnp.zeros(x.shape, x.dtype), abstract_outputs)
     
-    self.kv_cache_annotations_named = jax.tree_util.tree_map(lambda x : tuple(x.names), initialize()['cache'], is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned))
+    cache = initialize()['cache']
+    
+    self.kv_cache_annotations_named = jax.tree_util.tree_map(lambda x : tuple(x.names), cache, is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned))
+    del cache
     zeroed = max_utils.unbox_logicallypartioned(initialize())
     return zeroed
 
