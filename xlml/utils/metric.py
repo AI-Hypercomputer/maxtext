@@ -600,7 +600,7 @@ def process_metrics(
     task_metric_config: Optional[metric_config.MetricConfig],
     task_gcp_config: gcp_config.GCPConfig,
     use_startup_script: bool = False,
-    file_location: Optional[str] = None,
+    folder_location: Optional[str] = None,
 ) -> None:
   benchmark_id = task_test_config.benchmark_id
   current_time = datetime.datetime.now()
@@ -610,20 +610,32 @@ def process_metrics(
   profile_history_rows_list = []
 
   # process metrics, metadata, and profile
+  # TODO(ran/piz): remove absolute_path based on use_runtime_generated_gcs_folder once all
+  # dag configs are switched to using relative gcs path.
   if task_metric_config:
     if task_metric_config.json_lines:
-      metric_history_rows_list, metadata_history_rows_list = process_json_lines(
-          base_id, task_metric_config.json_lines.file_location
+      absolute_path = (
+          os.path.join(folder_location, task_metric_config.json_lines.file_location)
+          if task_metric_config.use_runtime_generated_gcs_folder
+          else task_metric_config.json_lines.file_location
       )
-    elif task_metric_config.use_runtime_generated_filename:
       metric_history_rows_list, metadata_history_rows_list = process_json_lines(
-          base_id, file_location
+          base_id, absolute_path
       )
     if task_metric_config.tensorboard_summary:
+      absolute_path = (
+          os.path.join(folder_location, task_metric_config.tensorboard_summary)
+          if task_metric_config.use_runtime_generated_gcs_folder
+          else task_metric_config.tensorboard_summary
+      )
       (
           metric_history_rows_list,
           metadata_history_rows_list,
-      ) = process_tensorboard_summary(base_id, task_metric_config.tensorboard_summary)
+      ) = process_tensorboard_summary(
+          base_id,
+          absolute_path,
+      )
+
     if task_metric_config.profile:
       has_profile = True
       num_profiles = len(task_metric_config.profile.file_locations)

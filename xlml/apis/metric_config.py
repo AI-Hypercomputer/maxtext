@@ -101,4 +101,6 @@ class MetricConfig:
   json_lines: Optional[JSONLinesConfig] = None
   tensorboard_summary: Optional[SummaryConfig] = None
   profile: Optional[ProfileConfig] = None
-  use_runtime_generated_filename: bool = False
+  # TODO (ran/piz): remove the following attribute once all dag configs are set to
+  # use relative gcs path.
+  use_runtime_generated_gcs_folder: bool = False

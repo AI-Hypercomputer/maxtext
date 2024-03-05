@@ -46,7 +46,7 @@ def generate_tb_file_location(run_name: str, base_output_directory: str) -> str:
 
 
 @task
-def generate_gcs_file_location(benchmark_id: str) -> str:
+def generate_gcs_folder_location(benchmark_id: str) -> str:
   """Generates result file location in GCS.
 
   Args:
@@ -56,4 +56,4 @@ def generate_gcs_file_location(benchmark_id: str) -> str:
     gsc file name with location
   """
   current_datetime = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-  return f"{gcs_bucket.BENCHMARK_OUTPUT_DIR}/{benchmark_id}-{current_datetime}/metric_report.jsonl"
+  return f"{gcs_bucket.OUTPUT_DIR}/{benchmark_id}-{current_datetime}/"
