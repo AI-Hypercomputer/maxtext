@@ -19,6 +19,7 @@ CRITEO_DIR = "gs://ml-auto-solutions/data/criteo/terabyte_processed_shuffled"
 IMAGENET_DIR = "gs://ml-auto-solutions/data/imagenet"
 TFDS_DATA_DIR = "gs://ml-auto-solutions/data/tfds-data"
 PAX_DIR = "gs://cloud-tpu-checkpoints/pax"
+MAXTEXT_DIR = "gs://max-datasets-rogue"
 
 # GCS bucket for output
 BENCHMARK_OUTPUT_DIR = "gs://ml-auto-solutions/output/benchmark"

@@ -15,6 +15,7 @@
 """The file for common projects, zone, and runtime versions."""
 
 import enum
+import datetime
 
 
 V5_NETWORKS_PREFIX = "projects/tpu-prod-env-automated"
@@ -116,6 +117,7 @@ class ClusterName(enum.Enum):
   V4_32_CLUSTER = "mas-v4-32"
   V5E_4_CLUSTER = "mas-v5e-4"
   V5E_16_CLUSTER = "mas-v5e-16"
+  V4_8_MULTISLICE_CLUSTER = "v4-8-maxtext"
   V4_128_MULTISLICE_CLUSTER = "v4-bodaborg"
   V5E_16_MULTISLICE_CLUSTER = "v5e-16-bodaborg"
   V5E_256_MULTISLICE_CLUSTER = "v5e-256-bodaborg"
@@ -126,3 +128,5 @@ class DockerImage(enum.Enum):
 
   XPK_JAX_TEST = "gcr.io/cloud-ml-auto-solutions/xpk_jax_test:latest"
   XPK_MAXTEXT_TEST = "gcr.io/tpu-prod-env-multipod/xpk_maxtext_test:latest"
+  MAXTEXT_JAX_STABLE = f"gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:{datetime.datetime.today().strftime('%Y-%m-%d')}"
+  MAXTEXT_JAX_NIGHTLY = f"gcr.io/tpu-prod-env-multipod/maxtext_jax_nightly:{datetime.datetime.today().strftime('%Y-%m-%d')}"
