@@ -140,7 +140,7 @@ class DenseGeneral(nn.Module):
           'bias',
           nn.with_logical_partitioning(bias_init, bias_axes),
           bias_shape,
-          jnp.float32,
+          self.weight_dtype,
       )
       bias = jnp.asarray(bias, self.dtype)
       output += bias
