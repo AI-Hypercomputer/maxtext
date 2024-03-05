@@ -1,0 +1,21 @@
+{
+  // General
+  "python.terminal.activateEnvironment": true,
+
+  // Formatting
+  "editor.tabSize": 2,
+  "editor.detectIndentation" : false,
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true,
+  "[python]": {
+    "editor.defaultFormatter": "ms-python.black-formatter",
+  },
+  "black-formatter.path": ["pyink"],
+  "black-formatter.args": [
+    "--pyink-indentation=2",
+    "--pyink-use-majority-quotes"
+  ],
+
+  // Linting
+  "pylint.importStrategy": "fromEnvironment"
+}

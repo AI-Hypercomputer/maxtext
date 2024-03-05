@@ -26,7 +26,7 @@ done
 
 for folder in "${FOLDERS_TO_FORMAT[@]}"
 do
-  pylint "./$folder" --rcfile=scripts/.pylintrc --fail-under=9
+  pylint "./$folder" --fail-under=9
 done
 
 echo "Successfully clean up all codes."
