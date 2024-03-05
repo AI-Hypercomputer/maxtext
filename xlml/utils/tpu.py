@@ -239,7 +239,14 @@ def delete_queued_resource(qualified_name: airflow.XComArg):
     creds, _ = google.auth.default()
     client = tpu_api.TpuClient(credentials=creds)
 
-    qr = client.get_queued_resource(name=qualified_name)
+    try:
+      qr = client.get_queued_resource(name=qualified_name)
+    except google.api_core.exceptions.NotFound:
+      logging.info(
+          f'{qualified_name} was removed by cleanup DAG or deleted unexpectedly'
+      )
+      return True
+
     # Queued Resources can only be deleted once they are SUSPENDED, even if all
     # underlying nodes have already been deleted.
     if qr.state.state in [
