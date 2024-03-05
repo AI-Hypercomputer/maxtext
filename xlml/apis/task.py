@@ -77,7 +77,9 @@ class TpuQueuedResourceTask(BaseTask):
           self.task_metric_config
           and self.task_metric_config.use_runtime_generated_gcs_folder
       ):
-        env_variable = {f"{metric_config.SshEnvVars.GCS_OUTPUT.value}": gcs_location}
+        env_variable = {
+            f"{metric_config.SshEnvVars.GCS_OUTPUT.value}": gcs_location
+        }
       else:
         env_variable = None
       run_model = self.run_model(queued_resource, ssh_keys, env_variable)
@@ -88,16 +90,20 @@ class TpuQueuedResourceTask(BaseTask):
     return group
 
   def run_with_run_name_generation(self) -> DAGNode:
-    """Generate a unique run name and tensorboard file location, then run a test job.
+    """Generate a unique run name and tensorboard file location,
+    then run a test job.
 
     Returns:
-      A task group with the following tasks chained: generate_run_name, generate_tb_file_location, provision, run_model,
-      post_process and clean_up.
+      A task group with the following tasks chained: generate_run_name,
+      generate_tb_file_location, provision, run_model, post_process,
+      and clean_up.
     """
     with TaskGroup(
         group_id=self.task_test_config.benchmark_id, prefix_group_id=True
     ) as group:
-      run_name = name_format.generate_run_name(self.task_test_config.benchmark_id)
+      run_name = name_format.generate_run_name(
+          self.task_test_config.benchmark_id
+      )
       tb_file_location = name_format.generate_tb_file_location(
           run_name, self.task_metric_config.tensorboard_summary.file_location
       )
@@ -109,14 +115,23 @@ class TpuQueuedResourceTask(BaseTask):
       self.task_test_config.run_model_cmds = new_run_model_cmds
 
       # Update tensorboard file location
-      self.task_metric_config.tensorboard_summary.file_location = tb_file_location
+      self.task_metric_config.tensorboard_summary.file_location = (
+          tb_file_location
+      )
 
       provision, queued_resource, ssh_keys, gcs_location = self.provision()
       run_model = self.run_model(queued_resource, ssh_keys)
       post_process = self.post_process()
       clean_up = self.clean_up(queued_resource)
 
-      run_name >> tb_file_location >> provision >> run_model >> post_process >> clean_up
+      (
+          run_name
+          >> tb_file_location
+          >> provision
+          >> run_model
+          >> post_process
+          >> clean_up
+      )
 
     return group
 
@@ -125,7 +140,8 @@ class TpuQueuedResourceTask(BaseTask):
 
     Returns:
       A task group with the following tasks chained:
-      provision_with_startup_script (create_queued_resource_request + wait_for_ready_queued_resource + check_if_startup_script_end),
+      provision_with_startup_script (create_queued_resource_request +
+      wait_for_ready_queued_resource + check_if_startup_script_end),
       post_process and clean_up.
     """
 
@@ -253,7 +269,9 @@ class TpuQueuedResourceTask(BaseTask):
     )
 
   def post_process(
-      self, use_startup_script: bool = False, result_location: Optional[str] = None
+      self,
+      use_startup_script: bool = False,
+      result_location: Optional[str] = None,
   ) -> DAGNode:
     """Process metrics and metadata, and insert them into BigQuery tables.
 
@@ -284,7 +302,9 @@ class TpuQueuedResourceTask(BaseTask):
     Raises:
       AirflowTaskTimeout: An error occurs when execution_timeout is breached.
     """
-    return tpu.delete_queued_resource.override(group_id="clean_up")(queued_resource)
+    return tpu.delete_queued_resource.override(group_id="clean_up")(
+        queued_resource
+    )
 
 
 @dataclasses.dataclass
@@ -314,16 +334,19 @@ class TpuXpkTask(BaseTask):
     return group
 
   def run_with_run_name_generation(self) -> DAGNode:
-    """Generate a unique run name and tensorboard file location, then run a test job within a docker image.
+    """Generate a unique run name and tensorboard file location,
+    then run a test job within a docker image.
 
     Returns:
-      A task group with the following tasks chained: generate_run_name, generate_tb_file_location, run provision, run_model,
-      post_process.
+      A task group with the following tasks chained: generate_run_name,
+      generate_tb_file_location, run provision, run_model, post_process.
     """
     with TaskGroup(
         group_id=self.task_test_config.benchmark_id, prefix_group_id=True
     ) as group:
-      run_name = name_format.generate_run_name(self.task_test_config.benchmark_id)
+      run_name = name_format.generate_run_name(
+          self.task_test_config.benchmark_id
+      )
       tb_file_location = name_format.generate_tb_file_location(
           run_name, self.task_metric_config.tensorboard_summary.file_location
       )
@@ -335,7 +358,9 @@ class TpuXpkTask(BaseTask):
       self.task_test_config.run_model_cmds = new_run_model_cmds
 
       # Update tensorboard file location
-      self.task_metric_config.tensorboard_summary.file_location = tb_file_location
+      self.task_metric_config.tensorboard_summary.file_location = (
+          tb_file_location
+      )
 
       run_name >> tb_file_location >> self.run_model() >> self.post_process()
 
@@ -426,20 +451,30 @@ class GpuCreateResourceTask(BaseTask):
     with TaskGroup(
         group_id=self.task_test_config.benchmark_id, prefix_group_id=True
     ) as group:
-      provision, ip_address, instance_name, ssh_keys, gcs_location = self.provision()
-      # If you already specify `task_metric_config.json_lines` value in the test config script,
-      # then `gcs_location` will take no effect.
+      (
+          provision,
+          ip_address,
+          instance_name,
+          ssh_keys,
+          gcs_location,
+      ) = self.provision()
+      # If you already specify `task_metric_config.json_lines` value in the
+      # test config script, then `gcs_location` will take no effect.
       if (
           self.task_metric_config
           and self.task_metric_config.use_runtime_generated_gcs_folder
       ):
-        env_variable = {f"{metric_config.SshEnvVars.GCS_OUTPUT.value}": gcs_location}
+        env_variable = {
+            f"{metric_config.SshEnvVars.GCS_OUTPUT.value}": gcs_location
+        }
       else:
         env_variable = None
       run_model = self.run_model(ip_address, ssh_keys, env_variable)
       post_process = self.post_process(gcs_location)
       clean_up = self.clean_up(
-          instance_name, self.task_gcp_config.project_name, self.task_gcp_config.zone
+          instance_name,
+          self.task_gcp_config.project_name,
+          self.task_gcp_config.zone,
       )
       provision >> run_model >> post_process >> clean_up
     return group
@@ -447,7 +482,11 @@ class GpuCreateResourceTask(BaseTask):
   def provision(
       self,
   ) -> Tuple[
-      DAGNode, airflow.XComArg, airflow.XComArg, airflow.XComArg, airflow.XComArg
+      DAGNode,
+      airflow.XComArg,
+      airflow.XComArg,
+      airflow.XComArg,
+      airflow.XComArg,
   ]:
     """Provision a GPU accelerator via a resource creation.
 
@@ -516,7 +555,9 @@ class GpuCreateResourceTask(BaseTask):
         env,
     )
 
-  def post_process(self, result_location: Optional[airflow.XComArg] = None) -> DAGNode:
+  def post_process(
+      self, result_location: Optional[airflow.XComArg] = None
+  ) -> DAGNode:
     """Process metrics and metadata, and insert them into BigQuery tables.
 
     Returns:
@@ -533,7 +574,9 @@ class GpuCreateResourceTask(BaseTask):
       )
       return group
 
-  def clean_up(self, resource: airflow.XComArg, project_id: str, zone: str) -> DAGNode:
+  def clean_up(
+      self, resource: airflow.XComArg, project_id: str, zone: str
+  ) -> DAGNode:
     """Clean up GPU resources created by `provision`.
 
     Args:
@@ -546,7 +589,9 @@ class GpuCreateResourceTask(BaseTask):
     Raises:
       AirflowTaskTimeout: An error occurs when execution_timeout is breached.
     """
-    return gpu.delete_resource.override(group_id="clean_up")(resource, project_id, zone)
+    return gpu.delete_resource.override(group_id="clean_up")(
+        resource, project_id, zone
+    )
 
 
 # TODO(ranran): This class is big. Let's move it to a new file.
@@ -579,19 +624,23 @@ class GpuGkeTask(BaseTask):
     ) as group:
       job_body = self._get_job_manifest()
       gke.run_job.override(group_id="run_model")(
-          job_body, self.task_gcp_config, self.cluster_name, self.job_create_timeout
+          job_body,
+          self.task_gcp_config,
+          self.cluster_name,
+          self.job_create_timeout,
       )
 
     return group
 
   def _get_job_manifest(self):
+    accelerator = self.task_test_config.accelerator
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
         "metadata": {
             "generateName": f"{self.task_test_config.benchmark_id}-",
             "labels": {
-                "accelerator": self.task_test_config.accelerator.name,
+                "accelerator": accelerator.name,
                 "benchmarkId": self.task_test_config.benchmark_id,
             },
         },
@@ -607,13 +656,14 @@ class GpuGkeTask(BaseTask):
             "parallelism": self.task_test_config.num_hosts,
             "template": {
                 "metadata": {
-                    # Matches `headless-svc` in GKE cluster. See deployments directory.
+                    # Matches `headless-svc` in GKE cluster.
+                    # See deployments directory.
                     "labels": {"headless-svc": "true"},
                 },
                 "spec": {
                     "subdomain": "headless-svc",
                     "nodeSelector": {
-                        "cloud.google.com/gke-accelerator": self.task_test_config.accelerator.accelerator_type,
+                        "cloud.google.com/gke-accelerator": accelerator.accelerator_type,
                     },
                     "restartPolicy": "Never",
                     "containers": [
@@ -621,24 +671,32 @@ class GpuGkeTask(BaseTask):
                             "name": "main",
                             "image": self.task_test_config.docker_image,
                             "imagePullPolicy": "Always",
-                            "command": shlex.split(self.task_test_config.setup_script),
-                            "args": shlex.split(self.task_test_config.test_script),
+                            "command": shlex.split(
+                                self.task_test_config.setup_script
+                            ),
+                            "args": shlex.split(
+                                self.task_test_config.test_script
+                            ),
                             "resources": {
                                 "limits": {
-                                    "nvidia.com/gpu": self.task_test_config.accelerator.count,
+                                    "nvidia.com/gpu": accelerator.count,
                                 }
                             },
                             "env": [
                                 {
                                     "name": "POD_NAME",
                                     "valueFrom": {
-                                        "fieldRef": {"fieldPath": "metadata.name"}
+                                        "fieldRef": {
+                                            "fieldPath": "metadata.name"
+                                        }
                                     },
                                 },
                                 {
                                     "name": "POD_NAMESPACE",
                                     "valueFrom": {
-                                        "fieldRef": {"fieldPath": "metadata.namespace"}
+                                        "fieldRef": {
+                                            "fieldPath": "metadata.namespace"
+                                        }
                                     },
                                 },
                                 {

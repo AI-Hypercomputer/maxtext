@@ -37,12 +37,16 @@ def get_setup_cmds(
 ) -> Tuple[str]:
   if pax_version is PaxVersion.STABLE:
     logging.info("Running the latest stable Pax version.")
-    ckp_cmds = f"gsutil -m cp -r {ckp_path} {job_log_dir}" if ckp_path else "echo"
+    ckp_cmds = (
+        f"gsutil -m cp -r {ckp_path} {job_log_dir}" if ckp_path else "echo"
+    )
     return common.set_up_google_pax() + (ckp_cmds,)
   elif pax_version is PaxVersion.NIGHTLY:
     logging.info("Running nightly Pax version.")
     build_date = datetime.today().strftime("%Y%m%d")
-    ckp_cmds = f"gsutil -m cp -r {ckp_path} {job_log_dir}" if ckp_path else "echo"
+    ckp_cmds = (
+        f"gsutil -m cp -r {ckp_path} {job_log_dir}" if ckp_path else "echo"
+    )
     return (
         ckp_cmds,
         (

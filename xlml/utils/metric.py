@@ -68,7 +68,9 @@ def is_valid_tag(
   Returns:
     A bool to indicate if this tag should be included.
   """
-  if exclude_tag_patterns and any(re.match(x, tag) for x in exclude_tag_patterns):
+  if exclude_tag_patterns and any(
+      re.match(x, tag) for x in exclude_tag_patterns
+  ):
     # check if tag in exclude_tag_patterns
     return False
   if include_tag_patterns:
@@ -102,7 +104,9 @@ def read_from_tb(
   for ex in serialized_examples:
     event = event_pb2.Event.FromString(ex.numpy())
     for value in event.summary.value:
-      if not is_valid_tag(value.tag, include_tag_patterns, exclude_tag_patterns):
+      if not is_valid_tag(
+          value.tag, include_tag_patterns, exclude_tag_patterns
+      ):
         continue
       value_type = value.metadata.plugin_data.plugin_name
       if value_type == "scalars":
@@ -118,7 +122,9 @@ def read_from_tb(
         scalar = TensorBoardScalar(value.simple_value, event.step)
         metrics.setdefault(value.tag, []).append(scalar)
       else:
-        logging.info(f"Discarding data point {value.tag} with type {value_type}.")
+        logging.info(
+            f"Discarding data point {value.tag} with type {value_type}."
+        )
 
   return metrics, metadata
 
@@ -147,7 +153,9 @@ def aggregate_metrics(
     raise NotImplementedError(f"Unknown aggregation strategy: {strategy}")
 
 
-def download_object_from_gcs(source_location: str, destination_location: str) -> None:
+def download_object_from_gcs(
+    source_location: str, destination_location: str
+) -> None:
   """Download object from GCS bucket.
 
   Args:
@@ -163,14 +171,20 @@ def download_object_from_gcs(source_location: str, destination_location: str) ->
   blob = bucket.blob(object_name)
   blob.download_to_filename(destination_location)
   logging.info(
-      f"Download JSON Lines file from {source_location} to {destination_location}"
+      (
+          "Download JSON Lines file from"
+          f" {source_location} to {destination_location}"
+      )
   )
 
 
 def process_json_lines(
     base_id: str,
     file_location: str,
-) -> (List[List[bigquery.MetricHistoryRow]], List[List[bigquery.MetadataHistoryRow]],):
+) -> (
+    List[List[bigquery.MetricHistoryRow]],
+    List[List[bigquery.MetadataHistoryRow]],
+):
   """Process metrics and dimensions from JSON Lines file.
 
   Args:
@@ -199,7 +213,9 @@ def process_json_lines(
 
       for key, value in raw_metrics.items():
         metric_history_rows.append(
-            bigquery.MetricHistoryRow(job_uuid=uuid, metric_key=key, metric_value=value)
+            bigquery.MetricHistoryRow(
+                job_uuid=uuid, metric_key=key, metric_value=value
+            )
         )
 
       for key, value in metadata.items():
@@ -218,7 +234,10 @@ def process_json_lines(
 def process_tensorboard_summary(
     base_id: str,
     summary_config: metric_config.SummaryConfig,
-) -> (List[List[bigquery.MetricHistoryRow]], List[List[bigquery.MetadataHistoryRow]],):
+) -> (
+    List[List[bigquery.MetricHistoryRow]],
+    List[List[bigquery.MetadataHistoryRow]],
+):
   """Process metrics and dimensions from TensorBoard file.
 
   Args:
@@ -256,7 +275,9 @@ def process_tensorboard_summary(
 
   for key, value in aggregated_metrics.items():
     metric_history_rows.append(
-        bigquery.MetricHistoryRow(job_uuid=uuid, metric_key=key, metric_value=value)
+        bigquery.MetricHistoryRow(
+            job_uuid=uuid, metric_key=key, metric_value=value
+        )
     )
 
   for key, value in metadata.items():
@@ -271,11 +292,13 @@ def process_tensorboard_summary(
 
 def get_gcs_file_location_with_regex(file_location: str) -> str:
   """
-  Get a file from GCS given a regex in the form of `gs://<your_bucket>/<your_file_path_regex>`.
-  Does not support bucket name or path regex. Only supports file name regex.
+  Get a file from GCS given a regex in the form of
+  `gs://<your_bucket>/<your_file_path_regex>`. Does not support
+   bucket name or path regex. Only supports file name regex.
 
   Args:
-    file_location: File location regex in the form of `gs://<your_bucket>/<path>/<your_file_name_regex>`.
+    file_location: File location regex in the form of
+        `gs://<your_bucket>/<path>/<your_file_name_regex>`.
 
   Returns:
     The file location of the first file that fits the given regex.
@@ -293,9 +316,14 @@ def get_gcs_file_location_with_regex(file_location: str) -> str:
   ]
 
   try:
-    return f"gs://{bucket_name}/{next(filter(file_path_regex.match, all_blobs_names))}"
+    return (
+        f"gs://{bucket_name}/"
+        f"{next(filter(file_path_regex.match, all_blobs_names))}"
+    )
   except StopIteration:
-    raise AirflowFailException(f"No objects matched supplied regex: {file_location}")
+    raise AirflowFailException(
+        f"No objects matched supplied regex: {file_location}"
+    )
 
 
 # TODO(qinwen): implement profile metrics & upload to Vertex AI TensorBoard
@@ -322,7 +350,8 @@ def add_airflow_metadata(
     project_name: str,
     metadata: List[List[bigquery.MetricHistoryRow]],
 ) -> List[List[bigquery.MetricHistoryRow]]:
-  """Add airflow metadata: run_id, prev_start_date_success, and airflow_dag_run_link.
+  """Add airflow metadata: run_id, prev_start_date_success,
+  and airflow_dag_run_link.
 
   Args:
     base_id: The base id to generate uuid.
@@ -345,7 +374,8 @@ def add_airflow_metadata(
       os.environ.get(composer_env.COMPOSER_ENVIRONMENT),
   )
   airflow_dag_run_link = (
-      f"{airflow_link}/dags/{dag_id}/grid?dag_run_id={dag_run_id}&task_id={task_id}"
+      f"{airflow_link}/dags/{dag_id}/"
+      f"grid?dag_run_id={dag_run_id}&task_id={task_id}"
   )
   logging.info(f"airflow_dag_run_link is {airflow_dag_run_link}")
 
@@ -416,10 +446,16 @@ def add_test_config_metadata(
           bigquery.MetadataHistoryRow(
               job_uuid=uuid,
               metadata_key="multislice_topology",
-              metadata_value=f"{task_test_config.num_slices}x{task_test_config.accelerator.name}",
+              metadata_value=(
+                  f"{task_test_config.num_slices}"
+                  f"x{task_test_config.accelerator.name}"
+              ),
           )
       )
-    if task_metric_config is not None and task_metric_config.tensorboard_summary:
+    if (
+        task_metric_config is not None
+        and task_metric_config.tensorboard_summary
+    ):
       test_config_meta.append(
           bigquery.MetadataHistoryRow(
               job_uuid=uuid,
@@ -509,8 +545,8 @@ def get_gce_job_status(
   MISSED - if any failure occurs in initialize & create_queued_resource
   FAILED - if any failure occurs in setup & run_model (including timeout of
   run_model) for SSH method.
-  FAILED - if any failure occurs in check_if_startup_script_end (including timeout of
-  check_if_startup_script_end) for startup script method.
+  FAILED - if any failure occurs in check_if_startup_script_end
+  (including timeout of check_if_startup_script_end) for startup script method.
   SUCCESS - end-to-end model tests are successful from provision to run_model
   """
   context = get_current_context()
@@ -521,7 +557,7 @@ def get_gce_job_status(
   # GCE SSH method
   if not use_startup_script:
     if isinstance(task_test_config.accelerator, test_config.Tpu):
-      # check wait status to see if wait_for_ready_queued_resource step is successful
+      # check wait status to see if wait_for_ready_queued_resource is successful
       wait_task = current_dag.get_task(
           task_id=f"{benchmark_id}.provision.create_queued_resource.wait_for_ready_queued_resource"
       )
@@ -556,7 +592,9 @@ def get_gce_job_status(
     run_model_state = run_model_ti.current_state()
 
     if run_model_state == TaskState.SUCCESS.value:
-      logging.info("The run_model state is success, and the job status is success.")
+      logging.info(
+          "The run_model state is success, and the job status is success."
+      )
       return bigquery.JobStatus.SUCCESS
 
     logging.info("The run_model state is failed, and the job status is failed.")
@@ -583,7 +621,9 @@ def get_gce_job_status(
     startup_script_ti = TaskInstance(startup_script_task, execution_date)
     startup_script_state = startup_script_ti.current_state()
     if startup_script_state == TaskState.FAILED.value:
-      logging.info("The startup_script state is failed, and the job status is failed.")
+      logging.info(
+          "The startup_script state is failed, and the job status is failed."
+      )
       return bigquery.JobStatus.FAILED
     else:
       logging.info(
@@ -615,7 +655,9 @@ def process_metrics(
   if task_metric_config:
     if task_metric_config.json_lines:
       absolute_path = (
-          os.path.join(folder_location, task_metric_config.json_lines.file_location)
+          os.path.join(
+              folder_location, task_metric_config.json_lines.file_location
+          )
           if task_metric_config.use_runtime_generated_gcs_folder
           else task_metric_config.json_lines.file_location
       )

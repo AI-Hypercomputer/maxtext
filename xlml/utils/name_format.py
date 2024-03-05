@@ -22,7 +22,8 @@ from dags import gcs_bucket
 
 @task
 def generate_run_name(benchmark_id: str) -> str:
-  """Generates a unique run name by appending the current datetime to benchmark_id.
+  """Generates a unique run name by appending the current
+  datetime to benchmark_id.
 
   Args:
     benchmark_id: Benchmark id of the test
@@ -33,8 +34,9 @@ def generate_run_name(benchmark_id: str) -> str:
 
 @task
 def generate_tb_file_location(run_name: str, base_output_directory: str) -> str:
-  """Generates a path to the tensorboard file to be used as a regex. Assumes the file is
-  located in <base_output_directory>/<run_name>/tensorboard/events.out.tfevents.*
+  """Generates a path to the tensorboard file to be used as a regex. Assumes
+  the file is located in:
+  <base_output_directory>/<run_name>/tensorboard/events.out.tfevents.*
 
   Args:
     run_name: run name for the tensorboard file location

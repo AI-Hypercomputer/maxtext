@@ -110,7 +110,9 @@ def get_tf_resnet_config(
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
 
-  set_up_cmds = common.install_tf_nightly() + common.set_up_google_tensorflow_models()
+  set_up_cmds = (
+      common.install_tf_nightly() + common.set_up_google_tensorflow_models()
+  )
   if not is_pjrt and is_pod:
     set_up_cmds += common.set_up_se_nightly()
 
@@ -199,7 +201,9 @@ def get_tf_dlrm_config(
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
 
-  set_up_cmds = common.install_tf_nightly() + common.set_up_google_tensorflow_models()
+  set_up_cmds = (
+      common.install_tf_nightly() + common.set_up_google_tensorflow_models()
+  )
   if not is_pjrt and is_pod:
     set_up_cmds += common.set_up_se_nightly()
 

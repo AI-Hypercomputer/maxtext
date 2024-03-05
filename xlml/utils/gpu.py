@@ -38,14 +38,15 @@ def get_image_from_family(project: str, family: str) -> compute_v1.Image:
   Retrieve the newest image that is part of a given family in a project.
 
   Args:
-    project: project ID or project number of the Cloud project you want to get image from.
+    project: project ID or project number of the Cloud project to get image.
     family: name of the image family you want to get image from.
 
   Returns:
     An Image object.
   """
   image_client = compute_v1.ImagesClient()
-  # List of public operating system (OS) images: https://cloud.google.com/compute/docs/images/os-details
+  # List of public operating system (OS) images:
+  # https://cloud.google.com/compute/docs/images/os-details
   newest_image = image_client.get_from_family(project=project, family=family)
   return newest_image
 
@@ -58,19 +59,23 @@ def disk_from_image(
     auto_delete: bool = True,
 ) -> compute_v1.AttachedDisk:
   """
-  Create an AttachedDisk object to be used in VM instance creation. Uses an image as the
-  source for the new disk.
+  Create an AttachedDisk object to be used in VM instance creation.
+  Uses an image as the source for the new disk.
 
   Args:
-    disk_type: the type of disk you want to create. This value uses the following format:
+    disk_type: the type of disk you want to create. This value uses the
+        following format:
         "zones/{zone}/diskTypes/(pd-standard|pd-ssd|pd-balanced|pd-extreme)".
         For example: "zones/us-west3-b/diskTypes/pd-ssd"
     disk_size_gb: size of the new disk in gigabytes
-    boot: boolean flag indicating whether this disk should be used as a boot disk of an instance
-    source_image: source image to use when creating this disk. You must have read access to this disk. This can be one
-        of the publicly available images or an image from one of your projects.
-        This value uses the following format: "projects/{project_name}/global/images/{image_name}"
-    auto_delete: boolean flag indicating whether this disk should be deleted with the VM that uses it
+    boot: boolean flag indicating whether this disk should be used as a boot
+        disk of an instance
+    source_image: source image to use when creating this disk. You must have
+        read access to this disk. This can be one of the publicly available
+        images or an image from one of your projects. This value uses the
+        following format: "projects/{project_name}/global/images/{image_name}"
+    auto_delete: boolean flag indicating whether this disk should be
+        deleted with the VM that uses it
 
   Returns:
     AttachedDisk object configured to be created using the specified image.
@@ -81,8 +86,8 @@ def disk_from_image(
   initialize_params.disk_size_gb = disk_size_gb
   initialize_params.disk_type = disk_type
   boot_disk.initialize_params = initialize_params
-  # Remember to set auto_delete to True if you want the disk to be deleted when you delete
-  # your VM instance.
+  # Remember to set auto_delete to True if you want the disk to be
+  # deleted when you delete your VM instance.
   boot_disk.auto_delete = auto_delete
   boot_disk.boot = boot
   return boot_disk
@@ -96,9 +101,11 @@ def create_metadata(key_val: Dict[str, str]) -> compute_v1.Metadata:
 
 @task
 def generate_gpu_name() -> str:
-  # note: GPU vm name need to match regex '(?:[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?)', while TPU vm allows '_'.
-  # return f'{base_gpu_name}-{str(uuid.uuid4())}'.replace('_', '-')
-  # If we use the above base_gpu_name in the return, some potion of the can be longer than 61 as in the regex.
+  # note: GPU vm name need to match regex
+  # '(?:[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?)', while TPU vm allows '_'. return
+  # f'{base_gpu_name}-{str(uuid.uuid4())}'.replace('_', '-')
+  # If we use the above base_gpu_name in the return, some potion of the can be
+  # longer than 61 as in the regex.
   return f"gpu-{str(uuid.uuid4())}"
 
 
@@ -140,19 +147,21 @@ def create_resource(
       delete_protection: bool = False,
   ) -> airflow.XComArg:
     """
-    Send an instance creation request to the Compute Engine API and wait for it to complete.
+    Send an instance creation request to the Compute Engine API and wait for
+    it to complete.
 
     Args:
         instance_name: name of the new virtual machine (VM) instance.
         accelerator: Description of GPU to create.
         ssh_keys: XCom value for SSH keys to communicate with these GPUs.
-        instance_termination_action: What action should be taken once a Spot VM is terminated.
-            Possible values: "STOP", "DELETE"
-        external_access: boolean flag indicating if the instance should have an external IPv4
-            address assigned.
-        spot: boolean value indicating if the new instance should be a Spot VM or not.
-        delete_protection: boolean value indicating if the new virtual machine should be
-            protected against deletion or not.
+        instance_termination_action: What action should be taken once a Spot VM
+            is terminated. Possible values: "STOP", "DELETE"
+        external_access: boolean flag indicating if the instance should have an
+            external IPv4 address assigned.
+        spot: boolean value indicating if the new instance should be a Spot VM
+            or not.
+        delete_protection: boolean value indicating if the new virtual machine
+            should be protected against deletion or not.
     Returns:
         Ip address of the instance object created.
     """
@@ -169,7 +178,10 @@ def create_resource(
     accelerators = [
         compute_v1.AcceleratorConfig(
             accelerator_count=accelerator.count,
-            accelerator_type=f"projects/{gcp.project_name}/zones/{gcp.zone}/acceleratorTypes/{accelerator.accelerator_type}",
+            accelerator_type=(
+                f"projects/{gcp.project_name}/zones/{gcp.zone}/"
+                f"acceleratorTypes/{accelerator.accelerator_type}"
+            ),
         )
     ]
     service_account = compute_v1.ServiceAccount(
@@ -217,7 +229,9 @@ def create_resource(
       instance.scheduling.provisioning_model = (
           compute_v1.Scheduling.ProvisioningModel.SPOT.name
       )
-      instance.scheduling.instance_termination_action = instance_termination_action
+      instance.scheduling.instance_termination_action = (
+          instance_termination_action
+      )
 
     if delete_protection:
       # Set the delete protection bit
@@ -235,7 +249,9 @@ def create_resource(
     operation = instance_client.insert(request=request)
     return operation.name
 
-  @task.sensor(poke_interval=60, timeout=timeout.total_seconds(), mode="reschedule")
+  @task.sensor(
+      poke_interval=60, timeout=timeout.total_seconds(), mode="reschedule"
+  )
   def wait_for_resource_creation(operation_name: airflow.XComArg):
     # Retrives the delete opeartion to check the status.
     client = compute_v1.ZoneOperationsClient()
@@ -247,14 +263,22 @@ def create_resource(
     operation = client.get(request=request)
     status = operation.status.name
     if status in ("RUNNING", "PENDING"):
-      logging.info(f"Resource create status: {status}, {operation.status_message}")
+      logging.info(
+          f"Resource create status: {status}, {operation.status_message}"
+      )
       return False
     else:
       if operation.error:
         logging.error(
-            f"Error during resource creation: [Code: {operation.http_error_status_code}]: {operation.http_error_message}",
+            (
+                "Error during resource creation: [Code:"
+                f" {operation.http_error_status_code}]:"
+                f" {operation.http_error_message}"
+            ),
         )
-        raise operation.exception() or RuntimeError(operation.http_error_message)
+        raise operation.exception() or RuntimeError(
+            operation.http_error_message
+        )
       elif operation.warnings:
         logging.warning(f"Warnings during resource creation:\n")
         for warning in operation.warnings:
@@ -263,14 +287,18 @@ def create_resource(
 
   @task
   def get_ip_address(instance: str) -> airflow.XComArg:
-    # It takes time to be able to use the ssh with the ip address even though the creation
-    # request is complete. We intentionally sleep for 60s to wait for the ip address to be
-    # accessible.
+    # It takes time to be able to use the ssh with the ip address
+    # even though the creation request is complete. We intentionally
+    # sleep for 60s to wait for the ip address to be accessible.
     time.sleep(60)
     instance_client = compute_v1.InstancesClient()
-    instance = instance_client.get(project=project_id, zone=zone, instance=instance)
+    instance = instance_client.get(
+        project=project_id, zone=zone, instance=instance
+    )
     if len(instance.network_interfaces) > 1:
-      logging.warning(f"GPU instance {gpu_name} has more than one network interface.")
+      logging.warning(
+          f"GPU instance {gpu_name} has more than one network interface."
+      )
     return instance.network_interfaces[0].network_i_p
 
   operation = create_resource_request(
@@ -342,15 +370,23 @@ def delete_resource(instance_name: airflow.XComArg, project_id: str, zone: str):
     operation = client.get(request=request)
     status = operation.status.name
     if status in ("RUNNING", "PENDING"):
-      logging.info(f"Resource deletion status: {status}, {operation.status_message}")
+      logging.info(
+          f"Resource deletion status: {status}, {operation.status_message}"
+      )
       return False
     else:
       if operation.error:
         logging.error(
-            f"Error during resource deletion: [Code: {operation.http_error_status_code}]: {operation.http_error_message}",
+            (
+                "Error during resource deletion: [Code:"
+                f" {operation.http_error_status_code}]:"
+                f" {operation.http_error_message}"
+            ),
         )
         logging.error(f"Operation ID: {operation.name}")
-        raise operation.exception() or RuntimeError(operation.http_error_message)
+        raise operation.exception() or RuntimeError(
+            operation.http_error_message
+        )
       elif operation.warnings:
         logging.warning(f"Warnings during resource deletion:\n")
         for warning in operation.warnings:

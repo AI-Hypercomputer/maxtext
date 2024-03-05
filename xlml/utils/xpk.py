@@ -57,8 +57,15 @@ def run_workload(
       "set -xue",
       "git clone https://github.com/google/xpk.git /tmp/xpk",
       "cd /tmp/xpk",
-      "curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg",
-      'echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list',
+      (
+          "curl https://packages.cloud.google.com/apt/doc/apt-key.gpg |"
+          " gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg"
+      ),
+      (
+          'echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg]'
+          ' https://packages.cloud.google.com/apt cloud-sdk main" |'
+          " tee -a /etc/apt/sources.list.d/google-cloud-sdk.list"
+      ),
       "apt-get update && apt-get install -y google-cloud-cli",
       "apt-get install -y kubectl",
       "apt-get install -y google-cloud-cli-gke-gcloud-auth-plugin",
@@ -66,8 +73,9 @@ def run_workload(
       f"gcloud config set compute/zone {zone}",
       (
           "python3 xpk.py workload create"
-          f" --cluster={cluster_name} --workload={workload_id} --command='{run_cmds}'"
-          f" --tpu-type={accelerator_type} --num-slices={num_slices} --docker-image={docker_image}"
+          f" --cluster={cluster_name} --workload={workload_id}"
+          f" --command='{run_cmds}' --tpu-type={accelerator_type}"
+          f" --num-slices={num_slices} --docker-image={docker_image}"
       ),
   )
 

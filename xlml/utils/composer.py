@@ -43,7 +43,11 @@ def get_composer_data(project: str, region: str, env: str) -> Mapping[str, str]:
   Returns:
   A dict mapping metadata.
   """
-  request_endpoint = f"https://composer.googleapis.com/v1beta1/projects/{project}/locations/{region}/environments/{env}"
+  request_endpoint = (
+      "https://composer.googleapis.com/"
+      f"v1beta1/projects/{project}/locations/"
+      f"{region}/environments/{env}"
+  )
   response = requests.get(request_endpoint, headers=get_headers())
   print("response.json()", response.json())
   return response.json()

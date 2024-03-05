@@ -99,11 +99,15 @@ class BigQueryMetricClient:
 
   @property
   def metric_history_table_id(self):
-    return ".".join((self.project, self.database, BENCHMARK_BQ_METRIC_TABLE_NAME))
+    return ".".join(
+        (self.project, self.database, BENCHMARK_BQ_METRIC_TABLE_NAME)
+    )
 
   @property
   def metadata_history_table_id(self):
-    return ".".join((self.project, self.database, BENCHMARK_BQ_METADATA_TABLE_NAME))
+    return ".".join(
+        (self.project, self.database, BENCHMARK_BQ_METADATA_TABLE_NAME)
+    )
 
   def is_valid_metric(self, value: float):
     """Check if float metric is valid for BigQuery table."""
@@ -140,7 +144,9 @@ class BigQueryMetricClient:
       ]:
         if not rows:
           continue
-        logging.info(f"Inserting {len(rows)} rows into BigQuery table {table_id}.")
+        logging.info(
+            f"Inserting {len(rows)} rows into BigQuery table {table_id}."
+        )
         table = self.client.get_table(table_id)
         errors = self.client.insert_rows(table, rows)
 

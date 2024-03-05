@@ -271,9 +271,13 @@ with models.DAG(
       "--max_seq_length 512",
       "--eval_steps 1000",
   ]
-  jax_bert_v4_mnli_extra_flags = jax_bert_mnli_extra_flags + jax_bert_v4_batch_size
+  jax_bert_v4_mnli_extra_flags = (
+      jax_bert_mnli_extra_flags + jax_bert_v4_batch_size
+  )
   jax_bert_v4_mnli_conv_extra_flags = (
-      jax_bert_mnli_extra_flags + jax_bert_v4_batch_size + jax_bert_conv_extra_flags
+      jax_bert_mnli_extra_flags
+      + jax_bert_v4_batch_size
+      + jax_bert_conv_extra_flags
   )
 
   jax_bert_mnli_v4_8 = flax_config.get_flax_bert_config(
@@ -300,9 +304,13 @@ with models.DAG(
       "--max_seq_length 128",
       "--eval_steps 100",
   ]
-  jax_bert_v4_mrpc_extra_flags = jax_bert_mrpc_extra_flags + jax_bert_v4_batch_size
+  jax_bert_v4_mrpc_extra_flags = (
+      jax_bert_mrpc_extra_flags + jax_bert_v4_batch_size
+  )
   jax_bert_v4_mrpc_conv_extra_flags = (
-      jax_bert_mrpc_extra_flags + jax_bert_v4_batch_size + jax_bert_conv_extra_flags
+      jax_bert_mrpc_extra_flags
+      + jax_bert_v4_batch_size
+      + jax_bert_conv_extra_flags
   )
 
   jax_bert_mrpc_v4_8 = flax_config.get_flax_bert_config(

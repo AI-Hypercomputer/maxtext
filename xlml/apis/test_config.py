@@ -253,7 +253,9 @@ class TpuGkeTest(TestConfig[Tpu]):
 
 def _load_compiled_jsonnet(test_name: str) -> Any:
   # TODO(wcromar): Parse GPU tests too
-  config_dir = os.environ.get('XLMLTEST_CONFIGS', '/home/airflow/gcs/dags/dags/jsonnet')
+  config_dir = os.environ.get(
+      'XLMLTEST_CONFIGS', '/home/airflow/gcs/dags/dags/jsonnet'
+  )
   test_path = os.path.join(config_dir, test_name)
   with open(test_path, 'r') as f:
     test = json.load(f)
@@ -296,7 +298,8 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
         test_name=test['testName'],
         accelerator=Tpu(
             version=TpuVersion(
-                str(test['accelerator']['version']) + test['accelerator']['variant']
+                str(test['accelerator']['version'])
+                + test['accelerator']['variant']
             ),
             cores=test['accelerator']['size'],
             runtime_version=test['tpuSettings']['softwareVersion'],
@@ -313,7 +316,10 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
 
   @staticmethod
   def from_jax(
-      test_name: str, reserved: bool = False, network='default', subnetwork='default'
+      test_name: str,
+      reserved: bool = False,
+      network='default',
+      subnetwork='default',
   ):
     """Parses a compiled legacy JSonnet config test from `tests/jax`."""
     test = _load_compiled_jsonnet(test_name)
@@ -330,7 +336,10 @@ class JSonnetTpuVmTest(TestConfig[Tpu]):
 
   @staticmethod
   def from_pytorch(
-      test_name: str, reserved: bool = False, network='default', subnetwork='default'
+      test_name: str,
+      reserved: bool = False,
+      network='default',
+      subnetwork='default',
   ):
     """Parses a compiled legacy JSonnet test config from `tests/pytorch`."""
     test = _load_compiled_jsonnet(test_name)

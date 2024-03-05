@@ -110,7 +110,9 @@ def get_tf_resnet_config(
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
 
-  set_up_cmds = common.install_tf_2_16() + common.set_up_google_tensorflow_2_16_models()
+  set_up_cmds = (
+      common.install_tf_2_16() + common.set_up_google_tensorflow_2_16_models()
+  )
   if not is_pjrt and is_pod:
     set_up_cmds += common.set_up_se_nightly()
 
@@ -199,7 +201,9 @@ def get_tf_dlrm_config(
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
 
-  set_up_cmds = common.install_tf_2_16() + common.set_up_google_tensorflow_2_16_models()
+  set_up_cmds = (
+      common.install_tf_2_16() + common.set_up_google_tensorflow_2_16_models()
+  )
   if not is_pjrt and is_pod:
     set_up_cmds += common.set_up_se_nightly()
 
@@ -311,7 +315,10 @@ def get_tf_dlrm_config(
 
 def export_env_variable(is_pod: bool, is_pjrt: bool) -> str:
   """Export environment variables for training if any."""
-  stmts = ["export WRAPT_DISABLE_EXTENSIONS=true", "export TF_USE_LEGACY_KERAS=1"]
+  stmts = [
+      "export WRAPT_DISABLE_EXTENSIONS=true",
+      "export TF_USE_LEGACY_KERAS=1",
+  ]
   if is_pod:
     stmts.append("export TPU_LOAD_LIBRARY=0")
   elif is_pjrt:

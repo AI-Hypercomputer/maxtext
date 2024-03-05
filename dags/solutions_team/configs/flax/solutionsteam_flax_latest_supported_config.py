@@ -513,7 +513,9 @@ def get_flax_bert_config(
   )
 
   set_up_cmds = get_flax_bert_setup_cmds()
-  run_model_cmds = get_flax_bert_run_model_cmds(task_name, num_train_epochs, extraFlags)
+  run_model_cmds = get_flax_bert_run_model_cmds(
+      task_name, num_train_epochs, extraFlags
+  )
 
   job_test_config = test_config.TpuVmTest(
       test_config.Tpu(

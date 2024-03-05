@@ -24,7 +24,7 @@ class GCPConfig:
   """This is a class to set up configs of GCP.
 
   Attributes:
-    project_name: The name of a project to provision resource and run a test job.
+    project_name: Name of a project to provision resource and run a test job.
     zone: The zone to provision resource and run a test job.
     dataset_name: The option of dataset for metrics.
     dataset_project: The name of a project that hosts the dataset.

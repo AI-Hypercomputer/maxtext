@@ -128,7 +128,9 @@ def get_torchbench_tpu_config(
 
 
 # Below is the setup for torchbench GPU run.
-def set_up_torchbench_gpu(model_name: str, nvidia_driver_version: str) -> Tuple[str]:
+def set_up_torchbench_gpu(
+    model_name: str, nvidia_driver_version: str
+) -> Tuple[str]:
   """Common set up for TorchBench."""
 
   def model_install_cmds(output_file=None) -> str:

@@ -18,7 +18,9 @@ def get_authenticated_client(
     project_name: str, region: str, cluster_name: str
 ) -> kubernetes.client.ApiClient:
   container_client = container_v1.ClusterManagerClient()
-  cluster_path = f'projects/{project_name}/locations/{region}/clusters/{cluster_name}'
+  cluster_path = (
+      f'projects/{project_name}/locations/{region}/clusters/{cluster_name}'
+  )
   response = container_client.get_cluster(name=cluster_path)
   creds, _ = google.auth.default()
   auth_req = google.auth.transport.requests.Request()
@@ -62,7 +64,9 @@ def run_job(
     return resp.metadata.name
 
   @task.sensor(
-      poke_interval=60, timeout=job_create_timeout.total_seconds(), mode='reschedule'
+      poke_interval=60,
+      timeout=job_create_timeout.total_seconds(),
+      mode='reschedule',
   )
   def stream_logs(name: str):
     client = get_authenticated_client(gcp.project_name, gcp.zone, cluster_name)
@@ -96,13 +100,18 @@ def run_job(
           field_selector=f'metadata.name={name}',
       ):
         status = event['object'].status
-        logging.info(f'Pod {event["object"].metadata.name} status: {status.phase}')
+        logging.info(
+            f'Pod {event["object"].metadata.name} status: {status.phase}'
+        )
         if status.phase != 'Pending':
           break
 
       logging.info(f'Streaming pod logs for {name}...')
       for line in logs_watcher.stream(
-          core_api.read_namespaced_pod_log, name, namespace, _request_timeout=3600
+          core_api.read_namespaced_pod_log,
+          name,
+          namespace,
+          _request_timeout=3600,
       ):
         logging.info(f'{name}] {line}')
 
@@ -124,7 +133,9 @@ def run_job(
     with concurrent.futures.ThreadPoolExecutor() as executor:
       futures = []
       for pod in pods.items:
-        f = executor.submit(_watch_pod, pod.metadata.name, pod.metadata.namespace)
+        f = executor.submit(
+            _watch_pod, pod.metadata.name, pod.metadata.namespace
+        )
         futures.append(f)
 
       # Wait for pods to complete, and exit with the first non-zero exit code.

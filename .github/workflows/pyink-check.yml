@@ -1,4 +1,4 @@
-name: Pre-commit
+name: Formatter
 
 on:
   pull_request:
@@ -16,5 +16,5 @@ jobs:
       with:
         # Note: this should match Cloud Composer
         # https://cloud.google.com/composer/docs/concepts/versioning/composer-versions
-        python-version: '3.8'
+        python-version: '3.10'
     - uses: pre-commit/action@v3.0.0

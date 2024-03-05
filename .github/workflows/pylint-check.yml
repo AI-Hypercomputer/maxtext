@@ -1,4 +1,4 @@
-name: Pylint
+name: Linter
 
 on:
   pull_request:
@@ -9,7 +9,7 @@ on:
     branches: [master]
 
 jobs:
-  build:
+  linting_check:
     runs-on: ubuntu-latest
     strategy:
       matrix:

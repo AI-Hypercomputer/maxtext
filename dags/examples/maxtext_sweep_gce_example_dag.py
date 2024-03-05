@@ -44,21 +44,23 @@ with models.DAG(
   ]
 
   # Get list of MaxText GCE QueuedResource jobs
-  maxtext_sweep_gce_test = maxtext_sweep_gce_config.get_maxtext_sweep_gce_config(
-      test_owner=test_owner.RAYMOND_Z,
-      project_name=Project.TPU_PROD_ENV_MULTIPOD.value,
-      tpu_zone=Zone.US_CENTRAL2_B.value,
-      time_out_in_min=60,
-      is_tpu_reserved=False,
-      tpu_version=TpuVersion.V4,
-      tpu_cores=8,
-      runtime_version=RuntimeVersion.TPU_UBUNTU2204_BASE.value,
-      base_output_directory=base_output_directory,
-      num_slices=[1],
-      run_name_prefix="maxtext-1b",
-      base_set_up_cmds=base_set_up_cmds,
-      base_run_model_cmds=base_run_model_cmds,
-      sweep_params={"M_PER_DEVICE_BATCH_SIZE": [1, 2, 4]},
+  maxtext_sweep_gce_test = (
+      maxtext_sweep_gce_config.get_maxtext_sweep_gce_config(
+          test_owner=test_owner.RAYMOND_Z,
+          project_name=Project.TPU_PROD_ENV_MULTIPOD.value,
+          tpu_zone=Zone.US_CENTRAL2_B.value,
+          time_out_in_min=60,
+          is_tpu_reserved=False,
+          tpu_version=TpuVersion.V4,
+          tpu_cores=8,
+          runtime_version=RuntimeVersion.TPU_UBUNTU2204_BASE.value,
+          base_output_directory=base_output_directory,
+          num_slices=[1],
+          run_name_prefix="maxtext-1b",
+          base_set_up_cmds=base_set_up_cmds,
+          base_run_model_cmds=base_run_model_cmds,
+          sweep_params={"M_PER_DEVICE_BATCH_SIZE": [1, 2, 4]},
+      )
   )
 
   # Run jobs

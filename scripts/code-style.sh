@@ -21,7 +21,7 @@ FOLDERS_TO_FORMAT=("dags" "xlml")
 
 for folder in "${FOLDERS_TO_FORMAT[@]}"
 do
-  pyink "$folder" --pyink-indentation=2 --pyink-use-majority-quotes
+  pyink "$folder" --pyink-indentation=2 --pyink-use-majority-quotes --line-length=80
 done
 
 for folder in "${FOLDERS_TO_FORMAT[@]}"

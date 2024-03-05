@@ -64,7 +64,9 @@ def get_maxtext_sweep_gke_config(
     del config_dict["NUM_SLICES"]
 
     # Export sweep params as env variables for MaxText to read
-    run_model_cmds = [f"export {key}={value}" for (key, value) in config_dict.items()]
+    run_model_cmds = [
+        f"export {key}={value}" for (key, value) in config_dict.items()
+    ]
     for cmd in base_run_model_cmds:
       run_model_cmds.append(cmd)
 

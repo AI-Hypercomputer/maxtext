@@ -3,6 +3,6 @@ repos:
     rev: 23.10.0
     hooks:
       - id: pyink
-        args: [--pyink-indentation=2, --pyink-use-majority-quotes]
-        language_version: python3.8
+        args: [--pyink-indentation=2, --pyink-use-majority-quotes, --line-length=80]
+        language_version: python3.10
         verbose: true

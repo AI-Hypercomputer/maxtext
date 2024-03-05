@@ -35,7 +35,9 @@ with models.DAG(
   log_dir_prefix = f"{gcs_bucket.XLML_OUTPUT_DIR}/pax/nightly"
 
   # GPT-3 config with 1B params on c4 dataset with SPMD and Adam
-  c4spmd1b_pretraining_exp_path = "tasks.lm.params.c4.C4Spmd1BAdam4ReplicasLimitSteps"
+  c4spmd1b_pretraining_exp_path = (
+      "tasks.lm.params.c4.C4Spmd1BAdam4ReplicasLimitSteps"
+  )
   pax_nightly_c4spmd1b_pretraining_v4_8 = pax_config.get_pax_lm_config(
       tpu_version=TpuVersion.V4,
       tpu_cores=8,

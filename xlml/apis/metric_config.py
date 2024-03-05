@@ -90,7 +90,8 @@ class ProfileConfig:
 
 @dataclasses.dataclass
 class MetricConfig:
-  """This is a class to set up config of Benchmark metric, dimension, and profile.
+  """This is a class to set up config of Benchmark metric,
+  dimension, and profile.
 
   Attributes:
     json_lines: The config for JSON Lines input.

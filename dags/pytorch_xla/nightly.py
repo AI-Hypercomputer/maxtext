@@ -56,7 +56,9 @@ US_EAST1_C = gcp_config.GCPConfig(
 @task_group(prefix_group_id=False)
 def torchvision():
   mnist_v2_8 = task.TpuQueuedResourceTask(
-      test_config.JSonnetTpuVmTest.from_pytorch("pt-nightly-mnist-pjrt-func-v2-8-1vm"),
+      test_config.JSonnetTpuVmTest.from_pytorch(
+          "pt-nightly-mnist-pjrt-func-v2-8-1vm"
+      ),
       US_CENTRAL1_C,
   ).run()
   resnet_v2_8 = task.TpuQueuedResourceTask(
@@ -108,7 +110,9 @@ def torchvision():
   resnet_v2_8 >> resnet_v3_8_tests
 
   resnet_v100_2x2 = task.GpuGkeTask(
-      test_config.JSonnetGpuTest.from_pytorch("pt-nightly-resnet50-mp-fake-v100-x2x2"),
+      test_config.JSonnetGpuTest.from_pytorch(
+          "pt-nightly-resnet50-mp-fake-v100-x2x2"
+      ),
       US_CENTRAL1,
       "gpu-uc1",
   ).run()
@@ -151,7 +155,9 @@ def huggingface():
       US_CENTRAL1_C,
   ).run()
   accelerate_v4_8 = task.TpuQueuedResourceTask(
-      test_config.JSonnetTpuVmTest.from_pytorch("pt-nightly-accelerate-smoke-v4-8-1vm"),
+      test_config.JSonnetTpuVmTest.from_pytorch(
+          "pt-nightly-accelerate-smoke-v4-8-1vm"
+      ),
       US_CENTRAL2_B,
   ).run()
   diffusers_v4_8 = task.TpuQueuedResourceTask(

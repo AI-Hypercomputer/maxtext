@@ -57,7 +57,9 @@ def create_queued_resource(
     gcp: gcp_config.GCPConfig,
     ssh_keys: airflow.XComArg,
     timeout: datetime.timedelta,
-    task_test_config: Union[test_config.TpuVmTest, test_config.JSonnetTpuVmTest],
+    task_test_config: Union[
+        test_config.TpuVmTest, test_config.JSonnetTpuVmTest
+    ],
     use_startup_script: bool = False,
 ) -> Tuple[TaskGroup, airflow.XComArg]:
   """Request a QueuedResource and wait until the nodes are created.
@@ -77,7 +79,9 @@ def create_queued_resource(
   """
 
   @task
-  def create_queued_resource_request(tpu_name: str, ssh_keys: ssh.SshKeys) -> str:
+  def create_queued_resource_request(
+      tpu_name: str, ssh_keys: ssh.SshKeys
+  ) -> str:
     creds, _ = google.auth.default()
     client = tpu_api.TpuClient(credentials=creds)
 
@@ -89,8 +93,10 @@ def create_queued_resource(
       multi_node_params = None
     else:
       node_id = None
-      multi_node_params = tpu_api.types.QueuedResource.Tpu.NodeSpec.MultiNodeParams(
-          node_count=task_test_config.num_slices, node_id_prefix=tpu_name
+      multi_node_params = (
+          tpu_api.types.QueuedResource.Tpu.NodeSpec.MultiNodeParams(
+              node_count=task_test_config.num_slices, node_id_prefix=tpu_name
+          )
       )
 
     startup_script_command = ''
@@ -99,7 +105,9 @@ def create_queued_resource(
       main_command = '\n'.join(
           task_test_config.set_up_cmds + task_test_config.run_model_cmds
       )
-      startup_script_command = startup_script.generate_startup_script(main_command)
+      startup_script_command = startup_script.generate_startup_script(
+          main_command
+      )
 
     metadata = {
         'ssh-keys': f'ml-auto-solutions:{ssh_keys.public}',
@@ -108,13 +116,19 @@ def create_queued_resource(
 
     create_tpu_timeout_in_sec = int(timeout.total_seconds())
     run_model_timeout = int(task_test_config.time_out_in_min)
-    run_model_timeout_in_sec = run_model_timeout * 60 if run_model_timeout else 0
-    # Time to live (ttl) is tpu provision timout + tpu run model timeout + 1 hour buffer time (provision, post_process, etc)
+    run_model_timeout_in_sec = (
+        run_model_timeout * 60 if run_model_timeout else 0
+    )
+    # Time to live (ttl) is combination of:
+    # 1) tpu provision timeout
+    # 2) tpu run model timeout
+    # 3) 1 hour buffer timeout (provision, post_process, etc)
     ttl = create_tpu_timeout_in_sec + run_model_timeout_in_sec + 3600
     labels = {
         TTL: str(ttl),
     }
 
+    accelerator = task_test_config.accelerator
     queued_resource = tpu_api.QueuedResource(
         # TODO(ranran): enable configuration via `AcceleratorConfig`
         tpu=tpu_api.QueuedResource.Tpu(
@@ -124,12 +138,12 @@ def create_queued_resource(
                     multi_node_params=multi_node_params,
                     parent=parent,
                     node=tpu_api.Node(
-                        accelerator_type=task_test_config.accelerator.name,
+                        accelerator_type=accelerator.name,
                         description='noteardown',
-                        runtime_version=task_test_config.accelerator.runtime_version,
+                        runtime_version=accelerator.runtime_version,
                         network_config=tpu_api.NetworkConfig(
-                            network=task_test_config.accelerator.network,
-                            subnetwork=task_test_config.accelerator.subnetwork,
+                            network=accelerator.network,
+                            subnetwork=accelerator.subnetwork,
                             enable_external_ips=True,
                         ),
                         metadata=metadata,
@@ -139,7 +153,7 @@ def create_queued_resource(
             ],
         ),
         guaranteed=tpu_api.QueuedResource.Guaranteed(
-            reserved=task_test_config.accelerator.reserved,
+            reserved=accelerator.reserved,
         ),
         queueing_policy=tpu_api.QueuedResource.QueueingPolicy(
             valid_until_duration=Duration(seconds=int(timeout.total_seconds())),
@@ -157,7 +171,9 @@ def create_queued_resource(
 
     return response.name
 
-  @task.sensor(poke_interval=60, timeout=timeout.total_seconds(), mode='reschedule')
+  @task.sensor(
+      poke_interval=60, timeout=timeout.total_seconds(), mode='reschedule'
+  )
   def wait_for_ready_queued_resource(qualified_name: str):
     creds, _ = google.auth.default()
     client = tpu_api.TpuClient(credentials=creds)
@@ -184,7 +200,9 @@ def create_queued_resource(
 
     return ssh_tpu.override(
         task_id='check_if_startup_script_end',
-        execution_timeout=datetime.timedelta(minutes=task_test_config.time_out_in_min),
+        execution_timeout=datetime.timedelta(
+            minutes=task_test_config.time_out_in_min
+        ),
         owner=task_test_config.task_owner,
     )(
         queued_resource,
@@ -197,9 +215,9 @@ def create_queued_resource(
     qualified_name = create_queued_resource_request(tpu_name, ssh_keys)
 
     if use_startup_script:
-      wait_for_ready_queued_resource(qualified_name) >> check_if_startup_script_end(
-          qualified_name, ssh_keys
-      )
+      wait_for_ready_queued_resource(
+          qualified_name
+      ) >> check_if_startup_script_end(qualified_name, ssh_keys)
     else:
       wait_for_ready_queued_resource(qualified_name)
 
@@ -287,10 +305,12 @@ def delete_queued_resource(qualified_name: airflow.XComArg):
     op = client.get_operation(operations.GetOperationRequest(name=op_name))
     return op.done
 
-  delete_tpu_nodes = delete_tpu_nodes_request(qualified_name) >> wait_for_tpu_deletion(
+  delete_tpu_nodes = delete_tpu_nodes_request(
+      qualified_name
+  ) >> wait_for_tpu_deletion(qualified_name)
+  qr_op_name = delete_tpu_nodes >> delete_queued_resource_request(
       qualified_name
   )
-  qr_op_name = delete_tpu_nodes >> delete_queued_resource_request(qualified_name)
   wait_for_queued_resource_deletion(qr_op_name)
 
 
@@ -336,13 +356,17 @@ def ssh_tpu(
   ]
 
   if all_workers:
-    endpoints = itertools.chain.from_iterable(node.network_endpoints for node in nodes)
+    endpoints = itertools.chain.from_iterable(
+        node.network_endpoints for node in nodes
+    )
   else:
     endpoints = [nodes[0].network_endpoints[0]]
 
   use_external_ips = os.getenv('XLMLTEST_SSH_EXTERNAL_IPS', '0') == '1'
   if use_external_ips:
-    ip_addresses = [endpoint.access_config.external_ip for endpoint in endpoints]
+    ip_addresses = [
+        endpoint.access_config.external_ip for endpoint in endpoints
+    ]
   else:
     ip_addresses = [endpoint.ip_address for endpoint in endpoints]
 
@@ -379,7 +403,9 @@ def ssh_tpu(
 
 
 @task
-def clean_up_idle_queued_resources(project_name: str, zones: Iterable[str]) -> None:
+def clean_up_idle_queued_resources(
+    project_name: str, zones: Iterable[str]
+) -> None:
   """Clean up queued resources in FAILED or SUSPENDED states.
 
   Args:
@@ -430,13 +456,19 @@ def clean_up_idle_nodes(project_name: str, zones: Iterable[str]) -> None:
         create_time = node.create_time
         current_time = datetime.datetime.now(datetime.timezone.utc)
         logging.info(
-            f'Checking node {node.name}: create_time is {create_time}, and current_time is {current_time}'
+            (
+                f'Checking node {node.name}: create_time is {create_time},'
+                f' and current_time is {current_time}.'
+            )
         )
         active_time = current_time - create_time
         delta = active_time.total_seconds() - ttl
         if delta > 0:
           datetime_delta = str(datetime.timedelta(seconds=delta))
           logging.info(
-              f'Deleting node {node.name} due to exceeding its time to live (TTL) by {datetime_delta}.'
+              (
+                  f'Deleting node {node.name} due to exceeding its time to'
+                  f' live (TTL) by {datetime_delta}.'
+              )
           )
           client.delete_node(name=node.name)

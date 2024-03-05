@@ -94,7 +94,9 @@ class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
       exclude_tag_patterns: Optional[Iterable[str]],
       expected_value: bool,
   ):
-    actual_value = metric.is_valid_tag(tag, include_tag_patterns, exclude_tag_patterns)
+    actual_value = metric.is_valid_tag(
+        tag, include_tag_patterns, exclude_tag_patterns
+    )
     self.assertEqual(actual_value, expected_value)
 
   def test_read_from_tb(self):
@@ -165,7 +167,9 @@ class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
       writer.write_all([test_run1, test_run2])
 
     base_id = "test_json_lines"
-    actual_metrics, actual_metadata = metric.process_json_lines("test_json_lines", path)
+    actual_metrics, actual_metadata = metric.process_json_lines(
+        "test_json_lines", path
+    )
     uuid_1 = hashlib.sha256(str(base_id + "0").encode("utf-8")).hexdigest()
 
     accuracy_metric_1 = bigquery.MetricHistoryRow(
@@ -313,7 +317,9 @@ class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
               )
           )
 
-          self.assert_metric_and_dimension_equal([], [], actual_value, expected_value)
+          self.assert_metric_and_dimension_equal(
+              [], [], actual_value, expected_value
+          )
 
   def test_add_test_config_metadata(self):
     base_id = "test_run"
