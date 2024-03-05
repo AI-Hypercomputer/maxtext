@@ -152,26 +152,32 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
 elif [[ $MODE == "nightly" ]]; then
 # Nightly mode
     if [[ $DEVICE == "gpu" ]]; then
-    # Not supported for gpu right now
-        exit 1
-    fi
-    echo "Installing jax-head, jaxlib-nightly"
-    # Install jax-nightly
-    pip3 install --pre -U jax -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
-    # Install jaxlib-nightly
-    pip3 install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
+        echo "Installing jax-nightly, jaxlib-nightly"
+        # Install jax-nightly
+        pip3 install --pre -U jax -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+        # Install jaxlib-nightly
+        pip3 install -U --pre jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_cuda12_releases.html
+    elif [[ $DEVICE == "tpu" ]]; then
+        echo "Installing jax-nightly, jaxlib-nightly"
+        # Install jax-nightly
+        pip3 install --pre -U jax -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+        # Install jaxlib-nightly
+        pip3 install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 
-    if [[ -n "$LIBTPU_GCS_PATH" ]]; then
-        # Install custom libtpu
-        echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
-        # Install required dependency
-        pip3 install -U crcmod
-        # Copy libtpu.so from GCS path
-        gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
-    else
-        # Install libtpu-nightly
-        echo "Installing libtpu-nightly"
-        pip3 install libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html -U --pre
+        if [[ -n "$LIBTPU_GCS_PATH" ]]; then
+            # Install custom libtpu
+            echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
+            # Install required dependency
+            pip3 install -U crcmod
+            # Copy libtpu.so from GCS path
+            gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+        else
+            # Install libtpu-nightly
+            echo "Installing libtpu-nightly"
+            pip3 install libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html -U --pre
+        fi
+        echo "Installing nightly tensorboard plugin profile"
+        pip3 install tbp-nightly --upgrade
     fi
     echo "Installing nightly tensorboard plugin profile"
     pip3 install tbp-nightly --upgrade
