@@ -34,7 +34,7 @@ import checkpointing
 import max_utils
 import max_logging
 import pyconfig
-from train import setup_mesh_and_model, get_first_step, validate_train_config
+from train import setup_mesh_and_model, validate_train_config
 
 from layers import models
 
@@ -75,13 +75,14 @@ def checkpoint_loop(config, state=None):
     else: # Checkpoint was unavailable, state needs to be initialized
       raise Exception("Checkpoint not available")
     max_logging.log(f"Finished step {step}, sleeping for 20s...")
-    time.sleep(20)
+    # time.sleep(20)
 
   if config.gcs_csv_folder != '':
     max_logging.log("Uploading metrics to GCS")
-    csv_file = f"{config.run_name}_{jax.process_index()}.csv"
+    csv_file = f"{jax.process_index()}.csv"
     # Update the raw metrics CSV file to GCS.
-    max_utils.upload_csv(csv_file, ckpt_read_time, config.gcs_csv_folder)
+    metrics_path = os.path.join(config.gcs_csv_folder, config.run_name, csv_file)
+    max_utils.upload_csv(csv_file, ckpt_read_time, metrics_path)
 
   max_utils.close_summary_writer(writer)
   return state

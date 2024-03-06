@@ -28,10 +28,10 @@ bash preflight.sh PLATFORM=$PLATFORM
 
 # Train
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
-python3 MaxText/$SCRIPT MaxText/configs/base.yml run_name=$RUN_NAME\
+python3 MaxText/$EXECUTABLE MaxText/configs/base.yml run_name=$RUN_NAME\
     steps=$STEPS checkpoint_period=1 per_device_batch_size=2 enable_checkpointing=true async_checkpointing=false\
     enable_profiler=false remat_policy=full global_parameter_scale=64\
-    max_target_length=2048 base_output_directory=$OUTPUT_PATH\
+    max_target_length=2048 base_output_directory=$OUTPUT_PATH hardware=$HARDWARE\
     dataset_path=$DATASET_PATH use_iota_embed=true reuse_example_batch=1\
     attention='flash' gcs_metrics=false gcs_csv_folder=$GCS_METRICS_DIR bq_dataset=$BQ_DATASET\
     load_full_state_path=$PREVIOUS_STATE

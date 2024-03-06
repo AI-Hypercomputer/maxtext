@@ -89,13 +89,14 @@ def checkpoint_loop(config, state=None):
         ckpt_save_time.append([jax.process_index(), step, (end_time-start_time).total_seconds()])
         max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint saved in {(end_time-start_time).total_seconds()}, "
                         f"step {step}, on host 0")
-        time.sleep(300)
+        time.sleep(20)
 
   if config.gcs_csv_folder != '':
     max_logging.log("Uploading metrics to GCS")
-    csv_file = f"{config.run_name}_{jax.process_index()}.csv"
+    csv_file = f"{jax.process_index()}.csv"
     # Update the raw metrics CSV file to GCS.
-    max_utils.upload_csv(csv_file, ckpt_save_time, config.gcs_csv_folder)
+    metrics_path = os.path.join(config.gcs_csv_folder, config.run_name, csv_file)
+    max_utils.upload_csv(csv_file, ckpt_save_time, metrics_path)
 
   max_utils.close_summary_writer(writer)
   return state
