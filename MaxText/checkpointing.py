@@ -132,50 +132,44 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
                                       default=orbax.checkpoint.args.StandardRestore(abstract_unboxed_pre_state),
                                       iter=grain.PyGrainCheckpointRestore(data_iterator.local_iterator)
                                     )), None
-      else:
+
+      def  map_to_pspec(data, pspec):
         if enable_single_replica_ckpt_restoring:
           orbax.checkpoint.type_handlers.register_type_handler(
             jax.Array,
             orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(),
             override=True)
-          def  map_to_pspec(data, pspec):
-            orbax.checkpoint.type_handlers.register_type_handler(
-              jax.Array,
-              orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(),
-              override=True)
-            replica_axis_index = 0  # for maxtext data is the first dimension
-            replica_devices = _replica_devices(mesh.devices, replica_axis_index)
-            replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
-            single_replica_sharding = jax.sharding.NamedSharding(replica_mesh, pspec)
-            return orbax.checkpoint.type_handlers.SingleReplicaArrayRestoreArgs(
-              sharding=jax.sharding.NamedSharding(mesh, pspec),
-              single_replica_sharding=single_replica_sharding,
-              replica_axis_index=replica_axis_index,
-              global_shape=data.shape,
-              dtype=data.dtype,
-              )
+          orbax.checkpoint.type_handlers.register_type_handler(
+            jax.Array,
+            orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(),
+            override=True)
+          replica_axis_index = 0  # for maxtext data is the first dimension
+          replica_devices = _replica_devices(mesh.devices, replica_axis_index)
+          replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
+          single_replica_sharding = jax.sharding.NamedSharding(replica_mesh, pspec)
+          return orbax.checkpoint.type_handlers.SingleReplicaArrayRestoreArgs(
+            sharding=jax.sharding.NamedSharding(mesh, pspec),
+            single_replica_sharding=single_replica_sharding,
+            replica_axis_index=replica_axis_index,
+            global_shape=data.shape,
+            dtype=data.dtype,
+            )
+        return orbax.checkpoint.type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
 
-          restore_args = jax.tree_util.tree_map(map_to_pspec,
-                                                abstract_unboxed_pre_state,
-                                                state_mesh_annotations,
-                                                )
-
-          return (
-            checkpoint_manager.restore(
-              latest_step,
-              args=orbax.checkpoint.args.Composite(
-                items=orbax.checkpoint.args.PyTreeRestore(
-                item=abstract_unboxed_pre_state,
-                restore_args=restore_args)
-              ),
-            ),
-            None)
-        else:
-          return checkpoint_manager.restore(latest_step,
-                                      args=orbax.checkpoint.args.Composite(
-                                      # items=orbax.checkpoint.args.StandardRestore(abstract_unboxed_pre_state),
-                                      items=orbax.checkpoint.args.PyTreeRestore(item=abstract_unboxed_pre_state,)
-                                    )), None
+      restore_args = jax.tree_util.tree_map(map_to_pspec,
+                                            abstract_unboxed_pre_state,
+                                            state_mesh_annotations,
+                                            )
+      return (
+        checkpoint_manager.restore(
+          latest_step,
+          args=orbax.checkpoint.args.Composite(
+            items=orbax.checkpoint.args.PyTreeRestore(
+            item=abstract_unboxed_pre_state,
+            restore_args=restore_args)
+          ),
+        ),
+        None)
 
   if load_parameters_from_path != "":
     max_logging.log(f"restoring params from {load_parameters_from_path=}")
