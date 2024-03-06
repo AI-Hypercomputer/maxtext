@@ -14,8 +14,8 @@
 
 local accelerate = import 'accelerate-smoke.libsonnet';
 local fairseqTransformer = import 'fs-transformer.libsonnet';
-local huggingfaceDiffusers = import 'hf-diffusers.libsonnet';
 local hfBert = import 'hf-bert.libsonnet';
+local huggingfaceDiffusers = import 'hf-diffusers.libsonnet';
 local huggingfaceGlue = import 'hf-glue.libsonnet';
 local huggingfaceGPT2 = import 'hf-llm.libsonnet';
 local llama2 = import 'llama2-model.libsonnet';
