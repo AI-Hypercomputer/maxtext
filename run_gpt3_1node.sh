@@ -18,18 +18,13 @@ export XLA_FLAGS="--xla_dump_to=gs://runner-maxtext-logs/yooh-gpt-$(date +%Y-%m-
                 --xla_disable_hlo_passes=rematerialization --xla_gpu_enable_async_collective_permute=true --xla_gpu_enable_async_all_to_all=true"
 EOF
 
+# python3 xpk/xpk.py workload create --cluster maxtext-a3-20nodes --workload yooh-gpt-$(date +%Y-%m-%d-%H-%M) \
+#     --docker-image=gcr.io/supercomputer-testing/yooh/maxtext-tcpx --device-type=h100-80gb-8 --num-slices=1 --env-file=xpk/env1.txt --priority=high \
+#     --command "python3 MaxText/train.py MaxText/configs/models/gpt3-22b.yml hardware=gpu per_device_batch_size=1\
+#         run_name=yooh-gpt-$(date +%Y-%m-%d-%H-%M) base_output_directory=gs://runner-maxtext-logs \
+#         dataset_path=gs://maxtext-dataset steps=30 enable_checkpointing=False attention=dot_product"
+
 python3 xpk/xpk.py workload create --cluster maxtext-a3-20nodes --workload yooh-gpt-$(date +%Y-%m-%d-%H-%M) \
     --docker-image=gcr.io/supercomputer-testing/yooh/maxtext-tcpx --device-type=h100-80gb-8 --num-slices=1 --env-file=xpk/env1.txt --priority=high \
-    --command "nsys profile -s none -o nsys_profile.out --force-overwrite true --capture-range=cudaProfilerApi 
-        --capture-range-end=stop python3 MaxText/train.py MaxText/configs/base.yml hardware=gpu \
-        run_name=yooh-gpt-$(date +%Y-%m-%d-%H-%M) base_output_directory=gs://runner-maxtext-logs \
-        dataset_path=gs://maxtext-dataset steps=30 enable_checkpointing=False tokenizer_path=assets/tokenizer \
-        base_emb_dim=6144 base_num_query_heads=24 base_num_kv_heads=24 base_mlp_dim=24576 \
-        base_num_decoder_layers=48 head_dim=256 max_target_length=1024 trainable_position_size=16384 \
-        vocab_size=32768 enable_dropout=False logits_via_embedding=True per_device_batch_size=8.0 \
-        normalize_embedding_logits=False logits_dot_in_fp32=False normalization_layer_epsilon=1.e-05 \
-        use_iota_embed=True fused_qkv=True opt_type=adam_pax decoder_block=gpt3 \
-        gradient_clipping_threshold=1. adam_b1=0.9 adam_b2=0.95 adam_eps=1.e-8 adam_weight_decay=0.1 attention=dot_product"
-
-
+    --command "sleep 3600"
 
