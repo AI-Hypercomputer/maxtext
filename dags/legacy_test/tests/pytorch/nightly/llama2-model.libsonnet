@@ -19,39 +19,25 @@ local tpus = import 'templates/tpus.libsonnet';
 local utils = import 'templates/utils.libsonnet';
 
 {
-  local llama2_inference = self.llama2_inference,
-  llama2_inference:: common.PyTorchTest {
-    local config = self,
-    modelName: 'llama2-i',
-    paramsOverride:: {
-      scriptPath: 'llama/7B/llama2inference.sh',
-      trainCommand: [
-        'bash',
-        self.scriptPath,
-      ],
-    },
-    command: self.paramsOverride.trainCommand,
+  local llama2 = self.llama2,
+  llama2:: common.PyTorchTest {
+    modelName: 'llama2',
   },
-  local llama2_training = self.llama2_training,
-  llama2_training:: common.PyTorchTest {
-    local config = self,
-    modelName: 'llama2-t',
-    paramsOverride:: {
-      scriptPath: 'transformers/7B/llama2training.sh',
-      trainCommand: [
-        'bash',
-        self.scriptPath,
-      ],
-    },
-    command: self.paramsOverride.trainCommand,
-  },
-  local pjrt = self.pjrt,
-  pjrt:: common.PyTorchTpuVmMixin {
-    modelName: 'llama2-pjrt',
-  },
+
   local infer = self.infer,
-  infer:: common.PyTorchTpuVmMixin + pjrt {
+  infer:: common.Functional + common.PyTorchTpuVmMixin {
     modelName+: '-infer',
+    command: [
+      'bash',
+      '-c',
+      |||
+        python3 llama/example_text_completion.py True llama/7B ~/spiece.model --max_seq_len=2048 --max_gen_len=1000 --max_batch_size=2 --dynamo=openxla |& tee output.txt
+
+        # Defined in setup script
+        python3 getvalue.py
+      |||,
+    ],
+
     tpuSettings+: {
       tpuVmExtraSetup: |||
         # install tokenizer model
@@ -68,25 +54,45 @@ local utils = import 'templates/utils.libsonnet';
         cd 7B/
         echo -e '{"dim": 4096, "multiple_of": 256, "n_heads": 32, "n_layers": 32, "norm_eps": 1e-05, "vocab_size": -1}' >> params.json
 
-        # save llama2 test
-        echo -e 'python3 llama/example_text_completion.py True "/home/xl-ml-test/llama/7B" /home/xl-ml-test/spiece.model --max_seq_len=2048 --max_gen_len=1000 --max_batch_size=2 --dynamo=openxla > output.txt' >> llama2inference.sh
-        echo -e 'file = open("output.txt")' >> getvalue.py
-        echo -e 'content = file.readlines()' >> getvalue.py
-        echo -e 'warm_line = content[-6]' >> getvalue.py
-        echo -e 'warm_value = float((warm_line.split())[5])' >> getvalue.py
-        echo -e 'if warm_value > 7.948752 or warm_value < 7.191728:' >> getvalue.py
-        echo -e '    raise ValueError("warm latency/token exceeded throuhold 7.57024 +- 5%")' >> getvalue.py
-        echo -e 'else:' >> getvalue.py
-        echo -e '    print("Finished llama2 test and warm latency/token within expected throuhold 7.57024 +- 5%")' >> getvalue.py
-        echo -e 'cat output.txt' >> llama2inference.sh
-        echo -e 'python3 llama/7B/getvalue.py' >> llama2inference.sh
-        cat llama2inference.sh
+        cd
+        cat > getvalue.py << GETVALUE_EOF
+        file = open("output.txt")
+        content = file.readlines()
+        warm_line = content[-6]
+        warm_value = float((warm_line.split())[5])
+        if warm_value > 7.948752 or warm_value < 7.191728:
+            raise ValueError("warm latency/token exceeded throuhold 7.57024 +- 5%")
+        else:
+            print("Finished llama2 test and warm latency/token within expected throuhold 7.57024 +- 5%")
+        GETVALUE_EOF
       |||,
     },
   },
   local spmd = self.spmd,
-  spmd:: common.PyTorchTpuVmMixin + pjrt {
+  spmd:: common.Functional + common.PyTorchTpuVmMixin {
     modelName+: '-train-spmd',
+    command: [
+      'python',
+      'transformers/examples/pytorch/language-modeling/run_clm.py',
+      '--tokenizer_name=gpt2',
+      '--dataset_name=wikitext',
+      '--dataset_config_name=wikitext-2-raw-v1',
+      '--per_device_train_batch_size=32',
+      '--per_device_eval_batch_size=8',
+      '--num_train_epochs=1',
+      '--do_train',
+      '--output_dir=/tmp/output',
+      '--overwrite_output_dir',
+      '--config_name=7B/2B.json',
+      '--save_strategy=no',
+      '--logging_strategy=no',
+      '--remove_unused_columns=no',
+      '--spmd_fsdp_sharding',
+      '--torch_dtype=bfloat16',
+      '--dataloader_drop_last=yes',
+      '--spmd_grad_chkpt',
+      '--report_to=none',
+    ],
     tpuSettings+: {
       tpuVmExports+: |||
         export XLA_USE_BF16=1
@@ -114,19 +120,12 @@ local utils = import 'templates/utils.libsonnet';
         pip3 install evaluate
         pip3 install scikit-learn
         pip3 install accelerate
-        pwd
-        ls
 
+        cd
         # 7B config
         mkdir 7B
         cd 7B/
         wget https://storage.googleapis.com/manfei_public_experimental/2B.json
-
-        # save llama2 training
-        echo -e 'python transformers/examples/pytorch/language-modeling/run_clm.py --tokenizer_name gpt2 --dataset_name wikitext --dataset_config_name wikitext-2-raw-v1 --per_device_train_batch_size 32 --per_device_eval_batch_size 8 --num_train_epochs 1 --do_train --output_dir /tmp/output --overwrite_output_dir --config_name transformers/7B/2B.json --save_strategy no --logging_strategy no --remove_unused_columns no --spmd_fsdp_sharding --torch_dtype bfloat16 --dataloader_drop_last yes --spmd_grad_chkpt --report_to none' >> llama2training.sh
-        cat llama2training.sh
-        pwd
-        ls
       |||,
     },
   },
@@ -137,7 +136,7 @@ local utils = import 'templates/utils.libsonnet';
   },
 
   configs: [
-    llama2_inference + v4_8 + common.Functional + timeouts.Hours(3) + infer,
-    llama2_training + v4_8 + common.Functional + timeouts.Hours(3) + spmd,
+    llama2 + v4_8 + infer + timeouts.Hours(3),
+    llama2 + v4_8 + spmd + timeouts.Hours(3),
   ],
 }
