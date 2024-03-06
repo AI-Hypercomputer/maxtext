@@ -125,6 +125,8 @@ resource "google_composer_environment" "example_environment" {
     software_config {
       image_version = "composer-2.6.1-airflow-2.6.3"
       airflow_config_overrides = {
+        # TODO: Update this to allowed_deserialization_classes_regexp with Airflow 2.8.1
+        # https://airflow.apache.org/docs/apache-airflow/stable/configurations-ref.html#allowed-deserialization-classes-regexp
         core-allowed_deserialization_classes = ".*"
         scheduler-min_file_process_interval  = "120"
       }
