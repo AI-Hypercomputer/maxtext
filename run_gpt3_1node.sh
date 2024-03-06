@@ -18,13 +18,10 @@ export XLA_FLAGS="--xla_dump_to=gs://runner-maxtext-logs/yooh-gpt-$(date +%Y-%m-
                 --xla_disable_hlo_passes=rematerialization --xla_gpu_enable_async_collective_permute=true --xla_gpu_enable_async_all_to_all=true"
 EOF
 
-# python3 xpk/xpk.py workload create --cluster maxtext-a3-20nodes --workload yooh-gpt-$(date +%Y-%m-%d-%H-%M) \
-#     --docker-image=gcr.io/supercomputer-testing/yooh/maxtext-tcpx --device-type=h100-80gb-8 --num-slices=1 --env-file=xpk/env1.txt --priority=high \
-#     --command "python3 MaxText/train.py MaxText/configs/models/gpt3-22b.yml hardware=gpu per_device_batch_size=1\
-#         run_name=yooh-gpt-$(date +%Y-%m-%d-%H-%M) base_output_directory=gs://runner-maxtext-logs \
-#         dataset_path=gs://maxtext-dataset steps=30 enable_checkpointing=False attention=dot_product"
-
 python3 xpk/xpk.py workload create --cluster maxtext-a3-20nodes --workload yooh-gpt-$(date +%Y-%m-%d-%H-%M) \
     --docker-image=gcr.io/supercomputer-testing/yooh/maxtext-tcpx --device-type=h100-80gb-8 --num-slices=1 --env-file=xpk/env1.txt --priority=high \
-    --command "sleep 3600"
+    --command "python3 MaxText/train.py MaxText/configs/models/gpt3-22b.yml hardware=gpu per_device_batch_size=1\
+        run_name=yooh-gpt-$(date +%Y-%m-%d-%H-%M) base_output_directory=gs://runner-maxtext-logs \
+        dataset_path=gs://maxtext-dataset steps=30 enable_checkpointing=False attention=dot_product"
+
 
