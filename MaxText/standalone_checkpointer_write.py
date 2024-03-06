@@ -52,7 +52,7 @@ def checkpoint_loop(config, state=None):
     ckpt_path:
   Returns:
   """
-  init_rng, _, checkpoint_manager, mesh, model, _, tx = setup_mesh_and_model(config)
+  init_rng, writer, checkpoint_manager, mesh, model, _, tx = setup_mesh_and_model(config)
 
   unboxed_abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
   # A barrier to sync all hosts before starting to restore checkpoint
@@ -78,6 +78,7 @@ def checkpoint_loop(config, state=None):
   start_step = get_first_step(state)  # this is the start_step for training
   for step in np.arange(start_step, config.steps):
     if checkpoint_manager is not None:
+      start_time = datetime.datetime.now()
       # A barrier to sync all hosts before starting to save checkpoint
       jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
       start_time = datetime.datetime.now()
@@ -86,7 +87,7 @@ def checkpoint_loop(config, state=None):
         end_time = datetime.datetime.now()
         ckpt_save_time.append([jax.process_index(), step, (end_time-start_time).total_seconds()])
         if jax.process_index() == 0:
-          max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint saved in {end_time - start_time} ,step {step}, on host 0")  
+          max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint saved in {end_time - start_time} ,step {step}, on host 0")
           time.sleep(20)
 
   if config.gcs_csv_folder != '':
