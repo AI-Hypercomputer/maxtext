@@ -66,8 +66,10 @@ def construct_xpk_command():
 def construct_command():
   """Construct xpk and maxtext commands to run optimal configs for checkpointing"""
   xpk_command = construct_xpk_command()
-  executable = f"standalone_checkpointer_{args.mode}.py"
-  # executable = 'train.py'
+  if args.mode == 'train':
+    executable = 'train.py'
+  else:
+    executable = f"standalone_checkpointer_{args.mode}.py"
   maxtext_command = (
     f'bash MaxText/configs/v5e/{args.model_size}b.sh '
     f'RUN_NAME={args.run_name} '
