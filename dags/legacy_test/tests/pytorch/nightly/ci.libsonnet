@@ -17,6 +17,11 @@ local tpus = import 'templates/tpus.libsonnet';
         test/tpu/run_tests.sh
       |||,
     ],
+    tpuSettings+: {
+      tpuVmExtraSetup: |||
+        pip install expecttest==0.1.6
+      |||,
+    },
   },
   local pjrt = self.pjrt,
   pjrt:: common.PyTorchTpuVmMixin,
