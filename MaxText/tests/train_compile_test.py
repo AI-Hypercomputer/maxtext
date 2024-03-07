@@ -60,3 +60,39 @@ class TrainCompile(unittest.TestCase):
     train_compile_main((None, "configs/base.yml", f"compiled_trainstep_file={compiled_trainstep_file}",
       "compile_topology=v5e-256", "use_iota_embed=true", "compile_topology_num_slices=1", 
       "ici_sequence_parallelism=16", "global_parameter_scale=32", "per_device_batch_size=0.0625", "max_target_length=65536"))
+
+  @pytest.mark.tpu
+  def test_remat_save_dot_except_mlpwi(self):
+    compiled_trainstep_file='/tmp/test_remat_save_dot_except_mlpwi.pickle'
+    train_compile_main((None, "configs/base.yml", f"compiled_trainstep_file={compiled_trainstep_file}",
+      "compile_topology=v5e-256", "compile_topology_num_slices=1", "per_device_batch_size=0.125", "ici_fsdp_parallelism=16",
+      "ici_tensor_parallelism=16", "max_target_length=2048",
+      "fused_qkv=true", "fused_mlp=true", "remat_policy=save_dot_except_mlpwi",
+      "use_iota_embed=true", "global_parameter_scale=128"))
+
+  @pytest.mark.tpu
+  def test_remat_save_dot_except_mlp(self):
+    compiled_trainstep_file='/tmp/test_remat_save_dot_except_mlp.pickle'
+    train_compile_main((None, "configs/base.yml", f"compiled_trainstep_file={compiled_trainstep_file}",
+      "compile_topology=v5e-256", "compile_topology_num_slices=1", "per_device_batch_size=0.25", "ici_fsdp_parallelism=16",
+      "ici_tensor_parallelism=16", "max_target_length=2048",
+      "fused_qkv=true", "fused_mlp=true", "remat_policy=save_dot_except_mlp",
+      "use_iota_embed=true", "global_parameter_scale=128"))
+
+  @pytest.mark.tpu
+  def test_remat_save_qkv_proj(self):
+    compiled_trainstep_file='/tmp/test_remat_save_qkv_proj.pickle'
+    train_compile_main((None, "configs/base.yml", f"compiled_trainstep_file={compiled_trainstep_file}",
+      "compile_topology=v5e-256", "compile_topology_num_slices=1", "per_device_batch_size=0.375", "ici_fsdp_parallelism=16",
+      "ici_tensor_parallelism=16", "max_target_length=2048",
+      "fused_qkv=true", "fused_mlp=true", "remat_policy=save_qkv_proj",
+      "use_iota_embed=true", "global_parameter_scale=128"))
+
+  @pytest.mark.tpu
+  def test_remat_full(self):
+    compiled_trainstep_file='/tmp/test_remat_full.pickle'
+    train_compile_main((None, "configs/base.yml", f"compiled_trainstep_file={compiled_trainstep_file}",
+      "compile_topology=v5e-256", "compile_topology_num_slices=1", "per_device_batch_size=1", "ici_fsdp_parallelism=16",
+      "ici_tensor_parallelism=16", "max_target_length=2048",
+      "fused_qkv=true", "fused_mlp=true", "remat_policy=full",
+      "use_iota_embed=true", "global_parameter_scale=128"))
