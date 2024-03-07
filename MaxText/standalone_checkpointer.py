@@ -70,12 +70,15 @@ def checkpoint_loop(config, state=None):
     state, _, _ = max_utils.setup_training_state(model, None,
           tx, config, init_rng, mesh, checkpoint_manager)
 
+
   start_step = get_first_step(state) # this is the start_step for training
   for step in np.arange(start_step, config.steps):
     if checkpoint_manager is not None:
       start_time = datetime.datetime.now()
       # A barrier to sync all hosts before starting to save checkpoint
       jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
+      if step == 0:
+        state = add_entropy_to_opt(state)
       if save_checkpoint(checkpoint_manager, step, state):
         checkpoint_manager.wait_until_finished()
         end_time = datetime.datetime.now()
@@ -83,6 +86,10 @@ def checkpoint_loop(config, state=None):
           max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint saved in {end_time - start_time} ,step {step}, on host 0")
 
   max_utils.close_summary_writer(writer)
+  return state
+
+def add_entropy_to_opt(state):
+  import pdb; pdb.set_trace()
   return state
 
 def main(argv: Sequence[str]) -> None:

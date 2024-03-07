@@ -105,6 +105,13 @@ parser.add_argument(
     default=1,
     type=int
 )
+parser.add_argument(
+    "--ici_pipeline_parallelism", "-ip",
+    help="Number of shards for Pipeline Parallelism within each slice.",
+    required=False,
+    default=1,
+    type=int
+)
 args = parser.parse_args()
 
 def main(_argv: Sequence[str]) -> None:
@@ -136,7 +143,7 @@ def main(_argv: Sequence[str]) -> None:
     return average_time
 
   dcn_parallelism = [args.dcn_data_parallelism, args.dcn_fsdp_parallelism, args.dcn_tensor_parallelism]
-  ici_parallelism = [args.ici_data_parallelism, args.ici_fsdp_parallelism, args.ici_tensor_parallelism]
+  ici_parallelism = [args.ici_data_parallelism, args.ici_fsdp_parallelism, args.ici_tensor_parallelism, args.ici_pipeline_parallelism]
 
   devices = jax.devices()
   num_devices = len(devices)
@@ -160,7 +167,7 @@ def main(_argv: Sequence[str]) -> None:
 
   print(f"Decided on mesh shape: {devices_array}")
 
-  mesh = Mesh(devices_array, ["data", "fsdp", "tensor"])
+  mesh = Mesh(devices_array, ["data", "fsdp", "tensor", "pipeline"])
 
   data_sharding = PartitionSpec(("data", "fsdp"),  "tensor")
   # We assume parameters are stored in a decreasing order of dimension size

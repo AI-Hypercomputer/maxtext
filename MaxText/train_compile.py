@@ -81,6 +81,7 @@ def get_shaped_inputs(topology_mesh, config):
   # Shaped state
   abstract_state, state_mesh_annotations, _ =  max_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
 
+  jax.tree_util.tree_map_with_path(lambda x,y: print(f"{x}, {y.shape}"), abstract_state.params)
   # Shaped batch
   shaped_batch = input_pipeline_interface.get_shaped_batch(config)
 

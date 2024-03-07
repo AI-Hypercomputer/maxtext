@@ -864,6 +864,21 @@ class Attention(nn.Module):
     )(inputs=query, position=inputs_positions)
     key = self.key_rotary(key, inputs_positions)
 
+    from layers import normalizations
+    RMSNorm = normalizations.RMSNorm
+    query = RMSNorm(
+        dtype=self.dtype,
+        name='query_norm',
+        kernel_axes=('heads',))(query)
+    key = RMSNorm(
+        dtype=self.dtype,
+        name='key_norm',
+        kernel_axes=('heads',))(key)
+    value = RMSNorm(
+        dtype=self.dtype,
+        name='value_norm',
+        kernel_axes=('heads',))(value)
+
     # annotate with sharding constraint.
     query = nn.with_logical_constraint(query, self.query_axis_names)
     query = checkpoint_name(query, 'query_proj')
