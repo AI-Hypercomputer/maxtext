@@ -35,6 +35,7 @@ from layers import initializers
 from layers import linears
 from layers import quantizations
 
+
 Array = common_types.Array
 Config = common_types.Config
 DType = common_types.DType
@@ -59,6 +60,9 @@ shard_map = shard_map.shard_map
 
 dynamic_vector_slice_in_dim = jax.vmap(
     lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
+
+# pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
+
 
 def apply_mask_to_logits(logits: Array, mask: Array):
   """Applies a floating-point mask to a set of logits.
@@ -168,12 +172,11 @@ class AttentionOp(nn.Module):
         raise ValueError("""Decode not supported with flash attention.
                             Use `dot_product` instead.""")
       return self.tpu_flash_attention(query, key, value, decoder_segment_ids), None, None
-# TODO(b/326467868): bring back cudnn_flash_te once transformer-engine issue in g3 is resolved
-    elif self.attention_kernel == 'cudnn_flash_te': #flash
-      if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE: #flash
-        raise ValueError("""Decode not supported with flash attention. #flash
-                            Use `dot_product` instead.""") #flash
-      return self.cudnn_flash_attention(query, key, value), None, None #flash
+    elif self.attention_kernel == 'cudnn_flash_te':
+      if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+        raise ValueError("""Decode not supported with flash attention.
+                           Use `dot_product` instead.""")
+      return self.cudnn_flash_attention(query, key, value), None, None
     else:
       raise ValueError(f'Unexpected attention kernel {self.attention_kernel=}.')
 
@@ -245,72 +248,58 @@ class AttentionOp(nn.Module):
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
     return x
 
-# TODO(b/326467868): bring back cudnn_flash_te once transformer-engine issue in g3 is resolved
-  def cudnn_flash_attention( #flash
-    self, #flash
-    query: Array, #flash
-    key: Array, #flash
-    value: Array, #flash
-  ) -> Array: #flash
-    """ #flash
-    CUDNN Flash Attention with Transformer Engine. #flash
-    It is an unstable API. In future release, the API can get changed #flash
-    A stable flash attention API will be included soon. Currently, #flash
-    1. It does not support GQA, num_query_heads == num_kv_heads #flash
-    2. It supports head_dim till 128 #flash
-    GQA support with head_dim=256 will be added soon  #flash
-    """ #flash
-     #flash
-    batch, s_q, n_heads, head_dim = query.shape # pylint: disable=unused-variable #flash
-    _, s_kv, _, _ = key.shape #flash
- #flash
-    import transformer_engine.jax.fused_attn as fused_attn #flash
-    from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLayout #flash
-    from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available #flash
-    import os #flash
- #flash
-    is_self_attn = True # (inputs_q is inputs_kv) #flash
-    is_gqa = False # (self.num_heads != self.num_gqa_groups) #flash
-    is_qkvpack = (is_self_attn and not is_gqa) #flash
-    qkv_layout = QKVLayout.BS3HD if is_self_attn else QKVLayout.BSHD_BS2HD #flash
-    attn_mask_type = AttnMaskType.CAUSAL_MASK #flash
-    attn_bias_type = AttnBiasType.NO_BIAS #flash
- #flash
-    enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "0")) #flash
- #flash
-    has_fused_attn_kernel = is_fused_attn_kernel_available(self.dtype, self.dtype, qkv_layout, #flash
-                                                            attn_bias_type,  #flash
-                                                            attn_mask_type, #flash
-                                                            self.dropout_rate, self.num_query_heads, #flash
-                                                            self.num_kv_heads, s_q, #flash
-                                                            s_kv, head_dim) #flash
-     #flash
-    if not enable_fused_attn: #flash
-      raise ValueError("Please enable NVTE_FUSED_ATTN: export NVTE_FUSED_ATTN=1") #flash
-       #flash
-    if not has_fused_attn_kernel: #flash
-      raise ValueError("""Flash attention is not supported for current config i.e. head_dim, seq_len, n_heads etc.  #flash
-      Please see transformer_engine/common/fused_attn/fused_attn.cpp:NVTE_Fused_Attn_Backend for details""") #flash
- #flash
-    q = jnp.reshape(query, (*query.shape[:2], 1, *query.shape[-2:])) #flash
-    k = jnp.reshape(key, (*query.shape[:2], 1, *query.shape[-2:])) #flash
-    v = jnp.reshape(value, (*query.shape[:2], 1, *query.shape[-2:])) #flash
-    qkv = jnp.concatenate((q, k, v), axis=2) # to make it (b, s, 3, h, d) #flash
- #flash
-    out = fused_attn.self_fused_attn( #flash
-        qkv=qkv, #flash
-        bias=None, #flash
-        mask=jnp.zeros((batch, 1, s_q, s_kv)),  # no padding #flash
-        seed=None, #flash
-        attn_bias_type=attn_bias_type, #flash
-        attn_mask_type=attn_mask_type, #flash
-        scaling_factor=1.0/math.sqrt(head_dim), #flash
-        dropout_probability=self.dropout_rate, #flash
-        is_training=True) #flash
-   #flash
-    return out #flash
+  def cudnn_flash_attention(self,
+                            query: Array,
+                            key: Array,
+                            value: Array) -> Array:
+    """CUDNN Flash Attention with Transformer Engine.
 
-  def compute_local_attention(self, 
+    It is an unstable API. In future release, the API can get changed
+    A stable flash attention API will be included soon. Currently,
+    1. It does not support GQA, num_query_heads == num_kv_heads
+    2. It supports head_dim till 128
+    GQA support with head_dim=256 will be added soon 
+    """
+    import transformer_engine.jax.fused_attn as fused_attn
+    from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLayout
+    from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
+
+    batch, s_q, n_heads, head_dim = query.shape  # pylint: disable=unused-variable
+    _, s_kv, _, _ = key.shape
+
+    qkv_layout = QKVLayout.BS3HD
+    attn_mask_type = AttnMaskType.CAUSAL_MASK
+    attn_bias_type = AttnBiasType.NO_BIAS
+
+    has_fused_attn_kernel = is_fused_attn_kernel_available(
+       self.dtype, self.dtype, qkv_layout,
+       attn_bias_type,
+       attn_mask_type,
+       self.dropout_rate, self.num_query_heads,
+       self.num_kv_heads, s_q,
+       s_kv, head_dim)
+
+    if not has_fused_attn_kernel:
+      raise ValueError("Flash attention is not supported for current config i.e. head_dim, seq_len, n_heads etc."
+          "Please see transformer_engine/common/fused_attn/fused_attn.cpp:NVTE_Fused_Attn_Backend for details")
+
+    q = jnp.reshape(query, (*query.shape[:2], 1, *query.shape[-2:]))
+    k = jnp.reshape(key, (*query.shape[:2], 1, *query.shape[-2:]))
+    v = jnp.reshape(value, (*query.shape[:2], 1, *query.shape[-2:]))
+    qkv = jnp.concatenate((q, k, v), axis=2)  # to make it (b, s, 3, h, d)
+
+    return fused_attn.self_fused_attn(
+        qkv=qkv,
+        bias=None,
+        mask=jnp.zeros((batch, 1, s_q, s_kv)),  # no padding
+        seed=None,
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        scaling_factor=1.0/math.sqrt(head_dim),
+        dropout_probability=self.dropout_rate,
+        is_training=True)
+
+  def compute_local_attention(self,
                               attn_weights: Array, 
                               value: Array) -> tuple[Array, Array, Array]:
     """Computes the attention of a local subset of the kv cache. 
