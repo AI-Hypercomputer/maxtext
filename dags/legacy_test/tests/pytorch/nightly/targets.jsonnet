@@ -16,12 +16,9 @@ local accelerate = import 'accelerate-smoke.libsonnet';
 local ci = import 'ci.libsonnet';
 local hfBert = import 'hf-bert.libsonnet';
 local huggingfaceDiffusers = import 'hf-diffusers.libsonnet';
-local huggingfaceGlue = import 'hf-glue.libsonnet';
-local huggingfaceGPT2 = import 'hf-llm.libsonnet';
 local llama2 = import 'llama2-model.libsonnet';
 local mnist = import 'mnist.libsonnet';
 local resnet50_mp = import 'resnet50-mp.libsonnet';
-local stableDif = import 'sd-model.libsonnet';
 
 // Add new models here
 std.flattenArrays([
@@ -29,10 +26,7 @@ std.flattenArrays([
   ci.configs,
   hfBert.configs,
   huggingfaceDiffusers.configs,
-  huggingfaceGlue.configs,
-  huggingfaceGPT2.configs,
   mnist.configs,
   resnet50_mp.configs,
-  stableDif.configs,
   llama2.configs,
 ])
