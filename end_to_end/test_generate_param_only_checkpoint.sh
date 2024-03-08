@@ -20,7 +20,7 @@ dry_run=false
 run_id=test_model_0b_$(date +%Y-%m-%d-%H)
 dataset_path=gs://test-maxtext-dataset
 base_output_directory=gs://test-maxtext-output
-ici_tensor_parallelism=8
+ici_tensor_parallelism=4
 attention=flash
 
 while getopts "nr:d:o:t:i:a:" opt
@@ -67,7 +67,7 @@ if [ $? -eq 0 ]
 then
   echo
   echo "Successfully created a training checkpoint"
-  echo "Checkpoint path:  ${base_output_directory}/${training_ckpt_run_id}/checkpoints/3/default"
+  echo "Checkpoint path:  ${base_output_directory}/${training_ckpt_run_id}/checkpoints/3/items"
 else
   echo
   echo "Could not create a training checkpoint" >&2
@@ -82,14 +82,14 @@ $cmd python3 MaxText/generate_param_only_checkpoint.py MaxText/configs/base.yml 
 run_name=${decode_ckpt_run_id} attention=${attention} \
 base_output_directory=${base_output_directory} \
 dataset_path=${dataset_path} async_checkpointing=false \
-load_full_state_path=${base_output_directory}/${training_ckpt_run_id}/checkpoints/3/default \
+load_full_state_path=${base_output_directory}/${training_ckpt_run_id}/checkpoints/3/items \
 ${model_params} \
 
 
 if [ $? -eq 0 ]
 then
   echo "Successfully created an decode checkpoint"
-  echo "Checkpoint path:  ${base_output_directory}/${decode_ckpt_run_id}/checkpoints/0/default"
+  echo "Checkpoint path:  ${base_output_directory}/${decode_ckpt_run_id}/checkpoints/0/items"
 
 else
   echo "Could not create an decode checkpoint" >&2
@@ -103,7 +103,7 @@ $cmd python3 MaxText/decode.py MaxText/configs/base.yml \
 run_name=${run_id}-decode-steps-50 \
 base_output_directory=${base_output_directory} \
 dataset_path=${dataset_path} \
-load_parameters_path=${base_output_directory}/${decode_ckpt_run_id}/checkpoints/0/default \
+load_parameters_path=${base_output_directory}/${decode_ckpt_run_id}/checkpoints/0/items \
 attention=dot_product ici_tensor_parallelism=${ici_tensor_parallelism} steps=50 \
 metrics_file=/tmp/${run_id}_metrics.txt async_checkpointing=false max_target_length=128 per_device_batch_size=1 \
 ${model_params} \

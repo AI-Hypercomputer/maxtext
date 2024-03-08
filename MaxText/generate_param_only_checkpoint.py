@@ -136,7 +136,7 @@ def generate_decode_checkpoint(config):
   # Save decode state to config's checkpoint directory at step 0
   max_logging.log(f"Save decode checkpoint at: {config.checkpoint_dir}")
   _save_decode_checkpoint(config, training_state, checkpoint_manager)
-  max_logging.log(f"Successfully generated decode checkpoint at: {config.checkpoint_dir}0/default")
+  max_logging.log(f"Successfully generated decode checkpoint at: {config.checkpoint_dir}0/items")
   return True
 
 

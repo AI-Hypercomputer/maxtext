@@ -172,21 +172,15 @@ def save_checkpoint(checkpoint_manager, step, state, dataset_type='c4', data_ite
   """Wrapper for saving checkpoint"""
   if dataset_type == 'c4-array_record':
     return checkpoint_manager.save(step, args=orbax.checkpoint.args.Composite(
-                                                    default=orbax.checkpoint.args.StandardSave(state),
+                                                    # default=orbax.checkpoint.args.StandardSave(state),
+                                                    items=orbax.checkpoint.args.PyTreeSave(item=state),
                                                     iter=grain.PyGrainCheckpointSave(data_iterator.local_iterator)
                                                     ))
   else:
-    # return checkpoint_manager.save(
-    #   step,
-    #   args=orbax.checkpoint.args.Composite(
-    #     items=orbax.checkpoint.args.StandardSave(state)
-    #     # default=orbax.checkpoint.args.StandardSave(state)
-    #     ))
     return checkpoint_manager.save(
       step,
       args=orbax.checkpoint.args.Composite(
         items=orbax.checkpoint.args.PyTreeSave(item=state)
-        # default=orbax.checkpoint.args.StandardSave(state)
         ))
 
 # -----------------------------------------------------------------------------
@@ -526,7 +520,7 @@ def train_loop(config, state=None):
           expected_num_p = num_params // (jax.device_count() // config.num_slices)
           for shard in pytree.addressable_shards:
             calc_shard_params(shard, expected_num_p, key, pspec)
-      
+
         jax.tree_util.tree_map_with_path(check_state_shardings,
                                          state_check.params,
                                          state_mesh_annotations_check.params)

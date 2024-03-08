@@ -42,11 +42,11 @@ def create_orbax_checkpoint_manager(
   max_logging.log("Creating checkpoint manager...")
   p = epath.Path(checkpoint_dir)
 
-  # if dataset_type=='c4-array_record':
-  #   item_names = ('default', 'iter')
-  # else:
-  #   item_names = ('default',)
-  item_names = ('items',)
+  if dataset_type=='c4-array_record':
+    item_names = ('items', 'iter')
+  else:
+    item_names = ('items',)
+
   mngr = CheckpointManager(
       p,
       item_names = item_names,
@@ -126,50 +126,55 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
     if latest_step is not None:
       max_logging.log(f"restoring from this run's directory latest step \
           {latest_step}")
-      if dataset_type == 'c4-array_record' and data_iterator is not None:
-        return checkpoint_manager.restore(latest_step,
-                                      args=orbax.checkpoint.args.Composite(
-                                      default=orbax.checkpoint.args.StandardRestore(abstract_unboxed_pre_state),
-                                      iter=grain.PyGrainCheckpointRestore(data_iterator.local_iterator)
-                                    )), None
 
       def  map_to_pspec(data, pspec):
-        if enable_single_replica_ckpt_restoring:
-          orbax.checkpoint.type_handlers.register_type_handler(
-            jax.Array,
-            orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(),
-            override=True)
-          orbax.checkpoint.type_handlers.register_type_handler(
-            jax.Array,
-            orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(),
-            override=True)
-          replica_axis_index = 0  # for maxtext data is the first dimension
-          replica_devices = _replica_devices(mesh.devices, replica_axis_index)
-          replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
-          single_replica_sharding = jax.sharding.NamedSharding(replica_mesh, pspec)
-          return orbax.checkpoint.type_handlers.SingleReplicaArrayRestoreArgs(
-            sharding=jax.sharding.NamedSharding(mesh, pspec),
-            single_replica_sharding=single_replica_sharding,
-            replica_axis_index=replica_axis_index,
-            global_shape=data.shape,
-            dtype=data.dtype,
-            )
-        return orbax.checkpoint.type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
+        if not enable_single_replica_ckpt_restoring:
+          return orbax.checkpoint.type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
+
+        orbax.checkpoint.type_handlers.register_type_handler(
+          jax.Array,
+          orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(),
+          override=True)
+        orbax.checkpoint.type_handlers.register_type_handler(
+          jax.Array,
+          orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(),
+          override=True)
+        replica_axis_index = 0  # for maxtext data is the first dimension
+        replica_devices = _replica_devices(mesh.devices, replica_axis_index)
+        replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
+        single_replica_sharding = jax.sharding.NamedSharding(replica_mesh, pspec)
+        return orbax.checkpoint.type_handlers.SingleReplicaArrayRestoreArgs(
+          sharding=jax.sharding.NamedSharding(mesh, pspec),
+          single_replica_sharding=single_replica_sharding,
+          replica_axis_index=replica_axis_index,
+          global_shape=data.shape,
+          dtype=data.dtype,
+          )
 
       restore_args = jax.tree_util.tree_map(map_to_pspec,
                                             abstract_unboxed_pre_state,
                                             state_mesh_annotations,
                                             )
-      return (
-        checkpoint_manager.restore(
+      if dataset_type == 'c4-array_record' and data_iterator is not None:
+        return checkpoint_manager.restore(
           latest_step,
           args=orbax.checkpoint.args.Composite(
             items=orbax.checkpoint.args.PyTreeRestore(
             item=abstract_unboxed_pre_state,
-            restore_args=restore_args)
+            restore_args=restore_args),
+            iter=grain.PyGrainCheckpointRestore(data_iterator.local_iterator))
+          ), None
+      else:
+        return (
+          checkpoint_manager.restore(
+            latest_step,
+            args=orbax.checkpoint.args.Composite(
+              items=orbax.checkpoint.args.PyTreeRestore(
+              item=abstract_unboxed_pre_state,
+              restore_args=restore_args)
+            ),
           ),
-        ),
-        None)
+          None)
 
   if load_parameters_from_path != "":
     max_logging.log(f"restoring params from {load_parameters_from_path=}")
@@ -186,7 +191,8 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
     p = epath.Path(load_full_state_from_path)
     ckptr = orbax.checkpoint.StandardCheckpointer()
     restored = ckptr.restore(p, args=orbax.checkpoint.args.StandardRestore(abstract_unboxed_pre_state))
-    return  {'default': restored}, None
+    # return  {'default': restored}, None
+    return  {'items': restored}, None
 
   else:
     max_logging.log("No existing checkpoints found, not restoring checkpoint.")
