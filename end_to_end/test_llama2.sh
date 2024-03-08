@@ -40,4 +40,4 @@ python3 MaxText/generate_param_only_checkpoint.py MaxText/configs/base.yml load_
 export new_ckpt_path=${M_BASE_OUTPUT_DIRECTORY}/${PARAMETER_CHECKPOINT_RUN}/checkpoints/0/default
 
 # Load fine-tuned parameter checkpoint into decode.py
-python3 MaxText/decode.py MaxText/configs/base.yml load_parameters_path=${new_ckpt_path} run_name=runner_decode_finetuned_${idx} per_device_batch_size=1 model_name='llama2-7b' ici_tensor_parallelism=4 max_prefill_predict_length=4  max_target_length=16 prompt="I love to" autoregressive_decode_assert="make my own bread. I love the smell of fresh" attention=dot_product scan_layers=false
+python3 MaxText/decode.py MaxText/configs/base.yml load_parameters_path=${new_ckpt_path} run_name=runner_decode_finetuned_${idx} per_device_batch_size=1 model_name='llama2-7b' ici_tensor_parallelism=4 max_prefill_predict_length=4  max_target_length=16 prompt="I love to" attention=dot_product scan_layers=false
