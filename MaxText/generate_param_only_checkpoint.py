@@ -93,8 +93,11 @@ def _save_decode_checkpoint(config, state, checkpoint_manager):
     decode_state = max_utils.init_decode_state(None, jax.tree_map(lambda x : x.astype(jax.numpy.bfloat16), state.params))
   if checkpoint_manager is not None:
     if save_checkpoint(checkpoint_manager, 10, decode_state):
+      checkpoint_manager.wait_until_finished()
       max_logging.log(f"saved an decode checkpoint at {config.checkpoint_dir}")
-    checkpoint_manager.wait_until_finished()
+    else:
+      raise ValueError("We failed to save the checkpoing")
+
 
 def generate_decode_checkpoint(config):
   """
