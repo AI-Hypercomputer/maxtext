@@ -18,7 +18,7 @@
 # bash setup.sh MODE={stable,nightly,libtpu-only} LIBTPU_GCS_PATH={gcs_path_to_custom_libtpu} DEVICE={tpu,gpu}
 
 
-# You need to specificy a MODE, default value stable.
+# You need to specificity a MODE, default value stable.
 # You have the option to provide a LIBTPU_GCS_PATH that points to a libtpu.so provided to you by Google.
 # In libtpu-only MODE, the LIBTPU_GCS_PATH is mandatory.
 # For MODE=stable you may additionally specify JAX_VERSION, e.g. JAX_VERSION=0.4.13
