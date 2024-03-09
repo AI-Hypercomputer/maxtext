@@ -88,6 +88,7 @@ def get_torchbench_tpu_config(
   else:
     run_filter = f" --filter={model_name} "
   run_script_cmds = (
+      "export HUGGING_FACE_HUB_TOKEN=hf_AbCdEfGhIjKlMnOpQ",  # Use a fake token to bypass torchbench hf init.
       (
           "export PJRT_DEVICE=TPU && cd ~/xla/benchmarks && python experiment_runner.py"
           " --suite-name=torchbench --xla=PJRT --accelerator=tpu --progress-bar"
@@ -230,6 +231,7 @@ def get_torchbench_gpu_config(
   cmd_list = (
       "export PJRT_DEVICE=CUDA",
       f"export GPU_NUM_DEVICES={count}",
+      "export HUGGING_FACE_HUB_TOKEN=hf_AbCdEfGhIjKlMnOpQ",  # Use a fake token to bypass torchbench hf init.
       "cd /tmp/xla/benchmarks",
       f"python experiment_runner.py  --suite-name=torchbench --accelerator=cuda --progress-bar --xla=PJRT --xla=None {run_filter}",
       "rm -rf /tmp/xla/benchmarks/output/metric_report.jsonl",
