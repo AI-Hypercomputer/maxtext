@@ -40,8 +40,9 @@ python MaxText/decode.py MaxText/configs/base.yml tokenizer_path=$CHKPT_BUCKET/t
 
 ### MaxText supports fine-tuning with high performance.
 
+Command for training Gemma-2b from scratch on 1 slice of v5e-256.
 ```
-python MaxText/train.py MaxText/configs/base.yml base_output_directory=gs://runner-maxtext-logs model_name=gamma-2b dataset_path=gs://maxtext-dataset enable_checkpointing=false assets_path=gs://maxtext-gamma/gamma steps=10 ici_fsdp_transpose_parallelism=16 ici_fsdp_parallelism=4 per_device_batch_size=2 remat_policy=minimal max_target_length=8192
+python MaxText/train.py MaxText/configs/base.yml base_output_directory=$BASE_OUTPUT_DIR model_name=gemma-2b dataset_path=$DATASET_PATH enable_checkpointing=false tokenizer_path=$CHKPT_BUCKET/tokenizer.model steps=10 ici_fsdp_transpose_parallelism=16 per_device_batch_size=2 remat_policy=minimal max_target_length=8192
 ```
 
 ### Performance
