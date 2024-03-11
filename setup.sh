@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # Description:
-# bash setup.sh MODE={stable,nightly,head,libtpu-only} LIBTPU_GCS_PATH={gcs_path_to_custom_libtpu} DEVICE={tpu,gpu}
+# bash setup.sh MODE={stable,nightly,libtpu-only} LIBTPU_GCS_PATH={gcs_path_to_custom_libtpu} DEVICE={tpu,gpu}
 
 
 # You need to specificy a MODE, default value stable.
@@ -27,16 +27,18 @@
 # Enable "exit immediately if any command fails" option
 set -e
 
-# Check if sudo is available
-if command -v sudo >/dev/null 2>&1; then
-    # sudo is available, use it
-    # install numactl for numa binding.
-    sudo apt update && sudo apt install -y numactl
-else
-    # sudo is not available, run the script without sudo
-    # install numactl for numa binding.
-    apt update && apt install -y numactl
-fi
+(sudo bash || bash) <<'EOF'
+apt update && \
+apt install -y numactl && \
+apt install -y lsb-release && \
+apt install -y gnupg && \
+apt install -y curl
+export GCSFUSE_REPO=gcsfuse-`lsb_release -c -s`
+echo "deb https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | tee /etc/apt/sources.list.d/gcsfuse.list
+curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+apt update -y && apt -y install gcsfuse
+rm -rf /var/lib/apt/lists/*
+EOF
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -88,16 +90,6 @@ pip3 show jax && pip3 uninstall -y jax
 pip3 show jaxlib && pip3 uninstall -y jaxlib
 pip3 show libtpu-nightly && pip3 uninstall -y libtpu-nightly
 
-# Delete jax folder if it exists
-if [[ -d $HOME/jax ]]; then
-    rm -rf $HOME/jax
-fi
-
-# Delete xla folder if it exists
-if [[ -d $HOME/xla ]]; then
-    rm -rf $HOME/xla
-fi
-
 # Delete custom libtpu if it exists
 if [ -e "$libtpu_path" ]; then
     rm "$libtpu_path"
@@ -144,59 +136,33 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
 elif [[ $MODE == "nightly" ]]; then
 # Nightly mode
     if [[ $DEVICE == "gpu" ]]; then
-    # Not supported for gpu right now
-        exit 1
-    fi
-    echo "Installing jax-head, jaxlib-nightly"
-    # Install jax from GitHub head
-    pip3 install git+https://github.com/google/jax
-    # Install jaxlib-nightly
-    pip3 install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
+        echo "Installing jax-nightly, jaxlib-nightly"
+        # Install jax-nightly
+        pip3 install --pre -U jax -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+        # Install jaxlib-nightly
+        pip3 install -U --pre jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_cuda12_releases.html
+    elif [[ $DEVICE == "tpu" ]]; then
+        echo "Installing jax-nightly, jaxlib-nightly"
+        # Install jax-nightly
+        pip3 install --pre -U jax -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+        # Install jaxlib-nightly
+        pip3 install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 
-    if [[ -n "$LIBTPU_GCS_PATH" ]]; then
-        # Install custom libtpu
-        echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
-        # Install required dependency
-        pip3 install -U crcmod
-        # Copy libtpu.so from GCS path
-        gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
-    else
-        # Install libtpu-nightly
-        echo "Installing libtpu-nightly"
-        pip3 install libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html -U --pre
+        if [[ -n "$LIBTPU_GCS_PATH" ]]; then
+            # Install custom libtpu
+            echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
+            # Install required dependency
+            pip3 install -U crcmod
+            # Copy libtpu.so from GCS path
+            gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+        else
+            # Install libtpu-nightly
+            echo "Installing libtpu-nightly"
+            pip3 install libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html -U --pre
+        fi
+        echo "Installing nightly tensorboard plugin profile"
+        pip3 install tbp-nightly --upgrade
     fi
-    echo "Installing nightly tensorboard plugin profile"
-    pip3 install tbp-nightly --upgrade
-elif [[ $MODE == "head" ]]; then
-# Head mode
-    if [[ $DEVICE == "gpu" ]]; then
-    # Not supported for gpu right now
-        exit 1
-    elif [[ -n "$LIBTPU_GCS_PATH" ]]; then
-        # Install custom libtpu
-        echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
-        # Install required dependency
-        pip3 install -U crcmod
-        # Copy libtpu.so from GCS path
-        gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
-    else
-        echo -e "\n\nError: You must provide a custom libtpu for head mode.\n\n"
-        exit 1
-    fi
-
-    echo "Installing jax-head, jaxlib-head"
-    # Install jax from GitHub head
-    echo "Installing jax from HEAD..."
-    # Install jax from GitHub head
-    pip3 install git+https://github.com/google/jax
-    # Install jaxlib from GitHub head
-    echo "Installing jaxlib from HEAD..."
-    cd $HOME && git clone https://github.com/openxla/xla
-    cd $HOME && git clone https://github.com/google/jax.git
-    cd $HOME/jax
-    pip3 install numpy wheel build
-    python3 build/build.py --bazel_options="--override_repository=xla=$HOME/xla"
-    pip3 install dist/jaxlib-*-cp*-manylinux2014_x86_64.whl --force-reinstall --no-deps
     echo "Installing nightly tensorboard plugin profile"
     pip3 install tbp-nightly --upgrade
 else

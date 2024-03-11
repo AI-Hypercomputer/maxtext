@@ -1,0 +1,17 @@
+base_config: "base.yml"
+
+hardware: "gpu"
+attention: "cudnn_flash_te"
+
+learning_rate_schedule_steps: 150001
+
+model_name: llama2-7b
+
+max_target_length: 1024
+dataset_type: "synthetic"
+steps: 10
+
+vocab_relative_path: tokenizer.llama2
+rms_norm_epsilon: 1e-05
+
+prompt: "I love to"

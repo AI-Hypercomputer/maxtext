@@ -16,21 +16,23 @@
 
 # pylint: disable=missing-module-docstring, bare-except, consider-using-generator
 from collections import OrderedDict
-
-import max_logging
-
-import accelerator_to_spec_map
 import math
-import max_utils
 import os
 import sys
-import yaml
-
-import jax
-
 from typing import Any, Union
 
+import jax
+import accelerator_to_spec_map
+import max_logging
+import max_utils
+import yaml
+
+# pylint: disable=line-too-long
+
 _MAX_PREFIX = "M_"
+
+# YAML attribute to specify inheritance.
+_BASE_CONFIG_ATTR = "base_config"
 
 def yaml_key_to_env_key(s: str) -> str:
   return _MAX_PREFIX + s.upper()
@@ -89,7 +91,7 @@ def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any],list[Any]]:
 
 class _HyperParameters():
   # pylint: disable=missing-class-docstring
-  def _validate_env_variables(self, raw_data_from_yaml):
+  def _validate_env_variables(self, raw_data_from_yaml: dict[str, Any]):
     for environment_var in os.environ:
       if environment_var[:len(_MAX_PREFIX)] == _MAX_PREFIX:
         proposed_key = environment_var[len(_MAX_PREFIX):].lower()
@@ -150,9 +152,28 @@ class _HyperParameters():
 
     return updated_keys
 
-  def __init__(self, argv: list[str], **kwargs):
-    with open(argv[1], "r", encoding="utf-8") as yaml_file:
+  def _load_config(self, config_name: str) -> dict[str, Any]:
+    """Loads the YAML config from a file with a given name."""
+    with open(config_name, "r", encoding="utf-8") as yaml_file:
       raw_data_from_yaml = yaml.safe_load(yaml_file)
+
+    # Load data from parent config. Note that inheritance has override
+    # semantics, and the path is relative to the current config.
+    if _BASE_CONFIG_ATTR in raw_data_from_yaml:
+      parent_config_filename = raw_data_from_yaml[_BASE_CONFIG_ATTR]
+      if not os.path.isabs(parent_config_filename):
+        parent_config_filename = os.path.join(
+            os.path.dirname(config_name), parent_config_filename
+        )
+      base_config = self._load_config(parent_config_filename)
+      for key, value in raw_data_from_yaml.items():
+        base_config[key] = value
+      return base_config
+    return raw_data_from_yaml
+
+  def __init__(self, argv: list[str], **kwargs):
+    raw_data_from_yaml = self._load_config(argv[1])
+
     self._validate_env_variables(raw_data_from_yaml)
 
     raw_keys = OrderedDict()

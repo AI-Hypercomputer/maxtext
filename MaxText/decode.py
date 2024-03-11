@@ -210,6 +210,8 @@ def aqt_serving_conversion(model, mesh, config, model_vars, rng, sp_tokenizer):
 
   # Update aqt state
   model_vars['aqt'] = aqt_vars
+  # Remove param values which have corresponding qtensors in aqt to save memory.
+  model_vars['params'] = quantizations.remove_quantized_params(model_vars['params'], aqt_vars)
 
   # Set quant mode for model to serve
   model.quant.quant_mode = quantizations.get_quant_mode('serve')
@@ -250,8 +252,14 @@ def decode_loop(model, model_vars, sp_tokenizer, rng, prompts):
 
   bytes_aqt_params = 0
   if model.quant:
+    num_params, bytes_params, bytes_per_param = max_utils.summarize_size_from_pytree(model_vars['params'])
+    max_logging.log(f"Number of model params after quantization={num_params/10**9:.3f} billion, "
+                    f"memory usage={bytes_params/2**30:.3f}GB, "
+                    f"bytes per param={bytes_per_param:.3f}")
+
     num_aqt_params, bytes_aqt_params, bytes_per_aqt_param = max_utils.summarize_size_from_pytree(model_vars['aqt'])
-    max_logging.log(f"Number of aqt params={num_aqt_params/10**9:.3f} billion, memory usage={bytes_aqt_params/2**30:.3f}GB, "
+    max_logging.log(f"Number of aqt params={num_aqt_params/10**9:.3f} billion, "
+                    f"memory usage={bytes_aqt_params/2**30:.3f}GB, "
                     f"bytes per aqt param={bytes_per_aqt_param:.3f}")
 
   # Compute shardings
