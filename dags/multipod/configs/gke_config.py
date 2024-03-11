@@ -20,7 +20,7 @@ from dags.vm_resource import TpuVersion, Project, ClusterName
 from typing import Iterable
 
 
-def get_maxtext_gke_config(
+def get_gke_config(
     tpu_version: TpuVersion,
     tpu_cores: int,
     tpu_zone: str,

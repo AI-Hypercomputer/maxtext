@@ -19,7 +19,7 @@ import datetime
 from airflow import models
 from dags import composer_env, test_owner, gcs_bucket
 from dags.vm_resource import TpuVersion, Zone, DockerImage, ClusterName
-from dags.multipod.configs import maxtext_gke_config
+from dags.multipod.configs import gke_config
 from dags.multipod.configs.common import SetupMode
 from xlml.apis import gcp_config, metric_config, task, test_config
 
@@ -53,7 +53,7 @@ with models.DAG(
   }
 
   for test_name, run_command in convergence_tests.items():
-    maxtext_v4_configs_test = maxtext_gke_config.get_maxtext_gke_config(
+    maxtext_v4_configs_test = gke_config.get_gke_config(
         tpu_version=TpuVersion.V4,
         tpu_cores=128,
         tpu_zone=Zone.US_CENTRAL2_B.value,

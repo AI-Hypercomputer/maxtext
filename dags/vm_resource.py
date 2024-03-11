@@ -118,6 +118,7 @@ class ClusterName(enum.Enum):
   V5E_4_CLUSTER = "mas-v5e-4"
   V5E_16_CLUSTER = "mas-v5e-16"
   V4_8_MULTISLICE_CLUSTER = "v4-8-maxtext"
+  V4_16_MULTISLICE_CLUSTER = "v4-16-maxtext"
   V4_128_MULTISLICE_CLUSTER = "v4-bodaborg"
   V5E_16_MULTISLICE_CLUSTER = "v5e-16-bodaborg"
   V5E_256_MULTISLICE_CLUSTER = "v5e-256-bodaborg"
