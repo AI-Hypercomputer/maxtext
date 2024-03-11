@@ -88,3 +88,33 @@ def load_compiled(config, partial_train, state):
   in_tree, out_tree = get_train_input_output_trees(partial_train, shaped_input_args, shaped_input_kwargs)
   p_train_step = deserialize_and_load(serialized_compiled, in_tree, out_tree)
   return p_train_step
+
+# https://arxiv.org/pdf/2204.02311.pdf Appendix B
+def calculate_tflops_training_per_device(num_model_parameters, config):
+  """ Calculate training TFLOP"""
+  learnable_weight_tflops = 6 * num_model_parameters * config.max_target_length * config.per_device_batch_size \
+                                   / 10**12
+  noncasual_attention_flops = 12 * config.num_query_heads * config.num_decoder_layers * config.head_dim \
+                      * config.max_target_length**2 * config.per_device_batch_size / 10**12
+  causal_attention_tflops = noncasual_attention_flops / 2 # due to causality in attention
+  total_tflops = learnable_weight_tflops + causal_attention_tflops
+
+  print(f'Per train step, total TFLOPs will be {total_tflops:.2f},',
+        f'split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops',
+        f'and {100 * causal_attention_tflops/total_tflops:.2f}% attention flops')
+  return total_tflops
+
+# https://arxiv.org/pdf/2204.02311.pdf Appendix B
+def calculate_tflops_prefill(num_model_parameters, prefill_length, config):
+  """ Calculate training TFLOP"""
+  learnable_weight_tflops = 2 * num_model_parameters * prefill_length \
+                                   / 10**12
+  noncasual_attention_flops = 4 * config.num_query_heads * config.num_decoder_layers * config.head_dim \
+                      * prefill_length**2 * config.per_device_batch_size / 10**12
+  causal_attention_tflops = noncasual_attention_flops / 2 # due to causality in attention
+  total_tflops = learnable_weight_tflops + causal_attention_tflops
+
+  print(f'Per prefill step, total TFLOPs will be {total_tflops:.2f},',
+        f'split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops',
+        f'and {100 * causal_attention_tflops/total_tflops:.2f}% attention flops')
+  return total_tflops

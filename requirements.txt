@@ -22,3 +22,4 @@ tensorflow-datasets
 tensorboardx
 tensorboard-plugin-profile
 git+https://github.com/mlperf/logging.git
+google-jetstream
