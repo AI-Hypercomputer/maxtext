@@ -56,8 +56,6 @@ def l2norm_pytree(x):
   ) ** 0.5
 
 def calculate_num_params_from_pytree(params):
-  shapes = jax.tree_util.tree_map(jax.numpy.shape, params)
-  max_logging.log(f'param shapes: {shapes}')
   params_sizes = jax.tree_util.tree_map(jax.numpy.size, params)
   total_parameters = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes)
   assert total_parameters >= 0
