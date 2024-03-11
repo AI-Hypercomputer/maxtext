@@ -69,7 +69,14 @@ def checkpoint_loop(config, state=None):
   else: # Checkpoint was unavailable, state needs to be initialized
     state, _, _ = max_utils.setup_training_state(model, None,
           tx, config, init_rng, mesh, checkpoint_manager)
-
+    import pdb; pdb.set_trace()
+    opt_0 = state.opt_state[0]
+    opt_0 = opt_0._replace(mu=state.params) # replace state.params with pytree.tree_map(cos(leaf))
+    opt_0 = opt_0._replace(nu=state.params) # replace state.params with pytree.tree_map(cos(leaf))
+    new_opt = [opt_0] + list(state.opt_state[1:])
+    state = state.replace(opt_state=new_opt)
+    
+    opt_state_list = list(state.opt_state)
   start_step = get_first_step(state) # this is the start_step for training
   for step in np.arange(start_step, config.steps):
     if checkpoint_manager is not None:
