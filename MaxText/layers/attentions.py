@@ -881,9 +881,7 @@ class Attention(nn.Module):
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)
 
     out = nn.with_logical_constraint(out, self.out_axis_names)
-    out = checkpoint_name(out, 'attention_out')
 
     # apply output projection,  output dim is set to the input dim.
     out = self.out_projection(inputs_q.shape[-1], out)
-    out = checkpoint_name(out, 'final_out')
     return out
