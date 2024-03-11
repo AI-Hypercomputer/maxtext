@@ -15,9 +15,9 @@
 """Utilities to run workloads with xpk (https://github.com/google/xpk)."""
 
 import uuid
+import os
 from absl import logging
 from airflow.decorators import task
-from airflow.providers.cncf.kubernetes.operators.kubernetes_pod import KubernetesPodOperator
 from kubernetes import client as k8s_client
 from kubernetes.client import models as k8s_models
 from xlml.utils import gke
@@ -30,7 +30,7 @@ def generate_workload_id(benchmark_id: str) -> str:
   return f"{benchmark_id}-{short_id}"
 
 
-def run_workload(
+def _run_workload(
     task_id: str,
     cluster_project: str,
     zone: str,
@@ -40,18 +40,10 @@ def run_workload(
     docker_image: str,
     accelerator_type: str,
     run_cmds: str,
-    task_owner: str,
-    startup_timeout: int,
     num_slices: int = 1,
-) -> KubernetesPodOperator:
-  """Run workload through xpk tool.
-
-  The reason to use KubernetesPodOperator instead of BashOperator is that
-  xpk must run with Python 3.10 or greater; however, the latest version in
-  Composer is Python 3.8, and it's non-trivial to upgrade it as the  Composer
-  uses docker images that bundle Airflow releases with Python and other
-  libraries.
-  """
+):
+  """Run workload through xpk tool."""
+  import subprocess
 
   cmds = (
       "set -xue",
@@ -79,17 +71,20 @@ def run_workload(
       ),
   )
 
-  return KubernetesPodOperator(
-      task_id=task_id,
-      name=benchmark_id,
-      cmds=["/bin/bash", "-c"],
-      arguments=[";".join(cmds)],
+  subprocess.run(["bash", "-c", ";".join(cmds)], check=True)
+
+
+# To support local execution using `scripts/local-airflow.sh`, run using
+# task.docker in local environments. Otherwise, task.kubernetes should be used.
+if "XLMLTEST_LOCAL_AIRFLOW" in os.environ:
+  run_workload = task.docker(_run_workload, image="python:3.10")
+else:
+  run_workload = task.kubernetes(
+      _run_workload,
       namespace="composer-user-workloads",
       image="python:3.10",
       config_file="/home/airflow/composer_kube_config",
       kubernetes_conn_id="kubernetes_default",
-      startup_timeout_seconds=startup_timeout,
-      owner=task_owner,
       container_resources=k8s_models.V1ResourceRequirements(
           limits={"ephemeral-storage": "10G"},
       ),

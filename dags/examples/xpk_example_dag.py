@@ -51,5 +51,5 @@ with models.DAG(
       cluster_name=ClusterName.V4_128_MULTISLICE_CLUSTER.value,
       docker_image=DockerImage.XPK_JAX_TEST.value,
       time_out_in_min=60,
-      num_slices=4,
+      num_slices=2,
   ).run()
