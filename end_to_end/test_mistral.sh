@@ -5,6 +5,7 @@
 #  - Using the checkpoint generated from train.py or available one in open source (i.e. https://files.mistral-7b-v0-1.mistral.ai/mistral-7B-v0.1.tar).
 
 set -e
+set -x
 idx=$(date +%Y-%m-%d-%H-%M)
 
 export M_ENABLE_CHECKPOINTING=true

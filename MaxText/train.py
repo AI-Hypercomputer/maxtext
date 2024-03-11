@@ -71,19 +71,7 @@ def validate_train_config(config):
     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
   assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive interger."
 
-# https://arxiv.org/pdf/2204.02311.pdf Appendix B
-def calculate_training_tflops(num_model_parameters, config):
-  """ Calculate training TFLOP"""
-  learnable_weight_tflops = 6 * num_model_parameters * config.max_target_length * config.per_device_batch_size \
-                                   / 10**12
-  noncasual_attention_flops = 12 * config.num_query_heads * config.num_decoder_layers * config.head_dim \
-                      * config.max_target_length**2 * config.per_device_batch_size / 10**12
-  causal_attention_tflops = noncasual_attention_flops / 2 # due to causality in attention
-  total_tflops = learnable_weight_tflops + causal_attention_tflops
-  print(f'Per train step, total TFLOPs will be {total_tflops:.2f},',
-        f'split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops',
-        f'and {100 * causal_attention_tflops/total_tflops:.2f}% attention flops')
-  return total_tflops
+
 
 def get_first_step(state):
   with jax.spmd_mode('allow_all'):
@@ -383,7 +371,7 @@ def train_loop(config, state=None):
 
   num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
   max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
-  per_device_tflops = calculate_training_tflops(num_model_parameters, config)
+  per_device_tflops = maxtext_utils.calculate_tflops_training_per_device(num_model_parameters, config)
 
   # Write train config params, num model params, and XLA flags to tensorboard
   max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
@@ -483,10 +471,7 @@ def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   config = pyconfig.config
   validate_train_config(config)
-  if jax.__version__ <= '0.4.23':
-    cc.initialize_cache(os.path.expanduser(config.jax_cache_dir))
-  else:
-    cc.set_cache_dir(os.path.expanduser(config.jax_cache_dir))
+  cc.set_cache_dir(os.path.expanduser(config.jax_cache_dir))
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   debug_config = debug_configuration.DebugConfig(
     stack_trace_config = stack_trace_configuration.StackTraceConfig(

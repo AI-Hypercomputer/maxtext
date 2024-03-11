@@ -115,6 +115,7 @@ def main(_argv: Sequence[str]) -> None:
 
   def activate_profiler(profiler_path):
     if profiler_path:
+      print(f"profiling to {profiler_path}")
       jax.profiler.start_trace(profiler_path)
 
   def deactivate_profiler(profiler_path):
