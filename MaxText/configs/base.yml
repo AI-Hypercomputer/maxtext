@@ -82,7 +82,7 @@ logits_via_embedding: False
 normalize_embedding_logits: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 
-# proj, minimal, minimal_offloaded, full, or none
+# proj, minimal, proj_offloaded, minimal_offloaded, full, or none
 remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1

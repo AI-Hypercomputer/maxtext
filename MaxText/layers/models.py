@@ -222,8 +222,7 @@ class Decoder(nn.Module):
             'query_proj', 'value_proj', 'key_proj'
         )
       elif cfg.remat_policy == 'minimal_offloaded':
-        policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(
-          offload_src="device", offload_dst="pinned_host")
+        policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host")
       elif cfg.remat_policy == 'proj_offloaded':
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
           names_which_can_be_saved=[], 
