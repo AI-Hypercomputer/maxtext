@@ -60,6 +60,8 @@ save_config_to_gcs: False
 # Activation dtypes.
 dtype: "bfloat16"
 quantization: "" #defaults to no quantization, i.e. bf16. possible alternative setting is 'int8'
+quantize_kvcache: False
+
 # Shard the range finding operation for quantization. By default this is set to number of slices.
 quantization_local_shard_count: -1
 
