@@ -41,7 +41,7 @@ jobs:
         python-version: ${{ matrix.python-version }}
     - name: Install Dependencies
       run: |
-        pip install pytype
+        pip install pytype==2024.2.27
         pip install pylint
     - name: Typecheck the code with pytype
       run: |
