@@ -395,12 +395,14 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
                                                 config.load_parameters_path,
                                                 config.load_full_state_path,
                                                 unboxed_abstract_state,
-                                                config.dataset_type)
+                                                config.enable_single_replica_ckpt_restoring,
+                                                config.dataset_type,
+                                                )
 
     if restored:
       if 'iter' in restored and restored['iter'] is not None:
         data_iterator.local_iterator = restored['iter']
-      state = restored['default']
+      state = restored['items']
     else:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       state = jax.jit(
