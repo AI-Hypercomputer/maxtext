@@ -165,9 +165,13 @@ class AttentionOp(nn.Module):
       decoder_segment_ids: Array | None,
       model_mode: str):
     self.check_attention_inputs(query, key, value)
-    if self.attention_kernel == "dot_product":
+    length = query.shape[-3]
+    if self.attention_kernel == 'dot_product' or\
+          (self.attention_kernel == 'autoselected' and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE) or\
+          (self.attention_kernel == 'autoselected' and length < 128):
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
-    elif self.attention_kernel == 'flash':
+    elif self.attention_kernel == 'flash' or\
+          self.attention_kernel == 'autoselected':
       if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
         raise ValueError("""Decode not supported with flash attention.
                             Use `dot_product` instead.""")
@@ -409,7 +413,8 @@ class AttentionOp(nn.Module):
     Returns:
       reshaped kv as [b, ..., s, n, d]
     """
-    return jnp.moveaxis(kv, -1, -3)
+    return jax.numpy.moveaxis(kv, (0,1,2,3), (1,2,0,3))
+
 
   def move_kvlen_axis(self, kv):
     """Move key/value length axis to the end.
@@ -420,7 +425,7 @@ class AttentionOp(nn.Module):
     Returns:
       reshaped kv as [b, ..., n, d, s]
     """
-    return jnp.moveaxis(kv, -3, -1)
+    return jax.numpy.moveaxis(kv, (0,1,2,3), (2,0,1,3))
 
   def cached_kv_shape(self, kv_shape):
     """Cached KV shape.
@@ -437,10 +442,10 @@ class AttentionOp(nn.Module):
     Returns:
       Swapped kv_shape as [b, ..., n, d, s] for cache.
     """
-    return kv_shape[:-3] + tuple(kv_shape[i] for i in [-2, -1, -3])
+    return (kv_shape[1], kv_shape[2], kv_shape[0], kv_shape[3])
 
   def _get_prefill_cache(self, batch, heads, kv_head_size, dtype):
-    kv_cache_layout = ('cache_batch', 'cache_heads', 'cache_kv', 'cache_sequence')
+    kv_cache_layout = ('cache_sequence', 'cache_heads', 'cache_batch', 'cache_kv', )
     cache_logical_shape = (batch, self.max_prefill_predict_length, heads, kv_head_size)
     cached_key = self.variable('cache', 'cached_prefill_key',
                                nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
@@ -454,7 +459,7 @@ class AttentionOp(nn.Module):
     return cached_key, cached_value, cached_segment_id
 
   def _get_ar_cache(self, batch, heads, kv_head_size, dtype):
-    kv_cache_layout = ('cache_batch', 'cache_heads', 'cache_kv', 'cache_sequence')
+    kv_cache_layout = ('cache_sequence', 'cache_heads', 'cache_batch', 'cache_kv', )
     cache_logical_shape = (batch, self.max_target_length - self.max_prefill_predict_length, heads, kv_head_size)
     cached_key = self.variable('cache', 'cached_ar_key',
                                nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
@@ -489,7 +494,6 @@ class AttentionOp(nn.Module):
       """
       batch, sequence, heads, kv_head_size = key.shape
       assert key.dtype == value.dtype, "Key and Value Dtypes should match."
-      assert self.max_prefill_predict_length == sequence, "Set prefill length must match prefill sequence"
       
       cached_prefill_key, cached_prefill_value, cached_prefill_segment_id = self._get_prefill_cache(batch, heads, kv_head_size, key.dtype)
       self._get_ar_cache(batch, heads, kv_head_size, key.dtype) # initialize it now
@@ -529,11 +533,19 @@ class AttentionOp(nn.Module):
     one_token_key = self.move_kvlen_axis(one_token_key)
     one_token_value = self.move_kvlen_axis(one_token_value)
 
+    ar_key = cached_ar_key.value
+    ar_value = cached_ar_value.value
+    one_hot_indices = one_hot_indices.astype(int)
+
     # We implement an efficient scatter into the cache via one-hot broadcast and addition.
-    ar_key = cached_ar_key.value + one_token_key * one_hot_indices
-    ar_value = cached_ar_value.value + one_token_value * one_hot_indices
+    ar_key = jax.lax.dynamic_update_index_in_dim(ar_key, one_token_key, jnp.squeeze(one_hot_indices), 0)
+    ar_value = jax.lax.dynamic_update_index_in_dim(ar_value, one_token_value, jnp.squeeze(one_hot_indices), 0)
+    ar_key = nn.with_logical_constraint(ar_key, ('cache_sequence', 'cache_heads', 'cache_batch', 'cache_kv',)) #TODO DUPE
+    ar_value = nn.with_logical_constraint(ar_value, ('cache_sequence', 'cache_heads', 'cache_batch', 'cache_kv',))
     cached_ar_key.value = ar_key
     cached_ar_value.value = ar_value
+
+
 
     # Move the keys and values back to their original shapes.
     return self.revert_kvlen_axis(ar_key), self.revert_kvlen_axis(ar_value)
@@ -564,16 +576,19 @@ class AttentionOp(nn.Module):
         raise ValueError("Error, we can't do autoregression if we haven't seeded the KV Cache.")
 
       cached_ar_key, cached_ar_value, cached_ar_segment_id, cache_ar_index = self._get_ar_cache(batch, heads, kv_head_size, key.dtype)
-      _, _, _, length = cached_ar_key.value.shape
+      length, _, _, _ = cached_ar_key.value.shape
 
       # Create a OHE of the current index. NOTE: the index is increased below.
-      one_hot_indices = jax.nn.one_hot(cache_ar_index.value, length, dtype=key.dtype)
       one_hot_indices_int32 = jax.nn.one_hot(cache_ar_index.value, length, dtype=jnp.int32)
 
+      key = nn.with_logical_constraint(key, (BATCH, LENGTH, HEAD, D_KV))
+      value = nn.with_logical_constraint(value, (BATCH, LENGTH, HEAD, D_KV))
+
+
       # Update key, value caches with our new 1d spatial slices.
-      ar_key, ar_value = self.update_ar_key_value(key, value, cached_ar_key, cached_ar_value, one_hot_indices)
+      ar_key, ar_value = self.update_ar_key_value(key, value, cached_ar_key, cached_ar_value, cache_ar_index.value)
       cached_ar_segment_id.value = cached_ar_segment_id.value + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR * one_hot_indices_int32
-      cache_ar_index.value = jnp.mod(cache_ar_index.value + 1, self.max_target_length)
+      cache_ar_index.value = jnp.mod(cache_ar_index.value + 1, self.max_target_length - self.max_prefill_predict_length)
 
       # Prep are return both prefill and ar caches
       cached_prefill_key, cached_prefill_value, cached_prefill_segment_id = self._get_prefill_cache(self.max_target_length, heads, kv_head_size, key.dtype)
