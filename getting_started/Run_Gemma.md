@@ -35,7 +35,7 @@ python MaxText/convert_gemma_chkpt.py --base_model_path $CHKPT_BUCKET/2b --maxte
 ### Run `decode.py`.
 
 ```
-python MaxText/decode.py MaxText/configs/base.yml tokenizer_path=$CHKPT_BUCKET/tokenizer.model load_parameters_path=$MODEL_BUCKET/{MODEL_VARIATION}/0/default per_device_batch_size=1 run_name=runner_$(date +%Y-%m-%d-%H-%M) max_prefill_predict_length=8 max_target_length=64 dataset_type=synthetic steps=10 async_checkpointing=false attention=dot_product model_name=gemma-2b prompt="Kaggle is good for"
+python MaxText/decode.py MaxText/configs/base.yml tokenizer_path=$CHKPT_BUCKET/tokenizer.model load_parameters_path=$MODEL_BUCKET/{MODEL_VARIATION}/0/items per_device_batch_size=1 run_name=runner_$(date +%Y-%m-%d-%H-%M) max_prefill_predict_length=8 max_target_length=64 dataset_type=synthetic steps=10 async_checkpointing=false attention=dot_product model_name=gemma-2b prompt="Kaggle is good for"
 ```
 
 ### MaxText supports fine-tuning with high performance.

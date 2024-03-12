@@ -118,7 +118,10 @@ class LlamaDecoderLayer(nn.Module):
         kernel_axes=('embed',),
         epsilon=cfg.normalization_layer_epsilon,
         )(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, ('activation_batch', 'activation_length', 'activation_embed'))
+    hidden_states = nn.with_logical_constraint(
+      hidden_states,
+      ('activation_batch', 'activation_length', 'activation_embed')
+      )
 
     # MLP block.
     mlp_lnx = linears.MlpBlock(
