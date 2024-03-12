@@ -417,6 +417,7 @@ def train_loop(config, state=None):
       max_utils.activate_profiler(config)
 
     example_batch = load_next_batch(data_iterator, example_batch, config)
+    # import pdb; pdb.set_trace()
     nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       state, metrics = p_train_step(
