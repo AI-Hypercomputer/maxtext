@@ -84,7 +84,7 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
     model, None, tx, config, rng, mesh, checkpoint_manager
   )
   num_params = max_utils.calculate_num_params_from_pytree(state.params)
-  max_logging.log(f"In input checkpoint Number of model params={num_params/10**9:.3f} billion")
+  max_logging.log(f"In input checkpoint Number of model params={num_params/1e9:.3f} billion")
   return state, state_mesh_notations
 
 def _save_decode_checkpoint(config, state, checkpoint_manager):

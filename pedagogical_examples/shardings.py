@@ -177,7 +177,7 @@ def main(_argv: Sequence[str]) -> None:
   activation_bytes = 2 * (  BATCH  * ( D_FF+D_EMB) ) * NUM_LAYERS
   memory_bytes = parameter_bytes + activation_bytes
 
-  print(f"total {memory_bytes/10**9} GB, parameters {parameter_bytes/10**9} GB, activations {activation_bytes/10**9} GB")
+  print(f"total {memory_bytes/1e9} GB, parameters {parameter_bytes/1e9} GB, activations {activation_bytes/1e9} GB")
 
   def gen_layer(random_key):
     keys = jax.random.split(random_key, num = 4)

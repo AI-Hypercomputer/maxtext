@@ -23,6 +23,9 @@ import os
 import pyconfig
 import sys
 
+from jax.experimental.compilation_cache import compilation_cache as cc
+
+
 
 def main(config):
   engine = maxengine.MaxEngine(config)
@@ -71,5 +74,6 @@ if __name__ == "__main__":
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   pyconfig.initialize(sys.argv)
   cfg = pyconfig.config
+  cc.set_cache_dir(os.path.expanduser(cfg.jax_cache_dir))
   validate_config(cfg)
   main(cfg)

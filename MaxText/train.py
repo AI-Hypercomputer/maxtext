@@ -370,7 +370,7 @@ def train_loop(config, state=None):
 
 
   num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
-  max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
+  max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
   per_device_tflops = maxtext_utils.calculate_tflops_training_per_device(num_model_parameters, config)
 
   # Write train config params, num model params, and XLA flags to tensorboard
