@@ -7,7 +7,7 @@
 set -e
 idx=$(date +%Y-%m-%d-%H-%M)
 
-base_ckpt_path=gs://maxtext-llama/test/2024-01-15-06-49/decode-ckpt-maxtext/0/default
+base_ckpt_path=gs://maxtext-llama/test/2024-01-15-06-49/decode-ckpt-maxtext/0/items
 BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs
 DATASET_PATH=gs://maxtext-dataset
 

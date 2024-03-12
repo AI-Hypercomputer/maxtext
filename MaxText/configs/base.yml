@@ -29,10 +29,10 @@ normalization_layer_epsilon: 1.e-05
 #   (3) We don't load a checkpoint and initialize state instead!
 
 # Loads a just parameters from a specific directory
-# e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/default/NUMBER or NUMBER/default
+# e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/items/NUMBER or NUMBER/items
 load_parameters_path: ""
 # Loads a full checkpoint including optimizer state and step count from a specific directory
-# e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/default/NUMBER or NUMBER/default
+# e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/items/NUMBER or NUMBER/items
 load_full_state_path: ""
 
 # If enable_checkpointing is true, an asynchronous checkpointer will be used if
@@ -41,6 +41,8 @@ load_full_state_path: ""
 enable_checkpointing: True
 async_checkpointing: True
 checkpoint_period: 10_000
+# enables one replica to read the ckpt then broadcast to the rest
+enable_single_replica_ckpt_restoring: False
 
 force_unroll: False # during generate_param_only_checkpoint should we unroll the loop?
 ############################### END CHECKPOINTING ##################################
