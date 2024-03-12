@@ -93,7 +93,6 @@ class MaxEngine(engine_api.Engine):
       return params
     else:
       self.model.quant.quant_mode = quantizations.get_quant_mode('convert')
-      print("DOING THE CONVERSION")
 
       @jax.jit
       def model_apply(_p, _rng):
@@ -227,7 +226,7 @@ class MaxEngine(engine_api.Engine):
 
     def copy(path, partial_cache, full_cache, annotations):
       path_key = path[-1].key
-      if path_key in ['cache_ar_index', 'cached_ar_key', 'cached_ar_value']:
+      if path_key in ['cache_ar_index', 'cached_ar_key', 'cached_ar_value', 'cached_ar_key_scale', 'cached_ar_value_scale']:
         return full_cache # we don't even zero these out because we can mask them out.
 
       batch_idx = annotations.index("cache_batch") if "cache_batch" in annotations else -1
@@ -249,7 +248,7 @@ class MaxEngine(engine_api.Engine):
         ## copy prefill cachce
         full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
         return full_cache
-      elif path_key in ['cached_prefill_key', 'cached_prefill_value']:
+      elif path_key in ['cached_prefill_key', 'cached_prefill_value', 'cached_prefill_key_scale', 'cached_prefill_value_scale']:
         return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
       else:
         raise ValueError(f"We don't have a strategy for inserting {path_key}")
