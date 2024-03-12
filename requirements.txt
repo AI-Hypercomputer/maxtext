@@ -3,7 +3,7 @@ jaxlib>=0.4.23
 orbax-checkpoint==0.5.3
 absl-py
 array-record
-aqtp
+aqtp>=0.6.1
 cloud-tpu-diagnostics
 google-cloud-storage
 grain-nightly
