@@ -1,8 +1,1 @@
-export M_LOAD_PARAMETERS_PATH=gs://runner-maxtext-logs/reroll5/checkpoints/10/default/
-export M_PER_DEVICE_BATCH_SIZE=24
-export M_MAX_PREFILL_PREDICT_LENGTH=1024
-export M_MAX_TARGET_LENGTH=2048
-
-#python MaxText/decode.py            MaxText/configs/base.yml tokenizer_path=assets/tokenizer.gemma run_name=runner_2024-03-06-04-17 steps=10 weight_dtype=bfloat16 async_checkpointing=false model_name=gemma-7b ici_fsdp_parallelism=1 ici_autoregressive_parallelism=-1 scan_layers=false
-
-python MaxText/maxengine_server.py MaxText/configs/base.yml tokenizer_path=assets/tokenizer.gemma run_name=runner_2024-03-06-04-17 steps=10 weight_dtype=bfloat16 async_checkpointing=false model_name=gemma-7b ici_fsdp_parallelism=1 ici_autoregressive_parallelism=-1 scan_layers=false 
+python3 MaxText/maxengine_server.py            MaxText/configs/base.yml tokenizer_path=assets/tokenizer.gemma run_name=runner_2024-03-06-04-17 steps=10 weight_dtype=bfloat16 async_checkpointing=false model_name=gemma-7b ici_fsdp_parallelism=1 ici_autoregressive_parallelism=-1 scan_layers=false max_prefill_predict_length=1024 max_target_length=2048 enable_profiler=true per_device_batch_size=24 base_output_directory=gs://vipannalla_maxtext_outputs_3/rwitten quantize_kvcache=true quantization=int8 load_parameters_path=gs://runner-maxtext-logs/reroll5/checkpoints/10/default
