@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -ex
 
 USER=${1}
 TFLOP_THRESHOLD=${2}

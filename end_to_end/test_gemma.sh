@@ -1,6 +1,5 @@
 #!/bin/bash
-set -e
-set -x
+set -ex
 idx=$(date +%Y-%m-%d-%H-%M)
 # convert 2.5B checkpoint
 export base_model_path=gs://maxtext-gemma/flax/2b

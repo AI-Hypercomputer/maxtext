@@ -4,7 +4,7 @@
 #  - Updating GCS paths (gs://) to your accessible locations.
 #  - Using the checkpoint generated from train.py or available one in open source (i.e. https://files.mixtral-8x7b-v0-1.mistral.ai/Mixtral-8x7B-v0.1-Instruct.tar).
 
-set -e
+set -ex
 idx=$(date +%Y-%m-%d-%H-%M)
 
 export M_ENABLE_CHECKPOINTING=true
