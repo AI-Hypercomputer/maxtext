@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -ex
 
 if [ -f "run_*_metrics.txt" ]; then
     rm run_*_metrics.txt

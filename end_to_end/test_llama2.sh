@@ -4,7 +4,7 @@
 #  - Updating GCS paths (gs://) to your accessible locations.
 #  - Using the checkpoint generated from train.py or available one in open source (https://llama.meta.com/llama-downloads/).
 
-set -e
+set -ex
 idx=$(date +%Y-%m-%d-%H-%M)
 
 export M_ENABLE_CHECKPOINTING=true

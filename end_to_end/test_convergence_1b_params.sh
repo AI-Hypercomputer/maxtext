@@ -1,4 +1,5 @@
 #!/bin/bash
+set -ex
 
 echo "Running test_convergence_1b_params.sh"
 # Run this on 64 chips to achieve a loss value of ~2.5 after 20400 steps, or ~2.7 after 10200 steps (v4-128)
@@ -11,9 +12,6 @@ echo "Running test_convergence_1b_params.sh"
 #
 # Example to invoke this script:
 # bash end_to_end/test_convergence_1b_params.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>" LOSS_THRESHOLD=100.0
-
-# Stop execution if any command exits with error
-set -e
 
 export LOSS_THRESHOLD=100.0 # Set to large value so test is guaranteed to pass.
 export STEPS=20400 # Run for 20B tokens for a 1B sized mode for "chinchilla" scaling https://arxiv.org/abs/2203.15556
