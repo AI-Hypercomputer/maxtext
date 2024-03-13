@@ -24,6 +24,7 @@ local tpus = import 'templates/tpus.libsonnet';
     tpuSettings+: {
       tpuVmExtraSetup: |||
         pip install expecttest==0.1.6 rich
+        pip install torch_xla[pallas] -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
       |||,
     },
   },
