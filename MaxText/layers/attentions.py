@@ -264,9 +264,11 @@ class AttentionOp(nn.Module):
     2. It supports head_dim till 128
     GQA support with head_dim=256 will be added soon 
     """
-    import transformer_engine.jax.fused_attn as fused_attn
-    from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLayout
-    from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available
+
+    # These imports are only meant to work in a GPU build.
+    import transformer_engine.jax.fused_attn as fused_attn  # pytype: disable=import-error
+    from transformer_engine.jax.fused_attn import AttnBiasType, AttnMaskType, QKVLayout  # pytype: disable=import-error
+    from transformer_engine.jax.fused_attn import is_fused_attn_kernel_available  # pytype: disable=import-error
 
     batch, s_q, n_heads, head_dim = query.shape  # pylint: disable=unused-variable
     _, s_kv, _, _ = key.shape

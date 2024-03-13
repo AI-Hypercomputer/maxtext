@@ -99,7 +99,7 @@ def calculate_tflops_training_per_device(num_model_parameters, config):
   causal_attention_tflops = noncasual_attention_flops / 2 # due to causality in attention
   total_tflops = learnable_weight_tflops + causal_attention_tflops
 
-  print(f'Per train step, total TFLOPs will be {total_tflops:.2f},',
+  print(f'Per train step, total TFLOPs/device will be {total_tflops:.2f},',
         f'split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops',
         f'and {100 * causal_attention_tflops/total_tflops:.2f}% attention flops')
   return total_tflops
