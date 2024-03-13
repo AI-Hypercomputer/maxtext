@@ -130,7 +130,7 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
             pip3 install -U "jax[cuda12_pip]==${JAX_VERSION}" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
         else
             echo "Installing stable jax, jaxlib, libtpu for NVIDIA gpu"
-            pip3 install -U "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+            pip3 install --no-cache-dir "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html -c constraints.txt
         fi
     fi
 elif [[ $MODE == "nightly" ]]; then
@@ -171,4 +171,9 @@ else
 fi
 
 # Install dependencies from requirements.txt
-cd $run_name_folder_path && pip install --upgrade pip &&  pip3 install -r requirements.txt
+cd $run_name_folder_path && pip install --upgrade pip 
+if [[ $DEVICE == "gpu"  ]] && [[ "$MODE" == "stable" || ! -v MODE ]] && [[ ! -v JAX_VERSION ]]; then
+    pip3 install --no-cache-dir -r requirements.txt -c constraints.txt
+else
+    pip3 install -U -r requirements.txt
+fi
