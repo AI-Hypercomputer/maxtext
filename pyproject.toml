@@ -8,8 +8,10 @@ package-mode = false
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.12"
-tf-nightly = "==2.17.0.dev20240310"
-tensorflow-text-nightly = "==2.17.0.dev20240310"
+tensorflow = "==2.16.1"
+tensorflow-text = [
+    { version = "==2.16.1", markers = "platform_system != \"Darwin\"" },
+]
 jax = { version = "==0.4.25", extras = ["cuda12_local"] }
 jaxlib = { version = "==0.4.25", extras = ["cuda12_local"] }
 orbax-checkpoint = "^0.5.5"
