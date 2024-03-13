@@ -1,0 +1,40 @@
+[tool.poetry]
+name = "MaxText"
+version = "0.1.0"
+description = "MaxText is a **high performance**, **arbitrarily scalable**, **open-source**, **simple**, **easily forkable**, **well-tested**, **batteries included** LLM written in pure Python/Jax and targeting Google Cloud TPUs. MaxText typically achieves 55% to 60% model-flop utilization and scales from single host to very large clusters while staying simple and \"optimization-free\" thanks to the power of Jax and the XLA compiler."
+authors = ["Google LLC"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.12"
+tf-nightly = "==2.17.0.dev20240310"
+tensorflow-text-nightly = "==2.17.0.dev20240310"
+jax = { version = "==0.4.25", extras = ["cuda12_local"] }
+jaxlib = { version = "==0.4.25", extras = ["cuda12_local"] }
+orbax-checkpoint = "^0.5.5"
+google-cloud-storage = "==2.15.0"
+google-auth = "2.28.2"
+protobuf = "3.20.3"
+flax = ">=0.8.0"
+tensorflow-datasets = "^4.9.4"
+grain-nightly = "^0.0.6"
+tensorboardx = "^2.6.2.2"
+ml-collections = "^0.1.1"
+sentencepiece = "^0.2.0"
+aqtp = "^0.6.1"
+cloud-tpu-diagnostics = "^0.1.5"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[[tool.poetry.source]]
+name = "jax_cuda"
+url = "https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"
+priority = "primary"
+
+
+[[tool.poetry.source]]
+name = "PyPI"
+priority = "primary"
