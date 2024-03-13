@@ -22,7 +22,8 @@ from dags.multipod.configs import maxtext_gce_config
 from dags.multipod.configs.common import SetupMode, Platform
 
 # Run once a day at 9 am UTC (1 am PST)
-SCHEDULED_TIME = "0 9 * * *" if composer_env.is_prod_env() else None
+# Pausing on GCE
+SCHEDULED_TIME = None
 
 
 with models.DAG(

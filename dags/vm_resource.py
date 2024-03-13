@@ -30,6 +30,7 @@ class Project(enum.Enum):
   CLOUD_ML_AUTO_SOLUTIONS = "cloud-ml-auto-solutions"
   TPU_PROD_ENV_MULTIPOD = "tpu-prod-env-multipod"
   TPU_PROD_ENV_AUTOMATED = "tpu-prod-env-automated"
+  CLOUD_TPU_MULTIPOD_DEV = "cloud-tpu-multipod-dev"
 
 
 class ImageProject(enum.Enum):
@@ -120,6 +121,7 @@ class ClusterName(enum.Enum):
   V4_8_MULTISLICE_CLUSTER = "v4-8-maxtext"
   V4_16_MULTISLICE_CLUSTER = "v4-16-maxtext"
   V4_128_MULTISLICE_CLUSTER = "v4-bodaborg"
+  V5P_8_MULTISLICE_CLUSTER = "v5p-8-bodaborg-us-east5-a"
   V5E_16_MULTISLICE_CLUSTER = "v5e-16-bodaborg"
   V5E_256_MULTISLICE_CLUSTER = "v5e-256-bodaborg"
 
