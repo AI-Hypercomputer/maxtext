@@ -1,9 +1,9 @@
 jax>=0.4.23
 jaxlib>=0.4.23
-orbax-checkpoint
+orbax-checkpoint==0.5.3
 absl-py
 array-record
-aqtp>=0.6.1
+aqtp
 cloud-tpu-diagnostics
 google-cloud-storage
 grain-nightly
@@ -16,8 +16,8 @@ pylint
 pytest
 pytype
 sentencepiece==0.1.97
-tensorflow-text
-tensorflow
+tensorflow-text>=2.13.0
+tensorflow>=2.13.0
 tensorflow-datasets
 tensorboardx
 tensorboard-plugin-profile
