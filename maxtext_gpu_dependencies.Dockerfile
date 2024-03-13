@@ -1,4 +1,4 @@
-FROM ghcr.io/nvidia/jax:base
+FROM ghcr.io/nvidia/jax:base-2024-03-13
 
 # Install dependencies for adjusting network rto
 RUN apt-get update && apt-get install -y iproute2 ethtool lsof

@@ -16,8 +16,9 @@ pylint
 pytest
 pytype
 sentencepiece==0.1.97
-tensorflow-text>=2.13.0
-tensorflow>=2.13.0
+# Limit tf version pending investigation https://github.com/google/maxtext/issues/516.
+tensorflow-text>=2.13.0,<2.15
+tensorflow>=2.13.0,<2.15
 tensorflow-datasets
 tensorboardx
 tensorboard-plugin-profile
