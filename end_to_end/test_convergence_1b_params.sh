@@ -24,6 +24,11 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
+if [ -n "$RUN_NAME" ];
+then
+    export M_RUN_NAME=$RUN_NAME
+fi
+
 if [ "$DATASET_TYPE" == "c4-array_record" ]
 then
     EVAL_METRICS=grain_checkpoint_save_restore
@@ -34,7 +39,7 @@ then
     CMD_DATA=" dataset_type=c4-array_record dataset_name=array-record/c4/en/3.0.1 eval_dataset_name=array-record/c4/en/3.0.1"
 fi
 
-TRAIN_CMD="python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
+TRAIN_CMD="python3 MaxText/train.py MaxText/configs/base.yml\
         steps=$STEPS per_device_batch_size=8.0 learning_rate=3e-4 enable_checkpointing=false \
         max_target_length=2048 global_parameter_scale=1 \
         enable_profiler=false metrics_file=metrics.txt base_output_directory=$OUTPUT_PATH\
