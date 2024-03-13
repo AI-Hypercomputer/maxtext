@@ -1,4 +1,4 @@
-export NNODES=16
+export NNODES=2
 export IMAGE="gcr.io/supercomputer-testing/yangyuwei/maxtext-fastrak:latest"
 export STEPS=30
 export PER_DEVICE_BATCH_SIZE=12
