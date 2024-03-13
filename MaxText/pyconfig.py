@@ -162,10 +162,18 @@ class _HyperParameters():
     if _BASE_CONFIG_ATTR in raw_data_from_yaml:
       parent_config_filename = raw_data_from_yaml[_BASE_CONFIG_ATTR]
       if not os.path.isabs(parent_config_filename):
-        parent_config_filename = os.path.join(
+        loaded_parent_config_filename = os.path.join(
             os.path.dirname(config_name), parent_config_filename
         )
-      base_config = self._load_config(parent_config_filename)
+        if not os.path.isfile(loaded_parent_config_filename):
+          dir_path = os.path.dirname(os.path.realpath(__file__))
+          loaded_parent_config_filename = os.path.join(
+              dir_path, f"configs/{parent_config_filename}"
+          )
+      else:
+        loaded_parent_config_filename = parent_config_filename
+
+      base_config = self._load_config(loaded_parent_config_filename)
       for key, value in raw_data_from_yaml.items():
         base_config[key] = value
       return base_config
