@@ -17,9 +17,9 @@
 
 import datetime
 from airflow import models
-from dags import composer_env
-from dags.vm_resource import TpuVersion, Zone
-from dags.multipod.configs import maxtext_gce_config
+from dags import composer_env, test_owner
+from dags.vm_resource import TpuVersion, Zone, DockerImage
+from dags.multipod.configs import gke_config
 from dags.multipod.configs.common import SetupMode, Platform
 
 
@@ -41,18 +41,27 @@ with models.DAG(
       "gemma": ["test_gemma"],
       "gpt3": ["test_gpt3"],
   }
-  test_modes = [SetupMode.STABLE, SetupMode.NIGHTLY]
 
   for model in test_models.keys():
-    for mode in test_modes:
-      for test_script in test_models[model]:
-        maxtext_gce_config.get_maxtext_end_to_end_test_config(
-            tpu_version=TpuVersion.V4,
-            tpu_cores=8,
-            tpu_zone=Zone.US_CENTRAL2_B.value,
-            time_out_in_min=60,
-            is_tpu_reserved=False,
-            test_name=f"{test_name_prefix}-{mode.value}-{test_script}",
-            test_script=test_script,
-            test_mode=mode,
-        ).run()
+    for test_script in test_models[model]:
+      stable = gke_config.get_gke_config(
+          tpu_version=TpuVersion.V4,
+          tpu_cores=8,
+          tpu_zone=Zone.US_CENTRAL2_B.value,
+          time_out_in_min=60,
+          test_name=f"{test_name_prefix}-stable-{test_script}",
+          run_model_cmds=(f"bash end_to_end/{test_script}.sh",),
+          docker_image=DockerImage.MAXTEXT_JAX_STABLE.value,
+          test_owner=test_owner.JON_B,
+      ).run()
+      nightly = gke_config.get_gke_config(
+          tpu_version=TpuVersion.V4,
+          tpu_cores=8,
+          tpu_zone=Zone.US_CENTRAL2_B.value,
+          time_out_in_min=60,
+          test_name=f"{test_name_prefix}-nightly-{test_script}",
+          run_model_cmds=(f"bash end_to_end/{test_script}.sh",),
+          docker_image=DockerImage.MAXTEXT_JAX_NIGHTLY.value,
+          test_owner=test_owner.JON_B,
+      ).run()
+      stable >> nightly

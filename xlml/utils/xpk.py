@@ -25,9 +25,14 @@ from xlml.utils import gke
 
 @task
 def generate_workload_id(benchmark_id: str) -> str:
-  """Generate a workload ID."""
+  """Generate a valid workload ID."""
+  import re
+
   short_id = str(uuid.uuid4())[:8]
-  return f"{benchmark_id}-{short_id}"
+  # Remove all non-alphanumeric characters, and truncate to ensure the result
+  # is less than 40 characters.
+  short_benchmark = re.sub(r"[^a-zA-Z0-9-]+", "", benchmark_id)[:32]
+  return f"{short_benchmark}{short_id}"
 
 
 def _run_workload(
@@ -49,18 +54,7 @@ def _run_workload(
       "set -xue",
       "git clone https://github.com/google/xpk.git /tmp/xpk",
       "cd /tmp/xpk",
-      (
-          "curl https://packages.cloud.google.com/apt/doc/apt-key.gpg |"
-          " gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg"
-      ),
-      (
-          'echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg]'
-          ' https://packages.cloud.google.com/apt cloud-sdk main" |'
-          " tee -a /etc/apt/sources.list.d/google-cloud-sdk.list"
-      ),
-      "apt-get update && apt-get install -y google-cloud-cli",
-      "apt-get install -y kubectl",
-      "apt-get install -y google-cloud-cli-gke-gcloud-auth-plugin",
+      "gcloud components install kubectl",
       f"gcloud config set project {cluster_project}",
       f"gcloud config set compute/zone {zone}",
       (
@@ -77,12 +71,12 @@ def _run_workload(
 # To support local execution using `scripts/local-airflow.sh`, run using
 # task.docker in local environments. Otherwise, task.kubernetes should be used.
 if "XLMLTEST_LOCAL_AIRFLOW" in os.environ:
-  run_workload = task.docker(_run_workload, image="python:3.10")
+  run_workload = task.docker(_run_workload, image="google/cloud-sdk:alpine")
 else:
   run_workload = task.kubernetes(
       _run_workload,
       namespace="composer-user-workloads",
-      image="python:3.10",
+      image="google/cloud-sdk:alpine",
       config_file="/home/airflow/composer_kube_config",
       kubernetes_conn_id="kubernetes_default",
       container_resources=k8s_models.V1ResourceRequirements(
