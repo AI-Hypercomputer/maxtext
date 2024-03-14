@@ -196,8 +196,10 @@ def initialize_jax_for_gpu():
     coordinator_port = str(os.getenv("JAX_COORDINATOR_PORT"))
     jax.distributed.initialize(
         coordinator_address=f"{coordinator_ip}:{coordinator_port}",
-        num_processes=int(os.getenv("NNODES")),
-        process_id=int(os.getenv("NODE_RANK")))
+        num_processes=int(os.getenv("JAX_NUM_PROCESSES")),
+        process_id=int(os.getenv("PROCESS_ID")),
+        local_device_ids=int(os.getenv("LOCAL_DEVICE_ID")),
+    )
     max_logging.log(f"JAX global devices: {jax.devices()}")
 
 def initialize_jax_for_cpu():
