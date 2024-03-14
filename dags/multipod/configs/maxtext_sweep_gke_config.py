@@ -37,13 +37,20 @@ def get_maxtext_sweep_gke_config(
     base_set_up_cmds: Iterable[str] = None,
     dataset_name: metric_config.DatasetOption = metric_config.DatasetOption.BENCHMARK_DATASET,
     metric_aggregation_strategy: metric_config.AggregationStrategy = metric_config.AggregationStrategy.MEDIAN,
+    dataset_project: str = None,
+    composer_project: str = None,
 ) -> List[task.TpuXpkTask]:
+  if not dataset_project:
+    dataset_project = project_name
+  if not composer_project:
+    composer_project = project_name
+
   job_gcp_config = gcp_config.GCPConfig(
       project_name=project_name,
       zone=tpu_zone,
       dataset_name=dataset_name,
-      dataset_project=project_name,
-      composer_project=project_name,
+      dataset_project=dataset_project,
+      composer_project=composer_project,
   )
 
   # Add num_slices as a sweep param

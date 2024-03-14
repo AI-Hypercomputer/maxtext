@@ -63,4 +63,6 @@ with models.DAG(
         run_model_cmds=run_command,
         docker_image=DockerImage.MAXTEXT_JAX_STABLE.value,
         test_owner=test_owner.MATT_D,
-    ).run()
+        base_output_directory=base_output_directory,
+        metric_aggregation_strategy=metric_config.AggregationStrategy.LAST,
+    ).run_with_run_name_generation()

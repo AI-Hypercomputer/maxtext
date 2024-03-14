@@ -36,6 +36,8 @@ def get_gke_config(
     dataset_name: metric_config.DatasetOption = metric_config.DatasetOption.XLML_DATASET,
     dataset_project: str = Project.CLOUD_ML_AUTO_SOLUTIONS.value,
     composer_project: str = Project.CLOUD_ML_AUTO_SOLUTIONS.value,
+    base_output_directory: str = None,
+    metric_aggregation_strategy: metric_config.AggregationStrategy = None,
 ) -> task.TpuXpkTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=project_name,
@@ -60,9 +62,22 @@ def get_gke_config(
       docker_image=docker_image,
   )
 
+  job_metric_config = (
+      metric_config.MetricConfig(
+          tensorboard_summary=metric_config.SummaryConfig(
+              file_location=base_output_directory,
+              aggregation_strategy=metric_aggregation_strategy,
+              use_regex_file_location=True,
+          ),
+      )
+      if base_output_directory and metric_aggregation_strategy
+      else None
+  )
+
   return task.TpuXpkTask(
       task_test_config=job_test_config,
       task_gcp_config=job_gcp_config,
+      task_metric_config=job_metric_config,
   )
 
 
