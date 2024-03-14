@@ -13,7 +13,7 @@ parser.add_argument('--run_name', type=str, default="",
                     help='The name of the current run')
 parser.add_argument('--xpk_dir', type=str, default="",
                     help='The path to the xpk.py file')
-parser.add_argument('--hardware', type=str, default="",
+parser.add_argument('--hardware', type=str, default="", choices=['tpu', 'cpu'],
                     help='The hardware to run the benchmark')
 parser.add_argument('--cluster', type=str, default="",
                     help='The cluster name to run the benchmark')
@@ -29,7 +29,7 @@ parser.add_argument('--tpu_type', type=str, default="",
                     help='The type of TPU devices')
 parser.add_argument('--num_processes', type=int, default=64,
                     help='The type of TPU devices')
-parser.add_argument('--mode', type=str, default="",
+parser.add_argument('--mode', type=str, default="", choices=['read', 'write', 'train'],
                     help='Mode of the checkpointing run, either read or write')
 parser.add_argument('--model_size', type=str, default="",
                     help='Size of the model, e.g. 16, 32, 64, 128...')
@@ -167,7 +167,17 @@ def aggregate_metrics():
     for _, t in enumerate(combine_data):
       writer.writerow(t)
 
+def validate_args():
+  """Some basic validations on the user input"""
+  if args.hardware == 'tpu':
+    if args.tpu_type == '' or args.device_type != '':
+      sys.exit("Flag tpu_type must be specified and device_type must not be specified if hardware is tpu")
+  elif args.hardware == 'cpu':
+    if args.tpu_type != '' or args.device_type == '':
+      sys.exit("Flag tpu_type must not be specified and device_type must  be specified if hardware is cpu")
+
 def main() -> None:
+  validate_args()
   command = construct_command()
   subprocess.run(command, capture_output=True, check=True)
   print(f"Running xpk command and waiting for pods to finish: {command}")

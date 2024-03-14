@@ -75,7 +75,7 @@ def checkpoint_loop(config, state=None):
     else: # Checkpoint was unavailable, state needs to be initialized
       raise Exception("Checkpoint not available")
     max_logging.log(f"Finished step {step}, sleeping for 20s...")
-    # time.sleep(20)
+    time.sleep(20)
 
   if config.gcs_csv_folder != '':
     max_logging.log("Uploading metrics to GCS")
