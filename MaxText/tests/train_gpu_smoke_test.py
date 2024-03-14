@@ -27,23 +27,10 @@ class Train(unittest.TestCase):
     test_tmpdir = os.environ.get("TEST_TMPDIR")
     train_main([
         None,
-        "third_party/py/maxtext/configs/base.yml",
+        "third_party/py/maxtext/configs/gpu_smoke_test.yml",
         f"base_output_directory=gs://runner-maxtext-logs",
         "run_name=runner_test",
-        "hardware=gpu",
-        "attention=dot_product",
         r"dataset_path=gs://maxtext-dataset",
-        "base_emb_dim=8",
-        "base_emb_dim=8",
-        "base_num_query_heads=4",
-        "base_num_kv_heads=4",
-        "base_mlp_dim=32",
-        "base_num_decoder_layers=8",
-        "head_dim=16",
-        "per_device_batch_size=2",
-        "max_target_length=1024",
-        "dataset_type=synthetic",
-        "steps=10",
         "enable_checkpointing=False",
     ])
 

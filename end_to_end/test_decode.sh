@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -ex
 
 NUM_TOKEN_THRESHOLD=${1}
 OUTPUT_PATH=${2}
