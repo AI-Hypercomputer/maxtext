@@ -230,6 +230,7 @@ class Gpt3MultiHeadAttention(nn.Module):
                                float32_qk_product=self.float32_qk_product,
                                float32_logits=self.float32_logits,
                                quant=self.quant,
+                               quantize_kvcache=self.config.quantize_kvcache,
                                num_query_heads=self.num_heads,
                                num_kv_heads=self.num_heads,
                                dtype=self.dtype)
