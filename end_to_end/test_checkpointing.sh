@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -ex
 
 if [ -f "saved_metrics.txt" ]; then
     rm saved_metrics.txt

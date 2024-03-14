@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -ex
 
 RUN_NAME=${1}_$(date +%Y-%m-%d-%H)
 OUTPUT_PATH=${2}
