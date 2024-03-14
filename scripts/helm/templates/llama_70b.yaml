@@ -1,3 +1,4 @@
+{{- $root := . -}}
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
@@ -12,8 +13,8 @@ spec:
       replicas: 1
       template:
         spec:
-          parallelism: ${NNODES}
-          completions: ${NNODES}
+          parallelism: {{ $root.Values.workload.nodes }}
+          completions: {{ $root.Values.workload.nodes }}
           backoffLimit: 0   # When any pod fails, the job is failed
           template:
             metadata:
@@ -54,7 +55,12 @@ spec:
               - name: fastrak-daemon
                 image: us-docker.pkg.dev/gce-ai-infra/gpudirect-tcpxo/tcpgpudmarxd-dev:v1.0.3
                 imagePullPolicy: Always
-                command: ["/bin/sh", "-c"]
+                command: 
+                - "bash"
+                - "-c"
+                - |
+                  set -ex; chmod 755 /fts/entrypoint_rxdm_container.sh; /fts/entrypoint_rxdm_container.sh --num_hops=2 --num_nics=8 --uid= --alsologtostderr &
+                  while [ ! -e "/usr/share/maxtext/workload_terminated" ]; do sleep 10; echo "sleeping"; done
                 args:
                   - |
                     set -ex
@@ -72,7 +78,7 @@ spec:
                 - name: LD_LIBRARY_PATH
                   value: /usr/local/nvidia/lib64
               - name: maxtext-fastrak
-                image: "${IMAGE}"
+                image: "{{ $root.Values.workload.image }}"
                 imagePullPolicy: Always
                 securityContext:
                   privileged: true
@@ -90,7 +96,7 @@ spec:
                   - name: JAX_COORDINATOR_ADDRESS
                     value: "$(JOBSET_NAME)-$(REPLICATED_JOB_NAME)-0-0.$(JOBSET_NAME)"
                   - name: NNODES
-                    value: "${NNODES}"
+                    value: "{{ $root.Values.workload.nodes }}"
                   - name: NODE_RANK
                     valueFrom:
                       fieldRef:
@@ -105,9 +111,9 @@ spec:
                     value: /usr/local/nvidia/lib64
 
                   - name: COMMAND
-                    value: "python MaxText/train.py MaxText/configs/base.yml hardware=gpu run_name=2024-03-07-20-59 steps=30 per_device_batch_size=12 model_name=llama2-7b enable_checkpointing=false attention=dot_product dataset_type=synthetic async_checkpointing=false"
+                    value: "python MaxText/train.py MaxText/configs/base.yml hardware=gpu run_name=2024-03-07-20-59 steps={{ $root.Values.workload.steps }} per_device_batch_size={{ $root.Values.workload.per_device_batch_size }} model_name={{ $root.Values.workload.model_name }} enable_checkpointing=false attention=dot_product dataset_type=synthetic async_checkpointing=false"
                   - name: XLA_FLAGS
-                    value: "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_async_all_gather=true --xla_gpu_enable_async_reduce_scatter=true --xla_gpu_enable_triton_gemm=false --xla_gpu_simplify_all_fp_conversions --xla_gpu_graph_level=0 --xla_gpu_enable_async_all_reduce=true --xla_gpu_enable_highest_priority_async_stream=true --xla_gpu_all_reduce_combine_threshold_bytes=8589934592 --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_enable_pipelined_all_gather=true --xla_gpu_enable_pipelined_reduce_scatter=true --xla_gpu_enable_pipelined_all_reduce=true --xla_gpu_enable_while_loop_double_buffering=true --xla_gpu_enable_triton_softmax_fusion=false --xla_gpu_enable_all_gather_combine_by_dim=false --xla_gpu_enable_reduce_scatter_combine_by_dim=false --xla_disable_hlo_passes=rematerialization --xla_gpu_enable_async_collective_permute=true --xla_gpu_enable_async_all_to_all=true"
+                    value: {{ $root.Values.workload.xla_flags }}
                 command:
                   - "bash"
                   - "-c"
