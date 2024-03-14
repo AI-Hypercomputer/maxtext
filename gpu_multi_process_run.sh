@@ -21,7 +21,7 @@ set_nccl_gpudirect_tcpx_specific_configuration() {
     export NCCL_CROSS_NIC=0
     export NCCL_ALGO=Ring
     export NCCL_PROTO=Simple
-    export NCCL_DEBUG=INFO
+    export NCCL_DEBUG=${NCCL_DEBUG:-INFO}
     export NCCL_NET_GDR_LEVEL=PIX
     export NCCL_P2P_PXN_LEVEL=0
     export NCCL_DEBUG_SUBSYS=INIT,GRAPH,ENV,TUNING,NET,VERSION
@@ -46,7 +46,7 @@ set_nccl_gpudirect_tcpx_specific_configuration() {
   elif [[ "$USE_GPUDIRECT" == "fastrak" ]]; then
     echo "Using GPUDirect-TCPFasTrak"
     export NCCL_DEBUG_SUBSYS=INIT,GRAPH,ENV,TUNING,NET,VERSION
-    export NCCL_DEBUG=INFO
+    export NCCL_DEBUG=${NCCL_DEBUG:-INFO}
     export NCCL_FASTRAK_ENABLE_HOTPATH_LOGGING=0
     export LD_LIBRARY_PATH="/usr/local/fastrak/lib64:${LD_LIBRARY_PATH}"
     export NCCL_FASTRAK_CTRL_DEV=eth0
