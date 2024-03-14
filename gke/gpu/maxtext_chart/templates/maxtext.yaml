@@ -1,0 +1,144 @@
+{{- $requiredVar := .Values.cluster.nNodes | required ".Values.cluster.nNodes is required" -}}
+{{- $requiredVar := .Values.cluster.nodePool | required ".Values.cluster.nodePool is required" -}}
+{{- $requiredVar := .Values.workload.image | required ".Values.image is required" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: "maxtext-leader-{{$.Release.Name}}"
+spec:
+  selector:
+    name: "maxtext-leader-{{$.Release.Name}}"
+  clusterIP: None
+  ports:
+  - name: maxtext-leader
+    port: 6002
+---
+{{$node_count := .Values.cluster.nNodes | int}}
+# This needs to be updated to allow uneven distribution of nodes to SBs
+{{- $root := . -}}
+{{range $node_index, $element := until $node_count}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: maxtext-{{$.Release.Name}}-pod{{$node_index}}
+  {{if eq $node_index 0}}
+  labels:
+    name: maxtext-leader-{{$.Release.Name}}
+  {{end}}
+spec:
+  hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
+  hostname: maxtext-pod{{$node_index}}
+  subdomain: maxtext-{{$.Release.Name}}
+  serviceAccountName: "default"
+  restartPolicy: Never
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: cloud.google.com/gke-accelerator
+            operator: Exists
+          - key: cloud.google.com/gke-nodepool
+            operator: In
+            values: [{{$.Values.cluster.nodePool}}]
+  tolerations:
+  - operator: "Exists"
+    key: nvidia.com/gpu
+  volumes:
+  - name: nvidia-install-dir-host
+    hostPath:
+      path: /home/kubernetes/bin/nvidia/lib64
+  - name: tcpd-socket
+    hostPath:
+      path: /run/tcpx
+  - name: shared-memory
+    emptyDir:
+      medium: "Memory"
+      sizeLimit: 200Gi
+  - name: workload-terminated-volume
+    emptyDir: {}
+  - name: tcpx-nccl-plugin-volume
+    emptyDir: {}
+  {{if eq $root.Values.network.useTcpx "yes"}}
+  initContainers:
+  - name: tcpx-nccl-plugin-installer
+    image: {{$root.Values.network.ncclPlugin}}
+    imagePullPolicy: Always
+    volumeMounts:
+    - name: tcpx-nccl-plugin-volume
+      mountPath: /var/lib/tcpx
+    resources:
+      requests:
+        cpu: 150m
+    command:
+      - /bin/sh
+      - -c
+      - |
+        /scripts/container_entry.sh install --install-nccl
+  {{end}}
+  containers:
+  {{if eq $root.Values.network.useTcpx "yes"}}
+  - name: tcpd-daemon
+    image: {{$root.Values.network.rxdmContainer}}
+    imagePullPolicy: Always
+    command:
+    - "bash"
+    - "-c"
+    - |
+      /tcpgpudmarxd/build/app/tcpgpudmarxd --gpu_nic_preset a3vm --gpu_shmem_type fd --setup_param "--verbose 128 2 0" &
+      while [ ! -e "/usr/share/maxtext/workload_terminated" ]; do sleep 10; echo "sleeping"; done
+    securityContext:
+      privileged: true
+    volumeMounts:
+    - name: nvidia-install-dir-host
+      mountPath: /usr/local/nvidia/lib64
+    - name: tcpd-socket
+      mountPath: /tmp
+    - name: workload-terminated-volume
+      mountPath: /usr/share/maxtext
+    env:
+    - name: LD_LIBRARY_PATH
+      value: /usr/local/nvidia/lib64
+  {{end}}
+  - name: maxtext
+    image: {{$root.Values.workload.image}}
+    imagePullPolicy: Always
+    securityContext:
+      privileged: true
+    env:
+      - name: NNODES
+        value: "{{$node_count}}"
+      - name: NODE_RANK
+        value: "{{ $node_index }}"
+      - name: USE_GPUDIRECT_TCPX
+        value: "{{$root.Values.network.useTcpx}}"
+      - name: GPUS_PER_NODE
+        value: "8"
+      - name: JAX_COORDINATOR_ADDRESS
+        value: "maxtext-leader-{{$.Release.Name}}"
+      - name: JAX_COORDINATOR_PORT
+        value: "{{$root.Values.workload.port}}"
+      - name: RUN_NAME
+        value: "{{$root.Values.workload.runName}}"
+      - name: LD_LIBRARY_PATH
+        value: /usr/local/nvidia/lib64
+    volumeMounts:
+      - name: nvidia-install-dir-host
+        mountPath: /usr/local/nvidia/lib64
+      - name: tcpx-nccl-plugin-volume
+        mountPath: /usr/local/tcpx
+      - name: tcpd-socket
+        mountPath: /tmp
+      - name: shared-memory
+        mountPath: /dev/shm
+    resources:
+      limits:
+        nvidia.com/gpu: !!int 8
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cd /deps && bash gke/gpu/start_training.sh
+---
+{{end}}
