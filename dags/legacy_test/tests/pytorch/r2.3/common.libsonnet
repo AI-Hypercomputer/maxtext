@@ -104,7 +104,7 @@ local volumes = import 'templates/volumes.libsonnet';
         pip install pillow
         git clone --depth=1 https://github.com/pytorch/pytorch.git
         cd pytorch
-        git clone https://github.com/pytorch/xla.git
+        git clone -b v2.3.0-rc2 https://github.com/pytorch/xla.git
       |||,
     },
     podTemplate+:: {
@@ -145,7 +145,7 @@ local volumes = import 'templates/volumes.libsonnet';
         pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.3.0rc2-cp310-cp310-linux_x86_64.whl
 
         mkdir -p pytorch/xla
-        git clone --depth=1 https://github.com/pytorch/xla.git pytorch/xla
+        git clone -b v2.3.0-rc2 https://github.com/pytorch/xla.git pytorch/xla
 
         %s
 
