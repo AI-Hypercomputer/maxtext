@@ -1,6 +1,6 @@
 workload:
   nodes: 16
-  image: "us-central1-docker.pkg.dev/gce-ai-infra/maxtext/maxtext_base_image:03_14_2024_release"
+  image: "us-central1-docker.pkg.dev/gce-ai-infra/maxtext/maxtext_base_image:03_14_2024_flash_release"
   steps: 30
   per_device_batch_size: 12
   model_name: llama2-7b
