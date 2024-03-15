@@ -180,7 +180,8 @@ class _HyperParameters():
     return raw_data_from_yaml
 
   def __init__(self, argv: list[str], **kwargs):
-    raw_data_from_yaml = self._load_config(argv[1])
+    config_name : str = argv[1]
+    raw_data_from_yaml = self._load_config(config_name)
 
     self._validate_env_variables(raw_data_from_yaml)
 
@@ -188,7 +189,7 @@ class _HyperParameters():
     keys_from_env_and_command_line = self._update_from_env_and_command_line(raw_keys, raw_data_from_yaml, argv, **kwargs)
     max_logging.log(
         f"Updating keys from env and command line: {keys_from_env_and_command_line}")
-    keys_from_model = _HyperParameters.update_model_vars(argv[1], raw_keys)
+    keys_from_model = _HyperParameters.update_model_vars(argv[1], raw_keys, config_name)
     max_logging.log(f"Updating keys from model: {keys_from_model}")
     validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
 
@@ -264,7 +265,7 @@ class _HyperParameters():
     raw_keys['eval_interval'] = math.ceil(24567 / global_batch_size_to_train_on)
 
   @staticmethod
-  def update_model_vars(base_config_path, raw_keys):
+  def update_model_vars(base_config_path, raw_keys, config_name : str):
     ''' Update model config variables
     '''
     validate_model_name(raw_keys['model_name'])
@@ -284,17 +285,17 @@ class _HyperParameters():
       with open(file_path, 'r', encoding="utf-8") as file:
         model_vars = yaml.safe_load(file)
         updated_keys = list(model_vars.keys())
-      raw_keys = validate_and_update_keys(raw_keys, model_vars)
+      raw_keys = validate_and_update_keys(raw_keys, model_vars, config_name)
     return updated_keys
 
-def validate_and_update_keys(raw_keys, model_keys):
+def validate_and_update_keys(raw_keys, model_keys, config_name : str):
   ''' Validate and update model specific config keys
   '''
   max_logging.log("Updating following parameters in config\n")
   for k in model_keys:
     max_logging.log(f"{k}: {model_keys[k]}")
     if k not in raw_keys:
-      raise ValueError(f'Key {k} does not exist in config/base.yml.')
+      raise ValueError(f'Key {k} does not exist in config {config_name}.')
     elif not isinstance(raw_keys[k], type(model_keys[k])):
       raise ValueError(f'Type of key:{k} does not match with {type(model_keys[k])}')
     else:
