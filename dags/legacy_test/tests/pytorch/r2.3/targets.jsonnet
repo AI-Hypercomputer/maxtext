@@ -12,11 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-local nightly = import 'nightly/targets.jsonnet';
-local r2_3 = import 'r2.3/targets.jsonnet';
+local accelerate = import 'accelerate-smoke.libsonnet';
+local ci = import 'ci.libsonnet';
+local hfBert = import 'hf-bert.libsonnet';
+local huggingfaceDiffusers = import 'hf-diffusers.libsonnet';
+local llama2 = import 'llama2-model.libsonnet';
+local mnist = import 'mnist.libsonnet';
+local resnet50_mp = import 'resnet50-mp.libsonnet';
 
-// Add new versions here
+// Add new models here
 std.flattenArrays([
-  nightly,
-  r2_3,
+  accelerate.configs,
+  ci.configs,
+  hfBert.configs,
+  huggingfaceDiffusers.configs,
+  mnist.configs,
+  resnet50_mp.configs,
+  llama2.configs,
 ])
