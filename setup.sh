@@ -141,7 +141,7 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
             pip3 install --no-cache-dir "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html -c constraints.txt
         fi
         export NVTE_FRAMEWORK=jax
-        pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+        pip3 install --no-cache-dir git+https://github.com/NVIDIA/TransformerEngine.git@0fbc76af3733ae997394eaf82b78ff9c0498fe9 -c constraints.txt
     fi
 elif [[ $MODE == "nightly" ]]; then
 # Nightly mode
