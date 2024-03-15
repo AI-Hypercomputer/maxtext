@@ -14,5 +14,6 @@
 
 export PYTHONPATH=$PWD
 export XLMLTEST_CONFIGS=$PWD/dags/jsonnet/
+export XLMLTEST_MULTIPOD_LEGACY_TEST_DIR=dags/multipod/legacy_tests
 
-find dags -name '*.py' |  xargs -n 1 -t python
+find dags -name '*.py' -not -path "$XLMLTEST_MULTIPOD_LEGACY_TEST_DIR/*" |  xargs -n 1 -t python

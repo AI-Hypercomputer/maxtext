@@ -18,6 +18,8 @@ import uuid
 import os
 from absl import logging
 from airflow.decorators import task
+from airflow.exceptions import AirflowFailException
+from datetime import timedelta
 from kubernetes import client as k8s_client
 from kubernetes.client import models as k8s_models
 from xlml.utils import gke
@@ -71,7 +73,9 @@ def _run_workload(
 # To support local execution using `scripts/local-airflow.sh`, run using
 # task.docker in local environments. Otherwise, task.kubernetes should be used.
 if "XLMLTEST_LOCAL_AIRFLOW" in os.environ:
-  run_workload = task.docker(_run_workload, image="google/cloud-sdk:alpine")
+  run_workload = task.docker(
+      _run_workload, image="google/cloud-sdk:alpine", auto_remove="force"
+  )
 else:
   run_workload = task.kubernetes(
       _run_workload,
@@ -85,7 +89,13 @@ else:
   )
 
 
-@task.sensor(poke_interval=60, timeout=600, mode="reschedule")
+# XPK tests are scheduled by Kueue. Allow up to 20 hours for the workload
+# to finish, since it may wait in the queue.
+@task.sensor(
+    poke_interval=60,
+    timeout=timedelta(hours=20).total_seconds(),
+    mode="reschedule",
+)
 def wait_for_workload_completion(
     workload_id: str, project_id: str, region: str, cluster_name: str
 ) -> bool:
@@ -114,7 +124,10 @@ def wait_for_workload_completion(
     if pod.status.phase in ["Pending", "Running"]:
       logging.info(f"One pod phase is: {pod.status.phase}")
       return False
-    elif pod.status.phase in ["Failed", "Unknown"]:
+    elif pod.status.phase == "Failed":
+      # Don't keep retrying if the pod has failed
+      raise AirflowFailException(f"Bad pod phase: {pod.status.phase}")
+    elif pod.status.phase in ["Unknown"]:
       raise RuntimeError(f"Bad pod phase: {pod.status.phase}")
 
   logging.info("All pod(s) phase are succeeded.")
