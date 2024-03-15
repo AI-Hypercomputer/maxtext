@@ -113,6 +113,7 @@ def get_gke_maxtext_nightly_config(
   run_name = f"{num_slices}slice-V{tpu_version.value}_{tpu_cores}-maxtext-nightly-{current_datetime}"
 
   run_model_cmds = (
+      "bash preflight.sh PLATFORM=GKE",
       (
           "JAX_PLATFORM_NAME=TPU XLA_FLAGS='--xla_dump_to=/tmp/xla_dump/'"
           " ENABLE_PJRT_COMPATIBILITY=true"
