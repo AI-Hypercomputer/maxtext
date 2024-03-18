@@ -43,6 +43,13 @@ jobs:
       run: |
         pip install pytype==2024.2.27
         pip install pylint
+        pip install --upgrade pip &&  pip3 install -r requirements.txt
+    - name: Test Gemma converter script
+      run: |
+        export idx=$(date +%Y-%m-%d-%H-%M)
+        export base_model_path=gs://maxtext-gemma/flax/2b
+        export maxtext_model_path=gs://maxtext-gemma/2b/${idx}
+        python MaxText/convert_gemma_chkpt.py --base_model_path ${base_model_path} --maxtext_model_path ${maxtext_model_path} --model_size 2b
     - name: Typecheck the code with pytype
       run: |
         pytype --jobs auto --disable import-error MaxText/
