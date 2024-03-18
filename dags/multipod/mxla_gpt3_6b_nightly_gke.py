@@ -25,119 +25,119 @@ from dags.multipod.configs import gke_config
 SCHEDULED_TIME = "0 9 * * *" if composer_env.is_prod_env() else None
 
 with models.DAG(
-    dag_id="mxla_maxtext_nightly_gke",
+    dag_id="mxla_gpt_6b_nightly_gke",
     schedule=SCHEDULED_TIME,
-    tags=["multipod_team", "maxtext", "gke", "nightly"],
-    start_date=datetime.datetime(2024, 3, 12),
+    tags=["multipod_team", "maxtext", "gke", "nightly", "gpt_6b"],
+    start_date=datetime.datetime(2024, 3, 18),
     catchup=False,
 ) as dag:
   jax_nightly_image = DockerImage.MAXTEXT_JAX_NIGHTLY
-  default_test_name = "mxla-maxtext-nightly-gke"
+  default_gpt3_6b_test_name = "mxla-gpt3-6b-nightly-gke"
 
-  maxtext_nightly_1slice_v4_8 = gke_config.get_gke_maxtext_nightly_config(
+  gpt3_6b_nightly_1slice_v4_8 = gke_config.get_gke_gpt3_6b_nightly_config(
       tpu_version=TpuVersion.V4,
       tpu_cores=8,
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
-      test_name=default_test_name,
+      test_name=default_gpt3_6b_test_name,
       docker_image=jax_nightly_image.value,
       test_owner=test_owner.TONY_C,
   ).run()
 
-  maxtext_nightly_2slice_v4_8 = gke_config.get_gke_maxtext_nightly_config(
+  gpt3_6b_nightly_2slice_v4_8 = gke_config.get_gke_gpt3_6b_nightly_config(
       tpu_version=TpuVersion.V4,
       tpu_cores=8,
       num_slices=2,
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
-      test_name=default_test_name,
+      test_name=default_gpt3_6b_test_name,
       docker_image=jax_nightly_image.value,
       test_owner=test_owner.TONY_C,
   ).run()
 
-  maxtext_nightly_4slice_v4_8 = gke_config.get_gke_maxtext_nightly_config(
+  gpt3_6b_nightly_4slice_v4_8 = gke_config.get_gke_gpt3_6b_nightly_config(
       tpu_version=TpuVersion.V4,
       tpu_cores=8,
       num_slices=4,
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
-      test_name=default_test_name,
+      test_name=default_gpt3_6b_test_name,
       docker_image=jax_nightly_image.value,
       test_owner=test_owner.TONY_C,
   ).run()
 
-  maxtext_nightly_8slice_v4_8 = gke_config.get_gke_maxtext_nightly_config(
+  gpt3_6b_nightly_8slice_v4_8 = gke_config.get_gke_gpt3_6b_nightly_config(
       tpu_version=TpuVersion.V4,
       tpu_cores=8,
       num_slices=8,
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
-      test_name=default_test_name,
+      test_name=default_gpt3_6b_test_name,
       docker_image=jax_nightly_image.value,
       test_owner=test_owner.TONY_C,
   ).run()
 
-  maxtext_nightly_1slice_v5p_8 = gke_config.get_gke_maxtext_nightly_config(
+  gpt3_6b_nightly_1slice_v5p_8 = gke_config.get_gke_gpt3_6b_nightly_config(
       tpu_version=TpuVersion.V5P,
       tpu_cores=8,
       cluster_name=ClusterName.V5P_8_MULTISLICE_CLUSTER.value,
       tpu_zone=Zone.US_EAST5_A.value,
       time_out_in_min=60,
-      test_name=default_test_name,
+      test_name=default_gpt3_6b_test_name,
       docker_image=jax_nightly_image.value,
       test_owner=test_owner.TONY_C,
       project_name=Project.CLOUD_TPU_MULTIPOD_DEV.value,
   ).run()
 
-  maxtext_nightly_2slice_v5p_8 = gke_config.get_gke_maxtext_nightly_config(
+  gpt3_6b_nightly_2slice_v5p_8 = gke_config.get_gke_gpt3_6b_nightly_config(
       tpu_version=TpuVersion.V5P,
       tpu_cores=8,
       num_slices=2,
       cluster_name=ClusterName.V5P_8_MULTISLICE_CLUSTER.value,
       tpu_zone=Zone.US_EAST5_A.value,
       time_out_in_min=60,
-      test_name=default_test_name,
+      test_name=default_gpt3_6b_test_name,
       docker_image=jax_nightly_image.value,
       test_owner=test_owner.TONY_C,
       project_name=Project.CLOUD_TPU_MULTIPOD_DEV.value,
   ).run()
 
-  maxtext_nightly_4slice_v5p_8 = gke_config.get_gke_maxtext_nightly_config(
+  gpt3_6b_nightly_4slice_v5p_8 = gke_config.get_gke_gpt3_6b_nightly_config(
       tpu_version=TpuVersion.V5P,
       tpu_cores=8,
       num_slices=4,
       cluster_name=ClusterName.V5P_8_MULTISLICE_CLUSTER.value,
       tpu_zone=Zone.US_EAST5_A.value,
       time_out_in_min=60,
-      test_name=default_test_name,
+      test_name=default_gpt3_6b_test_name,
       docker_image=jax_nightly_image.value,
       test_owner=test_owner.TONY_C,
       project_name=Project.CLOUD_TPU_MULTIPOD_DEV.value,
   ).run()
 
-  maxtext_nightly_8slice_v5p_8 = gke_config.get_gke_maxtext_nightly_config(
+  gpt3_6b_nightly_8slice_v5p_8 = gke_config.get_gke_gpt3_6b_nightly_config(
       tpu_version=TpuVersion.V5P,
       tpu_cores=8,
       num_slices=8,
       cluster_name=ClusterName.V5P_8_MULTISLICE_CLUSTER.value,
       tpu_zone=Zone.US_EAST5_A.value,
       time_out_in_min=60,
-      test_name=default_test_name,
+      test_name=default_gpt3_6b_test_name,
       docker_image=jax_nightly_image.value,
       test_owner=test_owner.TONY_C,
       project_name=Project.CLOUD_TPU_MULTIPOD_DEV.value,
   ).run()
 
   (
-      maxtext_nightly_1slice_v4_8
-      >> maxtext_nightly_2slice_v4_8
-      >> maxtext_nightly_4slice_v4_8
-      >> maxtext_nightly_8slice_v4_8
+      gpt3_6b_nightly_1slice_v4_8
+      >> gpt3_6b_nightly_2slice_v4_8
+      >> gpt3_6b_nightly_4slice_v4_8
+      >> gpt3_6b_nightly_8slice_v4_8
   )
 
   (
-      maxtext_nightly_1slice_v5p_8
-      >> maxtext_nightly_2slice_v5p_8
-      >> maxtext_nightly_4slice_v5p_8
-      >> maxtext_nightly_8slice_v5p_8
+      gpt3_6b_nightly_1slice_v5p_8
+      >> gpt3_6b_nightly_2slice_v5p_8
+      >> gpt3_6b_nightly_4slice_v5p_8
+      >> gpt3_6b_nightly_8slice_v5p_8
   )
