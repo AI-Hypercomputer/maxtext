@@ -53,6 +53,13 @@ def main(config):
 if __name__ == '__main__':
   jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+  xla_flags = os.getenv('XLA_FLAGS')
+  to_append = "--xla_disable_hlo_passes=rematerialization"
+  if xla_flags:
+    os.environ['XLA_FLAGS'] = f'{xla_flags} {to_append}'
+  else:
+    os.environ['XLA_FLAGS'] = to_append
+
   pyconfig.initialize(sys.argv)
   cfg = pyconfig.config
   cc.set_cache_dir(os.path.expanduser(cfg.jax_cache_dir))
