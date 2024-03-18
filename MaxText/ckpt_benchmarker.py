@@ -179,7 +179,13 @@ def validate_args():
 def main() -> None:
   validate_args()
   command = construct_command()
-  subprocess.run(command, capture_output=True, check=True)
+  try:
+    subprocess.run(command, capture_output=True, check=True)
+  except subprocess.CalledProcessError as e:
+    print("======================================")
+    print("An error occurred running xpk command:")
+    print("======================================")
+    sys.exit(e.output)
   print(f"Running xpk command and waiting for pods to finish: {command}")
   if not wait_for_pods_to_finish():
     sys.exit("An error occurred, please check pod logs")

@@ -412,7 +412,8 @@ def train_loop(config, state=None):
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
-
+  if start_step >= config.steps:
+    sys.exit(f"Please make sure config steps is larger than start step. Current config step: {config.steps}, start step: {start_step}")
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)

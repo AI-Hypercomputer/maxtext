@@ -23,6 +23,7 @@
 import datetime
 import os
 import time
+import sys
 
 from typing import Sequence
 from absl import app
@@ -76,9 +77,8 @@ def checkpoint_loop(config, state=None):
     max_logging.log(f"Number of model params={num_params/10**9:.3f} billion, memory usage={bytes_params/2**30:.3f}GB, "
                     f"bytes per param={bytes_per_param:.3f}")
 
-  start_step = get_first_step(state) # this is the start_step for training
   ckpt_save_time = []
-  for step in np.arange(start_step, config.steps):
+  for step in range(config.steps):
     if checkpoint_manager is not None:
       # A barrier to sync all hosts before starting to save checkpoint
       jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
