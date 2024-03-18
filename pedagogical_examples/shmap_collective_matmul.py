@@ -15,8 +15,11 @@ MESH_DATA_AXIS = "dp"
 MESH_FSDP_AXIS = "fsdp"
 MESH_TENSOR_AXIS = "tp"
 
-devices = mesh_utils.create_device_mesh((1, 1, 4))
-global_mesh = Mesh(devices, (MESH_DATA_AXIS, MESH_FSDP_AXIS, MESH_TENSOR_AXIS))
+#devices = mesh_utils.create_device_mesh((1, 1, 4))
+d = jax.devices()
+outd = [[[d[0], d[1], d[3], d[2]]]]
+global_mesh = Mesh(outd, (MESH_DATA_AXIS, MESH_FSDP_AXIS, MESH_TENSOR_AXIS))
+breakpoint()
 print(global_mesh.shape)
 
 batch_size = 2
@@ -48,7 +51,7 @@ def simple_timeit(f, *args, tries = 10, task = None):
     jax.profiler.stop_trace()
 
     average_time_ms = sum(outcomes_ms)/len(outcomes_ms)
-    print(f"{task}: average time milliseconds: {average_time_ms:.2f}, trace {trace_dir}")
+    print(f"{task}: average time milliseconds: {average_time_ms:.2f}")
     return average_time_ms
 
 # gen data
@@ -60,7 +63,7 @@ def gen_data_fn():
 
 data_fn = pjit(
     gen_data_fn,
-    out_shardings=(P(MESH_FSDP_AXIS, None, MESH_TENSOR_AXIS), P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None)),
+    out_shardings=(P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None ), P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None)),
 )
 
 def matmul(activations, weights):
@@ -68,19 +71,21 @@ def matmul(activations, weights):
 
 jit_matmul = pjit(matmul, out_shardings=P(MESH_FSDP_AXIS, None, MESH_TENSOR_AXIS, None))
 
+
+
 @partial(
     shard_map,
     mesh=global_mesh,
     in_specs=(
-        P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None), ###### missharded right?
+        P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None),
         P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None),
     ),
     out_specs=P(MESH_FSDP_AXIS, None, MESH_TENSOR_AXIS, None),
     check_rep=False,
 )
 def collective_matmul(activations, weights):
-    print(f"{activations.shape=} {weights.shape=}")
-    weights = jax.lax.all_gather(weights, MESH_FSDP_AXIS, axis=0, tiled=True)
+    print(f"sh_map {activations.shape=} {weights.shape=}")
+
     axis_size = jax.lax.psum(1, axis_name=MESH_TENSOR_AXIS)
     axis_index = jax.lax.axis_index(axis_name=MESH_TENSOR_AXIS)
     # The current sequence chunk
@@ -136,6 +141,8 @@ def collective_matmul(activations, weights):
         accum = jax.lax.dynamic_update_slice(accum, update_forward, (0, forward_update_index, 0, 0))
         accum = jax.lax.dynamic_update_slice(accum, update_backward, (0, backward_update_index, 0, 0))
         return (accum, activation_forward, activation_backward)
+    
+    print(f"{accum.shape=}")
 
     accum, _, _ = jax.lax.fori_loop(
         0, (axis_size - 1), scanned_call, (accum, activation_forward, activation_backward)
@@ -159,9 +166,20 @@ with global_mesh:
         with jax.named_scope("collective_matmul"):
             manual_outputs = jax.jit(collective_matmul)(_activations, _weights)
         return manual_outputs
+
+
+
     
     naive_outputs = run_naive(activations, weights)
     collective_outputs = run_collective(activations, weights)
+
+    print(f"input {activations.shape=} {activations.addressable_shards[0].data.shape=}")
+    print(f"input {weights.shape=} {weights.addressable_shards[0].data.shape=}")
+    print(f"naive_outputs {naive_outputs.shape=} {naive_outputs.addressable_shards[0].data.shape=}")
+    print(f"collective_outputs {collective_outputs.shape=} {collective_outputs.addressable_shards[0].data.shape=}")
+
+
+
     assert jnp.allclose(naive_outputs, collective_outputs), "Two algorithms should match but don't"
 
     simple_timeit(run_naive, activations, weights, task = "naive")
