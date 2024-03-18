@@ -21,9 +21,9 @@ print(global_mesh.shape)
 
 batch_size = 2
 seq_len = 8192
-n_heads = 32
+n_heads = 128
 head_dim = 128
-emb_dim = 4096
+emb_dim = 16384
 
 import random
 import string
@@ -72,13 +72,14 @@ jit_matmul = pjit(matmul, out_shardings=P(MESH_FSDP_AXIS, None, MESH_TENSOR_AXIS
     shard_map,
     mesh=global_mesh,
     in_specs=(
-        P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None),
+        P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None), ###### missharded right?
         P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None),
     ),
     out_specs=P(MESH_FSDP_AXIS, None, MESH_TENSOR_AXIS, None),
     check_rep=False,
 )
 def collective_matmul(activations, weights):
+    print(f"{activations.shape=} {weights.shape=}")
     weights = jax.lax.all_gather(weights, MESH_FSDP_AXIS, axis=0, tiled=True)
     axis_size = jax.lax.psum(1, axis_name=MESH_TENSOR_AXIS)
     axis_index = jax.lax.axis_index(axis_name=MESH_TENSOR_AXIS)
