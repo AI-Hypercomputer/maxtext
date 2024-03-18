@@ -5,7 +5,7 @@
 #  - Using the checkpoint generated from train.py or available one in open source (i.e. https://files.mixtral-8x7b-v0-1.mistral.ai/Mixtral-8x7B-v0.1-Instruct.tar).
 
 set -ex
-idx=$(date +%Y-%m-%d-%H-%M)
+idx=$(date +%Y-%m-%d-%H-%M)-${RANDOM}
 
 export M_ENABLE_CHECKPOINTING=true
 export M_BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs

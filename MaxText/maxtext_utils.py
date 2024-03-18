@@ -90,7 +90,7 @@ def load_compiled(config, partial_train, state):
   return p_train_step
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
-def calculate_tflops_training_per_device(num_model_parameters, config):
+def calculate_tflops_training_per_device(num_model_parameters, config, log=True):
   """ Calculate training TFLOP"""
   learnable_weight_tflops = 6 * num_model_parameters * config.max_target_length * config.per_device_batch_size \
                                    / 10**12
@@ -99,13 +99,15 @@ def calculate_tflops_training_per_device(num_model_parameters, config):
   causal_attention_tflops = noncasual_attention_flops / 2 # due to causality in attention
   total_tflops = learnable_weight_tflops + causal_attention_tflops
 
-  print(f'Per train step, total TFLOPs/device will be {total_tflops:.2f},',
-        f'split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops',
-        f'and {100 * causal_attention_tflops/total_tflops:.2f}% attention flops')
-  return total_tflops
+  if log:
+    print('Per train step:\n',
+          f'Total TFLOPs: {total_tflops:.2f} \n',
+          f'split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops',
+          f'and {100 * causal_attention_tflops/total_tflops:.2f}% attention flops')
+  return total_tflops, learnable_weight_tflops, causal_attention_tflops
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
-def calculate_tflops_prefill(num_model_parameters, prefill_length, config):
+def calculate_tflops_prefill(num_model_parameters, prefill_length, config, log=True):
   """ Calculate training TFLOP"""
   learnable_weight_tflops = 2 * num_model_parameters * prefill_length \
                                    / 10**12
@@ -114,7 +116,11 @@ def calculate_tflops_prefill(num_model_parameters, prefill_length, config):
   causal_attention_tflops = noncasual_attention_flops / 2 # due to causality in attention
   total_tflops = learnable_weight_tflops + causal_attention_tflops
 
-  print(f'Per prefill step, total TFLOPs will be {total_tflops:.2f},',
-        f'split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops',
-        f'and {100 * causal_attention_tflops/total_tflops:.2f}% attention flops')
-  return total_tflops
+  if log:
+    print('Per prefill step: \n',
+          f'\tTotal TFLOPs: {total_tflops:.2f} \n',
+          f'\t\tLearnable weight TFLOPs: {learnable_weight_tflops} ',
+          f'({100 * learnable_weight_tflops/total_tflops:.2f})% of Total\n',
+          f'\t\tCausal attention TFLOPs: {causal_attention_tflops} ',
+          f'({100 * causal_attention_tflops/total_tflops:.2f}% of Total')
+  return total_tflops, learnable_weight_tflops, causal_attention_tflops

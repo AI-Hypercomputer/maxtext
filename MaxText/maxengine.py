@@ -167,10 +167,12 @@ class MaxEngine(engine_api.Engine):
     )
 
     next_pos = jnp.full((1,1), true_length, dtype = jnp.int32)
+    generated_tokens = jnp.zeros((1,1), dtype = jnp.int32)
     selected_logits = jax.lax.dynamic_slice(flat_logits, (0, true_length-1,0),
                                             (flat_logits.shape[0], 1, flat_logits.shape[2]))
     selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
-    return {"logits" : selected_logits, "cache" : new_vars['cache'], "next_pos" : next_pos}
+    return {"logits" : selected_logits, "cache" : new_vars['cache'],
+            "next_pos" : next_pos, "generated_tokens" : generated_tokens}
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def generate(
@@ -197,7 +199,7 @@ class MaxEngine(engine_api.Engine):
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
 
     result = engine_api.ResultTokens(
-        data=jnp.concatenate((new_token, all_valid, decode_state["next_pos"]), axis=1),
+        data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
         # Tokens are shape [batch, speculations], so when we concatenate
         # tokens, validity and length along their index 1 dimension then they
         # occupy 0:speculations.
@@ -212,7 +214,8 @@ class MaxEngine(engine_api.Engine):
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
 
-    return {"logits" : out_logits, "cache" : new_cache, "next_pos" : decode_state["next_pos"]+1}, result
+    return {"logits" : out_logits, "cache" : new_cache,
+            "next_pos" : decode_state["next_pos"]+1, "generated_tokens" : decode_state["generated_tokens"]+1}, result
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(1, 2,))
   def insert(
@@ -258,12 +261,16 @@ class MaxEngine(engine_api.Engine):
                                                       self.kv_cache_annotations_named)
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state['logits'], unboxed_prefix['logits'], slot, 0)
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state['next_pos'], unboxed_prefix['next_pos'], slot, 0)
+    inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(decode_state['generated_tokens'],
+                                                                    unboxed_prefix['generated_tokens'], slot, 0)
 
     inserted_logits = jax.lax.with_sharding_constraint(inserted_logits, self.replicated_sharding)
+    inserted_generated_tokens = jax.lax.with_sharding_constraint(inserted_generated_tokens, self.replicated_sharding)
     inserted_next_pos = jax.lax.with_sharding_constraint(inserted_next_pos, self.replicated_sharding)
     inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
 
-    return {'logits' : inserted_logits, 'cache' : inserted_cache, 'next_pos' : inserted_next_pos }
+    return {'logits' : inserted_logits, 'cache' : inserted_cache,
+            'next_pos' : inserted_next_pos, 'generated_tokens' : inserted_generated_tokens }
 
   def get_prefix_destination_sharding(self) -> Any:
     return jax.sharding.NamedSharding(
@@ -291,9 +298,12 @@ class MaxEngine(engine_api.Engine):
         mutable=["cache"]
       )
 
+      next_pos = jnp.zeros((int(self.config.per_device_batch_size * jax.device_count()), 1), dtype=jnp.int32)
+      generated_tokens = jnp.zeros((int(self.config.per_device_batch_size * jax.device_count()), 1), dtype=jnp.int32)
       return {"logits" : jnp.zeros((int(self.config.per_device_batch_size * jax.device_count()), 1, self.config.vocab_size)),
               "cache" : cache["cache"],
-              "next_pos" : jnp.zeros((int(self.config.per_device_batch_size * jax.device_count()), 1), dtype=jnp.int32)
+              "next_pos" : next_pos,
+              "generated_tokens" : generated_tokens
               }
 
     abstract_outputs = jax.eval_shape(init, self.abstract_params)
