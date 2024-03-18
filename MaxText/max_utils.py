@@ -71,9 +71,10 @@ def summarize_size_from_pytree(params):
   num_bytes = calculate_bytes_from_pytree(params)
   return num_params, num_bytes, num_bytes/num_params
 
-def activate_profiler(config):
+def activate_profiler(config, optional_postfix=""):
   if config.enable_profiler and (config.upload_all_profiler_results or jax.process_index() == 0):
-    jax.profiler.start_trace(config.tensorboard_dir)
+    output_path = os.path.join(config.tensorboard_dir, optional_postfix)
+    jax.profiler.start_trace(output_path)
 
 def deactivate_profiler(config):
   if config.enable_profiler and (config.upload_all_profiler_results or jax.process_index() == 0):
