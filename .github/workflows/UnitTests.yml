@@ -118,6 +118,10 @@ jobs:
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
         'bash end_to_end/test_checkpoint_compatibility.sh runner gs://runner-maxtext-logs gs://maxtext-dataset'
+    - name: Validate Pedagogical Example, Shmap_collective_matmul
+      run: |
+        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
+        'python3 pedagogical_examples/shmap_collective_matmul.py'
   
   # IF YOU MODIFY THIS, YOU SHOULD ALSO ADD CORRESPONDING MODICATIONS TO 'tpu' job
   gpu:
