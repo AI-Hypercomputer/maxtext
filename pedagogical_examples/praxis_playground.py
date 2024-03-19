@@ -31,11 +31,19 @@ w_out_hm_sharding = [mdl_axis, None]
 bsm_sharding = [None, None, mdl_axis]
 bsh_sharding = [None, None, mdl_axis]
 
-model_dim = 8
-hidden_dim = 16
-seq_len = 4
-microbatch_size = 2
+model_dim = 3
+hidden_dim = 5
+seq_len = 7
+microbatch_size = 9
 microbatches = 8
+
+print("Running praxis_playground with \n")
+print(f"{stages=}")
+print(f"{model_dim=}")
+print(f"{hidden_dim=}")
+print(f"{seq_len=}")
+print(f"{microbatch_size=}")
+print(f"{microbatches=}")
 
 class SingleStageLayer(base_layer.BaseLayer):
   """Stage-parallel dense-relu-dense.
@@ -137,6 +145,7 @@ pipelined_layer_p = pax_fiddle.Config(
 pipelined_layer = instantiate(pipelined_layer_p)
 
 test_inputs = np.ones((microbatches, microbatch_size, seq_len, model_dim))
+print(f"test_inputs is [microbatches, microbatch_size, seq_len, model_dim] = [{microbatches}, {microbatch_size}, {seq_len}, {model_dim}]")
 
 
 
