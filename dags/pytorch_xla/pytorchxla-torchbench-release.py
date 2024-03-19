@@ -20,19 +20,19 @@ from dags import composer_env
 from dags.pytorch_xla.configs import pytorchxla_torchbench_config as config
 import dags.vm_resource as resource
 
-# Schudule the job to run everyday at 3:00AM PST (11:00AM UTC).
-SCHEDULED_TIME = "0 11 * * *" if composer_env.is_prod_env() else None
+SCHEDULED_TIME = None
 
 
 with models.DAG(
-    dag_id="pytorchxla-torchbench",
+    dag_id="pytorchxla-torchbench-release",
     schedule=SCHEDULED_TIME,
-    tags=["pytorchxla", "nightly", "torchbench"],
+    tags=["pytorchxla", "release", "torchbench"],
     start_date=datetime.datetime(2024, 1, 1),
     catchup=False,
 ) as dag:
   model = "all" if composer_env.is_prod_env() else "BERT_pytorch"
   torchbench_extra_flags = [f"--filter={model}"]
+  test_version = config.VERSION.R2_2
   # Running on V4-8:
   config.get_torchbench_tpu_config(
       tpu_version=resource.TpuVersion.V4,
@@ -40,6 +40,7 @@ with models.DAG(
       project=resource.Project.CLOUD_ML_AUTO_SOLUTIONS,
       tpu_zone=resource.Zone.US_CENTRAL2_B,
       runtime_version=resource.RuntimeVersion.TPU_UBUNTU2204_BASE,
+      test_version=test_version,
       model_name=model,
       time_out_in_min=1600,
       extraFlags=" ".join(torchbench_extra_flags),
@@ -54,6 +55,7 @@ with models.DAG(
       runtime_version=resource.RuntimeVersion.V2_ALPHA_TPUV5,
       network=resource.V5_NETWORKS,
       subnetwork=resource.V5P_SUBNETWORKS,
+      test_version=test_version,
       time_out_in_min=700,
       model_name=model,
       extraFlags=" ".join(torchbench_extra_flags),
@@ -68,6 +70,7 @@ with models.DAG(
       runtime_version=resource.RuntimeVersion.V2_ALPHA_TPUV5_LITE,
       network=resource.V5_NETWORKS,
       subnetwork=resource.V5E_SUBNETWORKS,
+      test_version=test_version,
       time_out_in_min=1600,
       model_name=model,
       extraFlags=" ".join(torchbench_extra_flags),
@@ -81,6 +84,7 @@ with models.DAG(
       accelerator_type=resource.GpuVersion.V100,
       count=1,
       gpu_zone=resource.Zone.US_CENTRAL1_C,
+      test_version=test_version,
       model_name=model,
       time_out_in_min=1600,
       extraFlags=" ".join(torchbench_extra_flags),
@@ -94,6 +98,7 @@ with models.DAG(
       accelerator_type=resource.GpuVersion.A100,
       count=1,
       gpu_zone=resource.Zone.US_CENTRAL1_F,
+      test_version=test_version,
       model_name=model,
       time_out_in_min=1600,
       extraFlags=" ".join(torchbench_extra_flags),
@@ -109,6 +114,7 @@ with models.DAG(
       count=8,
       gpu_zone=resource.Zone.US_CENTRAL1_A,
       nvidia_driver_version="535.86.10",
+      test_version=test_version,
       model_name=model,
       time_out_in_min=1600,
       extraFlags=" ".join(torchbench_extra_flags),
@@ -122,6 +128,7 @@ with models.DAG(
       accelerator_type=resource.GpuVersion.L4,
       count=1,
       gpu_zone=resource.Zone.US_CENTRAL1_C,
+      test_version=test_version,
       model_name=model,
       time_out_in_min=1600,
       extraFlags=" ".join(torchbench_extra_flags),

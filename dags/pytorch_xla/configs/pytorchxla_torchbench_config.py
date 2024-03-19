@@ -14,15 +14,72 @@
 
 """Utilities to construct configs for pytorchxla_torchbench DAG."""
 
-import datetime
+import enum
 from typing import Tuple
 from xlml.apis import gcp_config, metric_config, task, test_config
 import dags.vm_resource as resource
 from dags import gcs_bucket, test_owner
 
 
-def set_up_torchbench_tpu(model_name: str = "") -> Tuple[str]:
+class VERSION(enum.Enum):
+  NIGHTLY = enum.auto()
+  R2_2 = enum.auto()
+  R2_3 = enum.auto()
+
+
+class VERSION_MAPPING:
+
+  class NIGHTLY(enum.Enum):
+    TORCH_XLA_TPU_WHEEL = "https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-nightly-cp310-cp310-linux_x86_64.whl"
+    TORCH_XLA_CUDA_WHEEL = "https://storage.googleapis.com/pytorch-xla-releases/wheels/cuda/12.1/torch_xla-nightly-cp38-cp38-linux_x86_64.whl"
+    TORCH = "torch"
+    TORCHVISION = "torchvision"
+    TORCHAUDIO = "torchaudio"
+    # TODO(@piz): update to xla:nightly_3.10_cuda_12.1 once available
+    TORCH_XLA_GPU_DOCKER = "us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.8_cuda_12.1"
+    TORCH_INDEX_CPU_URL = "https://download.pytorch.org/whl/nightly/cpu"
+    TORCH_INDEX_CUDA_URL = "https://download.pytorch.org/whl/nightly/cu121"
+    TORCH_REPO_BRANCH = "-b main"
+    TORCH_XLA_REPO_BRANCH = "-b master"
+
+  class R2_2(enum.Enum):
+    TORCH_XLA_TPU_WHEEL = "https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.2.0-cp310-cp310-manylinux_2_28_x86_64.whl"
+    TORCH_XLA_CUDA_WHEEL = "https://storage.googleapis.com/pytorch-xla-releases/wheels/cuda/12.1/torch_xla-2.2.0-cp310-cp310-manylinux_2_28_x86_64.whl"
+    TORCH = "torch==2.2.0"
+    TORCHVISION = "torchvision==0.17.0"
+    TORCHAUDIO = "torchaudio==2.2.0"
+    TORCH_XLA_GPU_DOCKER = "us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:r2.2.0_3.10_cuda_12.1"
+    TORCH_INDEX_CPU_URL = "https://download.pytorch.org/whl/cpu"
+    TORCH_INDEX_CUDA_URL = "https://download.pytorch.org/whl/cu121"
+    TORCH_REPO_BRANCH = "-b v2.2.0"
+    TORCH_XLA_REPO_BRANCH = "-b v2.2.0"
+
+  # TODO(@siyuan): Please update the 2.3 rc to the latest.
+  class R2_3(enum.Enum):
+    TORCH_XLA_TPU_WHEEL = "https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.3.0rc2-cp310-cp310-linux_x86_64.whl"
+    TORCH_XLA_CUDA_WHEEL = "https://storage.googleapis.com/pytorch-xla-releases/wheels/cuda/12.1/torch_xla-2.3.0rc2-cp310-cp310-linux_x86_64.whl"
+    TORCH = "torch==2.3.0"
+    TORCHVISION = "torchvision==0.18.0"
+    TORCHAUDIO = "torchaudio==2.2.0"
+    TORCH_XLA_GPU_DOCKER = "us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:r2.3.0-rc2_3.10_cuda_12.1"
+    TORCH_INDEX_CPU_URL = "https://download.pytorch.org/whl/test/cpu"
+    TORCH_INDEX_CUDA_URL = "https://download.pytorch.org/whl/test/cu121"
+    TORCH_REPO_BRANCH = "-b v2.3.0-rc2"
+    TORCH_XLA_REPO_BRANCH = "-b v2.3.0-rc2"
+
+
+def set_up_torchbench_tpu(
+    model_name: str = "", test_version: VERSION = VERSION.NIGHTLY
+) -> Tuple[str]:
   """Common set up for TorchBench."""
+  if test_version == VERSION.NIGHTLY:
+    version_mapping = VERSION_MAPPING.NIGHTLY
+  elif test_version == VERSION.R2_2:
+    version_mapping = VERSION_MAPPING.R2_2
+  elif test_version == VERSION.R2_3:
+    version_mapping = VERSION_MAPPING.R2_3
+  else:
+    raise ValueError("version number does not exist in VERSION enum")
 
   def model_install_cmds(output_file=None) -> str:
     """Installs torchbench models.
@@ -47,18 +104,16 @@ def set_up_torchbench_tpu(model_name: str = "") -> Tuple[str]:
       "sudo apt-get install libgl1 -y",
       "pip3 install --user numpy pandas",
       (
-          "pip3 install --user --pre torch torchvision torchaudio --index-url"
-          " https://download.pytorch.org/whl/nightly/cpu"
+          f"pip3 install --user --pre {version_mapping.TORCH.value} {version_mapping.TORCHVISION.value} {version_mapping.TORCHAUDIO.value} --index-url {version_mapping.TORCH_INDEX_CPU_URL.value}"
       ),
       (
-          "pip3 install --user 'torch_xla[tpuvm] @"
-          " https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-nightly-cp310-cp310-linux_x86_64.whl'"
+          f"pip3 install --user 'torch_xla[tpuvm] @{version_mapping.TORCH_XLA_TPU_WHEEL.value}'"
       ),
       "pip3 install --user psutil",
       "cd; git clone https://github.com/pytorch/benchmark.git",
       f"cd benchmark && {model_install_cmds()}",
-      "cd; git clone https://github.com/pytorch/pytorch.git",
-      "cd; git clone https://github.com/pytorch/xla.git",
+      f"cd; git clone {version_mapping.TORCH_REPO_BRANCH.value} https://github.com/pytorch/pytorch.git",
+      f"cd; git clone {version_mapping.TORCH_XLA_REPO_BRANCH.value} https://github.com/pytorch/xla.git",
   )
 
 
@@ -71,6 +126,7 @@ def get_torchbench_tpu_config(
     time_out_in_min: int,
     network: str = "default",
     subnetwork: str = "default",
+    test_version: VERSION = VERSION.NIGHTLY,
     model_name: str = "",
     extraFlags: str = "",
 ) -> task.TpuQueuedResourceTask:
@@ -80,7 +136,7 @@ def get_torchbench_tpu_config(
       dataset_name=metric_config.DatasetOption.BENCHMARK_DATASET,
   )
 
-  set_up_cmds = set_up_torchbench_tpu(model_name)
+  set_up_cmds = set_up_torchbench_tpu(model_name, test_version)
   local_output_location = "~/xla/benchmarks/output/metric_report.jsonl"
 
   if not model_name or model_name.lower() == "all":
@@ -130,9 +186,19 @@ def get_torchbench_tpu_config(
 
 # Below is the setup for torchbench GPU run.
 def set_up_torchbench_gpu(
-    model_name: str, nvidia_driver_version: str
+    model_name: str,
+    nvidia_driver_version: str,
+    test_version: VERSION,
 ) -> Tuple[str]:
   """Common set up for TorchBench."""
+  if test_version == VERSION.NIGHTLY:
+    version_mapping = VERSION_MAPPING.NIGHTLY
+  elif test_version == VERSION.R2_2:
+    version_mapping = VERSION_MAPPING.R2_2
+  elif test_version == VERSION.R2_3:
+    version_mapping = VERSION_MAPPING.R2_3
+  else:
+    raise ValueError("version number does not exist in VERSION enum")
 
   def model_install_cmds(output_file=None) -> str:
     """Installs torchbench models.
@@ -172,11 +238,11 @@ def set_up_torchbench_gpu(
       # Below are the dependencies for benchmark data processing:
       "pip3 install --user numpy pandas",
       # torch related dependencies
-      "pip3 install --user --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121",
-      "cd /tmp/ && git clone https://github.com/pytorch/benchmark.git",
+      f"pip3 install --user --pre {version_mapping.TORCH.value} {version_mapping.TORCHVISION.value} {version_mapping.TORCHAUDIO.value} --index-url {version_mapping.TORCH_INDEX_CUDA_URL.value}",
+      f"cd /tmp/ && git clone https://github.com/pytorch/benchmark.git",
       f" cd benchmark && {model_install_cmds()}",
-      "cd /tmp/ && git clone https://github.com/pytorch/pytorch.git",
-      "cd /tmp/ && git clone https://github.com/pytorch/xla.git",
+      f"cd /tmp/ && git clone {version_mapping.TORCH_REPO_BRANCH.value} https://github.com/pytorch/pytorch.git",
+      f"cd /tmp/ && git clone {version_mapping.TORCH_XLA_REPO_BRANCH.value} https://github.com/pytorch/xla.git",
   )
   docker_cmds = "\n".join(docker_cmds_ls)
 
@@ -191,13 +257,10 @@ def set_up_torchbench_gpu(
       "sudo nvidia-smi --lock-gpu-clocks=1200,1200",
       "sudo systemctl restart docker",
       "sudo nvidia-smi -pm 1",
-      (
-          "sudo docker pull"
-          " us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.8_cuda_12.1"
-      ),
+      f"sudo docker pull {version_mapping.TORCH_XLA_GPU_DOCKER.value}",
       (
           "sudo docker run --shm-size 16g --gpus all -it -d --network host --name ml-automation-torchbench"
-          " us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.8_cuda_12.1"
+          f" {version_mapping.TORCH_XLA_GPU_DOCKER.value}"
       ),
       f"sudo docker exec -i ml-automation-torchbench /bin/bash -c '{docker_cmds}'",
   )
@@ -212,6 +275,7 @@ def get_torchbench_gpu_config(
     gpu_zone: resource.Zone,
     time_out_in_min: int,
     nvidia_driver_version: str = "525.125.06",
+    test_version: VERSION = VERSION.NIGHTLY,
     model_name: str = "",
     extraFlags: str = "",
 ) -> task.GpuCreateResourceTask:
@@ -221,7 +285,9 @@ def get_torchbench_gpu_config(
       dataset_name=metric_config.DatasetOption.BENCHMARK_DATASET,
   )
 
-  set_up_cmds = set_up_torchbench_gpu(model_name, nvidia_driver_version)
+  set_up_cmds = set_up_torchbench_gpu(
+      model_name, nvidia_driver_version, test_version
+  )
   local_output_location = "/tmp/xla/benchmarks/output/metric_report.jsonl"
 
   if not model_name or model_name.lower() == "all":
