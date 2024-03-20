@@ -176,15 +176,15 @@ def maybe_initialize_jax_distributed_system(raw_keys):
 
       For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
   """
-  if (raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"]
+  if is_gpu_backend(raw_keys):
+    max_logging.log("Attempting to initialize the jax distributed system for GPU backend...")
+    initialize_jax_for_gpu()
+    max_logging.log("Jax distributed system initialized on GPU!")
+  elif (raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"]
                 and raw_keys["compile_topology_num_slices"]==-1) or raw_keys["hardware"]=='gpu_multiprocess':
     max_logging.log("Attempting to initialize the jax distributed system...")
     jax.distributed.initialize()
     max_logging.log("Jax distributed system initialized!")
-  elif is_gpu_backend(raw_keys):
-    max_logging.log("Attempting to initialize the jax distributed system for GPU backend...")
-    initialize_jax_for_gpu()
-    max_logging.log("Jax distributed system initialized on GPU!")
   elif is_cpu_backend(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for CPU backend...")
     initialize_jax_for_cpu()
