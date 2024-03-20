@@ -545,7 +545,8 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   """ Get a shaped abstraction of the state (including optimizer)"""
   init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
 
-  abstract_state = jax.eval_shape(init_state_partial, rng)
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    abstract_state = jax.eval_shape(init_state_partial, rng)
 
   state_logical_annotations = nn.get_partition_spec(abstract_state)
 
@@ -579,9 +580,10 @@ def get_kv_cache_annotations(model, config, rng, mesh):
                           model_mode=common_types.MODEL_MODE_PREFILL)
     return model_vars['cache']
 
-  init_kv_cache_partial = functools.partial(init_kv_cache, model,
-                                              config)
-  abstract_state = jax.eval_shape(init_kv_cache_partial)
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    init_kv_cache_partial = functools.partial(init_kv_cache, model,
+                                                config)
+    abstract_state = jax.eval_shape(init_kv_cache_partial)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)

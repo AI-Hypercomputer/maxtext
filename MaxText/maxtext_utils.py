@@ -122,5 +122,5 @@ def calculate_tflops_prefill(num_model_parameters, prefill_length, config, log=T
           f'\t\tLearnable weight TFLOPs: {learnable_weight_tflops} ',
           f'({100 * learnable_weight_tflops/total_tflops:.2f})% of Total\n',
           f'\t\tCausal attention TFLOPs: {causal_attention_tflops} ',
-          f'({100 * causal_attention_tflops/total_tflops:.2f}% of Total')
+          f'({100 * causal_attention_tflops/total_tflops:.2f})% of Total')
   return total_tflops, learnable_weight_tflops, causal_attention_tflops

@@ -66,16 +66,17 @@ def prefill_benchmark(config, engine, params, decode_state, tokens, true_length,
   decode_state = engine.insert(prefill_result, decode_state, slot=0)
   jax.block_until_ready(decode_state)
 
+  print(f"Prefill results for length {tokens.size}:\n")
+
   profile_name = f"prefill_{tokens.size}" if profile_name == "" else profile_name
   time_in_s, decode_state = prefill_benchmark_loop(config, engine, decode_state, params, tokens, true_length, iters,
                                                    profile_name=profile_name)
   prefill_average_ms = 1000 * time_in_s / iters
   total_prefill_tflops, _, _ = maxtext_utils.calculate_tflops_prefill(num_model_params, tokens.size, config)
   tflops_per_sec_per_device = total_prefill_tflops / jax.device_count() / prefill_average_ms * 1000.
-  print(f"Prefill results for length {tokens.size}:\n"
-        f"\tPrefill step average time: {prefill_average_ms:.3f}ms\n"
+  print(f"\tPrefill step average time: {prefill_average_ms:.3f}ms\n"
         f"\tPrefill total TFLOPs: {total_prefill_tflops:.3f}\n"
-        f"\tPrefill TFLOPs/sec/device: {tflops_per_sec_per_device:.3f}\n")
+        f"\tPrefill TFLOPs/sec/device: {tflops_per_sec_per_device:.3f}\n\n\n\n")
   result_dict = {"prefill_time_in_ms": prefill_average_ms,
                  "prefill_total_tflops": total_prefill_tflops,
                  "prefill_tflops_per_sec_per_device": tflops_per_sec_per_device}
@@ -121,7 +122,7 @@ def ar_benchmark(config, engine, params, decode_state, cache_size=None, model_si
         f"\tAR step average time per seq: {ar_average_ms/global_batch_size:.3f}ms\n"
         f"\tAR global batch size: {global_batch_size}\n"
         f"\tAR throughput: {total_throughput:.3f} tokens/second\n"
-        f"\tAR memory bandwidth per device: {bw_per_device:.3f} GB/s")
+        f"\tAR memory bandwidth per device: {bw_per_device:.3f} GB/s\n\n\n")
 
 
   result_dict = {"ar_step_in_ms": ar_average_ms,
