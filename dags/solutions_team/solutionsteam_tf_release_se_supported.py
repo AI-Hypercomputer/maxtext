@@ -18,17 +18,19 @@ import datetime
 from airflow import models
 from dags import composer_env
 from dags.vm_resource import TpuVersion, Zone, RuntimeVersion, V5_NETWORKS, V5E_SUBNETWORKS, V5P_SUBNETWORKS
-from dags.solutions_team.configs.tensorflow import solutionsteam_tf_2_16_supported_config as tf_config
+from dags.solutions_team.configs.tensorflow import solutionsteam_tf_release_supported_config as tf_config
 from dags.solutions_team.configs.tensorflow import common
 
 
 # Release tests only need to run once, they can be run manually as needed
 SCHEDULED_TIME = None
+VERSION = f"{tf_config.MAJOR_VERSION}.{tf_config.MINOR_VERSION}"
+
 
 with models.DAG(
-    dag_id="tf_2_16_se_nightly_supported",
+    dag_id=f"tf_{tf_config.MAJOR_VERSION}_{tf_config.MINOR_VERSION}_se_nightly_supported",
     schedule=SCHEDULED_TIME,
-    tags=["solutions_team", "tf", "se", "2.16", "supported", "xlml"],
+    tags=["solutions_team", "tf", "se", VERSION, "supported", "xlml"],
     start_date=datetime.datetime(2024, 1, 4),
     catchup=False,
 ) as dag:

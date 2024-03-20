@@ -42,7 +42,7 @@ def get_tf_keras_config(
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
 
-  set_up_cmds = common.install_tf_nightly() + common.set_up_tensorflow_keras()
+  set_up_cmds = common.set_up_keras() + common.install_tf()
   if not is_pjrt and is_pod:
     set_up_cmds += common.set_up_se_nightly()
   keras_test_name = f"tf_keras_api_{test_name}"
@@ -110,9 +110,7 @@ def get_tf_resnet_config(
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
 
-  set_up_cmds = (
-      common.install_tf_nightly() + common.set_up_google_tensorflow_models()
-  )
+  set_up_cmds = common.set_up_tensorflow_models() + common.install_tf()
   if not is_pjrt and is_pod:
     set_up_cmds += common.set_up_se_nightly()
 
@@ -201,9 +199,7 @@ def get_tf_dlrm_config(
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
 
-  set_up_cmds = (
-      common.install_tf_nightly() + common.set_up_google_tensorflow_models()
-  )
+  set_up_cmds = common.set_up_tensorflow_models() + common.install_tf()
   if not is_pjrt and is_pod:
     set_up_cmds += common.set_up_se_nightly()
 

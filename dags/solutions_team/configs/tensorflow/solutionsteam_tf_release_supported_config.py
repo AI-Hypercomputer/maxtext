@@ -14,12 +14,23 @@
 
 """Utilities to construct configs for solutionsteam_tf_nightly_supported DAG."""
 
+from __future__ import annotations
+
 from xlml.apis import gcp_config, metric_config, task, test_config
 from dags import gcs_bucket, test_owner
 from dags.solutions_team.configs.tensorflow import common
 from airflow.models import Variable
 from dags.vm_resource import TpuVersion, Project, RuntimeVersion
-from typing import List
+
+
+MAJOR_VERSION = "2"
+MINOR_VERSION = "15"
+PATCH_VERSION = "1"
+LIBTPU_VERSION = "1.9.0"
+KERAS_VERSION = "2.15.1"
+MODELS_BRANCH = "r2.15.0"
+
+GS_VERSION_STR = f"tf-{MAJOR_VERSION}-{MINOR_VERSION}-{PATCH_VERSION}"
 
 
 def get_tf_keras_config(
@@ -42,10 +53,13 @@ def get_tf_keras_config(
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
 
-  set_up_cmds = common.install_tf_2_16() + common.set_up_tensorflow_2_16_keras()
+  set_up_cmds = common.set_up_keras(KERAS_VERSION)
+  set_up_cmds += common.install_tf(
+      MAJOR_VERSION, MINOR_VERSION, PATCH_VERSION, LIBTPU_VERSION
+  )
   if not is_pjrt and is_pod:
     set_up_cmds += common.set_up_se_nightly()
-  keras_test_name = f"tf_2_16_keras_api_{test_name}"
+  keras_test_name = f"tf_{MAJOR_VERSION}_{MINOR_VERSION}_keras_api_{test_name}"
   benchmark_id = f"{keras_test_name}-v{tpu_version.value}-{tpu_cores}"
   # Add default_var to pass DAG check
   # TODO(ranran): replace Variable.get() to XCOM when it applies
@@ -110,8 +124,9 @@ def get_tf_resnet_config(
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
 
-  set_up_cmds = (
-      common.install_tf_2_16() + common.set_up_google_tensorflow_2_16_models()
+  set_up_cmds = common.set_up_tensorflow_models(MODELS_BRANCH, KERAS_VERSION)
+  set_up_cmds += common.install_tf(
+      MAJOR_VERSION, MINOR_VERSION, PATCH_VERSION, LIBTPU_VERSION
   )
   if not is_pjrt and is_pod:
     set_up_cmds += common.set_up_se_nightly()
@@ -136,7 +151,7 @@ def get_tf_resnet_config(
       },
   }
 
-  test_name = "tf_2_16_resnet_imagenet"
+  test_name = f"tf_{MAJOR_VERSION}_{MINOR_VERSION}_resnet_imagenet"
   benchmark_id = f"{test_name}-v{tpu_version.value}-{tpu_cores}"
   # Add default_var to pass DAG check
   # TODO(ranran): replace Variable.get() to XCOM when it applies
@@ -183,7 +198,7 @@ def get_tf_dlrm_config(
     tpu_cores: int,
     tpu_zone: str,
     time_out_in_min: int,
-    bottom_mlp: List[int],
+    bottom_mlp: list[int],
     embedding_dim: int,
     train_steps: int,
     runtime_version: str,
@@ -201,8 +216,9 @@ def get_tf_dlrm_config(
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
 
-  set_up_cmds = (
-      common.install_tf_2_16() + common.set_up_google_tensorflow_2_16_models()
+  set_up_cmds = common.set_up_tensorflow_models(MODELS_BRANCH, KERAS_VERSION)
+  set_up_cmds += common.install_tf(
+      MAJOR_VERSION, MINOR_VERSION, PATCH_VERSION, LIBTPU_VERSION
   )
   if not is_pjrt and is_pod:
     set_up_cmds += common.set_up_se_nightly()
@@ -273,7 +289,7 @@ def get_tf_dlrm_config(
       },
   }
 
-  test_name = "tf_2_16_dlrm_criteo"
+  test_name = f"tf_{MAJOR_VERSION}_{MINOR_VERSION}_dlrm_criteo"
   benchmark_id = f"{test_name}-v{tpu_version.value}-{tpu_cores}"
   # Add default_var to pass DAG check
   # TODO(ranran): replace Variable.get() to XCOM when it applies

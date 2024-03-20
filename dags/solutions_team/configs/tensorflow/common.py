@@ -14,7 +14,7 @@
 
 """Utilities to construct common configs."""
 
-from typing import Tuple
+from __future__ import annotations
 
 
 # Keras API
@@ -60,7 +60,7 @@ CMD_INSTALL_KERAS_NIGHTLY = (
 )
 
 
-def set_up_se_nightly() -> Tuple[str]:
+def set_up_se_nightly() -> tuple[str]:
   """Adjust grpc_tpu_worker for SE tests"""
   return (
       "sudo sed -i 's/TF_DOCKER_URL=.*/TF_DOCKER_URL=gcr.io\/cloud-tpu-v2-images-dev\/grpc_tpu_worker:nightly\"/' /etc/systemd/system/tpu-runtime.service",
@@ -69,60 +69,83 @@ def set_up_se_nightly() -> Tuple[str]:
   )
 
 
-def install_tf_nightly() -> Tuple[str]:
-  """Install tf nightly + libtpu."""
+def install_tf(
+    major: Optional[int] = None,
+    minor: Optional[int] = None,
+    patch: Optional[int] = None,
+    libtpu_version: Optional[str] = None,
+) -> tuple[str]:
+  """Install tf + libtpu.
+
+  If the version numbers are set, installs that version. Otherwise just installs using nightly.
+  Either all of the version numbers need to be set or none of them should be set.
+
+  Args:
+      major (Optional[int]): The major version number
+      minor (Optional[int]): The minor version number
+      patch (Optional[int]): The minor version number
+      libtpu_version (Optional[str]): The libtpu version to install
+  """
+  gs_version_str = "tf-nightly"
+  if any(x is not None for x in {major, minor, patch}):
+    msg = "All parts of a version should be specified if any of them are"
+    assert all(x is not None for x in {major, minor, patch}), msg
+    gs_version_str = f"tf-{major}-{minor}-{patch}"
+
+  libtpu_version_str = "latest"
+  if libtpu_version is not None:
+    libtpu_version_str = f"{libtpu_version}/latest"
+
   return (
       "pip install tensorflow-text-nightly",
-      "sudo gsutil -m cp gs://cloud-tpu-v2-images-dev-artifacts/tensorflow/tf-nightly/latest/*.whl /tmp/ && pip install /tmp/tf*.whl --force",
-      "sudo gsutil -m cp gs://cloud-tpu-v2-images-dev-artifacts/libtpu/latest/libtpu.so /lib/",
+      f"sudo gsutil -m cp gs://cloud-tpu-v2-images-dev-artifacts/tensorflow/{gs_version_str}/latest/t*.whl /tmp/ && pip install /tmp/t*.whl --force",
+      f"sudo gsutil -m cp gs://cloud-tpu-v2-images-dev-artifacts/libtpu/{libtpu_version_str}/libtpu.so /lib/",
       CMD_PRINT_TF_VERSION,
   )
 
 
-def install_tf_2_16() -> Tuple[str]:
-  """Install tf 2.16 + libtpu."""
-  return (
-      "pip install tensorflow-text-nightly",
-      "sudo gsutil -m cp gs://cloud-tpu-v2-images-dev-artifacts/tensorflow/2.16/2024-02-20/t*.whl /tmp/ && pip install /tmp/t*.whl --force",
-      "sudo gsutil -m cp gs://cloud-tpu-v2-images-dev-artifacts/libtpu/1.10.0/rc0/libtpu.so /lib/",
-      CMD_PRINT_TF_VERSION,
-  )
+def set_up_keras(version: Optional[str] = None) -> tuple[str]:
+  """Common set up for tensorflow Keras tests.
 
+  If a version is not set, defaults to nightly.
 
-def set_up_tensorflow_keras() -> Tuple[str]:
-  """Common set up for tensorflow Keras tests."""
+  Args:
+    version(Optional[str]): The keras version to install
+  """
+  cmd_install_keras = CMD_INSTALL_KERAS_NIGHTLY
+  if version is not None:
+    cmd_install_keras = (
+        f"pip install --upgrade --force-reinstall --no-deps tf-keras=={version}"
+    )
+
   return (
-      CMD_INSTALL_KERAS_NIGHTLY,
+      cmd_install_keras,
       "export PATH=$PATH:/root/google-cloud-sdk/bin && cd /tmp && sudo gcloud source repos clone tf2-api-tests --project=cloud-ml-auto-solutions",
       "cd /tmp/tf2-api-tests && pip install behave matplotlib",
   )
 
 
-def set_up_tensorflow_2_16_keras() -> Tuple[str]:
-  """Common set up for tensorflow Keras 2.16 tests."""
-  return (
-      "pip install --upgrade --force-reinstall tf-keras==2.16.0rc0",
-      "export PATH=$PATH:/root/google-cloud-sdk/bin && cd /tmp && sudo gcloud source repos clone tf2-api-tests --project=cloud-ml-auto-solutions",
-      "cd /tmp/tf2-api-tests && pip install behave matplotlib",
-  )
+def set_up_tensorflow_models(
+    models_branch: Optional[str] = None,
+    keras_version: Optional[str] = None,
+) -> tuple[str]:
+  """Common set up for tensorflow models for the release.
 
+  If any versions are not set, defaults to nightly.
 
-def set_up_google_tensorflow_models() -> Tuple[str]:
-  """Common set up for tensorflow models."""
+  Args:
+      models_branch (Optional[str]): The models branch to use
+  """
+  if models_branch is None:
+    models_branch = "master"
+
+  cmd_install_keras = CMD_INSTALL_KERAS_NIGHTLY
+  if keras_version is not None:
+    cmd_install_keras = f"pip install --upgrade --force-reinstall --no-deps tf-keras=={keras_version}"
+
   return (
-      'if [ ! -d "/usr/share/tpu/models" ]; then sudo mkdir -p /usr/share/tpu && cd /usr/share/tpu && git clone https://github.com/tensorflow/models.git; fi',
+      f'if [ ! -d "/usr/share/tpu/models" ]; then sudo mkdir -p /usr/share/tpu && cd /usr/share/tpu && sudo git clone -b {models_branch} https://github.com/tensorflow/models.git; fi',
       "pip install -r /usr/share/tpu/models/official/requirements.txt",
       "pip install tensorflow-recommenders --no-deps",
-      CMD_INSTALL_KERAS_NIGHTLY,
-  )
-
-
-def set_up_google_tensorflow_2_16_models() -> Tuple[str]:
-  """Common set up for tensorflow models."""
-  return (
-      "sudo mkdir -p /usr/share/tpu && cd /usr/share/tpu",
-      "sudo git clone -b r2.16.0 https://github.com/tensorflow/models.git",
-      "pip install -r /usr/share/tpu/models/official/requirements.txt",
-      "pip install tensorflow-recommenders --no-deps",
-      "pip install --upgrade --force-reinstall tf-keras==2.16.0rc0",
+      cmd_install_keras,
   )
