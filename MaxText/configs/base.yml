@@ -128,7 +128,7 @@ logical_axis_rules: [
                       ['heads', ['tensor', 'autoregressive']],
                       ['kv', []],
                       ['cache_batch', []],
-                      ['cache_heads', ['autoregressive']],
+                      ['cache_heads', ['autoregressive', 'tensor']],
                       ['cache_kv', []],
                       ['cache_sequence', []],
                     ]

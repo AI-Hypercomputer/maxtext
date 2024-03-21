@@ -26,6 +26,7 @@
 
 # Enable "exit immediately if any command fails" option
 set -e
+export DEBIAN_FRONTEND=noninteractive
 
 (sudo bash || bash) <<'EOF'
 apt update && \
