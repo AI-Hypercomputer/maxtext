@@ -164,7 +164,7 @@ def print_results_for_analyze(results):
 def main(config):
   engine = maxengine.MaxEngine(config)
   params = engine.load_params()
-  prefill_lengths = [64, 128, 256, 512, 1024]
+  prefill_lengths = [int(l) for l in config.microbenchmark_prefill_lengths.split(",")]
   benchmark_loop_iters = 10
   text = config.prompt
   metadata = engine.get_tokenizer()
