@@ -66,7 +66,7 @@ def prefill_benchmark(config, engine, params, decode_state, tokens, true_length,
   decode_state = engine.insert(prefill_result, decode_state, slot=0)
   jax.block_until_ready(decode_state)
 
-  profile_name = f"prefill_{tokens.size}" if profile_name == "" else profile_name
+  profile_name = f"prefill_{tokens.size}" if profile_name == "" else f"{profile_name}_prefill_{tokens.size}"
   time_in_s, decode_state = prefill_benchmark_loop(config, engine, decode_state, params, tokens, true_length, iters,
                                                    profile_name=profile_name)
   prefill_average_ms = 1000 * time_in_s / iters
@@ -108,7 +108,7 @@ def ar_benchmark(config, engine, params, decode_state, cache_size=None, model_si
   decode_state, _ = engine.generate(params, decode_state)
   jax.block_until_ready(decode_state)
 
-  profile_name = "autoregress" if profile_name == "" else profile_name
+  profile_name = "autoregress" if profile_name == "" else f"{profile_name}_autoregress"
   time_in_s, decode_state = ar_benchmark_loop(config, engine, decode_state, params, profile_name=profile_name, iters=iters)
   seconds_per_step = time_in_s / iters
   ar_average_ms = seconds_per_step*1000
@@ -176,13 +176,13 @@ def main(config):
 
   benchmark_results = {"Prefill": {}}
   benchmark_results["AutoRegressive"], decode_state = ar_benchmark(
-    config, engine, params, decode_state, iters=benchmark_loop_iters, cache_size=cache_size, model_size=model_size)
+    config, engine, params, decode_state, iters=benchmark_loop_iters, cache_size=cache_size, model_size=model_size, profile_name=config.profile_name)
   for prefill_length in prefill_lengths:
     tokens, true_length = token_utils.tokenize_and_pad(
       text, vocab, is_bos=True, prefill_lengths=[prefill_length])
     benchmark_results["Prefill"][prefill_length], decode_state = prefill_benchmark(
       config, engine, params, decode_state, tokens, true_length,
-      iters=benchmark_loop_iters, num_model_params=num_model_params)
+      iters=benchmark_loop_iters, num_model_params=num_model_params, profile_name=config.profile_name)
 
   results = collate_results(config, benchmark_results, model_size, cache_size, num_model_params)
   write_results(results, filename="")
