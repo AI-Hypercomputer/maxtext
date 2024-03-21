@@ -198,6 +198,7 @@ class AttentionOp(nn.Module):
     key = jnp.transpose(key, axes=(0, 2, 1, 3))
     value = jnp.transpose(value, axes=(0, 2, 1, 3))
 
+
     if decoder_segment_ids is not None:
       decoder_segment_ids = splash_attention_kernel.SegmentIds(
           decoder_segment_ids, decoder_segment_ids
@@ -734,7 +735,7 @@ class AttentionOp(nn.Module):
       decoder_segment_ids=prefill_kv_cache[2],
       model_mode=model_mode,
     )
-    
+
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
     if ar_kv_cache is None:
       if prefill_exponentials_sum is not None:
