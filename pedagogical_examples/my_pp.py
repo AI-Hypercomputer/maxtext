@@ -51,6 +51,8 @@ def spmd_pipeline(w, x):
 
   for i in range(n_microbatches + n_stages - 1):
     state = shift_right_and_insert_input(state, x[i])
+    longer_name=w
+    breakpoint()
     state = jax.vmap(stage, in_axes=0, out_axes=0,
                      spmd_axis_name='stage')(w, state)
     outputs = outputs.at[i].set(state[-1])  # last layer output
@@ -111,6 +113,8 @@ def S(*specs):
 weight_sharding = S('stage', None, None) # weight sharded over stage
 input_sharding = S('data', None)   # inputs sharded over batch
 result_sharding = S('data', None)  # output sharded over batch
+
+spmd_pipeline(weight1, input)
 
 output_jit = jax.jit(spmd_pipeline,
              in_shardings=((weight_sharding, input_sharding)),
