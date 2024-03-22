@@ -160,15 +160,16 @@ def huggingface():
       ),
       US_CENTRAL2_B,
   ).run()
-  diffusers_v4_8 = task.TpuQueuedResourceTask(
-      test_config.JSonnetTpuVmTest.from_pytorch(
-          "pt-nightly-hf-diffusers-func-v4-8-1vm"
-      ),
-      US_CENTRAL2_B,
-  ).run()
+  # TODO(yeounoh) the dataset is taken down, we need a new SD model with a new dataset.
+  # diffusers_v4_8 = task.TpuQueuedResourceTask(
+  #     test_config.JSonnetTpuVmTest.from_pytorch(
+  #         "pt-nightly-hf-diffusers-func-v4-8-1vm"
+  #     ),
+  #     US_CENTRAL2_B,
+  # ).run()
 
   accelerate_v4_8 >> accelerate_v2_8
-  accelerate_v4_8 >> diffusers_v4_8
+  # accelerate_v4_8 >> diffusers_v4_8
 
   task.TpuQueuedResourceTask(
       test_config.JSonnetTpuVmTest.from_pytorch(
