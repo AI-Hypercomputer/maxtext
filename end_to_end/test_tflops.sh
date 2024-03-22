@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -ex
 
 USER=${1}
 TFLOP_THRESHOLD=${2}
@@ -9,9 +9,9 @@ DATASET_PATH=${4}
 
 if [ -z ${5} ]
 then 
-    RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S)
+    RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S)-${RANDOM}
 else
-    RUN_NAME=${5}_$(date +%Y-%m-%d-%H)
+    RUN_NAME=${5}_$(date +%Y-%m-%d-%H)-${RANDOM}
 fi
 
 #Train

@@ -1,4 +1,5 @@
 #!/bin/bash
+set -ex
 
 echo "Running test_convergence_1b_params.sh"
 # Run this on 64 chips to achieve a loss value of ~2.5 after 20400 steps, or ~2.7 after 10200 steps (v4-128)
@@ -12,9 +13,6 @@ echo "Running test_convergence_1b_params.sh"
 # Example to invoke this script:
 # bash end_to_end/test_convergence_1b_params.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>" LOSS_THRESHOLD=100.0
 
-# Stop execution if any command exits with error
-set -e
-
 export LOSS_THRESHOLD=100.0 # Set to large value so test is guaranteed to pass.
 export STEPS=20400 # Run for 20B tokens for a 1B sized mode for "chinchilla" scaling https://arxiv.org/abs/2203.15556
 
@@ -23,6 +21,11 @@ for ARGUMENT in "$@"; do
     IFS='=' read -r KEY VALUE <<< "$ARGUMENT"
     export "$KEY"="$VALUE"
 done
+
+if [ -n "$RUN_NAME" ];
+then
+    export M_RUN_NAME=$RUN_NAME
+fi
 
 if [ "$DATASET_TYPE" == "c4-array_record" ]
 then
@@ -34,7 +37,7 @@ then
     CMD_DATA=" dataset_type=c4-array_record dataset_name=array-record/c4/en/3.0.1 eval_dataset_name=array-record/c4/en/3.0.1"
 fi
 
-TRAIN_CMD="python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
+TRAIN_CMD="python3 MaxText/train.py MaxText/configs/base.yml\
         steps=$STEPS per_device_batch_size=8.0 learning_rate=3e-4 enable_checkpointing=false \
         max_target_length=2048 global_parameter_scale=1 \
         enable_profiler=false metrics_file=metrics.txt base_output_directory=$OUTPUT_PATH\

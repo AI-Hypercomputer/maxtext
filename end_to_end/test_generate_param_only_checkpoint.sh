@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -ue #x for debugging
+set -uex
 
 helpFunction()
 {

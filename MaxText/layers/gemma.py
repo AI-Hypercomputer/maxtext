@@ -94,7 +94,8 @@ class GemmaDecoderLayer(nn.Module):
       name='self_attention',
       float32_qk_product = True,
       float32_logits = True,
-      quant=self.quant)
+      quant=self.quant,
+      quantize_kvcache=cfg.quantize_kvcache)
 
     attention_lnx = attention_layer(
       lnx,

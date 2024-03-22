@@ -22,6 +22,7 @@ import sys
 from typing import Any, Union
 
 import jax
+from jax.experimental.compilation_cache import compilation_cache
 import accelerator_to_spec_map
 import max_logging
 import max_utils
@@ -63,7 +64,7 @@ def validate_keys(keys):
 
 def validate_model_name(s: str) -> bool:
   # currently supported models
-  valid_model_names = ('default', 'llama2-7b', 'llama2-70b', 'mistral-7b',
+  valid_model_names = ('default', 'llama2-7b', 'llama2-13b', 'llama2-70b', 'mistral-7b',
                        'mixtral-8x7b', 'gemma-7b','gemma-2b',
                        'gpt3-175b', 'gpt3-22b', 'gpt3-6b', 'gpt3-52k')
   if s not in valid_model_names:
@@ -75,7 +76,7 @@ def validate_no_keys_overwritten_twice(keys1: list[str], keys2: list[str]):
   overwritten_keys = [k for k in keys1 if k in keys2]
   if overwritten_keys:
     raise ValueError(
-        f"Keys {overwritten_keys} are overwritten from both the model" 
+        f"Keys {overwritten_keys} are overwritten from both the model"
         " and the environment/command line. This isn't allowed.")
 
 _config = None
@@ -162,17 +163,26 @@ class _HyperParameters():
     if _BASE_CONFIG_ATTR in raw_data_from_yaml:
       parent_config_filename = raw_data_from_yaml[_BASE_CONFIG_ATTR]
       if not os.path.isabs(parent_config_filename):
-        parent_config_filename = os.path.join(
+        loaded_parent_config_filename = os.path.join(
             os.path.dirname(config_name), parent_config_filename
         )
-      base_config = self._load_config(parent_config_filename)
+        if not os.path.isfile(loaded_parent_config_filename):
+          dir_path = os.path.dirname(os.path.realpath(__file__))
+          loaded_parent_config_filename = os.path.join(
+              dir_path, f"configs/{parent_config_filename}"
+          )
+      else:
+        loaded_parent_config_filename = parent_config_filename
+
+      base_config = self._load_config(loaded_parent_config_filename)
       for key, value in raw_data_from_yaml.items():
         base_config[key] = value
       return base_config
     return raw_data_from_yaml
 
   def __init__(self, argv: list[str], **kwargs):
-    raw_data_from_yaml = self._load_config(argv[1])
+    config_name : str = argv[1]
+    raw_data_from_yaml = self._load_config(config_name)
 
     self._validate_env_variables(raw_data_from_yaml)
 
@@ -180,12 +190,15 @@ class _HyperParameters():
     keys_from_env_and_command_line = self._update_from_env_and_command_line(raw_keys, raw_data_from_yaml, argv, **kwargs)
     max_logging.log(
         f"Updating keys from env and command line: {keys_from_env_and_command_line}")
-    keys_from_model = _HyperParameters.update_model_vars(argv[1], raw_keys)
+    keys_from_model = _HyperParameters.update_model_vars(argv[1], raw_keys, config_name)
     max_logging.log(f"Updating keys from model: {keys_from_model}")
     validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
 
     # We initialize the jax distributed system here because it must be done before device backend is initialized.
     max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+
+    if raw_keys['jax_cache_dir']:
+      compilation_cache.set_cache_dir(os.path.expanduser(raw_keys['jax_cache_dir']))
 
     if raw_keys['model_name'] == "gpt3-175b":
       _HyperParameters.configure_gpt3_task(raw_keys)
@@ -256,7 +269,7 @@ class _HyperParameters():
     raw_keys['eval_interval'] = math.ceil(24567 / global_batch_size_to_train_on)
 
   @staticmethod
-  def update_model_vars(base_config_path, raw_keys):
+  def update_model_vars(base_config_path, raw_keys, config_name : str):
     ''' Update model config variables
     '''
     validate_model_name(raw_keys['model_name'])
@@ -276,17 +289,17 @@ class _HyperParameters():
       with open(file_path, 'r', encoding="utf-8") as file:
         model_vars = yaml.safe_load(file)
         updated_keys = list(model_vars.keys())
-      raw_keys = validate_and_update_keys(raw_keys, model_vars)
+      raw_keys = validate_and_update_keys(raw_keys, model_vars, config_name)
     return updated_keys
 
-def validate_and_update_keys(raw_keys, model_keys):
+def validate_and_update_keys(raw_keys, model_keys, config_name : str):
   ''' Validate and update model specific config keys
   '''
   max_logging.log("Updating following parameters in config\n")
   for k in model_keys:
     max_logging.log(f"{k}: {model_keys[k]}")
     if k not in raw_keys:
-      raise ValueError(f'Key {k} does not exist in config/base.yml.')
+      raise ValueError(f'Key {k} does not exist in config {config_name}.')
     elif not isinstance(raw_keys[k], type(model_keys[k])):
       raise ValueError(f'Type of key:{k} does not match with {type(model_keys[k])}')
     else:

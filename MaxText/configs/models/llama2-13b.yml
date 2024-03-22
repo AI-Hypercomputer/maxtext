@@ -1,0 +1,28 @@
+# Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# model config for llama2-13b
+
+base_emb_dim: 5120
+base_num_query_heads: 40
+base_num_kv_heads: 40
+base_mlp_dim: 13824
+base_num_decoder_layers: 40
+head_dim: 128
+mlp_activations: ["silu","linear"]
+vocab_size: 32000
+enable_dropout: False
+logits_via_embedding: False
+normalization_layer_epsilon: 1.0e-5
+decoder_block: "llama2"

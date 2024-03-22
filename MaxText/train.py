@@ -49,8 +49,6 @@ import jax.numpy as jnp
 from jax import random
 from jax.sharding import Mesh
 
-from jax.experimental.compilation_cache import compilation_cache as cc
-
 from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
@@ -377,8 +375,8 @@ def train_loop(config, state=None):
 
 
   num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
-  max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
-  per_device_tflops = maxtext_utils.calculate_tflops_training_per_device(num_model_parameters, config)
+  max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
+  per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(num_model_parameters, config)
 
   # Write train config params, num model params, and XLA flags to tensorboard
   max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
@@ -423,12 +421,13 @@ def train_loop(config, state=None):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
 
-    example_batch = load_next_batch(data_iterator, example_batch, config)
-    nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
-    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      state, metrics = p_train_step(
-          state, example_batch, nextrng
-      )
+    with jax.profiler.StepTraceAnnotation("train", step_num=step):
+      example_batch = load_next_batch(data_iterator, example_batch, config)
+      nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
+      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        state, metrics = p_train_step(
+            state, example_batch, nextrng
+        )
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
@@ -478,7 +477,6 @@ def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   config = pyconfig.config
   validate_train_config(config)
-  cc.set_cache_dir(os.path.expanduser(config.jax_cache_dir))
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   debug_config = debug_configuration.DebugConfig(
     stack_trace_config = stack_trace_configuration.StackTraceConfig(

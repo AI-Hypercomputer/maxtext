@@ -4,8 +4,8 @@
 #  - Updating GCS paths (gs://) to your accessible locations.
 #  - Using the checkpoint generated from train.py or available one in open source (https://llama.meta.com/llama-downloads/).
 
-set -e
-idx=$(date +%Y-%m-%d-%H-%M)
+set -ex
+idx=$(date +%Y-%m-%d-%H-%M)-${RANDOM}
 
 export M_ENABLE_CHECKPOINTING=true
 export M_BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs
