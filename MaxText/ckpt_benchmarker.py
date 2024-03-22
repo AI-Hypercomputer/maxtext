@@ -24,11 +24,11 @@ parser.add_argument('--project', type=str, default="",
 parser.add_argument('--num_slices', type=str, default="",
                     help='The number of slices')
 parser.add_argument('--device_type', type=str, default="",
-                    help='The type of the device')
+                    help='The type of the CPU device')
 parser.add_argument('--tpu_type', type=str, default="",
                     help='The type of TPU devices')
 parser.add_argument('--num_processes', type=int, default=64,
-                    help='The type of TPU devices')
+                    help='The number of csv files uploaded to GCS bucket, will use this to process csv files')
 parser.add_argument('--mode', type=str, default="", choices=['read', 'write', 'train'],
                     help='Mode of the checkpointing run, either read or write')
 parser.add_argument('--model_size', type=str, default="",
