@@ -39,9 +39,8 @@ def summarize_pytree_data(params, name="Params"):
   return num_params, total_param_size, avg_param_size
 
 
-def prefill_benchmark_loop(config, engine, decode_state, params, tokens, true_length, iters, profile_name=""):
+def prefill_benchmark_loop(config, engine, decode_state, params, tokens, true_length, iters):
   """ Inner loop for benchmarking prefill step. """
-  max_utils.activate_profiler(config, profile_name)
   start = datetime.datetime.now()
   for i in range(iters):
     slot = int(i % (jax.device_count() * config.per_device_batch_size))
@@ -49,12 +48,11 @@ def prefill_benchmark_loop(config, engine, decode_state, params, tokens, true_le
     decode_state = engine.insert(prefill_result, decode_state, slot=slot)
   jax.block_until_ready(decode_state)
   end = datetime.datetime.now()
-  max_utils.deactivate_profiler(config)
   return (end - start).total_seconds(), decode_state
 
 
 def prefill_benchmark(config, engine, params, decode_state, tokens, true_length,
-                      iters=100, profile_name="", num_model_params=None):
+                      iters=100, num_model_params=None):
   """ Handles init, warmup, running prefill benchmark, and printing results. """
   if num_model_params is None:
     num_model_params, _, _ = summarize_pytree_data(params, name="Params")
@@ -68,9 +66,7 @@ def prefill_benchmark(config, engine, params, decode_state, tokens, true_length,
 
   print(f"Prefill results for length {tokens.size}:\n")
 
-  profile_name = f"prefill_{tokens.size}" if profile_name == "" else profile_name
-  time_in_s, decode_state = prefill_benchmark_loop(config, engine, decode_state, params, tokens, true_length, iters,
-                                                   profile_name=profile_name)
+  time_in_s, decode_state = prefill_benchmark_loop(config, engine, decode_state, params, tokens, true_length, iters)
   prefill_average_ms = 1000 * time_in_s / iters
   total_prefill_tflops, _, _ = maxtext_utils.calculate_tflops_prefill(num_model_params, tokens.size, config)
   tflops_per_sec_per_device = total_prefill_tflops / jax.device_count() / prefill_average_ms * 1000.
@@ -83,19 +79,17 @@ def prefill_benchmark(config, engine, params, decode_state, tokens, true_length,
   return result_dict, decode_state
 
 
-def ar_benchmark_loop(config, engine, decode_state, params, iters, profile_name=""):
+def ar_benchmark_loop(config, engine, decode_state, params, iters):
   """ Inner loop for benchmarking ar step. """
-  max_utils.activate_profiler(config, profile_name)
   start = datetime.datetime.now()
   for _ in range(iters):
     decode_state, _ = engine.generate(params, decode_state)
   jax.block_until_ready(decode_state)
   end = datetime.datetime.now()
-  max_utils.deactivate_profiler(config)
   return (end - start).total_seconds(), decode_state
 
 
-def ar_benchmark(config, engine, params, decode_state, cache_size=None, model_size=None, profile_name="", iters=100):
+def ar_benchmark(config, engine, params, decode_state, cache_size=None, model_size=None, iters=100):
   """ Handles init, warmup, running ar benchmark, and printing results. """
   if cache_size is None:
     _, cache_size, _ = summarize_pytree_data(decode_state['cache'], name="Cache")
@@ -109,8 +103,7 @@ def ar_benchmark(config, engine, params, decode_state, cache_size=None, model_si
   decode_state, _ = engine.generate(params, decode_state)
   jax.block_until_ready(decode_state)
 
-  profile_name = "autoregress" if profile_name == "" else profile_name
-  time_in_s, decode_state = ar_benchmark_loop(config, engine, decode_state, params, profile_name=profile_name, iters=iters)
+  time_in_s, decode_state = ar_benchmark_loop(config, engine, decode_state, params, iters=iters)
   seconds_per_step = time_in_s / iters
   ar_average_ms = seconds_per_step*1000
   total_throughput = jax.device_count() * config.per_device_batch_size / seconds_per_step
@@ -165,7 +158,7 @@ def print_results_for_analyze(results):
 def main(config):
   engine = maxengine.MaxEngine(config)
   params = engine.load_params()
-  prefill_lengths = [64, 128, 256, 512, 1024]
+  prefill_lengths = [int(l) for l in config.microbenchmark_prefill_lengths.split(",")]
   benchmark_loop_iters = 10
   text = config.prompt
   metadata = engine.get_tokenizer()
@@ -176,6 +169,9 @@ def main(config):
   num_model_params, model_size, _ = summarize_pytree_data(params, name="Model")
 
   benchmark_results = {"Prefill": {}}
+
+  max_utils.activate_profiler(config, config.profile_name)
+
   benchmark_results["AutoRegressive"], decode_state = ar_benchmark(
     config, engine, params, decode_state, iters=benchmark_loop_iters, cache_size=cache_size, model_size=model_size)
   for prefill_length in prefill_lengths:
@@ -184,6 +180,8 @@ def main(config):
     benchmark_results["Prefill"][prefill_length], decode_state = prefill_benchmark(
       config, engine, params, decode_state, tokens, true_length,
       iters=benchmark_loop_iters, num_model_params=num_model_params)
+
+  max_utils.deactivate_profiler(config)
 
   results = collate_results(config, benchmark_results, model_size, cache_size, num_model_params)
   write_results(results, filename="")

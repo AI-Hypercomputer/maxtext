@@ -194,6 +194,8 @@ prompt: "I love to" # Prompt for language model sampling.
 load_from_prefill_dir: False # If true, decode.py doesn't "prefill" but just reads from directory
 prefill_cache_dir: "" # If set and load_from_prefill_dir, decode.py reads from directory. If set, decode.py writes to directory
 autoregressive_decode_assert: ""
+microbenchmark_prefill_lengths: "64,128,256,512,1024" # The prefill lengths used for microbenchmark
+profile_name: "" # The profile prefix name for microbenchmark
 
 enable_profiler: False
 # If set to true, upload all profiler xplane results from all hosts. Otherwise, only upload the xplane reuslt from the first host.
