@@ -6,7 +6,7 @@ if [ -f "run_*_metrics.txt" ]; then
     echo "removed existing run_*_metrics.txt"
 fi
 
-RUN_NAME=${1}-$(date +%Y-%m-%d-%H-%M)-${RANDOM}
+RUN_NAME=${1}-$(date +%Y-%m-%d-%H-%M)
 OUTPUT_PATH=${2}
 DATASET_PATH=${3}
 model_params=" base_emb_dim=384 base_num_query_heads=8 base_num_kv_heads=8 base_mlp_dim=192 base_num_decoder_layers=8 head_dim=128"

@@ -11,7 +11,7 @@ if [ -f "restored_metrics.txt" ]; then
     echo "removed existing restored_metrics.txt"
 fi
 
-RUN_NAME=${1}-${4}-$(date +%Y-%m-%d-%H-%M)-${RANDOM}
+RUN_NAME=${1}-${4}-$(date +%Y-%m-%d-%H-%M)
 OUTPUT_PATH=${2}
 DATASET_PATH=${3}
 COLLECT_STACK_TRACE=${4}
