@@ -121,7 +121,7 @@ def set_up_keras(version: Optional[str] = None) -> tuple[str]:
   return (
       cmd_install_keras,
       "export PATH=$PATH:/root/google-cloud-sdk/bin && cd /tmp",
-      "gcloud source repos clone tf2-api-tests --project=cloud-ml-auto-solutions || (cd tf2-api-tests && git pull)"
+      "gcloud source repos clone tf2-api-tests --project=cloud-ml-auto-solutions || (cd tf2-api-tests && git pull)",
       "cd /tmp/tf2-api-tests && pip install behave matplotlib",
   )
 
