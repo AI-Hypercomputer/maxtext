@@ -64,8 +64,6 @@ MODEL_PARAMS_DICT = {
         'num_kv_heads': 40,
         'dims_per_head': 128,
         'vocab': 32000,
-        'num_gpus': 1,
-        'fused_qkv': True,
     },
     'llama2-7b': {
         'num_layers': 32,
@@ -73,8 +71,6 @@ MODEL_PARAMS_DICT = {
         'num_kv_heads': 32,
         'dims_per_head': 128,
         'vocab': 32000,
-        'base_emb_dim': 4096,
-        'base_mlp_dim': 11008,
     },
     'mistral-7b': {
         'num_layers': 32,
