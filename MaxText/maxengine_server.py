@@ -21,7 +21,6 @@ import pyconfig
 
 import  maxengine_config
 from jetstream.core import server_lib
-from jax.experimental.compilation_cache import compilation_cache as cc
 
 # _PORT = flags.DEFINE_integer('port', 9000, 'port to listen on')
 # _THREADS = flags.DEFINE_integer(
@@ -55,5 +54,4 @@ if __name__ == '__main__':
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   pyconfig.initialize(sys.argv)
   cfg = pyconfig.config
-  cc.set_cache_dir(os.path.expanduser(cfg.jax_cache_dir))
   main(cfg)
