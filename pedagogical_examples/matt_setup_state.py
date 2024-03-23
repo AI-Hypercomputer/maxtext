@@ -72,9 +72,9 @@ def run_one_iteration(state, shift, loop_iteration, weights):
    return new_state, new_shift
 
 def permute_ms_dim(state):
-    # This is for real?
+    # How come I don't see this function in praxis?
     ms_size = state.shape[1]
-    land_idx = (num_stages - 1) % ms_size
+    land_idx = (num_stages - 1) % ms_size # first_finish % ms_size (really first_finish - 1 is the idx we careabout)
     permutation = (np.arange(ms_size) + land_idx) % ms_size
     state = state[:,permutation]
     return state
