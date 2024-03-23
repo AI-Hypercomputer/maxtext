@@ -7,6 +7,11 @@ from jax.sharding import Mesh
 from jax.sharding import NamedSharding
 from jax.experimental import mesh_utils
 
+
+def my_print(s):
+   if yes_print:
+      print(f)
+
 def S(*specs):
   return NamedSharding(mesh, PartitionSpec(*specs))
 
@@ -94,6 +99,8 @@ def get_weights_stage(weights, loop_iteration):
     microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(num_stages), 0) # not a great name, really this is like batch_id * repeat idx
     repeat_ids = microbatch_ids // microbatches
     layer_ids = jnp.arange(num_stages) + repeat_ids * num_stages
+    # layer_idx actauly goes out of bounds on the last bubble, but jax pulls it back to last idx
+    # since its the bubble we don't care that its randomly clipped to the last, but should probably change this
     #weights_repeated = jnp.reshape(weights, [num_stages, num_repeat, model_dim, model_dim])
     # TODO!!! lax.dynamic slice
     to_stack = [weights[layer_ids[stage],:,:] for stage in range(num_stages)]
@@ -105,7 +112,7 @@ def get_weights_stage(weights, loop_iteration):
 def run_one_iteration(state, shift, async_state, lir, loop_iteration, weights):
    stages_in = get_iteration_inputs(loop_iteration, microbatches, num_stages, state, async_state)
    stages_in = select_state_or_input(stages_in, shift)
-   print(f"Stages in: {jnp.ravel(stages_in)}")
+   my_print(f"Stages in: {jnp.ravel(stages_in)}")
    weights_stage = get_weights_stage(weights, loop_iteration)
    output = jax.vmap(stage, in_axes=0, out_axes=0,
                         spmd_axis_name='stage')(weights_stage, stages_in)
@@ -115,6 +122,7 @@ def run_one_iteration(state, shift, async_state, lir, loop_iteration, weights):
 def permute_ms_dim(state):
     # How come I don't see this function in praxis?
     ms_size = state.shape[1]
+    # More accurately land_idx = microbatches * (r - 1) + num_stages - 1 % ms, but ms | microbatches
     land_idx = (num_stages - 1) % ms_size # first_finish % ms_size (really first_finish - 1 is the idx we careabout)
     permutation = (np.arange(ms_size) + land_idx) % ms_size
     state = state[:,permutation]
@@ -137,19 +145,21 @@ def run_pipeline(weights, inputs):
     total_iterations = microbatches * num_repeat + num_stages  - 1 # What? Shoulnd't this be num_stages * num_repeat + micro - 1
     #breakpoint()
     for loop_iteration in range(total_iterations):
-       print(f"Starting loop {loop_iteration}")
-       print(f"shift:{jnp.ravel(shift)}")
-       #print(f"state: {jnp.ravel(state)}")
-       ss = jnp.reshape(state, [4,2])
-       print(f"ss: {ss}")
-       ras = jnp.reshape(async_state, [4,8])
-       print(f" as: {ras}")
-       print(f"lir: {jnp.ravel(lir)}")
+       my_print(f"Starting loop {loop_iteration}")
+       my_print(f"shift:{jnp.ravel(shift)}")
+       #my_print(f"state: {jnp.ravel(state)}")
+       if yes_print:
+        ss = jnp.reshape(state, [4,2])
+        my_print(f"ss: {ss}")
+        ras = jnp.reshape(async_state, [4,8])
+        my_print(f" as: {ras}")
+        my_print(f"lir: {jnp.ravel(lir)}")
        state, shift, async_state, lir = run_one_iteration(state, shift, async_state, lir, loop_iteration, weights)
 
-    print("Final output")
-    print(f"shift:{jnp.ravel(shift)}")
-    print(f"state: {jnp.reshape(jnp.ravel(state),[4,2])}")
+    my_print("Final output")
+    my_print(f"shift:{jnp.ravel(shift)}")
+    if yes_print:
+        my_print(f"state: {jnp.reshape(jnp.ravel(state),[4,2])}")
     # reshape state to match input shape
     #state = jnp.transpose(state, axes=(0,2,1,3,4)) # holy crap
     #qqq = jnp.transpose(state, axes=(2,3,4,1,0))
@@ -163,12 +173,14 @@ def run_pipeline(weights, inputs):
 
 # Sizes
 num_stages = 4
-microbatches = 8
+microbatches = 12
 microbatch_size = 1
 seq_len = 1
 model_dim = 1
 total_batch = microbatches * microbatch_size
-num_repeat = 2
+num_repeat = 3
+
+yes_print = False
 
 micro_shape = [microbatch_size, seq_len, model_dim] # realistic
 #micro_shape = [microbatch_size] # great for debugging state transformations
@@ -233,11 +245,11 @@ if 0:
 # Test get_weights_stage
 if 0:
    weights = jnp.reshape(jnp.arange(8),weights_shape)
-   for loop_iteration in range(11):
+   for loop_iteration in range(19):
       weights_stage = get_weights_stage(weights, loop_iteration)
       print(f"iter {loop_iteration}: weights {jnp.ravel(weights_stage)}")
 
-if 1:
+if 0:
     # Test run_pipeline unjitted
     test_inputs = test_inputs + 1
     #weights = 100 * (1 + jnp.arange(num_stages * num_repeat)) * jnp.ones(weights_shape, dtype=jnp.float32)
@@ -250,8 +262,7 @@ if 1:
 
 
 
-
-if 0:
+if 1:
     # Test jit run_pipeline
     # initialize
     #test_inputs = np.ones([microbatches] + micro_shape, dtype=jnp.float32)
@@ -292,8 +303,8 @@ if 0:
     output_pipeline_norm = jnp.linalg.norm(output_pipeline)
     print(f"{output_pipeline_norm=}")
 
-    print(f"{output_pipeline=}")
-    print(f"{regular_output=}")
+    my_print(f"{output_pipeline=}")
+    my_print(f"{regular_output=}")
 
 
 
