@@ -86,7 +86,7 @@ logits_via_embedding: False
 normalize_embedding_logits: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 
-# Choose 'remat_policy' between 'minimal', 'save_dot_except_mlpwi', 'save_dot_except_mlp', 'save_qkv_proj', 'minimal_offloaded' and 'full'.
+# Choose 'remat_policy' between 'minimal', 'save_dot_except_mlpwi', 'save_dot_except_mlp', 'save_qkv_proj', 'qkv_proj_offloaded', 'minimal_offloaded' and 'full'.
 # These options offer a trade-off between speed (fastest to slowest) and HBM usage (highest to lowest)
 remat_policy: 'full'
 scan_layers: True
