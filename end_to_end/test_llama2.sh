@@ -5,7 +5,7 @@
 #  - Using the checkpoint generated from train.py or available one in open source (https://llama.meta.com/llama-downloads/).
 
 set -ex
-idx=$(date +%Y-%m-%d-%H-%M)-${RANDOM}
+idx=$(date +%Y-%m-%d-%H-%M)
 
 export M_ENABLE_CHECKPOINTING=true
 export M_BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs
