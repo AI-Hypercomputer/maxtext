@@ -88,7 +88,7 @@ def stage(weights, x):
   return x
 
 def layer(weights, x):
-  if debug_stage:
+  if sum_layer:
      x_out = weights + x
   else:
     x_out = jnp.einsum('bse,eh->bsh',x,weights) # The leading stage dimension of weights is missing because it is vmapped out
@@ -96,6 +96,11 @@ def layer(weights, x):
 
   #x = jnp.tanh(jnp.dot(x, w))
   return x_out
+
+# You are here, does global_layer need to be different for non-pipeline?
+def global_layer(weights, x):
+    return sad
+
 
 def get_weights_stage(weights, loop_iteration):
     microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(num_stages), 0) # not a great name, really this is like batch_id * repeat idx
@@ -180,6 +185,15 @@ def get_weights_random():
     k = jax.random.PRNGKey(1)
     return jax.random.normal(k,weights_random_shape, dtype=jnp.float32)
 
+def get_weights_debug_unique():
+    weights = list()
+    weights_debug_shape = [num_stages * num_repeat, microbatch_size, model_dim, model_dim]
+    for i in range(jnp.prod(weights_debug_shape)):
+       weights.append((i+1) * 10**(i+1))
+    weights = jnp.array(weights, dtype=jnp.float32)
+    weights = jnp.reshape(weights, weights_debug_shape)
+    return weights
+
 def get_inputs_random():
     micro_shape = [microbatch_size, seq_len, model_dim] # realistic
     test_input_shape = [microbatches] + micro_shape # [microbatches, microbatch_size, seq_len, model_dim]
@@ -207,7 +221,7 @@ total_batch = microbatches * microbatch_size
 num_repeat = 2
 
 yes_print = True
-debug_stage = True
+sum_layer = False
 
 micro_shape = [microbatch_size, seq_len, model_dim] # realistic
 #micro_shape = [microbatch_size] # great for debugging state transformations
@@ -215,13 +229,8 @@ micro_shape = [microbatch_size, seq_len, model_dim] # realistic
 
 k = jax.random.PRNGKey(1)
 
-test_inputs = np.ones([microbatches] + micro_shape, dtype=jnp.float32)
-test_inputs_shape = jnp.array([microbatches] + micro_shape)
-test_inputs = jnp.reshape(jnp.arange(jnp.prod(test_inputs_shape), dtype=jnp.float32), test_inputs_shape)
-
-weights_shape = jnp.array([num_stages * num_repeat, model_dim, model_dim]) # ideally  layers x embed x hidden,
-weights = jax.random.normal(k,weights_shape, dtype=jnp.float32)
-#weights = jnp.ones(weights_shape, dtype=jnp.float32)
+test_inputs = get_inputs_random()
+weights = get_weights_random()
 
 # Configure sharding
 pipeline_axis = 4
@@ -240,14 +249,16 @@ result_sharding = S('data', None, None, None)  # output sharded over batch
 ####### Start testing ###########
 
 # Test get_weights_stage
-# ws = get_weights_stage(weights, 0)
+if 0:
+    ws = get_weights_stage(weights, 0)
 
 
 # Test run_one_iteration
 # Initialize shift and state
-# shift = jnp.zeros((num_stages,) + test_inputs.shape[1:]) # equivalently inputs.shape[1:] is microshape
-# state = jnp.reshape(test_inputs, (num_stages, microbatches // num_stages) + test_inputs.shape[1:])
-# new_state, new_shift = run_one_iteration(state, shift, 0, weights)
+if 0:
+    shift = jnp.zeros((num_stages,) + test_inputs.shape[1:]) # equivalently inputs.shape[1:] is microshape
+    state = jnp.reshape(test_inputs, (num_stages, microbatches // num_stages) + test_inputs.shape[1:])
+    new_state, new_shift = run_one_iteration(state, shift, 0, weights)
 
 
 # Test get_iteration input + select_state = stages_in
@@ -276,52 +287,21 @@ if 0:
       weights_stage = get_weights_stage(weights, loop_iteration)
       print(f"iter {loop_iteration}: weights {jnp.ravel(weights_stage)}")
 
-if 1:
-    # Test run_pipeline unjitted
-    test_inputs = test_inputs + 1
-    #weights = 100 * (1 + jnp.arange(num_stages * num_repeat)) * jnp.ones(weights_shape, dtype=jnp.float32)'
-    weights = list()
-    for i in range(jnp.prod(weights_shape)):
-       weights.append((i+1) * 10**(i+1))
-    weights = jnp.array(weights, dtype=jnp.float32)
-    weights = jnp.reshape(weights, weights_shape)
+# Test run pipeline (no jit)
+if 0:
 
-    #weights = 100 + jnp.zeros(weights_shape, dtype=jnp.float32)
-    #weights = jnp.reshape(jnp.arange(8),weights_shape,dtype=jnp.float32)
-
-    print(f"weights: {jnp.ravel(weights)}")
     weights = get_weights_debug()
     inputs = get_inputs_debug()
     print(f"weights: {jnp.ravel(weights)}")
     print(f"inputs: {jnp.ravel(weights)}")
+
     outputs = run_pipeline(weights, test_inputs)
     #print(f"{outputs=}")
 
-
-
+# Test jitted E2E
 if 0:
-    # Test jit run_pipeline
-    # initialize
-    #test_inputs = np.ones([microbatches] + micro_shape, dtype=jnp.float32)
-    #test_inputs_shape = jnp.array([microbatches] + micro_shape)
-    k = jax.random.PRNGKey(1)
-    #test_inputs = jax.random.normal(k, test_inputs_shape, dtype=jnp.float32)
-
-    # weights_shape = jnp.array([num_stages, model_dim, model_dim]) # ideally  layers x embed x hidden,
-    # weights = jax.random.normal(k,weights_shape, dtype=jnp.float32)
-
-
-
-    weights = list()
-    for i in range(jnp.prod(weights_shape)):
-       weights.append((i+1) * 10**(i+1))
-    weights = jnp.array(weights, dtype=jnp.float32)
-    weights = jnp.reshape(weights, weights_shape)
-
-    # Useful to test # set layer -> x_out = x_in + weights
-    # test_inputs = test_inputs + 1
-    # weights = 100 + jnp.zeros(weights_shape, dtype=jnp.float32)
-
+    weights = get_weights_random()
+    inputs = get_inputs_random()
 
     output_jit = jax.jit(run_pipeline,
                 in_shardings=((weight_sharding, input_sharding)),
@@ -331,14 +311,14 @@ if 0:
     # [Microbatch, microsize, seq embed] -> [Batch, Seq, Embed]
     output_pipeline= jnp.reshape(output_pipeline, (total_batch,) + output_pipeline.shape[2:])
 
-    def reg_matmuls(weights, input):
+    def reg_layer(weights, input):
         for layer_idx in range(weights.shape[0]):
             input = layer(weights[layer_idx,:,:], input)
         return input
 
     # Reshape batched_inputs from [micro,micro_size,...] to [batch,...]
     batched_inputs = jnp.reshape(test_inputs, (total_batch,) + test_inputs.shape[2:])
-    regular_output = reg_matmuls(weights, batched_inputs)
+    regular_output = reg_layer(weights, batched_inputs)
 
     diff_norm = jnp.linalg.norm(output_pipeline - regular_output)
     print(f"{diff_norm=}")
@@ -349,9 +329,54 @@ if 0:
     output_pipeline_norm = jnp.linalg.norm(output_pipeline)
     print(f"{output_pipeline_norm=}")
 
-    yes_print = True
+    yes_print = False
     my_print(f"{output_pipeline=}")
     my_print(f"{regular_output=}")
+
+# Test 1 stage of vmap
+if 1:
+    sum_layer = False
+    weights = get_weights_random()
+    inputs = get_inputs_random()
+    print(f"{weights=}")
+    print(f"{inputs=}")
+
+    batched_inputs = jnp.reshape(inputs, (total_batch,) + test_inputs.shape[2:])
+    layer_1_reg = layer(weights[0,:,:], batched_inputs)
+    #print(f"{layer_1_reg=}")
+
+    loop_iteration = 0
+    state, shift, async_state, lir = init_states(inputs)
+    stages_in = get_iteration_inputs(loop_iteration, microbatches, num_stages, state, async_state)
+    stages_in = select_state_or_input(stages_in, shift)
+    #my_print(f"Stages in: {jnp.ravel(stages_in)}")
+    weights_stage = get_weights_stage(weights, loop_iteration)
+    pipeline_output = jax.vmap(stage, in_axes=0, out_axes=0,
+                        spmd_axis_name='stage')(weights_stage, stages_in)
+    print(f"{pipeline_output=}")
+
+    
+    batched_state = batched_inputs
+    for layer_idx in range(weights.shape[0]):
+       batched_state = layer(weights[layer_idx,:,:], batched_state)
+       print(f"layer {layer_idx}, batched_state: {jnp.ravel(batched_state)}")
+
+
+    total_iterations = microbatches * num_repeat + num_stages
+    for loop_iteration in range(total_iterations):
+       my_print(f"Starting loop {loop_iteration}")
+       my_print(f"shift:{jnp.ravel(shift)}")
+       #my_print(f"state: {jnp.ravel(state)}")
+       if yes_print:
+        ss = jnp.reshape(state, [4,2])
+        my_print(f"ss: {ss}")
+        ras = jnp.reshape(async_state, [4,8])
+        my_print(f" as: {ras}")
+        my_print(f"lir: {jnp.ravel(lir)}")
+       state, shift, async_state, lir = run_one_iteration(state, shift, async_state, lir, loop_iteration, weights)
+
+    
+       
 
 
 
