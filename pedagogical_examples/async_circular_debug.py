@@ -88,9 +88,12 @@ def stage(weights, x):
   return x
 
 def layer(weights, x):
-#   x_out = jnp.einsum('bse,eh->bsh',x,weights) # The leading stage dimension of weights is missing because it is vmapped out
-#   x_out = jnp.tanh(x_out)
-  x_out = weights + x
+  if debug_stage:
+     x_out = weights + x
+  else:
+    x_out = jnp.einsum('bse,eh->bsh',x,weights) # The leading stage dimension of weights is missing because it is vmapped out
+    x_out = jnp.tanh(x_out)
+
   #x = jnp.tanh(jnp.dot(x, w))
   return x_out
 
@@ -170,6 +173,30 @@ def run_pipeline(weights, inputs):
 
 ######################     Begin main      #################
 
+
+def get_weights_random():
+    # Assuming layer_i looks like output = inputs[micro_id,:,:,:] * weights[i,:,:] --> x_out = jnp.einsum('bse,eh->bsh',x,weights)
+    weights_random_shape = jnp.array([num_stages * num_repeat, model_dim, model_dim]) # more realistic:  layers x embed x hidden, etc
+    k = jax.random.PRNGKey(1)
+    return jax.random.normal(k,weights_random_shape, dtype=jnp.float32)
+
+def get_inputs_random():
+    micro_shape = [microbatch_size, seq_len, model_dim] # realistic
+    test_input_shape = [microbatches] + micro_shape # [microbatches, microbatch_size, seq_len, model_dim]
+    k = jax.random.PRNGKey(2)
+    return jax.random.normal(k,test_input_shape, dtype=jnp.float32)
+
+def get_weights_debug():
+   # Assuming layer_i looks like output = inputs[micro_id,:,:,:] + weights[i,:,:,:] --> x_out = x_out = inputs + weights
+    weights_debug_shape = [num_stages * num_repeat, microbatch_size, model_dim, model_dim]
+    return 100 + jnp.zeros(weights_debug_shape, dtype=jnp.float32)
+   
+def get_inputs_debug():
+    test_inputs_shape = jnp.array([microbatches] + micro_shape)
+    test_inputs = jnp.reshape(jnp.arange(jnp.prod(test_inputs_shape), dtype=jnp.float32), test_inputs_shape)
+   
+
+
 # Sizes
 num_stages = 4
 microbatches = 8
@@ -180,6 +207,7 @@ total_batch = microbatches * microbatch_size
 num_repeat = 2
 
 yes_print = True
+debug_stage = True
 
 micro_shape = [microbatch_size, seq_len, model_dim] # realistic
 #micro_shape = [microbatch_size] # great for debugging state transformations
@@ -248,20 +276,30 @@ if 0:
       weights_stage = get_weights_stage(weights, loop_iteration)
       print(f"iter {loop_iteration}: weights {jnp.ravel(weights_stage)}")
 
-if 0:
+if 1:
     # Test run_pipeline unjitted
     test_inputs = test_inputs + 1
-    #weights = 100 * (1 + jnp.arange(num_stages * num_repeat)) * jnp.ones(weights_shape, dtype=jnp.float32)
-    weights = 100 + jnp.zeros(weights_shape, dtype=jnp.float32)
+    #weights = 100 * (1 + jnp.arange(num_stages * num_repeat)) * jnp.ones(weights_shape, dtype=jnp.float32)'
+    weights = list()
+    for i in range(jnp.prod(weights_shape)):
+       weights.append((i+1) * 10**(i+1))
+    weights = jnp.array(weights, dtype=jnp.float32)
+    weights = jnp.reshape(weights, weights_shape)
+
+    #weights = 100 + jnp.zeros(weights_shape, dtype=jnp.float32)
     #weights = jnp.reshape(jnp.arange(8),weights_shape,dtype=jnp.float32)
 
     print(f"weights: {jnp.ravel(weights)}")
+    weights = get_weights_debug()
+    inputs = get_inputs_debug()
+    print(f"weights: {jnp.ravel(weights)}")
+    print(f"inputs: {jnp.ravel(weights)}")
     outputs = run_pipeline(weights, test_inputs)
     #print(f"{outputs=}")
 
 
 
-if 1:
+if 0:
     # Test jit run_pipeline
     # initialize
     #test_inputs = np.ones([microbatches] + micro_shape, dtype=jnp.float32)
@@ -272,9 +310,17 @@ if 1:
     # weights_shape = jnp.array([num_stages, model_dim, model_dim]) # ideally  layers x embed x hidden,
     # weights = jax.random.normal(k,weights_shape, dtype=jnp.float32)
 
+
+
+    weights = list()
+    for i in range(jnp.prod(weights_shape)):
+       weights.append((i+1) * 10**(i+1))
+    weights = jnp.array(weights, dtype=jnp.float32)
+    weights = jnp.reshape(weights, weights_shape)
+
     # Useful to test # set layer -> x_out = x_in + weights
-    test_inputs = test_inputs + 1
-    weights = 100 + jnp.zeros(weights_shape, dtype=jnp.float32)
+    # test_inputs = test_inputs + 1
+    # weights = 100 + jnp.zeros(weights_shape, dtype=jnp.float32)
 
 
     output_jit = jax.jit(run_pipeline,
@@ -303,6 +349,7 @@ if 1:
     output_pipeline_norm = jnp.linalg.norm(output_pipeline)
     print(f"{output_pipeline_norm=}")
 
+    yes_print = True
     my_print(f"{output_pipeline=}")
     my_print(f"{regular_output=}")
 
