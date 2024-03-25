@@ -18,12 +18,12 @@ import abc
 import dataclasses
 import datetime
 import shlex
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 import airflow
 from airflow.models.taskmixin import DAGNode
 from airflow.utils.task_group import TaskGroup
 from xlml.apis import gcp_config, metric_config, test_config
-from xlml.utils import gpu, metric, name_format, ssh, tpu, xpk, gke
+from xlml.utils import gpu, metric, name_format, ssh, tpu, xpk, gke, startup_script
 
 
 class BaseTask(abc.ABC):
@@ -308,16 +308,16 @@ class TpuQueuedResourceTask(BaseTask):
 
 
 @dataclasses.dataclass
-class TpuXpkTask(BaseTask):
-  """This is a class to set up tasks for TPU provisioned by XPK tool.
+class XpkTask(BaseTask):
+  """This is a class to set up tasks for TPU/GPU provisioned by XPK tool.
 
   Attributes:
-    task_test_config: Test configs to run on this TPU.
-    task_gcp_config: Runtime TPU creation parameters.
+    task_test_config: Test configs to run on this TPU/GPU.
+    task_gcp_config: Runtime TPU/GPU creation parameters.
     task_metric_config: Metric configs to process metrics.
   """
 
-  task_test_config: test_config.TestConfig[test_config.Tpu]
+  task_test_config: Union[test_config.TpuGkeTest, test_config.GpuXpkTest]
   task_gcp_config: gcp_config.GCPConfig
   task_metric_config: Optional[metric_config.MetricConfig] = None
 
@@ -367,7 +367,7 @@ class TpuXpkTask(BaseTask):
     return group
 
   def run_model(self) -> DAGNode:
-    """Run the TPU test in `task_test_config` using xpk.
+    """Run the TPU/GPU test in `task_test_config` using xpk.
 
     Returns:
       A DAG node that executes the model test.

@@ -29,7 +29,7 @@ def get_flax_resnet_xpk_config(
     docker_image: str,
     time_out_in_min: int,
     num_slices: int = 1,
-) -> task.TpuXpkTask:
+) -> task.XpkTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=project_name,
       zone=tpu_zone,
@@ -59,7 +59,7 @@ def get_flax_resnet_xpk_config(
       num_slices=num_slices,
   )
 
-  return task.TpuXpkTask(
+  return task.XpkTask(
       task_test_config=job_test_config,
       task_gcp_config=job_gcp_config,
   )

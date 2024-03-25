@@ -18,9 +18,8 @@
 import datetime
 from airflow import models
 from dags import composer_env, test_owner
-from dags.vm_resource import TpuVersion, Zone, DockerImage
+from dags.vm_resource import TpuVersion, Zone, DockerImage, GpuVersion, ClusterName
 from dags.multipod.configs import gke_config
-from dags.multipod.configs.common import SetupMode, Platform
 
 
 # Run once a day at 4 am UTC (8 pm PST)
@@ -44,24 +43,46 @@ with models.DAG(
 
   for model in test_models.keys():
     for test_script in test_models[model]:
-      stable = gke_config.get_gke_config(
+      stable_tpu = gke_config.get_gke_config(
           tpu_version=TpuVersion.V4,
           tpu_cores=8,
           tpu_zone=Zone.US_CENTRAL2_B.value,
           time_out_in_min=60,
           test_name=f"{test_name_prefix}-stable-{test_script}",
           run_model_cmds=(f"bash end_to_end/{test_script}.sh",),
-          docker_image=DockerImage.MAXTEXT_JAX_STABLE.value,
+          docker_image=DockerImage.MAXTEXT_TPU_JAX_STABLE.value,
           test_owner=test_owner.JON_B,
       ).run()
-      nightly = gke_config.get_gke_config(
+      nightly_tpu = gke_config.get_gke_config(
           tpu_version=TpuVersion.V4,
           tpu_cores=8,
           tpu_zone=Zone.US_CENTRAL2_B.value,
           time_out_in_min=60,
           test_name=f"{test_name_prefix}-nightly-{test_script}",
           run_model_cmds=(f"bash end_to_end/{test_script}.sh",),
-          docker_image=DockerImage.MAXTEXT_JAX_NIGHTLY.value,
+          docker_image=DockerImage.MAXTEXT_TPU_JAX_NIGHTLY.value,
           test_owner=test_owner.JON_B,
       ).run()
-      stable >> nightly
+      stable_gpu = gke_config.get_maxtext_end_to_end_gpu_gke_test_config(
+          accelerator_type=GpuVersion.XPK_H100,
+          gpu_zone=Zone.US_CENTRAL1_C.value,
+          time_out_in_min=300,
+          test_name=f"{test_name_prefix}-stable-{test_script}",
+          test_script=test_script,
+          num_slices=2,
+          cluster_name=ClusterName.A3_CLUSTER.value,
+          docker_image=DockerImage.MAXTEXT_GPU_JAX_STABLE.value,
+          test_owner=test_owner.NINA_C,
+      ).run()
+      nightly_gpu = gke_config.get_maxtext_end_to_end_gpu_gke_test_config(
+          accelerator_type=GpuVersion.XPK_H100,
+          gpu_zone=Zone.US_CENTRAL1_C.value,
+          time_out_in_min=300,
+          test_name=f"{test_name_prefix}-nightly-{test_script}",
+          test_script=test_script,
+          num_slices=2,
+          cluster_name=ClusterName.A3_CLUSTER.value,
+          docker_image=DockerImage.MAXTEXT_GPU_JAX_NIGHTLY.value,
+          test_owner=test_owner.NINA_C,
+      ).run()
+      stable_tpu >> nightly_tpu >> stable_gpu >> nightly_gpu

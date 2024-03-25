@@ -62,7 +62,7 @@ def _run_workload(
       (
           "python3 xpk.py workload create"
           f" --cluster={cluster_name} --workload={workload_id}"
-          f" --command='{run_cmds}' --tpu-type={accelerator_type}"
+          f" --command='{run_cmds}' --device-type={accelerator_type}"
           f" --num-slices={num_slices} --docker-image={docker_image}"
       ),
   )

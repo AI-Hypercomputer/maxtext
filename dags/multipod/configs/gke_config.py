@@ -16,7 +16,7 @@
 
 from xlml.apis import gcp_config, metric_config, task, test_config
 from dags import test_owner, gcs_bucket
-from dags.vm_resource import TpuVersion, Project, ClusterName
+from dags.vm_resource import TpuVersion, Project, ClusterName, GpuVersion
 from typing import Iterable
 import datetime
 
@@ -38,7 +38,7 @@ def get_gke_config(
     composer_project: str = Project.CLOUD_ML_AUTO_SOLUTIONS.value,
     base_output_directory: str = None,
     metric_aggregation_strategy: metric_config.AggregationStrategy = None,
-) -> task.TpuXpkTask:
+) -> task.XpkTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=project_name,
       zone=tpu_zone,
@@ -74,7 +74,7 @@ def get_gke_config(
       else None
   )
 
-  return task.TpuXpkTask(
+  return task.XpkTask(
       task_test_config=job_test_config,
       task_gcp_config=job_gcp_config,
       task_metric_config=job_metric_config,
@@ -95,7 +95,7 @@ def get_gke_maxtext_nightly_config(
     dataset_name: metric_config.DatasetOption = metric_config.DatasetOption.XLML_DATASET,
     dataset_project: str = Project.CLOUD_ML_AUTO_SOLUTIONS.value,
     composer_project: str = Project.CLOUD_ML_AUTO_SOLUTIONS.value,
-) -> task.TpuXpkTask:
+) -> task.XpkTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=project_name,
       zone=tpu_zone,
@@ -140,7 +140,50 @@ def get_gke_maxtext_nightly_config(
       docker_image=docker_image,
   )
 
-  return task.TpuXpkTask(
+  return task.XpkTask(
+      task_test_config=job_test_config,
+      task_gcp_config=job_gcp_config,
+  )
+
+
+def get_maxtext_end_to_end_gpu_gke_test_config(
+    accelerator_type: GpuVersion,
+    gpu_zone: str,
+    time_out_in_min: int,
+    test_name: str,
+    test_script: str,
+    cluster_name: str,
+    test_owner: str,
+    docker_image: str,
+    num_slices: int = 1,
+    project_name: str = Project.SUPERCOMPUTER_TESTING.value,
+) -> task.GpuCreateResourceTask:
+  job_gcp_config = gcp_config.GCPConfig(
+      project_name=project_name,
+      zone=gpu_zone,
+      dataset_name=metric_config.DatasetOption.XLML_DATASET,
+  )
+  run_model_cmds = (f"cd /tmp/maxtext && bash end_to_end/{test_script}.sh",)
+
+  job_test_config = test_config.GpuXpkTest(
+      test_config.Gpu(
+          machine_type=None,
+          image_family=None,
+          count=None,
+          accelerator_type=accelerator_type.value,
+          runtime_version=None,
+      ),
+      test_name=test_name,
+      set_up_cmds=None,
+      run_model_cmds=run_model_cmds,
+      time_out_in_min=time_out_in_min,
+      task_owner=test_owner,
+      cluster_name=cluster_name,
+      docker_image=docker_image,
+      num_slices=num_slices,
+  )
+
+  return task.XpkTask(
       task_test_config=job_test_config,
       task_gcp_config=job_gcp_config,
   )
@@ -160,7 +203,7 @@ def get_gke_gpt3_6b_nightly_config(
     dataset_name: metric_config.DatasetOption = metric_config.DatasetOption.XLML_DATASET,
     dataset_project: str = Project.CLOUD_ML_AUTO_SOLUTIONS.value,
     composer_project: str = Project.CLOUD_ML_AUTO_SOLUTIONS.value,
-) -> task.TpuXpkTask:
+) -> task.XpkTask:
   job_gcp_config = gcp_config.GCPConfig(
       project_name=project_name,
       zone=tpu_zone,
@@ -205,7 +248,7 @@ def get_gke_gpt3_6b_nightly_config(
       docker_image=docker_image,
   )
 
-  return task.TpuXpkTask(
+  return task.XpkTask(
       task_test_config=job_test_config,
       task_gcp_config=job_gcp_config,
   )

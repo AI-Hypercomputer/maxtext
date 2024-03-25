@@ -51,8 +51,8 @@ with models.DAG(
   }
   num_slices = [1, 2]
   docker_images = [
-      (SetupMode.STABLE, DockerImage.MAXTEXT_JAX_STABLE),
-      (SetupMode.NIGHTLY, DockerImage.MAXTEXT_JAX_NIGHTLY),
+      (SetupMode.STABLE, DockerImage.MAXTEXT_TPU_JAX_STABLE),
+      (SetupMode.NIGHTLY, DockerImage.MAXTEXT_TPU_JAX_NIGHTLY),
   ]
 
   run_model_cmds_dict = {}

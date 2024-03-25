@@ -31,7 +31,7 @@ with models.DAG(
     start_date=datetime.datetime(2024, 3, 12),
     catchup=False,
 ) as dag:
-  jax_nightly_image = DockerImage.MAXTEXT_JAX_NIGHTLY
+  jax_nightly_image = DockerImage.MAXTEXT_TPU_JAX_NIGHTLY
   default_test_name = "mxla-maxtext-nightly-gke"
 
   maxtext_nightly_1slice_v4_8 = gke_config.get_gke_maxtext_nightly_config(

@@ -52,7 +52,7 @@ with models.DAG(
           tpu_version=TpuVersion.V4,
           tpu_cores=128,
           num_slices=[1],
-          docker_image=DockerImage.MAXTEXT_JAX_STABLE.value,
+          docker_image=DockerImage.MAXTEXT_TPU_JAX_STABLE.value,
           run_name_prefix="maxtext-16b",
           base_run_model_cmds=base_run_model_cmds,
           sweep_params={"M_PER_DEVICE_BATCH_SIZE": [2, 4, 8]},

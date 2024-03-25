@@ -31,7 +31,7 @@ with models.DAG(
     start_date=datetime.datetime(2024, 3, 18),
     catchup=False,
 ) as dag:
-  jax_nightly_image = DockerImage.MAXTEXT_JAX_NIGHTLY
+  jax_nightly_image = DockerImage.MAXTEXT_TPU_JAX_NIGHTLY
   default_gpt3_6b_test_name = "mxla-gpt3-6b-nightly-gke"
 
   gpt3_6b_nightly_1slice_v4_8 = gke_config.get_gke_gpt3_6b_nightly_config(

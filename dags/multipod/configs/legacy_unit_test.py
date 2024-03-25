@@ -37,7 +37,7 @@ def get_legacy_unit_test_config(
     num_slices: int = 1,
     cluster_name: str = ClusterName.V4_8_MULTISLICE_CLUSTER.value,
     project_name: str = Project.TPU_PROD_ENV_MULTIPOD.value,
-) -> task.TpuXpkTask:
+) -> task.XpkTask:
   """
   Run a legacy unit test script.
   `script_to_copy` is a script in the `dags/multipod/legacy_tests` folder to be
@@ -78,7 +78,7 @@ def get_legacy_unit_test_config(
       docker_image=docker_image,
   )
 
-  return task.TpuXpkTask(
+  return task.XpkTask(
       task_test_config=job_test_config,
       task_gcp_config=job_gcp_config,
   )

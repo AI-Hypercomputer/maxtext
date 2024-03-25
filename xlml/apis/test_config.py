@@ -105,7 +105,7 @@ class Gpu(Accelerator):
   image_family: str
   count: int
   accelerator_type: str
-  runtime_version: str
+  runtime_version: Optional[str] = None
 
   @property
   def name(self):
@@ -261,6 +261,41 @@ def _load_compiled_jsonnet(test_name: str) -> Any:
     test = json.load(f)
 
   return test
+
+
+@attrs.define
+class GpuXpkTest(TestConfig[Gpu]):
+  """Test config that runs on a single Cloud GPU instance in GKE cluster.
+
+  Attributes:
+    test_name: Unique name for this test/model.
+    cluster_name: Name of the cluster that has provisioned GPUs.
+    docker_image: Image of the docker to run.
+    set_up_cmds: List of commands to run once when GPU is created.
+    run_model_cmds: List of commands to run the model under test.
+    startup_time_out_in_sec: Timeout to start up the pod.
+    num_slices: Number of GPU slices.
+  """
+
+  test_name: str
+  cluster_name: str
+  docker_image: str
+  set_up_cmds: Iterable[str]
+  run_model_cmds: Iterable[str]
+  startup_time_out_in_sec: int = attrs.field(default=300, kw_only=True)
+  num_slices: int = attrs.field(default=1, kw_only=True)
+
+  @property
+  def benchmark_id(self) -> str:
+    return f'{self.test_name}-{self.accelerator.name}'
+
+  @property
+  def setup_script(self) -> Optional[str]:
+    return ';'.join(self.set_up_cmds)
+
+  @property
+  def test_script(self) -> str:
+    return ';'.join(self.run_model_cmds)
 
 
 @attrs.define

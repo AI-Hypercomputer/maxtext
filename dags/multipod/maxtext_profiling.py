@@ -36,8 +36,8 @@ with models.DAG(
   base_output_directory = f"{gcs_bucket.OUTPUT_DIR}/maxtext_profiling"
   dataset_path = gcs_bucket.MAXTEXT_DIR
   docker_images = [
-      (SetupMode.STABLE, DockerImage.MAXTEXT_JAX_STABLE),
-      (SetupMode.NIGHTLY, DockerImage.MAXTEXT_JAX_NIGHTLY),
+      (SetupMode.STABLE, DockerImage.MAXTEXT_TPU_JAX_STABLE),
+      (SetupMode.NIGHTLY, DockerImage.MAXTEXT_TPU_JAX_NIGHTLY),
   ]
 
   for mode, image in docker_images:
