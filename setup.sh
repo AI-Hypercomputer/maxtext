@@ -131,8 +131,11 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
             pip3 install -U "jax[cuda12_pip]==${JAX_VERSION}" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
         else
             echo "Installing stable jax, jaxlib, libtpu for NVIDIA gpu"
-            pip3 install -U "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+            pip3 install "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html -c constraints.txt
         fi
+        pip3 install "transformer-engine==1.4.0+0fbc76a" \
+          --extra-index-url https://us-python.pkg.dev/gce-ai-infra/maxtext-build-support-packages/simple/ \
+          -c constraints.txt
     fi
 elif [[ $MODE == "nightly" ]]; then
 # Nightly mode
@@ -142,6 +145,9 @@ elif [[ $MODE == "nightly" ]]; then
         pip3 install --pre -U jax -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
         # Install jaxlib-nightly
         pip3 install -U --pre jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_cuda12_releases.html
+        # Install prebuilt Transformer Engine for GPU builds.
+        pip3 install "transformer-engine==1.4.0+0fbc76a" \
+          --extra-index-url https://us-python.pkg.dev/gce-ai-infra/maxtext-build-support-packages/simple/
     elif [[ $DEVICE == "tpu" ]]; then
         echo "Installing jax-nightly, jaxlib-nightly"
         # Install jax-nightly
@@ -172,4 +178,9 @@ else
 fi
 
 # Install dependencies from requirements.txt
-cd $run_name_folder_path && pip install --upgrade pip &&  pip3 install -r requirements.txt
+cd $run_name_folder_path && pip install --upgrade pip
+if [[ $DEVICE == "gpu"  ]] && [[ "$MODE" == "stable" || ! -v MODE ]] && [[ ! -v JAX_VERSION ]]; then
+    pip3 install -r requirements.txt -c constraints.txt
+else
+    pip3 install -U -r requirements.txt
+fi

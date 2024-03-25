@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Example command: 
+# Example command:
 # bash docker_build_dependency_image.sh MODE=stable
 # bash docker_build_dependency_image.sh MODE=nightly
 # bash docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
@@ -23,6 +23,9 @@
 set -e
 
 export LOCAL_IMAGE_NAME=maxtext_base_image
+
+# Use Docker BuildKit so we can cache pip packages.
+export DOCKER_BUILDKIT=1
 
 echo "Starting to build your docker image. This will take a few minutes but the image can be reused as you iterate."
 
