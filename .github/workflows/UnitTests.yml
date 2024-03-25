@@ -122,7 +122,7 @@ jobs:
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
         'python3 pedagogical_examples/shmap_collective_matmul.py'
-  
+
   # IF YOU MODIFY THIS, YOU SHOULD ALSO ADD CORRESPONDING MODICATIONS TO 'tpu' job
   gpu:
     strategy:
@@ -133,6 +133,8 @@ jobs:
     runs-on: ["self-hosted", "gpu", "${{ matrix.device-type }}"]
     steps:
     - uses: actions/checkout@v3
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
     - name: Cleanup old docker images
       run: |
         docker system prune --all --force
