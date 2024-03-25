@@ -191,6 +191,7 @@ class Gpt3MultiHeadAttention(nn.Module):
       name='out',
       quant=self.quant,
       use_bias=self.use_bias,
+      replicate_bias=True,
       )(out)
     return out_proj
 

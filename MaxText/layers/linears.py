@@ -85,6 +85,7 @@ class DenseGeneral(nn.Module):
   kernel_axes: Tuple[str, ...] = ()
   quant: Optional[Quant] = None
   use_bias: bool = False
+  replicate_bias: bool = False
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -130,6 +131,8 @@ class DenseGeneral(nn.Module):
 
     if self.use_bias:
       bias_axes, bias_shape = self.kernel_axes[-len(features):], kernel_shape[-len(features):]
+      if self.replicate_bias:
+        bias_axes = ['replicate', ] * len(bias_axes)
       bias = self.param(
           'bias',
           nn.with_logical_partitioning(bias_init, bias_axes),
@@ -239,6 +242,7 @@ class MlpBlock(nn.Module):
         name='wo',
         quant=self.quant,
         use_bias=self.use_bias,
+        replicate_bias=True,
     )(x)
 
     output = checkpoint_name(output, 'ffn2')
