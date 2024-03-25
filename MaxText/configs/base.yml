@@ -121,6 +121,7 @@ logical_axis_rules: [
                       ['embed', ['fsdp', 'sequence']],
                       ['heads', ['tensor', 'autoregressive']],
                       ['kv', []],
+                      ['replicate', []],
                       ['cache_batch', []],
                       ['cache_heads', ['autoregressive']],
                       ['cache_kv', []],

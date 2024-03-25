@@ -185,7 +185,7 @@ class MlpBlock(nn.Module):
       inputs = self.get_norm_layer()(
         name='mlp_layer_norm',
         dtype=cfg.dtype,
-        kernel_axes=('embed',),
+        kernel_axes=('replicate',),
         epsilon=cfg.normalization_layer_epsilon,
         )(inputs)
 
