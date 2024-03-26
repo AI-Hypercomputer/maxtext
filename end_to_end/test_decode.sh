@@ -9,9 +9,9 @@ DATASET_PATH=${3}
 
 if [ -z ${4} ]
 then
-    RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S)-${RANDOM}
+    RUN_NAME=${USER}_$(date +%Y-%m-%d-%H-%M-%S)
 else
-    RUN_NAME=${4}_$(date +%Y-%m-%d-%H)-${RANDOM}
+    RUN_NAME=${4}_$(date +%Y-%m-%d-%H)
 fi
 
 if [ -z ${5} ]
