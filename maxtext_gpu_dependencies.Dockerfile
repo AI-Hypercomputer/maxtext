@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y google-cloud-sdk
 # Set environment variables for Google Cloud SDK
 ENV PATH="/usr/local/google-cloud-sdk/bin:${PATH}"
 
-# Upgrade libcusprase to work with Jax
+# Upgrade libcusparse to work with Jax
 RUN apt-get update && apt-get install -y libcusparse-12-3
 
 ARG MODE
