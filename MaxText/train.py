@@ -49,8 +49,6 @@ import jax.numpy as jnp
 from jax import random
 from jax.sharding import Mesh
 
-from jax.experimental.compilation_cache import compilation_cache as cc
-
 from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
@@ -211,7 +209,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     for k, v in data.items():
       data[k] = v[:config.global_batch_size_to_train_on,:]
 
-  logits, intermediate_outputs = model.apply({'params': params},
+  logits, intermediate_outputs = model.apply(params,
                        data['inputs'],
                        data['inputs_position'],
                        decoder_segment_ids=data['inputs_segmentation'],
@@ -377,8 +375,8 @@ def train_loop(config, state=None):
 
 
   num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
-  max_logging.log(f"number parameters: {num_model_parameters/10**9:.3f} billion")
-  per_device_tflops = maxtext_utils.calculate_tflops_training_per_device(num_model_parameters, config)
+  max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
+  per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(num_model_parameters, config)
 
   # Write train config params, num model params, and XLA flags to tensorboard
   max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
@@ -479,7 +477,6 @@ def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   config = pyconfig.config
   validate_train_config(config)
-  cc.set_cache_dir(os.path.expanduser(config.jax_cache_dir))
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   debug_config = debug_configuration.DebugConfig(
     stack_trace_config = stack_trace_configuration.StackTraceConfig(

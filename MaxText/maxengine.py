@@ -87,20 +87,16 @@ class MaxEngine(engine_api.Engine):
     self.kv_cache_shardings = jax.tree_map(lambda x : jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations)
 
     if not self.model.quant:
-      params = {"params" : state.params}
       self.abstract_params = jax.tree_map(lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding),
-                                          params)
-      return params
+                                          state.params)
+      return state.params
     else:
       self.model.quant.quant_mode = quantizations.get_quant_mode('convert')
 
       @jax.jit
       def model_apply(_p, _rng):
         return self.model.apply(
-          {
-              "params": _p,
-              "aqt" : {}
-          },
+          _p | {"aqt": {}},
           jnp.ones( (1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           jnp.ones( (1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
@@ -115,7 +111,7 @@ class MaxEngine(engine_api.Engine):
       params = {}
       params['aqt'] = new_vars['aqt']
       # Remove param values which have corresponding qtensors in aqt to save memory.
-      params['params'] = quantizations.remove_quantized_params(state.params, new_vars['aqt'])
+      params['params'] = quantizations.remove_quantized_params(state.params['params'], new_vars['aqt'])
 
       self.abstract_params = jax.tree_map(lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding),
                                           params)
@@ -155,16 +151,17 @@ class MaxEngine(engine_api.Engine):
     one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
-    flat_logits, new_vars = self.model.apply(
-      params,
-      input_tokens,
-      positions,
-      decoder_segment_ids=sequence_indicator,
-      enable_dropout=False,
-      model_mode=common_types.MODEL_MODE_PREFILL,
-      rngs={'params': self.rng},
-      mutable=["cache"]
-    )
+    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      flat_logits, new_vars = self.model.apply(
+        params,
+        input_tokens,
+        positions,
+        decoder_segment_ids=sequence_indicator,
+        enable_dropout=False,
+        model_mode=common_types.MODEL_MODE_PREFILL,
+        rngs={'params': self.rng},
+        mutable=["cache"]
+      )
 
     next_pos = jnp.full((1,1), true_length, dtype = jnp.int32)
     generated_tokens = jnp.zeros((1,1), dtype = jnp.int32)
@@ -186,15 +183,16 @@ class MaxEngine(engine_api.Engine):
                                         nucleus_topp=self.config.decode_sampling_nucleus_p,
                                         temperature=self.config.decode_sampling_temperature)
 
-    out_logits, new_vars = self.model.apply(
-      params | { 'cache': decode_state['cache']},
-      new_token,
-      decode_state['next_pos'],
-      enable_dropout=False,
-      model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-      rngs={'params': self.rng},
-      mutable=['cache']
-    )
+    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      out_logits, new_vars = self.model.apply(
+        params | { 'cache': decode_state['cache']},
+        new_token,
+        decode_state['next_pos'],
+        enable_dropout=False,
+        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+        rngs={'params': self.rng},
+        mutable=['cache']
+      )
 
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
 
@@ -306,7 +304,8 @@ class MaxEngine(engine_api.Engine):
               "generated_tokens" : generated_tokens
               }
 
-    abstract_outputs = jax.eval_shape(init, self.abstract_params)
+    with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      abstract_outputs = jax.eval_shape(init, self.abstract_params)
     logical_annotations = nn.get_partition_spec(abstract_outputs)
 
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):

@@ -22,6 +22,7 @@ import sys
 from typing import Any, Union
 
 import jax
+from jax.experimental.compilation_cache import compilation_cache
 import accelerator_to_spec_map
 import max_logging
 import max_utils
@@ -63,7 +64,7 @@ def validate_keys(keys):
 
 def validate_model_name(s: str) -> bool:
   # currently supported models
-  valid_model_names = ('default', 'llama2-7b', 'llama2-70b', 'mistral-7b',
+  valid_model_names = ('default', 'llama2-7b', 'llama2-13b', 'llama2-70b', 'mistral-7b',
                        'mixtral-8x7b', 'gemma-7b','gemma-2b',
                        'gpt3-175b', 'gpt3-22b', 'gpt3-6b', 'gpt3-52k')
   if s not in valid_model_names:
@@ -75,7 +76,7 @@ def validate_no_keys_overwritten_twice(keys1: list[str], keys2: list[str]):
   overwritten_keys = [k for k in keys1 if k in keys2]
   if overwritten_keys:
     raise ValueError(
-        f"Keys {overwritten_keys} are overwritten from both the model" 
+        f"Keys {overwritten_keys} are overwritten from both the model"
         " and the environment/command line. This isn't allowed.")
 
 _config = None
@@ -195,6 +196,9 @@ class _HyperParameters():
 
     # We initialize the jax distributed system here because it must be done before device backend is initialized.
     max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+
+    if raw_keys['jax_cache_dir']:
+      compilation_cache.set_cache_dir(os.path.expanduser(raw_keys['jax_cache_dir']))
 
     if raw_keys['model_name'] == "gpt3-175b":
       _HyperParameters.configure_gpt3_task(raw_keys)
