@@ -64,7 +64,7 @@ set_nccl_gpudirect_tcpx_specific_configuration() {
     export NCCL_P2P_NET_CHUNKSIZE=524288
     export NCCL_P2P_PCI_CHUNKSIZE=524288
     export NCCL_P2P_NVL_CHUNKSIZE=1048576
-    export NCCL_FASTRAK_NUM_FLOWS=8
+    export NCCL_FASTRAK_NUM_FLOWS=${NCCL_FASTRAK_NUM_FLOWS:-8}
     export NCCL_FASTRAK_FLOWS_PER_GROUP=2
     export NCCL_BUFFSIZE=4194304
     export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
