@@ -1,0 +1,6 @@
+apiVersion: v2
+name: llama70b
+description: llama70b
+type: application
+version: 0.1.0
+appVersion: "1.16.0"
