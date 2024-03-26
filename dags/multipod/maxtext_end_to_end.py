@@ -35,7 +35,7 @@ with models.DAG(
 ) as dag:
   test_name_prefix = "maxtext"
   test_models = {
-      "llama2": ["test_llama2", "llama_finetuning_test"],
+      "llama2": ["test_llama2_7b"],
       "mistral": ["test_mistral"],
       "gemma": ["test_gemma"],
       "gpt3": ["test_gpt3"],
