@@ -12,6 +12,7 @@ helpFunction()
   echo -e "\t-o output_path: gs://test-maxtext-output"
   echo -e "\t-i ici_tensor_parallelism: 8"
   echo -e "\t-a attention: flash"
+  echo -e "\t-q quantization: int8"
   exit 1 # Exit script after printing help
 }
 
@@ -22,8 +23,9 @@ dataset_path=gs://test-maxtext-dataset
 base_output_directory=gs://test-maxtext-output
 ici_tensor_parallelism=8
 attention=flash
+quantization=""
 
-while getopts "nr:d:o:t:i:a:" opt
+while getopts "nr:d:o:t:i:a:q:" opt
 do
   case "$opt" in
       n ) dry_run=true ;;
@@ -32,6 +34,7 @@ do
       o ) base_output_directory="$OPTARG";;
       i ) ici_tensor_parallelism="$OPTARG" ;;
       a ) attention="$OPTARG" ;;
+      q ) quantization="int8" ;;
       ? ) helpFunction ;; # Print helpFunction in case parameter is non-existent
   esac
 done
@@ -39,7 +42,7 @@ done
 echo
 echo "Running: ./$0 dataset_path=${dataset_path} base_output_directory=${base_output_directory}"
 echo "          dry_run=${dry_run} run_id=${run_id}  "
-echo "          ici_tensor_parallelism=${ici_tensor_parallelism} attention=${attention}"
+echo "          ici_tensor_parallelism=${ici_tensor_parallelism} attention=${attention} quantization=${quantization}"
 echo
 
 if "$dry_run"; then
@@ -60,6 +63,7 @@ run_name=${training_ckpt_run_id} \
 base_output_directory=${base_output_directory} \
 dataset_path=${dataset_path} attention=${attention} \
 steps=5 checkpoint_period=3 async_checkpointing=false \
+quantization=${quantization} \
 ${model_params} \
 
 
@@ -83,6 +87,7 @@ run_name=${decode_ckpt_run_id} attention=${attention} \
 base_output_directory=${base_output_directory} \
 dataset_path=${dataset_path} async_checkpointing=false \
 load_full_state_path=${base_output_directory}/${training_ckpt_run_id}/checkpoints/3/items \
+quantization=${quantization} \
 ${model_params} \
 
 
@@ -106,6 +111,7 @@ dataset_path=${dataset_path} \
 load_parameters_path=${base_output_directory}/${decode_ckpt_run_id}/checkpoints/0/items \
 attention=dot_product ici_tensor_parallelism=${ici_tensor_parallelism} steps=50 \
 metrics_file=/tmp/${run_id}_metrics.txt async_checkpointing=false max_target_length=128 per_device_batch_size=1 \
+quantization=${quantization} \
 ${model_params} \
 
 if [ $? -eq 0 ]
