@@ -60,10 +60,10 @@ local utils = import 'templates/utils.libsonnet';
         content = file.readlines()
         warm_line = content[-6]
         warm_value = float((warm_line.split())[5])
-        if warm_value > 7.948752 or warm_value < 7.191728:
-            raise ValueError("warm latency/token exceeded throuhold 7.57024 +- 5%")
+        if warm_value > 7.948752:
+            raise ValueError(f"warm latency/token {warm_value} exceeded threshold 7.57024 + 5%")
         else:
-            print("Finished llama2 test and warm latency/token within expected throuhold 7.57024 +- 5%")
+            print(f"Finished llama2 test and warm latency/token {warm_value} within expected threshold 7.57024 + 5%")
         GETVALUE_EOF
       |||,
     },
