@@ -65,6 +65,8 @@ class Zone(enum.Enum):
   US_EAST1_D = "us-east1-d"
   # reserved v5p in tpu-prod-env-automated
   US_EAST5_A = "us-east5-a"
+  # reserved v5e in tpu-prod-env-multipod
+  US_WEST4_B = "us-west4-b"
 
 
 class MachineVersion(enum.Enum):
@@ -126,6 +128,7 @@ class ClusterName(enum.Enum):
   V5P_8_MULTISLICE_CLUSTER = "v5p-8-bodaborg-us-east5-a"
   V5E_16_MULTISLICE_CLUSTER = "v5e-16-bodaborg"
   V5E_256_MULTISLICE_CLUSTER = "v5e-256-bodaborg"
+  V5E_256_US_WEST_4_MULTISLICE_CLUSTER = "v5e-256-bodaborg-us-west4"
 
   A3_CLUSTER = "maxtext-a3-20n"
 
