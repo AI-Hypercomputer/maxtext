@@ -22,7 +22,7 @@ from dags.vm_resource import TpuVersion, Zone, DockerImage
 from dags.multipod.configs import gke_config
 from dags.multipod.configs.common import SetupMode
 
-# Run once a day at 6 am UTC (10 pm PST)
+# Run once a day at 5 am UTC (9 pm PST / 10 pm PDT)
 SCHEDULED_TIME = "0 5 * * *" if composer_env.is_prod_env() else None
 
 with models.DAG(
