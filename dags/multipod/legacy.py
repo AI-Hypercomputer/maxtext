@@ -28,6 +28,22 @@ DOCKER_IMAGE = {
     SetupMode.NIGHTLY: DockerImage.MAXTEXT_TPU_JAX_NIGHTLY,
 }
 
+# TFLOPS threshold values by configuration
+tflop_thresholds = {
+    "v4-8": {
+        "1": 130,
+    },
+    "v4-16": {
+        "1": 120,
+        "2": 100,
+    },
+    "v5litepod-256": {
+        "1": 60,
+        "2": 60,
+        "4": 60,
+        "8": 60,
+    },
+}
 
 with models.DAG(
     dag_id=f"multipod_legacy_xlml",
@@ -42,6 +58,7 @@ with models.DAG(
     # this pattern.
     # TODO(jonbolin): Example for legacy unit test migration - evaluate whether
     # to remove gpt1-like tests once test migration is complete.
+
     for n_slice in [1, 2]:
       legacy_unit_test.get_legacy_unit_test_config(
           script_to_copy="gpt1-like.py",
@@ -70,3 +87,49 @@ with models.DAG(
         docker_image=DOCKER_IMAGE[test_mode].value,
         test_owner=test_owner.JON_B,
     ).run()
+
+    # v4-8 1 slice TFLOPS test
+    gke_config.get_gke_config(
+        tpu_version=TpuVersion.V4,
+        tpu_cores=8,
+        tpu_zone=Zone.US_CENTRAL2_B.value,
+        time_out_in_min=60,
+        test_name=f"maxtext-perf-v4-8-1-slices-{test_mode.value}",
+        run_model_cmds=(
+            f"bash end_to_end/test_tflops.sh xlml {tflop_thresholds['v4-8']['1']} gs://maxtext-xlml gs://maxtext-xlml/dataset xlml-tflops-v4-8-1slice-{test_mode.value}",
+        ),
+        docker_image=DOCKER_IMAGE[test_mode].value,
+        test_owner=test_owner.PRIYANKA_G,
+    ).run()
+
+    # v4-16 1 and 2 slice TFLOPS test
+    for n_slice in [1, 2]:
+      gke_config.get_gke_config(
+          tpu_version=TpuVersion.V4,
+          tpu_cores=16,
+          num_slices=n_slice,
+          tpu_zone=Zone.US_CENTRAL2_B.value,
+          time_out_in_min=60,
+          test_name=f"maxtext-perf-v4-16-{n_slice}-slices-{test_mode.value}",
+          run_model_cmds=(
+              f"bash end_to_end/test_tflops.sh xlml {tflop_thresholds['v4-16'][str(n_slice)]} gs://maxtext-xlml gs://maxtext-xlml/dataset xlml-tflops-v4-16-{n_slice}slice-{test_mode.value}",
+          ),
+          cluster_name=ClusterName.V4_16_MULTISLICE_CLUSTER.value,
+          docker_image=DOCKER_IMAGE[test_mode].value,
+          test_owner=test_owner.PRIYANKA_G,
+      ).run()
+
+  # v4-8 2 slices checkpoint resharding test
+  gke_config.get_gke_config(
+      tpu_version=TpuVersion.V4,
+      tpu_cores=8,
+      num_slices=2,
+      tpu_zone=Zone.US_CENTRAL2_B.value,
+      time_out_in_min=60,
+      test_name=f"maxtext-checkpoint-reshard-v4-8-2-slices-{SetupMode.STABLE.value}",
+      run_model_cmds=(
+          f"bash end_to_end/test_checkpoint_resharding.sh xlml-checkpoint-resharding-v4-8-2slice-{SetupMode.STABLE.value} gs://maxtext-xlml gs://maxtext-xlml/dataset",
+      ),
+      docker_image=DOCKER_IMAGE[SetupMode.STABLE].value,
+      test_owner=test_owner.PRIYANKA_G,
+  ).run()
