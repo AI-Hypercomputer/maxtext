@@ -22,8 +22,4 @@ PAX_DIR = "gs://cloud-tpu-checkpoints/pax"
 MAXTEXT_DIR = "gs://max-datasets-rogue"
 
 # GCS bucket for output
-OUTPUT_DIR = "gs://ml-auto-solutions/output"
-# TODO(ran/piz): remove BENCHMARK_OUTPUT_DIR, XLML_OUTPUT_DIR onces all dag
-# configs get rid of those two dependencies and use relative gcs storage path.
-BENCHMARK_OUTPUT_DIR = f"{OUTPUT_DIR}/benchmark"
-XLML_OUTPUT_DIR = f"{OUTPUT_DIR}/xlml"
+BASE_OUTPUT_DIR = "gs://ml-auto-solutions/output"

@@ -50,7 +50,7 @@ def get_mxla_collective_config(
   current_date = current_time.strftime("%Y-%m-%d")
   current_datetime = current_time.strftime("%Y-%m-%d-%H-%M-%S")
 
-  base_output_directory = f"{gcs_bucket.XLML_OUTPUT_DIR}/multipod/mxla/nightly/automated/{current_date}/{num_slices}slice-V{tpu_version.value}_{tpu_cores}-mxla-collective-{bytes_to_transfer}transferBytes-{current_datetime}"
+  base_output_directory = f"{gcs_bucket.BASE_OUTPUT_DIR}/multipod/mxla/nightly/automated/{current_date}/{num_slices}slice-V{tpu_version.value}_{tpu_cores}-mxla-collective-{bytes_to_transfer}transferBytes-{current_datetime}"
 
   test_platform = common.Platform.GCE
   set_up_cmds = common.setup_mxla_collective()

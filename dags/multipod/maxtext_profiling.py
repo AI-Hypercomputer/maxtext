@@ -33,7 +33,7 @@ with models.DAG(
     catchup=False,
     concurrency=2,
 ) as dag:
-  base_output_directory = f"{gcs_bucket.OUTPUT_DIR}/maxtext_profiling"
+  base_output_directory = f"{gcs_bucket.BASE_OUTPUT_DIR}/maxtext_profiling"
   dataset_path = gcs_bucket.MAXTEXT_DIR
   docker_images = [
       (SetupMode.STABLE, DockerImage.MAXTEXT_TPU_JAX_STABLE),

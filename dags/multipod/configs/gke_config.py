@@ -108,7 +108,7 @@ def get_gke_maxtext_nightly_config(
   current_date = current_time.strftime("%Y-%m-%d")
   current_datetime = current_time.strftime("%Y-%m-%d-%H-%M-%S")
   base_output_directory = (
-      f"{gcs_bucket.XLML_OUTPUT_DIR}/maxtext/nightly/automated/{current_date}"
+      f"{gcs_bucket.BASE_OUTPUT_DIR}/maxtext/nightly/automated/{current_date}"
   )
   run_name = f"{num_slices}slice-V{tpu_version.value}_{tpu_cores}-maxtext-nightly-{current_datetime}"
 
@@ -216,7 +216,7 @@ def get_gke_gpt3_6b_nightly_config(
   current_date = current_time.strftime("%Y-%m-%d")
   current_datetime = current_time.strftime("%Y-%m-%d-%H-%M-%S")
   base_output_directory = (
-      f"{gcs_bucket.XLML_OUTPUT_DIR}/maxtext/nightly/automated/{current_date}"
+      f"{gcs_bucket.BASE_OUTPUT_DIR}/maxtext/nightly/automated/{current_date}"
   )
   run_name = f"{num_slices}slice-V{tpu_version.value}_{tpu_cores}-gpt3-6b-nightly-{current_datetime}"
 

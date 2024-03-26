@@ -234,6 +234,8 @@ def process_json_lines(
 def process_tensorboard_summary(
     base_id: str,
     summary_config: metric_config.SummaryConfig,
+    use_generated_gcs_folder: bool,
+    generated_gcs_folder: Optional[str],
 ) -> (
     List[List[bigquery.MetricHistoryRow]],
     List[List[bigquery.MetadataHistoryRow]],
@@ -243,6 +245,8 @@ def process_tensorboard_summary(
   Args:
     base_id: The unique ID for this test job.
     summary_config: The configs for TensorBoard summary.
+    use_generated_gcs_folder: The indicator to use default gcs folder.
+    generated_gcs_folder: The GCS path of default folder.
 
   Returns:
     A list of MetricHistoryRow for a test run, and
@@ -253,7 +257,12 @@ def process_tensorboard_summary(
   if isinstance(summary_config.file_location, airflow.XComArg):
     file_location = summary_config.file_location.resolve(get_current_context())
   else:
-    file_location = summary_config.file_location
+    if use_generated_gcs_folder:
+      file_location = os.path.join(
+          generated_gcs_folder, summary_config.file_location
+      )
+    else:
+      file_location = summary_config.file_location
 
   if summary_config.use_regex_file_location:
     file_location = get_gcs_file_location_with_regex(file_location)
@@ -650,8 +659,6 @@ def process_metrics(
   profile_history_rows_list = []
 
   # process metrics, metadata, and profile
-  # TODO(ran/piz): remove absolute_path based on use_runtime_generated_gcs_folder once all
-  # dag configs are switched to using relative gcs path.
   if task_metric_config:
     if task_metric_config.json_lines:
       absolute_path = (
@@ -665,17 +672,14 @@ def process_metrics(
           base_id, absolute_path
       )
     if task_metric_config.tensorboard_summary:
-      absolute_path = (
-          os.path.join(folder_location, task_metric_config.tensorboard_summary)
-          if task_metric_config.use_runtime_generated_gcs_folder
-          else task_metric_config.tensorboard_summary
-      )
       (
           metric_history_rows_list,
           metadata_history_rows_list,
       ) = process_tensorboard_summary(
           base_id,
-          absolute_path,
+          task_metric_config.tensorboard_summary,
+          task_metric_config.use_runtime_generated_gcs_folder,
+          folder_location,
       )
 
     if task_metric_config.profile:

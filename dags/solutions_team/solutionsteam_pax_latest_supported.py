@@ -32,7 +32,7 @@ with models.DAG(
     start_date=datetime.datetime(2023, 11, 8),
     catchup=False,
 ) as dag:
-  log_dir_prefix = f"{gcs_bucket.XLML_OUTPUT_DIR}/pax/stable"
+  log_dir_prefix = f"{gcs_bucket.BASE_OUTPUT_DIR}/pax/stable"
 
   # Language model with SPMD
   lmspmd2b_exp_path = "tasks.lm.params.lm_cloud.LmCloudSpmd2BLimitSteps"

@@ -32,7 +32,7 @@ with models.DAG(
     start_date=datetime.datetime(2023, 12, 5),
     catchup=False,
 ) as dag:
-  log_dir_prefix = f"{gcs_bucket.XLML_OUTPUT_DIR}/pax/nightly"
+  log_dir_prefix = f"{gcs_bucket.BASE_OUTPUT_DIR}/pax/nightly"
 
   # GPT-3 config with 1B params on c4 dataset with SPMD and Adam
   c4spmd1b_pretraining_exp_path = (

@@ -37,7 +37,7 @@ with models.DAG(
   current_time = datetime.datetime.now()
   current_date = current_time.strftime("%Y-%m-%d")
   base_output_directory = (
-      f"{gcs_bucket.XLML_OUTPUT_DIR}/maxtext/stable/automated/{current_date}"
+      f"{gcs_bucket.BASE_OUTPUT_DIR}/maxtext/stable/automated/{current_date}"
   )
   dataset_path = gcs_bucket.MAXTEXT_DIR
 

@@ -213,7 +213,7 @@ class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
         exclude_tag_patterns=None,
     )
     actual_metrics, actual_metadata = metric.process_tensorboard_summary(
-        base_id, summary_config
+        base_id, summary_config, False, None
     )
 
     uuid = hashlib.sha256(str(base_id + "0").encode("utf-8")).hexdigest()

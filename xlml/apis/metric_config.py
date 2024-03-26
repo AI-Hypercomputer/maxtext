@@ -38,7 +38,7 @@ class AggregationStrategy(enum.Enum):
 
 
 class SshEnvVars(enum.Enum):
-  GCS_OUTPUT = "GCS_OUTPUT"
+  GCS_OUTPUT = "${GCS_OUTPUT}"
 
 
 @dataclasses.dataclass
@@ -46,7 +46,8 @@ class JSONLinesConfig:
   """This is a class to set up JSON Lines config.
 
   Attributes:
-    file_location: The locatioin of the file in GCS.
+    file_location: The locatioin of the file in GCS. When
+      `use_runtime_generated_gcs_folder` flag is ture, use relative path.
   """
 
   file_location: str
@@ -57,7 +58,8 @@ class SummaryConfig:
   """This is a class to set up TensorBoard summary config.
 
   Attributes:
-    file_location: The locatioin of the file in GCS.
+    file_location: The locatioin of the file in GCS. When
+      `use_runtime_generated_gcs_folder` flag is ture, use relative path.
     aggregation_strategy: The aggregation strategy for metrics.
     include_tag_patterns: The matching patterns of tags that wil be included.
       All tags are included by default.
@@ -80,9 +82,10 @@ class ProfileConfig:
   """This is a class to set up profile config.
 
   Attributes:
-    file_locations: The locatioin of the file in GCS. If JSON_LINES format type
-      is used for metrics and dimensions, please ensure the order of profiles
-      match with test runs in JSON Lines.
+    file_locations: The locatioin of the file in GCS. When
+      `use_runtime_generated_gcs_folder` flag is ture, use relative path.
+      If JSON_LINES format type is used for metrics and dimensions, please
+      ensure the order of profiles match with test runs in JSON Lines.
   """
 
   file_locations: List[str]
@@ -97,11 +100,11 @@ class MetricConfig:
     json_lines: The config for JSON Lines input.
     tensorboard_summary: The config for TensorBoard summary input.
     profile: The config for profile input.
+    use_runtime_generated_gcs_folder: Indicator to use path based on
+      benchmark_id from generate_gcs_folder_location()
   """
 
   json_lines: Optional[JSONLinesConfig] = None
   tensorboard_summary: Optional[SummaryConfig] = None
   profile: Optional[ProfileConfig] = None
-  # TODO (ran/piz): remove the following attribute once all dag configs are set to
-  # use relative gcs path.
   use_runtime_generated_gcs_folder: bool = False

@@ -50,7 +50,7 @@ def get_maxtext_nightly_config(
   current_datetime = current_time.strftime("%Y-%m-%d-%H-%M-%S")
 
   trigger = "automated" if automated_test else "manual"
-  base_output_directory = f"{gcs_bucket.XLML_OUTPUT_DIR}/maxtext/{test_mode.value}/{trigger}/{current_date}"
+  base_output_directory = f"{gcs_bucket.BASE_OUTPUT_DIR}/maxtext/{test_mode.value}/{trigger}/{current_date}"
 
   run_name = f"{num_slices}slice-V{tpu_version.value}_{tpu_cores}-maxtext-{test_mode.value}-{current_datetime}"
 

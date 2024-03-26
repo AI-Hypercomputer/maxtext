@@ -21,6 +21,7 @@ from dags import gcs_bucket, test_owner
 from dags.solutions_team.configs.flax import common
 from dags.vm_resource import TpuVersion, Project, RuntimeVersion
 from datetime import datetime
+import os
 
 
 PROJECT_NAME = Project.CLOUD_ML_AUTO_SOLUTIONS.value
@@ -176,16 +177,14 @@ def get_flax_vit_conv_config(
   )
 
   set_up_cmds = get_flax_vit_setup_cmds()
-  tf_summary_location = (
-      "/tmp/transformers/vit-imagenette/events.out.tfevents.flax-vit.v2"
-  )
-  gcs_location = f"{gcs_bucket.XLML_OUTPUT_DIR}/flax/vit/{RUN_DATE}/events.out.tfevents.flax-vit.v2"
+  file_name = "events.out.tfevents.flax-vit.v2"
+  tf_summary_location = f"/tmp/transformers/vit-imagenette/{file_name}"
   extra_run_cmds = (
       (
           "cp /tmp/transformers/vit-imagenette/events.out.tfevents.*"
           f" {tf_summary_location} || exit 0"
       ),
-      f"gsutil cp {tf_summary_location} {gcs_location} || exit 0",
+      f"gsutil cp {tf_summary_location} {metric_config.SshEnvVars.GCS_OUTPUT.value} || exit 0",
   )
   run_model_cmds = get_flax_vit_run_model_cmds(
       num_train_epochs, extraFlags, extra_run_cmds
@@ -209,9 +208,10 @@ def get_flax_vit_conv_config(
 
   job_metric_config = metric_config.MetricConfig(
       tensorboard_summary=metric_config.SummaryConfig(
-          file_location=gcs_location,
+          file_location=file_name,
           aggregation_strategy=metric_config.AggregationStrategy.LAST,
-      )
+      ),
+      use_runtime_generated_gcs_folder=True,
   )
 
   return task.TpuQueuedResourceTask(
@@ -434,11 +434,11 @@ def get_flax_bart_conv_config(
 
   set_up_cmds = get_flax_bart_setup_cmds()
   work_dir = "/tmp/transformers/bart-base-wiki"
-  tf_summary_location = f"{work_dir}/events.out.tfevents.flax-bart.v2"
-  gcs_location = f"{gcs_bucket.XLML_OUTPUT_DIR}/flax/bart/{RUN_DATE}/events.out.tfevents.flax-bart.v2"
+  file_name = "events.out.tfevents.flax-bart.v2"
+  tf_summary_location = os.path.join(work_dir, file_name)
   extra_run_cmds = (
       f"cp {work_dir}/events.out.tfevents.* {tf_summary_location} || exit 0",
-      f"gsutil cp {tf_summary_location} {gcs_location} || exit 0",
+      f"gsutil cp {tf_summary_location} {metric_config.SshEnvVars.GCS_OUTPUT.value} || exit 0",
   )
   run_model_cmds = get_flax_bart_run_model_cmds(
       num_train_epochs, extraFlags, extra_run_cmds
@@ -460,9 +460,10 @@ def get_flax_bart_conv_config(
 
   job_metric_config = metric_config.MetricConfig(
       tensorboard_summary=metric_config.SummaryConfig(
-          file_location=gcs_location,
+          file_location=file_name,
           aggregation_strategy=metric_config.AggregationStrategy.LAST,
-      )
+      ),
+      use_runtime_generated_gcs_folder=True,
   )
 
   return task.TpuQueuedResourceTask(
@@ -555,11 +556,11 @@ def get_flax_bert_conv_config(
 
   set_up_cmds = get_flax_bert_setup_cmds()
   work_dir = "/tmp/transformers/bert-glue"
-  tf_summary_location = f"{work_dir}/events.out.tfevents.flax-bert.v2"
-  gcs_location = f"{gcs_bucket.XLML_OUTPUT_DIR}/flax/bert/{task_name}/{RUN_DATE}/events.out.tfevents.flax-bert.v2"
+  file_name = "events.out.tfevents.flax-bert.v2"
+  tf_summary_location = os.path.join(work_dir, file_name)
   extra_run_cmds = (
       f"cp {work_dir}/events.out.tfevents.* {tf_summary_location} || exit 0",
-      f"gsutil cp {tf_summary_location} {gcs_location} || exit 0",
+      f"gsutil cp {tf_summary_location} {metric_config.SshEnvVars.GCS_OUTPUT.value} || exit 0",
   )
   run_model_cmds = get_flax_bert_run_model_cmds(
       task_name, num_train_epochs, extraFlags, extra_run_cmds
@@ -581,9 +582,10 @@ def get_flax_bert_conv_config(
 
   job_metric_config = metric_config.MetricConfig(
       tensorboard_summary=metric_config.SummaryConfig(
-          file_location=gcs_location,
+          file_location=file_name,
           aggregation_strategy=metric_config.AggregationStrategy.LAST,
-      )
+      ),
+      use_runtime_generated_gcs_folder=True,
   )
 
   return task.TpuQueuedResourceTask(
