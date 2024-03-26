@@ -11,7 +11,8 @@ local tpus = import 'templates/tpus.libsonnet';
       'launch',
       'train_text_to_image.py',
       '--pretrained_model_name_or_path=CompVis/stable-diffusion-v1-4',
-      '--dataset_name=lambdalabs/pokemon-blip-captions',
+      '--dataset_name=huggan/smithsonian_butterflies_subset',
+      "--caption_column=image_url",
       '--use_ema',
       '--resolution=512',
       '--center_crop',
@@ -53,7 +54,7 @@ local tpus = import 'templates/tpus.libsonnet';
         pip install .
 
         cd examples/text_to_image
-        sed '/accelerate/d' requirements.txt > clean_requirements.txt
+        sed '/accelerate>=0.28.0/d' requirements.txt > clean_requirements.txt
         sed '/torchvision/d' requirements.txt > clean_requirements.txt
         sed -i 's/transformers>=.*/transformers>=4.36.2/g' clean_requirements.txt
         pip install -r clean_requirements.txt
