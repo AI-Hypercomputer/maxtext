@@ -214,13 +214,13 @@ def get_inputs_debug():
 # Sizes
 num_stages = 4
 microbatches = 8
-microbatch_size = 1
-seq_len = 1
-model_dim = 1
+microbatch_size = 5
+seq_len = 2048
+model_dim = 2560
 total_batch = microbatches * microbatch_size
-num_repeat = 2
+num_repeat = 3
 
-yes_print = True
+yes_print = False
 sum_layer = False
 
 micro_shape = [microbatch_size, seq_len, model_dim] # realistic
@@ -330,11 +330,11 @@ if 0:
     print(f"{output_pipeline_norm=}")
 
     yes_print = False
-    my_print(f"{output_pipeline=}")
-    my_print(f"{regular_output=}")
+    my_print(f"regular {jnp.ravel(regular_output)}")
+    my_print(f"pipeline {jnp.ravel(regular_output)}")
 
 # Test 1 stage of vmap
-if 1:
+if 0:
     sum_layer = False
     weights = get_weights_random()
     inputs = get_inputs_random()
@@ -378,6 +378,15 @@ if 1:
     
        
 
+if 1:
+    import timing_util
+    weights = get_weights_random()
+    inputs = get_inputs_random()
+    print(f"weights: {jnp.ravel(weights)}")
+    print(f"inputs: {jnp.ravel(inputs)}")
 
+    timing_util.simple_timeit(run_pipeline, weights, test_inputs, task = "run_pipeline")
+    #outputs = run_pipeline(weights, test_inputs)
+    #print(f"{outputs=}")
 
 
