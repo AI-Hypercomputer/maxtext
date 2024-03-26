@@ -178,8 +178,10 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
     p = epath.Path(load_parameters_from_path)
     ckptr = orbax.checkpoint.PyTreeCheckpointer()
     restore_args = orbax.checkpoint.checkpoint_utils.construct_restore_args(abstract_unboxed_pre_state.params)
+    # Orbax syntax -> We are telling Orbax that there is a pytree in this checkpoint named 'params'
+    # and how to handle it. We would need to handle any future collections (like a batch_stats) similarly
     restored = ckptr.restore(p, item = {'params': abstract_unboxed_pre_state.params}, transforms={},
-                             restore_args = {'params': restore_args})
+                              restore_args = {'params': restore_args})
 
     return None, restored['params']
 

@@ -349,13 +349,12 @@ def init_initial_state(model, tx, config, is_training, key):
                           jnp.ones(input_shape, dtype=jnp.int32),
                           jnp.ones(input_shape, dtype=jnp.int32))
   if is_training:
-    return init_training_state(model.apply, model_vars['params'], tx)
-  return init_decode_state(model.apply, model_vars['params'])
+    return init_training_state(model.apply, model_vars, tx)
+  return init_decode_state(model.apply, model_vars)
 
 def load_decode_model_vars(model, config, rng, mesh):
   state, _ = setup_decode_state(model, config, rng, mesh, None)
-  model_vars = {'params': state.params}
-  return model_vars
+  return state.params
 
 def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   is_training = False

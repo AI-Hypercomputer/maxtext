@@ -100,6 +100,60 @@ class MaxUtilsInitState(unittest.TestCase):
       max_utils.calculate_num_params_from_pytree(self.params)
     )
 
+class ModelWithMultipleCollections(nn.Module):
+    """
+      A simple model that has variables in multiple collections - "params" and "special_variables"
+    """
+    def setup(self):
+      self.dense = nn.Dense(4)
+      self.kernel = self.variable(
+        "special_variables", "my_first_kernel", lambda: jnp.ones((4, 5))
+      )
+    
+    def __call__(self, x, y):
+      x = self.dense(x)
+      x = x @ self.kernel.value
+      return x 
+
+class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
+
+  def setUp(self):
+    pyconfig.initialize([None, "configs/base.yml"], enable_checkpointing=False)
+    self.config = pyconfig.config
+    self.model = ModelWithMultipleCollections()
+    self.key1, self.key2, self.key3 = random.split(random.key(0), num=3)
+    self.input = random.normal(self.key1, 
+                               (self.config.global_batch_size_to_load, self.config.max_target_length))
+    self.params = self.model.init(self.key2, self.input, self.input)
+    self.tx = optax.adam(learning_rate=0.001)
+
+  def _test_init_initial_state_driver(self, is_training):
+    state_under_test = max_utils.init_initial_state(self.model, self.tx, self.config, is_training, self.key3)
+    self.assertEqual(state_under_test.apply_fn, self.model.apply)
+    if is_training:
+      self.assertEqual(state_under_test.tx, self.tx)
+      self.assertNotEqual(state_under_test.opt_state, {})
+    else:
+      self.assertIsNone(state_under_test.tx)
+      self.assertEqual(state_under_test.opt_state, {})
+    self.assertEqual(
+      max_utils.calculate_num_params_from_pytree(state_under_test.params),
+      max_utils.calculate_num_params_from_pytree(self.params)
+    )
+    self.assertEqual(
+      len(self.params),
+      len(state_under_test.params)
+    )
+    self.assertIn("special_variables", state_under_test.params)
+    self.assertIn("params", state_under_test.params)
+  
+  def test_initial_train_state(self):
+    self._test_init_initial_state_driver(True)
+  
+  def test_initial_decode_state(self):
+    self._test_init_initial_state_driver(False)
+
+
 class MaxUtilsInitTransformerState(unittest.TestCase):
   """Tests initialization of transformer states in max_utils.py"""
 

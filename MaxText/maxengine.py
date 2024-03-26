@@ -87,20 +87,16 @@ class MaxEngine(engine_api.Engine):
     self.kv_cache_shardings = jax.tree_map(lambda x : jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations)
 
     if not self.model.quant:
-      params = {"params" : state.params}
       self.abstract_params = jax.tree_map(lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding),
-                                          params)
-      return params
+                                          state.params)
+      return state.params
     else:
       self.model.quant.quant_mode = quantizations.get_quant_mode('convert')
 
       @jax.jit
       def model_apply(_p, _rng):
         return self.model.apply(
-          {
-              "params": _p,
-              "aqt" : {}
-          },
+          _p | {"aqt": {}},
           jnp.ones( (1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           jnp.ones( (1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
@@ -115,7 +111,7 @@ class MaxEngine(engine_api.Engine):
       params = {}
       params['aqt'] = new_vars['aqt']
       # Remove param values which have corresponding qtensors in aqt to save memory.
-      params['params'] = quantizations.remove_quantized_params(state.params, new_vars['aqt'])
+      params['params'] = quantizations.remove_quantized_params(state.params['params'], new_vars['aqt'])
 
       self.abstract_params = jax.tree_map(lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding),
                                           params)
