@@ -106,6 +106,12 @@ def test_vocab_creation(target):
   assert storage.Blob(bucket=storage_client.bucket(bucket_name), name=vocab_path).exists(storage_client)
   print('vocab creation test passed.')
 
+def test_start_step(metrics_file, start_step_target):
+  with open(metrics_file, 'r', encoding='utf8') as metrics:
+    start_step = json.loads(metrics.readlines()[0])["step"]
+  print(f"Start step is {start_step}, start step target is {start_step_target}")
+  assert start_step==float(start_step_target)
+  print("Start step test passed.")
 
 def main(argv: Sequence[str]) -> None:
 
@@ -123,6 +129,8 @@ def main(argv: Sequence[str]) -> None:
     test_vocab_creation(*test_vars)
   elif test_scenario == 'final_loss':
     test_final_loss(*test_vars)
+  elif test_scenario == 'test_start_step':
+    test_start_step(*test_vars)
   else:
      raise ValueError(f"Unrecognized test_scenario {test_scenario}")
 

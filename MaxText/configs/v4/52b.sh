@@ -41,13 +41,21 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
+# The setup accommodates two cases:
+# 1) Passing the 'RUN_NAME' variable at runtime
+# 2) Propagating the 'M_RUN_NAME' variable within an Airflow sweeping workflow
+if [ -n "$RUN_NAME" ];
+then
+    export M_RUN_NAME=$RUN_NAME
+fi
+
 # Set up network optimizations
 bash preflight.sh PLATFORM=$PLATFORM
 
 # Train
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true TPU_MEGACORE=MEGACORE_DENSE"
-python3 MaxText/$EXECUTABLE MaxText/configs/base.yml run_name=$RUN_NAME\
+python3 MaxText/$EXECUTABLE MaxText/configs/base.yml\
     enable_profiler=true enable_checkpointing=false steps=10\
-    ici_fsdp_parallelism=192 ici_tensor_parallelism=1 per_device_batch_size=8 remat_policy=full\
+    ici_fsdp_parallelism=192 ici_tensor_parallelism=1 per_device_batch_size=7 remat_policy=full\
     base_num_decoder_layers=32 base_emb_dim=12288 base_mlp_dim=49152 base_num_query_heads=32 base_num_kv_heads=32 learning_rate=1e-8\
     base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH

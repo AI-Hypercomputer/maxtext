@@ -1,6 +1,6 @@
 jax>=0.4.23
 jaxlib>=0.4.23
-orbax-checkpoint>=0.5.2
+orbax-checkpoint>=0.5.5
 absl-py
 array-record
 aqtp
@@ -22,3 +22,4 @@ tensorflow-datasets
 tensorboardx
 tensorboard-plugin-profile
 git+https://github.com/mlperf/logging.git
+google-jetstream

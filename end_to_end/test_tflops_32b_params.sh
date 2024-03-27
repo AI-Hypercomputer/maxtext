@@ -12,7 +12,7 @@ echo "Running test_tflops_32b_params.sh"
 # bash end_to_end/test_tflops_32b_params.sh RUN_NAME="<your_run_name>"" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>" PLATFORM="gke" TFLOP_THRESHOLD=0
 
 # Stop execution if any command exits with error
-set -e
+set -ex
 
 export TFLOP_THRESHOLD=0
 export PLATFORM="gce"

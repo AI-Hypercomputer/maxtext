@@ -23,7 +23,7 @@ on:
     - cron:  '0 3 * * *'
 
 jobs:
-  build_images:
+  tpu:
     strategy:
       fail-fast: false
       matrix:
@@ -33,27 +33,21 @@ jobs:
     - uses: actions/checkout@v3
     - name: build jax stable image
       run : |
-        project=tpu-prod-env-multipod
-        local_image_name=maxtext_local_jax_stable
-        cloud_image_name=maxtext_jax_stable
-        bash docker_build_dependency_image.sh LOCAL_IMAGE_NAME=$local_image_name MODE=stable
-        docker build --build-arg BASEIMAGE=${local_image_name} -f ./maxtext_runner.Dockerfile -t ${local_image_name}_runner .
-        gcloud auth configure-docker --quiet
-        docker tag ${local_image_name}_runner gcr.io/$project/${cloud_image_name}:latest
-        docker push gcr.io/$project/${cloud_image_name}:latest
-        image_date=$(date +%Y-%m-%d)
-        docker tag ${local_image_name}_runner gcr.io/$project/${cloud_image_name}:${image_date}
-        docker push gcr.io/$project/${cloud_image_name}:${image_date}
+        bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_jax_stable MODE=stable DEVICE=tpu PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_jax_stable
     - name: build jax nightly image
       run : |
-        project=tpu-prod-env-multipod
-        local_image_name=maxtext_local_jax_nightly
-        cloud_image_name=maxtext_jax_nightly
-        bash docker_build_dependency_image.sh LOCAL_IMAGE_NAME=$local_image_name MODE=nightly
-        docker build --build-arg BASEIMAGE=${local_image_name} -f ./maxtext_runner.Dockerfile -t ${local_image_name}_runner .
-        gcloud auth configure-docker --quiet
-        docker tag ${local_image_name}_runner gcr.io/$project/${cloud_image_name}:latest
-        docker push gcr.io/$project/${cloud_image_name}:latest
-        image_date=$(date +%Y-%m-%d)
-        docker tag ${local_image_name}_runner gcr.io/$project/${cloud_image_name}:${image_date}
-        docker push gcr.io/$project/${cloud_image_name}:${image_date}
+        bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_jax_nightly MODE=nightly DEVICE=tpu PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_jax_nightly
+  gpu:
+    strategy:
+      fail-fast: false
+      matrix:
+        device-type: ["a100-40gb-4"]
+    runs-on: ["self-hosted", "gpu", "${{ matrix.device-type }}"]
+    steps:
+    - uses: actions/checkout@v3
+    - name: build jax stable image
+      run : |
+        bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_gpu_jax_stable MODE=stable DEVICE=gpu PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_gpu_local_jax_stable
+    - name: build jax nightly image
+      run : |
+        bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_gpu_jax_nightly MODE=nightly DEVICE=gpu PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_gpu_local_jax_nightly

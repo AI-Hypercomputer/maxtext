@@ -35,12 +35,12 @@ import numpy as np
 
 import checkpointing
 import jax
-import jax.numpy as jnp
 from flax.training import train_state
 import max_logging
 from train import save_checkpoint
 import torch
 import sys
+import os
 
 jax.config.update('jax_platform_name', 'cpu')
 
@@ -64,8 +64,6 @@ MODEL_PARAMS_DICT = {
         'num_kv_heads': 40,
         'dims_per_head': 128,
         'vocab': 32000,
-        'num_gpus': 1,
-        'fused_qkv': True,
     },
     'llama2-7b': {
         'num_layers': 32,
@@ -73,8 +71,6 @@ MODEL_PARAMS_DICT = {
         'num_kv_heads': 32,
         'dims_per_head': 128,
         'vocab': 32000,
-        'base_emb_dim': 4096,
-        'base_mlp_dim': 11008,
     },
     'mistral-7b': {
         'num_layers': 32,
@@ -96,6 +92,8 @@ MODEL_PARAMS_DICT = {
         'num_experts': 8,
     },
 }
+
+SIMULATED_CPU_DEVICES_COUNT = 16
 
 
 def convert(base_model_path, maxtext_model_path, model_size):
@@ -350,8 +348,24 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
       jax_weights['decoder']['layers'][f'mlp_{k}'] = layer_weight[f'mlp_{k}']
 
-  # convert all weights to jax.numpy
-  jax_weights = jax.tree_map(jnp.array, jax_weights)
+  mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
+  s1=jax.sharding.NamedSharding(mesh,jax.sharding.PartitionSpec("checkpoint_sharding_axis")) #shards first axis
+  s2=jax.sharding.NamedSharding(mesh,jax.sharding.PartitionSpec(None,"checkpoint_sharding_axis")) #shards second axis
+  s3=jax.sharding.NamedSharding(mesh,jax.sharding.PartitionSpec(None)) #no sharding
+
+  def checkpoint_device_put(arr):
+    if arr.shape[0]%SIMULATED_CPU_DEVICES_COUNT==0:
+      print("sharding first axis")
+      return jax.device_put(arr, device=s1)
+    elif len(arr.shape)>1 and arr.shape[1]%SIMULATED_CPU_DEVICES_COUNT==0:
+      print("sharding second axis")
+      return jax.device_put(arr, device=s2)
+    else:
+      print("no sharding was possible, replicating")
+      return jax.device_put(arr, device=s3)
+
+  # convert all weights to jax.numpy with sharding if applicable
+  jax_weights = jax.tree_map(checkpoint_device_put, jax_weights)
 
   # dummy configs for the checkpoint_manager
   step_number_to_save_new_ckpt = 0
@@ -394,4 +408,7 @@ if __name__ == '__main__':
 
   if args.model_size not in MODEL_PARAMS_DICT:
     raise NotImplementedError
+
+  os.environ['XLA_FLAGS'] = f'--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}'
+
   convert(args.base_model_path, args.maxtext_model_path, args.model_size)

@@ -27,6 +27,7 @@ from layers import initializers
 from layers import normalizations
 from layers import quantizations
 import numpy as np
+from jax.ad_checkpoint import checkpoint_name
 
 Array = common_types.Array
 Config = common_types.Config
@@ -71,6 +72,7 @@ class DenseGeneral(nn.Module):
   Attributes:
     features: tuple with numbers of output features.
     axis: tuple with axes to apply the transformation on.
+    weight_dtype: the dtype of the weights (default: float32).
     dtype: the dtype of the computation (default: float32).
     kernel_init: initializer function for the weight matrix.
     use_bias: whether to add bias in linear transformation
@@ -79,6 +81,7 @@ class DenseGeneral(nn.Module):
 
   features: Union[Iterable[int], int]
   axis: Union[Iterable[int], int] = -1
+  weight_dtype: DType = jnp.float32
   dtype: DType = jnp.float32
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
   kernel_axes: Tuple[str, ...] = ()
@@ -114,14 +117,19 @@ class DenseGeneral(nn.Module):
     kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
     kernel_in_axis = np.arange(len(axis))
     kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
-    kernel = self.param(
+    if quantizations.in_serve_mode(self.quant):
+      # During aqt convert state we delete kernel weight from params to save memory.
+      # Instead they are retreived from the tensors stored in the 'aqt' collection.
+      kernel = jnp.zeros(kernel_shape)
+    else:
+      kernel = self.param(
         'kernel',
         nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
         kernel_shape,
-        self.dtype,
+        self.weight_dtype,
         kernel_in_axis,
         kernel_out_axis,
-    )
+      )
     kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(axis)))
@@ -133,7 +141,7 @@ class DenseGeneral(nn.Module):
           'bias',
           nn.with_logical_partitioning(bias_init, bias_axes),
           bias_shape,
-          jnp.float32,
+          self.weight_dtype,
       )
       bias = jnp.asarray(bias, self.dtype)
       output += bias
@@ -150,7 +158,8 @@ class MlpBlock(nn.Module):
     kernel_init: Kernel function, passed to the dense layers.
     deterministic: Whether the dropout layers should be deterministic.
     intermediate_dropout_rate: Dropout rate used after the intermediate layers.
-    dtype: Type for the dense layer.
+    dtype: computation data type for the dense layer.
+    weight_dtype: weight data type for the dense layer.
     use_bias: whether to add bias in all feedforward layers.
     use_pre_norm: whether to add pre layer norm in mlp layers.
     quant: Optional quantization config, no quantization if None.
@@ -162,6 +171,7 @@ class MlpBlock(nn.Module):
   kernel_init: NdInitializer = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
   intermediate_dropout_rate: float = 0.1
   dtype: Any = jnp.float32
+  weight_dtype: Any = jnp.float32
   use_bias: bool = False
   use_pre_norm: bool = False
   quant: Optional[Quant] = None
@@ -184,6 +194,7 @@ class MlpBlock(nn.Module):
       inputs = self.get_norm_layer()(
         name='mlp_layer_norm',
         dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
         kernel_axes=('embed',),
         epsilon=cfg.normalization_layer_epsilon,
         )(inputs)
@@ -195,6 +206,7 @@ class MlpBlock(nn.Module):
       x = DenseGeneral(
             (len(self.activations), self.intermediate_dim),
             dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
             kernel_init=self.kernel_init,
             kernel_axes=('embed', 'num_activations', 'mlp'),
             name='wi',
@@ -210,6 +222,7 @@ class MlpBlock(nn.Module):
         x = DenseGeneral(
             self.intermediate_dim,
             dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
             kernel_init=self.kernel_init,
             kernel_axes=('embed', 'mlp'),
             name=dense_name,
@@ -221,6 +234,7 @@ class MlpBlock(nn.Module):
 
     # Take elementwise product of above intermediate activations.
     x = functools.reduce(operator.mul, activations)
+    x = checkpoint_name(x, 'mlpwi')
     # Apply dropout and final dense output projection.
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
         x, deterministic=deterministic
@@ -231,12 +245,15 @@ class MlpBlock(nn.Module):
     output = DenseGeneral(
         inputs.shape[-1],
         dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
         kernel_init=self.kernel_init,
         kernel_axes=('mlp', 'embed'),
         name='wo',
         quant=self.quant,
         use_bias=self.use_bias,
     )(x)
+
+    output = checkpoint_name(output, 'mlpwo')
     return output
 
 
@@ -260,15 +277,15 @@ class MoeBlock(nn.Module):
 
   @nn.compact
   def __call__(self, inputs, deterministic: bool = False):
-    gate_logits = DenseGeneral(            
+    gate_logits = DenseGeneral(
             self.num_experts,
             dtype=self.dtype,
             kernel_init=self.kernel_init,
             kernel_axes=self.kernel_axes,
             name='gate')(inputs)
-      
+
     weights, selected_experts = lax.top_k(gate_logits, self.num_experts_per_tok)
-    weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1)    
+    weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1)
     mlp_lnx = jnp.zeros_like(inputs)
     weights = weights.astype(self.dtype)
     mlp_lnx = nn.with_logical_constraint(
@@ -283,14 +300,15 @@ class MoeBlock(nn.Module):
           activations=self.config.mlp_activations,
           intermediate_dropout_rate=self.config.dropout_rate,
           dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
           name=f'mlp_{k}',
           config=self.config,
           )(inputs, deterministic=deterministic)
-        
+
         mlp_lnx_exp = nn.with_logical_constraint(
             mlp_lnx_exp, ('activation_batch', 'activation_length', 'activation_embed')
         )
         mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
         mlp_lnx += mlp_lnx_exp
-    
+
     return mlp_lnx

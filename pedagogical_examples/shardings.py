@@ -24,13 +24,11 @@ import jax
 from jax.sharding import PartitionSpec
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
-from jax.experimental.compilation_cache import compilation_cache as cc
 from jax._src.pjit import with_sharding_constraint
 
 import argparse
 import datetime
 import numpy as np
-import os
 from typing import Sequence
 
 parser = argparse.ArgumentParser(
@@ -108,13 +106,9 @@ parser.add_argument(
 args = parser.parse_args()
 
 def main(_argv: Sequence[str]) -> None:
-  if jax.__version__ <= '0.4.23':
-    cc.initialize_cache(os.path.expanduser("~/jax_cache_2"))
-  else:
-    cc.set_cache_dir(os.path.expanduser("~/jax_cache_2"))
-
   def activate_profiler(profiler_path):
     if profiler_path:
+      print(f"profiling to {profiler_path}")
       jax.profiler.start_trace(profiler_path)
 
   def deactivate_profiler(profiler_path):
@@ -176,7 +170,7 @@ def main(_argv: Sequence[str]) -> None:
   activation_bytes = 2 * (  BATCH  * ( D_FF+D_EMB) ) * NUM_LAYERS
   memory_bytes = parameter_bytes + activation_bytes
 
-  print(f"total {memory_bytes/10**9} GB, parameters {parameter_bytes/10**9} GB, activations {activation_bytes/10**9} GB")
+  print(f"total {memory_bytes/1e9} GB, parameters {parameter_bytes/1e9} GB, activations {activation_bytes/1e9} GB")
 
   def gen_layer(random_key):
     keys = jax.random.split(random_key, num = 4)

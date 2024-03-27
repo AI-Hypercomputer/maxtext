@@ -15,7 +15,7 @@
  """
 
 
-import os
+import subprocess
 import sys
 import jax
 from jax.sharding import Mesh
@@ -26,12 +26,16 @@ import unittest
 import pyconfig
 from input_pipeline import _grain_data_processing
 
-exit_code = os.system("bash ../setup_gcsfuse.sh DATASET_GCS_BUCKET=maxtext-dataset MOUNT_PATH=../../gcsfuse")
-if exit_code != 0:
-    raise ValueError(f"Running setup_gcsfuse.sh failed with exit code: {exit_code}")
-
 class GrainDataProcessingTest(unittest.TestCase):
-
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()      
+        exit_code = subprocess.call(['bash','../setup_gcsfuse.sh', 
+                                    'DATASET_GCS_BUCKET=maxtext-dataset', 
+                                    'MOUNT_PATH=/tmp/gcsfuse'])
+        if exit_code != 0:
+            raise ValueError(f"Running setup_gcsfuse.sh failed with exit code: {exit_code}")        
+         
     def setUp(self):
         super().setUp()
         pyconfig.initialize([sys.argv[0], 'configs/base.yml'],
@@ -41,7 +45,7 @@ class GrainDataProcessingTest(unittest.TestCase):
                             logical_axis_rules = [['batch', 'data']],
                             data_sharding = ['data'],
                             base_output_directory = "gs://max-experiments/",
-                            dataset_path = "../../gcsfuse",
+                            dataset_path = "/tmp/gcsfuse",
                             tokenizer_path = "../assets/tokenizer",
                             enable_checkpointing=False,
                             dataset_type="c4-array_record",
@@ -51,10 +55,7 @@ class GrainDataProcessingTest(unittest.TestCase):
         self.mesh_shape_1d = (len(jax.devices()),)
         self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
         self.train_ds, self.eval_ds = self._get_datasets()
-        self.train_iter, self.eval_iter, self.predict_iter = self._get_preprocessed_datasets()
-        # self.devices_array = create_device_mesh(self.config)
-        # self.mesh = Mesh(self.devices_array, self.config.mesh_axes)
-
+        self.train_iter, self.eval_iter, self.predict_iter = self._get_preprocessed_datasets()      
 
     def _get_datasets(self):
         print("Sharding dataset in ", jax.process_count(), " shards")
@@ -63,9 +64,6 @@ class GrainDataProcessingTest(unittest.TestCase):
         return train_ds, eval_ds
 
     def _get_preprocessed_datasets(self):
-        # mesh_shape_1d = (len(jax.devices()),)
-        # mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), self.config.mesh_axes)
-
         train_iter, eval_iter, test_iter = _grain_data_processing.preprocess_dataset(
                 self.config,
                 self.mesh,
