@@ -20,7 +20,7 @@ import jax
 try:
   from jaxlib.xla_extension import ifrt_proxy
 
-  jax._src.xla_bridge.register_backend_factory(
+  jax._src.xla_bridge.register_backend_factory(  # pylint: disable=protected-access
       "proxy",
       lambda: ifrt_proxy.get_client(
           jax.config.read("jax_backend_target"),
