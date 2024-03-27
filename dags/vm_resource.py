@@ -137,6 +137,7 @@ class DockerImage(enum.Enum):
   """Common docker images."""
 
   XPK_JAX_TEST = "gcr.io/cloud-ml-auto-solutions/xpk_jax_test:latest"
+  PYTORCH_NIGHTLY = f"us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.10_tpuvm_{datetime.datetime.today().strftime('%Y%m%d')}"
   MAXTEXT_TPU_JAX_STABLE = f"gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:{datetime.datetime.today().strftime('%Y-%m-%d')}"
   MAXTEXT_TPU_JAX_NIGHTLY = f"gcr.io/tpu-prod-env-multipod/maxtext_jax_nightly:{datetime.datetime.today().strftime('%Y-%m-%d')}"
   MAXTEXT_GPU_JAX_STABLE = f"gcr.io/tpu-prod-env-multipod/maxtext_gpu_jax_stable:{datetime.datetime.today().strftime('%Y-%m-%d')}"
