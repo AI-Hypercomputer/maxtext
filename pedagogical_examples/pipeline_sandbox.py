@@ -6,13 +6,15 @@ from jax.sharding import PartitionSpec
 from jax.sharding import Mesh
 from jax.sharding import NamedSharding
 from jax.experimental import mesh_utils
+import os
+import argparse
 
 
 def my_print(s):
    if yes_print:
       print(s)
 
-def S(*specs):
+def S(mesh,*specs):
   return NamedSharding(mesh, PartitionSpec(*specs))
 
 # Initialize shift and state
@@ -32,7 +34,7 @@ def select_state_or_input(input, state):
     return jnp.where(jax.lax.broadcasted_iota('int32', state.shape, 0) == 0, input, state)
 
 # run model
-def get_new_loop_state(output, old_state, old_async_state, old_lir, loop_iteration,n_stages):
+def get_new_loop_state(output, old_state, old_async_state, old_lir, loop_iteration):
     # Rotate state to the right by 1. (for non-circ shift instead of rotate)
     
     # For non-circ
@@ -65,7 +67,7 @@ def get_new_loop_state(output, old_state, old_async_state, old_lir, loop_iterati
 
 
     # Stream state
-    stream_buf_idx = loop_iteration % (microbatches // args.n_stages)
+    stream_buf_idx = loop_iteration % (args.n_microbatches // args.n_stages)
     stream_slice = old_state[:, stream_buf_idx]
     def _update_state(state_in, stream_slice, output):
         # Shift the current slice to the left, then fill the last stage with
@@ -88,7 +90,7 @@ def stage(weights, x):
   return x
 
 def layer(weights, x):
-  if sum_layer:
+  if 0:
      x_out = weights + x
   else:
     x_out = jnp.einsum('bse,eh->bsh',x,weights) # The leading stage dimension of weights is missing because it is vmapped out
@@ -210,40 +212,40 @@ def get_inputs_debug():
     test_inputs = jnp.reshape(jnp.arange(jnp.prod(test_inputs_shape), dtype=jnp.float32), test_inputs_shape)
    
 
+if 0:
+    # Sizes
+    num_stages = 4
+    microbatches = 8
+    microbatch_size = 5
+    seq_len = 2048
+    model_dim = 2560
+    total_batch = microbatches * microbatch_size
+    num_repeat = 3
 
-# Sizes
-num_stages = 4
-microbatches = 8
-microbatch_size = 5
-seq_len = 2048
-model_dim = 2560
-total_batch = microbatches * microbatch_size
-num_repeat = 3
+    yes_print = False
+    sum_layer = False
 
-yes_print = False
-sum_layer = False
+    micro_shape = [microbatch_size, seq_len, model_dim] # realistic
+    #micro_shape = [microbatch_size] # great for debugging state transformations
+    #micro_shape = [microbatch_size, model_dim] # middle ground for debugging running with weights
 
-micro_shape = [microbatch_size, seq_len, model_dim] # realistic
-#micro_shape = [microbatch_size] # great for debugging state transformations
-#micro_shape = [microbatch_size, model_dim] # middle ground for debugging running with weights
+    k = jax.random.PRNGKey(1)
 
-k = jax.random.PRNGKey(1)
+    test_inputs = get_inputs_random()
+    weights = get_weights_random()
 
-test_inputs = get_inputs_random()
-weights = get_weights_random()
+    # Configure sharding
+    pipeline_axis = 4
+    dp_axis = 1
+    devices = mesh_utils.create_device_mesh((pipeline_axis, dp_axis))
+    mesh = Mesh(devices, axis_names=('stage', 'data'))
 
-# Configure sharding
-pipeline_axis = 4
-dp_axis = 1
-devices = mesh_utils.create_device_mesh((pipeline_axis, dp_axis))
-mesh = Mesh(devices, axis_names=('stage', 'data'))
+    weight_sharding = S('stage', None, None) # weight sharded over stage
+    input_sharding = S('data', None, None, None)   # inputs sharded over batch
+    result_sharding = S('data', None, None, None)  # output sharded over batch
 
-weight_sharding = S('stage', None, None) # weight sharded over stage
-input_sharding = S('data', None, None, None)   # inputs sharded over batch
-result_sharding = S('data', None, None, None)  # output sharded over batch
-
-#weights = jax.device_put(weights, weight_sharding)
-#jax.debug.visualize_array_sharding(weights)
+    #weights = jax.device_put(weights, weight_sharding)
+    #jax.debug.visualize_array_sharding(weights)
 
 
 ####### Start testing ###########
@@ -301,6 +303,12 @@ if 0:
 # Test jitted E2E
 def rawr():
     if 1:
+        devices = mesh_utils.create_device_mesh((args.n_stages, 1))
+        mesh = Mesh(devices, axis_names=('stage', 'data'))
+        weight_sharding = S(mesh,'stage', None, None) # weight sharded over stage
+        input_sharding = S(mesh,'data', None, None, None)   # inputs sharded over batch
+        result_sharding = S(mesh,'data', None, None, None)  # output sharded over batch
+
         weights = get_weights_random()
         test_inputs = get_inputs_random()
 
@@ -379,7 +387,7 @@ if 0:
     
        
 
-if 1:
+if 0:
     import timing_util
     weights = get_weights_random()
     inputs = get_inputs_random()
@@ -408,12 +416,14 @@ def main() -> None:
     args = parser.parse_args()
     args.microbatch_size = args.batch_size // args.n_microbatches
 
-
+    global yes_print
+    yes_print=False
     # Necessary artifacts for the good stuff
     #pipeline_func = get_pipelint_jit()
     #weights, inputs, targets = get_weights_and_inputs()
 
     rawr()
+
 
     #assert_same_output_and_grad(reg_matmuls, pipeline_func, targets, weights, inputs)
 
