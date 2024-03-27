@@ -143,6 +143,7 @@ resource "google_composer_environment" "example_environment" {
         # google-cloud-container            = ""
         # tensorflow-cpu                    = ""
         # kubernetes                        = ""
+        # pyarrow                           = ""
       }
     }
 
