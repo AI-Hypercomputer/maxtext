@@ -20,7 +20,7 @@ Gemma is a family of lightweight, state-of-the art open models built from resear
 
 Following commands will let you download Gemma-2B model weights along with its tokenizer, convert the orbax checkpoints to be compatible with MaxText and upload it to a GCS bucket. \
 Values for environment variables $KAGGLE_USERNAME and $KAGGLE_KEY can be set using your kaggle account's [API credentials](https://github.com/Kaggle/kaggle-api?tab=readme-ov-file#api-credentials). \
-Please use seperate GCS buckets for uploading model weights from kaggle ($MODEL_BUCKET) and MaxText compatible weights ($CHKPT_BUCKET).
+Please use separate GCS buckets for uploading model weights from kaggle ($MODEL_BUCKET) and MaxText compatible weights ($CHKPT_BUCKET).
 ```
 wget https://www.kaggle.com/api/v1/models/google/gemma/maxtext/2b/1/download --user=$KAGGLE_USERNAME --password=$KAGGLE_KEY --auth-no-challenge
 # Extract downloaded model

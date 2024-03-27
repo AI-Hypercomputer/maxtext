@@ -902,7 +902,7 @@ class Attention(nn.Module):
     Projects the inputs into multi-headed query, key, and value vectors,
     applies dot-product attention and project the results to an output vector.
 
-    There are three modes: training, prefill and autoregression. During training, the KV cahce
+    There are three modes: training, prefill and autoregression. During training, the KV cache
     is ignored. During prefill, the cache is filled. During autoregression the cache is used.
 
     In the cache initialization call, `inputs_q` has a shape [batch, length,
