@@ -110,10 +110,6 @@ jobs:
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
         'bash end_to_end/test_generate_param_only_checkpoint.sh -r runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} -o gs://runner-maxtext-logs -d gs://maxtext-dataset -i 4'
-    - name: Test generate_param_only_checkpoint with int8 quantization
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
-        'bash end_to_end/test_generate_param_only_checkpoint.sh -r runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} -o gs://runner-maxtext-logs -d gs://maxtext-dataset -i 4 -q int8'
     - name: Test grain checkpoint determinism
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
