@@ -215,8 +215,13 @@ class Decoder(nn.Module):
     BlockLayer = self.get_decoder_layer()
 
     if cfg.remat_policy != 'none':
+      # if cfg.remat_policy == 'minimal':
+      #   policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
       if cfg.remat_policy == 'minimal':
-        policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
+        policy = jax.checkpoint_policies.save_from_both_policies(
+          jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
+          jax.checkpoint_policies.save_only_these_names('context',),
+        )
       elif cfg.remat_policy == 'proj':
         policy = jax.checkpoint_policies.save_only_these_names(
             'query_proj', 'value_proj', 'key_proj'

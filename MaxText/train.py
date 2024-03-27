@@ -20,6 +20,9 @@
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
 
+import gc
+gc.disable()
+
 import datetime
 import os
 import sys
