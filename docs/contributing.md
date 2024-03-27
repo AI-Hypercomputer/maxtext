@@ -65,6 +65,23 @@ scripts/local-airflow.sh path/to/dag_file.py
 
 Comment out any test cases in the DAG that you do not want to run, or create a temporary DAG file to avoid running all tests.
 
+
+##### XPK-based tests
+
+XPK will run in the same environment as the local airflow execution, and there are two XPK requirements to be aware of:
+
+1. Python version >= 3.10.
+1. kubectl must support GKE-based authentication. Install the required component using
+
+```
+gcloud components install gke-gcloud-auth-plugin
+```
+
+If you encounter an error related to the gcloud installation being `managed by an external package manager`, you'll need to reinstall. The simplest way is to follow https://cloud.google.com/sdk/docs/downloads-interactive.
+
+
+##### JSonnet-based tests
+
 If you're running a JSonnet-based test, run this each time any time the test changes:
 
 ```

@@ -7,6 +7,4 @@ google-cloud-container
 google-cloud-tpu>=1.16.0
 jsonlines
 tensorflow-cpu
-apache-airflow-providers-cncf-kubernetes
-apache-airflow-providers-docker
 kubernetes

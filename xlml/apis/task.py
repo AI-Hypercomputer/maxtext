@@ -320,6 +320,9 @@ class XpkTask(BaseTask):
   task_test_config: Union[test_config.TpuGkeTest, test_config.GpuXpkTest]
   task_gcp_config: gcp_config.GCPConfig
   task_metric_config: Optional[metric_config.MetricConfig] = None
+  workload_provision_timeout: datetime.timedelta = datetime.timedelta(
+      minutes=300
+  )
 
   def run(self) -> DAGNode:
     """Run a test job within a docker image.
@@ -374,20 +377,10 @@ class XpkTask(BaseTask):
     """
     with TaskGroup(group_id="run_model") as group:
       workload_id = xpk.generate_workload_id(self.task_test_config.benchmark_id)
-      run_workload = xpk.run_workload.override(
-          owner=self.task_test_config.task_owner
-      )(
-          task_id="run_workload",
-          cluster_project=self.task_gcp_config.project_name,
-          zone=self.task_gcp_config.zone,
-          cluster_name=self.task_test_config.cluster_name,
-          benchmark_id=self.task_test_config.benchmark_id,
-          workload_id=workload_id,
-          docker_image=self.task_test_config.docker_image,
-          accelerator_type=self.task_test_config.accelerator.name,
-          run_cmds=self.task_test_config.test_script,
-          num_slices=self.task_test_config.num_slices,
+      gcs_path = name_format.generate_gcs_folder_location(
+          self.task_test_config.benchmark_id
       )
+      launch_workload = self.launch_workload(workload_id, gcs_path)
       wait_for_workload_completion = xpk.wait_for_workload_completion.override(
           timeout=self.task_test_config.time_out_in_min * 60,
       )(
@@ -397,7 +390,36 @@ class XpkTask(BaseTask):
           cluster_name=self.task_test_config.cluster_name,
       )
 
-      workload_id >> run_workload >> wait_for_workload_completion
+      (workload_id, gcs_path) >> launch_workload >> wait_for_workload_completion
+      return group
+
+  def launch_workload(self, workload_id: str, gcs_path: str) -> DAGNode:
+    """Create the workload and wait for it to provision."""
+    with TaskGroup(group_id="launch_workload") as group:
+      run_workload = xpk.run_workload.override(
+          owner=self.task_test_config.task_owner
+      )(
+          task_id="run_workload",
+          cluster_project=self.task_gcp_config.project_name,
+          zone=self.task_gcp_config.zone,
+          cluster_name=self.task_test_config.cluster_name,
+          benchmark_id=self.task_test_config.benchmark_id,
+          workload_id=workload_id,
+          gcs_path=gcs_path,
+          docker_image=self.task_test_config.docker_image,
+          accelerator_type=self.task_test_config.accelerator.name,
+          run_cmds=self.task_test_config.test_script,
+          num_slices=self.task_test_config.num_slices,
+      )
+      wait_for_workload_start = xpk.wait_for_workload_start.override(
+          timeout=self.workload_provision_timeout.total_seconds()
+      )(
+          workload_id=workload_id,
+          project_id=self.task_gcp_config.project_name,
+          region=self.task_gcp_config.zone[:-2],
+          cluster_name=self.task_test_config.cluster_name,
+      )
+      run_workload >> wait_for_workload_start
       return group
 
   def post_process(self) -> DAGNode:
