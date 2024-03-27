@@ -27,12 +27,20 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
+# The setup accommodates two cases:
+# 1) Passing the 'RUN_NAME' variable at runtime
+# 2) Propagating the 'M_RUN_NAME' variable within an Airflow sweeping workflow
+if [ -n "$RUN_NAME" ];
+then
+    export M_RUN_NAME=$RUN_NAME
+fi
+
 # Set up network optimizations
 bash preflight.sh PLATFORM=$PLATFORM
 
 # Train
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
-python3 MaxText/$EXECUTABLE MaxText/configs/base.yml run_name=$RUN_NAME\
+python3 MaxText/$EXECUTABLE MaxText/configs/base.yml\
     steps=30 per_device_batch_size=6 enable_checkpointing=false\
     enable_profiler=false remat_policy=full global_parameter_scale=16\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\

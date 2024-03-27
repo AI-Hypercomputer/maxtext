@@ -41,6 +41,8 @@ import maxtext_utils
 import max_logging
 import optimizers
 import pyconfig
+# pylint: disable-next=unused-import
+import register_jax_proxy_backend
 
 from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer
 from layers import models
