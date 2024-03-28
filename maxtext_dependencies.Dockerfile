@@ -20,6 +20,25 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python
 # Set environment variables for Google Cloud SDK and Python 3.10
 ENV PATH="/usr/local/google-cloud-sdk/bin:/usr/local/bin/python3.10:${PATH}"
 
+# Install dependencies for Docker
+RUN apt-get update && apt-get install -y \
+   apt-transport-https \
+   ca-certificates \
+   curl \
+   gnupg \
+   lsb-release
+
+# Add Docker's GPG key
+RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+# Set up the stable repository
+RUN echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian \
+  $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Install Docker Engine
+RUN apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io
+
 ARG MODE
 ENV ENV_MODE=$MODE
 
