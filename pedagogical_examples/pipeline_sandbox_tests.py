@@ -4,7 +4,18 @@ import argparse
 import jax
 from jax import numpy as jnp
 
-def test_get_weights(weights, n_stages, n_microbatches):
+
+def test_get_weights():
+    n_stages = 4
+    n_repeat = 2
+    n_layers = n_stages * n_repeat
+    sequence = 8
+    features = 6
+    batch_size = 24
+    n_microbatches = 8
+
+    weights, _, _ = pipeline_sandbox.get_weights_and_inputs(batch_size, sequence, features, n_layers)
+
     ws = pipeline_sandbox.get_weights_stage(weights, 0, n_stages, n_microbatches)
     assert jnp.allclose(weights[0,:,:],ws[0,:,:])
 
@@ -12,8 +23,59 @@ def test_get_weights(weights, n_stages, n_microbatches):
     ws = pipeline_sandbox.get_weights_stage(weights, 11, n_stages, n_microbatches)
     assert jnp.allclose(weights[5,:,:],ws[1,:,:])
 
-def test_run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights):
+def test_run_one_iteration():
+    n_stages = 4
+    n_repeat = 2
+    n_layers = n_stages * n_repeat
+    sequence = 8
+    features = 6
+    batch_size = 24
+    n_microbatches = 8
+    microbatch_size = batch_size // n_microbatches
+    loop_iteration = 0
+
+    weights, inputs, targets = pipeline_sandbox.get_weights_and_inputs(batch_size, sequence, features, n_layers)
+    inputs = inputs.reshape((n_microbatches, microbatch_size, sequence, features))
+    state_io, shift, circ_storage, circ_storage_mover = pipeline_sandbox.init_states(inputs, n_stages)
+
     new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = pipeline_sandbox.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights)
+
+def test_get_iteration_inputs():
+    n_stages = 4
+    n_repeat = 2
+    n_layers = n_stages * n_repeat
+    sequence = 8
+    features = 6
+    batch_size = 24
+    n_microbatches = 8
+    microbatch_size = batch_size // n_microbatches
+    loop_iteration = 0
+
+    weights, inputs, targets = pipeline_sandbox.get_weights_and_inputs(batch_size, sequence, features, n_layers)
+    inputs = inputs.reshape((n_microbatches, microbatch_size, sequence, features))
+    state_io, shift, circ_storage, circ_storage_mover = pipeline_sandbox.init_states(inputs, n_stages)
+
+    stages_in = pipeline_sandbox.get_iteration_inputs(loop_iteration, n_microbatches, n_stages, state_io, circ_storage, shift)
+
+
+def test_get_new_loop_state():
+    n_stages = 4
+    n_repeat = 2
+    n_layers = n_stages * n_repeat
+    sequence = 8
+    features = 6
+    batch_size = 24
+    n_microbatches = 8
+    microbatch_size = batch_size // n_microbatches
+    loop_iteration = 0
+
+    weights, inputs, targets = pipeline_sandbox.get_weights_and_inputs(batch_size, sequence, features, n_layers)
+    inputs = inputs.reshape((n_microbatches, microbatch_size, sequence, features))
+    state_io, shift, circ_storage, circ_storage_mover = pipeline_sandbox.init_states(inputs, n_stages)
+
+    output = 100.0 + input # Create fake outputs
+    pnew_state, new_shift, new_circ_storage, new_circ_storage_mover = pipeline_sandbox.get_new_loop_state(output, state_io, circ_storage, circ_storage_mover, loop_iteration)
+
 
 
 def main() -> None:
@@ -37,10 +99,13 @@ def main() -> None:
     inputs = inputs.reshape((args.n_microbatches, args.microbatch_size, args.sequence, args.features))
     state_io, shift, circ_storage, circ_storage_mover = pipeline_sandbox.init_states(inputs, args.n_stages)
 
-    test_get_weights(weights, args.n_stages, args.n_microbatches)
+    test_get_weights()
 
-    loop_iteration = 0
-    test_run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights)
+    test_run_one_iteration()
+
+    test_get_iteration_inputs()
+
+    test_get_new_loop_state()
 
 
 
@@ -51,14 +116,6 @@ if __name__ == "__main__":
 
 
 
-
-
-# Test get_iteration input + select_state = stages_in
-if 0:
-    loop_iteration = 0
-    state, shift, circ_storage, circ_storage_mover = init_states(1.0 + test_inputs)
-    stages_in = get_iteration_inputs(loop_iteration, args.n_microbatches, args.n_stages, state, circ_storage)
-    stages_in = select_state_or_input(stages_in, shift)
 
 
 # Test get_new_loop_state
