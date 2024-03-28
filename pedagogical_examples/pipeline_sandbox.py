@@ -22,19 +22,23 @@ def S(mesh,*specs):
 # state = jnp.reshape(test_inputs, (num_stages, microbatches // num_stages) + test_inputs.shape[1:])
 
 # Construct stages in
-def get_iteration_inputs(loop_iteration, microbatches, num_stages, state, async_state):
+def get_iteration_inputs(loop_iteration, microbatches, num_stages, state_io, circ_storage, shift):
     stream_buf_idx = loop_iteration % (microbatches // num_stages)
-    stream_slice = state[:,stream_buf_idx] 
-    circ_slice = async_state[:,loop_iteration % microbatches]
-    return jnp.where(loop_iteration < microbatches, stream_slice, circ_slice) # Circ specialty
-    #return state[:,stream_buf_idx] # equivalent to state[:,stream_buf_idx,:,:] # Non-circ
+    stream_slice = state_io[:,stream_buf_idx] 
+    circ_slice = circ_storage[:,loop_iteration % microbatches]
+    stages_in = jnp.where(loop_iteration < microbatches, stream_slice, circ_slice) # Circ specialty
 
-def select_state_or_input(input, state):
+    def select_state_or_input(input, state):
     # Selects input for stage 0, state for other stages
-    return jnp.where(jax.lax.broadcasted_iota('int32', state.shape, 0) == 0, input, state)
+        return jnp.where(jax.lax.broadcasted_iota('int32', state.shape, 0) == 0, input, state)
+
+    stages_in = select_state_or_input(stages_in, shift)
+    #return state[:,stream_buf_idx] # equivalent to state[:,stream_buf_idx,:,:] # Non-circ
+    return stages_in
+
 
 # run model
-def get_new_loop_state(output, old_state, old_async_state, old_lir, loop_iteration):
+def get_new_loop_state(output, old_state_io, old_circ_storage, old_circ_storage_mover, loop_iteration):
     # Rotate state to the right by 1. (for non-circ shift instead of rotate)
     
     # For non-circ
@@ -53,23 +57,23 @@ def get_new_loop_state(output, old_state, old_async_state, old_lir, loop_iterati
     new_shift = _rotate_right(output)
 
     # Async state
-    def _rotate_right_and_update(lir_in, async_state_in):
-        rotated = _rotate_right(lir_in)
+    def _rotate_right_and_update(circ_storage_mover_in, circ_storage_in):
+        rotated = _rotate_right(circ_storage_mover_in)
         rotated = jnp.expand_dims(rotated, 1)
         # The offset is the last stage's last microbatch ID.
-        #offset = (loop_iteration - (num_stages - 1)) % microbatches # we need extar -1 b/c grabbing from un-updated LIR
+        #offset = (loop_iteration - (num_stages - 1)) % microbatches # we need extar -1 b/c grabbing from un-updated circ_storage_mover
         offset = (loop_iteration - (args.n_stages - 1) - 1) % args.n_microbatches # This looks like an extra - 1 to me
-        return jax.lax.dynamic_update_slice_in_dim(async_state_in, rotated, offset, axis=1)
-    new_async_state = _rotate_right_and_update(old_lir, old_async_state)
+        return jax.lax.dynamic_update_slice_in_dim(circ_storage_in, rotated, offset, axis=1)
+    new_circ_storage = _rotate_right_and_update(old_circ_storage_mover, old_circ_storage)
 
-    # lir
-    new_lir = output
+    # circ_storage_mover
+    new_circ_storage_mover = output
 
 
     # Stream state
     stream_buf_idx = loop_iteration % (args.n_microbatches // args.n_stages)
-    stream_slice = old_state[:, stream_buf_idx]
-    def _update_state(state_in, stream_slice, output):
+    stream_slice = old_state_io[:, stream_buf_idx]
+    def _update_state_io(state_in, stream_slice, output):
         # Shift the current slice to the left, then fill the last stage with
         # the final output.
         padding = [[0, 1]] + [[0, 0]] * (stream_slice.ndim - 1)
@@ -81,8 +85,8 @@ def get_new_loop_state(output, old_state, old_async_state, old_lir, loop_iterati
         stream_slice = jnp.expand_dims(stream_slice, 1)
         return jax.lax.dynamic_update_slice_in_dim(
             state_in, stream_slice, stream_buf_idx, axis=1)
-    new_state = _update_state(old_state, stream_slice, output)
-    return new_state, new_shift, new_async_state, new_lir
+    new_state = _update_state_io(old_state_io, stream_slice, output)
+    return new_state, new_shift, new_circ_storage, new_circ_storage_mover
 
 def stage(weights, x):
   #for i in range(weights.shape[0]): # this was used if each stage had multiple layers (we would need to reshape weights to stages, layers/stage, embed, embed)
@@ -118,37 +122,36 @@ def get_weights_stage(weights, loop_iteration):
     to_ret = jnp.reshape(to_ret,desired_shape) # some singleton axes may have gotten flattened
     return to_ret
 
-def run_one_iteration(state, shift, async_state, lir, loop_iteration, weights):
-   stages_in = get_iteration_inputs(loop_iteration, args.n_microbatches, args.n_stages, state, async_state)
-   stages_in = select_state_or_input(stages_in, shift)
+def run_one_iteration(state, shift, circ_storage, circ_storage_mover, loop_iteration, weights):
+   stages_in = get_iteration_inputs(loop_iteration, args.n_microbatches, args.n_stages, state, circ_storage, shift)
    my_print(f"Stages in: {jnp.ravel(stages_in)}")
    weights_stage = get_weights_stage(weights, loop_iteration)
    output = jax.vmap(stage, in_axes=0, out_axes=0,
                         spmd_axis_name='stage')(weights_stage, stages_in)
-   new_state, new_shift, new_async_state, new_lir = get_new_loop_state(output, state, async_state, lir, loop_iteration)
-   return new_state, new_shift, new_async_state, new_lir
+   new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = get_new_loop_state(output, state, circ_storage, circ_storage_mover, loop_iteration)
+   return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
 
-def permute_ms_dim(state):
+def permute_output_ms_dim(output):
     # How come I don't see this function in praxis?
-    ms_size = state.shape[1]
+    ms_size = output.shape[1]
     # More accurately land_idx = microbatches * (r - 1) + num_stages - 1 % ms, but ms | microbatches
     land_idx = (args.n_stages - 1) % ms_size # first_finish % ms_size (really first_finish - 1 is the idx we careabout)
     permutation = (np.arange(ms_size) + land_idx) % ms_size
-    state = state[:,permutation]
-    return state
+    output = output[:,permutation]
+    return output
 
 def init_states(inputs):
     # Initialize shift and state
     shift = jnp.zeros((args.n_stages,) + inputs.shape[1:]) # equivalently inputs.shape[1:] is microshape
-    state = jnp.reshape(inputs, (args.n_stages, args.n_microbatches // args.n_stages) + inputs.shape[1:])
+    state_io = jnp.reshape(inputs, (args.n_stages, args.n_microbatches // args.n_stages) + inputs.shape[1:])
     # [num_stages, num_micro, micro_size, ...]
-    async_state = jnp.zeros((args.n_stages,) + inputs.shape ) # This is huge, is this correct?
-    lir = shift
-    return state, shift, async_state, lir
+    circ_storage = jnp.zeros((args.n_stages,) + inputs.shape ) # This is huge, is this correct?
+    circ_storage_mover = shift
+    return state_io, shift, circ_storage, circ_storage_mover
    
 
 def run_pipeline(weights, inputs):
-    state, shift, async_state, lir = init_states(inputs)
+    state_io, shift, circ_storage, circ_storage_mover = init_states(inputs)
 
     #total_iterations = microbatches + num_repeat * num_stages  - 1
     total_iterations = args.n_microbatches * args.num_repeat + args.n_stages  - 1 # What? Shoulnd't this be num_stages * num_repeat + micro - 1
@@ -160,10 +163,10 @@ def run_pipeline(weights, inputs):
        if yes_print:
         ss = jnp.reshape(state, [4,2])
         my_print(f"ss: {ss}")
-        ras = jnp.reshape(async_state, [4,8])
+        ras = jnp.reshape(circ_storage, [4,8])
         my_print(f" as: {ras}")
-        my_print(f"lir: {jnp.ravel(lir)}")
-       state, shift, async_state, lir = run_one_iteration(state, shift, async_state, lir, loop_iteration, weights)
+        my_print(f"circ_storage_mover: {jnp.ravel(circ_storage_mover)}")
+       state_io, shift, circ_storage, circ_storage_mover = run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights)
 
     my_print("Final output")
     my_print(f"shift:{jnp.ravel(shift)}")
@@ -172,10 +175,10 @@ def run_pipeline(weights, inputs):
     # reshape state to match input shape
     #state = jnp.transpose(state, axes=(0,2,1,3,4)) # holy crap
     #qqq = jnp.transpose(state, axes=(2,3,4,1,0))
-    state_perm = permute_ms_dim(state)
+    final_output = permute_output_ms_dim(state_io)
 
-    state = jnp.reshape(state_perm, (args.n_microbatches,) + state.shape[2:])
-    return state # this can be reshaped to match input at some point
+    final_output = jnp.reshape(final_output, (args.n_microbatches,) + state_io.shape[2:])
+    return final_output
 
 
 ######################     Begin main      #################
@@ -266,21 +269,21 @@ if 0:
 # Test get_iteration input + select_state = stages_in
 if 0:
     loop_iteration = 0
-    state, shift, async_state, lir = init_states(1.0 + test_inputs)
-    stages_in = get_iteration_inputs(loop_iteration, args.n_microbatches, args.n_stages, state, async_state)
+    state, shift, circ_storage, circ_storage_mover = init_states(1.0 + test_inputs)
+    stages_in = get_iteration_inputs(loop_iteration, args.n_microbatches, args.n_stages, state, circ_storage)
     stages_in = select_state_or_input(stages_in, shift)
 
 
 # Test get_new_loop_state
 if 0:
     loop_iteration = 0
-    state, shift, async_state, lir = init_states(1.0 + test_inputs)
+    state, shift, circ_storage, circ_storage_mover = init_states(1.0 + test_inputs)
     output = shift
-    new_state, new_shift, new_async_state, new_lir = get_new_loop_state(output, state, async_state, lir, loop_iteration)
+    new_state, new_shift, new_circ_storage, new_circ_storage_mover = get_new_loop_state(output, state, circ_storage, circ_storage_mover, loop_iteration)
     assert new_state.shape == state.shape
     assert new_shift.shape == shift.shape
-    assert new_async_state.shape == async_state.shape
-    assert new_lir.shape == lir.shape
+    assert new_circ_storage.shape == circ_storage.shape
+    assert new_circ_storage_mover.shape == circ_storage_mover.shape
 
 # Test get_weights_stage
 if 0:
@@ -355,8 +358,8 @@ if 0:
     #print(f"{layer_1_reg=}")
 
     loop_iteration = 0
-    state, shift, async_state, lir = init_states(inputs)
-    stages_in = get_iteration_inputs(loop_iteration, args.n_microbatches, args.n_stages, state, async_state)
+    state, shift, circ_storage, circ_storage_mover = init_states(inputs)
+    stages_in = get_iteration_inputs(loop_iteration, args.n_microbatches, args.n_stages, state, circ_storage)
     stages_in = select_state_or_input(stages_in, shift)
     #my_print(f"Stages in: {jnp.ravel(stages_in)}")
     weights_stage = get_weights_stage(weights, loop_iteration)
@@ -379,10 +382,10 @@ if 0:
        if yes_print:
         ss = jnp.reshape(state, [4,2])
         my_print(f"ss: {ss}")
-        ras = jnp.reshape(async_state, [4,8])
+        ras = jnp.reshape(circ_storage, [4,8])
         my_print(f" as: {ras}")
-        my_print(f"lir: {jnp.ravel(lir)}")
-       state, shift, async_state, lir = run_one_iteration(state, shift, async_state, lir, loop_iteration, weights)
+        my_print(f"circ_storage_mover: {jnp.ravel(circ_storage_mover)}")
+       state, shift, circ_storage, circ_storage_mover = run_one_iteration(state, shift, circ_storage, circ_storage_mover, loop_iteration, weights)
 
     
        
