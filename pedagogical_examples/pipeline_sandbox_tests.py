@@ -140,40 +140,6 @@ def main() -> None:
 
     test_jit_pipeline()
 
-
-
 if __name__ == "__main__":
   main()
 
-
-
-
-
-# Test run pipeline (no jit)
-if 0:
-
-    weights = get_weights_debug()
-    inputs = get_inputs_debug()
-    print(f"weights: {jnp.ravel(weights)}")
-    print(f"inputs: {jnp.ravel(weights)}")
-
-    outputs = run_pipeline(weights, test_inputs)
-    #print(f"{outputs=}")
-
-# Test jitted E2E
-def rawr():
-    if 1:
-        devices = mesh_utils.create_device_mesh((args.n_stages, 1))
-        mesh = Mesh(devices, axis_names=('stage', 'data'))
-        weight_sharding = S(mesh,'stage', None, None) # weight sharded over stage
-        input_sharding = S(mesh,'data', None, None, None)   # inputs sharded over batch
-        result_sharding = S(mesh,'data', None, None, None)  # output sharded over batch
-
-        weights = get_weights_random()
-        test_inputs = get_inputs_random()
-
-        output_jit = jax.jit(run_pipeline,
-                    in_shardings=((weight_sharding, input_sharding)),
-                    out_shardings=result_sharding)
-
-        output_pipeline = output_jit(weights, test_inputs)
