@@ -5,6 +5,7 @@ absl-py
 array-record
 aqtp
 cloud-tpu-diagnostics
+datasets
 google-cloud-storage
 grain-nightly
 flax>=0.8.0
@@ -21,5 +22,6 @@ tensorflow>=2.13.0
 tensorflow-datasets
 tensorboardx
 tensorboard-plugin-profile
+transformers
 git+https://github.com/mlperf/logging.git
 google-jetstream

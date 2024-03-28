@@ -26,6 +26,7 @@ from jax.sharding import PartitionSpec as P
 from input_pipeline import _tfds_data_processing
 from input_pipeline import _grain_data_processing
 from input_pipeline import _tfds_data_processing_c4_mlperf
+from input_pipeline import _hf_data_processing
 import tokenizer
 
 def get_tokenizer(tokenizer_path, add_bos=True, add_eos=True):
@@ -67,12 +68,26 @@ def make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
   )
   return train_iter, None, sp_tokenizer
 
+def make_hf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
+  """ Make train iterator using huggingface data pipeline"""
+  train_ds, _ = _hf_data_processing.get_datasets(
+    config=config
+  )
+  #sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
+  train_iter, _, _ = _hf_data_processing.preprocess_dataset(
+    config,
+    mesh,
+    train_ds,
+    add_bos = add_bos,
+    add_eos = add_eos
+  )
+  return train_iter, None, None
+
 def make_grain_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
-  """ Make train iterator and tokenizer for C4 dataset"""
+  """ Make train iterator using grain input pipeline"""
   train_ds, eval_ds = _grain_data_processing.get_datasets(
     config=config
   )
-  sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
   train_iter, _, _ = _grain_data_processing.preprocess_dataset(
     config,
     mesh,
@@ -82,7 +97,7 @@ def make_grain_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
     add_bos = add_bos,
     add_eos = add_eos
   )
-  return train_iter, None, sp_tokenizer
+  return train_iter, None, None
 
 class SyntheticDataIterator():
   """Creates a synthetic data iterator for performance testing work"""
@@ -131,6 +146,8 @@ def create_data_iterator_with_tokenizer(config, mesh, add_bos = True, add_eos = 
   elif config.dataset_type == "c4_mlperf":
     print("Overwrite both add_bos and add_eos to False")
     return make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, add_bos=False, add_eos=False)
+  elif config.dataset_type == "hf":
+    return make_hf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos)
   else:
     assert False, "dataset type not implemented"
 
