@@ -10,67 +10,59 @@ import os
 import argparse
 
 
-def my_print(s):
-   if yes_print:
-      print(s)
-
 def S(mesh,*specs):
   return NamedSharding(mesh, PartitionSpec(*specs))
 
-# Initialize shift and state
-# shift = jnp.zeros([num_stages] + micro_shape)
-# state = jnp.reshape(test_inputs, (num_stages, microbatches // num_stages) + test_inputs.shape[1:])
-
-# Construct stages in
 def get_iteration_inputs(loop_iteration, microbatches, num_stages, state_io, circ_storage, shift):
+    '''
+    Construct stages_in: what each stage will operate on of global shape same as shift=[stages, micro_size, sequence, embed]
+    This is almost a rotated version of the last outputs, except for the first stage which must grab from state_io or circ_storage
+    '''
+
+    # Grab input from state_io - rotate through the microbatch dimension
     stream_buf_idx = loop_iteration % (microbatches // num_stages)
     stream_slice = state_io[:,stream_buf_idx] 
-    circ_slice = circ_storage[:,loop_iteration % microbatches]
-    stages_in = jnp.where(loop_iteration < microbatches, stream_slice, circ_slice) # Circ specialty
 
-    def select_state_or_input(input, state):
+    # For early iterations we grab the new inputs from state_io, but once those have all passed into shift
+    # we grab from circular_storage
+    circ_slice = circ_storage[:,loop_iteration % microbatches]
+    stages_in = jnp.where(loop_iteration < microbatches, stream_slice, circ_slice)
+
+    def select_state_or_input(input, shift):
     # Selects input for stage 0, state for other stages
-        return jnp.where(jax.lax.broadcasted_iota('int32', state.shape, 0) == 0, input, state)
+        return jnp.where(jax.lax.broadcasted_iota('int32', shift.shape, 0) == 0, input, shift)
 
     stages_in = select_state_or_input(stages_in, shift)
-    #return state[:,stream_buf_idx] # equivalent to state[:,stream_buf_idx,:,:] # Non-circ
     return stages_in
 
-
-# run model
 def get_new_loop_state(output, old_state_io, old_circ_storage, old_circ_storage_mover, loop_iteration):
-    # Rotate state to the right by 1. (for non-circ shift instead of rotate)
+    '''
+      Update the various buffers given the output of the most recent iteration
+      * Rotates state_io up by 1 (replace last element with last stage output)
+      * Shift down by 1 (of the output)
+      * Rotate circ_storage down by 1, 
+      * circ mover gets FULL? output -- I think it should only need the last stage of output
+    '''
     
-    # For non-circ
-    # def _shift_right(shift_in):
-    #     padding = [[1, 0]] + [[0, 0]] * (shift_in.ndim - 1)
-    #     # Use lax.slice to guarantee the gradient is a pad.
-    #     return jax.lax.slice(jnp.pad(shift_in, padding), [0] * shift_in.ndim, shift_in.shape)
-    
+    # Rotate shift right by 1 (rotation of the output, not the previous shift)
     def _rotate_right(output_in):
       # Use lax.slice to avoid generating a gather.
       last = jax.lax.slice_in_dim(output_in, args.n_stages - 1, args.n_stages, axis=0)
       except_last = jax.lax.slice_in_dim(output_in, 0, args.n_stages - 1, axis=0)
       return jnp.concatenate([last, except_last], axis=0)
-
-    # Shift
     new_shift = _rotate_right(output)
 
-    # Async state
+    # Rotate circular storage right by 1, inserting latest output at specified index
     def _rotate_right_and_update(circ_storage_mover_in, circ_storage_in):
         rotated = _rotate_right(circ_storage_mover_in)
         rotated = jnp.expand_dims(rotated, 1)
-        # The offset is the last stage's last microbatch ID.
-        #offset = (loop_iteration - (num_stages - 1)) % microbatches # we need extar -1 b/c grabbing from un-updated circ_storage_mover
-        offset = (loop_iteration - (args.n_stages - 1) - 1) % args.n_microbatches # This looks like an extra - 1 to me
+        # The offset is the last stage's last microbatch ID. 
+        offset = (loop_iteration - (args.n_stages - 1) - 1) % args.n_microbatches # # we need extar -1 b/c grabbing from un-updated circ_storage_mover
         return jax.lax.dynamic_update_slice_in_dim(circ_storage_in, rotated, offset, axis=1)
     new_circ_storage = _rotate_right_and_update(old_circ_storage_mover, old_circ_storage)
-
-    # circ_storage_mover
     new_circ_storage_mover = output
 
-
-    # Stream state
+    # Rotate stream_io left (up by 1), replacing the bottom with the latest output
     stream_buf_idx = loop_iteration % (args.n_microbatches // args.n_stages)
     stream_slice = old_state_io[:, stream_buf_idx]
     def _update_state_io(state_in, stream_slice, output):
@@ -86,27 +78,17 @@ def get_new_loop_state(output, old_state_io, old_circ_storage, old_circ_storage_
         return jax.lax.dynamic_update_slice_in_dim(
             state_in, stream_slice, stream_buf_idx, axis=1)
     new_state = _update_state_io(old_state_io, stream_slice, output)
+
     return new_state, new_shift, new_circ_storage, new_circ_storage_mover
 
 def stage(weights, x):
-  #for i in range(weights.shape[0]): # this was used if each stage had multiple layers (we would need to reshape weights to stages, layers/stage, embed, embed)
-  x = layer(weights, x)
+  x = layer(weights, x) # To support multiple layers per stage we could add a for loop here instead of one layer
   return x
 
-def layer(weights, x):
-  if 0:
-     x_out = weights + x
-  else:
-    x_out = jnp.einsum('bse,eh->bsh',x,weights) # The leading stage dimension of weights is missing because it is vmapped out
-    x_out = jnp.tanh(x_out)
-
-  #x = jnp.tanh(jnp.dot(x, w))
-  return x_out
-
-# You are here, does global_layer need to be different for non-pipeline?
-def global_layer(weights, x):
-    return sad
-
+def layer(weights, stages_in):
+    outputs = jnp.einsum('bse,eh->bsh',x,weights) # The leading stage dimensions of weights and x is missing because it is vmapped out
+    outputs = jnp.tanh(outputs)
+    return outputs
 
 def get_weights_stage(weights, loop_iteration):
     microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(args.n_stages), 0) # not a great name, really this is like batch_id * repeat idx
@@ -114,17 +96,15 @@ def get_weights_stage(weights, loop_iteration):
     layer_ids = jnp.arange(args.n_stages) + repeat_ids * args.n_stages
     # layer_idx actauly goes out of bounds on the last bubble, but jax pulls it back to last idx
     # since its the bubble we don't care that its randomly clipped to the last, but should probably change this
-    #weights_repeated = jnp.reshape(weights, [num_stages, num_repeat, model_dim, model_dim])
-    # TODO!!! lax.dynamic slice
+    # TODO: Maybe use lax.dynamic slice instead of indexing?
     to_stack = [weights[layer_ids[stage],:,:] for stage in range(args.n_stages)]
-    to_ret = jnp.concatenate(to_stack, axis=0)
+    weights_stage = jnp.concatenate(to_stack, axis=0)
     desired_shape = (args.n_stages,) + weights.shape[1:]
-    to_ret = jnp.reshape(to_ret,desired_shape) # some singleton axes may have gotten flattened
-    return to_ret
+    weights_stage = jnp.reshape(weights_stage, desired_shape) # This reshape fleshes out singleton axes that are flattened in concatenate
+    return weights_stage
 
 def run_one_iteration(state, shift, circ_storage, circ_storage_mover, loop_iteration, weights):
    stages_in = get_iteration_inputs(loop_iteration, args.n_microbatches, args.n_stages, state, circ_storage, shift)
-   my_print(f"Stages in: {jnp.ravel(stages_in)}")
    weights_stage = get_weights_stage(weights, loop_iteration)
    output = jax.vmap(stage, in_axes=0, out_axes=0,
                         spmd_axis_name='stage')(weights_stage, stages_in)
@@ -132,23 +112,32 @@ def run_one_iteration(state, shift, circ_storage, circ_storage_mover, loop_itera
    return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
 
 def permute_output_ms_dim(output):
-    # How come I don't see this function in praxis?
+    '''
+    Although re-using the same array for both input and output is cute,
+    The final outputs turn out permuted compared to the inputs. Worringly I don't see this function in praxis
+    '''
+
     ms_size = output.shape[1]
     # More accurately land_idx = microbatches * (r - 1) + num_stages - 1 % ms, but ms | microbatches
-    land_idx = (args.n_stages - 1) % ms_size # first_finish % ms_size (really first_finish - 1 is the idx we careabout)
+    land_idx = (args.n_stages - 1) % ms_size # first_finish % ms_size (really first_finish - 1 is the idx we care about)
     permutation = (np.arange(ms_size) + land_idx) % ms_size
     output = output[:,permutation]
     return output
 
 def init_states(inputs):
-    # Initialize shift and state
+    # Initialize components of state: state_io, shift, circular_storage and circular_storage_mover
+    # shift is [n_stages, micro_size, sequence, embed]
     shift = jnp.zeros((args.n_stages,) + inputs.shape[1:]) # equivalently inputs.shape[1:] is microshape
+
+    # state_io is [n_stages, microbatches/stages, micro_size, sequence, embed]
     state_io = jnp.reshape(inputs, (args.n_stages, args.n_microbatches // args.n_stages) + inputs.shape[1:])
-    # [num_stages, num_micro, micro_size, ...]
-    circ_storage = jnp.zeros((args.n_stages,) + inputs.shape ) # This is huge, is this correct?
+
+    # circ_stoage is [num_stages, microbatches, micro_size, sequence, embed]
+    circ_storage = jnp.zeros((args.n_stages,) + inputs.shape ) # This is huge, is this size really what is in the pax code, and do we need this large?
+
+    # circ_storage_mover is same as shift: [n_stages, micro_size, sequence, embed]
     circ_storage_mover = shift
     return state_io, shift, circ_storage, circ_storage_mover
-   
 
 def run_pipeline(weights, inputs):
     state_io, shift, circ_storage, circ_storage_mover = init_states(inputs)
