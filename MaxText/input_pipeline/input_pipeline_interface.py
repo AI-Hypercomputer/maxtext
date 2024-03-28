@@ -26,6 +26,7 @@ from jax.sharding import PartitionSpec as P
 from input_pipeline import _tfds_data_processing
 from input_pipeline import _grain_data_processing
 from input_pipeline import _tfds_data_processing_c4_mlperf
+from input_pipeline import _hf_data_processing
 import tokenizer
 
 def get_tokenizer(tokenizer_path, add_bos=True, add_eos=True):
@@ -66,6 +67,22 @@ def make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
     data_shuffle_seed = config.data_shuffle_seed,
   )
   return train_iter, None, sp_tokenizer
+
+def make_hf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
+  train_ds, eval_ds = _hf_data_processing.get_datasets(
+    config=config
+  )
+  #sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
+  train_iter, _, _ = _hf_data_processing.preprocess_dataset(
+    config,
+    mesh,
+    train_ds, eval_ds,
+    tokenizer_path=config.tokenizer_path,
+    data_shuffle_seed = config.data_shuffle_seed,
+    add_bos = add_bos,
+    add_eos = add_eos
+  )
+  return train_iter, None, None
 
 def make_grain_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
   """ Make train iterator and tokenizer for C4 dataset"""
@@ -131,6 +148,8 @@ def create_data_iterator_with_tokenizer(config, mesh, add_bos = True, add_eos = 
   elif config.dataset_type == "c4_mlperf":
     print("Overwrite both add_bos and add_eos to False")
     return make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, add_bos=False, add_eos=False)
+  elif config.dataset_type == "hf":
+    return make_hf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos)
   else:
     assert False, "dataset type not implemented"
 

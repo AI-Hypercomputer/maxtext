@@ -33,6 +33,7 @@ from jax.sharding import PartitionSpec
 from jax.sharding import NamedSharding
 from jax.sharding import Mesh
 import grain.python as grain
+from input_pipeline._hf_operations import TransformedDataset
 
 import max_logging
 
@@ -95,12 +96,17 @@ def get_next_batch_sharded(
 
 class MultiHostDataLoadIterator:
   """fold get_next_batch_sharded into a iterator class"""
-  def __init__(self, dataloader: Union[tf.data.Dataset, grain.DataLoader], global_mesh: Mesh):
+  def __init__(
+    self, dataloader: Union[tf.data.Dataset, grain.DataLoader, TransformedDataset], 
+    global_mesh: Mesh
+    ):
     self.global_mesh = global_mesh
     self.dataloader = dataloader
     if isinstance(self.dataloader, tf.data.Dataset):
       self.local_iterator = self.dataloader.as_numpy_iterator()
     elif isinstance(self.dataloader, grain.DataLoader):
+      self.local_iterator = iter(self.dataloader)
+    elif isinstance(self.dataloader, TransformedDataset):
       self.local_iterator = iter(self.dataloader)
     else:
       raise ValueError("Type error: dataloader should be either tf.data.Dataset or grain.DataLoader.")
@@ -109,6 +115,8 @@ class MultiHostDataLoadIterator:
     if isinstance(self.dataloader, tf.data.Dataset):
       self.local_iterator = self.dataloader.as_numpy_iterator()
     elif isinstance(self.dataloader, grain.DataLoader):
+      self.local_iterator = iter(self.dataloader)
+    elif isinstance(self.dataloader, _hf_operations.TransformedDataset):
       self.local_iterator = iter(self.dataloader)
     else:
       raise ValueError("Type error: dataloader should be either tf.data.Dataset or grain.DataLoader.")
