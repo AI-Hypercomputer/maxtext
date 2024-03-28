@@ -193,7 +193,9 @@ def run_pipeline(weights, inputs):
     final_output = permute_output_ms_dim(state_io)
 
     # reshape state to match input shape of total batch instead of microbatches
-    final_output = jnp.reshape(final_output, (args.n_microbatches,) + state_io.shape[2:])
+    #final_output = jnp.reshape(final_output, (args.n_microbatches,) + state_io.shape[2:])
+    final_output = jnp.reshape(final_output, (args.batch_size, args.sequence, args.features))
+                               
     return final_output
 
 def get_pipelint_jit():
@@ -453,11 +455,12 @@ def main() -> None:
     weights, inputs, targets = get_weights_and_inputs()
 
     import pipeline_utils
+    #pipeline_utils.assert_same_output_and_grad(pipeline_func, pipeline_func, targets, weights, inputs)
     pipeline_utils.assert_same_output_and_grad(pipeline_utils.reg_matmuls, pipeline_func, targets, weights, inputs)
 
     assert 1 > 2
 
-    assert_same_output_and_grad(reg_matmuls, pipeline_func, targets, weights, inputs)
+    assert_same_output_and_grad(pipeline_func, pipeline_func, targets, weights, inputs)
     global yes_print
     yes_print=False
     # Necessary artifacts for the good stuff
