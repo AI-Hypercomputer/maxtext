@@ -8,7 +8,7 @@ from jax.sharding import NamedSharding
 from jax.experimental import mesh_utils
 import os
 import argparse
-
+import pipeline_utils
 
 def get_weights_and_inputs():
     weights_shape = jnp.array([args.n_stages * args.num_repeat, args.features, args.features]) # pytree in real cases instead of single array
@@ -443,7 +443,7 @@ def main() -> None:
     parser.add_argument('--pipeline_axis', type=int, default=4)
     parser.add_argument('--dp_axis', type=int, default=1)
     parser.add_argument('--features', type=int, default=16)
-    parser.add_argument('--sequence', type=int, default=2048)
+    parser.add_argument('--sequence', type=int, default=16)
     parser.add_argument('--num_repeat', type=int, default=2)
 
     global args
@@ -454,25 +454,11 @@ def main() -> None:
     pipeline_func = get_pipelint_jit()
     weights, inputs, targets = get_weights_and_inputs()
 
-    import pipeline_utils
-    #pipeline_utils.assert_same_output_and_grad(pipeline_func, pipeline_func, targets, weights, inputs)
-    pipeline_utils.assert_same_output_and_grad(pipeline_utils.reg_matmuls, pipeline_func, targets, weights, inputs)
+    # The fun stuff
+    #pipeline_utils.assert_same_output_and_grad(pipeline_utils.reg_matmuls, pipeline_func, targets, weights, inputs)
 
-    assert 1 > 2
+    pipeline_utils.simple_timeit(pipeline_func, weights, inputs, tries = 3, task = 'circular_pipeline')
 
-    assert_same_output_and_grad(pipeline_func, pipeline_func, targets, weights, inputs)
-    global yes_print
-    yes_print=False
-    # Necessary artifacts for the good stuff
-    #pipeline_func = get_pipelint_jit()
-    #weights, inputs, targets = get_weights_and_inputs()
-
-    rawr()
-
-
-    #assert_same_output_and_grad(reg_matmuls, pipeline_func, targets, weights, inputs)
-
-    #timing_util.simple_timeit(pipeline_func, weights, inputs, tries = 3, task = 'basic_pp')
 
 
 
