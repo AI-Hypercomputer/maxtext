@@ -77,22 +77,28 @@ def layer(weights, stages_in):
     outputs = jnp.tanh(outputs)
     return outputs
 
-def get_weights_stage(weights, loop_iteration):
+def get_weights_stage(weights, loop_iteration, n_stages, n_microbatches):
     '''
-    Get the weights for each stage used for this loop itereation. Output of shape [stage, embed, embed].
+    Get the weights for each stage used for this loop itereation. 
+    
+    Input:
+        Weights of shape [num_layers, embed, embed]
+    Returns:
+        Weights for stages of shape [stage, embed, embed].
+
     For non-circular pipelines this would just be stacked [weights_layer_0; weights_layer1; etc],
     but for circular the stages need a repeat_idx to determine what layer weights to grab
     '''
 
-    microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(args.n_stages), 0) # not a great name, this is really batch_id * repeat idx
-    repeat_ids = microbatch_ids // args.n_microbatches
-    layer_ids = jnp.arange(args.n_stages) + repeat_ids * args.n_stages
+    microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(n_stages), 0) # not a great name, this is really batch_id * repeat idx
+    repeat_ids = microbatch_ids // n_microbatches
+    layer_ids = jnp.arange(n_stages) + repeat_ids * n_stages
     # TODO: layer_ids actually goes out of bounds on the last bubble, but jax pulls it back to last idx
     # Since its a bubble computation we don't care what gets pulled, but we should change to avoid OOB anyway
     # TODO: Maybe use lax.dynamic slice instead of indexing?
-    to_stack = [weights[layer_ids[stage],:,:] for stage in range(args.n_stages)]
+    to_stack = [weights[layer_ids[stage],:,:] for stage in range(n_stages)]
     weights_stage = jnp.concatenate(to_stack, axis=0)
-    desired_shape = (args.n_stages,) + weights.shape[1:]
+    desired_shape = (n_stages,) + weights.shape[1:]
     weights_stage = jnp.reshape(weights_stage, desired_shape) # This reshape fleshes out singleton axes that are flattened in concatenate
     return weights_stage
 
@@ -129,11 +135,14 @@ def get_new_loop_state(output, old_state_io, old_circ_storage, old_circ_storage_
       * circ_mover gets FULL? rotated output -- I think it should only need the last stage of output
     '''
     
+    n_stages = old_state_io.shape[0]
+    n_microbatches = old_state_io.shape[0] * old_state_io.shape[1]
+
     # Shift becomes a rotated-right version of the previous output
     def _rotate_right(output_in):
       # Use lax.slice to avoid generating a gather.
-      last = jax.lax.slice_in_dim(output_in, args.n_stages - 1, args.n_stages, axis=0)
-      except_last = jax.lax.slice_in_dim(output_in, 0, args.n_stages - 1, axis=0)
+      last = jax.lax.slice_in_dim(output_in, n_stages - 1, n_stages, axis=0)
+      except_last = jax.lax.slice_in_dim(output_in, 0, n_stages - 1, axis=0)
       return jnp.concatenate([last, except_last], axis=0)
     new_shift = _rotate_right(output)
 
@@ -144,13 +153,13 @@ def get_new_loop_state(output, old_state_io, old_circ_storage, old_circ_storage_
         rotated = _rotate_right(circ_storage_mover_in)
         rotated = jnp.expand_dims(rotated, 1)
         # The offset is the last stage's last microbatch ID. 
-        offset = (loop_iteration - (args.n_stages - 1) - 1) % args.n_microbatches # we need extra -1 b/c grabbing from un-updated circ_storage_mover (one iter behind)
+        offset = (loop_iteration - (n_stages - 1) - 1) % n_microbatches # we need extra -1 b/c grabbing from un-updated circ_storage_mover (one iter behind)
         return jax.lax.dynamic_update_slice_in_dim(circ_storage_in, rotated, offset, axis=1)
     new_circ_storage = _rotate_right_and_update(old_circ_storage_mover, old_circ_storage)
     new_circ_storage_mover = output
 
     # Rotate stream_io left/up by 1 on rotating ms index (stream_buf_idx), replacing the last/bottom with the last stage output
-    stream_buf_idx = loop_iteration % (args.n_microbatches // args.n_stages)
+    stream_buf_idx = loop_iteration % (n_microbatches // n_stages)
     stream_slice = old_state_io[:, stream_buf_idx]
     def _update_state_io(state_in, stream_slice, output):
         # Shift the current slice to the left, then fill the last stage with
@@ -159,7 +168,7 @@ def get_new_loop_state(output, old_state_io, old_circ_storage, old_circ_storage_
         stream_slice = jax.lax.slice_in_dim(
             jnp.pad(stream_slice, padding), 1, stream_slice.shape[0] + 1, axis=0)
         stream_slice = jnp.where(
-            jax.lax.broadcasted_iota('int32', stream_slice.shape, 0) == args.n_stages - 1, output,
+            jax.lax.broadcasted_iota('int32', stream_slice.shape, 0) == n_stages - 1, output,
             stream_slice)
         stream_slice = jnp.expand_dims(stream_slice, 1)
         return jax.lax.dynamic_update_slice_in_dim(
@@ -168,15 +177,17 @@ def get_new_loop_state(output, old_state_io, old_circ_storage, old_circ_storage_
 
     return new_state, new_shift, new_circ_storage, new_circ_storage_mover
 
-def run_one_iteration(state, shift, circ_storage, circ_storage_mover, loop_iteration, weights):
+def run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights):
    '''
       Run one loop iteration - sending inputs and specifying weights for each pipeline stage, run the pipeline, and update the various state buffers
    '''
-   stages_in = get_iteration_inputs(loop_iteration, args.n_microbatches, args.n_stages, state, circ_storage, shift)
-   weights_stage = get_weights_stage(weights, loop_iteration)
+   n_stages = state_io.shape[0]
+   n_microbatches = state_io.shape[0] * state_io.shape[1]
+   stages_in = get_iteration_inputs(loop_iteration, n_microbatches, n_stages, state_io, circ_storage, shift)
+   weights_stage = get_weights_stage(weights, loop_iteration, n_stages, n_microbatches)
    output = jax.vmap(stage, in_axes=0, out_axes=0,
                         spmd_axis_name='stage')(weights_stage, stages_in)
-   new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = get_new_loop_state(output, state, circ_storage, circ_storage_mover, loop_iteration)
+   new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = get_new_loop_state(output, state_io, circ_storage, circ_storage_mover, loop_iteration)
    return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
 
 def permute_output_ms_dim(output):
@@ -185,26 +196,37 @@ def permute_output_ms_dim(output):
     The final outputs turn out permuted compared to the inputs. Worringly I don't see this function in praxis
     '''
 
+    n_stages = output.shape[0]
     ms_size = output.shape[1]
     # The first real output takes a certain amount of loop iterations to finish and be pushed to state_io - it will land on a different index of state_io depending on this 
-    # We could ignore first term since ms_size divides n_microbatches but this is clearer where it comes from
-    land_idx = (args.n_microbatches * (args.n_repeat - 1) + args.n_stages - 1) % ms_size # first_finish % ms_size
+    # Really (n_microbatches * (n_repeat - 1) + n_stages - 1) % ms_size but ms_size divides n_microbatches
+    land_idx = (n_stages - 1) % ms_size # first_finish % ms_size
     permutation = (np.arange(ms_size) + land_idx) % ms_size # make the value in land_idx actually appear in idx 0, and (land_idx + 1) appear in spot 1, etc
     output = output[:,permutation]
     return output
 
-def run_pipeline(weights, inputs, n_stages):
+def run_pipeline(weights, inputs, n_stages, n_microbatches, n_repeat):
     '''
     Runs all iterations of the pipeline. Takes input formmated as regular batching (not microbatched). Will reshape the inputs
     internally for microbatching and reshape the outputs to match the original input
+
+    Inputs:
+        weights: [layers, features, features]
+        inputs: [global batch, sequence, features]
+        n_stages: int
+        n_micorbatches: int (must divide n_stages)
+        n_repeat: int
     '''
 
+    global_batch_size, sequence, features = inputs.shape[0], inputs.shape[1], inputs.shape[2]
+    microbatch_size = global_batch_size // n_microbatches
+
     # Reshape from [global_batch, sequence, embed] to [num_micro_batches, micro_batch_size, sequence, embed]
-    inputs = inputs.reshape((args.n_microbatches, args.microbatch_size, args.sequence, args.features))
+    inputs = inputs.reshape((n_microbatches, microbatch_size, sequence, features))
 
     state_io, shift, circ_storage, circ_storage_mover = init_states(inputs, n_stages)
 
-    total_iterations = args.n_microbatches * args.n_repeat + args.n_stages  - 1 
+    total_iterations = n_microbatches * n_repeat + n_stages  - 1 
     for loop_iteration in range(total_iterations):
        state_io, shift, circ_storage, circ_storage_mover = run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights)
 
@@ -213,12 +235,12 @@ def run_pipeline(weights, inputs, n_stages):
 
     # reshape state to match input shape of total batch instead of microbatches
     #final_output = jnp.reshape(final_output, (args.n_microbatches,) + state_io.shape[2:])
-    final_output = jnp.reshape(final_output, (args.batch_size, args.sequence, args.features))
+    final_output = jnp.reshape(final_output, (global_batch_size, sequence, features))
                                
     return final_output
 
-def get_pipelint_jit():
-  devices = mesh_utils.create_device_mesh((args.pipeline_axis, args.dp_axis))
+def get_pipelint_jit(n_stages, dp_axis):
+  devices = mesh_utils.create_device_mesh((n_stages, dp_axis))
   mesh = Mesh(devices, axis_names=('stage', 'data'))
 
   def S(*specs):
@@ -232,7 +254,7 @@ def get_pipelint_jit():
   jitted_pipeline = jax.jit(run_pipeline,
               in_shardings=((weight_sharding, input_sharding)),
               out_shardings=result_sharding,
-              static_argnums=2)
+              static_argnums=[2,3,4])
   return jitted_pipeline
 
 def main() -> None:
@@ -241,25 +263,23 @@ def main() -> None:
     parser.add_argument('--batch_size', type=int, default=24)
     parser.add_argument('--n_stages', type=int, default=4)
     parser.add_argument('--n_microbatches', type=int, default=8)
-    parser.add_argument('--pipeline_axis', type=int, default=4)
     parser.add_argument('--dp_axis', type=int, default=1)
     parser.add_argument('--features', type=int, default=16)
     parser.add_argument('--sequence', type=int, default=16)
     parser.add_argument('--n_repeat', type=int, default=2)
 
-    global args
     args = parser.parse_args()
     args.microbatch_size = args.batch_size // args.n_microbatches
     args.layers = args.n_stages * args.n_repeat
 
     # Necessary artifacts for the fun stuff
-    pipeline_func = get_pipelint_jit()
+    pipeline_func = get_pipelint_jit(args.n_stages, args.dp_axis)
     weights, inputs, targets = get_weights_and_inputs(args.batch_size, args.sequence, args.features, args.layers)
 
     # The fun stuff
-    pipeline_utils.assert_same_output_and_grad(pipeline_utils.reg_matmuls, pipeline_func, targets, weights, inputs,f2_extra_inputs=[args.n_stages])
+    pipeline_utils.assert_same_output_and_grad(pipeline_utils.reg_matmuls, pipeline_func, targets, weights, inputs,f2_extra_inputs=[args.n_stages, args.n_microbatches, args.n_repeat])
 
-    pipeline_utils.simple_timeit(pipeline_func, weights, inputs, args.n_stages, tries = 3, task = 'circular_pipeline')
+    pipeline_utils.simple_timeit(pipeline_func, weights, inputs, args.n_stages, args.n_microbatches, args.n_repeat, tries = 3, task = 'circular_pipeline')
 
 if __name__ == "__main__":
   main()
