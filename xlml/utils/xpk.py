@@ -70,6 +70,7 @@ def run_workload(
             f" --num-slices={num_slices} --docker-image={docker_image}"
             f" --project={cluster_project} --zone={zone}"
             f" --env {metric_config.SshEnvVars.GCS_OUTPUT.name}={gcs_path}"
+            " --restart-on-user-code-failure"
         ),
     )
     hook = SubprocessHook()
