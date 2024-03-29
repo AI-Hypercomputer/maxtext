@@ -45,7 +45,7 @@ To authenticate with Google Cloud, run `gcloud auth application-default login`.
 
 To create a Google Cloud Storage (GCS) bucket to save Terraform state, run `gcloud storage buckets create gs://<your_tfstate_bucket_name>`. Please note this bucket name should be globally unique.
 
-Then, update `bucket` name to yours in the `backend "gcs"` block of `cloud_composer_template.tf` file.
+Then, update `bucket` name to yours in the `backend "gcs"` block of `provider.tf` file.
 
 ## Step 4 - Create Cloud Composer environment
 
