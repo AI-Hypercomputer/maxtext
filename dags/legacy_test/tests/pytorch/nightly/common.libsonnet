@@ -181,6 +181,8 @@ local volumes = import 'templates/volumes.libsonnet';
         export PATH=~/.local/bin:$PATH
       |||,
       tpuVmExtraSetup: |||
+        # Dependency of acceelerate, unfortunately there is no requirements.txt in acceelerate.
+        pip install pytest
         git clone https://github.com/huggingface/accelerate.git
         pip install --user ./accelerate
 
