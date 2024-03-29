@@ -119,6 +119,28 @@ with models.DAG(
           test_owner=test_owner.PRIYANKA_G,
       ).run()
 
+    # v4-16 two slices determinism test
+    slice_num = 2
+    accelerator = "v4-16"
+    base_output_directory = f"{gcs_bucket.BASE_OUTPUT_DIR}/maxtext_determinism"
+    dataset_path = gcs_bucket.MAXTEXT_DIR
+    maxtext_v4_configs_test = gke_config.get_gke_config(
+        tpu_version=TpuVersion.V4,
+        tpu_cores=16,
+        num_slices=slice_num,
+        cluster_name=ClusterName.V4_16_MULTISLICE_CLUSTER.value,
+        tpu_zone=Zone.US_CENTRAL2_B.value,
+        time_out_in_min=60,
+        test_name=f"maxtext-determinism-{test_mode.value}",
+        run_model_cmds=(
+            "bash end_to_end/test_determinism.sh"
+            f" determinism-{test_mode.value}-{slice_num}x-{accelerator}"
+            f" {base_output_directory} {dataset_path}",
+        ),
+        docker_image=DOCKER_IMAGE[test_mode].value,
+        test_owner=test_owner.MATT_D,
+    ).run()
+
   # v4-8 2 slices checkpoint resharding test
   gke_config.get_gke_config(
       tpu_version=TpuVersion.V4,
