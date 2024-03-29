@@ -58,7 +58,7 @@ def adam_pax(
     ) -> optax.GradientTransformation:
   """Standard Adam optimizer that supports weight decay.
 
-  Follows the implemenation in pax/praxis sharded_adam
+  Follows the implementation in pax/praxis sharded_adam
   https://github.com/google/praxis/blob/545e00ab126b823265d70c715950d39333484f38/praxis/optimizers.py#L621
 
   Args:

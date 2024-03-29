@@ -67,7 +67,7 @@ def get_topology_mesh(config):
 
 def get_shaped_inputs(topology_mesh, config):
   """ Get shaped abstractions of inputs to train_step: state, batch and rng """
-  # Construct the model and optimizier to get shaped versions of the state
+  # Construct the model and optimizer to get shaped versions of the state
   quant = quantizations.configure_quantization(config)
   model = Transformer(config, topology_mesh, quant=quant)
   # The learning_rate_schedule is baked into the compiled object.

@@ -15,7 +15,7 @@
  """
 
 # pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports
-"""Trasforms a "full state" including optimzer state to a bfloat16 "parameter state" without optimizer state.
+"""Transforms a "full state" including optimizer state to a bfloat16 "parameter state" without optimizer state.
    This typically used for turning a state output by training.py into a state than can be consumed by decode.py.
 
    The input "fullstate" is passed in via:
