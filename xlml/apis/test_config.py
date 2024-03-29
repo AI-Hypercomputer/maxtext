@@ -130,6 +130,7 @@ class TestConfig(abc.ABC, Generic[A]):
   # TODO(wcromar): make this a timedelta
   time_out_in_min: Optional[int] = attrs.field(default=None, kw_only=True)
   task_owner: str = attrs.field(default='unowned', kw_only=True)
+  gcs_subfolder: str = attrs.field(default='unowned', kw_only=True)
 
   @property
   @abc.abstractmethod

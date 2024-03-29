@@ -18,6 +18,7 @@ import datetime
 from airflow import models
 from dags.vm_resource import TpuVersion, Project, Zone, ClusterName, DockerImage
 from dags.examples.configs import xpk_example_config as config
+from dags import test_owner
 from xlml.utils import name_format
 from airflow.utils.task_group import TaskGroup
 
@@ -59,11 +60,13 @@ with models.DAG(
   # The value of 'test_group_id':
   #  1) a task group name for those chained tests
   #  2) an ID to generate gcs folder path in format:
-  #    "{gcs_bucket.BASE_OUTPUT_DIR}/{group_id}-{current_datetime}/"
+  #    "{gcs_bucket.BASE_OUTPUT_DIR}/{gcs_subfolder}/{group_id}-{current_datetime}/"
   test_group_id = "chained_tests"
+  gcs_subfolder = f"{test_owner.Team.MULTIPOD.value}/maxtext"
   with TaskGroup(group_id=test_group_id) as group:
     shared_gcs_location = name_format.generate_gcs_folder_location(
-        test_group_id
+        gcs_subfolder,
+        test_group_id,
     )
     chained_resnet_tpu_singleslice_v4_8 = config.get_flax_resnet_xpk_config(
         tpu_version=TpuVersion.V4,

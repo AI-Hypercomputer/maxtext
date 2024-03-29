@@ -14,6 +14,16 @@
 
 """The file of test owners."""
 
+import enum
+
+
+class Team(enum.Enum):
+  SOLUTIONS_TEAM = "solutions_team"
+  PYTORCH_XLA = "pytorch_xla"
+  MULTIPOD = "multipod"
+  MLCOMPASS = "mlcompass"
+
+
 # XLML - JAX/FLAX
 SHIVA_S = "Shiva S."
 

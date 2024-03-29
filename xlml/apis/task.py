@@ -184,7 +184,8 @@ class TpuQueuedResourceTask(BaseTask):
         )
         ssh_keys = ssh.generate_ssh_keys()
         output_location = name_format.generate_gcs_folder_location(
-            self.task_test_config.benchmark_id
+            self.task_test_config.gcs_subfolder,
+            self.task_test_config.benchmark_id,
         )
 
       queued_resource_op, queued_resource_name = tpu.create_queued_resource(
@@ -395,7 +396,8 @@ class XpkTask(BaseTask):
         gcs_path = gcs_location
       else:
         gcs_path = name_format.generate_gcs_folder_location(
-            self.task_test_config.benchmark_id
+            self.task_test_config.gcs_subfolder,
+            self.task_test_config.benchmark_id,
         )
       launch_workload = self.launch_workload(workload_id, gcs_path)
       wait_for_workload_completion = xpk.wait_for_workload_completion.override(
@@ -545,7 +547,8 @@ class GpuCreateResourceTask(BaseTask):
         gpu_name = gpu.generate_gpu_name()
         ssh_keys = ssh.generate_ssh_keys()
         gcs_location = name_format.generate_gcs_folder_location(
-            self.task_test_config.benchmark_id
+            self.task_test_config.gcs_subfolder,
+            self.task_test_config.benchmark_id,
         )
 
       ip_address = gpu.create_resource(

@@ -27,6 +27,7 @@ import os
 PROJECT_NAME = Project.CLOUD_ML_AUTO_SOLUTIONS.value
 RUNTIME_IMAGE = RuntimeVersion.TPU_UBUNTU2204_BASE.value
 RUN_DATE = datetime.now().strftime("%Y_%m_%d")
+GCS_SUBFOLDER_PREFIX = test_owner.Team.SOLUTIONS_TEAM.value
 
 
 def get_flax_resnet_config(
@@ -204,6 +205,7 @@ def get_flax_vit_conv_config(
       run_model_cmds=run_model_cmds,
       time_out_in_min=time_out_in_min,
       task_owner=test_owner.SHIVA_S,
+      gcs_subfolder=f"{GCS_SUBFOLDER_PREFIX}/flax",
   )
 
   job_metric_config = metric_config.MetricConfig(
@@ -456,6 +458,7 @@ def get_flax_bart_conv_config(
       run_model_cmds=run_model_cmds,
       time_out_in_min=time_out_in_min,
       task_owner=test_owner.SHIVA_S,
+      gcs_subfolder=f"{GCS_SUBFOLDER_PREFIX}/flax",
   )
 
   job_metric_config = metric_config.MetricConfig(
@@ -578,6 +581,7 @@ def get_flax_bert_conv_config(
       run_model_cmds=run_model_cmds,
       time_out_in_min=time_out_in_min,
       task_owner=test_owner.SHIVA_S,
+      gcs_subfolder=f"{GCS_SUBFOLDER_PREFIX}/flax",
   )
 
   job_metric_config = metric_config.MetricConfig(

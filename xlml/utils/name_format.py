@@ -48,13 +48,18 @@ def generate_tb_file_location(run_name: str, base_output_directory: str) -> str:
 
 
 @task
-def generate_gcs_folder_location(benchmark_id: str) -> str:
+def generate_gcs_folder_location(subfolder: str, benchmark_id: str) -> str:
   """Generates folder location in GCS.
 
   Args:
+    subfolder: Folder name/path for artifacts, such as 'solutions_team/flax'
     benchmark_id: Benchmark id of the test
 
   Returns: GCS folder name with location
   """
   current_datetime = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-  return f"{gcs_bucket.BASE_OUTPUT_DIR}/{benchmark_id}-{current_datetime}/"
+  return os.path.join(
+      gcs_bucket.BASE_OUTPUT_DIR,
+      subfolder,
+      f"{benchmark_id}-{current_datetime}/",
+  )
