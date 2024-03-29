@@ -19,8 +19,8 @@ name: Build Images
 
 on:
   schedule:
-    # Run the job daily at 7PM PST (3AM UTC)
-    - cron:  '0 3 * * *'
+    # Run the job daily at 12AM UTC
+    - cron:  '0 0 * * *'
 
 jobs:
   tpu:
