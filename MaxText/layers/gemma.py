@@ -74,7 +74,7 @@ class GemmaDecoderLayer(nn.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name='pre_self_attention_norm',
-        kernel_axes=('embed',))(inputs)
+        kernel_axes=('norm',))(inputs)
 
     lnx = nn.with_logical_constraint(
         lnx, ('activation_batch', 'activation_length', 'activation_embed'))
@@ -114,7 +114,7 @@ class GemmaDecoderLayer(nn.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name='pre_ffw_norm',
-        kernel_axes=('embed',))(attention_lnx)
+        kernel_axes=('norm',))(attention_lnx)
 
     # MLP block.
     mlp_lnx = MlpBlock(
