@@ -22,7 +22,7 @@
 # Enable "exit immediately if any command fails" option
 set -e
 
-export LOCAL_IMAGE_NAME=maxtext_base_image
+export LOCAL_IMAGE_NAME="${LOCAL_IMAGE_NAME:-maxtext_base_image}"
 
 # Use Docker BuildKit so we can cache pip packages.
 export DOCKER_BUILDKIT=1
