@@ -43,6 +43,10 @@ fi
 
 mkdir -p $MOUNT_PATH
 
+# see https://cloud.google.com/storage/docs/gcsfuse-cli for all configurable options of gcsfuse CLI
+# Grain uses _PROCESS_MANAGEMENT_MAX_THREADS = 64 (https://github.com/google/grain/blob/main/grain/_src/python/grain_pool.py)
+# Please make sure max-conns-per-host > grain_worker_count * _PROCESS_MANAGEMENT_MAX_THREADS
+
 gcsfuse -o ro --implicit-dirs --http-client-timeout=5s --max-conns-per-host=2000 \
         --debug_fuse_errors --debug_fuse --debug_gcs --debug_invariants --debug_mutex \
         --log-file=$HOME/gcsfuse.json "$DATASET_GCS_BUCKET" "$MOUNT_PATH"
