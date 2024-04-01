@@ -143,7 +143,7 @@ def preprocessing_pipeline(
 
   dataset = dataset.select_columns(['inputs', 'targets'])
 
-  dataset = dataset.with_format("jax")
+  dataset = dataset.with_format("np")
 
   if shuffle:
     dataset = dataset.shuffle(seed=data_shuffle_seed)
