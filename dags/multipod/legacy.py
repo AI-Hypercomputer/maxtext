@@ -94,7 +94,7 @@ with models.DAG(
         tpu_cores=8,
         tpu_zone=Zone.US_CENTRAL2_B.value,
         time_out_in_min=60,
-        test_name=f"maxtext-perf-v4-8-1-slices-{test_mode.value}",
+        test_name=f"maxtext-perf-{test_mode.value}",
         run_model_cmds=(
             f"bash end_to_end/test_tflops.sh xlml {tflop_thresholds['v4-8']['1']} gs://maxtext-xlml gs://maxtext-xlml/dataset xlml-tflops-v4-8-1slice-{test_mode.value}",
         ),
@@ -110,7 +110,7 @@ with models.DAG(
           num_slices=n_slice,
           tpu_zone=Zone.US_CENTRAL2_B.value,
           time_out_in_min=60,
-          test_name=f"maxtext-perf-v4-16-{n_slice}-slices-{test_mode.value}",
+          test_name=f"maxtext-perf-{test_mode.value}",
           run_model_cmds=(
               f"bash end_to_end/test_tflops.sh xlml {tflop_thresholds['v4-16'][str(n_slice)]} gs://maxtext-xlml gs://maxtext-xlml/dataset xlml-tflops-v4-16-{n_slice}slice-{test_mode.value}",
           ),
@@ -141,6 +141,30 @@ with models.DAG(
         test_owner=test_owner.MATT_D,
     ).run()
 
+    # v4-16 1 slice, v4-8 1 and 2 slices shardings.py test
+    for cores in [8, 16]:
+      if cores == 8:
+        cluster_name = ClusterName.V4_8_MULTISLICE_CLUSTER.value
+      elif cores == 16:
+        cluster_name = ClusterName.V4_16_MULTISLICE_CLUSTER.value
+      for n_slice in [1, 2]:
+        if cores == 16 and n_slice == 2:  # Skip test for 2 slice v4-16
+          break
+        gke_config.get_gke_config(
+            tpu_version=TpuVersion.V4,
+            tpu_cores=cores,
+            num_slices=n_slice,
+            tpu_zone=Zone.US_CENTRAL2_B.value,
+            time_out_in_min=60,
+            test_name=f"maxtext-shardings-{test_mode.value}",
+            run_model_cmds=(
+                f"python pedagogical_examples/shardings.py {n_slice} {cores//2}",
+            ),
+            cluster_name=cluster_name,
+            docker_image=DOCKER_IMAGE[test_mode].value,
+            test_owner=test_owner.MOHIT_K,
+        ).run()
+
   # v4-8 2 slices checkpoint resharding test
   gke_config.get_gke_config(
       tpu_version=TpuVersion.V4,
@@ -148,7 +172,7 @@ with models.DAG(
       num_slices=2,
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
-      test_name=f"maxtext-checkpoint-reshard-v4-8-2-slices-{SetupMode.STABLE.value}",
+      test_name=f"maxtext-checkpoint-reshard-{SetupMode.STABLE.value}",
       run_model_cmds=(
           f"bash end_to_end/test_checkpoint_resharding.sh xlml-checkpoint-resharding-v4-8-2slice-{SetupMode.STABLE.value} gs://maxtext-xlml gs://maxtext-xlml/dataset",
       ),
