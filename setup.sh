@@ -96,7 +96,17 @@ if [ -e "$libtpu_path" ]; then
     rm "$libtpu_path"
 fi
 
-if [[ "$MODE" == "stable" || ! -v MODE ]]; then
+if [[ "$MODE" == "pinned" ]]; then
+  if [[ "$DEVICE" != "gpu" ]]; then
+    echo "pinned mode is supported for GPU builds only."
+    exit 1
+  fi
+  echo "Installing pinned jax, jaxlib for NVIDIA gpu."
+  pip3 install "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html -c constraints_gpu.txt
+  pip3 install "transformer-engine==1.4.0+0fbc76a" \
+    --extra-index-url https://us-python.pkg.dev/gce-ai-infra/maxtext-build-support-packages/simple/ \
+    -c constraints_gpu.txt
+elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
 # Stable mode
     if [[ $DEVICE == "tpu" ]]; then
         echo "Installing stable jax, jaxlib for tpu"
@@ -131,11 +141,10 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
             pip3 install -U "jax[cuda12_pip]==${JAX_VERSION}" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
         else
             echo "Installing stable jax, jaxlib, libtpu for NVIDIA gpu"
-            pip3 install "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html -c constraints.txt
+            pip3 install "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
         fi
         pip3 install "transformer-engine==1.4.0+0fbc76a" \
-          --extra-index-url https://us-python.pkg.dev/gce-ai-infra/maxtext-build-support-packages/simple/ \
-          -c constraints.txt
+          --extra-index-url https://us-python.pkg.dev/gce-ai-infra/maxtext-build-support-packages/simple/
     fi
 elif [[ $MODE == "nightly" ]]; then
 # Nightly mode
@@ -179,8 +188,8 @@ fi
 
 # Install dependencies from requirements.txt
 cd $run_name_folder_path && pip install --upgrade pip
-if [[ $DEVICE == "gpu"  ]] && [[ "$MODE" == "stable" || ! -v MODE ]] && [[ ! -v JAX_VERSION ]]; then
-    pip3 install -r requirements.txt -c constraints.txt
+if [[ "$MODE" == "pinned" ]]; then
+    pip3 install -r requirements.txt -c constraints_gpu.txt
 else
     pip3 install -U -r requirements.txt
 fi

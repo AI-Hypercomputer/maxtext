@@ -34,7 +34,7 @@ RUN mkdir -p /deps
 WORKDIR /deps
 
 # Copy necessary build files to docker container
-COPY setup.sh requirements.txt constraints.txt /deps/
+COPY setup.sh requirements.txt constraints_gpu.txt /deps/
 RUN ls .
 
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
