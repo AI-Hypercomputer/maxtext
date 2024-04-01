@@ -49,7 +49,8 @@ def simple_timeit(f, *args, tries = 10, task = None):
     assert task is not None
 
     trace_name = f"t_{task}_" + ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(10))
-    trace_dir = f"/tmp/traces/{trace_name}"
+    #trace_dir = f"/tmp/traces/{trace_name}" # local 
+    trace_dir = f"gs://mattdavidow-maxtext-br/{trace_name}" # GCS 
 
     outcomes_ms = []
     jax.block_until_ready(f(*args)) #warm it up!

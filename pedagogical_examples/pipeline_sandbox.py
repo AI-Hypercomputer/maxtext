@@ -60,6 +60,7 @@ def init_states(inputs, n_stages, use_circ_storage, mesh):
     # Shift is used to rotate the output of each pipeline into the input of the next
     # shift has shape [n_stages, micro_size, sequence, embed]
     shift = jnp.zeros((n_stages,) + inputs.shape[1:])
+    shift = shard_dim_by_stages(shift, mesh)
 
     # state_io (state input output) at first holds all of the input batches, but also will hold the outputs as the pipeline runs/finishes
     # state_io has shape [n_stages, microbatches/stages, micro_size, sequence, embed]
@@ -107,17 +108,34 @@ def get_weights_stage(weights, loop_iteration, n_stages, n_microbatches):
     For non-circular pipelines this would just be stacked [weights_layer_0; weights_layer1; etc],
     but for circular the stages need a repeat_idx to determine what layer weights to grab
     '''
-
-    microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(n_stages), 0) # not a great name, this is really batch_id * repeat idx
-    repeat_ids = microbatch_ids // n_microbatches
-    layer_ids = jnp.arange(n_stages) + repeat_ids * n_stages
-    # TODO: layer_ids actually goes out of bounds on the last bubble, but jax pulls it back to last idx
-    # Since its a bubble computation we don't care what gets pulled, but we should change to avoid OOB anyway
-    # TODO: Maybe use lax.dynamic slice instead of indexing?
-    to_stack = [weights[layer_ids[stage],:,:] for stage in range(n_stages)]
-    weights_stage = jnp.concatenate(to_stack, axis=0)
-    desired_shape = (n_stages,) + weights.shape[1:]
-    weights_stage = jnp.reshape(weights_stage, desired_shape) # This reshape fleshes out singleton axes that are flattened in concatenate
+    if 0:
+        microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(n_stages), 0) # not a great name, this is really batch_id * repeat idx
+        repeat_ids = microbatch_ids // n_microbatches
+        layer_ids = jnp.arange(n_stages) + repeat_ids * n_stages
+        # TODO: layer_ids actually goes out of bounds on the last bubble, but jax pulls it back to last idx
+        # Since its a bubble computation we don't care what gets pulled, but we should change to avoid OOB anyway
+        # TODO: Maybe use lax.dynamic slice instead of indexing?
+        to_stack = [weights[layer_ids[stage],:,:] for stage in range(n_stages)]
+        weights_stage = jnp.concatenate(to_stack, axis=0)
+        desired_shape = (n_stages,) + weights.shape[1:]
+        weights_stage = jnp.reshape(weights_stage, desired_shape) # This reshape fleshes out singleton axes that are flattened in concatenate
+    elif 1:
+        # We use numpy instead of jnp so these indexes are not tracers
+        #microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(n_stages), 0) # not a great name, this is really batch_id * repeat idx
+        microbatch_ids = np.maximum(loop_iteration - np.arange(n_stages), 0) # not a great name, this is really batch_id * repeat idx
+        repeat_ids = microbatch_ids // n_microbatches
+        #layer_ids = jnp.arange(n_stages) + repeat_ids * n_stages
+        layer_ids = np.arange(n_stages) + repeat_ids * n_stages
+        layer_ids= np.minimum(layer_ids, weights.shape[0] - 1)
+        # TODO: layer_ids actually goes out of bounds on the last bubble, but jax pulls it back to last idx
+        # Since its a bubble computation we don't care what gets pulled, but we should change to avoid OOB anyway
+        # TODO: Maybe use lax.dynamic slice instead of indexing?
+        to_stack = [jax.lax.slice_in_dim(weights,layer_ids[stage], layer_ids[stage] + 1, axis=0) for stage in range(n_stages)]
+        weights_stage = jnp.concatenate(to_stack, axis=0)
+        desired_shape = (n_stages,) + weights.shape[1:]
+        weights_stage = jnp.reshape(weights_stage, desired_shape) # This reshape fleshes out singleton axes that are flattened in concatenate
+    else:
+       return weights
     return weights_stage
 
 def get_iteration_inputs(loop_iteration, microbatches, num_stages, state_io, circ_storage, shift, use_circ_storage):
@@ -272,6 +290,7 @@ def create_mesh(n_stages, dp_axis):
 def get_pipelint_jit(n_stages, dp_axis, mesh):
   # Configure shardings passed to in and out_sharding. Possibly this can be refactored somewhere different
   weight_sharding = S(mesh, 'stage', None, None) # weight sharded over stage -- this is actually highly inefficinet for circular pipelining, we should reshape first with repeat_idx
+  #weight_sharding = S(mesh, None, None, None) # weight sharded over stage -- this is actually highly inefficinet for circular pipelining, we should reshape first with repeat_idx
   input_sharding = S(mesh, 'data', None)   # inputs sharded over batch
   result_sharding = S(mesh, 'data', None)  # output sharded over batch
 
