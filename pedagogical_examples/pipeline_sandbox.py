@@ -10,6 +10,7 @@ import os
 import argparse
 import pipeline_utils
 import functools
+from flax import linen as nn
 
 def S(mesh, *specs):
     return NamedSharding(mesh, PartitionSpec(*specs))
@@ -61,11 +62,14 @@ def init_states(inputs, n_stages, use_circ_storage, mesh):
     # shift has shape [n_stages, micro_size, sequence, embed]
     shift = jnp.zeros((n_stages,) + inputs.shape[1:])
     shift = shard_dim_by_stages(shift, mesh)
+    shift = jax.lax.with_sharding_constraint(shift, S(mesh, 'stage', 'data', None, 'tensor'))
 
     # state_io (state input output) at first holds all of the input batches, but also will hold the outputs as the pipeline runs/finishes
     # state_io has shape [n_stages, microbatches/stages, micro_size, sequence, embed]
     state_io = jnp.reshape(inputs, (n_stages, n_microbatches // n_stages) + inputs.shape[1:])
-    state_io = shard_dim_by_stages(state_io, mesh)
+    #state_io = shard_dim_by_stages(state_io, mesh)
+    state_io = jax.lax.with_sharding_constraint(state_io, S(mesh, 'stage', None, 'data', None, 'tensor'))
+    # shard over microbatch_size, not number of microbatches. The num_microbatches is looped over so should not be sharded.
 
     # circ_storage is used to hold the final pipeline stage outputs before it is used for the next repeat. It is only needed
     # when num_microbatches > num_stages, else instead the final stage can immediately pass to the first without additional storage.
@@ -260,23 +264,40 @@ def run_pipeline(weights, inputs, n_stages, n_microbatches, n_repeat, use_circ_s
     # The final output is located in the input/output array, however the microbatches may be permuted
     final_output = permute_output_ms_dim(state_io)
 
-    # reshape state to match input shape of total batch instead of microbatches
+    # reshape state to match input shape of total batch instead of microbatches [batch, sequence, embed]
     #final_output = jnp.reshape(final_output, (args.n_microbatches,) + state_io.shape[2:])
     final_output = jnp.reshape(final_output, (global_batch_size, sequence, features))
                                
     return final_output
 
-def create_mesh(n_stages, dp_axis):
-  devices = mesh_utils.create_device_mesh((n_stages, dp_axis))
-  mesh = Mesh(devices, axis_names=('stage', 'data'))
+def create_mesh(n_stages, tp_axis, dp_axis):
+  devices = mesh_utils.create_device_mesh((n_stages, tp_axis, dp_axis))
+  mesh = Mesh(devices, axis_names=('stage', 'tensor', 'data'))
   return mesh
+
+def get_logical_axis_rules():
+    return (
+        ('pipeline_stages', 'stage'),
+        ('activation_length', 'sequence'),
+        ('activation_embed', 'tensor'),
+        ('activation_mlp', 'tensor'),
+        ('embed', 'sequence'),
+        ('mlp', 'tensor'),
+    )
 
 def get_pipelint_jit(n_stages, dp_axis, mesh):
   # Configure shardings passed to in and out_sharding. Possibly this can be refactored somewhere different
-  weight_sharding = S(mesh, 'stage', None, None) # weight sharded over stage -- this is actually highly inefficinet for circular pipelining, we should reshape first with repeat_idx
-  #weight_sharding = S(mesh, None, None, None) # weight sharded over stage -- this is actually highly inefficinet for circular pipelining, we should reshape first with repeat_idx
-  input_sharding = S(mesh, 'data', None)   # inputs sharded over batch
-  result_sharding = S(mesh, 'data', None)  # output sharded over batch
+
+  # Fully sharded
+  weight_sharding = S(mesh, 'stage', 'data', 'tensor') # weight sharded over stage -- this is actually highly inefficinet for circular pipelining, we should reshape first with repeat_idx
+  input_sharding = S(mesh, 'data', None, 'tensor')   # inputs sharded over batch -- unsure about how inputs should be sharded into PP
+  result_sharding = S(mesh, 'data', None, 'tensor')  # output sharded over batch -- unsure about how outputs should be sharded out of PP
+
+  # Only stage sharded
+  #weight_sharding = S(mesh, 'stage', None, None) # weight sharded over stage -- this is actually highly inefficinet for circular pipelining, we should reshape first with repeat_idx
+  #input_sharding = S(mesh, 'data', None, None)   # inputs sharded over batch
+  #result_sharding = S(mesh, 'data', None, None)  # output sharded over batch
+  
 
   pipeline_with_mesh = functools.partial(run_pipeline, mesh=mesh)
   jitted_pipeline = jax.jit(run_pipeline,
@@ -292,6 +313,7 @@ def main() -> None:
     parser.add_argument('--n_stages', type=int, default=4)
     parser.add_argument('--n_microbatches', type=int, default=8)
     parser.add_argument('--dp_axis', type=int, default=1)
+    parser.add_argument('--tp_axis', type=int, default=1)
     parser.add_argument('--features', type=int, default=16)
     parser.add_argument('--sequence', type=int, default=16)
     parser.add_argument('--n_repeat', type=int, default=2)
@@ -302,7 +324,7 @@ def main() -> None:
     use_circ_storage = args.n_repeat > 1 and args.n_microbatches > args.n_stages
 
     # Necessary artifacts for the fun stuff
-    mesh = create_mesh(args.n_stages, args.dp_axis)
+    mesh = create_mesh(args.n_stages, args.tp_axis, args.dp_axis)
     pipeline_func = get_pipelint_jit(args.n_stages, args.dp_axis, mesh)
     weights, inputs, targets = get_weights_and_inputs(args.batch_size, args.sequence, args.features, args.layers)
 
