@@ -25,6 +25,7 @@ import unittest
 
 import pyconfig
 from input_pipeline import _grain_data_processing
+from input_pipeline import input_pipeline_interface
 
 class GrainDataProcessingTest(unittest.TestCase):
     @classmethod
@@ -64,10 +65,13 @@ class GrainDataProcessingTest(unittest.TestCase):
         return train_ds, eval_ds
 
     def _get_preprocessed_datasets(self):
+        process_indices = input_pipeline_interface.get_process_loading_real_data(self.config, self.mesh)
         train_iter, eval_iter, test_iter = _grain_data_processing.preprocess_dataset(
                 self.config,
-                self.mesh,
-                self.train_ds, self.eval_ds,
+                dataloading_host_index = process_indices.index(jax.process_index()),
+                dataloading_host_count = len(process_indices),
+                global_mesh = self.mesh,
+                train_ds = self.train_ds, eval_ds = self.eval_ds,
                 vocab_path=self.config.tokenizer_path)
         return train_iter, eval_iter, test_iter
 
