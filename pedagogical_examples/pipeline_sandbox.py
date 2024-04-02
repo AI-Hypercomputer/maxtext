@@ -106,36 +106,20 @@ def get_weights_stage(weights, loop_iteration, n_stages, n_microbatches):
         Weights for stages of shape [stage, embed, embed].
 
     For non-circular pipelines this would just be stacked [weights_layer_0; weights_layer1; etc],
-    but for circular the stages need a repeat_idx to determine what layer weights to grab
+    but for circular the stages need a repeat_idx to determine what layer weights to grab, e.g. on iteration 5 with 4 stages
+    the repeat indexes are [1;1;0;0] so need weights [4,5,2,3]
     '''
-    if 0:
-        microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(n_stages), 0) # not a great name, this is really batch_id * repeat idx
-        repeat_ids = microbatch_ids // n_microbatches
-        layer_ids = jnp.arange(n_stages) + repeat_ids * n_stages
-        # TODO: layer_ids actually goes out of bounds on the last bubble, but jax pulls it back to last idx
-        # Since its a bubble computation we don't care what gets pulled, but we should change to avoid OOB anyway
-        # TODO: Maybe use lax.dynamic slice instead of indexing?
-        to_stack = [weights[layer_ids[stage],:,:] for stage in range(n_stages)]
-        weights_stage = jnp.concatenate(to_stack, axis=0)
-        desired_shape = (n_stages,) + weights.shape[1:]
-        weights_stage = jnp.reshape(weights_stage, desired_shape) # This reshape fleshes out singleton axes that are flattened in concatenate
-    elif 1:
-        # We use numpy instead of jnp so these indexes are not tracers
-        #microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(n_stages), 0) # not a great name, this is really batch_id * repeat idx
-        microbatch_ids = np.maximum(loop_iteration - np.arange(n_stages), 0) # not a great name, this is really batch_id * repeat idx
-        repeat_ids = microbatch_ids // n_microbatches
-        #layer_ids = jnp.arange(n_stages) + repeat_ids * n_stages
-        layer_ids = np.arange(n_stages) + repeat_ids * n_stages
-        layer_ids= np.minimum(layer_ids, weights.shape[0] - 1)
-        # TODO: layer_ids actually goes out of bounds on the last bubble, but jax pulls it back to last idx
-        # Since its a bubble computation we don't care what gets pulled, but we should change to avoid OOB anyway
-        # TODO: Maybe use lax.dynamic slice instead of indexing?
-        to_stack = [jax.lax.slice_in_dim(weights,layer_ids[stage], layer_ids[stage] + 1, axis=0) for stage in range(n_stages)]
-        weights_stage = jnp.concatenate(to_stack, axis=0)
-        desired_shape = (n_stages,) + weights.shape[1:]
-        weights_stage = jnp.reshape(weights_stage, desired_shape) # This reshape fleshes out singleton axes that are flattened in concatenate
-    else:
-       return weights
+    # We use numpy instead of jnp so these indexes are not traced
+    microbatch_ids = np.maximum(loop_iteration - np.arange(n_stages), 0) # not a great name, this is really batch_id * repeat idx
+    repeat_ids = microbatch_ids // n_microbatches
+    layer_ids = np.arange(n_stages) + repeat_ids * n_stages
+    #layer_ids goes out of bounds on the last bubble, we cap it within range.
+    layer_ids= np.minimum(layer_ids, weights.shape[0] - 1)
+    # slice_in_dim avoids executing an all gather
+    to_stack = [jax.lax.slice_in_dim(weights,layer_ids[stage], layer_ids[stage] + 1, axis=0) for stage in range(n_stages)]
+    weights_stage = jnp.concatenate(to_stack, axis=0)
+    desired_shape = (n_stages,) + weights.shape[1:]
+    weights_stage = jnp.reshape(weights_stage, desired_shape) # This reshape fleshes out singleton axes that are flattened in concatenate
     return weights_stage
 
 def get_iteration_inputs(loop_iteration, microbatches, num_stages, state_io, circ_storage, shift, use_circ_storage):
