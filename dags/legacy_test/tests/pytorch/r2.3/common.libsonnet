@@ -24,7 +24,7 @@ local volumes = import 'templates/volumes.libsonnet';
     tpuSettings+: {
       softwareVersion: 'tpu-ubuntu2204-base',
     },
-    imageTag: 'r2.3.0-rc2_3.10',
+    imageTag: 'r2.3.0-rc6_3.10',
   },
   PyTorchTest:: common.PyTorchTest + r2_3 {
     local config = self,
@@ -99,12 +99,12 @@ local volumes = import 'templates/volumes.libsonnet';
         # Install torchvision by pinned commit in PyTorch 2.3 release branch.
         pip install torch==2.3.0 --index-url https://download.pytorch.org/whl/test/cpu
         pip install --user --no-use-pep517 "git+https://github.com/pytorch/vision.git@2c127da8b5e2e8f44b50994c6cb931bcca267cfe"
-        pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.3.0rc2-cp310-cp310-linux_x86_64.whl
+        pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.3.0rc6-cp310-cp310-manylinux_2_28_x86_64.whl
         pip install torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html
         pip install pillow
         git clone --depth=1 https://github.com/pytorch/pytorch.git
         cd pytorch
-        git clone -b v2.3.0-rc2 https://github.com/pytorch/xla.git
+        git clone -b v2.3.0-rc6 https://github.com/pytorch/xla.git
       |||,
     },
     podTemplate+:: {
@@ -142,10 +142,10 @@ local volumes = import 'templates/volumes.libsonnet';
         pip uninstall -y torch torchvision
         pip install torch==2.3.0 --index-url https://download.pytorch.org/whl/test/cpu
         pip install --user --no-use-pep517 "git+https://github.com/pytorch/vision.git@2c127da8b5e2e8f44b50994c6cb931bcca267cfe"
-        pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.3.0rc2-cp310-cp310-linux_x86_64.whl
+        pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.3.0rc6-cp310-cp310-manylinux_2_28_x86_64.whl
 
         mkdir -p pytorch/xla
-        git clone -b v2.3.0-rc2 https://github.com/pytorch/xla.git pytorch/xla
+        git clone -b v2.3.0-rc6 https://github.com/pytorch/xla.git pytorch/xla
 
         %s
 
