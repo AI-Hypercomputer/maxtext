@@ -58,6 +58,8 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 from layers import quantizations
 
+from ml_goodput_measurement import goodput
+
 Transformer = models.Transformer
 EPS = 1e-8
 
@@ -280,6 +282,22 @@ def eval_step(model, config, state, data, dropout_rng):
 
   return metrics
 
+def create_goodput_recorder(config):
+  if config.enable_goodput_recording:
+    logger_name = f'goodput_{config.run_name}'
+    recorder = goodput.GoodputRecorder(config.run_name, logger_name, jax.process_index() == 0)
+    return recorder
+  return None
+
+def record_goodput(recorder, config, step=None, job_start=False, job_end=False):
+  if recorder and config.enable_goodput_recording:
+    if job_start and step is None:
+      recorder.record_job_start_time()
+    if job_end and step is None:
+      recorder.record_job_end_time()
+    if step is not None:
+      recorder.record_step_start_time(step)
+
 def setup_mesh_and_model(config):
   """ Set up the mesh and the model for training
 
@@ -354,6 +372,10 @@ def train_loop(config, state=None):
     ckpt_path:
   Returns:
   """
+  # Create a GoodputRecorder to log information
+  recorder = create_goodput_recorder(config)
+  record_goodput(recorder, config, job_start=True)
+
   ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
   mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state) = setup_train_loop(config)
   # pylint: disable=line-too-long
@@ -426,6 +448,7 @@ def train_loop(config, state=None):
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       example_batch = load_next_batch(data_iterator, example_batch, config)
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
+      record_goodput(recorder, config, step=step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(
             state, example_batch, nextrng
@@ -470,6 +493,7 @@ def train_loop(config, state=None):
     checkpoint_manager.wait_until_finished()
   write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config) # final step metrics
   max_utils.close_summary_writer(writer)
+  record_goodput(recorder, config, job_end=True)
   return state
 
 def main(argv: Sequence[str]) -> None:
@@ -488,7 +512,6 @@ def main(argv: Sequence[str]) -> None:
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
   with diagnostic.diagnose(diagnostic_config):
     train_loop(config)
-
 
 if __name__ == "__main__":
   app.run(main)
