@@ -140,7 +140,7 @@ jobs:
         docker system prune --all --force
     - name: Install dependencies
       run: |
-        bash docker_build_dependency_image.sh DEVICE=gpu MODE=${{ matrix.build-mode }}
+        bash docker_build_dependency_image.sh DEVICE=gpu MODE=${{ matrix.build-mode }} LOCAL_IMAGE_NAME="$LOCAL_IMAGE_NAME"
     - name: Test gsutil installation
       run: |
         docker run --runtime=nvidia --gpus all -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged "$LOCAL_IMAGE_NAME" bash -c \
