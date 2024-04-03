@@ -360,6 +360,8 @@ def setup_train_loop(config):
   state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(model, data_iterator,
           tx, config, init_rng, mesh, checkpoint_manager)
 
+  maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh)
+
   return ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
           mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state)
 
