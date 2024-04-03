@@ -177,10 +177,13 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
     max_logging.log(f"restoring params from {load_parameters_from_path=}")
     p = epath.Path(load_parameters_from_path)
     ckptr = orbax.checkpoint.PyTreeCheckpointer()
+    # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
+    # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
+    # memory, we instead specify here that we are just restoring the params field of the checkpoint
+    # (which itself may be a dictionary containing a key named 'params').
     restore_args = orbax.checkpoint.checkpoint_utils.construct_restore_args(abstract_unboxed_pre_state.params)
     restored = ckptr.restore(p, item = {'params': abstract_unboxed_pre_state.params}, transforms={},
-                             restore_args = {'params': restore_args})
-
+                                restore_args = {'params': restore_args})
     return None, restored['params']
 
   elif load_full_state_from_path != "":
