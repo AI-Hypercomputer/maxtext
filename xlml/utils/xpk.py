@@ -26,6 +26,7 @@ from kubernetes import client as k8s_client
 from kubernetes.client import models as k8s_models
 from xlml.apis import metric_config
 from xlml.utils import gke
+from dags.vm_resource import GpuVersion
 
 
 WORKLOAD_URL_FORMAT = "https://console.cloud.google.com/kubernetes/service/{region}/{cluster}/default/{workload_id}/details?project={project}"
@@ -60,6 +61,10 @@ def run_workload(
   """Run workload through xpk tool."""
 
   with tempfile.TemporaryDirectory() as tmpdir:
+    if accelerator_type == GpuVersion.XPK_H100.value:
+      multi_keyword = "num-nodes"
+    else:
+      multi_keyword = "num-slices"
     cmds = (
         "set -xue",
         f"git clone https://github.com/google/xpk {tmpdir}/xpk",
@@ -67,7 +72,7 @@ def run_workload(
             f"python {tmpdir}/xpk/xpk.py workload create"
             f" --cluster={cluster_name} --workload={workload_id}"
             f" --command='{run_cmds}' --device-type={accelerator_type}"
-            f" --num-slices={num_slices} --docker-image={docker_image}"
+            f" --{multi_keyword}={num_slices} --docker-image={docker_image}"
             f" --project={cluster_project} --zone={zone}"
             f" --env {metric_config.SshEnvVars.GCS_OUTPUT.name}={gcs_path}"
             " --restart-on-user-code-failure"

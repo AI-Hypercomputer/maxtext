@@ -163,7 +163,7 @@ def get_maxtext_end_to_end_gpu_gke_test_config(
       zone=gpu_zone,
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
-  run_model_cmds = (f"cd /tmp/maxtext && bash end_to_end/{test_script}.sh",)
+  run_model_cmds = (f"bash end_to_end/{test_script}.sh",)
 
   job_test_config = test_config.GpuXpkTest(
       test_config.Gpu(
