@@ -47,8 +47,8 @@ def _possibly_unroll_params(config, training_state, training_state_annotations, 
   if not config.scan_layers or not config.force_unroll:
     return
 
-  training_state_layers = training_state.params['decoder']['layers']
-  training_state_annotations_layers = training_state_annotations.params['decoder']['layers']
+  training_state_layers = training_state.params['params']['decoder']['layers']
+  training_state_annotations_layers = training_state_annotations.params['params']['decoder']['layers']
 
   def new_pspec(x):
     return jax.sharding.PartitionSpec(*x[0:config.param_scan_axis] + x[config.param_scan_axis+1:])
@@ -62,11 +62,11 @@ def _possibly_unroll_params(config, training_state, training_state_annotations, 
 
     new_layer = jax.jit(slice_ith, out_shardings = new_per_layer_state_sharding)(training_state_layers)
 
-    training_state.params['decoder'][f'layers_{i}'] = new_layer
-    training_state_annotations.params['decoder'][f'layers_{i}'] = new_per_layer_state_annotation
+    training_state.params['params']['decoder'][f'layers_{i}'] = new_layer
+    training_state_annotations.params['params']['decoder'][f'layers_{i}'] = new_per_layer_state_annotation
 
-  del training_state.params['decoder']['layers']
-  del training_state_annotations.params['decoder']['layers']
+  del training_state.params['params']['decoder']['layers']
+  del training_state_annotations.params['params']['decoder']['layers']
 
   jax.tree_map(lambda x : x.delete(), training_state_layers)
 

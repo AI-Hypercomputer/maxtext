@@ -61,6 +61,19 @@ def calculate_num_params_from_pytree(params):
   assert total_parameters >= 0
   return total_parameters
 
+
+def calculate_total_params_per_chip(params):
+  def calculate_leaf_params_per_chip(arr):
+    shard = arr.addressable_shards[0]
+    return np.prod(shard.data.shape)
+
+  params_sizes_per_chip = jax.tree_util.tree_map(
+    calculate_leaf_params_per_chip, params)
+  total_parameters_per_chip = jax.tree_util.tree_reduce(
+    lambda x, y: x + y, params_sizes_per_chip)
+  return total_parameters_per_chip
+
+
 def calculate_bytes_from_pytree(params):
   params_bytes = jax.tree_util.tree_map(lambda x : x.nbytes, params)
   total_bytes = jax.tree_util.tree_reduce(lambda x, y: x + y, params_bytes)
@@ -197,10 +210,8 @@ def initialize_jax_for_gpu():
     coordinator_port = str(os.getenv("JAX_COORDINATOR_PORT"))
     jax.distributed.initialize(
         coordinator_address=f"{coordinator_ip}:{coordinator_port}",
-        num_processes=int(os.getenv("JAX_NUM_PROCESSES")),
-        process_id=int(os.getenv("PROCESS_ID")),
-        local_device_ids=int(os.getenv("LOCAL_DEVICE_ID")),
-    )
+        num_processes=int(os.getenv("NNODES")),
+        process_id=int(os.getenv("NODE_RANK")))
     max_logging.log(f"JAX global devices: {jax.devices()}")
 
 def initialize_jax_for_cpu():
@@ -349,13 +360,12 @@ def init_initial_state(model, tx, config, is_training, key):
                           jnp.ones(input_shape, dtype=jnp.int32),
                           jnp.ones(input_shape, dtype=jnp.int32))
   if is_training:
-    return init_training_state(model.apply, model_vars['params'], tx)
-  return init_decode_state(model.apply, model_vars['params'])
+    return init_training_state(model.apply, model_vars, tx)
+  return init_decode_state(model.apply, model_vars)
 
 def load_decode_model_vars(model, config, rng, mesh):
   state, _ = setup_decode_state(model, config, rng, mesh, None)
-  model_vars = {'params': state.params}
-  return model_vars
+  return state.params
 
 def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   is_training = False
@@ -545,7 +555,8 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   """ Get a shaped abstraction of the state (including optimizer)"""
   init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
 
-  abstract_state = jax.eval_shape(init_state_partial, rng)
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    abstract_state = jax.eval_shape(init_state_partial, rng)
 
   state_logical_annotations = nn.get_partition_spec(abstract_state)
 
@@ -579,9 +590,10 @@ def get_kv_cache_annotations(model, config, rng, mesh):
                           model_mode=common_types.MODEL_MODE_PREFILL)
     return model_vars['cache']
 
-  init_kv_cache_partial = functools.partial(init_kv_cache, model,
-                                              config)
-  abstract_state = jax.eval_shape(init_kv_cache_partial)
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    init_kv_cache_partial = functools.partial(init_kv_cache, model,
+                                                config)
+    abstract_state = jax.eval_shape(init_kv_cache_partial)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)

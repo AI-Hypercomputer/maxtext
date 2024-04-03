@@ -18,6 +18,7 @@
 """Utils that are only interesting to MaxText. """
 
 import jax
+import max_utils
 from jax.sharding import PartitionSpec as P
 from jax.experimental.serialize_executable import deserialize_and_load
 
@@ -128,5 +129,43 @@ def calculate_tflops_prefill(num_model_parameters, prefill_length, config, log=T
           f'\t\tLearnable weight TFLOPs: {learnable_weight_tflops} ',
           f'({100 * learnable_weight_tflops/total_tflops:.2f})% of Total\n',
           f'\t\tCausal attention TFLOPs: {causal_attention_tflops} ',
-          f'({100 * causal_attention_tflops/total_tflops:.2f}% of Total')
+          f'({100 * causal_attention_tflops/total_tflops:.2f})% of Total')
   return total_tflops, learnable_weight_tflops, causal_attention_tflops
+
+
+def assert_params_sufficiently_sharded(params, mesh, tolerance=0.01):
+  """Checks whether most params are sharded across sharding axis.
+
+  This function determines whether the majority of parameters  are distributed
+  across a specified sharding axes with an acceptable tolerance. It compares the
+  current distribution to a scenario where all parameters are fully sharded
+  across the 'fsdp', 'fsdp_transpose', 'sequence', and 'tensor' axes.
+
+  Args:
+    params: params of the model state
+    mesh: mesh constructed from config
+    tolerance: float between 0.0 and 1.0 representing the allowed percentage of
+    non-sharded parameters.
+  Returns:
+    bool: True if the majority of parameters are sufficiently sharded
+  """
+  total_num_params = max_utils.calculate_num_params_from_pytree(params)
+  product_num_devices_for_weight_sharding  = 1
+  for axis in ['fsdp', 'fsdp_transpose', 'sequence', 'tensor']:
+    product_num_devices_for_weight_sharding *= mesh.shape[axis]
+  total_num_params_per_chip = (
+    max_utils.calculate_total_params_per_chip(
+      params)
+  )
+  perfectly_sharded_params_per_chip = (
+    total_num_params / product_num_devices_for_weight_sharding
+  )
+  assert total_num_params_per_chip >= perfectly_sharded_params_per_chip, (
+    'Number of parameters per chip must not be less than in the ideal sharded '
+    'scenario accross `fsdp`, `fsdp_transpose`,`sequence`, `tensor` axes.'
+    )
+  assert (
+    total_num_params_per_chip/perfectly_sharded_params_per_chip - 1 < tolerance
+    ), (f'Number of unsharded parameters exceeds tolerance {tolerance * 100}% '
+      'of total parameters.')
+

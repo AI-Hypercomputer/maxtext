@@ -181,7 +181,7 @@ def main(raw_args=None) -> None:
   state_new = train_state.TrainState(
     step=0,
     apply_fn=None,
-    params=jax_weights,
+    params={'params': jax_weights},
     tx=None, # type: ignore
     opt_state={}
   )
