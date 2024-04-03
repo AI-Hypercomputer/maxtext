@@ -90,7 +90,7 @@ class DecoderLayer(nn.Module):
       dropout_rate=cfg.dropout_rate,
       name='self_attention',
       quant=self.quant,
-      quantize_kvcache=self.quantize_kvcache)
+      quantize_kvcache=cfg.quantize_kvcache)
 
 
     attention_lnx = attention_layer(
