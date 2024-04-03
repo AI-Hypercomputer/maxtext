@@ -61,6 +61,19 @@ def calculate_num_params_from_pytree(params):
   assert total_parameters >= 0
   return total_parameters
 
+
+def calculate_total_params_per_chip(params):
+  def calculate_leaf_params_per_chip(arr):
+    shard = arr.addressable_shards[0]
+    return np.prod(shard.data.shape)
+
+  params_sizes_per_chip = jax.tree_util.tree_map(
+    calculate_leaf_params_per_chip, params)
+  total_parameters_per_chip = jax.tree_util.tree_reduce(
+    lambda x, y: x + y, params_sizes_per_chip)
+  return total_parameters_per_chip
+
+
 def calculate_bytes_from_pytree(params):
   params_bytes = jax.tree_util.tree_map(lambda x : x.nbytes, params)
   total_bytes = jax.tree_util.tree_reduce(lambda x, y: x + y, params_bytes)
