@@ -109,6 +109,7 @@ class RuntimeVersion(enum.Enum):
   TPU_VM_TF_STABLE_POD_SE = "tpu-vm-tf-2.16.0-pod-se"
   TPU_VM_TF_STABLE_PJRT = "tpu-vm-tf-2.16.0-pjrt"
   TPU_VM_TF_STABLE_POD_PJRT = "tpu-vm-tf-2.16.0-pod-pjrt"
+  TPU_VM_TF_V5P_ALPHA = "tpu-vm-tf-v5p-alpha-sc"
   TPU_UBUNTU2204_BASE = "tpu-ubuntu2204-base"
   TPU_VM_V4_BASE = "tpu-vm-v4-base"
   V2_ALPHA_TPUV5_LITE = "v2-alpha-tpuv5-lite"

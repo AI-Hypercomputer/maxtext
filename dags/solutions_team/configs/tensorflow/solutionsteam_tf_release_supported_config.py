@@ -64,13 +64,13 @@ def get_tf_keras_config(
   # Add default_var to pass DAG check
   # TODO(ranran): replace Variable.get() to XCOM when it applies
   tpu_name = Variable.get(benchmark_id, default_var=None) if is_pod else "local"
-  env_variable = export_env_variable(is_pod, is_pjrt)
+  env_variable = common.export_env_variables(tpu_name, is_pod, is_pjrt)
   skipped_tag = "--tags=-failspod" if is_pod else ""
   run_model_cmds = (
       "sudo chmod -R 777 /tmp/",
       (
           "export PATH=$PATH:/home/ml-auto-solutions/.local/bin &&"
-          f" export TPU_NAME={tpu_name} && {env_variable} &&"
+          f" {env_variable} &&"
           " cd /tmp/tf2-api-tests &&"
           " behave -e ipynb_checkpoints"
           f" --tags=-fails {skipped_tag} -i {test_feature}"
@@ -156,16 +156,15 @@ def get_tf_resnet_config(
   # Add default_var to pass DAG check
   # TODO(ranran): replace Variable.get() to XCOM when it applies
   tpu_name = Variable.get(benchmark_id, default_var=None) if is_pod else "local"
-  env_variable = export_env_variable(is_pod, is_pjrt)
+  env_variable = common.export_env_variables(tpu_name, is_pod, is_pjrt)
   run_model_cmds = (
       "sudo chmod -R 777 /tmp/",
       (
           f"cd /usr/share/tpu/models && {env_variable} &&"
-          " PYTHONPATH='.'"
           " python3 official/vision/train.py"
-          f" --tpu={tpu_name} --experiment=resnet_imagenet"
+          f" --experiment=resnet_imagenet"
           " --mode=train_and_eval --model_dir=/tmp/"
-          " --params_override='%s'" % str(params_override)
+          f" --params_override='{params_override}'"
       ),
   )
 
@@ -216,12 +215,25 @@ def get_tf_dlrm_config(
       dataset_name=metric_config.DatasetOption.XLML_DATASET,
   )
 
-  set_up_cmds = common.set_up_tensorflow_models(MODELS_BRANCH, KERAS_VERSION)
-  set_up_cmds += common.install_tf(
-      MAJOR_VERSION, MINOR_VERSION, PATCH_VERSION, LIBTPU_VERSION
+  # Add default_var to pass DAG check
+  # TODO(ranran): replace Variable.get() to XCOM when it applies
+  test_name = "tf_dlrm_criteo"
+  benchmark_id = f"{test_name}-v{tpu_version.value}-{tpu_cores}"
+  tpu_name = Variable.get(benchmark_id, default_var=None) if is_pod else "local"
+  is_v5p = tpu_version == TpuVersion.V5P
+  env_variable = common.export_env_variables(
+      tpu_name, is_pod, is_pjrt, is_v5p_sc=is_v5p
   )
-  if not is_pjrt and is_pod:
-    set_up_cmds += common.set_up_se_nightly()
+
+  if is_v5p:
+    set_up_cmds = common.set_up_dlrm_v5p()
+  else:
+    set_up_cmds = common.set_up_tensorflow_models(MODELS_BRANCH, KERAS_VERSION)
+    set_up_cmds += common.install_tf(
+        MAJOR_VERSION, MINOR_VERSION, PATCH_VERSION, LIBTPU_VERSION
+    )
+    if not is_pjrt and is_pod:
+      set_up_cmds += common.set_up_se_nightly()
 
   params_override = {
       "runtime": {"distribution_strategy": "tpu"},
@@ -289,19 +301,23 @@ def get_tf_dlrm_config(
       },
   }
 
-  test_name = f"tf_{MAJOR_VERSION}_{MINOR_VERSION}_dlrm_criteo"
-  benchmark_id = f"{test_name}-v{tpu_version.value}-{tpu_cores}"
-  # Add default_var to pass DAG check
-  # TODO(ranran): replace Variable.get() to XCOM when it applies
-  tpu_name = Variable.get(benchmark_id, default_var=None) if is_pod else "local"
-  env_variable = export_env_variable(is_pod, is_pjrt)
+  model_dir = "/tmp/"
+  if is_v5p:
+    params_override["trainer"]["pipeline_sparse_and_dense_execution"] = "true"
+    tpu_id = Variable.get(benchmark_id, default_var=None)
+    # TODO (ericlefort): Replace the model_dir with this line when the var is available
+    # model_dir = metric_config.SshEnvVars.GCS_OUTPUT.value + f"/dlrm/v5p/{benchmark_id}"
+    model_dir = f"{gcs_bucket.BASE_OUTPUT_DIR}/{test_owner.Team.SOLUTIONS_TEAM.value}/dlrm/v5p/{benchmark_id}"
+
+  # Clean out the prior checkpoint if it exists
   run_model_cmds = (
       "sudo chmod -R 777 /tmp/",
+      f"gsutil rm {model_dir}/* 2> /dev/null || true" if is_v5p else "echo",
       (
           f"cd /usr/share/tpu/models && {env_variable} &&"
-          " PYTHONPATH='.' python3 official/recommendation/ranking/train.py"
-          f" --tpu={tpu_name} --model_dir=/tmp/output {extraFlags}"
-          " --params_override='%s'" % str(params_override)
+          " python3 official/recommendation/ranking/train.py"
+          f" --model_dir={model_dir} {extraFlags}"
+          f" --params_override='{params_override}'"
       ),
   )
 
@@ -327,18 +343,3 @@ def get_tf_dlrm_config(
       tpu_name_env_var=is_pod,
       all_workers=not is_pod,
   )
-
-
-def export_env_variable(is_pod: bool, is_pjrt: bool) -> str:
-  """Export environment variables for training if any."""
-  stmts = [
-      "export WRAPT_DISABLE_EXTENSIONS=true",
-      "export TF_USE_LEGACY_KERAS=1",
-  ]
-  if is_pod:
-    stmts.append("export TPU_LOAD_LIBRARY=0")
-  elif is_pjrt:
-    stmts.append("export NEXT_PLUGGABLE_DEVICE_USE_C_API=true")
-    stmts.append("export TF_PLUGGABLE_DEVICE_LIBRARY_PATH=/lib/libtpu.so")
-
-  return " && ".join(stmts)

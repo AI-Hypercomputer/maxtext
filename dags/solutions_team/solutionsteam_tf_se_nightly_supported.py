@@ -17,7 +17,7 @@
 import datetime
 from airflow import models
 from dags import composer_env
-from dags.vm_resource import TpuVersion, Zone, RuntimeVersion, V5_NETWORKS, V5E_SUBNETWORKS, V5P_SUBNETWORKS
+from dags.vm_resource import TpuVersion, Project, Zone, RuntimeVersion, V5_NETWORKS, V5E_SUBNETWORKS, V5P_SUBNETWORKS
 from dags.solutions_team.configs.tensorflow import solutionsteam_tf_nightly_supported_config as tf_config
 from dags.solutions_team.configs.tensorflow import common
 
@@ -107,27 +107,30 @@ with models.DAG(
       is_pjrt=False,
       runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY_POD.value,
   ).run()
+
   # DLRM
+  embedding_dim = 16
   tf_dlrm_v2_8 = tf_config.get_tf_dlrm_config(
       tpu_version=TpuVersion.V2,
       tpu_cores=8,
       tpu_zone=Zone.US_CENTRAL1_C.value,
       time_out_in_min=60,
-      bottom_mlp=[512, 256, 16],
-      embedding_dim=16,
+      bottom_mlp=[512, 256, embedding_dim],
+      embedding_dim=embedding_dim,
       train_steps=10000,
       extraFlags="--mode=train",
       is_pjrt=False,
       runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY.value,
   ).run()
 
+  embedding_dim = 64
   tf_dlrm_v2_32 = tf_config.get_tf_dlrm_config(
       tpu_version=TpuVersion.V2,
       tpu_cores=32,
       tpu_zone=Zone.US_CENTRAL1_A.value,
       time_out_in_min=60,
-      bottom_mlp=[512, 256, 64],
-      embedding_dim=64,
+      bottom_mlp=[512, 256, embedding_dim],
+      embedding_dim=embedding_dim,
       train_steps=256054,
       extraFlags="--mode=train_and_eval",
       is_pod=True,
@@ -135,31 +138,51 @@ with models.DAG(
       runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY_POD.value,
   ).run()
 
+  embedding_dim = 64
   tf_dlrm_v4_8 = tf_config.get_tf_dlrm_config(
       tpu_version=TpuVersion.V4,
       tpu_cores=8,
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
-      bottom_mlp=[512, 256, 64],
-      embedding_dim=64,
+      bottom_mlp=[512, 256, embedding_dim],
+      embedding_dim=embedding_dim,
       train_steps=10000,
       extraFlags="--mode=train",
       is_pjrt=False,
       runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY.value,
   ).run()
 
+  embedding_dim = 128
   tf_dlrm_v4_32 = tf_config.get_tf_dlrm_config(
       tpu_version=TpuVersion.V4,
       tpu_cores=32,
       tpu_zone=Zone.US_CENTRAL2_B.value,
       time_out_in_min=60,
-      bottom_mlp=[512, 256, 128],
-      embedding_dim=128,
+      bottom_mlp=[512, 256, embedding_dim],
+      embedding_dim=embedding_dim,
       train_steps=256054,
       extraFlags="--mode=train_and_eval",
       is_pod=True,
       is_pjrt=False,
       runtime_version=RuntimeVersion.TPU_VM_TF_NIGHTLY_POD.value,
+  ).run()
+
+  embedding_dim = 32
+  tf_dlrm_v5p_8 = tf_config.get_tf_dlrm_config(
+      project_name=Project.TPU_PROD_ENV_AUTOMATED.value,
+      tpu_version=TpuVersion.V5P,
+      tpu_cores=8,
+      tpu_zone=Zone.US_EAST5_A.value,
+      time_out_in_min=60,
+      bottom_mlp=[512, 256, embedding_dim],
+      embedding_dim=embedding_dim,
+      train_steps=10000,
+      extraFlags="--mode=train",
+      is_pod=False,
+      is_pjrt=False,
+      network=V5_NETWORKS,
+      subnetwork=V5P_SUBNETWORKS,
+      runtime_version=RuntimeVersion.TPU_VM_TF_V5P_ALPHA.value,
   ).run()
 
   # Test dependencies
@@ -169,3 +192,4 @@ with models.DAG(
   tf_resnet_v4_8 >> tf_resnet_v4_32
   tf_dlrm_v2_8 >> tf_dlrm_v2_32
   tf_dlrm_v4_8 >> tf_dlrm_v4_32
+  tf_dlrm_v5p_8

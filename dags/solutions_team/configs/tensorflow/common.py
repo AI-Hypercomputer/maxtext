@@ -145,8 +145,61 @@ def set_up_tensorflow_models(
     cmd_install_keras = f"pip install --upgrade --force-reinstall --no-deps tf-keras=={keras_version}"
 
   return (
-      f'if [ ! -d "/usr/share/tpu/models" ]; then sudo mkdir -p /usr/share/tpu && cd /usr/share/tpu && sudo git clone -b {models_branch} https://github.com/tensorflow/models.git; fi',
+      "sudo mkdir -p /usr/share/tpu && cd /usr/share/tpu",
+      f'if [ ! -d "/usr/share/tpu/models" ]; then sudo git clone -b {models_branch} https://github.com/tensorflow/models.git; fi',
       "pip install -r /usr/share/tpu/models/official/requirements.txt",
       "pip install tensorflow-recommenders --no-deps",
       cmd_install_keras,
   )
+
+
+def set_up_dlrm_v5p(models_branch: Optional[str] = None) -> tuple[str]:
+  """Setup DLRM on v5p TPUs
+
+  If any versions are not set, defaults to nightly.
+  """
+  if models_branch is None:
+    models_branch = "master"
+
+  return (
+      "sudo mkdir -p /usr/share/tpu && cd /usr/share/tpu",
+      f'if [ ! -d "/usr/share/tpu/models" ]; then sudo git clone -b {models_branch} http    s://github.com/tensorflow/models.git; fi',
+      'if [ ! -d "/usr/share/tpu/recommenders" ]; then sudo git clone https://github.com/tensorflow/recommenders.git; fi',
+      "pip install gin-config tensorflow-datasets tbp-nightly tf_keras_nightly tbp-nightly",
+      "sudo pip install --no-deps /usr/share/tpu/recommenders",
+      "source /usr/share/tpu/four_tasks_per_host.sh && setup_four_tasks_per_host",
+  )
+
+
+def export_env_variables(
+    tpu_name: str,
+    is_pod: bool,
+    is_pjrt: bool,
+    is_v5p_sc: Optional[bool] = False,
+) -> str:
+  """Export environment variables for training."""
+  stmts = [
+      "export WRAPT_DISABLE_EXTENSIONS=true",
+      "export TF_USE_LEGACY_KERAS=1",
+  ]
+
+  if is_v5p_sc:
+    stmts.append("source /usr/share/tpu/four_tasks_per_host.sh")
+    stmts.append("export `get_tpu_name`")
+    stmts.append(
+        "export PYTHONPATH='/usr/share/tpu/recommenders:/usr/share/tpu/models'"
+    )
+    stmts.append("export TPU_LOAD_LIBRARY=0")
+    stmts.append(
+        "export TF_XLA_FLAGS='--tf_mlir_enable_mlir_bridge=true --tf_xla_sparse_core_disable_table_stacking=true --tf_mlir_enable_convert_control_to_data_outputs_pass=true --tf_mlir_enable_merge_control_flow_pass=true'"
+    )
+  else:
+    stmts.append(f"export TPU_NAME={tpu_name}")
+    stmts.append("export PYTHONPATH='.'")
+    if is_pod:
+      stmts.append("export TPU_LOAD_LIBRARY=0")
+    elif is_pjrt:
+      stmts.append("export NEXT_PLUGGABLE_DEVICE_USE_C_API=true")
+      stmts.append("export TF_PLUGGABLE_DEVICE_LIBRARY_PATH=/lib/libtpu.so")
+
+  return " && ".join(stmts)
