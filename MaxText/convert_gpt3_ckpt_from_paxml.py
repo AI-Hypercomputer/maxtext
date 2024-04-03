@@ -148,12 +148,12 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
 
   for keystr_maxtext, (keystr_pax, transform_fn) in keystr_map.items():
     # model variable
-    state_map[f".params{keystr_maxtext}"] = (f"mdl_vars{keystr_pax}", transform_fn)
+    state_map[f".params['params']{keystr_maxtext}"] = (f"mdl_vars{keystr_pax}", transform_fn)
     prefix_pax_opt_state = get_layer_prefix(keystr_pax)
     # first momentum in optimizer state
-    state_map[f".opt_state.mu{keystr_maxtext}"] = (f"opt_states_0.{prefix_pax_opt_state}.m{keystr_pax}", transform_fn)
+    state_map[f".opt_state.mu['params']{keystr_maxtext}"] = (f"opt_states_0.{prefix_pax_opt_state}.m{keystr_pax}", transform_fn)
     # second momentum in optimizer state
-    state_map[f".opt_state.nu{keystr_maxtext}"] = (f"opt_states_0.{prefix_pax_opt_state}.v{keystr_pax}", transform_fn)
+    state_map[f".opt_state.nu['params']{keystr_maxtext}"] = (f"opt_states_0.{prefix_pax_opt_state}.v{keystr_pax}", transform_fn)
 
   def verify_fn(key_path, _):
     keystr = jax.tree_util.keystr(key_path)

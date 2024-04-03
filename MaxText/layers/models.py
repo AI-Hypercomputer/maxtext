@@ -141,13 +141,7 @@ class DecoderLayer(nn.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    if cfg.scan_layers:
-      return layer_output, None
-
-    if cfg.scan_layers:
-      return layer_output, None
-    else:
-      return layer_output
+    return layer_output, None if cfg.scan_layers else layer_output
 
 
 class Decoder(nn.Module):

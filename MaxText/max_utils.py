@@ -61,6 +61,19 @@ def calculate_num_params_from_pytree(params):
   assert total_parameters >= 0
   return total_parameters
 
+
+def calculate_total_params_per_chip(params):
+  def calculate_leaf_params_per_chip(arr):
+    shard = arr.addressable_shards[0]
+    return np.prod(shard.data.shape)
+
+  params_sizes_per_chip = jax.tree_util.tree_map(
+    calculate_leaf_params_per_chip, params)
+  total_parameters_per_chip = jax.tree_util.tree_reduce(
+    lambda x, y: x + y, params_sizes_per_chip)
+  return total_parameters_per_chip
+
+
 def calculate_bytes_from_pytree(params):
   params_bytes = jax.tree_util.tree_map(lambda x : x.nbytes, params)
   total_bytes = jax.tree_util.tree_reduce(lambda x, y: x + y, params_bytes)
@@ -347,13 +360,12 @@ def init_initial_state(model, tx, config, is_training, key):
                           jnp.ones(input_shape, dtype=jnp.int32),
                           jnp.ones(input_shape, dtype=jnp.int32))
   if is_training:
-    return init_training_state(model.apply, model_vars['params'], tx)
-  return init_decode_state(model.apply, model_vars['params'])
+    return init_training_state(model.apply, model_vars, tx)
+  return init_decode_state(model.apply, model_vars)
 
 def load_decode_model_vars(model, config, rng, mesh):
   state, _ = setup_decode_state(model, config, rng, mesh, None)
-  model_vars = {'params': state.params}
-  return model_vars
+  return state.params
 
 def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   is_training = False

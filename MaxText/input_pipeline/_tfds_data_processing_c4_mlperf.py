@@ -191,6 +191,8 @@ def _pad_to_batch_size(ds: tf.data.Dataset,  batch_size: int, num_examples: Opti
 
 def get_datasets(
   config: ml_collections.ConfigDict,
+  dataloading_host_index,
+  dataloading_host_count,
 ):
   """Load and return dataset of batched examples for use during training."""
   # Training dataset.
@@ -204,10 +206,10 @@ def get_datasets(
   eval_ds = eval_ds_builder.as_dataset(split='validation_tokenized_5662seqs', read_config=read_config, shuffle_files=False)
 
   # shard the dataset as soon as it is loaded
-  train_ds = train_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
+  train_ds = train_ds.shard(num_shards = dataloading_host_count, index = dataloading_host_index)
   train_ds = rekey(train_ds, {'inputs': None, 'targets': 'text'})
 
-  eval_ds = eval_ds.shard(num_shards = jax.process_count(), index = jax.process_index())
+  eval_ds = eval_ds.shard(num_shards = dataloading_host_count, index = dataloading_host_index)
   # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and splitted to target_length
   #   mainly to avoid eval sequences change depending on the number of hosts
   eval_ds = rekey(eval_ds, {'inputs': None, 'targets': 'ids'})

@@ -383,7 +383,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
   state_new = train_state.TrainState(
       step=0,
       apply_fn=None,
-      params=jax_weights,
+      params={'params': jax_weights},
       tx=None,  # type: ignore
       opt_state={}
   )

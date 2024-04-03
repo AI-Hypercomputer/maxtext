@@ -54,8 +54,12 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
   def _get_datasets(self):
     print("Sharding dataset in ", jax.process_count(), " shards")
+    process_indices = input_pipeline_interface.get_process_loading_real_data(self.config, self.mesh)
     train_ds, eval_ds = _tfds_data_processing.get_datasets(
-            config=self.config, read_config = self.read_config)
+            config=self.config,
+            dataloading_host_index = process_indices.index(jax.process_index()),
+            dataloading_host_count = len(process_indices),
+            read_config = self.read_config)
     return train_ds, eval_ds
 
   def _get_preprocessed_datasets(self):
