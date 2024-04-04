@@ -234,6 +234,11 @@ class Decoder(nn.Module):
           offload_src="device", offload_dst="pinned_host")
       elif cfg.remat_policy == 'minimal_offloaded':
         policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host")
+      elif cfg.remat_policy == 'minimal_flash':
+        policy = jax.checkpoint_policies.save_from_both_policies(
+          jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
+          jax.checkpoint_policies.save_only_these_names('context',),
+        )
       else:
         assert (
             cfg.remat_policy == 'full'
