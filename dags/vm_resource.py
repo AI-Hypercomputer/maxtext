@@ -14,8 +14,8 @@
 
 """The file for common projects, zone, and runtime versions."""
 
-import enum
 import datetime
+import enum
 
 
 V5_NETWORKS_PREFIX = "projects/tpu-prod-env-automated"
@@ -55,7 +55,8 @@ class Zone(enum.Enum):
   US_CENTRAL1_B = "us-central1-b"
   # reserved v4-8 & v4-32 in cloud-ml-auto-solutions
   US_CENTRAL2_B = "us-central2-b"
-  # reserved/on-demand v2-8 in cloud-ml-auto-solutions & reserved h100 in supercomputer-testing
+  # reserved/on-demand v2-8 in cloud-ml-auto-solutions
+  # & reserved h100 in supercomputer-testing
   US_CENTRAL1_C = "us-central1-c"
   # committed resource for A100
   US_CENTRAL1_F = "us-central1-f"
@@ -137,8 +138,23 @@ class DockerImage(enum.Enum):
   """Common docker images."""
 
   XPK_JAX_TEST = "gcr.io/cloud-ml-auto-solutions/xpk_jax_test:latest"
-  PYTORCH_NIGHTLY = f"us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.10_tpuvm_{datetime.datetime.today().strftime('%Y%m%d')}"
-  MAXTEXT_TPU_JAX_STABLE = f"gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:{datetime.datetime.today().strftime('%Y-%m-%d')}"
-  MAXTEXT_TPU_JAX_NIGHTLY = f"gcr.io/tpu-prod-env-multipod/maxtext_jax_nightly:{datetime.datetime.today().strftime('%Y-%m-%d')}"
-  MAXTEXT_GPU_JAX_STABLE = f"gcr.io/tpu-prod-env-multipod/maxtext_gpu_jax_stable:{datetime.datetime.today().strftime('%Y-%m-%d')}"
-  MAXTEXT_GPU_JAX_NIGHTLY = f"gcr.io/tpu-prod-env-multipod/maxtext_gpu_jax_nightly:{datetime.datetime.today().strftime('%Y-%m-%d')}"
+  PYTORCH_NIGHTLY = (
+      "us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/"
+      f"xla:nightly_3.10_tpuvm_{datetime.datetime.today().strftime('%Y%m%d')}"
+  )
+  MAXTEXT_TPU_JAX_STABLE = (
+      "gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:"
+      f"{datetime.datetime.today().strftime('%Y-%m-%d')}"
+  )
+  MAXTEXT_TPU_JAX_NIGHTLY = (
+      "gcr.io/tpu-prod-env-multipod/maxtext_jax_nightly:"
+      f"{datetime.datetime.today().strftime('%Y-%m-%d')}"
+  )
+  MAXTEXT_GPU_JAX_STABLE = (
+      "gcr.io/tpu-prod-env-multipod/maxtext_gpu_jax_stable:"
+      f"{datetime.datetime.today().strftime('%Y-%m-%d')}"
+  )
+  MAXTEXT_GPU_JAX_NIGHTLY = (
+      "gcr.io/tpu-prod-env-multipod/maxtext_gpu_jax_nightly:"
+      f"{datetime.datetime.today().strftime('%Y-%m-%d')}"
+  )

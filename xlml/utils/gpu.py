@@ -280,7 +280,7 @@ def create_resource(
             operation.http_error_message
         )
       elif operation.warnings:
-        logging.warning(f"Warnings during resource creation:\n")
+        logging.warning("Warnings during resource creation:\n")
         for warning in operation.warnings:
           logging.warning(f" - {warning.code}: {warning.message}")
       return True
@@ -388,7 +388,7 @@ def delete_resource(instance_name: airflow.XComArg, project_id: str, zone: str):
             operation.http_error_message
         )
       elif operation.warnings:
-        logging.warning(f"Warnings during resource deletion:\n")
+        logging.warning("Warnings during resource deletion:\n")
         for warning in operation.warnings:
           logging.warning(f" - {warning.code}: {warning.message}")
       return True

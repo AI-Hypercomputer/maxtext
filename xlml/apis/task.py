@@ -18,12 +18,12 @@ import abc
 import dataclasses
 import datetime
 import shlex
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 import airflow
 from airflow.models.taskmixin import DAGNode
 from airflow.utils.task_group import TaskGroup
 from xlml.apis import gcp_config, metric_config, test_config
-from xlml.utils import gpu, metric, name_format, ssh, tpu, xpk, gke, startup_script
+from xlml.utils import gpu, metric, name_format, ssh, tpu, xpk, gke
 
 
 class BaseTask(abc.ABC):
@@ -47,6 +47,7 @@ class TpuQueuedResourceTask(BaseTask):
     task_test_config: Test configs to run on this TPU.
     task_gcp_config: Runtime TPU creation parameters.
     task_metric_config: Metric configs to process metrics.
+    tpu_create_timeout: Time to provision the machine.
     tpu_name_env_var: The flag to define if set up env variable for tpu name.
     all_workers: The flag to define if run commands on all workers or worker 0
       only.
@@ -71,8 +72,9 @@ class TpuQueuedResourceTask(BaseTask):
         group_id=self.task_test_config.benchmark_id, prefix_group_id=True
     ) as group:
       provision, queued_resource, ssh_keys, gcs_location = self.provision()
-      # If you didn't set `MetricConfig.use_runtime_generated_gcs_folder` value in the
-      # test config script then `gcs_location` will take no effect.
+      # If you didn't set `MetricConfig.use_runtime_generated_gcs_folder`
+      # value in the test config script then `gcs_location` will take
+      # no effect.
       if (
           self.task_metric_config
           and self.task_metric_config.use_runtime_generated_gcs_folder

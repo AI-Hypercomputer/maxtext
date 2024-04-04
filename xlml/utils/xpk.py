@@ -21,9 +21,7 @@ from absl import logging
 from airflow.decorators import task
 from airflow.exceptions import AirflowFailException
 from airflow.hooks.subprocess import SubprocessHook
-from datetime import timedelta
 from kubernetes import client as k8s_client
-from kubernetes.client import models as k8s_models
 from xlml.apis import metric_config
 from xlml.utils import gke
 from dags.vm_resource import GpuVersion
@@ -136,7 +134,7 @@ def wait_for_workload_completion(
     return False
 
   if any(pod.status.phase in ["Pending", "Running"] for pod in pods.items):
-    logging.info(f"At least one pod has yet to complete")
+    logging.info("At least one pod has yet to complete.")
     return False
 
   try:

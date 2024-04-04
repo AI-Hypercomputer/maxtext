@@ -43,7 +43,7 @@ class SshEnvVars(enum.Enum):
 
 @dataclasses.dataclass
 class JSONLinesConfig:
-  """This is a class to set up JSON Lines config.
+  """A class to set up JSON Lines config.
 
   Attributes:
     file_location: The locatioin of the file in GCS. When
@@ -55,7 +55,7 @@ class JSONLinesConfig:
 
 @dataclasses.dataclass
 class SummaryConfig:
-  """This is a class to set up TensorBoard summary config.
+  """A class to set up TensorBoard summary config.
 
   Attributes:
     file_location: The locatioin of the file in GCS. When
@@ -79,7 +79,7 @@ class SummaryConfig:
 
 @dataclasses.dataclass
 class ProfileConfig:
-  """This is a class to set up profile config.
+  """A class to set up profile config.
 
   Attributes:
     file_locations: The locatioin of the file in GCS. When
@@ -93,8 +93,7 @@ class ProfileConfig:
 
 @dataclasses.dataclass
 class MetricConfig:
-  """This is a class to set up config of Benchmark metric,
-  dimension, and profile.
+  """A class to set up config of Benchmark metric, dimension, and profile.
 
   Attributes:
     json_lines: The config for JSON Lines input.

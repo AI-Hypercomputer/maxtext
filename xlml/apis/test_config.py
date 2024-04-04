@@ -44,12 +44,13 @@ When Composer updates to a recent Python version, we can use dataclasses.
 """
 
 import abc
-import attrs
-from dags.vm_resource import TpuVersion
 import json
 import os
 import shlex
 from typing import Any, Generic, Iterable, List, Optional, TypeVar
+
+import attrs
+from dags.vm_resource import TpuVersion
 
 
 class Accelerator(abc.ABC):
@@ -124,6 +125,7 @@ class TestConfig(abc.ABC, Generic[A]):
     accelerator: Accelerator type required for this test.
     time_out_in_min: Test timeout in minutes.
     task_owner: Task owner username or link.
+    gcs_subfolder: Subfolder name for default GCS bucket.
   """
 
   accelerator: A

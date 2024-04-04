@@ -15,8 +15,9 @@
 """Config file for Google Cloud Project (GCP)."""
 
 import dataclasses
-from xlml.apis import metric_config
+
 from dags.vm_resource import Project
+from xlml.apis import metric_config
 
 
 @dataclasses.dataclass

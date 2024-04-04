@@ -71,6 +71,7 @@ class BenchmarkBigQueryMetricTest(parameterized.TestCase, absltest.TestCase):
       bigquery.Client, "insert_rows", return_value=["there is an error"]
   )
   def test_insert_failure(self, default, get_table, insert_rows):
+    del default, get_table, insert_rows
     bq_metric = test_bigquery.BigQueryMetricClient()
     self.assertRaises(RuntimeError, bq_metric.insert, self.test_runs)
 
@@ -80,6 +81,7 @@ class BenchmarkBigQueryMetricTest(parameterized.TestCase, absltest.TestCase):
   @mock.patch.object(bigquery.Client, "get_table", return_value="mock_table")
   @mock.patch.object(bigquery.Client, "insert_rows", return_value=[])
   def test_insert_success(self, default, get_table, insert_rows):
+    del default, get_table, insert_rows
     bq_metric = test_bigquery.BigQueryMetricClient()
     bq_metric.insert(self.test_runs)
 

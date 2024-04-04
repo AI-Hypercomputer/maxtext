@@ -166,7 +166,7 @@ def create_queued_resource(
         queued_resource=queued_resource,
     )
     response = qr_operation.result()
-    logging.info('Create QR response: {}'.format(response))
+    logging.info(f'Create QR response: {response}')
     # TODO(wcromar): do anything about failures
 
     return response.name
@@ -248,7 +248,7 @@ def delete_queued_resource(qualified_name: airflow.XComArg):
     for node in qr.tpu.node_spec:
       try:
         op = client.delete_node(name=f'{node.parent}/nodes/{node.node_id}')
-        logging.info('Delete node state: {}'.format(op))
+        logging.info(f'Delete node state: {op}')
       except google.api_core.exceptions.NotFound:
         logging.info(f'{node.node_id} is already deleted')
 

@@ -20,11 +20,11 @@ import datetime
 import enum
 import math
 from typing import Iterable, Optional
+
 from absl import logging
-from xlml.apis import metric_config
 import google.auth
 from google.cloud import bigquery
-
+from xlml.apis import metric_config
 
 BENCHMARK_BQ_JOB_TABLE_NAME = "job_history"
 BENCHMARK_BQ_METRIC_TABLE_NAME = "metric_history"
@@ -73,6 +73,7 @@ class BigQueryMetricClient:
   Attributes:
     project: The project name for database.
     database: The database name for BigQuery.
+    client: The client for BigQuery Metric.
   """
 
   def __init__(

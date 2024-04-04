@@ -29,9 +29,6 @@ import tensorflow as tf
 from dags.vm_resource import TpuVersion, RuntimeVersion
 
 
-"""Tests for Benchmark metric.py."""
-
-
 class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
 
   def get_tempdir(self):
@@ -152,7 +149,7 @@ class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
     self.assertAlmostEqual(actual_value, expected_value)
 
   @mock.patch("xlml.utils.metric.download_object_from_gcs")
-  def test_process_json_lines(self, download_object_from_gcs):
+  def test_process_json_lines(self, _):
     path = "/tmp/ml-auto-solutions-metrics.jsonl"
     test_run1 = {
         "metrics": {"accuracy": 0.95, "MFU": 0.50},
@@ -273,10 +270,10 @@ class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
               "COMPOSER_LOCATION": "test_location",
               "COMPOSER_ENVIRONMENT": "test_env",
           },
-      ) as mock_variable:
+      ) as _:
         with mock.patch.object(
             composer, "get_airflow_url", return_value="http://airflow"
-        ) as mock_object:
+        ) as _:
           raw_meta = [
               [
                   bigquery.MetadataHistoryRow(
@@ -313,7 +310,11 @@ class BenchmarkMetricTest(parameterized.TestCase, absltest.TestCase):
               bigquery.MetadataHistoryRow(
                   job_uuid=uuid,
                   metadata_key="airflow_dag_run_link",
-                  metadata_value="http://airflow/dags/benchmark_test/grid?dag_run_id=manual__2023-08-07T21%3A03%3A49.181263%2B00%3A00&task_id=post_process",
+                  metadata_value=(
+                      "http://airflow/dags/benchmark_test/grid?"
+                      "dag_run_id=manual__2023-08-07T21%3A03%3A49."
+                      "181263%2B00%3A00&task_id=post_process"
+                  ),
               )
           )
 

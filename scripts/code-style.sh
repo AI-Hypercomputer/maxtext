@@ -26,7 +26,7 @@ done
 
 for folder in "${FOLDERS_TO_FORMAT[@]}"
 do
-  pylint "./$folder" --fail-under=9
+  pylint "./$folder" --fail-under=9.6
 done
 
 echo "Successfully clean up all codes."
