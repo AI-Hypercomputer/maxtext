@@ -42,12 +42,13 @@ mesh_axis_name = "axis"
 global_mesh = Mesh(devices, (mesh_axis_name))
 array_on_device_sharding = jax.sharding.NamedSharding(global_mesh, jax.sharding.PartitionSpec("axis"))
 
-data_dim = 16384
-num_tensors = 4
+small_data_dim = 3072
+big_data_dim = 4*small_data_dim
+num_tensors = 16
 
 @partial(jax.jit, out_shardings=array_on_device_sharding )
 def generate_array():
-    return jax.numpy.ones( (data_dim, data_dim), dtype = jax.numpy.bfloat16)
+    return jax.numpy.ones( (small_data_dim, big_data_dim), dtype = jax.numpy.float32)
 
 data = [generate_array() for i in range(num_tensors)]
 shardings = jax.tree.map(lambda x : x.sharding, data)
@@ -64,5 +65,25 @@ def put_to_host(x):
 def put_to_device(x):
   return x
 
-host_data = put_to_host(data)
-device_data = put_to_device(host_data)
+num_iters = 10
+
+
+#host_datas_warm = []
+#for i in range(num_iters*2):
+#   host_datas_warm.append(put_to_host(data))
+#jax.block_until_ready(host_datas_warm)
+#jax.tree_map(lambda x : x.delete(), host_datas_warm)
+
+host_datas = []
+jax.profiler.start_trace("gs://runner-maxtext-logs/rwitten_whatever/host_offload")
+s = datetime.datetime.now()
+for i in range(num_iters):
+   host_datas.append(put_to_host(data))
+jax.block_until_ready(host_datas)
+e = datetime.datetime.now()
+jax.profiler.stop_trace()
+
+seconds = (e-s).total_seconds()
+total_bandwidth_GB = num_iters*4*small_data_dim*big_data_dim*num_tensors/1e9
+bandwidth_GB_per_s = (total_bandwidth_GB)/(seconds)
+print(f"Total time {seconds=}, {total_bandwidth_GB=} {bandwidth_GB_per_s=}")
