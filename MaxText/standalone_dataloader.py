@@ -27,21 +27,34 @@ from absl import app
 import numpy as np
 
 import pyconfig
-from train import validate_train_config, get_first_step, load_next_batch, setup_train_loop
+from train import validate_train_config, get_first_step, load_next_batch, setup_train_loop, setup_dataloading_loop
 
 
 def data_load_loop(config, state=None):
   """Main data loader loop.
     Loads batches of data for each training step.
   """
-  _, _, _, _, _, _, _, data_iterator, _, state = setup_train_loop(config)
+  # _, _, _, _, _, _, _, data_iterator, _, _ = setup_train_loop(config)
+  data_iterator, mesh = setup_dataloading_loop(config)
 
   example_batch = None
 
   start = datetime.datetime.now()
-  start_step = get_first_step(state)
+  print("Before example batch", flush=True)
+  start_step = 0
   example_batch = load_next_batch(data_iterator, example_batch, config)
+  # print(f"{example_batch['inputs']=}")
+  # jax.debug.print("example_batch {x}", x = example_batch['inputs'])
   jax.block_until_ready(example_batch)
+  print(f"after block until ready shape {example_batch['inputs'].shape=}", flush=True)
+  print(f"after block until ready {example_batch['inputs']=}", flush=True)
+  # example_batch = jax.block_until_ready(jax.experimental.multihost_utils.process_allgather(example_batch))
+  # data = jax.experimental.multihost_utils.process_allgather(example_batch['inputs'])
+  # example_batch = jax.jit(lambda x : x, out_shardings = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None)))(example_batch)
+  # data = example_batch['inputs']
+  # print(f"{data.shape=}")
+  # print(f"{data=}")
+  # jax.debug.print("data {x}", x = data)
   first_end = datetime.datetime.now()
   time_to_load_first_batch = first_end-start
   if jax.process_index() == 0:
@@ -54,11 +67,12 @@ def data_load_loop(config, state=None):
   end = datetime.datetime.now()
   if jax.process_index() == 0:
     max_logging.log(f"STANDALONE DATALOADER : {config.steps} batches loaded in {end-start} seconds, on host 0")
-  return state
 
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update('jax_cpu_enable_gloo_collectives', True)
+  # os.environ["TPU_MIN_LOG_LEVEL"] = "0"
+  # os.environ["TPU_STDERR_LOG_LEVEL"] = "0"
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   pyconfig.initialize(argv)
   config = pyconfig.config

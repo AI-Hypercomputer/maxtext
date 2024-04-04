@@ -59,7 +59,6 @@ def _form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
       f"local device count {len(global_mesh.local_devices)} "
       f"at {jtu.keystr(path)}"
     ) from array_split_error
-
   local_device_buffers = jax.device_put(local_device_arrays, global_mesh.local_devices)
   return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
 
@@ -87,9 +86,7 @@ def get_next_batch_sharded(
   # Try one last time, if this fails we will see the full stack trace.
   if not loaded_data_success:
     local_data = next(local_iterator)
-
   input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh = global_mesh), local_data)
-
   return input_gdas
 
 

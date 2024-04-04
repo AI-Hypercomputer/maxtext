@@ -205,12 +205,11 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   '''
   # inputs, targets, segments, positions = apply_args
   rng1, aqt_rng = jax.random.split(dropout_rng)
-
   # decimate proportion of data when per_device_batch_size<1
   if is_train:
     for k, v in data.items():
       data[k] = v[:config.global_batch_size_to_train_on,:]
-
+  
   logits, intermediate_outputs = model.apply({'params': params},
                        data['inputs'],
                        data['inputs_position'],
@@ -248,11 +247,23 @@ def train_step(model, config, state, data, dropout_rng):
     rng2: A new rng key that can be used in future calls.
 
   """
+  # print("Inside train_step")
+  # # data_input = jax.experimental.multihost_utils.process_allgather(data['inputs'], tiled = True)
+  # data_input = data['inputs']
+  # jax.debug.print("before cutting shape 🤯 {x} ", x = data_input.shape)
+  # jax.debug.print("before cutting 🤯 {x} ", x = data_input)
+  # # print(f"before cutting shape 🤯 {data_input.shape=}")
+  # # print(f"before cutting 🤯 {data_input=}")
+  # data_input = data_input[:config.global_batch_size_to_train_on, :]
+  # jax.debug.print("after cutting shape 🤯 {x} ", x = data_input.shape)
+  # jax.debug.print("after cutting 🤯 {x} ", x = data_input)
+  # print(f"after cutting shape 🤯 {data_input.shape=}")
+  # print(f"after cutting 🤯 {data_input=}")
   train_loss_fn = functools.partial(loss_fn, model, config, data, dropout_rng, is_train=True)
   grad_fn = jax.value_and_grad(train_loss_fn, has_aux=True)
   (loss, aux), raw_grads = grad_fn(state.params)
   intermediate_outputs = aux['intermediate_outputs']
-
+  # exit(1)
   if config.gradient_clipping_threshold > 0:
     grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
   else:
@@ -317,6 +328,12 @@ def setup_mesh_and_model(config):
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
 
+def setup_dataloading_loop(config):
+  devices_array = max_utils.create_device_mesh(config)
+  mesh = Mesh(devices_array, config.mesh_axes)
+  data_iterator, eval_data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
+  return data_iterator, mesh
+
 def setup_train_loop(config):
   """ Set up prerequisites for the training loop -
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
@@ -338,7 +355,7 @@ def setup_train_loop(config):
   """
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
   data_iterator, eval_data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
-
+  print("Here after iterator")
   state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(model, data_iterator,
           tx, config, init_rng, mesh, checkpoint_manager)
 
@@ -392,6 +409,7 @@ def train_loop(config, state=None):
     p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
     print("Loaded compiled function!", flush=True)
   else:
+    print("Just before jitting functional train")
     p_train_step = jax.jit(
       functional_train,
       in_shardings=in_shard_train,
@@ -431,45 +449,45 @@ def train_loop(config, state=None):
             state, example_batch, nextrng
         )
 
-    new_time = datetime.datetime.now()
-    record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
-    last_step_completion = new_time
+  #   new_time = datetime.datetime.now()
+  #   record_scalar_metrics(metrics, new_time - last_step_completion,  per_device_tflops, learning_rate_schedule(step))
+  #   last_step_completion = new_time
 
-    if checkpoint_manager is not None:
-      if save_checkpoint(checkpoint_manager, step, state, config.dataset_type, data_iterator):
-        max_logging.log(f"saved a checkpoint at step {step}")
+  #   if checkpoint_manager is not None:
+  #     if save_checkpoint(checkpoint_manager, step, state, config.dataset_type, data_iterator):
+  #       max_logging.log(f"saved a checkpoint at step {step}")
 
-      # Upon preemption, exit when and only when all ongoing saves are complete.
-      if checkpoint_manager.reached_preemption(step):
-        checkpoint_manager.wait_until_finished()
-        sys.exit()
+  #     # Upon preemption, exit when and only when all ongoing saves are complete.
+  #     if checkpoint_manager.reached_preemption(step):
+  #       checkpoint_manager.wait_until_finished()
+  #       sys.exit()
 
-    write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
+  #   write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
 
-    if config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
-      assert eval_data_iterator
-      cumulative_eval_metrics = {"total_loss": 0., "total_weights": 0.}
-      for eval_batch in eval_data_iterator:
-        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-          eval_metrics = p_eval_step(
-            state, eval_batch, nextrng
-          )
-        cumulative_eval_metrics['total_loss'] += float(eval_metrics['scalar']['evaluation/total_loss'])
-        cumulative_eval_metrics['total_weights'] += float(eval_metrics['scalar']['evaluation/total_weights'])
-      eval_loss = cumulative_eval_metrics['total_loss'] / (cumulative_eval_metrics['total_weights'] + EPS)
-      max_logging.log(f"average loss after {step=}: {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
-      if eval_loss <= config.target_eval_loss:
-        max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
-        max_utils.deactivate_profiler(config)
-        break
+  #   if config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
+  #     assert eval_data_iterator
+  #     cumulative_eval_metrics = {"total_loss": 0., "total_weights": 0.}
+  #     for eval_batch in eval_data_iterator:
+  #       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  #         eval_metrics = p_eval_step(
+  #           state, eval_batch, nextrng
+  #         )
+  #       cumulative_eval_metrics['total_loss'] += float(eval_metrics['scalar']['evaluation/total_loss'])
+  #       cumulative_eval_metrics['total_weights'] += float(eval_metrics['scalar']['evaluation/total_weights'])
+  #     eval_loss = cumulative_eval_metrics['total_loss'] / (cumulative_eval_metrics['total_weights'] + EPS)
+  #     max_logging.log(f"average loss after {step=}: {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
+  #     if eval_loss <= config.target_eval_loss:
+  #       max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
+  #       max_utils.deactivate_profiler(config)
+  #       break
 
-    if step == last_profiling_step:
-      max_utils.deactivate_profiler(config)
+  #   if step == last_profiling_step:
+  #     max_utils.deactivate_profiler(config)
 
-  if checkpoint_manager is not None:
-    checkpoint_manager.wait_until_finished()
-  write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config) # final step metrics
-  max_utils.close_summary_writer(writer)
+  # if checkpoint_manager is not None:
+  #   checkpoint_manager.wait_until_finished()
+  # write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config) # final step metrics
+  # max_utils.close_summary_writer(writer)
   return state
 
 def main(argv: Sequence[str]) -> None:
