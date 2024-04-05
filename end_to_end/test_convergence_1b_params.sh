@@ -15,6 +15,7 @@ echo "Running test_convergence_1b_params.sh"
 
 export LOSS_THRESHOLD=100.0 # Set to large value so test is guaranteed to pass.
 export STEPS=20400 # Run for 20B tokens for a 1B sized mode for "chinchilla" scaling https://arxiv.org/abs/2203.15556
+#export STEPS=20
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -26,6 +27,8 @@ if [ -n "$RUN_NAME" ];
 then
     export M_RUN_NAME=$RUN_NAME
 fi
+
+gsutil cp -r gs://maxtext-dataset/hf/llama2-tokenizer assets
 
 if [ "$DATASET_TYPE" == "c4-array_record" ]
 then
@@ -40,8 +43,9 @@ fi
 TRAIN_CMD="python3 MaxText/train.py MaxText/configs/base.yml\
         steps=$STEPS per_device_batch_size=8.0 learning_rate=3e-4 enable_checkpointing=false \
         max_target_length=2048 global_parameter_scale=1 \
-        enable_profiler=false metrics_file=metrics.txt base_output_directory=$OUTPUT_PATH\
-        dataset_path=$DATASET_PATH log_period=150 remat_policy=minimal enable_data_shuffling=false"
+        enable_profiler=false metrics_file=metrics.txt base_output_directory=$OUTPUT_PATH \
+        dataset_path=$DATASET_PATH log_period=150 remat_policy=minimal enable_data_shuffling=false \
+        tokenizer_path=assets/llama2-tokenizer "
 TRAIN_CMD+=$CMD_DATA
 
 # Train

@@ -116,7 +116,7 @@ class MultiHostDataLoadIterator:
       self.local_iterator = self.dataloader.as_numpy_iterator()
     elif isinstance(self.dataloader, grain.DataLoader):
       self.local_iterator = iter(self.dataloader)
-    elif isinstance(self.dataloader, _hf_operations.TransformedDataset):
+    elif isinstance(self.dataloader, TransformedDataset):
       self.local_iterator = iter(self.dataloader)
     else:
       raise ValueError("Type error: dataloader should be either tf.data.Dataset or grain.DataLoader.")

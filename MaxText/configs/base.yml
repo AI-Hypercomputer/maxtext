@@ -157,20 +157,23 @@ num_slices: -1
 
 # Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
-dataset_path: ""
+# When using data in gcs or local, set dataset_path to match the files. e.g. "gs://maxtext-dataset/hf/c4/c4-train-*.parquet"
+dataset_path: "gs://maxtext-dataset/hf/c4/c4-train-*.parquet"
 vocab_size: 32_000 # powers of 2 for sharding
 #vocab_size: 102_400
 #tokenizer_path: "assets/vocab_102400"  # downloaded from gs://lg-maxtext/shared_data_0313/vocab_102400
+tokenizer_path: "assets/llama2-tokenizer"
 #tokenizer_path: "assets/tokenizer.llama2"
+# tokenizer_path: "google-t5/t5-large"
 # tokenizer_loader can be AutoTokenizer, LlamaTokenizer, GemmaTokenizer
-tokenizer_loader: LlamaTokenizer
+tokenizer_loader: AutoTokenizer
 # tokenizer_path can be a path in huggingface hub to used with AutoTokenizer or a local path
-tokenizer_path: 'assets/tokenizer.llama2'
+#tokenizer_path: 'google-t5/t5-large'
 # provide access token if you are using a huggingface tokenizer from a gated model
 hf_access_token: ''
 #dataset_name: 'c4/en:3.0.1'
-dataset_name: 'allenai/c4'
-dataset_dir: 'en'
+dataset_name: 'parquet' # can be dataset from huggingface hub, e.g. 'allenai/c4'
+dataset_dir: '' # e.g. 'en'
 #dataset_name: 'json'
 # dataset_name: 'lm1b'
 # dataset_dir: None
@@ -178,7 +181,7 @@ dataset_dir: 'en'
 #dataset_files: '/tmp/gcsfuse/lg/jsonl-data/*.jsonl'
 #dataset_files: None
 eval_dataset_name: ''
-eval_split: ''
+eval_split: 'validation'
 per_device_batch_size: 12.0
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000

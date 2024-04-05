@@ -8,7 +8,7 @@ from transformers import AutoTokenizer, LlamaTokenizer, GemmaTokenizer
 
 _T = TypeVar("_T")
 
-def load_tokenizer(tokenizer_loader, tokenizer_path, add_bos, add_eos, token):
+def load_tokenizer(tokenizer_loader, tokenizer_path, add_bos, add_eos, max_length, token):
     def choose_tokenizer_loader(tokenizer_loader):
         if tokenizer_loader == "AutoTokenizer":
             return AutoTokenizer
@@ -23,6 +23,7 @@ def load_tokenizer(tokenizer_loader, tokenizer_path, add_bos, add_eos, token):
     return loader.from_pretrained(tokenizer_path,
                         add_bos_token=add_bos,
                         add_eos_token=add_eos,
+                        model_max_length=max_length,
                         token=token)
 
 def tokenization(example, tokenizer, max_length):

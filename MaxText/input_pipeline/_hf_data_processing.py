@@ -96,6 +96,7 @@ def preprocessing_pipeline(
                                             tokenizer_path,
                                             add_bos,
                                             add_eos,
+                                            max_length,
                                             access_token)
 
   dataset = dataset.map(_hf_operations.tokenization, batched=True,
