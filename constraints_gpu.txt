@@ -124,7 +124,7 @@ tomli==2.0.1
 tomlkit==0.12.4
 toolz==0.12.1
 tqdm==4.66.2
-transformer-engine==1.4.0+0fbc76a
+transformer-engine==1.5.0+297459b
 typeguard==2.13.3
 typing-inspect==0.9.0
 typing_extensions==4.5.0
