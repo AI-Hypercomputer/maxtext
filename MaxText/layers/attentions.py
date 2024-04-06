@@ -289,7 +289,6 @@ class AttentionOp(nn.Module):
                   transpose_batch_sequence=False)
     return dpa_layer(query, key, value, mask=attn_mask)
 
-
   def compute_local_attention(self,
                               attn_weights: Array, 
                               value: Array) -> tuple[Array, Array, Array]:
