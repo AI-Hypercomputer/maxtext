@@ -329,9 +329,9 @@ def main() -> None:
     weights, inputs, targets = get_weights_and_inputs(args.batch_size, args.sequence, args.features, args.layers)
 
     # The fun stuff
-    #pipeline_utils.assert_same_output_and_grad(pipeline_utils.reg_matmuls, pipeline_func, targets, weights, inputs,f2_extra_inputs=[args.n_stages, args.n_microbatches, args.n_repeat, use_circ_storage, mesh])
+    pipeline_utils.assert_same_output_and_grad(pipeline_utils.reg_matmuls, pipeline_func, targets, weights, inputs,f2_extra_inputs=[args.n_stages, args.n_microbatches, args.n_repeat, use_circ_storage, mesh])
 
-    pipeline_utils.simple_timeit(pipeline_func, weights, inputs, args.n_stages, args.n_microbatches, args.n_repeat, use_circ_storage, mesh, tries = 3, task = 'circular_pipeline')
+    #pipeline_utils.simple_timeit(pipeline_func, weights, inputs, args.n_stages, args.n_microbatches, args.n_repeat, use_circ_storage, mesh, tries = 3, task = 'circular_pipeline')
 
 if __name__ == "__main__":
   main()

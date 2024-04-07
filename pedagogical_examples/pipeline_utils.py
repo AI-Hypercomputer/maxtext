@@ -40,6 +40,8 @@ def assert_same_output_and_grad(f1,f2, targets, *inputs, f1_extra_inputs=[], f2_
   f2_value = f2(*f2_inputs)
   _, f1_grad = jax.value_and_grad(f1_loss)(*f1_inputs)
   _, f2_grad = jax.value_and_grad(f2_loss)(*f2_inputs)
+  
+  print(f"{f1_grad.shape=}")
 
   print_norms(f1_value, f2_value, a_name="regular", b_name="pipeline", diff_name="Output difference")
   print_norms(f1_grad, f2_grad, a_name="reg_grad", b_name="pipeline_grad", diff_name="Gradient difference")
