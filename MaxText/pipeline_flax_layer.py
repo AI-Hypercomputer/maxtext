@@ -5,6 +5,8 @@ from flax import linen as nn
 from jax.sharding import Mesh
 from jax.sharding import NamedSharding
 from jax.experimental import mesh_utils
+from typing import Sequence
+from absl import app
 import os
 import argparse
 
@@ -63,7 +65,7 @@ class Pipeline(nn.Module):
 
   def setup(self):
     # TODO: See what Inputs are needed to initialize DecoderLayers e.g. LlamaDecoderLayer
-    decoder_layers = [self.decoder_layer_class(self.config.emb_dim) for _ in range(self.config.n_layers)]
+    decoder_layers = [self.decoder_layer_class(self.config.emb_dim) for _ in range(self.config.num_decoder_layers)]
     self.decoder_layers = decoder_layers
     self.num_stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
     self.layers_per_stage = self.config.num_decoder_layers / (self.num_stages * self.config.num_pipeline_repeats)
@@ -80,11 +82,11 @@ class Pipeline(nn.Module):
     # decoder.variables is an empty dictionary until the loop above is executed
     decoder_params = [decoder.variables for decoder in self.decoder_layers] 
     stacked_params = stack_pytrees(*decoder_params)
-    stacked_inputs = stack_pytrees(*([x] * self.n_layers))
+    stacked_inputs = stack_pytrees(*([x] * self.config.num_decoder_layers))
     pipeline_output = jax.vmap(self.decoder_layers[0].apply)(stacked_params, stacked_inputs)
     return pipeline_output
 
-def main() -> None:
+def main(argv: Sequence[str]) -> None:
   # This only exists for convenient testing
 
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
@@ -96,12 +98,9 @@ def main() -> None:
   layers_per_stage = config.num_decoder_layers / (num_stages * config.num_pipeline_repeats)
   assert layers_per_stage==1,"Currently only supporting 1 layer per pipeline stage"
 
-
-
-  
   _, inputs, targets = get_weights_and_inputs(config.global_batch_size_to_train_on, config.max_target_length, config.emb_dim, config.num_decoder_layers)
 
-  mesh = create_mesh(num_stages, config['ici_tensor_parallelism'], config['ici_data_parallelism'])
+  mesh = create_mesh(num_stages, config.ici_tensor_parallelism, config.ici_data_parallelism)
 
   my_pipeline = Pipeline(
     config=config,
@@ -112,4 +111,4 @@ def main() -> None:
   my_pipeline.apply(init_pipeline_params, inputs)
 
 if __name__ == "__main__":
-  main()
+  app.run(main)
