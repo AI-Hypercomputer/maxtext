@@ -9,6 +9,7 @@ import os
 import argparse
 
 import common_types
+import pyconfig
 
 def stack_pytrees(*pytrees):
   """Stacks pytrees with identical structure along a new leading dimension."""
@@ -20,6 +21,29 @@ def create_mesh(n_stages, tp_axis, dp_axis):
   devices = mesh_utils.create_device_mesh((n_stages, tp_axis, dp_axis))
   mesh = Mesh(devices, axis_names=('stage', 'tensor', 'data'))
   return mesh
+
+def get_weights_and_inputs(batch_size, sequence, features, n_layers):
+    '''Get random weights, random inputs, and random targets
+
+        Returns
+            weights: [n_layers, features, features]
+            inputs: [global_batch, sequence, features]
+            targets: [global_batch, sequence, features]
+    '''
+    weights_shape = jnp.array([n_layers, features, features]) # pytree in real cases instead of single array
+    k = jax.random.PRNGKey(1)
+    weights = jax.random.normal(k,weights_shape, dtype=jnp.float32)
+
+    # we pass in input with global batch, its up to the pipeline function to reshape to microbatches
+    input_shape = [batch_size, sequence, features]
+    k = jax.random.PRNGKey(2)
+    inputs = jax.random.normal(k,input_shape, dtype=jnp.float32)
+    
+    # dummy targets same shape as inputs to use for a dummy loss funciton to check gradient correctness
+    k = jax.random.PRNGKey(3)
+    dummy_targets = jax.random.normal(k,input_shape, dtype=jnp.float32)
+
+    return weights, inputs, dummy_targets
 
 class SimpleDecoderLayer(nn.Module):
   embed_size: int
@@ -33,13 +57,13 @@ class SimpleDecoderLayer(nn.Module):
 # Pipeline is made up of several SimpleDecoderLayers 
 class Pipeline(nn.Module):
   
-  embed_size: int
-  n_layers: int
+  config: common_types.Config
   decoder_layer_class: nn.Module
-  mesh: common_types.Mesh #jax.sharding.Mesh
+  mesh: common_types.Mesh
 
   def setup(self):
-    decoder_layers = [self.decoder_layer_class(self.embed_size) for _ in range(self.n_layers)]
+    # TODO: See what Inputs are needed to initialize DecoderLayers e.g. LlamaDecoderLayer
+    decoder_layers = [self.decoder_layer_class(self.config.emb_dim) for _ in range(self.config.n_layers)]
     self.decoder_layers = decoder_layers
 
   def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
@@ -56,28 +80,33 @@ class Pipeline(nn.Module):
     return pipeline_output
 
 def main() -> None:
-  print("hello")
+  # This only exists for convenient testing
+
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-  parser = argparse.ArgumentParser(description='Pipeline Parallelism Options')
-  parser.add_argument('--batch_size', type=int, default=24)
-  parser.add_argument('--n_stages', type=int, default=4)
-  parser.add_argument('--n_microbatches', type=int, default=8)
-  parser.add_argument('--dp_axis', type=int, default=1)
-  parser.add_argument('--tp_axis', type=int, default=1)
-  parser.add_argument('--features', type=int, default=16)
-  parser.add_argument('--sequence', type=int, default=16)
-  parser.add_argument('--n_repeat', type=int, default=2)
+  pyconfig.initialize(argv)
+  config = pyconfig.config
 
-  args = parser.parse_args()
-  args.microbatch_size = args.batch_size // args.n_microbatches
-  args.layers = args.n_stages * args.n_repeat
-  use_circ_storage = args.n_repeat > 1 and args.n_microbatches > args.n_stages
+  # TODO: determine if num_stages should be added to pyconfig or elsewhere
+  # TODO place this logic in lass
+  num_stages = config.ici_pipeline_parallelism * config.dcn_pipeline_parallelism
+  layers_per_stage = config.num_decoder_layers / (num_stages * config.num_pipeline_repeats)
+  assert layers_per_stage==1,"Currently only supporting 1 layer per pipeline stage"
 
-  mesh = create_mesh(args.n_stages, args.tp_axis, args.dp_axis)
-  my_pipeline = Pipeline(embed_size=5,n_layers=2, decoder_layer_class=SimpleDecoderLayer, mesh=mesh)
-  example_input = jnp.ones([6,5])
-  init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), example_input)
-  my_pipeline.apply(init_pipeline_params, example_input)
+  # TODO: place this in class
+  use_circ_storage = config.num_pipeline_repeats > 1 and config.num_pipeline_microbatches > num_stages
+
+  
+  _, inputs, targets = get_weights_and_inputs(config.global_batch_size_to_train_on, config.max_target_length, config.emb_dim, config.num_decoder_layers)
+
+  mesh = create_mesh(num_stages, config['ici_tensor_parallelism'], config['ici_data_parallelism'])
+
+  my_pipeline = Pipeline(
+    config=config,
+    decoder_layer_class=SimpleDecoderLayer,
+    mesh=mesh
+  )
+  init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs)
+  my_pipeline.apply(init_pipeline_params, inputs)
 
 if __name__ == "__main__":
   main()
