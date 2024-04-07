@@ -13,6 +13,7 @@ from typing import Optional
 from layers import quantizations
 import common_types
 import pyconfig
+import functools
 
 def stack_pytrees(*pytrees):
   """Stacks pytrees with identical structure along a new leading dimension."""
@@ -46,7 +47,12 @@ def get_weights_and_inputs(batch_size, sequence, features, n_layers):
     k = jax.random.PRNGKey(3)
     dummy_targets = jax.random.normal(k,input_shape, dtype=jnp.float32)
 
-    return weights, inputs, dummy_targets
+    inputs_position = jnp.array([jnp.arange(sequence, dtype=jnp.int32) for _ in range(batch_size)], dtype=jnp.int32)
+    print(f"{inputs_position.shape}") 
+    #inputs_position = jnp.arange((batch_size, sequence), dtype = jnp.int32)
+    inputs_segmentation = jnp.ones((batch_size, sequence), dtype=jnp.int32)
+
+    return weights, inputs, dummy_targets, inputs_position, inputs_segmentation
 
 class SimpleDecoderLayer(nn.Module):
   config: common_types.Config
@@ -56,8 +62,8 @@ class SimpleDecoderLayer(nn.Module):
   def setup(self):
     self.weight_mat = self.param('weights', nn.initializers.ones, (self.config.emb_dim, self.config.emb_dim))
 
-  def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-    return x @ self.weight_mat
+  def __call__(self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode) -> jnp.ndarray:
+    return inputs @ self.weight_mat
 
 # Pipeline is made up of several SimpleDecoderLayers 
 class Pipeline(nn.Module):
@@ -77,17 +83,23 @@ class Pipeline(nn.Module):
     self.use_circ_storage = self.config.num_pipeline_repeats > 1 and self.config.num_pipeline_microbatches > self.num_stages
     
 
-  def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+  def __call__(self, inputs: jnp.ndarray, positions: jnp.ndarray, segment_ids:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
     # We want to access the variables of the decoder_layer, the below loop fills in the variables dictionary (previously empty dict)
     for decoder in self.decoder_layers:
       #print(dir(decoder))
-      _ = decoder(x)
+      _ = decoder(inputs, positions, segment_ids, deterministic, model_mode)
 
+    # TODO: This stacking is silly - its passing entire inputs to both instead of microbatching first
     # decoder.variables is an empty dictionary until the loop above is executed
     decoder_params = [decoder.variables for decoder in self.decoder_layers] 
     stacked_params = stack_pytrees(*decoder_params)
-    stacked_inputs = stack_pytrees(*([x] * self.config.num_decoder_layers))
-    pipeline_output = jax.vmap(self.decoder_layers[0].apply)(stacked_params, stacked_inputs)
+    stacked_inputs = stack_pytrees(*([inputs] * self.num_stages))
+    stacked_positions = stack_pytrees(*([positions] * self.num_stages))
+    stacked_segment_ids = stack_pytrees(*([segment_ids] * self.num_stages))
+
+    decoder_apply=functools.partial(self.decoder_layers[0].apply, deterministic=deterministic, model_mode=model_mode)
+    pipeline_output = jax.vmap(decoder_apply)(stacked_params, stacked_inputs, stacked_positions, stacked_segment_ids)
+    #pipeline_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,0,0,None,None])(stacked_params, inputs, positions, segment_ids, deterministic, model_mode)
     return pipeline_output
 
 def main(argv: Sequence[str]) -> None:
@@ -102,7 +114,9 @@ def main(argv: Sequence[str]) -> None:
   layers_per_stage = config.num_decoder_layers / (num_stages * config.num_pipeline_repeats)
   assert layers_per_stage==1,"Currently only supporting 1 layer per pipeline stage"
 
-  _, inputs, targets = get_weights_and_inputs(config.global_batch_size_to_train_on, config.max_target_length, config.emb_dim, config.num_decoder_layers)
+  _, inputs, targets, inputs_position, inputs_segmentation = get_weights_and_inputs(config.global_batch_size_to_train_on, config.max_target_length, config.emb_dim, config.num_decoder_layers)
+  deterministic = False
+  model_mode = common_types.MODEL_MODE_TRAIN
 
   mesh = create_mesh(num_stages, config.ici_tensor_parallelism, config.ici_data_parallelism)
 
@@ -111,8 +125,9 @@ def main(argv: Sequence[str]) -> None:
     decoder_layer_class=SimpleDecoderLayer,
     mesh=mesh
   )
-  init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs)
-  my_pipeline.apply(init_pipeline_params, inputs)
+  init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+
+  my_pipeline.apply(init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
 
 if __name__ == "__main__":
   app.run(main)
