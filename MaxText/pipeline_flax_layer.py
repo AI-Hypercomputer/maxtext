@@ -9,7 +9,8 @@ from typing import Sequence
 from absl import app
 import os
 import argparse
-
+from typing import Optional
+from layers import quantizations
 import common_types
 import pyconfig
 
@@ -48,10 +49,12 @@ def get_weights_and_inputs(batch_size, sequence, features, n_layers):
     return weights, inputs, dummy_targets
 
 class SimpleDecoderLayer(nn.Module):
-  embed_size: int
+  config: common_types.Config
+  mesh: Mesh
+  quant: Optional[quantizations.AqtQuantization] = None
 
   def setup(self):
-    self.weight_mat = self.param('weights', nn.initializers.ones, (self.embed_size, self.embed_size))
+    self.weight_mat = self.param('weights', nn.initializers.ones, (self.config.emb_dim, self.config.emb_dim))
 
   def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
     return x @ self.weight_mat
@@ -62,10 +65,11 @@ class Pipeline(nn.Module):
   config: common_types.Config
   decoder_layer_class: nn.Module
   mesh: common_types.Mesh
+  quant: Optional[quantizations.AqtQuantization] = None
 
   def setup(self):
     # TODO: See what Inputs are needed to initialize DecoderLayers e.g. LlamaDecoderLayer
-    decoder_layers = [self.decoder_layer_class(self.config.emb_dim) for _ in range(self.config.num_decoder_layers)]
+    decoder_layers = [self.decoder_layer_class(config=self.config, mesh=self.mesh, name=f'layers_{lyr}', quant=self.quant) for lyr in range(self.config.num_decoder_layers)]
     self.decoder_layers = decoder_layers
     self.num_stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
     self.layers_per_stage = self.config.num_decoder_layers / (self.num_stages * self.config.num_pipeline_repeats)
