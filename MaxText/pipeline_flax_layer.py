@@ -65,6 +65,11 @@ class Pipeline(nn.Module):
     # TODO: See what Inputs are needed to initialize DecoderLayers e.g. LlamaDecoderLayer
     decoder_layers = [self.decoder_layer_class(self.config.emb_dim) for _ in range(self.config.n_layers)]
     self.decoder_layers = decoder_layers
+    self.num_stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
+    self.layers_per_stage = self.config.num_decoder_layers / (self.num_stages * self.config.num_pipeline_repeats)
+    assert self.layers_per_stage==1,"Currently only supporting 1 layer per pipeline stage"
+    self.use_circ_storage = self.config.num_pipeline_repeats > 1 and self.config.num_pipeline_microbatches > self.num_stages
+    
 
   def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
     # We want to access the variables of the decoder_layer, the below loop fills in the variables dictionary (previously empty dict)
@@ -87,13 +92,11 @@ def main() -> None:
   config = pyconfig.config
 
   # TODO: determine if num_stages should be added to pyconfig or elsewhere
-  # TODO place this logic in lass
   num_stages = config.ici_pipeline_parallelism * config.dcn_pipeline_parallelism
   layers_per_stage = config.num_decoder_layers / (num_stages * config.num_pipeline_repeats)
   assert layers_per_stage==1,"Currently only supporting 1 layer per pipeline stage"
 
-  # TODO: place this in class
-  use_circ_storage = config.num_pipeline_repeats > 1 and config.num_pipeline_microbatches > num_stages
+
 
   
   _, inputs, targets = get_weights_and_inputs(config.global_batch_size_to_train_on, config.max_target_length, config.emb_dim, config.num_decoder_layers)
