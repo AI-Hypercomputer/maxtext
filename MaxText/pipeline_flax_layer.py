@@ -204,18 +204,50 @@ class Pipeline(nn.Module):
        weights_stage_list= [jax.lax.slice_in_dim(weight_leaf,layer_ids[stage], layer_ids[stage] + 1, axis=0) for stage in range(self.num_stages)]
        weights_stage = jnp.concatenate(weights_stage_list, axis=0)
        weights_stage_shape = (self.num_stages,) + weight_leaf.shape[1:]
-       weights_stage = jnp.reshape(weights_stage, weights_stage_shape) # This reshape unsqueezes singleton axes that were potentially squeezed in concatenate
+       weights_stage = jnp.reshape(weights_stage, weights_stage_shape)
+       return weights_stage # This reshape unsqueezes singleton axes that were potentially squeezed in concatenate
     weights_stage = jax.tree_map(layers_dimension_to_stages, weights)
     return weights_stage
 
   # TODO: should we pass in the weights explicitly? How about the segmentation IDs
-  def run_one_iteration(self, state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights):
+
+  def get_microbatch_id(self, stage_idx, loop_iteration):
+    '''
+    Gets the microbatch_id on this loop_iteration for this stage.
+    
+    Input:
+        stage_idx: Index of this stage, integer from 0 to num_stages - 1
+        loop_iteration: Integer of loop index
+    Returns:
+        Integer representing which microbatch the stage at stage_idx will work on during loop_iteration
+    '''
+    return (loop_iteration - stage_idx) % self.config.num_pipeline_microbatches
+     
+  def get_microbatches_for_stages(self, microbatched_array, loop_iteration):
+    '''
+    Returns an array of leading dimension stages grabing the current microbatch for each stage
+    
+    Input:
+        microbatched_array: Array to grab from, should have leading dimension num_microbatches
+        loop_iteration: Integer of loop index
+    Returns:
+        Array of shape microbatched_array for each stage, except the leading dimension is replaced by num_stages
+    '''
+
+    microbatched_stages_list = [microbatched_array(self.get_microbatch_id(stage_idx, loop_iteration)) for stage_idx in range(self.num_stages)]
+    stages_array = jnp.concatenate(microbatched_stages_list, axis=0)
+    return jnp.reshape(stages_array, [self.num_stages] + microbatched_array.shape[1:])
+
+     
+  def run_one_iteration(self, state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode):
    '''
       Run one loop iteration - sending inputs and specifying weights for each pipeline stage, run the pipeline, and update the various state buffers
    '''
-   stages_in = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
-   weights_stage = self.get_weights_stage(weights, loop_iteration)
-   pipeline_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,0,0,None,None])(stacked_params, stacked_inputs, stacked_positions, stacked_segment_ids, deterministic, model_mode)
+   stages_weights = self.get_weights_stage(weights, loop_iteration)
+   stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
+   stages_positions = self.get_microbatches_for_stages(positions, loop_iteration)
+   stages_segment_ids = self.get_microbatches_for_stages(segment_ids, loop_iteration)
+   pipeline_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,0,0,None,None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
    # output = jax.vmap
 
   #  new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = get_new_loop_state(output, state_io, circ_storage, circ_storage_mover, loop_iteration, use_circ_storage)
@@ -243,7 +275,7 @@ class Pipeline(nn.Module):
     # Go from a list of size n_layers of weight pytrees to a single pytree where each leaf has a leading dimension of n_layers 
     weights = stack_pytrees(*weights)
     for loop_iteration in range(total_iterations):
-       self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights)
+       self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode)
        #state_io, shift, circ_storage, circ_storage_mover = self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights)
 
 
