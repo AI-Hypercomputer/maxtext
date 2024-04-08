@@ -113,9 +113,7 @@ class Pipeline(nn.Module):
     #shift = self.shard_dim_by_stages(shift, self.mesh)
     # TODO: Is there a standard way to go from logical -> physical instead of the logical_to_mesh followed by with_sharding_constraint?
     # Can remove mesh and logical_axis_rules and rely on global context manager (but we should remove the global context manager anyway at some point) 
-    print(f"{self.config.logical_axis_rules=}")
     shift_shardings = nn.logical_to_mesh_axes(["activation_stage", "activation_batch", "activation_length", "activation_embed"],self.config.logical_axis_rules) 
-    print(f"{shift_shardings=}")
     shift = jax.lax.with_sharding_constraint(shift,NamedSharding(self.mesh, shift_shardings))
     #shift = jax.lax.with_sharding_constraint(shift, self.S(self.mesh, *shift_shardings)) # For some reason this complains about resource names
     #shift = jax.lax.with_sharding_constraint(shift, S(self.mesh, 'stage', 'data', None, 'tensor'))
@@ -131,6 +129,7 @@ class Pipeline(nn.Module):
     # TODO: verify comment below
     # The data/fsdp can shard over microbatch_size, not number of microbatches. The num_microbatches is looped over so should not be sharded.
 
+    # TODO: Consider sharding and/or changing the circ storage
     # circ_storage is used to hold the final pipeline stage outputs before it is used for the next repeat. It is only needed
     # when num_microbatches > num_stages, else instead the final stage can immediately pass to the first without additional storage.
     # Alternative name is "between_repeats_storage"
@@ -151,6 +150,45 @@ class Pipeline(nn.Module):
 
     return state_io, shift, circ_storage, circ_storage_mover
 
+  def get_iteration_inputs(self, loop_iteration, state_io, circ_storage, shift):
+    '''
+    Construct stages_in: the global array that is operated on for this iteration, shape same as shift=[stages, micro_size, sequence, embed]
+    This is almost a rotated version of the last outputs, except for the first stage which must grab from state_io or circ_storage
+    '''
+
+    # Setup potential input from state_io. state_io has a rotating microbatch index (size of micro/stages, stream_buf_idx below)
+    state_io_batch_idx = loop_iteration % (self.config.num_pipeline_microbatches // self.num_stages)
+    state_io_slice = state_io[:,state_io_batch_idx] 
+
+    if self.use_circ_storage:
+        # Setup potential input from circ_slice, which also has a rotating index for microbatch
+        circ_storage_batch_idx = loop_iteration % self.config.num_pipeline_microbatches
+        circ_storage_slice = circ_storage[:,circ_storage_batch_idx]
+    else:
+        circ_storage_slice = shift
+
+    stages_in = jnp.where(loop_iteration < self.config.num_pipeline_microbatches, state_io_slice, circ_storage_slice)
+
+    def select_state_or_input(input, shift):
+        # Selects input for stage 0, shift for other stages
+        return jnp.where(jax.lax.broadcasted_iota('int32', shift.shape, 0) == 0, input, shift)
+
+    # Selects input (from stream_io or circ_slice) for stage 0, other stages get from shift (the rotated previous output)
+    stages_in = select_state_or_input(stages_in, shift)
+    return stages_in
+
+  # TODO: should we pass in the weights explicitly? How about the segmentation IDs
+  def run_one_iteration(self, state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights):
+   '''
+      Run one loop iteration - sending inputs and specifying weights for each pipeline stage, run the pipeline, and update the various state buffers
+   '''
+   stages_in = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
+   weights_stage = get_weights_stage(weights, loop_iteration, n_stages, n_microbatches)
+   output = jax.vmap(stage, in_axes=0, out_axes=0,def get_iteration_inputs(loop_iteration, microbatches, num_stages, state_io, circ_storage, shift, use_circ_storage):
+
+   new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = get_new_loop_state(output, state_io, circ_storage, circ_storage_mover, loop_iteration, use_circ_storage)
+   return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
+  
   def __call__(self, inputs: jnp.ndarray, positions: jnp.ndarray, segment_ids:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
     # We want to access the variables of the decoder_layer, the below loop fills in the variables dictionary (previously empty dict)
     for decoder in self.decoder_layers:
@@ -165,6 +203,12 @@ class Pipeline(nn.Module):
     segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
 
     state_io, shift, circ_storage, circ_storage_mover = self.init_states(inputs)
+
+    total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
+    for loop_iteration in range(total_iterations):
+       state_io, shift, circ_storage, circ_storage_mover = self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration)
+
+
 
 
 
