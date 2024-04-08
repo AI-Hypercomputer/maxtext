@@ -101,15 +101,15 @@ class Pipeline(nn.Module):
         Assumes input has already been reshaped into microbatches: [num_micro_batches, micro_batch_size, sequence, embed]
 
         Returns
-          shift: zeros shape [n_stages, micro_size, sequence, embed]
-          state_io: reshaped inputs [n_stages, microbatches/stages, micro_size, sequence, embed]
+          shift: zeros shape [num_stages, micro_size, sequence, embed]
+          state_io: reshaped inputs [num_stages, microbatches/stages, micro_size, sequence, embed]
           circ_storage: zeros [num_stages, microbatches, micro_size, sequence, embed]
-          circ_storage_mover: zeros[n_stages, micro_size, sequence, embed]
+          circ_storage_mover: zeros[num_stages, micro_size, sequence, embed]
     
     '''
 
     # Shift is used to rotate the output of each pipeline into the input of the next
-    # shift has shape [n_stages, micro_size, sequence, embed]
+    # shift has shape [num_stages, micro_size, sequence, embed]
     shift = jnp.zeros((self.num_stages,) + inputs.shape[1:])
     #shift = self.shard_dim_by_stages(shift, self.mesh)
     # TODO: Is there a standard way to go from logical -> physical instead of the logical_to_mesh followed by with_sharding_constraint?
@@ -120,7 +120,7 @@ class Pipeline(nn.Module):
     #shift = jax.lax.with_sharding_constraint(shift, S(self.mesh, 'stage', 'data', None, 'tensor'))
 
     # state_io (state input output) at first holds all of the input batches, but also will hold the outputs as the pipeline runs/finishes
-    # state_io has shape [n_stages, microbatches/stages, micro_size, sequence, embed]
+    # state_io has shape [num_stages, microbatches/stages, micro_size, sequence, embed]
     state_io = jnp.reshape(inputs, (self.num_stages, self.microbatches_per_stage) + inputs.shape[1:])
     #state_io = self.shard_dim_by_stages(state_io)
     state_io_shardings = nn.logical_to_mesh_axes(["activation_stage", None, "activation_batch", "activation_length", "activation_embed"],self.config.logical_axis_rules) 
@@ -141,7 +141,7 @@ class Pipeline(nn.Module):
        circ_storage = None
 
     # circ_storage_mover is used to push the microbatches from the pipeline into circ_storage
-    # circ_storage_mover shape is same as shift: [n_stages, micro_size, sequence, embed]
+    # circ_storage_mover shape is same as shift: [num_stages, micro_size, sequence, embed]
     # This mover is one iteration behind before being pushed into storage - which is why we can't just re-use output
     # However shouldn't we be able to keep only the last stage's output instead of all stages?
     if self.use_circ_storage:
@@ -192,11 +192,11 @@ class Pipeline(nn.Module):
     the repeat indexes are [1,1,0,0] so need layers [4,5,2,3]
     '''
     # We use numpy instead of jnp so these indexes are not traced
-    microbatch_ids = np.maximum(loop_iteration - np.arange(self.n_stages), 0) # not a great name, this is really batch_id * repeat idx
+    microbatch_ids = np.maximum(loop_iteration - np.arange(self.num_stages), 0) # not a great name, this is really batch_id * repeat idx
     repeat_ids = microbatch_ids // self.config.num_pipeline_microbatches
     layer_ids = np.arange(self.num_stages) + repeat_ids * self.num_stages
     #layer_ids goes out of bounds on the last bubble, we cap it within range.
-    layer_ids= np.minimum(layer_ids, weights.shape[0] - 1)
+    layer_ids= np.minimum(layer_ids, self.config.num_decoder_layers - 1)
     # slice_in_dim avoids executing an all gather
 
 
@@ -205,7 +205,7 @@ class Pipeline(nn.Module):
        weights_stage = jnp.concatenate(weights_stage_list, axis=0)
        weights_stage_shape = (self.num_stages,) + weight_leaf.shape[1:]
        weights_stage = jnp.reshape(weights_stage, weights_stage_shape) # This reshape unsqueezes singleton axes that were potentially squeezed in concatenate
-    weights_stage = jax.tree_map(weights, layers_dimension_to_stages)
+    weights_stage = jax.tree_map(layers_dimension_to_stages, weights)
     return weights_stage
 
   # TODO: should we pass in the weights explicitly? How about the segmentation IDs
