@@ -1,3 +1,4 @@
+nvidia-cudnn-cu12==8.9.7.29
 jax>=0.4.23
 jaxlib>=0.4.23
 orbax-checkpoint>=0.5.5
