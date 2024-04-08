@@ -62,6 +62,8 @@ def get_weights_and_inputs(batch_size, sequence, features, n_layers):
 # Pipeline is made up of several SimpleDecoderLayers 
 class Pipeline(nn.Module):
   
+  # TODO: Some properties, (num repeat, num_micro are through the config, some are derived. This makes it annoying to call diff properties. Is there a better solution?)
+  # TODO: Should we declare the derived properties here as well? I think anything declared here becomes required as an input
   config: common_types.Config
   decoder_layer_class: nn.Module
   mesh: common_types.Mesh
@@ -73,9 +75,15 @@ class Pipeline(nn.Module):
     self.decoder_layers = decoder_layers
     self.num_stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
     self.layers_per_stage = self.config.num_decoder_layers / (self.num_stages * self.config.num_pipeline_repeats)
-    assert self.layers_per_stage==1,"Currently only supporting 1 layer per pipeline stage"
+    # TODO: should this assert be in this class or in the initial pyconfig check?
+    assert self.layers_per_stage==1,f"Currently only supporting 1 layer per pipeline stage, but {self.config.num_decoder_layers} layers were requested with {self.num_stages} stages"
     self.use_circ_storage = self.config.num_pipeline_repeats > 1 and self.config.num_pipeline_microbatches > self.num_stages
     self.microbatch_size = self.config.global_batch_size_to_train_on // self.config.num_pipeline_microbatches
+    microbatches_per_stage = self.config.num_pipeline_microbatches // self.num_stages
+    # TODO: improve error message to show inputs
+    assert microbatches_per_stage * self.num_stages == self.config.num_pipeline_microbatches, f"Currently the number of microbatches ({self.config.num_pipeline_microbatches}) must be divisible by the number of stages ({self.num_stages})"
+    self.microbatches_per_stage = microbatches_per_stage
+
     
   def S(self, *specs):
     return NamedSharding(self.mesh, PartitionSpec(*specs))
@@ -105,17 +113,20 @@ class Pipeline(nn.Module):
     #shift = self.shard_dim_by_stages(shift, self.mesh)
     # TODO: Is there a standard way to go from logical -> physical instead of the logical_to_mesh followed by with_sharding_constraint?
     # Can remove mesh and logical_axis_rules and rely on global context manager (but we should remove the global context manager anyway at some point) 
+    print(f"{self.config.logical_axis_rules=}")
     shift_shardings = nn.logical_to_mesh_axes(["activation_stage", "activation_batch", "activation_length", "activation_embed"],self.config.logical_axis_rules) 
     print(f"{shift_shardings=}")
-    shift = jax.lax.with_sharding_constraint(shift, self.S(self.mesh, *shift_shardings))
+    shift = jax.lax.with_sharding_constraint(shift,NamedSharding(self.mesh, shift_shardings))
+    #shift = jax.lax.with_sharding_constraint(shift, self.S(self.mesh, *shift_shardings)) # For some reason this complains about resource names
     #shift = jax.lax.with_sharding_constraint(shift, S(self.mesh, 'stage', 'data', None, 'tensor'))
 
     # state_io (state input output) at first holds all of the input batches, but also will hold the outputs as the pipeline runs/finishes
     # state_io has shape [n_stages, microbatches/stages, micro_size, sequence, embed]
-    state_io = jnp.reshape(inputs, (self.num_stages, self.num_pipeline_microbatches // self.num_stages) + inputs.shape[1:])
+    state_io = jnp.reshape(inputs, (self.num_stages, self.microbatches_per_stage) + inputs.shape[1:])
     #state_io = self.shard_dim_by_stages(state_io)
     state_io_shardings = nn.logical_to_mesh_axes(["activation_stage", None, "activation_batch", "activation_length", "activation_embed"],self.config.logical_axis_rules) 
-    state_io = jax.lax.with_sharding_constraint(state_io, self.S(self.mesh, *state_io_shardings))
+    state_io = jax.lax.with_sharding_constraint(state_io, NamedSharding(self.mesh, state_io_shardings))
+    #state_io = jax.lax.with_sharding_constraint(state_io, self.S(self.mesh, *state_io_shardings))
 
     # TODO: verify comment below
     # The data/fsdp can shard over microbatch_size, not number of microbatches. The num_microbatches is looped over so should not be sharded.
@@ -189,7 +200,7 @@ def main(argv: Sequence[str]) -> None:
   # TODO: determine if num_stages should be added to pyconfig or elsewhere
   num_stages = config.ici_pipeline_parallelism * config.dcn_pipeline_parallelism
   layers_per_stage = config.num_decoder_layers / (num_stages * config.num_pipeline_repeats)
-  assert layers_per_stage==1,"Currently only supporting 1 layer per pipeline stage"
+  #assert layers_per_stage==1,"Currently only supporting 1 layer per pipeline stage"
 
   _, inputs, targets, inputs_position, inputs_segmentation = get_weights_and_inputs(config.global_batch_size_to_train_on, config.max_target_length, config.emb_dim, config.num_decoder_layers)
   deterministic = False
