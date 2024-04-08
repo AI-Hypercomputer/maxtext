@@ -79,8 +79,9 @@ class Pipeline(nn.Module):
 
   def shard_dim_by_stages(self, x):
    '''Assumes the stages dimension is leading and the mesh has name stages.'''
-   specs = ['stage'] + [None] * (x.ndim - 1)
-   stage_sharding = S(self.mesh, *specs)
+   # TODO: currently uses physical axes instead of logical, should we use logical instead?
+   specs = ['pipeline_stage'] + [None] * (x.ndim - 1)
+   stage_sharding = self.S(*specs)
    return jax.lax.with_sharding_constraint(x, stage_sharding)
   
   def init_states(self, inputs):
@@ -99,15 +100,18 @@ class Pipeline(nn.Module):
     # shift has shape [n_stages, micro_size, sequence, embed]
     shift = jnp.zeros((self.num_stages,) + inputs.shape[1:])
     shift = self.shard_dim_by_stages(shift, self.mesh)
-    # TODO: Use logical names e.g. "activation_embed" for mixed sharding strategies below?
+    # TODO: Is there a standard way to go from logical -> physical instead of the logical_to_mesh followed by with_sharding_constraint?
+    # Can remove mesh and logical_axis_rules and rely on global context manager (but we should remove the global context manager anyway at some point) 
+    shift_shardings = nn.logical_to_mesh_axes(["activation_pipeline_stage", "activation_batch", "activation_length", "activation_embed"],self.config.logical_axis_rules) 
+    shift = jax.lax.with_sharding_constraint(shift, self.S(self.mesh, *shift_shardings))
     #shift = jax.lax.with_sharding_constraint(shift, S(self.mesh, 'stage', 'data', None, 'tensor'))
 
     # state_io (state input output) at first holds all of the input batches, but also will hold the outputs as the pipeline runs/finishes
     # state_io has shape [n_stages, microbatches/stages, micro_size, sequence, embed]
     state_io = jnp.reshape(inputs, (self.num_stages, self.num_pipeline_microbatches // self.num_stages) + inputs.shape[1:])
-    state_io = self.shard_dim_by_stages(state_io)
-    # TODO: Use logical names e.g. "activation_embed" for mixed sharding strategies below?
-    #state_io = jax.lax.with_sharding_constraint(state_io, S(self.mesh, 'stage', None, 'data', None, 'tensor'))
+    #state_io = self.shard_dim_by_stages(state_io)
+    state_io_shardings = nn.logical_to_mesh_axes(["activation_pipeline_stage", None, "activation_batch", "activation_length", "activation_embed"],self.config.logical_axis_rules) 
+    state_io = jax.lax.with_sharding_constraint(state_io, self.S(self.mesh, *state_io_shardings))
 
     # TODO: verify comment below
     # The data/fsdp can shard over microbatch_size, not number of microbatches. The num_microbatches is looped over so should not be sharded.
