@@ -43,7 +43,7 @@ You need to run these steps once per project prior to any local development or c
 ```
 bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
 ```
-3. Set config values for `base_output_directory` and `dataset_path` in `configs/base.yml`. `tokenizer_path` is full path for loading the tokenizer. MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them. We also recommend reviewing the configurable options in `configs/base.yml`, for instance you may change the `steps` or `logging_period` by either modifying `configs/base.yml` or by passing in `steps` and `logging_period` as additional args to the `train.py` call.
+3. Set config values for `base_output_directory` and `dataset_path` in `configs/base.yml`. `tokenizer_path` is full path for loading the tokenizer. MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them. We also recommend reviewing the configurable options in `configs/base.yml`, for instance you may change the `steps` or `log_period` by either modifying `configs/base.yml` or by passing in `steps` and `log_period` as additional args to the `train.py` call.
 
 To run maxtext the TPUVMs must have permission to read the gcs bucket. These permissions are granted by service account roles, such as the `STORAGE ADMIN` role.
 
@@ -90,7 +90,7 @@ Failed to execute XLA Runtime executable: run time error: custom call 'xla.gpu.a
 There are three patterns for running MaxText with more than one host.
 
 1. [GKE, recommended] [Running Maxtext with xpk](getting_started/Run_MaxText_via_xpk.md) - Quick Experimentation and Production support
-2. [GCE] [Running Maxtext with Multihost Jobs](getting_started/Run_MaxText_via_multihost_jobs.md) - Long Running Production Jobs with Queued Resources
+2. [GCE] [Running Maxtext with Multihost Jobs](getting_started/Run_MaxText_via_multihost_job.md) - Long Running Production Jobs with Queued Resources
 3. [GCE] [Running Maxtext with Multihost Runner](getting_started/Run_MaxText_via_multihost_runner.md) -  Fast experiments via multiple ssh connections.
 
 ## Getting Starting: Preflight Optimizations

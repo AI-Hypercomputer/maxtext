@@ -71,6 +71,7 @@ class LlamaDecoderLayer(nn.Module):
 
     lnx_rms = models.RMSNorm(
         dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
         name='pre_self_attention_layer_norm',
         kernel_axes=('embed',),
         epsilon=cfg.normalization_layer_epsilon,
@@ -91,9 +92,11 @@ class LlamaDecoderLayer(nn.Module):
       attention_kernel=cfg.attention,
       mesh=mesh,
       dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
       dropout_rate=cfg.dropout_rate,
       name='self_attention',
-      quant=self.quant)
+      quant=self.quant,
+      quantize_kvcache=cfg.quantize_kvcache)
 
     attention_lnx = attention_layer(
             lnx,
@@ -110,10 +113,16 @@ class LlamaDecoderLayer(nn.Module):
 
     # Fully Connected
     hidden_states = models.RMSNorm(
-        dtype=cfg.dtype, name='post_self_attention_layer_norm', kernel_axes=('embed',),
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name='post_self_attention_layer_norm',
+        kernel_axes=('embed',),
         epsilon=cfg.normalization_layer_epsilon,
         )(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, ('activation_batch', 'activation_length', 'activation_embed'))
+    hidden_states = nn.with_logical_constraint(
+      hidden_states,
+      ('activation_batch', 'activation_length', 'activation_embed')
+      )
 
     # MLP block.
     mlp_lnx = linears.MlpBlock(
@@ -121,6 +130,7 @@ class LlamaDecoderLayer(nn.Module):
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
         name='mlp',
         config=cfg,
         quant=self.quant,

@@ -167,7 +167,7 @@ UserFacingNameToSystemCharacteristics = {
         'tpu', 'v5:4x4x92', 'megacore', (2, 2, 1), 1472
     ),
     'v5p-3072': SystemCharacteristics(
-        'tpu', 'v5:4x12x16', 'megacore', (2, 2, 1), 1536
+        'tpu', 'v5:8x12x16', 'megacore', (2, 2, 1), 1536
     ),
     'v5p-3200': SystemCharacteristics(
         'tpu', 'v5:4x20x20', 'megacore', (2, 2, 1), 1600

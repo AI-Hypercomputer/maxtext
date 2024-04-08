@@ -18,9 +18,13 @@ import functools
 
 from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2.flax import aqt_flax
-from common_types import Config
+from common_types import Array, Config
 from dataclasses import dataclass
+import jax
 import jax.numpy as jnp
+from jax.tree_util import tree_flatten_with_path, tree_unflatten
+
+MAX_INT8 = 127.5
 
 @dataclass
 class AqtQuantization:
@@ -47,6 +51,7 @@ class AqtQuantization:
     return aqt_einsum
 
 def _get_quant_config(config):
+  """Set quantization params based on user configuration."""
   if not config.quantization or config.quantization == '':
     return None
   elif config.quantization == "int8":
@@ -97,3 +102,44 @@ def configure_quantization(config: Config, quant_mode_str: str = 'train'):
     quant_mode = get_quant_mode(quant_mode_str)
     return AqtQuantization(quant_dg=quant_cfg, quant_mode=quant_mode)
   return None
+
+def _get_aqt_key_paths(aqt_vars):
+  """ Generate a list of paths which have aqt state """
+  aqt_tree_flat, _ = jax.tree_util.tree_flatten_with_path(aqt_vars)
+  aqt_key_paths = []
+  for k, _ in aqt_tree_flat:
+    pruned_keys = []
+    for d in list(k):
+      if 'AqtDotGeneral' in d.key:
+        pruned_keys.append(jax.tree_util.DictKey(key='kernel'))
+        break
+      else:
+        assert 'Aqt' not in d.key, f"Unexpected Aqt op {d.key} in {k}."
+        pruned_keys.append(d)
+    aqt_key_paths.append(tuple(pruned_keys))
+  return aqt_key_paths
+
+
+def remove_quantized_params(params, aqt_vars):
+  """Remove param values with aqt tensors to Null to optimize memory."""
+  aqt_paths = _get_aqt_key_paths(aqt_vars)
+  tree_flat, tree_struct = tree_flatten_with_path(params)
+  for i, (k, v) in enumerate(tree_flat):
+    if k in aqt_paths:
+      v = {}
+    tree_flat[i] = v
+  return tree_unflatten(tree_struct, tree_flat)
+
+def configure_kv_quantization(config: Config):
+  """ Configure kv quantization based on user config."""
+  return False if not config.quantize_kvcache else True
+
+def quantize_kv(kv: Array):
+  """Quantize key/values stored in kvcache."""
+  scale = jnp.max(jnp.abs(kv), axis=-1, keepdims=True)
+  value = jnp.int8(jnp.rint(kv * (MAX_INT8 / scale)))
+  return value, scale
+
+def unquantize_kv(value: Array, scale:Array, dtype:jnp.dtype):
+  """Unquantize key/values stored in kvcache."""
+  return value.astype(dtype) * scale / MAX_INT8
