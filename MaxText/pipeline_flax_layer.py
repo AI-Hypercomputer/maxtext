@@ -16,6 +16,7 @@ from layers import simple_decoder_layer
 import common_types
 import pyconfig
 import functools
+import max_utils
 
 def stack_pytrees(*pytrees):
   """Stacks pytrees with identical structure along a new leading dimension."""
@@ -25,6 +26,8 @@ def stack_pytrees(*pytrees):
 
 def create_mesh(n_stages, tp_axis, dp_axis):
   devices = mesh_utils.create_device_mesh((n_stages, tp_axis, dp_axis))
+  
+
   mesh = Mesh(devices, axis_names=('stage', 'tensor', 'data'))
   return mesh
 
@@ -99,10 +102,11 @@ class Pipeline(nn.Module):
     # Shift is used to rotate the output of each pipeline into the input of the next
     # shift has shape [n_stages, micro_size, sequence, embed]
     shift = jnp.zeros((self.num_stages,) + inputs.shape[1:])
-    shift = self.shard_dim_by_stages(shift, self.mesh)
+    #shift = self.shard_dim_by_stages(shift, self.mesh)
     # TODO: Is there a standard way to go from logical -> physical instead of the logical_to_mesh followed by with_sharding_constraint?
     # Can remove mesh and logical_axis_rules and rely on global context manager (but we should remove the global context manager anyway at some point) 
-    shift_shardings = nn.logical_to_mesh_axes(["activation_pipeline_stage", "activation_batch", "activation_length", "activation_embed"],self.config.logical_axis_rules) 
+    shift_shardings = nn.logical_to_mesh_axes(["activation_stage", "activation_batch", "activation_length", "activation_embed"],self.config.logical_axis_rules) 
+    print(f"{shift_shardings=}")
     shift = jax.lax.with_sharding_constraint(shift, self.S(self.mesh, *shift_shardings))
     #shift = jax.lax.with_sharding_constraint(shift, S(self.mesh, 'stage', 'data', None, 'tensor'))
 
@@ -110,7 +114,7 @@ class Pipeline(nn.Module):
     # state_io has shape [n_stages, microbatches/stages, micro_size, sequence, embed]
     state_io = jnp.reshape(inputs, (self.num_stages, self.num_pipeline_microbatches // self.num_stages) + inputs.shape[1:])
     #state_io = self.shard_dim_by_stages(state_io)
-    state_io_shardings = nn.logical_to_mesh_axes(["activation_pipeline_stage", None, "activation_batch", "activation_length", "activation_embed"],self.config.logical_axis_rules) 
+    state_io_shardings = nn.logical_to_mesh_axes(["activation_stage", None, "activation_batch", "activation_length", "activation_embed"],self.config.logical_axis_rules) 
     state_io = jax.lax.with_sharding_constraint(state_io, self.S(self.mesh, *state_io_shardings))
 
     # TODO: verify comment below
@@ -191,7 +195,9 @@ def main(argv: Sequence[str]) -> None:
   deterministic = False
   model_mode = common_types.MODEL_MODE_TRAIN
 
-  mesh = create_mesh(num_stages, config.ici_tensor_parallelism, config.ici_data_parallelism)
+  devices_array = max_utils.create_device_mesh(config)
+  mesh = Mesh(devices_array, config.mesh_axes)
+  #mesh = create_mesh(num_stages, config.ici_tensor_parallelism, config.ici_data_parallelism)
 
   my_pipeline = Pipeline(
     config=config,
