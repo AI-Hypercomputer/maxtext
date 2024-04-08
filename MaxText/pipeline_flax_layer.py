@@ -1,4 +1,5 @@
 import jax
+import numpy as np
 from jax import numpy as jnp
 from jax import tree_map
 from flax import linen as nn
@@ -177,17 +178,49 @@ class Pipeline(nn.Module):
     stages_in = select_state_or_input(stages_in, shift)
     return stages_in
 
+  def get_weights_stage(self, weights, loop_iteration):
+    '''
+    Get the weights for each stage used for this loop itereation. 
+    
+    Input:
+        Weights are a pytree where each leaf has a leading dimension of num_layers, e.g. [num_layers, embed, mlp]
+    Returns:
+        Weights of same pytree structure but each leaf has a leading dimension of num_stages, e.g. [num_stages, embed, mlp].
+
+    For non-circular pipelines this would just be stacked [weights_layer_0; weights_layer1; etc],
+    but for circular the stages need a repeat_idx to determine what layer weights to grab, e.g. on iteration 5 with 4 stages
+    the repeat indexes are [1,1,0,0] so need layers [4,5,2,3]
+    '''
+    # We use numpy instead of jnp so these indexes are not traced
+    microbatch_ids = np.maximum(loop_iteration - np.arange(self.n_stages), 0) # not a great name, this is really batch_id * repeat idx
+    repeat_ids = microbatch_ids // self.config.num_pipeline_microbatches
+    layer_ids = np.arange(self.num_stages) + repeat_ids * self.num_stages
+    #layer_ids goes out of bounds on the last bubble, we cap it within range.
+    layer_ids= np.minimum(layer_ids, weights.shape[0] - 1)
+    # slice_in_dim avoids executing an all gather
+
+
+    def layers_dimension_to_stages(weight_leaf):
+       weights_stage_list= [jax.lax.slice_in_dim(weight_leaf,layer_ids[stage], layer_ids[stage] + 1, axis=0) for stage in range(self.num_stages)]
+       weights_stage = jnp.concatenate(weights_stage_list, axis=0)
+       weights_stage_shape = (self.num_stages,) + weight_leaf.shape[1:]
+       weights_stage = jnp.reshape(weights_stage, weights_stage_shape) # This reshape unsqueezes singleton axes that were potentially squeezed in concatenate
+    weights_stage = jax.tree_map(weights, layers_dimension_to_stages)
+    return weights_stage
+
   # TODO: should we pass in the weights explicitly? How about the segmentation IDs
   def run_one_iteration(self, state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights):
    '''
       Run one loop iteration - sending inputs and specifying weights for each pipeline stage, run the pipeline, and update the various state buffers
    '''
    stages_in = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
-   weights_stage = get_weights_stage(weights, loop_iteration, n_stages, n_microbatches)
-   output = jax.vmap(stage, in_axes=0, out_axes=0,def get_iteration_inputs(loop_iteration, microbatches, num_stages, state_io, circ_storage, shift, use_circ_storage):
+   weights_stage = self.get_weights_stage(weights, loop_iteration)
+   print("Finished gets weights stage!!!", flush=True)
+   return None
+  #  output = jax.vmap(stage, in_axes=0, out_axes=0,def get_iteration_inputs(loop_iteration, microbatches, num_stages, state_io, circ_storage, shift, use_circ_storage):
 
-   new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = get_new_loop_state(output, state_io, circ_storage, circ_storage_mover, loop_iteration, use_circ_storage)
-   return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
+  #  new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = get_new_loop_state(output, state_io, circ_storage, circ_storage_mover, loop_iteration, use_circ_storage)
+  #  return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
   
   def __call__(self, inputs: jnp.ndarray, positions: jnp.ndarray, segment_ids:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
     # We want to access the variables of the decoder_layer, the below loop fills in the variables dictionary (previously empty dict)
@@ -205,8 +238,14 @@ class Pipeline(nn.Module):
     state_io, shift, circ_storage, circ_storage_mover = self.init_states(inputs)
 
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
+
+    # TODO(huge): Shard the weights. This may be tricky b/c there is no "stage" axis in the weights to shard over until after the below
+    weights = [decoder.variables for decoder in self.decoder_layers]
+    # Go from a list of size n_layers of weight pytrees to a single pytree where each leaf has a leading dimension of n_layers 
+    weights = stack_pytrees(*weights)
     for loop_iteration in range(total_iterations):
-       state_io, shift, circ_storage, circ_storage_mover = self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration)
+       self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights)
+       #state_io, shift, circ_storage, circ_storage_mover = self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights)
 
 
 
