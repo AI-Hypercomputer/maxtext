@@ -215,9 +215,8 @@ class Pipeline(nn.Module):
    '''
    stages_in = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
    weights_stage = self.get_weights_stage(weights, loop_iteration)
-   print("Finished gets weights stage!!!", flush=True)
-   return None
-  #  output = jax.vmap(stage, in_axes=0, out_axes=0,def get_iteration_inputs(loop_iteration, microbatches, num_stages, state_io, circ_storage, shift, use_circ_storage):
+   pipeline_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,0,0,None,None])(stacked_params, stacked_inputs, stacked_positions, stacked_segment_ids, deterministic, model_mode)
+   # output = jax.vmap
 
   #  new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = get_new_loop_state(output, state_io, circ_storage, circ_storage_mover, loop_iteration, use_circ_storage)
   #  return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
