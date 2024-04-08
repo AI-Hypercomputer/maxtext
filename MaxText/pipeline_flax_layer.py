@@ -4,6 +4,7 @@ from jax import tree_map
 from flax import linen as nn
 from jax.sharding import Mesh
 from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec
 from jax.experimental import mesh_utils
 from typing import Sequence
 from absl import app
@@ -71,7 +72,65 @@ class Pipeline(nn.Module):
     self.layers_per_stage = self.config.num_decoder_layers / (self.num_stages * self.config.num_pipeline_repeats)
     assert self.layers_per_stage==1,"Currently only supporting 1 layer per pipeline stage"
     self.use_circ_storage = self.config.num_pipeline_repeats > 1 and self.config.num_pipeline_microbatches > self.num_stages
+    self.microbatch_size = self.config.global_batch_size_to_train_on // self.config.num_pipeline_microbatches
     
+  def S(self, *specs):
+    return NamedSharding(self.mesh, PartitionSpec(*specs))
+
+  def shard_dim_by_stages(self, x):
+   '''Assumes the stages dimension is leading and the mesh has name stages.'''
+   specs = ['stage'] + [None] * (x.ndim - 1)
+   stage_sharding = S(self.mesh, *specs)
+   return jax.lax.with_sharding_constraint(x, stage_sharding)
+  
+  def init_states(self, inputs):
+    '''Initialize components of state: state_io, shift, circular_storage and circular_storage_mover
+        Assumes input has already been reshaped into microbatches: [num_micro_batches, micro_batch_size, sequence, embed]
+
+        Returns
+          shift: zeros shape [n_stages, micro_size, sequence, embed]
+          state_io: reshaped inputs [n_stages, microbatches/stages, micro_size, sequence, embed]
+          circ_storage: zeros [num_stages, microbatches, micro_size, sequence, embed]
+          circ_storage_mover: zeros[n_stages, micro_size, sequence, embed]
+    
+    '''
+
+    # Shift is used to rotate the output of each pipeline into the input of the next
+    # shift has shape [n_stages, micro_size, sequence, embed]
+    shift = jnp.zeros((self.num_stages,) + inputs.shape[1:])
+    shift = self.shard_dim_by_stages(shift, self.mesh)
+    # TODO: Use logical names e.g. "activation_embed" for mixed sharding strategies below?
+    #shift = jax.lax.with_sharding_constraint(shift, S(self.mesh, 'stage', 'data', None, 'tensor'))
+
+    # state_io (state input output) at first holds all of the input batches, but also will hold the outputs as the pipeline runs/finishes
+    # state_io has shape [n_stages, microbatches/stages, micro_size, sequence, embed]
+    state_io = jnp.reshape(inputs, (self.num_stages, self.num_pipeline_microbatches // self.num_stages) + inputs.shape[1:])
+    state_io = self.shard_dim_by_stages(state_io)
+    # TODO: Use logical names e.g. "activation_embed" for mixed sharding strategies below?
+    #state_io = jax.lax.with_sharding_constraint(state_io, S(self.mesh, 'stage', None, 'data', None, 'tensor'))
+
+    # TODO: verify comment below
+    # The data/fsdp can shard over microbatch_size, not number of microbatches. The num_microbatches is looped over so should not be sharded.
+
+    # circ_storage is used to hold the final pipeline stage outputs before it is used for the next repeat. It is only needed
+    # when num_microbatches > num_stages, else instead the final stage can immediately pass to the first without additional storage.
+    # Alternative name is "between_repeats_storage"
+    # circ_storage has shape [num_stages, microbatches, micro_size, sequence, embed] -- this is huge btw, it should be reducible by a factor of num_stages
+    if self.use_circ_storage:
+        circ_storage = jnp.zeros((self.num_stages,) + inputs.shape )
+    else:
+       circ_storage = None
+
+    # circ_storage_mover is used to push the microbatches from the pipeline into circ_storage
+    # circ_storage_mover shape is same as shift: [n_stages, micro_size, sequence, embed]
+    # This mover is one iteration behind before being pushed into storage - which is why we can't just re-use output
+    # However shouldn't we be able to keep only the last stage's output instead of all stages?
+    if self.use_circ_storage:
+        circ_storage_mover = shift
+    else:
+       circ_storage_mover = None
+
+    return state_io, shift, circ_storage, circ_storage_mover
 
   def __call__(self, inputs: jnp.ndarray, positions: jnp.ndarray, segment_ids:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
     # We want to access the variables of the decoder_layer, the below loop fills in the variables dictionary (previously empty dict)
@@ -79,6 +138,23 @@ class Pipeline(nn.Module):
       #print(dir(decoder))
       _ = decoder(inputs, positions, segment_ids, deterministic, model_mode)
 
+
+    ##### Begin real implementation ####
+    #Reshape from [global_batch, ...] to [num_micro_batches, micro_batch_size, ...]
+    inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length, self.config.emb_dim))
+    positions = positions.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
+    segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
+
+    state_io, shift, circ_storage, circ_storage_mover = self.init_states(inputs)
+
+
+
+
+
+
+
+
+    # Fake implementation
     # TODO: This stacking is silly - its passing entire inputs to both instead of microbatching first
     # decoder.variables is an empty dictionary until the loop above is executed
     decoder_params = [decoder.variables for decoder in self.decoder_layers] 
