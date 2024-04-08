@@ -88,8 +88,11 @@ class Pipeline(nn.Module):
     stacked_segment_ids = stack_pytrees(*([segment_ids] * self.num_stages))
 
     decoder_apply=functools.partial(self.decoder_layers[0].apply, deterministic=deterministic, model_mode=model_mode)
-    pipeline_output = jax.vmap(decoder_apply)(stacked_params, stacked_inputs, stacked_positions, stacked_segment_ids)
-    #pipeline_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,0,0,None,None])(stacked_params, inputs, positions, segment_ids, deterministic, model_mode)
+    #pipeline_output = jax.vmap(decoder_apply)(stacked_params, stacked_inputs, stacked_positions, stacked_segment_ids)
+    # Alternatively use in_axis instead of partial:
+    pipeline_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,0,0,None,None])(stacked_params, stacked_inputs, stacked_positions, stacked_segment_ids, deterministic, model_mode)
+
+    pipeline_output = pipeline_output[0] # correct for shape of above hack
     return pipeline_output
 
 def main(argv: Sequence[str]) -> None:

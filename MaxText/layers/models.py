@@ -172,11 +172,14 @@ class Decoder(nn.Module):
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
       return gpt3.Gpt3DecoderLayer
+    elif self.config.decoder_block == "simple":
+      from layers import simple_decoder_layer
+      return simple_decoder_layer.SimpleDecoderLayer
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma", "simple"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
@@ -271,15 +274,25 @@ class Decoder(nn.Module):
           model_mode,
       )
     else:
-      for lyr in range(cfg.num_decoder_layers):
-        y = BlockLayer(config=cfg, mesh=mesh, name=f'layers_{lyr}',
-                       quant=self.quant)(
+      if cfg.ici_pipeline_parallelism > 1 or cfg.dcn_pipeline_parallelism > 1:
+        import pipeline_flax_layer
+        y = pipeline_flax_layer.Pipeline(config=cfg, mesh=mesh, decoder_layer_class=BlockLayer,quant=self.quant)(
             y,
             decoder_segment_ids,
             decoder_positions,
             deterministic,
             model_mode,
         )
+      else:
+        for lyr in range(cfg.num_decoder_layers):
+          y = BlockLayer(config=cfg, mesh=mesh, name=f'layers_{lyr}',
+                        quant=self.quant)(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+          )
 
     y = self.get_norm_layer()(
       dtype=cfg.dtype,
