@@ -11,6 +11,7 @@ import os
 import argparse
 from typing import Optional
 from layers import quantizations
+from layers import simple_decoder_layer
 import common_types
 import pyconfig
 import functools
@@ -53,17 +54,6 @@ def get_weights_and_inputs(batch_size, sequence, features, n_layers):
     inputs_segmentation = jnp.ones((batch_size, sequence), dtype=jnp.int32)
 
     return weights, inputs, dummy_targets, inputs_position, inputs_segmentation
-
-class SimpleDecoderLayer(nn.Module):
-  config: common_types.Config
-  mesh: Mesh
-  quant: Optional[quantizations.AqtQuantization] = None
-
-  def setup(self):
-    self.weight_mat = self.param('weights', nn.initializers.ones, (self.config.emb_dim, self.config.emb_dim))
-
-  def __call__(self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode) -> jnp.ndarray:
-    return inputs @ self.weight_mat
 
 # Pipeline is made up of several SimpleDecoderLayers 
 class Pipeline(nn.Module):
@@ -122,7 +112,7 @@ def main(argv: Sequence[str]) -> None:
 
   my_pipeline = Pipeline(
     config=config,
-    decoder_layer_class=SimpleDecoderLayer,
+    decoder_layer_class=simple_decoder_layer.SimpleDecoderLayer,
     mesh=mesh
   )
   init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
