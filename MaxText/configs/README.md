@@ -15,7 +15,7 @@
  -->
 
 # High Performance Model Configs
-This directory contains high performance model configurations for different generations of TPU hardware.
+This directory contains high performance model configurations for different generations of TPU and GPU hardware.
 
 These configurations do 3 things:
 * Sets various XLA compiler flags as `LIBTPU_INIT_ARGS` to optimize runtime performance.
