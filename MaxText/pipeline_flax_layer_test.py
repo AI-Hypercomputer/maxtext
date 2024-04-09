@@ -117,8 +117,8 @@ def main(argv: Sequence[str]) -> None:
   mesh = Mesh(devices_array, config.mesh_axes)
   #mesh = create_mesh(num_stages, config.ici_tensor_parallelism, config.ici_data_parallelism)
 
-  decoder_layer = simple_decoder_layer.SimpleDecoderLayer
-  #decoder_layer = llama2.LlamaDecoderLayer
+  #decoder_layer = simple_decoder_layer.SimpleDecoderLayer
+  decoder_layer = llama2.LlamaDecoderLayer
   my_pipeline = pipeline_flax_layer.Pipeline(
     config=config,
     decoder_layer_class=decoder_layer,
