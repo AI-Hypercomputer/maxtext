@@ -226,7 +226,8 @@ class Pipeline(nn.Module):
      
   def get_microbatches_for_stages(self, microbatched_array, loop_iteration):
     '''
-    Returns an array of leading dimension stages grabbing the current microbatch for each stage
+    Returns an array of leading dimension stages grabbing the current microbatch for each stage.
+    TODO: This is not actually used to get the microbatches, but the position/segment IDs, so probably should change method name
     
     Input:
         microbatched_array: Array to grab from, should have leading dimension num_microbatches
@@ -240,7 +241,56 @@ class Pipeline(nn.Module):
     stages_array = jnp.reshape(stages_array, (self.num_stages,) + microbatched_array.shape[1:])
     return stages_array
 
-     
+  def get_new_loop_state(self,output, old_state_io, old_circ_storage, old_circ_storage_mover, loop_iteration):
+    '''
+      Update the various buffers given the output of the most recent iteration
+      * state_io: rotates left/up by 1 (replace last element with last stage output) - we are pushing inputs up into the pipeline
+      * shift: rotate output right/down by 1 - we imagine the pipeline moves to right/down
+      * circ_storage: push latest circ_mover (e.g. FULL outputs) into rotating index -- why are we pushing full ouputs, why not just last stage?
+      * circ_mover gets FULL? rotated output -- I think it should only need the last stage of output
+    '''
+
+    # Shift becomes a rotated-right version of the previous output
+    def _rotate_right(output_in):
+      # Use lax.slice to avoid generating a gather.
+      last = jax.lax.slice_in_dim(output_in, self.num_stages - 1, self.num_stages, axis=0)
+      except_last = jax.lax.slice_in_dim(output_in, 0, self.num_stages - 1, axis=0)
+      return jnp.concatenate([last, except_last], axis=0)
+    new_shift = _rotate_right(output)
+
+    if self.use_circ_storage:
+        # Insert the circ_storage_mover into new_circ_storage at a microbatch-rotating index.
+        # circ_storage_mover still points to the output of PREVIOUS iteration, which should aid in allowing overlapped compute/async transfers
+        def _rotate_right_and_update(circ_storage_mover_in, circ_storage_in):
+            rotated = _rotate_right(circ_storage_mover_in)
+            rotated = jnp.expand_dims(rotated, 1)
+            # The offset is the last stage's last microbatch ID. 
+            offset = (loop_iteration - (self.num_stages - 1) - 1) % self.num_pipeline_microbatches # Note extra -1 b/c grabbing from the previous output - circ_storage_mover is one iter behind
+            return jax.lax.dynamic_update_slice_in_dim(circ_storage_in, rotated, offset, axis=1)
+        new_circ_storage = _rotate_right_and_update(old_circ_storage_mover, old_circ_storage)
+        new_circ_storage_mover = output
+    else:
+       new_circ_storage = None
+       new_circ_storage_mover = None
+
+    # Rotate stream_io left/up by 1 on rotating ms index (stream_buf_idx), replacing the last/bottom with the last stage output
+    stream_buf_idx = loop_iteration % self.microbatches_per_stage
+    stream_slice = old_state_io[:, stream_buf_idx]
+    def _update_state_io(state_in, stream_slice, output):
+        # Shift the current slice to the left, then fill the last stage with the final output.
+        padding = [[0, 1]] + [[0, 0]] * (stream_slice.ndim - 1)
+        stream_slice = jax.lax.slice_in_dim(
+            jnp.pad(stream_slice, padding), 1, stream_slice.shape[0] + 1, axis=0)
+        stream_slice = jnp.where(
+            jax.lax.broadcasted_iota('int32', stream_slice.shape, 0) == self.num_stages - 1, output,
+            stream_slice)
+        stream_slice = jnp.expand_dims(stream_slice, 1)
+        return jax.lax.dynamic_update_slice_in_dim(
+            state_in, stream_slice, stream_buf_idx, axis=1)
+    new_state = _update_state_io(old_state_io, stream_slice, output)
+
+    return new_state, new_shift, new_circ_storage, new_circ_storage_mover
+   
   def run_one_iteration(self, state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode):
    '''
       Run one loop iteration - sending inputs and specifying weights for each pipeline stage, run the pipeline, and update the various state buffers
@@ -249,10 +299,9 @@ class Pipeline(nn.Module):
    stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
    stages_positions = self.get_microbatches_for_stages(positions, loop_iteration)
    stages_segment_ids = self.get_microbatches_for_stages(segment_ids, loop_iteration)
-   pipeline_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,0,0,None,None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
-   return None
-  #  new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = get_new_loop_state(output, state_io, circ_storage, circ_storage_mover, loop_iteration, use_circ_storage)
-  #  return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
+   stages_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,0,0,None,None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
+   new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = self.get_new_loop_state(stages_output, state_io, circ_storage, circ_storage_mover, loop_iteration)
+   return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
   
   def __call__(self, inputs: jnp.ndarray, positions: jnp.ndarray, segment_ids:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
     # We want to access the variables of the decoder_layer, the below loop fills in the variables dictionary (previously empty dict)
@@ -265,49 +314,16 @@ class Pipeline(nn.Module):
       _ = decoder(inputs[0], positions[0], segment_ids[0], deterministic, model_mode)
 
 
-    ##### Begin real implementation ####
-    #Reshape from [global_batch, ...] to [num_micro_batches, micro_batch_size, ...]
-    
-
-
     state_io, shift, circ_storage, circ_storage_mover = self.init_states(inputs)
-
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
-
     # TODO(huge): Shard the weights. This may be tricky b/c there is no "stage" axis in the weights to shard over until after the below
     weights = [decoder.variables for decoder in self.decoder_layers]
     # Go from a list of size n_layers of weight pytrees to a single pytree where each leaf has a leading dimension of n_layers 
     weights = stack_pytrees(*weights)
     for loop_iteration in range(total_iterations):
-       self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode)
+       state_io, shift, circ_storage, circ_storage_mover = self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode)
 
-
-
-    if 0:
-      # Fake implementation
-      # TODO: This stacking is silly - its passing entire inputs to both instead of microbatching first
-      # decoder.variables is an empty dictionary until the loop above is executed
-      decoder_params = [decoder.variables for decoder in self.decoder_layers] 
-      stacked_params = stack_pytrees(*decoder_params)
-      stacked_inputs = stack_pytrees(*([inputs] * self.num_stages))
-      stacked_positions = stack_pytrees(*([positions] * self.num_stages))
-      stacked_segment_ids = stack_pytrees(*([segment_ids] * self.num_stages))
-
-      decoder_apply=functools.partial(self.decoder_layers[0].apply, deterministic=deterministic, model_mode=model_mode)
-      #pipeline_output = jax.vmap(decoder_apply)(stacked_params, stacked_inputs, stacked_positions, stacked_segment_ids)
-      # Alternatively use in_axis instead of partial:
-      gg=self.decoder_layers[0]
-      print("Running one non-vmap!!!", flush=True)
-      breakpoint()
-      gg.apply(gg.variables, stacked_inputs[0], stacked_positions[0], stacked_segment_ids[0],deterministic,model_mode)
-      print("Ran one successfully!!!!", flush=True)
-      breakpoint()
-      pipeline_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,0,0,None,None])(stacked_params, stacked_inputs, stacked_positions, stacked_segment_ids, deterministic, model_mode)
-      breakpoint()
-      pipeline_output = pipeline_output[0] # correct for shape of above hack
-      return pipeline_output
-    else:
-      return inputs
+    return inputs
 
 def main(argv: Sequence[str]) -> None:
   # This only exists for convenient testing
