@@ -1,7 +1,7 @@
 name: Linter
 
 on:
-  push:
+  pre-push:
     branches: '*'
 
 jobs:
