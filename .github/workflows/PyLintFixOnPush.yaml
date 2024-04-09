@@ -2,7 +2,7 @@ name: Linter
 
 on:
   pre-push:
-    branches: '*'
+    branches: ['ssusie-pylint']
 
 jobs:
   cpu:
