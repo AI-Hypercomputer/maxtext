@@ -23,6 +23,6 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install pylint pyink
-    - name: Analysing the code with pylint
+    - name: Analysing the code with pyink
       run: |
-        code_style.sh
+        bash code_style.sh
