@@ -1,8 +1,9 @@
 name: Linter
 
 on:
-  pre-push:
-    branches: ['ssusie-pylint']
+  push:
+    branches:
+      - '**'
 
 jobs:
   cpu:
