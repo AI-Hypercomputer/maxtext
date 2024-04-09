@@ -249,9 +249,8 @@ class Pipeline(nn.Module):
    stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
    stages_positions = self.get_microbatches_for_stages(positions, loop_iteration)
    stages_segment_ids = self.get_microbatches_for_stages(segment_ids, loop_iteration)
+   pipeline_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,0,0,None,None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
    return None
-  #  pipeline_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,0,0,None,None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
-  #  return None
   #  new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = get_new_loop_state(output, state_io, circ_storage, circ_storage_mover, loop_iteration, use_circ_storage)
   #  return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
   
@@ -262,7 +261,7 @@ class Pipeline(nn.Module):
     positions = positions.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
     segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
     for decoder in self.decoder_layers:
-      #print(dir(decoder))
+      # Initialize the decoder variables, since they are lazily initialized and we need them now.
       _ = decoder(inputs[0], positions[0], segment_ids[0], deterministic, model_mode)
 
 
@@ -274,7 +273,6 @@ class Pipeline(nn.Module):
     state_io, shift, circ_storage, circ_storage_mover = self.init_states(inputs)
 
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
-    total_iterations = 1
 
     # TODO(huge): Shard the weights. This may be tricky b/c there is no "stage" axis in the weights to shard over until after the below
     weights = [decoder.variables for decoder in self.decoder_layers]
@@ -282,13 +280,6 @@ class Pipeline(nn.Module):
     weights = stack_pytrees(*weights)
     for loop_iteration in range(total_iterations):
        self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode)
-       #state_io, shift, circ_storage, circ_storage_mover = self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights)
-
-
-
-
-
-
 
 
 
