@@ -296,6 +296,20 @@ class Pipeline(nn.Module):
 
     return new_state, new_shift, new_circ_storage, new_circ_storage_mover
    
+  def permute_output_ms_dim(self, output):
+    '''
+    Although re-using the same array for both input and output is cute,
+    The final outputs turn out permuted compared to the inputs. Worringly I don't see this function in praxis
+    '''
+
+    # The first real output (batch 0) takes a certain amount of loop iterations to finish and be pushed to state_io - it will land on a different index of state_io depending on the number of iters
+    first_output_num_iters = self.config.num_pipeline_microbatches * (self.config.num_pipeline_repeat - 1) + self.num_stages - 1
+    # The first term above is a multiple of num_pipeline_microbatches and thus could be ignored since its also a multiple of microbatches_per_stage
+    land_idx = first_output_num_iters % self.microbatches_per_stage
+    permutation = (np.arange(self.microbatches_per_stage) + land_idx) % self.microbatches_per_stage # make the value in land_idx actually appear in idx 0, and (land_idx + 1) appear in spot 1, etc
+    output = output[:,permutation]
+    return output
+
   def run_one_iteration(self, state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode):
    '''
       Run one loop iteration - sending inputs and specifying weights for each pipeline stage, run the pipeline, and update the various state buffers
@@ -329,7 +343,14 @@ class Pipeline(nn.Module):
        print(f"starting iteration {loop_iteration}")
        state_io, shift, circ_storage, circ_storage_mover = self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode)
 
-    return inputs
+    # The final output is located in the input/output array, however the microbatches may be permuted
+    final_output = self.permute_output_ms_dim(state_io)
+
+    # reshape outputs to match input shape of total batch instead of microbatches [batch, sequence, embed]
+    # TODO: Either confirm or fix batch size when mixed sharding (e.g. is this correct even with PP + FSDP?)
+    final_output = jnp.reshape(final_output, (self.config.global_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim))
+                               
+    return final_output
 
 def main(argv: Sequence[str]) -> None:
   # This only exists for convenient testing
