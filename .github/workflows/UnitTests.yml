@@ -49,7 +49,7 @@ jobs:
         pytype --jobs auto --disable import-error MaxText/
     - name: Analysing the code with pylint
       run: |
-        pylint MaxText/
+        pylint MaxText/ pedagogical_examples/ --fail-under=9
 
 
   # IF YOU MODIFY THIS, YOU SHOULD ALSO ADD CORRESPONDING MODICATIONS TO 'gpu' job
@@ -119,7 +119,7 @@ jobs:
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
         'python3 pedagogical_examples/shmap_collective_matmul.py'
-  
+
   # IF YOU MODIFY THIS, YOU SHOULD ALSO ADD CORRESPONDING MODICATIONS TO 'tpu' job
   gpu:
     strategy:
