@@ -303,7 +303,7 @@ class Pipeline(nn.Module):
     '''
 
     # The first real output (batch 0) takes a certain amount of loop iterations to finish and be pushed to state_io - it will land on a different index of state_io depending on the number of iters
-    first_output_num_iters = self.config.num_pipeline_microbatches * (self.config.num_pipeline_repeat - 1) + self.num_stages - 1
+    first_output_num_iters = self.config.num_pipeline_microbatches * (self.config.num_pipeline_repeats - 1) + self.num_stages - 1
     # The first term above is a multiple of num_pipeline_microbatches and thus could be ignored since its also a multiple of microbatches_per_stage
     land_idx = first_output_num_iters % self.microbatches_per_stage
     permutation = (np.arange(self.microbatches_per_stage) + land_idx) % self.microbatches_per_stage # make the value in land_idx actually appear in idx 0, and (land_idx + 1) appear in spot 1, etc
@@ -324,7 +324,7 @@ class Pipeline(nn.Module):
   
   def __call__(self, inputs: jnp.ndarray, positions: jnp.ndarray, segment_ids:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
     # We want to access the variables of the decoder_layer, the below loop fills in the variables dictionary (previously empty dict)
-
+    # TODO: may want to have some simplified flow when is initializing instead (don't need to run through total_iters)
     inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length, self.config.emb_dim))
     positions = positions.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
     segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
