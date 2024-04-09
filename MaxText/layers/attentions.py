@@ -859,9 +859,6 @@ class Attention(nn.Module):
       value = self.kv_projection(inputs_kv, proj_name='value')
 
     # apply ROPE
-    #breakpoint()
-    print(f"{query.shape=}")
-    print(f"{inputs_positions.shape=}")
     query = RotaryEmbedding(
         embedding_dims=self.head_dim, name='query_rotary'
     )(inputs=query, position=inputs_positions)

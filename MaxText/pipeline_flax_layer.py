@@ -256,7 +256,10 @@ class Pipeline(nn.Module):
       last = jax.lax.slice_in_dim(output_in, self.num_stages - 1, self.num_stages, axis=0)
       except_last = jax.lax.slice_in_dim(output_in, 0, self.num_stages - 1, axis=0)
       return jnp.concatenate([last, except_last], axis=0)
-    new_shift = _rotate_right(output)
+    #breakpoint()
+    jit_rotate_right = jax.jit(_rotate_right)
+    new_shift = jit_rotate_right(output)
+    #new_shift = _rotate_right(output) #TODO(big):file a bug or ping again on jax chat, why do we need to jit here
 
     if self.use_circ_storage:
         # Insert the circ_storage_mover into new_circ_storage at a microbatch-rotating index.
@@ -287,7 +290,9 @@ class Pipeline(nn.Module):
         stream_slice = jnp.expand_dims(stream_slice, 1)
         return jax.lax.dynamic_update_slice_in_dim(
             state_in, stream_slice, stream_buf_idx, axis=1)
-    new_state = _update_state_io(old_state_io, stream_slice, output)
+    jit_update_state_io = jax.jit(_update_state_io)
+    new_state = jit_update_state_io(old_state_io, stream_slice, output) # TODO(medium):same bug, requires jit
+    #new_state = _update_state_io(old_state_io, stream_slice, output)
 
     return new_state, new_shift, new_circ_storage, new_circ_storage_mover
    
@@ -321,6 +326,7 @@ class Pipeline(nn.Module):
     # Go from a list of size n_layers of weight pytrees to a single pytree where each leaf has a leading dimension of n_layers 
     weights = stack_pytrees(*weights)
     for loop_iteration in range(total_iterations):
+       print(f"starting iteration {loop_iteration}")
        state_io, shift, circ_storage, circ_storage_mover = self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode)
 
     return inputs
