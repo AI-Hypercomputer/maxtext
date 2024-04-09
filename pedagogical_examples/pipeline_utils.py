@@ -18,7 +18,7 @@ def reg_matmuls(weights, input, layer_fnc=None):
     input = layer_fnc(weights[layer_idx,:,:], input)
   return input
 
-def assert_same_output_and_grad(f1,f2, targets, *inputs, f1_extra_inputs=[], f2_extra_inputs=[]):
+def assert_same_output_and_grad(f1,f2, targets, *inputs, f1_extra_inputs=[], f2_extra_inputs=[],f1_name="regular",f2_name="pipeline"):
   f1_inputs = (*inputs, *f1_extra_inputs)
   f2_inputs = (*inputs, *f2_extra_inputs)
   def f1_loss(*f1_inputs):
@@ -27,14 +27,14 @@ def assert_same_output_and_grad(f1,f2, targets, *inputs, f1_extra_inputs=[], f2_
   def f2_loss(*f2_inputs):
     return jnp.linalg.norm(f2(*f2_inputs) - targets)
 
-  def print_norms(a,b,a_name="a",b_name="b",diff_name="diff"):
+  def print_norms(a,b,f1_name="regular",f2_name="pipeline",diff_name="diff"):
     a_norm = jnp.linalg.norm(a)
     b_norm = jnp.linalg.norm(b)
     diff_norm = jnp.linalg.norm(a-b)
 
     print(f"{diff_name} norm of {diff_norm}")
-    print(f"{a_name} norm of {a_norm}")
-    print(f"{b_name} norm of {b_norm}")
+    print(f"{f1_name} norm of {a_norm}")
+    print(f"{f2_name} norm of {b_norm}")
 
   f1_value = f1(*f1_inputs)
   f2_value = f2(*f2_inputs)
@@ -43,8 +43,8 @@ def assert_same_output_and_grad(f1,f2, targets, *inputs, f1_extra_inputs=[], f2_
   
   print(f"{f1_grad.shape=}")
 
-  print_norms(f1_value, f2_value, a_name="regular", b_name="pipeline", diff_name="Output difference")
-  print_norms(f1_grad, f2_grad, a_name="reg_grad", b_name="pipeline_grad", diff_name="Gradient difference")
+  print_norms(f1_value, f2_value, f1_name=f1_name, f2_name=f2_name, diff_name="Output difference")
+  print_norms(f1_grad, f2_grad, f1_name=f1_name, f2_name=f2_name, diff_name="Gradient difference")
 
 def simple_timeit(f, *args, tries = 10, task = None):
     '''Simple utility to time a function for multiple runs'''

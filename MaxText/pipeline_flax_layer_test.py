@@ -62,6 +62,41 @@ def get_weights_and_inputs(batch_size, sequence, features, n_layers):
 
     return weights, inputs, dummy_targets, inputs_position, inputs_segmentation
 
+def assert_same_output_and_grad(f1,f2, targets, *inputs, f1_extra_inputs=[], f2_extra_inputs=[],f1_name="regular",f2_name="pipeline"):
+  f1_inputs = (*inputs, *f1_extra_inputs)
+  f2_inputs = (*inputs, *f2_extra_inputs)
+  def f1_loss(*f1_inputs):
+    return jnp.linalg.norm(f1(*f1_inputs) - targets)
+  
+  def f2_loss(*f2_inputs):
+    return jnp.linalg.norm(f2(*f2_inputs) - targets)
+
+  def print_norms(a,b,f1_name="regular",f2_name="pipeline",diff_name="diff"):
+    a_norm = jnp.linalg.norm(a)
+    b_norm = jnp.linalg.norm(b)
+    diff_norm = jnp.linalg.norm(a-b)
+
+    print(f"{diff_name} norm of {diff_norm}")
+    print(f"{f1_name} norm of {a_norm}")
+    print(f"{f2_name} norm of {b_norm}")
+
+  def my_ravel(pytree):
+    ravelled_tree = jax.tree_map(jnp.ravel, pytree)
+    ravelled_leaves, _ = jax.tree_util.tree_flatten(ravelled_tree)
+    return jnp.concatenate(ravelled_leaves)
+
+  f1_value = f1(*f1_inputs)
+  f2_value = f2(*f2_inputs)
+  _, f1_grad = jax.value_and_grad(f1_loss)(*f1_inputs)
+  _, f2_grad = jax.value_and_grad(f2_loss)(*f2_inputs)
+  
+  f1_grad = my_ravel(f1_grad)
+  f2_grad = my_ravel(f2_grad)
+  print(f"{f1_grad.shape=}")
+
+  print_norms(f1_value, f2_value, f1_name=f1_name, f2_name=f2_name, diff_name="Output difference")
+  print_norms(f1_grad, f2_grad, f1_name=f1_name, f2_name=f2_name, diff_name="Gradient difference")
+
 def main(argv: Sequence[str]) -> None:
   # This only exists for convenient testing
 
@@ -82,16 +117,15 @@ def main(argv: Sequence[str]) -> None:
   mesh = Mesh(devices_array, config.mesh_axes)
   #mesh = create_mesh(num_stages, config.ici_tensor_parallelism, config.ici_data_parallelism)
 
-  #decoder_layer = simple_decoder_layer.SimpleDecoderLayer
-  decoder_layer = llama2.LlamaDecoderLayer
+  decoder_layer = simple_decoder_layer.SimpleDecoderLayer
+  #decoder_layer = llama2.LlamaDecoderLayer
   my_pipeline = pipeline_flax_layer.Pipeline(
     config=config,
     decoder_layer_class=decoder_layer,
     mesh=mesh
   )
   init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
-
-  pipeline_out = my_pipeline.apply(init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+  #pipeline_out = my_pipeline.apply(init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
 
   # def get_layer_params(params,layer_idx):
   #   def get_layer(leaf,layer_idx):
@@ -99,18 +133,25 @@ def main(argv: Sequence[str]) -> None:
   #   my_get_layer = functools.partial(get_layer,layer_idx=layer_idx)
   #   return jax.tree_map(my_get_layer, params)
   
-  reg_layer_activations = inputs
-  for layer in range(config.num_decoder_layers):
-    cur_layer_params = init_pipeline_params['params'][f'layers_{layer}']
-    cur_layer_params = {'params':cur_layer_params}
-    reg_layer_activations=decoder_layer(config=config,mesh=mesh).apply(cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode)
+  def run_regular_pipeline(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
+    reg_layer_activations = inputs
+    for layer in range(config.num_decoder_layers):
+      cur_layer_params = params['params'][f'layers_{layer}']
+      cur_layer_params = {'params':cur_layer_params}
+      reg_layer_activations=decoder_layer(config=config,mesh=mesh).apply(cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode)
+    return reg_layer_activations
   
-  diff = pipeline_out - reg_layer_activations
-  print(f"diff norm of {jnp.linalg.norm(diff)}")
+  
+  reg_layers = run_regular_pipeline
+  pipeline_func = my_pipeline.apply
+  assert_same_output_and_grad(reg_layers,pipeline_func, targets, init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+  if 0:
+    diff = pipeline_out - reg_layer_activations
+    print(f"diff norm of {jnp.linalg.norm(diff)}")
 
-  print(f"pipeline output norm of {jnp.linalg.norm(pipeline_out)}")
+    print(f"pipeline output norm of {jnp.linalg.norm(pipeline_out)}")
 
-  print(f"reg output norm of {jnp.linalg.norm(reg_layer_activations)}")
+    print(f"reg output norm of {jnp.linalg.norm(reg_layer_activations)}")
 
 
 
