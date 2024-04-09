@@ -19,6 +19,7 @@ import pyconfig
 import functools
 import max_utils
 import pipeline_flax_layer
+from layers import llama2
 
 def stack_pytrees(*pytrees):
   """Stacks pytrees with identical structure along a new leading dimension."""
@@ -81,7 +82,8 @@ def main(argv: Sequence[str]) -> None:
   mesh = Mesh(devices_array, config.mesh_axes)
   #mesh = create_mesh(num_stages, config.ici_tensor_parallelism, config.ici_data_parallelism)
 
-  decoder_layer = simple_decoder_layer.SimpleDecoderLayer
+  #decoder_layer = simple_decoder_layer.SimpleDecoderLayer
+  decoder_layer = llama2.LlamaDecoderLayer
   my_pipeline = pipeline_flax_layer.Pipeline(
     config=config,
     decoder_layer_class=decoder_layer,
@@ -108,7 +110,7 @@ def main(argv: Sequence[str]) -> None:
 
   print(f"pipeline output norm of {jnp.linalg.norm(pipeline_out)}")
 
-  print(f"reg output norm of s{jnp.linalg.norm(reg_layer_activations)}")
+  print(f"reg output norm of {jnp.linalg.norm(reg_layer_activations)}")
 
 
 
