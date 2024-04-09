@@ -130,7 +130,7 @@ logical_axis_rules: [
                       ['cache_kv', []],
                       ['cache_sequence', []],
                     ]
-data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']]
+data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive', 'stage']]
 
 # One axis for each parallelism type may hold a placeholder (-1)
 # value to auto-shard based on available slices and devices.

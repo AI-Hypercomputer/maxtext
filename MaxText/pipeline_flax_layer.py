@@ -111,9 +111,10 @@ class Pipeline(nn.Module):
 
     # Shift is used to rotate the output of each pipeline into the input of the next
     # shift has shape [num_stages, micro_size, sequence, embed]
-    shift = jnp.zeros((self.num_stages,) + inputs.shape[1:])
+    shift = jnp.zeros((self.num_stages,) + inputs.shape[1:], dtype=inputs.dtype)
     #shift = self.shard_dim_by_stages(shift, self.mesh)
     # TODO: Is there a standard way to go from logical -> physical instead of the logical_to_mesh followed by with_sharding_constraint?
+    # Answer: yes probably nn.with_logical_constraint https://github.com/google/maxtext/blob/5deb01a9221612c6c28f3f5a561b8af9c0fd720d/MaxText/layers/models.py#L322
     # Can remove mesh and logical_axis_rules and rely on global context manager (but we should remove the global context manager anyway at some point) 
     shift_shardings = nn.logical_to_mesh_axes(["activation_stage", "activation_batch", "activation_length", "activation_embed"],self.config.logical_axis_rules) 
     shift = jax.lax.with_sharding_constraint(shift,NamedSharding(self.mesh, shift_shardings))
@@ -137,7 +138,7 @@ class Pipeline(nn.Module):
     # Alternative name is "between_repeats_storage"
     # circ_storage has shape [num_stages, microbatches, micro_size, sequence, embed] -- this is huge btw, it should be reducible by a factor of num_stages
     if self.use_circ_storage:
-        circ_storage = jnp.zeros((self.num_stages,) + inputs.shape )
+        circ_storage = jnp.zeros((self.num_stages,) + inputs.shape , dtype=inputs.dtype)
     else:
        circ_storage = None
 
@@ -316,9 +317,19 @@ class Pipeline(nn.Module):
    '''
    stages_weights = self.get_weights_stage(weights, loop_iteration)
    stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
-   stages_positions = self.get_microbatches_for_stages(positions, loop_iteration)
-   stages_segment_ids = self.get_microbatches_for_stages(segment_ids, loop_iteration)
-   stages_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,0,0,None,None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
+   if positions is not None:
+    stages_positions = self.get_microbatches_for_stages(positions, loop_iteration)
+    positions_stage_idx = 0
+   else:
+     stages_positions = None
+     positions_stage_idx = 0
+   if segment_ids is not None:
+    stages_segment_ids = self.get_microbatches_for_stages(segment_ids, loop_iteration)
+    segment_stage_idx = 0
+   else:
+    stages_segment_ids
+    segment_stage_idx = None
+   stages_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,positions_stage_idx, segment_stage_idx, None, None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
    new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = self.get_new_loop_state(stages_output, state_io, circ_storage, circ_storage_mover, loop_iteration)
    return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
   
@@ -326,11 +337,20 @@ class Pipeline(nn.Module):
     # We want to access the variables of the decoder_layer, the below loop fills in the variables dictionary (previously empty dict)
     # TODO: may want to have some simplified flow when is initializing instead (don't need to run through total_iters)
     inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length, self.config.emb_dim))
-    positions = positions.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
-    segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
+    if positions is not None:
+      positions = positions.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
+      positions_0 = positions[0]
+    else:
+      positions_0 = None
+    if segment_ids is not None:
+      segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
+      segment_ids_0 = segment_ids[0]
+    else:
+      segment_ids_0 = None
     for decoder in self.decoder_layers:
       # Initialize the decoder variables, since they are lazily initialized and we need them now.
-      _ = decoder(inputs[0], positions[0], segment_ids[0], deterministic, model_mode)
+      _ = decoder(inputs[0], positions_0, segment_ids_0, deterministic, model_mode)
+         
 
 
     state_io, shift, circ_storage, circ_storage_mover = self.init_states(inputs)

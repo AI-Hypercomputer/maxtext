@@ -276,6 +276,7 @@ class Decoder(nn.Module):
     else:
       if cfg.ici_pipeline_parallelism > 1 or cfg.dcn_pipeline_parallelism > 1:
         import pipeline_flax_layer
+        #breakpoint()
         y = pipeline_flax_layer.Pipeline(config=cfg, mesh=mesh, decoder_layer_class=BlockLayer,quant=self.quant)(
             y,
             decoder_segment_ids,
