@@ -249,27 +249,32 @@ class Pipeline(nn.Module):
    stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
    stages_positions = self.get_microbatches_for_stages(positions, loop_iteration)
    stages_segment_ids = self.get_microbatches_for_stages(segment_ids, loop_iteration)
-   pipeline_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,0,0,None,None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
    return None
+  #  pipeline_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,0,0,None,None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
+  #  return None
   #  new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = get_new_loop_state(output, state_io, circ_storage, circ_storage_mover, loop_iteration, use_circ_storage)
   #  return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
   
   def __call__(self, inputs: jnp.ndarray, positions: jnp.ndarray, segment_ids:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
     # We want to access the variables of the decoder_layer, the below loop fills in the variables dictionary (previously empty dict)
+
+    inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length, self.config.emb_dim))
+    positions = positions.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
+    segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
     for decoder in self.decoder_layers:
       #print(dir(decoder))
-      _ = decoder(inputs, positions, segment_ids, deterministic, model_mode)
+      _ = decoder(inputs[0], positions[0], segment_ids[0], deterministic, model_mode)
 
 
     ##### Begin real implementation ####
     #Reshape from [global_batch, ...] to [num_micro_batches, micro_batch_size, ...]
-    inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length, self.config.emb_dim))
-    positions = positions.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
-    segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
+    
+
 
     state_io, shift, circ_storage, circ_storage_mover = self.init_states(inputs)
 
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
+    total_iterations = 1
 
     # TODO(huge): Shard the weights. This may be tricky b/c there is no "stage" axis in the weights to shard over until after the below
     weights = [decoder.variables for decoder in self.decoder_layers]
@@ -287,23 +292,31 @@ class Pipeline(nn.Module):
 
 
 
+    if 0:
+      # Fake implementation
+      # TODO: This stacking is silly - its passing entire inputs to both instead of microbatching first
+      # decoder.variables is an empty dictionary until the loop above is executed
+      decoder_params = [decoder.variables for decoder in self.decoder_layers] 
+      stacked_params = stack_pytrees(*decoder_params)
+      stacked_inputs = stack_pytrees(*([inputs] * self.num_stages))
+      stacked_positions = stack_pytrees(*([positions] * self.num_stages))
+      stacked_segment_ids = stack_pytrees(*([segment_ids] * self.num_stages))
 
-    # Fake implementation
-    # TODO: This stacking is silly - its passing entire inputs to both instead of microbatching first
-    # decoder.variables is an empty dictionary until the loop above is executed
-    decoder_params = [decoder.variables for decoder in self.decoder_layers] 
-    stacked_params = stack_pytrees(*decoder_params)
-    stacked_inputs = stack_pytrees(*([inputs] * self.num_stages))
-    stacked_positions = stack_pytrees(*([positions] * self.num_stages))
-    stacked_segment_ids = stack_pytrees(*([segment_ids] * self.num_stages))
-
-    decoder_apply=functools.partial(self.decoder_layers[0].apply, deterministic=deterministic, model_mode=model_mode)
-    #pipeline_output = jax.vmap(decoder_apply)(stacked_params, stacked_inputs, stacked_positions, stacked_segment_ids)
-    # Alternatively use in_axis instead of partial:
-    pipeline_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,0,0,None,None])(stacked_params, stacked_inputs, stacked_positions, stacked_segment_ids, deterministic, model_mode)
-
-    pipeline_output = pipeline_output[0] # correct for shape of above hack
-    return pipeline_output
+      decoder_apply=functools.partial(self.decoder_layers[0].apply, deterministic=deterministic, model_mode=model_mode)
+      #pipeline_output = jax.vmap(decoder_apply)(stacked_params, stacked_inputs, stacked_positions, stacked_segment_ids)
+      # Alternatively use in_axis instead of partial:
+      gg=self.decoder_layers[0]
+      print("Running one non-vmap!!!", flush=True)
+      breakpoint()
+      gg.apply(gg.variables, stacked_inputs[0], stacked_positions[0], stacked_segment_ids[0],deterministic,model_mode)
+      print("Ran one successfully!!!!", flush=True)
+      breakpoint()
+      pipeline_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,0,0,None,None])(stacked_params, stacked_inputs, stacked_positions, stacked_segment_ids, deterministic, model_mode)
+      breakpoint()
+      pipeline_output = pipeline_output[0] # correct for shape of above hack
+      return pipeline_output
+    else:
+      return inputs
 
 def main(argv: Sequence[str]) -> None:
   # This only exists for convenient testing
@@ -328,14 +341,29 @@ def main(argv: Sequence[str]) -> None:
   
   #block_layer = simple_decoder_layer.SimpleDecoderLayer
   block_layer = llama2.LlamaDecoderLayer
-  my_pipeline = Pipeline(
-    config=config,
-    decoder_layer_class=block_layer,
-    mesh=mesh
-  )
-  init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
 
-  my_pipeline.apply(init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+
+  if 1:
+    my_pipeline = Pipeline(
+      config=config,
+      decoder_layer_class=block_layer,
+      mesh=mesh
+    )
+    init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+    my_pipeline.apply(init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+  else:
+    llama_layer = block_layer(config=config,mesh=mesh, name=f'layers_{0}') 
+    inputs=inputs[0:2]
+    inputs_position=inputs_position[0:2]
+    inputs_segmentation=inputs_segmentation[0:2]
+    init_llama = llama_layer.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+    print("HELLO WORLD!", flush=True)
+    inputs=inputs[0:2]
+    inputs_position=inputs_position[0:2]
+    inputs_segmentation=inputs_segmentation[0:2]
+    print(inputs.shape)
+    llama_layer.apply(init_llama, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+
 
 if __name__ == "__main__":
   app.run(main)

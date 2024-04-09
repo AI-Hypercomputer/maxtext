@@ -97,6 +97,7 @@ class LlamaDecoderLayer(nn.Module):
       name='self_attention',
       quant=self.quant)
 
+    #breakpoint()
     attention_lnx = attention_layer(
             lnx,
             lnx,
