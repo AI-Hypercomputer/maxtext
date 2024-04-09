@@ -14,6 +14,7 @@ import argparse
 from typing import Optional
 from layers import quantizations
 from layers import simple_decoder_layer
+from layers import llama2
 import common_types
 import pyconfig
 import functools
@@ -225,18 +226,19 @@ class Pipeline(nn.Module):
      
   def get_microbatches_for_stages(self, microbatched_array, loop_iteration):
     '''
-    Returns an array of leading dimension stages grabing the current microbatch for each stage
+    Returns an array of leading dimension stages grabbing the current microbatch for each stage
     
     Input:
         microbatched_array: Array to grab from, should have leading dimension num_microbatches
         loop_iteration: Integer of loop index
     Returns:
-        Array of shape microbatched_array for each stage, except the leading dimension is replaced by num_stages
+        Array of shape microbatched_array, except the leading dimension is replaced by num_stages
     '''
 
-    microbatched_stages_list = [microbatched_array(self.get_microbatch_id(stage_idx, loop_iteration)) for stage_idx in range(self.num_stages)]
+    microbatched_stages_list = [microbatched_array[self.get_microbatch_id(stage_idx, loop_iteration)] for stage_idx in range(self.num_stages)]
     stages_array = jnp.concatenate(microbatched_stages_list, axis=0)
-    return jnp.reshape(stages_array, [self.num_stages] + microbatched_array.shape[1:])
+    stages_array = jnp.reshape(stages_array, (self.num_stages,) + microbatched_array.shape[1:])
+    return stages_array
 
      
   def run_one_iteration(self, state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode):
@@ -248,8 +250,7 @@ class Pipeline(nn.Module):
    stages_positions = self.get_microbatches_for_stages(positions, loop_iteration)
    stages_segment_ids = self.get_microbatches_for_stages(segment_ids, loop_iteration)
    pipeline_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,0,0,None,None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
-   # output = jax.vmap
-
+   return None
   #  new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = get_new_loop_state(output, state_io, circ_storage, circ_storage_mover, loop_iteration, use_circ_storage)
   #  return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
   
@@ -324,9 +325,12 @@ def main(argv: Sequence[str]) -> None:
   mesh = Mesh(devices_array, config.mesh_axes)
   #mesh = create_mesh(num_stages, config.ici_tensor_parallelism, config.ici_data_parallelism)
 
+  
+  #block_layer = simple_decoder_layer.SimpleDecoderLayer
+  block_layer = llama2.LlamaDecoderLayer
   my_pipeline = Pipeline(
     config=config,
-    decoder_layer_class=simple_decoder_layer.SimpleDecoderLayer,
+    decoder_layer_class=block_layer,
     mesh=mesh
   )
   init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
