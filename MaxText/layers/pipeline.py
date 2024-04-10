@@ -84,28 +84,20 @@ class Pipeline(nn.Module):
     # Shift is used to rotate the output of each pipeline into the input of the next
     # shift has shape [num_stages, micro_size, sequence, embed]
     shift = jnp.zeros((self.num_stages,) + inputs.shape[1:], dtype=inputs.dtype)
-    # TODO: Is there a standard way to go from logical -> physical instead of the logical_to_mesh followed by with_sharding_constraint?
-    # Answer: yes probably nn.with_logical_constraint https://github.com/google/maxtext/blob/5deb01a9221612c6c28f3f5a561b8af9c0fd720d/MaxText/layers/models.py#L322
-    # Can remove mesh and logical_axis_rules and rely on global context manager (but we should remove the global context manager anyway at some point) 
-    shift_shardings = nn.logical_to_mesh_axes(["activation_stage", "activation_batch", "activation_length", "activation_embed"],self.config.logical_axis_rules) 
-    shift = jax.lax.with_sharding_constraint(shift,NamedSharding(self.mesh, shift_shardings))
-    #shift = jax.lax.with_sharding_constraint(shift, self.S(self.mesh, *shift_shardings)) # For some reason this complains about resource names
-    #shift = jax.lax.with_sharding_constraint(shift, S(self.mesh, 'stage', 'data', None, 'tensor'))
+    shift = nn.with_logical_constraint(shift, ("activation_stage", "activation_batch", "activation_length", "activation_embed"),rules=self.config.logical_axis_rules,mesh=self.mesh)
 
     # state_io (state input output) at first holds all of the input batches, but also will hold the outputs as the pipeline runs/finishes
     # state_io has shape [num_stages, microbatches/stages, micro_size, sequence, embed]
     state_io = jnp.reshape(inputs, (self.num_stages, self.microbatches_per_stage) + inputs.shape[1:])
-    state_io_shardings = nn.logical_to_mesh_axes(["activation_stage", None, "activation_batch", "activation_length", "activation_embed"],self.config.logical_axis_rules) 
-    state_io = jax.lax.with_sharding_constraint(state_io, NamedSharding(self.mesh, state_io_shardings))
-    #state_io = jax.lax.with_sharding_constraint(state_io, self.S(self.mesh, *state_io_shardings))
+    state_io = nn.with_logical_constraint(state_io, ("activation_stage", None, "activation_batch", "activation_length", "activation_embed"),rules=self.config.logical_axis_rules, mesh=self.mesh) 
 
     # TODO: verify comment below
     # The data/fsdp can shard over microbatch_size, not number of microbatches. The num_microbatches is looped over so should not be sharded.
 
-    # TODO: Consider sharding and/or changing the circ storage
+    # TODO: Consider sharding and/or changing the circ storage. Understand if/when setting microbatches > num_stages is beneficial which is when circ_storage is needed
     # circ_storage is used to hold the final pipeline stage outputs before it is used for the next repeat. It is only needed
     # when num_microbatches > num_stages, else instead the final stage can immediately pass to the first without additional storage.
-    # Alternative name is "between_repeats_storage"
+    # Alternative name is "between_repeats_storage", since this storage is not needed always for circular - but only when microbatches > num_stages
     # circ_storage has shape [num_stages, microbatches, micro_size, sequence, embed] -- this is huge btw, it should be reducible by a factor of num_stages
     if self.use_circ_storage:
         circ_storage = jnp.zeros((self.num_stages,) + inputs.shape , dtype=inputs.dtype)
@@ -126,15 +118,15 @@ class Pipeline(nn.Module):
   def get_iteration_inputs(self, loop_iteration, state_io, circ_storage, shift):
     '''
     Construct stages_in: the global array that is operated on for this iteration, shape same as shift=[stages, micro_size, sequence, embed]
-    This is almost a rotated version of the last outputs, except for the first stage which must grab from state_io or circ_storage
+    This is almost a rotated version of the last outputs, except for the first stage which must grab a new batch from either state_io or circ_storage
     '''
 
-    # Setup potential input from state_io. state_io has a rotating microbatch index (size of micro/stages, stream_buf_idx below)
-    state_io_batch_idx = loop_iteration % (self.config.num_pipeline_microbatches // self.num_stages)
+    # Setup potential input from state_io, which has a rotating microbatch index (size of micro/stages, state_io_batch_idx below)
+    state_io_batch_idx = loop_iteration % self.microbatches_per_stage
     state_io_slice = state_io[:,state_io_batch_idx] 
 
     if self.use_circ_storage:
-        # Setup potential input from circ_slice, which also has a rotating index for microbatch
+        # Setup potential input from circ_storage, which also has a rotating index for microbatch, size of num_microbatches
         circ_storage_batch_idx = loop_iteration % self.config.num_pipeline_microbatches
         circ_storage_slice = circ_storage[:,circ_storage_batch_idx]
     else:
@@ -155,56 +147,49 @@ class Pipeline(nn.Module):
     Get the weights for each stage used for this loop itereation. 
     
     Input:
-        Weights are a pytree where each leaf has a leading dimension of num_layers, e.g. [num_layers, embed, mlp]
+        Weights are a pytree where each leaf has a leading dimension of num_layers, example leaf shape: [num_layers, embed, mlp]
     Returns:
-        Weights of same pytree structure but each leaf has a leading dimension of num_stages, e.g. [num_stages, embed, mlp].
+        Weights of same pytree structure but each leaf has a leading dimension of num_stages, example leaf shape: [num_stages, embed, mlp].
 
     For non-circular pipelines this would just be stacked [weights_layer_0; weights_layer1; etc],
     but for circular the stages need a repeat_idx to determine what layer weights to grab, e.g. on iteration 5 with 4 stages
     the repeat indexes are [1,1,0,0] so need layers [4,5,2,3]
     '''
+    # TODO(huge): When the weights are correctly sharded on init (not implemented currently) we need to ensure that this
+    # function does not execute an all-gather: All of the layers weights can be initialized on the correct devices and shouldn't
+    # need to be communicated to others (at least for forward pass, need some thought for backward whether this is necessary)
+
     # We use numpy instead of jnp so these indexes are not traced
-    microbatch_ids = np.maximum(loop_iteration - np.arange(self.num_stages), 0) # not a great name, this is really batch_id * repeat idx
+    microbatch_ids = np.maximum(loop_iteration - np.arange(self.num_stages), 0) # not a great name, this is really something like microbatch_id * repeat idx
     repeat_ids = microbatch_ids // self.config.num_pipeline_microbatches
     layer_ids = np.arange(self.num_stages) + repeat_ids * self.num_stages
     #layer_ids goes out of bounds on the last bubble, we cap it within range.
     layer_ids= np.minimum(layer_ids, self.config.num_decoder_layers - 1)
-    # slice_in_dim avoids executing an all gather
-
-
+    
     def layers_dimension_to_stages(weight_leaf):
+       # slice_in_dim avoids executing an all gather
        weights_stage_list= [jax.lax.slice_in_dim(weight_leaf,layer_ids[stage], layer_ids[stage] + 1, axis=0) for stage in range(self.num_stages)]
        weights_stage = jnp.concatenate(weights_stage_list, axis=0)
        weights_stage_shape = (self.num_stages,) + weight_leaf.shape[1:]
-       weights_stage = jnp.reshape(weights_stage, weights_stage_shape)
-       return weights_stage # This reshape unsqueezes singleton axes that were potentially squeezed in concatenate
+       weights_stage = jnp.reshape(weights_stage, weights_stage_shape) # This reshape unsqueezes singleton axes that were potentially squeezed in concatenate
+       return weights_stage
     weights_stage = jax.tree_map(layers_dimension_to_stages, weights)
     return weights_stage
 
-  # TODO: should we pass in the weights explicitly? How about the segmentation IDs
-
   def get_microbatch_id(self, stage_idx, loop_iteration):
-    '''
-    Gets the microbatch_id on this loop_iteration for this stage.
-    
-    Input:
-        stage_idx: Index of this stage, integer from 0 to num_stages - 1
-        loop_iteration: Integer of loop index
-    Returns:
-        Integer representing which microbatch the stage at stage_idx will work on during loop_iteration
-    '''
+    '''Gets the microbatch_id on this loop_iteration for this stage. Works for both circular and non-circular'''
     return (loop_iteration - stage_idx) % self.config.num_pipeline_microbatches
      
   def get_microbatches_for_stages(self, microbatched_array, loop_iteration):
     '''
     Returns an array of leading dimension stages grabbing the current microbatch for each stage.
-    TODO: This is not actually used to get the microbatches, but the position/segment IDs, so probably should change method name
+    TODO: This is not actually used to get the microbatches, but the position and segment IDs, so probably should change method name
     
     Input:
         microbatched_array: Array to grab from, should have leading dimension num_microbatches
         loop_iteration: Integer of loop index
     Returns:
-        Array of shape microbatched_array, except the leading dimension is replaced by num_stages
+        One microbatch from microbatched_array for each stage. Array same shape as microbatched_array except the leading dimension is replaced by num_stages
     '''
 
     microbatched_stages_list = [microbatched_array[self.get_microbatch_id(stage_idx, loop_iteration)] for stage_idx in range(self.num_stages)]
@@ -227,10 +212,9 @@ class Pipeline(nn.Module):
       last = jax.lax.slice_in_dim(output_in, self.num_stages - 1, self.num_stages, axis=0)
       except_last = jax.lax.slice_in_dim(output_in, 0, self.num_stages - 1, axis=0)
       return jnp.concatenate([last, except_last], axis=0)
-    #breakpoint()
+    #new_shift = _rotate_right(output) #TODO(big):file a bug or ping again on jax chat, why do we need to jit here
     jit_rotate_right = jax.jit(_rotate_right)
     new_shift = jit_rotate_right(output)
-    #new_shift = _rotate_right(output) #TODO(big):file a bug or ping again on jax chat, why do we need to jit here
 
     if self.use_circ_storage:
         # Insert the circ_storage_mover into new_circ_storage at a microbatch-rotating index.
@@ -261,21 +245,22 @@ class Pipeline(nn.Module):
         stream_slice = jnp.expand_dims(stream_slice, 1)
         return jax.lax.dynamic_update_slice_in_dim(
             state_in, stream_slice, stream_buf_idx, axis=1)
+    #new_state = _update_state_io(old_state_io, stream_slice, output)# TODO(medium):same sharding/jit issue
     jit_update_state_io = jax.jit(_update_state_io)
-    new_state = jit_update_state_io(old_state_io, stream_slice, output) # TODO(medium):same bug, requires jit
-    #new_state = _update_state_io(old_state_io, stream_slice, output)
-
+    new_state = jit_update_state_io(old_state_io, stream_slice, output) 
+    
     return new_state, new_shift, new_circ_storage, new_circ_storage_mover
    
   def permute_output_ms_dim(self, output):
     '''
+    TODO: Reach out to praxis owner about this permutation, fix comment
     Although re-using the same array for both input and output is cute,
     The final outputs turn out permuted compared to the inputs. Worringly I don't see this function in praxis
     '''
 
     # The first real output (batch 0) takes a certain amount of loop iterations to finish and be pushed to state_io - it will land on a different index of state_io depending on the number of iters
     first_output_num_iters = self.config.num_pipeline_microbatches * (self.config.num_pipeline_repeats - 1) + self.num_stages - 1
-    # The first term above is a multiple of num_pipeline_microbatches and thus could be ignored since its also a multiple of microbatches_per_stage
+    # The first term above is a multiple of num_pipeline_microbatches and thus could be ignored since its also a multiple of microbatches_per_stage, but we keep it for clairty
     land_idx = first_output_num_iters % self.microbatches_per_stage
     permutation = (np.arange(self.microbatches_per_stage) + land_idx) % self.microbatches_per_stage # make the value in land_idx actually appear in idx 0, and (land_idx + 1) appear in spot 1, etc
     output = output[:,permutation]
