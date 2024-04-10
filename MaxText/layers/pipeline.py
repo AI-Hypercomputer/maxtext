@@ -1,3 +1,19 @@
+# Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+''' Pipeline layer wrapping a decoder layer. Supports circular pipelining '''
+
 import jax
 import numpy as np
 from jax import numpy as jnp
@@ -20,7 +36,7 @@ import functools
 import max_utils
 
 def stack_pytrees(*pytrees):
-  """Stacks pytrees with identical structure along a new leading dimension."""
+  """Returns a pytree with identical key structure but whose leaves have a new [num pytree inputs] leading dimension stacking from each input."""
   def stacking_fn(*leaves):
     return jnp.stack(leaves)
   return tree_map(stacking_fn, *pytrees)
@@ -28,15 +44,14 @@ def stack_pytrees(*pytrees):
 # Pipeline is made up of several SimpleDecoderLayers 
 class Pipeline(nn.Module):
   
-  # TODO: Some properties, (num repeat, num_micro are through the config, some are derived. This makes it annoying to call diff properties. Is there a better solution?)
-  # TODO: Should we declare the derived properties here as well? I think anything declared here becomes required as an input
+  # TODO: Some properties, (num repeat, num_micro are through the config, some are derived. This makes it annoying to call different properties, some are self.property, some are self.config.property)
+  # TODO: Should we declare the derived properties here as well (e.g. num_stages? I think anything declared here becomes required as an input though
   config: common_types.Config
   decoder_layer_class: nn.Module
   mesh: common_types.Mesh
   quant: Optional[quantizations.AqtQuantization] = None
 
   def setup(self):
-    # TODO: See what Inputs are needed to initialize DecoderLayers e.g. LlamaDecoderLayer
     decoder_layers = [self.decoder_layer_class(config=self.config, mesh=self.mesh, name=f'layers_{lyr}', quant=self.quant) for lyr in range(self.config.num_decoder_layers)]
     self.decoder_layers = decoder_layers
     self.num_stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
@@ -46,7 +61,7 @@ class Pipeline(nn.Module):
     self.use_circ_storage = self.config.num_pipeline_repeats > 1 and self.config.num_pipeline_microbatches > self.num_stages
     self.microbatch_size = self.config.global_batch_size_to_train_on // self.config.num_pipeline_microbatches
     microbatches_per_stage = self.config.num_pipeline_microbatches // self.num_stages
-    # TODO: improve error message to show inputs
+    # TODO: should this assert be in this class or pyconfig check?
     assert microbatches_per_stage * self.num_stages == self.config.num_pipeline_microbatches, f"Currently the number of microbatches ({self.config.num_pipeline_microbatches}) must be divisible by the number of stages ({self.num_stages})"
     self.microbatches_per_stage = microbatches_per_stage
 
@@ -54,13 +69,6 @@ class Pipeline(nn.Module):
   def S(self, *specs):
     return NamedSharding(self.mesh, PartitionSpec(*specs))
 
-  def shard_dim_by_stages(self, x):
-   '''Assumes the stages dimension is leading and the mesh has name stages.'''
-   # TODO: currently uses physical axes instead of logical, should we use logical instead?
-   specs = ['pipeline_stage'] + [None] * (x.ndim - 1)
-   stage_sharding = self.S(*specs)
-   return jax.lax.with_sharding_constraint(x, stage_sharding)
-  
   def init_states(self, inputs):
     '''Initialize components of state: state_io, shift, circular_storage and circular_storage_mover
         Assumes input has already been reshaped into microbatches: [num_micro_batches, micro_batch_size, sequence, embed]
@@ -76,7 +84,6 @@ class Pipeline(nn.Module):
     # Shift is used to rotate the output of each pipeline into the input of the next
     # shift has shape [num_stages, micro_size, sequence, embed]
     shift = jnp.zeros((self.num_stages,) + inputs.shape[1:], dtype=inputs.dtype)
-    #shift = self.shard_dim_by_stages(shift, self.mesh)
     # TODO: Is there a standard way to go from logical -> physical instead of the logical_to_mesh followed by with_sharding_constraint?
     # Answer: yes probably nn.with_logical_constraint https://github.com/google/maxtext/blob/5deb01a9221612c6c28f3f5a561b8af9c0fd720d/MaxText/layers/models.py#L322
     # Can remove mesh and logical_axis_rules and rely on global context manager (but we should remove the global context manager anyway at some point) 
@@ -88,7 +95,6 @@ class Pipeline(nn.Module):
     # state_io (state input output) at first holds all of the input batches, but also will hold the outputs as the pipeline runs/finishes
     # state_io has shape [num_stages, microbatches/stages, micro_size, sequence, embed]
     state_io = jnp.reshape(inputs, (self.num_stages, self.microbatches_per_stage) + inputs.shape[1:])
-    #state_io = self.shard_dim_by_stages(state_io)
     state_io_shardings = nn.logical_to_mesh_axes(["activation_stage", None, "activation_batch", "activation_length", "activation_embed"],self.config.logical_axis_rules) 
     state_io = jax.lax.with_sharding_constraint(state_io, NamedSharding(self.mesh, state_io_shardings))
     #state_io = jax.lax.with_sharding_constraint(state_io, self.S(self.mesh, *state_io_shardings))
