@@ -28,6 +28,7 @@ from layers import attentions
 from layers import embeddings
 from layers import linears
 from layers import normalizations, quantizations
+from layers import pipeline
 
 Array = common_types.Array
 Config = common_types.Config
@@ -167,11 +168,14 @@ class Decoder(nn.Module):
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
       return gpt3.Gpt3DecoderLayer
+    elif self.config.decoder_block == "simple":
+      from layers import simple_decoder_layer
+      return simple_decoder_layer.SimpleDecoderLayer
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma", "simple"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
@@ -250,6 +254,7 @@ class Decoder(nn.Module):
           policy=policy,
           static_argnums=(-1, -2, -3, -4, -5),
       )
+    # TODO: support scan_layers for pipeline, also currently assert not requesting pipeline and scan (maybe in pyconfig)
     if cfg.scan_layers:
       initializing = self.is_mutable_collection('params')
       params_spec = (
@@ -284,15 +289,24 @@ class Decoder(nn.Module):
           model_mode,
       )
     else:
-      for lyr in range(cfg.num_decoder_layers):
-        y = BlockLayer(config=cfg, mesh=mesh, name=f'layers_{lyr}',
-                       quant=self.quant)(
+      if cfg.ici_pipeline_parallelism > 1 or cfg.dcn_pipeline_parallelism > 1:
+        y = pipeline.Pipeline(config=cfg, mesh=mesh, decoder_layer_class=BlockLayer,quant=self.quant)(
             y,
             decoder_segment_ids,
             decoder_positions,
             deterministic,
             model_mode,
         )
+      else:
+        for lyr in range(cfg.num_decoder_layers):
+          y = BlockLayer(config=cfg, mesh=mesh, name=f'layers_{lyr}',
+                        quant=self.quant)(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+          )
 
     y = self.get_norm_layer()(
       dtype=cfg.dtype,
