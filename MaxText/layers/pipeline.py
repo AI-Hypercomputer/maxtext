@@ -253,7 +253,7 @@ class Pipeline(nn.Module):
    
   def permute_output_ms_dim(self, output):
     '''
-    TODO: Reach out to praxis owner about this permutation, fix comment
+    TODO: Reach out to praxis owner about this permutation, fix comment and method name
     Although re-using the same array for both input and output is cute,
     The final outputs turn out permuted compared to the inputs. Worringly I don't see this function in praxis
     '''
@@ -267,9 +267,7 @@ class Pipeline(nn.Module):
     return output
 
   def run_one_iteration(self, state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode):
-   '''
-      Run one loop iteration - sending inputs and specifying weights for each pipeline stage, run the pipeline, and update the various state buffers
-   '''
+   '''Run one loop iteration - gets weights and inputs for each stage, run the stages in parallel, and update the various state buffers'''
    stages_weights = self.get_weights_stage(weights, loop_iteration)
    stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
    if positions is not None:
@@ -289,8 +287,7 @@ class Pipeline(nn.Module):
    return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
   
   def __call__(self, inputs: jnp.ndarray, positions: jnp.ndarray, segment_ids:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
-    # We want to access the variables of the decoder_layer, the below loop fills in the variables dictionary (previously empty dict)
-    # TODO: may want to have some simplified flow when is initializing instead (don't need to run through total_iters)
+    # Reshape inputs of [global_batch, ...] to [microbatches, microbatch_sizes, ...]
     inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length, self.config.emb_dim))
     if positions is not None:
       positions = positions.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
@@ -302,11 +299,12 @@ class Pipeline(nn.Module):
       segment_ids_0 = segment_ids[0]
     else:
       segment_ids_0 = None
+
+    # We need to access the variables of the decoder_layer, the below loop fills in the variables dictionary (previously empty dict since lazy initialization)
+    
     for decoder in self.decoder_layers:
       # Initialize the decoder variables, since they are lazily initialized and we need them now.
       _ = decoder(inputs[0], positions_0, segment_ids_0, deterministic, model_mode)
-         
-
 
     state_io, shift, circ_storage, circ_storage_mover = self.init_states(inputs)
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
@@ -314,15 +312,15 @@ class Pipeline(nn.Module):
     weights = [decoder.variables for decoder in self.decoder_layers]
     # Go from a list of size n_layers of weight pytrees to a single pytree where each leaf has a leading dimension of n_layers 
     weights = stack_pytrees(*weights)
+    # TODO: may want to have some simplified flow when is initializing instead (don't need to run through total_iters)
     for loop_iteration in range(total_iterations):
        print(f"starting iteration {loop_iteration}")
        state_io, shift, circ_storage, circ_storage_mover = self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode)
 
-    # The final output is located in the input/output array, however the microbatches may be permuted
+    # The final output is located in the input/output array, however the output microbatches may be permuted relative to the input
     final_output = self.permute_output_ms_dim(state_io)
 
     # reshape outputs to match input shape of total batch instead of microbatches [batch, sequence, embed]
-    # TODO: Either confirm or fix batch size when mixed sharding (e.g. is this correct even with PP + FSDP?)
     final_output = jnp.reshape(final_output, (self.config.global_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim))
                                
     return final_output
