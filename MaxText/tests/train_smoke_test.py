@@ -25,6 +25,7 @@ class Train(unittest.TestCase):
 
   def test_tiny_config(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")
+    os.environ["TENSORBOARD_PROJECT"] = "test-project"
     train_main([None, "third_party/py/maxtext/configs/base.yml",
       f"base_output_directory=gs://runner-maxtext-logs", "run_name=runner_test",
       r"dataset_path=gs://maxtext-dataset",

@@ -251,3 +251,13 @@ target_eval_loss: 0.  # early stop once reaching target eval_loss
 
 # Goodput parameters
 enable_goodput_recording: False
+
+# Vertex AI Tensorboard Configurations - https://github.com/google/maxtext/tree/main/getting_started/Use_Vertex_AI_Tensorboard.md
+# Set to True for GCE, False if running via XPK
+use_vertex_tensorboard: False
+# Project to create Vertex AI Tensorboard in for GCE, blank if project is set using 'gcloud config set project'
+# Set this to blank if running via XPK
+vertex_tensorboard_project: ""
+# Region to create Vertex AI Tensorboard in for GCE, blank if running via XPK
+# Vertex AI supported regions: https://cloud.google.com/vertex-ai/docs/general/locations#available-regions
+vertex_tensorboard_region: ""

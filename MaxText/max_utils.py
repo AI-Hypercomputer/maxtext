@@ -20,6 +20,7 @@ import common_types
 import functools
 import time
 import socket
+import subprocess
 
 import max_logging
 
@@ -609,3 +610,11 @@ def print_model_vars(print_str, model_vars):
   for k in model_vars:
     print(f'{print_str} key{k}:')
     print(f'\t {model_vars[k]}')
+
+def get_project():
+  completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
+  project_outputs = completed_command.stdout.decode().strip().split('\n')
+  if len(project_outputs) < 1 or project_outputs[-1]=='':
+    max_logging.log("You must specify config.vertex_tensorboard_project or set 'gcloud config set project <project>'")
+    return None
+  return project_outputs[-1]
