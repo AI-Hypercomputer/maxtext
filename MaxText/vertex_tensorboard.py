@@ -23,8 +23,8 @@ import jax
 import max_logging
 import max_utils
 
-from cloud_accelerator_diagnostics.pip_package.cloud_accelerator_diagnostics.src.tensorboard_uploader import tensorboard
-from cloud_accelerator_diagnostics.pip_package.cloud_accelerator_diagnostics.src.tensorboard_uploader import uploader
+from cloud_accelerator_diagnostics import tensorboard
+from cloud_accelerator_diagnostics import uploader
 
 
 class VertexTensorboardManager:
