@@ -80,6 +80,8 @@ head_dim: 128
 # pipeline parallelism
 # TODO: Decide on reasonable defaults: repeats could default to 1, or so that there is 1 layer per stage, or maybe required 
 # TODO: Similarly maybe num_microbatches defaults to num_stages or maybe its required
+# TODO: we are inferring microbatch_size = global_batch_size / num_pipeline_microbatches, alternatively user could set
+# microbatch_size and num_microbatches explicitly, and leave per_device_batch_size alone (assert unset)
 num_pipeline_repeats: 1
 num_pipeline_microbatches: 1
 # mixture of experts (moe)
