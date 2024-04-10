@@ -282,7 +282,8 @@ class MoeBlock(nn.Module):
             dtype=self.dtype,
             kernel_init=self.kernel_init,
             kernel_axes=self.kernel_axes,
-            name='gate')(inputs)
+            name='gate',
+            quant=self.quant,)(inputs)
 
     weights, selected_experts = lax.top_k(gate_logits, self.num_experts_per_tok)
     weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1)
