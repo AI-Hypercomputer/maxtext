@@ -21,19 +21,6 @@ import max_utils
 from layers import pipeline
 from layers import llama2
 
-def stack_pytrees(*pytrees):
-  """Stacks pytrees with identical structure along a new leading dimension."""
-  def stacking_fn(*leaves):
-    return jnp.stack(leaves)
-  return tree_map(stacking_fn, *pytrees)
-
-def create_mesh(n_stages, tp_axis, dp_axis):
-  devices = mesh_utils.create_device_mesh((n_stages, tp_axis, dp_axis))
-
-
-  mesh = Mesh(devices, axis_names=('stage', 'tensor', 'data'))
-  return mesh
-
 def get_weights_and_inputs(batch_size, sequence, features, n_layers):
     '''Get random weights, random inputs, and random targets
         Returns
@@ -55,8 +42,6 @@ def get_weights_and_inputs(batch_size, sequence, features, n_layers):
     dummy_targets = jax.random.normal(k,input_shape, dtype=jnp.float32)
 
     inputs_position = jnp.array([jnp.arange(sequence, dtype=jnp.int32) for _ in range(batch_size)], dtype=jnp.int32)
-    print(f"{inputs_position.shape}") 
-    #inputs_position = jnp.arange((batch_size, sequence), dtype = jnp.int32)
     inputs_segmentation = jnp.ones((batch_size, sequence), dtype=jnp.int32)
 
     return weights, inputs, dummy_targets, inputs_position, inputs_segmentation
@@ -114,7 +99,6 @@ def main(argv: Sequence[str]) -> None:
 
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
-  #mesh = create_mesh(num_stages, config.ici_tensor_parallelism, config.ici_data_parallelism)
 
   decoder_layer = simple_decoder_layer.SimpleDecoderLayer
   #decoder_layer = llama2.LlamaDecoderLayer
@@ -125,12 +109,6 @@ def main(argv: Sequence[str]) -> None:
   )
   init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
   #pipeline_out = my_pipeline.apply(init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
-
-  # def get_layer_params(params,layer_idx):
-  #   def get_layer(leaf,layer_idx):
-  #     return leaf[layer_idx]
-  #   my_get_layer = functools.partial(get_layer,layer_idx=layer_idx)
-  #   return jax.tree_map(my_get_layer, params)
 
   def run_regular_pipeline(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
     reg_layer_activations = inputs
