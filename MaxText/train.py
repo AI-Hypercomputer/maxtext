@@ -484,7 +484,8 @@ def main(argv: Sequence[str]) -> None:
     stack_trace_config = stack_trace_configuration.StackTraceConfig(
       collect_stack_trace = config.collect_stack_trace,
       stack_trace_to_cloud = config.stack_trace_to_cloud,
-      stack_trace_interval_seconds = config.stack_trace_interval_seconds))
+      stack_trace_interval_seconds = config.stack_trace_interval_seconds,
+      stack_trace_url = f"https://pantheon.corp.google.com/logs/query;query=logName%3D%22projects%2F%3C{project_name}%3E%2Flogs%2Ftpu.googleapis.com%252Fruntime_monitor%22%0AjsonPayload.verb%3D%22stacktraceanalyzer%22;duration=PT1H?e=13803378&mods=allow_workbench_image_override&project={project_name}"))
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
   with diagnostic.diagnose(diagnostic_config):
     train_loop(config)
