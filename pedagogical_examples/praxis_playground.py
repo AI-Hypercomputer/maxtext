@@ -179,8 +179,8 @@ with jax.sharding.Mesh(device_mesh, mesh_axis_names):
       # circular:
       #   {'body': {'w_in': (2, 4, 128, 256), 'w_out': (2, 4, 256, 128)}}
       pipelined_layer_vars = pjit_init(prng_key, test_inputs)
-      print('## pipelined_layer_vars=',
-            jax.tree.map(lambda x: x.shape, pipelined_layer_vars))
+      breakpoint()
+      print(jax.tree.map(lambda x: x.shape, pipelined_layer_vars))
 
       def loss(v, inp):
         # Need to allow
