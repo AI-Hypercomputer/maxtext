@@ -87,54 +87,55 @@ with models.DAG(
     ).run()
     stable_tpu >> nightly_tpu >> stable_gpu >> nightly_gpu
 
-    multicluster_test_models = {
-      "gemma-7b": ["gemma/7b/1_test_gemma","gemma/7b/2_test_gemma"],
-    }
+  multicluster_test_models = {
+    "gemma-7b": ["gemma/7b/1_test_gemma","gemma/7b/2_test_gemma"],
+  }
 
-    for model, test_scripts in multicluster_test_models.items():
-        test_group_id = "chained_tests" + "_" + model
-        gcs_subfolder = f"{test_owner.Team.MULTIPOD.value}/maxtext"
-        with TaskGroup(group_id=test_group_id) as group: 
-            shared_gcs_location = name_format.generate_gcs_folder_location(
-                gcs_subfolder,
-                test_group_id,
-            )
-            stable_cpu = gke_config.get_maxtext_cpu_end_to_end_gke_config(
-                device_type=CpuVersion.N2_STANDARD,
-                cpu_zone=Zone.US_CENTRAL1_B.value,
-                time_out_in_min=60,
-                test_name=f"{test_name_prefix}-stable-{model}",
-                run_model_cmds=(f"bash end_to_end/{test_scripts[0]}.sh",),
-                docker_image=DockerImage.MAXTEXT_TPU_JAX_STABLE.value,
-                test_owner=test_owner.ANISHA_M,
-            ).run(model_bucket=shared_gcs_location)
-            stable_tpu = gke_config.get_gke_config(
-                tpu_version=TpuVersion.V4,
-                tpu_cores=64,
-                tpu_zone=Zone.US_CENTRAL2_B.value,
-                time_out_in_min=60,
-                test_name=f"{test_name_prefix}-stable-{model}",
-                run_model_cmds=(f"bash end_to_end/{test_script[1]}.sh",),
-                docker_image=DockerImage.MAXTEXT_TPU_JAX_STABLE.value,
-                test_owner=test_owner.ANISHA_M,
-                ).run(model_bucket=shared_gcs_location)
-            nightly_cpu = gke_config.get_gke_config(
-                device_type=CpuVersion.N2_STANDARD,
-                cpu_zone=Zone.US_CENTRAL1_B.value,
-                time_out_in_min=60,
-                test_name=f"{test_name_prefix}-nightly-{model}",
-                run_model_cmds=(f"bash end_to_end/{test_script[0]}.sh",),
-                docker_image=DockerImage.MAXTEXT_TPU_JAX_NIGHTLY.value,
-                test_owner=test_owner.ANISHA_M,
-            ).run(model_bucket=shared_gcs_location)
-            nightly_tpu = gke_config.get_gke_config(
-                tpu_version=TpuVersion.V4,
-                tpu_cores=64,
-                tpu_zone=Zone.US_CENTRAL2_B.value,
-                time_out_in_min=60,
-                test_name=f"{test_name_prefix}-nightly-{model}",
-                run_model_cmds=(f"bash end_to_end/{test_script[1]}.sh",),
-                docker_image=DockerImage.MAXTEXT_TPU_JAX_NIGHTLY.value,
-                test_owner=test_owner.ANISHA_M,
-            ).run(model_bucket=shared_gcs_location)
+  for model, test_scripts in multicluster_test_models.items():
+      test_group_id = "chained_tests" + "_" + model
+      gcs_subfolder = f"{test_owner.Team.MULTIPOD.value}/maxtext"
+      with TaskGroup(group_id=test_group_id) as group: 
+          shared_gcs_location = name_format.generate_gcs_folder_location(
+              gcs_subfolder,
+              test_group_id,
+          )
+          stable_cpu = gke_config.get_maxtext_cpu_end_to_end_gke_config(
+              device_type=CpuVersion.N2_STANDARD,
+              cpu_zone=Zone.US_CENTRAL1_B.value,
+              time_out_in_min=60,
+              test_name=f"{test_name_prefix}-stable-{model}",
+              run_model_cmds=(f"bash end_to_end/{test_scripts[0]}.sh",),
+              docker_image=DockerImage.MAXTEXT_TPU_JAX_STABLE.value,
+              test_owner=test_owner.ANISHA_M,
+          ).run(model_bucket=shared_gcs_location)
+          stable_tpu = gke_config.get_gke_config(
+              tpu_version=TpuVersion.V4,
+              tpu_cores=64,
+              tpu_zone=Zone.US_CENTRAL2_B.value,
+              time_out_in_min=60,
+              test_name=f"{test_name_prefix}-stable-{model}",
+              run_model_cmds=(f"bash end_to_end/{test_script[1]}.sh",),
+              docker_image=DockerImage.MAXTEXT_TPU_JAX_STABLE.value,
+              test_owner=test_owner.ANISHA_M,
+              ).run(model_bucket=shared_gcs_location)
+          nightly_cpu = gke_config.get_gke_config(
+              device_type=CpuVersion.N2_STANDARD,
+              cpu_zone=Zone.US_CENTRAL1_B.value,
+              time_out_in_min=60,
+              test_name=f"{test_name_prefix}-nightly-{model}",
+              run_model_cmds=(f"bash end_to_end/{test_script[0]}.sh",),
+              docker_image=DockerImage.MAXTEXT_TPU_JAX_NIGHTLY.value,
+              test_owner=test_owner.ANISHA_M,
+          ).run(model_bucket=shared_gcs_location)
+          nightly_tpu = gke_config.get_gke_config(
+              tpu_version=TpuVersion.V4,
+              tpu_cores=64,
+              tpu_zone=Zone.US_CENTRAL2_B.value,
+              time_out_in_min=60,
+              test_name=f"{test_name_prefix}-nightly-{model}",
+              run_model_cmds=(f"bash end_to_end/{test_script[1]}.sh",),
+              docker_image=DockerImage.MAXTEXT_TPU_JAX_NIGHTLY.value,
+              test_owner=test_owner.ANISHA_M,
+          ).run(model_bucket=shared_gcs_location)
+          stable_cpu >> stable_tpu >> nightly_cpu >> nightly_tpu
 
