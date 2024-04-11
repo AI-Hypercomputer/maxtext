@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # This file is both an integration test that runs once a day on a v4-16 and documentation for how to get started with Gemma-7b. 
-# Please make sure you have run end_to_end/gemma/7b/1_test_gemma.sh before running commands from this file. 
+# Please make sure you have run end_to_end/tpu/gemma/7b/1_test_gemma.sh before running commands from this file. 
 
 # The flow of this file is as follows:
-# 1. Run decoding, finetuning of Gemma 7B with the converted checkpoint obtained from end_to_end/gemma/7b/1_test_gemma.sh. Also, run pretraining of Gemma 7B
+# 1. Run decoding, finetuning of Gemma 7B with the converted checkpoint obtained from end_to_end/tpu/gemma/7b/1_test_gemma.sh. Also, run pretraining of Gemma 7B
 # 2. Convert the scanned checkpoint from step 1 into unscanned checkpoint format and run more efficient decoding.
 # 3. Run decoding from the finetuned checkpoint from step 1
 # 4. Ahead of Time Compilation for running Gemma 7B on v5e-256
