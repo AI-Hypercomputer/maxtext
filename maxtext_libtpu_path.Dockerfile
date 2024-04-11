@@ -5,4 +5,4 @@ FROM $BASEIMAGE
 # Set the TPU_LIBRARY_PATH
 ENV TPU_LIBRARY_PATH='/root/custom_libtpu/libtpu.so'
 
-WORKDIR /app
+WORKDIR /deps
