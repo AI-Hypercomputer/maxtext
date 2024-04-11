@@ -261,3 +261,6 @@ vertex_tensorboard_project: ""
 # Region to create Vertex AI Tensorboard in for GCE, blank if running via XPK
 # Vertex AI supported regions: https://cloud.google.com/vertex-ai/docs/general/locations#available-regions
 vertex_tensorboard_region: ""
+
+# If set to True, MaxText will perform extra checks using jax.checkify. Note that this will effect performance. 
+max_checkify: False
