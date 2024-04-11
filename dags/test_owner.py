@@ -49,6 +49,7 @@ NINA_C = "Nina C."
 SURBHI_J = "Surbhi J."
 ZHIYU_L = "Zhiyu L."
 MOHIT_K = "Mohit K."
+ANISHA_M = "Anisha M."
 
 # MLCompass
 ORTI_B = "Orti B."

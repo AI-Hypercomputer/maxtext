@@ -100,6 +100,12 @@ class GpuVersion(enum.Enum):
   XPK_H100 = "h100-80gb-8"
   V100 = "nvidia-tesla-v100"
 
+class CpuVersion(enum.Enum):
+  """Common CPU versions."""
+
+  M1_MEGAMEM = "m1-megamem-96-1"
+  N2_STANDARD = "n2-standard-64-1"
+
 
 class RuntimeVersion(enum.Enum):
   """Common runtime versions."""
@@ -132,6 +138,8 @@ class ClusterName(enum.Enum):
   V5E_256_MULTISLICE_CLUSTER = "v5e-256-bodaborg"
   V5E_256_US_WEST_4_MULTISLICE_CLUSTER = "v5e-256-bodaborg-us-west4"
   A3_CLUSTER = "maxtext-a3-20n"
+  CPU_M1_MEGAMEM_96 = "m1-megamem-96-shared"
+  CPU_N2_STANDARD_64 = "shared-n2-standard-64"
 
 
 class DockerImage(enum.Enum):

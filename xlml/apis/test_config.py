@@ -50,7 +50,7 @@ import shlex
 from typing import Any, Generic, Iterable, List, Optional, TypeVar
 
 import attrs
-from dags.vm_resource import TpuVersion
+from dags.vm_resource import TpuVersion, CpuVersion
 
 
 class Accelerator(abc.ABC):
@@ -112,6 +112,23 @@ class Gpu(Accelerator):
   def name(self):
     """Name of this GPU type in the Cloud GPU API (e.g. 'a2-highgpu-1g')."""
     return self.accelerator_type
+
+
+@attrs.define
+class Cpu(Accelerator):
+  """Represents a single Cloud CPU instance.
+
+  Attributes:
+    device_type: CPU device type. E.g., `m1-megamem-96-1` or `n2-standard-64-1`.
+  """
+
+  device_type: CpuVersion
+  machine_count: int
+
+  @property
+  def name(self):
+    """Name of this CPU type (e.g. 'n2-standard-64-1')."""
+    return f'v{self.device_type.value}-{self.machine_count}'
 
 
 A = TypeVar('A', bound=Accelerator)
