@@ -104,7 +104,6 @@ MaxText is more similar to [Nvidia/Megatron-LM](https://github.com/NVIDIA/Megatr
 
 MaxText is also comparable to [Pax](https://github.com/google/paxml). Like Pax, MaxText provides high-performance and scalable implementations of LLMs in Jax. However, Pax is a framework in which developers can inject their code or configuration. By contrast, MaxText is a reference implementation designed to be forked and edited as needed.
 
-
 # Features and Diagnostics
 
 Install the [Cloud TPU diagnostics](https://pypi.org/project/cloud-tpu-diagnostics) Python package to monitor, debug and profile jobs running on Cloud TPUs.  
