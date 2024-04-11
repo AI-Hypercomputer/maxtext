@@ -375,9 +375,11 @@ def train_loop(config, state=None):
   # Create a GoodputRecorder to log information
   recorder = create_goodput_recorder(config)
   record_goodput(recorder, config, job_start=True)
-
+  
+  recorder.record_tpu_init_start_time(datetime.datetime.now())
   ( init_rng, writer, checkpoint_manager, state_mesh_annotations, model,
   mesh, learning_rate_schedule, data_iterator, eval_data_iterator, state) = setup_train_loop(config)
+  recorder.record_tpu_init_end_time(datetime.datetime.now())
   # pylint: disable=line-too-long
   functional_train, in_shard_train, out_shard_train, static_argnums_train, donate_argnums_train = maxtext_utils.get_functional_train_with_signature(
     train_step,
@@ -512,6 +514,14 @@ def main(argv: Sequence[str]) -> None:
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
   with diagnostic.diagnose(diagnostic_config):
     train_loop(config)
+  logger_name = f'goodput_{config.run_name}'
+  goodput_calculator = goodput.GoodputCalculator(config.run_name, logger_name)
+  current_goodput = goodput_calculator.get_job_goodput()
+  print(f"Current job goodput: {current_goodput:.2f}%")
+  current_badput = 100 - current_goodput
+  print(f"Current job badput: {current_badput:.2f}%")
+  badput_breakdown = goodput_calculator.get_job_badput_breakdown([goodput.BadputType.TPU_INITIALIZATION])
+  print(f"Percentage breakdown of badput due to TPU initialization: {badput_breakdown[goodput.BadputType.TPU_INITIALIZATION]:.2f}%")
 
 if __name__ == "__main__":
   app.run(main)
