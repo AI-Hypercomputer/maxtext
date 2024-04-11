@@ -90,7 +90,7 @@ class DecoderLayer(nn.Module):
       dropout_rate=cfg.dropout_rate,
       name='self_attention',
       quant=self.quant,
-      quantize_kvcache=self.quantize_kvcache)
+      quantize_kvcache=cfg.quantize_kvcache)
 
 
     attention_lnx = attention_layer(
@@ -234,6 +234,11 @@ class Decoder(nn.Module):
           offload_src="device", offload_dst="pinned_host")
       elif cfg.remat_policy == 'minimal_offloaded':
         policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host")
+      elif cfg.remat_policy == 'minimal_flash':
+        policy = jax.checkpoint_policies.save_from_both_policies(
+          jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
+          jax.checkpoint_policies.save_only_these_names('context',),
+        )
       else:
         assert (
             cfg.remat_policy == 'full'
@@ -258,6 +263,7 @@ class Decoder(nn.Module):
               'cache': cache_spec,
               'intermediates': 0,
               'aqt':0,
+              '_overwrite_with_gradient': 0,
           },
           split_rngs={
               'params': True,

@@ -43,6 +43,7 @@ import optimizers
 import pyconfig
 # pylint: disable-next=unused-import
 import register_jax_proxy_backend
+from vertex_tensorboard import VertexTensorboardManager
 
 from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer
 from layers import models
@@ -506,6 +507,9 @@ def main(argv: Sequence[str]) -> None:
   config = pyconfig.config
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
+  vertex_tensorboard_manager = VertexTensorboardManager()
+  vertex_tensorboard_manager.configure_vertex_tensorboard(config)
+
   debug_config = debug_configuration.DebugConfig(
     stack_trace_config = stack_trace_configuration.StackTraceConfig(
       collect_stack_trace = config.collect_stack_trace,

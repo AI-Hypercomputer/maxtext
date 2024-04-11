@@ -4,6 +4,7 @@ orbax-checkpoint>=0.5.5
 absl-py
 array-record
 aqtp
+cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
 google-cloud-storage
 grain-nightly
