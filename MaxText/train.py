@@ -508,7 +508,8 @@ def main(argv: Sequence[str]) -> None:
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   vertex_tensorboard_manager = VertexTensorboardManager()
-  vertex_tensorboard_manager.configure_vertex_tensorboard(config)
+  if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
+    vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
   debug_config = debug_configuration.DebugConfig(
     stack_trace_config = stack_trace_configuration.StackTraceConfig(
