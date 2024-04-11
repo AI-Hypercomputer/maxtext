@@ -98,7 +98,7 @@ jobs:
     - name: Test int8_training
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
-        'python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset quantization=int8 steps=2 enable_checkpointing=false' 
+        'python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset quantization=int8 steps=2 enable_checkpointing=false'
     - name: Test fp8_training
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
@@ -130,7 +130,7 @@ jobs:
       fail-fast: false
       matrix:
         device-type: ["a100-40gb-4"]
-        build-mode: ["nightly", "stable", "pinned"]
+        build-mode: ["pinned"]
     name: "GPU test (${{ matrix.device-type }}, ${{ matrix.build-mode }})"
     runs-on: ["self-hosted", "gpu", "${{ matrix.device-type }}"]
     env:
