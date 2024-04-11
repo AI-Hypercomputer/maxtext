@@ -25,7 +25,6 @@ class Train(unittest.TestCase):
 
   def test_tiny_config(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")
-    os.environ["TENSORBOARD_PROJECT"] = "test-project"
     train_main([
         None,
         "third_party/py/maxtext/configs/gpu_smoke_test.yml",
