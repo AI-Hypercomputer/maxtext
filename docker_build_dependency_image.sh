@@ -45,7 +45,6 @@ fi
 if [[ -z ${MODE} ]]; then
   export MODE=stable
   echo "Default MODE=${MODE}"
-
 fi
 
 if [[ -z ${DEVICE} ]]; then
@@ -57,7 +56,12 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
   export LIBTPU_GCS_PATH=NONE
   echo "Default LIBTPU_GCS_PATH=${LIBTPU_GCS_PATH}"
   if [[ ${DEVICE} == "gpu" ]]; then
-    docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg DEVICE=$DEVICE -f ./maxtext_gpu_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+    if [[ ${MODE} == "pinned" ]]; then
+      export BASEIMAGE=ghcr.io/nvidia/jax:base-2024-03-13
+    else
+      export BASEIMAGE=ghcr.io/nvidia/jax:base
+    fi
+    docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE -f ./maxtext_gpu_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
   else
     docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
   fi

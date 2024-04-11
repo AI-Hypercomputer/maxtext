@@ -1,4 +1,6 @@
-FROM ghcr.io/nvidia/jax:base
+# syntax=docker/dockerfile:experimental
+ARG BASEIMAGE=ghcr.io/nvidia/jax:base
+FROM $BASEIMAGE
 
 # Install dependencies for adjusting network rto
 RUN apt-get update && apt-get install -y iproute2 ethtool lsof
