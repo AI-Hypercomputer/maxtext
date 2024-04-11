@@ -15,4 +15,4 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME steps=102\
     metrics_file='restored_metrics.txt' base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH\
     dcn_data_parallelism=2 dcn_fsdp_parallelism=1 ici_fsdp_parallelism=2 ici_tensor_parallelism=2 collect_stack_trace=False
 
-python3 end_to_end/eval_assert.py checkpoint_save_restore metrics.txt learning/loss
+python3 end_to_end/tpu/eval_assert.py checkpoint_save_restore metrics.txt learning/loss

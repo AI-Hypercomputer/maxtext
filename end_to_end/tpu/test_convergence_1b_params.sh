@@ -11,7 +11,7 @@ echo "Running test_convergence_1b_params.sh"
 # LOSS_THRESHOLD (Optional, default is 100.0 )
 #
 # Example to invoke this script:
-# bash end_to_end/test_convergence_1b_params.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>" LOSS_THRESHOLD=100.0
+# bash end_to_end/tpu/test_convergence_1b_params.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>" LOSS_THRESHOLD=100.0
 
 export LOSS_THRESHOLD=100.0 # Set to large value so test is guaranteed to pass.
 export STEPS=20400 # Run for 20B tokens for a 1B sized mode for "chinchilla" scaling https://arxiv.org/abs/2203.15556
@@ -49,4 +49,4 @@ export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xl
 $TRAIN_CMD
 
 # Assert training loss is smaller than input LOSS_THRESHOLD
-python3 end_to_end/eval_assert.py final_loss metrics.txt $LOSS_THRESHOLD
+python3 end_to_end/tpu/eval_assert.py final_loss metrics.txt $LOSS_THRESHOLD

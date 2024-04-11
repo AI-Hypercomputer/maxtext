@@ -28,4 +28,4 @@ CMD2+=$CMD_DATA
 
 $CMD1
 $CMD2
-python3 end_to_end/eval_assert.py determinism metrics.txt learning/loss 
+python3 end_to_end/tpu/eval_assert.py determinism metrics.txt learning/loss 

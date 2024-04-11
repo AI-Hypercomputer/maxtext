@@ -106,19 +106,19 @@ jobs:
     - name: Test generate_param_only_checkpoint
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
-        'bash end_to_end/test_generate_param_only_checkpoint.sh -r runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} -o gs://runner-maxtext-logs -d gs://maxtext-dataset -i 4'
+        'bash end_to_end/tpu/test_generate_param_only_checkpoint.sh -r runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} -o gs://runner-maxtext-logs -d gs://maxtext-dataset -i 4'
     - name: Test generate_param_only_checkpoint with int8 quantization
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
-        'bash end_to_end/test_generate_param_only_checkpoint.sh -r runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} -o gs://runner-maxtext-logs -d gs://maxtext-dataset -i 4 -q int8'
+        'bash end_to_end/tpu/test_generate_param_only_checkpoint.sh -r runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} -o gs://runner-maxtext-logs -d gs://maxtext-dataset -i 4 -q int8'
     - name: Test grain checkpoint determinism
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
-        'bash end_to_end/test_checkpointing.sh runner gs://runner-maxtext-logs gs://maxtext-dataset False c4-array_record'
+        'bash end_to_end/tpu/test_checkpointing.sh runner gs://runner-maxtext-logs gs://maxtext-dataset False c4-array_record'
     - name: Test checkpoint compatibility
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
-        'bash end_to_end/test_checkpoint_compatibility.sh runner gs://runner-maxtext-logs gs://maxtext-dataset'
+        'bash end_to_end/tpu/test_checkpoint_compatibility.sh runner gs://runner-maxtext-logs gs://maxtext-dataset'
     - name: Validate Pedagogical Example, Shmap_collective_matmul
       run: |
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged maxtext_base_image bash -c \
