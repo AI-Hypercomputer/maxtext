@@ -96,17 +96,7 @@ if [ -e "$libtpu_path" ]; then
     rm "$libtpu_path"
 fi
 
-if [[ "$MODE" == "pinned" ]]; then
-  if [[ "$DEVICE" != "gpu" ]]; then
-    echo "pinned mode is supported for GPU builds only."
-    exit 1
-  fi
-  echo "Installing pinned jax, jaxlib for NVIDIA gpu."
-  pip3 install "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html -c constraints_gpu.txt
-  pip3 install "transformer-engine==1.5.0+297459b" \
-    --extra-index-url https://us-python.pkg.dev/gce-ai-infra/maxtext-build-support-packages/simple/ \
-    -c constraints_gpu.txt
-elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
+if [[ "$MODE" == "stable" || ! -v MODE ]]; then
 # Stable mode
     if [[ $DEVICE == "tpu" ]]; then
         echo "Installing stable jax, jaxlib for tpu"
@@ -141,10 +131,10 @@ elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
             pip3 install -U "jax[cuda12_pip]==${JAX_VERSION}" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
         else
             echo "Installing stable jax, jaxlib, libtpu for NVIDIA gpu"
-            pip3 install "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+            pip3 install -U "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
         fi
-        pip3 install "transformer-engine==1.5.0+297459b" \
-          --extra-index-url https://us-python.pkg.dev/gce-ai-infra/maxtext-build-support-packages/simple/
+        export NVTE_FRAMEWORK=jax
+        pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
     fi
 elif [[ $MODE == "nightly" ]]; then
 # Nightly mode
@@ -154,9 +144,6 @@ elif [[ $MODE == "nightly" ]]; then
         pip3 install --pre -U jax -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
         # Install jaxlib-nightly
         pip3 install -U --pre jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_cuda12_releases.html
-        # Install prebuilt Transformer Engine for GPU builds.
-        pip3 install "transformer-engine==1.5.0+297459b" \
-          --extra-index-url https://us-python.pkg.dev/gce-ai-infra/maxtext-build-support-packages/simple/
     elif [[ $DEVICE == "tpu" ]]; then
         echo "Installing jax-nightly, jaxlib-nightly"
         # Install jax-nightly
@@ -187,9 +174,4 @@ else
 fi
 
 # Install dependencies from requirements.txt
-cd $run_name_folder_path && pip install --upgrade pip
-if [[ "$MODE" == "pinned" ]]; then
-    pip3 install -r requirements.txt -c constraints_gpu.txt
-else
-    pip3 install -U -r requirements.txt
-fi
+cd $run_name_folder_path && pip install --upgrade pip &&  pip3 install -r requirements.txt

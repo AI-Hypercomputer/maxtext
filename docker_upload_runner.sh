@@ -20,7 +20,7 @@
 # Each time you update the base image via a "bash docker_build_dependency_image.sh", there will be a slow upload process
 # (minutes). However, if you are simply changing local code and not updating dependencies, uploading just takes a few seconds.
 
-# Example command:
+# Example command: 
 # bash docker_upload_runner.sh CLOUD_IMAGE_NAME=${USER}_runner
 
 set -e
