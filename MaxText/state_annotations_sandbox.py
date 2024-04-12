@@ -20,6 +20,10 @@ import max_utils
 import os
 import pyconfig
 from absl import app
+import optax
+from flax.training import train_state
+import flax
+from flax.linen import partitioning as nn_partitioning
 
 def get_weights_and_inputs(batch_size, sequence, features, n_layers):
     '''Get random weights, random inputs, and random targets
@@ -100,6 +104,20 @@ class MultipleSimpleDecoderLayer(nn.Module):
             model_mode,
         )
        return inputs
+def unbox_logicallypartioned(
+    boxed_pytree):
+  """ Unboxes the flax.LogicallyPartitioned pieces
+
+    Args:
+      boxed_pytree: a pytree that includes LogicallyPartitioned
+        leaves.
+    Returns:
+      a pytree where all all LogicallyPartitioned leaves have been unboxed.
+  """
+  return jax.tree_util.tree_map(lambda x: x.unbox() if \
+        isinstance(x, flax.linen.spmd.LogicallyPartitioned) \
+        else x, boxed_pytree, \
+        is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned))
 
 def main(argv) -> None:
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
@@ -132,13 +150,31 @@ def main(argv) -> None:
     #       deterministic,
     #       model_mode,
     # return init_training_state(model.apply, model_vars, tx)
-    rawr = msdl.init(jax.random.PRNGKey(0), inputs, inputs_segmentation,inputs_position,deterministic,model_mode)
-    print("success")
-    breakpoint()
-    # apply_fn=msdl.apply
-    # init_state_partial = functools.partial(init_initial_state, model, tx, config)
-    # state = train_state.TrainState.create(apply_fn=apply_fn,params=params,tx=tx)
+    variables = msdl.init(jax.random.PRNGKey(0), inputs, inputs_segmentation,inputs_position,deterministic,model_mode)
+    tx = optax.adam(learning_rate=0.01)
 
+
+    def create_state():
+        return train_state.TrainState.create(apply_fn=msdl.apply, params=variables,tx=tx )
+    abstract_state = jax.eval_shape(create_state)
+
+    state_logical_annotations = nn.get_partition_spec(abstract_state)
+
+    state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh,
+                                                     config.logical_axis_rules)
+
+    abstract_sharded_state = jax.jit(
+      create_state,
+      in_shardings=None,
+      out_shardings=state_mesh_shardings
+    ).eval_shape()
+
+    unboxed_abstract_sharded_state = unbox_logicallypartioned(abstract_sharded_state)
+
+    # Initialization
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+    breakpoint()
 
 if __name__ == "__main__":
   app.run(main)
