@@ -37,8 +37,8 @@ raw_len = 32768
 chunk_size = 512
 grid_pts = raw_len//chunk_size
 
-v1 = jax.random.normal(jax.random.key(0), (raw_len, raw_len), dtype=jnp.float32)
-v2 = jax.random.normal(jax.random.key(1), (raw_len, raw_len), dtype=jnp.float32)
+v1 = jax.random.normal(jax.random.key(0), (raw_len, raw_len), dtype=jnp.bfloat16)
+v2 = jax.random.normal(jax.random.key(1), (raw_len, raw_len), dtype=jnp.bfloat16)
 
 @jax.jit
 def multiply_tensors_normal(x: jax.Array, y: jax.Array):

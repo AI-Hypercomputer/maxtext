@@ -9,12 +9,12 @@ import string
 import datetime
 
 
-def simple_timeit(f, *args, tries = 2, task = None):
+def simple_timeit(f, *args, tries = 10, task = None):
     '''Simple utility to time a function for multiple runs'''
     assert task is not None
 
     trace_name = f"t_{task}_" + ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(10))
-    trace_dir = f"gs://runner-maxtext-logs/rwitten/{trace_name}"
+    trace_dir = f"gs://runner-maxtext-logs/rwittensuper/{trace_name}"
 
     outcomes_ms = []
     jax.block_until_ready(f(*args)) #warm it up!
@@ -52,9 +52,9 @@ def matmul_kernel(x_ref, y_ref, o_ref, o_scratch_ref):
 def matmul(x: jax.Array, y: jax.Array) -> jax.Array:
   m, _ = x.shape
   k, n = y.shape
-  tile_m = 512
-  tile_n = 1024
-  tile_k = 1024
+  tile_m = 768
+  tile_n = 768
+  tile_k = 768
   grid = (math.ceil(m / tile_m), math.ceil(n / tile_n), math.ceil(k / tile_k))
 
   block_spec_a = pl.BlockSpec(lambda i, j, h: (i, h), (tile_m, tile_k))
@@ -84,8 +84,8 @@ def matmul(x: jax.Array, y: jax.Array) -> jax.Array:
 
 
 if __name__ == "__main__":
-  x = jnp.ones((4096, 4096), dtype=jnp.float32)
-  y = jnp.ones((4096, 4096), dtype=jnp.float32)
+  x = jnp.ones((7680, 7680), dtype=jnp.bfloat16)
+  y = jnp.ones((7680, 7680), dtype=jnp.bfloat16)
 
   assert jax.numpy.allclose(matmul(x,y), jnp.matmul(x,y), atol=1e-2, rtol=1e-2)
 
