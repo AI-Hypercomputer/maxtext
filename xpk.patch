@@ -1,0 +1,41 @@
+diff --git a/xpk.py b/xpk.py
+index 3806d84..9829c1f 100644
+--- a/xpk.py
++++ b/xpk.py
+@@ -293,9 +293,6 @@ spec:
+                     - matchExpressions:
+                       - key: cloud.google.com/gke-accelerator
+                         operator: Exists
+-                      - key: cloud.google.com/gke-nodepool
+-                        operator: In
+-                        values: [{node_pool_name}]
+               nodeSelector:
+                 {accelerator_label}
+                 {machine_label}
+@@ -401,12 +398,12 @@ metadata:
+ script_dir_dockerfile = """FROM {base_docker_image}
+ 
+ # Set the working directory in the container
+-WORKDIR /app
++WORKDIR /deps
+ 
+ # Copy all files from local workspace into docker container
+ COPY . .
+ 
+-WORKDIR /app
++WORKDIR /deps
+ """
+ 
+ cluster_set_crd_yaml = """apiVersion: kueue.x-k8s.io/v1beta1
+@@ -1436,8 +1433,9 @@ def zone_to_region(zone) -> str:
+   Returns:
+      The region name.
+   """
+-  zone_terms = zone.split('-')
+-  return zone_terms[0] + '-' + zone_terms[1]
++  # zone_terms = zone.split('-')
++  # return zone_terms[0] + '-' + zone_terms[1]
++  return zone
+ 
+ 
+ def run_gke_cluster_create_command(args) -> int:

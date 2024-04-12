@@ -1,4 +1,4 @@
-ARG BASEIMAGE=maxtext_base_image
+ARG BASEIMAGE=gcr.io/supercomputer-testing/yangyuwei/maxtext-tcpx-0327:latest
 FROM $BASEIMAGE
 
 #FROM maxtext_base_image
