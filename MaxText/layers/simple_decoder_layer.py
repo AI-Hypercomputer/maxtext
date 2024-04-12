@@ -15,4 +15,7 @@ class SimpleDecoderLayer(nn.Module):
     self.weight_mat = self.param('weights', nn.initializers.ones, (self.config.emb_dim, self.config.emb_dim))
 
   def __call__(self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode) -> jnp.ndarray:
-    return inputs @ self.weight_mat.astype(inputs.dtype)
+    if self.config.scan_layers:
+      return inputs @ self.weight_mat.astype(inputs.dtype), None
+    else:
+      return inputs @ self.weight_mat.astype(inputs.dtype)
