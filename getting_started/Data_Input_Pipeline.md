@@ -15,7 +15,7 @@
 -->
 ## Data Input Pipeline
 
-Currently MaxText supports two data input pipelines: the tfds (tensorflow_datasets) based pipeline as default, and the Grain pipeline for determinism. 
+Currently MaxText supports two data input pipelines: the tfds (tensorflow_datasets) based pipeline as default, and the Grain pipeline for determinism. In addition, we are experimenting with the HuggingFace input pipeline. 
 
 ### Deterministic Data Input Pipeline - Grain
 
@@ -31,3 +31,31 @@ bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$BUCKET_NAME MOUNT_PATH=$MOUNT_PATH
 ```
 bash setup_gcsfuse.sh DATASET_GCS_BUCKET=maxtext-dataset MOUNT_PATH=/tmp/gcsfuse && python3 MaxText/train.py MaxText/configs/base.yml run_name=<RUN_NAME> base_output_directory=gs://<MY_BUCKET>  dataset_path=/tmp/gcsfuse/ dataset_name='array-record/c4/en/3.0.1' dataset_type=c4-array_record grain_worker_count=2
 ```
+
+### Experimental: HuggingFace input pipeline
+
+The HuggingFace pipeline supports streaming directly from HuggingFace Hub, or from GCS bucket in HuggingFace supported formats (parquet, json, etc.).
+Example config for streaming from HuggingFace Hub:
+```
+dataset_name: 'allenai/c4'
+dataset_dir_hf: 'en'
+eval_dataset_name: ''  # eval with a separate dataset is not yet supported
+tokenizer_path: 'google-t5/t5-large'
+hf_access_token: ''  # if using gated dataset or tokenizer
+dataset_type: hf
+```
+Example config for streaming from GCS bucket:
+```
+dataset_name: 'parquet'  # or json
+dataset_dir_hf: ''
+dataset_path: 'gs://<bucket>/<folder>/*-train-*.parquet' # match the train files
+eval_dataset_name: ''  # eval with a separate dataset is not yet supported
+tokenizer_path: 'google-t5/t5-large'
+dataset_type: hf
+```
+#### Limitations
+
+1. Streaming data directly from HuggingFace Hub may be impacted by the traffic of the server. During peak hours you may encounter "504 Server Error: Gateway Time-out". 
+2. The current implementation uses only single process to retrieve data. It may slows down the training if you train a small model on a big slice with big batch (e.g. 1B model on a v4-128 with a batch of 1M tokens). We are working on improving the perf.
+3. Pulling data with a subset of hosts by setting `expansion_factor_real_data`>0 is not yet supported with HF data pipeline 
+

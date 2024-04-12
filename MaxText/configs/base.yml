@@ -155,19 +155,30 @@ ici_autoregressive_parallelism: 1
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
 num_slices: -1
 
-# Dataset
-# Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
-dataset_path: ""
+# Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
-tokenizer_path: "assets/tokenizer.llama2"
-dataset_name: 'c4/en:3.0.1'
+# When using HF pipeline, set tokenizer_path to a tokenizer in HF hub, e.g. "google-t5/t5-large", or a local folder contains HF tokenizer
+tokenizer_path: "assets/tokenizer.llama2"  
+# provide access token if you are using a huggingface tokenizer from a gated model
+hf_access_token: ''
+
+# Dataset
+# For TFDS pipeline, Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
+# For Grain pipeline, set dataset_path to match the MOUNT_PATH you used in setup_gcsfuse.sh
+# For HF pipeline, this is the data_files field ("gs://" path supported) in load_dataset (https://huggingface.co/docs/datasets/en/loading)
+dataset_path: ""
+# For TFDS pipeline, dataset_name is the name of TFDS dataset
+# For Grain pipeline, dataset_name is the subfolder path under dataset_path
+# For HF pipeline, dataset_name corresponds to the path field in load_dataset (https://huggingface.co/docs/datasets/en/loading)
+dataset_name: 'c4/en:3.0.1'  # e.g. 'allenai/c4' for HF pipeline
+dataset_dir_hf: ''  # e.g. 'en', used by HF pipeline only, corresponds to the data_dir field in load_dataset (https://huggingface.co/docs/datasets/en/loading)
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
 per_device_batch_size: 12.0
 expansion_factor_real_data: -1 # if -1 then all hosts will load real data, else total_hosts//expansion_factor_real_data will pull data from GCS.
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
-dataset_type: c4 # must be c4 or synthetic
+dataset_type: c4 # must be c4, c4-array_record, c4_mlperf, hf or synthetic
 
 # Setting for grain
 grain_worker_count: 4

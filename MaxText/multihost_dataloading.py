@@ -22,7 +22,7 @@ https://github.com/sholtodouglas/multihost_dataloading
 """
 from functools import lru_cache, partial  # pylint: disable=g-importing-member
 from typing import Callable, Any, Union
-from collections.abc import Iterator
+from collections.abc import Iterator, Iterable
 import tensorflow as tf  # pylint: disable=g-import-not-at-top
 import time
 import numpy as np
@@ -95,23 +95,30 @@ def get_next_batch_sharded(
 
 class MultiHostDataLoadIterator:
   """fold get_next_batch_sharded into a iterator class"""
-  def __init__(self, dataloader: Union[tf.data.Dataset, grain.DataLoader], global_mesh: Mesh):
+  def __init__(
+    self, dataloader: Union[tf.data.Dataset, grain.DataLoader, Iterator],
+    global_mesh: Mesh
+    ):
     self.global_mesh = global_mesh
     self.dataloader = dataloader
     if isinstance(self.dataloader, tf.data.Dataset):
       self.local_iterator = self.dataloader.as_numpy_iterator()
     elif isinstance(self.dataloader, grain.DataLoader):
       self.local_iterator = iter(self.dataloader)
+    elif isinstance(self.dataloader, Iterable):
+      self.local_iterator = iter(self.dataloader)
     else:
-      raise ValueError("Type error: dataloader should be either tf.data.Dataset or grain.DataLoader.")
+      raise ValueError("Type error: dataloader should be either tf.data.Dataset, grain.DataLoader or Iterable.")
 
   def reset(self):
     if isinstance(self.dataloader, tf.data.Dataset):
       self.local_iterator = self.dataloader.as_numpy_iterator()
     elif isinstance(self.dataloader, grain.DataLoader):
       self.local_iterator = iter(self.dataloader)
+    elif isinstance(self.dataloader, Iterable):
+      self.local_iterator = iter(self.dataloader)
     else:
-      raise ValueError("Type error: dataloader should be either tf.data.Dataset or grain.DataLoader.")
+      raise ValueError("Type error: dataloader should be either tf.data.Dataset, grain.DataLoader or Iterable.")
 
   def __iter__(self):
     self.reset()

@@ -39,6 +39,8 @@ class TfdsDataProcessingTest(unittest.TestCase):
                         base_output_directory = "gs://max-experiments/",
                         dataset_path = "gs://maxtext-dataset/",
                         tokenizer_path = "../assets/tokenizer",
+                        dataset_type = "c4",
+                        dataset_name = "c4/en:3.0.1",
                         enable_checkpointing=False)
     os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
     self.config = pyconfig.config
