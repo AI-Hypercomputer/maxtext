@@ -7,7 +7,7 @@
 # 1. Pull the checkpoint from a GCS bucket and uploads the new MaxText compatible checkpoint to destination GCS bucket.
 # 2. Convert the scanned checkpoint from step 1 into unscanned checkpoint format and run more efficient decoding.
 
-# Example Usage: bash end_to_end/gemma/7b/1_test_gemma.sh
+# Example Usage: bash end_to_end/tpu/gemma/7b/1_test_gemma.sh
 set -ex
 idx=$(date +%Y-%m-%d-%H-%M)
 MODEL_VARIATION='7b'

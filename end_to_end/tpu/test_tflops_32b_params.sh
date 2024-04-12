@@ -9,7 +9,7 @@ echo "Running test_tflops_32b_params.sh"
 # TFLOP_THRESHOLD (Optional, default is 0 )
 #
 # Example to invoke this script:
-# bash end_to_end/test_tflops_32b_params.sh RUN_NAME="<your_run_name>"" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>" PLATFORM="gke" TFLOP_THRESHOLD=0
+# bash end_to_end/tpu/test_tflops_32b_params.sh RUN_NAME="<your_run_name>"" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>" PLATFORM="gke" TFLOP_THRESHOLD=0
 
 # Stop execution if any command exits with error
 set -ex
@@ -35,4 +35,4 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME\
     dataset_path=$DATASET_PATH log_period=150 global_parameter_scale=32
 
 # Assert TFLOP/s
-python3 end_to_end/eval_assert.py metrics_average metrics.txt $TFLOP_THRESHOLD perf/per_device_tflops_per_sec
+python3 end_to_end/tpu/eval_assert.py metrics_average metrics.txt $TFLOP_THRESHOLD perf/per_device_tflops_per_sec
