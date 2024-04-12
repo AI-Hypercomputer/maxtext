@@ -77,7 +77,7 @@ echo ""
 echo "Built your base docker image and named it ${LOCAL_IMAGE_NAME}.
 It only has the dependencies installed. Assuming you're on a TPUVM, to run the
 docker image locally and mirror your local working directory run:"
-echo "docker run -v $(pwd):/app --rm -it --privileged --entrypoint bash ${LOCAL_IMAGE_NAME}"
+echo "docker run -v $(pwd):/deps --rm -it --privileged --entrypoint bash ${LOCAL_IMAGE_NAME}"
 echo ""
 echo "You can run MaxText and your development tests inside of the docker image. Changes to your workspace will automatically
 be reflected inside the docker container."

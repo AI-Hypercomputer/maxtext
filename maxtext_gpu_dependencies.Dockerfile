@@ -44,4 +44,4 @@ RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JA
 
 COPY . .
 
-WORKDIR /app
+WORKDIR /deps
