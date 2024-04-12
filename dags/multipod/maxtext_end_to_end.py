@@ -20,7 +20,7 @@ from airflow import models
 from dags import composer_env, test_owner
 from dags.vm_resource import TpuVersion, CpuVersion, Zone, DockerImage, GpuVersion, ClusterName
 from dags.multipod.configs import gke_config
-import TaskGroup
+from airflow.utils.task_group import TaskGroup
 from xlml.utils import name_format
 
 # Run once a day at 4 am UTC (8 pm PST)
@@ -107,7 +107,7 @@ with models.DAG(
               cpu_zone=test_scripts_details[0]["cpu_zone"],
               time_out_in_min=60,
               test_name=f"{test_name_prefix}-stable-{model}",
-              run_model_cmds=(f"bash end_to_end/{test_scripts_details[0]["script_name"]}.sh",),
+              run_model_cmds=(f"bash end_to_end/{test_scripts_details[0]['script_name']}.sh",),
               cluster_name=test_scripts_details[0]["cluster_name"],
               #TODO: Anisha change this docker_images for each run
               docker_image=DockerImage.MAXTEXT_ANISHA_TPU_JAX_STABLE.value,
@@ -119,7 +119,7 @@ with models.DAG(
               tpu_zone=test_scripts_details[1]["tpu_zone"],
               time_out_in_min=60,
               test_name=f"{test_name_prefix}-stable-{model}",
-              run_model_cmds=(f"bash end_to_end/{test_scripts_details[1]["script_name"]}.sh",),
+              run_model_cmds=(f"bash end_to_end/{test_scripts_details[1]['script_name']}.sh",),
               docker_image=DockerImage.MAXTEXT_ANISHA_TPU_JAX_STABLE.value,
               test_owner=test_owner.ANISHA_M,
               ).run(gcs_location=shared_gcs_location)
@@ -128,7 +128,7 @@ with models.DAG(
               cpu_zone=test_scripts_details[0]["cpu_zone"],
               time_out_in_min=60,
               test_name=f"{test_name_prefix}-nightly-{model}",
-              run_model_cmds=(f"bash end_to_end/{test_scripts_details[0]["script_name"]}.sh",),
+              run_model_cmds=(f"bash end_to_end/{test_scripts_details[0]['script_name']}.sh",),
               cluster_name=test_scripts_details[0]["cluster_name"],
               docker_image=DockerImage.MAXTEXT_ANISHA_TPU_JAX_STABLE.value,
               test_owner=test_owner.ANISHA_M,
@@ -139,7 +139,7 @@ with models.DAG(
               tpu_zone=test_scripts_details[1]["tpu_zone"],
               time_out_in_min=60,
               test_name=f"{test_name_prefix}-nightly-{model}",
-              run_model_cmds=(f"bash end_to_end/{test_scripts_details[1]["script_name"]}.sh",),
+              run_model_cmds=(f"bash end_to_end/{test_scripts_details[1]['script_name']}.sh",),
               docker_image=DockerImage.MAXTEXT_ANISHA_TPU_JAX_STABLE.value,
               test_owner=test_owner.ANISHA_M,
           ).run(gcs_location=shared_gcs_location)
