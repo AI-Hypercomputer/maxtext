@@ -1,4 +1,6 @@
-FROM ghcr.io/nvidia/jax:base
+# syntax=docker/dockerfile:experimental
+ARG BASEIMAGE=ghcr.io/nvidia/jax:base
+FROM $BASEIMAGE
 
 # Install dependencies for adjusting network rto
 RUN apt-get update && apt-get install -y iproute2 ethtool lsof
@@ -33,11 +35,13 @@ RUN mkdir -p /deps
 # Set the working directory in the container
 WORKDIR /deps
 
-# Copy all files from local workspace into docker container
-COPY . .
+# Copy necessary build files to docker container
+COPY setup.sh requirements.txt constraints_gpu.txt /deps/
 RUN ls .
 
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
-RUN bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} DEVICE=${ENV_DEVICE}
+RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} DEVICE=${ENV_DEVICE}
+
+COPY . .
 
 WORKDIR /deps
