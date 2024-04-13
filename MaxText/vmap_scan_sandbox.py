@@ -54,8 +54,9 @@ class MultipleSimpleDecoderLayer(nn.Module):
   config: common_types.Config
   mesh: Mesh
   num_layers: int
-  quant: Optional[quantizations.AqtQuantization] = None
   decoder_layer_class: nn.Module
+  quant: Optional[quantizations.AqtQuantization] = None
+  
   
 
   def setup(self):
@@ -70,9 +71,29 @@ class MultipleSimpleDecoderLayer(nn.Module):
     assert microbatches_per_stage * self.num_stages == self.config.num_pipeline_microbatches, f"Currently the number of microbatches ({self.config.num_pipeline_microbatches}) must be divisible by the number of stages ({self.num_stages})"
     self.microbatches_per_stage = microbatches_per_stage
 
+  def get_microbatch_id(self, stage_idx, loop_iteration):
+    '''Gets the microbatch_id on this loop_iteration for this stage. Works for both circular and non-circular'''
+    return (loop_iteration - stage_idx) % self.config.num_pipeline_microbatches
+
+  def get_microbatches_for_stages(self, microbatched_array, loop_iteration):
+    '''
+    Returns an array of leading dimension stages grabbing the current microbatch for each stage.
+    TODO: This is not actually used to get the microbatches, but the position and segment IDs, so probably should change method name
+    
+    Input:
+        microbatched_array: Array to grab from, should have leading dimension num_microbatches
+        loop_iteration: Integer of loop index
+    Returns:
+        One microbatch from microbatched_array for each stage. Array same shape as microbatched_array except the leading dimension is replaced by num_stages
+    '''
+
+    microbatched_stages_list = [microbatched_array[self.get_microbatch_id(stage_idx, loop_iteration)] for stage_idx in range(self.num_stages)]
+    stages_array = jnp.concatenate(microbatched_stages_list, axis=0)
+    stages_array = jnp.reshape(stages_array, (self.num_stages,) + microbatched_array.shape[1:])
+    return stages_array
 
   @nn.compact
-  def __call__(self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode) -> jnp.ndarray:
+  def __call__(self, inputs: jnp.ndarray, positions, segment_ids, deterministic, model_mode) -> jnp.ndarray:
 
     inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length, self.config.emb_dim))
     if positions is not None:
@@ -86,31 +107,43 @@ class MultipleSimpleDecoderLayer(nn.Module):
     else:
       segment_ids_0 = None
 
+    loop_iteration = 0
     if positions is not None:
-    stages_positions = self.get_microbatches_for_stages(positions, loop_iteration)
-    positions_stage_idx = 0
-   else:
-     stages_positions = None
-     positions_stage_idx = 0
-   if segment_ids is not None:
-    stages_segment_ids = self.get_microbatches_for_stages(segment_ids, loop_iteration)
-    segment_stage_idx = 0
-   else:
-    stages_segment_ids
-    segment_stage_idx = None
+      stages_positions = self.get_microbatches_for_stages(positions, loop_iteration)
+      positions_stage_idx = 0
+    else:
+      stages_positions = None
+      positions_stage_idx = 0
+    if segment_ids is not None:
+      stages_segment_ids = self.get_microbatches_for_stages(segment_ids, loop_iteration)
+      segment_stage_idx = 0
+    else:
+      stages_segment_ids
+      segment_stage_idx = None
 
     initializing = self.is_mutable_collection('params')
+    sdl = simple_decoder_layer.SimpleDecoderLayer
     vmapped_fn = nn.vmap(
-       simple_decoder_layer.SimpleDecoderLayer,
-       in_axes=[0,0,positions_stage_idx, segment_stage_idx, None, None],
+       sdl,
+       in_axes=(0,positions_stage_idx, segment_stage_idx, None, None),
        out_axes = 0,
        spmd_axis_name="stage",
        variable_axes={'params': 0},
        split_rngs={'params': True}
     )
 
-    vmapped_fn()
-       return inputs
+    instantiated_vmapped_fn = vmapped_fn(config=self.config, mesh=self.mesh)
+
+    #breakpoint()
+    outputs = instantiated_vmapped_fn(
+      inputs,
+      stages_positions,
+      stages_segment_ids,
+      deterministic,
+      model_mode
+    )
+    return outputs
+
 def unbox_logicallypartioned(
     boxed_pytree):
   """ Unboxes the flax.LogicallyPartitioned pieces
@@ -141,10 +174,9 @@ def main(argv) -> None:
     msdl = MultipleSimpleDecoderLayer(
         config=config,
         mesh=mesh,
-        num_layers=4
+        num_layers=4,
+        decoder_layer_class=simple_decoder_layer.SimpleDecoderLayer
     )
-
-    print("success")
 
     # def init_initial_state(model, tx, config, is_training, key):
     #     input_shape = (
@@ -181,6 +213,8 @@ def main(argv) -> None:
     # Initialization
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+
+    outputs = msdl.apply(variables, inputs, inputs_segmentation,inputs_position,deterministic,model_mode)
     breakpoint()
 
 if __name__ == "__main__":
