@@ -103,8 +103,8 @@ class GpuVersion(enum.Enum):
 class CpuVersion(enum.Enum):
   """Common CPU versions."""
 
-  M1_MEGAMEM = "m1-megamem-96-1"
-  N2_STANDARD = "n2-standard-64-1"
+  M1_MEGAMEM = "m1-megamem-96"
+  N2_STANDARD = "n2-standard-64"
 
 
 class RuntimeVersion(enum.Enum):
@@ -167,6 +167,5 @@ class DockerImage(enum.Enum):
       f"{datetime.datetime.today().strftime('%Y-%m-%d')}"
   )
   MAXTEXT_ANISHA_TPU_JAX_STABLE = (
-      "gcr.io/tpu-prod-env-multipod/mazumdera_runner7_onesharedvar:"
-      f"{datetime.datetime.today().strftime('%Y-%m-%d')}"
+      "gcr.io/tpu-prod-env-multipod/mazumdera_runner7_onesharedvar:latest"
   )

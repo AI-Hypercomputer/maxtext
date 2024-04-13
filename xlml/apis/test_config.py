@@ -128,7 +128,7 @@ class Cpu(Accelerator):
   @property
   def name(self):
     """Name of this CPU type (e.g. 'n2-standard-64-1')."""
-    return f'v{self.device_type.value}-{self.machine_count}'
+    return f'{self.device_type.value}-{self.machine_count}'
 
 
 A = TypeVar('A', bound=Accelerator)
