@@ -291,20 +291,20 @@ class Pipeline(nn.Module):
     inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length, self.config.emb_dim))
     if positions is not None:
       positions = positions.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
-      positions_0 = positions[0]
+      example_position = positions[0]
     else:
-      positions_0 = None
+      example_position = None
     if segment_ids is not None:
       segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
-      segment_ids_0 = segment_ids[0]
+      example_segmentation = segment_ids[0]
     else:
-      segment_ids_0 = None
+      example_segmentation = None
 
     # We need to access the variables of the decoder_layer, the below loop fills in the variables dictionary (previously empty dict since lazy initialization)
     
     for decoder in self.decoder_layers:
       # Initialize the decoder variables, since they are lazily initialized and we need them now.
-      _ = decoder(inputs[0], positions_0, segment_ids_0, deterministic, model_mode)
+      _ = decoder(inputs[0], example_position, example_segmentation, deterministic, model_mode)
 
     state_io, shift, circ_storage, circ_storage_mover = self.init_states(inputs)
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
