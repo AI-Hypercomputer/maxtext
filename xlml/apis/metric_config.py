@@ -39,7 +39,7 @@ class AggregationStrategy(enum.Enum):
 
 class SshEnvVars(enum.Enum):
   GCS_OUTPUT = "${GCS_OUTPUT}"
-  BASE_OUTPUT_PATH = "${GCS_OUTPUT}"
+  BASE_OUTPUT_PATH = "${BASE_OUTPUT_PATH}"
 
 
 @dataclasses.dataclass
