@@ -115,12 +115,20 @@ def main(argv: Sequence[str]) -> None:
   )
   init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
   #pipeline_out = my_pipeline.apply(init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
-
+  #breakpoint()
   def run_regular_pipeline(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
     reg_layer_activations = inputs
+
+    def get_cur_layer_params(params, layer_idx):
+      def get_cur_layer_params_arr(leaf):
+        return leaf[layer_idx]
+      return jax.tree.map(get_cur_layer_params_arr, params)
+
     for layer in range(config.num_decoder_layers):
-      cur_layer_params = params['params'][f'layers_{layer}']
-      cur_layer_params = {'params':cur_layer_params}
+      # cur_layer_params = params['params'][f'layers_{layer}']
+      # cur_layer_params = {'params':cur_layer_params}
+      cur_layer_params = get_cur_layer_params(params, layer)
+      cur_layer_params['params'] = cur_layer_params['params']['layers']
       reg_layer_activations=decoder_layer(config=config,mesh=mesh).apply(cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode)
     return reg_layer_activations
 

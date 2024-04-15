@@ -176,6 +176,7 @@ class Pipeline(nn.Module):
        weights_stage = jnp.reshape(weights_stage, weights_stage_shape) # This reshape unsqueezes singleton axes that were potentially squeezed in concatenate
        return weights_stage
     weights_stage = jax.tree_map(layers_dimension_to_stages, weights)
+    weights_stage['params'] = weights_stage['params']['layers']
     return weights_stage
 
   def get_microbatch_id(self, stage_idx, loop_iteration):
@@ -284,7 +285,8 @@ class Pipeline(nn.Module):
    else:
     stages_segment_ids
     segment_stage_idx = None
-   stages_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,positions_stage_idx, segment_stage_idx, None, None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
+   #stages_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,positions_stage_idx, segment_stage_idx, None, None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
+   stages_output = jax.vmap(self.decoder_layer_class(mesh=self.mesh, config=self.config,quant=self.quant).apply, in_axes=[0,0,positions_stage_idx, segment_stage_idx, None, None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
    new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = self.get_new_loop_state(stages_output, state_io, circ_storage, circ_storage_mover, loop_iteration)
    return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
   
@@ -328,7 +330,7 @@ class Pipeline(nn.Module):
         split_rngs={'params': True},
         metadata_params={"partition_name": "layers"}
       )
-      instantiated_vmapped_fn = vmapped_fn(config=self.config, mesh=self.mesh, name='layers')
+      instantiated_vmapped_fn = vmapped_fn(config=self.config, mesh=self.mesh, name="layers")
       def reshape_to_layers(arr):
         return jnp.broadcast_to(arr[0], (self.config.num_decoder_layers,) + arr.shape[1:])
 
@@ -339,18 +341,17 @@ class Pipeline(nn.Module):
     # We need to access the variables of the decoder_layer, the below loop fills in the variables dictionary (previously empty dict since lazy initialization)
     
     weights = self.variables
-    breakpoint()
-    for decoder in self.decoder_layers:
-      # Initialize the decoder variables, since they are lazily initialized and we need them now.
-      _ = decoder(inputs[0], example_position, example_segmentation, deterministic, model_mode)
+    print(f"{weights=}")
+    # for decoder in self.decoder_layers:
+    #   # Initialize the decoder variables, since they are lazily initialized and we need them now.
+    #   _ = decoder(inputs[0], example_position, example_segmentation, deterministic, model_mode)
 
     state_io, shift, circ_storage, circ_storage_mover = self.init_states(inputs)
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
     # TODO(huge): Shard the weights. This may be tricky b/c there is no "stage" axis in the weights to shard over until after the below
-    weights = [decoder.variables for decoder in self.decoder_layers]
-    # Go from a list of size n_layers of weight pytrees to a single pytree where each leaf has a leading dimension of n_layers 
-    weights = stack_pytrees(*weights)
-    breakpoint()
+    # weights = [decoder.variables for decoder in self.decoder_layers]
+    # # Go from a list of size n_layers of weight pytrees to a single pytree where each leaf has a leading dimension of n_layers 
+    # weights = stack_pytrees(*weights)
     # TODO: may want to have some simplified flow when is initializing instead c
     # (don't need to run through total_iters)
     for loop_iteration in range(total_iterations):
