@@ -102,7 +102,13 @@ def main(argv: Sequence[str]) -> None:
 
   decoder_layer = simple_decoder_layer.SimpleDecoderLayer
   #decoder_layer = llama2.LlamaDecoderLayer
-  my_pipeline = pipeline.Pipeline(
+  # my_pipeline = pipeline.Pipeline(
+  #   config=config,
+  #   decoder_layer_class=decoder_layer,
+  #   mesh=mesh
+  # )
+  from layers import pipeline_shard
+  my_pipeline = pipeline_shard.Pipeline(
     config=config,
     decoder_layer_class=decoder_layer,
     mesh=mesh
@@ -119,8 +125,10 @@ def main(argv: Sequence[str]) -> None:
     return reg_layer_activations
 
 
+  
   reg_layers = run_regular_pipeline
   pipeline_func = my_pipeline.apply
+  pipeline_func(init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
   assert_same_output_and_grad(reg_layers,pipeline_func, targets, init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
 
 
