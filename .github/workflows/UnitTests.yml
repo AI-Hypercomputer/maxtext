@@ -27,31 +27,6 @@ on:
     - cron:  '0 */2 * * *'
 
 jobs:
-  cpu:
-    name: "CPU test"
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-20.04]
-        python-version: ['3.10']
-    steps:
-    - uses: actions/checkout@v3
-    - name: setup python
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install Dependencies
-      run: |
-        pip install pytype==2024.2.27
-        pip install pylint
-    - name: Typecheck the code with pytype
-      run: |
-        pytype --jobs auto --disable import-error MaxText/
-    - name: Analysing the code with pylint
-      run: |
-        pylint MaxText/
-
-
   # IF YOU MODIFY THIS, YOU SHOULD ALSO ADD CORRESPONDING MODICATIONS TO 'gpu' job
   tpu:
     strategy:

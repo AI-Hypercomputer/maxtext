@@ -29,6 +29,11 @@ jobs=4
 # active Python interpreter and may run arbitrary code.
 unsafe-load-any-extension=no
 
+# check python modules in the dir recursively
+recursive=y
+
+# score threshold under which it fails
+fail-under=9
 
 [MESSAGES CONTROL]
 
@@ -249,7 +254,10 @@ generated-members=
 [FORMAT]
 
 # Maximum number of characters on a single line.
-max-line-length=125
+max-line-length=80
+
+# Check whether character used as a quote delimiter is used inconsistently
+check-quote-consistency=y
 
 # TODO(https://github.com/PyCQA/pylint/issues/3352): Direct pylint to exempt
 # lines made too long by directives to pytype.

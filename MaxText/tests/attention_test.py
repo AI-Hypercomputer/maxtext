@@ -36,10 +36,18 @@ Attention = attentions.Attention
 
 
 class AttentionTest(unittest.TestCase):
-  """Test for the Attention """
+  """Test for the Attention"""
+
   def setUp(self):
     super().setUp()
-    pyconfig.initialize([sys.argv[0], 'configs/base.yml'], per_device_batch_size = 1.0, run_name='test', enable_checkpointing=False, max_target_length=128, max_prefill_predict_length=16 )
+    pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        per_device_batch_size=1.0,
+        run_name="test",
+        enable_checkpointing=False,
+        max_target_length=128,
+        max_prefill_predict_length=16,
+    )
     self.cfg = pyconfig.config
     self.rng = jax.random.PRNGKey(0)
 
@@ -62,20 +70,23 @@ class AttentionTest(unittest.TestCase):
         max_target_length=self.max_target_length,
         max_prefill_predict_length=self.cfg.max_prefill_predict_length,
         mesh=self.mesh,
-        attention_kernel = "dot_product",
+        attention_kernel="dot_product",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
-        name='self_attention',
+        name="self_attention",
     )
 
-    self._attention_as_mha_generic_variable = self._attention_as_mha_generic.init(
-        {'params': self.rng, 'aqt': self.rng},
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length)),
+    self._attention_as_mha_generic_variable = (
+        self._attention_as_mha_generic.init(
+            {"params": self.rng, "aqt": self.rng},
+            jnp.ones(
+                (self.global_batch_size, self.max_target_length, self.embed_dim)
+            ),
+            jnp.ones(
+                (self.global_batch_size, self.max_target_length, self.embed_dim)
+            ),
+            jnp.ones((self.global_batch_size, self.max_target_length)),
+        )
     )
 
   def get_data(self, dtype):
@@ -85,8 +96,15 @@ class AttentionTest(unittest.TestCase):
         dtype=dtype,
     )
 
-    decoder_segment_ids = jax.random.randint(self.rng, (self.global_batch_size, self.max_target_length), 0, 4)
-    decoder_positions = jax.random.randint(self.rng, (self.global_batch_size, self.max_target_length), 0, self.max_target_length)
+    decoder_segment_ids = jax.random.randint(
+        self.rng, (self.global_batch_size, self.max_target_length), 0, 4
+    )
+    decoder_positions = jax.random.randint(
+        self.rng,
+        (self.global_batch_size, self.max_target_length),
+        0,
+        self.max_target_length,
+    )
 
     return lnx, decoder_segment_ids, decoder_positions
 
@@ -97,23 +115,28 @@ class AttentionTest(unittest.TestCase):
         dtype=dtype,
     )
 
-    decoder_positions = jnp.stack([
-          jnp.arange(self.max_target_length, dtype=jnp.int32)
-          for _ in range(self.global_batch_size)
-    ])
+    decoder_positions = jnp.stack(
+        [
+            jnp.arange(self.max_target_length, dtype=jnp.int32)
+            for _ in range(self.global_batch_size)
+        ]
+    )
 
-    decoder_segment_ids = jax.numpy.zeros((self.global_batch_size, self.max_target_length))\
-                          + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    decoder_segment_ids = (
+        jax.numpy.zeros((self.global_batch_size, self.max_target_length))
+        + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    )
 
     return lnx, decoder_segment_ids, decoder_positions
-  
+
   @pytest.mark.tpu
   def test_autoregression(self):
     prefill_length = self.cfg.max_prefill_predict_length
     decode_total_length = self.cfg.max_target_length
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(
-        self.dtype)
-    
+        self.dtype
+    )
+
     mha_full = self._attention_as_mha_generic.apply(
         self._attention_as_mha_generic_variable,
         lnx,
@@ -122,13 +145,13 @@ class AttentionTest(unittest.TestCase):
         inputs_positions=decoder_positions,
         deterministic=True,
         model_mode=common_types.MODEL_MODE_TRAIN,
-        rngs={'aqt': self.rng},
+        rngs={"aqt": self.rng},
     )
-    
+
     lnx_prefill = lnx[:, 0:prefill_length, :]
     decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
     decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
-    
+
     mha_prefill, output_cache = self._attention_as_mha_generic.apply(
         self._attention_as_mha_generic_variable,
         lnx_prefill,
@@ -137,39 +160,45 @@ class AttentionTest(unittest.TestCase):
         inputs_positions=decoder_positions_prefill,
         deterministic=True,
         model_mode=common_types.MODEL_MODE_PREFILL,
-        rngs={'aqt': self.rng},
-        mutable=["cache"]
+        rngs={"aqt": self.rng},
+        mutable=["cache"],
     )
 
     self.assertTrue(
         jax.numpy.allclose(
-            mha_prefill, mha_full[:,:prefill_length,:], rtol=1e-02, atol=1e-02, equal_nan=False
+            mha_prefill,
+            mha_full[:, :prefill_length, :],
+            rtol=1e-02,
+            atol=1e-02,
+            equal_nan=False,
         )
     )
 
     for idx in range(prefill_length, decode_total_length):
-      lnx_idx = lnx[:, idx:idx+1, :]
-      decoder_positions_idx = decoder_positions[:, idx:idx+1]
+      lnx_idx = lnx[:, idx : idx + 1, :]
+      decoder_positions_idx = decoder_positions[:, idx : idx + 1]
       self._attention_as_mha_generic_variable.update(output_cache)
       mha_idx, output_cache = self._attention_as_mha_generic.apply(
-        self._attention_as_mha_generic_variable,
-        lnx_idx,
-        lnx_idx,
-        inputs_positions=decoder_positions_idx,
-        deterministic=True,
-        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-        rngs={'aqt': self.rng},
-        mutable=["cache"]
+          self._attention_as_mha_generic_variable,
+          lnx_idx,
+          lnx_idx,
+          inputs_positions=decoder_positions_idx,
+          deterministic=True,
+          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          rngs={"aqt": self.rng},
+          mutable=["cache"],
       )
 
-      mha_full_this_idx = mha_full[:,idx:idx+1,:]
+      mha_full_this_idx = mha_full[:, idx : idx + 1, :]
+      self.assertTrue(mha_full_this_idx.shape == mha_idx.shape)
       self.assertTrue(
-        mha_full_this_idx.shape == mha_idx.shape
-      )
-      self.assertTrue(
-        jax.numpy.allclose(
-            mha_full_this_idx, mha_idx, rtol=1e-02, atol=1e-02, equal_nan=False
-        )
+          jax.numpy.allclose(
+              mha_full_this_idx,
+              mha_idx,
+              rtol=1e-02,
+              atol=1e-02,
+              equal_nan=False,
+          )
       )
 
   @pytest.mark.tpu
@@ -187,8 +216,7 @@ class AttentionTest(unittest.TestCase):
   def tpu_kernel_attention_helper(self, num_kv_heads):
     """Test equalvant between dot_product and TPU accelerated"""
 
-    lnx, decoder_segment_ids, decoder_positions = self.get_data(
-        self.dtype)
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
 
     attention_as_mha_generic = Attention(
         config=self.cfg,
@@ -198,20 +226,21 @@ class AttentionTest(unittest.TestCase):
         max_target_length=self.max_target_length,
         max_prefill_predict_length=self.cfg.max_prefill_predict_length,
         mesh=self.mesh,
-        attention_kernel = "dot_product",
+        attention_kernel="dot_product",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
-        name='self_attention',
+        name="self_attention",
     )
 
     attention_as_mha_generic_variable = attention_as_mha_generic.init(
-        {'params': self.rng, 'aqt': self.rng},
+        {"params": self.rng, "aqt": self.rng},
         jnp.ones(
-            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+            (self.global_batch_size, self.max_target_length, self.embed_dim)
+        ),
         jnp.ones(
-            (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length)),
+            (self.global_batch_size, self.max_target_length, self.embed_dim)
+        ),
+        jnp.ones((self.global_batch_size, self.max_target_length)),
     )
 
     mha_generic_output = attention_as_mha_generic.apply(
@@ -222,7 +251,7 @@ class AttentionTest(unittest.TestCase):
         inputs_positions=decoder_segment_ids,
         deterministic=True,
         model_mode=common_types.MODEL_MODE_TRAIN,
-        rngs={'aqt': self.rng},
+        rngs={"aqt": self.rng},
     )
 
     attention_as_mha_flash = Attention(
@@ -233,20 +262,21 @@ class AttentionTest(unittest.TestCase):
         max_target_length=self.max_target_length,
         max_prefill_predict_length=self.cfg.max_prefill_predict_length,
         mesh=self.mesh,
-        attention_kernel = "flash",
+        attention_kernel="flash",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
-        name='self_attention',
+        name="self_attention",
     )
 
     attention_as_mha_flash_variable = attention_as_mha_flash.init(
-        {'params': self.rng, 'aqt': self.rng},
+        {"params": self.rng, "aqt": self.rng},
         jnp.ones(
-            (self.global_batch_size, self.max_target_length, self.embed_dim)),
+            (self.global_batch_size, self.max_target_length, self.embed_dim)
+        ),
         jnp.ones(
-            (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones(
-            (self.global_batch_size, self.max_target_length)),
+            (self.global_batch_size, self.max_target_length, self.embed_dim)
+        ),
+        jnp.ones((self.global_batch_size, self.max_target_length)),
     )
 
     mha_generic_flash_output = attention_as_mha_flash.apply(
@@ -257,14 +287,19 @@ class AttentionTest(unittest.TestCase):
         inputs_positions=decoder_segment_ids,
         deterministic=True,
         model_mode=common_types.MODEL_MODE_TRAIN,
-        rngs={'aqt': self.rng},
+        rngs={"aqt": self.rng},
     )
 
     self.assertTrue(
         jax.numpy.allclose(
-            mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False
+            mha_generic_output,
+            mha_generic_flash_output,
+            rtol=1e-01,
+            atol=1e-01,
+            equal_nan=False,
         )
     )
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
   unittest.main()

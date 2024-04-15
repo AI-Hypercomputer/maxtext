@@ -32,7 +32,7 @@ NdInitializer = Callable[
 ]
 
 default_embed_init = nn.initializers.variance_scaling(
-    1.0, 'fan_in', 'normal', out_axis=0
+    1.0, "fan_in", "normal", out_axis=0
 )
 
 default_bias_init = jax.nn.initializers.constant(0.0)
