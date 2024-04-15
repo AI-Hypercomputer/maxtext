@@ -233,6 +233,43 @@ class GpuVmTest(TestConfig[Gpu]):
 
 
 @attrs.define
+class CpuGkeTest(TestConfig[Cpu]):
+  """Test config that runs on a single Cloud TPU instance in GKE cluster.
+
+  Attributes:
+    test_name: Unique name for this test/model.
+    cluster_name: Name of the cluster that has provisioned CPUs.
+    docker_image: Image of the docker to run.
+    set_up_cmds: List of commands to run once when CPU is created.
+    run_model_cmds: List of commands to run the model under test.
+    startup_time_out_in_sec: Timeout to start up the pod.
+    num_slices: Number of TPU slices.
+  """
+
+  test_name: str
+  cluster_name: str
+  docker_image: str
+  set_up_cmds: Iterable[str]
+  run_model_cmds: Iterable[str]
+  startup_time_out_in_sec: int = attrs.field(default=300, kw_only=True)
+  num_slices: int = attrs.field(default=1, kw_only=True)
+
+  @property
+  def benchmark_id(self) -> str:
+    return (
+      f'{self.test_name}-{self.accelerator.name}'
+    )
+
+  @property
+  def setup_script(self) -> Optional[str]:
+    return ';'.join(('set -xue', *self.set_up_cmds))
+
+  @property
+  def test_script(self) -> str:
+    return ';'.join(('set -xue', *self.run_model_cmds))
+
+
+@attrs.define
 class TpuGkeTest(TestConfig[Tpu]):
   """Test config that runs on a single Cloud TPU instance in GKE cluster.
 

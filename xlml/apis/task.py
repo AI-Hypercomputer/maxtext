@@ -321,7 +321,7 @@ class XpkTask(BaseTask):
     workload_provision_timeout: Time allowed for provisioning a workload.
   """
 
-  task_test_config: Union[test_config.TpuGkeTest, test_config.GpuXpkTest]
+  task_test_config: Union[test_config.TpuGkeTest, test_config.GpuXpkTest, test_config.CpuGkeTest]
   task_gcp_config: gcp_config.GCPConfig
   task_metric_config: Optional[metric_config.MetricConfig] = None
   workload_provision_timeout: datetime.timedelta = datetime.timedelta(

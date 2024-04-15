@@ -279,7 +279,7 @@ def get_maxtext_cpu_end_to_end_gke_config(
       composer_project=composer_project,
   )
 
-  job_test_config = test_config.TpuGkeTest(
+  job_test_config = test_config.CpuGkeTest(
       test_config.Cpu(
           device_type=device_type,
           machine_count=machine_count,

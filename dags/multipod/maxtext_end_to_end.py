@@ -89,8 +89,8 @@ with models.DAG(
 
   multicluster_test_models = {
     "gemma-7b": [
-       {"script_name":"gemma/7b/1_test_gemma","cpu_device_type":CpuVersion.N2_STANDARD,"cpu_zone":Zone.US_CENTRAL1_B.value,"cluster_name":ClusterName.CPU_N2_STANDARD_64.value},
-       {"script_name":"gemma/7b/2_test_gemma","tpu_version":TpuVersion.V4,"tpu_cores":16,"tpu_zone":Zone.US_CENTRAL2_B.value,}
+       {"script_name":"tpu/gemma/7b/1_test_gemma","cpu_device_type":CpuVersion.N2_STANDARD,"cpu_zone":Zone.US_CENTRAL1_B.value,"cluster_name":ClusterName.CPU_N2_STANDARD_64.value},
+       {"script_name":"tpu/gemma/7b/2_test_gemma","tpu_version":TpuVersion.V4,"tpu_cores":16,"tpu_zone":Zone.US_CENTRAL2_B.value,}
                 ]
   }
 
