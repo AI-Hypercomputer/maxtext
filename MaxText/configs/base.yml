@@ -133,6 +133,7 @@ logical_axis_rules: [
                       ['embed', ['fsdp', 'fsdp_transpose', 'sequence']],
                       ['embed', ['fsdp', 'sequence']],
                       ['heads', ['tensor', 'autoregressive']],
+                      ['layers','stage'],
                       ['kv', []],
                       ['activation_stage', 'stage'],
                       ['cache_batch', []],

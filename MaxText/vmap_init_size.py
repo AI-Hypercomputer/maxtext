@@ -92,9 +92,6 @@ class MultipleSimpleDecoderLayer(nn.Module):
     stages_array = jnp.reshape(stages_array, (self.num_stages,) + microbatched_array.shape[1:])
     return stages_array
 
-
-
-
   @nn.compact
   def __call__(self, inputs: jnp.ndarray, positions, segment_ids, deterministic, model_mode) -> jnp.ndarray:
 
@@ -124,43 +121,58 @@ class MultipleSimpleDecoderLayer(nn.Module):
       stages_segment_ids
       segment_stage_idx = None
 
-    
-    def body_fprop(model, stage_inputs, stages_positions, stages_segment_ids, deterministic, model_mode):
+    if self.is_initializing():
       sdl = simple_decoder_layer.SimpleDecoderLayer
       vmapped_fn = nn.vmap(
         sdl,
-        in_axes=(0,0, 0, None, None),  #(0,positions_stage_idx, segment_stage_idx, None, None),
+        in_axes=(0,positions_stage_idx, segment_stage_idx, None, None),
         out_axes = 0,
         spmd_axis_name="stage",
         variable_axes={'params': 0},
         split_rngs={'params': True},
         metadata_params={"partition_name": "layers"}
       )
+      instantiated_vmapped_fn = vmapped_fn(config=self.config, mesh=self.mesh, name='layers')
+      def reshape_to_layers(arr):
+        return jnp.broadcast_to(arr[0], (self.num_layers,) + arr.shape[1:])
 
-      instantiated_vmapped_fn = vmapped_fn(config=model.config, mesh=model.mesh, name='layers')
+      input_init = reshape_to_layers(inputs)
+      positions_init = reshape_to_layers(positions)
+      segments_init = reshape_to_layers(segment_ids)
+      breakpoint()
+      return instantiated_vmapped_fn(input_init, positions_init, segments_init, deterministic, model_mode)
 
+    print("Maybe just self.variables has what we want, inspect it!", flush=True)
+    # jnp.shape(self.variables['params']['layers']['weights'].value)
+    breakpoint()
+    #weights = [decoder.variables for decoder in self.decoder_layers]
+    initializing = self.is_mutable_collection('params')
+    sdl = simple_decoder_layer.SimpleDecoderLayer
+    # Problem: in_axes=0 and passing in arguments with leading axis of microbatches instead of stages
+    # Can either pass in sliced args and/or use scan
+    vmapped_fn = nn.vmap(
+       sdl,
+       in_axes=(0,positions_stage_idx, segment_stage_idx, None, None),
+       out_axes = 0,
+       spmd_axis_name="stage",
+       variable_axes={'params': 0},
+       split_rngs={'params': True},
+       metadata_params={"partition_name": "layers"}
+    )
+
+    instantiated_vmapped_fn = vmapped_fn(config=self.config, mesh=self.mesh, name='layers')
+
+    outputs = inputs
+    num_iter = 3
+    for i in range(num_iter):
       outputs = instantiated_vmapped_fn(
-        stage_inputs,
+        outputs,
         stages_positions,
         stages_segment_ids,
         deterministic,
         model_mode
       )
-      return outputs, None # carry, ys
-    num_iter=3
-    # `variable_broadcast` for params because we already have a full pipeline
-    # due to the inner vmap.
-    scan_fn = nn.scan(
-      body_fprop,
-      variable_broadcast=['params', 'non_trainable'],
-      length=num_iter,
-      # Dropout keys will be split for each iteration.
-      split_rngs={'params': True},
-      # Each loop iteration gets all of the positions and segments
-      # In real implementation would be all microbatches, and up to body_fprop to grab only the stage one the current iter
-      in_axes = (nn.broadcast,nn.broadcast,nn.broadcast,nn.broadcast)
-    )
-    return scan_fn(self, inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
+    return outputs
 
 def unbox_logicallypartioned(
     boxed_pytree):
