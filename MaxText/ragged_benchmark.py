@@ -22,7 +22,7 @@ import time
 
 NUM_HEADS = 16
 HEAD_DIM = 256
-dtype = jnp.bfloat16
+dtype = jnp.int8
 DEFAULT_MASK_VALUE = -0.7 * float(np.finfo(np.dtype("float32")).max)
 BATCH = 'activation_batch'
 BLOCK_SIZE = 256
@@ -205,16 +205,22 @@ def run_ref_mqa(batch_size, seq_len, cache_entry_lengths, num_heads, head_dim, w
   key = random.PRNGKey(seed)
   k1, k2, k3 = random.split(key, 3)
 
-  q = random.normal(k1, (batch_size, num_heads, head_dim), dtype=dtype)
-  k = random.normal(k2, (batch_size, seq_len, head_dim), dtype=dtype)
-  v = random.normal(k3, (batch_size, seq_len, head_dim), dtype=dtype)
+  if dtype == jnp.int8:
+    q = random.randint(k1, (batch_size, num_heads, head_dim), -127, 128, dtype=dtype)
+    k = random.randint(k2, (batch_size, seq_len, head_dim), -127, 128, dtype=dtype)
+    v = random.randint(k3, (batch_size, seq_len, head_dim), -127, 128, dtype=dtype)
+  else:
+    q = random.normal(k1, (batch_size, num_heads, head_dim), dtype=dtype)
+    k = random.normal(k2, (batch_size, seq_len, head_dim), dtype=dtype)
+    v = random.normal(k3, (batch_size, seq_len, head_dim), dtype=dtype)
 
   profile_loop(lambda : mqa_reference(q, k, v, cache_entry_lengths), iters=warmup)
 
   start_time = time.perf_counter()
   profile_loop(lambda : mqa_reference(q, k, v, cache_entry_lengths), iters=iters)
   end_time = time.perf_counter()
-  return (end_time - start_time) / iters / 1000
+  # print("time:", end_time - start_time)
+  return (end_time - start_time) / iters * 1000
   # print(f"ref_mqa: Mean time to run iteration: {(end_time - start_time) * 1000 / iters:.3f}ms, "
   #       f"{iters}, {end_time-start_time}")
 
@@ -222,16 +228,22 @@ def run_ragged_mqa(batch_size, seq_len, cache_entry_lengths, num_heads, head_dim
   key = random.PRNGKey(seed)
   k1, k2, k3 = random.split(key, 3)
 
-  q = random.normal(k1, (batch_size, num_heads, head_dim), dtype=dtype)
-  k = random.normal(k2, (batch_size, seq_len, head_dim), dtype=dtype)
-  v = random.normal(k3, (batch_size, seq_len, head_dim), dtype=dtype)
+  if dtype == jnp.int8:
+    q = random.randint(k1, (batch_size, num_heads, head_dim), -127, 128, dtype=dtype)
+    k = random.randint(k2, (batch_size, seq_len, head_dim), -127, 128, dtype=dtype)
+    v = random.randint(k3, (batch_size, seq_len, head_dim), -127, 128, dtype=dtype)
+  else:
+    q = random.normal(k1, (batch_size, num_heads, head_dim), dtype=dtype)
+    k = random.normal(k2, (batch_size, seq_len, head_dim), dtype=dtype)
+    v = random.normal(k3, (batch_size, seq_len, head_dim), dtype=dtype)
 
   profile_loop(lambda : ragged_mqa(q, k, v, cache_entry_lengths, bk=bk), iters=warmup)
 
   start_time = time.perf_counter()
   profile_loop(lambda : ragged_mqa(q, k, v, cache_entry_lengths, bk=bk), iters=iters)
   end_time = time.perf_counter()
-  return (end_time - start_time) / iters / 1000
+  # print("time:", end_time - start_time)
+  return (end_time - start_time) / iters * 1000
   # print(f"ragged_mqa: Mean time to run iteration: {(end_time - start_time) * 1000 / iters:.3f}ms, "
   #       f"{iters}, {end_time-start_time}")
 
@@ -239,9 +251,14 @@ def run_ragged_mqa(batch_size, seq_len, cache_entry_lengths, num_heads, head_dim
 def run_vmapped_ref_mqa(batch_size, seq_len, cache_entry_lengths, num_heads, head_dim, warmup=100, iters=1000):
   key = random.PRNGKey(seed)
   k1, k2, k3 = random.split(key, 3)
-  q = random.normal(k1, (batch_size, num_heads, head_dim), dtype=dtype)
-  k = random.normal(k2, (batch_size, seq_len, head_dim), dtype=dtype)
-  v = random.normal(k3, (batch_size, seq_len, head_dim), dtype=dtype)
+  if dtype == jnp.int8:
+    q = random.randint(k1, (batch_size, num_heads, head_dim), -127, 128, dtype=dtype)
+    k = random.randint(k2, (batch_size, seq_len, head_dim), -127, 128, dtype=dtype)
+    v = random.randint(k3, (batch_size, seq_len, head_dim), -127, 128, dtype=dtype)
+  else:
+    q = random.normal(k1, (batch_size, num_heads, head_dim), dtype=dtype)
+    k = random.normal(k2, (batch_size, seq_len, head_dim), dtype=dtype)
+    v = random.normal(k3, (batch_size, seq_len, head_dim), dtype=dtype)
 
   q = jnp.expand_dims(q, axis=1)  # (b,n,d) -> (b,1,n,d)
   q = jnp.reshape(q, (batch_size, num_heads, head_dim))
@@ -259,15 +276,22 @@ def run_vmapped_ref_mqa(batch_size, seq_len, cache_entry_lengths, num_heads, hea
   start_time = time.perf_counter()
   profile_loop(lambda : vmap_mqa_ref(q, k, v, cache_entry_lengths), iters=iters)
   end_time = time.perf_counter()
-  return (end_time - start_time) / iters / 1000
+  # print("time:", end_time - start_time)
+  return (end_time - start_time) / iters * 1000
 
 
 def run_vmapped_ragged_mqa(batch_size, seq_len, cache_entry_lengths, num_heads, head_dim, warmup=100, iters=1000):
   key = random.PRNGKey(seed)
   k1, k2, k3 = random.split(key, 3)
-  q = random.normal(k1, (batch_size, num_heads, head_dim), dtype=dtype)
-  k = random.normal(k2, (batch_size, seq_len, head_dim), dtype=dtype)
-  v = random.normal(k3, (batch_size, seq_len, head_dim), dtype=dtype)
+  if dtype == jnp.int8:
+    q = random.randint(k1, (batch_size, num_heads, head_dim), -127, 128, dtype=dtype)
+    k = random.randint(k2, (batch_size, seq_len, head_dim), -127, 128, dtype=dtype)
+    v = random.randint(k3, (batch_size, seq_len, head_dim), -127, 128, dtype=dtype)
+
+  else: 
+    q = random.normal(k1, (batch_size, num_heads, head_dim), dtype=dtype)
+    k = random.normal(k2, (batch_size, seq_len, head_dim), dtype=dtype)
+    v = random.normal(k3, (batch_size, seq_len, head_dim), dtype=dtype)
 
   q = jnp.expand_dims(q, axis=1)  # (b,n,d) -> (b,1,n,d)
   q = jnp.reshape(q, (batch_size, num_heads, head_dim))
@@ -287,7 +311,8 @@ def run_vmapped_ragged_mqa(batch_size, seq_len, cache_entry_lengths, num_heads, 
   start_time = time.perf_counter()
   profile_loop(lambda : vmap_ragged_mqa(q, k, v, cache_entry_lengths), iters=iters)
   end_time = time.perf_counter()
-  return (end_time - start_time) / iters / 1000
+  # print("time:", end_time - start_time)
+  return (end_time - start_time) / iters * 1000
 
 
 def create_cache_entries(batch_size, entry_len_mean, entry_len_stddev):
@@ -298,34 +323,43 @@ def create_cache_entries(batch_size, entry_len_mean, entry_len_stddev):
 
 
 def get_cache_usage(cache_entries, block_size, max_cache_length):
-  blocks_used = int(sum((cache_entries // block_size) + 1))
+  blocks_used = int(sum(jnp.ceil(cache_entries / block_size)))
+  # print("blocks used:", blocks_used)
   total_cache_blocks = cache_entries.shape[0] * max_cache_length // block_size
+  # print("total cache blocks:", total_cache_blocks)
   block_usage = blocks_used / total_cache_blocks
 
+  # print("block usage:", block_usage)
   total_tokens = int(sum(cache_entries))
+  # print("total_tokens:", total_tokens)
   token_usage = total_tokens / (cache_entries.shape[0] * max_cache_length)
+  # print("token usage:", token_usage)
   return block_usage, token_usage
 
 
 # block_sizes = [256]
 
-max_cache_lengths = [2048]
-batch_sizes = [4, 8, 16, 24,] #32, 48, 64, 96, 128]
+max_cache_lengths = [512, 1024, 2048, 3072, 4096]
+batch_sizes = [4, 8, 16, 24, 32, 48, 64, 96, 128]
 # block_sizes = [256]
 
 
-print("batch_size, max_cache_length, block_size, mean_length, block_usage, token_usage, dtype, ref_mqa_ms, ragged_mqa_ms, vmapped_ref_mqa_ms, vmapped_ragged_mqa_ms")
+print("block_size, dtype, batch_size, max_cache_length, mean_entry_length, block_usage, token_usage, ref_mqa_ms, ragged_mqa_ms, vmapped_ref_mqa_ms, vmapped_ragged_mqa_ms")
 for mcl in max_cache_lengths:
   # for bk in block_sizes: 
-  # desired_lengths = [BLOCK_SIZE * i for i in range(1, (mcl // BLOCK_SIZE) + 1, 1)]
-  desired_lengths = [BLOCK_SIZE]
+  desired_lengths = [BLOCK_SIZE * i for i in range(1, (mcl // BLOCK_SIZE) + 1, 1)]
+  # desired_lengths = [BLOCK_SIZE]
   for bs in batch_sizes: 
     for dl in desired_lengths:
-      cache_entry_lengths = jnp.array([128, 250, 260, 500] * int(bs // 4), dtype=jnp.int32)
-      # cache_entry_lengths = create_cache_entries(bs, dl, 0)
+      # try:
+      # cache_entry_lengths = jnp.array([128, 250, 260, 500] * int(bs // 4), dtype=jnp.int32)
+      cache_entry_lengths = create_cache_entries(bs, dl, 0)
+      # print(f"{cache_entry_lengths=}")
       bu, tu = get_cache_usage(cache_entry_lengths, bs, mcl)
       a = run_ref_mqa(bs, mcl, cache_entry_lengths, NUM_HEADS, HEAD_DIM)
       b = run_ragged_mqa(bs, mcl, cache_entry_lengths, NUM_HEADS, HEAD_DIM)
       c = run_vmapped_ref_mqa(bs, mcl, cache_entry_lengths, NUM_HEADS, HEAD_DIM)
       d = run_vmapped_ragged_mqa(bs, mcl, cache_entry_lengths, NUM_HEADS, HEAD_DIM)
-      print(f"{bs}, {mcl}, {BLOCK_SIZE}, {dl}, {bu:.3}, {tu:.3}, {a:.3}, {b:.3}, {c:.3}, {d:.3}")
+      print(f"{BLOCK_SIZE}, {dtype.dtype}, {bs}, {mcl}, {dl}, {bu:.3}, {tu:.3}, {a:.3}, {b:.3}, {c:.3}, {d:.3}")
+      # except:
+      #   print(f"{BLOCK_SIZE}, {dtype.dtype}, {bs}, {mcl}, {dl}, dnf, dnf, dnf, dnf, dnf, dnf")
