@@ -305,7 +305,7 @@ class Pipeline(nn.Module):
        # To initialize all of the variables, we use a doubly nested vmap of (n_repeat x n_stages)
        circular_vmap_wrap = nn.vmap(
           pipeline_body_func,
-          in_axes=0,
+          in_axes=(0,positions_stage_idx, segment_stage_idx, None, None),
           out_axes=0,
           variable_axes={'params': 0},
           split_rngs={'params': True},
@@ -316,7 +316,46 @@ class Pipeline(nn.Module):
        )
        return circular_vmap_wrap
     else:
-       
+      vmapped_fn = nn.add_metadata_axis(
+         pipeline_body_func,
+         variable_axes={"params": 0},
+         metadata_params={
+            "is_initializing": False,
+            "x_times": self.config.num_pipeline_repeats,
+            "sub_weight_split_dims_mapping": (None,),
+            "partition_name": "circ_layers",
+            
+         }
+      )
+      microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0)
+      repeat_ids = microbatch_ids // self.config.num_pipeline_microbatches
+      def gather_layers(vars):
+         def _vmap_parallel_gather(xs, ids, ids_dim, xs_dim):
+           def _gather_one(x, i):
+             dim = ids_dim
+             if xs_dim < dim:
+               dim -= 1
+             return jnp.squeeze(jax.lax.dynamic_slice_in_dim(x, i, 1, dim), dim)
+           out_dim = xs_dim
+           if ids_dim < xs_dim:
+             out_dim -= 1
+           # TODO: shard_dim_by_stages
+           #ids = self._shard_dim_by_stages(ids, 0)
+           #xs = self._shard_dim_by_stages(xs, xs_dim)
+           outs = jax.vmap(_gather_one, in_axes=(xs_dim, 0), out_axes=out_dim)(xs, ids)
+           return outs
+           #return self._shard_dim_by_stages(outs, out_dim)
+         return jax.tree_map(
+            functools.partial(_vmap_parallel_gather, ids=repeat_ids, ids_dim=0, xs_dim=1), vars
+         )
+      vmapped_fn = nn.map_variables(
+        vmapped_fn,
+        mapped_collections=["params"],
+        mutable=True,
+        trans_in_fn=gather_layers
+      )
+      return vmapped_fn
+    
        
 
      
@@ -379,49 +418,6 @@ class Pipeline(nn.Module):
              model_mode
           )
           outputs = outputs[0]
-      elif self.config.num_pipeline_repeats > 1:
-         vmapped_fn = nn.add_metadata_axis(
-            vmapped_fn,
-            variable_axes={"params": 0},
-            metadata_params={
-               "is_initializing": False,
-               "x_times": self.config.num_pipeline_repeats,
-            }
-         )
-         microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0)
-         repeat_ids = microbatch_ids // self.config.num_pipeline_microbatches
-
-         def gather_layers(vars):
-            def _vmap_parallel_gather(xs, ids, ids_dim, xs_dim):
-              def _gather_one(x, i):
-                dim = ids_dim
-                if xs_dim < dim:
-                  dim -= 1
-                return jnp.squeeze(jax.lax.dynamic_slice_in_dim(x, i, 1, dim), dim)
-              out_dim = xs_dim
-              if ids_dim < xs_dim:
-                out_dim -= 1
-              ids = self._shard_dim_by_stages(ids, 0)
-              xs = self._shard_dim_by_stages(xs, xs_dim)
-              outs = jax.vmap(_gather_one, in_axes=(xs_dim, 0), out_axes=out_dim)(xs, ids)
-              return self._shard_dim_by_stages(outs, out_dim)
-            return jax.tree_map(
-               functools.partial(_vmap_parallel_gather, ids=repeat_ids, ids_dim=0, xs_dim=1)
-            )
-         vmapped_fn = nn.map_variables(
-           vmapped_fn,
-           mapped_collections=["params"],
-           mutable=True,
-           trans_in_fn=gather_layers
-         )
-         instantiated_vmapped_fn = vmapped_fn(config=model.config, mesh=model.mesh, name='layers')
-         outputs = instantiated_vmapped_fn(
-           stages_inputs,
-           stages_positions,
-           stages_segment_ids,
-           deterministic,
-           model_mode
-         )  
       else:
         outputs = instantiated_vmapped_fn(
           stages_inputs,
