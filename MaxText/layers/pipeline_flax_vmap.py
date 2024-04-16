@@ -264,6 +264,7 @@ class Pipeline(nn.Module):
     
     new_state = {
       "state_io": new_state_io,
+      "shift": new_shift,
       "circ_storage": new_circ_storage,
       "circ_storage_mover": new_circ_storage_mover,
       "loop_iteration": loop_iteration + 1
