@@ -107,8 +107,14 @@ def main(argv: Sequence[str]) -> None:
   #   decoder_layer_class=decoder_layer,
   #   mesh=mesh
   # )
-  from layers import pipeline_shard
-  my_pipeline = pipeline_shard.Pipeline(
+  # from layers import pipeline_shard
+  # my_pipeline = pipeline_shard.Pipeline(
+  #   config=config,
+  #   decoder_layer_class=decoder_layer,
+  #   mesh=mesh
+  # )
+  from layers import pipeline_flax_vmap
+  my_pipeline = pipeline_flax_vmap.Pipeline(
     config=config,
     decoder_layer_class=decoder_layer,
     mesh=mesh

@@ -264,29 +264,23 @@ class Pipeline(nn.Module):
     output = output[:,permutation]
     return output
 
-  def run_one_iteration(self, state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode):
+  def run_one_iteration(self, state_io, shift, circ_storage, circ_storage_mover, loop_iteration, positions, segment_ids, deterministic, model_mode, concrete_vmapped):
    '''Run one loop iteration - gets weights and inputs for each stage, run the stages in parallel, and update the various state buffers'''
-   stages_weights = self.get_weights_stage(weights, loop_iteration)
    stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
+
    if positions is not None:
     stages_positions = self.get_microbatches_for_stages(positions, loop_iteration)
     positions_stage_idx = 0
    else:
-     stages_positions = None
-     positions_stage_idx = 0
+    stages_positions = None
+    positions_stage_idx = 0
    if segment_ids is not None:
     stages_segment_ids = self.get_microbatches_for_stages(segment_ids, loop_iteration)
     segment_stage_idx = 0
    else:
     stages_segment_ids
     segment_stage_idx = None
-   
-
-
-
-
-   
-   stages_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,positions_stage_idx, segment_stage_idx, None, None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
+   stages_output = concrete_vmapped(stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
    new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = self.get_new_loop_state(stages_output, state_io, circ_storage, circ_storage_mover, loop_iteration)
    return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
   
@@ -296,14 +290,8 @@ class Pipeline(nn.Module):
     inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length, self.config.emb_dim))
     if positions is not None:
       positions = positions.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
-      example_position = positions[0]
-    else:
-      example_position = None
     if segment_ids is not None:
       segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
-      example_segmentation = segment_ids[0]
-    else:
-      example_segmentation = None
 
     state_io, shift, circ_storage, circ_storage_mover = self.init_states(inputs)
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
@@ -312,9 +300,32 @@ class Pipeline(nn.Module):
     # Go from a list of size n_layers of weight pytrees to a single pytree where each leaf has a leading dimension of n_layers 
     # weights = stack_pytrees(*weights)
     # TODO: may want to have some simplified flow when is initializing instead (don't need to run through total_iters)
+
+    if positions is not None:
+     positions_stage_idx = 0
+    else:
+     positions_stage_idx = 0
+    if segment_ids is not None:
+     segment_stage_idx = 0
+    else:
+     segment_stage_idx = None
+   
+
+    vmapped_fn = nn.vmap(
+     self.decoder_layer_class,
+     in_axes=(0,positions_stage_idx, segment_stage_idx, None, None),
+     out_axes = 0,
+     spmd_axis_name="stage",
+     variable_axes={'params': 0},
+     split_rngs={'params': True},
+     metadata_params={"partition_name": "layers"}
+    )
+    concrete_vmapped=vmapped_fn(config=self.config,mesh=self.mesh, quant=self.quant, name="layers")
+
+
     for loop_iteration in range(total_iterations):
        print(f"starting iteration {loop_iteration}")
-       state_io, shift, circ_storage, circ_storage_mover = self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode)
+       state_io, shift, circ_storage, circ_storage_mover = self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, positions, segment_ids, deterministic, model_mode, concrete_vmapped)
 
     # The final output is located in the input/output array, however the output microbatches may be permuted relative to the input
     final_output = self.permute_output_ms_dim(state_io)
