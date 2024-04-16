@@ -42,11 +42,22 @@ def mqa_reference(
     max logit ([batch_size, num_heads]) and softmax denominator ([batch_size,
     num_heads]).
   """
+
+  # loads the entire batch to its full size each time
+  # expects all the entries to be left-aligned, but not necessarily any padding
+
+  # computes the logits by multiplying q and k
   logits = jnp.einsum(
       "bhd,btd->bht", q.astype(jnp.float32), k.astype(jnp.float32)
   )
+
+  # Creates the mask based on the sequence length of each entry in `lengths` in k
   mask = jnp.arange(k.shape[1])[None] < lengths[:, None]        
+
+  # Change the logits by making all non-used entries a very negative number
   logits = logits + jnp.where(mask, 0.0, mask_value)[:, None]   
+
+  # Get logit info
   logits_max = logits.max(axis=-1)                              
   unnormalized = jnp.exp(logits - logits_max[..., None])        
   denominator = unnormalized.sum(axis=-1)                       
@@ -87,9 +98,11 @@ def ragged_flash_attention_kernel(
     v = v_ref[...].astype(jnp.float32)
     m_prev, l_prev = m_ref[...], l_ref[...]
 
+    # multiply q and k
     qk = lax.dot_general(
         q, k, (((1,), (1,)), ((), ())), preferred_element_type=jnp.float32
     )
+    
     mask = i * bk + jax.lax.broadcasted_iota(jnp.int32, qk.shape, 1) < length
     qk = qk + jnp.where(mask, 0.0, mask_value)
     m_curr = qk.max(axis=-1)
@@ -127,20 +140,22 @@ def ragged_mqa(
   assert lengths.dtype == jnp.int32
   seq_len = k.shape[1]  
 
-  def _compute_ragged_block_indices(b, i, lengths_ref):
+  def compute_ragged_block_indices(b, i, lengths_ref):
     length = lengths_ref[b]
     not_done = i * bk < length
+
+    # Compare current batch index(?) to see if we are at the last or not
     am_last_batch = b == batch_size - 1
+
+    # Compute the last good block based on the length of the current batch index and the block size
     last_good_block = lax.div(length, bk) - 1
 
+    # Compute next batch index based on 1) if we are at the end of the current batch index's length, 
+    #                               and 2) if we are the last batch index or not 
     b_next = jnp.where(not_done, b, jnp.where(am_last_batch, b, b + 1))
-    i_next = jnp.where(
-        not_done, i, jnp.where(am_last_batch, last_good_block, 0)
-    )
-    return b_next, i_next
 
-  def kv_index_map(b, i, lengths_ref):
-    b_next, i_next = _compute_ragged_block_indices(b, i, lengths_ref)
+    # Compute next block index based on if we are processing the last block of the current batch index's length or not
+    i_next = jnp.where(not_done, i, jnp.where(am_last_batch, last_good_block, 0))
     return b_next, i_next, 0
 
   out, m, l = pl.pallas_call(
@@ -153,8 +168,8 @@ def ragged_mqa(
           num_scalar_prefetch=1,
           in_specs=[
               pl.BlockSpec(lambda b, i, _: (b, 0, 0), (None, num_heads, head_dim)),
-              pl.BlockSpec(kv_index_map, (None, bk, head_dim)),
-              pl.BlockSpec(kv_index_map, (None, bk, head_dim)),
+              pl.BlockSpec(compute_ragged_block_indices, (None, bk, head_dim)),
+              pl.BlockSpec(compute_ragged_block_indices, (None, bk, head_dim)),
           ],
           out_specs=[
               pl.BlockSpec(lambda b, i, _: (b, 0, 0), (None, num_heads, head_dim)),

@@ -32,18 +32,36 @@ def main(config):
   metadata = engine.get_tokenizer()
   vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
   tokenizer = vocab.tokenizer
-  tokens, true_length = token_utils.tokenize_and_pad(text, vocab, is_bos=True,
-                                                     prefill_lengths=[config.max_prefill_predict_length])
-  assert tokens.size <= config.max_prefill_predict_length, "can't take too many tokens"
-
-  prefill_result = engine.prefill(
-      params=params, padded_tokens=tokens, true_length=true_length
+  unpadded_tokens, unpadded_true_length = token_utils.tokenize_and_maybe_pad(text, vocab, 
+                                                                         is_bos=True, pad_result=False, 
+                                                                         prefill_lengths=None)
+  # breakpoint()
+  print(f"{unpadded_tokens=}")
+  padded_prefill_result = engine.prefill(
+      params=params, padded_tokens=unpadded_tokens, true_length=unpadded_true_length
   )
+  # padded_prefill_result is a dictionary created using the vars from prefill():
+  #         {"logits" : selected_logits, 
+  #          "cache" : new_vars['cache'],
+  #          "next_pos" : next_pos, 
+  #          "generated_tokens" : generated_tokens}
+  # 
+  # padded_prefill_result: dict_keys(['cache', 'generated_tokens', 'logits', 'next_pos'])
+  # padded_prefill_result['cache']['decoder'] = dict of layers 0-31
+  # padded_prefill_result['logits'].shape = (1, 1, 32000) 
+  # padded_prefill_result['next_pos'] = Array([[4]], dtype=int32)
+  # padded_prefill_result['next_pos'].shape = (1, 1)
+  # padded_prefill_result['generated_tokens'] = Array([[0]], dtype=int32)
+  # padded_prefill_result['generated_tokens'].shape = (1, 1)
+  assert unpadded_tokens.size <= config.max_prefill_predict_length, "can't take too many tokens"
+
   slot=0
 
+  # breakpoint()
   decode_state = engine.init_decode_state()
+  # Copies data from the prefill result into decode_state
   decode_state = engine.insert(
-      prefill_result, decode_state, slot=slot
+      padded_prefill_result, decode_state, slot=slot
   )
 
   steps = range(config.max_prefill_predict_length, config.max_target_length)

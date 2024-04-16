@@ -123,6 +123,7 @@ class MaxEngine(engine_api.Engine):
       self.model.quant.quant_mode = quantizations.get_quant_mode('serve')
       return params
 
+
   @functools.partial(jax.jit, static_argnums=(0,))
   def prefill(
       self,
@@ -146,31 +147,166 @@ class MaxEngine(engine_api.Engine):
     """
     if existing_prefix:
       raise ValueError("We don't know what to do with existing_prefix")
+    
+    # Padded tokens:  array([   1,  306, 5360,  304,    0,    0,    0,    0,    0,    0,    0,
+    #                           0,    0,    0,    0,    0], dtype=int32)
+    # True length:    array(4, dtype=int32
 
+    # Expands 2D array containing the tokenized inputs w/ padding
+    # Padded tokens:  [[   1  306 5360  304    0    0    0    0    0    
+    # 0    0    0    0    0  0    0]]
     input_tokens = jnp.expand_dims(padded_tokens, 0) # [BATCH, SEQUENCE]
+    # jax.debug.print("input_tokens {}", input_tokens)
+
+    # Creates a 2D array of the positions 
+    # array([[ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15]],
     positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
-
+    # jax.debug.print("positions {}", positions)
+    
+    # Same as positions, but only 1D instead of 2D
+    # array([ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15],
     zero_to_n = jnp.arange(0, padded_tokens.shape[0])
-    ones_to_keep = zero_to_n < true_length
-    one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
-    sequence_indicator = jnp.expand_dims(one_d_output, 0)
+    # jax.debug.print("zero_to_n {}", zero_to_n)
 
+    # A 1D array of bool values indicating where tokens exist
+    # array([ True,  True,  True,  True, False, False, False, False, False,
+    #  False, False, False, False, False, False, False])
+    ones_to_keep = zero_to_n < true_length
+    # jax.debug.print("ones_to_keep {}", ones_to_keep)
+
+    # Changes the boolean 1D array to int32 of 0s and 1s
+    # array([1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=int32)
+    one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    # jax.debug.print("one_d_output {}", one_d_output)
+
+    # Same as one_d_output, but in 2D
+    # array([[1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]], dtype=int32)
+    sequence_indicator = jnp.expand_dims(one_d_output, 0)
+    # jax.debug.print("sequence_indicator {}", sequence_indicator)
+
+    # flat_logits.shape: (1, 16, 32000) (batch, seqlen, v)
     flat_logits, new_vars = self.model.apply(
       params,
-      input_tokens,
-      positions,
-      decoder_segment_ids=sequence_indicator,
-      enable_dropout=False,
-      model_mode=common_types.MODEL_MODE_PREFILL,
-      rngs={'params': self.rng},
-      mutable=["cache"]
+      input_tokens,   # Currently expects padded input
+      positions,      # 2D Array of values that represent locations in monotonic increasing order
+      decoder_segment_ids=sequence_indicator, # 2D Array of 0/1 ints representing existing tokens
+      enable_dropout=False,                   # ?
+      model_mode=common_types.MODEL_MODE_PREFILL, # Self explanatory
+      rngs={'params': self.rng},                  # Existing PRNG keys
+      mutable=["cache"]                           # We want to change the "cache" variable
     )
+    # jax.debug.print("flat_logits.shape {}", flat_logits.shape)
 
-    next_pos = jnp.full((1,1), true_length, dtype = jnp.int32)
+    # array([[4]], dtype=int32)
+    next_pos = jnp.full((1,1), true_length, dtype = jnp.int32)    # Position of next entry
+    # jax.debug.print("next_pos {}", next_pos)
+
+    # generated_tokens: array([[0]], dtype=int32)
     generated_tokens = jnp.zeros((1,1), dtype = jnp.int32)
+    # jax.debug.print("generated_tokens {}", generated_tokens)
+
+    # selected_logits.shape: (1, 1, 32000)
     selected_logits = jax.lax.dynamic_slice(flat_logits, (0, true_length-1,0),
                                             (flat_logits.shape[0], 1, flat_logits.shape[2]))
     selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
+
+    # jax.debug.print("selected_logits.shape {}", selected_logits.shape)
+
+    # selected_logits.shape: (1, 1, 256128)
+    # jax.debug.breakpoint()
+    return {"logits" : selected_logits, "cache" : new_vars['cache'],
+            "next_pos" : next_pos, "generated_tokens" : generated_tokens}
+
+  @functools.partial(jax.jit, static_argnums=(0,))
+  def prefill(
+      self,
+      *,
+      params: Params,
+      existing_prefix: Optional[jax.Array] = None,
+      padded_tokens: jax.Array,
+      true_length: int,
+  ) -> Prefix:
+    """Computes a kv-cache for a new generate request.
+
+    Args:
+      params: Scalar multiplier.
+      existing_prefix: If provided, represents a prefix that has already been
+        processed by the underlying model.
+      padded_tokens: Logically appended tokens to any existing prefix, this is
+        what we compute prefill on.
+      true_length: The real length of the tokens, pre-pad.
+    Returns:
+      kv_cache: For the resulting text.
+    """
+    if existing_prefix:
+      raise ValueError("We don't know what to do with existing_prefix")
+    
+    # Padded tokens:  array([   1,  306, 5360,  304,    0,    0,    0,    0,    0,    0,    0,
+    #                           0,    0,    0,    0,    0], dtype=int32)
+    # True length:    array(4, dtype=int32
+
+    # Expands 2D array containing the tokenized inputs w/ padding
+    # Padded tokens:  [[   1  306 5360  304    0    0    0    0    0    
+    # 0    0    0    0    0  0    0]]
+    input_tokens = jnp.expand_dims(padded_tokens, 0) # [BATCH, SEQUENCE]
+    # jax.debug.print("input_tokens {}", input_tokens)
+
+    # Creates a 2D array of the positions 
+    # array([[ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15]],
+    positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
+    # jax.debug.print("positions {}", positions)
+    
+    # Same as positions, but only 1D instead of 2D
+    # array([ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15],
+    zero_to_n = jnp.arange(0, padded_tokens.shape[0])
+    # jax.debug.print("zero_to_n {}", zero_to_n)
+
+    # A 1D array of bool values indicating where tokens exist
+    # array([ True,  True,  True,  True, False, False, False, False, False,
+    #  False, False, False, False, False, False, False])
+    ones_to_keep = zero_to_n < true_length
+    # jax.debug.print("ones_to_keep {}", ones_to_keep)
+
+    # Changes the boolean 1D array to int32 of 0s and 1s
+    # array([1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=int32)
+    one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    # jax.debug.print("one_d_output {}", one_d_output)
+
+    # Same as one_d_output, but in 2D
+    # array([[1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]], dtype=int32)
+    sequence_indicator = jnp.expand_dims(one_d_output, 0)
+    # jax.debug.print("sequence_indicator {}", sequence_indicator)
+
+    # flat_logits.shape: (1, 16, 32000) (batch, seqlen, v)
+    flat_logits, new_vars = self.model.apply(
+      params,
+      input_tokens,   # Currently expects padded input
+      positions,      # 2D Array of values that represent locations in monotonic increasing order
+      decoder_segment_ids=sequence_indicator, # 2D Array of 0/1 ints representing existing tokens
+      enable_dropout=False,                   # ?
+      model_mode=common_types.MODEL_MODE_PREFILL, # Self explanatory
+      rngs={'params': self.rng},                  # Existing PRNG keys
+      mutable=["cache"]                           # We want to change the "cache" variable
+    )
+    # jax.debug.print("flat_logits.shape {}", flat_logits.shape)
+
+    # array([[4]], dtype=int32)
+    next_pos = jnp.full((1,1), true_length, dtype = jnp.int32)    # Position of next entry
+    # jax.debug.print("next_pos {}", next_pos)
+
+    # generated_tokens: array([[0]], dtype=int32)
+    generated_tokens = jnp.zeros((1,1), dtype = jnp.int32)
+    # jax.debug.print("generated_tokens {}", generated_tokens)
+
+    # selected_logits.shape: (1, 1, 32000)
+    selected_logits = jax.lax.dynamic_slice(flat_logits, (0, true_length-1,0),
+                                            (flat_logits.shape[0], 1, flat_logits.shape[2]))
+    selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
+
+    # jax.debug.print("selected_logits.shape {}", selected_logits.shape)
+
+    # selected_logits.shape: (1, 1, 256128)
+    # jax.debug.breakpoint()
     return {"logits" : selected_logits, "cache" : new_vars['cache'],
             "next_pos" : next_pos, "generated_tokens" : generated_tokens}
 
@@ -226,13 +362,31 @@ class MaxEngine(engine_api.Engine):
   ) -> DecodeState:
     ''' Insert into KV cache '''
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
+    # unboxed_prefix.keys() = dict_keys(['cache', 'generated_tokens', 'logits', 'next_pos'])
+    # slot = array(0, dtype=int32)
 
     def copy(path, partial_cache, full_cache, annotations):
+
+      # path: (DictKey(key='decoder'), DictKey(key='layers_0'), DictKey(key='self_attention'), DictKey(key='AttentionOp_0'), DictKey(key='cache_ar_index'))
+      # partial_cache.shape has different shapes at different times: 
+      #   (16, 32, 1, 128)
+      #   (16, 32, 1, 1)
+      #   (16, 32, 8, 1)
+      # full_cache.shape: (16, 32, 8, 1)
+      # annotations: ()
+
+      # cache_ar_index
       path_key = path[-1].key
+      # pri
+      print("pathkey {}", path_key)
+      # jax.debug.print("\n\n\npath_key {}", path_key)
+      # jax.debug.print("partial_cache.shape: {}", partial_cache.shape)
+      # jax.debug.print("full_cache.shape: {}", full_cache.shape)
       if path_key in ['cache_ar_index', 'cached_ar_key', 'cached_ar_value', 'cached_ar_key_scale', 'cached_ar_value_scale']:
         return full_cache # we don't even zero these out because we can mask them out.
 
       batch_idx = annotations.index("cache_batch") if "cache_batch" in annotations else -1
+      print("batch_idx {}", batch_idx)
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
 
@@ -240,12 +394,20 @@ class MaxEngine(engine_api.Engine):
         ### goal: zero this out in case there is existing data
         s = list(full_cache.shape)
         s[batch_idx] = 1
+        # cache_ar_segment_id s: [array(1, dtype=int32), array(16, dtype=int32)]
+        # jax.debug.print("cache_ar_segment_id s: {}", s)
         zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
+        # cache_ar_segment_id zeros: [[0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]]
+        # jax.debug.print("cache_ar_segment_id zeros: {}", zeros)
         return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
       elif path_key == 'cache_prefill_segment_id':
         s = list(full_cache.shape)
         s[batch_idx] = 1
+        # cache_prefill_segment_id s: [array(1, dtype=int32), array(16, dtype=int32)]
+        # jax.debug.print("cache_prefill_segment_id s: {}", s)
+        # cache_prefill_segment_id zeros: [[0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]]
         zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
+        # jax.debug.print("cache_prefill_segment_id zeros: {}", zeros)
         ## zero out in case prefill cache is too small to cover
         full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
         ## copy prefill cachce
@@ -257,17 +419,47 @@ class MaxEngine(engine_api.Engine):
       else:
         raise ValueError(f"We don't have a strategy for inserting {path_key}")
 
+    # inserted_cache['decoder']['layers_0']['self_attention']['AttentionOp_0'].keys() = 
+    #     dict_keys(['cache_ar_index', 'cache_ar_segment_id', 'cache_prefill_segment_id', 'cached_ar_key', 
+    #                'cached_ar_key_scale', 'cached_ar_value', 'cached_ar_value_scale', 'cached_prefill_key', 
+    #                'cached_prefill_key_scale', 'cached_prefill_value', 'cached_prefill_value_scale'])
     inserted_cache = jax.tree_util.tree_map_with_path(copy, unboxed_prefix['cache'], decode_state['cache'],
                                                       self.kv_cache_annotations_named)
+    inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
+
+
+    # inserted_logits.shape = (8, 1, 32000)
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state['logits'], unboxed_prefix['logits'], slot, 0)
+    inserted_logits = jax.lax.with_sharding_constraint(inserted_logits, self.replicated_sharding)
+
+    # inserted_next_pos.shape: (8, 1)
+    # inserted_next_pos: 
+    #   array([[4],
+    #          [0],
+    #          [0],
+    #          [0],
+    #          [0],
+    #          [0],
+    #          [0],
+    #          [0]], dtype=int32)
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state['next_pos'], unboxed_prefix['next_pos'], slot, 0)
+    inserted_next_pos = jax.lax.with_sharding_constraint(inserted_next_pos, self.replicated_sharding)
+
+
+    # inserted_generated_tokens.shape: (8, 1)
+    # inserted_generated_tokens: 
+    #   array([[0],
+    #          [0],
+    #          [0],
+    #          [0],
+    #          [0],
+    #          [0],
+    #          [0],
+    #          [0]], dtype=int32)
+    # jax.debug.breakpoint()
     inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(decode_state['generated_tokens'],
                                                                     unboxed_prefix['generated_tokens'], slot, 0)
-
-    inserted_logits = jax.lax.with_sharding_constraint(inserted_logits, self.replicated_sharding)
     inserted_generated_tokens = jax.lax.with_sharding_constraint(inserted_generated_tokens, self.replicated_sharding)
-    inserted_next_pos = jax.lax.with_sharding_constraint(inserted_next_pos, self.replicated_sharding)
-    inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
 
     return {'logits' : inserted_logits, 'cache' : inserted_cache,
             'next_pos' : inserted_next_pos, 'generated_tokens' : inserted_generated_tokens }

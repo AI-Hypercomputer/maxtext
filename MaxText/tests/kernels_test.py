@@ -71,6 +71,9 @@ class RaggedAttentionTest(unittest.TestCase):
   @pytest.mark.tpu
   def test_autoregression(self):
     q, k, v = self.create_mqa_qkv()
+    # q: (96, 16, 256)
+    # k: (96, 1024, 256)
+    # v: (96, 1024, 256)
 
     # Compare the ragged MQA kernel directly with the reference version of MQA
     ragged_mqa_output, (ragged_mqa_max_logits, ragged_mqa_denom) = ragged_mqa(q, k, v, self.lengths, bk=self.bk)
@@ -81,6 +84,9 @@ class RaggedAttentionTest(unittest.TestCase):
 
     # Compare the vmapped version of the MQA kernel to original 
     q_mha, k_mha, v_mha = self.create_mha_qkv(q, k, v)
+    # q_mha: (96, 16, 256)
+    # v_mha: (96, 16, 1024, 256)
+    # k_mha: (96, 16, 1024, 256)
     vmap_ragged_mqa = jax.vmap(ragged_mqa, in_axes=[None, 1, 1, None])
     vmap_ragged_output, (vmap_ragged_logits, vmap_ragged_denom) = vmap_ragged_mqa(q_mha, k_mha, v_mha, self.lengths)
     self._assert_allclose(ragged_mqa_output, vmap_ragged_output[0], atol=3e-2, rtol=3e-2)

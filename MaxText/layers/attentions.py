@@ -166,6 +166,17 @@ class AttentionOp(nn.Module):
       value: Array,
       decoder_segment_ids: Array | None,
       model_mode: str):
+
+    # query.shape:  (1, 16, 8, 256)
+    # key.shape:    (1, 16, 1, 256)
+    # value.shape:  (1, 16, 1, 256)
+    # decoder_segment_ids: array([[1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]], dtype=int32)
+    # model_mode: 'prefill' 
+
+    # self.attention_kernel: 'autoselected'
+    # length: 16
+
+    # jax.debug.breakpoint()
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
     if self.attention_kernel == 'dot_product' or\
@@ -252,6 +263,7 @@ class AttentionOp(nn.Module):
     )
     x = wrap_flash_attention(query, key, value, decoder_segment_ids)
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
+    # jax.debug.breakpoint()
     return x
 
   def cudnn_flash_attention(self,
@@ -368,6 +380,7 @@ class AttentionOp(nn.Module):
     attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
+    # jax.debug.breakpoint()
     return self.compute_local_attention(attn_weights, value)
 
   def qk_product(self, query: Array, key: Array) -> Array:
@@ -548,6 +561,7 @@ class AttentionOp(nn.Module):
       if decoder_segment_ids is not None:
         cached_prefill_segment_id.value = decoder_segment_ids
 
+      # jax.debug.breakpoint()
       return key, value, decoder_segment_ids
   
 
@@ -725,8 +739,17 @@ class AttentionOp(nn.Module):
 
   @nn.compact
   def __call__(self, query, key, value, decoder_segment_ids, model_mode):
+    # query.shape: (8, 32, 16, 256)
+    # key.shape: (8, 32, 16, 256)
+    # value.shape: (8, 32, 16, 256)
     prefill_kv_cache, ar_kv_cache = self.kv_cache(key, value, decoder_segment_ids, model_mode)
 
+    # Pate
+    # jax.debug.print("query.shape: {}", query.shape)
+    # jax.debug.print("key.shape: {}", key.shape)
+    # jax.debug.print("value.shape: {}", value.shape)
+    # jax.debug.print("decoder_segment_ids.shape: {}", decoder_segment_ids.shape)
+    # print(f"model_mode: {model_mode}")
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
       query=query,
       key=prefill_kv_cache[0],
@@ -953,6 +976,7 @@ class Attention(nn.Module):
                                dropout_rate = self.dropout_rate,
                                dtype=self.dtype)
 
+    # Pate
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)
 
     out = nn.with_logical_constraint(out, self.out_axis_names)
