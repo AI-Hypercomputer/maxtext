@@ -29,6 +29,8 @@ jobs=4
 # active Python interpreter and may run arbitrary code.
 unsafe-load-any-extension=no
 
+# check python modules in the dir recursively
+recursive=y
 
 [MESSAGES CONTROL]
 

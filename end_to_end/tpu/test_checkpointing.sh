@@ -60,4 +60,4 @@ echo $CMD2
 
 $CMD2
 
-python3 end_to_end/eval_assert.py $eval_metrics metrics.txt learning/loss
+python3 end_to_end/tpu/eval_assert.py $eval_metrics metrics.txt learning/loss

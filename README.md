@@ -31,6 +31,13 @@ Key supported features:
 * Training and Inference (in preview)
 * Models: Llama2, Mistral and Gemma
 
+We have used MaxText to [demonstrate high-performance, well-converging training in int8](https://cloud.google.com/blog/products/compute/accurate-quantized-training-aqt-for-tpu-v5e) and [scale training to ~51K chips](https://cloud.google.com/blog/products/compute/the-worlds-largest-distributed-llm-training-job-on-tpu-v5e).
+
+Key supported features:
+* TPUs and GPUs (in preview)
+* Training and Inference (in preview)
+* Models: Llama2, Mistral and Gemma
+
 # Table of Contents
 
 * [Getting Started](getting_started/First_run.md)
@@ -56,6 +63,10 @@ In addition to the getting started guides, new content is added regularly! The f
 
 This section describes the runtime performance of MaxText using different TPU versions as well as different numbers of parameters. The performance is measured by TFLOP/sec/chip and [Model Flops Utilization (MFU)](https://services.google.com/fh/files/blogs/tpu_v4_benchmarking.pdf).
 You can find more details on reproducing these results can be found in [MaxText/configs/README.md](MaxText/configs/README.md).
+
+# Runtime Performance Results
+
+More details on reproducing these results can be found in [MaxText/configs/README.md](MaxText/configs/README.md).
 
 ## TPU v5p
 
@@ -93,6 +104,7 @@ MaxText is more similar to [Nvidia/Megatron-LM](https://github.com/NVIDIA/Megatr
 
 MaxText is also comparable to [Pax](https://github.com/google/paxml). Like Pax, MaxText provides high-performance and scalable implementations of LLMs in Jax. However, Pax is a framework in which developers can inject their code or configuration. By contrast, MaxText is a reference implementation designed to be forked and edited as needed.
 
+
 # Features and Diagnostics
 
 Install the [Cloud TPU diagnostics](https://pypi.org/project/cloud-tpu-diagnostics) Python package to monitor, debug and profile jobs running on Cloud TPUs.  
@@ -104,14 +116,12 @@ When running a Single Program, Multiple Data (SPMD) job on accelerators, the ove
 The following configurations will help you debug a workload by collecting stack traces. Change the following parameter values accordingly in `MaxText/configs/base.yml`:
 
 * Set `collect_stack_trace: True` to enable collection of stack traces on faults or when the program hangs. This setting periodically dumps stack traces. To disable this, set `collect_stack_trace: False`.
-
-* Set `stack_trace_to_cloud: False` to display stack traces on the console. Or, set `stack_trace_to_cloud: True` to create a temporary file in `/tmp/debugging` in your TPU VMs to store stack traces. There is an agent running on TPU VMs that periodically uploads traces from the temporary directory to [Cloud Logging](https://cloud.google.com/logging/docs/overview). You can view the traces in [Logs Explorer](https://cloud.google.com/logging/docs/view/logs-explorer-interface) in Cloud Logging using the following query:
+* Set `stack_trace_to_cloud: False` to display stack traces on the console. Or, set `stack_trace_to_cloud: True` to create a temporary file in `/tmp/debugging` in your TPU VMs to store stack traces. There is an agent running on TPU VMs that periodically uploads traces from the temporary directory to [Cloud Logging](https://cloud.google.com/logging/docs/overview). You can view the traces in [Logs Explorer](https://cloud.google.com/logging/docs/view/logs-explorer-interface) in Cloud Logging using the following query: 
 
    ```none
    logName="projects/<project_name>/logs/tpu.googleapis.com%2Fruntime_monitor"
    jsonPayload.verb="stacktraceanalyzer"
    ```
-
 * `stack_trace_interval_seconds` sets the duration in seconds between each stack trace collection event. For example, setting `stack_trace_interval_seconds: 600` will collect the stack traces every 600 seconds (10 minutes).
 
 ## Ahead of Time Compilation (AOT, TPU-only)

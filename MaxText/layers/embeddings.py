@@ -32,6 +32,7 @@ with_logical_partitioning = nn.with_logical_partitioning
 
 _MAX_WAVELENGTH = 10_000
 
+
 class Embed(nn.Module):
   """A parameterized function from integers [0, n) to d-dimensional vectors.
 
@@ -53,8 +54,8 @@ class Embed(nn.Module):
 
   def setup(self):
     self.embedding = self.param(
-        'embedding',
-        with_logical_partitioning(self.embedding_init, ('vocab', 'embed')),
+        "embedding",
+        with_logical_partitioning(self.embedding_init, ("vocab", "embed")),
         (self.num_embeddings, self.features),
         self.config.weight_dtype,
     )
@@ -73,7 +74,7 @@ class Embed(nn.Module):
     if self.cast_input_dtype:
       inputs = inputs.astype(self.cast_input_dtype)
     if not jnp.issubdtype(inputs.dtype, jnp.integer):
-      raise ValueError('Input type must be an integer or unsigned integer.')
+      raise ValueError("Input type must be an integer or unsigned integer.")
 
     if cfg.use_iota_embed:
       iota = lax.iota(jnp.int32, self.num_embeddings)
@@ -81,9 +82,7 @@ class Embed(nn.Module):
       output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
     else:
       output = jnp.asarray(self.embedding, self.dtype)[inputs]
-    output = nn.with_logical_constraint(
-        output, ('activation_batch', 'activation_length', 'activation_embed')
-    )
+    output = nn.with_logical_constraint(output, ("activation_batch", "activation_length", "activation_embed"))
     return output
 
   def attend(self, query: Array) -> Array:
@@ -122,9 +121,7 @@ class RotaryEmbedding(nn.Module):
 
   def setup(self) -> None:
     if self.embedding_dims % 2:
-      raise ValueError(
-          'Embedding dim for rotary position embedding must be a multiple of 2.'
-      )
+      raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
 
   def __call__(
       self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
@@ -147,25 +144,18 @@ class RotaryEmbedding(nn.Module):
     """
     assert position is not None
     if len(inputs.shape) != 4:
-      raise ValueError(
-          'Input is assumed to be a rank 4 tensor of shape'
-          '[batch, sequence, heads, dims].'
-      )
+      raise ValueError("Input is assumed to be a rank 4 tensor of shape" "[batch, sequence, heads, dims].")
     if self.embedding_dims != inputs.shape[3]:
       raise ValueError(
-          'The embedding dims of the rotary position embedding'
-          'must match the hidden dimension of the inputs.'
+          "The embedding dims of the rotary position embedding" "must match the hidden dimension of the inputs."
       )
     half_embedding_dim = self.embedding_dims // 2
     fraction = 2 * jnp.arange(0, half_embedding_dim) / self.embedding_dims
-    timescale = (
-        self.min_timescale
-        * (self.max_timescale / self.min_timescale) ** fraction
-    )
+    timescale = self.min_timescale * (self.max_timescale / self.min_timescale) ** fraction
     position = position[:, :, jnp.newaxis, jnp.newaxis]
     sinusoid_inp = position / timescale
-    sin = jnp.sin(sinusoid_inp)
-    cos = jnp.cos(sinusoid_inp)
+    sin = jnp.sin(sinusoid_inp).astype(inputs.dtype)
+    cos = jnp.cos(sinusoid_inp).astype(inputs.dtype)
     first_half, second_half = jnp.split(inputs, 2, axis=-1)
     first_part = first_half * cos - second_half * sin
     second_part = second_half * cos + first_half * sin
@@ -189,13 +179,11 @@ class PositionalEmbedding(nn.Module):
     log_timescale_increment = jnp.log(float(self.max_wavelength)) / jnp.maximum(
         jnp.asarray(num_timescales, dtype=jnp.float32) - 1, 1
     )
-    inv_timescales = jnp.exp(
-        jnp.arange(num_timescales, dtype=jnp.float32) * -log_timescale_increment
-    )
+    inv_timescales = jnp.exp(jnp.arange(num_timescales, dtype=jnp.float32) * -log_timescale_increment)
     position = position[:, :, jnp.newaxis]
     inv_timescales = inv_timescales[jnp.newaxis, jnp.newaxis, :]
     scaled_time = position * inv_timescales
-    signal = jnp.concatenate([jnp.sin(scaled_time), jnp.cos(scaled_time)], axis = -1)
+    signal = jnp.concatenate([jnp.sin(scaled_time), jnp.cos(scaled_time)], axis=-1)
     # signal = jnp.pad(signal, [[0, jnp.mod(self.embedding_dims, 2)]])
     position_embedding = signal.astype(jnp.float32)
     return input_embedding + position_embedding
