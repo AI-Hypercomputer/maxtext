@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Big TODO: Rename the partitioning (including metadata partition_name) to stages instead of layers
+# Rename the metadata partition name circ_layers to circ_repeats
 ''' Pipeline layer wrapping a decoder layer. Supports circular pipelining '''
 
 import jax

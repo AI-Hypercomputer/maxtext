@@ -121,7 +121,7 @@ def main(argv: Sequence[str]) -> None:
   )
   init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
   #pipeline_out = my_pipeline.apply(init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
-  #breakpoint()
+  breakpoint()
   def run_regular_pipeline(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
     reg_layer_activations = inputs
 
