@@ -156,7 +156,7 @@ class MultipleSimpleDecoderLayer(nn.Module):
       length=num_iter,
       # Dropout keys will be split for each iteration.
       split_rngs={'params': True},
-      # Each loop iteration gets all of the positions and segments
+      # Each loop iteration gets staged versions of the positions and segments
       # In real implementation would be all microbatches, and up to body_fprop to grab only the stage one the current iter
       in_axes = (nn.broadcast,nn.broadcast,nn.broadcast,nn.broadcast)
     )

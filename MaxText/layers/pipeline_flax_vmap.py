@@ -195,7 +195,7 @@ class Pipeline(nn.Module):
     stages_array = jnp.reshape(stages_array, (self.num_stages,) + microbatched_array.shape[1:])
     return stages_array
 
-  def get_new_loop_state(self,output, old_state_io, old_circ_storage, old_circ_storage_mover, loop_iteration):
+  def get_new_loop_state(self,output, old_state):
     '''
       Update the various buffers given the output of the most recent iteration
       * state_io: rotates left/up by 1 (replace last element with last stage output) - we are pushing inputs up into the pipeline
@@ -204,6 +204,10 @@ class Pipeline(nn.Module):
       * circ_mover gets FULL? rotated output -- I think it should only need the last stage of output
     '''
 
+    old_state_io = old_state["state_io"]
+    old_circ_storage = old_state["circ_storage"]
+    old_circ_storage_mover = old_state["circ_storage_mover"]
+    loop_iteration = old_state["loop_iteration"]
     # Shift becomes a rotated-right version of the previous output
     def _rotate_right(output_in):
       # Use lax.slice to avoid generating a gather.
@@ -245,9 +249,15 @@ class Pipeline(nn.Module):
             state_in, stream_slice, stream_buf_idx, axis=1)
     #new_state = _update_state_io(old_state_io, stream_slice, output)# TODO(medium):same sharding/jit issue
     jit_update_state_io = jax.jit(_update_state_io)
-    new_state = jit_update_state_io(old_state_io, stream_slice, output) 
+    new_state_io = jit_update_state_io(old_state_io, stream_slice, output) 
     
-    return new_state, new_shift, new_circ_storage, new_circ_storage_mover
+    new_state = {
+      "state_io": new_state_io,
+      "circ_storage": new_circ_storage,
+      "circ_storage_mover": new_circ_storage_mover,
+      "loop_iteration": loop_iteration + 1
+      }
+    return new_state
    
   def permute_output_ms_dim(self, output):
     '''
@@ -284,6 +294,58 @@ class Pipeline(nn.Module):
    new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = self.get_new_loop_state(stages_output, state_io, circ_storage, circ_storage_mover, loop_iteration)
    return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
   
+
+
+  # TODO(Tuesday morning: MAke this a subfnction of __call__ so it is not a method)
+  # This function is wrapped in an nn.scan so its first argument must be a nn.model. The model is the full pipeline,
+  # e.g. self, since we need multiple decoder layers (namely #stages of them) to run a single pipeline iteration. We name the first argument model instead of
+  # self to highlight this point. The loop state below is the nn.scan "carry", it is both an input at each loop iteration
+  # and then an output which is fed as input to the next iteration. It has the required information to grab the relevant
+  # microbatches for the current loop iteration. The input positions and segment_ids are all (shaped as [num_micro, micro_size,seq]),
+  # and scan_fn will grab the relevant microbatches for the current loop iteration
+  def _scan_fn(model, loop_state, positions, segment_ids, deterministic, model_mode):
+
+    loop_iteration = loop_state.loop_iteration
+    stages_inputs = model.get_iteration_inputs(loop_iteration, loop_state.state_io, loop_state.circ_storage, loop_state.shift)
+    if positions is not None:
+      stages_positions = model.get_microbatches_for_stages(positions, loop_iteration)
+      positions_stage_idx = 0
+    else:
+      stages_positions = None
+      positions_stage_idx = None
+    if segment_ids is not None:
+      stages_segment_ids = model.get_microbatches_for_stages(segment_ids, loop_iteration)
+      segment_stage_idx = 0
+    else:
+      stages_segment_ids
+      segment_stage_idx = None
+    
+    vmapped_fn = nn.vmap(
+      model.pipeline_layer_class,
+      in_axes=(0,positions_stage_idx, segment_stage_idx, None, None),  #(0,positions_stage_idx, segment_stage_idx, None, None),
+      out_axes = 0,
+      spmd_axis_name="stage",
+      variable_axes={'params': 0},
+      split_rngs={'params': True},
+      metadata_params={"partition_name": "layers"}
+    )
+
+    instantiated_vmapped_fn = vmapped_fn(config=model.config, mesh=model.mesh, name='layers')
+
+    outputs = instantiated_vmapped_fn(
+      stages_inputs,
+      stages_positions,
+      stages_segment_ids,
+      deterministic,
+      model_mode
+    )
+
+    new_loop_state = model.get_new_loop_state(outputs, loop_state)
+
+    # The output of a function to be nn.scan should be length 2: out_carry, per_iteration_outputs
+    # Currently there is no use of per_iteration_outputs (which would get concatenated into a dimension of size num_iterations)
+    return new_loop_state, None
+
   @nn.compact
   def __call__(self, inputs: jnp.ndarray, positions: jnp.ndarray, segment_ids:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
     # Reshape inputs of [global_batch, ...] to [microbatches, microbatch_sizes, ...]
@@ -311,21 +373,20 @@ class Pipeline(nn.Module):
      segment_stage_idx = None
    
 
-    vmapped_fn = nn.vmap(
-     self.decoder_layer_class,
-     in_axes=(0,positions_stage_idx, segment_stage_idx, None, None),
-     out_axes = 0,
-     spmd_axis_name="stage",
-     variable_axes={'params': 0},
-     split_rngs={'params': True},
-     metadata_params={"partition_name": "layers"}
+    num_iter=3
+    # `variable_broadcast` for params because we already have a full pipeline
+    # due to the inner vmap.
+    scan_fn = nn.scan(
+      _scan_fn,
+      variable_broadcast=['params', 'non_trainable'],
+      length=num_iter,
+      # Dropout keys will be split for each iteration.
+      split_rngs={'params': True},
+      # Each loop iteration gets staged versions of the positions and segments
+      # In real implementation would be all microbatches, and up to body_fprop to grab only the stage one the current iter
+      in_axes = (nn.broadcast,nn.broadcast,nn.broadcast,nn.broadcast)
     )
-    concrete_vmapped=vmapped_fn(config=self.config,mesh=self.mesh, quant=self.quant, name="layers")
-
-
-    for loop_iteration in range(total_iterations):
-       print(f"starting iteration {loop_iteration}")
-       state_io, shift, circ_storage, circ_storage_mover = self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, positions, segment_ids, deterministic, model_mode, concrete_vmapped)
+    return scan_fn(self, inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
 
     # The final output is located in the input/output array, however the output microbatches may be permuted relative to the input
     final_output = self.permute_output_ms_dim(state_io)
