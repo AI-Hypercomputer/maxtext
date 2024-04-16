@@ -286,6 +286,41 @@ class Pipeline(nn.Module):
     output = output[:,permutation]
     return output
 
+  # For circular pipelines, we use different weights at different loop iterations.
+  # This function allows us to gather the relevant weights for the current iteration, as well as
+  # take on a different form to initialize the weights
+  def get_pipeline_body_func(self, loop_iteration, positions_stage_idx, segment_stage_idx):
+    pipeline_body_func = nn.vmap(
+        self.decoder_layer_class,
+        in_axes=(0,positions_stage_idx, segment_stage_idx, None, None),
+        out_axes = 0,
+        spmd_axis_name="stage",
+        variable_axes={'params': 0},
+        split_rngs={'params': True},
+        metadata_params={"partition_name": "layers"}
+    )
+    if self.config.num_pipeline_repeats == 1:
+      return pipeline_body_func 
+    elif self.is_initializing():
+       # To initialize all of the variables, we use a doubly nested vmap of (n_repeat x n_stages)
+       circular_vmap_wrap = nn.vmap(
+          pipeline_body_func,
+          in_axes=0,
+          out_axes=0,
+          variable_axes={'params': 0},
+          split_rngs={'params': True},
+          metadata_params={
+             "partition_name": "circ_layers",
+             "x_times": self.config.num_pipeline_repeats
+          },        
+       )
+       return circular_vmap_wrap
+    else:
+       
+       
+
+     
+     
   @nn.compact
   def __call__(self, inputs: jnp.ndarray, positions: jnp.ndarray, segment_ids:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
     # Reshape inputs of [global_batch, ...] to [microbatches, microbatch_sizes, ...]
@@ -327,25 +362,74 @@ class Pipeline(nn.Module):
         stages_segment_ids
         segment_stage_idx = None
       
-      vmapped_fn = nn.vmap(
-        model.decoder_layer_class,
-        in_axes=(0,positions_stage_idx, segment_stage_idx, None, None),
-        out_axes = 0,
-        spmd_axis_name="stage",
-        variable_axes={'params': 0},
-        split_rngs={'params': True},
-        metadata_params={"partition_name": "layers"}
-      )
+      vmapped_fn = model.get_pipeline_body_func(loop_iteration, positions_stage_idx, segment_stage_idx)
 
       instantiated_vmapped_fn = vmapped_fn(config=model.config, mesh=model.mesh, name='layers')
+      if self.config.num_pipeline_repeats > 1 and self.is_initializing():
+          # To initialize all of the variables (weights) use a doubly nested vmap (outer n_repeat, inner n_stages)
+          # We have to grow the stage inputs by a factor of n_repeat to feed this doubly nested vmap but then
+          # we grab only the the inner n_stages as output to match the real forward pass output shape.
+          # For a real forward pass we will use the single vmapped function, but with a variable transform to
+          # feed the right weights to the right stage
+          outputs = instantiated_vmapped_fn(
+             jax.lax.broadcast(stages_inputs, [self.config.num_pipeline_repeats]),
+             jax.lax.broadcast(stages_positions, [self.config.num_pipeline_repeats]),
+             jax.lax.broadcast(stages_segment_ids, [self.config.num_pipeline_repeats]),
+             deterministic,
+             model_mode
+          )
+          outputs = outputs[0]
+      elif self.config.num_pipeline_repeats > 1:
+         vmapped_fn = nn.add_metadata_axis(
+            vmapped_fn,
+            variable_axes={"params": 0},
+            metadata_params={
+               "is_initializing": False,
+               "x_times": self.config.num_pipeline_repeats,
+            }
+         )
+         microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0)
+         repeat_ids = microbatch_ids // self.config.num_pipeline_microbatches
 
-      outputs = instantiated_vmapped_fn(
-        stages_inputs,
-        stages_positions,
-        stages_segment_ids,
-        deterministic,
-        model_mode
-      )
+         def gather_layers(vars):
+            def _vmap_parallel_gather(xs, ids, ids_dim, xs_dim):
+              def _gather_one(x, i):
+                dim = ids_dim
+                if xs_dim < dim:
+                  dim -= 1
+                return jnp.squeeze(jax.lax.dynamic_slice_in_dim(x, i, 1, dim), dim)
+              out_dim = xs_dim
+              if ids_dim < xs_dim:
+                out_dim -= 1
+              ids = self._shard_dim_by_stages(ids, 0)
+              xs = self._shard_dim_by_stages(xs, xs_dim)
+              outs = jax.vmap(_gather_one, in_axes=(xs_dim, 0), out_axes=out_dim)(xs, ids)
+              return self._shard_dim_by_stages(outs, out_dim)
+            return jax.tree_map(
+               functools.partial(_vmap_parallel_gather, ids=repeat_ids, ids_dim=0, xs_dim=1)
+            )
+         vmapped_fn = nn.map_variables(
+           vmapped_fn,
+           mapped_collections=["params"],
+           mutable=True,
+           trans_in_fn=gather_layers
+         )
+         instantiated_vmapped_fn = vmapped_fn(config=model.config, mesh=model.mesh, name='layers')
+         outputs = instantiated_vmapped_fn(
+           stages_inputs,
+           stages_positions,
+           stages_segment_ids,
+           deterministic,
+           model_mode
+         )  
+      else:
+        outputs = instantiated_vmapped_fn(
+          stages_inputs,
+          stages_positions,
+          stages_segment_ids,
+          deterministic,
+          model_mode
+        )
 
       new_loop_state = model.get_new_loop_state(outputs, loop_state)
 
