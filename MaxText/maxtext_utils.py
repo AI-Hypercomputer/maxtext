@@ -127,7 +127,6 @@ def calculate_tflops_prefill(num_model_parameters, prefill_length, config, log=T
       * config.num_decoder_layers
       * config.head_dim
       * prefill_length**2
-      * config.per_device_batch_size
       / 10**12
   )
   causal_attention_tflops = noncasual_attention_flops / 2  # due to causality in attention
