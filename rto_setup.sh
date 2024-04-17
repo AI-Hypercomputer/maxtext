@@ -5,13 +5,6 @@ set -e
 
 echo "Adjust Network settings and apply non cache copy"
 
-# Install ip.
-apt-get update
-yes | apt-get install net-tools
-yes | apt-get install iproute2
-yes | apt-get install procps
-yes | apt-get install ethtool
-
 # Disable slow start after idle
 sysctl net.ipv4.tcp_slow_start_after_idle=0
 
