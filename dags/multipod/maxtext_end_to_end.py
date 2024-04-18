@@ -95,9 +95,11 @@ with models.DAG(
   }
 
   for model, test_scripts_details in multicluster_test_models.items():
-      test_group_id = "chained_tests" + "_" + model
       gcs_subfolder = f"{test_owner.Team.MULTIPOD.value}/maxtext"
-      with TaskGroup(group_id=test_group_id) as group: 
+
+      test_group_id = "chained_tests" + "_" + model + "_" + "stable"
+
+      with TaskGroup(group_id=test_group_id, prefix_group_id=False) as group: 
           shared_gcs_location = name_format.generate_gcs_folder_location(
               gcs_subfolder,
               test_group_id,
@@ -123,6 +125,14 @@ with models.DAG(
               docker_image=DockerImage.MAXTEXT_ANISHA_TPU_JAX_STABLE.value,
               test_owner=test_owner.ANISHA_M,
               ).run(gcs_location=shared_gcs_location)
+          
+      test_group_id = "chained_tests" + "_" + model + "_" + "nightly"
+
+      with TaskGroup(group_id=test_group_id) as group: 
+          shared_gcs_location = name_format.generate_gcs_folder_location(
+              gcs_subfolder,
+              test_group_id,
+          )
           nightly_cpu = gke_config.get_maxtext_cpu_end_to_end_gke_config(
               device_type=test_scripts_details[0]["cpu_device_type"],
               cpu_zone=test_scripts_details[0]["cpu_zone"],

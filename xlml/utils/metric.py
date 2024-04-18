@@ -526,7 +526,7 @@ def get_gke_job_status(benchmark_id: str) -> bigquery.JobStatus:
   current_dag = context["dag"]
 
   workload_completion = current_dag.get_task(
-      task_id=f"{benchmark_id}.run_model.wait_for_workload_completion"
+      task_id=f"{benchmark_id}.run_model.wait_for_workload_completion", include_subdags=True
   )
   workload_completion_ti = TaskInstance(workload_completion, execution_date)
   workload_completion_state = workload_completion_ti.current_state()
