@@ -150,7 +150,7 @@ def main(argv: Sequence[str]) -> None:
         return leaf[layer_idx]
       return jax.tree.map(get_cur_layer_params_arr, params)
 
-    old=True
+    old=False
     for layer in range(config.num_decoder_layers):
       if old:
         cur_layer_params = params['params'][f'layers_{layer}']
