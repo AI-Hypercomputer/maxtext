@@ -157,7 +157,7 @@ def main(argv: Sequence[str]) -> None:
         cur_layer_params = {'params':cur_layer_params}
       else:
         cur_layer_params = get_cur_layer_params(params, layer)
-        cur_layer_params['params'] = cur_layer_params['params']['decoder_layer_instance']
+        cur_layer_params['params'] = cur_layer_params['params']['layers']
       reg_layer_activations=decoder_layer(config=config,mesh=mesh).apply(cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode)
     return reg_layer_activations
 
