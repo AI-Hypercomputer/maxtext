@@ -38,13 +38,12 @@ RUN mkdir -p /deps
 # Set the working directory in the container
 WORKDIR /deps
 
-# Copy necessary build files to docker container
-COPY setup.sh requirements.txt constraints_gpu.txt /deps/
+# Copy all files from local workspace into docker container
+COPY . .
 RUN ls .
 
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
 RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} DEVICE=${ENV_DEVICE}
 
-COPY . .
 
 WORKDIR /deps

@@ -853,7 +853,7 @@ class Attention(nn.Module):
       raise ValueError("num_kv_heads is not defined.")
 
     if self.num_query_heads % self.num_kv_heads != 0:
-      raise ValueError("Invaid num_kv_heads for GQA.")
+      raise ValueError("Invalid num_kv_heads for GQA.")
 
     kv_proj = DenseGeneral(
         features=(self.num_kv_heads, self.head_dim),
@@ -918,7 +918,7 @@ class Attention(nn.Module):
     Projects the inputs into multi-headed query, key, and value vectors,
     applies dot-product attention and project the results to an output vector.
 
-    There are three modes: training, prefill and autoregression. During training, the KV cahce
+    There are three modes: training, prefill and autoregression. During training, the KV cache
     is ignored. During prefill, the cache is filled. During autoregression the cache is used.
 
     In the cache initialization call, `inputs_q` has a shape [batch, length,

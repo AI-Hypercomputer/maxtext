@@ -169,7 +169,7 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance=0.01):
   perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
   assert total_num_params_per_chip >= perfectly_sharded_params_per_chip, (
       "Number of parameters per chip must not be less than in the ideal sharded "
-      "scenario accross `fsdp`, `fsdp_transpose`,`sequence`, `tensor` axes."
+      "scenario across `fsdp`, `fsdp_transpose`,`sequence`, `tensor` axes."
   )
   assert total_num_params_per_chip / perfectly_sharded_params_per_chip - 1 < tolerance, (
       f"Number of unsharded parameters exceeds tolerance {tolerance * 100}% " "of total parameters."

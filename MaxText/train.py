@@ -74,7 +74,7 @@ def validate_train_config(config):
     max_logging.log("WARNING: 'dataset_path' might be pointing your local file system")
   if not config.base_output_directory.startswith("gs://"):
     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
-  assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive interger."
+  assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive integer."
 
 
 def get_first_step(state):

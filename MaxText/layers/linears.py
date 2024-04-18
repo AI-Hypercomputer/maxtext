@@ -120,7 +120,7 @@ class DenseGeneral(nn.Module):
     kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
     if quantizations.in_serve_mode(self.quant):
       # During aqt convert state we delete kernel weight from params to save memory.
-      # Instead they are retreived from the tensors stored in the 'aqt' collection.
+      # Instead they are retrieved from the tensors stored in the 'aqt' collection.
       kernel = jnp.zeros(kernel_shape)
     else:
       kernel = self.param(

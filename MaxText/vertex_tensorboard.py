@@ -72,7 +72,7 @@ class VertexTensorboardManager:
     return tensorboard_url
 
   def upload_data(self, tensorboard_dir):
-    """Starts an uploader to continously monitor and upload data to Vertex Tensorboard.
+    """Starts an uploader to continuously monitor and upload data to Vertex Tensorboard.
 
     Args:
       tensorboard_dir: directory that contains Tensorboard data.
