@@ -370,10 +370,42 @@ class Pipeline(nn.Module):
 
     weights = self.variables
     weights['params'] = weights['params']['layers']
-    # TODO: may want to have some simplified flow when is initializing instead (don't need to run through total_iters)
-    for loop_iteration in range(total_iterations):
-       print(f"starting iteration {loop_iteration}")
-       loop_state = self.run_one_iteration(loop_state, weights, positions, segment_ids, deterministic, model_mode)
+    
+    func_to_scan = functools.partial(self.run_one_iteration, weights=weights, deterministic=deterministic, model_mode=model_mode)
+    def dumb_func(model, loop_state, weights, positions, segment_ids, deterministic, model_mode):
+      return model.run_one_iteration(loop_state, weights, positions, segment_ids, deterministic, model_mode)
+
+
+    scanned_loop_iteration = nn.scan(
+      dumb_func,
+      variable_broadcast="params",
+      variable_axes={
+            "summaries": 0,
+            "aux_loss": 0,
+            "intermediates": 0,
+            "hyper_params": 0,
+      },
+      length=total_iterations,
+      in_axes=(
+              nn.broadcast,
+              nn.broadcast,
+              nn.broadcast,
+              nn.broadcast,
+              nn.broadcast,
+      ),
+      # Dropout keys will be split for each iteration.
+      split_rngs={'params': True},
+      #split_rngs={'random': True},
+      # Each loop iteration gets staged versions of the positions and segments
+      # In real implementation would be all microbatches, and up to body_fprop to grab only the stage one the current iter
+      #in_axes = (nn.broadcast,nn.broadcast,nn.broadcast,nn.broadcast)
+    )
+    if True:
+        loop_state = scanned_loop_iteration(loop_state, weights, positions, segment_ids, deterministic, model_mode)
+    else:
+        for loop_iteration in range(total_iterations):
+            print(f"starting iteration {loop_iteration}")
+            loop_state = self.run_one_iteration(loop_state, weights, positions, segment_ids, deterministic, model_mode)
 
     # The final output is located in the input/output array, however the output microbatches may be permuted relative to the input
     final_output = self.permute_output_ms_dim(loop_state["state_io"])
