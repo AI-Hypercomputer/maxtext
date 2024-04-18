@@ -76,16 +76,16 @@ def prefill_benchmark(
       config, engine, decode_state, params, tokens, true_length, iters, profile_name=profile_name
   )
   prefill_average_ms = 1000 * time_in_s / iters
-  total_prefill_tflops, _, _ = maxtext_utils.calculate_tflops_prefill(num_model_params, tokens.size, config)
-  tflops_per_sec_per_device = total_prefill_tflops / jax.device_count() / prefill_average_ms * 1000.0
+  prefill_tflops_per_device, _, _ = maxtext_utils.calculate_prefill_tflops_per_device(num_model_params, tokens.size, config)
+  tflops_per_sec_per_device = prefill_tflops_per_device /  prefill_average_ms * 1000.0
   print(
       f"\tPrefill step average time: {prefill_average_ms:.3f}ms\n"
-      f"\tPrefill total TFLOPs: {total_prefill_tflops:.3f}\n"
+      f"\tPrefill total TFLOPs/device: {prefill_tflops_per_device:.3f}\n"
       f"\tPrefill TFLOPs/sec/device: {tflops_per_sec_per_device:.3f}\n\n\n\n"
   )
   result_dict = {
       "prefill_time_in_ms": prefill_average_ms,
-      "prefill_total_tflops": total_prefill_tflops,
+      "prefill_total_tflops_per_device": prefill_tflops_per_device,
       "prefill_tflops_per_sec_per_device": tflops_per_sec_per_device,
   }
   return result_dict, decode_state

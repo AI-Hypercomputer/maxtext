@@ -118,28 +118,29 @@ def calculate_tflops_training_per_device(num_model_parameters, config, log=True)
 
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
-def calculate_tflops_prefill(num_model_parameters, prefill_length, config, log=True):
+def calculate_prefill_tflops_per_device(num_model_parameters, prefill_length, config, log=True):
   """Calculate training TFLOP"""
-  learnable_weight_tflops = 2 * num_model_parameters * prefill_length / 10**12
+  learnable_weight_tflops = 2 * num_model_parameters * prefill_length / jax.device_count() / 1e12
   noncasual_attention_flops = (
       4
       * config.num_query_heads
       * config.num_decoder_layers
       * config.head_dim
       * prefill_length**2
-      / 10**12
+      / jax.device_count()
+      / 1e12
   )
   causal_attention_tflops = noncasual_attention_flops / 2  # due to causality in attention
   total_tflops = learnable_weight_tflops + causal_attention_tflops
 
   if log:
     print(
-        "Per prefill step: \n",
-        f"\tTotal TFLOPs: {total_tflops:.2f} \n",
-        f"\t\tLearnable weight TFLOPs: {learnable_weight_tflops} ",
-        f"({100 * learnable_weight_tflops/total_tflops:.2f})% of Total\n",
-        f"\t\tCausal attention TFLOPs: {causal_attention_tflops} ",
-        f"({100 * causal_attention_tflops/total_tflops:.2f})% of Total",
+      "Per prefill step per device: \n",
+      f"\tTotal TFLOPs: {total_tflops:.2f} \n",
+      f"\t\tLearnable weight TFLOPs: {learnable_weight_tflops:.2f} ",
+      f"({100 * learnable_weight_tflops/total_tflops:.2f})% of Total\n",
+      f"\t\tCausal attention TFLOPs: {causal_attention_tflops:.2f} ",
+      f"({100 * causal_attention_tflops/total_tflops:.2f})% of Total",
     )
   return total_tflops, learnable_weight_tflops, causal_attention_tflops
 
