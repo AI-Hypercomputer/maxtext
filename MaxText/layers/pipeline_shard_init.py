@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Big TODO: Rename the partitioning (including metadata partition_name) to stages instead of layers
-# Rename the metadata partition name circ_layers to circ_repeats
 ''' Pipeline layer wrapping a decoder layer. Supports circular pipelining '''
 
 import jax
@@ -49,11 +47,13 @@ class Pipeline(nn.Module):
   # TODO: Some properties, (num repeat, num_micro are through the config, some are derived. This makes it annoying to call different properties, some are self.property, some are self.config.property)
   # TODO: Should we declare the derived properties here as well (e.g. num_stages? I think anything declared here becomes required as an input though
   config: common_types.Config
-  decoder_layer_instance: nn.Module
+  decoder_layer_class: nn.Module
   mesh: common_types.Mesh
   quant: Optional[quantizations.AqtQuantization] = None
 
   def setup(self):
+    #decoder_layers = [self.decoder_layer_class(config=self.config, mesh=self.mesh, name=f'layers_{lyr}', quant=self.quant) for lyr in range(self.config.num_decoder_layers)]
+    #self.decoder_layers = decoder_layers
     self.num_stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
     self.layers_per_stage = self.config.num_decoder_layers / (self.num_stages * self.config.num_pipeline_repeats)
     # TODO: should this assert be in this class or in the initial pyconfig check?
@@ -112,25 +112,14 @@ class Pipeline(nn.Module):
         circ_storage_mover = shift
     else:
        circ_storage_mover = None
-    loop_state = {
-      "state_io": state_io,
-      "shift": shift,
-      "circ_storage": circ_storage,
-      "circ_storage_mover": circ_storage_mover,
-      "loop_iteration": 0
-    }
-    return loop_state
 
-  def get_iteration_inputs(self, loop_state):
+    return state_io, shift, circ_storage, circ_storage_mover
+
+  def get_iteration_inputs(self, loop_iteration, state_io, circ_storage, shift):
     '''
     Construct stages_in: the global array that is operated on for this iteration, shape same as shift=[stages, micro_size, sequence, embed]
     This is almost a rotated version of the last outputs, except for the first stage which must grab a new batch from either state_io or circ_storage
     '''
-
-    state_io = loop_state["state_io"]
-    loop_iteration = loop_state["loop_iteration"]
-    circ_storage = loop_state["circ_storage"]
-    shift = loop_state["shift"]
 
     # Setup potential input from state_io, which has a rotating microbatch index (size of micro/stages, state_io_batch_idx below)
     state_io_batch_idx = loop_iteration % self.microbatches_per_stage
@@ -208,7 +197,7 @@ class Pipeline(nn.Module):
     stages_array = jnp.reshape(stages_array, (self.num_stages,) + microbatched_array.shape[1:])
     return stages_array
 
-  def get_new_loop_state(self,output, old_state):
+  def get_new_loop_state(self,output, old_state_io, old_circ_storage, old_circ_storage_mover, loop_iteration):
     '''
       Update the various buffers given the output of the most recent iteration
       * state_io: rotates left/up by 1 (replace last element with last stage output) - we are pushing inputs up into the pipeline
@@ -217,10 +206,6 @@ class Pipeline(nn.Module):
       * circ_mover gets FULL? rotated output -- I think it should only need the last stage of output
     '''
 
-    old_state_io = old_state["state_io"]
-    old_circ_storage = old_state["circ_storage"]
-    old_circ_storage_mover = old_state["circ_storage_mover"]
-    loop_iteration = old_state["loop_iteration"]
     # Shift becomes a rotated-right version of the previous output
     def _rotate_right(output_in):
       # Use lax.slice to avoid generating a gather.
@@ -262,16 +247,9 @@ class Pipeline(nn.Module):
             state_in, stream_slice, stream_buf_idx, axis=1)
     #new_state = _update_state_io(old_state_io, stream_slice, output)# TODO(medium):same sharding/jit issue
     jit_update_state_io = jax.jit(_update_state_io)
-    new_state_io = jit_update_state_io(old_state_io, stream_slice, output) 
+    new_state = jit_update_state_io(old_state_io, stream_slice, output) 
     
-    new_state = {
-      "state_io": new_state_io,
-      "shift": new_shift,
-      "circ_storage": new_circ_storage,
-      "circ_storage_mover": new_circ_storage_mover,
-      "loop_iteration": loop_iteration + 1
-      }
-    return new_state
+    return new_state, new_shift, new_circ_storage, new_circ_storage_mover
    
   def permute_output_ms_dim(self, output):
     '''
@@ -288,210 +266,97 @@ class Pipeline(nn.Module):
     output = output[:,permutation]
     return output
 
-  # For circular pipelines, we use different weights at different loop iterations.
-  # This function allows us to gather the relevant weights for the current iteration, as well as
-  # take on a different form to initialize the weights
-  def get_pipeline_body_func(self, loop_iteration, positions_stage_idx, segment_stage_idx):
-    # TODO (try to call this (maybe get_pipeline_body_func) in a non-scan?)
-    def func_to_vmap(decoder_layer_instance, per_stage_inputs, per_stage_positions, per_stage_segments, deterministic, model_mode):
-       return decoder_layer_instance(per_stage_inputs, per_stage_positions, per_stage_segments, deterministic, model_mode)
-
-    pipeline_body_func = nn.vmap(
-        func_to_vmap,
-        in_axes=(0,positions_stage_idx, segment_stage_idx, None, None),
-        out_axes = 0,
-        spmd_axis_name="stage",
-        variable_axes={'params': 0},
-        split_rngs={'params': True},
-        metadata_params={
-         "partition_name": "layers",
-         "is_initializing": self.is_initializing(),
-         "x_times": self.num_stages
-        }
-    )
-    if self.config.num_pipeline_repeats == 1:
-      return pipeline_body_func 
-    elif self.is_initializing():
-       # To initialize all of the variables, we use a doubly nested vmap of (n_repeat x n_stages)
-       circular_vmap_wrap = nn.vmap(
-          pipeline_body_func,
-          in_axes=(0,positions_stage_idx, segment_stage_idx, None, None),
-          out_axes=0,
-          variable_axes={'params': 0},
-          split_rngs={'params': True},
-          metadata_params={
-             "partition_name": "circ_layers",
-             "x_times": self.config.num_pipeline_repeats
-          },        
-       )
-       return circular_vmap_wrap
-    else:
-      vmapped_fn = nn.add_metadata_axis(
-         pipeline_body_func,
-         variable_axes={"params": 0},
-         metadata_params={
-            "is_initializing": False,
-            "x_times": self.config.num_pipeline_repeats,
-            "sub_weight_split_dims_mapping": (None,),
-            "partition_name": "circ_layers",
-            
-         }
-      )
-      microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0)
-      repeat_ids = microbatch_ids // self.config.num_pipeline_microbatches
-      def gather_layers(vars):
-         def _vmap_parallel_gather(xs, ids, ids_dim, xs_dim):
-           def _gather_one(x, i):
-             dim = ids_dim
-             if xs_dim < dim:
-               dim -= 1
-             return jnp.squeeze(jax.lax.dynamic_slice_in_dim(x, i, 1, dim), dim)
-           out_dim = xs_dim
-           if ids_dim < xs_dim:
-             out_dim -= 1
-           # TODO: shard_dim_by_stages
-           #ids = self._shard_dim_by_stages(ids, 0)
-           #xs = self._shard_dim_by_stages(xs, xs_dim)
-           outs = jax.vmap(_gather_one, in_axes=(xs_dim, 0), out_axes=out_dim)(xs, ids)
-           return outs
-           #return self._shard_dim_by_stages(outs, out_dim)
-         return jax.tree_map(
-            functools.partial(_vmap_parallel_gather, ids=repeat_ids, ids_dim=0, xs_dim=1), vars
-         )
-      vmapped_fn = nn.map_variables(
-        vmapped_fn,
-        mapped_collections=["params"],
-        mutable=True,
-        trans_in_fn=gather_layers
-      )
-      return vmapped_fn
-    
-       
-
-     
-     
+  def run_one_iteration(self, state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode):
+   '''Run one loop iteration - gets weights and inputs for each stage, run the stages in parallel, and update the various state buffers'''
+   stages_weights = self.get_weights_stage(weights, loop_iteration)
+   stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
+   if positions is not None:
+    stages_positions = self.get_microbatches_for_stages(positions, loop_iteration)
+    positions_stage_idx = 0
+   else:
+     stages_positions = None
+     positions_stage_idx = 0
+   if segment_ids is not None:
+    stages_segment_ids = self.get_microbatches_for_stages(segment_ids, loop_iteration)
+    segment_stage_idx = 0
+   else:
+    stages_segment_ids
+    segment_stage_idx = None
+   stages_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,positions_stage_idx, segment_stage_idx, None, None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
+   new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = self.get_new_loop_state(stages_output, state_io, circ_storage, circ_storage_mover, loop_iteration)
+   return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
+  
   @nn.compact
   def __call__(self, inputs: jnp.ndarray, positions: jnp.ndarray, segment_ids:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
     # Reshape inputs of [global_batch, ...] to [microbatches, microbatch_sizes, ...]
     inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length, self.config.emb_dim))
     if positions is not None:
       positions = positions.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
+      example_position = positions[0]
+    else:
+      example_position = None
     if segment_ids is not None:
       segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
+      example_segmentation = segment_ids[0]
+    else:
+      example_segmentation = None
 
+    # TODO: Consider refactoring scan to call a fctn that takes instance as arg instead of class
+    # TODO: Maxtext uses layer scan axis as 1 instead of 0, I don't want to deal with that indexing
+    def scan_to_init_params():
+      y, _ = nn.scan(
+          self.decoder_layer_class,
+          variable_axes={
+              "params": 0,
+              "cache": 1,
+              "intermediates": 0,
+              "aqt": 0,
+              "_overwrite_with_gradient": 0,
+          },
+          split_rngs={
+              "params": True,
+              "dropout": self.config.enable_dropout,
+          },
+          in_axes=(
+              nn.broadcast,
+              nn.broadcast,
+              nn.broadcast,
+              nn.broadcast,
+          ),
+          length=self.config.num_decoder_layers,
+          metadata_params={nn.PARTITION_NAME: "layers"},
+      )(config=self.config, mesh=self.mesh, name="layers", quant=self.quant)(
+          inputs[0],
+          segment_ids[0],
+          positions[0],
+          deterministic,
+          model_mode,
+      )
+      return y
+    if self.is_mutable_collection("params"):
+      return scan_to_init_params()
+      
+      
+    breakpoint()  
+    # We need to access the variables of the decoder_layer, the below loop fills in the variables dictionary (previously empty dict since lazy initialization)
     
+    for decoder in self.decoder_layers:
+      # Initialize the decoder variables, since they are lazily initialized and we need them now.
+      _ = decoder(inputs[0], example_position, example_segmentation, deterministic, model_mode)
+
+    state_io, shift, circ_storage, circ_storage_mover = self.init_states(inputs)
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
     # TODO(huge): Shard the weights. This may be tricky b/c there is no "stage" axis in the weights to shard over until after the below
-    #weights = [decoder.variables for decoder in self.decoder_layers]
+    weights = [decoder.variables for decoder in self.decoder_layers]
     # Go from a list of size n_layers of weight pytrees to a single pytree where each leaf has a leading dimension of n_layers 
-    # weights = stack_pytrees(*weights)
+    weights = stack_pytrees(*weights)
     # TODO: may want to have some simplified flow when is initializing instead (don't need to run through total_iters)
-
-
-    # This function is wrapped in an nn.scan so its first argument must be a nn.model. The model is the full pipeline,
-    # e.g. self, since we need multiple decoder layers (namely #stages of them) to run a single pipeline iteration. We name the first argument model instead of
-    # self to highlight this point. The loop state below is the nn.scan "carry", it is both an input at each loop iteration
-    # and then an output which is fed as input to the next iteration. It has the required information to grab the relevant
-    # microbatches for the current loop iteration. The input positions and segment_ids are all (shaped as [num_micro, micro_size,seq]),
-    # and scan_fn will grab the relevant microbatches for the current loop iteration
-    def _run_one_loop_iteration(model, loop_state):
-
-      loop_iteration = loop_state["loop_iteration"]
-      stages_inputs = model.get_iteration_inputs(loop_state)
-      if positions is not None:
-        stages_positions = model.get_microbatches_for_stages(positions, loop_iteration)
-        positions_stage_idx = 0
-      else:
-        stages_positions = None
-        positions_stage_idx = None
-      if segment_ids is not None:
-        stages_segment_ids = model.get_microbatches_for_stages(segment_ids, loop_iteration)
-        segment_stage_idx = 0
-      else:
-        stages_segment_ids
-        segment_stage_idx = None
-      
-      vmapped_fn = model.get_pipeline_body_func(loop_iteration, positions_stage_idx, segment_stage_idx)
-
-      # TODO: remove unnecessary alias
-      instantiated_vmapped_fn = vmapped_fn
-      if model.config.num_pipeline_repeats > 1 and model.is_initializing():
-          # To initialize all of the variables (weights) use a doubly nested vmap (outer n_repeat, inner n_stages)
-          # We have to grow the stage inputs by a factor of n_repeat to feed this doubly nested vmap but then
-          # we grab only the the inner n_stages as output to match the real forward pass output shape.
-          # For a real forward pass we will use the single vmapped function, but with a variable transform to
-          # feed the right weights to the right stage
-          outputs = instantiated_vmapped_fn(
-             model.decoder_layer_instance,
-             jax.lax.broadcast(stages_inputs, [self.config.num_pipeline_repeats]),
-             jax.lax.broadcast(stages_positions, [self.config.num_pipeline_repeats]),
-             jax.lax.broadcast(stages_segment_ids, [self.config.num_pipeline_repeats]),
-             deterministic,
-             model_mode
-          )
-          outputs = outputs[0]
-      else:
-        # TODO: When scan is turned on, need to replace outputs with outputs, _
-        outputs = instantiated_vmapped_fn(
-          model.decoder_layer_instance,
-          stages_inputs,
-          stages_positions,
-          stages_segment_ids,
-          deterministic,
-          model_mode
-        )
-      
-      new_loop_state = model.get_new_loop_state(outputs, loop_state)
-
-      # The output of a function to be nn.scan should be length 2: out_carry, per_iteration_outputs
-      # Currently there is no use of per_iteration_outputs (which would get concatenated into a dimension of size num_iterations)
-      return new_loop_state, None
-
-    total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
-    # TODO: Re-word comment
-    # `variable_broadcast` for params because we already have a full pipeline
-    # due to the inner vmap.
-    NON_TRAINABLE = "non_trainable"
-    variable_carry =[]
-    variable_broadcast = ["params"]
-    if self.is_mutable_collection(NON_TRAINABLE):
-      variable_carry.append(NON_TRAINABLE)
-    else:
-      variable_broadcast.append(NON_TRAINABLE)
-    scanned_loop_iteration = nn.scan(
-      _run_one_loop_iteration,
-      #variable_broadcast=['params', 'non_trainable'],
-      variable_broadcast=variable_broadcast,
-      variable_axes={
-            "summaries": 0,
-            "aux_loss": 0,
-            "intermediates": 0,
-            "hyper_params": 0,
-      },
-      variable_carry=variable_carry,
-      length=total_iterations,
-      # Dropout keys will be split for each iteration.
-      split_rngs={'params': True},
-      #split_rngs={'random': True},
-      # Each loop iteration gets staged versions of the positions and segments
-      # In real implementation would be all microbatches, and up to body_fprop to grab only the stage one the current iter
-      #in_axes = (nn.broadcast,nn.broadcast,nn.broadcast,nn.broadcast)
-    )
-    init_loop_state = self.init_states(inputs)
-
-    if False:
-      final_loop_state, _ = scanned_loop_iteration(self, init_loop_state)
-    else: # Doesn't work since tries to create several submodules instead of only once? Even fails with below
-       if self.is_initializing():
-          total_iterations = 1
-       loop_state = init_loop_state
-       for i in range(total_iterations):
-          loop_state, _ = _run_one_loop_iteration(self, init_loop_state)
-       final_loop_state = loop_state
-          
+    for loop_iteration in range(total_iterations):
+       print(f"starting iteration {loop_iteration}")
+       state_io, shift, circ_storage, circ_storage_mover = self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode)
 
     # The final output is located in the input/output array, however the output microbatches may be permuted relative to the input
-    final_output = self.permute_output_ms_dim(final_loop_state["state_io"])
+    final_output = self.permute_output_ms_dim(state_io)
 
     # reshape outputs to match input shape of total batch instead of microbatches [batch, sequence, embed]
     final_output = jnp.reshape(final_output, (self.config.global_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim))

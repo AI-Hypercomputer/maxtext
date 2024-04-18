@@ -119,13 +119,23 @@ def main(argv: Sequence[str]) -> None:
   #   mesh=mesh
   # )
 
-  decoder_layer_instance = simple_decoder_layer.SimpleDecoderLayer(config=config, mesh=mesh)
-  from layers import pipeline_flax_vmap
-  my_pipeline = pipeline_flax_vmap.Pipeline(
+  # decoder_layer_instance = simple_decoder_layer.SimpleDecoderLayer(config=config, mesh=mesh)
+  # from layers import pipeline_flax_vmap
+  # my_pipeline = pipeline_flax_vmap.Pipeline(
+  #   config=config,
+  #   decoder_layer_instance=decoder_layer_instance,
+  #   mesh=mesh
+  # )
+
+  decoder_layer_class = simple_decoder_layer.SimpleDecoderLayer
+  from layers import pipeline
+  my_pipeline = pipeline.Pipeline(
     config=config,
-    decoder_layer_instance=decoder_layer_instance,
+    decoder_layer_class=decoder_layer_class,
     mesh=mesh
   )
+
+
   init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
   #pipeline_out = my_pipeline.apply(init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
   def run_regular_pipeline(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
@@ -139,11 +149,14 @@ def main(argv: Sequence[str]) -> None:
         return leaf[layer_idx]
       return jax.tree.map(get_cur_layer_params_arr, params)
 
+    old=True
     for layer in range(config.num_decoder_layers):
-      # cur_layer_params = params['params'][f'layers_{layer}']
-      # cur_layer_params = {'params':cur_layer_params}
-      cur_layer_params = get_cur_layer_params(params, layer)
-      cur_layer_params['params'] = cur_layer_params['params']['layers']
+      if old:
+        cur_layer_params = params['params'][f'layers_{layer}']
+        cur_layer_params = {'params':cur_layer_params}
+      else:
+        cur_layer_params = get_cur_layer_params(params, layer)
+        cur_layer_params['params'] = cur_layer_params['params']['decoder_layer_instance']
       reg_layer_activations=decoder_layer(config=config,mesh=mesh).apply(cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode)
     return reg_layer_activations
 
