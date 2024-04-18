@@ -261,3 +261,14 @@ vertex_tensorboard_project: ""
 # Region to create Vertex AI Tensorboard in for GCE, blank if running via XPK
 # Vertex AI supported regions: https://cloud.google.com/vertex-ai/docs/general/locations#available-regions
 vertex_tensorboard_region: ""
+
+# Inference
+inference_mode: False
+inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
+inference_microbenchmark_stages: "prefill,generate"
+
+inference_batching_mode: "static"
+inference_output_path: ""
+inference_profiler_batch_indices: 5,10
+
+profiler_server_port: 9999
