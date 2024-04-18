@@ -100,7 +100,9 @@ with models.DAG(
       test_group_id = "chained_tests" + "_" + model + "_" + "stable"
 
       with TaskGroup(group_id=test_group_id, prefix_group_id=False) as group: 
-          shared_gcs_location = name_format.generate_gcs_folder_location(
+          shared_gcs_location = name_format.generate_gcs_folder_location.override(
+                task_id=f"{test_group_id}_generate_gcs_folder_location"
+                )(
               gcs_subfolder,
               test_group_id,
           )
