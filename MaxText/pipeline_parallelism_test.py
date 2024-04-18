@@ -144,7 +144,7 @@ def main(argv: Sequence[str]) -> None:
 
     def get_cur_layer_params(params, layer_idx):
       def get_cur_layer_params_arr(leaf):
-        if config.num_pipeline_repeats > 1:
+        if config.num_pipeline_repeats > 1 and False:
           new_shape = (leaf.shape[0] * leaf.shape[1],) + leaf.shape[2:]
           leaf = jnp.reshape(leaf, new_shape)
         return leaf[layer_idx]

@@ -113,7 +113,14 @@ class Pipeline(nn.Module):
     else:
        circ_storage_mover = None
 
-    return state_io, shift, circ_storage, circ_storage_mover
+    init_loop_state = {
+      "state_io": state_io,
+      "shift": shift,
+      "circ_storage": circ_storage,
+      "circ_storage_mover": circ_storage_mover,
+      "loop_iteration": 0
+    }
+    return init_loop_state
 
   def get_iteration_inputs(self, loop_iteration, state_io, circ_storage, shift):
     '''
@@ -197,7 +204,7 @@ class Pipeline(nn.Module):
     stages_array = jnp.reshape(stages_array, (self.num_stages,) + microbatched_array.shape[1:])
     return stages_array
 
-  def get_new_loop_state(self,output, old_state_io, old_circ_storage, old_circ_storage_mover, loop_iteration):
+  def get_new_loop_state(self,output, loop_state):
     '''
       Update the various buffers given the output of the most recent iteration
       * state_io: rotates left/up by 1 (replace last element with last stage output) - we are pushing inputs up into the pipeline
@@ -205,7 +212,10 @@ class Pipeline(nn.Module):
       * circ_storage: push latest circ_mover (e.g. FULL outputs) into rotating index -- why are we pushing full ouputs, why not just last stage?
       * circ_mover gets FULL? rotated output -- I think it should only need the last stage of output
     '''
-
+    old_state_io = loop_state['state_io']
+    old_circ_storage = loop_state["circ_storage"]
+    old_circ_storage_mover = loop_state["circ_storage_mover"]
+    loop_iteration = loop_state["loop_iteration"]
     # Shift becomes a rotated-right version of the previous output
     def _rotate_right(output_in):
       # Use lax.slice to avoid generating a gather.
@@ -249,7 +259,14 @@ class Pipeline(nn.Module):
     jit_update_state_io = jax.jit(_update_state_io)
     new_state = jit_update_state_io(old_state_io, stream_slice, output) 
     
-    return new_state, new_shift, new_circ_storage, new_circ_storage_mover
+    new_loop_state = {
+      "state_io": new_state,
+      "shift": new_shift,
+      "circ_storage": new_circ_storage,
+      "circ_storage_mover": new_circ_storage_mover,
+      "loop_iteration": loop_iteration + 1
+    }
+    return new_loop_state
    
   def permute_output_ms_dim(self, output):
     '''
@@ -266,8 +283,14 @@ class Pipeline(nn.Module):
     output = output[:,permutation]
     return output
 
-  def run_one_iteration(self, state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode):
+  def run_one_iteration(self, loop_state, weights, positions, segment_ids, deterministic, model_mode):
    '''Run one loop iteration - gets weights and inputs for each stage, run the stages in parallel, and update the various state buffers'''
+   state_io = loop_state['state_io']
+   shift = loop_state["shift"]
+   circ_storage = loop_state["circ_storage"]
+   circ_storage_mover = loop_state["circ_storage_mover"]
+   loop_iteration = loop_state["loop_iteration"]
+
    stages_weights = self.get_weights_stage(weights, loop_iteration)
    stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
    if positions is not None:
@@ -284,9 +307,8 @@ class Pipeline(nn.Module):
     segment_stage_idx = None
    rawr = self.decoder_layer_class(config=self.config, mesh=self.mesh)
    stages_output, _ = jax.vmap(rawr.apply, in_axes=[0,0,positions_stage_idx, segment_stage_idx, None, None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
-   new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = self.get_new_loop_state(stages_output, state_io, circ_storage, circ_storage_mover, loop_iteration)
-   return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
-  
+   new_state = self.get_new_loop_state(stages_output, loop_state)
+   return new_state
   @nn.compact
   def __call__(self, inputs: jnp.ndarray, positions: jnp.ndarray, segment_ids:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
     # Reshape inputs of [global_batch, ...] to [microbatches, microbatch_sizes, ...]
@@ -339,7 +361,7 @@ class Pipeline(nn.Module):
       
       
 
-    state_io, shift, circ_storage, circ_storage_mover = self.init_states(inputs)
+    loop_state = self.init_states(inputs)
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
     # TODO(huge): Shard the weights. This may be tricky b/c there is no "stage" axis in the weights to shard over until after the below
     # weights = [decoder.variables for decoder in self.decoder_layers]
@@ -351,10 +373,10 @@ class Pipeline(nn.Module):
     # TODO: may want to have some simplified flow when is initializing instead (don't need to run through total_iters)
     for loop_iteration in range(total_iterations):
        print(f"starting iteration {loop_iteration}")
-       state_io, shift, circ_storage, circ_storage_mover = self.run_one_iteration(state_io, shift, circ_storage, circ_storage_mover, loop_iteration, weights, positions, segment_ids, deterministic, model_mode)
+       loop_state = self.run_one_iteration(loop_state, weights, positions, segment_ids, deterministic, model_mode)
 
     # The final output is located in the input/output array, however the output microbatches may be permuted relative to the input
-    final_output = self.permute_output_ms_dim(state_io)
+    final_output = self.permute_output_ms_dim(loop_state["state_io"])
 
     # reshape outputs to match input shape of total batch instead of microbatches [batch, sequence, embed]
     final_output = jnp.reshape(final_output, (self.config.global_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim))
