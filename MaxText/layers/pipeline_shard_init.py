@@ -282,7 +282,8 @@ class Pipeline(nn.Module):
    else:
     stages_segment_ids
     segment_stage_idx = None
-   stages_output = jax.vmap(self.decoder_layers[0].apply, in_axes=[0,0,positions_stage_idx, segment_stage_idx, None, None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
+   rawr = self.decoder_layer_class(config=self.config, mesh=self.mesh)
+   stages_output, _ = jax.vmap(rawr.apply, in_axes=[0,0,positions_stage_idx, segment_stage_idx, None, None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
    new_state_io, new_shift, new_circ_storage, new_circ_storage_mover = self.get_new_loop_state(stages_output, state_io, circ_storage, circ_storage_mover, loop_iteration)
    return new_state_io, new_shift, new_circ_storage, new_circ_storage_mover
   
@@ -337,19 +338,16 @@ class Pipeline(nn.Module):
       return scan_to_init_params()
       
       
-    breakpoint()  
-    # We need to access the variables of the decoder_layer, the below loop fills in the variables dictionary (previously empty dict since lazy initialization)
-    
-    for decoder in self.decoder_layers:
-      # Initialize the decoder variables, since they are lazily initialized and we need them now.
-      _ = decoder(inputs[0], example_position, example_segmentation, deterministic, model_mode)
 
     state_io, shift, circ_storage, circ_storage_mover = self.init_states(inputs)
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
     # TODO(huge): Shard the weights. This may be tricky b/c there is no "stage" axis in the weights to shard over until after the below
-    weights = [decoder.variables for decoder in self.decoder_layers]
-    # Go from a list of size n_layers of weight pytrees to a single pytree where each leaf has a leading dimension of n_layers 
-    weights = stack_pytrees(*weights)
+    # weights = [decoder.variables for decoder in self.decoder_layers]
+    # # Go from a list of size n_layers of weight pytrees to a single pytree where each leaf has a leading dimension of n_layers 
+    # weights = stack_pytrees(*weights)
+
+    weights = self.variables
+    weights['params'] = weights['params']['layers']
     # TODO: may want to have some simplified flow when is initializing instead (don't need to run through total_iters)
     for loop_iteration in range(total_iterations):
        print(f"starting iteration {loop_iteration}")

@@ -312,6 +312,7 @@ class Pipeline(nn.Module):
     weights = [decoder.variables for decoder in self.decoder_layers]
     # Go from a list of size n_layers of weight pytrees to a single pytree where each leaf has a leading dimension of n_layers 
     weights = stack_pytrees(*weights)
+    breakpoint() # TODO: Look at these weights
     # TODO: may want to have some simplified flow when is initializing instead (don't need to run through total_iters)
     for loop_iteration in range(total_iterations):
        print(f"starting iteration {loop_iteration}")

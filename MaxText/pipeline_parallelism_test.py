@@ -128,8 +128,9 @@ def main(argv: Sequence[str]) -> None:
   # )
 
   decoder_layer_class = simple_decoder_layer.SimpleDecoderLayer
+  from layers import pipeline_shard_init
   from layers import pipeline
-  my_pipeline = pipeline.Pipeline(
+  my_pipeline = pipeline_shard_init.Pipeline(
     config=config,
     decoder_layer_class=decoder_layer_class,
     mesh=mesh
