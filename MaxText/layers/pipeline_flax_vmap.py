@@ -292,6 +292,7 @@ class Pipeline(nn.Module):
   # This function allows us to gather the relevant weights for the current iteration, as well as
   # take on a different form to initialize the weights
   def get_pipeline_body_func(self, loop_iteration, positions_stage_idx, segment_stage_idx):
+    # TODO (try to call this (maybe get_pipeline_body_func) in a non-scan?)
     def func_to_vmap(decoder_layer_instance, per_stage_inputs, per_stage_positions, per_stage_segments, deterministic, model_mode):
        return decoder_layer_instance(per_stage_inputs, per_stage_positions, per_stage_segments, deterministic, model_mode)
 
