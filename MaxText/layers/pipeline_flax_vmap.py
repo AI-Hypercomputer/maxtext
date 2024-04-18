@@ -49,7 +49,7 @@ class Pipeline(nn.Module):
   # TODO: Some properties, (num repeat, num_micro are through the config, some are derived. This makes it annoying to call different properties, some are self.property, some are self.config.property)
   # TODO: Should we declare the derived properties here as well (e.g. num_stages? I think anything declared here becomes required as an input though
   config: common_types.Config
-  decoder_layer_class: nn.Module
+  decoder_layer_instance: nn.Module
   mesh: common_types.Mesh
   quant: Optional[quantizations.AqtQuantization] = None
 
@@ -292,8 +292,11 @@ class Pipeline(nn.Module):
   # This function allows us to gather the relevant weights for the current iteration, as well as
   # take on a different form to initialize the weights
   def get_pipeline_body_func(self, loop_iteration, positions_stage_idx, segment_stage_idx):
+    def func_to_vmap(decoder_layer_instance, per_stage_inputs, per_stage_positions, per_stage_segments, deterministic, model_mode):
+       return decoder_layer_instance(per_stage_inputs, per_stage_positions, per_stage_segments, deterministic, model_mode)
+
     pipeline_body_func = nn.vmap(
-        self.decoder_layer_class,
+        func_to_vmap,
         in_axes=(0,positions_stage_idx, segment_stage_idx, None, None),
         out_axes = 0,
         spmd_axis_name="stage",
@@ -386,7 +389,7 @@ class Pipeline(nn.Module):
     # and then an output which is fed as input to the next iteration. It has the required information to grab the relevant
     # microbatches for the current loop iteration. The input positions and segment_ids are all (shaped as [num_micro, micro_size,seq]),
     # and scan_fn will grab the relevant microbatches for the current loop iteration
-    def _run_one_loop_iteration(model, loop_state, positions, segment_ids, deterministic, model_mode):
+    def _run_one_loop_iteration(model, loop_state):
 
       loop_iteration = loop_state["loop_iteration"]
       stages_inputs = model.get_iteration_inputs(loop_state)
@@ -405,7 +408,8 @@ class Pipeline(nn.Module):
       
       vmapped_fn = model.get_pipeline_body_func(loop_iteration, positions_stage_idx, segment_stage_idx)
 
-      instantiated_vmapped_fn = vmapped_fn(config=model.config, mesh=model.mesh, name='layers')
+      # TODO: remove unnecessary alias
+      instantiated_vmapped_fn = vmapped_fn
       if self.config.num_pipeline_repeats > 1 and self.is_initializing():
           # To initialize all of the variables (weights) use a doubly nested vmap (outer n_repeat, inner n_stages)
           # We have to grow the stage inputs by a factor of n_repeat to feed this doubly nested vmap but then
@@ -421,6 +425,8 @@ class Pipeline(nn.Module):
           )
           outputs = outputs[0]
       else:
+        # TODO: When scan is turned on, need to replace outputs with outputs, _
+        breakpoint()
         outputs = instantiated_vmapped_fn(
           stages_inputs,
           stages_positions,
@@ -428,7 +434,7 @@ class Pipeline(nn.Module):
           deterministic,
           model_mode
         )
-
+      
       new_loop_state = model.get_new_loop_state(outputs, loop_state)
 
       # The output of a function to be nn.scan should be length 2: out_carry, per_iteration_outputs
@@ -439,18 +445,44 @@ class Pipeline(nn.Module):
     # TODO: Re-word comment
     # `variable_broadcast` for params because we already have a full pipeline
     # due to the inner vmap.
+    NON_TRAINABLE = "non_trainable"
+    variable_carry =[]
+    variable_broadcast = ["params"]
+    if self.is_mutable_collection(NON_TRAINABLE):
+      variable_carry.append(NON_TRAINABLE)
+    else:
+      variable_broadcast.append(NON_TRAINABLE)
     scanned_loop_iteration = nn.scan(
       _run_one_loop_iteration,
-      variable_broadcast=['params', 'non_trainable'],
+      #variable_broadcast=['params', 'non_trainable'],
+      variable_broadcast=variable_broadcast,
+      variable_axes={
+            "summaries": 0,
+            "aux_loss": 0,
+            "intermediates": 0,
+            "hyper_params": 0,
+      },
+      variable_carry=variable_carry,
       length=total_iterations,
       # Dropout keys will be split for each iteration.
       split_rngs={'params': True},
+      #split_rngs={'random': True},
       # Each loop iteration gets staged versions of the positions and segments
       # In real implementation would be all microbatches, and up to body_fprop to grab only the stage one the current iter
-      in_axes = (nn.broadcast,nn.broadcast,nn.broadcast,nn.broadcast)
+      #in_axes = (nn.broadcast,nn.broadcast,nn.broadcast,nn.broadcast)
     )
     init_loop_state = self.init_states(inputs)
-    final_loop_state, _ = scanned_loop_iteration(self, init_loop_state, positions, segment_ids, deterministic, model_mode)
+
+    if True:
+      final_loop_state, _ = scanned_loop_iteration(self, init_loop_state)
+    else: # Doesn't work since tries to create several submodules instead of only once? Even fails with below
+       if self.is_initializing():
+          total_iterations = 1
+       loop_state = init_loop_state
+       for i in range(total_iterations):
+          loop_state, _ = _run_one_loop_iteration(self, init_loop_state)
+       final_loop_state = loop_state
+          
 
     # The final output is located in the input/output array, however the output microbatches may be permuted relative to the input
     final_output = self.permute_output_ms_dim(final_loop_state["state_io"])

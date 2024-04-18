@@ -48,7 +48,7 @@ Quant = quantizations.AqtQuantization
 #-----------------------------------------
 
 
-class LlamaDecoderLayer(nn.Module):
+class LlamaDecoderLayerOriginal(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
   config: models.Config
   mesh: Mesh
@@ -163,4 +163,46 @@ class LlamaDecoderLayer(nn.Module):
     if cfg.scan_layers:
       return layer_output, None
     else:
+      #return inputs
       return layer_output
+
+class LlamaDecoderLayer(nn.Module):
+  """Transformer decoder layer that attends to the encoder."""
+  config: models.Config
+  mesh: Mesh
+  quant: Optional[Quant] = None
+
+  @nn.compact
+  def __call__(self,
+               inputs,
+               decoder_segment_ids,
+               decoder_positions,
+               deterministic,
+               model_mode,
+               ):
+    cfg = self.config
+    mesh = self.mesh
+
+    # inputs = nn.with_logical_constraint(
+    #     inputs, ('activation_batch', 'activation_length', 'activation_embed'))
+
+    return linears.DenseGeneral(
+       cfg.emb_dim,
+       kernel_axes=('embed', 'embed'),
+       name="my_dense",
+       )(inputs)
+        # MLP block.
+    # mlp_lnx = linears.MlpBlock(
+    #     intermediate_dim=cfg.mlp_dim,
+    #     activations=cfg.mlp_activations,
+    #     intermediate_dropout_rate=cfg.dropout_rate,
+    #     dtype=cfg.dtype,
+    #     weight_dtype=cfg.weight_dtype,
+    #     name='mlp',
+    #     config=cfg,
+    #     quant=self.quant,
+    # )(inputs, deterministic=deterministic)
+    # mlp_lnx = nn.with_logical_constraint(
+    #     mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')
+    # )
+    # return mlp_lnx

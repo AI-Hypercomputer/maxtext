@@ -100,8 +100,13 @@ def main(argv: Sequence[str]) -> None:
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
-  decoder_layer = simple_decoder_layer.SimpleDecoderLayer
+  #decoder_layer = simple_decoder_layer.SimpleDecoderLayer
+  #from layers import nested_simple_decoder_layer
+  #decoder_layer = nested_simple_decoder_layer.SimpleDecoderLayer
+  #decoder_layer = simple_decoder_layer.SimpleDecoderLayer(config=config,mesh=mesh).apply
   #decoder_layer = llama2.LlamaDecoderLayer
+  from layers import simple_dg
+  decoder_layer = simple_dg.SimpleDenseGeneral
   # my_pipeline = pipeline.Pipeline(
   #   config=config,
   #   decoder_layer_class=decoder_layer,
@@ -113,10 +118,12 @@ def main(argv: Sequence[str]) -> None:
   #   decoder_layer_class=decoder_layer,
   #   mesh=mesh
   # )
+
+  decoder_layer_instance = simple_decoder_layer.SimpleDecoderLayer(config=config, mesh=mesh)
   from layers import pipeline_flax_vmap
   my_pipeline = pipeline_flax_vmap.Pipeline(
     config=config,
-    decoder_layer_class=decoder_layer,
+    decoder_layer_instance=decoder_layer_instance,
     mesh=mesh
   )
   init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
