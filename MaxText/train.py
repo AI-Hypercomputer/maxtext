@@ -51,6 +51,7 @@ from layers import models
 import jax.numpy as jnp
 from jax import random
 from jax.sharding import Mesh
+from jax.experimental import checkify
 
 from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
@@ -310,6 +311,14 @@ def record_goodput(recorder, config, step=None, job_start=False, job_end=False):
     if step is not None:
       recorder.record_step_start_time(step)
 
+def check_example_batch(config, example_batch):
+  if config.max_checkify:
+    jittable_f = checkify.checkify(
+        lambda x: checkify.check(jnp.any(x > -1), "Batch contains bad synthetic data!")
+    )
+    # Check if inputs in batch contains bad synthetic data.
+    err, _ = jax.jit(jittable_f)(example_batch['inputs'][: config.global_batch_size_to_train_on, :])
+    err.throw()
 
 def setup_mesh_and_model(config):
   """Set up the mesh and the model for training
@@ -485,6 +494,7 @@ def train_loop(config, state=None):
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       example_batch = load_next_batch(data_iterator, example_batch, config)
+      check_example_batch(config, example_batch=example_batch)
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, step=step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
