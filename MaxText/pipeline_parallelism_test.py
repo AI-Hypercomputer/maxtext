@@ -21,6 +21,24 @@ import max_utils
 from layers import pipeline
 from layers import llama2
 
+import jax.numpy as jnp
+
+def pretty_print_pytree(pytree, indent_level=0):
+  """Pretty-prints a JAX PyTree, showing the shapes of each leaf.
+
+  Args:
+    pytree: The JAX PyTree to print.
+    indent_level: The initial indentation level (default: 0).
+  """
+
+  for key, value in pytree.items():
+    indent = "  " * indent_level  # Calculate indentation
+    if isinstance(value, jnp.ndarray):
+      print(f"{indent}{key} {value.shape}")  # Print arrays with shape
+    else:
+      print(f"{indent}{key}")  # Print other leaves as they are
+      pretty_print_pytree(value, indent_level + 1)  # Recurse for nested structures
+
 def get_weights_and_inputs(batch_size, sequence, features, n_layers):
     '''Get random weights, random inputs, and random targets
         Returns
@@ -105,8 +123,7 @@ def main(argv: Sequence[str]) -> None:
   #decoder_layer = nested_simple_decoder_layer.SimpleDecoderLayer
   #decoder_layer = simple_decoder_layer.SimpleDecoderLayer(config=config,mesh=mesh).apply
   #decoder_layer = llama2.LlamaDecoderLayer
-  from layers import simple_dg
-  decoder_layer = simple_dg.SimpleDenseGeneral
+
   # my_pipeline = pipeline.Pipeline(
   #   config=config,
   #   decoder_layer_class=decoder_layer,
@@ -127,7 +144,9 @@ def main(argv: Sequence[str]) -> None:
   #   mesh=mesh
   # )
 
-  decoder_layer_class = simple_decoder_layer.SimpleDecoderLayer
+  from layers import simple_dg
+  #decoder_layer_class = simple_decoder_layer.SimpleDecoderLayer
+  decoder_layer_class = llama2.LlamaDecoderLayer
   from layers import pipeline_shard_init
   from layers import pipeline
   my_pipeline = pipeline_shard_init.Pipeline(
@@ -139,6 +158,7 @@ def main(argv: Sequence[str]) -> None:
 
   init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
   #pipeline_out = my_pipeline.apply(init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+  #breakpoint()
   def run_regular_pipeline(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
     reg_layer_activations = inputs
 
@@ -158,7 +178,7 @@ def main(argv: Sequence[str]) -> None:
       else:
         cur_layer_params = get_cur_layer_params(params, layer)
         cur_layer_params['params'] = cur_layer_params['params']['layers']
-      reg_layer_activations=decoder_layer(config=config,mesh=mesh).apply(cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode)
+      reg_layer_activations, _ = decoder_layer_class(config=config,mesh=mesh).apply(cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode)
     return reg_layer_activations
 
 
