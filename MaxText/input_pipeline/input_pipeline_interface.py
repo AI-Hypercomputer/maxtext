@@ -16,6 +16,8 @@ limitations under the License.
 
 """Input pipeline"""
 
+import numpy as np
+import tensorflow as tf
 import tensorflow_datasets as tfds
 import jax
 import jax.numpy as jnp
@@ -25,7 +27,7 @@ from input_pipeline import _tfds_data_processing
 from input_pipeline import _grain_data_processing
 from input_pipeline import _tfds_data_processing_c4_mlperf
 import tokenizer
-
+import multihost_dataloading
 
 def get_tokenizer(tokenizer_path, add_bos=True, add_eos=True):
   # Load tokenizer
@@ -134,43 +136,35 @@ class BadSyntheticDataIterator:
 
   def __init__(self, config, mesh):
     self.mesh = mesh
-    self.config = config
-    data_pspec = P(*config.data_sharding)
-    data_pspec_shardings = jax.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
-    self.data_generator = jax.jit(
-        BadSyntheticDataIterator.get_bad_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
-    )
+    dataset = BadSyntheticDataIterator.get_bad_synthetic_data(config)
+    self.data_generator = multihost_dataloading.MultiHostDataLoadIterator(dataset, self.mesh)
 
-  def __iter__(self):
-    return self
-
+  def  __iter__(self):
+    return self.data_generator
+  
   def __next__(self):
-    with self.mesh:
-      return self.data_generator(self.config)
+    return next(self.data_generator)
 
   @staticmethod
   def get_bad_synthetic_data(config):
     """fill negative value in synthetic data"""
     output = {}
-    output["inputs"] = jax.numpy.full(
-        (config.global_batch_size_to_load, config.max_target_length), -1, dtype=jax.numpy.int32
-    )
-    output["inputs_position"] = jax.numpy.full(
-        (config.global_batch_size_to_load, config.max_target_length), -1, dtype=jax.numpy.int32
-    )
-    output["inputs_segmentation"] = jax.numpy.full(
-        (config.global_batch_size_to_load, config.max_target_length), -1, dtype=jax.numpy.int32
-    )
-    output["targets"] = jax.numpy.full(
-        (config.global_batch_size_to_load, config.max_target_length), -1, dtype=jax.numpy.int32
-    )
-    output["targets_position"] = jax.numpy.full(
-        (config.global_batch_size_to_load, config.max_target_length), -1, dtype=jax.numpy.int32
-    )
-    output["targets_segmentation"] = jax.numpy.full(
-        (config.global_batch_size_to_load, config.max_target_length), -1, dtype=jax.numpy.int32
-    )
-    return output
+    output['inputs'] = tf.data.Dataset.from_tensor_slices(np.full((1, config.max_target_length),
+                                                                  -1, dtype=jax.numpy.int32))
+    output['inputs_position'] = tf.data.Dataset.from_tensor_slices(np.full((1, config.max_target_length),
+                                                                  -1, dtype=jax.numpy.int32))
+    output['inputs_segmentation'] = tf.data.Dataset.from_tensor_slices(np.full( (1, config.max_target_length),
+                                                                  -1, dtype=jax.numpy.int32))
+    output['targets'] = tf.data.Dataset.from_tensor_slices(np.full( (1, config.max_target_length),
+                                                                  -1, dtype=jax.numpy.int32))
+    output['targets_position'] = tf.data.Dataset.from_tensor_slices(np.full( (1, config.max_target_length),
+                                                                  -1, dtype=jax.numpy.int32))
+    output['targets_segmentation'] = tf.data.Dataset.from_tensor_slices(np.full( (1, config.max_target_length),
+                                                                  -1, dtype=jax.numpy.int32))
+    dataset = tf.data.Dataset.zip((output)) # pytype: disable=wrong-arg-types
+    dataset = dataset.repeat()
+    dataset = dataset.batch(config.global_batch_size_to_load // jax.process_count())
+    return dataset
 
 
 def get_process_loading_real_data(config, mesh):
@@ -187,8 +181,7 @@ def get_process_loading_real_data(config, mesh):
 
 def make_mixed_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
   process_indices = get_process_loading_real_data(config, mesh)
-  print(len(process_indices), "hosts out of", jax.process_count(), "are loading real data")
-  if config.expansion_factor_real_data != -1:  # assert number of hosts loading real data
+  if config.expansion_factor_real_data != -1: # assert number of hosts loading real data
     assert len(process_indices) == jax.process_count() // config.expansion_factor_real_data
   if jax.process_index() in process_indices:
     if config.dataset_type == "c4":
