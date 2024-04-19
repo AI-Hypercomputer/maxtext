@@ -28,7 +28,7 @@ from layers import normalizations
 from layers import quantizations
 import numpy as np
 from jax.ad_checkpoint import checkpoint_name
-import jax.experimental.pallas.ops.tpu.megablox as mblx
+import megablox as mblx
 from jax.experimental import shard_map
 from jax.sharding import Mesh
 
@@ -308,7 +308,11 @@ class MoeBlock(nn.Module):
     return kernel
 
 
-  def call_gmm(self, inputs, kernel, group_sizes):
+  def call_gmm(self,
+               inputs,
+               kernel,
+               group_sizes,
+               tiling: tuple[int, int, int] = (128, 128, 128)):
 
     @functools.partial(
         shard_map.shard_map,
@@ -317,11 +321,12 @@ class MoeBlock(nn.Module):
               (nn.logical_to_mesh_axes(("m", "k"))),
               (nn.logical_to_mesh_axes(("num_groups", "k", "n"))),
               (nn.logical_to_mesh_axes(("num_groups",))),
+              (nn.logical_to_mesh_axes(("m", "k", "n"))),
           ),
         out_specs=(nn.logical_to_mesh_axes(("m", "n"))),
         check_rep=False,
     )
-    def gmm(inputs, kernel, group_sizes):
+    def gmm(inputs, kernel, group_sizes, tiling):
       hs_shape = inputs.shape
       if hs_shape[0] % 128:
         # padding
@@ -331,13 +336,14 @@ class MoeBlock(nn.Module):
         inputs = inputs.astype(self.dtype)
       output = mblx.gmm(lhs=inputs, 
                         rhs=kernel, 
-                        group_sizes=group_sizes)
+                        group_sizes=group_sizes,
+                        tiling=tiling)
       if hs_shape[0] % 128:
         output = output[:hs_shape[0]]
 
       return output
   
-    output = gmm(inputs, kernel, group_sizes)
+    output = gmm(inputs, kernel, group_sizes, tiling)
     return output
 
 
@@ -354,8 +360,8 @@ class MoeBlock(nn.Module):
     # print("gate_logits.dtype", gate_logits.dtype)
 
     inputs_2d = jnp.reshape(inputs, (-1, cfg.base_emb_dim))
-    # print("inputs.shape", inputs.shape)
-    # print("inputs.shape", inputs_2d.shape)
+    print("inputs.shape", inputs.shape)
+    print("inputs.shape", inputs_2d.shape)
     weights, selected_experts = jax.lax.top_k(gate_logits, cfg.num_experts_per_tok)
 
     # print("weights from megablox", weights)
@@ -378,7 +384,7 @@ class MoeBlock(nn.Module):
                                      reshape = (cfg.base_emb_dim, cfg.num_experts, cfg.mlp_dim),
                                      permute = [1, 0, 2])
     # print("w0_kernel.dtype", w0_kernel.dtype)
-    # print("w0_kernel.shape", w0_kernel.shape)
+    print("w0_kernel.shape", w0_kernel.shape)
 
     w1_kernel = self.generate_kernel(name = "wi_1",
                                      shape = (cfg.base_emb_dim, cfg.mlp_dim * cfg.num_experts),
@@ -386,7 +392,7 @@ class MoeBlock(nn.Module):
                                      reshape = (cfg.base_emb_dim, cfg.num_experts, cfg.mlp_dim),
                                      permute = [1, 0, 2])
     # print("w1_kernel.dtype", w1_kernel.dtype)
-    # print("w1_kernel.shape", w1_kernel.shape)
+    print("w1_kernel.shape", w1_kernel.shape)
 
     wo_kernel = self.generate_kernel(name = "wo",
                                      shape = (cfg.mlp_dim, cfg.base_emb_dim * cfg.num_experts),
@@ -394,32 +400,35 @@ class MoeBlock(nn.Module):
                                      reshape = (cfg.mlp_dim, cfg.num_experts, cfg.base_emb_dim),
                                     permute = [1, 0, 2])
     # print("wo_kernel.dtype", wo_kernel.dtype)
-    # print("sorted_hidden_states.shape", sorted_hidden_states.shape)
+    print("sorted_hidden_states.shape", sorted_hidden_states.shape)
     # print("group_sizes.shape", group_sizes)
     # print("sorted_hidden_states", sorted_hidden_states)
 
     layer_1 = self.call_gmm(sorted_hidden_states,
                               w0_kernel,
-                              group_sizes)
+                              group_sizes,
+                              tiling=None)
     # print("sorted_hidden_states.shape", sorted_hidden_states.shape)
     # print("layer_1.shape", layer_1.shape)
     # print("layer_1", layer_1)
 
     layer_2 = self.call_gmm(sorted_hidden_states,
                               w1_kernel,
-                              group_sizes)
+                              group_sizes,
+                              tiling=None)
 
     layer_1_act = _convert_to_activation_function(cfg.mlp_activations[0])(layer_1)
     # print("layer_1_act", layer_1_act)
     # print("layer_2", layer_2)
     intermediate_layer = jnp.multiply(layer_1_act, layer_2)
     # print("intermediate_layer", intermediate_layer)
-    # print("intermediate_layer.shape", intermediate_layer.shape)
-    # print("wo_kernel.shape", wo_kernel.shape)
+    print("intermediate_layer.shape", intermediate_layer.shape)
+    print("wo_kernel.shape", wo_kernel.shape)
 
     layer_3 = self.call_gmm(intermediate_layer,
                               wo_kernel,
-                              group_sizes)
+                              group_sizes,
+                              tiling=None)
 
     # print("intermediate_layer.shape", intermediate_layer.shape)
     # print("layer_3.shape", layer_3.shape)

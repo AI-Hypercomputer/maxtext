@@ -65,6 +65,7 @@ class MistralDecoderLayer(nn.Module):
                ):
     cfg = self.config
     mesh = self.mesh
+    print("very first inputs", inputs.shape)
 
     inputs = nn.with_logical_constraint(
         inputs, ('activation_batch', 'activation_length', 'activation_embed'))
