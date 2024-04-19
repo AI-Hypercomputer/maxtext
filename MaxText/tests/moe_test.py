@@ -28,6 +28,7 @@ from jax.sharding import Mesh
 from typing import Tuple
 import common_types
 import flax.linen as nn
+from tests import time
 
 
 Array = common_types.Array
@@ -107,7 +108,13 @@ def get_expected_output(rng, hidden_states, cfg):
                                                           cfg.head_dim, 
                                                           cfg.base_emb_dim)))
       print("get_expected_output variables", variables)
-      return variables, model.apply(variables, hidden_states)
+      time.simple_timeit(model.apply, variables, hidden_states, tries=1, task="loop")
+
+      # start_time = time.time()
+      # output = model.apply(variables, hidden_states)
+      # end_time = time.time()
+      # print("--- for loop takes: %s seconds ---" % (end_time - start_time))
+      return variables, 0
 
 
 def get_moe_output(variables, hidden_states, cfg, mesh):
@@ -162,10 +169,15 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
 
       
       # print("get_moe_output expected_variables", variables)
-      return model.apply(moe_variables, hidden_states)
+      time.simple_timeit(model.apply, moe_variables, hidden_states, tries=1, task="megablox")
+      # start_time = time.time()
+      # output = model.apply(moe_variables, hidden_states)
+      # end_time = time.time()
+      # print("--- megablox takes: %s seconds ---" % (end_time - start_time))
+      return 0
 
 
-class MixtralTest(unittest.TestCase):
+class MoeTest(unittest.TestCase):
 
   def setUp(self):
     pyconfig.initialize(
@@ -191,9 +203,9 @@ class MixtralTest(unittest.TestCase):
   def test_moe_block(self):
     variables, expected_output = get_expected_output(self.rng, self.hidden_states, self.cfg)
     actual_output = get_moe_output(variables, self.hidden_states, self.cfg, self.mesh)
-    # print("expected_output", expected_output)
+    print("expected_output", expected_output)
     print("actual_output", actual_output)
-    # self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-03, atol=1e-03, equal_nan=False))
+    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-03, atol=1e-03, equal_nan=False))
 
 
 if __name__ == '__main__':

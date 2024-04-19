@@ -120,9 +120,9 @@ class _HyperParameters():
         )
 
     for k in raw_data_from_yaml:
-      if k in raw_data_from_cmd_line and yaml_key_to_env_key(k) in os.environ:
-        raise ValueError(
-            f"You are passing overrides by both CLI and ENV for `{k}`. This isn't allowed.")
+      # if k in raw_data_from_cmd_line and yaml_key_to_env_key(k) in os.environ:
+      #   raise ValueError(
+      #       f"You are passing overrides by both CLI and ENV for `{k}`. This isn't allowed.")
 
       if not k in raw_data_from_cmd_line and not yaml_key_to_env_key(k) in os.environ:
         raw_keys[k] = raw_data_from_yaml[k]

@@ -122,6 +122,7 @@ class RotaryEmbedding(nn.Module):
 
   def setup(self) -> None:
     if self.embedding_dims % 2:
+      print("self.embedding_dims", self.embedding_dims)
       raise ValueError(
           'Embedding dim for rotary position embedding must be a multiple of 2.'
       )
