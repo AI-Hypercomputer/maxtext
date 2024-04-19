@@ -167,15 +167,16 @@ class Pipeline(nn.Module):
     # need to be communicated to others (at least for forward pass, need some thought for backward whether this is necessary)
 
     # We use numpy instead of jnp so these indexes are not traced
-    microbatch_ids = np.maximum(loop_iteration - np.arange(self.num_stages), 0) # not a great name, this is really something like microbatch_id * repeat idx
+    microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0) # not a great name, this is really something like microbatch_id * repeat idx
     repeat_ids = microbatch_ids // self.config.num_pipeline_microbatches
-    layer_ids = np.arange(self.num_stages) + repeat_ids * self.num_stages
+    layer_ids = jnp.arange(self.num_stages) + repeat_ids * self.num_stages
     #layer_ids goes out of bounds on the last bubble, we cap it within range.
-    layer_ids= np.minimum(layer_ids, self.config.num_decoder_layers - 1)
+    layer_ids= jnp.minimum(layer_ids, self.config.num_decoder_layers - 1)
     
     def layers_dimension_to_stages(weight_leaf):
        # slice_in_dim avoids executing an all gather
-       weights_stage_list= [jax.lax.slice_in_dim(weight_leaf,layer_ids[stage], layer_ids[stage] + 1, axis=0) for stage in range(self.num_stages)]
+       #weights_stage_list= [jax.lax.slice_in_dim(weight_leaf,layer_ids[stage], layer_ids[stage] + 1, axis=0) for stage in range(self.num_stages)]
+       weights_stage_list= [jax.lax.dynamic_slice_in_dim(weight_leaf,layer_ids[stage], 1, axis=0) for stage in range(self.num_stages)]
        weights_stage = jnp.concatenate(weights_stage_list, axis=0)
        weights_stage_shape = (self.num_stages,) + weight_leaf.shape[1:]
        weights_stage = jnp.reshape(weights_stage, weights_stage_shape) # This reshape unsqueezes singleton axes that were potentially squeezed in concatenate
@@ -375,7 +376,6 @@ class Pipeline(nn.Module):
     def dumb_func(model, loop_state, weights, positions, segment_ids, deterministic, model_mode):
       return model.run_one_iteration(loop_state, weights, positions, segment_ids, deterministic, model_mode)
 
-
     scanned_loop_iteration = nn.scan(
       dumb_func,
       variable_broadcast="params",
@@ -400,9 +400,14 @@ class Pipeline(nn.Module):
       # In real implementation would be all microbatches, and up to body_fprop to grab only the stage one the current iter
       #in_axes = (nn.broadcast,nn.broadcast,nn.broadcast,nn.broadcast)
     )
-    if True:
-        loop_state = scanned_loop_iteration(loop_state, weights, positions, segment_ids, deterministic, model_mode)
-    else:
+
+    def func_to_scan(model,loop_state, xs):
+       return model.run_one_iteration(loop_state, weights, positions, segment_ids, deterministic, model_mode), None
+    scan_func = nn.scan(func_to_scan, length=total_iterations)
+    loop_state, _ = scan_func(self, loop_state, None)
+    if False:
+        loop_state = scanned_loop_iteration(self, loop_state, weights, positions, segment_ids, deterministic, model_mode)
+    elif False:
         for loop_iteration in range(total_iterations):
             print(f"starting iteration {loop_iteration}")
             loop_state = self.run_one_iteration(loop_state, weights, positions, segment_ids, deterministic, model_mode)
