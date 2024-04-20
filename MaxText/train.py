@@ -517,3 +517,4 @@ def main(argv: Sequence[str]) -> None:
 
 if __name__ == "__main__":
   app.run(main)
+# python3 MaxText/train.py MaxText/configs/base.yml run_name=mattdavidow-train-base base_output_directory=gs://maxtext-experiments-multipod dataset_path=gs://max-datasets-rogue steps=5 enable_checkpointing=False ici_pipeline_parallelism=4 base_num_decoder_layers=12 scan_layers=True num_pipeline_microbatches=24 per_device_batch_size=6 num_pipeline_repeats=3
