@@ -290,7 +290,8 @@ class Decoder(nn.Module):
       )
     else:
       if cfg.ici_pipeline_parallelism > 1 or cfg.dcn_pipeline_parallelism > 1:
-        y = pipeline.Pipeline(config=cfg, mesh=mesh, decoder_layer_class=BlockLayer,quant=self.quant)(
+        import pipeline_shard_init
+        y = pipeline_shard_init.Pipeline(config=cfg, mesh=mesh, decoder_layer_class=BlockLayer,quant=self.quant)(
             y,
             decoder_segment_ids,
             decoder_positions,
