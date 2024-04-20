@@ -158,8 +158,7 @@ class Pipeline(nn.Module):
     Returns:
         Weights of same pytree structure but each leaf has a leading dimension of num_stages, example leaf shape: [num_stages, embed, mlp].
 
-    For non-circular pipelines this would just be stacked [weights_layer_0; weights_layer1; etc],
-    but for circular the stages need a repeat_idx to determine what layer weights to grab, e.g. on iteration 5 with 4 stages
+    For circular pipelines the stages need a repeat_idx to determine what layer weights to grab, e.g. on iteration 5 with 4 stages
     the repeat indexes are [1,1,0,0] so need layers [4,5,2,3]
     '''
     # TODO(huge): When the weights are correctly sharded on init (not implemented currently) we need to ensure that this
@@ -169,18 +168,17 @@ class Pipeline(nn.Module):
     # We use numpy instead of jnp so these indexes are not traced
     microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0) # not a great name, this is really something like microbatch_id * repeat idx
     repeat_ids = microbatch_ids // self.config.num_pipeline_microbatches
-    layer_ids = jnp.arange(self.num_stages) + repeat_ids * self.num_stages
-    #layer_ids goes out of bounds on the last bubble, we cap it within range.
-    layer_ids= jnp.minimum(layer_ids, self.config.num_decoder_layers - 1)
     
     def layers_dimension_to_stages(weight_leaf):
        # slice_in_dim avoids executing an all gather
        #weights_stage_list= [jax.lax.slice_in_dim(weight_leaf,layer_ids[stage], layer_ids[stage] + 1, axis=0) for stage in range(self.num_stages)]
-       weights_stage_list= [jax.lax.dynamic_slice_in_dim(weight_leaf,layer_ids[stage], 1, axis=0) for stage in range(self.num_stages)]
+       #weights_stage_list= [jax.lax.dynamic_slice_in_dim(weight_leaf,layer_ids[stage], 1, axis=0) for stage in range(self.num_stages)]
+       weights_stage_list= [jax.lax.dynamic_slice_in_dim(weight_leaf[:,stage],repeat_ids[stage], 1, axis=0) for stage in range(self.num_stages)]
        weights_stage = jnp.concatenate(weights_stage_list, axis=0)
-       weights_stage_shape = (self.num_stages,) + weight_leaf.shape[1:]
+       weights_stage_shape = (self.num_stages,) + weight_leaf.shape[2:]
        weights_stage = jnp.reshape(weights_stage, weights_stage_shape) # This reshape unsqueezes singleton axes that were potentially squeezed in concatenate
        return weights_stage
+
     weights_stage = jax.tree_map(layers_dimension_to_stages, weights)
     return weights_stage
 
@@ -292,7 +290,10 @@ class Pipeline(nn.Module):
    circ_storage_mover = loop_state["circ_storage_mover"]
    loop_iteration = loop_state["loop_iteration"]
 
-   stages_weights = self.get_weights_stage(weights, loop_iteration)
+   if self.config.num_pipeline_repeats > 1:
+    stages_weights = self.get_weights_stage(weights, loop_iteration)
+   else:
+     stages_weights = weights
    stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
    if positions is not None:
     stages_positions = self.get_microbatches_for_stages(positions, loop_iteration)
@@ -306,8 +307,8 @@ class Pipeline(nn.Module):
    else:
     stages_segment_ids
     segment_stage_idx = None
-   rawr = self.decoder_layer_class(config=self.config, mesh=self.mesh)
-   stages_output, _ = jax.vmap(rawr.apply, in_axes=[0,0,positions_stage_idx, segment_stage_idx, None, None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
+   decoder_layer_instance = self.decoder_layer_class(config=self.config, mesh=self.mesh)
+   stages_output, _ = jax.vmap(decoder_layer_instance.apply, in_axes=[0,0,positions_stage_idx, segment_stage_idx, None, None])(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
    new_state = self.get_new_loop_state(stages_output, loop_state)
    return new_state
   @nn.compact
@@ -328,7 +329,7 @@ class Pipeline(nn.Module):
     # TODO: Consider refactoring scan to call a fctn that takes instance as arg instead of class
     # TODO: Maxtext uses layer scan axis as 1 instead of 0, I don't want to deal with that indexing
     def scan_to_init_params():
-      y, _ = nn.scan(
+      scan_fn = nn.scan(
           self.decoder_layer_class,
           variable_axes={
               "params": 0,
@@ -347,16 +348,42 @@ class Pipeline(nn.Module):
               nn.broadcast,
               nn.broadcast,
           ),
-          length=self.config.num_decoder_layers,
+          length=self.num_stages,
           metadata_params={nn.PARTITION_NAME: "layers"},
-      )(config=self.config, mesh=self.mesh, name="layers", quant=self.quant)(
-          inputs[0],
-          segment_ids[0],
-          positions[0],
-          deterministic,
-          model_mode,
       )
-      return y
+      if self.config.num_pipeline_repeats > 1:
+         # Add an additional leading pipeline_repeats dimension
+         scan_fn = nn.scan(
+          scan_fn,
+          variable_axes={
+              "params": 0,
+              "cache": 1,
+              "intermediates": 0,
+              "aqt": 0,
+              "_overwrite_with_gradient": 0,
+          },
+          split_rngs={
+              "params": True,
+              "dropout": self.config.enable_dropout,
+          },
+          in_axes=(
+              nn.broadcast,
+              nn.broadcast,
+              nn.broadcast,
+              nn.broadcast,
+          ),
+          length=self.config.num_pipeline_repeats,
+          metadata_params={nn.PARTITION_NAME: "pipeline_repeats"},
+        )
+      outputs, _ = scan_fn(config=self.config, mesh=self.mesh, name="layers", quant=self.quant)(
+            inputs[0],
+            segment_ids[0],
+            positions[0],
+            deterministic,
+            model_mode,
+        )
+      return outputs
+
     if self.is_mutable_collection("params"):
       return scan_to_init_params()
       
@@ -364,11 +391,6 @@ class Pipeline(nn.Module):
 
     loop_state = self.init_states(inputs)
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
-    # TODO(huge): Shard the weights. This may be tricky b/c there is no "stage" axis in the weights to shard over until after the below
-    # weights = [decoder.variables for decoder in self.decoder_layers]
-    # # Go from a list of size n_layers of weight pytrees to a single pytree where each leaf has a leading dimension of n_layers 
-    # weights = stack_pytrees(*weights)
-
     weights = self.variables
     weights['params'] = weights['params']['layers']
     
@@ -419,6 +441,3 @@ class Pipeline(nn.Module):
     final_output = jnp.reshape(final_output, (self.config.global_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim))
                                
     return final_output
-  
-# Test train.py with
-#python3 MaxText/train.py MaxText/configs/base.yml run_name=mattdavidow-train-base base_output_directory=gs://maxtext-experiments-multipod dataset_path=gs://max-datasets-rogue steps=50 enable_checkpointing=False ici_pipeline_parallelism=4 base_num_decoder_layers=12 scan_layers=True num_pipeline_microbatches=24 per_device_batch_size=6 num_pipeline_repeats=3

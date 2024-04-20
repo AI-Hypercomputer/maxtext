@@ -145,11 +145,12 @@ def main(argv: Sequence[str]) -> None:
   # )
 
   from layers import simple_dg
-  #decoder_layer_class = simple_decoder_layer.SimpleDecoderLayer
-  decoder_layer_class = llama2.LlamaDecoderLayer
+  decoder_layer_class = simple_decoder_layer.SimpleDecoderLayer
+  #decoder_layer_class = llama2.LlamaDecoderLayer
   from layers import pipeline_shard_init
   from layers import pipeline
-  my_pipeline = pipeline_shard_init.Pipeline(
+  from layers import pipeline_circular_shard_init
+  my_pipeline = pipeline_circular_shard_init.Pipeline(
     config=config,
     decoder_layer_class=decoder_layer_class,
     mesh=mesh
@@ -158,13 +159,13 @@ def main(argv: Sequence[str]) -> None:
 
   init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
   #pipeline_out = my_pipeline.apply(init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
-  #breakpoint()
+
   def run_regular_pipeline(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
     reg_layer_activations = inputs
 
     def get_cur_layer_params(params, layer_idx):
       def get_cur_layer_params_arr(leaf):
-        if config.num_pipeline_repeats > 1 and False:
+        if config.num_pipeline_repeats > 1 and True:
           new_shape = (leaf.shape[0] * leaf.shape[1],) + leaf.shape[2:]
           leaf = jnp.reshape(leaf, new_shape)
         return leaf[layer_idx]
@@ -191,4 +192,4 @@ def main(argv: Sequence[str]) -> None:
 
 if __name__ == "__main__":
   app.run(main)
-  # python3 MaxText/pipeline_parallelism_test.py MaxText/configs/base.yml run_name=mattdavidow-train-base base_output_directory=gs://maxtext-experiments-multipod dataset_path=gs://max-datasets-rogue steps=5 enable_checkpointing=False base_emb_dim=28 ici_pipeline_parallelism=4 base_num_decoder_layers=8 scan_layers=False num_pipeline_microbatches=12 num_pipeline_repeats=2
+  # python3 MaxText/pipeline_parallelism_test.py MaxText/configs/base.yml run_name=mattdavidow-train-base base_output_directory=gs://maxtext-experiments-multipod dataset_path=gs://max-datasets-rogue steps=5 enable_checkpointing=False base_emb_dim=28 ici_pipeline_parallelism=4 base_num_decoder_layers=8 scan_layers=True num_pipeline_microbatches=12 num_pipeline_repeats=2
