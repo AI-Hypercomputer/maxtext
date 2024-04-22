@@ -186,6 +186,33 @@ class Pipeline(nn.Module):
     '''Gets the microbatch_id on this loop_iteration for this stage. Works for both circular and non-circular'''
     return (loop_iteration - stage_idx) % self.config.num_pipeline_microbatches
      
+
+  def shard_leading_dim_by_stages(self, x):
+    return jax.lax.with_sharding_constraint(x, ('stage',) + [None] * x.ndim -1)
+
+  def vmap_gather(self, xs, ids, ids_dim):
+    """Use vmap to implement a stage-wise sharded gather.
+
+    The stages share the same input, but they have different offsets.
+
+    Args:
+      xs: Data shared by all stages, to be gathered from.
+      ids: Integer tensor of shape [num_stages], the offsets of the stages.
+      ids_dim: The dimension in xs where ids are applied. In the output, this
+        dimension will be [num_stages], since each stage gets one slice.
+
+    Returns:
+      The per-stage gathered values. The shape is xs.shape but with ids_dim size
+        replaced with [num_stages].
+    """
+    def _gather_one(x, i):
+      return jnp.squeeze(
+          jax.lax.dynamic_slice_in_dim(x, i, 1, ids_dim), ids_dim)
+
+    ids = self.shard_leading_dim_by_stages(ids, 0)
+    outs = jax.vmap(_gather_one, in_axes=(None, 0), out_axes=ids_dim)(xs, ids)
+    return self.shard_leading_dim_by_stages(outs, ids_dim)
+
   def get_microbatches_for_stages(self, microbatched_array, loop_iteration):
     '''
     Returns an array of leading dimension stages grabbing the current microbatch for each stage.
@@ -290,19 +317,21 @@ class Pipeline(nn.Module):
    circ_storage_mover = loop_state["circ_storage_mover"]
    loop_iteration = loop_state["loop_iteration"]
 
+   microbatch_ids = jnp.array([self.get_microbatch_id(stage_idx, loop_iteration) for stage_idx in range(self.num_stages)])
+
    if self.config.num_pipeline_repeats > 1:
     stages_weights = self.get_weights_stage(weights, loop_iteration)
    else:
      stages_weights = weights
    stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
    if positions is not None:
-    stages_positions = self.get_microbatches_for_stages(positions, loop_iteration)
+    stages_positions = self.vmap_gather(positions, microbatch_ids, 0)
     positions_stage_idx = 0
    else:
      stages_positions = None
      positions_stage_idx = 0
    if segment_ids is not None:
-    stages_segment_ids = self.get_microbatches_for_stages(segment_ids, loop_iteration)
+    stages_segment_ids = self.vmap_gather(segment_ids, microbatch_ids, 0)
     segment_stage_idx = 0
    else:
     stages_segment_ids

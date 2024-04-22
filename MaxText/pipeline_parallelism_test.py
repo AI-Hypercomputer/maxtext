@@ -146,7 +146,7 @@ def main(argv: Sequence[str]) -> None:
   # )
 
   from layers import simple_dg
-  decoder_layer_class = simple_decoder_layer.SimpleDecoderLayer
+  #decoder_layer_class = simple_decoder_layer.SimpleDecoderLayer
   decoder_layer_class = llama2.LlamaDecoderLayer
   from layers import pipeline_shard_init
   from layers import pipeline
