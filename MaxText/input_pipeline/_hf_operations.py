@@ -17,6 +17,7 @@
 """Operations used by HuggingFace input pipeline"""
 
 from typing import Generic, Iterator, TypeVar, Union
+from collections import defaultdict
 import jax
 import jaxtyping as jt
 from jax import tree_util
@@ -35,6 +36,80 @@ def normalize_features(example, key):
       'inputs': example[key],
       'targets': example[key],
   }
+
+def shift(example):
+  example['inputs'] = [0] + example['inputs'][:-1]
+  return example
+
+
+
+def pack_in_batch(batch, max_len=2048):
+
+  def _pad_and_refine(current_pack, max_len):
+    targets_nonzero = current_pack['targets'] != 0
+    current_pack['inputs_segmentation'] *= targets_nonzero
+    current_pack['targets_segmentation'] *= targets_nonzero
+    for k,v in current_pack.items():
+      current_pack[k] = v + [0] * (max_len-len(v))
+    return current_pack
+
+  packed_text = []
+  current_pack = {'inputs':[], 'targets':[],
+                  'inputs_segmentation':[], 'targets_segmentation': [], 
+                  'inputs_position': [], 'targets_position': []}
+  current_pack_len = 0
+  current_segmentation = 0
+  #print(f"{batch=}")
+
+  for text in batch:
+    #print(f"{text=}")
+    new_len = current_pack_len + len(text['inputs']) + 1
+    if new_len <= max_len:
+      current_segmentation += 1
+      current_pack['inputs'] += [0] + text['inputs']
+      current_pack['targets'] += [0] + text['targets']
+      current_pack['inputs_segmentation'] += [current_segmentation] * (len(text['inputs'])+1)
+      current_pack['targets_segmentation'] += [current_segmentation] * (len(text['targets'])+1)
+      current_pack['inputs_position'] += [i for i in range(len(text['inputs'])+1)]
+      current_pack['targets_position'] += [i for i in range(len(text['targets'])+1)]
+      current_pack_len = new_len
+    else:
+      current_pack = _pad_and_refine(current_pack, max_len)
+      packed_text.append(current_pack)
+      current_segmentation=1
+      current_pack = {'inputs': [0] + text['inputs'],
+                        'targets': [0] + text['targets'], 
+                        'inputs_segmentation': [current_segmentation] * (len(text['inputs'])+1),
+                        'targets_segmentation': [current_segmentation] * (len(text['targets'])+1),
+                        'inputs_position': [i for i in range(len(text['inputs'])+1)],
+                        'targets_position': [i for i in range(len(text['targets'])+1)]
+                      } # Start a new pack
+      current_pack_len = len(text['inputs']) + 1
+
+  # Handle the last pack (might not reach max_len)
+  if current_pack:
+    current_pack = _pad_and_refine(current_pack, max_len)
+    packed_text.append(current_pack)
+
+  return packed_text
+
+def group_in_batch(batch):
+    # new_batch = {'inputs':np.array([]), 'targets':np.array([]), 
+    #             'inputs_segmentation':np.array([]), 'targets_segmentation': np.array([]), 
+    #             'inputs_position': np.array([]), 'targets_position': np.array([])}
+    new_batch = defaultdict(list)
+    for x in batch:
+        for k, v in x.items():
+            new_batch[k].append(v)
+
+    return {
+        'inputs': np.array(new_batch['inputs']),
+        'targets': np.array(new_batch['targets']),
+        'inputs_segmentation': np.array(new_batch['inputs_segmentation']),
+        'targets_segmentation': np.array(new_batch['targets_segmentation']),
+        'inputs_position': np.array(new_batch['inputs_position']),
+        'targets_position': np.array(new_batch['targets_position']),
+    }
 
 class _PackedBatch:
   """Class to represent a batch of packed examples.

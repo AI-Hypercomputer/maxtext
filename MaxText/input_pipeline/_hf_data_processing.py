@@ -23,8 +23,11 @@ import jax
 
 from datasets import load_dataset
 from datasets.distributed import split_dataset_by_node
-from transformers import AutoTokenizer
-from torchdata.datapipes.iter import IterableWrapper
+from functools import partial
+from transformers import LlamaTokenizer
+from torchdata.datapipes.iter import Collator, IterableWrapper
+
+from torchdata.dataloader2 import DataLoader2, InProcessReadingService
 
 from input_pipeline import _hf_operations
 import multihost_dataloading
@@ -91,34 +94,42 @@ def preprocessing_pipeline(
 
   dataset = split_dataset_by_node(dataset, world_size=jax.process_count(), rank=jax.process_index())
 
-  tokenizer = AutoTokenizer.from_pretrained(tokenizer_path,
+  tokenizer = LlamaTokenizer.from_pretrained(tokenizer_path,
                                             add_bos_token=add_bos,
                                             add_eos_token=add_eos,
                                             model_max_length=max_length,
-                                            token=access_token)
+                                            token=access_token,
+                                            legacy=False)
 
   dataset = dataset.map(_hf_operations.tokenization, batched=True,
-                        fn_kwargs={"tokenizer": tokenizer, "max_length": max_length})
+                        fn_kwargs={"tokenizer": tokenizer, "max_length": max_length-1})
 
   dataset = dataset.map(_hf_operations.normalize_features, batched=True,
                         fn_kwargs={"key":"input_ids"})
 
   dataset = dataset.select_columns(['inputs', 'targets'])
-  dataset = dataset.with_format("np")
+  #dataset = dataset.with_format("np")
 
   if shuffle:
     dataset = dataset.shuffle(seed=data_shuffle_seed)
 
-  if pack_examples:
-    pack_op = _hf_operations.PackAndBatchOperation(
-      batch_size=batch_size // jax.process_count(),
-      length_struct={"inputs": max_length, "targets":max_length},
-      shift_inputs=shift,
-    )
-    dataset = _hf_operations.TransformedDataset(pack_op, dataset)
+  dataset = IterableWrapper(dataset)
+  dataset.prefetch(prefetch_buffer_size)
 
-  dataset = IterableWrapper(iter(dataset))
-  dataset = dataset.prefetch(prefetch_buffer_size)
+  if shift:
+    dataset = dataset.map(_hf_operations.shift)
+
+  if pack_examples:
+    dataset = dataset.batch(max_length)
+    dataset = Collator(dataset, collate_fn=partial(_hf_operations.pack_in_batch, max_len=max_length))
+    dataset = dataset.unbatch()
+    dataset = dataset.batch(batch_size // jax.process_count())
+
+  dataset = dataset.map(_hf_operations.group_in_batch)
+
+  # rs = InProcessReadingService(prefetch_cnt=batch_size // jax.process_count())
+  rs = InProcessReadingService()
+  dataset = DataLoader2(dataset, reading_service=rs)
 
   multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataset, global_mesh)
 
