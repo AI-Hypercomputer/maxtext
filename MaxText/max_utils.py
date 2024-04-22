@@ -652,3 +652,30 @@ def get_project():
     max_logging.log("You must specify config.vertex_tensorboard_project or set 'gcloud config set project <project>'")
     return None
   return project_outputs[-1]
+
+
+def delete_pytree(p):
+  def delete_leaf(leaf):
+    if isinstance(leaf, jax.Array):
+      leaf.delete()
+    del leaf
+
+  jax.tree_map(delete_leaf, p)
+
+
+def summarize_pytree_data(params, name="Params", raw=False):
+  """Generate basic metrics of a given Pytree."""
+  num_params, total_param_size, avg_param_size = summarize_size_from_pytree(params)
+  if not raw:
+    num_params_in_billions = num_params / 1e9
+    total_param_size_in_gb = total_param_size / 1e9
+    print(f"{name} stats: \n"
+          f"\tTotal number of params: {num_params_in_billions:.3f} billion \n"	
+          f"\tTotal memory usage: {total_param_size_in_gb:.3f} GB \n"	
+          f"\tAvg size: {avg_param_size:.3f} bytes\n")	
+  else:
+    print(f"{name} stats: \n"
+            f"\tTotal number of params: {num_params:.3f} \n"
+            f"\tTotal memory usage: {total_param_size:.3f} bytes \n"
+            f"\tAvg size: {avg_param_size:.3f} bytes\n")
+  return num_params, total_param_size, avg_param_size

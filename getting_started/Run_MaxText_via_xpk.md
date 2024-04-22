@@ -28,6 +28,8 @@ This document focuses on steps required to setup XPK on TPU VM and assumes you h
 
 * gcloud is installed on TPUVMs using the snap distribution package. Install kubectl using snap
 ```shell
+sudo apt-get update
+sudo apt install snapd
 sudo snap install kubectl --classic
 ```
 * Install `gke-gcloud-auth-plugin`
