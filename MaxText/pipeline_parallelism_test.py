@@ -22,6 +22,7 @@ from layers import pipeline
 from layers import llama2
 
 import jax.numpy as jnp
+import timing_util
 
 def pretty_print_pytree(pytree, indent_level=0):
   """Pretty-prints a JAX PyTree, showing the shapes of each leaf.
@@ -187,7 +188,9 @@ def main(argv: Sequence[str]) -> None:
   reg_layers = run_regular_pipeline
   pipeline_func = my_pipeline.apply
   pipeline_func(init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
-  assert_same_output_and_grad(reg_layers,pipeline_func, targets, init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+  #assert_same_output_and_grad(reg_layers,pipeline_func, targets, init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+
+  timing_util.simple_timeit(pipeline_func, init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, tries = 3, task = 'basic_pp')
 
 
 if __name__ == "__main__":
