@@ -46,12 +46,25 @@ class AqtQuantization:
 
   def dot_general_cls(self):
     """Returns dot_general configured with aqt params."""
-    aqt_dg_cls = functools.partial(aqt_flax.AqtDotGeneral, self.quant_dg, rhs_quant_mode=self.quant_mode)
+    aqt_dg_cls = functools.partial(
+        aqt_flax.AqtDotGeneral,
+        self.quant_dg,
+        rhs_quant_mode=self.quant_mode,
+        lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+        rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
+    )
     return aqt_dg_cls
 
   def einsum(self):
-    """Returns einsum configured with aqt params"""
-    aqt_einsum = functools.partial(aqt_flax.AqtEinsum(cfg=self.quant_dg, lhs_quant_mode=self.quant_mode))
+    """Returns einsum configured with aqt params."""
+    aqt_einsum = functools.partial(
+        aqt_flax.AqtEinsum(
+            cfg=self.quant_dg,
+            lhs_quant_mode=self.quant_mode,
+            lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+            rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
+        )
+    )
     return aqt_einsum
 
 
