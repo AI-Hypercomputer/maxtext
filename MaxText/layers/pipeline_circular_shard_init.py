@@ -188,7 +188,9 @@ class Pipeline(nn.Module):
      
 
   def shard_leading_dim_by_stages(self, x):
-    return jax.lax.with_sharding_constraint(x, ('stage',) + [None] * x.ndim -1)
+    stage_sharding_constraint = ('layers',) + tuple([None] * (x.ndim -1))
+    # return jax.lax.with_sharding_constraint(x, ('stage',) + tuple([None] * (x.ndim -1)))
+    return nn.with_logical_constraint(x, stage_sharding_constraint, mesh=self.mesh, rules=self.config.logical_axis_rules)
 
   def vmap_gather(self, xs, ids, ids_dim):
     """Use vmap to implement a stage-wise sharded gather.
@@ -209,9 +211,9 @@ class Pipeline(nn.Module):
       return jnp.squeeze(
           jax.lax.dynamic_slice_in_dim(x, i, 1, ids_dim), ids_dim)
 
-    ids = self.shard_leading_dim_by_stages(ids, 0)
+    ids = self.shard_leading_dim_by_stages(ids)
     outs = jax.vmap(_gather_one, in_axes=(None, 0), out_axes=ids_dim)(xs, ids)
-    return self.shard_leading_dim_by_stages(outs, ids_dim)
+    return self.shard_leading_dim_by_stages(outs)
 
   def get_microbatches_for_stages(self, microbatched_array, loop_iteration):
     '''
@@ -318,7 +320,6 @@ class Pipeline(nn.Module):
    loop_iteration = loop_state["loop_iteration"]
 
    microbatch_ids = jnp.array([self.get_microbatch_id(stage_idx, loop_iteration) for stage_idx in range(self.num_stages)])
-
    if self.config.num_pipeline_repeats > 1:
     stages_weights = self.get_weights_stage(weights, loop_iteration)
    else:
