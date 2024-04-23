@@ -319,7 +319,7 @@ class Pipeline(nn.Module):
    circ_storage_mover = loop_state["circ_storage_mover"]
    loop_iteration = loop_state["loop_iteration"]
 
-  # moving lines around
+  # For some reason this is really bad and causes a lot of collective permutes (with or without the sharding constraint)
   #  microbatch_ids = jnp.array([self.get_microbatch_id(stage_idx, loop_iteration) for stage_idx in range(self.num_stages)])
   #  microbatch_ids = self.shard_leading_dim_by_stages(microbatch_ids)
 
