@@ -1,5 +1,5 @@
 absl-py==1.4.0
-aqtp==0.6.1
+aqtp==0.7.2
 array-record==0.5.0
 astroid==3.1.0
 astunparse==1.6.3
