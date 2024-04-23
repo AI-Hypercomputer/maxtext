@@ -119,15 +119,15 @@ hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' 
 # Parallelism
 mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive', 'stage']
 logical_axis_rules: [
-                      ['activation_batch', ['data', 'fsdp', 'fsdp_transpose',]],
+                      ['activation_batch', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_heads', ['tensor','sequence']],
                       ['activation_length', 'sequence'],
                       ['activation_embed', 'tensor'],
                       ['activation_mlp', 'tensor'],
                       ['activation_kv', 'tensor'],
-                      ['activation_vocab', ['tensor', 'sequence']],
-                      ['activation_vocab', 'tensor'],
-                      ['activation_vocab', 'sequence'],
+                      ['activation_vocab', ['tensor', 'sequence', 'stage']],
+                      # ['activation_vocab', 'tensor'],
+                      # ['activation_vocab', 'sequence'],
                       ['mlp', ['fsdp_transpose', 'tensor', 'autoregressive']],
                       ['vocab', ['tensor', 'autoregressive', 'stage']], # TODO: should we shard this by stage?
                       ['embed', ['fsdp', 'fsdp_transpose', 'sequence']],

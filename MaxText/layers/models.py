@@ -255,7 +255,7 @@ class Decoder(nn.Module):
           static_argnums=(-1, -2, -3, -4, -5),
       )
     # TODO: support scan_layers for pipeline, also currently assert not requesting pipeline and scan (maybe in pyconfig)
-    if cfg.scan_layers:
+    if cfg.scan_layers and cfg.ici_pipeline_parallelism == 1 and cfg.dcn_pipeline_parallelism == 1:
       initializing = self.is_mutable_collection('params')
       params_spec = (
           cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
@@ -290,8 +290,7 @@ class Decoder(nn.Module):
       )
     else:
       if cfg.ici_pipeline_parallelism > 1 or cfg.dcn_pipeline_parallelism > 1:
-        import pipeline_shard_init
-        import pipeline_circular_shard_init
+        from layers import pipeline_circular_shard_init
         y = pipeline_circular_shard_init.Pipeline(config=cfg, mesh=mesh, decoder_layer_class=BlockLayer,quant=self.quant)(
             y,
             decoder_segment_ids,

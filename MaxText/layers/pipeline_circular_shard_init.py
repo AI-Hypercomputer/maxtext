@@ -149,6 +149,43 @@ class Pipeline(nn.Module):
     stages_in = select_state_or_input(stages_in, shift)
     return stages_in
 
+  def shard_dim_by_stages(self, x, dim: int):
+    dims_mapping = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
+    dims_mapping[dim] = "stages"
+    return jax.lax.with_sharding_constraint(x, dims_mapping) # maybe PartitionSpec(dims_mapping)
+
+
+  def vmap_parallel_gather(self, weights, repeat_ids, repeat_dim_in_weights, stages_dim_in_weights):
+    """Use vmap to implement a sharded parallel gather.
+
+    Parallel gather means each stage has its own weights, and gets one slice from it.
+
+    Args:
+      weights: Per-stage data to be gathered from.
+      repeat_ids: Integer tensor of shape [num_stages], the repeats of the stages.
+      repeat_dim_in_weights: The dimension in weights where repeat_ids are applied. The output will not
+        have this dimension.
+      stages_dim_in_weights: The dimension in weights that represents parallel stages.
+
+    Returns:
+      The per-stage gathered values. The shape is weights.shape but with repeat_dim_in_weights
+        removed.
+    """
+    def _gather_one(x, i):
+      dim = repeat_dim_in_weights
+      if stages_dim_in_weights < dim:
+        dim -= 1
+      return jnp.squeeze(jax.lax.dynamic_slice_in_dim(x, i, 1, dim), dim)
+
+    out_dim = stages_dim_in_weights
+    if repeat_dim_in_weights < stages_dim_in_weights:
+      out_dim -= 1
+
+    repeat_ids = self.shard_leading_dim_by_stages(repeat_ids)
+    #weights = self._shard_dim_by_stages(weights, stages_dim_in_weights)
+    outs = jax.vmap(_gather_one, in_axes=(stages_dim_in_weights, 0), out_axes=out_dim)(weights, repeat_ids)
+    return outs
+
   def get_weights_stage(self, weights, loop_iteration):
     '''
     Get the weights for each stage used for this loop itereation. 
@@ -168,19 +205,9 @@ class Pipeline(nn.Module):
     # We use numpy instead of jnp so these indexes are not traced
     microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0) # not a great name, this is really something like microbatch_id * repeat idx
     repeat_ids = microbatch_ids // self.config.num_pipeline_microbatches
-    
-    def layers_dimension_to_stages(weight_leaf):
-       # slice_in_dim avoids executing an all gather
-       #weights_stage_list= [jax.lax.slice_in_dim(weight_leaf,layer_ids[stage], layer_ids[stage] + 1, axis=0) for stage in range(self.num_stages)]
-       #weights_stage_list= [jax.lax.dynamic_slice_in_dim(weight_leaf,layer_ids[stage], 1, axis=0) for stage in range(self.num_stages)]
-       weights_stage_list= [jax.lax.dynamic_slice_in_dim(weight_leaf[:,stage],repeat_ids[stage], 1, axis=0) for stage in range(self.num_stages)]
-       weights_stage = jnp.concatenate(weights_stage_list, axis=0)
-       weights_stage_shape = (self.num_stages,) + weight_leaf.shape[2:]
-       weights_stage = jnp.reshape(weights_stage, weights_stage_shape) # This reshape unsqueezes singleton axes that were potentially squeezed in concatenate
-       return weights_stage
 
-    weights_stage = jax.tree_map(layers_dimension_to_stages, weights)
-    return weights_stage
+
+    return jax.tree_map(functools.partial(self.vmap_parallel_gather, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1), weights)
 
   def get_microbatch_id(self, stage_idx, loop_iteration):
     '''Gets the microbatch_id on this loop_iteration for this stage. Works for both circular and non-circular'''
@@ -348,7 +375,7 @@ class Pipeline(nn.Module):
    new_state = self.get_new_loop_state(stages_output, loop_state)
    return new_state
   @nn.compact
-  def __call__(self, inputs: jnp.ndarray, positions: jnp.ndarray, segment_ids:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
+  def __call__(self, inputs: jnp.ndarray, segment_ids: jnp.ndarray, positions:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
     # Reshape inputs of [global_batch, ...] to [microbatches, microbatch_sizes, ...]
     inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length, self.config.emb_dim))
     if positions is not None:
@@ -413,8 +440,8 @@ class Pipeline(nn.Module):
         )
       outputs, _ = scan_fn(config=self.config, mesh=self.mesh, name="layers", quant=self.quant)(
             inputs[0],
-            segment_ids[0],
-            positions[0],
+            example_segmentation,
+            example_position,
             deterministic,
             model_mode,
         )
