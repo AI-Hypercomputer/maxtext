@@ -319,7 +319,13 @@ class Pipeline(nn.Module):
    circ_storage_mover = loop_state["circ_storage_mover"]
    loop_iteration = loop_state["loop_iteration"]
 
-   microbatch_ids = jnp.array([self.get_microbatch_id(stage_idx, loop_iteration) for stage_idx in range(self.num_stages)])
+  # moving lines around
+  #  microbatch_ids = jnp.array([self.get_microbatch_id(stage_idx, loop_iteration) for stage_idx in range(self.num_stages)])
+  #  microbatch_ids = self.shard_leading_dim_by_stages(microbatch_ids)
+
+   microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0)
+   microbatch_ids = microbatch_ids % self.config.num_pipeline_microbatches
+   # Really this array?
    if self.config.num_pipeline_repeats > 1:
     stages_weights = self.get_weights_stage(weights, loop_iteration)
    else:
