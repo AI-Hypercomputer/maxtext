@@ -91,7 +91,7 @@ def reduce_concat_tokens(
 ):
   """Token-preprocessor to concatenate multiple unrelated documents.
   If we want to generate examples of exactly the right length,
-  (to avoid wasting space on padding), then we use this function, folowed by
+  (to avoid wasting space on padding), then we use this function, followed by
   split_tokens.
   Args:
     dataset: a tf.data.Dataset with dictionaries containing the key feature_key.
@@ -219,7 +219,7 @@ def get_datasets(
   train_ds = rekey(train_ds, {"inputs": None, "targets": "text"})
 
   eval_ds = eval_ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
-  # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and splitted to target_length
+  # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and split to target_length
   #   mainly to avoid eval sequences change depending on the number of hosts
   eval_ds = rekey(eval_ds, {"inputs": None, "targets": "ids"})
 
@@ -243,7 +243,7 @@ def preprocess_dataset(
   train_ds = split_tokens_to_targets_length(train_ds, config.max_target_length)
   train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
 
-  # note eval_ds is pre tokenized, reduce_concated and splitted to target_length
+  # note eval_ds is pre tokenized, reduce_concated and split to target_length
   #   mainly to avoid eval sequences change depending on the number of hosts
   train_ds = sequence_packing.pack_dataset(train_ds, config.max_target_length)
   eval_ds = sequence_packing.pack_dataset(eval_ds, config.max_target_length)

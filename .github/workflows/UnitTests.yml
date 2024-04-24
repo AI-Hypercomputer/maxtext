@@ -27,7 +27,7 @@ on:
     - cron:  '0 */2 * * *'
 
 jobs:
-  # IF YOU MODIFY THIS, YOU SHOULD ALSO ADD CORRESPONDING MODICATIONS TO 'gpu' job
+  # IF YOU MODIFY THIS, YOU SHOULD ALSO ADD CORRESPONDING MODIFICATIONS TO 'gpu' job
   tpu:
     strategy:
       fail-fast: false
@@ -99,7 +99,7 @@ jobs:
         docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged maxtext_base_image bash -c \
         'python3 pedagogical_examples/shmap_collective_matmul.py'
 
-  # IF YOU MODIFY THIS, YOU SHOULD ALSO ADD CORRESPONDING MODICATIONS TO 'tpu' job
+  # IF YOU MODIFY THIS, YOU SHOULD ALSO ADD CORRESPONDING MODIFICATIONS TO 'tpu' job
   gpu:
     strategy:
       fail-fast: false
