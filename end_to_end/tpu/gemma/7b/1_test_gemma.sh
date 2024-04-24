@@ -17,7 +17,7 @@ MODEL_VARIATION='7b'
 
 
 # After downloading checkpoints, copy them to GCS bucket at $CHKPT_BUCKET \
-# Please use seperate GCS paths for uploading model weights from kaggle ($CHKPT_BUCKET) and MaxText compatible weights ($BASE_OUTPUT_PATH).
+# Please use separate GCS paths for uploading model weights from kaggle ($CHKPT_BUCKET) and MaxText compatible weights ($BASE_OUTPUT_PATH).
 # Non-Googlers please remember to point CHKPT_BUCKET to GCS buckets that you own
 export CHKPT_BUCKET=gs://maxtext-gemma/flax
 

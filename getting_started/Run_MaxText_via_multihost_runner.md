@@ -54,7 +54,7 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
     Choose names for your TPUs and QR:
     ```
     TPU_PREFIX=$YOUR_TPU_NAME # Use new names when you create new TPUs
-    QR_ID=$TPU_PREFIX # Convenient to re-use the node names, but can be different
+    QR_ID=$TPU_PREFIX # Convenient to reuse the node names, but can be different
     ```
     Choose the number of nodes (we use 2 below, but you may customize this and other feature of your TPU(s))
     ```

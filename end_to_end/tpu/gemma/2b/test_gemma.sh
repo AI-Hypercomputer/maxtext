@@ -15,7 +15,7 @@ idx=$(date +%Y-%m-%d-%H-%M)
 export MODEL_VARIATION='2b'
 
 # After downloading checkpoints, copy them to GCS bucket at $CHKPT_BUCKET \
-# Non-Googlers please remember to use seperate GCS paths for uploading model weights from kaggle ($CHKPT_BUCKET) and MaxText compatible weights ($MODEL_BUCKET).
+# Non-Googlers please remember to use separate GCS paths for uploading model weights from kaggle ($CHKPT_BUCKET) and MaxText compatible weights ($MODEL_BUCKET).
 # Non-Googlers please remember to point these variables to GCS buckets that you own, this script uses internal buckets for testing.
 export CHKPT_BUCKET=gs://maxtext-gemma/flax
 export MODEL_BUCKET=gs://maxtext-gemma

@@ -96,6 +96,7 @@ pandas==2.2.1
 platformdirs==4.2.0
 pluggy==1.4.0
 portpicker==1.6.0
+pre-commit==3.7.0
 promise==2.3
 proto-plus==1.23.0
 protobuf==3.20.3
@@ -107,6 +108,7 @@ pydantic==1.10.14
 pydot==2.0.0
 pyglove==0.4.4
 Pygments==2.17.2
+pyink==24.3.0
 pylint==3.1.0
 pyparsing==3.1.2
 pytest==8.1.1

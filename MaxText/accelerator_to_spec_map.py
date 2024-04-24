@@ -17,7 +17,7 @@ limitations under the License.
 """ Static map of TPU names such as v4-8 to properties such as chip layout."""
 
 """ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-IF YOU MODIFY THIS FILE YOU SHOULD ALSO ADD CORRESPONDING MODICATIONS TO
+IF YOU MODIFY THIS FILE YOU SHOULD ALSO ADD CORRESPONDING MODIFICATIONS TO
 UserFacingNameToSystemCharacteristics in xpk/xpk.py !!!!! """
 
 from dataclasses import dataclass
