@@ -121,7 +121,7 @@ mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregress
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_heads', ['tensor','sequence']],
-                      ['activation_length', ['sequence', 'stage']],
+                      ['activation_length', 'sequence'],
                       ['activation_embed', 'tensor'],
                       ['activation_mlp', 'tensor'],
                       ['activation_kv', 'tensor'],
