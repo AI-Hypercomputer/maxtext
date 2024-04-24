@@ -38,10 +38,81 @@ def normalize_features(example, key):
   }
 
 def shift(example):
-  example['inputs'] = [0] + example['inputs'][:-1]
+  example['inputs'] = [0] + example['targets'][:-1]
   return example
 
+def group_batch(batch):
+    return {k: [v] for k, v in batch.items()}
 
+def unbatch(batch):
+    new_batch = defaultdict(list)
+    keys = batch.keys()
+    for values in zip(*batch.values()):
+        ex = {k: v for k, v in zip(keys, values)}
+        new_batch["inputs"].extend(ex["inputs"])
+        new_batch["targets"].extend(ex["targets"])
+        new_batch["inputs_segmentation"].extend(ex["inputs_segmentation"])
+        new_batch["targets_segmentation"].extend(ex["targets_segmentation"])
+        new_batch["inputs_position"].extend(ex["inputs_position"])
+        new_batch["targets_position"].extend(ex["targets_position"])
+    return new_batch
+
+def pack_in_batch_hf(batch, max_len=2048):
+
+  def _pad_and_refine(current_pack, max_len):
+    targets_nonzero = current_pack['targets'] != 0
+    current_pack['inputs_segmentation'] *= targets_nonzero
+    current_pack['targets_segmentation'] *= targets_nonzero
+    for k,v in current_pack.items():
+      current_pack[k] = v + [0] * (max_len-len(v))
+    return current_pack
+
+  def _add_current_pack(packed_text, current_pack):
+    for key in current_pack.keys():
+      packed_text[key].append(current_pack[key])
+
+  # packed_text = {'inputs':[], 'targets':[],
+  #                 'inputs_segmentation':[], 'targets_segmentation': [], 
+  #                 'inputs_position': [], 'targets_position': []}
+  packed_text = defaultdict(list)
+
+  current_pack = {'inputs':[], 'targets':[],
+                  'inputs_segmentation':[], 'targets_segmentation': [], 
+                  'inputs_position': [], 'targets_position': []}
+  current_pack_len = 0
+  current_segmentation = 0
+  #print(f"{batch=}")
+
+  for inputs, targets in zip(batch["inputs"], batch["targets"]):
+    #print(f"{text=}")
+    new_len = current_pack_len + len(inputs) + 1
+    if new_len <= max_len:
+      current_segmentation += 1
+      current_pack['inputs'] += [0] + inputs
+      current_pack['targets'] += [0] + targets
+      current_pack['inputs_segmentation'] += [current_segmentation] * (len(inputs)+1)
+      current_pack['targets_segmentation'] += [current_segmentation] * (len(targets)+1)
+      current_pack['inputs_position'] += [i for i in range(len(inputs)+1)]
+      current_pack['targets_position'] += [i for i in range(len(targets)+1)]
+      current_pack_len = new_len
+    else:
+      current_pack = _pad_and_refine(current_pack, max_len)
+      _add_current_pack(packed_text, current_pack)
+      current_segmentation=1
+      current_pack = {'inputs': [0] + inputs,
+                        'targets': [0] + targets, 
+                        'inputs_segmentation': [current_segmentation] * (len(inputs)+1),
+                        'targets_segmentation': [current_segmentation] * (len(targets)+1),
+                        'inputs_position': [i for i in range(len(inputs)+1)],
+                        'targets_position': [i for i in range(len(targets)+1)]
+                      } # Start a new pack
+      current_pack_len = len(inputs) + 1
+    # Handle the last pack (might not reach max_len)
+  if current_pack:
+    current_pack = _pad_and_refine(current_pack, max_len)
+    _add_current_pack(packed_text, current_pack)
+
+  return packed_text
 
 def pack_in_batch(batch, max_len=2048):
 
