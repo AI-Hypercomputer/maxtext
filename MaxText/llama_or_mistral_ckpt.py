@@ -73,6 +73,13 @@ MODEL_PARAMS_DICT = {
         "dims_per_head": 128,
         "vocab": 32000,
     },
+    "llama3-8b": {
+        "num_layers": 32,
+        "num_heads": 32,
+        "num_kv_heads": 8,
+        "dims_per_head": 128,
+        "vocab": 128256,
+    },
     "mistral-7b": {
         "num_layers": 32,
         "num_heads": 32,

@@ -19,7 +19,7 @@ limitations under the License.
 
 import numpy as np
 import train_tokenizer
-import tokenizer
+from input_pipeline import input_pipeline_interface
 import unittest
 import pytest
 import tensorflow_datasets as tfds
@@ -38,7 +38,7 @@ class TokenizerTest(unittest.TestCase):
     assets_path = "tests"
     vocab_model_name = "test_tokenizer"
     cls.tokenizer_path = os.path.join(assets_path, vocab_model_name)
-    cls.source_tokenizer = tokenizer.load_tokenizer("../assets/tokenizer", add_eos=False, add_bos=False)
+    cls.source_tokenizer = input_pipeline_interface.get_tokenizer("../assets/tokenizer", add_bos=False, add_eos=False)
     os.environ["TFDS_DATA_DIR"] = dataset_path
     read_config = tfds.ReadConfig(
         shuffle_seed=0,
@@ -51,7 +51,7 @@ class TokenizerTest(unittest.TestCase):
         vocab_size=cls.vocab_size,
         max_corpus_chars=cls.max_corpus_chars,
     )
-    cls.test_tokenizer = tokenizer.load_tokenizer(cls.tokenizer_path, add_eos=False, add_bos=False)
+    cls.test_tokenizer = input_pipeline_interface.get_tokenizer(cls.tokenizer_path, add_bos=False, add_eos=False)
 
   @classmethod
   def tearDownClass(cls):
@@ -61,14 +61,43 @@ class TokenizerTest(unittest.TestCase):
   @pytest.mark.tpu
   def test_tokenize(self):
     text = 'This is a test'
-    self.assertTrue(np.array_equal(self.source_tokenizer.tokenize(text).numpy()[1:-1],
-                                    self.test_tokenizer.tokenize(text).numpy()))
+    self.assertTrue(np.array_equal(self.source_tokenizer.encode(text).numpy(),
+                                    self.test_tokenizer.encode(text).numpy()))
 
   @pytest.mark.tpu
   def test_detokenize(self):
     tokens = [66, 12, 10, 698]
-    self.assertEqual(np.asarray(self.source_tokenizer.detokenize(tokens)), 
-                     np.asarray(self.test_tokenizer.detokenize(tokens)))
+    self.assertEqual(np.asarray(self.source_tokenizer.decode(tokens)), 
+                     np.asarray(self.test_tokenizer.decode(tokens)))
+    
+
+class TikTokenTest(unittest.TestCase):
+  """Tests for train_tokenizer.py"""
+
+  @classmethod
+  def setUpClass(cls):
+    dataset_name = "c4/en:3.0.1"
+    dataset_path = "gs://maxtext-dataset"
+    cls.source_tokenizer = input_pipeline_interface.get_tokenizer("../assets/tokenizer_llama3.tiktoken", add_bos=False, add_eos=False)
+    os.environ["TFDS_DATA_DIR"] = dataset_path
+    read_config = tfds.ReadConfig(
+        shuffle_seed=0,
+    )
+    train_ds_builder = tfds.builder(dataset_name)
+    cls.dataset = train_ds_builder.as_dataset(split="train", read_config=read_config, shuffle_files=True)
+
+  @pytest.mark.tpu
+  def test_tokenize(self):
+    text = 'This is a test'
+    tokens = [2028, 374, 264, 1296]
+    self.assertTrue(np.array_equal(self.source_tokenizer.encode(text), tokens))
+
+  @pytest.mark.tpu
+  def test_detokenize(self):
+    tokens = [2028, 374, 264, 1296]
+    text = 'This is a test'
+    self.assertEqual(np.asarray(self.source_tokenizer.decode(tokens)), 
+                     np.asarray(text))
 
 
 if __name__ == "__main__":

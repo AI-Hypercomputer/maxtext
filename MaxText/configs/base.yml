@@ -277,6 +277,9 @@ use_iota_embed: False
 # use positional embedding
 use_untrainable_positional_embedding: False
 trainable_position_size: -1  # enable gpt3 position embedding with a positive trainable_position_size
+# Rope parameters
+rope_min_timescale: 1
+rope_max_timescale: 10_000
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.

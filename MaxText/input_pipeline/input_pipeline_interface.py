@@ -31,10 +31,10 @@ import tokenizer
 import multihost_dataloading
 
 
-def get_tokenizer(tokenizer_path, add_bos=True, add_eos=True):
+def get_tokenizer(tokenizer_path, add_bos, add_eos):
   # Load tokenizer
-  sp_tokenizer = tokenizer.load_tokenizer(tokenizer_path=tokenizer_path, add_bos=add_bos, add_eos=add_eos)
-  return sp_tokenizer
+  tokenizer_model = tokenizer.build_tokenizer(tokenizer_path, add_bos, add_eos)
+  return tokenizer_model
 
 
 def make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos, process_indices):
@@ -46,7 +46,8 @@ def make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos, 
   )
   sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
   train_iter, eval_iter = _tfds_data_processing_c4_mlperf.preprocess_dataset(
-      config, mesh, train_ds, eval_ds, sp_tokenizer, data_shuffle_seed=config.data_shuffle_seed
+      config, mesh, train_ds, eval_ds, sp_tokenizer,
+      data_shuffle_seed=config.data_shuffle_seed
   )
   return train_iter, eval_iter, sp_tokenizer
 
@@ -62,16 +63,17 @@ def make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos, process
       dataloading_host_count=len(process_indices),
       read_config=read_config,
   )
-  sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
+  tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
   train_iter, _, _ = _tfds_data_processing.preprocess_dataset(
       config,
       mesh,
       train_ds,
       eval_ds,
-      sp_tokenizer,
+      tokenizer,
       data_shuffle_seed=config.data_shuffle_seed,
   )
-  return train_iter, None, sp_tokenizer
+  return train_iter, None, tokenizer
+
 
 
 def make_hf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos, process_indices):
