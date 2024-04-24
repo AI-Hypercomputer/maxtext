@@ -30,6 +30,8 @@ from jax.sharding import PartitionSpec as P
 import common_types
 from jetstream.engine import engine_api
 from jetstream.engine import tokenizer_pb2
+from jetstream.engine import tokenizer_api
+from jetstream.engine import token_utils
 
 import max_utils
 import inference_utils
@@ -307,6 +309,13 @@ class MaxEngine(engine_api.Engine):
   def get_tokenizer(self) -> tokenizer_pb2.TokenizerParameters:
     """Return a protobuf of tokenizer info, callable from Py or C++."""
     return tokenizer_pb2.TokenizerParameters(path=self.config.tokenizer_path, extra_ids=0)
+
+  def build_tokenizer(self, metadata: tokenizer_pb2.TokenizerParameters) -> tokenizer_api.Tokenizer:
+    """Return a tokenizer"""
+    if "tiktoken" in metadata.path:
+      return token_utils.TikToken(metadata)
+    else:
+      return token_utils.SentencePieceTokenizer(metadata)
 
   def init_decode_state(self, *args, **kwargs) -> DecodeState:
     """Initialises any state which a generation step transforms."""

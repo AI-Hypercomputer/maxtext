@@ -94,10 +94,10 @@ class RoPETest(unittest.TestCase):
     position = jnp.arange(seq_length, dtype=jnp.float32)[jnp.newaxis, :]
 
     # Calculate RoPE embeddings from MaxText implementation
-    query_proj = embeddings.RotaryEmbedding(embedding_dims=dim_per_head)(
+    query_proj = embeddings.RotaryEmbedding(min_timescale=1, max_timescale = 10_000, embedding_dims=dim_per_head)(
         permute_to_match_maxtext_rope(x_q), position=position
     )
-    key_proj = embeddings.RotaryEmbedding(embedding_dims=dim_per_head)(permute_to_match_maxtext_rope(x_k), position=position)
+    key_proj = embeddings.RotaryEmbedding(min_timescale=1, max_timescale = 10_000, embedding_dims=dim_per_head)(permute_to_match_maxtext_rope(x_k), position=position)
 
     # Compare results
     self.assertTrue(
@@ -118,12 +118,12 @@ class RoPETest(unittest.TestCase):
     position = jnp.arange(seq_len, dtype=jnp.float32)[jnp.newaxis, :]
 
     # Calculate RoPE embeddings and then scale
-    query_proj_1 = embeddings.RotaryEmbedding(embedding_dims=dim_per_head)(x_q, position=position)
+    query_proj_1 = embeddings.RotaryEmbedding(min_timescale=1, max_timescale = 10_000, embedding_dims=dim_per_head)(x_q, position=position)
     query_proj_1 = query_proj_1 * (dim_per_head**-0.5)
 
     # scale first and then apply RoPE
     query_proj_2 = x_q * (dim_per_head**-0.5)
-    query_proj_2 = embeddings.RotaryEmbedding(embedding_dims=dim_per_head)(query_proj_2, position=position)
+    query_proj_2 = embeddings.RotaryEmbedding(min_timescale=1, max_timescale = 10_000, embedding_dims=dim_per_head)(query_proj_2, position=position)
 
     self.assertTrue(jax.numpy.allclose(query_proj_2, query_proj_1, rtol=1e-01, atol=1e-04, equal_nan=False))
 
