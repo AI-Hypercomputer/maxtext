@@ -142,20 +142,35 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
       exp2_wo = variables['params']['mlp_2']['wo']['kernel'].value
 
       # construct
-      exp0_wi_0 = jnp.reshape(exp0_wi_0, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
-      exp1_wi_0 = jnp.reshape(exp1_wi_0, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
-      exp2_wi_0 = jnp.reshape(exp2_wi_0, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
-      wi_0 = jnp.concat((exp0_wi_0, exp1_wi_0, exp2_wi_0), axis=1).reshape(cfg.base_emb_dim,-1)
+      # exp0_wi_0 = jnp.reshape(exp0_wi_0, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
+      # exp1_wi_0 = jnp.reshape(exp1_wi_0, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
+      # exp2_wi_0 = jnp.reshape(exp2_wi_0, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
+      # wi_0 = jnp.concat((exp0_wi_0, exp1_wi_0, exp2_wi_0), axis=1).reshape(cfg.base_emb_dim,-1)
 
-      exp0_wi_1 = jnp.reshape(exp0_wi_1, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
-      exp1_wi_1 = jnp.reshape(exp1_wi_1, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
-      exp2_wi_1 = jnp.reshape(exp2_wi_1, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
-      wi_1 = jnp.concat((exp0_wi_1, exp1_wi_1, exp2_wi_1), axis=1).reshape(cfg.base_emb_dim,-1)
+      # exp0_wi_1 = jnp.reshape(exp0_wi_1, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
+      # exp1_wi_1 = jnp.reshape(exp1_wi_1, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
+      # exp2_wi_1 = jnp.reshape(exp2_wi_1, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
+      # wi_1 = jnp.concat((exp0_wi_1, exp1_wi_1, exp2_wi_1), axis=1).reshape(cfg.base_emb_dim,-1)
 
-      exp0_wo = jnp.reshape(exp0_wo, (cfg.base_mlp_dim, 1, cfg.base_emb_dim))
-      exp1_wo = jnp.reshape(exp1_wo, (cfg.base_mlp_dim, 1, cfg.base_emb_dim))
-      exp2_wo = jnp.reshape(exp2_wo, (cfg.base_mlp_dim, 1, cfg.base_emb_dim))
-      wo = jnp.concat((exp0_wo, exp1_wo, exp2_wo), axis=1).reshape(cfg.base_mlp_dim,-1)
+      # exp0_wo = jnp.reshape(exp0_wo, (cfg.base_mlp_dim, 1, cfg.base_emb_dim))
+      # exp1_wo = jnp.reshape(exp1_wo, (cfg.base_mlp_dim, 1, cfg.base_emb_dim))
+      # exp2_wo = jnp.reshape(exp2_wo, (cfg.base_mlp_dim, 1, cfg.base_emb_dim))
+      # wo = jnp.concat((exp0_wo, exp1_wo, exp2_wo), axis=1).reshape(cfg.base_mlp_dim,-1)
+
+      exp0_wi_0 = jnp.reshape(exp0_wi_0, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
+      exp1_wi_0 = jnp.reshape(exp1_wi_0, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
+      exp2_wi_0 = jnp.reshape(exp2_wi_0, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
+      wi_0 = jnp.concat((exp0_wi_0, exp1_wi_0, exp2_wi_0), axis=0)
+
+      exp0_wi_1 = jnp.reshape(exp0_wi_1, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
+      exp1_wi_1 = jnp.reshape(exp1_wi_1, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
+      exp2_wi_1 = jnp.reshape(exp2_wi_1, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
+      wi_1 = jnp.concat((exp0_wi_1, exp1_wi_1, exp2_wi_1), axis=0)
+
+      exp0_wo = jnp.reshape(exp0_wo, (1, cfg.base_mlp_dim, cfg.base_emb_dim))
+      exp1_wo = jnp.reshape(exp1_wo, (1, cfg.base_mlp_dim, cfg.base_emb_dim))
+      exp2_wo = jnp.reshape(exp2_wo, (1, cfg.base_mlp_dim, cfg.base_emb_dim))
+      wo = jnp.concat((exp0_wo, exp1_wo, exp2_wo), axis=0)
 
       moe_variables = {'params': {'gate': {'kernel': kernel}, 
                                            'wi_0': wi_0, 

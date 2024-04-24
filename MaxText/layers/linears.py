@@ -291,33 +291,53 @@ class MoeBlock(nn.Module):
   weight_dtype: DType = jnp.float32
   dtype: DType = jnp.float32
 
-  def generate_kernel(self, name, shape, axes, reshape, permute):
+
+  def generate_kernels(self, num_experts, base_emb_dim, mlp_dim):
+    kernel_start_time = time.time()
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
     kernel_init = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
-    kernel_axes = axes
-    kernel_start_time = time.time()
-    kernel = self.param(
-        name,
+
+    kernel_axes = ('exp', 'embed', 'mlp')
+    wo_kernel_axes = ('exp', 'mlp', 'embed')
+    
+    w0_kernel = self.param(
+        'wi_0',
         nn.with_logical_partitioning(kernel_init, kernel_axes),
-        shape,
+        (num_experts, base_emb_dim, mlp_dim),
         self.weight_dtype,
         kernel_in_axis,
         kernel_out_axis,
       )
+    w0 = jnp.asarray(w0_kernel, self.dtype)
+    w1_kernel = self.param(
+        'wi_1',
+        nn.with_logical_partitioning(kernel_init, kernel_axes),
+        (num_experts, base_emb_dim, mlp_dim),
+        self.weight_dtype,
+        kernel_in_axis,
+        kernel_out_axis,
+      )
+    w1 = jnp.asarray(w1_kernel, self.dtype)
+    wo_kernel = self.param(
+        'wo',
+        nn.with_logical_partitioning(kernel_init, wo_kernel_axes),
+        (num_experts, mlp_dim, base_emb_dim),
+        self.weight_dtype,
+        kernel_in_axis,
+        kernel_out_axis,
+      )
+    wo = jnp.asarray(wo_kernel, self.dtype)
     kernel_gen_end_time = time.time()
     print("--- kernel_gen_end_time takes: %s seconds ---" % (kernel_gen_end_time - kernel_start_time))
-    kernel = jnp.asarray(kernel, self.dtype)
-    kernel = jnp.reshape(kernel, reshape)
-    kernel = jnp.permute_dims(kernel, permute)
-    reshape_permute_time = time.time()
-    print("--- reshape_permute_time takes: %s seconds ---" % (reshape_permute_time - kernel_gen_end_time))
-    return kernel
-
+    return w0, w1, wo
 
   def call_gmm(self,
                inputs,
-               kernel,
+               num_experts,
+               base_emb_dim,
+               mlp_dim,
+               mlp_activation,
                group_sizes):
 
     @functools.partial(
@@ -355,14 +375,18 @@ class MoeBlock(nn.Module):
 
       return output
   
-    output = gmm(inputs, kernel, group_sizes)
+    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(num_experts,base_emb_dim,mlp_dim)
+    layer_1 = gmm(inputs, w0_kernel, group_sizes)
+    layer_2 = gmm(inputs, w1_kernel, group_sizes)
+    layer_1_act = _convert_to_activation_function(mlp_activation)(layer_1)
+    intermediate_layer = jnp.multiply(layer_1_act, layer_2)
+    output = gmm(intermediate_layer, wo_kernel, group_sizes)
     return output
   
   def get_group_size(self, inputs, size):
     _, group_size = jnp.unique(inputs, return_counts=True, size=size)
     return group_size
 
-  
   def permute(self, inputs, gate_logits, base_emb_dim):
     inputs_2d = jnp.reshape(inputs, (-1, base_emb_dim))
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
@@ -371,17 +395,16 @@ class MoeBlock(nn.Module):
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     repeat_hidden_states = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
     sorted_output = jnp.take(repeat_hidden_states, indices=sorted_selected_experts, axis=0).astype(self.dtype)
+    _, group_size = jnp.unique(flatten_selected_experts, return_counts=True, size=self.num_experts)
 
-    return sorted_output, flatten_selected_experts, sorted_selected_experts, weights
+    return sorted_output, sorted_selected_experts, weights, group_size
 
-  
-  def unpermute(self, layer_3, inputs, sorted_selected_experts, weights, num_experts_per_tok):
+  def unpermute(self, layer_3, inputs, sorted_selected_experts, weights):
     unsort_output = jnp.take(layer_3, indices=jnp.argsort(sorted_selected_experts), axis=0)
     flatten_weights = jnp.ravel(weights)
     combined_output = jnp.multiply(unsort_output, flatten_weights[:, jnp.newaxis])
-    groups = jnp.reshape(combined_output, (-1, num_experts_per_tok, combined_output.shape[1]))
+    groups = jnp.reshape(combined_output, (-1, self.num_experts_per_tok, combined_output.shape[1]))
     return jnp.sum(groups, axis=1).reshape(inputs.shape).astype(self.dtype)
-
 
   @nn.compact
   def __call__(self, inputs):
@@ -396,104 +419,23 @@ class MoeBlock(nn.Module):
             name='gate')(inputs)
     gate_logits_time = time.time()
     print("--- gate_logits_time takes: %s seconds ---" % (gate_logits_time - start_time))
-    
-    # print("gate_logits.dtype", gate_logits.dtype)
-
-    # inputs_2d = jnp.reshape(inputs, (-1, cfg.base_emb_dim))
-    # print("inputs.shape", inputs.shape)
-    # print("inputs.shape", inputs_2d.shape)
-    # weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-    # top_k_time = time.time()
-    # print("--- top_k_time takes: %s seconds ---" % (top_k_time - gate_logits_time))
-
-    # # print("weights from megablox", weights)
-    # # print("selected_experts from megablox", selected_experts)
-    # weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(cfg.dtype)
-    # # print("weights.dtype", weights.dtype)
-    # flatten_selected_experts = jnp.ravel(selected_experts)
-    # flatten_time = time.time()
-    # print("--- flatten_time takes: %s seconds ---" % (flatten_time - top_k_time))
-    # sorted_selected_experts = jnp.argsort(flatten_selected_experts)
-    # repeat_hidden_states = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-    # # print("flatten_selected_experts.shape", flatten_selected_experts.shape)
-    # # print("sorted_selected_experts.shape", sorted_selected_experts.shape)
-    # sorted_hidden_states = jnp.take(repeat_hidden_states, indices=sorted_selected_experts, axis=0).astype(cfg.dtype)
-    
-    sorted_hidden_states, flatten_selected_experts, sorted_selected_experts, weights = self.permute(inputs,
-                                                                                                    gate_logits,
-                                                                                                    cfg.base_emb_dim)
-    sort_time = time.time()
-    print("--- sort_time takes: %s seconds ---" % (sort_time - gate_logits_time))
-
-    group_sizes = jax.jit(self.get_group_size, static_argnames='size')(flatten_selected_experts, self.num_experts)
-    # print("group_sizes", group_sizes)
-    unique_time = time.time()
-    print("--- unique_time takes: %s seconds ---" % (unique_time - sort_time))
-    
-    w0_kernel = self.generate_kernel(name = "wi_0",
-                                            shape = (cfg.base_emb_dim, cfg.mlp_dim * cfg.num_experts),
-                                            axes = ('embed', 'mlp'),
-                                            reshape = (cfg.base_emb_dim, cfg.num_experts, cfg.mlp_dim),
-                                            permute = (1, 0, 2))
-    # print("w0_kernel.dtype", w0_kernel.dtype)
-    # print("w0_kernel.shape", w0_kernel.shape)
-
-    w1_kernel = self.generate_kernel(name = "wi_1",
-                                            shape = (cfg.base_emb_dim, cfg.mlp_dim * cfg.num_experts),
-                                            axes = ('embed', 'mlp'),
-                                            reshape = (cfg.base_emb_dim, cfg.num_experts, cfg.mlp_dim),
-                                            permute = (1, 0, 2))
-    # print("w1_kernel.dtype", w1_kernel.dtype)
-    # print("w1_kernel.shape", w1_kernel.shape)
-
-    wo_kernel = self.generate_kernel(name = "wo",
-                                              shape = (cfg.mlp_dim, cfg.base_emb_dim * cfg.num_experts),
-                                              axes = ('mlp', 'embed'),
-                                              reshape = (cfg.mlp_dim, cfg.num_experts, cfg.base_emb_dim),
-                                              permute = (1, 0, 2))
-    # print("wo_kernel.dtype", wo_kernel.dtype)
-    # print("sorted_hidden_states.shape", sorted_hidden_states.shape)
-    # print("group_sizes.shape", group_sizes)
-    # print("sorted_hidden_states", sorted_hidden_states)
-    kernel_time = time.time()
-    print("--- kernel_time takes: %s seconds ---" % (kernel_time - sort_time))
-
-    layer_1 = jax.jit(self.call_gmm)(sorted_hidden_states,
-                                    w0_kernel,
-                                    group_sizes)
-    # print("sorted_hidden_states.shape", sorted_hidden_states.shape)
-    # print("layer_1.shape", layer_1.shape)
-    # print("layer_1", layer_1)
-
-    layer_2 = jax.jit(self.call_gmm)(sorted_hidden_states,
-                                    w1_kernel,
-                                    group_sizes)
-
-    layer_1_act = _convert_to_activation_function(cfg.mlp_activations[0])(layer_1)
-    # print("layer_1_act", layer_1_act)
-    # print("layer_2", layer_2)
-    intermediate_layer = jnp.multiply(layer_1_act, layer_2)
-    # print("intermediate_layer", intermediate_layer)
-    # print("intermediate_layer.shape", intermediate_layer.shape)
-    # print("wo_kernel.shape", wo_kernel.shape)
-
-    layer_3 = jax.jit(self.call_gmm)(intermediate_layer,
-                                    wo_kernel,
-                                    group_sizes)
-
-    # print("intermediate_layer.shape", intermediate_layer.shape)
-    # print("layer_3.shape", layer_3.shape)
-    # print("layer_3.dtype", layer_3.dtype)
-    # print("layer_3", layer_3)
+    sorted_hidden_states, sorted_selected_experts, weights, group_size = self.permute(inputs,
+                                                                                      gate_logits,
+                                                                                      cfg.base_emb_dim)
+    permute_time = time.time()
+    print("--- permute_time takes: %s seconds ---" % (permute_time - gate_logits_time))
+  
+    intermediate_output = jax.jit(self.call_gmm, 
+                                  static_argnames=['num_experts','base_emb_dim','mlp_dim','mlp_activation'])(sorted_hidden_states,
+                                                                                   cfg.num_experts,
+                                                                                   cfg.base_emb_dim,
+                                                                                   cfg.mlp_dim,
+                                                                                   cfg.mlp_activations[0],
+                                                                                   group_size)
     gmm_time = time.time()
-    print("--- gmm_wrapper_time takes: %s seconds ---" % (gmm_time - kernel_time))
+    print("--- gmm_wrapper_time takes: %s seconds ---" % (gmm_time - permute_time))
 
-    # unsort_output = jnp.take(layer_3, indices=jnp.argsort(sorted_selected_experts), axis=0)
-    # flatten_weights = jnp.ravel(weights)
-    # combined_output = jnp.multiply(unsort_output, flatten_weights[:, jnp.newaxis])
-    # groups = jnp.reshape(combined_output, (-1, cfg.num_experts_per_tok, combined_output.shape[1]))
-    # output = jnp.sum(groups, axis=1).reshape(inputs.shape).astype(cfg.dtype)
-    output = self.unpermute(layer_3, inputs, sorted_selected_experts, weights, cfg.num_experts_per_tok)
+    output = self.unpermute(intermediate_output, inputs, sorted_selected_experts, weights)
     unsort_time = time.time()
     print("--- unsort_time takes: %s seconds ---" % (unsort_time - gmm_time))
 
