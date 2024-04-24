@@ -371,7 +371,7 @@ class Pipeline(nn.Module):
     stages_segment_ids
     segment_stage_idx = None
    decoder_layer_instance = self.decoder_layer_class(config=self.config, mesh=self.mesh)
-   stages_output, _ = jax.vmap(decoder_layer_instance.apply, in_axes=[0,0,positions_stage_idx, segment_stage_idx, None, None], spmd_axis_name='stage')(stages_weights, stages_inputs, stages_positions, stages_segment_ids, deterministic, model_mode)
+   stages_output, _ = jax.vmap(decoder_layer_instance.apply, in_axes=[0,0, segment_stage_idx, positions_stage_idx, None, None], spmd_axis_name='stage')(stages_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
    new_state = self.get_new_loop_state(stages_output, loop_state)
    return new_state
   @nn.compact

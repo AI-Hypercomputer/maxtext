@@ -189,12 +189,15 @@ def main(argv: Sequence[str]) -> None:
   
   reg_layers = run_regular_pipeline
   pipeline_func = my_pipeline.apply
-  pipeline_func(init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
-  #assert_same_output_and_grad(reg_layers,pipeline_func, targets, init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+
+  # pipeline_func(init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+  # assert_same_output_and_grad runs non-jitted functions, which in particular will probably fail on multihost with "non-addresable" array error
+  assert_same_output_and_grad(reg_layers,pipeline_func, targets, init_pipeline_params, inputs, inputs_segmentation, inputs_position, deterministic, model_mode)
 
   partial_pipeline_func = functools.partial(pipeline_func, deterministic=deterministic, model_mode=model_mode)
+
   jit_pipeline_func = jax.jit(partial_pipeline_func)
-  timing_util.simple_timeit(jit_pipeline_func, init_pipeline_params, inputs, inputs_position, inputs_segmentation, tries = 3, task = 'basic_pp')
+  #timing_util.simple_timeit(jit_pipeline_func, init_pipeline_params, inputs, inputs_segmentation, inputs_position, tries = 3, task = 'basic_pp')
 
 
 if __name__ == "__main__":
