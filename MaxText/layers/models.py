@@ -335,7 +335,7 @@ class Decoder(nn.Module):
           kernel_axes=('embed', 'vocab'),
           name='logits_dense')(y) # We do not quantize the logits matmul.
     logits = nn.with_logical_constraint(
-        logits, ('activation_batch', 'activation_length', 'activation_vocab'))
+        logits, ('logits_activation_batch', 'activation_length', 'activation_vocab'))
     logits = logits.astype(jnp.float32)
     return logits
 
