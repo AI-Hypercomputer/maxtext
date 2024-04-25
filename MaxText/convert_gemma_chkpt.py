@@ -143,7 +143,7 @@ def main(raw_args=None) -> None:
 
   layer_weight["self_attention"] = copy.deepcopy(self_attention)
   jax_weights["decoder"]["layers"] = copy.deepcopy(layer_weight)
-  jax_weights = jax.tree_map(jnp.array, jax_weights)
+  jax_weights = jax.tree_util.tree_map(jnp.array, jax_weights)
 
   def astype_fn(x):
     if isinstance(x, jnp.ndarray):
@@ -151,7 +151,7 @@ def main(raw_args=None) -> None:
     else:
       return x
 
-  jax_weights = jax.tree_map(astype_fn, jax_weights)
+  jax_weights = jax.tree_util.tree_map(astype_fn, jax_weights)
 
   enable_checkpointing = True
   async_checkpointing = False
