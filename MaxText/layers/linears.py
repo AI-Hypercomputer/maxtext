@@ -343,12 +343,12 @@ class MoeBlock(nn.Module):
               (nn.logical_to_mesh_axes(("m", "k"))),
               (nn.logical_to_mesh_axes(("num_groups", "k", "n"))),
               (nn.logical_to_mesh_axes(("num_groups",))),
-              # (nn.logical_to_mesh_axes(("m","k","n"))),
+              (nn.logical_to_mesh_axes(("m","k","n"))),
           ),
         out_specs=(nn.logical_to_mesh_axes(("m", "n"))),
         check_rep=False,
     )
-    def gmm(inputs, kernel, group_sizes):
+    def gmm(inputs, kernel, group_sizes, tiling):
       hs_shape = inputs.shape
       if hs_shape[0] % 128:
         # padding
@@ -358,18 +358,19 @@ class MoeBlock(nn.Module):
         inputs = inputs.astype(self.dtype)
       output = mblx.gmm(lhs=inputs, 
                         rhs=kernel, 
-                        group_sizes=group_sizes)
+                        group_sizes=group_sizes,
+                        tiling=tiling)
       if hs_shape[0] % 128:
         output = output[:hs_shape[0]]
 
       return output
   
     w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(num_experts,base_emb_dim,mlp_dim)
-    layer_1 = gmm(inputs, w0_kernel, group_sizes)
-    layer_2 = gmm(inputs, w1_kernel, group_sizes)
+    layer_1 = gmm(inputs, w0_kernel, group_sizes, None)
+    layer_2 = gmm(inputs, w1_kernel, group_sizes, None)
     layer_1_act = _convert_to_activation_function(mlp_activation)(layer_1)
     intermediate_layer = jnp.multiply(layer_1_act, layer_2)
-    output = gmm(intermediate_layer, wo_kernel, group_sizes)
+    output = gmm(intermediate_layer, wo_kernel, group_sizes, None)
     return output
   
   def get_group_size(self, inputs, size):

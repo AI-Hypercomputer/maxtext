@@ -128,20 +128,20 @@ def adam_pax(
       nu = (1.0 - beta2_decay) * (update**2) + beta2_decay * nu
       return _slot_opt_state(mu=mu, nu=nu)
 
-    updated_moments = jax.tree_map(_update_momentum, updates, state.mu, state.nu)
+    updated_moments = jax.tree_util.tree_map(_update_momentum, updates, state.mu, state.nu)
 
-    mu = jax.tree_map(lambda x: x.mu, updated_moments)
-    nu = jax.tree_map(lambda x: x.nu, updated_moments)
+    mu = jax.tree_util.tree_map(lambda x: x.mu, updated_moments)
+    nu = jax.tree_util.tree_map(lambda x: x.nu, updated_moments)
 
-    updates = jax.tree_map(
+    updates = jax.tree_util.tree_map(
         lambda mu, nu: mu / (jnp.sqrt(nu + epsilon_root) + epsilon), mu, nu)
 
     if weight_decay > 0:
-      updates = jax.tree_map(lambda x, v: x + weight_decay * v, updates, params)
+      updates = jax.tree_util.tree_map(lambda x, v: x + weight_decay * v, updates, params)
 
     step_size = -1.0 * learning_rate_fn(count)
     # Finally, fold in step size.
-    updates = jax.tree_map(lambda x: step_size * x, updates)
+    updates = jax.tree_util.tree_map(lambda x: step_size * x, updates)
 
     updated_states = optax.ScaleByAdamState(count=count + 1, mu=mu, nu=nu)
     return updates, updated_states

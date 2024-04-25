@@ -94,7 +94,7 @@ class SyntheticDataIterator():
     self.mesh = mesh
     self.config = config
     data_pspec = P(*config.data_sharding)
-    data_pspec_shardings = jax.tree_map(
+    data_pspec_shardings = jax.tree_util.tree_map(
         lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
     self.data_generator = jax.jit(SyntheticDataIterator.raw_generate_synthetic_data,
         out_shardings=data_pspec_shardings,
@@ -131,7 +131,7 @@ class BadSyntheticDataIterator():
     self.mesh = mesh
     self.config = config
     data_pspec = P(*config.data_sharding)
-    data_pspec_shardings = jax.tree_map(
+    data_pspec_shardings = jax.tree_util.tree_map(
         lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
     self.data_generator = jax.jit(BadSyntheticDataIterator.get_bad_synthetic_data,
         out_shardings=data_pspec_shardings,

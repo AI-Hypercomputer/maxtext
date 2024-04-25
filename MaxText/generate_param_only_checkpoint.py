@@ -53,12 +53,12 @@ def _possibly_unroll_params(config, training_state, training_state_annotations, 
   def new_pspec(x):
     return jax.sharding.PartitionSpec(*x[0:config.param_scan_axis] + x[config.param_scan_axis+1:])
 
-  new_per_layer_state_annotation = jax.tree_map(new_pspec, training_state_annotations_layers)
-  new_per_layer_state_sharding = jax.tree_map(lambda x : jax.sharding.NamedSharding(mesh, x), new_per_layer_state_annotation)
+  new_per_layer_state_annotation = jax.tree_util.tree_map(new_pspec, training_state_annotations_layers)
+  new_per_layer_state_sharding = jax.tree_util.tree_map(lambda x : jax.sharding.NamedSharding(mesh, x), new_per_layer_state_annotation)
 
   for i in range(config.num_decoder_layers):
     def slice_ith(input_layers):
-      return jax.tree_map(lambda x : jax.numpy.take(x, i, axis = config.param_scan_axis), input_layers)
+      return jax.tree_util.tree_map(lambda x : jax.numpy.take(x, i, axis = config.param_scan_axis), input_layers)
 
     new_layer = jax.jit(slice_ith, out_shardings = new_per_layer_state_sharding)(training_state_layers)
 
@@ -68,7 +68,7 @@ def _possibly_unroll_params(config, training_state, training_state_annotations, 
   del training_state.params['params']['decoder']['layers']
   del training_state_annotations.params['params']['decoder']['layers']
 
-  jax.tree_map(lambda x : x.delete(), training_state_layers)
+  jax.tree_util.tree_map(lambda x : x.delete(), training_state_layers)
 
 def _read_train_checkpoint(config, checkpoint_manager, mesh):
   """Read training checkpoint at path defined by load_full_state_path."""
@@ -88,7 +88,7 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
 def _save_decode_checkpoint(config, state, checkpoint_manager):
   """Generate checkpoint for decode from the training_state."""
   with jax.spmd_mode('allow_all'):
-    decode_state = max_utils.init_decode_state(None, jax.tree_map(lambda x : x.astype(jax.numpy.bfloat16), state.params))
+    decode_state = max_utils.init_decode_state(None, jax.tree_util.tree_map(lambda x : x.astype(jax.numpy.bfloat16), state.params))
   if checkpoint_manager is not None:
     if save_checkpoint(checkpoint_manager, 0, decode_state):
       max_logging.log(f"saved an decode checkpoint at {config.checkpoint_dir}")
