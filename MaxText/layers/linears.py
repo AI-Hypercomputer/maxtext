@@ -31,7 +31,6 @@ from jax.ad_checkpoint import checkpoint_name
 import megablox as mblx
 from jax.experimental import shard_map
 from jax.sharding import Mesh
-import time
 
 
 Array = common_types.Array
@@ -293,7 +292,6 @@ class MoeBlock(nn.Module):
 
 
   def generate_kernels(self, num_experts, base_emb_dim, mlp_dim):
-    kernel_start_time = time.time()
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
     kernel_init = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
@@ -328,8 +326,6 @@ class MoeBlock(nn.Module):
         kernel_out_axis,
       )
     wo = jnp.asarray(wo_kernel, self.dtype)
-    kernel_gen_end_time = time.time()
-    print("--- kernel_gen_end_time takes: %s seconds ---" % (kernel_gen_end_time - kernel_start_time))
     return w0, w1, wo
 
   def call_gmm(self,
@@ -353,7 +349,6 @@ class MoeBlock(nn.Module):
         check_rep=False,
     )
     def gmm(inputs, kernel, group_sizes):
-      pad_start_time = time.time()
       hs_shape = inputs.shape
       if hs_shape[0] % 128:
         # padding
@@ -361,17 +356,11 @@ class MoeBlock(nn.Module):
 
         inputs = jax.lax.pad(inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0,0,0)])
         inputs = inputs.astype(self.dtype)
-        padding_time = time.time()
-        print("--- padding_time takes: %s seconds ---" % (padding_time - pad_start_time))
       output = mblx.gmm(lhs=inputs, 
                         rhs=kernel, 
                         group_sizes=group_sizes)
-      gmm_kernel_time = time.time()
-      print("--- gmm_kernel_time takes: %s seconds ---" % (gmm_kernel_time - pad_start_time))
       if hs_shape[0] % 128:
         output = output[:hs_shape[0]]
-        unpad_time = time.time()
-        print("--- unpad_time takes: %s seconds ---" % (unpad_time - gmm_kernel_time))
 
       return output
   
@@ -410,20 +399,15 @@ class MoeBlock(nn.Module):
   def __call__(self, inputs):
     cfg = self.config
 
-    start_time = time.time()
     gate_logits = DenseGeneral(
             self.num_experts,
             dtype=self.dtype,
             kernel_init=self.kernel_init,
             kernel_axes=self.kernel_axes,
             name='gate')(inputs)
-    gate_logits_time = time.time()
-    print("--- gate_logits_time takes: %s seconds ---" % (gate_logits_time - start_time))
     sorted_hidden_states, sorted_selected_experts, weights, group_size = self.permute(inputs,
                                                                                       gate_logits,
                                                                                       cfg.base_emb_dim)
-    permute_time = time.time()
-    print("--- permute_time takes: %s seconds ---" % (permute_time - gate_logits_time))
   
     intermediate_output = jax.jit(self.call_gmm, 
                                   static_argnames=['num_experts','base_emb_dim','mlp_dim','mlp_activation'])(sorted_hidden_states,
@@ -432,12 +416,8 @@ class MoeBlock(nn.Module):
                                                                                    cfg.mlp_dim,
                                                                                    cfg.mlp_activations[0],
                                                                                    group_size)
-    gmm_time = time.time()
-    print("--- gmm_wrapper_time takes: %s seconds ---" % (gmm_time - permute_time))
 
     output = self.unpermute(intermediate_output, inputs, sorted_selected_experts, weights)
-    unsort_time = time.time()
-    print("--- unsort_time takes: %s seconds ---" % (unsort_time - gmm_time))
 
     return output
   

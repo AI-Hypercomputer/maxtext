@@ -65,8 +65,8 @@ class MoeLoopBlock(nn.Module):
             name='gate')(inputs)
     
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-    print("weights from loop", weights)
-    print("selected_experts from loop", selected_experts)
+    # print("weights from loop", weights)
+    # print("selected_experts from loop", selected_experts)
     weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1)
     mlp_lnx = jnp.zeros_like(inputs)
     weights = weights.astype(self.dtype)
@@ -78,7 +78,7 @@ class MoeLoopBlock(nn.Module):
         weights_exp = jnp.sum(jnp.multiply(selected_experts==k, weights), axis=-1)
         mlp_lnx_exp = linears.MlpBlock(
           intermediate_dim=self.config.mlp_dim,
-          activations=self.config.mlp_activations,
+          activations=['silu', 'linear'],
           intermediate_dropout_rate=self.config.dropout_rate,
           dtype=self.dtype,
           weight_dtype=self.weight_dtype,
@@ -107,13 +107,10 @@ def get_expected_output(rng, hidden_states, cfg):
       variables = model.init(rng, jax.random.normal(rng, (cfg.base_num_query_heads, 
                                                           cfg.head_dim, 
                                                           cfg.base_emb_dim)))
-      print("get_expected_output variables", variables)
-      time.simple_timeit(model.apply, variables, hidden_states, tries=1, task="loop")
+      # print("get_expected_output variables", variables)
+      time.simple_timeit(jax.jit(model.apply), variables, hidden_states, tries=10, task="loop")
 
-      # start_time = time.time()
       # output = model.apply(variables, hidden_states)
-      # end_time = time.time()
-      # print("--- for loop takes: %s seconds ---" % (end_time - start_time))
       return variables, 0
 
 
@@ -129,48 +126,58 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
       )
 
       kernel = variables['params']['gate']['kernel'].value
-      exp0_wi_0 = variables['params']['mlp_0']['wi_0']['kernel'].value
-      exp1_wi_0 = variables['params']['mlp_1']['wi_0']['kernel'].value
-      exp2_wi_0 = variables['params']['mlp_2']['wi_0']['kernel'].value
 
-      exp0_wi_1 = variables['params']['mlp_0']['wi_1']['kernel'].value
-      exp1_wi_1 = variables['params']['mlp_1']['wi_1']['kernel'].value
-      exp2_wi_1 = variables['params']['mlp_2']['wi_1']['kernel'].value
+      exp_wi_0 = []
+      exp_wi_1 = []
+      exp_wo = []
 
-      exp0_wo = variables['params']['mlp_0']['wo']['kernel'].value
-      exp1_wo = variables['params']['mlp_1']['wo']['kernel'].value
-      exp2_wo = variables['params']['mlp_2']['wo']['kernel'].value
+      for i in range(cfg.num_experts):
+
+        tmp_wi_0 = variables['params'][f'mlp_{i}']['wi_0']['kernel'].value
+        tmp_wi_0 = jnp.reshape(tmp_wi_0, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
+        
+        tmp_wi_1 = variables['params'][f'mlp_{i}']['wi_1']['kernel'].value
+        tmp_wi_1 = jnp.reshape(tmp_wi_1, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
+
+        tmp_wo = variables['params'][f'mlp_{i}']['wo']['kernel'].value
+        tmp_wo = jnp.reshape(tmp_wo, (1, cfg.base_mlp_dim, cfg.base_emb_dim))
+        
+        exp_wi_0.append(tmp_wi_0)
+        exp_wi_1.append(tmp_wi_1)
+        exp_wo.append(tmp_wo)
+
+      wi_0 = jnp.concat(exp_wi_0, axis=0)
+      wi_1 = jnp.concat(exp_wi_1, axis=0)
+      wo = jnp.concat(exp_wo, axis=0)
+         
+      # exp0_wi_0 = variables['params']['mlp_0']['wi_0']['kernel'].value
+      # exp1_wi_0 = variables['params']['mlp_1']['wi_0']['kernel'].value
+      # exp2_wi_0 = variables['params']['mlp_2']['wi_0']['kernel'].value
+
+      # exp0_wi_1 = variables['params']['mlp_0']['wi_1']['kernel'].value
+      # exp1_wi_1 = variables['params']['mlp_1']['wi_1']['kernel'].value
+      # exp2_wi_1 = variables['params']['mlp_2']['wi_1']['kernel'].value
+
+      # exp0_wo = variables['params']['mlp_0']['wo']['kernel'].value
+      # exp1_wo = variables['params']['mlp_1']['wo']['kernel'].value
+      # exp2_wo = variables['params']['mlp_2']['wo']['kernel'].value
 
       # construct
-      # exp0_wi_0 = jnp.reshape(exp0_wi_0, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
-      # exp1_wi_0 = jnp.reshape(exp1_wi_0, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
-      # exp2_wi_0 = jnp.reshape(exp2_wi_0, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
-      # wi_0 = jnp.concat((exp0_wi_0, exp1_wi_0, exp2_wi_0), axis=1).reshape(cfg.base_emb_dim,-1)
 
-      # exp0_wi_1 = jnp.reshape(exp0_wi_1, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
-      # exp1_wi_1 = jnp.reshape(exp1_wi_1, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
-      # exp2_wi_1 = jnp.reshape(exp2_wi_1, (cfg.base_emb_dim, 1, cfg.base_mlp_dim))
-      # wi_1 = jnp.concat((exp0_wi_1, exp1_wi_1, exp2_wi_1), axis=1).reshape(cfg.base_emb_dim,-1)
+      # exp0_wi_0 = jnp.reshape(exp0_wi_0, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
+      # exp1_wi_0 = jnp.reshape(exp1_wi_0, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
+      # exp2_wi_0 = jnp.reshape(exp2_wi_0, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
+      # wi_0 = jnp.concat((exp0_wi_0, exp1_wi_0, exp2_wi_0), axis=0)
 
-      # exp0_wo = jnp.reshape(exp0_wo, (cfg.base_mlp_dim, 1, cfg.base_emb_dim))
-      # exp1_wo = jnp.reshape(exp1_wo, (cfg.base_mlp_dim, 1, cfg.base_emb_dim))
-      # exp2_wo = jnp.reshape(exp2_wo, (cfg.base_mlp_dim, 1, cfg.base_emb_dim))
-      # wo = jnp.concat((exp0_wo, exp1_wo, exp2_wo), axis=1).reshape(cfg.base_mlp_dim,-1)
+      # exp0_wi_1 = jnp.reshape(exp0_wi_1, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
+      # exp1_wi_1 = jnp.reshape(exp1_wi_1, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
+      # exp2_wi_1 = jnp.reshape(exp2_wi_1, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
+      # wi_1 = jnp.concat((exp0_wi_1, exp1_wi_1, exp2_wi_1), axis=0)
 
-      exp0_wi_0 = jnp.reshape(exp0_wi_0, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      exp1_wi_0 = jnp.reshape(exp1_wi_0, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      exp2_wi_0 = jnp.reshape(exp2_wi_0, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      wi_0 = jnp.concat((exp0_wi_0, exp1_wi_0, exp2_wi_0), axis=0)
-
-      exp0_wi_1 = jnp.reshape(exp0_wi_1, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      exp1_wi_1 = jnp.reshape(exp1_wi_1, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      exp2_wi_1 = jnp.reshape(exp2_wi_1, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      wi_1 = jnp.concat((exp0_wi_1, exp1_wi_1, exp2_wi_1), axis=0)
-
-      exp0_wo = jnp.reshape(exp0_wo, (1, cfg.base_mlp_dim, cfg.base_emb_dim))
-      exp1_wo = jnp.reshape(exp1_wo, (1, cfg.base_mlp_dim, cfg.base_emb_dim))
-      exp2_wo = jnp.reshape(exp2_wo, (1, cfg.base_mlp_dim, cfg.base_emb_dim))
-      wo = jnp.concat((exp0_wo, exp1_wo, exp2_wo), axis=0)
+      # exp0_wo = jnp.reshape(exp0_wo, (1, cfg.base_mlp_dim, cfg.base_emb_dim))
+      # exp1_wo = jnp.reshape(exp1_wo, (1, cfg.base_mlp_dim, cfg.base_emb_dim))
+      # exp2_wo = jnp.reshape(exp2_wo, (1, cfg.base_mlp_dim, cfg.base_emb_dim))
+      # wo = jnp.concat((exp0_wo, exp1_wo, exp2_wo), axis=0)
 
       moe_variables = {'params': {'gate': {'kernel': kernel}, 
                                            'wi_0': wi_0, 
@@ -184,22 +191,21 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
 
       
       # print("get_moe_output expected_variables", variables)
-      time.simple_timeit(model.apply, moe_variables, hidden_states, tries=1, task="megablox")
-      # start_time = time.time()
+      time.simple_timeit(jax.jit(model.apply), moe_variables, hidden_states, tries=10, task="megablox")
       # output = model.apply(moe_variables, hidden_states)
-      # end_time = time.time()
-      # print("--- megablox takes: %s seconds ---" % (end_time - start_time))
       return 0
 
 
 class MoeTest(unittest.TestCase):
 
   def setUp(self):
+    import os
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
     pyconfig.initialize(
       [None, 'configs/base.yml'],
       run_name='test',
       enable_checkpointing=False,
-      model_name='mixtral-test',
+      model_name='mixtral-8x7b',
       dtype='float32',
     )
 
@@ -210,7 +216,7 @@ class MoeTest(unittest.TestCase):
     self.hidden_states = jnp.reshape(num, (self.cfg.base_num_query_heads, 
                                            self.cfg.head_dim, 
                                            self.cfg.base_emb_dim))
-    print("hidden_states", self.hidden_states.shape)
+    # print("hidden_states", self.hidden_states.shape)
 
     devices_array = max_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
@@ -218,9 +224,9 @@ class MoeTest(unittest.TestCase):
   def test_moe_block(self):
     variables, expected_output = get_expected_output(self.rng, self.hidden_states, self.cfg)
     actual_output = get_moe_output(variables, self.hidden_states, self.cfg, self.mesh)
-    print("expected_output", expected_output)
-    print("actual_output", actual_output)
-    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-03, atol=1e-03, equal_nan=False))
+    # print("expected_output", expected_output)
+    # print("actual_output", actual_output)
+    # self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-03, atol=1e-03, equal_nan=False))
 
 
 if __name__ == '__main__':
