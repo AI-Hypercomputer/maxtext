@@ -47,7 +47,7 @@ class Pipeline(nn.Module):
   # TODO: Some properties, (num repeat, num_micro are through the config, some are derived. This makes it annoying to call different properties, some are self.property, some are self.config.property)
   # TODO: Should we declare the derived properties here as well (e.g. num_stages? I think anything declared here becomes required as an input though
   config: common_types.Config
-  layers: nn.Module
+  layers: nn.Module # The name of this property (layers) is reflected in the state pytree and thus also checkpoints.
   mesh: common_types.Mesh
   quant: Optional[quantizations.AqtQuantization] = None
 
@@ -416,11 +416,26 @@ class Pipeline(nn.Module):
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
 
     def func_to_scan(model,loop_state, xs):
-       return model.run_one_iteration(loop_state, positions, segment_ids, deterministic, model_mode), None
+       return model.run_one_iteration(loop_state, positions, segment_ids, deterministic, model_mode, model.layers), None
     
     use_scan = True
-    if use_scan:
-        scan_func = nn.scan(func_to_scan, length=total_iterations)
+    variable_carry = []
+    variable_broadcast = ["params"]
+    NON_TRAINABLE="non_trainable"
+    if self.is_mutable_collection(NON_TRAINABLE):
+      variable_carry.append(NON_TRAINABLE)
+    else:
+      variable_broadcast.append(NON_TRAINABLE)
+
+    if use_scan and not self.is_initializing():
+        scan_func = nn.scan(
+          func_to_scan,
+          variable_broadcast=variable_broadcast,
+          variable_carry=variable_carry,
+          # Dropout/aqt keys will be split for each iteration.
+          split_rngs={'params': True},
+          length=total_iterations,
+          )
         loop_state, _ = scan_func(self, loop_state, None)
     else:
         for loop_iteration in range(total_iterations):

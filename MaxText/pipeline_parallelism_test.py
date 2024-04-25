@@ -160,7 +160,7 @@ def main(argv: Sequence[str]) -> None:
   from layers import pipeline_circular_init_vmap
   my_pipeline = pipeline_circular_init_vmap.Pipeline(
     config=config,
-    decoder_layer_instance=decoder_layer_instance,
+    layers=decoder_layer_instance,
     mesh=mesh
   )
 
@@ -189,7 +189,7 @@ def main(argv: Sequence[str]) -> None:
       else:
         cur_layer_params = get_cur_layer_params(params, layer)
         cur_layer_params['params'] = cur_layer_params['params']['layers']
-      reg_layer_activations, _ = decoder_layer_class(config=config,mesh=mesh).apply(cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode)
+      reg_layer_activations, _ = decoder_layer_instance.apply(cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode)
     return reg_layer_activations
 
 
