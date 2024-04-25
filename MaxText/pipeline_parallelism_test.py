@@ -155,7 +155,8 @@ def main(argv: Sequence[str]) -> None:
   from layers import pipeline_shard_init
   from layers import pipeline
   from layers import pipeline_circular_shard_init
-  my_pipeline = pipeline_circular_shard_init.Pipeline(
+  from layers import pipeline_circular_init_vmap
+  my_pipeline = pipeline_circular_init_vmap.Pipeline(
     config=config,
     decoder_layer_class=decoder_layer_class,
     mesh=mesh
