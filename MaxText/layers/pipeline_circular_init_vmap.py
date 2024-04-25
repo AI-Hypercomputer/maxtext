@@ -47,7 +47,7 @@ class Pipeline(nn.Module):
   # TODO: Some properties, (num repeat, num_micro are through the config, some are derived. This makes it annoying to call different properties, some are self.property, some are self.config.property)
   # TODO: Should we declare the derived properties here as well (e.g. num_stages? I think anything declared here becomes required as an input though
   config: common_types.Config
-  decoder_layer_class: nn.Module
+  layers: nn.Module
   mesh: common_types.Mesh
   quant: Optional[quantizations.AqtQuantization] = None
 
@@ -346,7 +346,7 @@ class Pipeline(nn.Module):
     output = output[:,permutation]
     return output
 
-  def run_one_iteration(self, loop_state, weights, positions, segment_ids, deterministic, model_mode, decoder_layer_instance):
+  def run_one_iteration(self, loop_state, positions, segment_ids, deterministic, model_mode, decoder_layer_instance):
    '''Run one loop iteration - gets weights and inputs for each stage, run the stages in parallel, and update the various state buffers'''
    state_io = loop_state['state_io']
    shift = loop_state["shift"]
@@ -354,17 +354,9 @@ class Pipeline(nn.Module):
    circ_storage_mover = loop_state["circ_storage_mover"]
    loop_iteration = loop_state["loop_iteration"]
 
-  # For some reason this is really bad and causes a lot of collective permutes (with or without the sharding constraint)
-  #  microbatch_ids = jnp.array([self.get_microbatch_id(stage_idx, loop_iteration) for stage_idx in range(self.num_stages)])
-  #  microbatch_ids = self.shard_leading_dim_by_stages(microbatch_ids)
-
    microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0)
    microbatch_ids = microbatch_ids % self.config.num_pipeline_microbatches
-   # Really this array?
-#    if self.config.num_pipeline_repeats > 1:
-#     stages_weights = self.get_weights_stage(weights, loop_iteration)
-#    else:
-#      stages_weights = weights
+
    stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
    if positions is not None:
     stages_positions = self.vmap_gather(positions, microbatch_ids, 0)
@@ -378,16 +370,6 @@ class Pipeline(nn.Module):
    else:
     stages_segment_ids
     segment_stage_idx = None
-
-  # Explict weights via apply
-  #  def func_to_vmap(body_instance, stages_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
-  #    return body_instance.apply(stages_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
-  #  vmap_func = nn.vmap(
-  #    func_to_vmap,
-  #    in_axes=[0,0, segment_stage_idx, positions_stage_idx, None, None],
-  #    spmd_axis_name='stage'
-  #  )
-  #  stages_output, _ = vmap_func(decoder_layer_instance, stages_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
   # With magic weight via name gathering
    def func_to_vmap(body_instance,stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
@@ -413,9 +395,6 @@ class Pipeline(nn.Module):
    )
    stages_output, _ = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
-
-   #stages_output, _ = jax.vmap(decoder_layer_instance.apply, in_axes=[0,0, segment_stage_idx, positions_stage_idx, None, None], spmd_axis_name='stage')(stages_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
-
    new_state = self.get_new_loop_state(stages_output, loop_state)
    return new_state
   @nn.compact
@@ -433,79 +412,20 @@ class Pipeline(nn.Module):
     else:
       example_segmentation = None
 
-    # TODO: Consider refactoring scan to call a fctn that takes instance as arg instead of class
-    # TODO: Maxtext uses layer scan axis as 1 instead of 0, I don't want to deal with that indexing
-    def scan_to_init_params():
-      scan_fn = nn.scan(
-          self.decoder_layer_class,
-          variable_axes={
-              "params": 0,
-              "cache": 1,
-              "intermediates": 0,
-              "aqt": 0,
-              "_overwrite_with_gradient": 0,
-          },
-          split_rngs={
-              "params": True,
-              "dropout": self.config.enable_dropout,
-          },
-          in_axes=(
-              nn.broadcast,
-              nn.broadcast,
-              nn.broadcast,
-              nn.broadcast,
-          ),
-          length=self.num_stages,
-          metadata_params={nn.PARTITION_NAME: "layers"},
-      )
-      if self.config.num_pipeline_repeats > 1:
-         # Add an additional leading pipeline_repeats dimension
-         scan_fn = nn.scan(
-          scan_fn,
-          variable_axes={
-              "params": 0,
-              "cache": 1,
-              "intermediates": 0,
-              "aqt": 0,
-              "_overwrite_with_gradient": 0,
-          },
-          split_rngs={
-              "params": True,
-              "dropout": self.config.enable_dropout,
-          },
-          in_axes=(
-              nn.broadcast,
-              nn.broadcast,
-              nn.broadcast,
-              nn.broadcast,
-          ),
-          length=self.config.num_pipeline_repeats,
-          metadata_params={nn.PARTITION_NAME: "pipeline_repeats"},
-        )
-      outputs, _ = scan_fn(config=self.config, mesh=self.mesh, name="layers", quant=self.quant)(
-            inputs[0],
-            example_segmentation,
-            example_position,
-            deterministic,
-            model_mode,
-        )
-      return outputs
-
-    if self.is_mutable_collection("params") and False:
-      return scan_to_init_params()
-      
-      
-
     loop_state = self.init_states(inputs)
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
-    # weights = self.variables
-    # weights['params'] = weights['params']['layers']
+
+    def func_to_scan(model,loop_state, xs):
+       return model.run_one_iteration(loop_state, positions, segment_ids, deterministic, model_mode), None
     
-    decoder_layer_instance = self.decoder_layer_class(config=self.config, mesh=self.mesh, name="layers")
-    for loop_iteration in range(total_iterations):
-        print(f"starting iteration {loop_iteration}")
-        # weights are none
-        loop_state = self.run_one_iteration(loop_state, None, positions, segment_ids, deterministic, model_mode, decoder_layer_instance)
+    use_scan = True
+    if use_scan:
+        scan_func = nn.scan(func_to_scan, length=total_iterations)
+        loop_state, _ = scan_func(self, loop_state, None)
+    else:
+        for loop_iteration in range(total_iterations):
+            print(f"starting iteration {loop_iteration}")
+            loop_state = self.run_one_iteration(loop_state, positions, segment_ids, deterministic, model_mode, self.layers)
 
     # The final output is located in the input/output array, however the output microbatches may be permuted relative to the input
     final_output = self.permute_output_ms_dim(loop_state["state_io"])
