@@ -379,7 +379,42 @@ class Pipeline(nn.Module):
     stages_segment_ids
     segment_stage_idx = None
    decoder_layer_instance = self.decoder_layer_class(config=self.config, mesh=self.mesh)
+
+  # Explict weights via apply
+  #  def func_to_vmap(body_instance, stages_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
+  #    return body_instance.apply(stages_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+  #  vmap_func = nn.vmap(
+  #    func_to_vmap,
+  #    in_axes=[0,0, segment_stage_idx, positions_stage_idx, None, None],
+  #    spmd_axis_name='stage'
+  #  )
+  #  stages_output, _ = vmap_func(decoder_layer_instance, stages_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+
+  # With magic weight via name gathering
+  #  def func_to_vmap(body_instance,stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
+  #    return body_instance(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+
+  #  mutable_func_to_vmap = nn.map_variables(
+  #    func_to_vmap,
+  #    mapped_collections=["params"],
+  #    mutable=True
+  #  )
+  #  vmap_func = nn.vmap(
+  #    mutable_func_to_vmap,
+  #    in_axes=(0, segment_stage_idx, positions_stage_idx, None, None),
+  #    spmd_axis_name='stage',
+  #    variable_axes={'params': 0},
+  #    split_rngs={'params': True},
+  #    metadata_params={
+  #      nn.PARTITION_NAME: "layers",
+  #      "is_initializing": self.is_initializing(),
+  #      "x_times": self.num_stages}
+  #  )
+  #  stages_output, _ = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+
+
    stages_output, _ = jax.vmap(decoder_layer_instance.apply, in_axes=[0,0, segment_stage_idx, positions_stage_idx, None, None], spmd_axis_name='stage')(stages_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+
    new_state = self.get_new_loop_state(stages_output, loop_state)
    return new_state
   @nn.compact
@@ -466,11 +501,11 @@ class Pipeline(nn.Module):
     weights['params'] = weights['params']['layers']
     
     func_to_scan = functools.partial(self.run_one_iteration, weights=weights, deterministic=deterministic, model_mode=model_mode)
-    def dumb_func(model, loop_state, weights, positions, segment_ids, deterministic, model_mode):
+    def scan_loop_iteration(model, loop_state, weights, positions, segment_ids, deterministic, model_mode):
       return model.run_one_iteration(loop_state, weights, positions, segment_ids, deterministic, model_mode)
 
     scanned_loop_iteration = nn.scan(
-      dumb_func,
+      scan_loop_iteration,
       variable_broadcast="params",
       variable_axes={
             "summaries": 0,

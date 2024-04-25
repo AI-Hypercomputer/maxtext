@@ -31,15 +31,19 @@ def pretty_print_pytree(pytree, indent_level=0):
     pytree: The JAX PyTree to print.
     indent_level: The initial indentation level (default: 0).
   """
-
-  for key, value in pytree.items():
-    indent = "  " * indent_level  # Calculate indentation
-    if isinstance(value, jnp.ndarray):
-      print(f"{indent}{key} {value.shape}")  # Print arrays with shape
-    else:
-      print(f"{indent}{key}")  # Print other leaves as they are
-      pretty_print_pytree(value, indent_level + 1)  # Recurse for nested structures
-
+  try:
+    x = pytree.items()
+    for key, value in pytree.items():
+      indent = "  " * indent_level  # Calculate indentation
+      if isinstance(value, jnp.ndarray):
+        print(f"{indent}{key} {value.shape}")  # Print arrays with shape
+      else:
+        print(f"{indent}{key}")  # Print other leaves as they are
+        pretty_print_pytree(value, indent_level + 1)  # Recurse for nested structures
+  except: # Assume logically partitioned
+    indent = "  " * indent_level
+    print(f"{indent} {pytree.value.shape}")
+    
 def get_weights_and_inputs(batch_size, sequence, features, n_layers):
     '''Get random weights, random inputs, and random targets
         Returns
@@ -159,8 +163,8 @@ def main(argv: Sequence[str]) -> None:
 
 
   init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+  pretty_print_pytree(init_pipeline_params)
   #pipeline_out = my_pipeline.apply(init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
-
 
 
   def run_regular_pipeline(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
@@ -168,7 +172,7 @@ def main(argv: Sequence[str]) -> None:
 
     def get_cur_layer_params(params, layer_idx):
       def get_cur_layer_params_arr(leaf):
-        if config.num_pipeline_repeats > 1 and True:
+        if config.num_pipeline_repeats > 1:
           new_shape = (leaf.shape[0] * leaf.shape[1],) + leaf.shape[2:]
           leaf = jnp.reshape(leaf, new_shape)
         return leaf[layer_idx]
@@ -192,12 +196,12 @@ def main(argv: Sequence[str]) -> None:
 
   # pipeline_func(init_pipeline_params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
   # assert_same_output_and_grad runs non-jitted functions, which in particular will probably fail on multihost with "non-addresable" array error
-  #assert_same_output_and_grad(reg_layers,pipeline_func, targets, init_pipeline_params, inputs, inputs_segmentation, inputs_position, deterministic, model_mode)
+  assert_same_output_and_grad(reg_layers,pipeline_func, targets, init_pipeline_params, inputs, inputs_segmentation, inputs_position, deterministic, model_mode)
 
   partial_pipeline_func = functools.partial(pipeline_func, deterministic=deterministic, model_mode=model_mode)
 
   jit_pipeline_func = jax.jit(partial_pipeline_func)
-  timing_util.simple_timeit(jit_pipeline_func, init_pipeline_params, inputs, inputs_segmentation, inputs_position, tries = 3, task = 'basic_pp')
+  #timing_util.simple_timeit(jit_pipeline_func, init_pipeline_params, inputs, inputs_segmentation, inputs_position, tries = 3, task = 'basic_pp')
 
 
 if __name__ == "__main__":
