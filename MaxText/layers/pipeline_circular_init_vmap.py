@@ -363,13 +363,13 @@ class Pipeline(nn.Module):
     positions_stage_idx = 0
    else:
      stages_positions = None
-     positions_stage_idx = 0
+     positions_stage_idx = 0 # can be 0 or None? TODO
    if segment_ids is not None:
     stages_segment_ids = self.vmap_gather(segment_ids, microbatch_ids, 0)
     segment_stage_idx = 0
    else:
-    stages_segment_ids
-    segment_stage_idx = None
+    stages_segment_ids = None
+    segment_stage_idx = 0 # can be 0 or None? TODO
 
   # With magic weight via name gathering
    def func_to_vmap(body_instance,stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
@@ -427,6 +427,8 @@ class Pipeline(nn.Module):
     else:
       variable_broadcast.append(NON_TRAINABLE)
 
+    # The scan cannot be used on init since it broadcasts the state. Thus the state must be independent of the loop body,
+    # but on init the loop body will initialize the params.
     if use_scan and not self.is_initializing():
         scan_func = nn.scan(
           func_to_scan,
@@ -439,7 +441,6 @@ class Pipeline(nn.Module):
         loop_state, _ = scan_func(self, loop_state, None)
     else:
         for loop_iteration in range(total_iterations):
-            print(f"starting iteration {loop_iteration}")
             loop_state = self.run_one_iteration(loop_state, positions, segment_ids, deterministic, model_mode, self.layers)
 
     # The final output is located in the input/output array, however the output microbatches may be permuted relative to the input

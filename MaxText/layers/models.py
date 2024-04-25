@@ -290,8 +290,10 @@ class Decoder(nn.Module):
       )
     else:
       if cfg.ici_pipeline_parallelism > 1 or cfg.dcn_pipeline_parallelism > 1:
-        from layers import pipeline_circular_shard_init
-        y = pipeline_circular_shard_init.Pipeline(config=cfg, mesh=mesh, decoder_layer_class=BlockLayer,quant=self.quant)(
+        from layers import pipeline_circular_init_vmap
+        deocder_layer_instace = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
+        # TODO: Pipeline doesn't need its own config/mesh/quant?
+        y = pipeline_circular_init_vmap.Pipeline(config=cfg, mesh=mesh, layers=deocder_layer_instace,quant=self.quant)(
             y,
             decoder_segment_ids,
             decoder_positions,
