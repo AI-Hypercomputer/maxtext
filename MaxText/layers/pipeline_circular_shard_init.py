@@ -150,9 +150,14 @@ class Pipeline(nn.Module):
     return stages_in
 
   def shard_dim_by_stages(self, x, dim: int):
-    dims_mapping = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
-    dims_mapping[dim] = "stages"
-    return jax.lax.with_sharding_constraint(x, dims_mapping) # maybe PartitionSpec(dims_mapping)
+    #dims_mapping = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
+    dims_mapping = [None] * x.ndim
+    dims_mapping[dim] = "stage"
+    dims_mapping = tuple(dims_mapping)
+    p1 = jax.sharding.PartitionSpec(*dims_mapping)
+    sharding = jax.sharding.NamedSharding(self.mesh,p1)
+    return jax.lax.with_sharding_constraint(x, sharding) # maybe PartitionSpec(dims_mapping)
+    #return jax.lax.with_sharding_constraint(x, PartitionSpec(*tuple(dims_mapping))) # maybe PartitionSpec(dims_mapping)
 
 
   def vmap_parallel_gather(self, weights, repeat_ids, repeat_dim_in_weights, stages_dim_in_weights):
@@ -177,13 +182,16 @@ class Pipeline(nn.Module):
         dim -= 1
       return jnp.squeeze(jax.lax.dynamic_slice_in_dim(x, i, 1, dim), dim)
 
+    # TODO: this boolean is always true, out_dim should just be 0
     out_dim = stages_dim_in_weights
     if repeat_dim_in_weights < stages_dim_in_weights:
       out_dim -= 1
 
     repeat_ids = self.shard_leading_dim_by_stages(repeat_ids)
-    #weights = self._shard_dim_by_stages(weights, stages_dim_in_weights)
+    weights = self.shard_dim_by_stages(weights, stages_dim_in_weights)
     outs = jax.vmap(_gather_one, in_axes=(stages_dim_in_weights, 0), out_axes=out_dim)(weights, repeat_ids)
+    # Also shard outs
+    outs = self.shard_dim_by_stages(outs, out_dim)
     return outs
 
   def get_weights_stage(self, weights, loop_iteration):
