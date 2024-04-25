@@ -323,7 +323,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
       return jax.device_put(arr, device=s3)
 
   # convert all weights to jax.numpy with sharding if applicable
-  jax_weights = jax.tree_map(checkpoint_device_put, jax_weights)
+  jax_weights = jax.tree_util.tree_map(checkpoint_device_put, jax_weights)
 
   # dummy configs for the checkpoint_manager
   step_number_to_save_new_ckpt = 0
