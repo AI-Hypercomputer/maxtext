@@ -346,6 +346,32 @@ class Pipeline(nn.Module):
     output = output[:,permutation]
     return output
 
+  def get_main_vmap_func(self, segment_stage_idx, positions_stage_idx):
+      # With magic weight via name gathering
+    def func_to_vmap(body_instance,stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
+      return body_instance(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+
+    # TODO: this can probably be removed
+    mutable_func_to_vmap = nn.map_variables(
+      func_to_vmap,
+      mapped_collections=["params"],
+      mutable=True
+    )
+    vmap_func = nn.vmap(
+      mutable_func_to_vmap,
+      in_axes=(0, segment_stage_idx, positions_stage_idx, None, None),
+      spmd_axis_name='stage',
+      variable_axes={'params': 0},
+      # TODO: params:self.is_initializing instead of always true
+      split_rngs={'params': True},
+      metadata_params={
+        nn.PARTITION_NAME: "layers",
+        'sub_weight_split_dims_mapping': (-1),
+        "is_initializing": self.is_initializing(),
+        "x_times": self.num_stages}
+    )
+    return vmap_func
+
   def run_one_iteration(self, loop_state, positions, segment_ids, deterministic, model_mode, decoder_layer_instance):
    '''Run one loop iteration - gets weights and inputs for each stage, run the stages in parallel, and update the various state buffers'''
    state_io = loop_state['state_io']
@@ -371,32 +397,12 @@ class Pipeline(nn.Module):
     stages_segment_ids = None
     segment_stage_idx = 0 # can be 0 or None? TODO
 
-  # With magic weight via name gathering
-   def func_to_vmap(body_instance,stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
-     return body_instance(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
-
-   mutable_func_to_vmap = nn.map_variables(
-     func_to_vmap,
-     mapped_collections=["params"],
-     mutable=True
-   )
-   vmap_func = nn.vmap(
-     mutable_func_to_vmap,
-     in_axes=(0, segment_stage_idx, positions_stage_idx, None, None),
-     spmd_axis_name='stage',
-     variable_axes={'params': 0},
-     # TODO: params:self.is_initializing instead of always true
-     split_rngs={'params': True},
-     metadata_params={
-       nn.PARTITION_NAME: "layers",
-       'sub_weight_split_dims_mapping': (-1),
-       "is_initializing": self.is_initializing(),
-       "x_times": self.num_stages}
-   )
+   vmap_func = self.get_main_vmap_func(segment_stage_idx, positions_stage_idx)
    stages_output, _ = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
    new_state = self.get_new_loop_state(stages_output, loop_state)
    return new_state
+
   @nn.compact
   def __call__(self, inputs: jnp.ndarray, segment_ids: jnp.ndarray, positions:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
     # Reshape inputs of [global_batch, ...] to [microbatches, microbatch_sizes, ...]
@@ -404,13 +410,17 @@ class Pipeline(nn.Module):
     if positions is not None:
       positions = positions.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
       example_position = positions[0]
+      position_idx = 0
     else:
       example_position = None
+      position_idx = None
     if segment_ids is not None:
       segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
       example_segmentation = segment_ids[0]
+      segment_idx = 0
     else:
       example_segmentation = None
+      segment_idx = None
 
     loop_state = self.init_states(inputs)
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
@@ -426,6 +436,19 @@ class Pipeline(nn.Module):
       variable_carry.append(NON_TRAINABLE)
     else:
       variable_broadcast.append(NON_TRAINABLE)
+
+    if self.is_initializing() and self.config.num_pipeline_repeats > 1:
+     # To shard weight (both for initialization and at rest) for the circular pipeline
+     # we create weights of shape [num_repeat, num_stages, ...] (e.g. [num_repeat, num_stages, embed, mlp])
+     # and shard the num_stages  we wrap the main stage vmap with a num_repeat vmap to generate this axis only for parameter initialization
+     # TODO: to call this need to flush out segments and positions to num_layers probably
+     vmap_func = nn.vmap(
+       self.get_main_vmap_func(segment_idx, position_idx), # segment_stage_idx, positions_stage_idx
+       in_axes=(0, 0, 0, segment_idx, position_idx), # in_axes=(0, segment_stage_idx, positions_stage_idx, None, None),
+       
+
+
+     )
 
     # The scan cannot be used on init since it broadcasts the state. Thus the state must be independent of the loop body,
     # but on init the loop body will initialize the params.
