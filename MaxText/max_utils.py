@@ -49,7 +49,7 @@ def find_nans_and_infs(pytree):
   def finder(x):
     return jnp.any(jnp.isinf(x) | jnp.isnan(x))
 
-  bad_pytree = jax.tree_map(finder, pytree)
+  bad_pytree = jax.tree_util.tree_map(finder, pytree)
   return jax.tree_util.tree_flatten(bad_pytree)
 
 
@@ -660,7 +660,7 @@ def delete_pytree(p):
       leaf.delete()
     del leaf
 
-  jax.tree_map(delete_leaf, p)
+  jax.tree_util.tree_map(delete_leaf, p)
 
 
 def summarize_pytree_data(params, name="Params", raw=False):

@@ -207,16 +207,16 @@ def main(_argv: Sequence[str]) -> None:
 
   def training_step(in_act, in_layers):
     _, grad_layers = multiply_layers_and_grad(in_act, in_layers)
-    out_layers = jax.tree_map(lambda param, grad: param - 1e-4 * grad, in_layers, grad_layers[0])
+    out_layers = jax.tree_util.tree_map(lambda param, grad: param - 1e-4 * grad, in_layers, grad_layers[0])
     return out_layers
 
   print("finished includes ", flush=True)
 
   replicated_sharding = jax.sharding.NamedSharding(mesh, data_sharding)
 
-  parameter_mesh_shardings = jax.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), parameter_sharding)
+  parameter_mesh_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), parameter_sharding)
 
-  data_pspec_shardings = jax.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), parameter_sharding)
+  data_pspec_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), parameter_sharding)
 
   jit_func = jax.jit(
       training_step,
@@ -224,11 +224,11 @@ def main(_argv: Sequence[str]) -> None:
       out_shardings=data_pspec_shardings,
   )
 
-  data_mesh_shardings = jax.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_sharding)
+  data_mesh_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_sharding)
 
   jit_gen_data = jax.jit(gen_data, in_shardings=None, out_shardings=data_mesh_shardings)
 
-  parameter_mesh_shardings = jax.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), parameter_sharding)
+  parameter_mesh_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), parameter_sharding)
 
   jit_gen_layers = jax.jit(gen_layers, in_shardings=None, out_shardings=parameter_mesh_shardings)
 
