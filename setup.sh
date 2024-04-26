@@ -27,19 +27,13 @@
 # Enable "exit immediately if any command fails" option
 set -e
 export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_SUSPEND=1
+export NEEDRESTART_MODE=l
+
 
 (sudo bash || bash) <<'EOF'
 apt update && \
-apt install -y numactl && \
-apt install -y lsb-release && \
-apt install -y gnupg && \
-apt install -y curl && \
-apt install -y net-tools && \
-apt install -y iproute2 && \
-apt install -y procps && \
-apt install -y lsof && \
-apt install -y git && \
-apt install -y ethtool
+apt install -y numactl lsb-release gnupg curl net-tools iproute2 procps lsof git ethtool && \
 export GCSFUSE_REPO=gcsfuse-`lsb_release -c -s`
 echo "deb https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | tee /etc/apt/sources.list.d/gcsfuse.list
 curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
