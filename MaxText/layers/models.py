@@ -235,6 +235,7 @@ class Decoder(nn.Module):
             "key_proj",
             "qkv_proj",
             "out_proj",
+            "context",
         )
       elif cfg.remat_policy == "save_qkv_proj":
         policy = jax.checkpoint_policies.save_only_these_names(
@@ -242,6 +243,7 @@ class Decoder(nn.Module):
             "value_proj",
             "key_proj",
             "qkv_proj",
+            "context",
         )
       elif cfg.remat_policy == "qkv_proj_offloaded":
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(

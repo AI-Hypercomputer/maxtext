@@ -149,5 +149,7 @@ ${COMMAND} &
 PID=$!
 PIDS+=($PID)
 
+test "${NODE_RANK}" -eq 0 && eval "gsutil -m cp -r /deps/ gs://runner-maxtext-logs/ninacai/nsys/"
+
 wait_all_success_or_exit "${PIDS[@]}"
 
