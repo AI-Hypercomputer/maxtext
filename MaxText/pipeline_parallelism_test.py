@@ -154,6 +154,7 @@ def main(argv: Sequence[str]) -> None:
   #decoder_layer_class = llama2.LlamaDecoderLayer
 
   decoder_layer_instance = simple_decoder_layer.SimpleDecoderLayer(config=config, mesh=mesh, name="layers")
+  #decoder_layer_instance = llama2.LlamaDecoderLayer(config=config, mesh=mesh, name="layers")
   from layers import pipeline_shard_init
   from layers import pipeline
   from layers import pipeline_circular_shard_init
