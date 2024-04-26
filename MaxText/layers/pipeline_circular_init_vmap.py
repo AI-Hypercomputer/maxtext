@@ -35,6 +35,12 @@ import pyconfig
 import functools
 import max_utils
 
+PARAMS="params"
+NON_TRAINABLE="non_trainable"
+SUMMARIES = 'summaries'
+INTERMEDIATES = 'intermediates'
+
+
 def stack_pytrees(*pytrees):
   """Returns a pytree with identical key structure but whose leaves have a new [num pytree inputs] leading dimension stacking from each input."""
   def stacking_fn(*leaves):
@@ -396,6 +402,24 @@ class Pipeline(nn.Module):
     segment_stage_idx = 0 # can be 0 or None? TODO
 
    vmap_func = self.get_main_vmap_func(segment_stage_idx, positions_stage_idx)
+
+   if self.config.num_pipeline_repeats > 1:
+    microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0) # not a great name, this is really something like microbatch_id * repeat idx
+    repeat_ids = microbatch_ids // self.config.num_pipeline_microbatches
+    def gather_weights_for_stages_in(weights):
+      return jax.tree_map(
+          functools.partial(
+              self.vmap_parallel_gather, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1),
+          weights)
+
+    vmap_func = nn.map_variables(
+        vmap_func,
+        mapped_collections=[PARAMS, NON_TRAINABLE, SUMMARIES, INTERMEDIATES],
+        mutable=True,
+        trans_in_fn=gather_weights_for_stages_in,
+        # TODO trasn_out_fn :)
+    )
+   print(f"{loop_iteration=}", flush=True)
    stages_output, _ = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
    new_state = self.get_new_loop_state(stages_output, loop_state)
@@ -449,7 +473,7 @@ class Pipeline(nn.Module):
           # TODO: params:self.is_initializing instead of always true
           split_rngs={'params': True},
           metadata_params={
-            nn.PARTITION_NAME: "circular_repeats",
+            nn.PARTITION_NAME: "layers",
             'sub_weight_split_dims_mapping': (-1), #(None,), # Maybe -1? 
             "is_initializing": True,
             "x_times": self.config.num_pipeline_repeats}
