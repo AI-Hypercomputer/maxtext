@@ -407,16 +407,17 @@ class Pipeline(nn.Module):
   def __call__(self, inputs: jnp.ndarray, segment_ids: jnp.ndarray, positions:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
     # Reshape inputs of [global_batch, ...] to [microbatches, microbatch_sizes, ...]
     inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length, self.config.emb_dim))
+    example_inputs = jax.lax.broadcast(inputs[0], self.config.num_decoder_layers)
     if positions is not None:
       positions = positions.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
-      example_position = positions[0]
+      example_position = jax.lax.broadcast(positions[0], self.config.num_decoder_layers)
       position_idx = 0
     else:
       example_position = None
       position_idx = None
     if segment_ids is not None:
       segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
-      example_segmentation = segment_ids[0]
+      example_segmentation = jax.lax.broadcast(segment_ids[0], self.config.num_decoder_layers)
       segment_idx = 0
     else:
       example_segmentation = None
@@ -445,10 +446,11 @@ class Pipeline(nn.Module):
      vmap_func = nn.vmap(
        self.get_main_vmap_func(segment_idx, position_idx), # segment_stage_idx, positions_stage_idx
        in_axes=(0, 0, 0, segment_idx, position_idx), # in_axes=(0, segment_stage_idx, positions_stage_idx, None, None),
-       
+
 
 
      )
+     return vmap_func(example_inputs, example_segmentation, example_position, deterministic, model_mode)
 
     # The scan cannot be used on init since it broadcasts the state. Thus the state must be independent of the loop body,
     # but on init the loop body will initialize the params.
