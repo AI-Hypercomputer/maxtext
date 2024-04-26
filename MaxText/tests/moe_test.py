@@ -206,7 +206,7 @@ class MoeTest(unittest.TestCase):
       run_name='test',
       enable_checkpointing=False,
       model_name='mixtral-8x7b',
-      dtype='float32',
+      dtype='bfloat16',
     )
 
     self.cfg = pyconfig.config
