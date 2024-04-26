@@ -142,7 +142,7 @@ dcn_data_parallelism: -1  # recommended DCN axis to be auto-sharded
 dcn_fsdp_parallelism: 1
 dcn_fsdp_transpose_parallelism: 1
 dcn_sequence_parallelism: 1  # never recommended
-dcn_tensor_parallelism: 1 # never recommeneded
+dcn_tensor_parallelism: 1 # never recommended
 dcn_autoregressive_parallelism: 1 # never recommended
 ici_data_parallelism: 1
 ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
@@ -197,7 +197,7 @@ prefill_cache_dir: "" # If set and load_from_prefill_dir, decode.py reads from d
 autoregressive_decode_assert: ""
 
 enable_profiler: False
-# If set to true, upload all profiler xplane results from all hosts. Otherwise, only upload the xplane reuslt from the first host.
+# If set to true, upload all profiler xplane results from all hosts. Otherwise, only upload the xplane result from the first host.
 upload_all_profiler_results: False
 # Skip first n steps for profiling, to omit things like compilation and to give
 # the iteration time a chance to stabilize.
@@ -261,5 +261,14 @@ vertex_tensorboard_project: ""
 # Region to create Vertex AI Tensorboard in for GCE, blank if running via XPK
 # Vertex AI supported regions: https://cloud.google.com/vertex-ai/docs/general/locations#available-regions
 vertex_tensorboard_region: ""
+
+# If set to True, MaxText will perform extra checks using jax.checkify. Note that this will effect performance. 
+max_checkify: False
+
+# Inference
+inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
+inference_microbenchmark_stages: "prefill,generate"
+inference_microbenchmark_loop_iters: 10
+inference_microbenchmark_log_file_path: ""
 
 turn_on_megablox: True

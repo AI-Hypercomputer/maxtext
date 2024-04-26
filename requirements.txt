@@ -16,6 +16,8 @@ optax
 protobuf==3.20.3
 pylint
 pytest
+pyink
+pre-commit
 pytype
 sentencepiece==0.1.97
 tensorflow-text>=2.13.0

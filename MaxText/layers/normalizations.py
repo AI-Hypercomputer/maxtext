@@ -26,6 +26,7 @@ Initializer = initializers.Initializer
 
 class RMSNorm(nn.Module):
   """RMS normalization."""
+
   epsilon: float = 1e-6
   dtype: Any = jnp.float32
   weight_dtype: Any = jnp.float32
@@ -40,7 +41,7 @@ class RMSNorm(nn.Module):
     mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
     y = jnp.asarray(x * lax.rsqrt(mean2 + self.epsilon), self.dtype)
     scale = self.param(
-        'scale',
+        "scale",
         nn.with_logical_partitioning(self.scale_init, self.kernel_axes),
         (features,),
         self.weight_dtype,

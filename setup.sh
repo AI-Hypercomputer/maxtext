@@ -33,7 +33,13 @@ apt update && \
 apt install -y numactl && \
 apt install -y lsb-release && \
 apt install -y gnupg && \
-apt install -y curl
+apt install -y curl && \
+apt install -y net-tools && \
+apt install -y iproute2 && \
+apt install -y procps && \
+apt install -y lsof && \
+apt install -y git && \
+apt install -y ethtool
 export GCSFUSE_REPO=gcsfuse-`lsb_release -c -s`
 echo "deb https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | tee /etc/apt/sources.list.d/gcsfuse.list
 curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
@@ -189,7 +195,8 @@ fi
 # Install dependencies from requirements.txt
 cd $run_name_folder_path && pip install --upgrade pip
 if [[ "$MODE" == "pinned" ]]; then
-    pip3 install -r requirements.txt -c constraints_gpu.txt
+    pip3 install -U -r requirements.txt -c constraints_gpu.txt
 else
     pip3 install -U -r requirements.txt
 fi
+[ -d ".git" ] && pre-commit install
