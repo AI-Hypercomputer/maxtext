@@ -223,8 +223,7 @@ class MlpBlock(nn.Module):
     else:
       for idx, act_fn in enumerate(self.activations):
         dense_name = 'wi' if len(self.activations) == 1 else f'wi_{idx}'
-        # print("act_fn", act_fn)
-        # print("dense_name", dense_name)
+
         # print("before DenseGeneral", self.kernel_init)
         x = DenseGeneral(
             self.intermediate_dim,
@@ -244,6 +243,7 @@ class MlpBlock(nn.Module):
     # Take elementwise product of above intermediate activations.
     # print("activations", activations)
     x = functools.reduce(operator.mul, activations)
+    # print("after activation", x)
     x = checkpoint_name(x, 'mlpwi')
     # Apply dropout and final dense output projection.
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
@@ -263,7 +263,7 @@ class MlpBlock(nn.Module):
         use_bias=self.use_bias,
     )(x)
 
-    # print("output", output)
+    # print("layer3 from loop", output)
 
     output = checkpoint_name(output, 'mlpwo')
     return output
@@ -343,12 +343,12 @@ class MoeBlock(nn.Module):
               (nn.logical_to_mesh_axes(("m", "k"))),
               (nn.logical_to_mesh_axes(("num_groups", "k", "n"))),
               (nn.logical_to_mesh_axes(("num_groups",))),
-              (nn.logical_to_mesh_axes(("m","k","n"))),
+              # (nn.logical_to_mesh_axes(("m","k","n"))),
           ),
         out_specs=(nn.logical_to_mesh_axes(("m", "n"))),
         check_rep=False,
     )
-    def gmm(inputs, kernel, group_sizes, tiling):
+    def gmm(inputs, kernel, group_sizes):
       hs_shape = inputs.shape
       if hs_shape[0] % 128:
         # padding
@@ -358,24 +358,20 @@ class MoeBlock(nn.Module):
         inputs = inputs.astype(self.dtype)
       output = mblx.gmm(lhs=inputs, 
                         rhs=kernel, 
-                        group_sizes=group_sizes,
-                        tiling=tiling)
+                        group_sizes=group_sizes)
       if hs_shape[0] % 128:
         output = output[:hs_shape[0]]
 
       return output
   
-    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(num_experts,base_emb_dim,mlp_dim)
-    layer_1 = gmm(inputs, w0_kernel, group_sizes, None)
-    layer_2 = gmm(inputs, w1_kernel, group_sizes, None)
+    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(num_experts, base_emb_dim, mlp_dim)
+    layer_1 = gmm(inputs, w0_kernel, group_sizes)
+    layer_2 = gmm(inputs, w1_kernel, group_sizes)
     layer_1_act = _convert_to_activation_function(mlp_activation)(layer_1)
     intermediate_layer = jnp.multiply(layer_1_act, layer_2)
-    output = gmm(intermediate_layer, wo_kernel, group_sizes, None)
+    output = gmm(intermediate_layer, wo_kernel, group_sizes)
     return output
-  
-  def get_group_size(self, inputs, size):
-    _, group_size = jnp.unique(inputs, return_counts=True, size=size)
-    return group_size
+
 
   def permute(self, inputs, gate_logits, base_emb_dim):
     inputs_2d = jnp.reshape(inputs, (-1, base_emb_dim))
@@ -385,14 +381,24 @@ class MoeBlock(nn.Module):
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     repeat_hidden_states = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
     sorted_output = jnp.take(repeat_hidden_states, indices=sorted_selected_experts, axis=0).astype(self.dtype)
-    _, group_size = jnp.unique(flatten_selected_experts, return_counts=True, size=self.num_experts)
+    expert_order, expert_size = jnp.unique(flatten_selected_experts, return_counts=True, size=self.num_experts)
+    group_size = jnp.zeros(self.num_experts, dtype=jnp.int32)
+
+    indices = jnp.where(expert_size == 0, len(group_size), expert_order)
+    group_size = group_size.at[indices].set(jnp.where(expert_size == 0, group_size[indices], expert_size), mode='drop')
+
+    # group_size = group_size.at[expert_order].set(jnp.where(expert_size != 0, expert_size, group_size[expert_order]))
+
+    # for i in range(self.num_experts):
+    #   if expert_size[i] != 0:
+    #     group_size = group_size.at[expert_order[i]].set(expert_size[i])
 
     return sorted_output, sorted_selected_experts, weights, group_size
 
   def unpermute(self, layer_3, inputs, sorted_selected_experts, weights):
     unsort_output = jnp.take(layer_3, indices=jnp.argsort(sorted_selected_experts), axis=0)
     flatten_weights = jnp.ravel(weights)
-    combined_output = jnp.multiply(unsort_output, flatten_weights[:, jnp.newaxis])
+    combined_output = jnp.multiply(unsort_output, flatten_weights[:, None])
     groups = jnp.reshape(combined_output, (-1, self.num_experts_per_tok, combined_output.shape[1]))
     return jnp.sum(groups, axis=1).reshape(inputs.shape).astype(self.dtype)
 

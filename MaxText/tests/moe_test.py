@@ -76,6 +76,7 @@ class MoeLoopBlock(nn.Module):
 
     for k in range(self.num_experts):
         weights_exp = jnp.sum(jnp.multiply(selected_experts==k, weights), axis=-1)
+        # print("weights_exp from loop", weights_exp)
         mlp_lnx_exp = linears.MlpBlock(
           intermediate_dim=self.config.mlp_dim,
           activations=['silu', 'linear'],
@@ -149,35 +150,6 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
       wi_0 = jnp.concat(exp_wi_0, axis=0)
       wi_1 = jnp.concat(exp_wi_1, axis=0)
       wo = jnp.concat(exp_wo, axis=0)
-         
-      # exp0_wi_0 = variables['params']['mlp_0']['wi_0']['kernel'].value
-      # exp1_wi_0 = variables['params']['mlp_1']['wi_0']['kernel'].value
-      # exp2_wi_0 = variables['params']['mlp_2']['wi_0']['kernel'].value
-
-      # exp0_wi_1 = variables['params']['mlp_0']['wi_1']['kernel'].value
-      # exp1_wi_1 = variables['params']['mlp_1']['wi_1']['kernel'].value
-      # exp2_wi_1 = variables['params']['mlp_2']['wi_1']['kernel'].value
-
-      # exp0_wo = variables['params']['mlp_0']['wo']['kernel'].value
-      # exp1_wo = variables['params']['mlp_1']['wo']['kernel'].value
-      # exp2_wo = variables['params']['mlp_2']['wo']['kernel'].value
-
-      # construct
-
-      # exp0_wi_0 = jnp.reshape(exp0_wi_0, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      # exp1_wi_0 = jnp.reshape(exp1_wi_0, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      # exp2_wi_0 = jnp.reshape(exp2_wi_0, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      # wi_0 = jnp.concat((exp0_wi_0, exp1_wi_0, exp2_wi_0), axis=0)
-
-      # exp0_wi_1 = jnp.reshape(exp0_wi_1, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      # exp1_wi_1 = jnp.reshape(exp1_wi_1, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      # exp2_wi_1 = jnp.reshape(exp2_wi_1, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      # wi_1 = jnp.concat((exp0_wi_1, exp1_wi_1, exp2_wi_1), axis=0)
-
-      # exp0_wo = jnp.reshape(exp0_wo, (1, cfg.base_mlp_dim, cfg.base_emb_dim))
-      # exp1_wo = jnp.reshape(exp1_wo, (1, cfg.base_mlp_dim, cfg.base_emb_dim))
-      # exp2_wo = jnp.reshape(exp2_wo, (1, cfg.base_mlp_dim, cfg.base_emb_dim))
-      # wo = jnp.concat((exp0_wo, exp1_wo, exp2_wo), axis=0)
 
       moe_variables = {'params': {'gate': {'kernel': kernel}, 
                                            'wi_0': wi_0, 
@@ -206,7 +178,7 @@ class MoeTest(unittest.TestCase):
       run_name='test',
       enable_checkpointing=False,
       model_name='mixtral-8x7b',
-      dtype='float32',
+      dtype='bfloat16',
     )
 
     self.cfg = pyconfig.config
@@ -224,8 +196,8 @@ class MoeTest(unittest.TestCase):
   def test_moe_block(self):
     variables, expected_output = get_expected_output(self.rng, self.hidden_states, self.cfg)
     actual_output = get_moe_output(variables, self.hidden_states, self.cfg, self.mesh)
-    # print("expected_output", expected_output)
-    # print("actual_output", actual_output)
+    print("expected_output", expected_output)
+    print("actual_output", actual_output)
     # self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-03, atol=1e-03, equal_nan=False))
 
 
