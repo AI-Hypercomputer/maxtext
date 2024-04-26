@@ -71,7 +71,7 @@ class GemmaDecoderLayer(nn.Module):
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
 
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
-    lnx = RMSNorm(dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_self_attention_norm", kernel_axes=("embed",))(
+    lnx = RMSNorm(dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_self_attention_norm", kernel_axes=("norm",))(
         inputs
     )
 
@@ -108,7 +108,7 @@ class GemmaDecoderLayer(nn.Module):
     attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
     attention_lnx += inputs
     residual = attention_lnx
-    attn_output = RMSNorm(dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_ffw_norm", kernel_axes=("embed",))(
+    attn_output = RMSNorm(dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_ffw_norm", kernel_axes=("norm",))(
         attention_lnx
     )
 

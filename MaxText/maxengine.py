@@ -83,7 +83,8 @@ class MaxEngine(engine_api.Engine):
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), state.params
     )
     self.kv_cache_annotations = max_utils.get_kv_cache_annotations(self.model, self.config, self.rng, self._mesh)
-    self.kv_cache_shardings = jax.tree_util.tree_map(lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations)
+    self.kv_cache_shardings = jax.tree_util.tree_map(
+      lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations)
 
     if not self.model.quant:
       self.abstract_params = jax.tree_util.tree_map(
