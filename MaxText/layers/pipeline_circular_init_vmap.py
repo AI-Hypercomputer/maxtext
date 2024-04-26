@@ -18,6 +18,7 @@ import jax
 import numpy as np
 from jax import numpy as jnp
 from jax import tree_map
+from flax import core as flax_core
 from flax import linen as nn
 from jax.sharding import Mesh
 from jax.sharding import NamedSharding
@@ -200,28 +201,37 @@ class Pipeline(nn.Module):
     outs = self.shard_dim_by_stages(outs, out_dim)
     return outs
 
-  def get_weights_stage(self, weights, loop_iteration):
-    '''
-    Get the weights for each stage used for this loop itereation. 
-    
-    Input:
-        Weights are a pytree where each leaf has a leading dimension of num_layers, example leaf shape: [num_layers, embed, mlp]
+  def _vmap_scatter(self, xs, updates, ids, ids_dim, xs_dim, updates_dim):
+    """Use vmap to implement a sharded parallel scatter.
+
+    Parallel scatter means each stage has its own xs and updates.
+
+    Args:
+      xs: Per-stage data that updates are to be scattered to.
+      updates: Per-stage updates.
+      ids: Integer tensor of shape [num_stages], the offsets of the stages.
+      ids_dim: The dimension in xs where ids are applied. The updates do not
+        have this dimension.
+      xs_dim: The dimension in xs that represents parallel stages.
+      updates_dim: The dimension in updates that represents parallel stages.
+
     Returns:
-        Weights of same pytree structure but each leaf has a leading dimension of num_stages, example leaf shape: [num_stages, embed, mlp].
+      The per-stage gathered values. The shape is xs.shape.
+    """
+    def _scatter_one(x, update, i):
+      dim = ids_dim
+      if xs_dim < dim:
+        dim -= 1
+      update = jnp.expand_dims(update, dim)
+      return jax.lax.dynamic_update_slice_in_dim(x, update, i, dim)
 
-    For circular pipelines the stages need a repeat_idx to determine what layer weights to grab, e.g. on iteration 5 with 4 stages
-    the repeat indexes are [1,1,0,0] so need layers [4,5,2,3]
-    '''
-    # TODO(huge): When the weights are correctly sharded on init (not implemented currently) we need to ensure that this
-    # function does not execute an all-gather: All of the layers weights can be initialized on the correct devices and shouldn't
-    # need to be communicated to others (at least for forward pass, need some thought for backward whether this is necessary)
-
-    # We use numpy instead of jnp so these indexes are not traced
-    microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0) # not a great name, this is really something like microbatch_id * repeat idx
-    repeat_ids = microbatch_ids // self.config.num_pipeline_microbatches
-
-
-    return jax.tree_map(functools.partial(self.vmap_parallel_gather, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1), weights)
+    ids = self.shard_dim_by_stages(ids, 0)
+    xs = self.shard_dim_by_stages(xs, xs_dim)
+    updates = self.shard_dim_by_stages(updates, updates_dim)
+    outs = jax.vmap(
+        _scatter_one, in_axes=(xs_dim, updates_dim, 0),
+        out_axes=xs_dim)(xs, updates, ids)
+    return self.shard_dim_by_stages(outs, xs_dim)
 
   def get_microbatch_id(self, stage_idx, loop_iteration):
     '''Gets the microbatch_id on this loop_iteration for this stage. Works for both circular and non-circular'''
@@ -412,12 +422,33 @@ class Pipeline(nn.Module):
               self.vmap_parallel_gather, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1),
           weights)
 
+    backup_vars = self.layers.variables
+    def scatter_weight_updates(weights):
+      mapped_vars = {}
+      for collection, tree in weights.items():
+        if collection in backup_vars:
+          original_vars = flax_core.unfreeze(backup_vars[collection])
+        else:
+          original_vars = jax.tree_map(
+              lambda x: jnp.zeros((self.circular_repeat,) + x.shape, x.dtype),
+              tree,
+          )
+        mapped_vars[collection] = jax.tree_map(
+            functools.partial(
+                self._vmap_scatter,
+                ids=repeat_ids,
+                ids_dim=0,
+                xs_dim=1,
+                updates_dim=0), original_vars, tree)
+      return mapped_vars
+
+
     vmap_func = nn.map_variables(
         vmap_func,
         mapped_collections=[PARAMS, NON_TRAINABLE, SUMMARIES, INTERMEDIATES],
         mutable=True,
         trans_in_fn=gather_weights_for_stages_in,
-        # TODO trasn_out_fn :)
+        trans_out_fn=scatter_weight_updates
     )
    print(f"{loop_iteration=}", flush=True)
    stages_output, _ = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
