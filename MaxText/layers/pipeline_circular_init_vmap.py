@@ -333,9 +333,7 @@ class Pipeline(nn.Module):
    
   def permute_output_ms_dim(self, output):
     '''
-    TODO: Reach out to praxis owner about this permutation, fix comment and method name
-    Although re-using the same array for both input and output is cute,
-    The final outputs turn out permuted compared to the inputs. Worringly I don't see this function in praxis
+    TODO: Likely need to match http://google3/third_party/py/praxis/layers/pipeline.py;l=935;rcl=577941721 to avoid all gathers
     '''
 
     # The first real output (batch 0) takes a certain amount of loop iterations to finish and be pushed to state_io - it will land on a different index of state_io depending on the number of iters
@@ -407,17 +405,17 @@ class Pipeline(nn.Module):
   def __call__(self, inputs: jnp.ndarray, segment_ids: jnp.ndarray, positions:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
     # Reshape inputs of [global_batch, ...] to [microbatches, microbatch_sizes, ...]
     inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length, self.config.emb_dim))
-    example_inputs = jax.lax.broadcast(inputs[0], self.config.num_decoder_layers)
+    example_inputs = jax.lax.broadcast(inputs[0], [self.config.num_decoder_layers])
     if positions is not None:
       positions = positions.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
-      example_position = jax.lax.broadcast(positions[0], self.config.num_decoder_layers)
+      example_position = jax.lax.broadcast(positions[0], [self.config.num_decoder_layers])
       position_idx = 0
     else:
       example_position = None
       position_idx = None
     if segment_ids is not None:
       segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
-      example_segmentation = jax.lax.broadcast(segment_ids[0], self.config.num_decoder_layers)
+      example_segmentation = jax.lax.broadcast(segment_ids[0], [self.config.num_decoder_layers])
       segment_idx = 0
     else:
       example_segmentation = None
@@ -438,19 +436,23 @@ class Pipeline(nn.Module):
     else:
       variable_broadcast.append(NON_TRAINABLE)
 
-    if self.is_initializing() and self.config.num_pipeline_repeats > 1:
-     # To shard weight (both for initialization and at rest) for the circular pipeline
-     # we create weights of shape [num_repeat, num_stages, ...] (e.g. [num_repeat, num_stages, embed, mlp])
-     # and shard the num_stages  we wrap the main stage vmap with a num_repeat vmap to generate this axis only for parameter initialization
-     # TODO: to call this need to flush out segments and positions to num_layers probably
-     vmap_func = nn.vmap(
-       self.get_main_vmap_func(segment_idx, position_idx), # segment_stage_idx, positions_stage_idx
-       in_axes=(0, 0, 0, segment_idx, position_idx), # in_axes=(0, segment_stage_idx, positions_stage_idx, None, None),
+    if self.is_initializing():
+     # TODO(possible): praxis is using the _scan_Fn, possibly having the real fwd use scan but not the initial causes issues
+     # TODO: to call this need to reshape segments and positions to num_layers probably
+     # We only need to run one set of stages to initialize the variables, instead of looping over all microbatches
+     breakpoint()
+     vmap_func = self.get_main_vmap_func(segment_idx, position_idx)
+     if self.config.num_pipeline_repeats > 1:
+       return 0
+       # To shard weight (both for initialization and at rest) for the circular pipeline
+       # we create weights of shape [num_repeat, num_stages, ...] (e.g. [num_repeat, num_stages, embed, mlp])
+       # and shard the num_stages  we wrap the main stage vmap with a num_repeat vmap to generate this axis only for parameter initialization
+     stage_outputs, _ = vmap_func(self.layers, example_inputs, example_segmentation, example_position, deterministic, model_mode)
+     # We return something of the correct shape (global_batch, sequence, embed) by reshaping a single stages output which has
+     # shape [microbatch_size, sequence, embed]
+     broadcasted_stage_outpus = jax.lax.broadcast(stage_outputs[0], [self.config.global_batch_size_to_train_on // self.microbatch_size])
+     return jnp.reshape(broadcasted_stage_outpus, [self.config.global_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim])
 
-
-
-     )
-     return vmap_func(example_inputs, example_segmentation, example_position, deterministic, model_mode)
 
     # The scan cannot be used on init since it broadcasts the state. Thus the state must be independent of the loop body,
     # but on init the loop body will initialize the params.
