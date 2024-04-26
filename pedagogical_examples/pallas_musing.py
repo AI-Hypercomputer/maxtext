@@ -34,7 +34,7 @@ def simple_timeit(f, *args, tries = 2, task = None):
     return average_time_ms
 
 raw_len = 32768
-chunk_size = 512
+chunk_size = 1024
 grid_pts = raw_len//chunk_size
 
 v1 = jax.random.normal(jax.random.key(0), (raw_len, raw_len), dtype=jnp.bfloat16)
@@ -45,11 +45,27 @@ def multiply_tensors_normal(x: jax.Array, y: jax.Array):
   return x @ y
 
 def multiply_tensors_kernel_original(x_ref, y_ref, o_ref):
+  with pltpu.trace("body"):
+    with pltpu.trace("clear"):
+
+      @pl.when(pl.program_id(axis=2) == 0)
+      def _():
+        o_ref[...] = jnp.zeros_like(o_ref)
+
+    with pltpu.trace("dot"):
+      dot = jnp.dot(x_ref[...], y_ref[...], preferred_element_type=jnp.float32)
+
+    with pltpu.trace("accum"):
+      o_ref[...] += dot
+
+def multiply_tensors_kernel_original_fast(x_ref, y_ref, o_ref):
   @pl.when(pl.program_id(axis=2) == 0)
   def _():
     o_ref[...] = jnp.zeros_like(o_ref)
 
-  o_ref[...] += x_ref[...] @ y_ref[...]
+  dot = jnp.dot(x_ref[...], y_ref[...], preferred_element_type=jnp.float32)
+
+  o_ref[...] += dot
 
 def multiply_tensors_kernel(x_tile_ref, y_tile_ref, o_tile_ref, acc_ref):
   @pl.when(pl.program_id(2) == 0)
@@ -87,7 +103,7 @@ def multiply_tensors_pallas(x: jax.Array, y: jax.Array) -> jax.Array:
 
 @jax.jit
 def multiply_tensors_pallas_original(x: jax.Array, y: jax.Array) -> jax.Array:
-  return pl.pallas_call(multiply_tensors_kernel,
+  return pl.pallas_call(multiply_tensors_kernel_original,
                         out_shape=jax.ShapeDtypeStruct(x.shape, jnp.float32),
                         in_specs=[
                           pl.BlockSpec(lambda i,j,k: (i,k), (chunk_size, chunk_size,)),
@@ -98,12 +114,12 @@ def multiply_tensors_pallas_original(x: jax.Array, y: jax.Array) -> jax.Array:
                         compiler_params=dict(mosaic=dict(dimension_semantics=("parallel","parallel","arbitrary",))),
                         )(x, y)
 
-pallas = multiply_tensors_pallas(v1, v2)
+pallas = multiply_tensors_pallas_original(v1, v2)
 normal = multiply_tensors_normal(v1, v2)
 
 assert jax.numpy.allclose(pallas, normal, atol=1e-2, rtol=1e-2)
 
-simple_timeit(multiply_tensors_pallas, v1, v2, task="pallas")
+simple_timeit(multiply_tensors_pallas_original, v1, v2, task="pallas")
 simple_timeit(multiply_tensors_normal, v1, v2, task="normal")
 
 
