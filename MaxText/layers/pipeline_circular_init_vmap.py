@@ -450,7 +450,6 @@ class Pipeline(nn.Module):
         trans_in_fn=gather_weights_for_stages_in,
         trans_out_fn=scatter_weight_updates
     )
-   print(f"{loop_iteration=}", flush=True)
    stages_output, _ = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
    new_state = self.get_new_loop_state(stages_output, loop_state)
@@ -511,8 +510,9 @@ class Pipeline(nn.Module):
         )
        
        example_inputs = jax.lax.broadcast(example_inputs, [self.config.num_pipeline_repeats])
-       example_segmentation = jax.lax.broadcast(example_segmentation, [self.config.num_pipeline_repeats])
-       example_position = jax.lax.broadcast(example_position, [self.config.num_pipeline_repeats])
+
+       example_segmentation = jax.lax.broadcast(example_segmentation, [self.config.num_pipeline_repeats]) if example_segmentation is not None else None
+       example_position = jax.lax.broadcast(example_position, [self.config.num_pipeline_repeats]) if example_position is not None else None
        # To shard weight (both for initialization and at rest) for the circular pipeline
        # we create weights of shape [num_repeat, num_stages, ...] (e.g. [num_repeat, num_stages, embed, mlp])
        # and shard the num_stages  we wrap the main stage vmap with a num_repeat vmap to generate this axis only for parameter initialization
