@@ -19,6 +19,7 @@ import numpy as np
 from jax import numpy as jnp
 from jax import tree_map
 from flax import core as flax_core
+from flax.core import meta
 from flax import linen as nn
 from jax.sharding import Mesh
 from jax.sharding import NamedSharding
@@ -416,12 +417,25 @@ class Pipeline(nn.Module):
    if self.config.num_pipeline_repeats > 1:
     microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0) # not a great name, this is really something like microbatch_id * repeat idx
     repeat_ids = microbatch_ids // self.config.num_pipeline_microbatches
-    def gather_weights_for_stages_in(weights):
-      return jax.tree_map(
-          functools.partial(
-              self.vmap_parallel_gather, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1),
-          weights)
+
+    metadata_params={
+            nn.PARTITION_NAME: "circular_repeats",
+            'sub_weight_split_dims_mapping': (0), #(None,), # Maybe -1? 
+            "is_initializing": True,
+            "x_times": self.config.num_pipeline_repeats}
+    def prepare_vars_for_main_vmap(weights):
+      def gather_weights_for_stages_in(weights):
+        return jax.tree_map(
+            functools.partial(
+                self.vmap_parallel_gather, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1),
+            weights)
       # IDea: also need to remove axis from metadata "pipeline_Repeats"
+      #breakpoint()
+      weights = meta.remove_axis(weights, 0, metadata_params) # do we re-assing weights?
+      weights = gather_weights_for_stages_in(weights)
+      return weights
+
+    # TODO: probably need to add back axis
     backup_vars = self.layers.variables
     def scatter_weight_updates(weights):
       mapped_vars = {}
@@ -447,8 +461,8 @@ class Pipeline(nn.Module):
         vmap_func,
         mapped_collections=[PARAMS, NON_TRAINABLE, SUMMARIES, INTERMEDIATES],
         mutable=True,
-        trans_in_fn=gather_weights_for_stages_in,
-        trans_out_fn=scatter_weight_updates
+        trans_in_fn=prepare_vars_for_main_vmap,
+        #trans_out_fn=scatter_weight_updates
     )
    stages_output, _ = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
@@ -527,8 +541,6 @@ class Pipeline(nn.Module):
        stage_outputs = stage_outputs[0]
      broadcasted_stage_outpus = jax.lax.broadcast(stage_outputs[0], [self.config.global_batch_size_to_train_on // self.microbatch_size])
      return jnp.reshape(broadcasted_stage_outpus, [self.config.global_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim])
-    else:
-      assert 1 > 2
 
 
     # The scan cannot be used on init since it broadcasts the state. Thus the state must be independent of the loop body,
