@@ -2,9 +2,9 @@
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: llama70b-maxtext
+  name: maxtext-llama2
   labels:
-    xpk.google.com/workload: llama70b-maxtext
+    xpk.google.com/workload: maxtext-llama2
 spec:
   failurePolicy:
     maxRestarts: 0
@@ -19,7 +19,7 @@ spec:
           template:
             metadata:
               labels:
-                xpk.google.com/workload: llama70b-maxtext
+                xpk.google.com/workload: maxtext-llama2
             spec:
               schedulerName: default-scheduler
               restartPolicy: Never
@@ -109,7 +109,7 @@ spec:
                     value: /usr/local/nvidia/lib64
 
                   - name: COMMAND
-                    value: "python MaxText/train.py MaxText/configs/base.yml hardware=gpu run_name=2024-04-25-21-06 steps={{ $root.Values.workload.steps }} model_name={{ $root.Values.workload.model_name }} enable_checkpointing=false attention=cudnn_flash_te dataset_type=synthetic async_checkpointing=false enable_profiler=false use_iota_embed=true scan_layers=true per_device_batch_size={{ $root.Values.workload.per_device_batch_size }} remat_policy=full logits_dot_in_fp32=false max_target_length=4096 num_slices=32 dcn_fsdp_parallelism=32 ici_fsdp_parallelism=8 ici_data_parallelism=1 dcn_data_parallelism=1  ici_tensor_parallelism=1"
+                    value: {{ $root.Values.workload.train_command }}
                   - name: XLA_FLAGS
                     value: {{ $root.Values.workload.xla_flags }}
                   - name: NCCL_FASTRAK_CTRL_DEV
