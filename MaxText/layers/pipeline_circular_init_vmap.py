@@ -431,11 +431,11 @@ class Pipeline(nn.Module):
             weights)
       # IDea: also need to remove axis from metadata "pipeline_Repeats"
       #breakpoint()
-      weights = meta.remove_axis(weights, 0, metadata_params) # do we re-assing weights?
+      weights = meta.remove_axis(weights, 0, metadata_params) # Remove the circular_repeats axis annotation, we will select only one circular_repeat per stage and remove this axis
       weights = gather_weights_for_stages_in(weights)
       return weights
 
-    # TODO: probably need to add back axis
+    # TODO: probably need to add back axis?
     backup_vars = self.layers.variables
     def scatter_weight_updates(weights):
       mapped_vars = {}
@@ -462,7 +462,7 @@ class Pipeline(nn.Module):
         mapped_collections=[PARAMS, NON_TRAINABLE, SUMMARIES, INTERMEDIATES],
         mutable=True,
         trans_in_fn=prepare_vars_for_main_vmap,
-        #trans_out_fn=scatter_weight_updates
+        trans_out_fn=scatter_weight_updates
     )
    stages_output, _ = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
