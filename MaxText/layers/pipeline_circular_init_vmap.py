@@ -380,7 +380,7 @@ class Pipeline(nn.Module):
       split_rngs={'params': True},
       metadata_params={
         nn.PARTITION_NAME: "layers",
-        'sub_weight_split_dims_mapping': (-1),
+        'sub_weight_split_dims_mapping': (None),
         "is_initializing": self.is_initializing(),
         "x_times": self.num_stages}
     )
@@ -421,7 +421,7 @@ class Pipeline(nn.Module):
           functools.partial(
               self.vmap_parallel_gather, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1),
           weights)
-
+      # IDea: also need to remove axis from metadata "pipeline_Repeats"
     backup_vars = self.layers.variables
     def scatter_weight_updates(weights):
       mapped_vars = {}
@@ -499,12 +499,16 @@ class Pipeline(nn.Module):
        vmap_func= nn.vmap(
          vmap_func,
          in_axes=(0, segment_idx, position_idx, None, None),
-          variable_axes={'params': 0},
+          variable_axes={
+            'params': 0,
+            NON_TRAINABLE: 0,
+            "hyper_params": 0,
+          },
           # TODO: params:self.is_initializing instead of always true
           split_rngs={'params': True},
           metadata_params={
-            nn.PARTITION_NAME: "layers",
-            'sub_weight_split_dims_mapping': (-1), #(None,), # Maybe -1? 
+            nn.PARTITION_NAME: "circular_repeats",
+            'sub_weight_split_dims_mapping': (0), #(None,), # Maybe -1? 
             "is_initializing": True,
             "x_times": self.config.num_pipeline_repeats}
         )
@@ -523,6 +527,8 @@ class Pipeline(nn.Module):
        stage_outputs = stage_outputs[0]
      broadcasted_stage_outpus = jax.lax.broadcast(stage_outputs[0], [self.config.global_batch_size_to_train_on // self.microbatch_size])
      return jnp.reshape(broadcasted_stage_outpus, [self.config.global_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim])
+    else:
+      assert 1 > 2
 
 
     # The scan cannot be used on init since it broadcasts the state. Thus the state must be independent of the loop body,
