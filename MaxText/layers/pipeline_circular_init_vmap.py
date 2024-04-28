@@ -41,6 +41,9 @@ PARAMS="params"
 NON_TRAINABLE="non_trainable"
 SUMMARIES = 'summaries'
 INTERMEDIATES = 'intermediates'
+RANDOM = 'random'
+AUX_LOSS = 'aux_loss'
+HYPER_PARAMS = 'hyper_params'
 
 
 def stack_pytrees(*pytrees):
@@ -434,9 +437,9 @@ class Pipeline(nn.Module):
       # IDea: also need to remove axis from metadata "pipeline_Repeats"
       #breakpoint()
       weights = meta.remove_axis(weights, 0, metadata_params) # Remove the circular_repeats axis annotation, we will select only one circular_repeat per stage and remove this axis
-      weights = meta.remove_axis(weights, 0, metadata_params) # Remove the circular_repeats axis annotation, we will select only one circular_repeat per stage and remove this axis
+      #weights = meta.remove_axis(weights, 0, metadata_params) # Remove the circular_repeats axis annotation, we will select only one circular_repeat per stage and remove this axis
       weights = gather_weights_for_stages_in(weights)
-      weights = meta.remove_axis(weights, 0, metadata_params) # Remove the circular_repeats axis annotation, we will select only one circular_repeat per stage and remove this axis
+      #weights = meta.remove_axis(weights, 0, metadata_params) # Remove the circular_repeats axis annotation, we will select only one circular_repeat per stage and remove this axis
       return weights
 
     # TODO: probably need to add back axis?
@@ -481,6 +484,7 @@ class Pipeline(nn.Module):
   @nn.compact
   def __call__(self, inputs: jnp.ndarray, segment_ids: jnp.ndarray, positions:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
     # Reshape inputs of [global_batch, ...] to [microbatches, microbatch_sizes, ...]
+    # TODO: Shard inputs after reshape along num_microbatches?
     inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length, self.config.emb_dim))
     example_inputs = jax.lax.broadcast(inputs[0], [self.num_stages])
     if positions is not None:
@@ -560,10 +564,16 @@ class Pipeline(nn.Module):
     if use_scan and not self.is_initializing():
         scan_func = nn.scan(
           func_to_scan,
+          variable_axes={
+            SUMMARIES: 0,
+            AUX_LOSS: 0,
+            INTERMEDIATES: 0,
+            HYPER_PARAMS: 0,
+          },
           variable_broadcast=variable_broadcast,
           variable_carry=variable_carry,
           # Dropout/aqt keys will be split for each iteration.
-          split_rngs={'params': True},
+          split_rngs={RANDOM: True},
           length=total_iterations,
           )
         loop_state, _ = scan_func(self, loop_state, None)
