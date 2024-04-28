@@ -158,8 +158,8 @@ class Pipeline(nn.Module):
     return stages_in
 
   def shard_dim_by_stages(self, x, dim: int):
-    #dims_mapping = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
-    dims_mapping = [None] * x.ndim
+    dims_mapping = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
+    #dims_mapping = [None] * x.ndim
     dims_mapping[dim] = "stage"
     dims_mapping = tuple(dims_mapping)
     p1 = jax.sharding.PartitionSpec(*dims_mapping)
@@ -184,11 +184,11 @@ class Pipeline(nn.Module):
       The per-stage gathered values. The shape is weights.shape but with repeat_dim_in_weights
         removed.
     """
-    def _gather_one(x, i):
+    def _gather_one(x, repeat_id):
       dim = repeat_dim_in_weights
       if stages_dim_in_weights < dim:
         dim -= 1
-      return jnp.squeeze(jax.lax.dynamic_slice_in_dim(x, i, 1, dim), dim)
+      return jnp.squeeze(jax.lax.dynamic_slice_in_dim(x, repeat_id, 1, dim), dim)
 
     # TODO: this boolean is always true, out_dim should just be 0
     out_dim = stages_dim_in_weights
@@ -419,10 +419,12 @@ class Pipeline(nn.Module):
     repeat_ids = microbatch_ids // self.config.num_pipeline_microbatches
 
     metadata_params={
-            nn.PARTITION_NAME: "circular_repeats",
-            'sub_weight_split_dims_mapping': (0), #(None,), # Maybe -1? 
-            "is_initializing": True,
-            "x_times": self.config.num_pipeline_repeats}
+      nn.PARTITION_NAME: "circular_repeats",
+      'sub_weight_split_dims_mapping': (None,), #(None,), # Maybe -1? 
+      "is_initializing": True,
+      "x_times": self.config.num_pipeline_repeats,
+      'optimizer_dims_mapping': None,
+    }
     def prepare_vars_for_main_vmap(weights):
       def gather_weights_for_stages_in(weights):
         return jax.tree_map(
@@ -436,25 +438,30 @@ class Pipeline(nn.Module):
       return weights
 
     # TODO: probably need to add back axis?
-    backup_vars = self.layers.variables
-    def scatter_weight_updates(weights):
-      mapped_vars = {}
-      for collection, tree in weights.items():
-        if collection in backup_vars:
-          original_vars = flax_core.unfreeze(backup_vars[collection])
-        else:
-          original_vars = jax.tree_map(
-              lambda x: jnp.zeros((self.circular_repeat,) + x.shape, x.dtype),
-              tree,
-          )
-        mapped_vars[collection] = jax.tree_map(
-            functools.partial(
-                self._vmap_scatter,
-                ids=repeat_ids,
-                ids_dim=0,
-                xs_dim=1,
-                updates_dim=0), original_vars, tree)
-      return mapped_vars
+    def prepare_updates(weights):
+      if len(weights) > 0:
+        print("Real weights")
+        breakpoint()
+      backup_vars = self.layers.variables
+      def scatter_weight_updates(weights):
+        mapped_vars = {}
+        for collection, tree in weights.items():
+          if collection in backup_vars:
+            original_vars = flax_core.unfreeze(backup_vars[collection])
+          else:
+            original_vars = jax.tree_map(
+                lambda x: jnp.zeros((self.circular_repeat,) + x.shape, x.dtype),
+                tree,
+            )
+          mapped_vars[collection] = jax.tree_map(
+              functools.partial(
+                  self._vmap_scatter,
+                  ids=repeat_ids,
+                  ids_dim=0,
+                  xs_dim=1,
+                  updates_dim=0), original_vars, tree)
+        return mapped_vars
+      return scatter_weight_updates(weights)
 
 
     vmap_func = nn.map_variables(
@@ -462,7 +469,7 @@ class Pipeline(nn.Module):
         mapped_collections=[PARAMS, NON_TRAINABLE, SUMMARIES, INTERMEDIATES],
         mutable=True,
         trans_in_fn=prepare_vars_for_main_vmap,
-        trans_out_fn=scatter_weight_updates
+        trans_out_fn=prepare_updates
     )
    stages_output, _ = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
@@ -520,11 +527,14 @@ class Pipeline(nn.Module):
           },
           # TODO: params:self.is_initializing instead of always true
           split_rngs={'params': True},
+          #spmd_axis_name="stage",
           metadata_params={
             nn.PARTITION_NAME: "circular_repeats",
-            'sub_weight_split_dims_mapping': (0), #(None,), # Maybe -1? 
+            'sub_weight_split_dims_mapping': (None,), #(None,), # Maybe -1? 
             "is_initializing": True,
-            "x_times": self.config.num_pipeline_repeats}
+            "x_times": self.config.num_pipeline_repeats,
+            'optimizer_dims_mapping': None,
+          }
         )
        
        example_inputs = jax.lax.broadcast(example_inputs, [self.config.num_pipeline_repeats])
