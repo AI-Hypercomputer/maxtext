@@ -73,7 +73,7 @@ class DecoderLayer(nn.Module):
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_norm",
         epsilon=cfg.normalization_layer_epsilon,
-        kernel_axes=("embed",),
+        kernel_axes=("norm",),
     )(inputs)
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
 

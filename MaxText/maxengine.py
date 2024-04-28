@@ -79,14 +79,15 @@ class MaxEngine(engine_api.Engine):
     """Load Parameters, typically from GCS"""
     # pylint: disable=unused-argument
     state, self.state_mesh_annotations = max_utils.setup_decode_state(self.model, self.config, self.rng, self._mesh, None)
-    self.abstract_params = jax.tree_map(
+    self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), state.params
     )
     self.kv_cache_annotations = max_utils.get_kv_cache_annotations(self.model, self.config, self.rng, self._mesh)
-    self.kv_cache_shardings = jax.tree_map(lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations)
+    self.kv_cache_shardings = jax.tree_util.tree_map(
+      lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations)
 
     if not self.model.quant:
-      self.abstract_params = jax.tree_map(
+      self.abstract_params = jax.tree_util.tree_map(
           lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), state.params
       )
       return state.params
@@ -113,7 +114,7 @@ class MaxEngine(engine_api.Engine):
       # Remove param values which have corresponding qtensors in aqt to save memory.
       params["params"] = quantizations.remove_quantized_params(state.params["params"], new_vars["aqt"])
 
-      self.abstract_params = jax.tree_map(
+      self.abstract_params = jax.tree_util.tree_map(
           lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), params
       )
 
@@ -342,13 +343,13 @@ class MaxEngine(engine_api.Engine):
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       mesh_annotations = nn.logical_to_mesh(logical_annotations)
 
-    shardings = jax.tree_map(
+    shardings = jax.tree_util.tree_map(
         lambda mesh_annotation: jax.sharding.NamedSharding(self._mesh, mesh_annotation), mesh_annotations
     )
 
     @functools.partial(jax.jit, out_shardings=shardings)
     def initialize():
-      return jax.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), abstract_outputs)
+      return jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), abstract_outputs)
 
     cache = initialize()["cache"]
 
