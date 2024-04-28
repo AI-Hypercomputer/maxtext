@@ -34,7 +34,7 @@ load_parameters_path: ""
 # Loads a full checkpoint including optimizer state and step count from a specific directory
 # e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/items/NUMBER or NUMBER/items
 #load_full_state_path: "gs://mazumdera-test-bucket-us-east5/lg-llama2/hf/mazumdera-llama27b-lg-2024-04-22-16-15/checkpoints/77000"
-load_full_state_path: "gs://mazumdera-test-bucket-us-east5/lg-llama2/hf/mazumdera-llama27b-lg-2024-04-22-22-48/checkpoints/100000"
+load_full_state_path: ""
 
 # If enable_checkpointing is true, an asynchronous checkpointer will be used if
 # async_checkpointing is true, else a synchronous one is used. If you have
@@ -162,6 +162,7 @@ num_slices: -1
 dataset_path: ""
 vocab_size: 32_000 # powers of 2 for sharding
 tokenizer_path: "assets/vocab_102400"
+#tokenizer_path: "assets/tokenizer.llama2"
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
