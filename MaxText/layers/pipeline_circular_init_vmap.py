@@ -369,7 +369,7 @@ class Pipeline(nn.Module):
     # TODO: this can probably be removed
     mutable_func_to_vmap = nn.map_variables(
       func_to_vmap,
-      mapped_collections=["params"],
+      mapped_collections=True,
       mutable=True
     )
     vmap_func = nn.vmap(
@@ -434,7 +434,9 @@ class Pipeline(nn.Module):
       # IDea: also need to remove axis from metadata "pipeline_Repeats"
       #breakpoint()
       weights = meta.remove_axis(weights, 0, metadata_params) # Remove the circular_repeats axis annotation, we will select only one circular_repeat per stage and remove this axis
+      weights = meta.remove_axis(weights, 0, metadata_params) # Remove the circular_repeats axis annotation, we will select only one circular_repeat per stage and remove this axis
       weights = gather_weights_for_stages_in(weights)
+      weights = meta.remove_axis(weights, 0, metadata_params) # Remove the circular_repeats axis annotation, we will select only one circular_repeat per stage and remove this axis
       return weights
 
     # TODO: probably need to add back axis?
@@ -502,7 +504,7 @@ class Pipeline(nn.Module):
     def func_to_scan(model,loop_state, xs):
        return model.run_one_iteration(loop_state, positions, segment_ids, deterministic, model_mode, model.layers), None
     
-    use_scan = True
+    use_scan = False
     variable_carry = []
     variable_broadcast = ["params"]
     NON_TRAINABLE="non_trainable"
