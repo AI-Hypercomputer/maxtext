@@ -345,21 +345,18 @@ class MoeBlock(nn.Module):
     )
     def gmm(inputs, kernel, group_sizes):
       hs_shape = inputs.shape
-      if hs_shape[0] % 128:
-        # padding
-        pad_length = 128 - hs_shape[0] % 128
 
-        inputs = jax.lax.pad(inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0,0,0)])
-        inputs = inputs.astype(self.dtype)
       output = mblx.gmm(lhs=inputs, 
                         rhs=kernel, 
-                        group_sizes=group_sizes)
-      if hs_shape[0] % 128:
-        output = output[:hs_shape[0]]
+                        group_sizes=group_sizes,
+                        tiling = (512,512,512))
 
       return output
   
     w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(num_experts,base_emb_dim,mlp_dim)
+    #breakpoint()
+
+    #jax.debug.print("group sizes: {group_sizes}", group_sizes=group_sizes)
     layer_1 = gmm(inputs, w0_kernel, group_sizes)
     layer_2 = gmm(inputs, w1_kernel, group_sizes)
     layer_1_act = _convert_to_activation_function(mlp_activation)(layer_1)
