@@ -205,42 +205,9 @@ class Pipeline(nn.Module):
     outs = self.shard_dim_by_stages(outs, out_dim)
     return outs
 
-  def _vmap_scatter(self, xs, updates, ids, ids_dim, xs_dim, updates_dim):
-    """Use vmap to implement a sharded parallel scatter.
-
-    Parallel scatter means each stage has its own xs and updates.
-
-    Args:
-      xs: Per-stage data that updates are to be scattered to.
-      updates: Per-stage updates.
-      ids: Integer tensor of shape [num_stages], the offsets of the stages.
-      ids_dim: The dimension in xs where ids are applied. The updates do not
-        have this dimension.
-      xs_dim: The dimension in xs that represents parallel stages.
-      updates_dim: The dimension in updates that represents parallel stages.
-
-    Returns:
-      The per-stage gathered values. The shape is xs.shape.
-    """
-    def _scatter_one(x, update, i):
-      dim = ids_dim
-      if xs_dim < dim:
-        dim -= 1
-      update = jnp.expand_dims(update, dim)
-      return jax.lax.dynamic_update_slice_in_dim(x, update, i, dim)
-
-    ids = self.shard_dim_by_stages(ids, 0)
-    xs = self.shard_dim_by_stages(xs, xs_dim)
-    updates = self.shard_dim_by_stages(updates, updates_dim)
-    outs = jax.vmap(
-        _scatter_one, in_axes=(xs_dim, updates_dim, 0),
-        out_axes=xs_dim)(xs, updates, ids)
-    return self.shard_dim_by_stages(outs, xs_dim)
-
   def get_microbatch_id(self, stage_idx, loop_iteration):
     '''Gets the microbatch_id on this loop_iteration for this stage. Works for both circular and non-circular'''
     return (loop_iteration - stage_idx) % self.config.num_pipeline_microbatches
-     
 
   def shard_leading_dim_by_stages(self, x):
     stage_sharding_constraint = ('layers',) + tuple([None] * (x.ndim -1))
@@ -442,39 +409,11 @@ class Pipeline(nn.Module):
       #weights = meta.remove_axis(weights, 0, metadata_params) # Remove the circular_repeats axis annotation, we will select only one circular_repeat per stage and remove this axis
       return weights
 
-    # TODO: probably need to add back axis?
-    def prepare_updates(weights):
-      if len(weights) > 0:
-        print("Real weights")
-        breakpoint()
-      backup_vars = self.layers.variables
-      def scatter_weight_updates(weights):
-        mapped_vars = {}
-        for collection, tree in weights.items():
-          if collection in backup_vars:
-            original_vars = flax_core.unfreeze(backup_vars[collection])
-          else:
-            original_vars = jax.tree_map(
-                lambda x: jnp.zeros((self.circular_repeat,) + x.shape, x.dtype),
-                tree,
-            )
-          mapped_vars[collection] = jax.tree_map(
-              functools.partial(
-                  self._vmap_scatter,
-                  ids=repeat_ids,
-                  ids_dim=0,
-                  xs_dim=1,
-                  updates_dim=0), original_vars, tree)
-        return mapped_vars
-      return scatter_weight_updates(weights)
-
-
     vmap_func = nn.map_variables(
         vmap_func,
         mapped_collections=[PARAMS, NON_TRAINABLE, SUMMARIES, INTERMEDIATES],
         mutable=True,
         trans_in_fn=prepare_vars_for_main_vmap,
-        trans_out_fn=prepare_updates
     )
    stages_output, _ = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
