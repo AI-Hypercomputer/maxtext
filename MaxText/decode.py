@@ -32,9 +32,9 @@ def main(config):
   metadata = engine.get_tokenizer()
   vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
   tokenizer = vocab.tokenizer
-  unpadded_tokens, unpadded_true_length = token_utils.tokenize_and_maybe_pad(text, vocab, 
-                                                                         is_bos=True, pad_result=False, 
-                                                                         prefill_lengths=None)
+  unpadded_tokens, unpadded_true_length = token_utils.tokenize_and_pad(text, vocab, 
+                                                                       is_bos=True, 
+                                                                       prefill_lengths=None)
   # breakpoint()
   print(f"{unpadded_tokens=}")
   padded_prefill_result = engine.prefill(
@@ -53,6 +53,8 @@ def main(config):
   # padded_prefill_result['next_pos'].shape = (1, 1)
   # padded_prefill_result['generated_tokens'] = Array([[0]], dtype=int32)
   # padded_prefill_result['generated_tokens'].shape = (1, 1)
+  # print(f"{unpadded_tokens.size=}")
+  # print(f"{config.max_prefill_predict_length=}")
   assert unpadded_tokens.size <= config.max_prefill_predict_length, "can't take too many tokens"
 
   slot=0

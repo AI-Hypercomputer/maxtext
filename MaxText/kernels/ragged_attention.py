@@ -42,7 +42,7 @@ def mqa_reference(
     max logit ([batch_size, num_heads]) and softmax denominator ([batch_size,
     num_heads]).
   """
-
+  
   # loads the entire batch to its full size each time
   # expects all the entries to be left-aligned, but not necessarily any padding
 
@@ -54,18 +54,24 @@ def mqa_reference(
   # Creates the mask based on the sequence length of each entry in `lengths` in k
   mask = jnp.arange(k.shape[1])[None] < lengths[:, None]        
 
-  # Change the logits by making all non-used entries a very negative number
+  # Mask out some logits by making all non-used entries a very negative number
   logits = logits + jnp.where(mask, 0.0, mask_value)[:, None]   
 
-  # Get logit info
+  # Get logit max
   logits_max = logits.max(axis=-1)                              
+
+  # Get unnormalized logits by subtracting the max and taking exp of result
   unnormalized = jnp.exp(logits - logits_max[..., None])        
+
+  # Sum across the last dimension to get the denominator(?)
   denominator = unnormalized.sum(axis=-1)                       
+
+  # Does this renormalize the output? 
   o = (                                                         
       jnp.einsum("bht,btd->bhd", unnormalized.astype(v.dtype), v)
       / denominator[..., None]
   )
-  return o, (logits_max, denominator)
+  return o, logits_max, denominator
 
 
 def ragged_flash_attention_kernel(
@@ -136,7 +142,9 @@ def ragged_mqa(
 ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
   """Ragged multi query attention."""
   batch_size, num_heads, head_dim = q.shape 
+#   jax.debug.print("lengths.shape: {}", lengths.shape)
   assert lengths.shape == (batch_size,)
+#   jax.debug.print("lengths.dtype: {}", lengths.dtype)
   assert lengths.dtype == jnp.int32
   seq_len = k.shape[1]  
 
@@ -185,4 +193,4 @@ def ragged_mqa(
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
       ],
   )(lengths, q, k, v)
-  return out, (m[..., 0], l[..., 0])
+  return out, m[..., 0], l[..., 0]  # o=q (b,n,d)?, m=(b,n,d), l=(b,n,d)

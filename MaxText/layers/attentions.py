@@ -34,6 +34,7 @@ from layers import embeddings
 from layers import initializers
 from layers import linears
 from layers import quantizations
+from kernels.ragged_attention import mqa_reference, ragged_mqa
 
 
 Array = common_types.Array
@@ -165,21 +166,53 @@ class AttentionOp(nn.Module):
       key: Array,
       value: Array,
       decoder_segment_ids: Array | None,
-      model_mode: str):
+      model_mode: str, 
+      ragged: bool = False):
 
-    # query.shape:  (1, 16, 8, 256)
-    # key.shape:    (1, 16, 1, 256)
-    # value.shape:  (1, 16, 1, 256)
-    # decoder_segment_ids: array([[1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]], dtype=int32)
     # model_mode: 'prefill' 
+      # query.shape:  (4, 1024, 16, 256)   (b, s, n, d)
+      # key.shape:    (4, 1024, 16, 256)   (b, s, n, d)
+      # value.shape:  (4, 1024, 16, 256)   (b, s, n, d)
 
-    # self.attention_kernel: 'autoselected'
-    # length: 16
+    # model_mode: 'autoregressive' 
+      # query.shape:  (4,    1, 16, 256)   (b, 1, n, d)
+      # key.shape:    (4, 1024, 16, 256)   (b, s, n, d)
+      # value.shape:  (4, 1024, 16, 256)   (b, s, n, d)
 
-    # jax.debug.breakpoint()
+    # Ragged MQA is expecting: 
+      # q_mha:        (4, 16, 256)   (b, n, d)
+      # k_mha:        (4, 1024, 256) (b, s, d)
+      # v_mha:        (4, 1024, 256) (b, s, d)
+      # Which then gets vmapped across k and v's [1] dimension which is num_heads
+        # jax.vmap(ragged_mqa, in_axes=[None, 1, 1, None])
+
+    # AR - query.shape=(4, 32, 128)
+    # AR - key.shape=(4, 32, 1024, 128)
+    # AR - value.shape=(4, 32, 1024, 128)
+
+    # We have AR output.
+    # query.shape=(4, 1, 32, 128), prefill_kv_cache[0].shape=(4, 1024, 32, 128), prefill_kv_cache[1].shape=(4, 1024, 32, 128)
+    # query.shape=(4, 1, 32, 128), ar_kv_cache[0].shape=(4, 1024, 32, 128), ar_kv_cache[1].shape=(4, 1024, 32, 128)
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
-    if self.attention_kernel == 'dot_product' or\
+    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
+    # if False:
+    # if True:
+      # query = query.squeeze()           # (b,s=1,n,d) -> (b,n,d)
+      query = jnp.swapaxes(query, 1, 2)     # (b,s,n,d) -> (b,n,s,d)
+      key = jnp.swapaxes(key, 1, 2)     # (b,s,n,d) -> (b,n,s,d)
+      value = jnp.swapaxes(value, 1, 2) # (b,s,n,d) -> (b,n,s,d)
+      print(f"\nAR - {query.shape=}") 
+      print(f"AR - {key.shape=}")
+      print(f"AR - {value.shape=}")
+      # Vmap across k and v's [1] dimension which is num_heads
+      # TODO: this works for vmapped version of mqa_ref, but breaks for ragged_mqa
+      # NotImplementedError: Mosaic kernels cannot be automatically partitioned. Please wrap the call in a shard_map or xmap.
+      # vmap_ragged_mqa = jax.vmap(ragged_mqa, in_axes=[1, 1, 1, None], out_axes=2)
+      # return vmap_ragged_mqa(query, key, value, decoder_segment_ids.sum(axis=1))
+      vmap_ref_mqa = jax.vmap(mqa_reference, in_axes=[1, 1, 1, None], out_axes=2)
+      return vmap_ref_mqa(query, key, value, decoder_segment_ids.sum(axis=1))
+    elif self.attention_kernel == 'dot_product' or\
           (self.attention_kernel == 'autoselected' and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE) or\
           (self.attention_kernel == 'autoselected' and length < 128):
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
@@ -367,7 +400,23 @@ class AttentionOp(nn.Module):
       model_mode: str = common_types.MODEL_MODE_TRAIN,
   ):
     """Apply Attention."""
+    # query.shape: (16, 1, 8, 32) 
+    # key.shape: (16, 32, 8, 32)
+    # value.shape: (16, 32, 8, 32) 
     # Casting qk_product and softmaxt computation for float32 for model stability.
+    # jax.debug.breakpoint()
+    # if decoder_segment_ids is not None:
+    #   jax.debug.print("")
+    #   jax.debug.print("decoder_segment_ids.sum: {}", decoder_segment_ids.sum(axis=1))
+    #   jax.debug.print("decoder_segment_ids.shape: {}", decoder_segment_ids.shape)
+    #   jax.debug.print("query.shape: {}", query.shape)
+    #   jax.debug.print("key.shape: {}", key.shape)
+    #   jax.debug.print("value.shape: {}", value.shape)
+    #   jax.debug.print("")
+    # else:
+    #   print(f"Decoder is None in {model_mode}")
+    # if decoder_segment_ids is not None:
+    #   lengths = decoder_segment_ids.sum(axis=1)
     if self.float32_qk_product:
       query = query.astype(jnp.float32)
       key = key.astype(jnp.float32)
@@ -710,9 +759,9 @@ class AttentionOp(nn.Module):
   
   
   def normalize_attention(self, 
-                          local_outs,
-                          local_maxes,
-                          local_sums):
+                          local_outs,   # ((8, 12, 8, 32) , (8, 12, 8, 32))
+                          local_maxes,  # ((8, 12, 8)     , (8, 12, 8))
+                          local_sums):  # ((8, 12, 8)     , (8, 12, 8))
     """Normalize across multiple localized attentions
 
     Args:
@@ -723,33 +772,59 @@ class AttentionOp(nn.Module):
     Returns:
         Array: Combined attention that has been normalized 
     """
+    print(f"local_outs: {local_outs[0].shape=}, {local_outs[1].shape=}")
+    print(f"local_maxes?: {local_maxes[0].shape=}, {local_maxes[1].shape=}")
+    print(f"local_sums?: {local_sums[0].shape=}, {local_sums[1].shape=}")
+    # Comparing original call to ragged
+    
+    # local_outs: local_outs[0].shape=(4, 1, 32, 128), local_outs[1].shape=(4, 1, 32, 128)
+    # local_outs: local_outs[0].shape=(4, 32, 1, 128), local_outs[1].shape=(4, 32, 1, 128)
+
+    # local_maxes?: local_maxes[0].shape=(4, 1, 32, 1), local_maxes[1].shape=(4, 1, 32, 1)
+    # local_maxes?: local_maxes[0].shape=(4, 32, 1), local_maxes[1].shape=(4, 32, 1)
+
+    # local_sums?: local_sums[0].shape=(4, 32, 1), local_sums[1].shape=(4, 32, 1)
+    # local_sums?: local_sums[0].shape=(4, 1, 32, 1), local_sums[1].shape=(4, 1, 32, 1)
+
+    # global_max.shape=(4, 1, 32, 1)
+    # global_sum.shape=(4, 1, 32, 1)
+
+    # local_normalizer.shape=(4, 1, 32, 1)
+    # local_normalizer.shape=(4, 1, 32, 1)
+
+    # attn_out.shape=(4, 1, 32, 128)
+    # attn_out.shape=(4, 1, 32, 128)
+
     # Based on https://github.com/google-research/google-research/blob/master/scaling_transformer_inference_efficiency/attention.py
+    # jax.debug.breakpoint()
     global_max = functools.reduce(jnp.maximum, local_maxes)
     global_sum = sum([
       jnp.exp(local_max - global_max) * local_sum
       for (local_sum, local_max) in zip(local_sums, local_maxes)
     ])
-
+    # print(f"{global_max.shape=}")
+    # print(f"{global_sum.shape=}")
     attn_out = 0
+    
     for local_max, local_out in zip(local_maxes, local_outs):
-      local_normalizer = jnp.exp(local_max - global_max) / global_sum
-      attn_out += local_normalizer * local_out
+      local_normalizer = jnp.exp(local_max - global_max) / global_sum # (8,12,8) for all vars
+      # print(f"{local_normalizer.shape=}") # local_normalizer.shape=(4, 32, 1)
+      # print(f"{local_out.shape=}")        # 
+      result = local_normalizer*local_out
+      # print(f"{result.shape=}")
+      # local_normalizer.shape=(4, 32, 1)
+      attn_out += local_normalizer * local_out    # (8,12,8) * (8,12,8,32)  Causes issue
+      # print(f"{attn_out.shape=}")
+    # jax.debug.print("attn_out: {}", attn_out.shape)
     return attn_out
 
 
   @nn.compact
   def __call__(self, query, key, value, decoder_segment_ids, model_mode):
-    # query.shape: (8, 32, 16, 256)
-    # key.shape: (8, 32, 16, 256)
-    # value.shape: (8, 32, 16, 256)
     prefill_kv_cache, ar_kv_cache = self.kv_cache(key, value, decoder_segment_ids, model_mode)
 
-    # Pate
-    # jax.debug.print("query.shape: {}", query.shape)
-    # jax.debug.print("key.shape: {}", key.shape)
-    # jax.debug.print("value.shape: {}", value.shape)
-    # jax.debug.print("decoder_segment_ids.shape: {}", decoder_segment_ids.shape)
-    # print(f"model_mode: {model_mode}")
+
+    # Prefill Step 7
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
       query=query,
       key=prefill_kv_cache[0],
@@ -760,7 +835,9 @@ class AttentionOp(nn.Module):
     
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
     if ar_kv_cache is None:
+      # print("ar_kv_cache is None")
       if prefill_exponentials_sum is not None:
+        # print("prefill_exponentials_sum is not None")
         return prefill_unnormalized_output / prefill_exponentials_sum
       return prefill_unnormalized_output
 
@@ -772,10 +849,24 @@ class AttentionOp(nn.Module):
       model_mode=model_mode,
     )
 
-    unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
-    exponentials_maxes = [prefill_exponentials_max, ar_exponentials_max]
-    exponentials_sums = [prefill_exponentials_sum, ar_exponentials_sum]
-    return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
+    if ar_unnormalized_output is not None:
+      print("\nWe have AR output.")
+      print(f"{query.shape=}, {prefill_kv_cache[0].shape=}, {prefill_kv_cache[1].shape=}")
+      print(f"{query.shape=}, {ar_kv_cache[0].shape=}, {ar_kv_cache[1].shape=}")
+      prefill_exponentials_max = jnp.expand_dims(prefill_exponentials_max, axis=-1)
+      prefill_exponentials_sum = jnp.expand_dims(prefill_exponentials_sum, axis=-1)
+      ar_exponentials_max = jnp.expand_dims(ar_exponentials_max, axis=-1)
+      ar_exponentials_sum = jnp.expand_dims(ar_exponentials_sum, axis=-1)
+      print(f"{prefill_unnormalized_output.shape=}, {ar_unnormalized_output.shape=}")
+      print(f"{prefill_exponentials_max.shape=}, {ar_exponentials_max.shape=}")
+      print(f"{prefill_exponentials_sum.shape=}, {ar_exponentials_sum.shape=}")
+      # We have AR output.
+      unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
+      exponentials_maxes = [prefill_exponentials_max, ar_exponentials_max]
+      exponentials_sums = [prefill_exponentials_sum, ar_exponentials_sum]
+      return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
+    else:
+      return prefill_unnormalized_output / prefill_exponentials_sum
 
 
 class Attention(nn.Module):
@@ -976,7 +1067,7 @@ class Attention(nn.Module):
                                dropout_rate = self.dropout_rate,
                                dtype=self.dtype)
 
-    # Pate
+    # Prefill Step 6
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)
 
     out = nn.with_logical_constraint(out, self.out_axis_names)

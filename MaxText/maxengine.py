@@ -189,7 +189,7 @@ class MaxEngine(engine_api.Engine):
       params,
       input_tokens,   # Currently expects padded input
       positions,      # 2D Array of values that represent locations in monotonic increasing order
-      decoder_segment_ids=sequence_indicator, # 2D Array of 0/1 ints representing existing tokens
+      decoder_segment_ids=sequence_indicator, # 2D Array of 0/1 ints representing existing tokens?
       enable_dropout=False,                   # ?
       model_mode=common_types.MODEL_MODE_PREFILL, # Self explanatory
       rngs={'params': self.rng},                  # Existing PRNG keys
@@ -278,6 +278,7 @@ class MaxEngine(engine_api.Engine):
     # jax.debug.print("sequence_indicator {}", sequence_indicator)
 
     # flat_logits.shape: (1, 16, 32000) (batch, seqlen, v)
+    # Prefill Step 2
     flat_logits, new_vars = self.model.apply(
       params,
       input_tokens,   # Currently expects padded input
@@ -286,7 +287,7 @@ class MaxEngine(engine_api.Engine):
       enable_dropout=False,                   # ?
       model_mode=common_types.MODEL_MODE_PREFILL, # Self explanatory
       rngs={'params': self.rng},                  # Existing PRNG keys
-      mutable=["cache"]                           # We want to change the "cache" variable
+      mutable=["cache"],                           # We want to change the "cache" variable
     )
     # jax.debug.print("flat_logits.shape {}", flat_logits.shape)
 
@@ -378,7 +379,6 @@ class MaxEngine(engine_api.Engine):
       # cache_ar_index
       path_key = path[-1].key
       # pri
-      print("pathkey {}", path_key)
       # jax.debug.print("\n\n\npath_key {}", path_key)
       # jax.debug.print("partial_cache.shape: {}", partial_cache.shape)
       # jax.debug.print("full_cache.shape: {}", full_cache.shape)
@@ -386,7 +386,6 @@ class MaxEngine(engine_api.Engine):
         return full_cache # we don't even zero these out because we can mask them out.
 
       batch_idx = annotations.index("cache_batch") if "cache_batch" in annotations else -1
-      print("batch_idx {}", batch_idx)
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
 

@@ -70,11 +70,11 @@ class AttentionTest(unittest.TestCase):
 
     self._attention_as_mha_generic_variable = self._attention_as_mha_generic.init(
         {'params': self.rng, 'aqt': self.rng},
-        jnp.ones(
+        jnp.ones( # q? 
             (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones(
+        jnp.ones( # k?
             (self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones(
+        jnp.ones( # v? 
             (self.global_batch_size, self.max_target_length)),
     )
 
@@ -109,15 +109,22 @@ class AttentionTest(unittest.TestCase):
   
   @pytest.mark.tpu
   def test_autoregression(self):
+    # 16
     prefill_length = self.cfg.max_prefill_predict_length
+
+    # 128
     decode_total_length = self.cfg.max_target_length
-    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(
-        self.dtype)
+
+    # lnx.shape:                  (4, 128, 2048)
+    # decoder_segment_ids.shape:  (4, 128)
+    # decoder_positions.shape:    (4, 128)
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
     
+    # mha_full.shape: (4, 128, 2048)
     mha_full = self._attention_as_mha_generic.apply(
-        self._attention_as_mha_generic_variable,
-        lnx,
-        lnx,
+        self._attention_as_mha_generic_variable,  # q
+        lnx,  # k
+        lnx,  # v
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
@@ -125,10 +132,16 @@ class AttentionTest(unittest.TestCase):
         rngs={'aqt': self.rng},
     )
     
+    # lnx_prefill.shape: (4, 16, 2048)
     lnx_prefill = lnx[:, 0:prefill_length, :]
+
+    # decoder_segment_ids_prefill.shape: (4, 16)
     decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
+
+    # decoder_positions_prefill.shape: (4, 16)
     decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
     
+    # mha_prefill.shape: (4, 16, 2048)
     mha_prefill, output_cache = self._attention_as_mha_generic.apply(
         self._attention_as_mha_generic_variable,
         lnx_prefill,
@@ -148,8 +161,16 @@ class AttentionTest(unittest.TestCase):
     )
 
     for idx in range(prefill_length, decode_total_length):
+      # lnx_idx.shape: (4, 1, 2048)
       lnx_idx = lnx[:, idx:idx+1, :]
+
+      # decoder_positions_idx: (4, 1)
+        # Array([[16],
+        # [16],
+        # [16],
+        # [16]], dtype=int32)
       decoder_positions_idx = decoder_positions[:, idx:idx+1]
+
       self._attention_as_mha_generic_variable.update(output_cache)
       mha_idx, output_cache = self._attention_as_mha_generic.apply(
         self._attention_as_mha_generic_variable,
@@ -162,7 +183,12 @@ class AttentionTest(unittest.TestCase):
         mutable=["cache"]
       )
 
+      # mha_full_this_idx.shape: (4, 1, 2048)
+      # mha_full.shape: (4, 128, 2048)
+      # mha_idx.shape: (4, 1, 2048)
       mha_full_this_idx = mha_full[:,idx:idx+1,:]
+      # breakpoint()
+      
       self.assertTrue(
         mha_full_this_idx.shape == mha_idx.shape
       )
