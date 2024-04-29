@@ -100,6 +100,8 @@ class AttentionOp(nn.Module):
   max_target_length: int
   num_query_heads: int
   num_kv_heads: int
+  prefill_cache_axis_names: AxisNames
+  ar_cache_axis_names: AxisNames
   float32_qk_product: bool = False
   max_prefill_predict_length: int = -1
   float32_logits: bool = False
@@ -377,7 +379,7 @@ class AttentionOp(nn.Module):
     """
     return jax.numpy.moveaxis(kv, (0, 1, 2, 3), (2, 0, 1, 3))
 
-  def cached_kv_shape(self, kv_shape):
+  def prefill_cached_kv_shape(self, kv_shape):
     """Cached KV shape.
 
     The key and value have dimension [batch, length, num_heads, head_dim], but
@@ -391,28 +393,56 @@ class AttentionOp(nn.Module):
     """
     return (kv_shape[1], kv_shape[2], kv_shape[0], kv_shape[3])
 
+  def ar_cached_kv_shape(self, kv_shape):
+    """Cached KV shape.
+
+    The key and value have dimension [batch, length, num_heads, head_dim], but
+    we cache them as [length, num_heads, batch, head_dim, ] for optimized read/write performance.
+
+    Args:
+      kv_shape: shape of key or value for caching, as [b, ..., s, n, d].
+
+    Returns:
+      Swapped kv_shape as [b, ..., n, d, s] for cache.
+    """
+    cach_axis_name_to_logical_dimension_map = {
+      "cache_sequence": 1,
+      "cache_heads": 2,
+      "cache_batch": 0,
+      "cache_kv": 3
+    }
+
+    logical_dimensions = [
+      cach_axis_name_to_logical_dimension_map[self.ar_cache_axis_names[0]],
+      cach_axis_name_to_logical_dimension_map[self.ar_cache_axis_names[1]],
+      cach_axis_name_to_logical_dimension_map[self.ar_cache_axis_names[2]],
+      cach_axis_name_to_logical_dimension_map[self.ar_cache_axis_names[3]]
+    ]
+
+    return (
+      kv_shape[logical_dimensions[0]],
+      kv_shape[logical_dimensions[1]],
+      kv_shape[logical_dimensions[2]],
+      kv_shape[logical_dimensions[3]]
+    )
+
   def _get_prefill_cache(self, batch, heads, kv_head_size, quantize_kvcache):
     dtype = jnp.int8 if quantize_kvcache else jnp.bfloat16
 
-    kv_cache_layout = (
-        "cache_sequence",
-        "cache_heads",
-        "cache_batch",
-        "cache_kv",
-    )
+    kv_cache_layout = self.prefill_cache_axis_names
     cache_logical_shape = (batch, self.max_prefill_predict_length, heads, kv_head_size)
     cached_key = self.variable(
         "cache",
         "cached_prefill_key",
         nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
-        self.cached_kv_shape(cache_logical_shape),
+        self.prefill_cached_kv_shape(cache_logical_shape),
         dtype,
     )
     cached_value = self.variable(
         "cache",
         "cached_prefill_value",
         nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
-        self.cached_kv_shape(cache_logical_shape),
+        self.prefill_cached_kv_shape(cache_logical_shape),
         dtype,
     )
     cached_segment_id = self.variable(
@@ -429,14 +459,14 @@ class AttentionOp(nn.Module):
           "cache",
           "cached_prefill_key_scale",
           nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
-          self.cached_kv_shape(cache_logical_shape_scale),
+          self.prefill_cached_kv_shape(cache_logical_shape_scale),
           jnp.bfloat16,
       )
       cached_value_scale_var = self.variable(
           "cache",
           "cached_prefill_value_scale",
           nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
-          self.cached_kv_shape(cache_logical_shape_scale),
+          self.prefill_cached_kv_shape(cache_logical_shape_scale),
           jnp.bfloat16,
       )
     else:
@@ -450,25 +480,20 @@ class AttentionOp(nn.Module):
   def _get_ar_cache(self, batch, heads, kv_head_size, quantize_kvcache):
     dtype = jnp.int8 if quantize_kvcache else jnp.bfloat16
     cache_length = self.max_target_length - self.max_prefill_predict_length
-    kv_cache_layout = (
-        "cache_sequence",
-        "cache_heads",
-        "cache_batch",
-        "cache_kv",
-    )
+    kv_cache_layout = self.ar_cache_axis_names
     cache_logical_shape = (batch, cache_length, heads, kv_head_size)
     cached_key = self.variable(
         "cache",
         "cached_ar_key",
         nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
-        self.cached_kv_shape(cache_logical_shape),
+        self.ar_cached_kv_shape(cache_logical_shape),
         dtype,
     )
     cached_value = self.variable(
         "cache",
         "cached_ar_value",
         nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
-        self.cached_kv_shape(cache_logical_shape),
+        self.ar_cached_kv_shape(cache_logical_shape),
         dtype,
     )
     cached_segment_id = self.variable(
@@ -485,14 +510,14 @@ class AttentionOp(nn.Module):
           "cache",
           "cached_ar_key_scale",
           nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
-          self.cached_kv_shape(cache_logical_shape_scale),
+          self.ar_cached_kv_shape(cache_logical_shape_scale),
           jnp.bfloat16,
       )
       cached_value_scale_var = self.variable(
           "cache",
           "cached_ar_value_scale",
           nn.with_logical_partitioning(jnp.zeros, kv_cache_layout),
-          self.cached_kv_shape(cache_logical_shape_scale),
+          self.ar_cached_kv_shape(cache_logical_shape_scale),
           jnp.bfloat16,
       )
     else:
@@ -968,6 +993,8 @@ class Attention(nn.Module):
         num_kv_heads=self.num_kv_heads,
         dropout_rate=self.dropout_rate,
         dtype=self.dtype,
+        prefill_cache_axis_names=self.config.prefill_cache_axis_names.split(","),
+        ar_cache_axis_names=self.config.ar_cache_axis_names.split(","),
     )
 
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)
