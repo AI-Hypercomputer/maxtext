@@ -18,24 +18,15 @@ import jax
 import numpy as np
 from jax import numpy as jnp
 from jax import tree_map
-from flax import core as flax_core
 from flax.core import meta
 from flax import linen as nn
 from jax.sharding import Mesh
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec
-from jax.experimental import mesh_utils
-from typing import Sequence
-from absl import app
-import os
-import argparse
 from typing import Optional
 from layers import quantizations
-from layers import simple_decoder_layer
 import common_types
-import pyconfig
 import functools
-import max_utils
 
 PARAMS="params"
 NON_TRAINABLE="non_trainable"
@@ -500,7 +491,7 @@ class Pipeline(nn.Module):
 
     # The scan cannot be used on init since it broadcasts the state. Thus the state must be independent of the loop body,
     # but on init the loop body will initialize the params.
-    if use_scan and not self.is_initializing():
+    if self.config.scan_pipeline_iterations and not self.is_initializing():
         scan_func = nn.scan(
           func_to_scan,
           variable_axes={
