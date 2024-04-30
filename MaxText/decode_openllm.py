@@ -82,9 +82,9 @@ def hf_tokenize_and_pad(
   else:
     padded_tokens = np.pad(tokens, (0, padding))
   if jax_padding:
-    padded_tokens = jnp.array(padded_tokens)  
-  
-  return padded_tokens, true_length    
+    padded_tokens = jnp.array(padded_tokens)
+
+  return padded_tokens, true_length
 
 
 class MaxTextLM(LM):
@@ -94,12 +94,7 @@ class MaxTextLM(LM):
         self.lm_config = config
         self.engine = maxengine.MaxEngine(config)
         self.params = self.engine.load_params()
-
-        # metadata = self.engine.get_tokenizer()
-        # self.vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
-        # self.tokenizer = self.vocab.tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path, add_bos_token=True)
-        #import pdb; pdb.set_trace()
 
     def generate_until(self, requests, disable_tqdm: bool = False):
         res = []
@@ -113,7 +108,6 @@ class MaxTextLM(LM):
             tokens, true_length = hf_tokenize_and_pad(
                 ctx, self.tokenizer, prefill_lengths=[self.lm_config.max_prefill_predict_length]
             )
-            # import pdb; pdb.set_trace()
             assert tokens.size <= self.lm_config.max_prefill_predict_length, "can't take too many tokens"
             assert self.lm_config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
             prefill_result = self.engine.prefill(params=self.params, padded_tokens=tokens, true_length=true_length)
@@ -143,7 +137,6 @@ class MaxTextLM(LM):
             tokens, true_length = hf_tokenize_and_pad(
                 ctx, self.tokenizer, prefill_lengths=[self.lm_config.max_prefill_predict_length]
             )
-            # import pdb; pdb.set_trace()
             prefill_result = self.engine.prefill(params=self.params, padded_tokens=tokens, true_length=true_length)
             assert tokens.size <= self.lm_config.max_prefill_predict_length, "can't take too many tokens"
             assert self.lm_config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
@@ -153,7 +146,7 @@ class MaxTextLM(LM):
             decode_state = self.engine.init_decode_state()
             decode_state = self.engine.insert(prefill_result, decode_state, slot=slot)
 
-            target_tokens = np.array(self.vocab.encode_tf(cont))
+            target_tokens = np.array(self.tokenizer(cont)['input_ids'])
             steps = range(len(target_tokens)-1)
 
             log_probs = jax.nn.log_softmax(decode_state["logits"][0][0])
@@ -184,7 +177,7 @@ def run_eval_harness(config, bootstrap_iters=2):
         model=lm,
         tasks=["hellaswag"],  # arc_challenge hellaswag winogrande mmlu truthfulqa_gen
         num_fewshot=10,
-        #limit=5,  # limit the number of tasks
+        limit=5,  # Limit the number of examples per task 
         bootstrap_iters=bootstrap_iters,  # default: 10000
         log_samples=False,
     )
