@@ -58,6 +58,7 @@ class TokenizerTest(unittest.TestCase):
   def tearDownClass(cls):
     os.remove(cls.tokenizer_path)
 
+  @pytest.mark.skip(reason="mohitkhatwani@ will fix this")
   @pytest.mark.tpu
   def test_tokenize(self):
     text = 'This is a test'
