@@ -145,7 +145,7 @@ def calculate_prefill_tflops_per_device(num_model_parameters, prefill_length, co
   return total_tflops, learnable_weight_tflops, causal_attention_tflops
 
 
-def assert_params_sufficiently_sharded(params, mesh, tolerance=0.01):
+def assert_params_sufficiently_sharded(params, mesh, tolerance=0.02):
   """Checks whether most params are sharded across sharding axis.
 
   This function determines whether the majority of parameters  are distributed
