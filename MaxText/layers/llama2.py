@@ -73,7 +73,7 @@ class LlamaDecoderLayer(nn.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_layer_norm",
-        kernel_axes=("embed",),
+        kernel_axes=("norm",),
         epsilon=cfg.normalization_layer_epsilon,
     )
     lnx = lnx_rms(inputs)
@@ -115,7 +115,7 @@ class LlamaDecoderLayer(nn.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="post_self_attention_layer_norm",
-        kernel_axes=("embed",),
+        kernel_axes=("norm",),
         epsilon=cfg.normalization_layer_epsilon,
     )(intermediate_inputs)
     hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_length", "activation_embed"))

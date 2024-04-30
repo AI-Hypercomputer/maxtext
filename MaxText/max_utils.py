@@ -55,7 +55,7 @@ def find_nans_and_infs(pytree):
 
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
-  return jax.tree_util.tree_reduce(lambda x, y: x + jax.numpy.sum(jax.numpy.square(y)), x, initializer=0.0) ** 0.5
+  return jnp.sqrt(jax.tree_util.tree_reduce(lambda x, y: x + jnp.sum(jnp.square(y)), x, initializer=0.0))
 
 
 def calculate_num_params_from_pytree(params):
