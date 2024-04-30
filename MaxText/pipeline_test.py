@@ -1,24 +1,15 @@
 import jax
-import numpy as np
 from jax import numpy as jnp
 from jax import tree_map
-from flax import linen as nn
 from jax.sharding import Mesh
-from jax.sharding import NamedSharding
-from jax.sharding import PartitionSpec
-from jax.experimental import mesh_utils
 from typing import Sequence
 from absl import app
 import os
-import argparse
-from typing import Optional
-from layers import quantizations
-from layers import simple_decoder_layer
+#from layers import simple_decoder_layer
 import common_types
 import pyconfig
 import functools
 import max_utils
-from layers import pipeline
 from layers import llama2
 
 import jax.numpy as jnp
