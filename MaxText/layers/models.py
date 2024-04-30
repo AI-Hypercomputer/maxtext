@@ -28,6 +28,7 @@ from layers import attentions
 from layers import embeddings
 from layers import linears
 from layers import normalizations, quantizations
+from layers import pipeline_flax
 
 Array = common_types.Array
 Config = common_types.Config
@@ -170,11 +171,15 @@ class Decoder(nn.Module):
       from layers import gpt3
 
       return gpt3.Gpt3DecoderLayer
+    
+    elif self.config.decoder_block == "simple":
+      from layers import simple_layer
+      return simple_layer.SimpleDecoderLayer
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma", "simple"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
@@ -268,47 +273,59 @@ class Decoder(nn.Module):
           policy=policy,
           static_argnums=(-1, -2, -3, -4, -5),
       )
-    if cfg.scan_layers:
-      initializing = self.is_mutable_collection("params")
-      params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
-      cache_spec = 0
-      y, _ = nn.scan(
-          BlockLayer,
-          variable_axes={
-              "params": params_spec,
-              "cache": cache_spec,
-              "intermediates": 0,
-              "aqt": 0,
-              "_overwrite_with_gradient": 0,
-          },
-          split_rngs={
-              "params": True,
-              "dropout": cfg.enable_dropout,
-          },
-          in_axes=(
-              nn.broadcast,
-              nn.broadcast,
-              nn.broadcast,
-              nn.broadcast,
-          ),
-          length=cfg.num_decoder_layers,
-          metadata_params={nn.PARTITION_NAME: "layers"},
-      )(config=cfg, mesh=mesh, name="layers", quant=self.quant)(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-      )
-    else:
-      for lyr in range(cfg.num_decoder_layers):
-        y = BlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+    pipeline_parallelism = cfg.ici_pipeline_parallelism > 1 or cfg.dcn_pipeline_parallelism > 1
+    if pipeline_parallelism:
+        deocder_layer_instace = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
+        # TODO: Pipeline doesn't need its own config/mesh/quant?
+        y = pipeline_flax.Pipeline(config=cfg, mesh=mesh, layers=deocder_layer_instace,quant=self.quant)(
             y,
             decoder_segment_ids,
             decoder_positions,
             deterministic,
             model_mode,
         )
+    else:
+      if cfg.scan_layers:
+        initializing = self.is_mutable_collection("params")
+        params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
+        cache_spec = 0
+        y, _ = nn.scan(
+            BlockLayer,
+            variable_axes={
+                "params": params_spec,
+                "cache": cache_spec,
+                "intermediates": 0,
+                "aqt": 0,
+                "_overwrite_with_gradient": 0,
+            },
+            split_rngs={
+                "params": True,
+                "dropout": cfg.enable_dropout,
+            },
+            in_axes=(
+                nn.broadcast,
+                nn.broadcast,
+                nn.broadcast,
+                nn.broadcast,
+            ),
+            length=cfg.num_decoder_layers,
+            metadata_params={nn.PARTITION_NAME: "layers"},
+        )(config=cfg, mesh=mesh, name="layers", quant=self.quant)(
+            y,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+        )
+      else:
+        for lyr in range(cfg.num_decoder_layers):
+          y = BlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+          )
 
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
@@ -336,7 +353,7 @@ class Decoder(nn.Module):
       )(
           y
       )  # We do not quantize the logits matmul.
-    logits = nn.with_logical_constraint(logits, ("activation_batch", "activation_length", "activation_vocab"))
+    logits = nn.with_logical_constraint(logits, ("logits_activation_batch", "activation_length", "activation_vocab"))
     logits = logits.astype(jnp.float32)
     return logits
 
