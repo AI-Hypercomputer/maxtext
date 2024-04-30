@@ -104,14 +104,14 @@ def get_expected_output(rng, hidden_states, cfg):
           kernel_axes=('embed', 'mlp'),
           dtype=cfg.dtype,
       )
-      variables = model.init(rng, jax.random.normal(rng, (cfg.base_num_query_heads, 
-                                                          cfg.head_dim, 
+      variables = model.init(rng, jax.random.normal(rng, (int(cfg.per_device_batch_size), 
+                                                          cfg.max_target_length, 
                                                           cfg.base_emb_dim)))
       # print("get_expected_output variables", variables)
       time.simple_timeit(jax.jit(model.apply), variables, hidden_states, tries=10, task="loop")
 
-      # output = model.apply(variables, hidden_states)
-      return variables, 0
+      output = model.apply(variables, hidden_states)
+      return variables, output
 
 
 def get_moe_output(variables, hidden_states, cfg, mesh):
@@ -192,8 +192,8 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
       
       # print("get_moe_output expected_variables", variables)
       time.simple_timeit(jax.jit(model.apply), moe_variables, hidden_states, tries=10, task="megablox")
-      # output = model.apply(moe_variables, hidden_states)
-      return 0
+      output = jax.jit(model.apply)(moe_variables, hidden_states)
+      return output
 
 
 class MoeTest(unittest.TestCase):
@@ -212,11 +212,11 @@ class MoeTest(unittest.TestCase):
     self.cfg = pyconfig.config
     self.rng = jax.random.PRNGKey(42)
 
-    num = jnp.arange(self.cfg.base_num_query_heads * self.cfg.head_dim * self.cfg.base_emb_dim)
-    self.hidden_states = jnp.reshape(num, (self.cfg.base_num_query_heads, 
-                                           self.cfg.head_dim, 
+    num = jnp.arange(self.cfg.per_device_batch_size * self.cfg.max_target_length * self.cfg.base_emb_dim)
+    self.hidden_states = jnp.reshape(num, (int(self.cfg.per_device_batch_size), 
+                                           self.cfg.max_target_length, 
                                            self.cfg.base_emb_dim))
-    # print("hidden_states", self.hidden_states.shape)
+    print(f"{self.hidden_states.shape}=")
 
     devices_array = max_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
@@ -226,7 +226,8 @@ class MoeTest(unittest.TestCase):
     actual_output = get_moe_output(variables, self.hidden_states, self.cfg, self.mesh)
     # print("expected_output", expected_output)
     # print("actual_output", actual_output)
-    # self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-03, atol=1e-03, equal_nan=False))
+    #breakpoint()
+    #self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-01, atol=1e-01, equal_nan=False))
 
 
 if __name__ == '__main__':

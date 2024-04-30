@@ -9,7 +9,7 @@ def simple_timeit(f, *args, tries = 10, task = None):
     assert task is not None
 
     trace_name = f"t_{task}_" + ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(10))
-    trace_dir = f"gs://ranran-tpu-prod/megablox/{trace_name}"
+    trace_dir = f"gs://runner-maxtext-logs/megablox/{trace_name}"
 
     outcomes_ms = []
     jax.block_until_ready(f(*args)) #warm it up!
