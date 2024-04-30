@@ -325,6 +325,7 @@ def create_device_mesh(config, devices=None):
       config.dcn_sequence_parallelism,
       config.dcn_tensor_parallelism,
       config.dcn_autoregressive_parallelism,
+      config.dcn_pipeline_parallelism,
   ]
   ici_parallelism = [
       config.ici_data_parallelism,
@@ -333,6 +334,7 @@ def create_device_mesh(config, devices=None):
       config.ici_sequence_parallelism,
       config.ici_tensor_parallelism,
       config.ici_autoregressive_parallelism,
+      config.ici_pipeline_parallelism,
   ]
 
   # Find possible unspecified parallelisms

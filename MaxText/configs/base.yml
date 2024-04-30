@@ -77,6 +77,15 @@ base_num_kv_heads: 16
 base_mlp_dim: 7168
 base_num_decoder_layers: 16
 head_dim: 128
+
+# pipeline parallelism
+# We recommend leaving the num_pipeline_repeats to default behavior.
+# By default the number of repeats will be set to [num_decoder_layers] / [num_pipeline_stages], since we currently only support one layer per stage
+num_pipeline_repeats: -1 
+# The number of pipeline_microbatches must be a multiple of the number of pipeline stages. By default it is set to the number of stages.
+num_pipeline_microbatches: -1
+# The microbatch_size is given by global_batch_size / num_pipeline_microbatches, where global_batch_size = per_device_batch_size * num_devices
+
 # mixture of experts (moe)
 num_experts: 1
 num_experts_per_tok: 1
@@ -90,6 +99,7 @@ logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedd
 # These options offer a trade-off between speed (fastest to slowest) and HBM usage (highest to lowest)
 remat_policy: 'full'
 scan_layers: True
+scan_pipeline_iterations: False # TODO: only have one scan?
 param_scan_axis: 1
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
 
@@ -110,9 +120,13 @@ jax_cache_dir: "~/jax_cache"
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
 # Parallelism
-mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']
+mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive', 'stage']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose',]],
+                      # TODO: Should stage be first or last? Does it matter?
+                      # TODO: Probably instead have an activation_batch and an activation_microbatch,
+                      # which would swap the meaning of the current activation_batch
+                      ['logits_activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'stage']],
                       ['activation_heads', ['tensor','sequence']],
                       ['activation_length', 'sequence'],
                       ['activation_embed', 'tensor'],
@@ -127,13 +141,14 @@ logical_axis_rules: [
                       ['embed', ['fsdp', 'sequence']],
                       ['norm', 'tensor'],
                       ['heads', ['tensor', 'autoregressive']],
+                      ['layers','stage']
                       ['kv', []],
                       ['cache_batch', []],
                       ['cache_heads', ['autoregressive', 'tensor']],
                       ['cache_kv', []],
                       ['cache_sequence', []],
                     ]
-data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']]
+data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive', 'stage']]
 
 # One axis for each parallelism type may hold a placeholder (-1)
 # value to auto-shard based on available slices and devices.
@@ -145,12 +160,14 @@ dcn_fsdp_transpose_parallelism: 1
 dcn_sequence_parallelism: 1  # never recommended
 dcn_tensor_parallelism: 1 # never recommended
 dcn_autoregressive_parallelism: 1 # never recommended
+dcn_pipeline_parallelism: 1
 ici_data_parallelism: 1
 ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
 ici_fsdp_transpose_parallelism: 1
 ici_sequence_parallelism: 1
 ici_tensor_parallelism: 1
 ici_autoregressive_parallelism: 1
+ici_pipeline_parallelism: 1
 
 # The number of TPU slices is automatically determined, you should not set this explicitly. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
