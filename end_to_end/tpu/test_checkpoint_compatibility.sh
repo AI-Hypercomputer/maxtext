@@ -45,5 +45,5 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME steps=7 ${m
     dataset_type=c4-array_record grain_worker_count=0\
     dataset_name=array-record/c4/en/3.0.1 eval_dataset_name=array-record/c4/en/3.0.1
 
-python3 end_to_end/eval_assert.py test_start_step run_2_metrics.txt 3.0
-python3 end_to_end/eval_assert.py test_start_step run_3_metrics.txt 5.0
+python3 end_to_end/tpu/eval_assert.py test_start_step run_2_metrics.txt 3.0
+python3 end_to_end/tpu/eval_assert.py test_start_step run_3_metrics.txt 5.0

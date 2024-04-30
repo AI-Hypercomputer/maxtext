@@ -19,7 +19,7 @@ import os
 import sys
 import pyconfig
 
-import  maxengine_config
+import maxengine_config
 from jetstream.core import server_lib
 
 # _PORT = flags.DEFINE_integer('port', 9000, 'port to listen on')
@@ -36,7 +36,7 @@ from jetstream.core import server_lib
 def main(config):
   # No devices for local cpu test. A None for prefill and a None for generate.
   devices = server_lib.get_devices()
-  server_config = maxengine_config.get_server_config('MaxtextInterleavedServer', config)
+  server_config = maxengine_config.get_server_config("MaxtextInterleavedServer", config)
   # We separate credential from run so that we can unit test it with
   # local credentials.
   # TODO: Add grpc credentials for OSS.
@@ -49,8 +49,8 @@ def main(config):
   jetstream_server.wait_for_termination()
 
 
-if __name__ == '__main__':
-  jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
+if __name__ == "__main__":
+  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   xla_flags = os.getenv('XLA_FLAGS')
   to_append = "--xla_disable_hlo_passes=rematerialization"

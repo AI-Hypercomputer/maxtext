@@ -52,7 +52,7 @@ jobs:
             }
 
             // This list should match with CODEOWNERS
-            let requiredReviewers = { rwitten: "" }
+            let requiredReviewers = { rwitten: "", gobbleturk: "" }
             const reviews = await github.rest.pulls.listReviews({
               owner,
               repo,
@@ -62,12 +62,13 @@ jobs:
               console.log("Not adding pull ready because the PR is not approved yet")
               process.exit()
             }
+            let is_approved=false
             for (const review of reviews.data) {
-              if (review.state === "APPROVED") {
-                delete requiredReviewers[review.user.login]
+              if (review.state === "APPROVED" && review.user.login in requiredReviewers) {
+                is_approved=true
               }
             }
-            if (Object.keys(requiredReviewers).length !== 0) {
+            if (!is_approved) {
               console.log("Not adding pull ready because the PR is not approved yet")
               process.exit()
             }

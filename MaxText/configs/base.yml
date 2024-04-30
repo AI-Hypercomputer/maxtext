@@ -59,7 +59,7 @@ save_config_to_gcs: False
 
 # Activation dtypes.
 dtype: "bfloat16"
-quantization: "" #defaults to no quantization, i.e. bf16. possible alternative setting is 'int8'
+quantization: "" #defaults to no quantization, i.e. bf16. possible alternative setting is 'int8' or use fp8 to run with 8-bit floating-point GeMMs on NVIDIA GPUs.
 quantize_kvcache: False
 
 # Shard the range finding operation for quantization. By default this is set to number of slices.
@@ -125,6 +125,7 @@ logical_axis_rules: [
                       ['vocab', ['tensor', 'autoregressive']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'sequence']],
                       ['embed', ['fsdp', 'sequence']],
+                      ['norm', 'tensor'],
                       ['heads', ['tensor', 'autoregressive']],
                       ['kv', []],
                       ['cache_batch', []],
@@ -142,7 +143,7 @@ dcn_data_parallelism: -1  # recommended DCN axis to be auto-sharded
 dcn_fsdp_parallelism: 1
 dcn_fsdp_transpose_parallelism: 1
 dcn_sequence_parallelism: 1  # never recommended
-dcn_tensor_parallelism: 1 # never recommeneded
+dcn_tensor_parallelism: 1 # never recommended
 dcn_autoregressive_parallelism: 1 # never recommended
 ici_data_parallelism: 1
 ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
@@ -164,6 +165,7 @@ dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
 per_device_batch_size: 12.0
+expansion_factor_real_data: -1 # if -1 then all hosts will load real data, else total_hosts//expansion_factor_real_data will pull data from GCS.
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
 dataset_type: c4 # must be c4 or synthetic
@@ -196,7 +198,7 @@ prefill_cache_dir: "" # If set and load_from_prefill_dir, decode.py reads from d
 autoregressive_decode_assert: ""
 
 enable_profiler: False
-# If set to true, upload all profiler xplane results from all hosts. Otherwise, only upload the xplane reuslt from the first host.
+# If set to true, upload all profiler xplane results from all hosts. Otherwise, only upload the xplane result from the first host.
 upload_all_profiler_results: False
 # Skip first n steps for profiling, to omit things like compilation and to give
 # the iteration time a chance to stabilize.
@@ -247,3 +249,25 @@ decode_sampling_temperature: 1.
 
 eval_interval: -1  # the specific number of train step between eval_step
 target_eval_loss: 0.  # early stop once reaching target eval_loss
+
+# Goodput parameters
+enable_goodput_recording: False
+
+# Vertex AI Tensorboard Configurations - https://github.com/google/maxtext/tree/main/getting_started/Use_Vertex_AI_Tensorboard.md
+# Set to True for GCE, False if running via XPK
+use_vertex_tensorboard: False
+# Project to create Vertex AI Tensorboard in for GCE, blank if project is set using 'gcloud config set project'
+# Set this to blank if running via XPK
+vertex_tensorboard_project: ""
+# Region to create Vertex AI Tensorboard in for GCE, blank if running via XPK
+# Vertex AI supported regions: https://cloud.google.com/vertex-ai/docs/general/locations#available-regions
+vertex_tensorboard_region: ""
+
+# If set to True, MaxText will perform extra checks using jax.checkify. Note that this will effect performance. 
+max_checkify: False
+
+# Inference
+inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
+inference_microbenchmark_stages: "prefill,generate"
+inference_microbenchmark_loop_iters: 10
+inference_microbenchmark_log_file_path: ""
