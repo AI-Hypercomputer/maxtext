@@ -95,30 +95,35 @@ def add_entropy_to_checkpoint(state):
   Returns:
     state: Returns state with entropy added to the optimizer state.
   """
+  state_tree = state.params
+  tree_structure = jax.tree_util.tree_structure(state_tree)
+  leaves = jax.tree_util.tree_leaves(state_tree)
+  mu_keys = 2 * jnp.arange(len(leaves))
+  mu_keys = jax.tree_util.tree_unflatten(tree_structure, mu_keys)
+  nu_keys = 2 * jnp.arange(len(leaves)) + 1
+  nu_keys = jax.tree_util.tree_unflatten(tree_structure, nu_keys)
   opt_0 = state.opt_state[0]
   opt_0 = opt_0._replace(
-      mu=jax.tree_util.tree_map(lambda x: jax.random.normal(create_random_keys(x), shape=x.shape), state.params)
+      mu=jax.tree_util.tree_map(lambda arr, key: create_random_array_sharded_like(arr, key), state.params, mu_keys)
   )
   opt_0 = opt_0._replace(
-      nu=jax.tree_util.tree_map(lambda x: jax.random.normal(create_random_keys(x), shape=x.shape), state.params)
+      nu=jax.tree_util.tree_map(lambda arr, key: create_random_array_sharded_like(arr, key), state.params, nu_keys)
   )
   new_opt = [opt_0] + list(state.opt_state[1:])
   state = state.replace(opt_state=new_opt)
   return state
 
 
-def create_random_keys(x):
-  """Create random keys to help alter the checkpoint state.
-  Args:
-    x: Leaf of the checkpoint PyTree object
-  Returns:
-    random key based on the sum of the values in the leaf.
-  """
-  return random.PRNGKey(int(jnp.sum(jnp.abs(x))))
+def create_random_array_sharded_like(x, key):
+  keys = jax.random.PRNGKey()
+  keys = jax.random.split(random.PRNGKey(int(key)), #prod (sharding))
+  keys = jax.lax.with_sharding_constraint(keys)
+  to_ret = jax.random.normal(random.PRNGKey(int(key)), shape=x.shape)
+  return jax.lax.with_sharding_constraint(to_ret, x.sharding)
 
 
 def main(argv: Sequence[str]) -> None:
-  jax.config.update("jax_cpu_enable_gloo_collectives", True)
+  #jax.config.update("jax_cpu_enable_gloo_collectives", True)
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   pyconfig.initialize(argv)
   config = pyconfig.config
