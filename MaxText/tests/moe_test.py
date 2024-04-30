@@ -110,7 +110,7 @@ def get_expected_output(rng, hidden_states, cfg):
       # print("get_expected_output variables", variables)
       time.simple_timeit(jax.jit(model.apply), variables, hidden_states, tries=10, task="loop")
 
-      output = model.apply(variables, hidden_states)
+      output = jax.jit(model.apply(variables, hidden_states))
       return variables, output
 
 
@@ -149,46 +149,11 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
       wi_0 = jnp.concat(exp_wi_0, axis=0)
       wi_1 = jnp.concat(exp_wi_1, axis=0)
       wo = jnp.concat(exp_wo, axis=0)
-         
-      # exp0_wi_0 = variables['params']['mlp_0']['wi_0']['kernel'].value
-      # exp1_wi_0 = variables['params']['mlp_1']['wi_0']['kernel'].value
-      # exp2_wi_0 = variables['params']['mlp_2']['wi_0']['kernel'].value
-
-      # exp0_wi_1 = variables['params']['mlp_0']['wi_1']['kernel'].value
-      # exp1_wi_1 = variables['params']['mlp_1']['wi_1']['kernel'].value
-      # exp2_wi_1 = variables['params']['mlp_2']['wi_1']['kernel'].value
-
-      # exp0_wo = variables['params']['mlp_0']['wo']['kernel'].value
-      # exp1_wo = variables['params']['mlp_1']['wo']['kernel'].value
-      # exp2_wo = variables['params']['mlp_2']['wo']['kernel'].value
-
-      # construct
-
-      # exp0_wi_0 = jnp.reshape(exp0_wi_0, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      # exp1_wi_0 = jnp.reshape(exp1_wi_0, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      # exp2_wi_0 = jnp.reshape(exp2_wi_0, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      # wi_0 = jnp.concat((exp0_wi_0, exp1_wi_0, exp2_wi_0), axis=0)
-
-      # exp0_wi_1 = jnp.reshape(exp0_wi_1, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      # exp1_wi_1 = jnp.reshape(exp1_wi_1, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      # exp2_wi_1 = jnp.reshape(exp2_wi_1, (1, cfg.base_emb_dim, cfg.base_mlp_dim))
-      # wi_1 = jnp.concat((exp0_wi_1, exp1_wi_1, exp2_wi_1), axis=0)
-
-      # exp0_wo = jnp.reshape(exp0_wo, (1, cfg.base_mlp_dim, cfg.base_emb_dim))
-      # exp1_wo = jnp.reshape(exp1_wo, (1, cfg.base_mlp_dim, cfg.base_emb_dim))
-      # exp2_wo = jnp.reshape(exp2_wo, (1, cfg.base_mlp_dim, cfg.base_emb_dim))
-      # wo = jnp.concat((exp0_wo, exp1_wo, exp2_wo), axis=0)
 
       moe_variables = {'params': {'gate': {'kernel': kernel}, 
                                            'wi_0': wi_0, 
                                            'wi_1': wi_1,
                                            'wo': wo}}
-      # print("actual_variables", variables)
-      # rng = jax.random.PRNGKey(42)
-      # variables = model.init(rng, jax.random.normal(rng, (cfg.base_num_query_heads, 
-      #                                                     cfg.head_dim, 
-      #                                                     cfg.base_emb_dim)))
-
       
       # print("get_moe_output expected_variables", variables)
       time.simple_timeit(jax.jit(model.apply), moe_variables, hidden_states, tries=10, task="megablox")
@@ -212,10 +177,9 @@ class MoeTest(unittest.TestCase):
     self.cfg = pyconfig.config
     self.rng = jax.random.PRNGKey(42)
 
-    num = jnp.arange(self.cfg.per_device_batch_size * self.cfg.max_target_length * self.cfg.base_emb_dim)
-    self.hidden_states = jnp.reshape(num, (int(self.cfg.per_device_batch_size), 
-                                           self.cfg.max_target_length, 
-                                           self.cfg.base_emb_dim))
+    self.hidden_states = jax.random.uniform(self.rng, (int(self.cfg.per_device_batch_size),
+                                            self.cfg.max_target_length,
+                                            self.cfg.base_emb_dim))
     print(f"{self.hidden_states.shape}=")
 
     devices_array = max_utils.create_device_mesh(self.cfg)
@@ -224,10 +188,10 @@ class MoeTest(unittest.TestCase):
   def test_moe_block(self):
     variables, expected_output = get_expected_output(self.rng, self.hidden_states, self.cfg)
     actual_output = get_moe_output(variables, self.hidden_states, self.cfg, self.mesh)
-    # print("expected_output", expected_output)
-    # print("actual_output", actual_output)
-    #breakpoint()
-    #self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-01, atol=1e-01, equal_nan=False))
+    print("expected_output", expected_output)
+    print("actual_output", actual_output)
+    # breakpoint()
+    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
 
 if __name__ == '__main__':
