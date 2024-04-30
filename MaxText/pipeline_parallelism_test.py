@@ -149,7 +149,7 @@ def main(argv: Sequence[str]) -> None:
   #   mesh=mesh
   # )
 
-  from layers import simple_dg
+  #from layers import simple_dg
   #decoder_layer_class = simple_decoder_layer.SimpleDecoderLayer
   #decoder_layer_class = llama2.LlamaDecoderLayer
 
