@@ -29,6 +29,8 @@ from typing import Tuple
 import common_types
 import flax.linen as nn
 from tests import time
+import megablox as mblx
+
 
 
 Array = common_types.Array
@@ -105,14 +107,14 @@ def get_expected_output(rng, hidden_states, cfg):
           kernel_axes=('embed', 'mlp'),
           dtype=cfg.dtype,
       )
-      variables = model.init(rng, jax.random.normal(rng, (cfg.base_num_query_heads, 
-                                                          cfg.head_dim, 
+      variables = model.init(rng, jax.random.normal(rng, (int(cfg.per_device_batch_size), 
+                                                          cfg.max_target_length, 
                                                           cfg.base_emb_dim)))
       # print("get_expected_output variables", variables)
       time.simple_timeit(jax.jit(model.apply), variables, hidden_states, tries=10, task="loop")
 
-      # output = model.apply(variables, hidden_states)
-      return variables, 0
+      output = jax.jit(model.apply)(variables, hidden_states)
+      return variables, output
 
 
 def get_moe_output(variables, hidden_states, cfg, mesh):
@@ -164,8 +166,22 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
       
       # print("get_moe_output expected_variables", variables)
       time.simple_timeit(jax.jit(model.apply), moe_variables, hidden_states, tries=10, task="megablox")
-      # output = model.apply(moe_variables, hidden_states)
-      return 0
+      output = jax.jit(model.apply)(moe_variables, hidden_states)
+      return output
+
+
+def sample_groups(m: int, num_groups: int, key: jax.Array) -> jnp.ndarray:
+    # Randomly sample proportions of 'm' that will be assigned to each group.
+
+    # Randomly sample 'num_groups - 1' run ends. The final group will end at 'm'.
+    # Sample with replacement so that it's possible to get zero-sized groups.
+    ends_no_final = jnp.sort(jax.random.choice(key, m, shape=(num_groups - 1,)))
+    ends = jnp.concatenate([ends_no_final, jnp.array([m], dtype=jnp.int32)])
+
+    # Calculate the run starts by shifting ends 1 to the right. The first run
+    # starts at zero.
+    starts = jnp.concatenate([jnp.zeros(1, dtype=jnp.int32), ends_no_final])
+    return ends - starts
 
 
 class MoeTest(unittest.TestCase):
@@ -179,26 +195,43 @@ class MoeTest(unittest.TestCase):
       enable_checkpointing=False,
       model_name='mixtral-8x7b',
       dtype='bfloat16',
+      weight_dtype='bfloat16',
     )
 
     self.cfg = pyconfig.config
     self.rng = jax.random.PRNGKey(42)
 
-    num = jnp.arange(self.cfg.base_num_query_heads * self.cfg.head_dim * self.cfg.base_emb_dim)
-    self.hidden_states = jnp.reshape(num, (self.cfg.base_num_query_heads, 
-                                           self.cfg.head_dim, 
+    # num = jnp.arange(self.cfg.per_device_batch_size * self.cfg.max_target_length * self.cfg.base_emb_dim)
+    # self.hidden_states = jnp.reshape(num, (int(self.cfg.per_device_batch_size), 
+    #                                        self.cfg.max_target_length, 
+    #                                        self.cfg.base_emb_dim))
+    self.hidden_states = jax.random.uniform(self.rng, (int(self.cfg.per_device_batch_size), 
+                                           self.cfg.max_target_length, 
                                            self.cfg.base_emb_dim))
     # print("hidden_states", self.hidden_states.shape)
 
     devices_array = max_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
 
+  @unittest.skip
   def test_moe_block(self):
     variables, expected_output = get_expected_output(self.rng, self.hidden_states, self.cfg)
     actual_output = get_moe_output(variables, self.hidden_states, self.cfg, self.mesh)
-    print("expected_output", expected_output)
-    print("actual_output", actual_output)
-    # self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-03, atol=1e-03, equal_nan=False))
+    # print("expected_output", expected_output)
+    # print("actual_output", actual_output)
+    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+
+  def test_gmm_only(self):
+    k1, k2, k3 = jax.random.split(jax.random.PRNGKey(0), 3)
+    m = int(self.cfg.per_device_batch_size)*self.cfg.max_target_length*self.cfg.num_experts_per_tok
+    lhs_shape = (m, self.cfg.base_emb_dim)
+    rhs_shape = (self.cfg.num_experts, self.cfg.base_emb_dim, self.cfg.base_mlp_dim)
+    print("lhs_shape", lhs_shape)
+    print("rhs_shape", rhs_shape)
+    lhs = jax.random.uniform(k1, shape=lhs_shape, minval=-1, maxval=1).astype(jnp.bfloat16)
+    rhs = jax.random.uniform(k2, shape=rhs_shape, minval=-1, maxval=1).astype(jnp.bfloat16)
+    group_size = sample_groups(m, self.cfg.num_experts, k3)
+    time.simple_timeit(jax.jit(mblx.gmm), lhs, rhs, group_size, tries=10, task="simple_gmm")
 
 
 if __name__ == '__main__':

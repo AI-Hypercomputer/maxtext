@@ -287,8 +287,8 @@ class MoeBlock(nn.Module):
   mesh: Mesh
   kernel_init: NdInitializer
   kernel_axes: Tuple[str, ...]
-  weight_dtype: DType = jnp.float32
-  dtype: DType = jnp.float32
+  weight_dtype: DType = jnp.bfloat16
+  dtype: DType = jnp.bfloat16
 
 
   def generate_kernels(self, num_experts, base_emb_dim, mlp_dim):
@@ -349,22 +349,29 @@ class MoeBlock(nn.Module):
         check_rep=False,
     )
     def gmm(inputs, kernel, group_sizes):
-      hs_shape = inputs.shape
-      if hs_shape[0] % 128:
-        # padding
-        pad_length = 128 - hs_shape[0] % 128
+      # hs_shape = inputs.shape
+      # if hs_shape[0] % 128:
+      #   # padding
+      #   pad_length = 128 - hs_shape[0] % 128
 
-        inputs = jax.lax.pad(inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0,0,0)])
-        inputs = inputs.astype(self.dtype)
+      #   inputs = jax.lax.pad(inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0,0,0)])
+      #   inputs = inputs.astype(self.dtype)
+      # print("inputs.shape", inputs.shape)
+      # print("kernel.shape", kernel.shape)
+
+      inputs = inputs.astype(self.dtype)
+      kernel = kernel.astype(self.weight_dtype)
       output = mblx.gmm(lhs=inputs, 
                         rhs=kernel, 
-                        group_sizes=group_sizes)
-      if hs_shape[0] % 128:
-        output = output[:hs_shape[0]]
+                        group_sizes=group_sizes,
+                        tiling=None)
+      # if hs_shape[0] % 128:
+      #   output = output[:hs_shape[0]]
 
       return output
   
     w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(num_experts, base_emb_dim, mlp_dim)
+    # jax.debug.print("group_size {group_size}", group_size = group_sizes)
     layer_1 = gmm(inputs, w0_kernel, group_sizes)
     layer_2 = gmm(inputs, w1_kernel, group_sizes)
     layer_1_act = _convert_to_activation_function(mlp_activation)(layer_1)
@@ -376,7 +383,7 @@ class MoeBlock(nn.Module):
   def permute(self, inputs, gate_logits, base_emb_dim):
     inputs_2d = jnp.reshape(inputs, (-1, base_emb_dim))
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-    weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+    weights = jax.nn.softmax(weights.astype(self.weight_dtype), axis=-1).astype(self.dtype)
     flatten_selected_experts = jnp.ravel(selected_experts)
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     repeat_hidden_states = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
@@ -386,12 +393,6 @@ class MoeBlock(nn.Module):
 
     indices = jnp.where(expert_size == 0, len(group_size), expert_order)
     group_size = group_size.at[indices].set(jnp.where(expert_size == 0, group_size[indices], expert_size), mode='drop')
-
-    # group_size = group_size.at[expert_order].set(jnp.where(expert_size != 0, expert_size, group_size[expert_order]))
-
-    # for i in range(self.num_experts):
-    #   if expert_size[i] != 0:
-    #     group_size = group_size.at[expert_order[i]].set(expert_size[i])
 
     return sorted_output, sorted_selected_experts, weights, group_size
 

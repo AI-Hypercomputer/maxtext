@@ -315,7 +315,7 @@ def gmm(
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: Optional[Union[tuple[int, int, int], LutFn]] = (128, 128, 128),
+    tiling: Optional[Union[tuple[int, int, int], LutFn]] = None,
     group_offset: Optional[jnp.ndarray] = None,
     existing_out: Optional[jnp.ndarray] = None,
     transpose_rhs: bool = False,
@@ -521,9 +521,11 @@ def gmm(
       (lhs_bytes * tiles_n) + (rhs_bytes * max_active_tiles) + out_bytes
   )
   flops = 2 * m * k * n
+  # print("flops..", flops)
   cost_estimate = pltpu.CostEstimate(
       flops=flops, bytes_accessed=bytes_accessed, transcendentals=0
   )
+  # print("cost_estimate.to_json()",cost_estimate.to_json())
   call_gmm = pl.pallas_call(
       kernel,
       out_shape=jax.ShapeDtypeStruct((m, n), preferred_element_type),
@@ -765,6 +767,8 @@ def tgmm(
   cost_estimate = pltpu.CostEstimate(
       flops=flops, bytes_accessed=bytes_accessed, transcendentals=0
   )
+  # print("flops tgmm:", flops)
+  # print("cost_estimate tgmm:", cost_estimate.to_json())
   lhs = lhs.swapaxes(0, 1)
   call_gmm = pl.pallas_call(
       kernel,
@@ -806,8 +810,10 @@ def _gmm_tiling_lut(m: int, k: int, n: int) -> tuple[int, int, int] | None:
   tiling_lut = {
       # "14336_4096": (256, 896, 2048),  # m=16384 65.88%
       # "4096_14336": (256, 2048, 1024),  # m=16384 64.73%
-      "14336_4096": (128, 896, 1024),  # m=16384 65.88%
-      "4096_14336": (128, 1024, 896),  # m=16384 64.73%
+      # "14336_4096": (128, 896, 1024),  
+      # "4096_14336": (128, 1024, 896),  
+      "14336_4096": (512, 1024, 1024),  # m=49152 81.81%
+      "4096_14336": (512, 1024, 1024),  # m=49152 77.70% 
   }
   # Try specific m lookup.
   key = "_".join(map(str, [k, n, m]))
@@ -817,6 +823,7 @@ def _gmm_tiling_lut(m: int, k: int, n: int) -> tuple[int, int, int] | None:
   # Try generic k, n lookup.
   key = "_".join(map(str, [k, n]))
   if key in tiling_lut:
+    # breakpoint()
     return tiling_lut[key]
 
   return None  # No tiling found.
@@ -826,8 +833,10 @@ def _tgmm_tiling_lut(m: int, k: int, n: int) -> tuple[int, int, int] | None:
   tiling_lut = {
     # "14336_4096": (128, 896, 2048),  # m=16384 67.02%
     # "4096_14336": (128, 1024, 1792),  # m=16384 66.16%
-    "14336_4096": (128, 896, 1024),  # m=16384 67.02%
-    "4096_14336": (128, 1024, 896),  # m=16384 66.16%
+    # "14336_4096": (128, 896, 1024),  
+    # "4096_14336": (128, 1024, 896),  
+    "14336_4096": (128, 896, 2048),  # m=49152 80.96%
+    "4096_14336": (128, 1024, 1792),  # m=49152 79.80%
   }
   # Try specific m lookup.
   key = "_".join(map(str, [k, n, m]))
