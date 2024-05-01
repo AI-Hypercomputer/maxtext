@@ -175,8 +175,11 @@ class MaxEngine(engine_api.Engine):
     # delete the "cached_ar_key" and "cached_ar_value" keys would cause error in insert() function
     # so set cached_ar_key/cached_ar_value to dummy shape (1,) value to save memory
     for i in range(self.config.num_decoder_layers):
-      new_vars['cache']['decoder']['layers_{}'.format(i)]['self_attention']['AttentionOp_0']['cached_ar_key'] = jnp.zeros((1), dtype=jnp.int32)
-      new_vars['cache']['decoder']['layers_{}'.format(i)]['self_attention']['AttentionOp_0']['cached_ar_value'] = jnp.zeros((1), dtype=jnp.int32)
+      new_vars['cache']['decoder']['layers_{}'.format(i)]['self_attention'][
+        'AttentionOp_0']['cached_ar_key'] = jnp.zeros((1), dtype=jnp.int32)
+      new_vars['cache']['decoder']['layers_{}'.format(i)]['self_attention'][
+        'AttentionOp_0']['cached_ar_value'] = jnp.zeros((1), dtype=jnp.int32)
+    
     return {
         "logits": selected_logits,
         "cache": new_vars["cache"],
