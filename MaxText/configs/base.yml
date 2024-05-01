@@ -182,6 +182,7 @@ dataset_type: c4 # must be c4, c4-array_record, c4_mlperf, hf or synthetic
 
 # Setting for grain
 grain_worker_count: 4
+num_threads: 4
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps

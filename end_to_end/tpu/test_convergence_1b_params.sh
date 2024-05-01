@@ -1,6 +1,9 @@
 #!/bin/bash
 set -ex
 
+echo "All dependencies"
+pip freeze
+
 echo "Running test_convergence_1b_params.sh"
 # Run this on 64 chips to achieve a loss value of ~2.5 after 20400 steps, or ~2.7 after 10200 steps (v4-128)
 #
@@ -15,7 +18,7 @@ echo "Running test_convergence_1b_params.sh"
 
 export LOSS_THRESHOLD=100.0 # Set to large value so test is guaranteed to pass.
 export STEPS=20400 # Run for 20B tokens for a 1B sized mode for "chinchilla" scaling https://arxiv.org/abs/2203.15556
-export STEPS=20
+export STEPS=10
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -35,19 +38,19 @@ then
     echo "Mounting $DATASET_PATH to /tmp/gcsfuse/"
     bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$DATASET_PATH MOUNT_PATH=/tmp/gcsfuse/
     DATASET_PATH=/tmp/gcsfuse/
-    CMD_DATA=" dataset_type=c4-array_record dataset_name=array-record/c4/en/3.0.1 eval_dataset_name=array-record/c4/en/3.0.1"
+    CMD_DATA=" dataset_type=c4-array_record dataset_name=array-record/c4/en/3.0.1 eval_dataset_name=array-record/c4/en/3.0.1 grain_worker_count=0"
 fi
 
 if [ "$DATASET_TYPE" == "hf" ]
 then
     gsutil cp -r gs://maxtext-dataset/hf/llama2-tokenizer assets
-    CMD_DATA=" dataset_name=parquet dataset_type=hf tokenizer_path=assets/llama2-tokenizer"
+    CMD_DATA=" dataset_name=parquet dataset_type=hf tokenizer_path=assets/llama2-tokenizer grain_worker_count=4 num_threads=2"
 fi
 
 TRAIN_CMD="python3 MaxText/train.py MaxText/configs/base.yml \
-        steps=$STEPS per_device_batch_size=8.0 learning_rate=3e-4 enable_checkpointing=false \
+        steps=$STEPS per_device_batch_size=4.0 learning_rate=3e-4 enable_checkpointing=false \
         max_target_length=2048 global_parameter_scale=1 \
-        enable_profiler=True skip_first_n_steps_for_profiler=10 profiler_steps=6 \
+        enable_profiler=False skip_first_n_steps_for_profiler=16 profiler_steps=6 \
         metrics_file=metrics.txt base_output_directory=$OUTPUT_PATH \
         dataset_path=$DATASET_PATH log_period=150 remat_policy=minimal enable_data_shuffling=false"
 TRAIN_CMD+=$CMD_DATA

@@ -45,6 +45,14 @@ class NormalizeFeatures(grain.MapTransform):
       'targets': features['text'].numpy().decode()
     }
 
+@dataclasses.dataclass
+class HFNormalizeFeatures(grain.MapTransform):
+  """Normalize text feature keys."""
+  def map(self, features):
+    return {
+      'inputs': np.asarray(features['input_ids'], dtype=np.int32), 
+      'targets': np.asarray(features['input_ids'], dtype=np.int32)
+    }
 
 @dataclasses.dataclass
 class ReformatPacking(grain.MapTransform):

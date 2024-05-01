@@ -25,12 +25,14 @@ from datasets import load_dataset
 from datasets.distributed import split_dataset_by_node
 from functools import partial
 from transformers import AutoTokenizer, LlamaTokenizer
-from torchdata.datapipes.iter import Collator, IterableWrapper
+#from torchdata.datapipes.iter import Collator, IterableWrapper
 
-from torchdata.dataloader2 import DataLoader2, InProcessReadingService
-
+#from torchdata.dataloader2 import DataLoader2, InProcessReadingService
+import grain.python as grain
 from input_pipeline import _hf_operations
+from input_pipeline import _grain_operations
 import multihost_dataloading
+
 
 def get_datasets(
   config: ml_collections.ConfigDict
@@ -52,98 +54,51 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
                         ):
   """preprocess dataset"""
   # Set global batch size.
-  global_batch_size_to_load = config.global_batch_size_to_load
+  batch_size = config.global_batch_size_to_load
 
-  train_iter = preprocessing_pipeline(
-      dataset=train_ds,
-      tokenizer_path=config.tokenizer_path,
-      add_bos=add_bos,
-      add_eos=add_eos,
-      batch_size=global_batch_size_to_load,
-      global_mesh=global_mesh,
-      shuffle=config.enable_data_shuffling,
-      num_epochs=1,
-      pack_examples=True,
-      max_length=config.max_target_length,
-      data_shuffle_seed=config.data_shuffle_seed,
-      access_token=config.hf_access_token,)
-
-  return train_iter, None, None
-
-def preprocessing_pipeline(
-  dataset,
-  tokenizer_path,
-  add_bos: bool,
-  add_eos: bool,
-  batch_size: int,
-  global_mesh,
-  shuffle: bool,
-  num_epochs: Optional[int] = 1,  # only support num_epoch=1 for now
-  pack_examples: bool = True,
-  max_length: int = 512,
-  shift: bool = True,
-  drop_remainder: bool = True,  # does not support drop_remainder
-  data_shuffle_seed = 0,
-  access_token: Union[str | None] = None,
-  prefetch_buffer_size: int = 10,
-):
-  """pipeline for preprocessing"""
   assert (
         batch_size % global_mesh.size == 0
   ), 'Batch size should be divisible number of global devices.'
 
-  dataset = split_dataset_by_node(dataset, world_size=jax.process_count(), rank=jax.process_index())
+  dataset = _hf_operations.HFDataSource(train_ds,
+                                        config.tokenizer_path,
+                                        config.max_target_length,
+                                        config.num_threads,
+                                        config.grain_worker_count,
+                                        add_bos,
+                                        add_eos)
 
-  tokenizer = AutoTokenizer.from_pretrained(tokenizer_path,
-                                            add_bos_token=add_bos,
-                                            add_eos_token=add_eos,
-                                            model_max_length=max_length,
-                                            token=access_token,
-                                            legacy=False)
+  operations = []
+  operations.append(_grain_operations.HFNormalizeFeatures())
+  operations.append(grain.experimental.PackAndBatchOperation(
+                          batch_size=batch_size,
+                          length_struct={'inputs':config.max_target_length,
+                                        'targets':config.max_target_length}))
 
-  dataset = dataset.map(_hf_operations.tokenization, batched=True,
-                        fn_kwargs={"tokenizer": tokenizer, "max_length": max_length-1})
+  operations.append(_grain_operations.ReformatPacking())
+  operations.append(_grain_operations.ShiftData(axis=1))
 
-  # dataset = dataset.map(_hf_operations.normalize_features, batched=True,
-  #                       fn_kwargs={"key":"input_ids"})
+  index_sampler = grain.IndexSampler(
+    num_records=len(dataset),
+    num_epochs = 1,
+    shard_options=grain.ShardOptions(
+      shard_index = 0, shard_count = 1, drop_remainder = True
+    ),
+    shuffle = False,
+    seed = 0
+  )
 
-  # dataset = dataset.select_columns(['inputs', 'targets'])
-  dataset = dataset.select_columns(["input_ids"])
-  dataset = dataset.rename_column("input_ids", "targets")
+  dataloader = grain.DataLoader(
+    data_source = dataset,
+    operations = operations,
+    sampler = index_sampler,
+    worker_count = config.grain_worker_count,
+    worker_buffer_size = 16,
+    read_options = grain.ReadOptions(num_threads=config.num_threads, prefetch_buffer_size=256)
+  )
 
-  # dataset = dataset.map(batched=True, batch_size=max_length)
-  dataset = dataset.map(_hf_operations.shift)
-
-  if shuffle:
-    dataset = dataset.shuffle(seed=data_shuffle_seed)
-
-  dataset = dataset.map(_hf_operations.group_batch, batched=True, batch_size=20)
-  dataset = dataset.map(_hf_operations.pack_in_batch_hf, fn_kwargs={"max_len": max_length})
-  dataset = dataset.map(_hf_operations.unbatch, batched=True)
-  # dataset = dataset.map(_hf_operations.group_batch, batched=True,
-  #                       batch_size=batch_size // jax.process_count())
-
-  dataset = IterableWrapper(dataset)
-  dataset = dataset.batch(batch_size // jax.process_count())
-  dataset = dataset.map(_hf_operations.group_in_batch)
-  # dataset.prefetch(prefetch_buffer_size)
-
-  # if shift:
-  #   dataset = dataset.map(_hf_operations.shift)
-
-  # if pack_examples:
-  #   dataset = dataset.batch(max_length)
-  #   dataset = Collator(dataset, collate_fn=partial(_hf_operations.pack_in_batch, max_len=max_length))
-  #   dataset = dataset.unbatch()
-  #   dataset = dataset.batch(batch_size // jax.process_count())
-
-  # dataset = dataset.map(_hf_operations.group_in_batch)
-
-  # rs = InProcessReadingService(prefetch_cnt=batch_size // jax.process_count())
-  # #rs = InProcessReadingService()
-  # dataset = DataLoader2(dataset, reading_service=rs)
-
-  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataset, global_mesh)
+  train_iter = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
 
   # Return multi-host jax.Array prep iterator
-  return multihost_gen
+  return train_iter, None, None
+

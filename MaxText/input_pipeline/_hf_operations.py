@@ -23,12 +23,57 @@ import jaxtyping as jt
 from jax import tree_util
 import dataclasses
 import numpy as np
+from datasets import load_dataset
+from datasets.distributed import split_dataset_by_node
+from transformers import AutoTokenizer
+from threading import current_thread
+import max_logging
 
 _T = TypeVar("_T")
 
 def tokenization(example, tokenizer, max_length):
   """Tokenize dataset"""
   return tokenizer(example["text"], truncation=True, max_length=max_length)
+
+class HFDataSource:
+  def __init__(self, dataset, tokenizer_path, max_length, num_threads, num_worker, add_bos=True, add_eos=True):
+    #self.dataset_length = dataset.info.splits['train'].num_examples
+    self.tokenizer =  AutoTokenizer.from_pretrained(tokenizer_path,
+                                            add_bos_token=add_bos,
+                                            add_eos_token=add_eos,
+                                            model_max_length=max_length)
+
+    dataset = dataset.map(tokenization, batched=True,
+                        fn_kwargs={"tokenizer": self.tokenizer, "max_length": max_length-1})
+    dataset = dataset.select_columns(["input_ids"])
+    self.num_threads = num_threads
+    self.num_worker = num_worker
+    self.datasets = tuple(split_dataset_by_node(dataset, world_size=jax.process_count() * self.num_threads,
+                                                rank=jax.process_index() * self.num_threads + i)
+                          for i in range(self.num_threads))
+    self.current_dataset_idx = None
+    self.data_iters = None
+    # self.dataset = IterableWrapper(self.dataset)
+    # self.dataset = iter(self.dataset)
+
+  def __len__(self):
+    return 10_000_000_000
+    #return self
+    #return len(self.dataset)
+
+  def __getitem__(self, index):
+    if self.data_iters is None:
+      self.data_iters = tuple(iter(x) for x in self.datasets)
+
+    idx = int(current_thread().name.split("_")[1])
+    return next(self.data_iters[idx])
+      #self.current_dataset_idx = -1
+    # if self.num_worker != 0:
+    #   self.current_dataset_idx = (index % (self.num_thread * self.num_worker)) // self.num_worker
+    # else:
+    #   self.current_dataset_idx = index % self.num_thread
+    # #max_logging.log(f"{self.current_dataset_idx=}")
+    # return next(self.data_iters[self.current_dataset_idx])
 
 def normalize_features(example, key):
   """Extract text column from data and rename as inputs and targets"""
