@@ -84,7 +84,8 @@ class MaxEngine(engine_api.Engine):
     )
     self.kv_cache_annotations = max_utils.get_kv_cache_annotations(self.model, self.config, self.rng, self._mesh)
     self.kv_cache_shardings = jax.tree_util.tree_map(
-      lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations)
+        lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations
+    )
 
     if not self.model.quant:
       self.abstract_params = jax.tree_util.tree_map(
@@ -175,11 +176,14 @@ class MaxEngine(engine_api.Engine):
     # delete the "cached_ar_key" and "cached_ar_value" keys would cause error in insert() function
     # so set cached_ar_key/cached_ar_value to dummy shape (1,) value to save memory
     for i in range(self.config.num_decoder_layers):
-      new_vars['cache']['decoder']['layers_{}'.format(i)]['self_attention'][
-        'AttentionOp_0']['cached_ar_key'] = jnp.zeros((1), dtype=jnp.int32)
-      new_vars['cache']['decoder']['layers_{}'.format(i)]['self_attention'][
-        'AttentionOp_0']['cached_ar_value'] = jnp.zeros((1), dtype=jnp.int32)
-    
+      if "layers_{}".format(i) in new_vars["cache"]["decoder"]:
+        new_vars["cache"]["decoder"]["layers_{}".format(i)]["self_attention"]["AttentionOp_0"]["cached_ar_key"] = jnp.zeros(
+            (1), dtype=jnp.int32
+        )
+        new_vars["cache"]["decoder"]["layers_{}".format(i)]["self_attention"]["AttentionOp_0"]["cached_ar_value"] = (
+            jnp.zeros((1), dtype=jnp.int32)
+        )
+
     return {
         "logits": selected_logits,
         "cache": new_vars["cache"],
