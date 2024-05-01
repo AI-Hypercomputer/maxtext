@@ -123,10 +123,12 @@ hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' 
 mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive', 'stage']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose',]],
-                      # TODO: Should stage be first or last? Does it matter?
                       # TODO: Probably instead have an activation_batch and an activation_microbatch,
                       # which would swap the meaning of the current activation_batch
-                      ['logits_activation_batch', ['stage','data', 'fsdp', 'fsdp_transpose', ]],
+                      # The global batch is reshaped into microbatches, [num_microbatches, microbatch_size] = jnp.reshape(global_batch)
+                      # And we shard the num_microbatches by stages, so it is important the the stage dimension here is first
+                      # so that this reshape (and corresponding reshape back into global batch) does not require cross-stage communication 
+                      ['logits_activation_batch', ['stage', 'data', 'fsdp', 'fsdp_transpose']],
                       ['activation_heads', ['tensor','sequence']],
                       ['activation_length', 'sequence'],
                       ['activation_embed', 'tensor'],
