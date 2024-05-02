@@ -30,6 +30,8 @@ from absl import app
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 import grain.python as grain
+
+from cuda_api import cudaProfilerStart, cudaProfilerStop
 import jax
 import numpy as np
 import optax
@@ -492,6 +494,12 @@ def train_loop(config, state=None):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
 
+    if step == 6 and jax.process_index() == 0:
+      cudaProfilerStart()
+
+    if step == 8 and jax.process_index() == 0:
+      cudaProfilerStop()
+      
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       example_batch = load_next_batch(data_iterator, example_batch, config)
       check_example_batch(config, example_batch=example_batch)
