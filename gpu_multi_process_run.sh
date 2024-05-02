@@ -14,6 +14,7 @@ set -o pipefail
 export GPUS_PER_NODE=$GPUS_PER_NODE
 export JAX_COORDINATOR_PORT=$JAX_COORDINATOR_PORT
 export JAX_COORDINATOR_ADDRESS=$JAX_COORDINATOR_ADDRESS
+export JAX_NUM_PROCESSES=$((NNODES * GPUS_PER_NODE))
 
 set_nccl_gpudirect_tcpx_specific_configuration() {
   if [[ "$USE_GPUDIRECT" == "tcpx" ]]; then
@@ -145,9 +146,13 @@ resolve_coordinator_ip
 set -e
 
 PIDS=()
-${COMMAND} &
-PID=$!
-PIDS+=($PID)
+for ((LOCAL_DEVICE_ID=0; LOCAL_DEVICE_ID <= $((GPUS_PER_NODE - 1)); LOCAL_DEVICE_ID++)); do
+   PROCESS_ID=$(($GPUS_PER_NODE*$NODE_RANK + $LOCAL_DEVICE_ID))
+   LOCAL_DEVICE_ID=$LOCAL_DEVICE_ID PROCESS_ID=$PROCESS_ID ${COMMAND} &
+   PID=$!
+   PIDS+=($PID)
+   echo "Launched MaxText/train.py for local_device_id: $LOCAL_DEVICE_ID process_id: $PROCESS_ID and PID $PID"
+done
 
 wait_all_success_or_exit "${PIDS[@]}"
 
