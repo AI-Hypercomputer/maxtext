@@ -123,7 +123,7 @@ class MistralDecoderLayer(nn.Module):
     hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_length", "activation_embed"))
 
     if cfg.num_experts > 1:
-        if cfg.turn_on_megablox:
+        if cfg.megablox:
             print("running megablox")
             # print("hidden_states.dtype", hidden_states.dtype)
             # print("mesh.......", mesh)

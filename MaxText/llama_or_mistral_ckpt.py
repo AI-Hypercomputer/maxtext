@@ -115,6 +115,8 @@ def convert(base_model_path, maxtext_model_path, model_size):
   base_num_kv_heads = model_params["num_kv_heads"]
   vocab_size = model_params["vocab"]
   num_experts = model_params["num_experts"] if "num_experts" in model_params else None
+  base_emb_dim = model_params["base_emb_dim"]
+  base_mlp_dim = model_params["base_mlp_dim"]
 
   print(f"Loading the base model from {base_model_path}")
   # Skip any hidden files for checkpoints
@@ -158,7 +160,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
         "wo": {"kernel": []},
     }
   else:
-    layer_weight["gate"] = {"kernel": []}
+    layer_weight["gate"] = {"kernel": []}   
 
     for k in range(num_experts):
       jax_weights["decoder"]["layers"][f"mlp_{k}"] = {}
@@ -295,6 +297,10 @@ def convert(base_model_path, maxtext_model_path, model_size):
     layer_weight["gate"]["kernel"] = np.array(layer_weight["gate"]["kernel"])
     layer_weight["gate"]["kernel"] = np.transpose(layer_weight["gate"]["kernel"], axes=(1, 0, 2))
     jax_weights["decoder"]["layers"]["gate"] = layer_weight["gate"]
+
+    wi_0 = []
+    wi_1 = []
+    wo = []
     for k in range(num_experts):
       layer_weight[f"mlp_{k}"]["wi_0"]["kernel"] = np.array(layer_weight[f"mlp_{k}"]["wi_0"]["kernel"])
       layer_weight[f"mlp_{k}"]["wi_1"]["kernel"] = np.array(layer_weight[f"mlp_{k}"]["wi_1"]["kernel"])
@@ -303,8 +309,21 @@ def convert(base_model_path, maxtext_model_path, model_size):
       layer_weight[f"mlp_{k}"]["wi_0"]["kernel"] = np.transpose(layer_weight[f"mlp_{k}"]["wi_0"]["kernel"], axes=(1, 0, 2))
       layer_weight[f"mlp_{k}"]["wi_1"]["kernel"] = np.transpose(layer_weight[f"mlp_{k}"]["wi_1"]["kernel"], axes=(1, 0, 2))
       layer_weight[f"mlp_{k}"]["wo"]["kernel"] = np.transpose(layer_weight[f"mlp_{k}"]["wo"]["kernel"], axes=(1, 0, 2))
+      # reshape
+      layer_weight[f"mlp_{k}"]["wi_0"]["kernel"] = np.reshape(layer_weight[f"mlp_{k}"]["wi_0"]["kernel"], (-1, base_emb_dim, base_mlp_dim))
+      layer_weight[f"mlp_{k}"]["wi_1"]["kernel"] = np.reshape(layer_weight[f"mlp_{k}"]["wi_1"]["kernel"], (-1, base_emb_dim, base_mlp_dim))
+      layer_weight[f"mlp_{k}"]["wo"]["kernel"] = np.reshape(layer_weight[f"mlp_{k}"]["wo"]["kernel"], (-1, base_mlp_dim, base_emb_dim))
+      
+      wi_0.append(layer_weight[f"mlp_{k}"]["wi_0"]["kernel"])
+      wi_1.append(layer_weight[f"mlp_{k}"]["wi_1"]["kernel"])
+      wo.append(layer_weight[f"mlp_{k}"]["wo"]["kernel"])
 
-      jax_weights["decoder"]["layers"][f"mlp_{k}"] = layer_weight[f"mlp_{k}"]
+    #   jax_weights["decoder"]["layers"][f"mlp_{k}"] = layer_weight[f"mlp_{k}"]
+
+    layer_weight["gate"]["wi_0"] = np.concatenate(wi_0, axis=0)
+    layer_weight["gate"]["wi_1"] = np.concatenate(wi_1, axis=0)
+    layer_weight["gate"]["wo"] = np.concatenate(wo, axis=0)
+    jax_weights["decoder"]["layers"]["gate"] = layer_weight["gate"]
 
   mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
   s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))  # shards first axis
