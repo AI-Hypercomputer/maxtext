@@ -67,7 +67,7 @@ class MistralDecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
-    print("very first inputs", inputs.shape)
+    # print("very first inputs", inputs.shape)
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
 
@@ -181,19 +181,6 @@ class MistralDecoderLayer(nn.Module):
                 mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
                 mlp_lnx += mlp_lnx_exp
                 # print("mlp_lnx.dtype", mlp_lnx.dtype)
-    else: 
-        mlp_lnx = linears.MlpBlock(
-            intermediate_dim=cfg.mlp_dim,
-            activations=cfg.mlp_activations,
-            intermediate_dropout_rate=cfg.dropout_rate,
-            dtype=cfg.dtype,
-            weight_dtype=cfg.weight_dtype,
-            name=f"mlp_{k}",
-            config=cfg,
-        )(hidden_states, deterministic=deterministic)
-        mlp_lnx_exp = nn.with_logical_constraint(mlp_lnx_exp, ("activation_batch", "activation_length", "activation_embed"))
-        mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
-        mlp_lnx += mlp_lnx_exp
     else:
       mlp_lnx = linears.MlpBlock(
           intermediate_dim=cfg.mlp_dim,

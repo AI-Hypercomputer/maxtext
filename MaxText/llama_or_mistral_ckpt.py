@@ -296,7 +296,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
   else:
     layer_weight["gate"]["kernel"] = np.array(layer_weight["gate"]["kernel"])
     layer_weight["gate"]["kernel"] = np.transpose(layer_weight["gate"]["kernel"], axes=(1, 0, 2))
-    jax_weights["decoder"]["layers"]["gate"] = layer_weight["gate"]
+    jax_weights["decoder"]["layers"]["gate"]["kernel"] = layer_weight["gate"]["kernel"]
 
     wi_0 = []
     wi_1 = []
@@ -320,10 +320,15 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
     #   jax_weights["decoder"]["layers"][f"mlp_{k}"] = layer_weight[f"mlp_{k}"]
 
-    layer_weight["gate"]["wi_0"] = np.concatenate(wi_0, axis=0)
-    layer_weight["gate"]["wi_1"] = np.concatenate(wi_1, axis=0)
-    layer_weight["gate"]["wo"] = np.concatenate(wo, axis=0)
-    jax_weights["decoder"]["layers"]["gate"] = layer_weight["gate"]
+    layer_weight["gate"]["wi_0"] = np.concatenate(np.asarray(wi_0), axis=0)
+    layer_weight["gate"]["wi_1"] = np.concatenate(np.asarray(wi_1), axis=0)
+    layer_weight["gate"]["wo"] = np.concatenate(np.asarray(wo), axis=0)
+    jax_weights["decoder"]["layers"]["gate"]["wi_0"] = layer_weight["gate"]["wi_0"]
+    jax_weights["decoder"]["layers"]["gate"]["wi_1"] = layer_weight["gate"]["wi_1"]
+    jax_weights["decoder"]["layers"]["gate"]["wo"] = layer_weight["gate"]["wo"]
+
+  print("jax_weights......")
+  print(jax_weights)
 
   mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
   s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))  # shards first axis
@@ -353,6 +358,9 @@ def convert(base_model_path, maxtext_model_path, model_size):
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       maxtext_model_path, enable_checkpointing, async_checkpointing, save_interval_steps
   )
+
+  print("before saving jax_weights......")
+  print(jax_weights)
 
   state_new = train_state.TrainState(
       step=0, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore

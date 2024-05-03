@@ -315,7 +315,7 @@ def gmm(
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: Optional[Union[tuple[int, int, int], LutFn]] = None,
+    tiling: Optional[Union[tuple[int, int, int], LutFn]] = (128, 128, 128),
     group_offset: Optional[jnp.ndarray] = None,
     existing_out: Optional[jnp.ndarray] = None,
     transpose_rhs: bool = False,
