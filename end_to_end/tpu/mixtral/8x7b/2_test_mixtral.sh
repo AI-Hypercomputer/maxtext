@@ -2,9 +2,9 @@
 
 # This file, combined with step 1 in the same directory, runs on daily basis and demonstrates:
 # 1. Converts the Mistral PyTorch checkpoint to MaxText(orbax) format using a CPU VM.
-# 2. Takes the MaxText(orbax) checkpoint to run inference and fine-tuning on a TPU VM.
+# 2. Takes the MaxText(orbax) checkpoint to run inference, fine-tuning, and pre-training on a TPU VM.
 
-# The flow of this file is to take the MaxText(orbax) checkpoint to run inference and fine-tuning on a TPU VM. 
+# The flow of this file is to take the MaxText(orbax) checkpoint to run inference, fine-tuning, and pre-training on a TPU VM. 
 # Please make sure you have run end_to_end/tpu/mixtral/8x7b/1_test_mixtral.sh before running commands from this file. 
 
 # Example Usage: export BASE_OUTPUT_PATH=/path/to/GCS/bucket; bash end_to_end/tpu/mixtral/8x7b/2_test_mixtral.sh
@@ -24,8 +24,16 @@ export M_BASE_OUTPUT_DIRECTORY=${BASE_OUTPUT_PATH}${MODEL_VARIATION}
 export M_DATASET_PATH=gs://maxtext-dataset
 export M_ASYNC_CHECKPOINTING=false
 
-# Run decoding
-python3 MaxText/decode.py MaxText/configs/base.yml load_parameters_path=${BASE_OUTPUT_PATH}${MODEL_VARIATION}/decode-ckpt-maxtext/0/items run_name=decoding per_device_batch_size=1 model_name=mixtral-8x7b tokenizer_path=gs://maxtext-external/mixtral-8x7B-v0.1-Instruct/tokenizer.mistral ici_tensor_parallelism=4 ici_fsdp_parallelism=16 max_prefill_predict_length=11 max_target_length=24 prompt="[INST] I love to [/INST]" autoregressive_decode_assert="That's great to hear! I love to learn new things" attention=dot_product
+# `SCANNED_CHECKPOINT` refers to the checkpoint that used for both `train.py` and `decode.py` 
+export SCANNED_CHECKPOINT=${M_BASE_OUTPUT_DIRECTORY}/scanned_ckpt/0/items
+
+# Run decoding with converted ckpt
+python3 MaxText/decode.py MaxText/configs/base.yml load_parameters_path=${SCANNED_CHECKPOINT} run_name=scanned_decoding per_device_batch_size=1 model_name=mixtral-8x7b tokenizer_path=gs://maxtext-external/mixtral-8x7B-v0.1-Instruct/tokenizer.mistral ici_tensor_parallelism=4 ici_fsdp_parallelism=16 max_prefill_predict_length=11 max_target_length=24 prompt="[INST] I love to [/INST]" autoregressive_decode_assert="That's great to hear! I love to learn new things" attention=dot_product
 
 # Run fine-tuning
-python3 MaxText/train.py MaxText/configs/base.yml load_parameters_path=${BASE_OUTPUT_PATH}${MODEL_VARIATION}/decode-ckpt-maxtext/0/items run_name=fine_tuning per_device_batch_size=1 model_name=mixtral-8x7b ici_tensor_parallelism=4 ici_fsdp_parallelism=16 steps=10 max_target_length=1024 tokenizer_path=gs://maxtext-external/mixtral-8x7B-v0.1-Instruct/tokenizer.mistral
+python3 MaxText/train.py MaxText/configs/base.yml load_parameters_path=${SCANNED_CHECKPOINT} run_name=fine_tuning per_device_batch_size=1 model_name=mixtral-8x7b ici_tensor_parallelism=4 ici_fsdp_parallelism=16 steps=10 max_target_length=1024 tokenizer_path=gs://maxtext-external/mixtral-8x7B-v0.1-Instruct/tokenizer.mistral checkpoint_period=5
+
+# Run pre-training without load_parameters_path
+python3 MaxText/train.py MaxText/configs/base.yml run_name=pre_training per_device_batch_size=1 model_name=mixtral-8x7b ici_tensor_parallelism=4 ici_fsdp_parallelism=16 steps=5 max_target_length=1024 tokenizer_path=gs://maxtext-external/mixtral-8x7B-v0.1-Instruct/tokenizer.mistral
+
+# TODO(ranran): Run decoding with unscanned ckpt
