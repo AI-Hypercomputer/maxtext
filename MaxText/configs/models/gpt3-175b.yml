@@ -40,5 +40,5 @@ adam_b1: 0.9
 adam_b2: 0.95
 adam_eps: 1.e-8
 adam_weight_decay: 0.1
-checkpoint_period: 10_000
+checkpoint_period: 3  # 10_000
 target_eval_loss: 2.69

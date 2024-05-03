@@ -399,6 +399,10 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
   unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(model, tx, config,
                                                                                             rng, mesh, is_training)
 
+  jax.experimental.multihost_utils.sync_global_devices("Barrier before load")
+  import datetime
+  checkpoint_load_start = datetime.datetime.now()
+
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     restored, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
@@ -424,6 +428,13 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
       if raw_params: # If we loaded a partial state, we need to merge it.
         state = state.replace(params = raw_params)
 
+  jax.block_until_ready(state)
+  checkpoint_load_end = datetime.datetime.now()
+  if state is not None:  # Checkpoint was available for restore
+    if jax.process_index() == 0:
+      max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint restored in : {checkpoint_load_end - checkpoint_load_start}")
+      import sys; sys.exit()
+      
   state = unbox_logicallypartioned(state)
   return state, state_mesh_annotations, data_iterator
 

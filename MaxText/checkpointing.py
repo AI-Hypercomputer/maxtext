@@ -129,10 +129,10 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
         mesh = data.sharding.mesh
         if not enable_single_replica_ckpt_restoring:
           return orbax.checkpoint.type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
-        orbax.checkpoint.type_handlers.register_type_handler(
-          jax.Array,
-          orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(),
-          override=True)
+        # orbax.checkpoint.type_handlers.register_type_handler(
+        #   jax.Array,
+        #   orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(),
+        #   override=True)
         orbax.checkpoint.type_handlers.register_type_handler(
           jax.Array,
           orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(),
@@ -141,6 +141,7 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
         replica_devices = _replica_devices(mesh.devices, replica_axis_index)
         replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
         single_replica_sharding = jax.sharding.NamedSharding(replica_mesh, pspec)
+        max_logging.log("SS:Using SingleReplicaArrayRestore")
         return orbax.checkpoint.type_handlers.SingleReplicaArrayRestoreArgs(
           sharding=jax.sharding.NamedSharding(mesh, pspec),
           single_replica_sharding=single_replica_sharding,
@@ -162,6 +163,7 @@ def load_state_if_possible(checkpoint_manager: CheckpointManager,
             iter=grain.PyGrainCheckpointRestore(data_iterator.local_iterator))
           ), None
       else:
+        max_logging.log("SS: restoring checkpoint ")
         return (
           checkpoint_manager.restore(
             latest_step,
