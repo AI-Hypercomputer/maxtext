@@ -268,6 +268,18 @@ class MlpBlock(nn.Module):
     output = checkpoint_name(output, 'mlpwo')
     return output
 
+def sample_groups(m: int, num_groups: int, key: jax.Array) -> jnp.ndarray:
+    # Randomly sample proportions of 'm' that will be assigned to each group.
+
+    # Randomly sample 'num_groups - 1' run ends. The final group will end at 'm'.
+    # Sample with replacement so that it's possible to get zero-sized groups.
+    ends_no_final = jnp.sort(jax.random.choice(key, m, shape=(num_groups - 1,)))
+    ends = jnp.concatenate([ends_no_final, jnp.array([m], dtype=jnp.int32)])
+
+    # Calculate the run starts by shifting ends 1 to the right. The first run
+    # starts at zero.
+    starts = jnp.concatenate([jnp.zeros(1, dtype=jnp.int32), ends_no_final])
+    return ends - starts
 
 class MoeBlock(nn.Module):
   """Mixture of Experts (MoE) block.
@@ -336,18 +348,18 @@ class MoeBlock(nn.Module):
                mlp_activation,
                group_sizes):
 
-    @functools.partial(
-        shard_map.shard_map,
-        mesh=self.mesh,
-        in_specs=(
-              (nn.logical_to_mesh_axes(("m", "k"))),
-              (nn.logical_to_mesh_axes(("num_groups", "k", "n"))),
-              (nn.logical_to_mesh_axes(("num_groups",))),
-              # (nn.logical_to_mesh_axes(("m","k","n"))),
-          ),
-        out_specs=(nn.logical_to_mesh_axes(("m", "n"))),
-        check_rep=False,
-    )
+    # @functools.partial(
+    #     shard_map.shard_map,
+    #     mesh=self.mesh,
+    #     # in_specs=(
+    #     #       (nn.logical_to_mesh_axes(("m", "k"))),
+    #     #       (nn.logical_to_mesh_axes(("num_groups", "k", "n"))),
+    #     #       (nn.logical_to_mesh_axes(("num_groups",))),
+    #     #       # (nn.logical_to_mesh_axes(("m","k","n"))),
+    #     #   ),
+    #     # out_specs=(nn.logical_to_mesh_axes(("m", "n"))),
+    #     check_rep=False,
+    # )
     def gmm(inputs, kernel, group_sizes):
       # hs_shape = inputs.shape
       # if hs_shape[0] % 128:
@@ -384,15 +396,18 @@ class MoeBlock(nn.Module):
     inputs_2d = jnp.reshape(inputs, (-1, base_emb_dim))
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     weights = jax.nn.softmax(weights.astype(self.weight_dtype), axis=-1).astype(self.dtype)
+
     flatten_selected_experts = jnp.ravel(selected_experts)
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     repeat_hidden_states = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
     sorted_output = jnp.take(repeat_hidden_states, indices=sorted_selected_experts, axis=0).astype(self.dtype)
+        
     expert_order, expert_size = jnp.unique(flatten_selected_experts, return_counts=True, size=self.num_experts)
     group_size = jnp.zeros(self.num_experts, dtype=jnp.int32)
 
-    indices = jnp.where(expert_size == 0, len(group_size), expert_order)
-    group_size = group_size.at[indices].set(jnp.where(expert_size == 0, group_size[indices], expert_size), mode='drop')
+    expert_is_unused = expert_size == 0
+    indices = jnp.where(expert_is_unused, len(group_size), expert_order)
+    group_size = group_size.at[indices].set(jnp.where(expert_is_unused, group_size[indices], expert_size))
 
     return sorted_output, sorted_selected_experts, weights, group_size
 
@@ -416,14 +431,19 @@ class MoeBlock(nn.Module):
     sorted_hidden_states, sorted_selected_experts, weights, group_size = self.permute(inputs,
                                                                                       gate_logits,
                                                                                       cfg.base_emb_dim)
-  
-    intermediate_output = jax.jit(self.call_gmm, 
-                                  static_argnames=['num_experts','base_emb_dim','mlp_dim','mlp_activation'])(sorted_hidden_states,
-                                                                                   cfg.num_experts,
-                                                                                   cfg.base_emb_dim,
-                                                                                   cfg.mlp_dim,
-                                                                                   cfg.mlp_activations[0],
-                                                                                   group_size)
+    # k1, k2 = jax.random.split(jax.random.PRNGKey(0), 2)
+    # m = int(cfg.per_device_batch_size)*cfg.max_target_length*self.num_experts_per_tok
+    # lhs_shape = (m, cfg.base_emb_dim)
+    # sorted_hidden_states = jax.random.uniform(k1, shape=lhs_shape, minval=-1, maxval=1).astype(jnp.bfloat16)
+    # group_size = sample_groups(m, self.num_experts, k2)  
+
+    
+    intermediate_output = self.call_gmm(sorted_hidden_states,
+                                        cfg.num_experts,
+                                        cfg.base_emb_dim,
+                                        cfg.mlp_dim,
+                                        cfg.mlp_activations[0],
+                                        group_size)
 
     output = self.unpermute(intermediate_output, inputs, sorted_selected_experts, weights)
 

@@ -165,7 +165,9 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
 
       
       # print("get_moe_output expected_variables", variables)
-      time.simple_timeit(jax.jit(model.apply), moe_variables, hidden_states, tries=10, task="megablox")
+      jitted = jax.jit(model.apply)
+      jitted(moe_variables, hidden_states) #warm_up
+      time.simple_timeit(jitted, moe_variables, hidden_states, tries=10, task="megablox")
       output = jax.jit(model.apply)(moe_variables, hidden_states)
       return output
 
@@ -183,6 +185,25 @@ def sample_groups(m: int, num_groups: int, key: jax.Array) -> jnp.ndarray:
     starts = jnp.concatenate([jnp.zeros(1, dtype=jnp.int32), ends_no_final])
     return ends - starts
 
+def simple_gmm():
+  num_experts = 8
+  per_device_batch_size = 12
+  max_target_length = 2048
+  num_experts_per_tok = 2
+  base_emb_dim = 4096
+  base_mlp_dim = 14336
+
+  k1, k2, k3 = jax.random.split(jax.random.PRNGKey(0), 3)
+  m = int(per_device_batch_size)*max_target_length*num_experts_per_tok
+  lhs_shape = (m, base_emb_dim)
+  rhs_shape = (num_experts, base_emb_dim, base_mlp_dim)
+  # print("lhs_shape", lhs_shape)
+  # print("rhs_shape", rhs_shape)
+  lhs = jax.random.uniform(k1, shape=lhs_shape, minval=-1, maxval=1).astype(jnp.bfloat16)
+  rhs = jax.random.uniform(k2, shape=rhs_shape, minval=-1, maxval=1).astype(jnp.bfloat16)
+  group_size = sample_groups(m, num_experts, k3)
+  output = mblx.gmm(lhs, rhs, group_size)
+  return output
 
 class MoeTest(unittest.TestCase):
 
@@ -212,8 +233,8 @@ class MoeTest(unittest.TestCase):
 
     devices_array = max_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
+    print("self.mesh", self.mesh)
 
-  @unittest.skip
   def test_moe_block(self):
     variables, expected_output = get_expected_output(self.rng, self.hidden_states, self.cfg)
     actual_output = get_moe_output(variables, self.hidden_states, self.cfg, self.mesh)
@@ -221,18 +242,13 @@ class MoeTest(unittest.TestCase):
     # print("actual_output", actual_output)
     self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
+  @unittest.skip
   def test_gmm_only(self):
-    k1, k2, k3 = jax.random.split(jax.random.PRNGKey(0), 3)
-    m = int(self.cfg.per_device_batch_size)*self.cfg.max_target_length*self.cfg.num_experts_per_tok
-    lhs_shape = (m, self.cfg.base_emb_dim)
-    rhs_shape = (self.cfg.num_experts, self.cfg.base_emb_dim, self.cfg.base_mlp_dim)
-    print("lhs_shape", lhs_shape)
-    print("rhs_shape", rhs_shape)
-    lhs = jax.random.uniform(k1, shape=lhs_shape, minval=-1, maxval=1).astype(jnp.bfloat16)
-    rhs = jax.random.uniform(k2, shape=rhs_shape, minval=-1, maxval=1).astype(jnp.bfloat16)
-    group_size = sample_groups(m, self.cfg.num_experts, k3)
-    time.simple_timeit(jax.jit(mblx.gmm), lhs, rhs, group_size, tries=10, task="simple_gmm")
-
+    # simple_gmm(self.cfg)
+    jitted = jax.jit(simple_gmm)
+    jitted # warm up
+    time.simple_timeit(jitted, tries=10, task="simple_gmm")
+     
 
 if __name__ == '__main__':
   unittest.main()
