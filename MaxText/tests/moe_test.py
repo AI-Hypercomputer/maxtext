@@ -52,8 +52,8 @@ class MoeLoopBlock(nn.Module):
   num_experts_per_tok: int
   kernel_init: NdInitializer
   kernel_axes: Tuple[str, ...]
-  weight_dtype: DType = jnp.float32
-  dtype: DType = jnp.float32
+  weight_dtype: DType = jnp.bfloat16
+  dtype: DType = jnp.bfloat16
 
   @nn.compact
   def __call__(self, inputs, deterministic: bool = False):
@@ -67,7 +67,7 @@ class MoeLoopBlock(nn.Module):
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     # print("weights from loop", weights)
     # print("selected_experts from loop", selected_experts)
-    weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1)
+    weights = jax.nn.softmax(weights.astype(self.weight_dtype), axis=-1)
     mlp_lnx = jnp.zeros_like(inputs)
     weights = weights.astype(self.dtype)
     mlp_lnx = nn.with_logical_constraint(
@@ -110,7 +110,7 @@ def get_expected_output(rng, hidden_states, cfg):
       # print("get_expected_output variables", variables)
       time.simple_timeit(jax.jit(model.apply), variables, hidden_states, tries=10, task="loop")
 
-      output = jax.jit(model.apply(variables, hidden_states))
+      output = jax.jit(model.apply)(variables, hidden_states)
       return variables, output
 
 
@@ -172,6 +172,7 @@ class MoeTest(unittest.TestCase):
       enable_checkpointing=False,
       model_name='mixtral-8x7b',
       dtype='bfloat16',
+      weight_dtype='bfloat16',
     )
 
     self.cfg = pyconfig.config
@@ -180,7 +181,7 @@ class MoeTest(unittest.TestCase):
     self.hidden_states = jax.random.uniform(self.rng, (int(self.cfg.per_device_batch_size),
                                             self.cfg.max_target_length,
                                             self.cfg.base_emb_dim))
-    print(f"{self.hidden_states.shape}=")
+    # print(f"{self.hidden_states.shape}=")
 
     devices_array = max_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
@@ -188,8 +189,8 @@ class MoeTest(unittest.TestCase):
   def test_moe_block(self):
     variables, expected_output = get_expected_output(self.rng, self.hidden_states, self.cfg)
     actual_output = get_moe_output(variables, self.hidden_states, self.cfg, self.mesh)
-    print("expected_output", expected_output)
-    print("actual_output", actual_output)
+    # print("expected_output", expected_output)
+    # print("actual_output", actual_output)
     # breakpoint()
     self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 

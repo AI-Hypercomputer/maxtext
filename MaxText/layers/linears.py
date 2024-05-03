@@ -282,8 +282,8 @@ class MoeBlock(nn.Module):
   mesh: Mesh
   kernel_init: NdInitializer
   kernel_axes: Tuple[str, ...]
-  weight_dtype: DType = jnp.float32
-  dtype: DType = jnp.float32
+  weight_dtype: DType = jnp.bfloat16
+  dtype: DType = jnp.bfloat16
 
 
   def generate_kernels(self, num_experts, base_emb_dim, mlp_dim):
@@ -331,35 +331,34 @@ class MoeBlock(nn.Module):
                mlp_activation,
                group_sizes):
 
-    @functools.partial(
-        shard_map.shard_map,
-        mesh=self.mesh,
-        in_specs=(
-              (nn.logical_to_mesh_axes(("m", "k"))),
-              (nn.logical_to_mesh_axes(("num_groups", "k", "n"))),
-              (nn.logical_to_mesh_axes(("num_groups",))),
-              # (nn.logical_to_mesh_axes(("m","k","n"))),
-          ),
-        out_specs=(nn.logical_to_mesh_axes(("m", "n"))),
-        check_rep=False,
-    )
+    # @functools.partial(
+    #     shard_map.shard_map,
+    #     mesh=self.mesh,
+    #     in_specs=(
+    #           (nn.logical_to_mesh_axes(("m", "k"))),
+    #           (nn.logical_to_mesh_axes(("num_groups", "k", "n"))),
+    #           (nn.logical_to_mesh_axes(("num_groups",))),
+    #           # (nn.logical_to_mesh_axes(("m","k","n"))),
+    #       ),
+    #     out_specs=(nn.logical_to_mesh_axes(("m", "n"))),
+    #     check_rep=False,
+    # )
     def gmm(inputs, kernel, group_sizes):
-      hs_shape = inputs.shape
 
-      print(f"{inputs.shape} {kernel.shape} {group_sizes.shape}")
-
+      # print(f"{inputs.shape} {kernel.shape} {group_sizes.shape}")
       #jax.debug.print("{group_sizes}", group_sizes=group_sizes)
-
+      inputs = inputs.astype(self.dtype)
+      kernel = kernel.astype(self.weight_dtype)
       output = mblx.gmm(lhs=inputs, 
                         rhs=kernel, 
                         group_sizes=group_sizes,
-                        tiling = (512,512,512))
+                        tiling = None)
 
       return output
   
     w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(num_experts,base_emb_dim,mlp_dim)
 
-    jax.debug.print("group sizes: {group_sizes}", group_sizes=group_sizes)
+    # jax.debug.print("group sizes: {group_sizes}", group_sizes=group_sizes)
     layer_1 = gmm(inputs, w0_kernel, group_sizes)
     layer_2 = gmm(inputs, w1_kernel, group_sizes)
     layer_1_act = _convert_to_activation_function(mlp_activation)(layer_1)
@@ -370,7 +369,7 @@ class MoeBlock(nn.Module):
   def permute(self, inputs, gate_logits, base_emb_dim):
     inputs_2d = jnp.reshape(inputs, (-1, base_emb_dim))
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-    weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+    weights = jax.nn.softmax(weights.astype(self.weight_dtype), axis=-1).astype(self.dtype)
     flatten_selected_experts = jnp.ravel(selected_experts)
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     repeat_hidden_states = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
@@ -378,8 +377,9 @@ class MoeBlock(nn.Module):
     expert_order, expert_size = jnp.unique(flatten_selected_experts, return_counts=True, size=self.num_experts)
     group_size = jnp.zeros(self.num_experts, dtype=jnp.int32)
 
-    indices = jnp.where(expert_size == 0, len(group_size), expert_order)
-    group_size = group_size.at[indices].set(jnp.where(expert_size == 0, group_size[indices], expert_size), mode='drop')
+    expert_is_unused = expert_size == 0
+    indices = jnp.where(expert_is_unused, len(group_size), expert_order)
+    group_size = group_size.at[indices].set(jnp.where(expert_is_unused, group_size[indices], expert_size))
 
     return sorted_output, sorted_selected_experts, weights, group_size
 
@@ -404,13 +404,12 @@ class MoeBlock(nn.Module):
                                                                                       gate_logits,
                                                                                       cfg.base_emb_dim)
   
-    intermediate_output = jax.jit(self.call_gmm, 
-                                  static_argnames=['num_experts','base_emb_dim','mlp_dim','mlp_activation'])(sorted_hidden_states,
-                                                                                   cfg.num_experts,
-                                                                                   cfg.base_emb_dim,
-                                                                                   cfg.mlp_dim,
-                                                                                   cfg.mlp_activations[0],
-                                                                                   group_size)
+    intermediate_output = self.call_gmm(sorted_hidden_states,
+                                        cfg.num_experts,
+                                        cfg.base_emb_dim,
+                                        cfg.mlp_dim,
+                                        cfg.mlp_activations[0],
+                                        group_size)
 
     output = self.unpermute(intermediate_output, inputs, sorted_selected_experts, weights)
 

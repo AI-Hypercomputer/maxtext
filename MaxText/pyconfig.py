@@ -91,8 +91,7 @@ def validate_model_name(s: str) -> bool:
 
 
 def validate_no_keys_overwritten_twice(keys1: list[str], keys2: list[str]):
-  # overwritten_keys = [k for k in keys1 if k in keys2]
-  overwritten_keys = None
+  overwritten_keys = [k for k in keys1 if k in keys2]
   if overwritten_keys:
     raise ValueError(
         f"Keys {overwritten_keys} are overwritten from both the model"
@@ -140,9 +139,9 @@ class _HyperParameters:
         raise ValueError(f"Key {k} was passed at the command line but isn't in config.")
 
     for k in raw_data_from_yaml:
-      # if k in raw_data_from_cmd_line and yaml_key_to_env_key(k) in os.environ:
-      #   raise ValueError(
-      #       f"You are passing overrides by both CLI and ENV for `{k}`. This isn't allowed.")
+      if k in raw_data_from_cmd_line and yaml_key_to_env_key(k) in os.environ:
+        raise ValueError(
+            f"You are passing overrides by both CLI and ENV for `{k}`. This isn't allowed.")
 
       if not k in raw_data_from_cmd_line and not yaml_key_to_env_key(k) in os.environ:
         raw_keys[k] = raw_data_from_yaml[k]
