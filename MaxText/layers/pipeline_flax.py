@@ -15,6 +15,7 @@
 ''' Pipeline layer wrapping a decoder layer. Supports circular pipelining '''
 
 import jax
+import jax.ad_checkpoint
 import numpy as np
 from jax import numpy as jnp
 from jax import tree_map
@@ -27,6 +28,7 @@ from typing import Optional
 from layers import quantizations
 import common_types
 import functools
+from typing import Any
 
 PARAMS="params"
 NON_TRAINABLE="non_trainable"
@@ -52,6 +54,7 @@ class Pipeline(nn.Module):
   layers: nn.Module # The name of this property (layers) is reflected in the state pytree and thus also checkpoints.
   mesh: common_types.Mesh
   quant: Optional[quantizations.AqtQuantization] = None
+  remat_policy: Any = None
 
   def setup(self):
     #decoder_layers = [self.decoder_layer_class(config=self.config, mesh=self.mesh, name=f'layers_{lyr}', quant=self.quant) for lyr in range(self.config.num_decoder_layers)]
@@ -250,7 +253,7 @@ class Pipeline(nn.Module):
       Update the various buffers given the output of the most recent iteration
       * state_io: rotates left/up by 1 (replace last element with last stage output) - we are pushing inputs up into the pipeline
       * shift: rotate output right/down by 1 - we imagine the pipeline moves to right/down
-      * circ_storage: push latest circ_mover (e.g. FULL outputs) into rotating index -- why are we pushing full ouputs, why not just last stage?
+      * circ_storage: push latest circ_mover (e.g. FULL outputs) into rotating index -- why are we pushing full outputs, why not just last stage?
       * circ_mover gets FULL? rotated output -- I think it should only need the last stage of output
     '''
     old_state_io = loop_state['state_io']
@@ -360,6 +363,9 @@ class Pipeline(nn.Module):
    microbatch_ids = microbatch_ids % self.config.num_pipeline_microbatches
 
    stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
+   # We checkpoint stages_inputs since we are grabbing only one slice of the state_io, don't need to save the entire buffer.
+   stages_inputs = jax.ad_checkpoint.checkpoint_name(stages_inputs, 'iteration_input')
+
    if positions is not None:
     stages_positions = self.vmap_gather(positions, microbatch_ids, 0)
     positions_stage_idx = 0
@@ -492,8 +498,18 @@ class Pipeline(nn.Module):
     # The scan cannot be used on init since it broadcasts the state. Thus the state must be independent of the loop body,
     # but on init the loop body will initialize the params.
     if self.config.scan_pipeline_iterations and not self.is_initializing():
-        scan_func = nn.scan(
+        
+        remat_policy = jax.checkpoint_policies.save_from_both_policies(
+            self.remat_policy,
+            jax.checkpoint_policies.save_only_these_names('iteration_input')
+        )
+        remat_fn = nn.remat(
           func_to_scan,
+          prevent_cse=False, # prevent_cse not used with scan
+          policy=remat_policy
+        )
+        scan_func = nn.scan(
+          remat_fn,
           variable_axes={
             SUMMARIES: 0,
             AUX_LOSS: 0,

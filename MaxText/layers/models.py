@@ -267,17 +267,19 @@ class Decoder(nn.Module):
       else:
         assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None
+
+    pipeline_parallelism = cfg.ici_pipeline_parallelism > 1 or cfg.dcn_pipeline_parallelism > 1
+    if not pipeline_parallelism:
       BlockLayer = nn.remat(  # pylint: disable=invalid-name
           BlockLayer,
           prevent_cse=not cfg.scan_layers,
           policy=policy,
           static_argnums=(-1, -2, -3, -4, -5),
       )
-    pipeline_parallelism = cfg.ici_pipeline_parallelism > 1 or cfg.dcn_pipeline_parallelism > 1
     if pipeline_parallelism:
         deocder_layer_instace = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
         # TODO: Pipeline doesn't need its own config/mesh/quant?
-        y = pipeline_flax.Pipeline(config=cfg, mesh=mesh, layers=deocder_layer_instace,quant=self.quant)(
+        y = pipeline_flax.Pipeline(config=cfg, mesh=mesh, layers=deocder_layer_instace,quant=self.quant, remat_policy=policy)(
             y,
             decoder_segment_ids,
             decoder_positions,
