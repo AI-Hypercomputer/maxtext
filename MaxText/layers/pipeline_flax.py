@@ -499,10 +499,13 @@ class Pipeline(nn.Module):
     # but on init the loop body will initialize the params.
     if self.config.scan_pipeline_iterations and not self.is_initializing():
         
-        remat_policy = jax.checkpoint_policies.save_from_both_policies(
-            self.remat_policy,
-            jax.checkpoint_policies.save_only_these_names('iteration_input')
-        )
+        if self.remat_policy is not None:
+          remat_policy = jax.checkpoint_policies.save_from_both_policies(
+              self.remat_policy,
+              jax.checkpoint_policies.save_only_these_names('iteration_input')
+          )
+        else:
+          remat_policy = jax.checkpoint_policies.save_only_these_names('iteration_input')
         remat_fn = nn.remat(
           func_to_scan,
           prevent_cse=False, # prevent_cse not used with scan

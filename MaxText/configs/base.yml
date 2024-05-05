@@ -99,7 +99,7 @@ logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedd
 # These options offer a trade-off between speed (fastest to slowest) and HBM usage (highest to lowest)
 remat_policy: 'full'
 scan_layers: True
-scan_pipeline_iterations: False # TODO: only have one scan?
+scan_pipeline_iterations: True # TODO: Ensure compatibility regardless of scan_layers
 param_scan_axis: 1
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
 
