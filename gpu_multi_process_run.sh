@@ -145,7 +145,7 @@ resolve_coordinator_ip
 set -e
 
 PIDS=()
-${COMMAND} &
+eval ${COMMAND} &
 PID=$!
 PIDS+=($PID)
 
