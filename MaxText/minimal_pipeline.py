@@ -172,9 +172,15 @@ def main() -> None:
 
     #assert_same_output_and_grad(reg_matmuls, pipeline_func, targets, weights, inputs)
 
-    timing_util.simple_timeit(pipeline_func, weights, inputs, tries = 3, task = 'basic_pp')
+    #timing_util.simple_timeit(pipeline_func, weights, inputs, tries = 3, task = 'basic_pp')
 
-
+    def loss_fn(weights, inputs, targets):
+      output = pipeline_func(weights, inputs)
+      return jnp.linalg.norm(output - targets)
+    
+    value_and_grad = jax.value_and_grad(loss_fn)
+    value_and_grad = jax.jit(value_and_grad)
+    timing_util.simple_timeit(value_and_grad, weights, inputs, targets, tries = 3, task = 'basic_pp_loss')
 
 if __name__ == "__main__":
   main()

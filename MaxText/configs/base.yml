@@ -85,6 +85,7 @@ num_pipeline_repeats: -1
 # The number of pipeline_microbatches must be a multiple of the number of pipeline stages. By default it is set to the number of stages.
 num_pipeline_microbatches: -1
 # The microbatch_size is given by global_batch_size / num_pipeline_microbatches, where global_batch_size = per_device_batch_size * num_devices
+num_layers_per_pipeline_stage: 1
 
 # mixture of experts (moe)
 num_experts: 1

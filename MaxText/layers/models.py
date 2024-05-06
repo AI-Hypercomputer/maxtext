@@ -277,7 +277,34 @@ class Decoder(nn.Module):
           static_argnums=(-1, -2, -3, -4, -5),
       )
     if pipeline_parallelism:
-        deocder_layer_instace = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
+        if cfg.num_layers_per_pipeline_stage == 1:
+          deocder_layer_instace = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
+        else:
+          initializing = self.is_mutable_collection("params")
+          params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
+          cache_spec = 0
+          deocder_layer_instace = nn.scan(
+            BlockLayer,
+            variable_axes={
+                "params": params_spec,
+                "cache": cache_spec,
+                "intermediates": 0,
+                "aqt": 0,
+                "_overwrite_with_gradient": 0,
+            },
+            split_rngs={
+                "params": True,
+                "dropout": cfg.enable_dropout,
+            },
+            in_axes=(
+                nn.broadcast,
+                nn.broadcast,
+                nn.broadcast,
+                nn.broadcast,
+            ),
+            length=cfg.num_layers_per_pipeline_stage,
+            metadata_params={nn.PARTITION_NAME: "layers_per_stage"},
+        )(config=cfg, mesh=mesh, name="layers", quant=self.quant)
         # TODO: Pipeline doesn't need its own config/mesh/quant?
         y = pipeline_flax.Pipeline(config=cfg, mesh=mesh, layers=deocder_layer_instace,quant=self.quant, remat_policy=policy)(
             y,
