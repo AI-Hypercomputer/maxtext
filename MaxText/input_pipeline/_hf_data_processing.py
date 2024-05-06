@@ -25,9 +25,7 @@ from datasets import load_dataset
 from datasets.distributed import split_dataset_by_node
 from functools import partial
 from transformers import AutoTokenizer, LlamaTokenizer
-#from torchdata.datapipes.iter import Collator, IterableWrapper
 
-#from torchdata.dataloader2 import DataLoader2, InProcessReadingService
 import grain.python as grain
 from input_pipeline import _hf_operations
 from input_pipeline import _grain_operations
@@ -93,8 +91,8 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
     operations = operations,
     sampler = index_sampler,
     worker_count = config.grain_worker_count,
-    worker_buffer_size = 16,
-    read_options = grain.ReadOptions(num_threads=config.num_threads, prefetch_buffer_size=256)
+    worker_buffer_size = 1,
+    read_options = grain.ReadOptions(num_threads=config.num_threads, prefetch_buffer_size=128)
   )
 
   train_iter = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)

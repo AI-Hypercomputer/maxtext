@@ -43,17 +43,22 @@ def data_load_loop(config, state=None):
   example_batch = load_next_batch(data_iterator, example_batch, config)
   jax.block_until_ready(example_batch)
   first_end = datetime.datetime.now()
+  last_step_completion = first_end
   time_to_load_first_batch = first_end-start
   if jax.process_index() == 0:
-    max_logging.log(f"STANDALONE DATALOADER : First step completed in {time_to_load_first_batch} seconds, on host 0")
+    max_logging.log(f"STANDALONE DATALOADER : First step completed in {time_to_load_first_batch.seconds} seconds, on host 0")
 
-  for _ in np.arange(start_step+1, config.steps):
+  for step in np.arange(start_step+1, config.steps):
     example_batch = load_next_batch(data_iterator, example_batch, config)
+    # new_time = datetime.datetime.now()
+    # if jax.process_index() == 0:
+    #   max_logging.log(f"STANDALONE DATALOADER : load batch {step+1} in {(new_time-last_step_completion).seconds} seconds")
+    # last_step_completion = new_time
 
   jax.block_until_ready(example_batch) # wait until the last batch is read
   end = datetime.datetime.now()
   if jax.process_index() == 0:
-    max_logging.log(f"STANDALONE DATALOADER : {config.steps} batches loaded in {end-start} seconds, on host 0")
+    max_logging.log(f"STANDALONE DATALOADER : {config.steps} batches loaded in {(end-start).seconds} seconds, on host 0")
   return state
 
 
@@ -66,7 +71,7 @@ def main(argv: Sequence[str]) -> None:
   max_logging.log(f"Found {jax.device_count()} devices.")
   max_logging.log(f"Found {jax.process_count()} processes.")
   max_logging.log(f"Found {jax.devices()} devices.")
-  os.environ["TFDS_DATA_DIR"] = config.dataset_path
+  #os.environ["TFDS_DATA_DIR"] = config.dataset_path
   data_load_loop(config)
 
 

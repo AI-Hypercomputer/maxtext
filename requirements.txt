@@ -26,6 +26,5 @@ tensorflow-datasets
 tensorboardx
 tensorboard-plugin-profile
 transformers
-torchdata
 git+https://github.com/mlperf/logging.git
 google-jetstream

@@ -186,7 +186,7 @@ def get_process_loading_real_data(config, mesh):
   batch_cutoff = config.global_batch_size_to_train_on
   process_loading_real_data = set()
   for p, indices in devices_indices_map.items():
-    if indices[0].stop <= batch_cutoff:
+    if not indices[0].stop or indices[0].stop <= batch_cutoff:
       process_loading_real_data.add(p.process_index)
   return list(process_loading_real_data)
 
