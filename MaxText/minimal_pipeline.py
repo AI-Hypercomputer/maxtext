@@ -10,6 +10,9 @@ import argparse
 from typing import Sequence
 import os
 
+def S(mesh, *specs):
+    return NamedSharding(mesh, PartitionSpec(*specs))
+
 def stage(w, x):
   for i in range(w.shape[0]):
     x = layer(w[i], x)
@@ -19,7 +22,7 @@ def layer(w, x):
   x = jnp.tanh(jnp.dot(x, w))
   return x
 
-def spmd_pipeline(weights, inputs):
+def spmd_pipeline(weights, inputs, mesh):
   # M: n_microbatches
   # F: features
   # L: n_stages
@@ -27,6 +30,7 @@ def spmd_pipeline(weights, inputs):
 
   # w: [n_stages, n_layers/n_stages, F, F] [L, -1, F , F]
   weights = weights.reshape((args.n_stages, -1 , args.features ,args.features))
+  weights = jax.lax.with_sharding_constraint(weights, S(mesh, "stage", None, None, None))
   # x: [n_microbatches, microbatch_size, F] [M, B, F]
   inputs = inputs.reshape((args.n_microbatches, args.microbatch_size, args.features))
 
@@ -37,6 +41,7 @@ def spmd_pipeline(weights, inputs):
   outputs = jnp.zeros((args.n_microbatches + args.n_stages - 1, args.microbatch_size, args.features))
 
   state = jnp.zeros([args.n_stages, args.microbatch_size, args.features])
+  state = jax.lax.with_sharding_constraint(state, S(mesh, "stage", None, None))
 
   for i in range(args.n_microbatches + args.n_stages - 1):
     state = shift_right_and_insert_input(state, inputs[i])
@@ -46,12 +51,14 @@ def spmd_pipeline(weights, inputs):
   return outputs[args.n_stages - 1:].reshape((args.n_microbatches * args.microbatch_size, args.features))
 
 
+
+
 def shift_right_and_insert_input_new(state, new_microbatch):
     padding = [[1, 0]] + [[0, 0]] * (state.ndim - 1)
     # Use lax.slice to guarantee the gradient is a pad.
     return jax.lax.slice(jnp.pad(state, padding), [0] * state.ndim, state.shape)
 
-def shift_right_and_insert_input(state, new_microbatch):
+def shift_right_and_insert_input_old(state, new_microbatch):
   prev = new_microbatch
   for stage in range(args.n_stages):
     next = state[stage]
@@ -59,6 +66,25 @@ def shift_right_and_insert_input(state, new_microbatch):
     state = state.at[stage].set(prev)
     prev = next
   return state
+
+def shift_right_and_insert_input(state, new_microbatch):
+    # Shift becomes a rotated-right version of the previous output
+    def _rotate_right(state):
+      # Use lax.slice to avoid generating a gather.
+      last = jax.lax.slice_in_dim(state, args.n_stages - 1, args.n_stages, axis=0)
+      except_last = jax.lax.slice_in_dim(state, 0, args.n_stages - 1, axis=0)
+      return jnp.concatenate([last, except_last], axis=0)
+    jit_rotate_right = jax.jit(_rotate_right)
+    state = jit_rotate_right(state)
+    
+    def select_state_or_input(input, shift):
+      # Selects input for stage 0, shift for other stages
+      return jnp.where(jax.lax.broadcasted_iota('int32', state.shape, 0) == 0, input, shift)
+    
+    
+    state = select_state_or_input(new_microbatch, state)
+    return state
+    
 
 def get_weights_and_inputs():
   k = jax.random.PRNGKey(1)
@@ -69,22 +95,25 @@ def get_weights_and_inputs():
   targets = jax.random.normal(k3, (args.batch_size, args.features))
   return weights, inputs, targets
 
-def get_pipelint_jit():
-  if args.dcn_pipeline_axs == 1 and args.dcn_dp_axis == 1:
+
+def create_mesh():
+  if args.dcn_pipeline_axis == 1 and args.dcn_dp_axis == 1:
     devices = mesh_utils.create_device_mesh((args.pipeline_axis, args.dp_axis))
   else:
     devices = mesh_utils.create_hybrid_device_mesh((args.pipeline_axis, args.dp_axis),(args.dcn_pipeline_axis, args.dcn_dp_axis))
   mesh = Mesh(devices, axis_names=('stage', 'data'))
+  return mesh
 
-  def S(*specs):
-    return NamedSharding(mesh, PartitionSpec(*specs))
-
+def get_pipelint_jit(mesh):
   # Configure sharding
-  weight_sharding = S('stage', None, None) # weight sharded over stage
-  input_sharding = S('data', None)   # inputs sharded over batch
-  result_sharding = S('data', None)  # output sharded over batch
+  weight_sharding = S(mesh, 'stage', None, None) # weight sharded over stage
+  input_sharding = S(mesh, 'data', None)   # inputs sharded over batch
+  result_sharding = S(mesh, 'data', None)  # output sharded over batch
 
-  output_jit = jax.jit(spmd_pipeline,
+  import functools
+  spmd_pipeline_partial = functools.partial(spmd_pipeline, mesh=mesh)
+
+  output_jit = jax.jit(spmd_pipeline_partial,
               in_shardings=((weight_sharding, input_sharding)),
               out_shardings=result_sharding)
   return output_jit
@@ -128,7 +157,7 @@ def main() -> None:
     parser.add_argument('--pipeline_axis', type=int, default=4)
     parser.add_argument('--dp_axis', type=int, default=1)
     parser.add_argument('--dcn_pipeline_axis', type=int, default=1)
-    parser.add_argument('--dp_axis', type=int, default=1)
+    parser.add_argument('--dcn_dp_axis', type=int, default=1)
     parser.add_argument('--features', type=int, default=16)
 
     global args
@@ -137,7 +166,8 @@ def main() -> None:
 
 
     # Necessary artifacts for the good stuff
-    pipeline_func = get_pipelint_jit()
+    mesh = create_mesh()
+    pipeline_func = get_pipelint_jit(mesh)
     weights, inputs, targets = get_weights_and_inputs()
 
     assert_same_output_and_grad(reg_matmuls, pipeline_func, targets, weights, inputs)
