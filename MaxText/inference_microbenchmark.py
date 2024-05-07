@@ -17,6 +17,7 @@ limitations under the License.
 """Inference microbenchmark for prefill and autoregressive steps."""
 import datetime
 import jax
+import flax
 import json
 import sys
 
@@ -27,8 +28,38 @@ import maxengine
 import maxtext_utils
 import pyconfig
 
-
 _WARMUP_ITERS = 2
+
+
+def _debug_pytree(pytree):
+  """Debug pytree sizing and sharding across chips."""
+  if isinstance(pytree, flax.linen.spmd.LogicallyPartitioned):
+    pytree = pytree.value
+  print(f"\tshape: {pytree.shape}")
+  print(f"\tsharding: {pytree.sharding}")
+  total_logical_sizes, total_logical_bytes, _ = max_utils.summarize_size_from_pytree(pytree)
+  total_physical_sizes_across_chips, n_chips = max_utils.calculate_total_params_across_chips(pytree)
+  total_physical_bytes_across_chip, _ = max_utils.calculate_total_bytes_across_chips(pytree)
+  print(f"\ttotal_logical_sizes: {total_logical_sizes}")
+  print(f"\ttotal_logical_bytes: {total_logical_bytes}", )
+  print(f"\tn_chips: {n_chips}")
+  print(f"\ttotal_physical_sizes_across_chips: {total_physical_sizes_across_chips}")
+  print(f"\ttotal_physical_bytes_across_chip: {total_physical_bytes_across_chip}")
+
+
+def debug_result(result):
+  """Debug result pytrees' sizing and sharding across chips."""
+  for result_key in result.keys():
+    result_element = result[result_key]
+    if result_key == "cache":
+      singler_layer_kv_cache = result["cache"]["decoder"]["layers_0"]["self_attention"]["AttentionOp_0"]
+      for cache_key in singler_layer_kv_cache.keys():
+        cache_element = singler_layer_kv_cache[cache_key]
+        print(f"{cache_key}:")
+        _debug_pytree(cache_element)
+    else:
+      print(f"{result_key}:")
+      _debug_pytree(result_element)
 
 
 def prefill_benchmark_loop(engine, params, tokens, true_length, iters):
@@ -204,6 +235,7 @@ def summarize_prefill_result(engine, params, tokens, true_length):
   num_prefill_cache_params, total_prefill_cache_size, avg_prefill_cache_param_size = (
     max_utils.summarize_pytree_data(prefill_result["cache"], name="Prefill Cache")
   )
+  debug_result(prefill_result)
   max_utils.delete_pytree(prefill_result)
   return {
     "num_prefill_logits_params": num_prefill_logits_params,
