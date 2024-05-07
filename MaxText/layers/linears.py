@@ -138,7 +138,10 @@ class DenseGeneral(nn.Module):
     kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(axis)))
+    print(f"inputs.shape: {inputs.shape}")
+    print(f"kernel.shape: {kernel.shape}")
     output = compute_dot_general(inputs, kernel, axis, contract_ind)
+    print(f"output.shape: {output.shape}")
 
     if self.use_bias:
       bias_axes, bias_shape = self.kernel_axes[-len(features) :], kernel_shape[-len(features) :]
@@ -335,17 +338,23 @@ class MoeBlock(nn.Module):
         shard_map.shard_map,
         mesh=self.mesh,
         in_specs=(
-              (nn.logical_to_mesh_axes(("m", "k"))),
-              (nn.logical_to_mesh_axes(("num_groups", "k", "n"))),
-              (nn.logical_to_mesh_axes(("num_groups",))),
+              (nn.logical_to_mesh_axes((None, None))),
+              (nn.logical_to_mesh_axes((None, None, None))),
+              (nn.logical_to_mesh_axes((None,))),
           ),
-        out_specs=(nn.logical_to_mesh_axes(("m", "n"))),
+        out_specs=(nn.logical_to_mesh_axes((None, None))),
+        # in_specs=(
+        #       (nn.logical_to_mesh_axes(("activation_batch_length", "embed"))),
+        #       (nn.logical_to_mesh_axes((None, "activation_embed", "mlp"))),
+        #       (nn.logical_to_mesh_axes((None,))),
+        #   ),
+        # out_specs=(nn.logical_to_mesh_axes(("activation_batch_length", "mlp"))),
         check_rep=False,
     )
     def gmm(inputs, kernel, group_sizes):
       hs_shape = inputs.shape
       # pad lengh is the 1st dimension of tiling size in gmm call
-      pad_length = 128
+      pad_length = 512
       if hs_shape[0] % pad_length:
         # padding
         pad_length = pad_length - hs_shape[0] % pad_length
@@ -360,7 +369,7 @@ class MoeBlock(nn.Module):
       output = mblx.gmm(lhs=inputs, 
                         rhs=kernel, 
                         group_sizes=group_sizes,
-                        tiling=(128, 128, 128))
+                        tiling=(512, 512, 512))
       
       if hs_shape[0] % pad_length:
         output = output[:hs_shape[0]]

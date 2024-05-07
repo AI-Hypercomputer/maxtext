@@ -32,6 +32,7 @@ from layers import embeddings
 from layers import normalizations
 from layers import models
 import common_types
+import max_utils
 
 Array = common_types.Array
 Config = common_types.Config
@@ -126,7 +127,12 @@ class MistralDecoderLayer(nn.Module):
         if cfg.megablox:
             print("running megablox")
             # print("hidden_states.dtype", hidden_states.dtype)
-            # print("mesh.......", mesh)
+            
+            # overwrite the mesh to single device
+            devices_array = max_utils.create_device_mesh(cfg, devices=[jax.devices()[0]])
+            mesh = Mesh(devices_array, cfg.mesh_axes)
+            print("mesh.......", mesh)
+
             mlp_lnx = linears.MoeBlock(
                 config=cfg,
                 num_experts=cfg.num_experts,

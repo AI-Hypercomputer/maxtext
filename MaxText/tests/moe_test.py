@@ -91,6 +91,7 @@ class MoeLoopBlock(nn.Module):
         )
         mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
         mlp_lnx += mlp_lnx_exp
+        print(f"mlp_lnx.shape: {mlp_lnx.shape}")
 
     return mlp_lnx
 
@@ -183,7 +184,7 @@ class MoeTest(unittest.TestCase):
                                             self.cfg.base_emb_dim))
     # print(f"{self.hidden_states.shape}=")
 
-    devices_array = max_utils.create_device_mesh(self.cfg)
+    devices_array = max_utils.create_device_mesh(self.cfg, devices=[jax.devices()[0]])
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
 
   def test_moe_block(self):
