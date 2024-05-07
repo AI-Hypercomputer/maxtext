@@ -128,7 +128,8 @@ def convert(base_model_path, maxtext_model_path, model_size):
     pytorch_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = checkpoint
   pytorch_vars = [pytorch_vars[i] for i in sorted(list(pytorch_vars.keys()))]
 
-  layer_key = "gate" if num_experts else "mlp"
+#   layer_key = "gate" if num_experts else "mlp"
+  layer_key = "MoeBlock_0" if num_experts else "mlp"
   jax_weights = {
       "decoder": {
           "layers": {
@@ -163,7 +164,8 @@ def convert(base_model_path, maxtext_model_path, model_size):
     layer_weight["gate"] = {"kernel": []}   
 
     for k in range(num_experts):
-      jax_weights["decoder"]["layers"][f"mlp_{k}"] = {}
+      jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"] = {}
+    #   jax_weights["decoder"]["layers"][f"mlp_{k}"] = {}
       layer_weight[f"mlp_{k}"] = {
           "wi_0": {"kernel": []},
           "wi_1": {"kernel": []},
@@ -296,7 +298,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
   else:
     layer_weight["gate"]["kernel"] = np.array(layer_weight["gate"]["kernel"])
     layer_weight["gate"]["kernel"] = np.transpose(layer_weight["gate"]["kernel"], axes=(1, 0, 2))
-    jax_weights["decoder"]["layers"]["gate"]["kernel"] = layer_weight["gate"]["kernel"]
+    jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["kernel"] = layer_weight["gate"]["kernel"]
 
     wi_0 = []
     wi_1 = []
@@ -320,15 +322,17 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
     #   jax_weights["decoder"]["layers"][f"mlp_{k}"] = layer_weight[f"mlp_{k}"]
 
-    layer_weight["gate"]["wi_0"] = np.concatenate(np.asarray(wi_0), axis=0)
-    layer_weight["gate"]["wi_1"] = np.concatenate(np.asarray(wi_1), axis=0)
-    layer_weight["gate"]["wo"] = np.concatenate(np.asarray(wo), axis=0)
-    jax_weights["decoder"]["layers"]["gate"]["wi_0"] = layer_weight["gate"]["wi_0"]
-    jax_weights["decoder"]["layers"]["gate"]["wi_1"] = layer_weight["gate"]["wi_1"]
-    jax_weights["decoder"]["layers"]["gate"]["wo"] = layer_weight["gate"]["wo"]
+    layer_weight["gate"]["wi_0"] = np.concatenate(np.array(wi_0), axis=0)
+    layer_weight["gate"]["wi_1"] = np.concatenate(np.array(wi_1), axis=0)
+    layer_weight["gate"]["wo"] = np.concatenate(np.array(wo), axis=0)
+    jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["wi_0"] = layer_weight["gate"]["wi_0"]
+    jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["wi_1"] = layer_weight["gate"]["wi_1"]
+    jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["wo"] = layer_weight["gate"]["wo"]
 
-  print("jax_weights......")
-  print(jax_weights)
+#   print("before sharding jax_weights......")
+#   print(jax_weights)
+
+  jax_weights = jax.tree_util.tree_map(jax.numpy.array, jax_weights)
 
   mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
   s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))  # shards first axis
@@ -347,7 +351,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
       return jax.device_put(arr, device=s3)
 
   # convert all weights to jax.numpy with sharding if applicable
-  jax_weights = jax.tree_util.tree_map(checkpoint_device_put, jax_weights)
+#   jax_weights = jax.tree_util.tree_map(checkpoint_device_put, jax_weights)
 
   # dummy configs for the checkpoint_manager
   step_number_to_save_new_ckpt = 0
@@ -359,8 +363,8 @@ def convert(base_model_path, maxtext_model_path, model_size):
       maxtext_model_path, enable_checkpointing, async_checkpointing, save_interval_steps
   )
 
-  print("before saving jax_weights......")
-  print(jax_weights)
+#   print("before saving jax_weights......")
+#   print(jax_weights)
 
   state_new = train_state.TrainState(
       step=0, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore

@@ -457,7 +457,6 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
       state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings)(rng)
       if raw_params:  # If we loaded a partial state, we need to merge it.
         state = state.replace(params=raw_params)
-
   state = unbox_logicallypartioned(state)
   return state, state_mesh_annotations, data_iterator
 
