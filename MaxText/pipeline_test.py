@@ -11,9 +11,11 @@ import pyconfig
 import functools
 import max_utils
 from layers import llama2
+from flax.core import meta
 
 import jax.numpy as jnp
 import timing_util
+from flax import linen as nn
 
 def pretty_print_pytree(pytree, indent_level=0):
   """Pretty-prints a JAX PyTree, showing the shapes of each leaf.
@@ -51,7 +53,7 @@ def get_weights_and_inputs(batch_size, sequence, features, n_layers):
     k = jax.random.PRNGKey(2)
     inputs = jax.random.normal(k,input_shape, dtype=jnp.float32)
 
-    # dummy targets same shape as inputs to use for a dummy loss funciton to check gradient correctness
+    # dummy targets same shape as inputs to use for a dummy loss function to check gradient correctness
     k = jax.random.PRNGKey(3)
     dummy_targets = jax.random.normal(k,input_shape, dtype=jnp.float32)
 
@@ -114,11 +116,45 @@ def main(argv: Sequence[str]) -> None:
 
 
   #decoder_layer_instance = simple_decoder_layer.SimpleDecoderLayer(config=config, mesh=mesh, name="layers")
-  decoder_layer_instance = llama2.LlamaDecoderLayer(config=config, mesh=mesh, name="layers")
+  #decoder_layer_instance = llama2.LlamaDecoderLayer(config=config, mesh=mesh, name="layers")
+  BlockLayer = llama2.LlamaDecoderLayer
+  if config.num_layers_per_pipeline_stage == 1:
+    pipeline_stage = BlockLayer(config=config, mesh=mesh)
+  else:
+    params_spec = 0
+    cache_spec = 1
+    pipeline_stage = nn.scan(
+      BlockLayer,
+      variable_axes={
+          "params": params_spec,
+          "cache": cache_spec,
+          "intermediates": 0,
+          "aqt": 0,
+          "_overwrite_with_gradient": 0,
+      },
+      split_rngs={
+          "params": True,
+          "dropout": config.enable_dropout,
+      },
+      in_axes=(
+          nn.broadcast,
+          nn.broadcast,
+          nn.broadcast,
+          nn.broadcast,
+      ),
+      length=config.num_layers_per_pipeline_stage,
+      metadata_params={nn.PARTITION_NAME: "layers_per_stage"},
+  )(config=config, mesh=mesh, name="layers")
+
+
+
+
+
+
   from layers import pipeline_flax
   my_pipeline = pipeline_flax.Pipeline(
     config=config,
-    layers=decoder_layer_instance,
+    layers=pipeline_stage,
     mesh=mesh
   )
 
@@ -129,11 +165,32 @@ def main(argv: Sequence[str]) -> None:
 
 
   def run_regular_pipeline(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
+    decoder_layer_instance = BlockLayer(config=config, mesh=mesh)
     reg_layer_activations = inputs
 
     def get_cur_layer_params(params, layer_idx):
+      circular_metadata_params={
+        nn.PARTITION_NAME: "circular_repeats",
+        'sub_weight_split_dims_mapping': (None,), #(None,), # Maybe -1? 
+        "is_initializing": True,
+        "x_times": config.num_pipeline_repeats,
+        'optimizer_dims_mapping': None,
+      }
+      stage_metadata_params={
+        nn.PARTITION_NAME: "layers",
+        'sub_weight_split_dims_mapping': (None,), #(None,), # Maybe -1? 
+        "is_initializing": True,
+        "x_times": config.ici_pipeline_parallelism,
+        'optimizer_dims_mapping': None,
+      }
       def get_cur_layer_params_arr(leaf):
-        if config.num_pipeline_repeats > 1:
+        if config.num_pipeline_repeats > 1 and config.num_layers_per_pipeline_stage == 1:
+          new_shape = (leaf.shape[0] * leaf.shape[1],) + leaf.shape[2:]
+          leaf = jnp.reshape(leaf, new_shape)
+        elif config.num_pipeline_repeats > 1 and config.num_layers_per_pipeline_stage > 1:
+          new_shape = (leaf.shape[0] * leaf.shape[1] * leaf.shape[2],) + leaf.shape[3:]
+          leaf = jnp.reshape(leaf, new_shape)
+        elif config.num_pipeline_repeats == 1 and config.num_layers_per_pipeline_stage > 1:
           new_shape = (leaf.shape[0] * leaf.shape[1],) + leaf.shape[2:]
           leaf = jnp.reshape(leaf, new_shape)
         return leaf[layer_idx]
@@ -147,6 +204,9 @@ def main(argv: Sequence[str]) -> None:
       else:
         cur_layer_params = get_cur_layer_params(params, layer)
         cur_layer_params['params'] = cur_layer_params['params']['layers']
+      if config.num_pipeline_repeats > 1 and config.num_layers_per_pipeline_stage > 1:
+        cur_layer_params['params'] = meta.remove_axis(cur_layer_params['params'], 0, {nn.PARTITION_NAME:"circular_repeats"})
+        cur_layer_params['params'] = meta.remove_axis(cur_layer_params['params'], 0, {nn.PARTITION_NAME:"layers"})
       reg_layer_activations, _ = decoder_layer_instance.apply(cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode)
     return reg_layer_activations
 
@@ -168,8 +228,10 @@ def main(argv: Sequence[str]) -> None:
 if __name__ == "__main__":
   app.run(main)
   # Circular
-  # python3 MaxText/pipeline_parallelism_test.py MaxText/configs/base.yml run_name=mattdavidow-train-base base_output_directory=gs://maxtext-experiments-multipod dataset_path=gs://max-datasets-rogue steps=5 enable_checkpointing=False base_emb_dim=28 ici_pipeline_parallelism=4 base_num_decoder_layers=8 scan_layers=True num_pipeline_microbatches=12 num_pipeline_repeats=2
+  # python3 MaxText/pipeline_test.py MaxText/configs/base.yml run_name=mattdavidow-train-base base_output_directory=gs://maxtext-experiments-multipod dataset_path=gs://max-datasets-rogue steps=5 enable_checkpointing=False base_emb_dim=28 ici_pipeline_parallelism=4 base_num_decoder_layers=8 scan_layers=True num_pipeline_microbatches=12 num_pipeline_repeats=2
   # Non-circular
-  # python3 MaxText/pipeline_parallelism_test.py MaxText/configs/base.yml run_name=mattdavidow-train-base base_output_directory=gs://maxtext-experiments-multipod dataset_path=gs://max-datasets-rogue steps=5 enable_checkpointing=False base_emb_dim=28 ici_pipeline_parallelism=4 base_num_decoder_layers=4 scan_layers=True num_pipeline_microbatches=12 num_pipeline_repeats=1
+  # python3 MaxText/pipeline_test.py MaxText/configs/base.yml run_name=mattdavidow-train-base base_output_directory=gs://maxtext-experiments-multipod dataset_path=gs://max-datasets-rogue steps=5 enable_checkpointing=False base_emb_dim=28 ici_pipeline_parallelism=4 base_num_decoder_layers=4 scan_layers=True num_pipeline_microbatches=12 num_pipeline_repeats=1
+  # Multiple layers per stage + circular (24 layers = 4 stages * 3 repeats * 2 layers per stage) !! Takes 2 min to run
+  # python3 MaxText/pipeline_test.py MaxText/configs/base.yml run_name=mattdavidow-train-base base_output_directory=gs://maxtext-experiments-multipod dataset_path=gs://max-datasets-rogue steps=5 enable_checkpointing=False base_emb_dim=28 ici_pipeline_parallelism=4 base_num_decoder_layers=24  scan_layers=True num_pipeline_microbatches=4 num_pipeline_repeats=3 num_layers_per_pipeline_stage=2 per_device_batch_size=1
   # For timing:
-  # python3 MaxText/pipeline_parallelism_test.py MaxText/configs/base.yml run_name=mattdavidow-train-base base_output_directory=gs://maxtext-experiments-multipod dataset_path=gs://max-datasets-rogue steps=5 enable_checkpointing=False ici_pipeline_parallelism=4 base_num_decoder_layers=4 scan_layers=True num_pipeline_microbatches=4 num_pipeline_repeats=1 base_emb_dim=2560
+  # python3 MaxText/pipeline_test.py MaxText/configs/base.yml run_name=mattdavidow-train-base base_output_directory=gs://maxtext-experiments-multipod dataset_path=gs://max-datasets-rogue steps=5 enable_checkpointing=False ici_pipeline_parallelism=4 base_num_decoder_layers=4 scan_layers=True num_pipeline_microbatches=4 num_pipeline_repeats=1 base_emb_dim=2560

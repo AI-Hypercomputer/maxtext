@@ -141,7 +141,8 @@ logical_axis_rules: [
                       ['activation_vocab', 'sequence'],
                       ['activation_stage','stage'],
                       ['mlp', ['fsdp_transpose', 'tensor', 'autoregressive']],
-                      ['vocab', ['tensor', 'autoregressive', 'stage']],
+                      ['vocab', ['tensor', 'autoregressive']],
+                      #['vocab', ['tensor', 'autoregressive', 'stage']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'sequence']],
                       ['embed', ['fsdp', 'sequence']],
                       ['norm', 'tensor'],
@@ -153,6 +154,8 @@ logical_axis_rules: [
                       ['cache_kv', []],
                       ['cache_sequence', []],
                     ]
+
+# The order of axes here must be identical to the one use defined to the mesh in create_device_mesh https://github.com/google/maxtext/blob/a519018a891575a9232123350282213855dc980e/MaxText/max_utils.py#L321-L336
 data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive', 'stage']]
 
 # One axis for each parallelism type may hold a placeholder (-1)

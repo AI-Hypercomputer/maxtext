@@ -83,6 +83,7 @@ class Embed(nn.Module):
     else:
       output = jnp.asarray(self.embedding, self.dtype)[inputs]
     output = nn.with_logical_constraint(output, ("logits_activation_batch", "activation_length", "activation_embed"))
+    #output = nn.with_logical_constraint(output, ("activation_batch", "activation_length", "activation_embed"))
     return output
 
   def attend(self, query: Array) -> Array:
