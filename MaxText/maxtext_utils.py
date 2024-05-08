@@ -91,30 +91,60 @@ def load_compiled(config, partial_train, state):
   return p_train_step
 
 
-# https://arxiv.org/pdf/2204.02311.pdf Appendix B
-def calculate_tflops_training_per_device(num_model_parameters, config, log=True):
+def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
-  learnable_weight_tflops = 6 * num_model_parameters * config.max_target_length * config.per_device_batch_size / 10**12
-  noncasual_attention_flops = (
-      12
-      * config.num_query_heads
-      * config.num_decoder_layers
-      * config.head_dim
-      * config.max_target_length**2
+  ffn1_flops = (
+      2
       * config.per_device_batch_size
-      / 10**12
+      * config.max_target_length
+      * config.mlp_dim
+      * config.emb_dim
+      * len(config.mlp_activations)
   )
-  causal_attention_tflops = noncasual_attention_flops / 2  # due to causality in attention
-  total_tflops = learnable_weight_tflops + causal_attention_tflops
+  ffn2_flops = 2 * config.per_device_batch_size * config.max_target_length * config.mlp_dim * config.emb_dim
+  total_ffn_flops = ffn1_flops + ffn2_flops
+
+  if config.num_experts > 1:
+    # MoE: brute force implementation
+    gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
+    weight_combination_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim
+    total_ffn_flops = gate_flops + config.num_experts * (total_ffn_flops + weight_combination_flops)
+
+  qkv_flops = (
+      2
+      * config.per_device_batch_size
+      * config.max_target_length
+      * config.emb_dim
+      * (config.num_query_heads + 2 * config.num_kv_heads)
+      * config.head_dim
+  )
+  attention_flops = (
+      4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
+  )
+  projection_flops = (
+      2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_query_heads * config.head_dim
+  )
+  embedding_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.vocab_size
+
+  # multiply by 3 for both feed forward and back proporgation flops
+  learnable_weight_tflops = (
+      ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
+  )
+  # megatron tflops calculation does not account for causality in attention
+  attention_tflops = (
+      attention_flops * config.num_decoder_layers * 3 / 10**12
+  )
+
+  total_tflops = learnable_weight_tflops + attention_tflops
 
   if log:
     print(
         "Per train step:\n",
         f"Total TFLOPs: {total_tflops:.2f} \n",
         f"split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops",
-        f"and {100 * causal_attention_tflops/total_tflops:.2f}% attention flops",
+        f"and {100 * attention_tflops/total_tflops:.2f}% attention flops",
     )
-  return total_tflops, learnable_weight_tflops, causal_attention_tflops
+  return total_tflops, learnable_weight_tflops, attention_tflops
 
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
@@ -135,12 +165,12 @@ def calculate_prefill_tflops_per_device(num_model_parameters, prefill_length, co
 
   if log:
     print(
-      "Per prefill step per device: \n",
-      f"\tTotal TFLOPs: {total_tflops:.2f} \n",
-      f"\t\tLearnable weight TFLOPs: {learnable_weight_tflops:.2f} ",
-      f"({100 * learnable_weight_tflops/total_tflops:.2f})% of Total\n",
-      f"\t\tCausal attention TFLOPs: {causal_attention_tflops:.2f} ",
-      f"({100 * causal_attention_tflops/total_tflops:.2f})% of Total",
+        "Per prefill step per device: \n",
+        f"\tTotal TFLOPs: {total_tflops:.2f} \n",
+        f"\t\tLearnable weight TFLOPs: {learnable_weight_tflops:.2f} ",
+        f"({100 * learnable_weight_tflops/total_tflops:.2f})% of Total\n",
+        f"\t\tCausal attention TFLOPs: {causal_attention_tflops:.2f} ",
+        f"({100 * causal_attention_tflops/total_tflops:.2f})% of Total",
     )
   return total_tflops, learnable_weight_tflops, causal_attention_tflops
 
