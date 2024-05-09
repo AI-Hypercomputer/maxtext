@@ -39,6 +39,7 @@ import os
 from jax import random
 from jax.sharding import Mesh
 from layers.models import Transformer
+from layers import quantizations
 import checkpointing
 
 import numpy as np
@@ -80,7 +81,6 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
     'ici_fsdp_parallelism=-1', 'ici_tensor_parallelism=1',
     f'model_name={maxtext_model_name}',
     f'run_name={run_name}', f'base_output_directory={base_output_directory}',
-    'checkpoint_period=1',
     'async_checkpointing=false',
   ]
   pyconfig.initialize(base_args)
@@ -89,15 +89,19 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   devices_array = max_utils.create_device_mesh(cfg)
   mesh = Mesh(devices_array, cfg.mesh_axes)
 
-  model = Transformer(cfg, mesh)
+  # Model and Optimizer definition
+  quant = quantizations.configure_quantization(cfg)
+  model = Transformer(cfg, mesh, quant=quant)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(cfg)
   tx = optimizers.get_optimizer(cfg, learning_rate_schedule)
 
+  # Modify checkpoint_period to force saving converted checkpoints at any step
+  checkpoint_period_overwrite = 1
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
     cfg.checkpoint_dir,
     cfg.enable_checkpointing,
     cfg.async_checkpointing,
-    cfg.checkpoint_period,
+    checkpoint_period_overwrite,
   )
 
   state, _, _ = max_utils.setup_training_state(model, None, tx, cfg, init_rng, mesh, checkpoint_manager)
