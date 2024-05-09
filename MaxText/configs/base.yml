@@ -161,8 +161,8 @@ num_slices: -1
 dataset_path: ""
 vocab_size: 32_000 # powers of 2 for sharding
 tokenizer_path: "assets/tokenizer.llama2"
-dataset_name: 'c4/en:3.0.1'
-eval_dataset_name: 'c4/en:3.0.1'
+dataset_name: 'c4/en:3.1.0'
+eval_dataset_name: 'c4/en:3.1.0'
 eval_split: 'validation'
 per_device_batch_size: 12.0
 expansion_factor_real_data: -1 # if -1 then all hosts will load real data, else total_hosts//expansion_factor_real_data will pull data from GCS.
@@ -271,3 +271,5 @@ inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
 inference_microbenchmark_stages: "prefill,generate"
 inference_microbenchmark_loop_iters: 10
 inference_microbenchmark_log_file_path: ""
+
+flops_change: True

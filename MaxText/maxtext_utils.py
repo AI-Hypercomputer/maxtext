@@ -91,8 +91,24 @@ def load_compiled(config, partial_train, state):
   return p_train_step
 
 
-def calculate_tflops_training_per_device(config, log=True):
+def calculate_tflops_training_per_device(num_model_parameters, config, log=True):
   """Calculate training TFLOP"""
+  if not config.flops_change:
+    learnable_weight_tflops = 6 * num_model_parameters * config.max_target_length * config.per_device_batch_size / 10**12
+    noncasual_attention_flops = (
+        12
+        * config.num_query_heads
+        * config.num_decoder_layers
+        * config.head_dim
+        * config.max_target_length**2
+        * config.per_device_batch_size
+        / 10**12
+    )
+    causal_attention_tflops = noncasual_attention_flops / 2  # due to causality in attention
+    total_tflops = learnable_weight_tflops + causal_attention_tflops
+    print(f"original total_tflops: {total_tflops}")
+    return total_tflops, learnable_weight_tflops, causal_attention_tflops  
+    
   ffn1_flops = (
       2
       * config.per_device_batch_size
@@ -106,9 +122,9 @@ def calculate_tflops_training_per_device(config, log=True):
 
   if config.num_experts > 1:
     # MoE: brute force implementation
-    gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
-    weight_combination_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim
-    total_ffn_flops = gate_flops + config.num_experts * (total_ffn_flops + weight_combination_flops)
+    gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim
+    total_ffn_flops = config.num_experts * (gate_flops + total_ffn_flops)
+
 
   qkv_flops = (
       2
@@ -136,6 +152,7 @@ def calculate_tflops_training_per_device(config, log=True):
   )
 
   total_tflops = learnable_weight_tflops + attention_tflops
+  print(f"..updated total_tflops: {total_tflops}")
 
   if log:
     print(
