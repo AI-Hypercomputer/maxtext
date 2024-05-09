@@ -200,124 +200,124 @@ class Decoder(nn.Module):
     y = self.shared_embedding(decoder_input_tokens.astype("int32"))
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
+    if cfg.skip_decoder:
+      if cfg.use_untrainable_positional_embedding:
+        y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
 
-    if cfg.use_untrainable_positional_embedding:
-      y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
+      if cfg.trainable_position_size > 0:
+        y += Embed(
+            num_embeddings=cfg.trainable_position_size,
+            features=cfg.emb_dim,
+            dtype=cfg.dtype,
+            embedding_init=nn.initializers.normal(stddev=1.0),
+            name="position_embedder",
+            config=cfg,
+        )(decoder_positions)
 
-    if cfg.trainable_position_size > 0:
-      y += Embed(
-          num_embeddings=cfg.trainable_position_size,
-          features=cfg.emb_dim,
-          dtype=cfg.dtype,
-          embedding_init=nn.initializers.normal(stddev=1.0),
-          name="position_embedder",
-          config=cfg,
-      )(decoder_positions)
+      BlockLayer = self.get_decoder_layer()
 
-    BlockLayer = self.get_decoder_layer()
-
-    if cfg.remat_policy != "none":
-      if cfg.remat_policy == "minimal":
-        policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
-      elif cfg.remat_policy == "save_dot_except_mlpwi":
-        policy = jax.checkpoint_policies.save_only_these_names(
-            "query_proj",
-            "value_proj",
-            "key_proj",
-            "qkv_proj",
-            "out_proj",
-            "mlpwo",
+      if cfg.remat_policy != "none":
+        if cfg.remat_policy == "minimal":
+          policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
+        elif cfg.remat_policy == "save_dot_except_mlpwi":
+          policy = jax.checkpoint_policies.save_only_these_names(
+              "query_proj",
+              "value_proj",
+              "key_proj",
+              "qkv_proj",
+              "out_proj",
+              "mlpwo",
+          )
+        elif cfg.remat_policy == "save_dot_except_mlp":
+          policy = jax.checkpoint_policies.save_only_these_names(
+              "query_proj",
+              "value_proj",
+              "key_proj",
+              "qkv_proj",
+              "out_proj",
+          )
+        elif cfg.remat_policy == "save_qkv_proj":
+          policy = jax.checkpoint_policies.save_only_these_names(
+              "query_proj",
+              "value_proj",
+              "key_proj",
+              "qkv_proj",
+          )
+        elif cfg.remat_policy == "qkv_proj_offloaded":
+          policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+              names_which_can_be_saved=[],
+              names_which_can_be_offloaded=["query_proj", "value_proj", "key_proj"],
+              offload_src="device",
+              offload_dst="pinned_host",
+          )
+        elif cfg.remat_policy == "minimal_offloaded":
+          policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host")
+        elif cfg.remat_policy == "minimal_flash":
+          policy = jax.checkpoint_policies.save_from_both_policies(
+              jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
+              jax.checkpoint_policies.save_only_these_names(
+                  "context",
+              ),
+          )
+        else:
+          assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
+          policy = None
+        BlockLayer = nn.remat(  # pylint: disable=invalid-name
+            BlockLayer,
+            prevent_cse=not cfg.scan_layers,
+            policy=policy,
+            static_argnums=(-1, -2, -3, -4, -5),
         )
-      elif cfg.remat_policy == "save_dot_except_mlp":
-        policy = jax.checkpoint_policies.save_only_these_names(
-            "query_proj",
-            "value_proj",
-            "key_proj",
-            "qkv_proj",
-            "out_proj",
-        )
-      elif cfg.remat_policy == "save_qkv_proj":
-        policy = jax.checkpoint_policies.save_only_these_names(
-            "query_proj",
-            "value_proj",
-            "key_proj",
-            "qkv_proj",
-        )
-      elif cfg.remat_policy == "qkv_proj_offloaded":
-        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=[],
-            names_which_can_be_offloaded=["query_proj", "value_proj", "key_proj"],
-            offload_src="device",
-            offload_dst="pinned_host",
-        )
-      elif cfg.remat_policy == "minimal_offloaded":
-        policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host")
-      elif cfg.remat_policy == "minimal_flash":
-        policy = jax.checkpoint_policies.save_from_both_policies(
-            jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
-            jax.checkpoint_policies.save_only_these_names(
-                "context",
+      if cfg.scan_layers:
+        initializing = self.is_mutable_collection("params")
+        params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
+        cache_spec = 0
+        y, _ = nn.scan(
+            BlockLayer,
+            variable_axes={
+                "params": params_spec,
+                "cache": cache_spec,
+                "intermediates": 0,
+                "aqt": 0,
+                "_overwrite_with_gradient": 0,
+            },
+            split_rngs={
+                "params": True,
+                "dropout": cfg.enable_dropout,
+            },
+            in_axes=(
+                nn.broadcast,
+                nn.broadcast,
+                nn.broadcast,
+                nn.broadcast,
             ),
-        )
-      else:
-        assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
-        policy = None
-      BlockLayer = nn.remat(  # pylint: disable=invalid-name
-          BlockLayer,
-          prevent_cse=not cfg.scan_layers,
-          policy=policy,
-          static_argnums=(-1, -2, -3, -4, -5),
-      )
-    if cfg.scan_layers:
-      initializing = self.is_mutable_collection("params")
-      params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
-      cache_spec = 0
-      y, _ = nn.scan(
-          BlockLayer,
-          variable_axes={
-              "params": params_spec,
-              "cache": cache_spec,
-              "intermediates": 0,
-              "aqt": 0,
-              "_overwrite_with_gradient": 0,
-          },
-          split_rngs={
-              "params": True,
-              "dropout": cfg.enable_dropout,
-          },
-          in_axes=(
-              nn.broadcast,
-              nn.broadcast,
-              nn.broadcast,
-              nn.broadcast,
-          ),
-          length=cfg.num_decoder_layers,
-          metadata_params={nn.PARTITION_NAME: "layers"},
-      )(config=cfg, mesh=mesh, name="layers", quant=self.quant)(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-      )
-    else:
-      for lyr in range(cfg.num_decoder_layers):
-        y = BlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+            length=cfg.num_decoder_layers,
+            metadata_params={nn.PARTITION_NAME: "layers"},
+        )(config=cfg, mesh=mesh, name="layers", quant=self.quant)(
             y,
             decoder_segment_ids,
             decoder_positions,
             deterministic,
             model_mode,
         )
+      else:
+        for lyr in range(cfg.num_decoder_layers):
+          y = BlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+          )
 
-    y = self.get_norm_layer()(
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="decoder_norm",
-        epsilon=cfg.normalization_layer_epsilon,
-        kernel_axes=("norm",),
-    )(y)
-    y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
+      y = self.get_norm_layer()(
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          name="decoder_norm",
+          epsilon=cfg.normalization_layer_epsilon,
+          kernel_axes=("norm",),
+      )(y)
+      y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
 
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:

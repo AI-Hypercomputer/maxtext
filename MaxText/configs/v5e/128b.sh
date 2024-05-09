@@ -49,4 +49,5 @@ python3 MaxText/$EXECUTABLE MaxText/configs/base.yml\
     use_iota_embed=true reuse_example_batch=1\
     dataset_type=synthetic attention='flash' gcs_metrics=true\
     fused_qkv=True fused_mlp=True\
+    dcn_fsdp_parallelism=2
     
