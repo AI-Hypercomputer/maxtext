@@ -31,29 +31,22 @@ if [[ -z ${DATASET_GCS_BUCKET} || -z ${MOUNT_PATH} ]]; then
   exit 1
 fi
 
-if [[ $GCS_BUCKET == gs://* ]] ; then
-    echo "Remove gs:// from GCS bucket name"
-    exit 1
+if [[ "$DATASET_GCS_BUCKET" =~ gs:\/\/ ]] ; then
+    DATASET_GCS_BUCKET="${DATASET_GCS_BUCKET/gs:\/\//}"
+    echo "Removed gs:// from GCS bucket name, GCS bucket is $DATASET_GCS_BUCKET"
 fi
 
-if ! command -v sudo &> /dev/null ; then
-  apt install sudo
-fi
-
-if ! command -v gcsfuse &> /dev/null ; then
-	sudo apt-get update -y && \
-  sudo apt-get install -y lsb-release && \
-  sudo apt-get install -y gnupg && \
-  sudo apt-get install -y curl
-  export GCSFUSE_REPO=gcsfuse-`lsb_release -c -s`
-  echo "deb https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | sudo tee /etc/apt/sources.list.d/gcsfuse.list
-  curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
-  sudo apt-get update -y && sudo apt-get -y install gcsfuse
-  sudo rm -rf /var/lib/apt/lists/*
+if [[ -d ${MOUNT_PATH} ]]; then
+  echo "$MOUNT_PATH exists, removing..."
+  fusermount -u $MOUNT_PATH || rm -rf $MOUNT_PATH
 fi
 
 mkdir -p $MOUNT_PATH
 
-gcsfuse --implicit-dirs --http-client-timeout=5s --max-conns-per-host=2000 \
+# see https://cloud.google.com/storage/docs/gcsfuse-cli for all configurable options of gcsfuse CLI
+# Grain uses _PROCESS_MANAGEMENT_MAX_THREADS = 64 (https://github.com/google/grain/blob/main/grain/_src/python/grain_pool.py)
+# Please make sure max-conns-per-host > grain_worker_count * _PROCESS_MANAGEMENT_MAX_THREADS
+
+gcsfuse -o ro --implicit-dirs --http-client-timeout=5s --max-conns-per-host=2000 \
         --debug_fuse_errors --debug_fuse --debug_gcs --debug_invariants --debug_mutex \
         --log-file=$HOME/gcsfuse.json "$DATASET_GCS_BUCKET" "$MOUNT_PATH"

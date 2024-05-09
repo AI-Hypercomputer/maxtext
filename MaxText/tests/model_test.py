@@ -27,105 +27,104 @@ import pytest
 import pyconfig
 
 from layers import models
+from layers import quantizations
 
 Mesh = jax.sharding.Mesh
-MAX_PREFILL_PREDICT_LENGTH = 4 
+MAX_PREFILL_PREDICT_LENGTH = 4
+
 
 class TestModel(unittest.TestCase):
-  """Test the Whole Model """
+  """Test the Whole Model"""
+
   def setUp(self):
     super().setUp()
-    pyconfig.initialize([sys.argv[0], 'configs/base.yml'], per_device_batch_size = 1.0, run_name='test',
-                         enable_checkpointing=False, base_num_decoder_layers=2, attention="dot_product",
-                         max_target_length=16, base_emb_dim=256, base_num_query_heads=2, base_num_kv_heads=2, max_prefill_predict_length=4)
+    pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        per_device_batch_size=1.0,
+        run_name="test",
+        enable_checkpointing=False,
+        base_num_decoder_layers=2,
+        attention="dot_product",
+        max_target_length=16,
+        base_emb_dim=256,
+        base_num_query_heads=2,
+        base_num_kv_heads=2,
+        max_prefill_predict_length=4,
+    )
     self.cfg = pyconfig.config
     self.rng = jax.random.PRNGKey(0)
 
   def get_data(self):
     s = (self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length)
-    ids = jax.random.randint(
-        self.rng,
-        s,
-        0,
-        self.cfg.vocab_size
-    )
+    ids = jax.random.randint(self.rng, s, 0, self.cfg.vocab_size)
 
     decoder_segment_ids = jax.numpy.zeros(s) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
-    decoder_positions = jnp.stack([
-          jnp.arange(self.cfg.max_target_length, dtype=jnp.int32)
-          for _ in range(self.cfg.global_batch_size_to_train_on)
-    ])
+    decoder_positions = jnp.stack(
+        [jnp.arange(self.cfg.max_target_length, dtype=jnp.int32) for _ in range(self.cfg.global_batch_size_to_train_on)]
+    )
 
     return ids, decoder_segment_ids, decoder_positions
-  
+
   @pytest.mark.tpu
   def test_train_vs_prefill_and_autoregress(self):
     PREFILL_RANGE = MAX_PREFILL_PREDICT_LENGTH
 
     devices_array = max_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
-    model = models.Transformer(config = self.cfg, mesh = mesh)
+    quant = quantizations.configure_quantization(self.cfg)
+    model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant)
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
     transformer_vars = model.init(
-        {'params': self.rng, 'aqt': self.rng},
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False
+        {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
     )
 
     full_train_logits = model.apply(
-      transformer_vars,
-      ids,
-      decoder_positions,
-      decoder_segment_ids,
-      enable_dropout=False,
-      model_mode = common_types.MODEL_MODE_TRAIN,
-      rngs={'aqt': self.rng}
+        transformer_vars,
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+        model_mode=common_types.MODEL_MODE_TRAIN,
+        rngs={"aqt": self.rng},
     )
 
     partial_prefill_logits, partial_cache = model.apply(
-      transformer_vars,
-      ids[:, :PREFILL_RANGE],
-      decoder_positions[:, :PREFILL_RANGE],
-      decoder_segment_ids=decoder_segment_ids[:, :PREFILL_RANGE],
-      enable_dropout=False,
-      model_mode = common_types.MODEL_MODE_PREFILL,
-      rngs={'aqt': self.rng},
-      mutable=["cache"],
+        transformer_vars,
+        ids[:, :PREFILL_RANGE],
+        decoder_positions[:, :PREFILL_RANGE],
+        decoder_segment_ids=decoder_segment_ids[:, :PREFILL_RANGE],
+        enable_dropout=False,
+        model_mode=common_types.MODEL_MODE_PREFILL,
+        rngs={"aqt": self.rng},
+        mutable=["cache"],
     )
 
     self.assertTrue(
         jax.numpy.allclose(
-            full_train_logits[:,:PREFILL_RANGE,:], partial_prefill_logits, rtol=1e-01, atol=1e-01, equal_nan=False
+            full_train_logits[:, :PREFILL_RANGE, :], partial_prefill_logits, rtol=1e-01, atol=1e-01, equal_nan=False
         )
     )
 
     for idx in range(PREFILL_RANGE, self.cfg.max_target_length):
-      ids_idx = ids[:, idx:idx+1]
-      decoder_positions_idx = decoder_positions[:, idx:idx+1]
+      ids_idx = ids[:, idx : idx + 1]
+      decoder_positions_idx = decoder_positions[:, idx : idx + 1]
       transformer_vars.update(partial_cache)
       ar_logits, partial_cache = model.apply(
-        transformer_vars,
-        ids_idx,
-        decoder_positions_idx,
-        enable_dropout=False,
-        model_mode = common_types.MODEL_MODE_AUTOREGRESSIVE,
-        rngs={'aqt': self.rng},
-        mutable=["cache"],
+          transformer_vars,
+          ids_idx,
+          decoder_positions_idx,
+          enable_dropout=False,
+          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          rngs={"aqt": self.rng},
+          mutable=["cache"],
       )
 
-      full_train_logits_idx  = full_train_logits[:,idx:idx+1,:]
-      self.assertTrue(
-        full_train_logits_idx.shape == ar_logits.shape
-      )
-      self.assertTrue(
-        jax.numpy.allclose(
-            full_train_logits_idx, ar_logits, rtol=1e-01, atol=1e-01, equal_nan=False
-        )
-      )
+      full_train_logits_idx = full_train_logits[:, idx : idx + 1, :]
+      self.assertTrue(full_train_logits_idx.shape == ar_logits.shape)
+      self.assertTrue(jax.numpy.allclose(full_train_logits_idx, ar_logits, rtol=1e-01, atol=1e-01, equal_nan=False))
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
   unittest.main()

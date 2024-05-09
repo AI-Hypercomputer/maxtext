@@ -10,18 +10,30 @@ echo "Running 32b.sh"
 #
 # Example to invoke this script:
 # bash MaxText/configs/v5e/32b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>" PLATFORM="gke"
+#
+# Example to AOT compile:
+# bash MaxText/configs/v5e/32b.sh EXECUTABLE=train_compile.py M_COMPILE_TOPOLOGY=v5e-256 M_COMPILE_TOPOLOGY_NUM_SLICES=2
 
 
 # Stop execution if any command exits with error
 set -e
 
 export PLATFORM="gce"
+export EXECUTABLE="train.py" # or train_compile.py
 
 # Set environment variables
 for ARGUMENT in "$@"; do
     IFS='=' read -r KEY VALUE <<< "$ARGUMENT"
     export "$KEY"="$VALUE"
 done
+
+# The setup accommodates two cases:
+# 1) Passing the 'RUN_NAME' variable at runtime
+# 2) Propagating the 'M_RUN_NAME' variable within an Airflow sweeping workflow
+if [ -n "$RUN_NAME" ];
+then
+    export M_RUN_NAME=$RUN_NAME
+fi
 
 # Set up network optimizations
 bash preflight.sh PLATFORM=$PLATFORM

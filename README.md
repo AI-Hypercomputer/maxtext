@@ -1,5 +1,5 @@
 <!--
- Copyright 2023 Google LLC
+ Copyright 2024 Google LLC
 
  Licensed under the Apache License, Version 2.0 (the "License");
  you may not use this file except in compliance with the License.
@@ -19,13 +19,20 @@
 
 # Overview
 
-MaxText is a **high performance**, **arbitrarily scalable**, **open-source**, **simple**, **easily forkable**, **well-tested**, **batteries included** LLM written in pure Python/Jax and targeting Google Cloud TPUs. MaxText typically achieves 55% to 60% model-flop utilization and scales from single host to very large clusters while staying simple and "optimization-free" thanks to the power of Jax and the XLA compiler.
+MaxText is a **high performance**, **highly scalable**, **open-source** LLM written in pure Python/Jax and targeting Google Cloud TPUs and GPUs for **training** and **inference**. MaxText achieves [high MFUs](#runtime-performance-results) and scales from single host to very large clusters while staying simple and "optimization-free" thanks to the power of Jax and the XLA compiler.
 
 MaxText aims to be a launching off point for ambitious LLM projects both in research and production. We encourage users to start by experimenting with MaxText out of the box and then fork and modify MaxText to meet their needs.
 
+We have used MaxText to [demonstrate high-performance, well-converging training in int8](https://cloud.google.com/blog/products/compute/accurate-quantized-training-aqt-for-tpu-v5e) and [scale training to ~51K chips](https://cloud.google.com/blog/products/compute/the-worlds-largest-distributed-llm-training-job-on-tpu-v5e).
+
+Key supported features:
+* TPUs and GPUs (in preview)
+* Training and Inference (in preview)
+* Models: Llama2, Mistral and Gemma
+
 # Table of Contents
 
-* [Getting Started](#getting-started)
+* [Getting Started](getting_started/First_run.md)
 * [Runtime Performance Results](#runtime-performance-results)
 * [Comparison To Alternatives](#comparison-to-alternatives)
 * [Development](#development)
@@ -33,89 +40,38 @@ MaxText aims to be a launching off point for ambitious LLM projects both in rese
 
 # Getting Started
 
-We recommend starting with a single host first and then moving to multihost.
+For your first time running MaxText, we provide specific [instructions](getting_started/First_run.md).
 
-## Getting Started: Download Dataset and Configure
-You need to run these steps once per project prior to any local development or cluster experiments.
+MaxText supports training and inference of various open models. Follow user guides in the [getting started](getting_started) folder to know more.
 
-1. Create two gcs buckets in your project, one for to downloading and retrieving the dataset and the other for storing the logs.
-2. Download the dataset in your gcs bucket
-```
-bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
-```
-3. Set config values for `base_output_directory` and `dataset_path` in `configs/base.yml`. `vocab_relative_path` is relative to `base_output_directory` for loading the tokenizer. MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them. We also recommend reviewing the configurable options in `configs/base.yml`, for instance you may change the `steps` or `logging_period` by either modifying `configs/base.yml` or by passing in `steps` and `logging_period` as additional args to the `train.py` call.
+Some extra helpful guides:
+* [Gemma](https://ai.google.dev/gemma): a family of open-weights Large Language Model (LLM) by [Google DeepMind](https://deepmind.google/), based on Gemini research and technology. You can run decode and finetuning using [these instructions](end_to_end/gemma/Run_Gemma.md).
+* [Llama2](https://llama.meta.com/llama2/): a family of open-weights Large Language Model (LLM) by Meta. You can run decode and finetuning using [these instructions](getting_started/Run_Llama2.md).
 
-To run maxtext the TPUVMs must have permission to read the gcs bucket. These permissions are granted by service account roles, such as the `STORAGE ADMIN` role.
-
-## Getting Started: Local Development for single host
-
-Local development is a convenient way to run MaxText on a single host. It doesn't scale to
-multiple hosts.
-
-1. [Create and SSH to the single-host TPU of your choice.](https://cloud.google.com/tpu/docs/users-guide-tpu-vm#creating_a_cloud_tpu_vm_with_gcloud) We recommend a `v4-8`.
-2. Clone MaxText onto that TPUVM.
-3. Within the root directory of that `git` repo, install dependencies by running:
-```
-bash setup.sh
-```
-4. After installation completes, run training with the command:
-```
-python3 MaxText/train.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
-```
-
-5. If you want to decode, you can decode as follows.
-```
-python3 MaxText/decode.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
-```
-Be aware, these decodings will be random. To get high quality decodings you need pass in a checkpoint, typically via the `load_parameters_path` argument.
-
-
-#### Running on NVIDIA GPUs
-1. Use `bash docker_build_dependency_image.sh DEVICE=gpu` can be used to build a container with the required dependencies.
-2. After installation is completed, run training with the command:
-```
-python3 MaxText/train.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
-```
-3. If you want to decode, you can decode as follows.
-```
-python3 MaxText/decode.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
-```
-
-* If you see the following error when running inside a container, set a larger `--shm-size` (e.g. `--shm-size=1g`)
-```
-Failed to execute XLA Runtime executable: run time error: custom call 'xla.gpu.all_reduce' failed: external/xla/xla/service/gpu/nccl_utils.cc:297: NCCL operation ncclCommInitRank(&comm, nranks, id, rank) failed: unhandled cuda error (run with NCCL_DEBUG=INFO for details); current tracing scope: all-reduce-start.2; current profiling annotation: XlaModule:#hlo_module=jit__unnamed_wrapped_function_,program_id=7#.
-```
-
-## Getting Starting: Multihost development
-There are three patterns for running MaxText with more than one host.
-
-1. [GKE, recommended] [Running Maxtext with xpk](getting_started/Run_MaxText_via_xpk.md) - Quick Experimentation and Production support
-2. [GCE] [Running Maxtext with Multihost Jobs](getting_started/Run_MaxText_via_multihost_jobs.md) - Long Running Production Jobs with Queued Resources
-3. [GCE] [Running Maxtext with Multihost Runner](getting_started/Run_MaxText_via_multihost_runner.md) -  Fast experiments via multiple ssh connections.
+In addition to the getting started guides, there are always other MaxText capabilities that are being constantly being added! The full suite of end-to-end tests is in [end_to_end](end_to_end). We run them with a nightly cadence. They can be a good source for understanding MaxText Alternatively you can see the continuous [unit tests](.github/workflows/UnitTests.yml) which are run almost continuously.
 
 # Runtime Performance Results
 
-## TPU v4
+More details on reproducing these results can be found in [MaxText/configs/README.md](MaxText/configs/README.md).
 
-For a 22B model. See full run configs in `MaxText/configs/v4/` as `22b.sh`.
+## TPU v5p
 
-| Hardware    | TFLOP/sec/chip   |  MFU  |
-| ----------- | ---------------- | ----- |
-| 1x v4-128   | 156              | 56.7% |
-| 2x v4-128   | 152              | 55.2% |
-| 4x v4-128   | 149              | 54.3% |
-| 8x v4-128   | 146              | 53.2% |
-
-For a 52B model. See full run configs in `MaxText/configs/v4/` as `52b.sh`.
-
-| Hardware    | TFLOP/sec/chip   |  MFU  |
-| ----------- | ---------------- | ----- |
-| 1x v4-384   | 154              | 56.0% |
-| 2x v4-384   | 162              | 58.9% | # this is quirkily higher than single slice because of choices made by the compiler, not for a fundamental reason.
+| No. of params | Accelerator Type | TFLOP/chip/sec | Model flops utilization (MFU) |
+|---|---|---|---|
+| 32B | v5p-128 | 3.28e+02 | 71.47% |
+| 64B | v5p-128 | 3.23e+02 | 70.31% |
+| 128B | v5p-256 | 3.15e+02 | 68.68% |
+| 128B | v5p-512 | 3.15e+02 | 68.53% |
+| 256B | v5p-1024 | 3.16e+02 | 68.82% |
+| 512B | v5p-1024 | 2.94e+02 | 63.99% |
+| 1024B | v5p-2048 | 2.49e+02 | 64.05% |
+| 1024B | v5p-4096 | 2.97e+02 | 64.80% |
+| 1160B | v5p-7680 | 2.95e+02 | 64.27% |
+| 1160B | v5p-12288 | 3.04e+02 | 66.23% |
 
 ## TPU v5e
 
-For 16B, 32B, 64B, and 128B models. See full run configs in `MaxText/configs/v5e/` as `16b.sh`, `32b.sh`, `64b.sh`, `128b.sh`.
+For 16B, 32B, 64B, and 128B models. See full run configs in [MaxText/configs/v5e/](MaxText/configs/v5e/) as `16b.sh`, `32b.sh`, `64b.sh`, `128b.sh`.
 
 | Hardware    | 16B TFLOP/sec/chip | 16B MFU | 32B TFLOP/sec/chip | 32B MFU | 64B TFLOP/sec/chip | 64B MFU | 128B TFLOP/sec/chip | 128B MFU |
 | ----------- | -----------------: | ------- | -----------------: | ------- | -----------------: | ------- | ------------------: | -------- |
@@ -126,31 +82,17 @@ For 16B, 32B, 64B, and 128B models. See full run configs in `MaxText/configs/v5e
 | 16x v5e-256 | 111                | 56.56%  | 123                | 62.26%  | 105                | 53.29%  | 100                 | 50.86%   |
 | 32x v5e-256 | 108                | 54.65%  | 119                | 60.40%  | 99                 | 50.18%  | 91                  | 46.25%   |
 
-More details on reproducing these results can be found in `MaxText/configs/README.md`.
-
-
 # Comparison to Alternatives
 
-MaxText is heavily inspired by [MinGPT](https://github.com/karpathy/minGPT)/[NanoGPT](https://github.com/karpathy/nanoGPT), elegant standalone GPT implementations written in PyTorch and targeting Nvidia GPUs. MaxText is more complex but has an MFU more than three times the [17%](https://twitter.com/karpathy/status/1613250489097027584?cxt=HHwWgIDUhbixteMsAAAA) reported most recently with that codebase, is massively scalable and implements a key-value cache for efficient auto-regressive decoding.
+MaxText is heavily inspired by [MinGPT](https://github.com/karpathy/minGPT)/[NanoGPT](https://github.com/karpathy/nanoGPT), elegant standalone GPT implementations written in PyTorch and targeting Nvidia GPUs. MaxText is more complex, supporting more industry standard models and scaling to tens of thousands of chips. Ultimately MaxText has an MFU more than three times the [17%](https://twitter.com/karpathy/status/1613250489097027584?cxt=HHwWgIDUhbixteMsAAAA) reported most recently with that codebase, is massively scalable and implements a key-value cache for efficient auto-regressive decoding.
 
 MaxText is more similar to [Nvidia/Megatron-LM](https://github.com/NVIDIA/Megatron-LM), a very well tuned LLM implementation targeting Nvidia GPUs. The two implementations achieve comparable MFUs. The difference in the codebases highlights the different programming strategies. MaxText is pure Python, relying heavily on the XLA compiler to achieve high performance. By contrast, Megatron-LM is a mix of Python and CUDA, relying on well-optimized CUDA kernels to achieve high performance.
 
-MaxText is also comparable to [Pax](https://github.com/google/paxml). Like Pax, MaxText provides high-performance and scalable implementations of LLMs in Jax. Pax focuses on enabling powerful configuration parameters, enabling developers to change the model by editing config parameters. By contrast, MaxText is a simple, concrete implementation of an LLM that encourages users to extend by forking and directly editing the source code. The right choice depends on your project's priorities.
-
-# Development
-
-Whether you are forking MaxText for your own needs or intending to contribute back to the community, we wanted to offer simple testing recipes.
-
-To run unit tests and lint, simply run:
-```
-bash unit_test_and_lint.sh
-```
-
-The full suite of end-to-end tests is in `end_to_end/`. We run them with a nightly cadence.
+MaxText is also comparable to [Pax](https://github.com/google/paxml). Like Pax, MaxText provides high-performance and scalable implementations of LLMs in Jax. Pax focuses on enabling powerful configuration parameters, enabling developers to change the model by editing config parameters. By contrast, MaxText is a simple, concrete implementation of various LLMs that encourages users to extend by forking and directly editing the source code.
 
 # Features and Diagnostics
 ## Collect Stack Traces
-When running a Single Program, Multiple Data (SPMD) job on TPU VMs, the overall process can hang if there is any error or any VM hangs/crashes for some reason. In this scenario, capturing stack traces will help to identify and troubleshoot the issues for the jobs running on TPU VMs.
+When running a Single Program, Multiple Data (SPMD) job on accelerators, the overall process can hang if there is any error or any VM hangs/crashes for some reason. In this scenario, capturing stack traces will help to identify and troubleshoot the issues for the jobs running on TPU VMs.
 
 The following configurations will help to debug a fault or when a program is stuck or hung somewhere by collecting stack traces. Change the parameter values accordingly in `MaxText/configs/base.yml`:
 1. Set `collect_stack_trace: True` to enable collection of stack traces on faults or when the program is hung. This setting will periodically dump the traces for the program to help in debugging. To disable this, set `collect_stack_trace: False`.
@@ -163,7 +105,7 @@ jsonPayload.verb="stacktraceanalyzer"
 
 Here is the related PyPI package: https://pypi.org/project/cloud-tpu-diagnostics.
 
-## Ahead of Time Compilation (AOT)
+## Ahead of Time Compilation (AOT, tpu-only)
 To compile your training run ahead of time, we provide a tool `train_compile.py`. This tool allows you to compile the main `train_step` in `train.py` for target hardware (e.g. a large number of v5e devices) without using the target hardware, and instead you may use only a CPU or a single VM from a different family. This compilation helps with two main goals:
 
 * It will flag any out of memory (OOM) information, such as when the `per_device_batch_size` is set too high, with an identical OOM stack trace as if it was compiled on the target hardware.
@@ -209,3 +151,5 @@ base_output_directory=gs://my-output-bucket dataset_path=gs://my-dataset-bucket
 
 In the save step of example 2 above we included exporting the compiler flag `LIBTPU_INIT_ARGS` and `learning_rate` because those affect the compiled object `my_compiled_train.pickle.` The sizes of the model (e.g. `global_parameter_scale`, `max_sequence_length` and `per_device_batch`) are fixed when you initially compile via `compile_train.py`, you will see a size error if you try to run the saved compiled object with different sizes than you compiled with. However a subtle note is that the **learning rate schedule** is also fixed when you run `compile_train` - which is determined by both `steps` and `learning_rate`. The optimizer parameters such as  `adam_b1` are passed only as shaped objects to the compiler - thus their real values are determined when you run `train.py`, not during the compilation. If you do pass in different shapes (e.g. `per_device_batch`), you will get a clear error message reporting that the compiled signature has different expected shapes than what was input. If you attempt to run on different hardware than the compilation targets requested via `compile_topology`, you will get an error saying there is a failure to map the devices from the compiled to your real devices. Using different XLA flags or a LIBTPU than what was compiled will probably run silently with the environment you compiled in without error. However there is no guaranteed behavior in this case; you should run in the same environment you compiled in.
 
+## Automatically Upload Logs to Vertex Tensorboard
+MaxText supports automatic upload of logs collected in a directory to a Tensorboard instance in Vertex AI. Follow [user guide](getting_started/Use_Vertex_AI_Tensorboard.md) to know more.
