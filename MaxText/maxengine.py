@@ -171,6 +171,7 @@ class MaxEngine(engine_api.Engine):
         flat_logits, (0, true_length - 1, 0), (flat_logits.shape[0], 1, flat_logits.shape[2])
     )
     selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
+
     return {
         "logits": selected_logits,
         "cache": new_vars["cache"],
