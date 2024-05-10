@@ -67,9 +67,8 @@ class MoeLoopBlock(nn.Module):
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     # print("weights from loop", weights)
     # print("selected_experts from loop", selected_experts)
-    weights = jax.nn.softmax(weights.astype(self.weight_dtype), axis=-1)
+    weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
     mlp_lnx = jnp.zeros_like(inputs)
-    weights = weights.astype(self.dtype)
     mlp_lnx = nn.with_logical_constraint(
             mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')
         )
@@ -91,7 +90,7 @@ class MoeLoopBlock(nn.Module):
         )
         mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
         mlp_lnx += mlp_lnx_exp
-        print(f"mlp_lnx.shape: {mlp_lnx.shape}")
+        # print(f"mlp_lnx.shape: {mlp_lnx.shape}")
 
     return mlp_lnx
 
@@ -127,6 +126,7 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
       )
 
       kernel = variables['params']['gate']['kernel'].value
+      kernel = kernel.astype(cfg.weight_dtype)
 
       exp_wi_0 = []
       exp_wi_1 = []
@@ -147,9 +147,9 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
         exp_wi_1.append(tmp_wi_1)
         exp_wo.append(tmp_wo)
 
-      wi_0 = jnp.concat(exp_wi_0, axis=0)
-      wi_1 = jnp.concat(exp_wi_1, axis=0)
-      wo = jnp.concat(exp_wo, axis=0)
+      wi_0 = jnp.concatenate(exp_wi_0, axis=0, dtype=cfg.weight_dtype)
+      wi_1 = jnp.concatenate(exp_wi_1, axis=0, dtype=cfg.weight_dtype)
+      wo = jnp.concatenate(exp_wo, axis=0, dtype=cfg.weight_dtype)
 
       moe_variables = {'params': {'gate': {'kernel': kernel}, 
                                            'wi_0': wi_0, 
@@ -157,8 +157,10 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
                                            'wo': wo}}
       
       # print("get_moe_output expected_variables", variables)
-      time.simple_timeit(jax.jit(model.apply), moe_variables, hidden_states, tries=10, task="megablox")
+      # breakpoint()
+      time.simple_timeit(jax.jit(model.apply), moe_variables, hidden_states, tries=10, task="matmul")
       output = jax.jit(model.apply)(moe_variables, hidden_states)
+      # output = model.apply(moe_variables, hidden_states)
       return output
 
 
@@ -184,7 +186,8 @@ class MoeTest(unittest.TestCase):
                                             self.cfg.base_emb_dim))
     # print(f"{self.hidden_states.shape}=")
 
-    devices_array = max_utils.create_device_mesh(self.cfg, devices=[jax.devices()[0]])
+    # devices_array = max_utils.create_device_mesh(self.cfg, devices=[jax.devices()[0]])
+    devices_array = max_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
 
   def test_moe_block(self):

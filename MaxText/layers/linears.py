@@ -138,10 +138,10 @@ class DenseGeneral(nn.Module):
     kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(axis)))
-    print(f"inputs.shape: {inputs.shape}")
-    print(f"kernel.shape: {kernel.shape}")
+    # print(f"inputs.shape: {inputs.shape}")
+    # print(f"kernel.shape: {kernel.shape}")
     output = compute_dot_general(inputs, kernel, axis, contract_ind)
-    print(f"output.shape: {output.shape}")
+    # print(f"output.shape: {output.shape}")
 
     if self.use_bias:
       bias_axes, bias_shape = self.kernel_axes[-len(features) :], kernel_shape[-len(features) :]
@@ -305,7 +305,6 @@ class MoeBlock(nn.Module):
         kernel_in_axis,
         kernel_out_axis,
       )
-    w0 = jnp.asarray(w0_kernel, self.dtype)
     w1_kernel = self.param(
         'wi_1',
         nn.with_logical_partitioning(kernel_init, kernel_axes),
@@ -314,7 +313,6 @@ class MoeBlock(nn.Module):
         kernel_in_axis,
         kernel_out_axis,
       )
-    w1 = jnp.asarray(w1_kernel, self.dtype)
     wo_kernel = self.param(
         'wo',
         nn.with_logical_partitioning(kernel_init, wo_kernel_axes),
@@ -323,8 +321,7 @@ class MoeBlock(nn.Module):
         kernel_in_axis,
         kernel_out_axis,
       )
-    wo = jnp.asarray(wo_kernel, self.dtype)
-    return w0, w1, wo
+    return w0_kernel, w1_kernel, wo_kernel
 
   def call_gmm(self,
                inputs,
@@ -334,23 +331,23 @@ class MoeBlock(nn.Module):
                mlp_activation,
                group_sizes):
 
-    @functools.partial(
-        shard_map.shard_map,
-        mesh=self.mesh,
-        in_specs=(
-              (nn.logical_to_mesh_axes((None, None))),
-              (nn.logical_to_mesh_axes((None, None, None))),
-              (nn.logical_to_mesh_axes((None,))),
-          ),
-        out_specs=(nn.logical_to_mesh_axes((None, None))),
-        # in_specs=(
-        #       (nn.logical_to_mesh_axes(("activation_batch_length", "embed"))),
-        #       (nn.logical_to_mesh_axes((None, "activation_embed", "mlp"))),
-        #       (nn.logical_to_mesh_axes((None,))),
-        #   ),
-        # out_specs=(nn.logical_to_mesh_axes(("activation_batch_length", "mlp"))),
-        check_rep=False,
-    )
+    # @functools.partial(
+    #     shard_map.shard_map,
+    #     mesh=self.mesh,
+    #     in_specs=(
+    #           (nn.logical_to_mesh_axes((None, None))),
+    #           (nn.logical_to_mesh_axes((None, None, None))),
+    #           (nn.logical_to_mesh_axes((None,))),
+    #       ),
+    #     out_specs=(nn.logical_to_mesh_axes((None, None))),
+    #     # in_specs=(
+    #     #       (nn.logical_to_mesh_axes(("activation_batch_length", "embed"))),
+    #     #       (nn.logical_to_mesh_axes((None, "activation_embed", "mlp"))),
+    #     #       (nn.logical_to_mesh_axes((None,))),
+    #     #   ),
+    #     # out_specs=(nn.logical_to_mesh_axes(("activation_batch_length", "mlp"))),
+    #     check_rep=False,
+    # )
     def gmm(inputs, kernel, group_sizes):
       hs_shape = inputs.shape
       # pad lengh is the 1st dimension of tiling size in gmm call
@@ -410,27 +407,71 @@ class MoeBlock(nn.Module):
     groups = jnp.reshape(combined_output, (-1, self.num_experts_per_tok, combined_output.shape[1]))
     return jnp.sum(groups, axis=1).reshape(inputs.shape).astype(self.dtype)
 
+  # @nn.compact
+  # def __call__(self, inputs):
+  #   cfg = self.config
+
+  #   gate_logits = DenseGeneral(
+  #           self.num_experts,
+  #           dtype=self.dtype,
+  #           kernel_init=self.kernel_init,
+  #           kernel_axes=self.kernel_axes,
+  #           name='gate')(inputs)
+  #   sorted_hidden_states, sorted_selected_experts, weights, group_size = self.permute(inputs,
+  #                                                                                     gate_logits,
+  #                                                                                     cfg.base_emb_dim)
+  
+  #   intermediate_output = self.call_gmm(sorted_hidden_states,
+  #                                       cfg.num_experts,
+  #                                       cfg.base_emb_dim,
+  #                                       cfg.mlp_dim,
+  #                                       cfg.mlp_activations[0],
+  #                                       group_size)
+
+  #   output = self.unpermute(intermediate_output, inputs, sorted_selected_experts, weights)
+
+  #   return output
+
   @nn.compact
   def __call__(self, inputs):
     cfg = self.config
-
+    inputs = inputs.astype(cfg.dtype)
     gate_logits = DenseGeneral(
             self.num_experts,
             dtype=self.dtype,
             kernel_init=self.kernel_init,
             kernel_axes=self.kernel_axes,
             name='gate')(inputs)
-    sorted_hidden_states, sorted_selected_experts, weights, group_size = self.permute(inputs,
-                                                                                      gate_logits,
-                                                                                      cfg.base_emb_dim)
-  
-    intermediate_output = self.call_gmm(sorted_hidden_states,
-                                        cfg.num_experts,
-                                        cfg.base_emb_dim,
-                                        cfg.mlp_dim,
-                                        cfg.mlp_activations[0],
-                                        group_size)
+    
+    top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+    flattened_top_k_weights = top_k_weights.reshape(-1, self.num_experts_per_tok)
 
-    output = self.unpermute(intermediate_output, inputs, sorted_selected_experts, weights)
+    # print(f"flattened_top_k_weights.shape: {flattened_top_k_weights.shape}")
+    # print(f"flattened_top_k_weights: {flattened_top_k_weights}")
 
+    softmax_probs = jax.nn.softmax(flattened_top_k_weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
+    softmax_probs = softmax_probs.reshape(gate_logits.shape[:-1] + (self.num_experts_per_tok,))
+
+    weights = jnp.zeros_like(gate_logits)
+    index_update = (jnp.arange(gate_logits.shape[0])[:, None, None], jnp.arange(gate_logits.shape[1])[:, None], top_k_indices)
+    weights = weights.at[index_update].set(softmax_probs)
+
+    # print(f"weights.shape: {weights.shape}")
+    # print(f"weights: {weights}")
+
+    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts,
+                                                            cfg.base_emb_dim,
+                                                            cfg.mlp_dim)
+    
+    with jax.named_scope("wi_0"):
+      layer_w0 = jnp.einsum("BLE,NEH -> BLNH", inputs, w0_kernel)
+    with jax.named_scope("wi_1"):
+      layer_w1 = jnp.einsum("BLE,NEH -> BLNH", inputs, w1_kernel)
+    layer_w0_act = _convert_to_activation_function(cfg.mlp_activations[0])(layer_w0)
+    layer_multiply = jnp.multiply(layer_w0_act, layer_w1)
+    with jax.named_scope("wo"):
+      intermediate_layer = jnp.einsum("BLNH,NHE -> BLNE", layer_multiply, wo_kernel)
+    with jax.named_scope("w_sum"):
+      output = jnp.einsum("BLNE,BLN -> BLE", intermediate_layer, weights)
+    
     return output

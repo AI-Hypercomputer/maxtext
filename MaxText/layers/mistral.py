@@ -129,9 +129,9 @@ class MistralDecoderLayer(nn.Module):
             # print("hidden_states.dtype", hidden_states.dtype)
             
             # overwrite the mesh to single device
-            devices_array = max_utils.create_device_mesh(cfg, devices=[jax.devices()[0]])
-            mesh = Mesh(devices_array, cfg.mesh_axes)
-            print("mesh.......", mesh)
+            # devices_array = max_utils.create_device_mesh(cfg, devices=[jax.devices()[0]])
+            # mesh = Mesh(devices_array, cfg.mesh_axes)
+            # print("mesh.......", mesh)
 
             mlp_lnx = linears.MoeBlock(
                 config=cfg,
