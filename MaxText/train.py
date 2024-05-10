@@ -44,7 +44,6 @@ import pyconfig
 # pylint: disable-next=unused-import
 import register_jax_proxy_backend
 from vertex_tensorboard import VertexTensorboardManager
-# Placeholder: internal
 
 from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer
 from layers import models
@@ -446,7 +445,7 @@ def train_loop(config, state=None):
 
   num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
   max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
-  per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(num_model_parameters, config)
+  per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(config)
 
   # Write train config params, num model params, and XLA flags to tensorboard
   max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
