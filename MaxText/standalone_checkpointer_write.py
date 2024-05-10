@@ -74,7 +74,7 @@ def checkpoint_loop(config, state=None):
     state, _, _ = max_utils.setup_training_state(model, None, tx, config, init_rng, mesh, checkpoint_manager)
   state = add_entropy_to_checkpoint(state)
 
-    ckpt_save_time = []
+  ckpt_save_time = []
   start_step = get_first_step(state)  # this is the start_step for training
   for step in np.arange(start_step, config.steps):
     if checkpoint_manager is not None:

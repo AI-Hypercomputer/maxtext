@@ -19,21 +19,12 @@ echo "Running 64b.sh"
 set -e
 
 export PLATFORM="gce"
-export EXECUTABLE="train.py" # or train_compile.py
 
 # Set environment variables
 for ARGUMENT in "$@"; do
     IFS='=' read -r KEY VALUE <<< "$ARGUMENT"
     export "$KEY"="$VALUE"
 done
-
-# The setup accommodates two cases:
-# 1) Passing the 'RUN_NAME' variable at runtime
-# 2) Propagating the 'M_RUN_NAME' variable within an Airflow sweeping workflow
-if [ -n "$RUN_NAME" ];
-then
-    export M_RUN_NAME=$RUN_NAME
-fi
 
 # Set up network optimizations
 bash preflight.sh PLATFORM=$PLATFORM

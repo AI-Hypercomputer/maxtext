@@ -27,14 +27,6 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
-# The setup accommodates two cases:
-# 1) Passing the 'RUN_NAME' variable at runtime
-# 2) Propagating the 'M_RUN_NAME' variable within an Airflow sweeping workflow
-if [ -n "$RUN_NAME" ];
-then
-    export M_RUN_NAME=$RUN_NAME
-fi
-
 # Set up network
 bash preflight.sh PLATFORM=$PLATFORM
 
