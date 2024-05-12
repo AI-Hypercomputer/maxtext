@@ -488,6 +488,10 @@ def train_loop(config, state=None):
   example_batch = None
   last_step_completion = datetime.datetime.now()
 
+
+  def my_data_operation(data):
+    return jnp.linalg.norm(data)
+
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
       max_utils.activate_profiler(config)
@@ -497,6 +501,9 @@ def train_loop(config, state=None):
       example_batch = load_next_batch(data_iterator, example_batch, config)
       example_batch['inputs'].block_until_ready()
       print(f"Batch on step {step} Loaded!!!", flush=True)
+      print(f"before computing with data...", flush=True)
+      data_norm = my_data_operation(example_batch['inputs'])
+      print(f"Data norm of {data_norm}")
       check_example_batch(config, example_batch=example_batch)
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, step=step)
