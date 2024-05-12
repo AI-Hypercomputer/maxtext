@@ -299,3 +299,4 @@ inference_microbenchmark_loop_iters: 10
 inference_microbenchmark_log_file_path: ""
 
 skip_decoder: True
+skip_train: True

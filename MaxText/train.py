@@ -500,14 +500,16 @@ def train_loop(config, state=None):
       check_example_batch(config, example_batch=example_batch)
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, step=step)
-      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, metrics = p_train_step(state, example_batch, nextrng)
+      if not config.skip_train:
+        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          state, metrics = p_train_step(state, example_batch, nextrng)
 
-    new_time = datetime.datetime.now()
-    record_scalar_metrics(metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step))
-    last_step_completion = new_time
+    if not config.skip_train:
+      new_time = datetime.datetime.now()
+      record_scalar_metrics(metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step))
+      last_step_completion = new_time
 
-    if checkpoint_manager is not None:
+    if checkpoint_manager is not None and not config.skip_train:
       if save_checkpoint(checkpoint_manager, step, state, config.dataset_type, data_iterator):
         max_logging.log(f"saved a checkpoint at step {step}")
 
@@ -516,9 +518,10 @@ def train_loop(config, state=None):
         checkpoint_manager.wait_until_finished()
         sys.exit()
 
-    write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
+    if not config.skip_train:
+      write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
 
-    if config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
+    if not config.skip_train and config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
       assert eval_data_iterator
       cumulative_eval_metrics = {"total_loss": 0.0, "total_weights": 0.0}
       for eval_batch in eval_data_iterator:
@@ -536,10 +539,12 @@ def train_loop(config, state=None):
     if step == last_profiling_step:
       max_utils.deactivate_profiler(config)
 
-  if checkpoint_manager is not None:
+  if not config.skip_train and checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()
-  write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config)  # final step metrics
-  max_utils.close_summary_writer(writer)
+
+  if not config.skip_train:
+    write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config)  # final step metrics
+    max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, job_end=True)
   return state
 
