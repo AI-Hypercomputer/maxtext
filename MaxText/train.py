@@ -490,6 +490,7 @@ def train_loop(config, state=None):
 
 
   def my_data_operation(data):
+    #return data*2
     return jnp.linalg.norm(data)
 
   for step in np.arange(start_step, config.steps):
@@ -502,7 +503,11 @@ def train_loop(config, state=None):
       example_batch['inputs'].block_until_ready()
       print(f"Batch on step {step} Loaded!!!", flush=True)
       print(f"before computing with data...", flush=True)
-      data_norm = my_data_operation(example_batch['inputs'])
+      jit_my_data_operation = jax.jit(my_data_operation)
+      data_norm = jit_my_data_operation(example_batch['inputs'])
+      print(f"About to block until read...", flush=True)
+      data_norm.block_until_ready()
+      print(f"Passed block until ready!!!", flush=True)
       print(f"Data norm of {data_norm}")
       check_example_batch(config, example_batch=example_batch)
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
