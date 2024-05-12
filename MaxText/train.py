@@ -493,7 +493,10 @@ def train_loop(config, state=None):
       max_utils.activate_profiler(config)
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
+      print(f"Loaded batch on step {step}...", flush=True)
       example_batch = load_next_batch(data_iterator, example_batch, config)
+      example_batch.block_until_ready()
+      print(f"Batch on step {step} Loaded!!!", flush=True)
       check_example_batch(config, example_batch=example_batch)
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, step=step)
