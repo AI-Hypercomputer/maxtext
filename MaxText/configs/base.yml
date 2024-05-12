@@ -130,7 +130,8 @@ logical_axis_rules: [
                       # The global batch is reshaped into microbatches, [num_microbatches, microbatch_size] = jnp.reshape(global_batch)
                       # And we shard the num_microbatches by stages, so it is important the the stage dimension here is first
                       # so that this reshape (and corresponding reshape back into global batch) does not require cross-stage communication 
-                      ['logits_activation_batch', ['stage', 'data', 'fsdp', 'fsdp_transpose']],
+                     # ['logits_activation_batch', ['stage', 'data', 'fsdp', 'fsdp_transpose']],
+                      ['logits_activation_batch', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_heads', ['tensor','sequence']],
                       ['activation_length', 'sequence'],
                       ['activation_embed', 'tensor'],
