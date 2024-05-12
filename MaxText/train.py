@@ -377,26 +377,26 @@ def setup_train_loop(config):
     data_iterator:
     state: the initialized train state
   """
-  #init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+  init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
   data_iterator, eval_data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  # state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(
-  #     model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
-  # )
+  state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(
+      model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
+  )
 
-  #maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh)
+  maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh)
 
   return (
-      None, #init_rng,
-      None, #writer,
-      None, # checkpoint_manager,
-      None, #state_mesh_annotations,
-      None, #model,
-      None, #mesh,
-      None, #learning_rate_schedule,
+      init_rng,
+      writer,
+      checkpoint_manager,
+      state_mesh_annotations,
+      model,
+      mesh,
+      learning_rate_schedule,
       data_iterator,
       eval_data_iterator,
-      None, #state,
+      state,
   )
 
 
@@ -425,30 +425,30 @@ def train_loop(config, state=None):
       state,
   ) = setup_train_loop(config)
   # pylint: disable=line-too-long
-  # (
-  #     functional_train,
-  #     in_shard_train,
-  #     out_shard_train,
-  #     static_argnums_train,
-  #     donate_argnums_train,
-  # ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config)
+  (
+      functional_train,
+      in_shard_train,
+      out_shard_train,
+      static_argnums_train,
+      donate_argnums_train,
+  ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config)
 
-  # if eval_data_iterator:
-  #   # pylint: disable=line-too-long
-  #   (
-  #       functional_eval,
-  #       in_shard_eval,
-  #       out_shard_eval,
-  #       static_argnums_eval,
-  #       donate_argnums_eval,
-  #   ) = maxtext_utils.get_functional_eval_with_signature(eval_step, mesh, state_mesh_annotations, model, config)
+  if eval_data_iterator:
+    # pylint: disable=line-too-long
+    (
+        functional_eval,
+        in_shard_eval,
+        out_shard_eval,
+        static_argnums_eval,
+        donate_argnums_eval,
+    ) = maxtext_utils.get_functional_eval_with_signature(eval_step, mesh, state_mesh_annotations, model, config)
 
-  # num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
-  # max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
-  # per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(num_model_parameters, config)
+  num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
+  max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
+  per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(num_model_parameters, config)
 
-  # # Write train config params, num model params, and XLA flags to tensorboard
-  # max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
+  # Write train config params, num model params, and XLA flags to tensorboard
+  max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
   max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
   max_utils.add_config_to_summary_writer(config, writer)
 
@@ -459,12 +459,27 @@ def train_loop(config, state=None):
     p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
     print("Loaded compiled function!", flush=True)
   else:
-    pass
+    p_train_step = jax.jit(
+        functional_train,
+        in_shardings=in_shard_train,
+        out_shardings=out_shard_train,
+        static_argnums=static_argnums_train,
+        donate_argnums=donate_argnums_train,
+    )
+
+    if eval_data_iterator:
+      p_eval_step = jax.jit(
+          functional_eval,
+          in_shardings=in_shard_eval,
+          out_shardings=out_shard_eval,
+          static_argnums=static_argnums_eval,
+          donate_argnums=donate_argnums_eval,
+      )
 
   local_metrics_file = open(config.metrics_file, "a", encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
-  start_step = 0  # this is the start_step for training
+  start_step = get_first_step(state)  # this is the start_step for training
   first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
   if config.enable_profiler and first_profiling_step >= config.steps:
     raise ValueError("Profiling requested but initial profiling step set past training final step")
@@ -480,7 +495,7 @@ def train_loop(config, state=None):
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       print(f"Loaded batch on step {step}...", flush=True)
       example_batch = load_next_batch(data_iterator, example_batch, config)
-      example_batch["inputs"].block_until_ready()
+      example_batch['inputs'].block_until_ready()
       print(f"Batch on step {step} Loaded!!!", flush=True)
       check_example_batch(config, example_batch=example_batch)
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
