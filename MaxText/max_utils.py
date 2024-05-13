@@ -367,7 +367,9 @@ def unbox_logicallypartioned(boxed_pytree):
 
 def init_decode_state(apply_fn, params):
   """Init train state with null opt state for decode."""
+  print(f"before params,params: {params}")
   state = train_state.TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
+  print(f"params,params: {params}")
   return state
 
 
@@ -393,6 +395,7 @@ def init_initial_state(model, tx, config, is_training, key):
   )
   if is_training:
     return init_training_state(model.apply, model_vars, tx)
+  print(f'model_vars: {model_vars}')
   return init_decode_state(model.apply, model_vars)
 
 

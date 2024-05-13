@@ -108,6 +108,7 @@ def get_expected_output(rng, hidden_states, cfg):
                                                           cfg.max_target_length, 
                                                           cfg.base_emb_dim)))
       # print("get_expected_output variables", variables)
+      # breakpoint()
       time.simple_timeit(jax.jit(model.apply), variables, hidden_states, tries=10, task="loop")
 
       output = jax.jit(model.apply)(variables, hidden_states)
@@ -183,7 +184,7 @@ class MoeTest(unittest.TestCase):
 
     self.hidden_states = jax.random.uniform(self.rng, (int(self.cfg.per_device_batch_size),
                                             self.cfg.max_target_length,
-                                            self.cfg.base_emb_dim))
+                                            self.cfg.base_emb_dim), dtype=self.cfg.dtype)
     # print(f"{self.hidden_states.shape}=")
 
     # devices_array = max_utils.create_device_mesh(self.cfg, devices=[jax.devices()[0]])

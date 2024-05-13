@@ -37,9 +37,6 @@ def main(config):
   )
   assert tokens.size <= config.max_prefill_predict_length, "can't take too many tokens"
   assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
-  print(f"type(params), {type(params)}")
-  print(f"type(tokens), {type(tokens)}")
-  print(f"type(true_length), {type(true_length)}")
 
   prefill_result = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
   slot = 0

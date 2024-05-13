@@ -79,11 +79,10 @@ class MaxEngine(engine_api.Engine):
     """Load Parameters, typically from GCS"""
     # pylint: disable=unused-argument
     state, self.state_mesh_annotations = max_utils.setup_decode_state(self.model, self.config, self.rng, self._mesh, None)
+    print(f"state.params : {state.params}")
     self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), state.params
     )
-    print(f"self.abstract_params...")
-    print(self.abstract_params)
     self.kv_cache_annotations = max_utils.get_kv_cache_annotations(self.model, self.config, self.rng, self._mesh)
     self.kv_cache_shardings = jax.tree_util.tree_map(lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations)
 
@@ -91,10 +90,6 @@ class MaxEngine(engine_api.Engine):
       self.abstract_params = jax.tree_util.tree_map(
           lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), state.params
       )
-      print(f"not self.model.quant self.abstract_params...")
-      print(self.abstract_params)
-      print(f"state.params...")
-      print(state.params)
       return state.params
     else:
       self.model.quant.quant_mode = quantizations.get_quant_mode("convert")

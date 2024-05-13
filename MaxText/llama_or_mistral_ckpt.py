@@ -325,14 +325,16 @@ def convert(base_model_path, maxtext_model_path, model_size):
     layer_weight["gate"]["wi_0"] = np.concatenate(np.array(wi_0), axis=0)
     layer_weight["gate"]["wi_1"] = np.concatenate(np.array(wi_1), axis=0)
     layer_weight["gate"]["wo"] = np.concatenate(np.array(wo), axis=0)
-    jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["wi_0"] = layer_weight["gate"]["wi_0"]
-    jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["wi_1"] = layer_weight["gate"]["wi_1"]
-    jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["wo"] = layer_weight["gate"]["wo"]
+    jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["wi_0"] = np.array(layer_weight["gate"]["wi_0"])
+    jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["wi_1"] = np.array(layer_weight["gate"]["wi_1"])
+    jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["wo"] = np.array(layer_weight["gate"]["wo"])
+
+    print(jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["wi_0"])
 
 #   print("before sharding jax_weights......")
 #   print(jax_weights)
 
-  jax_weights = jax.tree_util.tree_map(jax.numpy.array, jax_weights)
+  # jax_weights = jax.tree_util.tree_map(jax.numpy.array, jax_weights)
 
   mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
   s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))  # shards first axis
@@ -341,17 +343,14 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
   def checkpoint_device_put(arr):
     if arr.shape[0] % SIMULATED_CPU_DEVICES_COUNT == 0:
-      print("sharding first axis")
       return jax.device_put(arr, device=s1)
     elif len(arr.shape) > 1 and arr.shape[1] % SIMULATED_CPU_DEVICES_COUNT == 0:
-      print("sharding second axis")
       return jax.device_put(arr, device=s2)
     else:
-      print("no sharding was possible, replicating")
       return jax.device_put(arr, device=s3)
 
   # convert all weights to jax.numpy with sharding if applicable
-#   jax_weights = jax.tree_util.tree_map(checkpoint_device_put, jax_weights)
+  # jax_weights = jax.tree_util.tree_map(checkpoint_device_put, jax_weights)
 
   # dummy configs for the checkpoint_manager
   step_number_to_save_new_ckpt = 0
@@ -363,8 +362,8 @@ def convert(base_model_path, maxtext_model_path, model_size):
       maxtext_model_path, enable_checkpointing, async_checkpointing, save_interval_steps
   )
 
-#   print("before saving jax_weights......")
-#   print(jax_weights)
+  # print("before saving jax_weights......")
+  # print(jax_weights)
 
   state_new = train_state.TrainState(
       step=0, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore
