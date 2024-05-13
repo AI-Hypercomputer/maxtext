@@ -71,7 +71,7 @@ def make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos, process
   )
   return train_iter, None, sp_tokenizer
 
-def make_hf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
+def make_hf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos, process_indices):
   """ Make train iterator using huggingface data pipeline"""
   train_ds, _ = _hf_data_processing.get_datasets(
     config=config
@@ -79,8 +79,10 @@ def make_hf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
 
   train_iter, _, _ = _hf_data_processing.preprocess_dataset(
     config,
-    mesh,
-    train_ds,
+    dataloading_host_index = process_indices.index(jax.process_index()),
+    dataloading_host_count = len(process_indices),
+    global_mesh = mesh,
+    dataset = train_ds,
     add_bos = add_bos,
     add_eos = add_eos
   )
@@ -204,15 +206,17 @@ def make_mixed_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
       print("Overwrite both add_bos and add_eos to False")
       return make_c4_mlperf_train_iterator_and_tokenizer(config, mesh, add_bos=False, add_eos=False,
                                                          process_indices = process_indices)
+    elif config.dataset_type == "hf":
+      return make_hf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos, process_indices)
   else:
     return BadSyntheticDataIterator(config, mesh), None, get_tokenizer(config.tokenizer_path, add_bos, add_eos)
 
 def create_data_iterator_with_tokenizer(config, mesh, add_bos = True, add_eos = True):
   if config.dataset_type == "synthetic":
     return SyntheticDataIterator(config, mesh), None, get_tokenizer(config.tokenizer_path, add_bos, add_eos)
-  elif config.dataset_type == "hf":
-    return make_hf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos)
-  elif config.dataset_type in ("c4", "c4-array_record", "c4_mlperf"):
+  # elif config.dataset_type == "hf":
+  #   return make_hf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos)
+  elif config.dataset_type in ("c4", "c4-array_record", "c4_mlperf", "hf"):
     return make_mixed_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos)
   else:
     assert False, "dataset type not implemented"

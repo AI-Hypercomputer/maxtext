@@ -45,8 +45,10 @@ def get_datasets(
   return train_ds, None
 
 def preprocess_dataset(config: ml_collections.ConfigDict,
+                        dataloading_host_index,
+                        dataloading_host_count,
                         global_mesh,
-                        train_ds,
+                        dataset,
                         add_bos = True,
                         add_eos = True,
                         ):
@@ -57,10 +59,24 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
   assert (
         batch_size % global_mesh.size == 0
   ), 'Batch size should be divisible number of global devices.'
+  
+  if config.enable_data_shuffling:
+    dataset = dataset.shuffle(seed=config.data_shuffle_seed)
 
-  dataset = _hf_operations.HFDataSource(train_ds,
-                                        config.tokenizer_path,
-                                        config.max_target_length,
+  tokenizer =  AutoTokenizer.from_pretrained(config.tokenizer_path,
+                                            add_bos_token=add_bos,
+                                            add_eos_token=add_eos,
+                                            model_max_length=config.max_target_length)
+
+  dataset = dataset.map(_hf_operations.tokenization, batched=True,
+                        fn_kwargs={"tokenizer": tokenizer, "max_length": config.max_target_length-1})
+  dataset = dataset.select_columns(["input_ids"])
+
+  #dataset = split_dataset_by_node(dataset, world_size=jax.process_count(), rank=jax.process_index())
+
+  dataset = _hf_operations.HFDataSource(dataset,
+                                        dataloading_host_index,
+                                        dataloading_host_count,
                                         config.num_threads,
                                         config.grain_worker_count,
                                         add_bos,
@@ -69,11 +85,14 @@ def preprocess_dataset(config: ml_collections.ConfigDict,
   operations = []
   operations.append(_grain_operations.HFNormalizeFeatures())
   operations.append(grain.experimental.PackAndBatchOperation(
-                          batch_size=batch_size,
+                          batch_size=batch_size // dataloading_host_count,
                           length_struct={'inputs':config.max_target_length,
                                         'targets':config.max_target_length}))
-
   operations.append(_grain_operations.ReformatPacking())
+
+  # operations.append(_grain_operations.PadToMaxLength(config.max_target_length))
+  # operations.append(grain.Batch(batch_size=batch_size // jax.process_count(), drop_remainder=True))
+
   operations.append(_grain_operations.ShiftData(axis=1))
 
   index_sampler = grain.IndexSampler(

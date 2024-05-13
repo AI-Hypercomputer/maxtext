@@ -15,46 +15,206 @@
  """
 
 """Operations used by HuggingFace input pipeline"""
-
-from typing import Generic, Iterator, TypeVar, Union
+import collections
+from collections.abc import Iterator, Sequence
+from concurrent import futures
+from typing import Generic, TypeVar, Union
 from collections import defaultdict
 import jax
 import jaxtyping as jt
 from jax import tree_util
 import dataclasses
 import numpy as np
-from datasets import load_dataset
+import datasets
+from datasets import distributed
 from datasets.distributed import split_dataset_by_node
 from transformers import AutoTokenizer
 from threading import current_thread
 import max_logging
+from grain import python_lazy_dataset
+from grain import python as grain
 
 _T = TypeVar("_T")
+
+class HuggingFaceLazyDatasetIterator(python_lazy_dataset.LazyDatasetIterator):
+
+  def __init__(
+      self,
+      #datasets: Sequence[datasets.IterableDataset],
+      dataset: datasets.IterableDataset,
+      read_options: grain.ReadOptions,
+  ):
+    #self._datasets = tuple(datasets)
+    self._dataset = dataset
+    self._read_options = read_options
+    self._next_index = 0
+    self._iterator = None
+  #   self._transform()
+    
+  # def _transform(self):
+  #   for ds in self._datasets:
+      
+
+  def _make_iterator(self) -> Iterator:
+    """Reads data in a round-robin fashion."""
+    # We use a thread pool to read elements and add them to a buffer in the
+    # background.
+    # The main thread simply gets elements from the buffer and waits for them
+    # to be available.
+    index = 0
+    #iterators = tuple(iter(dataset) for dataset in self._datasets)
+    data_iter = iter(self._dataset)
+    
+    def prefetch_element():
+      # print(f"{current_thread().name=}")
+      # idx = int(current_thread().name.split("_")[1])
+      return next(data_iter)
+      #return next(iterators[idx])
+
+    buffer = collections.deque()
+    buffer_size = self._read_options.prefetch_buffer_size
+    # threads = tuple(Thread(target = prefetch_element, args=(i), name="thread-{i}")
+    #                 for i in len(self._datasets) )
+
+    #for i in range(buffer_size):
+
+    #with futures.ThreadPoolExecutor(self._read_options.num_threads) as executor:
+    for i in range(buffer_size):
+      #buffer.append(executor.submit(prefetch_element, i % len(self._datasets)))
+      buffer.append(prefetch_element())
+      #print("in buffer_size loop", i)
+      #buffer.append(executor.submit(prefetch_element, i))
+    while True:
+      try:
+        element = buffer.popleft()
+        #element = buffer.popleft().result()
+      except (IndexError, StopIteration):
+        # End of sampler.
+        return
+      if index == self._next_index:
+        yield element
+        self._next_index += 1
+      # buffer.append(
+      #     executor.submit(prefetch_element,
+      #                     buffer_size + index))
+      # buffer.append(
+      #     executor.submit(prefetch_element,
+      #                     (buffer_size + index) % len(self._datasets)))
+      buffer.append(prefetch_element())
+      index += 1
+
+  def __next__(self):
+    if self._iterator is None:
+      self._iterator = self._make_iterator()
+    return next(self._iterator)
+
+  def get_state(self):
+    return {"next_index": self._next_index}
+
+  def set_state(self, state):
+    self._next_index = state["next_index"]
+
+
+class HuggingFaceLazyIterDataset(python_lazy_dataset.LazyIterDataset):
+
+  def __init__(self,
+                dataset: datasets.IterableDataset,
+                tokenizer,
+                max_length,
+                read_options: grain.ReadOptions | None = None):
+    super().__init__()
+    self._dataset = dataset
+    self._tokenizer = tokenizer
+    self._max_length = max_length
+    self._read_options = (
+        grain.ReadOptions() if read_options is None else read_options)
+    self._slice = slice(0, self._dataset.n_shards, 1)
+    #self._transform()
+
+  # def _transform(self):
+  #   self._dataset = self._dataset.map(tokenization, batched=True,
+  #                   fn_kwargs={"tokenizer": self._tokenizer, "max_length": self._max_length-1})
+  #   self._dataset = self._dataset.select_columns(["input_ids"])
+
+  def __iter__(self):
+    # datasets = tuple(
+    #     distributed.split_dataset_by_node(self._dataset, i, self._read_options.num_threads)
+    #     for i in range(self._read_options.num_threads)
+    #     # distributed.split_dataset_by_node(self._dataset, i, self._dataset.n_shards)
+    #     # for i in range(self._dataset.n_shards)[self._slice]
+    # )
+    return HuggingFaceLazyDatasetIterator(self._dataset, self._read_options)
+
+  def set_parent_maps_slice(self, sl: slice) -> None:
+    super().set_parent_maps_slice(sl)
+    self._slice = sl
+
+
+class HuggingFaceDataLoader(python_lazy_dataset.DataLoader):
+
+  def __init__(self,
+                dataset: datasets.Dataset | datasets.IterableDataset,
+                tokenizer,
+                max_length,
+                multiprocessing_options: grain.MultiprocessingOptions | None = None,
+                read_options: grain.ReadOptions | None = None):
+    if isinstance(dataset, datasets.Dataset):
+      super().__init__(
+          lazy_ds=python_lazy_dataset.SourceLazyMapDataset(dataset),
+          multiprocessing_options=multiprocessing_options, read_options=read_options)
+    elif isinstance(dataset, datasets.IterableDataset):
+      super().__init__(
+          lazy_ds=HuggingFaceLazyIterDataset(dataset, tokenizer, max_length, read_options),
+          multiprocessing_options=multiprocessing_options,
+          read_options=read_options)
+    else:
+      raise ValueError(f'Unknown {dataset=}.')
+
 
 def tokenization(example, tokenizer, max_length):
   """Tokenize dataset"""
   return tokenizer(example["text"], truncation=True, max_length=max_length)
 
 class HFDataSource:
-  def __init__(self, dataset, tokenizer_path, max_length, num_threads, num_worker, add_bos=True, add_eos=True):
+  def __init__(self, dataset, dataloading_host_index, dataloading_host_count, num_threads, num_worker, add_bos=True, add_eos=True):
     #self.dataset_length = dataset.info.splits['train'].num_examples
-    self.tokenizer =  AutoTokenizer.from_pretrained(tokenizer_path,
-                                            add_bos_token=add_bos,
-                                            add_eos_token=add_eos,
-                                            model_max_length=max_length)
+    #dataset = split_dataset_by_node(dataset, world_size=jax.process_count(), rank=jax.process_index())
 
-    dataset = dataset.map(tokenization, batched=True,
-                        fn_kwargs={"tokenizer": self.tokenizer, "max_length": max_length-1})
-    dataset = dataset.select_columns(["input_ids"])
+    # self.tokenizer =  AutoTokenizer.from_pretrained(tokenizer_path,
+    #                                         add_bos_token=add_bos,
+    #                                         add_eos_token=add_eos,
+    #                                         model_max_length=max_length)
+
+    # dataset = dataset.map(tokenization, batched=True,
+    #                     fn_kwargs={"tokenizer": self.tokenizer, "max_length": max_length-1})
+    # dataset = dataset.select_columns(["input_ids"])
+    self.dataset = dataset
     self.num_threads = num_threads
     self.num_worker = num_worker
-    self.datasets = tuple(split_dataset_by_node(dataset, world_size=jax.process_count() * self.num_threads,
-                                                rank=jax.process_index() * self.num_threads + i)
-                          for i in range(self.num_threads))
-    self.current_dataset_idx = None
+    self.n_shards = dataset.n_shards
+    self.dataloading_host_count = dataloading_host_count
+    self.dataloading_host_index = dataloading_host_index
+    self.dataset_shards = [dataloading_host_index * self.num_threads + i for i in range (self.num_threads)]
+    self.datasets = [split_dataset_by_node(dataset, world_size=self.n_shards, rank=x)
+                          for x in self.dataset_shards]
+    # self.datasets = tuple(split_dataset_by_node(dataset, world_size=self.n_shards,
+    #                                             rank=dataloading_host_index * dataloading_host_count + i)
+    #                       for i in range(self.num_threads))
+    # self.datasets = tuple(split_dataset_by_node(dataset, world_size=self.world_size, rank=i)
+    #                       for i in range(self.world_size))
+    #self.count = [0] * num_threads
+    #self.current_dataset_idx = None
     self.data_iters = None
-    # self.dataset = IterableWrapper(self.dataset)
-    # self.dataset = iter(self.dataset)
+
+  def _update_shard(self, idx):
+    max_logging.log(f"Updating host {self.dataloading_host_index} dataset {idx} from shard {self.dataset_shards[idx]}")
+    self.dataset_shards[idx] += self.dataloading_host_count * self.num_threads
+    max_logging.log(f"New shard is {self.dataset_shards[idx]}")
+    if self.dataset_shards[idx] > self.n_shards:
+      raise ValueError(f"Run out of shards, shard {self.dataset_shards[idx]} is not available")
+    self.datasets[idx] = split_dataset_by_node(self.dataset, world_size=self.n_shards, rank=self.dataset_shards[idx])
+    self.data_iters[idx] = iter(self.datasets[idx])
+
 
   def __len__(self):
     return 10_000_000_000
@@ -63,10 +223,26 @@ class HFDataSource:
 
   def __getitem__(self, index):
     if self.data_iters is None:
-      self.data_iters = tuple(iter(x) for x in self.datasets)
+      self.data_iters = [iter(x) for x in self.datasets]
+      #self.current_dataset_idx = -1
 
     idx = int(current_thread().name.split("_")[1])
-    return next(self.data_iters[idx])
+
+    # self.count[idx] += 1
+    # if self.count[idx]>100:
+    #   self._update_shard(idx)
+    #   self.count[idx] = 0
+    while True:
+      try:
+        data = next(self.data_iters[idx])
+        return data
+      except StopIteration:
+        self._update_shard(idx)
+
+    #return data
+    #self.current_dataset_idx = (self.current_dataset_idx + 1) % self.world_size
+    #return next(self.data_iters[self.current_dataset_idx])
+
       #self.current_dataset_idx = -1
     # if self.num_worker != 0:
     #   self.current_dataset_idx = (index % (self.num_thread * self.num_worker)) // self.num_worker
