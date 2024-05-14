@@ -252,6 +252,8 @@ target_eval_loss: 0.  # early stop once reaching target eval_loss
 
 # Goodput parameters
 enable_goodput_recording: False
+monitor_goodput: False
+goodput_upload_interval_seconds: 60
 
 # Vertex AI Tensorboard Configurations - https://github.com/google/maxtext/tree/main/getting_started/Use_Vertex_AI_Tensorboard.md
 # Set to True for GCE, False if running via XPK
