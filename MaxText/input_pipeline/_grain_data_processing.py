@@ -24,8 +24,7 @@ import ml_collections
 import jax
 import grain.python as grain
 
-import tokenizer
-from input_pipeline import _grain_operations
+from input_pipeline import _input_pipeline_utils
 from input_pipeline import _grain_tokenizer
 
 import multihost_dataloading
@@ -140,8 +139,8 @@ def preprocessing_pipeline(
   assert batch_size % global_mesh.size == 0, "Batch size should be divisible number of global devices."
 
   operations = []
-  operations.append(_grain_operations.ParseFeatures())
-  operations.append(_grain_operations.NormalizeFeatures())
+  operations.append(_input_pipeline_utils.ParseFeatures())
+  operations.append(_input_pipeline_utils.NormalizeFeatures())
   operations.append(_grain_tokenizer.TokenizeAndTrim(["inputs", "targets"], max_length, vocab_path, add_bos, add_eos))
 
   # Pack and Batch examples.
@@ -151,14 +150,14 @@ def preprocessing_pipeline(
             batch_size=batch_size // jax.process_count(), length_struct={"inputs": max_length, "targets": max_length}
         )
     )
-    operations.append(_grain_operations.ReformatPacking())
+    operations.append(_input_pipeline_utils.ReformatPacking())
   else:
-    operations.append(_grain_operations.PadToMaxLength(max_length))
+    operations.append(_input_pipeline_utils.PadToMaxLength(max_length))
     operations.append(grain.Batch(batch_size=batch_size // jax.process_count(), drop_remainder=drop_remainder))
 
   # Shift inputs for teacher-forced training
   if shift:
-    operations.append(_grain_operations.ShiftData(axis=1))
+    operations.append(_input_pipeline_utils.ShiftData(axis=1))
 
   index_sampler = grain.IndexSampler(
       num_records=len(dataset),

@@ -68,6 +68,14 @@ def validate_keys(keys):
   ), "At most one of `load_parameters_path` or `load_full_state_path` should be set"
 
 
+def validate_data_input(keys):
+  if keys["dataset_type"] == "hf":
+    max_logging.log(
+        f"dataset_type set to hf, will use {keys['hf_path']=}, {keys['hf_data_dir']=} and {keys['hf_data_files']=} to read data"
+    )
+    assert keys["hf_path"] != "", "hf_path can't be empty when dataset_type=hf"
+
+
 def validate_model_name(s: str) -> bool:
   """Validate provided model name."""
   # currently supported models
@@ -262,6 +270,7 @@ class _HyperParameters:
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
     validate_keys(raw_keys)
+    validate_data_input(raw_keys)
 
   @staticmethod
   def configure_gpt3_task(raw_keys):
