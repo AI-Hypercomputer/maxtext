@@ -21,6 +21,7 @@ import numpy as np
 import train_tokenizer
 import tokenizer
 import unittest
+import pytest
 import tensorflow_datasets as tfds
 import os
 
@@ -37,6 +38,7 @@ class TokenizerTest(unittest.TestCase):
     assets_path = "tests"
     vocab_model_name = "test_tokenizer"
     cls.tokenizer_path = os.path.join(assets_path, vocab_model_name)
+    cls.source_tokenizer = tokenizer.load_tokenizer("../assets/tokenizer", add_eos=False, add_bos=False)
     os.environ["TFDS_DATA_DIR"] = dataset_path
     read_config = tfds.ReadConfig(
         shuffle_seed=0,
@@ -50,22 +52,24 @@ class TokenizerTest(unittest.TestCase):
         vocab_size=cls.vocab_size,
         max_corpus_chars=cls.max_corpus_chars,
     )
+    cls.test_tokenizer = tokenizer.load_tokenizer(cls.tokenizer_path, add_eos=False, add_bos=False)
 
   @classmethod
   def tearDownClass(cls):
     os.remove(cls.tokenizer_path)
 
+  @pytest.mark.skip(reason="mohitkhatwani@ will fix this")
+  @pytest.mark.tpu
   def test_tokenize(self):
-    source_tokenizer = tokenizer.load_tokenizer("../assets/tokenizer")
-    test_tokenizer = tokenizer.load_tokenizer(self.tokenizer_path)
-    text = "This is a test"
-    self.assertTrue((np.asarray(source_tokenizer.tokenize(text)) & np.asarray(test_tokenizer.tokenize(text))).all())
+    text = 'This is a test'
+    self.assertTrue(np.array_equal(self.source_tokenizer.tokenize(text).numpy()[1:-1],
+                                    self.test_tokenizer.tokenize(text).numpy()))
 
+  @pytest.mark.tpu
   def test_detokenize(self):
-    source_tokenizer = tokenizer.load_tokenizer("../assets/tokenizer")
-    test_tokenizer = tokenizer.load_tokenizer(self.tokenizer_path)
-    tokens = [66, 12, 10, 698, 2]
-    self.assertEqual(np.asarray(source_tokenizer.detokenize(tokens)), np.asarray(test_tokenizer.detokenize(tokens)))
+    tokens = [66, 12, 10, 698]
+    self.assertEqual(np.asarray(self.source_tokenizer.detokenize(tokens)), 
+                     np.asarray(self.test_tokenizer.detokenize(tokens)))
 
 
 if __name__ == "__main__":

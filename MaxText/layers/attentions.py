@@ -401,6 +401,7 @@ class AttentionOp(nn.Module):
         "cache_kv",
     )
     cache_logical_shape = (batch, self.max_prefill_predict_length, heads, kv_head_size)
+
     cached_key = self.variable(
         "cache",
         "cached_prefill_key",
@@ -457,6 +458,8 @@ class AttentionOp(nn.Module):
         "cache_kv",
     )
     cache_logical_shape = (batch, cache_length, heads, kv_head_size)
+
+    # TODO(b/339703100): investigate the issue why with_logical_partitioning doesn't enforce sharding
     cached_key = self.variable(
         "cache",
         "cached_ar_key",
@@ -464,6 +467,16 @@ class AttentionOp(nn.Module):
         self.cached_kv_shape(cache_logical_shape),
         dtype,
     )
+    cached_key.value = nn.with_logical_constraint(
+        cached_key.value,
+        (
+            "cache_sequence",
+            "cache_heads",
+            "cache_batch",
+            "cache_kv",
+        ),
+    )
+
     cached_value = self.variable(
         "cache",
         "cached_ar_value",
@@ -471,6 +484,16 @@ class AttentionOp(nn.Module):
         self.cached_kv_shape(cache_logical_shape),
         dtype,
     )
+    cached_value.value = nn.with_logical_constraint(
+        cached_value.value,
+        (
+            "cache_sequence",
+            "cache_heads",
+            "cache_batch",
+            "cache_kv",
+        ),
+    )
+
     cached_segment_id = self.variable(
         "cache",
         "cache_ar_segment_id",

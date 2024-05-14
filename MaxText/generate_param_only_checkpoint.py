@@ -55,7 +55,8 @@ def _possibly_unroll_params(config, training_state, training_state_annotations, 
     return jax.sharding.PartitionSpec(*x[0 : config.param_scan_axis] + x[config.param_scan_axis + 1 :])
 
   new_per_layer_state_annotation = jax.tree_util.tree_map(new_pspec, training_state_annotations_layers)
-  new_per_layer_state_sharding = jax.tree_util.tree_map(lambda x: jax.sharding.NamedSharding(mesh, x), new_per_layer_state_annotation)
+  new_per_layer_state_sharding = jax.tree_util.tree_map(
+    lambda x: jax.sharding.NamedSharding(mesh, x), new_per_layer_state_annotation)
 
   for i in range(config.num_decoder_layers):
 
@@ -90,7 +91,8 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
 def _save_decode_checkpoint(config, state, checkpoint_manager):
   """Generate checkpoint for decode from the training_state."""
   with jax.spmd_mode("allow_all"):
-    decode_state = max_utils.init_decode_state(None, jax.tree_util.tree_map(lambda x: x.astype(jax.numpy.bfloat16), state.params))
+    decode_state = max_utils.init_decode_state(
+      None, jax.tree_util.tree_map(lambda x: x.astype(jax.numpy.bfloat16), state.params))
   if checkpoint_manager is not None:
     if save_checkpoint(checkpoint_manager, 0, decode_state):
       max_logging.log(f"saved an decode checkpoint at {config.checkpoint_dir}")

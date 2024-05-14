@@ -204,7 +204,7 @@ class MlpBlock(nn.Module):
           name="mlp_layer_norm",
           dtype=cfg.dtype,
           weight_dtype=cfg.weight_dtype,
-          kernel_axes=("embed",),
+          kernel_axes=("norm",),
           epsilon=cfg.normalization_layer_epsilon,
       )(inputs)
 

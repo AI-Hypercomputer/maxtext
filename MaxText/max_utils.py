@@ -55,7 +55,7 @@ def find_nans_and_infs(pytree):
 
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
-  return jax.tree_util.tree_reduce(lambda x, y: x + jax.numpy.sum(jax.numpy.square(y)), x, initializer=0.0) ** 0.5
+  return jnp.sqrt(jax.tree_util.tree_reduce(lambda x, y: x + jnp.sum(jnp.square(y)), x, initializer=0.0))
 
 
 def calculate_num_params_from_pytree(params):
@@ -289,7 +289,7 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
     ), f"Found unspecified values (-1) for more than one {parallelism_type}\
       parallelism axis. At most one axis can be unspecified."
 
-    determined_val = target_product / np.product(parallelism_vals) * -1
+    determined_val = target_product / np.prod(parallelism_vals) * -1
 
     assert (
         determined_val >= 1 and determined_val.is_integer
@@ -301,9 +301,9 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
   target_type = "slices" if parallelism_type == "DCN" else "devices per slice"
 
   assert (
-      np.product(parallelism_vals) == target_product
+      np.prod(parallelism_vals) == target_product
   ), f"Number of {target_type} {target_product} does not match\
-    the product of the {parallelism_type} parallelism {np.product(parallelism_vals)}"
+    the product of the {parallelism_type} parallelism {np.prod(parallelism_vals)}"
 
   return parallelism_vals
 

@@ -127,9 +127,9 @@ def main(_argv: Sequence[str]) -> None:
 
   # Assert that we have correct inputs of sharding that fit the number of chips
   assert (
-      np.product(dcn_parallelism) * np.product(ici_parallelism) == num_devices
+      np.prod(dcn_parallelism) * np.prod(ici_parallelism) == num_devices
   ), f"Number of devices {num_devices} \
-        does not match the product of the parallelism {np.product(dcn_parallelism) * np.product(ici_parallelism)}"
+        does not match the product of the parallelism {np.prod(dcn_parallelism) * np.prod(ici_parallelism)}"
 
   multi_slice_env = hasattr(jax.devices()[0], "slice_index")
   # Create device mesh
