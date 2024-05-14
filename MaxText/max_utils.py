@@ -367,9 +367,7 @@ def unbox_logicallypartioned(boxed_pytree):
 
 def init_decode_state(apply_fn, params):
   """Init train state with null opt state for decode."""
-  print(f"before params,params: {params}")
   state = train_state.TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
-  print(f"params,params: {params}")
   return state
 
 
@@ -395,7 +393,6 @@ def init_initial_state(model, tx, config, is_training, key):
   )
   if is_training:
     return init_training_state(model.apply, model_vars, tx)
-  print(f'model_vars: {model_vars}')
   return init_decode_state(model.apply, model_vars)
 
 
@@ -409,6 +406,7 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   state, state_mesh_annotations, _ = setup_initial_state(
       model, None, None, config, rng, mesh, checkpoint_manager, is_training
   )
+  print(f"setup_decode_state.state.params: {state.params}")
   return state, state_mesh_annotations
 
 
@@ -438,6 +436,7 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
   unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
       model, tx, config, rng, mesh, is_training
   )
+  print(f"unboxed_abstract_state.params: {unboxed_abstract_state.params}")
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -450,6 +449,7 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
         config.enable_single_replica_ckpt_restoring,
         config.dataset_type,
     )
+    print(f"raw_params: {raw_params}")
 
     if restored:
       if "iter" in restored and restored["iter"] is not None:
@@ -458,9 +458,11 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
     else:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings)(rng)
+      print(f"unboxed_abstract_state.jit.state: {state.params}")
       if raw_params:  # If we loaded a partial state, we need to merge it.
         state = state.replace(params=raw_params)
   state = unbox_logicallypartioned(state)
+  print(f"unbox_logicallypartioned.state: {state.params}")
   return state, state_mesh_annotations, data_iterator
 
 

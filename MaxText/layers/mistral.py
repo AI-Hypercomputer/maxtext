@@ -122,6 +122,7 @@ class MistralDecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
     )(intermediate_inputs)
     hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_length", "activation_embed"))
+    print(f"hidden_states.shape: {hidden_states.shape}")
 
     if cfg.num_experts > 1:
         if cfg.megablox:

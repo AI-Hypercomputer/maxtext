@@ -184,10 +184,14 @@ def load_state_if_possible(
     # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
     # memory, we instead specify here that we are just restoring the params field of the checkpoint
     # (which itself may be a dictionary containing a key named 'params').
+    print(f"abstract_unboxed_pre_state.params: {abstract_unboxed_pre_state.params}")
     restore_args = orbax.checkpoint.checkpoint_utils.construct_restore_args(abstract_unboxed_pre_state.params)
+    print(f"restore_args: {restore_args}")
     restored = ckptr.restore(
         p, item={"params": abstract_unboxed_pre_state.params}, transforms={}, restore_args={"params": restore_args}
     )
+    print(jax.tree_util.tree_structure(restored))
+    print(f'restored[params]: {restored["params"]}')
     return None, restored["params"]
 
   elif load_full_state_from_path != "":

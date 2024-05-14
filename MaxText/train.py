@@ -506,6 +506,8 @@ def train_loop(config, state=None):
 
     if checkpoint_manager is not None:
       if save_checkpoint(checkpoint_manager, step, state, config.dataset_type, data_iterator):
+        print(f"config.dataset_type:{config.dataset_type}")
+        print(f"data_iterator : {data_iterator}")
         max_logging.log(f"saved a checkpoint at step {step}")
 
       # Upon preemption, exit when and only when all ongoing saves are complete.
