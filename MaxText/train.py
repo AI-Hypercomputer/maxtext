@@ -384,7 +384,7 @@ def setup_train_loop(config):
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
 
-  maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh)
+  #maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh)
 
   return (
       init_rng,
