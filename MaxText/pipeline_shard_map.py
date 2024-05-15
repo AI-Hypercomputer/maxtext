@@ -98,8 +98,10 @@ def spmd_pipeline(fn, stage_params, inputs):
 def shift(i, state, inputs, outputs):
   sh = lambda x, d: jax.lax.ppermute(x, 'stages', [(i, (i+d) % S) for i in range(S)])
   # jnp or np.roll shifts elements of an array, e.g. [0,1,2] -> [2,0,1]
-  rolled = jnp.roll(state, +1, axis=0)
-  rolled_0 = jnp.roll(state, +1, axis=0).at[0]
+  # Roll moves the activations from within-stage layer i to layer i+1 on the same device
+  # The shift moves the last layer on the device to the first layer on the next device
+  # The order of operations is a bit hard to parse, but the shift is on the pre-rolled state, so that
+  # the activations from the last stage are still on the last stage instead of rolled around dummily to the first
   state = jnp.roll(state, +1, axis=0).at[0].set(sh(state[-1], +1))
   # In pax code we roll the specific ms index every loop iteration
   # Instead we could roll every ms index after every K=|ms| loop iterations
