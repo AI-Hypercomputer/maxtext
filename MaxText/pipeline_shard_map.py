@@ -34,10 +34,13 @@ def init(key, layer_sizes, batch_size):
 
     return params, (inputs, targets)
 
-layer_sizes = [784, 128, 128, 128, 128, 128, 8]
+layer_sizes = [784, 128, 128, 128, 128, 128, 128, 128, 8]
 batch_size = 32
 
 params, batch = init(jax.random.PRNGKey(0), layer_sizes, batch_size)
+print(f"input size is {batch[0].shape}")
+
+### Start pipeline parallelism ###
 
 L = len(params) - 2        # num layers, excluding first and last
 N = batch_size             # batch size
@@ -80,7 +83,12 @@ def spmd_pipeline(fn, stage_params, inputs):
   outputs = jnp.zeros_like(inputs) * jnp.nan
   state = jnp.zeros((L // S, B, F)) * jnp.nan
   for i in range(M+L-1):
+    # Using jnp.where with axis_index creates a float32[2,8,128;stages:2] object - 
+    # I believe this means each device actually has different data - its neither
+    # sharded nor replicated
     state = state.at[0].set(jnp.where(stage == 0, inputs[i % K], state[0]))
+    #breakpoint()
+    # This is vmapping over layers per stage?
     state = jax.vmap(fn)(stage_params, state)
     outputs = outputs.at[(i-L+1) % K].set(jnp.where(stage == S-1, state[-1], outputs[(i-L+1) % K]))
     state, inputs, outputs = shift(i, state, inputs, outputs)
@@ -89,7 +97,12 @@ def spmd_pipeline(fn, stage_params, inputs):
 
 def shift(i, state, inputs, outputs):
   sh = lambda x, d: jax.lax.ppermute(x, 'stages', [(i, (i+d) % S) for i in range(S)])
+  # jnp or np.roll shifts elements of an array, e.g. [0,1,2] -> [2,0,1]
+  rolled = jnp.roll(state, +1, axis=0)
+  rolled_0 = jnp.roll(state, +1, axis=0).at[0]
   state = jnp.roll(state, +1, axis=0).at[0].set(sh(state[-1], +1))
+  # In pax code we roll the specific ms index every loop iteration
+  # Instead we could roll every ms index after every K=|ms| loop iterations
   if (i % K) == (-1 % K):
     inputs = sh(inputs, +1)
   if ((i-L+1) % K) == (-1 % K):
