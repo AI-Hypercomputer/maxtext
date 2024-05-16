@@ -18,6 +18,7 @@ limitations under the License.
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
+import itertools
 from flax import linen as nn
 from jax.sharding import Mesh
 import jax.numpy as jnp
@@ -80,6 +81,25 @@ class LlamaDecoderLayer(nn.Module):
 
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
 
+    prefill_key_axis_order = tuple([int(i) for i in cfg.prefill_key_axis_order.split(",")])
+    prefill_value_axis_order = tuple([int(i) for i in cfg.prefill_value_axis_order.split(",")])
+    ar_key_axis_order = tuple([int(i) for i in cfg.ar_key_axis_order.split(",")])
+    ar_value_axis_order = tuple([int(i) for i in cfg.ar_value_axis_order.split(",")])
+
+    if cfg.key_value_axis_order_product_id != "":
+      cache_rank = 4
+      cache_permu_values = list(itertools.permutations(range(cache_rank)))
+      cache_permu_strs = [",".join([str(i) for i in value]) for value in cache_permu_values]
+      cache_permu_idx_strs = {cache_permu_idx: cache_permu_str for cache_permu_idx, cache_permu_str in enumerate(cache_permu_strs)}
+      num_cache_permu = len(cache_permu_strs)
+      key_value_cache_idx_product_values = list(itertools.product(range(num_cache_permu), range(num_cache_permu)))
+      key_value_cache_idx_product_idx_values = {key_value_cache_idx_product_idx: key_value_cache_idx_product_value for key_value_cache_idx_product_idx, key_value_cache_idx_product_value in enumerate(key_value_cache_idx_product_values)}
+      key_axis_order_idx, value_axis_order_idx = key_value_cache_idx_product_idx_values[int(cfg.key_value_axis_order_product_id)]
+      ar_key_axis_order_str = cache_permu_idx_strs[key_axis_order_idx]
+      ar_value_axis_order_str = cache_permu_idx_strs[value_axis_order_idx]
+      ar_key_axis_order = tuple([int(i) for i in ar_key_axis_order_str.split(",")])
+      ar_value_axis_order = tuple([int(i) for i in ar_value_axis_order_str.split(",")])
+
     # Self-attention block
     attention_layer = Attention(
         config=cfg,
@@ -90,6 +110,10 @@ class LlamaDecoderLayer(nn.Module):
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
         mesh=mesh,
+        prefill_key_axis_order=prefill_key_axis_order,
+        prefill_value_axis_order=prefill_value_axis_order,
+        ar_key_axis_order=ar_key_axis_order,
+        ar_value_axis_order=ar_value_axis_order,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         dropout_rate=cfg.dropout_rate,
