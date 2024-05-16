@@ -48,7 +48,7 @@ fi
 TRAIN_CMD="python3 MaxText/train.py MaxText/configs/base.yml\
         steps=$STEPS per_device_batch_size=8.0 learning_rate=3e-4 enable_checkpointing=false \
         max_target_length=2048 global_parameter_scale=1 \
-        enable_profiler=false metrics_file=metrics.txt base_output_directory=$OUTPUT_PATH\
+        metrics_file=metrics.txt base_output_directory=$OUTPUT_PATH\
         dataset_path=$DATASET_PATH log_period=150 remat_policy=minimal enable_data_shuffling=false"
 TRAIN_CMD+=$CMD_DATA
 

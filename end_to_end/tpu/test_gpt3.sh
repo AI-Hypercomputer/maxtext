@@ -11,6 +11,5 @@ python3 MaxText/convert_gpt3_ckpt_from_paxml.py --paxml-ckpt-path=${PAXML_CKPT_P
 # Run gpt3-52k with the converted ckpt
 python3 MaxText/train.py MaxText/configs/base.yml run_name=${RUN_NAME} model_name=gpt3-52k\
     steps=10 per_device_batch_size=6 enable_checkpointing=true async_checkpointing=false\
-    enable_profiler=false remat_policy=full\
-    max_target_length=2048 base_output_directory=${OUTPUT_PATH}\
+    remat_policy=full max_target_length=2048 base_output_directory=${OUTPUT_PATH}\
     dataset_type=synthetic
