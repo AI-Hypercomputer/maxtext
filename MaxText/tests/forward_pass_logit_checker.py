@@ -75,9 +75,23 @@ def get_data(golden_data, golden_data_index, config):
 def main(config):
   """Test the Whole Model of model_name"""
 
-  #initialize the Llama2-7b model with weights from Meta
+  # initialize the Llama2-7b model with weights from Meta
   (
       init_rng,
+      _,
+      _,
+      _,
+      model_loop,
+      _,
+      _,
+      _,
+      _,
+      state_loop,
+    ) = train.setup_train_loop(config)
+
+  config.__setattr__("megablox", True)
+  (
+      _,
       _,
       _,
       _,
@@ -88,15 +102,48 @@ def main(config):
       _,
       state,
     ) = train.setup_train_loop(config)
+  # print(f"state_loop: {state_loop.params}")
+  # print(jax.tree_util.tree_structure(state_loop))
+  # print(f"state: {state.params}")
+  # print(jax.tree_util.tree_structure(state))
+  
+  for i in range(config.num_decoder_layers):
+    state.params['params']['decoder'][f'layers_{i}']['MoeBlock_0'] = {'gate':{}}
+    state.params['params']['decoder'][f'layers_{i}']['MoeBlock_0']['gate']['kernel'] = state_loop.params['params']['decoder'][f'layers_{i}']['gate']['kernel']
+    
+    wi_0 = []
+    wi_1 = []
+    wo = []
+    for k in range(config.num_experts):
+      wi_0.append(state_loop.params['params']['decoder'][f'layers_{i}'][f"mlp_{k}"]["wi_0"]["kernel"])
+      wi_1.append(state_loop.params['params']['decoder'][f'layers_{i}'][f"mlp_{k}"]["wi_1"]["kernel"])
+      wo.append(state_loop.params['params']['decoder'][f'layers_{i}'][f"mlp_{k}"]["wo"]["kernel"])
+    
+    state.params['params']['decoder'][f'layers_{i}']['MoeBlock_0']['wi_0'] = np.array(wi_0)
+    state.params['params']['decoder'][f'layers_{i}']['MoeBlock_0']['wi_1'] = np.array(wi_1)
+    state.params['params']['decoder'][f'layers_{i}']['MoeBlock_0']['wo'] = np.array(wo)
 
-  input_golden_data_path = "MaxText/test_assets/golden_data_"+config.model_name+".jsonl"
+  # print(f"state:")
+  # print(jax.tree_util.tree_structure(state))
+
+  input_golden_data_path = "MaxText/test_assets/golden_data_llama2-7b.jsonl"
   with jsonlines.open(input_golden_data_path, 'r') as f:
     golden_data = list(f)
 
-
   for golden_data_index in range(len(golden_data)):
+    # print(f"golden_data: {golden_data}")
     ids, decoder_segment_ids, decoder_positions, golden_logits = get_data(golden_data,golden_data_index,config)
-
+    config.__setattr__("megablox", False)
+    full_train_logits_loop = model_loop.apply(
+        state_loop.params,
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+        rngs={"aqt": init_rng},
+    )
+    print("full_train_logits_loop is done")
+    config.__setattr__("megablox", True)
     full_train_logits = model.apply(
         state.params,
         ids,
@@ -106,14 +153,15 @@ def main(config):
         rngs={"aqt": init_rng},
     )
 
-    max_logging.log(f"{golden_logits[0] =}, {full_train_logits[0, 0, :]=}")
+    print("full_train_logits is done")
     assert jax.numpy.allclose(
-            full_train_logits[0, :, :], golden_logits, rtol=1e-01, atol=1e-01, equal_nan=False
+            full_train_logits_loop, full_train_logits, rtol=1e-01, atol=1e-01, equal_nan=False
         )
-
-
+  
+    print("comparison is successful")
 
 if __name__ == "__main__":
+  import copy
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   pyconfig.initialize(sys.argv)

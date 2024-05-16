@@ -122,6 +122,13 @@ class DenseGeneral(nn.Module):
     kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
     kernel_in_axis = np.arange(len(axis))
     kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
+
+    print(f"for loop.......")
+    print(f"features: {features}")
+    print(f"axis: {axis}")
+    print(f"kernel_shape: {kernel_shape}")
+    print(f"kernel_in_axis: {kernel_in_axis}")
+    print(f"kernel_out_axis: {kernel_out_axis}")
     if quantizations.in_serve_mode(self.quant):
       # During aqt convert state we delete kernel weight from params to save memory.
       # Instead they are retrieved from the tensors stored in the 'aqt' collection.
@@ -228,6 +235,7 @@ class MlpBlock(nn.Module):
     else:
       for idx, act_fn in enumerate(self.activations):
         dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
+        print(f"self.intermediate_dim: {self.intermediate_dim}")
         x = DenseGeneral(
             self.intermediate_dim,
             dtype=self.dtype,
@@ -252,6 +260,7 @@ class MlpBlock(nn.Module):
         x, deterministic=deterministic
     )  # Broadcast along length.
     x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
+    print(f"inputs.shape[-1]: {inputs.shape[-1]}")
     output = DenseGeneral(
         inputs.shape[-1],
         dtype=self.dtype,
@@ -287,17 +296,27 @@ class MoeBlock(nn.Module):
   kernel_axes: Tuple[str, ...]
   weight_dtype: DType = jnp.float32
   dtype: DType = jnp.float32
-  features: Union[Iterable[int], int] = 8
-  axis: Union[Iterable[int], int] = -1
 
-
-  def generate_kernels(self, num_experts, base_emb_dim, mlp_dim, inputs_dim):
-    features = _canonicalize_tuple(self.features)
-    axis = _canonicalize_tuple(self.axis)
-    axis = _normalize_axes(axis, inputs_dim)
-
+  def generate_kernels(self, num_experts, base_emb_dim, mlp_dim, inputs):
+    
+    features = _canonicalize_tuple(mlp_dim)
+    wo_features = _canonicalize_tuple(inputs.shape[-1])
+    axis = _canonicalize_tuple(-1)
+    axis = _normalize_axes(axis, inputs.ndim)
+    kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
+    wo_kernel_shape = tuple(inputs.shape[ax] for ax in axis) + wo_features
     kernel_in_axis = np.arange(len(axis))
     kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
+    wo_kernel_out_axis = np.arange(len(axis), len(axis) + len(wo_features))
+
+    print("mega.......")
+    print(f"features: {features}")
+    print(f"axis: {axis}")
+    print(f"kernel_shape: {kernel_shape}")
+    print(f"kernel_shape_0: {wo_kernel_shape}")
+    print(f"kernel_in_axis: {kernel_in_axis}")
+    print(f"kernel_out_axis: {kernel_out_axis}")
+    print(f"wo_kernel_out_axis: {wo_kernel_out_axis}")
 
     # kernel_in_axis = np.arange(1)
     # kernel_out_axis = np.arange(1, 2)
@@ -311,8 +330,8 @@ class MoeBlock(nn.Module):
         nn.with_logical_partitioning(kernel_init, kernel_axes),
         (num_experts, base_emb_dim, mlp_dim),
         self.weight_dtype,
-        kernel_in_axis,
-        kernel_out_axis,
+        np.arange(1),
+        np.arange(1, 2),
       )
     w0_kernel = jnp.asarray(w0_kernel, self.dtype)
     w1_kernel = self.param(
@@ -320,8 +339,8 @@ class MoeBlock(nn.Module):
         nn.with_logical_partitioning(kernel_init, kernel_axes),
         (num_experts, base_emb_dim, mlp_dim),
         self.weight_dtype,
-        kernel_in_axis,
-        kernel_out_axis,
+        np.arange(1),
+        np.arange(1, 2),
       )
     w1_kernel = jnp.asarray(w1_kernel, self.dtype)
     wo_kernel = self.param(
@@ -329,8 +348,8 @@ class MoeBlock(nn.Module):
         nn.with_logical_partitioning(kernel_init, wo_kernel_axes),
         (num_experts, mlp_dim, base_emb_dim),
         self.weight_dtype,
-        kernel_in_axis,
-        kernel_out_axis,
+        np.arange(1),
+        np.arange(1, 3),
       )
     wo_kernel = jnp.asarray(wo_kernel, self.dtype)
     return w0_kernel, w1_kernel, wo_kernel
@@ -475,7 +494,7 @@ class MoeBlock(nn.Module):
     w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts,
                                                             cfg.base_emb_dim,
                                                             cfg.mlp_dim,
-                                                            inputs.ndim)
+                                                            inputs)
     
     with jax.named_scope("wi_0"):
       layer_w0 = jnp.einsum("BLE,NEH -> BLNH", inputs, w0_kernel)

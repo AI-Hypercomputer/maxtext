@@ -436,7 +436,7 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
   unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
       model, tx, config, rng, mesh, is_training
   )
-  print(f"unboxed_abstract_state.params: {unboxed_abstract_state.params}")
+  # print(f"unboxed_abstract_state.params: {unboxed_abstract_state.params}")
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -458,11 +458,11 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
     else:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings)(rng)
-      print(f"unboxed_abstract_state.jit.state: {state.params}")
+      # print(f"unboxed_abstract_state.jit.state: {state.params}")
       if raw_params:  # If we loaded a partial state, we need to merge it.
         state = state.replace(params=raw_params)
   state = unbox_logicallypartioned(state)
-  print(f"unbox_logicallypartioned.state: {state.params}")
+  # print(f"unbox_logicallypartioned.state: {state.params}")
   return state, state_mesh_annotations, data_iterator
 
 

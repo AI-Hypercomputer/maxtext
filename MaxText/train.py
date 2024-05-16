@@ -337,7 +337,8 @@ def setup_mesh_and_model(config):
     tx:
   """
 
-  init_rng = random.PRNGKey(config.init_weights_seed)
+  # init_rng = random.PRNGKey(config.init_weights_seed)
+  init_rng = random.PRNGKey(42)
   writer = max_utils.initialize_summary_writer(config)
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       config.checkpoint_dir,

@@ -115,8 +115,6 @@ def convert(base_model_path, maxtext_model_path, model_size):
   base_num_kv_heads = model_params["num_kv_heads"]
   vocab_size = model_params["vocab"]
   num_experts = model_params["num_experts"] if "num_experts" in model_params else None
-  # base_emb_dim = model_params["base_emb_dim"]
-  # base_mlp_dim = model_params["base_mlp_dim"]
 
   print(f"Loading the base model from {base_model_path}")
   # Skip any hidden files for checkpoints
@@ -165,7 +163,6 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
     for k in range(num_experts):
       jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"] = {}
-    #   jax_weights["decoder"]["layers"][f"mlp_{k}"] = {}
       layer_weight[f"mlp_{k}"] = {
           "wi_0": {"kernel": []},
           "wi_1": {"kernel": []},
@@ -314,28 +311,18 @@ def convert(base_model_path, maxtext_model_path, model_size):
       print(layer_weight[f"mlp_{k}"]["wi_0"]["kernel"].shape)
       print(layer_weight[f"mlp_{k}"]["wi_1"]["kernel"].shape)
       print(layer_weight[f"mlp_{k}"]["wo"]["kernel"].shape)
-      # swap the layer index
-      # layer_weight[f"mlp_{k}"]["wi_0"]["kernel"] = np.transpose(layer_weight[f"mlp_{k}"]["wi_0"]["kernel"], axes=(1, 0, 2))
-      # layer_weight[f"mlp_{k}"]["wi_1"]["kernel"] = np.transpose(layer_weight[f"mlp_{k}"]["wi_1"]["kernel"], axes=(1, 0, 2))
-      # layer_weight[f"mlp_{k}"]["wo"]["kernel"] = np.transpose(layer_weight[f"mlp_{k}"]["wo"]["kernel"], axes=(1, 0, 2))
-      # reshape
-      # layer_weight[f"mlp_{k}"]["wi_0"]["kernel"] = np.reshape(layer_weight[f"mlp_{k}"]["wi_0"]["kernel"], (-1, base_emb_dim, base_mlp_dim))
-      # layer_weight[f"mlp_{k}"]["wi_1"]["kernel"] = np.reshape(layer_weight[f"mlp_{k}"]["wi_1"]["kernel"], (-1, base_emb_dim, base_mlp_dim))
-      # layer_weight[f"mlp_{k}"]["wo"]["kernel"] = np.reshape(layer_weight[f"mlp_{k}"]["wo"]["kernel"], (-1, base_mlp_dim, base_emb_dim))
 
       wi_0.append(layer_weight[f"mlp_{k}"]["wi_0"]["kernel"])
       wi_1.append(layer_weight[f"mlp_{k}"]["wi_1"]["kernel"])
       wo.append(layer_weight[f"mlp_{k}"]["wo"]["kernel"])
 
-    #   jax_weights["decoder"]["layers"][f"mlp_{k}"] = layer_weight[f"mlp_{k}"]
-
     # layer_weight["gate"]["wi_0"] = np.array(wi_0)
     # layer_weight["gate"]["wi_1"] = np.array(wi_1)
     # layer_weight["gate"]["wo"] = np.array(wo)
     # print(layer_weight["gate"]["wi_0"].shape)
-    jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_0"] = np.transpose(np.array(wi_0), axes=(1, 0, 2, 3))
-    jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_1"] = np.transpose(np.array(wi_1), axes=(1, 0, 2, 3))
-    jax_weights["decoder"]["layers"]["MoeBlock_0"]["wo"] = np.transpose(np.array(wo), axes=(1, 0, 2, 3))
+    jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_0"] = np.array(wi_0)
+    jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_1"] = np.array(wi_1)
+    jax_weights["decoder"]["layers"]["MoeBlock_0"]["wo"] = np.array(wo)
     print(".....")
     print(jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_0"].shape)
     print(jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_1"].shape)

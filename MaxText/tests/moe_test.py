@@ -110,10 +110,9 @@ def get_expected_output(rng, hidden_states, cfg):
 
       # print("get_expected_output variables", variables)
       # breakpoint()
-      # time.simple_timeit(jax.jit(model.apply), variables, hidden_states, tries=10, task="loop")
+      time.simple_timeit(jax.jit(model.apply), variables, hidden_states, tries=10, task="loop")
 
       output = jax.jit(model.apply)(variables, hidden_states)
-      breakpoint()
       return variables, output
 
 
@@ -153,6 +152,11 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
         exp_wi_0.append(tmp_wi_0)
         exp_wi_1.append(tmp_wi_1)
         exp_wo.append(tmp_wo)
+      
+      # wi_0 = jnp.array(exp_wi_0, dtype=cfg.weight_dtype)
+      # wi_1 = jnp.array(exp_wi_1, dtype=cfg.weight_dtype)
+      # wo = jnp.array(exp_wo, dtype=cfg.weight_dtype)
+      # print("wi_0: {wi_0}")
 
       wi_0 = jnp.concatenate(exp_wi_0, axis=0, dtype=cfg.weight_dtype)
       wi_1 = jnp.concatenate(exp_wi_1, axis=0, dtype=cfg.weight_dtype)
@@ -199,11 +203,11 @@ class MoeTest(unittest.TestCase):
 
   def test_moe_block(self):
     variables, expected_output = get_expected_output(self.rng, self.hidden_states, self.cfg)
-    # actual_output = get_moe_output(variables, self.hidden_states, self.cfg, self.mesh)
+    actual_output = get_moe_output(variables, self.hidden_states, self.cfg, self.mesh)
     # print("expected_output", expected_output)
     # print("actual_output", actual_output)
     # breakpoint()
-    # self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
 
 if __name__ == '__main__':
