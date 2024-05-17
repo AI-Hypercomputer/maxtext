@@ -6,6 +6,10 @@ from jax.sharding import NamedSharding, Mesh, PartitionSpec as P
 from jax.experimental.shard_map import shard_map
 from jax.experimental import mesh_utils
 
+import timing_util
+
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
 def predict(params, inputs):
   for layer in params:
@@ -33,8 +37,8 @@ def init(key_init, num_layers, embed_size, batch_size):
     return params, (inputs, targets)
 
 num_layers = 4
-embed_size = 1024
-batch_size = 32
+embed_size = 2048
+batch_size = 128
 
 params, batch = init(jax.random.PRNGKey(0), num_layers, embed_size, batch_size)
 print(f"input size is {batch[0].shape}")
@@ -89,12 +93,13 @@ def spmd_pipeline(fn, stage_params, inputs):
     # Using jnp.where with axis_index creates a float32[2,8,128;stages:2] object - 
     # I believe this means each device actually has different data - its neither
     # sharded nor replicated
-    # TODO simplifying this API
+    # TODO simplifying this API?
     #state = state.at[0].set(jnp.where(stage == 0, inputs[i % K], state[0]))
-    state = state.at[:,:].set(jnp.where(stage == 0, inputs[i % K], state[:,:]))
-    # This is vmapping over layers per stage? I don't like this so I'm keeping one layer per stage for now
-    #state = jax.vmap(fn)(stage_params, state)
-    state = fn(stage_params[0], state) # state = fn(stage_params, state)
+    #state = state.at[:,:].set(jnp.where(stage == 0, inputs[i % K], state[:,:]))
+    state = state.at[:].set(jnp.where(stage == 0, inputs[i % K], state[:]))
+    # Shard map is rank preserving, so the params have shape [1,embed,embed] inside each shard
+    # We want to pass something of shape [embed, embed] instead
+    state = fn(stage_params[0], state)
     outputs = outputs.at[(i-L+1) % K].set(jnp.where(stage == S-1, state, outputs[(i-L+1) % K]))
     state, inputs, outputs = shift(i, state, inputs, outputs)
   outputs = jax.lax.ppermute(outputs, 'stages', [(i, (i+1) % S) for i in range(S)])
@@ -102,13 +107,6 @@ def spmd_pipeline(fn, stage_params, inputs):
 
 def shift(i, state, inputs, outputs):
   sh = lambda x, d: jax.lax.ppermute(x, 'stages', [(i, (i+d) % S) for i in range(S)])
-  # jnp or np.roll shifts elements of an array, e.g. [0,1,2] -> [2,0,1]
-  # Roll moves the activations from within-stage layer i to layer i+1 on the same device
-  # The shift moves the last layer on the device to the first layer on the next device
-  # The order of operations is a bit hard to parse, but the shift is on the pre-rolled state, so that
-  # the activations from the last stage are still on the last stage instead of rolled around dummily to the first
-
-  #state = jnp.roll(state, +1, axis=0).at[0].set(sh(state[-1], +1))
   state = sh(state, +1)
   # In pax code we roll the specific ms index every loop iteration
   # Instead we could roll every ms index after every`` K=|ms| loop iterations
@@ -124,3 +122,6 @@ batch_sharded = jax.device_put(batch, NamedSharding(mesh, P('stages')))
 
 print(jax.jit(loss)(params, batch))
 print(jax.jit(loss_pp)(params_sharded, batch_sharded))
+jit_pipeline = jax.jit(loss_pp)
+
+timing_util.simple_timeit(jit_pipeline, params_sharded, batch_sharded, tries = 3, task = 'shard_pp')
