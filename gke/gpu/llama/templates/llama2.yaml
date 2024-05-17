@@ -21,20 +21,9 @@ spec:
               labels:
                 xpk.google.com/workload: maxtext-llama2
             spec:
-              schedulerName: default-scheduler
+              schedulingGates:
+              - name: "gke.io/topology-aware-auto-scheduling"
               restartPolicy: Never
-              affinity:
-                nodeAffinity:
-                  requiredDuringSchedulingIgnoredDuringExecution:
-                    nodeSelectorTerms:
-                    - matchExpressions:
-                      - key: cloud.google.com/gke-accelerator
-                        operator: Exists
-                      - key: cloud.google.com/gke-nodepool
-                        operator: In
-                        values: [np-1]
-              nodeSelector:
-                cloud.google.com/gke-accelerator: nvidia-h100-80gb
               hostNetwork: true
               dnsPolicy: ClusterFirstWithHostNet
               terminationGracePeriodSeconds: 30
