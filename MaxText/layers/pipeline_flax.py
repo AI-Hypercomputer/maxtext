@@ -198,7 +198,16 @@ class Pipeline(nn.Module):
     weights = self.shard_dim_by_stages(weights, stages_dim_in_weights)
     outs = jax.vmap(_gather_one, in_axes=(stages_dim_in_weights, 0), out_axes=out_dim)(weights, repeat_ids)
     # Also shard outs
-    outs = self.shard_dim_by_stages(outs, out_dim)
+    #outs = self.shard_dim_by_stages(outs, out_dim)
+
+    # dims_mapping[dim] = "stage"
+    # dims_mapping = tuple(dims_mapping)
+    dims_mapping = ("stage", "fsdp", "tensor")
+    p1 = jax.sharding.PartitionSpec(*dims_mapping)
+    sharding = jax.sharding.NamedSharding(self.mesh,p1)
+
+    print(f"Shape of outs is {outs.shape}", flush=True)
+    outs = jax.lax.with_sharding_constraint(outs, p1)
     return outs
 
   def get_microbatch_id(self, stage_idx, loop_iteration):
