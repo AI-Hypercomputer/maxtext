@@ -123,12 +123,12 @@ class DenseGeneral(nn.Module):
     kernel_in_axis = np.arange(len(axis))
     kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
 
-    print(f"for loop.......")
-    print(f"features: {features}")
-    print(f"axis: {axis}")
-    print(f"kernel_shape: {kernel_shape}")
-    print(f"kernel_in_axis: {kernel_in_axis}")
-    print(f"kernel_out_axis: {kernel_out_axis}")
+    # print(f"for loop.......")
+    # print(f"features: {features}")
+    # print(f"axis: {axis}")
+    # print(f"kernel_shape: {kernel_shape}")
+    # print(f"kernel_in_axis: {kernel_in_axis}")
+    # print(f"kernel_out_axis: {kernel_out_axis}")
     if quantizations.in_serve_mode(self.quant):
       # During aqt convert state we delete kernel weight from params to save memory.
       # Instead they are retrieved from the tensors stored in the 'aqt' collection.
@@ -235,7 +235,6 @@ class MlpBlock(nn.Module):
     else:
       for idx, act_fn in enumerate(self.activations):
         dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
-        print(f"self.intermediate_dim: {self.intermediate_dim}")
         x = DenseGeneral(
             self.intermediate_dim,
             dtype=self.dtype,
@@ -260,7 +259,6 @@ class MlpBlock(nn.Module):
         x, deterministic=deterministic
     )  # Broadcast along length.
     x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
-    print(f"inputs.shape[-1]: {inputs.shape[-1]}")
     output = DenseGeneral(
         inputs.shape[-1],
         dtype=self.dtype,
@@ -309,14 +307,14 @@ class MoeBlock(nn.Module):
     kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
     wo_kernel_out_axis = np.arange(len(axis), len(axis) + len(wo_features))
 
-    print("mega.......")
-    print(f"features: {features}")
-    print(f"axis: {axis}")
-    print(f"kernel_shape: {kernel_shape}")
-    print(f"kernel_shape_0: {wo_kernel_shape}")
-    print(f"kernel_in_axis: {kernel_in_axis}")
-    print(f"kernel_out_axis: {kernel_out_axis}")
-    print(f"wo_kernel_out_axis: {wo_kernel_out_axis}")
+    # print("mega.......")
+    # print(f"features: {features}")
+    # print(f"axis: {axis}")
+    # print(f"kernel_shape: {kernel_shape}")
+    # print(f"kernel_shape_0: {wo_kernel_shape}")
+    # print(f"kernel_in_axis: {kernel_in_axis}")
+    # print(f"kernel_out_axis: {kernel_out_axis}")
+    # print(f"wo_kernel_out_axis: {wo_kernel_out_axis}")
 
     # kernel_in_axis = np.arange(1)
     # kernel_out_axis = np.arange(1, 2)

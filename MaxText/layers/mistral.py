@@ -152,8 +152,7 @@ class MistralDecoderLayer(nn.Module):
                 cfg.num_experts,
                 weight_dtype=cfg.weight_dtype,
                 dtype=cfg.dtype,
-                kernel_init=initializers.nd_dense_init(
-                    1.0, 'fan_in', 'truncated_normal'),
+                kernel_init=initializers.nd_dense_init(1.0, 'fan_in', 'truncated_normal'),
                 kernel_axes=('embed', 'mlp'),
                 name="gate",
                 quant=self.quant,
@@ -166,13 +165,10 @@ class MistralDecoderLayer(nn.Module):
             mlp_lnx = jnp.zeros_like(hidden_states)
             weights = weights.astype(cfg.dtype)
             # print("weights.dtype", weights.dtype)
-            mlp_lnx = nn.with_logical_constraint(
-                mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')
-            )
+            mlp_lnx = nn.with_logical_constraint(mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed'))
 
             for k in range(cfg.num_experts):
-                weights_exp = jnp.sum(jnp.multiply(
-                    selected_experts == k, weights), axis=-1)  
+                weights_exp = jnp.sum(jnp.multiply(selected_experts == k, weights), axis=-1)  
                 mlp_lnx_exp = linears.MlpBlock(
                     intermediate_dim=cfg.mlp_dim,
                     activations=cfg.mlp_activations,
@@ -182,9 +178,7 @@ class MistralDecoderLayer(nn.Module):
                     name=f'mlp_{k}',
                     config=cfg,
                 )(hidden_states, deterministic=deterministic)
-                mlp_lnx_exp = nn.with_logical_constraint(
-                    mlp_lnx_exp, ('activation_batch', 'activation_length', 'activation_embed')
-                )
+                mlp_lnx_exp = nn.with_logical_constraint(mlp_lnx_exp, ('activation_batch', 'activation_length', 'activation_embed'))
                 mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
                 mlp_lnx += mlp_lnx_exp
                 # print("mlp_lnx.dtype", mlp_lnx.dtype)

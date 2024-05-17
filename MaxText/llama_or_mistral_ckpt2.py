@@ -126,8 +126,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
     pytorch_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = checkpoint
   pytorch_vars = [pytorch_vars[i] for i in sorted(list(pytorch_vars.keys()))]
 
-#   layer_key = "gate" if num_experts else "mlp"
-  layer_key = "MoeBlock_0" if num_experts else "mlp"
+  layer_key = "gate" if num_experts else "mlp"
   jax_weights = {
       "decoder": {
           "layers": {
@@ -159,10 +158,10 @@ def convert(base_model_path, maxtext_model_path, model_size):
         "wo": {"kernel": []},
     }
   else:
-    layer_weight["gate"] = {"kernel": []}   
+    layer_weight["gate"] = {"kernel": []}
 
     for k in range(num_experts):
-      jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"] = {}
+      jax_weights["decoder"]["layers"][f"mlp_{k}"] = {}
       layer_weight[f"mlp_{k}"] = {
           "wi_0": {"kernel": []},
           "wi_1": {"kernel": []},
@@ -274,10 +273,10 @@ def convert(base_model_path, maxtext_model_path, model_size):
   layer_weight["post_self_attention_layer_norm"]["scale"] = np.array(layer_weight["post_self_attention_layer_norm"]["scale"])
   layer_weight["pre_self_attention_layer_norm"]["scale"] = np.transpose(
       layer_weight["pre_self_attention_layer_norm"]["scale"], axes=(1, 0)
-  )[:4, :32]
+  )[:4, :4]
   layer_weight["post_self_attention_layer_norm"]["scale"] = np.transpose(
       layer_weight["post_self_attention_layer_norm"]["scale"], axes=(1, 0)
-  )[:4, :32]
+  )[:4, :4]
 
   jax_weights["decoder"]["layers"]["pre_self_attention_layer_norm"] = layer_weight["pre_self_attention_layer_norm"]
   jax_weights["decoder"]["layers"]["post_self_attention_layer_norm"] = layer_weight["post_self_attention_layer_norm"]
@@ -294,52 +293,19 @@ def convert(base_model_path, maxtext_model_path, model_size):
     jax_weights["decoder"]["layers"]["mlp"] = layer_weight["mlp"]
   else:
     layer_weight["gate"]["kernel"] = np.array(layer_weight["gate"]["kernel"])
-    # print(f'layer_weight["gate"]["kernel"]: {type(layer_weight["gate"]["kernel"])}')
     layer_weight["gate"]["kernel"] = np.transpose(layer_weight["gate"]["kernel"], axes=(1, 0, 2))[:4,:4,:8]
-    jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["kernel"] = layer_weight["gate"]["kernel"]
-    print("kernel shape")
-    print(jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["kernel"].shape)
-
-    all_wi_0 = []
-    all_wi_1 = []
-    all_wo = []
+    jax_weights["decoder"]["layers"]["gate"] = layer_weight["gate"]
     for k in range(num_experts):
-      # print(type(layer_weight[f"mlp_{k}"]["wi_0"]["kernel"]))
       layer_weight[f"mlp_{k}"]["wi_0"]["kernel"] = np.array(layer_weight[f"mlp_{k}"]["wi_0"]["kernel"])
       layer_weight[f"mlp_{k}"]["wi_1"]["kernel"] = np.array(layer_weight[f"mlp_{k}"]["wi_1"]["kernel"])
       layer_weight[f"mlp_{k}"]["wo"]["kernel"] = np.array(layer_weight[f"mlp_{k}"]["wo"]["kernel"])
-      print(layer_weight[f"mlp_{k}"]["wi_0"]["kernel"].shape)
-      print(layer_weight[f"mlp_{k}"]["wi_1"]["kernel"].shape)
-      print(layer_weight[f"mlp_{k}"]["wo"]["kernel"].shape)
+      # swap the layer index
+      layer_weight[f"mlp_{k}"]["wi_0"]["kernel"] = np.transpose(layer_weight[f"mlp_{k}"]["wi_0"]["kernel"], axes=(1, 0, 2))[:4,:4,:64]
+      layer_weight[f"mlp_{k}"]["wi_1"]["kernel"] = np.transpose(layer_weight[f"mlp_{k}"]["wi_1"]["kernel"], axes=(1, 0, 2))[:4,:4,:64]
+      layer_weight[f"mlp_{k}"]["wo"]["kernel"] = np.transpose(layer_weight[f"mlp_{k}"]["wo"]["kernel"], axes=(1, 0, 2))[:64,:4,:4]
 
-      all_wi_0.append(layer_weight[f"mlp_{k}"]["wi_0"]["kernel"])
-      all_wi_1.append(layer_weight[f"mlp_{k}"]["wi_1"]["kernel"])
-      all_wo.append(layer_weight[f"mlp_{k}"]["wo"]["kernel"])
-
-    # layer_weight["gate"]["wi_0"] = np.array(wi_0)
-    # layer_weight["gate"]["wi_1"] = np.array(wi_1)
-    # layer_weight["gate"]["wo"] = np.array(wo)
-    # print(layer_weight["gate"]["wi_0"].shape)
-    jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_0"] = np.array(all_wi_0)[:8,:4,:4,:64]
-    jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_1"] = np.array(all_wi_1)[:8,:4,:4,:64]
-    jax_weights["decoder"]["layers"]["MoeBlock_0"]["wo"] = np.array(all_wo)[:8,:4,:64,:4]
-    print(".....")
-    print(jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_0"].shape)
-    print(jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_1"].shape)
-    print(jax_weights["decoder"]["layers"]["MoeBlock_0"]["wo"].shape)
-
-    print("...tree structure....")
-    print(jax.tree_util.tree_structure(jax_weights))
-
-  # jax_weights = jax.tree_util.tree_map(jax.numpy.array, jax_weights)
-  # import jax.numpy as jnp
-  # jax_weights = jax.tree_util.tree_map(jnp.array, jax_weights)
-  # def astype_fn(x):
-  #   if isinstance(x, jnp.ndarray):
-  #     return x.astype(jnp.bfloat16)
-  #   else:
-  #     return x
-  # jax_weights = jax.tree_util.tree_map(astype_fn, jax_weights)
+      jax_weights["decoder"]["layers"][f"mlp_{k}"] = layer_weight[f"mlp_{k}"]
+  
 
   mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
   s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))  # shards first axis

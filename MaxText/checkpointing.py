@@ -186,7 +186,7 @@ def load_state_if_possible(
     # (which itself may be a dictionary containing a key named 'params').
     print(f"abstract_unboxed_pre_state.params: {abstract_unboxed_pre_state.params}")
     restore_args = orbax.checkpoint.checkpoint_utils.construct_restore_args(abstract_unboxed_pre_state.params)
-    print(f"restore_args: {restore_args}")
+    # print(f"restore_args: {restore_args}")
     restored = ckptr.restore(
         p, item={"params": abstract_unboxed_pre_state.params}, transforms={}, restore_args={"params": restore_args}
     )

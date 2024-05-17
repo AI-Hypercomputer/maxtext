@@ -102,10 +102,8 @@ def main(config):
       _,
       state,
     ) = train.setup_train_loop(config)
-  # print(f"state_loop: {state_loop.params}")
-  # print(jax.tree_util.tree_structure(state_loop))
-  # print(f"state: {state.params}")
-  # print(jax.tree_util.tree_structure(state))
+  print(f"state_loop: {state_loop.params}")
+  print(jax.tree_util.tree_structure(state_loop))
   
   for i in range(config.num_decoder_layers):
     state.params['params']['decoder'][f'layers_{i}']['MoeBlock_0'] = {'gate':{}}
@@ -122,6 +120,12 @@ def main(config):
     state.params['params']['decoder'][f'layers_{i}']['MoeBlock_0']['wi_0'] = np.array(wi_0)
     state.params['params']['decoder'][f'layers_{i}']['MoeBlock_0']['wi_1'] = np.array(wi_1)
     state.params['params']['decoder'][f'layers_{i}']['MoeBlock_0']['wo'] = np.array(wo)
+
+    # print(f"np.array(wi_0): {np.array(wi_0).shape}")
+    # print(f"np.array(wi_1): {np.array(wi_1).shape}")
+    # print(f"np.array(wo): {np.array(wo).shape}")
+    print(f"state: {state.params}")
+    print(jax.tree_util.tree_structure(state))
 
   # print(f"state:")
   # print(jax.tree_util.tree_structure(state))
@@ -153,9 +157,10 @@ def main(config):
         rngs={"aqt": init_rng},
     )
 
-    print("full_train_logits is done")
+    # print(f"full_train_logits_loop: {full_train_logits_loop}")
+    # print(f"full_train_logits: {full_train_logits}")
     assert jax.numpy.allclose(
-            full_train_logits_loop, full_train_logits, rtol=1e-01, atol=1e-01, equal_nan=False
+            full_train_logits_loop, full_train_logits, rtol=0.1, atol=0.1, equal_nan=False
         )
   
     print("comparison is successful")
