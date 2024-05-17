@@ -600,12 +600,16 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
     abstract_state = jax.eval_shape(init_state_partial, rng)
 
   state_logical_annotations = nn.get_partition_spec(abstract_state)
+  print(f"{state_logical_annotations=}", flush=True)
 
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
+  print(f"{state_mesh_shardings=}", flush=True)
 
   abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape(rng)
+  print(f"{abstract_sharded_state}", flush=True)
 
   unboxed_abstract_sharded_state = unbox_logicallypartioned(abstract_sharded_state)
+  print(f"{unboxed_abstract_sharded_state=}", flush=True)
   # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)

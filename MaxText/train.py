@@ -226,7 +226,8 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   )
   one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
   xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
-  xent = nn.with_logical_constraint(xent, ("activation_batch", "activation_length"))
+  # TODO: confirm we do want logits_activation_batch here
+  xent = nn.with_logical_constraint(xent, ("logits_activation_batch", "activation_length"))
   # Mask out paddings at the end of each example.
   xent = xent * (data["targets_segmentation"] != 0)
   total_loss = jnp.sum(xent)

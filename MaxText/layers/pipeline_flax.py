@@ -154,6 +154,8 @@ class Pipeline(nn.Module):
     stages_in = select_state_or_input(stages_in, shift)
     return stages_in
 
+  # TODO: Instead of unconstrained, should we passing the initial sharding of X?
+  # TODO: This can be used instead of shard_leading_dim_by_stages
   def shard_dim_by_stages(self, x, dim: int):
     dims_mapping = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
     #dims_mapping = [None] * x.ndim
@@ -203,10 +205,16 @@ class Pipeline(nn.Module):
     '''Gets the microbatch_id on this loop_iteration for this stage. Works for both circular and non-circular'''
     return (loop_iteration - stage_idx) % self.config.num_pipeline_microbatches
 
-  def shard_leading_dim_by_stages(self, x):
+  def shard_leading_dim_by_stages_old(self, x):
     stage_sharding_constraint = ('layers',) + tuple([None] * (x.ndim -1))
     # return jax.lax.with_sharding_constraint(x, ('stage',) + tuple([None] * (x.ndim -1)))
     return nn.with_logical_constraint(x, stage_sharding_constraint, mesh=self.mesh, rules=self.config.logical_axis_rules)
+
+  def shard_leading_dim_by_stages(self, x):
+    partition_spec_list = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
+    partition_spec_list[0] = jax.sharding.PartitionSpec("stage")
+    partition_spec = jax.sharding.PartitionSpec(*partition_spec_list)
+    return jax.lax.with_sharding_constraint(x, partition_spec)
 
   def vmap_gather(self, xs, ids, ids_dim):
     """Use vmap to implement a stage-wise sharded gather.
@@ -362,6 +370,7 @@ class Pipeline(nn.Module):
    microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0)
    microbatch_ids = microbatch_ids % self.config.num_pipeline_microbatches
 
+  # TODO: try sharding this again explicitly over stages
    stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
    # We checkpoint stages_inputs since we are grabbing only one slice of the state_io, don't need to save the entire buffer.
    stages_inputs = jax.ad_checkpoint.checkpoint_name(stages_inputs, 'iteration_input')
