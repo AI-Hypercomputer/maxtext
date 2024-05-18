@@ -457,7 +457,9 @@ class Pipeline(nn.Module):
       segment_idx = None
 
     loop_state = self.init_states(inputs)
+    
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
+    print(f"{total_iterations=} {self.num_stages=}", flush=True)
 
     def func_to_scan(model,loop_state, xs):
        return model.run_one_iteration(loop_state, positions, segment_ids, deterministic, model_mode, model.layers), None
