@@ -57,7 +57,7 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
   echo "Default LIBTPU_GCS_PATH=${LIBTPU_GCS_PATH}"
   if [[ ${DEVICE} == "gpu" ]]; then
     if [[ ${MODE} == "pinned" ]]; then
-      export BASEIMAGE=ghcr.io/nvidia/jax:base-2024-03-13
+      export BASEIMAGE=ghcr.io/nvidia/jax:base-2024-04-29
     else
       export BASEIMAGE=ghcr.io/nvidia/jax:base
     fi
