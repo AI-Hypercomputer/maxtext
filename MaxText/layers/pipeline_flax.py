@@ -137,6 +137,7 @@ class Pipeline(nn.Module):
     state_io_batch_idx = loop_iteration % self.microbatches_per_stage
     state_io_slice = state_io[:,state_io_batch_idx] 
 
+    # TODO circ_storage_slice is a bad name since used for both since_storage and not
     if self.use_circ_storage:
         # Setup potential input from circ_storage, which also has a rotating index for microbatch, size of num_microbatches
         circ_storage_batch_idx = loop_iteration % self.config.num_pipeline_microbatches
@@ -381,6 +382,12 @@ class Pipeline(nn.Module):
 
   # TODO: try sharding this again explicitly over stages
    stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
+
+   dims_mapping = ("stage", "fsdp", "tensor")
+   p1 = jax.sharding.PartitionSpec(*dims_mapping)
+   sharding = jax.sharding.NamedSharding(self.mesh, p1)
+   stages_inputs = jax.lax.with_sharding_constraint(stages_inputs, sharding)
+
    # We checkpoint stages_inputs since we are grabbing only one slice of the state_io, don't need to save the entire buffer.
    stages_inputs = jax.ad_checkpoint.checkpoint_name(stages_inputs, 'iteration_input')
 
