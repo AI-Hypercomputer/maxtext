@@ -11,6 +11,9 @@ import timing_util
 import os
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
+global mesh
+mesh = Mesh(jax.devices(), ('stages',))
+
 def predict(params, inputs):
   for layer in params:
     inputs = jnp.dot(inputs, layer)
@@ -36,36 +39,6 @@ def init(key_init, num_layers, embed_size, batch_size):
 
     return params, (inputs, targets)
 
-num_layers = 4
-embed_size = 2048
-batch_size = 128
-
-params, batch = init(jax.random.PRNGKey(0), num_layers, embed_size, batch_size)
-print(f"input size is {batch[0].shape}")
-
-### Start pipeline parallelism ###
-
-L = len(params)       # num layers
-N = batch_size             # batch size
-F = embed_size
-
-# choose some pipeline parameters
-S = 4      # number of stages
-B = 8      # size of each microbatch
-assert L == S, "Number of layers must equal the number of stages"
-#assert L % S == 0, "S (number of stages) must divide L (number of inner layers)"
-
-# compute some useful quantities
-M, ragged = divmod(N, B)  # M is number of microbatches
-assert not ragged, "B (size of each microbatch) must divide total batch size"
-K, ragged = divmod(M, S)  # K is microbatches per stage
-assert not ragged, "S (number of stages) must divide number of microbatches"
-print(f'{S} stages, {L // S} layer(s) per stage, {L} pipelined layers total')
-print(f'{B} examples per microbatch, {M} microbatches total')
-
-
-mesh = Mesh(jax.devices(), ('stages',))
-
 def stage_fn(layer, inputs):
   inputs = jnp.dot(inputs, layer)
   return jax.nn.relu(inputs)
@@ -74,54 +47,95 @@ def predict_pp(params, inputs):
   outputs = spmd_pipeline(stage_fn, params, inputs)
   return outputs
 
-# @partial(shard_map, mesh=mesh, in_specs=((P(), P('stages'), P()), P('stages')),
-#          out_specs=P())
 @partial(shard_map, mesh=mesh, in_specs=((P('stages')), P('stages')),
          out_specs=P())
 def loss_pp(params, batch):
   inputs, targets = batch
-  predictions = predict_pp(params, inputs.reshape(K, B, -1)).reshape(K * B, -1)
+  predictions = predict_pp(params, inputs.reshape(args.microbatches_per_stage, args.microbatch_size, -1)).reshape(args.microbatches_per_stage * args.microbatch_size, -1)
   local_loss = jnp.mean(jnp.sum((predictions - targets)**2, axis=-1))
   return jax.lax.pmean(local_loss, 'stages')
+
+def get_real_permute_pairs(loop_iteration, num_stages):
+  if loop_iteration >= num_stages:
+    # If pipeline is full, loop through all
+    return [(i, (i+1) % num_stages) for i in range(num_stages)]
+  else:
+    return [(i, (i+1) % num_stages) for i in range(loop_iteration + 1)]
 
 def spmd_pipeline(fn, stage_params, inputs):
   stage = jax.lax.axis_index('stages')
   outputs = jnp.zeros_like(inputs) * jnp.nan
-  #state = jnp.zeros((L // S, B, F)) * jnp.nan
-  state = jnp.zeros((B, F)) * jnp.nan
-  for i in range(M+L-1):
+  state = jnp.zeros((args.microbatch_size, args.embed_size)) * jnp.nan
+  for loop_iter in range(args.num_microbatches+args.num_layers-1):
     # Using jnp.where with axis_index creates a float32[2,8,128;stages:2] object - 
     # I believe this means each device actually has different data - its neither
     # sharded nor replicated
     # TODO simplifying this API?
     #state = state.at[0].set(jnp.where(stage == 0, inputs[i % K], state[0]))
     #state = state.at[:,:].set(jnp.where(stage == 0, inputs[i % K], state[:,:]))
-    state = state.at[:].set(jnp.where(stage == 0, inputs[i % K], state[:]))
+    state = state.at[:].set(jnp.where(stage == 0, inputs[loop_iter % args.microbatches_per_stage], state[:]))
     # Shard map is rank preserving, so the params have shape [1,embed,embed] inside each shard
     # We want to pass something of shape [embed, embed] instead
     state = fn(stage_params[0], state)
-    outputs = outputs.at[(i-L+1) % K].set(jnp.where(stage == S-1, state, outputs[(i-L+1) % K]))
-    state, inputs, outputs = shift(i, state, inputs, outputs)
-  outputs = jax.lax.ppermute(outputs, 'stages', [(i, (i+1) % S) for i in range(S)])
+    outputs = outputs.at[(loop_iter-args.num_layers+1) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, state, outputs[(loop_iter-args.num_layers+1) % args.microbatches_per_stage]))
+    state, inputs, outputs = shift(loop_iter, state, inputs, outputs)
+  outputs = jax.lax.ppermute(outputs, 'stages', [(i, (i+1) % args.num_stages) for i in range(args.num_stages)])
   return outputs
 
 def shift(i, state, inputs, outputs):
-  sh = lambda x, d: jax.lax.ppermute(x, 'stages', [(i, (i+d) % S) for i in range(S)])
-  state = sh(state, +1)
+  sh = lambda x, d: jax.lax.ppermute(x, 'stages', [(i, (i+d) % args.num_stages) for i in range(args.num_stages)])
+  if args.remove_dummy_comms:
+    permute_pairs = get_real_permute_pairs(i, args.num_stages)
+    state_sh = lambda x, d: jax.lax.ppermute(x, 'stages', permute_pairs)
+  else:
+    state_sh = sh
+  
+  state = state_sh(state, +1)
   # In pax code we roll the specific ms index every loop iteration
   # Instead we could roll every ms index after every`` K=|ms| loop iterations
-  if (i % K) == (-1 % K):
+  # This permutation should be done in full regardless of loop iteration - e.g. use all
+  # stage pairs.
+  if (i % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage):
     inputs = sh(inputs, +1)
-  if ((i-L+1) % K) == (-1 % K):
+  if ((i-args.num_layers+1) % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage):
     outputs = sh(outputs, +1)
   return state, inputs, outputs
 
-params_stacked = jnp.stack(params)
-params_sharded = jax.device_put(params_stacked, NamedSharding(mesh, P('stages')))
-batch_sharded = jax.device_put(batch, NamedSharding(mesh, P('stages')))
+def main():
+  import argparse
+  parser = argparse.ArgumentParser(description='Sharding and size settings')
+  parser.add_argument('--num_stages', type=int, default=4)
+  parser.add_argument('--num_layers', type=int, default=4)
+  parser.add_argument('--batch_size', type=int, default=16)
+  parser.add_argument('--embed_size', type=int, default=2048)
+  parser.add_argument('--num_microbatches', type=int, default=4)
+  parser.add_argument('--global_batch_size', type=int, default=128)
+  parser.add_argument('--remove_dummy_comms', action=argparse.BooleanOptionalAction, default=True)
+  global args
+  args = parser.parse_args()
+    
+  params, batch = init(jax.random.PRNGKey(0), args.num_layers, args.embed_size, args.batch_size)
+  print(f"input size is {batch[0].shape}")
 
-print(jax.jit(loss)(params, batch))
-print(jax.jit(loss_pp)(params_sharded, batch_sharded))
-jit_pipeline = jax.jit(loss_pp)
+  assert args.num_layers == args.num_stages, "Number of layers must equal the number of stages"
 
-timing_util.simple_timeit(jit_pipeline, params_sharded, batch_sharded, tries = 3, task = 'shard_pp')
+  microbatch_size = args.batch_size // args.num_microbatches
+  args.microbatch_size = microbatch_size
+  microbatches_per_stage = args.num_microbatches // args.num_stages
+  args.microbatches_per_stage = microbatches_per_stage
+
+  print(f'{args.num_stages} stages, {args.num_layers // args.num_stages} layer(s) per stage, {args.num_layers} pipelined layers total')
+  print(f'{args.microbatch_size} examples per microbatch, {args.num_microbatches} microbatches total')
+
+  params_stacked = jnp.stack(params)
+  params_sharded = jax.device_put(params_stacked, NamedSharding(mesh, P('stages')))
+  batch_sharded = jax.device_put(batch, NamedSharding(mesh, P('stages')))
+
+  print(jax.jit(loss)(params, batch))
+  print(jax.jit(loss_pp)(params_sharded, batch_sharded))
+  #jit_pipeline = jax.jit(loss_pp)
+
+  #timing_util.simple_timeit(jit_pipeline, params_sharded, batch_sharded, tries = 3, task = 'shard_pp')
+  
+
+main()
