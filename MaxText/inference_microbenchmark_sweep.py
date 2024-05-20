@@ -28,13 +28,13 @@ import pyconfig
 def main(config):
 
   # inference_microbenchmark_sweep_key_value_axis_order_product_id_list = [
-  #   item for item in config.inference_microbenchmark_sweep_key_value_axis_order_product_id_list.split('|')
+  #   item for item in config.inference_microbenchmark_sweep_key_value_axis_order_product_id_list.split(':')
   # ]
   inference_microbenchmark_sweep_ar_key_axis_order_list = [
-    item for item in config.inference_microbenchmark_sweep_ar_key_axis_order_list.split('|')
+    item for item in config.inference_microbenchmark_sweep_ar_key_axis_order_list.split(':')
   ]
   inference_microbenchmark_sweep_ar_value_axis_order_list = [
-    item for item in config.inference_microbenchmark_sweep_ar_value_axis_order_list.split('|')
+    item for item in config.inference_microbenchmark_sweep_ar_value_axis_order_list.split(':')
   ]
 
   results = []
