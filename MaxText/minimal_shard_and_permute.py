@@ -35,11 +35,12 @@ def create_data():
     return data
 
 # Create weight matrix
-# TODO: should wrap in a create_weights just like create_data above so initializes as sharded
-weight_sharding = ("stage", "fsdp", None)
-weight_pspec = jax.sharding.NamedSharding(mesh, P(*weight_sharding))
-weights = jax.numpy.ones((num_stages, embed_size, embed_out_size))
-weights = jax.lax.with_sharding_constraint(weights, weight_pspec)
+def create_weights():
+    weight_sharding = ("stage", "fsdp", None)
+    weight_pspec = jax.sharding.NamedSharding(mesh, P(*weight_sharding))
+    weights = jax.numpy.ones((num_stages, embed_size, embed_out_size))
+    weights = jax.lax.with_sharding_constraint(weights, weight_pspec)
+    return weights
 
 def layer_matmul(acitivations, weights):
     return acitivations @ weights
@@ -63,6 +64,8 @@ jit_pipeline_imitator = jax.jit(pipeline_imitator)
 
 jit_create_data = jax.jit(create_data)
 data = jit_create_data()
+jit_create_weights = jax.jit(create_weights)
+weights = jit_create_weights()
 
 print("About to perform the imitator...",flush=True)
 outputs = jit_pipeline_imitator(data, weights)

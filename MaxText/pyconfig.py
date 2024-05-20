@@ -254,7 +254,9 @@ class _HyperParameters:
     if using_pipeline_parallelism(raw_keys):
       num_stages = int(raw_keys['ici_pipeline_parallelism'] * raw_keys['dcn_pipeline_parallelism'])
       if raw_keys['num_pipeline_repeats'] == -1:
-        raw_keys['num_pipeline_repeats'] = raw_keys['num_decoder_layers'] // (num_stages * raw_keys['num_layers_per_pipeline_stage'])
+        num_pipeline_repeats, remainder = divmod(raw_keys['num_decoder_layers'], num_stages * raw_keys['num_layers_per_pipeline_stage'])
+        assert not remainder, f"The number of layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) times the number of stages ({num_stages}) must divide the number of decoder layers ({raw_keys['num_decoder_layers']}) "
+        raw_keys['num_pipeline_repeats'] = num_pipeline_repeats
       if raw_keys['num_pipeline_microbatches'] == -1:
         raw_keys['num_pipeline_microbatches'] = num_stages
 
