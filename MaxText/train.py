@@ -339,14 +339,12 @@ def setup_mesh_and_model(config):
 
   init_rng = random.PRNGKey(config.init_weights_seed)
   writer = max_utils.initialize_summary_writer(config)
-  logger = checkpointing.setup_checkpoint_logger(config)
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       config.checkpoint_dir,
       config.enable_checkpointing,
       config.async_checkpointing,
       config.checkpoint_period,
       config.dataset_type,
-      logger,
   )
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
@@ -459,8 +457,6 @@ def train_loop(config, state=None):
     print("Loading the compiled function...", flush=True)
     # Need to pass train signature and state to determine i/o shapes of train_state for now.
     p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
-    # TODO: p_eval_step is not yet supported in load_compiled
-    p_eval_step = None
     print("Loaded compiled function!", flush=True)
   else:
     p_train_step = jax.jit(
@@ -479,8 +475,6 @@ def train_loop(config, state=None):
           static_argnums=static_argnums_eval,
           donate_argnums=donate_argnums_eval,
       )
-    else:
-      p_eval_step = None
 
   local_metrics_file = open(config.metrics_file, "a", encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
@@ -511,7 +505,7 @@ def train_loop(config, state=None):
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
-      if save_checkpoint(checkpoint_manager, int(step), state, config.dataset_type, data_iterator):
+      if save_checkpoint(checkpoint_manager, step, state, config.dataset_type, data_iterator):
         max_logging.log(f"saved a checkpoint at step {step}")
 
       # Upon preemption, exit when and only when all ongoing saves are complete.

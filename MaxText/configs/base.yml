@@ -271,7 +271,3 @@ inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
 inference_microbenchmark_stages: "prefill,generate"
 inference_microbenchmark_loop_iters: 10
 inference_microbenchmark_log_file_path: ""
-
-# Checkpoint Structured logging
-enable_checkpoint_cloud_logger: False
-enable_checkpoint_standard_logger: False

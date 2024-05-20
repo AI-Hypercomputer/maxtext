@@ -262,7 +262,6 @@ def is_gpu_backend(raw_keys):
 def get_coordinator_ip_address():
   """Get coordinator IP Address with retries"""
   coordinator_address = ""
-  coordinator_ip_address = ""
   if os.environ.get("JAX_COORDINATOR_ADDRESS") is not None:
     coordinator_address = os.environ.get("JAX_COORDINATOR_ADDRESS")
     coordinator_found = False

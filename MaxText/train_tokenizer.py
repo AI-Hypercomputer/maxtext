@@ -63,6 +63,7 @@ def _train_sentencepiece(
     *,
     vocab_size: int,
     maxchars: int = int(1e7),
+    assets_path: str,
     model_path: str,
     model_type: str = "unigram",
     character_coverage: float = 1.0,
@@ -86,6 +87,7 @@ def _train_sentencepiece(
     abs_model_path = model_path
   else:
     abs_model_path = os.path.abspath(os.path.expanduser(model_path))
+    abs_assets_path = os.path.abspath(os.path.expanduser(assets_path))
   fname, _ = _dump_chars_to_textfile(dataset, maxchars=maxchars, data_keys=data_keys)
   with tempfile.NamedTemporaryFile(delete=False, prefix="/tmp/sp_tmp") as model_fp:
     pass  # we just want a prefix'd tmp-filename
@@ -101,6 +103,8 @@ def _train_sentencepiece(
     # Use an intermediate filename that is renamed to the target name to address
     # create and fill delays.
     copy_rename_path = abs_model_path + ".rntmp"
+    if not model_path.startswith("gs://"):
+      tf.io.gfile.makedirs(abs_assets_path)
     tf.io.gfile.copy(model_fp.name + ".model", copy_rename_path, overwrite=True)
     tf.io.gfile.rename(copy_rename_path, abs_model_path, overwrite=True)
     logging.info("copied %s to %s", model_fp.name + ".model", abs_model_path)
@@ -114,6 +118,7 @@ def _train_sentencepiece(
 def train_tokenizer(
     dataset: tf.data.Dataset,
     *,
+    assets_path: str,
     vocab_path: str,
     vocab_size: int,
     max_corpus_chars: int,
@@ -125,6 +130,7 @@ def train_tokenizer(
       dataset,
       vocab_size=vocab_size,
       maxchars=max_corpus_chars,
+      assets_path=assets_path,
       model_path=vocab_path,
       data_keys=data_keys,
   )
@@ -142,6 +148,7 @@ def main(argv):
   train_ds = train_ds_builder.as_dataset(split="train", read_config=read_config, shuffle_files=True)
   train_tokenizer(
       train_ds,
+      assets_path=_ASSETS_PATH.value,
       vocab_path=os.path.join(_ASSETS_PATH.value, _VOCAB_MODEL_NAME.value),
       vocab_size=_VOCAB_SIZE.value,
       max_corpus_chars=_MAX_CORPUS_CHARS.value,

@@ -47,6 +47,7 @@ class TokenizerTest(unittest.TestCase):
     cls.dataset = train_ds_builder.as_dataset(split="train", read_config=read_config, shuffle_files=True)
     train_tokenizer.train_tokenizer(
         cls.dataset,
+        assets_path=assets_path,
         vocab_path=cls.tokenizer_path,
         vocab_size=cls.vocab_size,
         max_corpus_chars=cls.max_corpus_chars,
