@@ -77,7 +77,7 @@ def main(config):
 
   # initialize the Llama2-7b model with weights from Meta
   (
-      init_rng,
+      _,
       _,
       _,
       _,
@@ -102,8 +102,8 @@ def main(config):
       _,
       state,
     ) = train.setup_train_loop(config)
-  print(f"state_loop: {state_loop.params}")
-  print(jax.tree_util.tree_structure(state_loop))
+  # print(f"state_loop: {state_loop.params}")
+  # print(jax.tree_util.tree_structure(state_loop))
   
   for i in range(config.num_decoder_layers):
     state.params['params']['decoder'][f'layers_{i}']['MoeBlock_0'] = {'gate':{}}
@@ -124,7 +124,7 @@ def main(config):
     # print(f"np.array(wi_0): {np.array(wi_0).shape}")
     # print(f"np.array(wi_1): {np.array(wi_1).shape}")
     # print(f"np.array(wo): {np.array(wo).shape}")
-    print(f"state: {state.params}")
+    # print(f"state: {state.params}")
     print(jax.tree_util.tree_structure(state))
 
   # print(f"state:")
@@ -133,6 +133,9 @@ def main(config):
   input_golden_data_path = "MaxText/test_assets/golden_data_llama2-7b.jsonl"
   with jsonlines.open(input_golden_data_path, 'r') as f:
     golden_data = list(f)
+  
+  from jax import random
+  init_rng = random.PRNGKey(42)
 
   for golden_data_index in range(len(golden_data)):
     # print(f"golden_data: {golden_data}")
@@ -157,16 +160,18 @@ def main(config):
         rngs={"aqt": init_rng},
     )
 
-    # print(f"full_train_logits_loop: {full_train_logits_loop}")
-    # print(f"full_train_logits: {full_train_logits}")
+    print(f"full_train_logits_loop.shape: {full_train_logits_loop.shape}")
+    print(f"full_train_logits.shape: {full_train_logits.shape}")
+    print(f"full_train_logits_loop: {full_train_logits_loop}")
+    print(f"full_train_logits: {full_train_logits}")
+    print(f".....")
     assert jax.numpy.allclose(
-            full_train_logits_loop, full_train_logits, rtol=0.1, atol=0.1, equal_nan=False
+            full_train_logits_loop, full_train_logits, rtol=0.01, atol=0.1, equal_nan=False
         )
   
     print("comparison is successful")
 
 if __name__ == "__main__":
-  import copy
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   pyconfig.initialize(sys.argv)
