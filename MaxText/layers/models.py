@@ -280,6 +280,13 @@ class Decoder(nn.Module):
         if cfg.num_layers_per_pipeline_stage == 1:
           deocder_layer_instace = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
         else:
+          # Remat the scan layers per stage
+          BlockLayer = nn.remat(  # pylint: disable=invalid-name
+            BlockLayer,
+            prevent_cse=not cfg.scan_layers,
+            policy=policy,
+            static_argnums=(-1, -2, -3, -4, -5),
+          )
           initializing = self.is_mutable_collection("params")
           params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
           cache_spec = 0
