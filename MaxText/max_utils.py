@@ -336,6 +336,8 @@ def create_device_mesh(config, devices=None):
   ]
 
   # Find possible unspecified parallelisms
+  print(f"num_devices_per_slice: {num_devices_per_slice}")
+  print(f"ici_parallelism: {ici_parallelism}")
   ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, "ICI")
 
   if multi_slice_env:
@@ -458,7 +460,7 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
     else:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings)(rng)
-      print(f"unboxed_abstract_state.jit.state: {state.params}")
+      # print(f"unboxed_abstract_state.jit.state: {state.params}")
       if raw_params:  # If we loaded a partial state, we need to merge it.
         state = state.replace(params=raw_params)
   state = unbox_logicallypartioned(state)

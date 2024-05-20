@@ -297,15 +297,15 @@ class MoeBlock(nn.Module):
 
   def generate_kernels(self, num_experts, base_emb_dim, mlp_dim, inputs):
     
-    features = _canonicalize_tuple(mlp_dim)
-    wo_features = _canonicalize_tuple(inputs.shape[-1])
-    axis = _canonicalize_tuple(-1)
-    axis = _normalize_axes(axis, inputs.ndim)
-    kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
-    wo_kernel_shape = tuple(inputs.shape[ax] for ax in axis) + wo_features
-    kernel_in_axis = np.arange(len(axis))
-    kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
-    wo_kernel_out_axis = np.arange(len(axis), len(axis) + len(wo_features))
+    # features = _canonicalize_tuple(mlp_dim)
+    # wo_features = _canonicalize_tuple(inputs.shape[-1])
+    # axis = _canonicalize_tuple(-1)
+    # axis = _normalize_axes(axis, inputs.ndim)
+    # kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
+    # wo_kernel_shape = tuple(inputs.shape[ax] for ax in axis) + wo_features
+    # kernel_in_axis = np.arange(len(axis))
+    # kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
+    # wo_kernel_out_axis = np.arange(len(axis), len(axis) + len(wo_features))
 
     # print("mega.......")
     # print(f"features: {features}")
@@ -347,162 +347,162 @@ class MoeBlock(nn.Module):
         (num_experts, mlp_dim, base_emb_dim),
         self.weight_dtype,
         np.arange(1),
-        np.arange(1, 3),
+        np.arange(1, 2),
       )
     wo_kernel = jnp.asarray(wo_kernel, self.dtype)
     return w0_kernel, w1_kernel, wo_kernel
 
-  # def call_gmm(self,
-  #              inputs,
-  #              num_experts,
-  #              base_emb_dim,
-  #              mlp_dim,
-  #              mlp_activation,
-  #              group_sizes):
+  def call_gmm(self,
+               inputs,
+               num_experts,
+               base_emb_dim,
+               mlp_dim,
+               mlp_activation,
+               group_sizes):
 
-  #   @functools.partial(
-  #       shard_map.shard_map,
-  #       mesh=self.mesh,
-  #       in_specs=(
-  #             (nn.logical_to_mesh_axes((None, None))),
-  #             (nn.logical_to_mesh_axes((None, None, None))),
-  #             (nn.logical_to_mesh_axes((None,))),
-  #         ),
-  #       out_specs=(nn.logical_to_mesh_axes((None, None))),
-  #       # in_specs=(
-  #       #       (nn.logical_to_mesh_axes(("activation_batch_length", "embed"))),
-  #       #       (nn.logical_to_mesh_axes((None, "activation_embed", "mlp"))),
-  #       #       (nn.logical_to_mesh_axes((None,))),
-  #       #   ),
-  #       # out_specs=(nn.logical_to_mesh_axes(("activation_batch_length", "mlp"))),
-  #       check_rep=False,
-  #   )
-  #   def gmm(inputs, kernel, group_sizes):
-  #     hs_shape = inputs.shape
-  #     # pad lengh is the 1st dimension of tiling size in gmm call
-  #     pad_length = 512
-  #     if hs_shape[0] % pad_length:
-  #       # padding
-  #       pad_length = pad_length - hs_shape[0] % pad_length
+    @functools.partial(
+        shard_map.shard_map,
+        mesh=self.mesh,
+        in_specs=(
+              (nn.logical_to_mesh_axes((None, None))),
+              (nn.logical_to_mesh_axes((None, None, None))),
+              (nn.logical_to_mesh_axes((None,))),
+          ),
+        out_specs=(nn.logical_to_mesh_axes((None, None))),
+        # in_specs=(
+        #       (nn.logical_to_mesh_axes(("activation_batch_length", "embed"))),
+        #       (nn.logical_to_mesh_axes((None, "activation_embed", "mlp"))),
+        #       (nn.logical_to_mesh_axes((None,))),
+        #   ),
+        # out_specs=(nn.logical_to_mesh_axes(("activation_batch_length", "mlp"))),
+        check_rep=False,
+    )
+    def gmm(inputs, kernel, group_sizes):
+      hs_shape = inputs.shape
+      # pad lengh is the 1st dimension of tiling size in gmm call
+      pad_length = 512
+      if hs_shape[0] % pad_length:
+        # padding
+        pad_length = pad_length - hs_shape[0] % pad_length
 
-  #       inputs = jax.lax.pad(inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0,0,0)])
-  #       inputs = inputs.astype(self.dtype)
+        inputs = jax.lax.pad(inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0,0,0)])
+        inputs = inputs.astype(self.dtype)
 
-  #     # print(f"{inputs.shape} {kernel.shape} {group_sizes.shape}")
-  #     #jax.debug.print("{group_sizes}", group_sizes=group_sizes)
-  #     inputs = inputs.astype(self.dtype)
-  #     kernel = kernel.astype(self.weight_dtype)
-  #     output = mblx.gmm(lhs=inputs, 
-  #                       rhs=kernel, 
-  #                       group_sizes=group_sizes,
-  #                       tiling=(512, 512, 512))
+      # print(f"{inputs.shape} {kernel.shape} {group_sizes.shape}")
+      #jax.debug.print("{group_sizes}", group_sizes=group_sizes)
+      inputs = inputs.astype(self.dtype)
+      kernel = kernel.astype(self.weight_dtype)
+      output = mblx.gmm(lhs=inputs, 
+                        rhs=kernel, 
+                        group_sizes=group_sizes,
+                        tiling=(512, 512, 512))
       
-  #     if hs_shape[0] % pad_length:
-  #       output = output[:hs_shape[0]]
+      if hs_shape[0] % pad_length:
+        output = output[:hs_shape[0]]
 
-  #     return output
+      return output
   
-  #   w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(num_experts,base_emb_dim,mlp_dim,inputs.ndim)
+    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(num_experts,base_emb_dim,mlp_dim,inputs.ndim)
 
-  #   # jax.debug.print("group sizes: {group_sizes}", group_sizes=group_sizes)
-  #   layer_1 = gmm(inputs, w0_kernel, group_sizes)
-  #   layer_2 = gmm(inputs, w1_kernel, group_sizes)
-  #   layer_1_act = _convert_to_activation_function(mlp_activation)(layer_1)
-  #   intermediate_layer = jnp.multiply(layer_1_act, layer_2)
-  #   output = gmm(intermediate_layer, wo_kernel, group_sizes)
-  #   print("running gmm")
-  #   return output
+    # jax.debug.print("group sizes: {group_sizes}", group_sizes=group_sizes)
+    layer_1 = gmm(inputs, w0_kernel, group_sizes)
+    layer_2 = gmm(inputs, w1_kernel, group_sizes)
+    layer_1_act = _convert_to_activation_function(mlp_activation)(layer_1)
+    intermediate_layer = jnp.multiply(layer_1_act, layer_2)
+    output = gmm(intermediate_layer, wo_kernel, group_sizes)
+    print("running gmm")
+    return output
 
-  # def permute(self, inputs, gate_logits, base_emb_dim):
-  #   inputs_2d = jnp.reshape(inputs, (-1, base_emb_dim))
-  #   weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-  #   weights = jax.nn.softmax(weights.astype(self.weight_dtype), axis=-1).astype(self.dtype)
-  #   flatten_selected_experts = jnp.ravel(selected_experts)
-  #   sorted_selected_experts = jnp.argsort(flatten_selected_experts)
-  #   repeat_hidden_states = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-  #   sorted_output = jnp.take(repeat_hidden_states, indices=sorted_selected_experts, axis=0).astype(self.dtype)
-  #   expert_order, expert_size = jnp.unique(flatten_selected_experts, return_counts=True, size=self.num_experts)
-  #   group_size = jnp.zeros(self.num_experts, dtype=jnp.int32)
+  def permute(self, inputs, gate_logits, base_emb_dim):
+    inputs_2d = jnp.reshape(inputs, (-1, base_emb_dim))
+    weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+    weights = jax.nn.softmax(weights.astype(self.weight_dtype), axis=-1).astype(self.dtype)
+    flatten_selected_experts = jnp.ravel(selected_experts)
+    sorted_selected_experts = jnp.argsort(flatten_selected_experts)
+    repeat_hidden_states = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
+    sorted_output = jnp.take(repeat_hidden_states, indices=sorted_selected_experts, axis=0).astype(self.dtype)
+    expert_order, expert_size = jnp.unique(flatten_selected_experts, return_counts=True, size=self.num_experts)
+    group_size = jnp.zeros(self.num_experts, dtype=jnp.int32)
 
-  #   expert_is_unused = expert_size == 0
-  #   indices = jnp.where(expert_is_unused, len(group_size), expert_order)
-  #   group_size = group_size.at[indices].set(jnp.where(expert_is_unused, group_size[indices], expert_size))
+    expert_is_unused = expert_size == 0
+    indices = jnp.where(expert_is_unused, len(group_size), expert_order)
+    group_size = group_size.at[indices].set(jnp.where(expert_is_unused, group_size[indices], expert_size))
 
-  #   return sorted_output, sorted_selected_experts, weights, group_size
+    return sorted_output, sorted_selected_experts, weights, group_size
 
-  # def unpermute(self, layer_3, inputs, sorted_selected_experts, weights):
-  #   unsort_output = jnp.take(layer_3, indices=jnp.argsort(sorted_selected_experts), axis=0)
-  #   flatten_weights = jnp.ravel(weights)
-  #   combined_output = jnp.multiply(unsort_output, flatten_weights[:, None])
-  #   groups = jnp.reshape(combined_output, (-1, self.num_experts_per_tok, combined_output.shape[1]))
-  #   return jnp.sum(groups, axis=1).reshape(inputs.shape).astype(self.dtype)
-
-  # @nn.compact
-  # def __call__(self, inputs):
-  #   cfg = self.config
-
-  #   gate_logits = DenseGeneral(
-  #           self.num_experts,
-  #           dtype=self.dtype,
-  #           kernel_init=self.kernel_init,
-  #           kernel_axes=self.kernel_axes,
-  #           name='gate')(inputs)
-  #   sorted_hidden_states, sorted_selected_experts, weights, group_size = self.permute(inputs,
-  #                                                                                     gate_logits,
-  #                                                                                     cfg.base_emb_dim)
-  
-  #   intermediate_output = self.call_gmm(sorted_hidden_states,
-  #                                       cfg.num_experts,
-  #                                       cfg.base_emb_dim,
-  #                                       cfg.mlp_dim,
-  #                                       cfg.mlp_activations[0],
-  #                                       group_size)
-
-  #   output = self.unpermute(intermediate_output, inputs, sorted_selected_experts, weights)
-
-  #   return output
+  def unpermute(self, layer_3, inputs, sorted_selected_experts, weights):
+    unsort_output = jnp.take(layer_3, indices=jnp.argsort(sorted_selected_experts), axis=0)
+    flatten_weights = jnp.ravel(weights)
+    combined_output = jnp.multiply(unsort_output, flatten_weights[:, None])
+    groups = jnp.reshape(combined_output, (-1, self.num_experts_per_tok, combined_output.shape[1]))
+    return jnp.sum(groups, axis=1).reshape(inputs.shape).astype(self.dtype)
 
   @nn.compact
   def __call__(self, inputs):
     cfg = self.config
-    inputs = inputs.astype(cfg.dtype)
+
     gate_logits = DenseGeneral(
             self.num_experts,
             dtype=self.dtype,
             kernel_init=self.kernel_init,
             kernel_axes=self.kernel_axes,
             name='gate')(inputs)
-    
-    top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-    flattened_top_k_weights = top_k_weights.reshape(-1, self.num_experts_per_tok)
+    sorted_hidden_states, sorted_selected_experts, weights, group_size = self.permute(inputs,
+                                                                                      gate_logits,
+                                                                                      cfg.base_emb_dim)
+  
+    intermediate_output = self.call_gmm(sorted_hidden_states,
+                                        cfg.num_experts,
+                                        cfg.base_emb_dim,
+                                        cfg.mlp_dim,
+                                        cfg.mlp_activations[0],
+                                        group_size)
 
-    # print(f"flattened_top_k_weights.shape: {flattened_top_k_weights.shape}")
-    # print(f"flattened_top_k_weights: {flattened_top_k_weights}")
+    output = self.unpermute(intermediate_output, inputs, sorted_selected_experts, weights)
 
-    softmax_probs = jax.nn.softmax(flattened_top_k_weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
-    softmax_probs = softmax_probs.reshape(gate_logits.shape[:-1] + (self.num_experts_per_tok,))
-
-    weights = jnp.zeros_like(gate_logits)
-    index_update = (jnp.arange(gate_logits.shape[0])[:, None, None], jnp.arange(gate_logits.shape[1])[:, None], top_k_indices)
-    weights = weights.at[index_update].set(softmax_probs)
-
-    # print(f"weights.shape: {weights.shape}")
-    # print(f"weights: {weights}")
-
-    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts,
-                                                            cfg.base_emb_dim,
-                                                            cfg.mlp_dim,
-                                                            inputs)
-    
-    with jax.named_scope("wi_0"):
-      layer_w0 = jnp.einsum("BLE,NEH -> BLNH", inputs, w0_kernel)
-    with jax.named_scope("wi_1"):
-      layer_w1 = jnp.einsum("BLE,NEH -> BLNH", inputs, w1_kernel)
-    layer_w0_act = _convert_to_activation_function(cfg.mlp_activations[0])(layer_w0)
-    layer_multiply = jnp.multiply(layer_w0_act, layer_w1)
-    with jax.named_scope("wo"):
-      intermediate_layer = jnp.einsum("BLNH,NHE -> BLNE", layer_multiply, wo_kernel)
-    with jax.named_scope("w_sum"):
-      output = jnp.einsum("BLNE,BLN -> BLE", intermediate_layer, weights)
-    
     return output
+
+  # @nn.compact
+  # def __call__(self, inputs):
+  #   cfg = self.config
+  #   inputs = inputs.astype(cfg.dtype)
+  #   gate_logits = DenseGeneral(
+  #           self.num_experts,
+  #           dtype=self.dtype,
+  #           kernel_init=self.kernel_init,
+  #           kernel_axes=self.kernel_axes,
+  #           name='gate')(inputs)
+    
+  #   top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+  #   flattened_top_k_weights = top_k_weights.reshape(-1, self.num_experts_per_tok)
+
+  #   # print(f"flattened_top_k_weights.shape: {flattened_top_k_weights.shape}")
+  #   # print(f"flattened_top_k_weights: {flattened_top_k_weights}")
+
+  #   softmax_probs = jax.nn.softmax(flattened_top_k_weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
+  #   softmax_probs = softmax_probs.reshape(gate_logits.shape[:-1] + (self.num_experts_per_tok,))
+
+  #   weights = jnp.zeros_like(gate_logits)
+  #   index_update = (jnp.arange(gate_logits.shape[0])[:, None, None], jnp.arange(gate_logits.shape[1])[:, None], top_k_indices)
+  #   weights = weights.at[index_update].set(softmax_probs)
+
+  #   # print(f"weights.shape: {weights.shape}")
+  #   # print(f"weights: {weights}")
+
+  #   w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts,
+  #                                                           cfg.base_emb_dim,
+  #                                                           cfg.mlp_dim,
+  #                                                           inputs)
+    
+  #   with jax.named_scope("wi_0"):
+  #     layer_w0 = jnp.einsum("BLE,NEH -> BLNH", inputs, w0_kernel)
+  #   with jax.named_scope("wi_1"):
+  #     layer_w1 = jnp.einsum("BLE,NEH -> BLNH", inputs, w1_kernel)
+  #   layer_w0_act = _convert_to_activation_function(cfg.mlp_activations[0])(layer_w0)
+  #   layer_multiply = jnp.multiply(layer_w0_act, layer_w1)
+  #   with jax.named_scope("wo"):
+  #     intermediate_layer = jnp.einsum("BLNH,NHE -> BLNE", layer_multiply, wo_kernel)
+  #   with jax.named_scope("w_sum"):
+  #     output = jnp.einsum("BLNE,BLN -> BLE", intermediate_layer, weights)
+    
+  #   return output

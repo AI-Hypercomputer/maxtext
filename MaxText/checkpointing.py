@@ -190,7 +190,7 @@ def load_state_if_possible(
     restored = ckptr.restore(
         p, item={"params": abstract_unboxed_pre_state.params}, transforms={}, restore_args={"params": restore_args}
     )
-    print(jax.tree_util.tree_structure(restored))
+    # print(jax.tree_util.tree_structure(restored))
     print(f'restored[params]: {restored["params"]}')
     return None, restored["params"]
 
