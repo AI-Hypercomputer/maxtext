@@ -282,6 +282,6 @@ ar_value_axis_order: "1,2,0,3"
 # Lists of KV-related settings over which to loop.
 # Each iteration will take same index from every list; therefore lists must be of the same length
 inference_microbenchmark_sweep_additional_metadata: ""
-inference_microbenchmark_sweep_key_value_axis_order_product_id: ""
-inference_microbenchmark_sweep_ar_key_axis_order: ""
-inference_microbenchmark_sweep_ar_value_axis_order: ""
+inference_microbenchmark_sweep_key_value_axis_order_product_id_list: ""
+inference_microbenchmark_sweep_ar_key_axis_order_list: ""
+inference_microbenchmark_sweep_ar_value_axis_order_list: ""
