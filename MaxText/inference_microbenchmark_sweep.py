@@ -65,8 +65,9 @@ def main():
     # config = pyconfig.config
 
     # Manually update
-    pyconfig._config['ar_key_axis_order'] = ar_key_axis_order
-    pyconfig._config['ar_value_axis_order'] = ar_value_axis_order
+    print(f"pyconfig._config {dir(pyconfig._config)}; {pyconfig._config}")
+    pyconfig._config.keys['ar_key_axis_order'] = ar_key_axis_order
+    pyconfig._config.keys['ar_value_axis_order'] = ar_value_axis_order
 
     print(f"@@config.ar_key_axis_order {config.ar_key_axis_order}")
     print(f"@@config.ar_value_axis_order {config.ar_value_axis_order}")
