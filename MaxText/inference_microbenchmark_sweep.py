@@ -25,26 +25,28 @@ import pyconfig
 
 
 # def main(config, sweep_args):
-def main(config):
-# def main():
+# def main(config):
+def main():
 
-  # inference_microbenchmark_sweep_key_value_axis_order_product_id_list = [
-  #   item for item in config.inference_microbenchmark_sweep_key_value_axis_order_product_id_list.split(':')
+  # inference_microbenchmark_sweep_ar_key_axis_order_list = [
+  #   item for item in config.inference_microbenchmark_sweep_ar_key_axis_order_list.split(':')
   # ]
+  # inference_microbenchmark_sweep_ar_value_axis_order_list = [
+  #   item for item in config.inference_microbenchmark_sweep_ar_value_axis_order_list.split(':')
+  # ]
+  args_dict = dict(a.split("=", 1) for a in sys.argv[2:])
   inference_microbenchmark_sweep_ar_key_axis_order_list = [
-    item for item in config.inference_microbenchmark_sweep_ar_key_axis_order_list.split(':')
+    item for item in args_dict['inference_microbenchmark_sweep_ar_key_axis_order_list'].split(':')
   ]
   inference_microbenchmark_sweep_ar_value_axis_order_list = [
-    item for item in config.inference_microbenchmark_sweep_ar_value_axis_order_list.split(':')
+    item for item in args_dict['inference_microbenchmark_sweep_ar_value_axis_order_list'].split(':')
   ]
 
   results = []
   for (
-    # key_value_axis_order_product_id,
     ar_key_axis_order,
     ar_value_axis_order,
   ) in zip(
-    # inference_microbenchmark_sweep_key_value_axis_order_product_id_list,
     inference_microbenchmark_sweep_ar_key_axis_order_list,
     inference_microbenchmark_sweep_ar_value_axis_order_list,
   ):
@@ -56,7 +58,7 @@ def main(config):
       f'ar_key_axis_order={ar_key_axis_order}',
       f'ar_value_axis_order={ar_value_axis_order}',
     ]
-    print(f"sys.argv2: {sys.argv}")
+    print(f"sys.argv2: {argv}")
     pyconfig.initialize(argv)
     config = pyconfig.config
 
@@ -123,7 +125,7 @@ if __name__ == "__main__":
   #     ),
   # )
   # sweep_args = parser.parse_args()
-  pyconfig.initialize(sys.argv)
+  # pyconfig.initialize(sys.argv)
   # main(pyconfig.config, sweep_args)
-  main(pyconfig.config)
-  # main()
+  # main(pyconfig.config)
+  main()
