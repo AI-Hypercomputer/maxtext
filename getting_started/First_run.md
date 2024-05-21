@@ -2,20 +2,14 @@
 
 We recommend starting with a single host first and then moving to multihost.
 
-## Getting Started: Download Dataset and Configure
-You need to run these steps once per project prior to any local development or cluster experiments.
+## Getting Started: Cloud Storage and Configure
+1. [Create a gcs buckets](https://cloud.google.com/storage/docs/creating-buckets) in your project for storing logs and checkpoints. To run maxtext the TPU/GPU VMs must have permission to read/write the gcs bucket. These permissions are granted by service account roles, such as the `STORAGE ADMIN` role.
 
-1. Create two gcs buckets in your project, one for to downloading and retrieving the dataset and the other for storing the logs.
-2. Download the dataset in your gcs bucket
-```
-bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
-```
-3. Set config values for `base_output_directory` and `dataset_path` in `configs/base.yml`. `tokenizer_path` is full path for loading the tokenizer. MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them. We also recommend reviewing the configurable options in `configs/base.yml`, for instance you may change the `steps` or `log_period` by either modifying `configs/base.yml` or by passing in `steps` and `log_period` as additional args to the `train.py` call.
-
-To run maxtext the TPUVMs must have permission to read the gcs bucket. These permissions are granted by service account roles, such as the `STORAGE ADMIN` role.
+2. MaxText reads a yaml file for configuration. We also recommend reviewing the configurable options in `configs/base.yml`, this config includes a decoder-only model of ~1B parameters. The configurable options can be overwritten from command lines. For instance you may change the `steps` or `log_period` by either modifying `configs/base.yml` or by passing in `steps` and `log_period` as additional args to the `train.py` call. `base_output_directory` should be set to a folder in the bucket you just created.
 
 ## Getting Started: Local Development for single host
 
+#### Running on Cloud TPUs
 Local development is a convenient way to run MaxText on a single host. It doesn't scale to
 multiple hosts.
 
@@ -25,27 +19,43 @@ multiple hosts.
 ```
 bash setup.sh
 ```
-4. After installation completes, run training with the command:
+4. After installation completes, run training with the command on synthetic data:
 ```
-python3 MaxText/train.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
+python3 MaxText/train.py MaxText/configs/base.yml \
+  run_name=$YOUR_JOB_NAME \
+  base_output_directory=gs://<my-bucket> \
+  dataset_type=synthetic \
+  steps=10
 ```
+Next, you can try training on a HugginFace dataset, see [Data Input Pipeline](https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md) for data input options.
 
 5. If you want to decode, you can decode as follows.
 ```
-python3 MaxText/decode.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
+python3 MaxText/decode.py MaxText/configs/base.yml \
+  run_name=$YOUR_JOB_NAME \
+  base_output_directory=gs://<my-bucket> \
+  per_device_batch_size=1
 ```
 Be aware, these decodings will be random. To get high quality decodings you need pass in a checkpoint, typically via the `load_parameters_path` argument.
 
 
 #### Running on NVIDIA GPUs
 1. Use `bash docker_build_dependency_image.sh DEVICE=gpu` can be used to build a container with the required dependencies.
-2. After installation is completed, run training with the command:
+2. After installation is completed, run training with the command on synthetic data:
 ```
-python3 MaxText/train.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
+python3 MaxText/train.py MaxText/configs/base.yml \
+  run_name=$YOUR_JOB_NAME \
+  base_output_directory=gs://<my-bucket> \
+  dataset_type=synthetic \
+  steps=10  
 ```
+
 3. If you want to decode, you can decode as follows.
 ```
-python3 MaxText/decode.py MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
+python3 MaxText/decode.py MaxText/configs/base.yml \
+  run_name=$YOUR_JOB_NAME \
+  base_output_directory=gs://<my-bucket> \
+  per_device_batch_size=1  
 ```
 
 * If you see the following error when running inside a container, set a larger `--shm-size` (e.g. `--shm-size=1g`)

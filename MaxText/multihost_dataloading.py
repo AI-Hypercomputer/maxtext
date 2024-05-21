@@ -22,7 +22,7 @@ https://github.com/sholtodouglas/multihost_dataloading
 """
 from functools import lru_cache, partial  # pylint: disable=g-importing-member
 from typing import Callable, Any, Union
-from collections.abc import Iterator
+from collections.abc import Iterator, Iterable
 import tensorflow as tf  # pylint: disable=g-import-not-at-top
 import time
 import numpy as np
@@ -98,10 +98,10 @@ class MultiHostDataLoadIterator:
     self.dataloader = dataloader
     if isinstance(self.dataloader, tf.data.Dataset):
       self.local_iterator = self.dataloader.as_numpy_iterator()
-    elif isinstance(self.dataloader, grain.DataLoader):
+    elif isinstance(self.dataloader, Iterable):
       self.local_iterator = iter(self.dataloader)
     else:
-      raise ValueError("Type error: dataloader should be either tf.data.Dataset or grain.DataLoader.")
+      raise ValueError("Type error: dataloader should be either tf.data.Dataset or Iterable.")
 
   def reset(self):
     if isinstance(self.dataloader, tf.data.Dataset):

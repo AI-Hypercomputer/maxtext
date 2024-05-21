@@ -156,19 +156,28 @@ ici_autoregressive_parallelism: 1
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
 num_slices: -1
 
-# Dataset
+# Tokenizer and Dataset
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
-dataset_path: ""
 vocab_size: 32_000 # powers of 2 for sharding
 tokenizer_path: "assets/tokenizer.llama2"
-dataset_name: 'c4/en:3.0.1'
-eval_dataset_name: 'c4/en:3.0.1'
-eval_split: 'validation'
 per_device_batch_size: 12.0
 expansion_factor_real_data: -1 # if -1 then all hosts will load real data, else total_hosts//expansion_factor_real_data will pull data from GCS.
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
-dataset_type: c4 # must be c4 or synthetic
+# dataset_type must be c4, c4-array_record, hf or synthetic
+# details in: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md
+dataset_type: c4
+# for TFDS input pipeline (dataset_type=c4) and Grain input pipeline (dataset_type:c4-array_record)
+# TODO (aireenmei): will rename the flags to be more clear (corresponding to each input pipeline)
+dataset_path: ""
+dataset_name: 'c4/en:3.0.1'
+eval_dataset_name: 'c4/en:3.0.1'
+eval_split: 'validation'
+# for HuggingFace input pipeline (dataset_type=hf)
+hf_path: ''
+hf_data_dir: ''
+hf_data_files: ''
+hf_access_token: ''
 
 # Setting for grain
 grain_worker_count: 4
