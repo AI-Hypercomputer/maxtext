@@ -17,15 +17,12 @@ limitations under the License.
 """Sweep across inference microbenchmarks."""
 
 import sys
-import argparse
 import json
 import jsonlines
 import inference_microbenchmark
 import pyconfig
 
 
-# def main(config, sweep_args):
-# def main(config):
 def main():
   pyconfig.initialize(sys.argv)
   config = pyconfig.config
@@ -36,13 +33,6 @@ def main():
   inference_microbenchmark_sweep_ar_value_axis_order_list = [
     item for item in config.inference_microbenchmark_sweep_ar_value_axis_order_list.split(':')
   ]
-  # args_dict = dict(a.split("=", 1) for a in sys.argv[2:])
-  # inference_microbenchmark_sweep_ar_key_axis_order_list = [
-  #   item for item in args_dict['inference_microbenchmark_sweep_ar_key_axis_order_list'].split(':')
-  # ]
-  # inference_microbenchmark_sweep_ar_value_axis_order_list = [
-  #   item for item in args_dict['inference_microbenchmark_sweep_ar_value_axis_order_list'].split(':')
-  # ]
 
   results = []
   for (
@@ -55,25 +45,15 @@ def main():
     print(f"ar_key_axis_order {ar_key_axis_order}")
     print(f"ar_value_axis_order {ar_value_axis_order}")
 
-    # print(f"sys.argv1: {sys.argv}")
-    # argv = sys.argv + [
-    #   f'ar_key_axis_order={ar_key_axis_order}',
-    #   f'ar_value_axis_order={ar_value_axis_order}',
-    # ]
-    # print(f"sys.argv2: {argv}")
-    # pyconfig.initialize(argv)
-    # config = pyconfig.config
-
     # Manually update
-    print(f"pyconfig._config {dir(pyconfig._config)}; {pyconfig._config}")
     pyconfig._config.keys['ar_key_axis_order'] = ar_key_axis_order
     pyconfig._config.keys['ar_value_axis_order'] = ar_value_axis_order
 
     print(f"@@config.ar_key_axis_order {config.ar_key_axis_order}")
     print(f"@@config.ar_value_axis_order {config.ar_value_axis_order}")
     metrics = inference_microbenchmark.main(config)
+    metrics = {k.lower(): v for k, v in metrics.items()}
     dimensions_json = {}
-    # dimensions_json['key_value_axis_order_product_id'] = key_value_axis_order_product_id
     dimensions_json['ar_key_axis_order'] = ar_key_axis_order
     dimensions_json['ar_value_axis_order'] = ar_value_axis_order
     dimensions_json = {
@@ -91,44 +71,4 @@ def main():
 
 
 if __name__ == "__main__":
-  # parser = argparse.ArgumentParser()
-  # # Lists of KV-related settings over which to loop. 
-  # # Each iteration will take same index from every list; therefore lists must be of the same length
-  # parser.add_argument(
-  #     "--key-value-axis-order-product-id-list",
-  #     type=str,
-  #     default="",
-  #     required=True,
-  # )
-  # parser.add_argument(
-  #     "--ar-key-axis-order-list",
-  #     type=str,
-  #     help='semicolon delimited list of ar key axis orders',
-  #     default="1,2,0,3",
-  #     required=True,
-  # )
-  # parser.add_argument(
-  #     "--ar-value-axis-order-list",
-  #     type=str,
-  #     help='semicolon delimited list of ar value axis orders',
-  #     default="1,2,0,3",
-  #     required=True,
-  # )
-  # parser.add_argument(
-  #     "--save-sweep-result",
-  #     action="store_true",
-  #     help="Specify to save benchmark results to a jsonlines file",
-  # )
-  # parser.add_argument(
-  #     "--additional-metadata-metrics-to-save",
-  #     type=str,
-  #     help=(
-  #         "Additional metadata about the workload. Should be a dictionary in"
-  #         " the form of a string."
-  #     ),
-  # )
-  # sweep_args = parser.parse_args()
-  # pyconfig.initialize(sys.argv)
-  # main(pyconfig.config, sweep_args)
-  # main(pyconfig.config)
   main()
