@@ -26,6 +26,7 @@ import pyconfig
 
 # def main(config, sweep_args):
 def main(config):
+# def main():
 
   # inference_microbenchmark_sweep_key_value_axis_order_product_id_list = [
   #   item for item in config.inference_microbenchmark_sweep_key_value_axis_order_product_id_list.split(':')
@@ -47,9 +48,21 @@ def main(config):
     inference_microbenchmark_sweep_ar_key_axis_order_list,
     inference_microbenchmark_sweep_ar_value_axis_order_list,
   ):
+    print(f"ar_key_axis_order {ar_key_axis_order}")
+    print(f"ar_value_axis_order {ar_value_axis_order}")
+
+    print(f"sys.argv1: {sys.argv}")
+    argv = sys.argv + ' '.join([
+      f'ar_key_axis_order={ar_key_axis_order}',
+      f'ar_value_axis_order={ar_value_axis_order}',
+    ])
+    print(f"sys.argv2: {sys.argv}")
+    pyconfig.initialize(argv)
+    config = pyconfig.config
+
     # config.key_value_axis_order_product_id = key_value_axis_order_product_id
-    config.ar_key_axis_order = ar_key_axis_order
-    config.ar_value_axis_order = ar_value_axis_order
+    # config.ar_key_axis_order = ar_key_axis_order
+    # config.ar_value_axis_order = ar_value_axis_order
     # print(f"@@config.key_value_axis_order_product_id {config.key_value_axis_order_product_id}")
     print(f"@@config.ar_key_axis_order {config.ar_key_axis_order}")
     print(f"@@config.ar_value_axis_order {config.ar_value_axis_order}")
@@ -113,3 +126,4 @@ if __name__ == "__main__":
   pyconfig.initialize(sys.argv)
   # main(pyconfig.config, sweep_args)
   main(pyconfig.config)
+  # main()
