@@ -167,7 +167,7 @@ def collate_results(config, results, model_size, cache_size, num_model_params, i
   return results
 
 
-def write_results(results, filename, flatten_results):
+def write_results(results, filename):
   if filename != "":
     with open(filename, "w", encoding="utf-8") as f:
       json.dump(results, f, indent=2)
