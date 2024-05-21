@@ -21,6 +21,7 @@ import json
 import jsonlines
 import inference_microbenchmark
 import pyconfig
+from jax._src.lib import xla_extension
 
 
 def main():
@@ -51,8 +52,6 @@ def main():
 
     print(f"@@config.ar_key_axis_order {config.ar_key_axis_order}")
     print(f"@@config.ar_value_axis_order {config.ar_value_axis_order}")
-    metrics = inference_microbenchmark.main(config)
-    metrics = {k.lower(): v for k, v in metrics.items()}
     dimensions_json = {}
     dimensions_json['ar_key_axis_order'] = ar_key_axis_order
     dimensions_json['ar_value_axis_order'] = ar_value_axis_order
@@ -60,6 +59,15 @@ def main():
       **dimensions_json,
       **json.loads(config.inference_microbenchmark_sweep_additional_metadata)
     }
+    try:
+      metrics = inference_microbenchmark.main(config)
+      metrics = {k.lower(): v for k, v in metrics.items()}
+      dimensions_json['oom'] = 'False'
+    except xla_extension.XlaRuntimeError:
+      # OOM
+      metrics = {}
+      dimensions_json['oom'] = 'True'
+
     final = {'metrics': metrics, 'dimensions': dimensions_json}
     print(f"final {final}")
     results.append(final)
