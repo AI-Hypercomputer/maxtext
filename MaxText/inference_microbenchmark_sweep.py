@@ -84,9 +84,10 @@ def main():
     print(f"final {final}")
     results.append(final)
   
+  print(f"results {results}")
   path = 'inference_microbenchmark_sweep_results.jsonl'
   with jsonlines.open(path, mode="w") as writer:
-    writer.write_all()
+    writer.write_all(results)
 
 
 if __name__ == "__main__":
