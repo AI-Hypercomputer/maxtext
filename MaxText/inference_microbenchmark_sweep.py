@@ -52,10 +52,10 @@ def main(config):
     print(f"ar_value_axis_order {ar_value_axis_order}")
 
     print(f"sys.argv1: {sys.argv}")
-    argv = sys.argv + ' '.join([
+    argv = sys.argv + [
       f'ar_key_axis_order={ar_key_axis_order}',
       f'ar_value_axis_order={ar_value_axis_order}',
-    ])
+    ]
     print(f"sys.argv2: {sys.argv}")
     pyconfig.initialize(argv)
     config = pyconfig.config
