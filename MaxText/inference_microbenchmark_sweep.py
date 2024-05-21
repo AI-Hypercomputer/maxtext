@@ -68,7 +68,7 @@ def main():
     # print(f"@@config.key_value_axis_order_product_id {config.key_value_axis_order_product_id}")
     print(f"@@config.ar_key_axis_order {config.ar_key_axis_order}")
     print(f"@@config.ar_value_axis_order {config.ar_value_axis_order}")
-    results = inference_microbenchmark.main(config)
+    metrics = inference_microbenchmark.main(config)
     dimensions_json = {}
     # dimensions_json['key_value_axis_order_product_id'] = key_value_axis_order_product_id
     dimensions_json['ar_key_axis_order'] = ar_key_axis_order
@@ -78,7 +78,7 @@ def main():
       # **json.loads(sweep_args.additional_metadata_metrics_to_save)
       **json.loads(config.inference_microbenchmark_sweep_additional_metadata)
     }
-    final = {'metrics': results, 'dimensions': dimensions_json}
+    final = {'metrics': metrics, 'dimensions': dimensions_json}
     print(f"final {final}")
     results.append(final)
   
