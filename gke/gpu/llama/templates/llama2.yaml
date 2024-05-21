@@ -34,7 +34,7 @@ spec:
                         operator: In
                         values: [np-1]
               nodeSelector:
-                cloud.google.com/gke-accelerator: nvidia-h100-80gb
+                cloud.google.com/gke-accelerator: nvidia-h100-mega-80gb
               hostNetwork: true
               dnsPolicy: ClusterFirstWithHostNet
               terminationGracePeriodSeconds: 30
