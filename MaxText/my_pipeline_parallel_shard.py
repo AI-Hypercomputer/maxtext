@@ -62,26 +62,14 @@ def get_real_permute_pairs(loop_iteration, num_stages):
   else:
     return [(i, (i+1) % num_stages) for i in range(loop_iteration + 1)]
 
-def parallelizable_body(previous_output, stage_params, current_input):
-  next_previous_output = fn(stage_params[0], current_input)
-  next_input = shift(previous_outputs)
-  return next_previous_output, next_input
-
-
 def spmd_pipeline(fn, stage_params, inputs):
   stage = jax.lax.axis_index('stages')
   outputs = jnp.zeros_like(inputs) * jnp.nan
   state = jnp.zeros((args.microbatch_size, args.embed_size)) * jnp.nan
   for loop_iter in range(args.num_microbatches+args.num_layers-1):
-    # Using jnp.where with axis_index creates a float32[2,8,128;stages:2] object - 
-    # I believe this means each device actually has different data - its neither
-    # sharded nor replicated
-    # TODO simplifying this API?
-    #state = state.at[0].set(jnp.where(stage == 0, inputs[i % K], state[0]))
-    #state = state.at[:,:].set(jnp.where(stage == 0, inputs[i % K], state[:,:]))
     state = state.at[:].set(jnp.where(stage == 0, inputs[loop_iter % args.microbatches_per_stage], state[:]))
     # Shard map is rank preserving, so the params have shape [1,embed,embed] inside each shard
-    # We want to pass something of shape [embed, embed] instead
+    # We want to pass something of shape [embed, embed] instead, so we index away the first unit axis.
     state = fn(stage_params[0], state)
     outputs = outputs.at[(loop_iter-args.num_layers+1) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, state, outputs[(loop_iter-args.num_layers+1) % args.microbatches_per_stage]))
     state, inputs, outputs = shift(loop_iter, state, inputs, outputs)
