@@ -18,6 +18,7 @@ import functools
 
 from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2.flax import aqt_flax
+from layers.fp8_ops_manual import Fp8DotGeneralOp
 from common_types import Array, Config
 from dataclasses import dataclass
 import flax.linen as nn
@@ -76,7 +77,7 @@ class Fp8Quantization(Quantization):
 
   def dot_general_cls(self):
     """Returns dot_general configured with aqt params."""
-    return nn.Fp8DotGeneralOp
+    return Fp8DotGeneralOp
 
 
 def _get_quant_config(config):
