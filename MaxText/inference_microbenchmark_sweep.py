@@ -21,6 +21,7 @@ import sys
 import json
 import jsonlines
 import inference_microbenchmark
+import max_utils
 import pyconfig
 from jax._src.lib import xla_extension
 
@@ -92,17 +93,23 @@ def main():
     # Manually update the config
     # Don't set key_value_axis_order_product_id; otherwise it will recompute
     # ar_key_axis_order and ar_value_axis_order
-    pyconfig._config.keys['prefill_key_axis_order'] = prefill_key_axis_order
-    pyconfig._config.keys['prefill_value_axis_order'] = prefill_value_axis_order
-    pyconfig._config.keys['ar_key_axis_order'] = ar_key_axis_order
-    pyconfig._config.keys['ar_value_axis_order'] = ar_value_axis_order
+
     # name = f"{key_value_axis_order_product_id}-{prefill_key_axis_order}-{prefill_value_axis_order}-{ar_key_axis_order}-{ar_value_axis_order}"
     # profile_name = f"{key_value_axis_order_product_id}-{prefill_key_axis_order}-{ar_key_axis_order}"
     quant = 'bf16' if not config['quantization'] else config['quantization']
     run_name = f"{inference_metadata['accelerator']}-{config['model_name']}-{quant}-{key_value_axis_order_product_id}-{prefill_key_axis_order}-{ar_key_axis_order}"
     tensorboard_dir = os.path.join(config.base_output_directory, run_name, "tensorboard", "")
+    checkpoint_dir = os.path.join(config.base_output_directory, run_name, "checkpoint", "")
+    metrics_dir = os.path.join(config.base_output_directory, run_name, "metrics", "")
+    pyconfig._config.keys['prefill_key_axis_order'] = prefill_key_axis_order
+    pyconfig._config.keys['prefill_value_axis_order'] = prefill_value_axis_order
+    pyconfig._config.keys['ar_key_axis_order'] = ar_key_axis_order
+    pyconfig._config.keys['ar_value_axis_order'] = ar_value_axis_order
     pyconfig._config.keys['tensorboard_dir'] = tensorboard_dir
+    pyconfig._config.keys['checkpoint_dir'] = checkpoint_dir
+    pyconfig._config.keys['metrics_dir'] = metrics_dir
     pyconfig._config.keys['run_name'] = run_name
+    max_utils.write_config_raw_keys_for_gcs(pyconfig._config.keys)
 
     print(f"prefill_key_axis_order {config.prefill_key_axis_order}")
     print(f"prefill_value_axis_order {config.prefill_value_axis_order}")
