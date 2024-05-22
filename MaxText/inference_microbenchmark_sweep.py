@@ -16,6 +16,7 @@ limitations under the License.
 
 """Sweep across inference microbenchmarks."""
 
+import os
 import sys
 import json
 import jsonlines
@@ -56,7 +57,9 @@ def main():
     # Don't set key_value_axis_order_product_id; otherwise it will recompute ar_key_axis_order and ar_value_axis_order
     pyconfig._config.keys['ar_key_axis_order'] = ar_key_axis_order
     pyconfig._config.keys['ar_value_axis_order'] = ar_value_axis_order
-    pyconfig._config.keys['run_name'] = f"{key_value_axis_order_product_id}-{ar_key_axis_order}-{ar_value_axis_order}"
+    name = f"{key_value_axis_order_product_id}-{ar_key_axis_order}-{ar_value_axis_order}"
+    tensorboard_dir = os.path.join(config.base_output_directory, name, "tensorboard", "")
+    pyconfig._config.keys['tensorboard_dir'] = tensorboard_dir
 
     print(f"ar_key_axis_order {config.ar_key_axis_order}")
     print(f"ar_value_axis_order {config.ar_value_axis_order}")
