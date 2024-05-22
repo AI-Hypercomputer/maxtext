@@ -262,12 +262,13 @@ def train_step(model, config, state, data, dropout_rng):
 
   if config.gradient_clipping_threshold > 0:
     grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
-    def swap_with_grad(key_path, clipped_leaf, raw_leaf):
-      if key_path[-1].key in ['input_amax_history', 'kernel_amax_history', 'input_scale', 'kernel_scale']:
-        return raw_leaf
-      else:
-        return clipped_leaf
-    grads = jax.tree_util.tree_map_with_path(swap_with_grad, grads, (raw_grads))
+    # def swap_with_grad(key_path, clipped_leaf, raw_leaf):
+    #   if key_path[-1].key in ['input_amax_history', 'kernel_amax_history', 'input_scale', 'kernel_scale']:
+    #     return raw_leaf
+    #   else:
+    #     return clipped_leaf
+    # grads = jax.tree_util.tree_map_with_path(swap_with_grad, grads, (raw_grads))
+    grads['_overwrite_with_gradient'] = raw_grads['_overwrite_with_gradient']  
   else:
     grads = raw_grads
   new_state = state.apply_gradients(grads=grads)
