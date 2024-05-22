@@ -30,6 +30,7 @@ def main():
   pyconfig.initialize(sys.argv)
   config = pyconfig.config
 
+  print(f"pwd: {os.getcwd()}")
   with open(config.inference_metadata_file, encoding='utf-8') as json_file:
     inference_metadata = json.load(json_file)
     print(inference_metadata)
