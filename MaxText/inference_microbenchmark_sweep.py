@@ -97,8 +97,8 @@ def main():
 
     # name = f"{key_value_axis_order_product_id}-{prefill_key_axis_order}-{prefill_value_axis_order}-{ar_key_axis_order}-{ar_value_axis_order}"
     # profile_name = f"{key_value_axis_order_product_id}-{prefill_key_axis_order}-{ar_key_axis_order}"
-    quant = 'bf16' if not config['quantization'] else config['quantization']
-    run_name = f"{inference_metadata['accelerator']}-{config['model_name']}-{quant}-{key_value_axis_order_product_id}-{prefill_key_axis_order}-{ar_key_axis_order}"
+    quant = 'bf16' if not config.quantization else config.quantization
+    run_name = f"{inference_metadata['accelerator']}-{config.model_name}-{quant}-{key_value_axis_order_product_id}-{prefill_key_axis_order}-{ar_key_axis_order}"
     tensorboard_dir = os.path.join(config.base_output_directory, run_name, "tensorboard", "")
     checkpoint_dir = os.path.join(config.base_output_directory, run_name, "checkpoint", "")
     metrics_dir = os.path.join(config.base_output_directory, run_name, "metrics", "")
