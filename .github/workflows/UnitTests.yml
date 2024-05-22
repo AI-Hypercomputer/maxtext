@@ -27,80 +27,117 @@ on:
     - cron:  '0 */2 * * *'
 
 jobs:
-  # IF YOU MODIFY THIS, YOU SHOULD ALSO ADD CORRESPONDING MODIFICATIONS TO 'gpu' job
+  build_and_upload_image:
+    strategy:
+        fail-fast: false
+        matrix:
+          device:
+          - type: tpu
+            name: v4-8
+            mode: stable
+          - type: gpu
+            name: a100-40gb-4
+            mode: pinned
+    name: Build and upload image (${{ matrix.device.name }})
+    runs-on: ["self-hosted", "${{ matrix.device.type }}", "${{ matrix.device.name }}"]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Cleanup old docker images
+      run: docker system prune --all --force
+    - name: Build an image
+      run: |
+        bash docker_build_dependency_image.sh MODE=${{ matrix.device.mode }} DEVICE=${{ matrix.device.type }} 
+    - name: Tag the image
+      run: |
+        docker tag maxtext_base_image gcr.io/tpu-prod-env-multipod/maxtext_${{ github.sha }}:${{ matrix.device.type }}
+    - name: Upload the image
+      run: |
+        docker push gcr.io/tpu-prod-env-multipod/maxtext_${{ github.sha }}:${{ matrix.device.type }}
+
+  common:
+    needs: build_and_upload_image
+    strategy:
+      fail-fast: False
+      matrix:
+        device:
+        - type: tpu
+          name: v4-8
+          attention: autoselected
+          pytest_marker: ''
+          container_env:
+            XLA_PYTHON_CLIENT_MEM_FRACTION: 0.75
+            TF_FORCE_GPU_ALLOW_GROWTH: false
+          container_resource_option: "--privileged"
+        - type: gpu
+          name: a100-40gb-4
+          image_suffix: gpu_jax_pinned
+          attention: dot_product
+          pytest_marker: -m 'not tpu'
+          container_env:
+            XLA_PYTHON_CLIENT_MEM_FRACTION: 0.65
+            TF_FORCE_GPU_ALLOW_GROWTH: true
+          container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
+    name: Common test (${{ matrix.device.name }})
+    runs-on: ["self-hosted", "${{ matrix.device.type }}", "${{ matrix.device.name }}"]
+    container:
+      image: gcr.io/tpu-prod-env-multipod/maxtext_${{ github.sha }}:${{ matrix.device.type }}
+      volumes: 
+        - /home/runner/actions-runner/_work/maxtext/maxtext:/deps
+      env:
+        XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ matrix.device.container_env.XLA_PYTHON_CLIENT_MEM_FRACTION }}
+        TF_FORCE_GPU_ALLOW_GROWTH: ${{ matrix.device.container_env.TF_FORCE_GPU_ALLOW_GROWTH }}
+      options: ${{ matrix.device.container_resource_option }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Test gsutil installation
+      run: which gsutil >/dev/null 2>&1 || { echo >&2 "gsutil is required but not installed. Aborting"; exit 24;}
+    - name: Test with pytest
+      run: cd MaxText;python3 -m pytest ${{ matrix.device.pytest_marker }}
+    - name: Test train.py with TFDS c4
+      run: python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M-%S) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 enable_checkpointing=false attention=${{ matrix.device.attention }}
+    - name: Test train.py with HF c4
+      run: python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M-%S) base_output_directory=gs://runner-maxtext-logs hf_data_files=gs://maxtext-dataset/hf/c4/c4-train-00000-of-01637.parquet hf_path=parquet dataset_type=hf steps=2 tokenizer_path=google-t5/t5-large attention=${{ matrix.device.attention }} enable_checkpointing=false
+    - name: Test train.py with synthetic data
+      run: python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M-%S) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 enable_checkpointing=false attention=${{ matrix.device.attention }} dataset_type=synthetic
+    - name: Test train.py with per_device_batch_size < 1
+      run: python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M-%S) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 per_device_batch_size=0.25 ici_tensor_parallelism=4 enable_checkpointing=false attention=${{ matrix.device.attention }}
+    - name: Test decode.py
+      run: python3 MaxText/decode.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M-%S) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 ici_tensor_parallelism=4 attention=${{ matrix.device.attention }} enable_checkpointing=false max_target_length=128 per_device_batch_size=1
+    - name: Test decode.py with per_device_batch_size < 1
+      run: python3 MaxText/decode.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M-%S) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 ici_tensor_parallelism=4 attention=${{ matrix.device.attention }} enable_checkpointing=false max_target_length=128 per_device_batch_size=.25
+    - name: Test int8_training
+      run: python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M-%S) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset quantization=int8 steps=2 enable_checkpointing=false attention=${{ matrix.device.attention }}
+    - name: Test fp8_training
+      run: python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M-%S) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset quantization=fp8 steps=2 enable_checkpointing=false attention=${{ matrix.device.attention }}
+    - name: Test generate_param_only_checkpoint
+      run: bash end_to_end/test_generate_param_only_checkpoint.sh -r runner_$(date +%Y-%m-%d-%H-%M-%S) -o gs://runner-maxtext-logs -d gs://maxtext-dataset -i 4 -a ${{ matrix.device.attention }}
+    - name: Test generate_param_only_checkpoint with int8 quantization
+      run: bash end_to_end/test_generate_param_only_checkpoint.sh -r runner_$(date +%Y-%m-%d-%H-%M-%S) -o gs://runner-maxtext-logs -d gs://maxtext-dataset -i 4 -q int8 -a ${{ matrix.device.attention }}
+    - name: Test grain checkpoint determinism
+      run: bash end_to_end/test_checkpointing.sh runner_$(date +%Y-%m-%d-%H-%M-%S) gs://runner-maxtext-logs gs://maxtext-dataset False c4-array_record ${{ matrix.device.attention }}
+    - name: Test checkpoint compatibility
+      run: bash end_to_end/test_checkpoint_compatibility.sh runner_$(date +%Y-%m-%d-%H-%M-%S) gs://runner-maxtext-logs gs://maxtext-dataset ${{ matrix.device.attention }}
+
   tpu:
+    needs: build_and_upload_image
     strategy:
       fail-fast: false
       matrix:
         device-type: ["v4-8"]
     name: "TPU test (${{ matrix.device-type }})"
     runs-on: ["self-hosted", "tpu", "${{ matrix.device-type }}"]
+    container:
+      image: gcr.io/tpu-prod-env-multipod/maxtext_${{ github.sha }}:tpu
+      volumes: 
+      - /home/runner/actions-runner/_work/maxtext/maxtext:/deps
+      options: "--privileged"
     steps:
-    - uses: actions/checkout@v3
-    - name: Cleanup old docker images
-      run: |
-        docker system prune --all --force
-    - name: Install dependencies
-      run: |
-        bash docker_build_dependency_image.sh
-    - name: Test gsutil installation
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged maxtext_base_image bash -c \
-        'which gsutil >/dev/null 2>&1 || { echo >&2 "gsutil is required but not installed. Aborting"; exit 24;}'
-    - name: Test with pytest
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged maxtext_base_image bash -c 'cd MaxText;python3 -m pytest'
-    - name: Test train.py with c4
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged maxtext_base_image bash -c \
-        'python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 enable_checkpointing=false'
-    - name: Test train.py with synthetic data
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged maxtext_base_image bash -c \
-        'python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 enable_checkpointing=false dataset_type=synthetic'
-    - name: Test train.py with per_device_batch_size < 1
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged maxtext_base_image bash -c \
-        'python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 per_device_batch_size=0.25 ici_tensor_parallelism=4 enable_checkpointing=false'
-    - name: Test decode.py
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged maxtext_base_image bash -c \
-        'python3 MaxText/decode.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 ici_tensor_parallelism=4 attention=dot_product enable_checkpointing=false max_target_length=128 per_device_batch_size=1'
-    - name: Test decode.py with per_device_batch_size < 1
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged maxtext_base_image bash -c \
-        'python3 MaxText/decode.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 ici_tensor_parallelism=4 attention=dot_product enable_checkpointing=false max_target_length=128 per_device_batch_size=.25'
-    - name: Test int8_training
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged maxtext_base_image bash -c \
-        'python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset quantization=int8 steps=2 enable_checkpointing=false'
-    - name: Test fp8_training
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged maxtext_base_image bash -c \
-        'python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset quantization=fp8 steps=2 enable_checkpointing=false'
-    - name: Test generate_param_only_checkpoint
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged maxtext_base_image bash -c \
-        'bash end_to_end/test_generate_param_only_checkpoint.sh -r runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} -o gs://runner-maxtext-logs -d gs://maxtext-dataset -i 4'
-    - name: Test generate_param_only_checkpoint with int8 quantization
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged maxtext_base_image bash -c \
-        'bash end_to_end/test_generate_param_only_checkpoint.sh -r runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} -o gs://runner-maxtext-logs -d gs://maxtext-dataset -i 4 -q int8'
-    - name: Test grain checkpoint determinism
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged maxtext_base_image bash -c \
-        'bash end_to_end/test_checkpointing.sh runner gs://runner-maxtext-logs gs://maxtext-dataset False c4-array_record'
-    - name: Test checkpoint compatibility
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged maxtext_base_image bash -c \
-        'bash end_to_end/test_checkpoint_compatibility.sh runner gs://runner-maxtext-logs gs://maxtext-dataset'
+    - uses: actions/checkout@v4
     - name: Validate Pedagogical Example, Shmap_collective_matmul
-      run: |
-        docker run -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged maxtext_base_image bash -c \
-        'python3 pedagogical_examples/shmap_collective_matmul.py'
+      run: python3 pedagogical_examples/shmap_collective_matmul.py
 
-  # IF YOU MODIFY THIS, YOU SHOULD ALSO ADD CORRESPONDING MODIFICATIONS TO 'tpu' job
   gpu:
+    needs: build_and_upload_image
     strategy:
       fail-fast: false
       matrix:
@@ -108,70 +145,29 @@ jobs:
         build-mode: ["pinned"]
     name: "GPU test (${{ matrix.device-type }}, ${{ matrix.build-mode }})"
     runs-on: ["self-hosted", "gpu", "${{ matrix.device-type }}"]
-    env:
-      LOCAL_IMAGE_NAME: "maxtext_base_image_${{ matrix.build-mode }}_${{ github.sha }}"
+    container:
+      image: gcr.io/tpu-prod-env-multipod/maxtext_${{ github.sha }}:gpu
+      volumes: 
+      - /home/runner/actions-runner/_work/maxtext/maxtext:/deps
+      env:
+        XLA_PYTHON_CLIENT_MEM_FRACTION: 0.65
+        TF_FORCE_GPU_ALLOW_GROWTH: true
+      options: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
-    - name: Cleanup old docker images
-      run: |
-        docker system prune --all --force
-    - name: Install dependencies
-      run: |
-        bash docker_build_dependency_image.sh DEVICE=gpu MODE=${{ matrix.build-mode }} LOCAL_IMAGE_NAME="$LOCAL_IMAGE_NAME"
-    - name: Test gsutil installation
-      run: |
-        docker run --runtime=nvidia --gpus all -v /home/runner/actions-runner/_work/maxtext/maxtext:/app --rm --privileged "$LOCAL_IMAGE_NAME" bash -c \
-        'which gsutil >/dev/null 2>&1 || { echo >&2 "gsutil is required but not installed. Aborting"; exit 24;}'
-    - name: Test with pytest
-      run: |
-        docker run -e XLA_PYTHON_CLIENT_MEM_FRACTION=0.65 -e TF_FORCE_GPU_ALLOW_GROWTH=true --shm-size=2g --runtime=nvidia --gpus all -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged "$LOCAL_IMAGE_NAME" bash -c 'cd MaxText;python3 -m pytest -m "not tpu"'
-    - name: Test train.py with c4
-      run: |
-        docker run -e XLA_PYTHON_CLIENT_MEM_FRACTION=0.65 -e TF_FORCE_GPU_ALLOW_GROWTH=true --shm-size=2g  --runtime=nvidia --gpus all -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged "$LOCAL_IMAGE_NAME" bash -c \
-        'python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 enable_checkpointing=false attention=dot_product'
-    - name: Test train.py with synthetic data
-      run: |
-        docker run -e XLA_PYTHON_CLIENT_MEM_FRACTION=0.65 -e TF_FORCE_GPU_ALLOW_GROWTH=true --shm-size=2g  --runtime=nvidia --gpus all -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged "$LOCAL_IMAGE_NAME" bash -c \
-        'python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 enable_checkpointing=false attention=dot_product dataset_type=synthetic'
     - name: Test train.py with flash attention
-      run: |
-        docker run -e XLA_PYTHON_CLIENT_MEM_FRACTION=0.65 -e TF_FORCE_GPU_ALLOW_GROWTH=true --shm-size=2g  --runtime=nvidia --gpus all -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged "$LOCAL_IMAGE_NAME" bash -c \
-        'python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 enable_checkpointing=false attention=cudnn_flash_te'
-    - name: Test train.py with per_device_batch_size < 1
-      run: |
-        docker run -e XLA_PYTHON_CLIENT_MEM_FRACTION=0.65 -e TF_FORCE_GPU_ALLOW_GROWTH=true  --shm-size=2g --runtime=nvidia --gpus all -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged "$LOCAL_IMAGE_NAME" bash -c \
-        'python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 per_device_batch_size=0.25 ici_tensor_parallelism=4 enable_checkpointing=false attention=dot_product'
-    - name: Test int8_training
-      run: |
-        docker run -e XLA_PYTHON_CLIENT_MEM_FRACTION=0.65 -e TF_FORCE_GPU_ALLOW_GROWTH=true  --shm-size=2g --runtime=nvidia --gpus all -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged "$LOCAL_IMAGE_NAME" bash -c \
-        'python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset quantization=int8 steps=2 enable_checkpointing=false attention=dot_product'
-    - name: Test decode.py
-      run: |
-        docker run -e XLA_PYTHON_CLIENT_MEM_FRACTION=0.65 -e TF_FORCE_GPU_ALLOW_GROWTH=true  --shm-size=2g --runtime=nvidia --gpus all -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged "$LOCAL_IMAGE_NAME" bash -c \
-        'python3 MaxText/decode.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 ici_tensor_parallelism=4 attention=dot_product enable_checkpointing=false max_target_length=128 per_device_batch_size=1'
-    - name: Test decode.py with per_device_batch_size < 1
-      run: |
-        docker run -e XLA_PYTHON_CLIENT_MEM_FRACTION=0.65 -e TF_FORCE_GPU_ALLOW_GROWTH=true  --shm-size=2g --runtime=nvidia --gpus all -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged "$LOCAL_IMAGE_NAME" bash -c \
-        'python3 MaxText/decode.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 ici_tensor_parallelism=4 attention=dot_product enable_checkpointing=false max_target_length=128 per_device_batch_size=.25'
-    - name: Test fp8_training
-      run: |
-        docker run -e XLA_PYTHON_CLIENT_MEM_FRACTION=0.65 -e TF_FORCE_GPU_ALLOW_GROWTH=true  --shm-size=2g --runtime=nvidia --gpus all -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged "$LOCAL_IMAGE_NAME" bash -c \
-        'python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset quantization=fp8 steps=2 enable_checkpointing=false attention=dot_product'
-    - name: Test generate_param_only_checkpoint
-      run: |
-        docker run -e XLA_PYTHON_CLIENT_MEM_FRACTION=0.65 -e TF_FORCE_GPU_ALLOW_GROWTH=true  --shm-size=2g --runtime=nvidia --gpus all -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged "$LOCAL_IMAGE_NAME" bash -c \
-        'bash end_to_end/test_generate_param_only_checkpoint.sh -r runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} -o gs://runner-maxtext-logs -d gs://maxtext-dataset -i 4 -a dot_product'
-    - name: Test generate_param_only_checkpoint with int8 quantization
-      run: |
-        docker run -e XLA_PYTHON_CLIENT_MEM_FRACTION=0.65 -e TF_FORCE_GPU_ALLOW_GROWTH=true  --shm-size=2g --runtime=nvidia --gpus all -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged "$LOCAL_IMAGE_NAME" bash -c \
-        'bash end_to_end/test_generate_param_only_checkpoint.sh -r runner_$(date +%Y-%m-%d-%H-%M)-${RANDOM} -o gs://runner-maxtext-logs -d gs://maxtext-dataset -i 4 -q int8 -a dot_product'
-    - name: Test grain checkpoint determinism
-      run: |
-        docker run -e XLA_PYTHON_CLIENT_MEM_FRACTION=0.65 -e TF_FORCE_GPU_ALLOW_GROWTH=true  --shm-size=2g --runtime=nvidia --gpus all -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged "$LOCAL_IMAGE_NAME" bash -c \
-        'bash end_to_end/test_checkpointing.sh runner gs://runner-maxtext-logs gs://maxtext-dataset False c4-array_record dot_product'
-    - name: Test checkpoint compatibility
-      run: |
-        docker run -e XLA_PYTHON_CLIENT_MEM_FRACTION=0.65 -e TF_FORCE_GPU_ALLOW_GROWTH=true  --shm-size=2g --runtime=nvidia --gpus all -v /home/runner/actions-runner/_work/maxtext/maxtext:/deps --rm --privileged "$LOCAL_IMAGE_NAME" bash -c \
-        'bash end_to_end/test_checkpoint_compatibility.sh runner gs://runner-maxtext-logs gs://maxtext-dataset dot_product'
+      run: python3 MaxText/train.py MaxText/configs/base.yml run_name=runner_$(date +%Y-%m-%d-%H-%M-%S) base_output_directory=gs://runner-maxtext-logs dataset_path=gs://maxtext-dataset steps=2 enable_checkpointing=false attention=cudnn_flash_te
+
+  clean_up:
+    if: ${{ always() }}
+    needs: [common, gpu, tpu]
+    name: "Clean up"
+    runs-on: ["self-hosted"]
+    steps:
+    - name: Delete GPU image
+      run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.sha }}:gpu --force-delete-tags --quiet
+    - name: Delete TPU image
+      run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.sha }}:tpu --force-delete-tags --quiet
+ 
