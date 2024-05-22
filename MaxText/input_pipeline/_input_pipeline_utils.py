@@ -86,7 +86,7 @@ class HFDataSource(grain.RandomAccessDataSource):
   def __getitem__(self, index):
     """Since HuggingFace IterableDataset does not support random access by index.
     The next item in the iterator is returned."""
-    if self.data_iters:
+    if not self.data_iters:
       self.data_iters = [iter(x) for x in self.datasets]
     idx = int(current_thread().name.split("_")[1])
 
