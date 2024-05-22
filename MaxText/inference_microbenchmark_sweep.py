@@ -101,7 +101,7 @@ def main():
     quant = 'bf16' if not config['quantization'] else config['quantization']
     run_name = f"{inference_metadata['accelerator']}-{config['model_name']}-{quant}-{key_value_axis_order_product_id}-{prefill_key_axis_order}-{ar_key_axis_order}"
     tensorboard_dir = os.path.join(config.base_output_directory, run_name, "tensorboard", "")
-    pyconfig._config.keys['tensorboard_dir'] = tensorboard_dir
+    # pyconfig._config.keys['tensorboard_dir'] = tensorboard_dir
     pyconfig._config.keys['run_name'] = run_name
 
     print(f"prefill_key_axis_order {config.prefill_key_axis_order}")
