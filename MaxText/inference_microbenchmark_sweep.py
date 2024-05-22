@@ -36,19 +36,19 @@ def main():
     print(inference_metadata)
 
   key_value_axis_order_product_id_list = [
-    item for item in inference_metadata.key_value_axis_order_product_id_list.split(':')
+    item for item in inference_metadata['key_value_axis_order_product_id_list'].split(':')
   ]
   prefill_key_axis_order_list = [
-    item for item in inference_metadata.prefill_key_axis_order_list.split(':')
+    item for item in inference_metadata['prefill_key_axis_order_list'].split(':')
   ]
   prefill_value_axis_order_list = [
-    item for item in inference_metadata.prefill_value_axis_order_list.split(':')
+    item for item in inference_metadata['prefill_value_axis_order_list'].split(':')
   ]
   ar_key_axis_order_list = [
-    item for item in inference_metadata.ar_key_axis_order_list.split(':')
+    item for item in inference_metadata['ar_key_axis_order_list'].split(':')
   ]
   ar_value_axis_order_list = [
-    item for item in inference_metadata.ar_value_axis_order_list.split(':')
+    item for item in inference_metadata['ar_value_axis_order_list'].split(':')
   ]
   # inference_microbenchmark_sweep_key_value_axis_order_product_id_list = [
   #   item for item in config.inference_microbenchmark_sweep_key_value_axis_order_product_id_list.split(':')
