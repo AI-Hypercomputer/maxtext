@@ -40,6 +40,29 @@ spec:
                   sizeLimit: 1Gi
               - name: workload-terminated-volume
                 emptyDir:
+              - name: nccl-plugin-volume
+                emptyDir:
+              initContainers:
+              - name: nccl-plugin-installer
+                image: "us-docker.pkg.dev/kernel-net-team/gpudirect-tcpx/nccl-plugin-gpudirecttcpx-pre-test-cuda12.0:cl_631269254"
+                imagePullPolicy: Always
+                volumeMounts:
+                - name: nccl-plugin-volume
+                  mountPath: /usr/local/nccl-plugin
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    mkdir -p /var/lib/tcpxo
+                    ln -s /var/lib/tcpxo /var/lib/tcpx
+                    /scripts/container_entry.sh install --install-nccl
+                    # cp -r /var/lib/tcpxo/lib64/. /usr/local/nccl-plugin/lib64
+                    cp -r /var/lib/tcpxo/* /usr/local/nccl-plugin/
+                    echo "Installed NCCL plugin to pod-wide, shared NCCL plug-in volume"
+                    echo "Contents (mounted at /usr/local/nccl-plugin/lib64):"
+                    ls /usr/local/nccl-plugin/lib64 | sed 's/^/  /'
+                    echo "Contents (mounted at /usr/local/nccl-plugin/):"
+                    ls /usr/local/nccl-plugin/ | sed 's/^/  /'
               containers:
               - name: fastrak-daemon
                 image: us-docker.pkg.dev/gce-ai-infra/gpudirect-tcpxo/tcpgpudmarxd-dev:v1.0.6-sctp
@@ -89,14 +112,13 @@ spec:
                       fieldRef:
                         fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
                   - name: USE_GPUDIRECT
-                    value: "fastrak"
+                    value: ""
                   - name: GPUS_PER_NODE
                     value: "8"
                   - name: JAX_COORDINATOR_PORT
                     value: "6002"
                   - name: LD_LIBRARY_PATH
-                    value: /usr/local/nvidia/lib64
-
+                    value: /usr/local/nccl-plugin/lib64:/usr/local/cuda-12.2/lib64:/usr/local/nvidia/lib64/:/usr/local/tcpxo/lib64
                   - name: COMMAND
                     value: {{ $root.Values.workload.train_command }}
                   - name: XLA_FLAGS
@@ -110,7 +132,7 @@ spec:
                   - name: NCCL_CROSS_NIC
                     value: "0"
                   - name: NCCL_ALGO
-                    value: "Ring"
+                    value: "Ring,Tree"
                   - name: NCCL_PROTO
                     value: "Simple"
                   - name: NCCL_MIN_NCHANNELS
@@ -153,6 +175,10 @@ spec:
                     value: "1"
                   - name: NVTE_FUSED_ATTN
                     value: "1"
+                  - name: NCCL_TUNER_PLUGIN
+                    value: "libnccl-tuner.so"
+                  - name: NCCL_TUNER_CONFIG_PATH
+                    value: "/usr/local/nccl-plugin/a3plus_tuner_config.textproto"
 
                 command:
                   - "bash"
@@ -166,6 +192,8 @@ spec:
                     mountPath: /dev/shm
                   - name: workload-terminated-volume
                     mountPath: /usr/share/maxtext
+                  - name: nccl-plugin-volume
+                    mountPath: /usr/local/nccl-plugin
                 resources:
                   limits:
                     nvidia.com/gpu: 8
