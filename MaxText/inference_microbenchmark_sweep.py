@@ -28,6 +28,9 @@ def main():
   pyconfig.initialize(sys.argv)
   config = pyconfig.config
 
+  inference_microbenchmark_sweep_key_value_axis_order_product_id_list = [
+    item for item in config.inference_microbenchmark_sweep_key_value_axis_order_product_id_list.split(':')
+  ]
   inference_microbenchmark_sweep_ar_key_axis_order_list = [
     item for item in config.inference_microbenchmark_sweep_ar_key_axis_order_list.split(':')
   ]
@@ -37,22 +40,28 @@ def main():
 
   results = []
   for (
+    key_value_axis_order_product_id,
     ar_key_axis_order,
     ar_value_axis_order,
   ) in zip(
+    inference_microbenchmark_sweep_key_value_axis_order_product_id_list,
     inference_microbenchmark_sweep_ar_key_axis_order_list,
     inference_microbenchmark_sweep_ar_value_axis_order_list,
   ):
+    print(f"key_value_axis_order_product_id {key_value_axis_order_product_id}")
     print(f"ar_key_axis_order {ar_key_axis_order}")
     print(f"ar_value_axis_order {ar_value_axis_order}")
 
-    # Manually update
+    # Manually update the config
+    # Don't set key_value_axis_order_product_id; otherwise it will recompute ar_key_axis_order and ar_value_axis_order
     pyconfig._config.keys['ar_key_axis_order'] = ar_key_axis_order
     pyconfig._config.keys['ar_value_axis_order'] = ar_value_axis_order
+    pyconfig._config.keys['run_name'] = f"{key_value_axis_order_product_id}-{ar_key_axis_order}-{ar_value_axis_order}"
 
-    print(f"@@config.ar_key_axis_order {config.ar_key_axis_order}")
-    print(f"@@config.ar_value_axis_order {config.ar_value_axis_order}")
+    print(f"ar_key_axis_order {config.ar_key_axis_order}")
+    print(f"ar_value_axis_order {config.ar_value_axis_order}")
     dimensions_json = {}
+    dimensions_json['key_value_axis_order_product_id'] = key_value_axis_order_product_id
     dimensions_json['ar_key_axis_order'] = ar_key_axis_order
     dimensions_json['ar_value_axis_order'] = ar_value_axis_order
     dimensions_json = {
@@ -69,10 +78,10 @@ def main():
       dimensions_json['oom'] = 'True'
 
     final = {'metrics': metrics, 'dimensions': dimensions_json}
-    print(f"final {final}")
+    print(f"Result: {final}")
     results.append(final)
   
-  print(f"results {results}")
+  print(f"All results {results}")
   path = 'inference_microbenchmark_sweep_results.jsonl'
   with jsonlines.open(path, mode="w") as writer:
     writer.write_all(results)
