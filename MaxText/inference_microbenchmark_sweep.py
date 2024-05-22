@@ -32,6 +32,12 @@ def main():
   inference_microbenchmark_sweep_key_value_axis_order_product_id_list = [
     item for item in config.inference_microbenchmark_sweep_key_value_axis_order_product_id_list.split(':')
   ]
+  inference_microbenchmark_sweep_prefill_key_axis_order_list = [
+    item for item in config.inference_microbenchmark_sweep_prefill_key_axis_order_list.split(':')
+  ]
+  inference_microbenchmark_sweep_prefill_value_axis_order_list = [
+    item for item in config.inference_microbenchmark_sweep_prefill_value_axis_order_list.split(':')
+  ]
   inference_microbenchmark_sweep_ar_key_axis_order_list = [
     item for item in config.inference_microbenchmark_sweep_ar_key_axis_order_list.split(':')
   ]
@@ -42,29 +48,41 @@ def main():
   results = []
   for (
     key_value_axis_order_product_id,
+    prefill_key_axis_order,
+    prefill_value_axis_order,
     ar_key_axis_order,
     ar_value_axis_order,
   ) in zip(
     inference_microbenchmark_sweep_key_value_axis_order_product_id_list,
+    inference_microbenchmark_sweep_prefill_key_axis_order_list,
+    inference_microbenchmark_sweep_prefill_value_axis_order_list,
     inference_microbenchmark_sweep_ar_key_axis_order_list,
     inference_microbenchmark_sweep_ar_value_axis_order_list,
   ):
     print(f"key_value_axis_order_product_id {key_value_axis_order_product_id}")
+    print(f"prefill_key_axis_order {prefill_key_axis_order}")
+    print(f"prefill_value_axis_order {prefill_value_axis_order}")
     print(f"ar_key_axis_order {ar_key_axis_order}")
     print(f"ar_value_axis_order {ar_value_axis_order}")
 
     # Manually update the config
     # Don't set key_value_axis_order_product_id; otherwise it will recompute ar_key_axis_order and ar_value_axis_order
+    pyconfig._config.keys['prefill_key_axis_order'] = prefill_key_axis_order
+    pyconfig._config.keys['prefill_value_axis_order'] = prefill_value_axis_order
     pyconfig._config.keys['ar_key_axis_order'] = ar_key_axis_order
     pyconfig._config.keys['ar_value_axis_order'] = ar_value_axis_order
-    name = f"{key_value_axis_order_product_id}-{ar_key_axis_order}-{ar_value_axis_order}"
+    name = f"{key_value_axis_order_product_id}-{prefill_key_axis_order}-{prefill_value_axis_order}-{ar_key_axis_order}-{ar_value_axis_order}"
     tensorboard_dir = os.path.join(config.base_output_directory, name, "tensorboard", "")
     pyconfig._config.keys['tensorboard_dir'] = tensorboard_dir
 
+    print(f"prefill_key_axis_order {config.prefill_key_axis_order}")
+    print(f"prefill_value_axis_order {config.prefill_value_axis_order}")
     print(f"ar_key_axis_order {config.ar_key_axis_order}")
     print(f"ar_value_axis_order {config.ar_value_axis_order}")
     dimensions_json = {}
     dimensions_json['key_value_axis_order_product_id'] = key_value_axis_order_product_id
+    dimensions_json['prefill_key_axis_order'] = prefill_key_axis_order
+    dimensions_json['prefill_value_axis_order'] = prefill_value_axis_order
     dimensions_json['ar_key_axis_order'] = ar_key_axis_order
     dimensions_json['ar_value_axis_order'] = ar_value_axis_order
     dimensions_json = {
