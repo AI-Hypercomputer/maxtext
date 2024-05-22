@@ -31,11 +31,16 @@ Mesh = jax.sharding.Mesh
 ScanIn = partitioning.ScanIn
 
 AxisNames = tuple[str, ...]
+AxisIdxes = tuple[int, ...]
 
 BATCH = "activation_batch"
 LENGTH = "activation_length"
 HEAD = "activation_heads"
 D_KV = "activation_kv"
+CACHE_BATCH = "cache_batch"
+CACHE_SEQUENCE = "cache_sequence"
+CACHE_HEADS = "cache_heads"
+CACHE_KV = "cache_kv"
 
 MODEL_MODE_AUTOREGRESSIVE = "autoregressive"
 MODEL_MODE_PREFILL = "prefill"
