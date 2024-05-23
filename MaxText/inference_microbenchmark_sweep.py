@@ -30,10 +30,9 @@ def main():
   pyconfig.initialize(sys.argv)
   config = pyconfig.config
 
-  print(f"pwd: {os.getcwd()}")
   with open(config.inference_metadata_file, encoding='utf-8') as json_file:
     inference_metadata = json.load(json_file)
-    print(inference_metadata)
+    print(f"inference_metadata: {inference_metadata}")
 
   key_value_axis_order_product_id_list = [
     item for item in inference_metadata['key_value_axis_order_product_id_list'].split(':')
@@ -50,21 +49,6 @@ def main():
   ar_value_axis_order_list = [
     item for item in inference_metadata['ar_value_axis_order_list'].split(':')
   ]
-  # inference_microbenchmark_sweep_key_value_axis_order_product_id_list = [
-  #   item for item in config.inference_microbenchmark_sweep_key_value_axis_order_product_id_list.split(':')
-  # ]
-  # inference_microbenchmark_sweep_prefill_key_axis_order_list = [
-  #   item for item in config.inference_microbenchmark_sweep_prefill_key_axis_order_list.split(':')
-  # ]
-  # inference_microbenchmark_sweep_prefill_value_axis_order_list = [
-  #   item for item in config.inference_microbenchmark_sweep_prefill_value_axis_order_list.split(':')
-  # ]
-  # inference_microbenchmark_sweep_ar_key_axis_order_list = [
-  #   item for item in config.inference_microbenchmark_sweep_ar_key_axis_order_list.split(':')
-  # ]
-  # inference_microbenchmark_sweep_ar_value_axis_order_list = [
-  #   item for item in config.inference_microbenchmark_sweep_ar_value_axis_order_list.split(':')
-  # ]
 
   results = []
   for (
@@ -74,11 +58,6 @@ def main():
     ar_key_axis_order,
     ar_value_axis_order,
   ) in zip(
-    # inference_microbenchmark_sweep_key_value_axis_order_product_id_list,
-    # inference_microbenchmark_sweep_prefill_key_axis_order_list,
-    # inference_microbenchmark_sweep_prefill_value_axis_order_list,
-    # inference_microbenchmark_sweep_ar_key_axis_order_list,
-    # inference_microbenchmark_sweep_ar_value_axis_order_list,
     key_value_axis_order_product_id_list,
     prefill_key_axis_order_list,
     prefill_value_axis_order_list,
@@ -94,9 +73,6 @@ def main():
     # Manually update the config
     # Don't set key_value_axis_order_product_id; otherwise it will recompute
     # ar_key_axis_order and ar_value_axis_order
-
-    # name = f"{key_value_axis_order_product_id}-{prefill_key_axis_order}-{prefill_value_axis_order}-{ar_key_axis_order}-{ar_value_axis_order}"
-    # profile_name = f"{key_value_axis_order_product_id}-{prefill_key_axis_order}-{ar_key_axis_order}"
     quant = 'bf16' if not config.quantization else config.quantization
     run_name = f"{inference_metadata['accelerator']}-{config.model_name}-{quant}-{key_value_axis_order_product_id}-{prefill_key_axis_order}-{ar_key_axis_order}"
     tensorboard_dir = os.path.join(config.base_output_directory, run_name, "tensorboard", "")
@@ -112,25 +88,44 @@ def main():
     pyconfig._config.keys['run_name'] = run_name
     max_utils.write_config_raw_keys_for_gcs(pyconfig._config.keys)
 
-    print(f"prefill_key_axis_order {config.prefill_key_axis_order}")
-    print(f"prefill_value_axis_order {config.prefill_value_axis_order}")
-    print(f"ar_key_axis_order {config.ar_key_axis_order}")
-    print(f"ar_value_axis_order {config.ar_value_axis_order}")
-    dimensions_json = {}
-    dimensions_json['key_value_axis_order_product_id'] = key_value_axis_order_product_id
-    dimensions_json['prefill_key_axis_order'] = prefill_key_axis_order
-    dimensions_json['prefill_value_axis_order'] = prefill_value_axis_order
-    dimensions_json['ar_key_axis_order'] = ar_key_axis_order
-    dimensions_json['ar_value_axis_order'] = ar_value_axis_order
-    dimensions_json['tensorboard_dir'] = tensorboard_dir
-    dimensions_json['run_name'] = run_name
-    # dimensions_json['overwrite_key_value_axis_order_product_id'] = key_value_axis_order_product_id
-    # dimensions_json['overwrite_prefill_key_axis_order'] = prefill_key_axis_order
-    # dimensions_json['overwrite_prefill_value_axis_order'] = prefill_value_axis_order
-    # dimensions_json['overwrite_ar_key_axis_order'] = ar_key_axis_order
-    # dimensions_json['overwrite_ar_value_axis_order'] = ar_value_axis_order
-    # dimensions_json['overwrite_tensorboard_dir'] = tensorboard_dir
-    # dimensions_json['overwrite_run_name'] = run_name
+    # Prepare metadata (dimensions) json for XLML
+    # dimensions_json = {}
+    # dimensions_json['key_value_axis_order_product_id'] = key_value_axis_order_product_id
+    # dimensions_json['prefill_key_axis_order'] = prefill_key_axis_order
+    # dimensions_json['prefill_value_axis_order'] = prefill_value_axis_order
+    # dimensions_json['ar_key_axis_order'] = ar_key_axis_order
+    # dimensions_json['ar_value_axis_order'] = ar_value_axis_order
+    # dimensions_json['tensorboard_dir'] = tensorboard_dir
+    # dimensions_json['run_name'] = run_name
+    # dimensions_json = {
+    #   **dimensions_json,
+    #   **inference_metadata,
+    # }
+    dimensions_json = {
+      "base_output_directory": config.base_output_directory,
+      "model_name": config.model_name,
+      "tokenizer": config.tokenizer,
+      "weight_dtype": config.weight_dtype,
+      "inference_microbenchmark_prefill_lengths": config.inference_microbenchmark_prefill_lengths,
+      "inference_microbenchmark_stages": config.inference_microbenchmark_stages,
+      "inference_microbenchmark_loop_iters": config.inference_microbenchmark_loop_iters,
+      "max_prefill_predict_length": config.max_prefill_predict_length,
+      "max_target_length": config.max_target_length,
+      "per_device_batch_size": config.per_device_batch_size,
+      "ici_fsdp_parallelism": config.ici_fsdp_parallelism,
+      "ici_autoregressive_parallelism": config.ici_autoregressive_parallelism,
+      "ici_tensor_parallelism": config.ici_tensor_parallelism,
+      "enable_profiler": config.enable_profiler,
+      "scan_layers": config.scan_layers,
+      "quantization": config.quantization,
+      "quantize_kvcache": config.quantize_kvcache,
+      "attention": config.attention,
+      "key_value_axis_order_product_id_list": config.key_value_axis_order_product_id_list,
+      "prefill_key_axis_order_list": config.prefill_key_axis_order_list,
+      "prefill_value_axis_order_list": config.prefill_value_axis_order_list,
+      "ar_key_axis_order_list": config.ar_key_axis_order_list,
+      "ar_value_axis_order_list": config.ar_value_axis_order_list,
+    }
     dimensions_json = {
       **dimensions_json,
       **inference_metadata,
@@ -147,7 +142,7 @@ def main():
     final = {'metrics': metrics, 'dimensions': dimensions_json}
     print(f"Result: {final}")
     results.append(final)
-  
+
   print(f"All results {results}")
   path = 'inference_microbenchmark_sweep_results.jsonl'
   with jsonlines.open(path, mode="w") as writer:

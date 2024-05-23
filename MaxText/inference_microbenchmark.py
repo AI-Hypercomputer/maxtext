@@ -22,6 +22,7 @@ import sys
 
 from jetstream.engine import token_utils
 
+import inference_utils
 import max_utils
 import maxengine
 import maxtext_utils
@@ -167,7 +168,16 @@ def collate_results(config, results, model_size, cache_size, num_model_params, i
   return results
 
 
-def write_results(results, filename):
+def write_results(results, filename, flatten_microbenchmark_results):
+  """Write the results microbenchmark results to a json file."""
+  if flatten_microbenchmark_results:
+    flattened_results = {}
+    for key, value in results.items():
+      if isinstance(value, dict):
+        flattened_results.update(value)
+      else:
+        flattened_results[key] = value
+    results = flattened_results
   if filename != "":
     with open(filename, "w", encoding="utf-8") as f:
       json.dump(results, f, indent=2)
@@ -274,15 +284,8 @@ def main(config, inference_metadata={}):
       config, engine, params, decode_state, engine.max_concurrent_decodes, cache_size, model_size, benchmark_loop_iters)
 
   results = collate_results(config, benchmark_results, model_size, cache_size, num_model_params)
-  if pyconfig.string_to_bool(inference_metadata['flatten_microbenchmark_results']):
-    flattened_results = {}
-    for key, value in results.items():
-      if isinstance(value, dict):
-        flattened_results.update(value)
-      else:
-        flattened_results[key] = value
-    results = flattened_results
-  write_results(results, filename=config.inference_microbenchmark_log_file_path)
+  flatten_microbenchmark_results = pyconfig.string_to_bool(inference_metadata.get('flatten_microbenchmark_results', 'false'))
+  write_results(results, filename=config.inference_microbenchmark_log_file_path, flatten_microbenchmark_results=flatten_microbenchmark_results)
   print_results_for_analyze(results)
   return results
 
