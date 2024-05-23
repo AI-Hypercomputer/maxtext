@@ -435,7 +435,7 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
   unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
       model, tx, config, rng, mesh, is_training
   )
-
+  jax.profiler.start_trace("/tmp/tensorboard")
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     restored, raw_params = checkpointing.load_state_if_possible(
@@ -458,6 +458,7 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
       if raw_params:  # If we loaded a partial state, we need to merge it.
         state = state.replace(params=raw_params)
 
+  jax.profiler.stop_trace()
   state = unbox_logicallypartioned(state)
   return state, state_mesh_annotations, data_iterator
 
@@ -670,9 +671,9 @@ def summarize_pytree_data(params, name="Params", raw=False):
     num_params_in_billions = num_params / 1e9
     total_param_size_in_gb = total_param_size / 1e9
     print(f"{name} stats: \n"
-          f"\tTotal number of params: {num_params_in_billions:.3f} billion \n"	
-          f"\tTotal memory usage: {total_param_size_in_gb:.3f} GB \n"	
-          f"\tAvg size: {avg_param_size:.3f} bytes\n")	
+          f"\tTotal number of params: {num_params_in_billions:.3f} billion \n"
+          f"\tTotal memory usage: {total_param_size_in_gb:.3f} GB \n"
+          f"\tAvg size: {avg_param_size:.3f} bytes\n")
   else:
     print(f"{name} stats: \n"
             f"\tTotal number of params: {num_params:.3f} \n"
