@@ -120,11 +120,11 @@ def main():
       "quantization": config.quantization,
       "quantize_kvcache": config.quantize_kvcache,
       "attention": config.attention,
-      "key_value_axis_order_product_id_list": config.key_value_axis_order_product_id_list,
-      "prefill_key_axis_order_list": config.prefill_key_axis_order_list,
-      "prefill_value_axis_order_list": config.prefill_value_axis_order_list,
-      "ar_key_axis_order_list": config.ar_key_axis_order_list,
-      "ar_value_axis_order_list": config.ar_value_axis_order_list,
+      # "key_value_axis_order_product_id_list": config.key_value_axis_order_product_id_list,
+      # "prefill_key_axis_order_list": config.prefill_key_axis_order_list,
+      # "prefill_value_axis_order_list": config.prefill_value_axis_order_list,
+      # "ar_key_axis_order_list": config.ar_key_axis_order_list,
+      # "ar_value_axis_order_list": config.ar_value_axis_order_list,
     }
     dimensions_json = {
       **dimensions_json,
