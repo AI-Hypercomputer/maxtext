@@ -284,3 +284,6 @@ inference_microbenchmark_log_file_path: ""
 # Checkpoint Structured logging
 enable_checkpoint_cloud_logger: False
 enable_checkpoint_standard_logger: False
+
+# Single-controller
+enable_single_controller: False
