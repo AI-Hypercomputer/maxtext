@@ -117,18 +117,20 @@ def main():
     print(f"ar_key_axis_order {config.ar_key_axis_order}")
     print(f"ar_value_axis_order {config.ar_value_axis_order}")
     dimensions_json = {}
-    # dimensions_json['key_value_axis_order_product_id'] = key_value_axis_order_product_id
-    # dimensions_json['prefill_key_axis_order'] = prefill_key_axis_order
-    # dimensions_json['prefill_value_axis_order'] = prefill_value_axis_order
-    # dimensions_json['ar_key_axis_order'] = ar_key_axis_order
-    # dimensions_json['ar_value_axis_order'] = ar_value_axis_order
-    dimensions_json['overwrite_key_value_axis_order_product_id'] = key_value_axis_order_product_id
-    dimensions_json['overwrite_prefill_key_axis_order'] = prefill_key_axis_order
-    dimensions_json['overwrite_prefill_value_axis_order'] = prefill_value_axis_order
-    dimensions_json['overwrite_ar_key_axis_order'] = ar_key_axis_order
-    dimensions_json['overwrite_ar_value_axis_order'] = ar_value_axis_order
-    dimensions_json['overwrite_tensorboard_dir'] = tensorboard_dir
-    dimensions_json['overwrite_run_name'] = run_name
+    dimensions_json['key_value_axis_order_product_id'] = key_value_axis_order_product_id
+    dimensions_json['prefill_key_axis_order'] = prefill_key_axis_order
+    dimensions_json['prefill_value_axis_order'] = prefill_value_axis_order
+    dimensions_json['ar_key_axis_order'] = ar_key_axis_order
+    dimensions_json['ar_value_axis_order'] = ar_value_axis_order
+    dimensions_json['tensorboard_dir'] = tensorboard_dir
+    dimensions_json['run_name'] = run_name
+    # dimensions_json['overwrite_key_value_axis_order_product_id'] = key_value_axis_order_product_id
+    # dimensions_json['overwrite_prefill_key_axis_order'] = prefill_key_axis_order
+    # dimensions_json['overwrite_prefill_value_axis_order'] = prefill_value_axis_order
+    # dimensions_json['overwrite_ar_key_axis_order'] = ar_key_axis_order
+    # dimensions_json['overwrite_ar_value_axis_order'] = ar_value_axis_order
+    # dimensions_json['overwrite_tensorboard_dir'] = tensorboard_dir
+    # dimensions_json['overwrite_run_name'] = run_name
     dimensions_json = {
       **dimensions_json,
       **inference_metadata,
