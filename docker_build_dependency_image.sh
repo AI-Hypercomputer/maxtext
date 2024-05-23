@@ -25,8 +25,8 @@ set -e
 
 export LOCAL_IMAGE_NAME=maxtext_base_image
 
-# # Use Docker BuildKit so we can cache pip packages.
-# export DOCKER_BUILDKIT=1
+# Use Docker BuildKit so we can cache pip packages.
+export DOCKER_BUILDKIT=1
 
 echo "Starting to build your docker image. This will take a few minutes but the image can be reused as you iterate."
 
