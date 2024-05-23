@@ -92,6 +92,16 @@ MODEL_PARAMS_DICT = {
         "base_mlp_dim": 14336,
         "num_experts": 8,
     },
+    "mixtral-8x22b": {
+        "num_layers": 56,
+        "num_heads": 48,
+        "num_kv_heads": 8,
+        "dims_per_head": 128,
+        "vocab": 32768,
+        "base_emb_dim": 6144,
+        "base_mlp_dim": 16384,
+        "num_experts": 8,
+    },
 }
 
 SIMULATED_CPU_DEVICES_COUNT = 16

@@ -78,6 +78,7 @@ def validate_model_name(s: str) -> bool:
       "llama2-70b",
       "mistral-7b",
       "mixtral-8x7b",
+      "mixtral-8x22b",
       "gemma-7b",
       "gemma-2b",
       "gpt3-175b",
