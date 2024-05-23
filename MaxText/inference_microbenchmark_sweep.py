@@ -134,7 +134,7 @@ def main():
       **inference_metadata,
     }
     try:
-      metrics = inference_microbenchmark.main(config)
+      metrics = inference_microbenchmark.main(config, inference_metadata=inference_metadata)
       metrics = {k.lower(): v for k, v in metrics.items()}
       dimensions_json['oom'] = 'False'
     except xla_extension.XlaRuntimeError:

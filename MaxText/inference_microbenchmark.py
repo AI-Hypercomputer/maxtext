@@ -215,7 +215,7 @@ def summarize_prefill_result(engine, params, tokens, true_length):
   }
 
 
-def main(config):
+def main(config, inference_metadata={}):
   engine = maxengine.MaxEngine(config)
   params = engine.load_params()
   prefill_lengths = [int(l) for l in config.inference_microbenchmark_prefill_lengths.split(",")]
@@ -274,7 +274,7 @@ def main(config):
       config, engine, params, decode_state, engine.max_concurrent_decodes, cache_size, model_size, benchmark_loop_iters)
 
   results = collate_results(config, benchmark_results, model_size, cache_size, num_model_params)
-  if config.inference_microbenchmark_flatten_results:
+  if inference_metadata['flatten_microbenchmark_results']:
     flattened_results = {}
     for key, value in results.items():
       if isinstance(value, dict):
