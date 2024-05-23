@@ -284,7 +284,8 @@ def main(config, inference_metadata={}):
       config, engine, params, decode_state, engine.max_concurrent_decodes, cache_size, model_size, benchmark_loop_iters)
 
   results = collate_results(config, benchmark_results, model_size, cache_size, num_model_params)
-  flatten_microbenchmark_results = pyconfig.string_to_bool(inference_metadata.get('flatten_microbenchmark_results', 'false'))
+  flatten_microbenchmark_results = pyconfig.string_to_bool(inference_metadata['flatten_microbenchmark_results'])
+  print(f"@@{inference_metadata['flatten_microbenchmark_results']}, {flatten_microbenchmark_results}")
   write_results(results, filename=config.inference_microbenchmark_log_file_path, flatten_microbenchmark_results=flatten_microbenchmark_results)
   print_results_for_analyze(results)
   return results
