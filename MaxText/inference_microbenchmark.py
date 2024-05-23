@@ -274,7 +274,7 @@ def main(config, inference_metadata={}):
       config, engine, params, decode_state, engine.max_concurrent_decodes, cache_size, model_size, benchmark_loop_iters)
 
   results = collate_results(config, benchmark_results, model_size, cache_size, num_model_params)
-  if inference_metadata['flatten_microbenchmark_results']:
+  if pyconfig.string_to_bool(inference_metadata['flatten_microbenchmark_results']):
     flattened_results = {}
     for key, value in results.items():
       if isinstance(value, dict):
