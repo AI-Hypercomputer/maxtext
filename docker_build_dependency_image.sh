@@ -18,14 +18,15 @@
 # bash docker_build_dependency_image.sh MODE=stable
 # bash docker_build_dependency_image.sh MODE=nightly
 # bash docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
+# bash docker_build_dependency_image.sh MODE=stable_stack
 
 # Enable "exit immediately if any command fails" option
 set -e
 
 export LOCAL_IMAGE_NAME=maxtext_base_image
 
-# Use Docker BuildKit so we can cache pip packages.
-export DOCKER_BUILDKIT=1
+# # Use Docker BuildKit so we can cache pip packages.
+# export DOCKER_BUILDKIT=1
 
 echo "Starting to build your docker image. This will take a few minutes but the image can be reused as you iterate."
 
@@ -63,7 +64,12 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
     fi
     docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE -f ./maxtext_gpu_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
   else
-    docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+    if [[ ${MODE} == "stable_stack" ]]; then
+      echo "Building JAX SS MaxText . . ."
+      docker build --network host -f ./maxtext_jax_ss_tpu.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+    else
+      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+    fi
   fi
 else
   docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
