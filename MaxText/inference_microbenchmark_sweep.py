@@ -104,7 +104,7 @@ def main():
     dimensions_json = {
       "base_output_directory": config.base_output_directory,
       "model_name": config.model_name,
-      "tokenizer": config.tokenizer,
+      "tokenizer_path": config.tokenizer_path,
       "weight_dtype": config.weight_dtype,
       "inference_microbenchmark_prefill_lengths": config.inference_microbenchmark_prefill_lengths,
       "inference_microbenchmark_stages": config.inference_microbenchmark_stages,
