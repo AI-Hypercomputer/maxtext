@@ -58,33 +58,62 @@ def l2norm_pytree(x):
   return jnp.sqrt(jax.tree_util.tree_reduce(lambda x, y: x + jnp.sum(jnp.square(y)), x, initializer=0.0))
 
 
-def calculate_num_params_from_pytree(params):
+def calculate_num_params_from_pytree(params) -> int:
+  """Calculate params' logical size."""
   params_sizes = jax.tree_util.tree_map(jax.numpy.size, params)
   total_parameters = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes)
   assert total_parameters >= 0
   return total_parameters
 
 
-def calculate_total_params_per_chip(params):
+def calculate_total_params_per_chip(params) -> int:
+  """Calculate params' physical size on an addressable chip."""
   def calculate_leaf_params_per_chip(arr):
     shard = arr.addressable_shards[0]
-    return np.prod(shard.data.shape)
+    return shard.data.size
 
   params_sizes_per_chip = jax.tree_util.tree_map(calculate_leaf_params_per_chip, params)
   total_parameters_per_chip = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes_per_chip)
   return total_parameters_per_chip
 
 
-def calculate_bytes_from_pytree(params):
+def calculate_bytes_from_pytree(params) -> int:
+  """Calculate params' logical bytes."""
   params_bytes = jax.tree_util.tree_map(lambda x: x.nbytes, params)
   total_bytes = jax.tree_util.tree_reduce(lambda x, y: x + y, params_bytes)
   return total_bytes
 
 
-def summarize_size_from_pytree(params):
+def summarize_size_from_pytree(params) -> tuple[int, int, float]:
+  """Calculate params' logical size and bytes."""
   num_params = calculate_num_params_from_pytree(params)
   num_bytes = calculate_bytes_from_pytree(params)
   return num_params, num_bytes, num_bytes / num_params
+
+
+def calculate_total_bytes_per_chip(params) -> int:
+  """Calculate params' physical bytes on an addressable chip."""
+  def calculate_leaf_params_bytes_per_chip(arr):
+    shard = arr.addressable_shards[0]
+    return shard.data.nbytes
+
+  params_sizes_per_chip = jax.tree_util.tree_map(calculate_leaf_params_bytes_per_chip, params)
+  total_parameters_per_chip = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes_per_chip)
+  return total_parameters_per_chip
+
+
+def calculate_total_params_across_chips(params) -> tuple[int, int]:
+  """Calculate params' physical sizes across all chips."""
+  total_params_per_chip = calculate_total_params_per_chip(params)
+  n_chips = len(params.addressable_shards)
+  return total_params_per_chip * n_chips, n_chips
+
+
+def calculate_total_bytes_across_chips(params) -> tuple[int, int]:
+  """Calculate params' physical bytes across all chips."""
+  total_bytes_per_chip = calculate_total_bytes_per_chip(params)
+  n_chips = len(params.addressable_shards)
+  return total_bytes_per_chip * n_chips, n_chips
 
 
 def activate_profiler(config, optional_postfix=""):
