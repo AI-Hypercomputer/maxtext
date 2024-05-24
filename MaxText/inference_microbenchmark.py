@@ -170,7 +170,6 @@ def collate_results(config, results, model_size, cache_size, num_model_params, i
 
 def write_results(results, filename, flatten_microbenchmark_results):
   """Write the results microbenchmark results to a json file."""
-  print(f"##flatten_microbenchmark_results {flatten_microbenchmark_results}")
   if flatten_microbenchmark_results:
     flattened_results = {}
     for key, value in results.items():
@@ -179,10 +178,10 @@ def write_results(results, filename, flatten_microbenchmark_results):
       else:
         flattened_results[key] = value
     results = flattened_results
-    print(f"##results {results}")
   if filename != "":
     with open(filename, "w", encoding="utf-8") as f:
       json.dump(results, f, indent=2)
+  return results
 
 
 def print_results_for_analyze(results):
@@ -286,10 +285,9 @@ def main(config, inference_metadata={}):
       config, engine, params, decode_state, engine.max_concurrent_decodes, cache_size, model_size, benchmark_loop_iters)
 
   results = collate_results(config, benchmark_results, model_size, cache_size, num_model_params)
-  flatten_microbenchmark_results = pyconfig.string_to_bool(inference_metadata['flatten_microbenchmark_results'])
-  print(f"@@{inference_metadata['flatten_microbenchmark_results']}, {flatten_microbenchmark_results}")
-  write_results(results, filename=config.inference_microbenchmark_log_file_path, flatten_microbenchmark_results=flatten_microbenchmark_results)
   print_results_for_analyze(results)
+  flatten_microbenchmark_results = pyconfig.string_to_bool(inference_metadata.get('flatten_microbenchmark_results', 'false'))
+  results = write_results(results, filename=config.inference_microbenchmark_log_file_path, flatten_microbenchmark_results=flatten_microbenchmark_results)
   return results
 
 
