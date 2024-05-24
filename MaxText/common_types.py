@@ -31,6 +31,7 @@ Mesh = jax.sharding.Mesh
 ScanIn = partitioning.ScanIn
 
 AxisNames = tuple[str, ...]
+AxisIdxes = tuple[int, ...]
 
 BATCH = "activation_batch"
 LENGTH = "activation_length"

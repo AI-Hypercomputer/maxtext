@@ -339,12 +339,14 @@ def setup_mesh_and_model(config):
 
   init_rng = random.PRNGKey(config.init_weights_seed)
   writer = max_utils.initialize_summary_writer(config)
+  logger = checkpointing.setup_checkpoint_logger(config)
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       config.checkpoint_dir,
       config.enable_checkpointing,
       config.async_checkpointing,
       config.checkpoint_period,
       config.dataset_type,
+      logger,
   )
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
@@ -509,7 +511,7 @@ def train_loop(config, state=None):
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
-      if save_checkpoint(checkpoint_manager, step, state, config.dataset_type, data_iterator):
+      if save_checkpoint(checkpoint_manager, int(step), state, config.dataset_type, data_iterator):
         max_logging.log(f"saved a checkpoint at step {step}")
 
       # Upon preemption, exit when and only when all ongoing saves are complete.

@@ -48,6 +48,7 @@ NdInitializer = initializers.NdInitializer
 Quant = quantizations.AqtQuantization
 
 AxisNames = common_types.AxisNames
+AxisIdxes = common_types.AxisIdxes
 BATCH = common_types.BATCH
 LENGTH = common_types.LENGTH
 HEAD = common_types.HEAD
@@ -113,6 +114,10 @@ class AttentionOp(nn.Module):
   float32_logits: bool = False
   flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
   kv_cache_logical_layout: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
+  prefill_key_axis_order: AxisIdxes = (1, 2, 0, 3)
+  prefill_value_axis_order: AxisIdxes = (1, 2, 0, 3)
+  ar_key_axis_order: AxisIdxes = (1, 2, 0, 3)
+  ar_value_axis_order: AxisIdxes = (1, 2, 0, 3)
   dropout_rate: float = 0.0
   dtype: DType = jnp.float32
   quant: Optional[Quant] = None
@@ -1014,10 +1019,10 @@ class Attention(nn.Module):
         num_kv_heads=self.num_kv_heads,
         dropout_rate=self.dropout_rate,
         dtype=self.dtype,
-        prefill_key_axis_order=self.prefill_key_axis_order,
-        prefill_value_axis_order=self.prefill_value_axis_order,
-        ar_key_axis_order=self.ar_key_axis_order,
-        ar_value_axis_order=self.ar_value_axis_order,
+        prefill_key_axis_order = tuple([int(i) for i in self.config.prefill_key_axis_order.split(",")]),
+        prefill_value_axis_order = tuple([int(i) for i in self.config.prefill_value_axis_order.split(",")]),
+        ar_key_axis_order = tuple([int(i) for i in self.config.ar_key_axis_order.split(",")]),
+        ar_value_axis_order = tuple([int(i) for i in self.config.ar_value_axis_order.split(",")]),
     )
 
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)
