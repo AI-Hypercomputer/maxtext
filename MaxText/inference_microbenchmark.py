@@ -170,6 +170,7 @@ def collate_results(config, results, model_size, cache_size, num_model_params, i
 
 def write_results(results, filename, flatten_microbenchmark_results):
   """Write the results microbenchmark results to a json file."""
+  print(f"##flatten_microbenchmark_results {flatten_microbenchmark_results}")
   if flatten_microbenchmark_results:
     flattened_results = {}
     for key, value in results.items():
@@ -178,6 +179,7 @@ def write_results(results, filename, flatten_microbenchmark_results):
       else:
         flattened_results[key] = value
     results = flattened_results
+    print(f"##results {results}")
   if filename != "":
     with open(filename, "w", encoding="utf-8") as f:
       json.dump(results, f, indent=2)
