@@ -76,7 +76,8 @@ def spmd_pipeline(fn, stage_params, inputs):
     state = state.at[:].set(jnp.where(stage == 0, inputs[loop_iter % args.microbatches_per_stage], state[:]))
     # Shard map is rank preserving, so the params have shape [1,embed,embed] inside each shard
     # We want to pass something of shape [embed, embed] instead
-    state = fn(stage_params[0], state)
+    for _ in range(args.num_layers_per_stage):
+      state = fn(stage_params[0], state)
     outputs = outputs.at[(loop_iter-args.num_layers+1) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, state, outputs[(loop_iter-args.num_layers+1) % args.microbatches_per_stage]))
     state, inputs, outputs = shift(loop_iter, state, inputs, outputs)
   outputs = jax.lax.ppermute(outputs, 'stages', [(i, (i+1) % args.num_stages) for i in range(args.num_stages)])
@@ -108,8 +109,8 @@ def main():
   parser.add_argument('--num_layers', type=int, default=4)
   parser.add_argument('--batch_size', type=int, default=16)
   parser.add_argument('--embed_size', type=int, default=2048)
+  parser.add_argument('--num_layers_per_stage', type=int, default=1)
   parser.add_argument('--num_microbatches', type=int, default=4)
-  parser.add_argument('--global_batch_size', type=int, default=128)
   parser.add_argument('--remove_dummy_comms', action=argparse.BooleanOptionalAction, default=True)
   global args
   args = parser.parse_args()
@@ -133,9 +134,9 @@ def main():
 
   print(jax.jit(loss)(params, batch))
   print(jax.jit(loss_pp)(params_sharded, batch_sharded))
-  #jit_pipeline = jax.jit(loss_pp)
+  jit_pipeline = jax.jit(loss_pp)
 
-  #timing_util.simple_timeit(jit_pipeline, params_sharded, batch_sharded, tries = 3, task = 'shard_pp')
+  timing_util.simple_timeit(jit_pipeline, params_sharded, batch_sharded, tries = 3, task = 'shard_pp')
   
 
 main()

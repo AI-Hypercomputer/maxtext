@@ -103,7 +103,6 @@ def main():
   parser.add_argument('--batch_size', type=int, default=16)
   parser.add_argument('--embed_size', type=int, default=2048)
   parser.add_argument('--num_microbatches', type=int, default=4)
-  parser.add_argument('--global_batch_size', type=int, default=128)
   parser.add_argument('--remove_dummy_comms', action=argparse.BooleanOptionalAction, default=True)
   global args
   args = parser.parse_args()
@@ -127,9 +126,9 @@ def main():
 
   print(jax.jit(loss)(params, batch))
   print(jax.jit(loss_pp)(params_sharded, batch_sharded))
-  #jit_pipeline = jax.jit(loss_pp)
+  jit_pipeline = jax.jit(loss_pp)
 
-  #timing_util.simple_timeit(jit_pipeline, params_sharded, batch_sharded, tries = 3, task = 'shard_pp')
+  timing_util.simple_timeit(jit_pipeline, params_sharded, batch_sharded, tries = 3, task = 'shard_pp')
   
 
 main()
