@@ -103,10 +103,10 @@ def main():
       "ici_fsdp_parallelism": f"{config.ici_fsdp_parallelism}",
       "ici_autoregressive_parallelism": f"{config.ici_autoregressive_parallelism}",
       "ici_tensor_parallelism": f"{config.ici_tensor_parallelism}",
-      "enable_profiler": config.enable_profiler,
-      "scan_layers": config.scan_layers,
+      "enable_profiler": f"{config.enable_profiler}",
+      "scan_layers": f"{config.scan_layers}",
       "quantization": config.quantization,
-      "quantize_kvcache": config.quantize_kvcache,
+      "quantize_kvcache": f"{config.quantize_kvcache}",
       "attention": config.attention,
     }
     dimensions_json = {
