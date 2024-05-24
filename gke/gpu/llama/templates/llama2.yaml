@@ -44,7 +44,7 @@ spec:
                 emptyDir:
               initContainers:
               - name: nccl-plugin-installer
-                image: "us-docker.pkg.dev/kernel-net-team/gpudirect-tcpx/nccl-plugin-gpudirecttcpx-pre-test-cuda12.0:cl_631269254"
+                image: "us-docker.pkg.dev/gce-ai-infra/gpudirect-tcpxo/nccl-plugin-gpudirecttcpx-dev:v1.0.1"
                 imagePullPolicy: Always
                 volumeMounts:
                 - name: nccl-plugin-volume
@@ -65,7 +65,7 @@ spec:
                     ls /usr/local/nccl-plugin/ | sed 's/^/  /'
               containers:
               - name: fastrak-daemon
-                image: us-docker.pkg.dev/gce-ai-infra/gpudirect-tcpxo/tcpgpudmarxd-dev:v1.0.6-sctp
+                image: us-docker.pkg.dev/gce-ai-infra/gpudirect-tcpxo/tcpgpudmarxd-dev:v1.0.8
                 imagePullPolicy: Always
                 command: 
                 - "bash"
@@ -91,10 +91,6 @@ spec:
                 ports:
                     - containerPort: 6002
                 env:
-                  - name: NCCL_FASTRAK_ENABLE_CONTROL_CHANNEL
-                    value: "0"
-                  - name: NCCL_BUFFSIZE
-                    value: "8388608"
                   - name: REPLICATED_JOB_NAME
                     valueFrom:
                       fieldRef:
@@ -161,8 +157,12 @@ spec:
                     value: "0"
                   - name: NCCL_FASTRAK_USE_LLCM
                     value: "1"
+                  - name: NCCL_NVLS_ENABLE
+                    value: "0"
                   - name: NCCL_DEBUG
-                    value: "VERSION"
+                    value: "INFO"
+                  - name: NCCL_DEBUG_SUBSYS
+                    value: "INIT,NET"
                   - name: TF_CPP_VMODULE
                     value: "profile_guided_latency_estimator=10"
                   - name: TF_CPP_MIN_LOG_LEVEL
