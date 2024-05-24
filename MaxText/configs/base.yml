@@ -282,6 +282,9 @@ inference_microbenchmark_loop_iters: 10
 inference_microbenchmark_log_file_path: ""
 inference_metadata_file: "" # path to a json file
 
+# KV Cache layout control
+# Logical layout: 0,1,2,3 ; CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV
+# Default layout: 1,2,0,3 ; CACHE_SEQUENCE, CACHE_HEADS, CACHE_BATCH, CACHE_KV
 prefill_key_axis_order: "1,2,0,3"
 prefill_value_axis_order: "1,2,0,3"
 ar_key_axis_order: "1,2,0,3"

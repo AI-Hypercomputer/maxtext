@@ -105,10 +105,6 @@ class AttentionOp(nn.Module):
   max_target_length: int
   num_query_heads: int
   num_kv_heads: int
-  prefill_key_axis_order: tuple[int]
-  prefill_value_axis_order: tuple[int]
-  ar_key_axis_order: tuple[int]
-  ar_value_axis_order: tuple[int]
   float32_qk_product: bool = False
   max_prefill_predict_length: int = -1
   float32_logits: bool = False
@@ -846,10 +842,6 @@ class Attention(nn.Module):
   max_target_length: int
   mesh: Mesh
   attention_kernel: str
-  prefill_key_axis_order: tuple[int]
-  prefill_value_axis_order: tuple[int]
-  ar_key_axis_order: tuple[int]
-  ar_value_axis_order: tuple[int]
   dtype: DType = jnp.float32
   weight_dtype: DType = jnp.float32
   max_prefill_predict_length: int = -1
