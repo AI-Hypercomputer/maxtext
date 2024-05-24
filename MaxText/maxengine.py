@@ -117,6 +117,28 @@ class MaxEngine(engine_api.Engine):
       self.abstract_params = jax.tree_util.tree_map(
           lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), params
       )
+  
+      ## Save quantized checkpoint
+      print('save quantized checkpoint')
+      import checkpointing
+      from train import save_checkpoint
+      step_number_to_save_new_ckpt = 0
+      enable_checkpointing = True
+      async_checkpointing = False
+      save_interval_steps = 1
+
+      checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+          "/mnt/disks/persist/llama70b-chat-quantized-fixed",
+          enable_checkpointing,
+          async_checkpointing,
+          save_interval_steps
+      )
+      if checkpoint_manager is not None:
+        print(state.params.keys())
+        state.params['params'] = params['params']
+        state.params['aqt'] = params['aqt']
+        if save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state):
+          print('save checkpoint successfully')
 
       self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
       return params
