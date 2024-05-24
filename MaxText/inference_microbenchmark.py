@@ -279,5 +279,6 @@ def main(config):
 
 
 if __name__ == "__main__":
+  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   pyconfig.initialize(sys.argv)
   main(pyconfig.config)
