@@ -22,7 +22,6 @@ import sys
 
 from jetstream.engine import token_utils
 
-import inference_utils
 import max_utils
 import maxengine
 import maxtext_utils

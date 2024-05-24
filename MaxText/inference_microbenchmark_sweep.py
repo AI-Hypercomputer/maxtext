@@ -108,6 +108,11 @@ def main():
       "quantization": config.quantization,
       "quantize_kvcache": f"{config.quantize_kvcache}",
       "attention": config.attention,
+      "key_value_axis_order_product_id": f"{key_value_axis_order_product_id}",
+      "prefill_key_axis_order": f"{prefill_key_axis_order}",
+      "prefill_value_axis_order": f"{prefill_value_axis_order}",
+      "ar_key_axis_order": f"{ar_key_axis_order}",
+      "ar_value_axis_order": f"{ar_value_axis_order}",
     }
     dimensions_json = {
       **dimensions_json,
