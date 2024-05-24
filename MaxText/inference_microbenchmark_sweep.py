@@ -89,42 +89,25 @@ def main():
     max_utils.write_config_raw_keys_for_gcs(pyconfig._config.keys)
 
     # Prepare metadata (dimensions) json for XLML
-    # dimensions_json = {}
-    # dimensions_json['key_value_axis_order_product_id'] = key_value_axis_order_product_id
-    # dimensions_json['prefill_key_axis_order'] = prefill_key_axis_order
-    # dimensions_json['prefill_value_axis_order'] = prefill_value_axis_order
-    # dimensions_json['ar_key_axis_order'] = ar_key_axis_order
-    # dimensions_json['ar_value_axis_order'] = ar_value_axis_order
-    # dimensions_json['tensorboard_dir'] = tensorboard_dir
-    # dimensions_json['run_name'] = run_name
-    # dimensions_json = {
-    #   **dimensions_json,
-    #   **inference_metadata,
-    # }
     dimensions_json = {
       "base_output_directory": config.base_output_directory,
       "model_name": config.model_name,
       "tokenizer": config.tokenizer_path,
       "weight_dtype": config.weight_dtype,
-      "inference_microbenchmark_prefill_lengths": config.inference_microbenchmark_prefill_lengths,
+      "inference_microbenchmark_prefill_lengths": f"{config.inference_microbenchmark_prefill_lengths}",
       "inference_microbenchmark_stages": config.inference_microbenchmark_stages,
-      "inference_microbenchmark_loop_iters": config.inference_microbenchmark_loop_iters,
-      "max_prefill_predict_length": config.max_prefill_predict_length,
-      "max_target_length": config.max_target_length,
-      "per_device_batch_size": config.per_device_batch_size,
-      "ici_fsdp_parallelism": config.ici_fsdp_parallelism,
-      "ici_autoregressive_parallelism": config.ici_autoregressive_parallelism,
-      "ici_tensor_parallelism": config.ici_tensor_parallelism,
+      "inference_microbenchmark_loop_iters": f"{config.inference_microbenchmark_loop_iters}",
+      "max_prefill_predict_length": f"{config.max_prefill_predict_length}",
+      "max_target_length": f"{config.max_target_length}",
+      "per_device_batch_size": f"{config.per_device_batch_size}",
+      "ici_fsdp_parallelism": f"{config.ici_fsdp_parallelism}",
+      "ici_autoregressive_parallelism": f"{config.ici_autoregressive_parallelism}",
+      "ici_tensor_parallelism": f"{config.ici_tensor_parallelism}",
       "enable_profiler": config.enable_profiler,
       "scan_layers": config.scan_layers,
       "quantization": config.quantization,
       "quantize_kvcache": config.quantize_kvcache,
       "attention": config.attention,
-      # "key_value_axis_order_product_id_list": config.key_value_axis_order_product_id_list,
-      # "prefill_key_axis_order_list": config.prefill_key_axis_order_list,
-      # "prefill_value_axis_order_list": config.prefill_value_axis_order_list,
-      # "ar_key_axis_order_list": config.ar_key_axis_order_list,
-      # "ar_value_axis_order_list": config.ar_value_axis_order_list,
     }
     dimensions_json = {
       **dimensions_json,
