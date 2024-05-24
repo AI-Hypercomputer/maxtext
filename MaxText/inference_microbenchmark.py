@@ -225,7 +225,7 @@ def summarize_prefill_result(engine, params, tokens, true_length):
   }
 
 
-def main(config, inference_metadata={}):
+def main(config, inference_metadata):
   engine = maxengine.MaxEngine(config)
   params = engine.load_params()
   prefill_lengths = [int(l) for l in config.inference_microbenchmark_prefill_lengths.split(",")]
@@ -286,10 +286,14 @@ def main(config, inference_metadata={}):
   results = collate_results(config, benchmark_results, model_size, cache_size, num_model_params)
   print_results_for_analyze(results)
   flatten_microbenchmark_results = pyconfig.string_to_bool(inference_metadata.get('flatten_microbenchmark_results', 'false'))
-  results = write_results(results, filename=config.inference_microbenchmark_log_file_path, flatten_microbenchmark_results=flatten_microbenchmark_results)
+  results = write_results(
+    results,
+    filename=config.inference_microbenchmark_log_file_path,
+    flatten_microbenchmark_results=flatten_microbenchmark_results
+  )
   return results
 
 
 if __name__ == "__main__":
   pyconfig.initialize(sys.argv)
-  main(pyconfig.config)
+  main(pyconfig.config, {})
