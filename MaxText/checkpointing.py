@@ -188,13 +188,50 @@ def load_state_if_possible(
     # memory, we instead specify here that we are just restoring the params field of the checkpoint
     # (which itself may be a dictionary containing a key named 'params').
     restore_args = orbax.checkpoint.checkpoint_utils.construct_restore_args(abstract_unboxed_pre_state.params)
-    # restored = ckptr.restore(
-    #     p, item={"params": abstract_unboxed_pre_state.params}, transforms={}, restore_args={"params": restore_args}
-    # )
+    # print("abstract_unboxed_pre_state params:", abstract_unboxed_pre_state.params)
+    # print("restore_args:", restore_args)
+    abstract_unboxed_pre_state_flat_paths, _ = jax.tree_util.tree_flatten_with_path(abstract_unboxed_pre_state.params)
+    params_flat_paths = []
+    for i, (k, v) in enumerate(abstract_unboxed_pre_state_flat_paths):
+      pruned_keys = []
+      for d in list(k):
+        if 'params' in d.key:
+          continue
+        else:
+          pruned_keys.append(d)
+      params_flat_paths.append(tuple(pruned_keys))
+    print('abstract_unboxed_pre_state params_paths:', abstract_unboxed_pre_state_flat_paths)
+    print('params_flat_paths:', params_flat_paths)
+    # assert False
 
+    # restored = ckptr.restore(
+    #         p, 
+    #         item={"params": abstract_unboxed_pre_state.params,}, 
+    #         transforms={}, 
+    #         restore_args={"params": restore_args}
+    # )
     restored = ckptr.restore(p)
-    print(restored['params'].keys()) # printed ['params', 'aqt']
+    print(restored.keys())
+    print('scale shape example: ', restored['params']['aqt']['decoder']['layers_0']['mlp']['wo']['AqtDotGeneral_0']['qrhs']['scale'].shape)
+    print('value shape example: ', restored['params']['aqt']['decoder']['layers_0']['mlp']['wo']['AqtDotGeneral_0']['qrhs']['value'].shape)
+
+    print('scale shape example: ', restored['params']['aqt']['decoder']['layers_0']['self_attention']['key']['AqtDotGeneral_0']['qrhs']['scale'].shape)
+    print('value shape example: ', restored['params']['aqt']['decoder']['layers_0']['self_attention']['key']['AqtDotGeneral_0']['qrhs']['value'].shape)
+
+    from layers import quantizations
+    aqt_flat_paths = quantizations._get_aqt_key_paths(restored['params']['aqt'])
+    print('aqt_paths:', aqt_flat_paths)
+    #for aqt_path in aqt_flat_paths:
+    #    assert aqt_path in params_flat_paths
+    assert False
     return None, restored["params"]
+
+  elif load_full_state_from_path != "":
+    max_logging.log(f"restoring full state from {load_full_state_from_path=}")
+    p = epath.Path(load_full_state_from_path)
+    ckptr = orbax.checkpoint.StandardCheckpointer()
+    restored = ckptr.restore(p, args=orbax.checkpoint.args.StandardRestore(abstract_unboxed_pre_state))
+    return {"items": restored}, None
 
   elif load_full_state_from_path != "":
     max_logging.log(f"restoring full state from {load_full_state_from_path=}")
