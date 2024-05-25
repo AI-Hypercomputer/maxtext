@@ -57,17 +57,12 @@ class Pipeline(nn.Module):
   remat_policy: Any = None
 
   def setup(self):
-    #decoder_layers = [self.decoder_layer_class(config=self.config, mesh=self.mesh, name=f'layers_{lyr}', quant=self.quant) for lyr in range(self.config.num_decoder_layers)]
-    #self.decoder_layers = decoder_layers
     self.num_stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
     self.layers_per_stage = self.config.num_decoder_layers / (self.num_stages * self.config.num_pipeline_repeats)
-    # TODO: should this assert be in this class or in the initial pyconfig check?
-    # assert self.layers_per_stage==1,f"Currently only supporting 1 layer per pipeline stage, but {self.config.num_decoder_layers} layers were requested with {self.num_stages * self.config.num_pipeline_repeats} total stages = {self.num_stages} pipeline parallel axes * {self.config.num_pipeline_repeats} circ repeats"
     self.use_circ_storage = self.config.num_pipeline_repeats > 1 and self.config.num_pipeline_microbatches > self.num_stages
     self.microbatch_size = self.config.global_batch_size_to_train_on // self.config.num_pipeline_microbatches
     microbatches_per_stage = self.config.num_pipeline_microbatches // self.num_stages
-    # TODO: should this assert be in this class or pyconfig check?
-    assert microbatches_per_stage * self.num_stages == self.config.num_pipeline_microbatches, f"Currently the number of microbatches ({self.config.num_pipeline_microbatches}) must be divisible by the number of stages ({self.num_stages})"
+    assert microbatches_per_stage * self.num_stages == self.config.num_pipeline_microbatches, f"The number of microbatches ({self.config.num_pipeline_microbatches}) must be divisible by the number of stages ({self.num_stages})"
     self.microbatches_per_stage = microbatches_per_stage
 
     
@@ -96,8 +91,7 @@ class Pipeline(nn.Module):
     state_io = jnp.reshape(inputs, (self.num_stages, self.microbatches_per_stage) + inputs.shape[1:])
     state_io = nn.with_logical_constraint(state_io, ("activation_stage", None, "activation_batch", "activation_length", "activation_embed"),rules=self.config.logical_axis_rules, mesh=self.mesh) 
 
-    # TODO: verify comment below
-    # The data/fsdp can shard over microbatch_size, not number of microbatches. The num_microbatches is looped over so should not be sharded.
+    # We shard the microbatch_size axis by data/fsdp, not num_microbatches. 
 
     # TODO: Consider sharding and/or changing the circ storage. Understand if/when setting microbatches > num_stages is beneficial which is when circ_storage is needed
     # circ_storage is used to hold the final pipeline stage outputs before it is used for the next repeat. It is only needed
@@ -199,17 +193,17 @@ class Pipeline(nn.Module):
     weights = self.shard_dim_by_stages(weights, stages_dim_in_weights)
     outs = jax.vmap(_gather_one, in_axes=(stages_dim_in_weights, 0), out_axes=out_dim)(weights, repeat_ids)
     # Also shard outs
-    #outs = self.shard_dim_by_stages(outs, out_dim)
+    outs = self.shard_dim_by_stages(outs, out_dim)
 
     # TODO: Is this sharding needed?
     # dims_mapping[dim] = "stage"
     # dims_mapping = tuple(dims_mapping)
-    dims_mapping = ("stage", "fsdp", "tensor")
-    p1 = jax.sharding.PartitionSpec(*dims_mapping)
-    sharding = jax.sharding.NamedSharding(self.mesh,p1)
+    # dims_mapping = ("stage", "fsdp", "tensor")
+    # p1 = jax.sharding.PartitionSpec(*dims_mapping)
+    # sharding = jax.sharding.NamedSharding(self.mesh,p1)
 
-    print(f"Shape of outs is {outs.shape}", flush=True)
-    outs = jax.lax.with_sharding_constraint(outs, sharding)
+    # print(f"Shape of outs is {outs.shape}", flush=True)
+    # outs = jax.lax.with_sharding_constraint(outs, sharding)
     return outs
 
   def get_microbatch_id(self, stage_idx, loop_iteration):
