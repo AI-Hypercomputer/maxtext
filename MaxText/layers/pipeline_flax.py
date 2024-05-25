@@ -201,6 +201,7 @@ class Pipeline(nn.Module):
     # Also shard outs
     #outs = self.shard_dim_by_stages(outs, out_dim)
 
+    # TODO: Is this sharding needed?
     # dims_mapping[dim] = "stage"
     # dims_mapping = tuple(dims_mapping)
     dims_mapping = ("stage", "fsdp", "tensor")
@@ -208,7 +209,7 @@ class Pipeline(nn.Module):
     sharding = jax.sharding.NamedSharding(self.mesh,p1)
 
     print(f"Shape of outs is {outs.shape}", flush=True)
-    outs = jax.lax.with_sharding_constraint(outs, p1)
+    outs = jax.lax.with_sharding_constraint(outs, sharding)
     return outs
 
   def get_microbatch_id(self, stage_idx, loop_iteration):
@@ -221,10 +222,17 @@ class Pipeline(nn.Module):
     return nn.with_logical_constraint(x, stage_sharding_constraint, mesh=self.mesh, rules=self.config.logical_axis_rules)
 
   def shard_leading_dim_by_stages(self, x):
+    # dims_mapping[dim] = "stage"
+    # dims_mapping = tuple(dims_mapping)
+    # p1 = jax.sharding.PartitionSpec(*dims_mapping)
+    # sharding = jax.sharding.NamedSharding(self.mesh,p1)
+    # return jax.lax.with_sharding_constraint(x, sharding) # maybe PartitionSpec(dims_mapping)
+
     partition_spec_list = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
     partition_spec_list[0] = jax.sharding.PartitionSpec("stage")
     partition_spec = jax.sharding.PartitionSpec(*partition_spec_list)
-    return jax.lax.with_sharding_constraint(x, partition_spec)
+    sharding = jax.sharding.NamedSharding(self.mesh, partition_spec)
+    return jax.lax.with_sharding_constraint(x, sharding)
 
   def vmap_gather(self, xs, ids, ids_dim):
     """Use vmap to implement a stage-wise sharded gather.
