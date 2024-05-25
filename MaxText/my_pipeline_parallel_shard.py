@@ -14,6 +14,8 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 global mesh
 mesh = Mesh(jax.devices(), ('stages',))
 
+def parallel_body():
+  # rawr
 def predict(params, inputs):
   for layer in params:
     inputs = jnp.dot(inputs, layer)
