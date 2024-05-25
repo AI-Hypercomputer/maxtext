@@ -233,13 +233,6 @@ def load_state_if_possible(
     restored = ckptr.restore(p, args=orbax.checkpoint.args.StandardRestore(abstract_unboxed_pre_state))
     return {"items": restored}, None
 
-  elif load_full_state_from_path != "":
-    max_logging.log(f"restoring full state from {load_full_state_from_path=}")
-    p = epath.Path(load_full_state_from_path)
-    ckptr = orbax.checkpoint.StandardCheckpointer()
-    restored = ckptr.restore(p, args=orbax.checkpoint.args.StandardRestore(abstract_unboxed_pre_state))
-    return {"items": restored}, None
-
   else:
     max_logging.log("No existing checkpoints found, not restoring checkpoint.")
     return None, None
