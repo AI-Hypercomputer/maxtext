@@ -88,15 +88,15 @@ def assert_same_output_and_grad(f1,f2, targets, *inputs, f1_extra_inputs=[], f2_
   print_norms(f1_grad, f2_grad, f1_name=f"{f1_name} grad", f2_name=f"{f2_name} grad", diff_name="Gradient difference")
 
 
-class PipelineParallelismTest(unittest.TestCase):
+class PipelineParallelismTest:
 
   def setUp(self):
-    super().setUp()
-
     pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], "MaxText/configs/base.yml"],
         enable_checkpointing=False,
         run_name="pipeline_parallelism_test",
+        max_target_length=128,
+        base_emb_dim=28,
         ici_pipeline_parallelism=4        
     )
     config = pyconfig.config
@@ -133,9 +133,10 @@ class PipelineParallelismTest(unittest.TestCase):
 
     self.deterministic = True
     self.model_mode = common_types.MODEL_MODE_TRAIN
+    pipeline_stage = llama2.LlamaDecoderLayer(config=config, mesh=self.mesh)
     my_pipeline = pipeline_flax.Pipeline(
         config=self.config,
-        layers=self.config.num_decoder_layers,
+        layers=pipeline_stage,
         mesh=self.mesh
     )
     self.init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), self.inputs, self.inputs_position, self.inputs_segmentation, self.deterministic, self.model_mode)
@@ -180,11 +181,15 @@ class PipelineParallelismTest(unittest.TestCase):
     self.pipeline_func = my_pipeline.apply
 
 
-  @pytest.mark.tpu
   def test_pipeline_parallelism_same_output_and_grad(self):
+    print("Setting up...", flush=True)
+    self.setUp()
+    print("Set up complete!", flush=True)
     assert 2 > 1
-    #assert_same_output_and_grad(self.reg_layers,self.pipeline_func, self.targets, self.init_pipeline_params, self.inputs, self.inputs_segmentation, self.inputs_position, self.deterministic, self.model_mode)
+    print("asserting grad...", flush=True)
+    assert_same_output_and_grad(self.pipeline_func, self.reg_layers, self.dummy_targets, self.init_pipeline_params, self.inputs, self.inputs_segmentation, self.inputs_position, self.deterministic, self.model_mode)
+    print("Grad asserted!...", flush=True)
 
 if __name__ == "__main__":
-  
-  unittest.main()
+  my_test = PipelineParallelismTest()
+  my_test.test_pipeline_parallelism_same_output_and_grad()
