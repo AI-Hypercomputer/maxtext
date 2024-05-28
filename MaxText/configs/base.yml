@@ -89,6 +89,7 @@ num_pipeline_repeats: -1
 # The number of pipeline_microbatches must be a multiple of the number of pipeline stages. By default it is set to the number of stages.
 # Note the microbatch_size is given by global_batch_size / num_pipeline_microbatches, where global_batch_size = per_device_batch_size * num_devices
 num_pipeline_microbatches: -1
+scan_pipeline_iterations: True # This can be set independently of scan_layers, which is relevant when num_layers_per_pipeline_stage > 1.
 
 # mixture of experts (moe)
 num_experts: 1
@@ -103,7 +104,6 @@ logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedd
 # These options offer a trade-off between speed (fastest to slowest) and HBM usage (highest to lowest)
 remat_policy: 'full'
 scan_layers: True
-scan_pipeline_iterations: True # TODO: Ensure compatibility regardless of scan_layers
 param_scan_axis: 1
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
 
