@@ -63,24 +63,9 @@ def assert_same_output_and_grad(f1, f2, *inputs):
 
 class PipelineParallelismTest(unittest.TestCase):
 
-  def setUp(self):
-    super().setUp()
-
-    pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
-        enable_checkpointing=False,
-        run_name="pipeline_parallelism_test",
-        max_target_length=128,
-        base_emb_dim=28,
-        ici_pipeline_parallelism=4,
-        base_num_decoder_layers=8,
-        num_pipeline_microbatches=8,
-        per_device_batch_size=4
-    )
-    config = pyconfig.config
+  def assert_pipeline_same_output_and_grad(self, config):
     devices_array = max_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
-
 
     def get_inputs(batch_size, sequence, features):
         '''Get random inputs, and random dummy targets
@@ -100,17 +85,17 @@ class PipelineParallelismTest(unittest.TestCase):
         inputs_segmentation = jnp.ones((batch_size, sequence), dtype=jnp.int32)
         return inputs, dummy_targets, inputs_position, inputs_segmentation
 
-    self.inputs, self.dummy_targets, self.inputs_position, self.inputs_segmentation = get_inputs(config.global_batch_size_to_train_on, config.max_target_length, config.emb_dim)
-    self.deterministic = True
-    self.model_mode = common_types.MODEL_MODE_TRAIN
-    # We use a simpler single matmul decoder layer for fast compilation to run in tests.    
+    inputs, dummy_targets, inputs_position, inputs_segmentation = get_inputs(config.global_batch_size_to_train_on, config.max_target_length, config.emb_dim)
+    deterministic = True
+    model_mode = common_types.MODEL_MODE_TRAIN
+    # We use a simpler single matmul decoder layer for fast compilation in these tests.    
     single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh)
     my_pipeline = pipeline_flax.Pipeline(
         config=config,
         layers=single_pipeline_stage,
         mesh=mesh
     )
-    self.init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), self.inputs, self.inputs_position, self.inputs_segmentation, self.deterministic, self.model_mode)
+    init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
 
     # Create a dummy scalar loss function so we may take the gradient wrt weights
     def pipeline_parallelism_dummy_loss_func(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, dummy_targets):
@@ -119,18 +104,20 @@ class PipelineParallelismTest(unittest.TestCase):
        return loss
 
     def regular_sequential_layers(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
-        # We need to reshape the pipeline's weights to remove the circular dimension to apply layers sequentially.
+        
         def get_cur_layer_params(params, layer_idx):
             def get_cur_layer_params_arr(leaf):
-                new_shape = (leaf.shape[0] * leaf.shape[1],) + leaf.shape[2:]
-                leaf = jnp.reshape(leaf, new_shape)
+                if config.num_pipeline_repeats > 1:
+                  # Reshape the pipeline's weights to remove the circular dimension to apply layers sequentially.
+                  new_shape = (leaf.shape[0] * leaf.shape[1],) + leaf.shape[2:]
+                  leaf = jnp.reshape(leaf, new_shape)
                 return leaf[layer_idx]
             return jax.tree.map(get_cur_layer_params_arr, params)
 
         reg_layer_activations = inputs
         for layer in range(config.num_decoder_layers):
             cur_layer_params = get_cur_layer_params(params, layer)
-            cur_layer_params['params'] = cur_layer_params['params']['layers'] # Remove the leading "layers" structure
+            cur_layer_params['params'] = cur_layer_params['params']['layers']
             reg_layer_activations, _ = single_pipeline_stage.apply(cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode)
         return reg_layer_activations
 
@@ -139,13 +126,58 @@ class PipelineParallelismTest(unittest.TestCase):
        loss = jnp.linalg.norm(outputs - dummy_targets)
        return loss
 
-    self.pipeline_dummy = pipeline_parallelism_dummy_loss_func
-    self.regular_dummy = regular_sequential_layers_dummy_loss
-
+    assert_same_output_and_grad(regular_sequential_layers_dummy_loss, pipeline_parallelism_dummy_loss_func, init_pipeline_params, inputs, inputs_segmentation, inputs_position, deterministic, model_mode, dummy_targets)
 
   @pytest.mark.tpu
-  def test_pipeline_parallelism_same_output_and_grad(self):
-    assert_same_output_and_grad(self.regular_dummy,self.pipeline_dummy, self.init_pipeline_params, self.inputs, self.inputs_segmentation, self.inputs_position, self.deterministic, self.model_mode, self.dummy_targets)
+  def test_circular_minimum_microbatches_same_output_and_grad(self):
+     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 4 microbatches
+     pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        enable_checkpointing=False,
+        run_name="circular_minimum_microbatches",
+        max_target_length=128,
+        base_emb_dim=28,
+        ici_pipeline_parallelism=4,
+        base_num_decoder_layers=8,
+        num_pipeline_microbatches=4,
+        per_device_batch_size=4
+     )
+     config = pyconfig.config
+     self.assert_pipeline_same_output_and_grad(config)
+
+  @pytest.mark.tpu
+  def test_circular_extra_microbatches_same_output_and_grad(self):
+     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
+     pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        enable_checkpointing=False,
+        run_name="circular_extra_microbatches",
+        max_target_length=128,
+        base_emb_dim=28,
+        ici_pipeline_parallelism=4,
+        base_num_decoder_layers=8,
+        num_pipeline_microbatches=8,
+        per_device_batch_size=4
+     )
+     config = pyconfig.config
+     self.assert_pipeline_same_output_and_grad(config)
+
+  @pytest.mark.tpu
+  def test_non_circular_same_output_and_grad(self):
+     # 4 stages, 4 layers (no need for circular), 4 microbatches
+     pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        enable_checkpointing=False,
+        run_name="non_circular",
+        max_target_length=128,
+        base_emb_dim=28,
+        ici_pipeline_parallelism=4,
+        base_num_decoder_layers=4,
+        num_pipeline_microbatches=4,
+        per_device_batch_size=4
+     )
+     config = pyconfig.config
+     self.assert_pipeline_same_output_and_grad(config)
 
 if __name__ == "__main__":
   unittest.main()
