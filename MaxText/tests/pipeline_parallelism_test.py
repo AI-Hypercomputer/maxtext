@@ -32,7 +32,6 @@ import pyconfig
 from layers import pipeline_flax
 import jax
 from jax import numpy as jnp
-from jax import tree_map
 from jax.sharding import Mesh
 
 import common_types
@@ -53,7 +52,7 @@ def assert_same_output_and_grad(f1, f2, *inputs):
   f2_value, f2_grad = jax.value_and_grad(f2)(*inputs)
 
   def pytree_ravel(pytree):
-    ravelled_tree = jax.tree_map(jnp.ravel, pytree)
+    ravelled_tree = jax.tree.map(jnp.ravel, pytree)
     ravelled_leaves, _ = jax.tree_util.tree_flatten(ravelled_tree)
     return jnp.concatenate(ravelled_leaves)
   f1_grad = pytree_ravel(f1_grad)
