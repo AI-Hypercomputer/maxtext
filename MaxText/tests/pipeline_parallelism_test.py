@@ -98,13 +98,12 @@ class PipelineParallelismTest(unittest.TestCase):
     init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
 
     # Create a dummy scalar loss function so we may take the gradient wrt weights
-    def pipeline_parallelism_dummy_loss_func(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, dummy_targets):
+    def pipeline_parallelism_dummy_loss(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, dummy_targets):
        outputs = my_pipeline.apply(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
        loss = jnp.linalg.norm(outputs - dummy_targets)
        return loss
 
-    def regular_sequential_layers(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
-        
+    def regular_sequential_layers(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):     
         def get_cur_layer_params(params, layer_idx):
             def get_cur_layer_params_arr(leaf):
                 if config.num_pipeline_repeats > 1:
@@ -126,7 +125,7 @@ class PipelineParallelismTest(unittest.TestCase):
        loss = jnp.linalg.norm(outputs - dummy_targets)
        return loss
 
-    assert_same_output_and_grad(regular_sequential_layers_dummy_loss, pipeline_parallelism_dummy_loss_func, init_pipeline_params, inputs, inputs_segmentation, inputs_position, deterministic, model_mode, dummy_targets)
+    assert_same_output_and_grad(regular_sequential_layers_dummy_loss, pipeline_parallelism_dummy_loss, init_pipeline_params, inputs, inputs_segmentation, inputs_position, deterministic, model_mode, dummy_targets)
 
   @pytest.mark.tpu
   def test_circular_minimum_microbatches_same_output_and_grad(self):
@@ -164,7 +163,7 @@ class PipelineParallelismTest(unittest.TestCase):
 
   @pytest.mark.tpu
   def test_non_circular_same_output_and_grad(self):
-     # 4 stages, 4 layers (no need for circular), 4 microbatches
+     # 4 stages, 4 layers (no circular repeats, 1 layer per stage), 4 microbatches
      pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         enable_checkpointing=False,
