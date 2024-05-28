@@ -269,7 +269,7 @@ class Decoder(nn.Module):
         policy = None
 
     pipeline_parallelism = cfg.ici_pipeline_parallelism > 1 or cfg.dcn_pipeline_parallelism > 1
-    if not pipeline_parallelism:
+    if not pipeline_parallelism or True:
       BlockLayer = nn.remat(  # pylint: disable=invalid-name
           BlockLayer,
           prevent_cse=not cfg.scan_layers,
@@ -279,7 +279,7 @@ class Decoder(nn.Module):
     if pipeline_parallelism:
         if cfg.num_layers_per_pipeline_stage == 1:
           deocder_layer_instace = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
-        else:
+        elif cfg.scan_layers:
           # Remat the scan layers per stage
           BlockLayer = nn.remat(  # pylint: disable=invalid-name
             BlockLayer,
@@ -312,6 +312,27 @@ class Decoder(nn.Module):
             length=cfg.num_layers_per_pipeline_stage,
             metadata_params={nn.PARTITION_NAME: "layers_per_stage"},
         )(config=cfg, mesh=mesh, name="layers", quant=self.quant)
+        elif not cfg.scan_layers:
+          class SequentialBlockDecoderLayers(nn.Module):
+            decoder_layer: None
+            num_decoder_layers: int
+            config: Config
+            mesh: Mesh
+            quant: Quant
+
+          @nn.compact
+          def __call__(self, inputs: jnp.ndarray, decoder_positions, decoder_segment_ids, deterministic, model_mode) -> jnp.ndarray:
+            for lyr in range(self.num_decoder_layers):
+              inputs = self.decoder_layer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+                inputs,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+                )
+            return inputs
+          deocder_layer_instace=SequentialBlockDecoderLayers(decoder_layer=BlockLayer, num_decoder_layers=cfg.num_num_layers_per_pipeline_stage, config=cfg, mesh=mesh,quant=self.quant)
+        
         # TODO: Pipeline doesn't need its own config/mesh/quant?
         y = pipeline_flax.Pipeline(config=cfg, mesh=mesh, layers=deocder_layer_instace,quant=self.quant, remat_policy=policy)(
             y,
