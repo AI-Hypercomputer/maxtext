@@ -140,6 +140,10 @@ class PipelineParallelismTest(unittest.TestCase):
     )
     self.init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), self.inputs, self.inputs_position, self.inputs_segmentation, self.deterministic, self.model_mode)
 
+    # Create a dummy scalar loss function so we may take the gradient wrt weights
+    def pipeline_parallelism_dummy_loss_func(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, dummy_targets):
+       outputs = 
+
     self.config=config
     def run_regular_pipeline(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
         config = self.config
