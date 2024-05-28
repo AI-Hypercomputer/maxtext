@@ -97,7 +97,8 @@ class PipelineParallelismTest:
         run_name="pipeline_parallelism_test",
         max_target_length=128,
         base_emb_dim=28,
-        ici_pipeline_parallelism=4        
+        ici_pipeline_parallelism=4,
+        base_num_decoder_layers=4        
     )
     config = pyconfig.config
     self.config = config
@@ -187,7 +188,11 @@ class PipelineParallelismTest:
     print("Set up complete!", flush=True)
     assert 2 > 1
     print("asserting grad...", flush=True)
-    assert_same_output_and_grad(self.pipeline_func, self.reg_layers, self.dummy_targets, self.init_pipeline_params, self.inputs, self.inputs_segmentation, self.inputs_position, self.deterministic, self.model_mode)
+    partial_pipeline_func = functools.partial(self.pipeline_func, deterministic=self.deterministic, model_mode=self.model_mode)
+    partial_regular_func = functools.partial(self.reg_layers, deterministic=self.deterministic, model_mode=self.model_mode)
+
+    #assert_same_output_and_grad(self.pipeline_func, self.reg_layers, self.dummy_targets, self.init_pipeline_params, self.inputs, self.inputs_segmentation, self.inputs_position, self.deterministic, self.model_mode)
+    assert_same_output_and_grad(partial_pipeline_func, partial_regular_func, self.dummy_targets, self.init_pipeline_params, self.inputs, self.inputs_segmentation, self.inputs_position)
     print("Grad asserted!...", flush=True)
 
 if __name__ == "__main__":

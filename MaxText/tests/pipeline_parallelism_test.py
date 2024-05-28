@@ -18,37 +18,30 @@ limitations under the License.
 
 # pylint: disable=missing-module-docstring, missing-function-docstring
 import sys
-import numpy as np
+
 import jax
 from jax.sharding import Mesh
-from jax.experimental import mesh_utils
-from jax.sharding import PartitionSpec
 
-import tensorflow as tf
+
 import unittest
 import pytest
 
 import pyconfig
-import multihost_dataloading
+
 
 from layers import pipeline_flax
 import jax
 from jax import numpy as jnp
 from jax import tree_map
 from jax.sharding import Mesh
-from typing import Sequence
-from absl import app
-import os
-#from layers import simple_decoder_layer
+
 import common_types
 import pyconfig
-import functools
 import max_utils
 from layers import llama2
 from flax.core import meta
 
 import jax.numpy as jnp
-import timing_util
 from flax import linen as nn
 
 
@@ -97,7 +90,10 @@ class PipelineParallelismTest(unittest.TestCase):
         [sys.argv[0], "configs/base.yml"],
         enable_checkpointing=False,
         run_name="pipeline_parallelism_test",
-        ici_pipeline_parallelism=4        
+        max_target_length=128,
+        base_emb_dim=28,
+        ici_pipeline_parallelism=4,
+        base_num_decoder_layers=4            
     )
     config = pyconfig.config
     self.config = config
@@ -133,9 +129,13 @@ class PipelineParallelismTest(unittest.TestCase):
 
     self.deterministic = True
     self.model_mode = common_types.MODEL_MODE_TRAIN
+    pipeline_stage = llama2.LlamaDecoderLayer(config=config, mesh=self.mesh)
+    from layers import simple_layer
+    pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=self.mesh)
+    self.pipeline_stage = pipeline_stage
     my_pipeline = pipeline_flax.Pipeline(
         config=self.config,
-        layers=self.config.num_decoder_layers,
+        layers=pipeline_stage,
         mesh=self.mesh
     )
     self.init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), self.inputs, self.inputs_position, self.inputs_segmentation, self.deterministic, self.model_mode)
@@ -143,7 +143,7 @@ class PipelineParallelismTest(unittest.TestCase):
     self.config=config
     def run_regular_pipeline(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
         config = self.config
-        decoder_layer_instance = llama2.LlamaDecoderLayer(config=self.config, mesh=self.mesh)
+        decoder_layer_instance = self.pipeline_stage
         reg_layer_activations = inputs
 
         def get_cur_layer_params(params, layer_idx):
@@ -183,7 +183,7 @@ class PipelineParallelismTest(unittest.TestCase):
   @pytest.mark.tpu
   def test_pipeline_parallelism_same_output_and_grad(self):
     assert 2 > 1
-    #assert_same_output_and_grad(self.reg_layers,self.pipeline_func, self.targets, self.init_pipeline_params, self.inputs, self.inputs_segmentation, self.inputs_position, self.deterministic, self.model_mode)
+    assert_same_output_and_grad(self.reg_layers,self.pipeline_func, self.dummy_targets, self.init_pipeline_params, self.inputs, self.inputs_segmentation, self.inputs_position, self.deterministic, self.model_mode)
 
 if __name__ == "__main__":
   
