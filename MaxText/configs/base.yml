@@ -79,13 +79,11 @@ base_num_decoder_layers: 16
 head_dim: 128
 
 # pipeline parallelism
-# We recommend leaving the num_pipeline_repeats to default behavior.
-# By default the number of repeats will be set to [num_decoder_layers] / [num_pipeline_stages], since we currently only support one layer per stage
+# By default the number of repeats will be set to num_decoder_layers / num_pipeline_stages 
 num_pipeline_repeats: -1 
 # The number of pipeline_microbatches must be a multiple of the number of pipeline stages. By default it is set to the number of stages.
 # Note the microbatch_size is given by global_batch_size / num_pipeline_microbatches, where global_batch_size = per_device_batch_size * num_devices
 num_pipeline_microbatches: -1
-
 num_layers_per_pipeline_stage: 1
 
 # mixture of experts (moe)

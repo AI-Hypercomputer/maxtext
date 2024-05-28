@@ -439,7 +439,9 @@ class Pipeline(nn.Module):
         mutable=True,
         trans_in_fn=prepare_vars_for_main_vmap,
     )
-   stages_output, _ = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+   stages_output = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+   if self.config.scan_layers:
+     stages_output = stages_output[0]
 
    new_state = self.get_new_loop_state(stages_output, loop_state)
    return new_state
@@ -515,7 +517,10 @@ class Pipeline(nn.Module):
        # To shard weight (both for initialization and at rest) for the circular pipeline
        # we create weights of shape [num_repeat, num_stages, ...] (e.g. [num_repeat, num_stages, embed, mlp])
        # and shard the num_stages  we wrap the main stage vmap with a num_repeat vmap to generate this axis only for parameter initialization
-     stage_outputs, _ = vmap_func(self.layers, example_inputs, example_segmentation, example_position, deterministic, model_mode)
+     stage_outputs = vmap_func(self.layers, example_inputs, example_segmentation, example_position, deterministic, model_mode)
+     if self.config.scan_layers:
+       stage_outputs = stage_outputs[0]
+
      # We return something of the correct shape (global_batch, sequence, embed) by reshaping a single stages output which has
      # shape [microbatch_size, sequence, embed]
      if self.config.num_pipeline_repeats > 1:

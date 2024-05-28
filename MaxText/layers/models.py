@@ -142,6 +142,24 @@ class DecoderLayer(nn.Module):
 
     return layer_output, None if cfg.scan_layers else layer_output
 
+class SequentialBlockDecoderLayers(nn.Module):
+  decoder_layer: None
+  num_decoder_layers: int
+  config: Config
+  mesh: Mesh
+  quant: Quant
+
+  @nn.compact
+  def __call__(self, inputs: jnp.ndarray, decoder_segment_ids, decoder_positions, deterministic, model_mode) -> jnp.ndarray:
+    for lyr in range(self.num_decoder_layers):
+      inputs = self.decoder_layer(config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant)(
+        inputs,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        )
+    return inputs
 
 class Decoder(nn.Module):
   """A stack of decoder layers as a part of an encoder-decoder architecture."""
@@ -306,25 +324,7 @@ class Decoder(nn.Module):
             metadata_params={nn.PARTITION_NAME: "layers_per_stage"},
         )(config=cfg, mesh=mesh, name="layers", quant=self.quant)
         elif not cfg.scan_layers:
-          class SequentialBlockDecoderLayers(nn.Module):
-            decoder_layer: None
-            num_decoder_layers: int
-            config: Config
-            mesh: Mesh
-            quant: Quant
-
-          @nn.compact
-          def __call__(self, inputs: jnp.ndarray, decoder_positions, decoder_segment_ids, deterministic, model_mode) -> jnp.ndarray:
-            for lyr in range(self.num_decoder_layers):
-              inputs = self.decoder_layer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
-                inputs,
-                decoder_segment_ids,
-                decoder_positions,
-                deterministic,
-                model_mode,
-                )
-            return inputs
-          deocder_layer_instace=SequentialBlockDecoderLayers(decoder_layer=RemattedBlockLayer, num_decoder_layers=cfg.num_num_layers_per_pipeline_stage, config=cfg, mesh=mesh,quant=self.quant)
+          deocder_layer_instace=SequentialBlockDecoderLayers(decoder_layer=RemattedBlockLayer, num_decoder_layers=cfg.num_layers_per_pipeline_stage, config=cfg, mesh=mesh,quant=self.quant)
         
         # TODO: Pipeline doesn't need its own config/mesh/quant?
         y = pipeline_flax.Pipeline(config=cfg, mesh=mesh, layers=deocder_layer_instace,quant=self.quant, remat_policy=policy)(
