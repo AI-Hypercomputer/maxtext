@@ -81,6 +81,31 @@ def assert_same_output_and_grad(f1,f2, targets, *inputs, f1_extra_inputs=[], f2_
   print_norms(f1_grad, f2_grad, f1_name=f"{f1_name} grad", f2_name=f"{f2_name} grad", diff_name="Gradient difference")
 
 
+def assert_same_output_and_grad_2(f1,f2, *inputs, f1_name="regular",f2_name="pipeline"):
+  f1_value, f1_grad = jax.value_and_grad(f1)(*inputs)
+  f2_value, f2_grad = jax.value_and_grad(f2)(*inputs)
+
+  def my_ravel(pytree):
+    ravelled_tree = jax.tree_map(jnp.ravel, pytree)
+    ravelled_leaves, _ = jax.tree_util.tree_flatten(ravelled_tree)
+    return jnp.concatenate(ravelled_leaves)
+
+  f1_grad = my_ravel(f1_grad)
+  f2_grad = my_ravel(f2_grad)
+  print(f"{f1_grad.shape=}")
+
+  def print_norms(a,b,f1_name="regular",f2_name="pipeline",diff_name="diff"):
+    a_norm = jnp.linalg.norm(a)
+    b_norm = jnp.linalg.norm(b)
+    diff_norm = jnp.linalg.norm(a-b)
+
+    print(f"{diff_name} norm of {diff_norm}")
+    print(f"{f1_name} norm of {a_norm}")
+    print(f"{f2_name} norm of {b_norm}")
+  print_norms(f1_value, f2_value, f1_name=f"{f1_name} output", f2_name=f"{f2_name} output", diff_name="Output difference")
+  print_norms(f1_grad, f2_grad, f1_name=f"{f1_name} grad", f2_name=f"{f2_name} grad", diff_name="Gradient difference")
+
+
 class PipelineParallelismTest(unittest.TestCase):
 
   def setUp(self):
@@ -142,7 +167,9 @@ class PipelineParallelismTest(unittest.TestCase):
 
     # Create a dummy scalar loss function so we may take the gradient wrt weights
     def pipeline_parallelism_dummy_loss_func(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, dummy_targets):
-       outputs = 
+       outputs = my_pipeline.apply(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+       loss = jnp.linalg.norm(outputs - dummy_targets)
+       return loss
 
     self.config=config
     def run_regular_pipeline(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
@@ -178,17 +205,24 @@ class PipelineParallelismTest(unittest.TestCase):
             reg_layer_activations, _ = decoder_layer_instance.apply(cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode)
         return reg_layer_activations
 
+    def run_regular_pipeline_dummy_loss(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, dummy_targets):
+       outputs = run_regular_pipeline(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+       loss = jnp.linalg.norm(outputs - dummy_targets)
+       return loss
 
   
     self.reg_layers = run_regular_pipeline
     self.pipeline_func = my_pipeline.apply
 
+    self.pipeline_dummy = pipeline_parallelism_dummy_loss_func
+    self.regular_dummy = run_regular_pipeline_dummy_loss
+
 
   @pytest.mark.tpu
   def test_pipeline_parallelism_same_output_and_grad(self):
     assert 2 > 1
-    assert_same_output_and_grad(self.reg_layers,self.pipeline_func, self.dummy_targets, self.init_pipeline_params, self.inputs, self.inputs_segmentation, self.inputs_position, self.deterministic, self.model_mode)
-
+    #assert_same_output_and_grad(self.reg_layers,self.pipeline_func, self.dummy_targets, self.init_pipeline_params, self.inputs, self.inputs_segmentation, self.inputs_position, self.deterministic, self.model_mode)
+    assert_same_output_and_grad_2(self.regular_dummy,self.pipeline_dummy, self.init_pipeline_params, self.inputs, self.inputs_segmentation, self.inputs_position, self.deterministic, self.model_mode, self.dummy_targets)
 if __name__ == "__main__":
   
   unittest.main()
