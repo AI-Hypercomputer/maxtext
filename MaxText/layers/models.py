@@ -269,29 +269,22 @@ class Decoder(nn.Module):
         policy = None
 
     pipeline_parallelism = cfg.ici_pipeline_parallelism > 1 or cfg.dcn_pipeline_parallelism > 1
-    if not pipeline_parallelism or True:
-      BlockLayer = nn.remat(  # pylint: disable=invalid-name
-          BlockLayer,
-          prevent_cse=not cfg.scan_layers,
-          policy=policy,
-          static_argnums=(-1, -2, -3, -4, -5),
-      )
+
+    RemattedBlockLayer = nn.remat(  # pylint: disable=invalid-name
+        BlockLayer,
+        prevent_cse=not cfg.scan_layers,
+        policy=policy,
+        static_argnums=(-1, -2, -3, -4, -5),
+    )
     if pipeline_parallelism:
         if cfg.num_layers_per_pipeline_stage == 1:
           deocder_layer_instace = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
         elif cfg.scan_layers:
-          # Remat the scan layers per stage
-          BlockLayer = nn.remat(  # pylint: disable=invalid-name
-            BlockLayer,
-            prevent_cse=not cfg.scan_layers,
-            policy=policy,
-            static_argnums=(-1, -2, -3, -4, -5),
-          )
           initializing = self.is_mutable_collection("params")
           params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
           cache_spec = 0
           deocder_layer_instace = nn.scan(
-            BlockLayer,
+            RemattedBlockLayer,
             variable_axes={
                 "params": params_spec,
                 "cache": cache_spec,
@@ -331,7 +324,7 @@ class Decoder(nn.Module):
                 model_mode,
                 )
             return inputs
-          deocder_layer_instace=SequentialBlockDecoderLayers(decoder_layer=BlockLayer, num_decoder_layers=cfg.num_num_layers_per_pipeline_stage, config=cfg, mesh=mesh,quant=self.quant)
+          deocder_layer_instace=SequentialBlockDecoderLayers(decoder_layer=RemattedBlockLayer, num_decoder_layers=cfg.num_num_layers_per_pipeline_stage, config=cfg, mesh=mesh,quant=self.quant)
         
         # TODO: Pipeline doesn't need its own config/mesh/quant?
         y = pipeline_flax.Pipeline(config=cfg, mesh=mesh, layers=deocder_layer_instace,quant=self.quant, remat_policy=policy)(
@@ -347,7 +340,7 @@ class Decoder(nn.Module):
         params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
         cache_spec = 0
         y, _ = nn.scan(
-            BlockLayer,
+            RemattedBlockLayer,
             variable_axes={
                 "params": params_spec,
                 "cache": cache_spec,
@@ -376,7 +369,7 @@ class Decoder(nn.Module):
         )
       else:
         for lyr in range(cfg.num_decoder_layers):
-          y = BlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+          y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
               y,
               decoder_segment_ids,
               decoder_positions,
