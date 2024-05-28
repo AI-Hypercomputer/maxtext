@@ -143,7 +143,7 @@ class DecoderLayer(nn.Module):
     return layer_output, None if cfg.scan_layers else layer_output
 
 class SequentialBlockDecoderLayers(nn.Module):
-  decoder_layer: None
+  decoder_layer: nn.Module
   num_decoder_layers: int
   config: Config
   mesh: Mesh

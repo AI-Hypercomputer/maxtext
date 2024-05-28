@@ -44,6 +44,8 @@ from flax.core import meta
 import jax.numpy as jnp
 from flax import linen as nn
 from layers import simple_layer
+from train import main as train_main
+
 
 
 def assert_same_output_and_grad(f1, f2, *inputs):
@@ -105,18 +107,27 @@ class PipelineParallelismTest(unittest.TestCase):
 
     def regular_sequential_layers(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):     
         def get_cur_layer_params(params, layer_idx):
-            def get_cur_layer_params_arr(leaf):
-                if config.num_pipeline_repeats > 1:
-                  # Reshape the pipeline's weights to remove the circular dimension to apply layers sequentially.
-                  new_shape = (leaf.shape[0] * leaf.shape[1],) + leaf.shape[2:]
-                  leaf = jnp.reshape(leaf, new_shape)
-                return leaf[layer_idx]
-            return jax.tree.map(get_cur_layer_params_arr, params)
+          def get_cur_layer_params_arr(leaf):
+            # Reshape layers into a linear list of layers, e.g. [repeat, stage] into [layers]  
+            if config.num_pipeline_repeats > 1 and config.num_layers_per_pipeline_stage == 1:
+              new_shape = (leaf.shape[0] * leaf.shape[1],) + leaf.shape[2:]
+              leaf = jnp.reshape(leaf, new_shape) # [repeat, stage] -> [layers]  
+            elif config.num_pipeline_repeats > 1 and config.num_layers_per_pipeline_stage > 1:
+              new_shape = (leaf.shape[0] * leaf.shape[1] * leaf.shape[2],) + leaf.shape[3:]
+              leaf = jnp.reshape(leaf, new_shape) # [repeat, stage, layers_per_stage] -> [layers]
+            elif config.num_pipeline_repeats == 1 and config.num_layers_per_pipeline_stage > 1:
+              new_shape = (leaf.shape[0] * leaf.shape[1],) + leaf.shape[2:]
+              leaf = jnp.reshape(leaf, new_shape) # [stage, layers_per_stage] -> [layers]
+            return leaf[layer_idx]
+          return jax.tree.map(get_cur_layer_params_arr, params)
 
         reg_layer_activations = inputs
         for layer in range(config.num_decoder_layers):
             cur_layer_params = get_cur_layer_params(params, layer)
             cur_layer_params['params'] = cur_layer_params['params']['layers']
+            if config.num_pipeline_repeats > 1 and config.num_layers_per_pipeline_stage > 1:
+              cur_layer_params['params'] = meta.remove_axis(cur_layer_params['params'], 0, {nn.PARTITION_NAME:"circular_repeats"})
+              cur_layer_params['params'] = meta.remove_axis(cur_layer_params['params'], 0, {nn.PARTITION_NAME:"layers"})
             reg_layer_activations, _ = single_pipeline_stage.apply(cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode)
         return reg_layer_activations
 
@@ -177,6 +188,31 @@ class PipelineParallelismTest(unittest.TestCase):
      )
      config = pyconfig.config
      self.assert_pipeline_same_output_and_grad(config)
+
+  @pytest.mark.tpu
+  def test_full_train(self):
+    # Run a full train.py call with 4 stages, 32 layers (2 layers per stage, 4 circular repeats), 8 microbatches
+    train_main([
+          None,
+          "configs/base.yml",
+          r"base_output_directory=gs://runner-maxtext-logs",
+          "run_name=runner_pipeline_parallelism_test",
+          r"dataset_path=gs://maxtext-dataset",
+          "base_emb_dim=28",
+          "base_num_query_heads=4",
+          "base_num_kv_heads=4",
+          "base_mlp_dim=32",
+          "base_num_decoder_layers=32",
+          "head_dim=128",
+          "per_device_batch_size=2",
+          "max_target_length=1024",
+          "dataset_type=synthetic",
+          "steps=3",
+          "enable_checkpointing=False",
+          "ici_pipeline_parallelism=4",
+          "num_layers_per_pipeline_stage=2",
+          "num_pipeline_microbatches=8",
+    ])
 
 if __name__ == "__main__":
   unittest.main()
