@@ -149,7 +149,6 @@ class Pipeline(nn.Module):
     stages_in = select_state_or_input(stages_in, shift)
     return stages_in
 
-  # TODO: This can be used instead of shard_leading_dim_by_stages
   def shard_dim_by_stages(self, x, dim: int):
     dims_mapping = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
     #dims_mapping = [None] * x.ndim
@@ -188,7 +187,7 @@ class Pipeline(nn.Module):
     if repeat_dim_in_weights < stages_dim_in_weights:
       out_dim -= 1
 
-    repeat_ids = self.shard_leading_dim_by_stages(repeat_ids)
+    repeat_ids = self.shard_dim_by_stages(repeat_ids, 0)
     weights = self.shard_dim_by_stages(weights, stages_dim_in_weights)
     outs = jax.vmap(_gather_one, in_axes=(stages_dim_in_weights, 0), out_axes=out_dim)(weights, repeat_ids)
     # Also shard outs
@@ -209,19 +208,6 @@ class Pipeline(nn.Module):
     '''Gets the microbatch_id on this loop_iteration for this stage. Works for both circular and non-circular'''
     return (loop_iteration - stage_idx) % self.config.num_pipeline_microbatches
 
-  def shard_leading_dim_by_stages(self, x):
-    # dims_mapping[dim] = "stage"
-    # dims_mapping = tuple(dims_mapping)
-    # p1 = jax.sharding.PartitionSpec(*dims_mapping)
-    # sharding = jax.sharding.NamedSharding(self.mesh,p1)
-    # return jax.lax.with_sharding_constraint(x, sharding) # maybe PartitionSpec(dims_mapping)
-
-    partition_spec_list = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
-    partition_spec_list[0] = jax.sharding.PartitionSpec("stage")
-    partition_spec = jax.sharding.PartitionSpec(*partition_spec_list)
-    sharding = jax.sharding.NamedSharding(self.mesh, partition_spec)
-    return jax.lax.with_sharding_constraint(x, sharding)
-
   def vmap_gather(self, xs, ids, ids_dim):
     """Use vmap to implement a stage-wise sharded gather.
 
@@ -241,9 +227,9 @@ class Pipeline(nn.Module):
       return jnp.squeeze(
           jax.lax.dynamic_slice_in_dim(x, i, 1, ids_dim), ids_dim)
 
-    ids = self.shard_leading_dim_by_stages(ids)
+    ids = self.shard_dim_by_stages(ids, 0)
     outs = jax.vmap(_gather_one, in_axes=(None, 0), out_axes=ids_dim)(xs, ids)
-    return self.shard_leading_dim_by_stages(outs)
+    return self.shard_dim_by_stages(outs, 0)
 
   def get_microbatches_for_stages(self, microbatched_array, loop_iteration):
     '''
