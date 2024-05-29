@@ -56,9 +56,15 @@ def validate_attention_type(s: str) -> None:
   if s not in valid_attention_types:  # currently supported attention
     raise ValueError("Invalid attention type was passed. Valid options ", valid_attention_types)
 
+def validate_profiler_type(s: str) -> None:
+  valid_profiler_types = ("", "nsys", "xplane")
+  if s not in valid_profiler_types:  # currently supported attention
+    raise ValueError("Invalid profiler type was passed. Valid options ", valid_profiler_types)
+
 
 def validate_keys(keys):
   validate_attention_type(keys["attention"])
+  validate_profiler_type(keys["profiler"])
 
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"
