@@ -125,8 +125,8 @@ hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' 
 
 # Parallelism
 mesh_axes: ['stage','data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']
-logical_axis_rules: [ # find . -type f -exec sed -i "s/'activation_batch'/'activation_batch_decoder_block'/g" {} +
-                      ['activation_batch_decoder_block', ['data', 'fsdp', 'fsdp_transpose',]],
+logical_axis_rules: [ # find . -type f -exec sed -i "s/'activation_batch'/'activation_batch'/g" {} +
+                      ['activation_batch', ['data', 'fsdp', 'fsdp_transpose',]],
                       # TODO: Think of names of activation batch and logits_activation_batch (which is used both for logits and initial embed)
                       # ideally one is "activation_microbatch" but that has downsides - is misleading in non-pipeline cases, and requires consumers
                       # of pipeline parallelism change their decode layer code (just the name of this axis to microbatch instead of batch)
