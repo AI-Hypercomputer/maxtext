@@ -286,6 +286,7 @@ class Decoder(nn.Module):
         assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None
 
+    # TODO: can we re-use config definition here?
     pipeline_parallelism = cfg.ici_pipeline_parallelism > 1 or cfg.dcn_pipeline_parallelism > 1
 
     RemattedBlockLayer = nn.remat(  # pylint: disable=invalid-name
@@ -296,12 +297,12 @@ class Decoder(nn.Module):
     )
     if pipeline_parallelism:
         if cfg.num_layers_per_pipeline_stage == 1:
-          deocder_layer_instace = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
+          stage_module = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
         elif cfg.scan_layers:
           initializing = self.is_mutable_collection("params")
           params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
           cache_spec = 0
-          deocder_layer_instace = nn.scan(
+          stage_module = nn.scan(
             RemattedBlockLayer,
             variable_axes={
                 "params": params_spec,
@@ -324,10 +325,10 @@ class Decoder(nn.Module):
             metadata_params={nn.PARTITION_NAME: "layers_per_stage"},
         )(config=cfg, mesh=mesh, name="layers", quant=self.quant)
         elif not cfg.scan_layers:
-          deocder_layer_instace=SequentialBlockDecoderLayers(decoder_layer=RemattedBlockLayer, num_decoder_layers=cfg.num_layers_per_pipeline_stage, config=cfg, mesh=mesh,quant=self.quant)
+          stage_module=SequentialBlockDecoderLayers(decoder_layer=RemattedBlockLayer, num_decoder_layers=cfg.num_layers_per_pipeline_stage, config=cfg, mesh=mesh,quant=self.quant)
         
         # TODO: Pipeline doesn't need its own config/mesh/quant?
-        y = pipeline_flax.Pipeline(config=cfg, mesh=mesh, layers=deocder_layer_instace,quant=self.quant, remat_policy=policy)(
+        y = pipeline_flax.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)(
             y,
             decoder_segment_ids,
             decoder_positions,

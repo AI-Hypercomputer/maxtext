@@ -25,18 +25,9 @@ from jax.sharding import Mesh
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec
 from typing import Optional
-from layers import quantizations
 import common_types
 import functools
 from typing import Any
-
-PARAMS="params"
-NON_TRAINABLE="non_trainable"
-SUMMARIES = 'summaries'
-INTERMEDIATES = 'intermediates'
-RANDOM = 'random'
-AUX_LOSS = 'aux_loss'
-HYPER_PARAMS = 'hyper_params'
 
 
 def stack_pytrees(*pytrees):
@@ -45,15 +36,26 @@ def stack_pytrees(*pytrees):
     return jnp.stack(leaves)
   return tree_map(stacking_fn, *pytrees)
 
-# Pipeline is made up of several SimpleDecoderLayers 
 class Pipeline(nn.Module):
+  """Module that implements pipelining across stages.
   
-  # TODO: Some properties, (num repeat, num_micro are through the config, some are derived. This makes it annoying to call different properties, some are self.property, some are self.config.property)
-  # TODO: Should we declare the derived properties here as well (e.g. num_stages? I think anything declared here becomes required as an input though
+  This module will loop over microbatches and execute the main body with a vmap() for both the inputs and weights.
+  This will produce a pipeline pattern if the stage dimension if sharded.
+
+  Both circular and non-circular patterns are supported, as determined by config.num_pipeline_repeats. Multiple
+  layers per stage can be implemented by passing a module that executes multiple layers per stage as the layers input.
+
+  Attributes:
+    config: The MaxText config, importantly containing num_pipeline_repeats and num_pipeline_microbatches
+    layers: A module instance that each stage can execute. It can either be a single layer such as a LlamaDecoderLayer instance
+      or scanned/looped set of decoder layers to execute multiple layers per stage.
+    mesh:  The device mesh of the system.
+    remat_policy: Remat policy to use for the loop iteration
+  """
+  
   config: common_types.Config
   layers: nn.Module # The name of this property (layers) is reflected in the state pytree and thus also checkpoints.
   mesh: common_types.Mesh
-  quant: Optional[quantizations.AqtQuantization] = None
   remat_policy: Any = None
 
   def setup(self):
@@ -89,15 +91,12 @@ class Pipeline(nn.Module):
     # state_io (state input output) at first holds all of the input batches, but also will hold the outputs as the pipeline runs/finishes
     # state_io has shape [num_stages, microbatches/stages, micro_size, sequence, embed]
     state_io = jnp.reshape(inputs, (self.num_stages, self.microbatches_per_stage) + inputs.shape[1:])
+    # We shard the microbatch_size axis by data/fsdp, not num_microbatches since those are looped over.
     state_io = nn.with_logical_constraint(state_io, ("activation_stage", None, "activation_batch", "activation_length", "activation_embed"),rules=self.config.logical_axis_rules, mesh=self.mesh) 
 
-    # We shard the microbatch_size axis by data/fsdp, not num_microbatches. 
-
-    # TODO: Consider sharding and/or changing the circ storage. Understand if/when setting microbatches > num_stages is beneficial which is when circ_storage is needed
     # circ_storage is used to hold the final pipeline stage outputs before it is used for the next repeat. It is only needed
     # when num_microbatches > num_stages, else instead the final stage can immediately pass to the first without additional storage.
-    # Alternative name is "between_repeats_storage", since this storage is not needed always for circular - but only when microbatches > num_stages
-    # circ_storage has shape [num_stages, microbatches, micro_size, sequence, embed] -- this is huge btw, it should be reducible by a factor of num_stages
+    # circ_storage has shape [num_stages, microbatches, micro_size, sequence, embed] it should be reducible by a factor of num_stages
     if self.use_circ_storage:
         circ_storage = jnp.zeros((self.num_stages,) + inputs.shape , dtype=inputs.dtype)
     else:
@@ -131,15 +130,16 @@ class Pipeline(nn.Module):
     state_io_batch_idx = loop_iteration % self.microbatches_per_stage
     state_io_slice = state_io[:,state_io_batch_idx] 
 
-    # TODO circ_storage_slice is a bad name since used for both since_storage and not
     if self.use_circ_storage:
         # Setup potential input from circ_storage, which also has a rotating index for microbatch, size of num_microbatches
         circ_storage_batch_idx = loop_iteration % self.config.num_pipeline_microbatches
-        circ_storage_slice = circ_storage[:,circ_storage_batch_idx]
+        circ_storage_input = circ_storage[:,circ_storage_batch_idx]
     else:
-        circ_storage_slice = shift
+        circ_storage_input = shift
 
-    stages_in = jnp.where(loop_iteration < self.config.num_pipeline_microbatches, state_io_slice, circ_storage_slice)
+    # For early loop iterations we grab a new input for stage 0 from the state_io. Once each microbatch has left state_io
+    # we instead grab from the last stage's output (possibly buffered when num_microbatches > num_stages, e.g. use_circ_storage).
+    stages_in = jnp.where(loop_iteration < self.config.num_pipeline_microbatches, state_io_slice, circ_storage_input)
 
     def select_state_or_input(input, shift):
         # Selects input for stage 0, shift for other stages
@@ -149,7 +149,6 @@ class Pipeline(nn.Module):
     stages_in = select_state_or_input(stages_in, shift)
     return stages_in
 
-  # TODO: Instead of unconstrained, should we passing the initial sharding of X?
   # TODO: This can be used instead of shard_leading_dim_by_stages
   def shard_dim_by_stages(self, x, dim: int):
     dims_mapping = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
@@ -209,11 +208,6 @@ class Pipeline(nn.Module):
   def get_microbatch_id(self, stage_idx, loop_iteration):
     '''Gets the microbatch_id on this loop_iteration for this stage. Works for both circular and non-circular'''
     return (loop_iteration - stage_idx) % self.config.num_pipeline_microbatches
-
-  def shard_leading_dim_by_stages_old(self, x):
-    stage_sharding_constraint = ('layers',) + tuple([None] * (x.ndim -1))
-    # return jax.lax.with_sharding_constraint(x, ('stage',) + tuple([None] * (x.ndim -1)))
-    return nn.with_logical_constraint(x, stage_sharding_constraint, mesh=self.mesh, rules=self.config.logical_axis_rules)
 
   def shard_leading_dim_by_stages(self, x):
     # dims_mapping[dim] = "stage"
@@ -435,7 +429,7 @@ class Pipeline(nn.Module):
 
     vmap_func = nn.map_variables(
         vmap_func,
-        mapped_collections=[PARAMS, NON_TRAINABLE, SUMMARIES, INTERMEDIATES],
+        mapped_collections=["params", "non_trainable", "summaries", "intermediates"],
         mutable=True,
         trans_in_fn=prepare_vars_for_main_vmap,
     )
@@ -449,7 +443,6 @@ class Pipeline(nn.Module):
   @nn.compact
   def __call__(self, inputs: jnp.ndarray, segment_ids: jnp.ndarray, positions:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
     # Reshape inputs of [global_batch, ...] to [microbatches, microbatch_sizes, ...]
-    # TODO: Shard inputs after reshape along num_microbatches?
     inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length, self.config.emb_dim))
     example_inputs = jax.lax.broadcast(inputs[0], [self.num_stages])
     if positions is not None:
@@ -478,11 +471,10 @@ class Pipeline(nn.Module):
     use_scan = False
     variable_carry = []
     variable_broadcast = ["params"]
-    NON_TRAINABLE="non_trainable"
-    if self.is_mutable_collection(NON_TRAINABLE):
-      variable_carry.append(NON_TRAINABLE)
+    if self.is_mutable_collection("non_trainable"):
+      variable_carry.append("non_trainable")
     else:
-      variable_broadcast.append(NON_TRAINABLE)
+      variable_broadcast.append("non_trainable")
 
     if self.is_initializing():
      # TODO(possible): praxis is using the _scan_Fn, possibly having the real fwd use scan but not the initial causes issues
@@ -495,7 +487,7 @@ class Pipeline(nn.Module):
          in_axes=(0, segment_idx, position_idx, None, None),
           variable_axes={
             'params': 0,
-            NON_TRAINABLE: 0,
+            "non_trainable": 0,
             "hyper_params": 0,
           },
           # TODO: params:self.is_initializing instead of always true
@@ -548,15 +540,15 @@ class Pipeline(nn.Module):
         scan_func = nn.scan(
           remat_fn,
           variable_axes={
-            SUMMARIES: 0,
-            AUX_LOSS: 0,
-            INTERMEDIATES: 0,
-            HYPER_PARAMS: 0,
+            "summaries": 0,
+            "aux_loss": 0,
+            "intermediates": 0,
+            "hyper_params": 0,
           },
           variable_broadcast=variable_broadcast,
           variable_carry=variable_carry,
           # Dropout/aqt keys will be split for each iteration.
-          split_rngs={RANDOM: True},
+          split_rngs={"random": True},
           length=total_iterations,
           )
         loop_state, _ = scan_func(self, loop_state, None)

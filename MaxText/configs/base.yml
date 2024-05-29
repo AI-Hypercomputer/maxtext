@@ -125,15 +125,9 @@ hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' 
 
 # Parallelism
 mesh_axes: ['stage','data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']
-logical_axis_rules: [ # find . -type f -exec sed -i "s/'activation_batch'/'activation_batch'/g" {} +
+logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose',]],
-                      # TODO: Think of names of activation batch and logits_activation_batch (which is used both for logits and initial embed)
-                      # ideally one is "activation_microbatch" but that has downsides - is misleading in non-pipeline cases, and requires consumers
-                      # of pipeline parallelism change their decode layer code (just the name of this axis to microbatch instead of batch)
-                      # The global batch is reshaped into microbatches, [num_microbatches, microbatch_size] = jnp.reshape(global_batch)
-                      # And we shard the num_microbatches by stages, so it is important the the stage dimension here is first
-                      # so that this reshape (and corresponding reshape back into global batch) does not require cross-stage communication 
-                      # Idea: Rename activation_batch to activation_decoder_block_batch, and the below to ???
+                      # For pipeline parallelism the pre and post decoder layer tensors' batch dimension should be explicitly sharded by stages. 
                       ['activation_embed_and_logits_batch', ['stage', 'data', 'fsdp', 'fsdp_transpose']],
                       ['activation_heads', ['tensor','sequence']],
                       ['activation_length', 'sequence'],
@@ -146,7 +140,6 @@ logical_axis_rules: [ # find . -type f -exec sed -i "s/'activation_batch'/'activ
                       ['activation_stage','stage'],
                       ['mlp', ['fsdp_transpose', 'tensor', 'autoregressive']],
                       ['vocab', ['tensor', 'autoregressive']],
-                      #['vocab', ['tensor', 'autoregressive', 'stage']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'sequence']],
                       ['embed', ['fsdp', 'sequence']],
                       ['norm', 'tensor'],
