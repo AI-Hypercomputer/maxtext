@@ -216,23 +216,6 @@ class Pipeline(nn.Module):
     outs = jax.vmap(_gather_one, in_axes=(None, 0), out_axes=ids_dim)(xs, ids)
     return self.shard_dim_by_stages(outs, 0)
 
-  def get_microbatches_for_stages(self, microbatched_array, loop_iteration):
-    '''
-    Returns an array of leading dimension stages grabbing the current microbatch for each stage.
-    TODO: This is not actually used to get the microbatches, but the position and segment IDs, so probably should change method name
-    
-    Input:
-        microbatched_array: Array to grab from, should have leading dimension num_microbatches
-        loop_iteration: Integer of loop index
-    Returns:
-        One microbatch from microbatched_array for each stage. Array same shape as microbatched_array except the leading dimension is replaced by num_stages
-    '''
-
-    microbatched_stages_list = [microbatched_array[self.get_microbatch_id(stage_idx, loop_iteration)] for stage_idx in range(self.num_stages)]
-    stages_array = jnp.concatenate(microbatched_stages_list, axis=0)
-    stages_array = jnp.reshape(stages_array, (self.num_stages,) + microbatched_array.shape[1:])
-    return stages_array
-
   def get_new_loop_state(self,output, loop_state):
     '''
       Update the various buffers given the output of the most recent iteration
