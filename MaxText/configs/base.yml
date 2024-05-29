@@ -134,7 +134,7 @@ logical_axis_rules: [ # find . -type f -exec sed -i "s/'activation_batch'/'activ
                       # And we shard the num_microbatches by stages, so it is important the the stage dimension here is first
                       # so that this reshape (and corresponding reshape back into global batch) does not require cross-stage communication 
                       # Idea: Rename activation_batch to activation_decoder_block_batch, and the below to ???
-                      ['logits_activation_batch', ['stage', 'data', 'fsdp', 'fsdp_transpose']],
+                      ['activation_embed_and_logits_batch', ['stage', 'data', 'fsdp', 'fsdp_transpose']],
                       ['activation_heads', ['tensor','sequence']],
                       ['activation_length', 'sequence'],
                       ['activation_embed', 'tensor'],
