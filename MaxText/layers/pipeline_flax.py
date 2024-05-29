@@ -182,27 +182,12 @@ class Pipeline(nn.Module):
         dim -= 1
       return jnp.squeeze(jax.lax.dynamic_slice_in_dim(x, repeat_id, 1, dim), dim)
 
-    # TODO: this boolean is always true, out_dim should just be 0
-    out_dim = stages_dim_in_weights
-    if repeat_dim_in_weights < stages_dim_in_weights:
-      out_dim -= 1
-
+    gathered_weights_stage_dim = 0
     repeat_ids = self.shard_dim_by_stages(repeat_ids, 0)
     weights = self.shard_dim_by_stages(weights, stages_dim_in_weights)
-    outs = jax.vmap(_gather_one, in_axes=(stages_dim_in_weights, 0), out_axes=out_dim)(weights, repeat_ids)
-    # Also shard outs
-    outs = self.shard_dim_by_stages(outs, out_dim)
-
-    # TODO: Is this sharding needed?
-    # dims_mapping[dim] = "stage"
-    # dims_mapping = tuple(dims_mapping)
-    # dims_mapping = ("stage", "fsdp", "tensor")
-    # p1 = jax.sharding.PartitionSpec(*dims_mapping)
-    # sharding = jax.sharding.NamedSharding(self.mesh,p1)
-
-    # print(f"Shape of outs is {outs.shape}", flush=True)
-    # outs = jax.lax.with_sharding_constraint(outs, sharding)
-    return outs
+    stage_weights = jax.vmap(_gather_one, in_axes=(stages_dim_in_weights, 0), out_axes=gathered_weights_stage_dim)(weights, repeat_ids)
+    stage_weights = self.shard_dim_by_stages(stage_weights, gathered_weights_stage_dim)
+    return stage_weights
 
   def get_microbatch_id(self, stage_idx, loop_iteration):
     '''Gets the microbatch_id on this loop_iteration for this stage. Works for both circular and non-circular'''
@@ -464,7 +449,6 @@ class Pipeline(nn.Module):
 
     if self.is_initializing():
      # TODO(possible): praxis is using the _scan_Fn, possibly having the real fwd use scan but not the initial causes issues
-     # TODO: to call this need to reshape segments and positions to num_layers probably
      # We only need to run one set of stages to initialize the variables, instead of looping over all microbatches
      vmap_func = self.get_main_vmap_func(segment_idx, position_idx)
      if self.config.num_pipeline_repeats > 1:
