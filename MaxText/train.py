@@ -32,7 +32,6 @@ from flax.linen import partitioning as nn_partitioning
 import grain.python as grain
 import jax
 import numpy as np
-import optax
 import orbax.checkpoint
 
 import checkpointing
@@ -261,7 +260,7 @@ def train_step(model, config, state, data, dropout_rng):
   intermediate_outputs = aux["intermediate_outputs"]
 
   if config.gradient_clipping_threshold > 0:
-    grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
+    grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
   else:
     grads = raw_grads
   new_state = state.apply_gradients(grads=grads)
