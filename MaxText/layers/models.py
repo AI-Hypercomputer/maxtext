@@ -92,6 +92,10 @@ class DecoderLayer(nn.Module):
         name="self_attention",
         quant=self.quant,
         quantize_kvcache=cfg.quantize_kvcache,
+        prefill_key_axis_order=tuple([int(i) for i in cfg.prefill_key_axis_order.split(",")]),
+        prefill_value_axis_order=tuple([int(i) for i in cfg.prefill_value_axis_order.split(",")]),
+        ar_key_axis_order=tuple([int(i) for i in cfg.ar_key_axis_order.split(",")]),
+        ar_value_axis_order=tuple([int(i) for i in cfg.ar_value_axis_order.split(",")]),
     )
 
     attention_lnx = attention_layer(
