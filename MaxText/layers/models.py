@@ -161,10 +161,6 @@ class SequentialBlockDecoderLayers(nn.Module):
         )
     return inputs
 
-# TODO:
-def scan_decoder_layers(config, decoder_layer, length, metdata_axis_name):
-
-
 class Decoder(nn.Module):
   """A stack of decoder layers as a part of an encoder-decoder architecture."""
 
@@ -209,6 +205,34 @@ class Decoder(nn.Module):
       return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=True)
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
+
+  def scan_decoder_layers(self, cfg, decoder_layer, length, metdata_axis_name, mesh):
+    initializing = self.is_mutable_collection("params")
+    params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
+    cache_spec = 0
+    scan_fn = nn.scan(
+      decoder_layer,
+      variable_axes={
+          "params": params_spec,
+          "cache": cache_spec,
+          "intermediates": 0,
+          "aqt": 0,
+          "_overwrite_with_gradient": 0,
+      },
+      split_rngs={
+          "params": True,
+          "dropout": cfg.enable_dropout,
+      },
+      in_axes=(
+          nn.broadcast,
+          nn.broadcast,
+          nn.broadcast,
+          nn.broadcast,
+      ),
+      length=length,
+      metadata_params={nn.PARTITION_NAME: metdata_axis_name},
+    )
+    return scan_fn(config=cfg, mesh=mesh, name="layers", quant=self.quant)
 
   @nn.compact
   def __call__(
@@ -300,31 +324,7 @@ class Decoder(nn.Module):
         if cfg.num_layers_per_pipeline_stage == 1:
           stage_module = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
         elif cfg.scan_layers:
-          initializing = self.is_mutable_collection("params")
-          params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
-          cache_spec = 0
-          stage_module = nn.scan(
-            RemattedBlockLayer,
-            variable_axes={
-                "params": params_spec,
-                "cache": cache_spec,
-                "intermediates": 0,
-                "aqt": 0,
-                "_overwrite_with_gradient": 0,
-            },
-            split_rngs={
-                "params": True,
-                "dropout": cfg.enable_dropout,
-            },
-            in_axes=(
-                nn.broadcast,
-                nn.broadcast,
-                nn.broadcast,
-                nn.broadcast,
-            ),
-            length=cfg.num_layers_per_pipeline_stage,
-            metadata_params={nn.PARTITION_NAME: "layers_per_stage"},
-        )(config=cfg, mesh=mesh, name="layers", quant=self.quant)
+          stage_module = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_layers_per_pipeline_stage, "layers_per_stage", mesh)
         elif not cfg.scan_layers:
           stage_module=SequentialBlockDecoderLayers(decoder_layer=RemattedBlockLayer, num_decoder_layers=cfg.num_layers_per_pipeline_stage, config=cfg, mesh=mesh,quant=self.quant)
 
@@ -337,31 +337,7 @@ class Decoder(nn.Module):
         )
     else:
       if cfg.scan_layers:
-        initializing = self.is_mutable_collection("params")
-        params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
-        cache_spec = 0
-        y, _ = nn.scan(
-            RemattedBlockLayer,
-            variable_axes={
-                "params": params_spec,
-                "cache": cache_spec,
-                "intermediates": 0,
-                "aqt": 0,
-                "_overwrite_with_gradient": 0,
-            },
-            split_rngs={
-                "params": True,
-                "dropout": cfg.enable_dropout,
-            },
-            in_axes=(
-                nn.broadcast,
-                nn.broadcast,
-                nn.broadcast,
-                nn.broadcast,
-            ),
-            length=cfg.num_decoder_layers,
-            metadata_params={nn.PARTITION_NAME: "layers"},
-        )(config=cfg, mesh=mesh, name="layers", quant=self.quant)(
+        y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
             y,
             decoder_segment_ids,
             decoder_positions,
