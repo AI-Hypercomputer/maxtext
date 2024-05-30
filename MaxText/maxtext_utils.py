@@ -194,7 +194,7 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance=0.02):
   """
   total_num_params = max_utils.calculate_num_params_from_pytree(params)
   product_num_devices_for_weight_sharding = 1
-  for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor"]:
+  for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor", "stage"]:
     product_num_devices_for_weight_sharding *= mesh.shape[axis]
   total_num_params_per_chip = max_utils.calculate_total_params_per_chip(params)
   perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
@@ -202,6 +202,9 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance=0.02):
       "Number of parameters per chip must not be less than in the ideal sharded "
       "scenario across `fsdp`, `fsdp_transpose`,`sequence`, `tensor` axes."
   )
+  if mesh.shape["stage"] > 1:
+    # The vocab tensor of shape [embed, vocab] is not sharded by stage
+    tolerance = 0.1
   assert total_num_params_per_chip / perfectly_sharded_params_per_chip - 1 < tolerance, (
       f"Number of unsharded parameters exceeds tolerance {tolerance * 100}% " "of total parameters."
   )
