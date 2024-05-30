@@ -29,13 +29,13 @@ class Pipeline(nn.Module):
   """Module that implements pipelining across stages.
   
   This module will loop over microbatches and execute the main body with a vmap for both the inputs and weights.
-  This will produce a pipeline pattern if the stage dimension if sharded.
+  This will produce a pipeline pattern if the stage dimension is sharded.
 
   Both circular and non-circular patterns are supported, as determined by config.num_pipeline_repeats. Multiple
-  layers per stage can be implemented by passing a module that executes multiple layers per stage as the layers input.
+  layers per stage are used when a module that executes multiple layers per stage is passed as the layers input.
 
   Attributes:
-    config: The MaxText config, importantly containing num_pipeline_repeats and num_pipeline_microbatches
+    config: Importantly contains num_pipeline_repeats, num_pipeline_microbatches, and scan_loop_iterations
     layers: A module instance that each stage can execute. It can either be a single layer such as a LlamaDecoderLayer instance
       or scanned/looped set of decoder layers to execute multiple layers per stage.
     mesh:  The device mesh of the system.
@@ -315,12 +315,12 @@ class Pipeline(nn.Module):
    vmap_func = self.get_main_vmap_func(segment_stage_idx, positions_stage_idx)
 
    if self.config.num_pipeline_repeats > 1:
-    microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0) # not a great name, this is really something like microbatch_id * repeat idx
-    repeat_ids = microbatch_ids // self.config.num_pipeline_microbatches
+    microbatches_processed = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0) # Stage 0 has processed one microbatch every loop_iter, but Stage 1 is one behind due to bubble, etc for other stages
+    repeat_ids = microbatches_processed // self.config.num_pipeline_microbatches
 
     metadata_params={
       nn.PARTITION_NAME: "circular_repeats",
-      'sub_weight_split_dims_mapping': (None,), #(None,), # Maybe -1? 
+      'sub_weight_split_dims_mapping': (None,),
       "is_initializing": True,
       "x_times": self.config.num_pipeline_repeats,
       'optimizer_dims_mapping': None,
@@ -375,8 +375,7 @@ class Pipeline(nn.Module):
 
     def func_to_scan(model,loop_state, xs):
        return model.run_one_iteration(loop_state, positions, segment_ids, deterministic, model_mode, model.layers), None
-    
-    use_scan = False
+
     variable_carry = []
     variable_broadcast = ["params"]
     if self.is_mutable_collection("non_trainable"):
@@ -397,10 +396,9 @@ class Pipeline(nn.Module):
             "hyper_params": 0,
           },
           split_rngs={'params': True},
-          #spmd_axis_name="stage",
           metadata_params={
             nn.PARTITION_NAME: "circular_repeats",
-            'sub_weight_split_dims_mapping': (None,), #(None,), # Maybe -1? 
+            'sub_weight_split_dims_mapping': (None,), 
             "is_initializing": True,
             "x_times": self.config.num_pipeline_repeats,
             'optimizer_dims_mapping': None,
@@ -411,9 +409,9 @@ class Pipeline(nn.Module):
 
        example_segmentation = jax.lax.broadcast(example_segmentation, [self.config.num_pipeline_repeats]) if example_segmentation is not None else None
        example_position = jax.lax.broadcast(example_position, [self.config.num_pipeline_repeats]) if example_position is not None else None
-       # To shard weight (both for initialization and at rest) for the circular pipeline
-       # we create weights of shape [num_repeat, num_stages, ...] (e.g. [num_repeat, num_stages, embed, mlp])
-       # and shard the num_stages  we wrap the main stage vmap with a num_repeat vmap to generate this axis only for parameter initialization
+       # To shard weight (both for initialization and at rest) for the circular pipeline we create weights of
+       # shape [num_repeat, num_stages, ...] (e.g. [num_repeat, num_stages, embed, mlp]) and shard the num_stages axis.
+       # We wrap the main stage vmap with a num_repeat vmap to generate this axis only for parameter initialization
      stage_outputs = vmap_func(self.layers, example_inputs, example_segmentation, example_position, deterministic, model_mode)
      if self.config.scan_layers:
        stage_outputs = stage_outputs[0]
