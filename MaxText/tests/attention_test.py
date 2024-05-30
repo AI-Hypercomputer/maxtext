@@ -58,6 +58,7 @@ class AttentionTest(unittest.TestCase):
     self.num_kv_heads = self.cfg.num_kv_heads
     self.num_query_heads = self.cfg.num_query_heads
     self.max_target_length = self.cfg.max_target_length
+    self.max_prefill_predict_length = self.cfg.max_prefill_predict_length
     self.head_dim = self.cfg.head_dim
     self.embed_dim = self.cfg.base_emb_dim
     self.dtype = self.cfg.dtype
@@ -254,6 +255,119 @@ class AttentionTest(unittest.TestCase):
     self.assertTrue(
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False)
     )
+
+  @pytest.mark.tpu
+  def test_dot_product_1203_1203(self):
+    self.dot_product_attention_helper(
+      prefill_cache_axis_order=(1,2,0,3),
+      ar_cache_axis_order=(1,2,0,3)
+    )
+
+  @pytest.mark.tpu
+  def test_dot_product_1203_2130(self):
+    self.dot_product_attention_helper(
+      prefill_cache_axis_order=(1,2,0,3),
+      ar_cache_axis_order=(2,1,3,0)
+    )
+
+  @pytest.mark.tpu
+  def test_dot_product_2130_1203(self):
+    self.dot_product_attention_helper(
+      prefill_cache_axis_order=(2,1,3,0),
+      ar_cache_axis_order=(1,2,0,3)
+    )
+
+  @pytest.mark.tpu
+  def test_dot_product_2130_2130(self):
+    self.dot_product_attention_helper(
+      prefill_cache_axis_order=(2,1,3,0),
+      ar_cache_axis_order=(2,1,3,0),
+    )
+
+  def dot_product_attention_helper(self, prefill_cache_axis_order, ar_cache_axis_order):
+    self._dot_product_attention(prefill_cache_axis_order, ar_cache_axis_order, quantize_kvcache=False)
+    self._dot_product_attention(prefill_cache_axis_order, ar_cache_axis_order, quantize_kvcache=True)
+
+  def _dot_product_attention(self, prefill_cache_axis_order, ar_cache_axis_order, quantize_kvcache):
+    """Test equalvant between dot_product and TPU accelerated"""
+    prefill_length = self.max_prefill_predict_length
+    decode_total_length = self.max_target_length
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
+
+    lnx_prefill = lnx[:, 0:prefill_length, :]
+    decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
+    decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
+
+    attention_w_layout = Attention(
+        config=self.cfg,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=self.dtype,
+        prefill_key_axis_order=prefill_cache_axis_order,
+        prefill_value_axis_order=prefill_cache_axis_order,
+        ar_key_axis_order=ar_cache_axis_order,
+        ar_value_axis_order=ar_cache_axis_order,
+        quantize_kvcache=quantize_kvcache,
+    )
+
+    attention_w_layout_variable = attention_w_layout.init(
+        {"params": self.rng, "aqt": self.rng},
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length)),
+    )
+
+    attention_w_layout_full = attention_w_layout.apply(
+        attention_w_layout_variable,
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_TRAIN,
+        rngs={"aqt": self.rng},
+    )
+
+    attention_w_layout_prefill, attention_w_layout_output_cache = attention_w_layout.apply(
+        attention_w_layout_variable,
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_PREFILL,
+        rngs={"aqt": self.rng},
+        mutable=["cache"],
+    )
+    self.assertTrue(
+        jax.numpy.allclose(attention_w_layout_full[:, :prefill_length, :], attention_w_layout_prefill, equal_nan=False)
+    )
+
+    for idx in range(prefill_length, decode_total_length):
+
+      lnx_idx = lnx[:, idx : idx + 1, :]
+      decoder_positions_idx = decoder_positions[:, idx : idx + 1]
+      
+      attention_w_layout_variable.update(attention_w_layout_output_cache)
+      attention_w_layout_idx, attention_w_layout_output_cache = attention_w_layout.apply(
+          attention_w_layout_variable,
+          lnx_idx,
+          lnx_idx,
+          inputs_positions=decoder_positions_idx,
+          deterministic=True,
+          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          rngs={"aqt": self.rng},
+          mutable=["cache"],
+      )
+
+      attention_w_layout_full_this_idx = attention_w_layout_full[:, idx : idx + 1, :]
+      self.assertTrue(attention_w_layout_full_this_idx.shape == attention_w_layout_idx.shape)
+      self.assertTrue(jax.numpy.allclose(attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=1e-02, atol=1e-01, equal_nan=False))
 
 
 if __name__ == "__main__":

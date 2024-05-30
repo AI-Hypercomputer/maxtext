@@ -25,6 +25,7 @@ from jetstream.engine import token_utils
 import max_utils
 import maxengine
 import maxtext_utils
+import profiler
 import pyconfig
 
 
@@ -73,7 +74,8 @@ def prefill_insert_benchmark_loop(
     config, engine, decode_state, params, total_slots, tokens, true_length, iters, profile_name
   ):
   """Inner loop for benchmarking prefill and insert step."""
-  max_utils.activate_profiler(config, profile_name)
+  prof = profiler.Profiler(config, profile_name)
+  prof.activate()
   start = datetime.datetime.now()
   for i in range(iters):
     prefill_result = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
@@ -81,7 +83,7 @@ def prefill_insert_benchmark_loop(
     max_utils.delete_pytree(prefill_result)
   jax.block_until_ready(decode_state)
   end = datetime.datetime.now()
-  max_utils.deactivate_profiler(config)
+  prof.deactivate()
   return (end - start).total_seconds(), decode_state
 
 
@@ -111,13 +113,14 @@ def prefill_insert_benchmark(
 
 def ar_benchmark_loop(config, engine, params, decode_state, iters, profile_name):
   """Inner loop for benchmarking ar step."""
-  max_utils.activate_profiler(config, profile_name)
+  prof = profiler.Profiler(config, profile_name)
+  prof.activate()
   start = datetime.datetime.now()
   for _ in range(iters):
     decode_state, _ = engine.generate(params, decode_state)
   jax.block_until_ready(decode_state)
   end = datetime.datetime.now()
-  max_utils.deactivate_profiler(config)
+  prof.deactivate()
   return (end - start).total_seconds(), decode_state
 
 
@@ -295,5 +298,6 @@ def main(config, inference_metadata):
 
 
 if __name__ == "__main__":
+  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   pyconfig.initialize(sys.argv)
   main(pyconfig.config, {})

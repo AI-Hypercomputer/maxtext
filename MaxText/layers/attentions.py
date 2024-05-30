@@ -628,7 +628,7 @@ class AttentionOp(nn.Module):
     one_hot_indices = one_hot_indices.astype(int)
 
     ar_key = cached_key_var.value
-    ar_key = jax.lax.dynamic_update_index_in_dim(ar_key, one_token_key_shaped_for_cache, jnp.squeeze(one_hot_indices), 0)
+    ar_key = jax.lax.dynamic_update_index_in_dim(ar_key, one_token_key_shaped_for_cache, jnp.squeeze(one_hot_indices), ar_key_layout.index(CACHE_SEQUENCE))
     ar_key = nn.with_logical_constraint(
         ar_key,
         ar_key_layout
@@ -636,7 +636,7 @@ class AttentionOp(nn.Module):
     cached_key_var.value = ar_key
 
     ar_value = cached_value_var.value
-    ar_value = jax.lax.dynamic_update_index_in_dim(ar_value, one_token_value_shaped_for_cache, jnp.squeeze(one_hot_indices), 0)
+    ar_value = jax.lax.dynamic_update_index_in_dim(ar_value, one_token_value_shaped_for_cache, jnp.squeeze(one_hot_indices), ar_key_layout.index(CACHE_SEQUENCE))
     ar_value = nn.with_logical_constraint(
         ar_value,
         ar_value_layout,
@@ -645,14 +645,22 @@ class AttentionOp(nn.Module):
 
     if self.quantize_kvcache:
       ar_key_scale = jax.lax.dynamic_update_index_in_dim(
-          cached_key_scale_var.value, one_token_key_scale, jnp.squeeze(one_hot_indices), 0
+          cached_key_scale_var.value, one_token_key_scale, jnp.squeeze(one_hot_indices), ar_key_layout.index(CACHE_SEQUENCE)
+      )
+      ar_key_scale = nn.with_logical_constraint(
+          ar_key_scale,
+          ar_key_layout
       )
       ar_key_scale = nn.with_logical_constraint(
           ar_key_scale,
           ar_key_layout
       )
       ar_value_scale = jax.lax.dynamic_update_index_in_dim(
-          cached_value_scale_var.value, one_token_value_scale, jnp.squeeze(one_hot_indices), 0
+          cached_value_scale_var.value, one_token_value_scale, jnp.squeeze(one_hot_indices), ar_key_layout.index(CACHE_SEQUENCE)
+      )
+      ar_value_scale = nn.with_logical_constraint(
+          ar_value_scale,
+          ar_value_layout
       )
       ar_value_scale = nn.with_logical_constraint(
           ar_value_scale,
@@ -857,6 +865,11 @@ class Attention(nn.Module):
   value_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
   out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
 
+  prefill_key_axis_order: AxisIdxes = (1, 2, 0, 3)
+  prefill_value_axis_order: AxisIdxes = (1, 2, 0, 3)
+  ar_key_axis_order: AxisIdxes = (1, 2, 0, 3)
+  ar_value_axis_order: AxisIdxes = (1, 2, 0, 3)
+
   def query_projection(self, inputs_q: Array) -> Array:
     """Query projection."""
 
@@ -1011,10 +1024,10 @@ class Attention(nn.Module):
         num_kv_heads=self.num_kv_heads,
         dropout_rate=self.dropout_rate,
         dtype=self.dtype,
-        prefill_key_axis_order = tuple([int(i) for i in self.config.prefill_key_axis_order.split(",")]),
-        prefill_value_axis_order = tuple([int(i) for i in self.config.prefill_value_axis_order.split(",")]),
-        ar_key_axis_order = tuple([int(i) for i in self.config.ar_key_axis_order.split(",")]),
-        ar_value_axis_order = tuple([int(i) for i in self.config.ar_value_axis_order.split(",")]),
+        prefill_key_axis_order = self.prefill_key_axis_order,
+        prefill_value_axis_order = self.prefill_value_axis_order,
+        ar_key_axis_order = self.ar_key_axis_order,
+        ar_value_axis_order = self.ar_value_axis_order,
     )
 
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)
