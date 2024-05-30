@@ -55,6 +55,6 @@ bash preflight.sh PLATFORM=$PLATFORM
 # Train
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true TPU_MEGACORE=MEGACORE_DENSE"
 python3 MaxText/$EXECUTABLE MaxText/configs/base.yml\
-    ici_fsdp_parallelism=64 steps=10 per_device_batch_size=13 enable_profiler=true remat_policy=full\
+    ici_fsdp_parallelism=64 steps=10 per_device_batch_size=13 profiler=xplane remat_policy=full\
     base_emb_dim=6144 base_num_kv_heads=24 base_num_query_heads=24 base_mlp_dim=24576 base_num_decoder_layers=48\
     base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH 
