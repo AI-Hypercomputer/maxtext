@@ -295,7 +295,7 @@ class MoeBlock(nn.Module):
   weight_dtype: DType = jnp.float32
   dtype: DType = jnp.float32
 
-  def generate_kernels(self, num_experts, base_emb_dim, mlp_dim, inputs):
+  def generate_kernels(self, num_experts, base_emb_dim, mlp_dim):
     
     # features = _canonicalize_tuple(mlp_dim)
     # wo_features = _canonicalize_tuple(inputs.shape[-1])
@@ -322,6 +322,8 @@ class MoeBlock(nn.Module):
 
     kernel_axes = ('exp', 'embed', 'mlp')
     wo_kernel_axes = ('exp', 'mlp', 'embed')
+    # kernel_axes = (None, None, None)
+    # wo_kernel_axes = (None, None, None)
     
     w0_kernel = self.param(
         'wi_0',
@@ -358,25 +360,28 @@ class MoeBlock(nn.Module):
                base_emb_dim,
                mlp_dim,
                mlp_activation,
-               group_sizes):
+               group_sizes,
+               w0_kernel,
+               w1_kernel,
+               wo_kernel):
 
-    @functools.partial(
-        shard_map.shard_map,
-        mesh=self.mesh,
-        in_specs=(
-              (nn.logical_to_mesh_axes((None, None))),
-              (nn.logical_to_mesh_axes((None, None, None))),
-              (nn.logical_to_mesh_axes((None,))),
-          ),
-        out_specs=(nn.logical_to_mesh_axes((None, None))),
-        # in_specs=(
-        #       (nn.logical_to_mesh_axes(("activation_batch_length", "embed"))),
-        #       (nn.logical_to_mesh_axes((None, "activation_embed", "mlp"))),
-        #       (nn.logical_to_mesh_axes((None,))),
-        #   ),
-        # out_specs=(nn.logical_to_mesh_axes(("activation_batch_length", "mlp"))),
-        check_rep=False,
-    )
+    # @functools.partial(
+    #     shard_map.shard_map,
+    #     mesh=self.mesh,
+    #     in_specs=(
+    #           (nn.logical_to_mesh_axes((None, None))),
+    #           (nn.logical_to_mesh_axes((None, None, None))),
+    #           (nn.logical_to_mesh_axes((None,))),
+    #       ),
+    #     out_specs=(nn.logical_to_mesh_axes((None, None))),
+    #     # in_specs=(
+    #     #       (nn.logical_to_mesh_axes(("activation_batch_length", "activation_embed"))),
+    #     #       (nn.logical_to_mesh_axes((None, "activation_embed", "activation_mlp"))),
+    #     #       (nn.logical_to_mesh_axes((None,))),
+    #     #   ),
+    #     # out_specs=(nn.logical_to_mesh_axes(("activation_batch_length", "activation_mlp"))),
+    #     check_rep=False,
+    # )
     def gmm(inputs, kernel, group_sizes):
       hs_shape = inputs.shape
       # pad lengh is the 1st dimension of tiling size in gmm call
@@ -402,9 +407,8 @@ class MoeBlock(nn.Module):
 
       return output
   
-    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(num_experts,base_emb_dim,mlp_dim,inputs.ndim)
-
     # jax.debug.print("group sizes: {group_sizes}", group_sizes=group_sizes)
+
     layer_1 = gmm(inputs, w0_kernel, group_sizes)
     layer_2 = gmm(inputs, w1_kernel, group_sizes)
     layer_1_act = _convert_to_activation_function(mlp_activation)(layer_1)
@@ -437,6 +441,44 @@ class MoeBlock(nn.Module):
     groups = jnp.reshape(combined_output, (-1, self.num_experts_per_tok, combined_output.shape[1]))
     return jnp.sum(groups, axis=1).reshape(inputs.shape).astype(self.dtype)
 
+
+  def all_to_all_gmm(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
+    @functools.partial(
+    shard_map.shard_map,
+    mesh=self.mesh,
+    in_specs=(
+          (nn.logical_to_mesh_axes(('activation_batch', 'activation_length', 'activation_embed'))),
+          (nn.logical_to_mesh_axes(('activation_batch', 'activation_length', None))),
+          (nn.logical_to_mesh_axes((None, None, None))),
+          (nn.logical_to_mesh_axes((None, None, None))),
+          (nn.logical_to_mesh_axes((None, None, None))),
+      ),
+    out_specs=(nn.logical_to_mesh_axes(('activation_batch', 'activation_length', 'activation_embed'))),
+    check_rep=False,
+    )
+    def _all_gmm(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
+      cfg = self.config
+      sorted_hidden_states, sorted_selected_experts, weights, group_size = self.permute(inputs,
+                                                                                        gate_logits,
+                                                                                        cfg.base_emb_dim)
+    
+      intermediate_output = self.call_gmm(sorted_hidden_states,
+                                          cfg.num_experts,
+                                          cfg.base_emb_dim,
+                                          cfg.mlp_dim,
+                                          cfg.mlp_activations[0],
+                                          group_size,
+                                          w0_kernel,
+                                          w1_kernel,
+                                          wo_kernel)
+
+      print(f"intermediate_output.shape: {intermediate_output.shape}")
+      print(f"inputs.shape: {inputs.shape}")
+      output = self.unpermute(intermediate_output, inputs, sorted_selected_experts, weights)
+      return output
+    
+    return _all_gmm(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+
   @nn.compact
   def __call__(self, inputs):
     cfg = self.config
@@ -447,18 +489,38 @@ class MoeBlock(nn.Module):
             kernel_init=self.kernel_init,
             kernel_axes=self.kernel_axes,
             name='gate')(inputs)
-    sorted_hidden_states, sorted_selected_experts, weights, group_size = self.permute(inputs,
-                                                                                      gate_logits,
-                                                                                      cfg.base_emb_dim)
-  
-    intermediate_output = self.call_gmm(sorted_hidden_states,
-                                        cfg.num_experts,
-                                        cfg.base_emb_dim,
-                                        cfg.mlp_dim,
-                                        cfg.mlp_activations[0],
-                                        group_size)
+    
+    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(self.num_experts,
+                                                            cfg.base_emb_dim,
+                                                            cfg.mlp_dim)
+    from jax.sharding import PartitionSpec as P
+    import max_utils
+    devices_array = max_utils.create_device_mesh(cfg)
+    mesh = jax.sharding.Mesh(devices_array, cfg.mesh_axes)
+    replicated_sharding = jax.sharding.NamedSharding(mesh, P(None))
+    w0_kernel = jax.lax.with_sharding_constraint(w0_kernel, replicated_sharding)
+    w1_kernel = jax.lax.with_sharding_constraint(w1_kernel, replicated_sharding)
+    wo_kernel = jax.lax.with_sharding_constraint(wo_kernel, replicated_sharding)
+    print(f"inputs: {inputs.shape}")
+    print(f"gate_logits: {gate_logits.shape}")
 
-    output = self.unpermute(intermediate_output, inputs, sorted_selected_experts, weights)
+    output = self.all_to_all_gmm(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+
+    # sorted_hidden_states, sorted_selected_experts, weights, group_size = self.permute(inputs,
+    #                                                                                   gate_logits,
+    #                                                                                   cfg.base_emb_dim)
+  
+    # intermediate_output = self.call_gmm(sorted_hidden_states,
+    #                                     cfg.num_experts,
+    #                                     cfg.base_emb_dim,
+    #                                     cfg.mlp_dim,
+    #                                     cfg.mlp_activations[0],
+    #                                     group_size,
+    #                                     w0_kernel,
+    #                                     w1_kernel,
+    #                                     wo_kernel)
+
+    # output = self.unpermute(intermediate_output, inputs, sorted_selected_experts, weights)
 
     return output
 
