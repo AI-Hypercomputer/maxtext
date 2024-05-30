@@ -302,7 +302,6 @@ class Pipeline(nn.Module):
    state_io = loop_state['state_io']
    shift = loop_state["shift"]
    circ_storage = loop_state["circ_storage"]
-   circ_storage_mover = loop_state["circ_storage_mover"]
    loop_iteration = loop_state["loop_iteration"]
 
    microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0)
@@ -317,19 +316,10 @@ class Pipeline(nn.Module):
 
    # We checkpoint stages_inputs since we are grabbing only one slice of the state_io, don't need to save the entire buffer.
    stages_inputs = jax.ad_checkpoint.checkpoint_name(stages_inputs, 'iteration_input')
-
-   if positions is not None:
-    stages_positions = self.vmap_gather(positions, microbatch_ids, 0)
-    positions_stage_idx = 0
-   else:
-     stages_positions = None
-     positions_stage_idx = 0 # can be 0 or None? TODO
-   if segment_ids is not None:
-    stages_segment_ids = self.vmap_gather(segment_ids, microbatch_ids, 0)
-    segment_stage_idx = 0
-   else:
-    stages_segment_ids = None
-    segment_stage_idx = 0 # can be 0 or None? TODO
+   stages_positions = self.vmap_gather(positions, microbatch_ids, 0) if positions is not None else None
+   positions_stage_idx = 0
+   stages_segment_ids = self.vmap_gather(segment_ids, microbatch_ids, 0) if segment_ids is not None else None
+   segment_stage_idx = 0
 
    vmap_func = self.get_main_vmap_func(segment_stage_idx, positions_stage_idx)
 
@@ -408,7 +398,6 @@ class Pipeline(nn.Module):
       variable_broadcast.append("non_trainable")
 
     if self.is_initializing():
-     # TODO(possible): praxis is using the _scan_Fn, possibly having the real fwd use scan but not the initial causes issues
      # We only need to run one set of stages to initialize the variables, instead of looping over all microbatches
      vmap_func = self.get_main_vmap_func(segment_idx, position_idx)
      if self.config.num_pipeline_repeats > 1:
@@ -420,7 +409,6 @@ class Pipeline(nn.Module):
             "non_trainable": 0,
             "hyper_params": 0,
           },
-          # TODO: params:self.is_initializing instead of always true
           split_rngs={'params': True},
           #spmd_axis_name="stage",
           metadata_params={
