@@ -292,14 +292,6 @@ prefill_value_axis_order: "1,2,0,3"
 ar_key_axis_order: "1,2,0,3"
 ar_value_axis_order: "1,2,0,3"
 
-# KV Cache layout control
-# Logical layout: 0,1,2,3 ; CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV
-# Default layout: 1,2,0,3 ; CACHE_SEQUENCE, CACHE_HEADS, CACHE_BATCH, CACHE_KV
-prefill_key_axis_order: "1,2,0,3"
-prefill_value_axis_order: "1,2,0,3"
-ar_key_axis_order: "1,2,0,3"
-ar_value_axis_order: "1,2,0,3"
-
 # Checkpoint Structured logging
 enable_checkpoint_cloud_logger: False
 enable_checkpoint_standard_logger: False

@@ -651,16 +651,8 @@ class AttentionOp(nn.Module):
           ar_key_scale,
           ar_key_layout
       )
-      ar_key_scale = nn.with_logical_constraint(
-          ar_key_scale,
-          ar_key_layout
-      )
       ar_value_scale = jax.lax.dynamic_update_index_in_dim(
           cached_value_scale_var.value, one_token_value_scale, jnp.squeeze(one_hot_indices), ar_key_layout.index(CACHE_SEQUENCE)
-      )
-      ar_value_scale = nn.with_logical_constraint(
-          ar_value_scale,
-          ar_value_layout
       )
       ar_value_scale = nn.with_logical_constraint(
           ar_value_scale,
