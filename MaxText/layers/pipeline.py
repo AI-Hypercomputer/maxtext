@@ -21,10 +21,6 @@ from jax import numpy as jnp
 from jax import tree_map
 from flax.core import meta
 from flax import linen as nn
-from jax.sharding import Mesh
-from jax.sharding import NamedSharding
-from jax.sharding import PartitionSpec
-from typing import Optional
 import common_types
 import functools
 from typing import Any
@@ -335,12 +331,8 @@ class Pipeline(nn.Module):
             functools.partial(
                 self.vmap_parallel_gather, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1),
             weights)
-      # IDea: also need to remove axis from metadata "pipeline_Repeats"
-      #breakpoint()
-      weights = meta.remove_axis(weights, 0, metadata_params) # Remove the circular_repeats axis annotation, we will select only one circular_repeat per stage and remove this axis
-      #weights = meta.remove_axis(weights, 0, metadata_params) # Remove the circular_repeats axis annotation, we will select only one circular_repeat per stage and remove this axis
+      weights = meta.remove_axis(weights, 0, metadata_params)
       weights = gather_weights_for_stages_in(weights)
-      #weights = meta.remove_axis(weights, 0, metadata_params) # Remove the circular_repeats axis annotation, we will select only one circular_repeat per stage and remove this axis
       return weights
 
     vmap_func = nn.map_variables(
