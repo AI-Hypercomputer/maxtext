@@ -227,7 +227,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   )
   one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
   xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
-  xent = nn.with_logical_constraint(xent, ("activation_batch", "activation_length"))
+  xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
   # Mask out paddings at the end of each example.
   xent = xent * (data["targets_segmentation"] != 0)
   total_loss = jnp.sum(xent)
@@ -387,7 +387,12 @@ def setup_train_loop(config):
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
 
-  maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh)
+  if config.using_pipeline_parallelism:
+    # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
+    params_sharded_tolerance=0.1
+  else:
+    params_sharded_tolerance=0.02
+  maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, tolerance=params_sharded_tolerance)
 
   return (
       init_rng,
