@@ -64,7 +64,7 @@ class Pipeline(nn.Module):
           state_io: reshaped inputs [num_stages, microbatches/stages, micro_size, sequence, embed]
           circ_storage: zeros [num_stages, microbatches, micro_size, sequence, embed]
           circ_storage_mover: zeros[num_stages, micro_size, sequence, embed]
-          loop_iteration: scalar int (0)  
+          loop_iteration: scalar set initially to 0.  
     '''
 
     # Shift is used to rotate the output of each pipeline into the input of the next
@@ -134,15 +134,13 @@ class Pipeline(nn.Module):
     return stages_in
 
   def shard_dim_by_stages(self, x, dim: int):
+    # Shards a dimension by stages. Currently the other dimensions are left up the compiler, alternatively
+    # we may want to copy over the sharding from the other input axes.
     dims_mapping = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
-    #dims_mapping = [None] * x.ndim
     dims_mapping[dim] = "stage"
     dims_mapping = tuple(dims_mapping)
-    p1 = jax.sharding.PartitionSpec(*dims_mapping)
-    sharding = jax.sharding.NamedSharding(self.mesh,p1)
-    return jax.lax.with_sharding_constraint(x, sharding) # maybe PartitionSpec(dims_mapping)
-    #return jax.lax.with_sharding_constraint(x, PartitionSpec(*tuple(dims_mapping))) # maybe PartitionSpec(dims_mapping)
-
+    sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(*dims_mapping))
+    return jax.lax.with_sharding_constraint(x, sharding)
 
   def vmap_parallel_gather(self, weights, repeat_ids, repeat_dim_in_weights, stages_dim_in_weights):
     """Use vmap to implement a sharded parallel gather.
@@ -269,14 +267,13 @@ class Pipeline(nn.Module):
     output = output[:,permutation]
     return output
 
-  def get_main_vmap_func(self, segment_stage_idx, positions_stage_idx):
-    # With magic weight via name gathering
+  def get_main_vmap_func(self):
     def func_to_vmap(body_instance,stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
       return body_instance(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
     vmap_func = nn.vmap(
-      func_to_vmap, # used to be mutable_func_to_vmap
-      in_axes=(0, segment_stage_idx, positions_stage_idx, None, None),
+      func_to_vmap,
+      in_axes=(0, 0, 0, None, None),
       spmd_axis_name='stage',
       variable_axes={'params': 0},
       split_rngs={'params':  self.is_initializing()},
@@ -308,11 +305,9 @@ class Pipeline(nn.Module):
    # We checkpoint stages_inputs since we are grabbing only one slice of the state_io, don't need to save the entire buffer.
    stages_inputs = jax.ad_checkpoint.checkpoint_name(stages_inputs, 'iteration_input')
    stages_positions = self.vmap_gather(positions, microbatch_ids, 0) if positions is not None else None
-   positions_stage_idx = 0
    stages_segment_ids = self.vmap_gather(segment_ids, microbatch_ids, 0) if segment_ids is not None else None
-   segment_stage_idx = 0
 
-   vmap_func = self.get_main_vmap_func(segment_stage_idx, positions_stage_idx)
+   vmap_func = self.get_main_vmap_func()
 
    if self.config.num_pipeline_repeats > 1:
     microbatches_processed = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0) # Stage 0 has processed one microbatch every loop_iter, but Stage 1 is one behind due to bubble, etc for other stages
@@ -385,7 +380,7 @@ class Pipeline(nn.Module):
 
     if self.is_initializing():
      # We only need to run one set of stages to initialize the variables, instead of looping over all microbatches
-     vmap_func = self.get_main_vmap_func(segment_idx, position_idx)
+     vmap_func = self.get_main_vmap_func()
      if self.config.num_pipeline_repeats > 1:
        vmap_func= nn.vmap(
          vmap_func,
