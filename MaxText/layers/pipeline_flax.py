@@ -29,13 +29,6 @@ import common_types
 import functools
 from typing import Any
 
-
-def stack_pytrees(*pytrees):
-  """Returns a pytree with identical key structure but whose leaves have a new [num pytree inputs] leading dimension stacking from each input."""
-  def stacking_fn(*leaves):
-    return jnp.stack(leaves)
-  return tree_map(stacking_fn, *pytrees)
-
 class Pipeline(nn.Module):
   """Module that implements pipelining across stages.
   
@@ -234,9 +227,7 @@ class Pipeline(nn.Module):
       last = jax.lax.slice_in_dim(output_in, self.num_stages - 1, self.num_stages, axis=0)
       except_last = jax.lax.slice_in_dim(output_in, 0, self.num_stages - 1, axis=0)
       return jnp.concatenate([last, except_last], axis=0)
-    #new_shift = _rotate_right(output) #TODO(big):file a bug or ping again on jax chat, why do we need to jit here
-    jit_rotate_right = jax.jit(_rotate_right)
-    new_shift = jit_rotate_right(output)
+    new_shift = _rotate_right(output)
 
     if self.use_circ_storage:
         # Insert the circ_storage_mover into new_circ_storage at a microbatch-rotating index.
@@ -267,9 +258,7 @@ class Pipeline(nn.Module):
         stream_slice = jnp.expand_dims(stream_slice, 1)
         return jax.lax.dynamic_update_slice_in_dim(
             state_in, stream_slice, stream_buf_idx, axis=1)
-    #new_state = _update_state_io(old_state_io, stream_slice, output)# TODO(medium):same sharding/jit issue
-    jit_update_state_io = jax.jit(_update_state_io)
-    new_state = jit_update_state_io(old_state_io, stream_slice, output) 
+    new_state = _update_state_io(old_state_io, stream_slice, output)
     
     new_loop_state = {
       "state_io": new_state,
@@ -281,10 +270,6 @@ class Pipeline(nn.Module):
     return new_loop_state
    
   def permute_output_ms_dim(self, output):
-    '''
-    TODO: Likely need to match http://google3/third_party/py/praxis/layers/pipeline.py;l=935;rcl=577941721 to avoid all gathers
-    '''
-
     # The first real output (batch 0) takes a certain amount of loop iterations to finish and be pushed to state_io - it will land on a different index of state_io depending on the number of iters
     first_output_num_iters = self.config.num_pipeline_microbatches * (self.config.num_pipeline_repeats - 1) + self.num_stages - 1
     # The first term above is a multiple of num_pipeline_microbatches and thus could be ignored since its also a multiple of microbatches_per_stage, but we keep it for clairty
@@ -294,23 +279,16 @@ class Pipeline(nn.Module):
     return output
 
   def get_main_vmap_func(self, segment_stage_idx, positions_stage_idx):
-      # With magic weight via name gathering
+    # With magic weight via name gathering
     def func_to_vmap(body_instance,stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
       return body_instance(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
-    # TODO: this can probably be removed
-    mutable_func_to_vmap = nn.map_variables(
-      func_to_vmap,
-      mapped_collections=True,
-      mutable=True
-    )
     vmap_func = nn.vmap(
-      mutable_func_to_vmap,
+      func_to_vmap, # used to be mutable_func_to_vmap
       in_axes=(0, segment_stage_idx, positions_stage_idx, None, None),
       spmd_axis_name='stage',
       variable_axes={'params': 0},
-      # TODO: params:self.is_initializing instead of always true
-      split_rngs={'params': True},
+      split_rngs={'params':  self.is_initializing()},
       metadata_params={
         nn.PARTITION_NAME: "layers",
         'sub_weight_split_dims_mapping': (None),
@@ -330,7 +308,6 @@ class Pipeline(nn.Module):
    microbatch_ids = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0)
    microbatch_ids = microbatch_ids % self.config.num_pipeline_microbatches
 
-  # TODO: try sharding this again explicitly over stages
    stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
 
    dims_mapping = ("stage", "fsdp", "tensor")
