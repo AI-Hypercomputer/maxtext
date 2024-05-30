@@ -35,7 +35,7 @@ class Pipeline(nn.Module):
   layers per stage are used when a module that executes multiple layers per stage is passed as the layers input.
 
   Attributes:
-    config: Importantly contains num_pipeline_repeats, num_pipeline_microbatches, and scan_loop_iterations
+    config: Importantly contains num_pipeline_repeats and num_pipeline_microbatches.
     layers: A module instance that each stage can execute. It can either be a single layer such as a LlamaDecoderLayer instance
       or scanned/looped set of decoder layers to execute multiple layers per stage.
     mesh:  The device mesh of the system.
@@ -135,7 +135,7 @@ class Pipeline(nn.Module):
     return stages_in
 
   def shard_dim_by_stages(self, x, dim: int):
-    # Shards a dimension by stages. Currently the other dimensions are left up the compiler, alternatively
+    # Shards a dimension by stages. Currently the sharding of other dimensions are left up the compiler, alternatively
     # we may want to copy over the sharding from the other input axes.
     dims_mapping = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
     dims_mapping[dim] = "stage"
@@ -174,7 +174,8 @@ class Pipeline(nn.Module):
 
   def get_microbatch_and_repeat_ids(self, loop_iteration):
     '''Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and non-circular'''
-    microbatches_processed = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0) # Stage 0 has processed one microbatch every loop_iter, but Stage 1 is one behind due to bubble, etc for other stages
+    # Stage 0 has processed one microbatch every loop_iter, but Stage 1 is one behind due to bubble, etc for other stages
+    microbatches_processed = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0) 
     microbatch_ids = microbatches_processed % self.config.num_pipeline_microbatches
     repeat_ids = microbatches_processed // self.config.num_pipeline_microbatches
     return microbatch_ids, repeat_ids
@@ -206,11 +207,11 @@ class Pipeline(nn.Module):
     '''
       Update the various buffers given the output of the most recent iteration
       * state_io: rotates left/up by 1 (the whole created in the last slot is filled with the most recent pipeline output)
-         * Pushing inputs up from state_io into shift
-         * Pulling outputs up from shift into state_io
+         * Pushing inputs up from top of state_io into first stage of shift
+         * Pulling outputs up from last stage of shift into bottom of state_io
       * shift: rotate output right/down by 1 - we imagine the pipeline moves to right/down
       * circ_storage: pushes circ_storage_mover (the output of the previous iteration) into rotating index of circ_storage
-      * circ_storage_mover gets rotated output
+      * circ_storage_mover: assigned to rotated output and pushed into circ_storage on the next iteration
     '''
 
     old_state_io = loop_state['state_io']
@@ -375,11 +376,11 @@ class Pipeline(nn.Module):
 
     def func_to_scan(model,loop_state, xs):
        # nn.scan can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
-       # the run_one_iteration in this method - model (or self) is a nn.module instance.
+       # the run_one_iteration in this method - the first argument model (i.e. self) is a nn.module instance.
        return model.run_one_iteration(loop_state, positions, segment_ids, deterministic, model_mode, model.layers), None
 
     variable_carry = []
-    variable_broadcast = ["params"]
+    variable_broadcast = ["params"] # All loop iterations need the weights for the full pipeline.  
     if self.is_mutable_collection("non_trainable"):
       variable_carry.append("non_trainable")
     else:
