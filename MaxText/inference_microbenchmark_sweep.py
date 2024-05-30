@@ -27,6 +27,20 @@ from jax._src.lib import xla_extension
 
 
 def main():
+  """
+  User needs to set the config's inference_metadata_file, which is a path to a
+  json file.
+
+  This json should contain the following keys:
+    - key_value_axis_order_product_id_list: comma separated string of key_value_axis_order_product_id
+    - prefill_key_axis_order_list: comma delimited string of prefill_key_axis_order
+    - prefill_value_axis_order_list: comma delimited string of prefill_value_axis_order
+    - ar_key_axis_order_list: comma delimited string of ar_key_axis_order
+    - ar_value_axis_order_list: comma delimited string of ar_value_axis_order
+    - accelerator: name of the accelerator
+    - flatten_microbenchmark_results: Whether or not to flatten results. Should
+      be true
+  """
   pyconfig.initialize(sys.argv)
   config = pyconfig.config
 
@@ -108,9 +122,9 @@ def main():
       "ar_key_axis_order": f"{ar_key_axis_order}",
       "ar_value_axis_order": f"{ar_value_axis_order}",
       "config_json_string": json.dumps(
-        pyconfig._config.keys,
-        default=lambda x: f"<<non-serializable: {type(x).__qualname__}>>"
-        ) # pylint: disable=protected-access
+          pyconfig._config.keys, # pylint: disable=protected-access
+          default=lambda x: f"<<non-serializable: {type(x).__qualname__}>>"
+        )
     }
     dimensions_json = {
       **dimensions_json,
