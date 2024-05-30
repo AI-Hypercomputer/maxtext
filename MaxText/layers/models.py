@@ -161,6 +161,10 @@ class SequentialBlockDecoderLayers(nn.Module):
         )
     return inputs
 
+# TODO:
+def scan_decoder_layers(config, decoder_layer, length, metdata_axis_name):
+
+
 class Decoder(nn.Module):
   """A stack of decoder layers as a part of an encoder-decoder architecture."""
 
@@ -324,7 +328,6 @@ class Decoder(nn.Module):
         elif not cfg.scan_layers:
           stage_module=SequentialBlockDecoderLayers(decoder_layer=RemattedBlockLayer, num_decoder_layers=cfg.num_layers_per_pipeline_stage, config=cfg, mesh=mesh,quant=self.quant)
 
-        # TODO: Pipeline doesn't need its own config/mesh/quant?
         y = pipeline.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)(
             y,
             decoder_segment_ids,
