@@ -32,7 +32,7 @@ from typing import Any
 class Pipeline(nn.Module):
   """Module that implements pipelining across stages.
   
-  This module will loop over microbatches and execute the main body with a vmap() for both the inputs and weights.
+  This module will loop over microbatches and execute the main body with a vmap for both the inputs and weights.
   This will produce a pipeline pattern if the stage dimension if sharded.
 
   Both circular and non-circular patterns are supported, as determined by config.num_pipeline_repeats. Multiple
@@ -43,7 +43,7 @@ class Pipeline(nn.Module):
     layers: A module instance that each stage can execute. It can either be a single layer such as a LlamaDecoderLayer instance
       or scanned/looped set of decoder layers to execute multiple layers per stage.
     mesh:  The device mesh of the system.
-    remat_policy: Remat policy to use for the loop iteration
+    remat_policy: Remat policy to use for the loop iterations
   """
   
   config: common_types.Config
@@ -60,20 +60,16 @@ class Pipeline(nn.Module):
     assert microbatches_per_stage * self.num_stages == self.config.num_pipeline_microbatches, f"The number of microbatches ({self.config.num_pipeline_microbatches}) must be divisible by the number of stages ({self.num_stages})"
     self.microbatches_per_stage = microbatches_per_stage
 
-    
-  def S(self, *specs):
-    return NamedSharding(self.mesh, PartitionSpec(*specs))
-
   def init_states(self, inputs):
     '''Initialize components of state: state_io, shift, circular_storage and circular_storage_mover
         Assumes input has already been reshaped into microbatches: [num_micro_batches, micro_batch_size, sequence, embed]
 
-        Returns
+        Returns a dictionary with properties
           shift: zeros shape [num_stages, micro_size, sequence, embed]
           state_io: reshaped inputs [num_stages, microbatches/stages, micro_size, sequence, embed]
           circ_storage: zeros [num_stages, microbatches, micro_size, sequence, embed]
           circ_storage_mover: zeros[num_stages, micro_size, sequence, embed]
-    
+          loop_iteration: scalar int (0)  
     '''
 
     # Shift is used to rotate the output of each pipeline into the input of the next
@@ -88,17 +84,15 @@ class Pipeline(nn.Module):
     state_io = nn.with_logical_constraint(state_io, ("activation_stage", None, "activation_batch", "activation_length", "activation_embed"),rules=self.config.logical_axis_rules, mesh=self.mesh) 
 
     # circ_storage is used to hold the final pipeline stage outputs before it is used for the next repeat. It is only needed
-    # when num_microbatches > num_stages, else instead the final stage can immediately pass to the first without additional storage.
-    # circ_storage has shape [num_stages, microbatches, micro_size, sequence, embed] it should be reducible by a factor of num_stages
+    # when num_microbatches > num_stages, else instead the final stage will immediately pass to the first without additional storage.
+    # circ_storage has shape [num_stages, microbatches, micro_size, sequence, embed].
     if self.use_circ_storage:
         circ_storage = jnp.zeros((self.num_stages,) + inputs.shape , dtype=inputs.dtype)
     else:
        circ_storage = None
 
-    # circ_storage_mover is used to push the microbatches from the pipeline into circ_storage
+    # circ_storage_mover is used to push the microbatches from the pipeline into circ_storage with one buffer iteration of delay
     # circ_storage_mover shape is same as shift: [num_stages, micro_size, sequence, embed]
-    # This mover is one iteration behind before being pushed into storage - which is why we can't just re-use output
-    # However shouldn't we be able to keep only the last stage's output instead of all stages?
     if self.use_circ_storage:
         circ_storage_mover = shift
     else:
@@ -116,10 +110,10 @@ class Pipeline(nn.Module):
   def get_iteration_inputs(self, loop_iteration, state_io, circ_storage, shift):
     '''
     Construct stages_in: the global array that is operated on for this iteration, shape same as shift=[stages, micro_size, sequence, embed]
-    This is almost a rotated version of the last outputs, except for the first stage which must grab a new batch from either state_io or circ_storage
+    This is almost a rotated version of the last outputs, except for the first stage which must grab either a new batch from state_io or an old one from circ_storage
     '''
 
-    # Setup potential input from state_io, which has a rotating microbatch index (size of micro/stages, state_io_batch_idx below)
+    # Setup potential input from state_io, which has a rotating microbatch index (size of microbatches_per_stage)
     state_io_batch_idx = loop_iteration % self.microbatches_per_stage
     state_io_slice = state_io[:,state_io_batch_idx] 
 
@@ -128,10 +122,11 @@ class Pipeline(nn.Module):
         circ_storage_batch_idx = loop_iteration % self.config.num_pipeline_microbatches
         circ_storage_input = circ_storage[:,circ_storage_batch_idx]
     else:
+        # The last stage immediately flows into the first stage, use this rotated shift instead of circular storage
         circ_storage_input = shift
 
     # For early loop iterations we grab a new input for stage 0 from the state_io. Once each microbatch has left state_io
-    # we instead grab from the last stage's output (possibly buffered when num_microbatches > num_stages, e.g. use_circ_storage).
+    # we instead grab from the last stage's output (possibly buffered when num_microbatches > num_stages, e.g. from circ_storage).
     stages_in = jnp.where(loop_iteration < self.config.num_pipeline_microbatches, state_io_slice, circ_storage_input)
 
     def select_state_or_input(input, shift):
