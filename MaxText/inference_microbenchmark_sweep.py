@@ -65,9 +65,9 @@ def main():
     # ar_key_axis_order and ar_value_axis_order
     quant = 'bf16' if not config.quantization else config.quantization
     run_name = (
-      f"{inference_metadata['accelerator']}-{config.model_name}-",
-      f"{quant}-{key_value_axis_order_product_id}-{prefill_key_axis_order}-",
-      f"{ar_key_axis_order}",
+      f"{inference_metadata['accelerator']}-{config.model_name}-"
+      f"{quant}-{key_value_axis_order_product_id}-{prefill_key_axis_order}-"
+      f"{ar_key_axis_order}"
     )
     tensorboard_dir = os.path.join(config.base_output_directory, run_name, "tensorboard", "")
     checkpoint_dir = os.path.join(config.base_output_directory, run_name, "checkpoint", "")
