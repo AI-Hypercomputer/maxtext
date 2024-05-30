@@ -285,7 +285,6 @@ class Decoder(nn.Module):
       else:
         assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None
-        pipeline_parallelism = cfg.ici_pipeline_parallelism > 1 or cfg.dcn_pipeline_parallelism > 1
 
     RemattedBlockLayer = nn.remat(  # pylint: disable=invalid-name
         BlockLayer,
@@ -293,7 +292,7 @@ class Decoder(nn.Module):
         policy=policy,
         static_argnums=(-1, -2, -3, -4, -5),
     )
-    if pipeline_parallelism:
+    if cfg.using_pipeline_parallelism:
         if cfg.num_layers_per_pipeline_stage == 1:
           stage_module = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
         elif cfg.scan_layers:

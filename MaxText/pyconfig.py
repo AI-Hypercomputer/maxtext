@@ -275,6 +275,8 @@ class _HyperParameters:
       assert num_stages * raw_keys['num_pipeline_repeats'] * raw_keys['num_layers_per_pipeline_stage'] == raw_keys['num_decoder_layers'], f"The product of pipeline stages ({num_stages}), repeats ({raw_keys['num_pipeline_repeats']}), and layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) must be equal to the number of layers ({raw_keys['num_decoder_layers']})"
       if raw_keys['num_pipeline_microbatches'] == -1:
         raw_keys['num_pipeline_microbatches'] = num_stages
+      assert raw_keys['num_pipeline_microbatches'] % num_stages == 0, f"The number of microbatches ({raw_keys['num_pipeline_microbatches']}) must be divisible by the number of stages ({num_stages})"
+      assert raw_keys['global_batch_size_to_train_on'] % raw_keys['num_pipeline_microbatches'] == 0, f"The global batch size ({raw_keys['global_batch_size_to_train_on']}) must be divisible by the number of microbatches ({raw_keys['num_pipeline_microbatches']})"
     else:
       raw_keys["using_pipeline_parallelism"] = False
 

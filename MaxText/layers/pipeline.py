@@ -53,11 +53,10 @@ class Pipeline(nn.Module):
 
   def setup(self):
     self.num_stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
-    self.layers_per_stage = self.config.num_decoder_layers / (self.num_stages * self.config.num_pipeline_repeats)
+    self.layers_per_stage = self.config.num_decoder_layers // (self.num_stages * self.config.num_pipeline_repeats)
     self.use_circ_storage = self.config.num_pipeline_repeats > 1 and self.config.num_pipeline_microbatches > self.num_stages
     self.microbatch_size = self.config.global_batch_size_to_train_on // self.config.num_pipeline_microbatches
     microbatches_per_stage = self.config.num_pipeline_microbatches // self.num_stages
-    assert microbatches_per_stage * self.num_stages == self.config.num_pipeline_microbatches, f"The number of microbatches ({self.config.num_pipeline_microbatches}) must be divisible by the number of stages ({self.num_stages})"
     self.microbatches_per_stage = microbatches_per_stage
 
   def init_states(self, inputs):
