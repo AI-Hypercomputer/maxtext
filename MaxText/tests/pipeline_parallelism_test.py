@@ -24,7 +24,7 @@ import pytest
 import pyconfig
 
 
-from layers import pipeline_flax
+from layers import pipeline
 import jax
 from jax import numpy as jnp
 from jax.sharding import Mesh
@@ -85,7 +85,7 @@ class PipelineParallelismTest(unittest.TestCase):
     model_mode = common_types.MODEL_MODE_TRAIN
     # We use a simpler single matmul decoder layer for fast compilation in these tests.    
     single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh)
-    my_pipeline = pipeline_flax.Pipeline(
+    my_pipeline = pipeline.Pipeline(
         config=config,
         layers=single_pipeline_stage,
         mesh=mesh
@@ -199,12 +199,14 @@ class PipelineParallelismTest(unittest.TestCase):
           "head_dim=128",
           "per_device_batch_size=2",
           "max_target_length=1024",
+          "vocab_size=32",
           "dataset_type=synthetic",
           "steps=3",
           "enable_checkpointing=False",
           "ici_pipeline_parallelism=4",
           "num_layers_per_pipeline_stage=2",
           "num_pipeline_microbatches=8",
+          
     ])
 
 if __name__ == "__main__":

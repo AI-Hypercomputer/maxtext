@@ -28,7 +28,7 @@ from layers import attentions
 from layers import embeddings
 from layers import linears
 from layers import normalizations, quantizations
-from layers import pipeline_flax
+from layers import pipeline
 
 Array = common_types.Array
 Config = common_types.Config
@@ -326,7 +326,7 @@ class Decoder(nn.Module):
           stage_module=SequentialBlockDecoderLayers(decoder_layer=RemattedBlockLayer, num_decoder_layers=cfg.num_layers_per_pipeline_stage, config=cfg, mesh=mesh,quant=self.quant)
 
         # TODO: Pipeline doesn't need its own config/mesh/quant?
-        y = pipeline_flax.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)(
+        y = pipeline.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)(
             y,
             decoder_segment_ids,
             decoder_positions,
