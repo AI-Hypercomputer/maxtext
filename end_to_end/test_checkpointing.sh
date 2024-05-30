@@ -24,14 +24,14 @@ eval_metrics=checkpoint_save_restore
 model_params=" base_emb_dim=384 base_num_query_heads=8 base_num_kv_heads=8 base_mlp_dim=192 base_num_decoder_layers=8 head_dim=128"
 CMD_DATA=""
 
-if [ "$DATASET_TYPE" == "c4-array_record" ]
+if [ "$DATASET_TYPE" == "grain" ]
 then
     eval_metrics=grain_checkpoint_save_restore
-    echo "Using c4-array_record dataset type"
+    echo "Using grain dataset type"
     echo "Mounting $DATASET_PATH to /tmp/gcsfuse/"
     bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$DATASET_PATH MOUNT_PATH=/tmp/gcsfuse/
     DATASET_PATH=/tmp/gcsfuse/
-    CMD_DATA=" grain_worker_count=0 dataset_type=c4-array_record dataset_name=array-record/c4/en/3.0.1 eval_dataset_name=array-record/c4/en/3.0.1"
+    CMD_DATA=" grain_worker_count=0 dataset_type=grain grain_data_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*"
 fi
 
 #Train

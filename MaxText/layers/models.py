@@ -28,6 +28,7 @@ from layers import attentions
 from layers import embeddings
 from layers import linears
 from layers import normalizations, quantizations
+from layers import pipeline
 
 Array = common_types.Array
 Config = common_types.Config
@@ -92,6 +93,10 @@ class DecoderLayer(nn.Module):
         name="self_attention",
         quant=self.quant,
         quantize_kvcache=cfg.quantize_kvcache,
+        prefill_key_axis_order=tuple([int(i) for i in cfg.prefill_key_axis_order.split(",")]),
+        prefill_value_axis_order=tuple([int(i) for i in cfg.prefill_value_axis_order.split(",")]),
+        ar_key_axis_order=tuple([int(i) for i in cfg.ar_key_axis_order.split(",")]),
+        ar_value_axis_order=tuple([int(i) for i in cfg.ar_value_axis_order.split(",")]),
     )
 
     attention_lnx = attention_layer(
@@ -141,6 +146,25 @@ class DecoderLayer(nn.Module):
 
     return layer_output, None if cfg.scan_layers else layer_output
 
+class SequentialBlockDecoderLayers(nn.Module):
+  """Sequential unscanned series of decoder layers."""
+  decoder_layer: nn.Module
+  num_decoder_layers: int
+  config: Config
+  mesh: Mesh
+  quant: Quant
+
+  @nn.compact
+  def __call__(self, inputs: jnp.ndarray, decoder_segment_ids, decoder_positions, deterministic, model_mode) -> jnp.ndarray:
+    for lyr in range(self.num_decoder_layers):
+      inputs = self.decoder_layer(config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant)(
+        inputs,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        )
+    return inputs
 
 class Decoder(nn.Module):
   """A stack of decoder layers as a part of an encoder-decoder architecture."""
@@ -170,6 +194,10 @@ class Decoder(nn.Module):
       from layers import gpt3
 
       return gpt3.Gpt3DecoderLayer
+    elif self.config.decoder_block == "simple":
+      from layers import simple_layer
+
+      return simple_layer.SimpleDecoderLayer
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
@@ -182,6 +210,34 @@ class Decoder(nn.Module):
       return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=True)
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
+
+  def scan_decoder_layers(self, cfg, decoder_layer, length, metdata_axis_name, mesh):
+    initializing = self.is_mutable_collection("params")
+    params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
+    cache_spec = 0
+    scan_fn = nn.scan(
+      decoder_layer,
+      variable_axes={
+          "params": params_spec,
+          "cache": cache_spec,
+          "intermediates": 0,
+          "aqt": 0,
+          "_overwrite_with_gradient": 0,
+      },
+      split_rngs={
+          "params": True,
+          "dropout": cfg.enable_dropout,
+      },
+      in_axes=(
+          nn.broadcast,
+          nn.broadcast,
+          nn.broadcast,
+          nn.broadcast,
+      ),
+      length=length,
+      metadata_params={nn.PARTITION_NAME: metdata_axis_name},
+    )
+    return scan_fn(config=cfg, mesh=mesh, name="layers", quant=self.quant)
 
   @nn.compact
   def __call__(
@@ -262,53 +318,46 @@ class Decoder(nn.Module):
       else:
         assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None
-      BlockLayer = nn.remat(  # pylint: disable=invalid-name
-          BlockLayer,
-          prevent_cse=not cfg.scan_layers,
-          policy=policy,
-          static_argnums=(-1, -2, -3, -4, -5),
-      )
-    if cfg.scan_layers:
-      initializing = self.is_mutable_collection("params")
-      params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
-      cache_spec = 0
-      y, _ = nn.scan(
-          BlockLayer,
-          variable_axes={
-              "params": params_spec,
-              "cache": cache_spec,
-              "intermediates": 0,
-              "aqt": 0,
-              "_overwrite_with_gradient": 0,
-          },
-          split_rngs={
-              "params": True,
-              "dropout": cfg.enable_dropout,
-          },
-          in_axes=(
-              nn.broadcast,
-              nn.broadcast,
-              nn.broadcast,
-              nn.broadcast,
-          ),
-          length=cfg.num_decoder_layers,
-          metadata_params={nn.PARTITION_NAME: "layers"},
-      )(config=cfg, mesh=mesh, name="layers", quant=self.quant)(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-      )
-    else:
-      for lyr in range(cfg.num_decoder_layers):
-        y = BlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+
+    RemattedBlockLayer = nn.remat(  # pylint: disable=invalid-name
+        BlockLayer,
+        prevent_cse=not cfg.scan_layers,
+        policy=policy,
+        static_argnums=(-1, -2, -3, -4, -5),
+    )
+    if cfg.using_pipeline_parallelism:
+        if cfg.num_layers_per_pipeline_stage == 1:
+          stage_module = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
+        elif cfg.scan_layers:
+          stage_module = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_layers_per_pipeline_stage, "layers_per_stage", mesh)
+        elif not cfg.scan_layers:
+          stage_module=SequentialBlockDecoderLayers(decoder_layer=RemattedBlockLayer, num_decoder_layers=cfg.num_layers_per_pipeline_stage, config=cfg, mesh=mesh,quant=self.quant)
+
+        y = pipeline.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)(
             y,
             decoder_segment_ids,
             decoder_positions,
             deterministic,
             model_mode,
         )
+    else:
+      if cfg.scan_layers:
+        y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
+            y,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+        )
+      else:
+        for lyr in range(cfg.num_decoder_layers):
+          y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+          )
 
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
@@ -336,7 +385,7 @@ class Decoder(nn.Module):
       )(
           y
       )  # We do not quantize the logits matmul.
-    logits = nn.with_logical_constraint(logits, ("activation_batch", "activation_length", "activation_vocab"))
+    logits = nn.with_logical_constraint(logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab"))
     logits = logits.astype(jnp.float32)
     return logits
 

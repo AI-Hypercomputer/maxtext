@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# High Performance Model Configs on TPU v5e
+# High Performance Model Training Configs on TPU v5e
 Expected performance results for 16B, 32B, 64B, and 128B parameter models running on TPU v5e:
 
 

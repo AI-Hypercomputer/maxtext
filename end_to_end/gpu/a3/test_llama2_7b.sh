@@ -1,5 +1,6 @@
 #!/bin/bash
 
+
 # This file is both an integration test that runs once a day on a A3 and documentation for how to get started with Llama2-7b
 
 # The flow of this file is as follows:
@@ -47,10 +48,6 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
-export CUDA_DEVICE_MAX_CONNECTIONS=1
-export NVTE_FUSED_ATTN=1
-export NCCL_DEBUG=VERSION
 
 export XLA_FLAGS="--xla_dump_to=$BASE_OUTPUT_PATH/$RUN_NAME/HLO_dumps/
 --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_triton_gemm=false
