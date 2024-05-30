@@ -387,8 +387,8 @@ def setup_train_loop(config):
   )
 
   if config.using_pipeline_parallelism:
-    # The vocab tensor of shape [embed, vocab] is not sharded by stage
-    params_sharded_tolerance=0.50
+    # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
+    params_sharded_tolerance=0.1
   else:
     params_sharded_tolerance=0.02
   maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, tolerance=params_sharded_tolerance)
