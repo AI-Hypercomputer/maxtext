@@ -21,20 +21,9 @@ spec:
               labels:
                 xpk.google.com/workload: maxtext-llama2
             spec:
-              schedulerName: default-scheduler
+              schedulingGates:
+              - name: "gke.io/topology-aware-auto-maxtext-llama2"
               restartPolicy: Never
-              affinity:
-                nodeAffinity:
-                  requiredDuringSchedulingIgnoredDuringExecution:
-                    nodeSelectorTerms:
-                    - matchExpressions:
-                      - key: cloud.google.com/gke-accelerator
-                        operator: Exists
-                      - key: cloud.google.com/gke-nodepool
-                        operator: In
-                        values: [np-1]
-              nodeSelector:
-                cloud.google.com/gke-accelerator: nvidia-h100-mega-80gb
               hostNetwork: true
               dnsPolicy: ClusterFirstWithHostNet
               terminationGracePeriodSeconds: 30
@@ -53,7 +42,7 @@ spec:
                 emptyDir:
               containers:
               - name: fastrak-daemon
-                image: us-docker.pkg.dev/gce-ai-infra/gpudirect-tcpxo/tcpgpudmarxd-dev:v1.0.6-sctp
+                image: us-docker.pkg.dev/gce-ai-infra/gpudirect-tcpxo/tcpgpudmarxd-dev:v1.0.8
                 imagePullPolicy: Always
                 command: 
                 - "bash"
@@ -79,10 +68,6 @@ spec:
                 ports:
                     - containerPort: 6002
                 env:
-                  - name: NCCL_FASTRAK_ENABLE_CONTROL_CHANNEL
-                    value: "0"
-                  - name: NCCL_BUFFSIZE
-                    value: "8388608"
                   - name: REPLICATED_JOB_NAME
                     valueFrom:
                       fieldRef:
@@ -121,7 +106,7 @@ spec:
                   - name: NCCL_CROSS_NIC
                     value: "0"
                   - name: NCCL_ALGO
-                    value: "Ring"
+                    value: "Ring,Tree"
                   - name: NCCL_PROTO
                     value: "Simple"
                   - name: NCCL_MIN_NCHANNELS
@@ -164,6 +149,14 @@ spec:
                     value: "1"
                   - name: NVTE_FUSED_ATTN
                     value: "1"
+                  - name: NCCL_NVLS_ENABLE
+                    value: "0"
+                  - name: NCCL_TUNER_PLUGIN
+                    value: "libnccl-tuner.so"
+                  - name: NCCL_TUNER_CONFIG_PATH
+                    value: "/usr/local/nvidia/lib64/a3plus_tuner_config.textproto"
+                  - name: NCCL_FASTRAK_ENABLE_CONTROL_CHANNEL
+                    value: "0"
 
                 command:
                   - "bash"
