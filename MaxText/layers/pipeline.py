@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-''' Pipeline layer wrapping a decoder layer. Supports circular pipelining '''
+''' Pipeline layer wrapping a decoder layer(s). Supports circular pipelining '''
 
 import jax
 import jax.ad_checkpoint
@@ -119,21 +119,22 @@ class Pipeline(nn.Module):
     if self.use_circ_storage:
         # Setup potential input from circ_storage, which also has a rotating index for microbatch, size of num_microbatches
         circ_storage_batch_idx = loop_iteration % self.config.num_pipeline_microbatches
-        circ_storage_input = circ_storage[:,circ_storage_batch_idx]
+        first_stage_in = circ_storage[:,circ_storage_batch_idx]
     else:
         # The last stage immediately flows into the first stage, use this rotated shift instead of circular storage
-        circ_storage_input = shift
+        first_stage_in = shift
 
     # For early loop iterations we grab a new input for stage 0 from the state_io. Once each microbatch has left state_io
     # we instead grab from the last stage's output (possibly buffered when num_microbatches > num_stages, e.g. from circ_storage).
-    stages_in = jnp.where(loop_iteration < self.config.num_pipeline_microbatches, state_io_slice, circ_storage_input)
+    # Note that although we call this first_stage_in it has filler data for all stages so it can be composed with jnp.where.
+    first_stage_in = jnp.where(loop_iteration < self.config.num_pipeline_microbatches, state_io_slice, first_stage_in)
 
-    def select_state_or_input(input, shift):
+    def select_state_or_input(first_stage_in, shift):
         # Selects input for stage 0, shift for other stages
-        return jnp.where(jax.lax.broadcasted_iota('int32', shift.shape, 0) == 0, input, shift)
+        return jnp.where(jax.lax.broadcasted_iota('int32', shift.shape, 0) == 0, first_stage_in, shift)
 
     # Selects input (from stream_io or circ_slice) for stage 0, other stages get from shift (the rotated previous output)
-    stages_in = select_state_or_input(stages_in, shift)
+    stages_in = select_state_or_input(first_stage_in, shift)
     return stages_in
 
   def shard_dim_by_stages(self, x, dim: int):
