@@ -107,7 +107,7 @@ def main():
       "prefill_value_axis_order": f"{prefill_value_axis_order}",
       "ar_key_axis_order": f"{ar_key_axis_order}",
       "ar_value_axis_order": f"{ar_value_axis_order}",
-      "config_json_string": json.dumps(pyconfig._config.keys) # pylint: disable=protected-access
+      "config_json_string": json.dumps(pyconfig._config.keys, default=lambda x: f"<<non-serializable: {type(x).__qualname__}>>") # pylint: disable=protected-access
     }
     dimensions_json = {
       **dimensions_json,
