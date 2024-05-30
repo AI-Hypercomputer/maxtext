@@ -36,7 +36,7 @@ class Inference_Microbenchmark(unittest.TestCase):
         "scan_layers=false",
         "weight_dtype=bfloat16",
     ])
-    inference_microbenchmark_main(pyconfig.config)
+    inference_microbenchmark_main(pyconfig.config, {})
 
 
 if __name__ == "__main__":
