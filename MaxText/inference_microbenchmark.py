@@ -20,7 +20,7 @@ import jax
 import json
 import sys
 
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from jetstream.engine import token_utils
 
@@ -230,7 +230,7 @@ def summarize_prefill_result(engine, params, tokens, true_length):
   }
 
 
-def main(config, inference_metadata: Optional[Dict[str]] = None):
+def main(config, inference_metadata: Optional[Dict[str, Any]] = None):
   engine = maxengine.MaxEngine(config)
   params = engine.load_params()
   prefill_lengths = [int(l) for l in config.inference_microbenchmark_prefill_lengths.split(",")]
