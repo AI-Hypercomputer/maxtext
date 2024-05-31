@@ -153,18 +153,9 @@ def write_metrics_to_tensorboard(writer, metrics, step, config):
 
 def save_checkpoint(checkpoint_manager, step, state, dataset_type="c4", data_iterator=None):
   """Wrapper for saving checkpoint"""
-  if dataset_type == "c4-array_record":
-    return checkpoint_manager.save(
-        step,
-        args=orbax.checkpoint.args.Composite(
-            items=orbax.checkpoint.args.PyTreeSave(item=state),
-            iter=grain.PyGrainCheckpointSave(data_iterator.local_iterator),
-        ),
-    )
-  else:
-    return checkpoint_manager.save(
-        step, args=orbax.checkpoint.args.Composite(items=orbax.checkpoint.args.PyTreeSave(item=state))
-    )
+  return checkpoint_manager.save(
+      step, args=orbax.checkpoint.args.PyTreeSave(state)
+  )
 
 
 # -----------------------------------------------------------------------------

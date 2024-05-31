@@ -18,16 +18,22 @@ limitations under the License.
 
 from typing import Optional, Union
 from etils import epath
-from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions
-from orbax.checkpoint.logging import abstract_logger, cloud_logger, standard_logger, composite_logger
-import jax
-import numpy as np
-import orbax.checkpoint
+from flax.training import train_state
 import grain.python as grain
-
+import jax
 import max_logging
 from multihost_dataloading import MultiHostDataLoadIterator
-from flax.training import train_state
+import numpy as np
+import orbax.checkpoint
+from orbax.checkpoint import pytree_checkpoint_handler, type_handlers
+from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, PyTree
+import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+
+PyTreeCheckpointHandler = pytree_checkpoint_handler.PyTreeCheckpointHandler
+LocalCheckpointOptions = emergency_checkpoint_manager.LocalCheckpointOptions
+PersistentCheckpointOptions = (
+    emergency_checkpoint_manager.PersistentCheckpointOptions
+)
 
 
 def create_orbax_checkpoint_manager(
@@ -36,7 +42,6 @@ def create_orbax_checkpoint_manager(
     use_async: bool,
     save_interval_steps: int,
     dataset_type: Optional[str] = "c4",
-    orbax_logger: Optional[abstract_logger.AbstractLogger] = None,
 ):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -58,10 +63,61 @@ def create_orbax_checkpoint_manager(
           save_interval_steps=save_interval_steps,
           enable_async_checkpointing=use_async,
       ),
-      logger=orbax_logger
   )
   max_logging.log("Checkpoint manager created!")
   return mngr
+
+
+def create_orbax_emergency_checkpoint_manager(
+    local_checkpoint_dir: str,
+    persistent_checkpoint_dir: str,
+    global_mesh: jax.sharding.Mesh,
+    abstract_state: PyTree,
+    persistent_save_interval_steps: int,
+):
+  """Returns an emergency checkpoint."""
+  max_logging.log("Creating emergency checkpoint manager...")
+  p = epath.Path(persistent_checkpoint_dir)
+
+  local_registry = type_handlers.create_type_handler_registry(
+      (
+          jax.Array,
+          type_handlers.ArrayHandler(primary_host=None, replica_id=None),
+      ),
+  )
+
+  local_checkpoint_handler = PyTreeCheckpointHandler(
+      use_ocdbt=True,
+      use_zarr3=True,
+      primary_host=None,
+      type_handler_registry=local_registry,
+  )
+  persistent_checkpoint_handler = PyTreeCheckpointHandler(
+      use_ocdbt=True,
+      use_zarr3=True,
+  )
+
+  options = emergency_checkpoint_manager.CheckpointManagerOptions(
+      local=LocalCheckpointOptions(
+          save_interval_steps=2, max_to_keep=2
+      ),
+      persistent=PersistentCheckpointOptions(
+          save_interval_steps=persistent_save_interval_steps, max_to_keep=3
+      ),
+  )
+  local_checkpoint_dir = epath.Path(local_checkpoint_dir) / f"process_{orbax.checkpoint.multihost.process_index()}"
+  emergency_mngr = emergency_checkpoint_manager.CheckpointManager(
+      local_checkpoint_dir,
+      p,
+      global_mesh=global_mesh,
+      abstract_state=abstract_state,
+      options=options,
+      local_state_handler=local_checkpoint_handler,
+      persistent_state_handler=persistent_checkpoint_handler,
+  )
+
+  max_logging.log("Emergency checkpoint manager created!")
+  return emergency_mngr
 
 
 def _find_idx(array: np.ndarray, replica_axis_idx: int):
@@ -161,10 +217,7 @@ def load_state_if_possible(
         return (
             checkpoint_manager.restore(
                 latest_step,
-                args=orbax.checkpoint.args.Composite(
-                    items=orbax.checkpoint.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args),
-                    iter=grain.PyGrainCheckpointRestore(data_iterator.local_iterator),
-                ),
+                args=orbax.checkpoint.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args),
             ),
             None,
         )
@@ -172,9 +225,7 @@ def load_state_if_possible(
         return (
             checkpoint_manager.restore(
                 latest_step,
-                args=orbax.checkpoint.args.Composite(
-                    items=orbax.checkpoint.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args)
-                ),
+                args=orbax.checkpoint.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args),
             ),
             None,
         )

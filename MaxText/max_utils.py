@@ -44,6 +44,8 @@ from tensorboardX import writer
 
 from google.cloud import storage
 
+import orbax.checkpoint
+
 
 def find_nans_and_infs(pytree):
   def finder(x):
@@ -198,6 +200,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   ) or raw_keys["hardware"] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
     jax.distributed.initialize()
+    orbax.checkpoint.multihost.utils.initialize_runtime_to_distributed_ids()
     max_logging.log("Jax distributed system initialized!")
   elif is_gpu_backend(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for GPU backend...")
@@ -439,9 +442,9 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
     )
 
     if restored:
-      if "iter" in restored and restored["iter"] is not None:
-        data_iterator.local_iterator = restored["iter"]
-      state = restored["items"]
+      # if "iter" in restored and restored["iter"] is not None:
+      #   data_iterator.local_iterator = restored["iter"]
+      state = restored
     else:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings)(rng)

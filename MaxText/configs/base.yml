@@ -103,6 +103,9 @@ record_internal_nn_metrics: 0
 # Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
 base_output_directory: ""
 
+# Local checkpoint directory
+local_checkpoint_dir: ""
+
 # Jax cache directory
 jax_cache_dir: "~/jax_cache"
 
