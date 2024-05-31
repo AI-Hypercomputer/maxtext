@@ -188,13 +188,6 @@ def write_results(results, filename, flatten_microbenchmark_results):
   """Write the results microbenchmark results to a json file."""
   if flatten_microbenchmark_results:
     results['flattened_results'] = flatten_dict(results)
-    # flattened_results = {}
-    # for key, value in results.items():
-    #   if isinstance(value, dict):
-    #     flattened_results.update(value)
-    #   else:
-    #     flattened_results[key] = value
-    # results['flattened_results'] = flattened_results
   if filename != "":
     with open(filename, "w", encoding="utf-8") as f:
       json.dump(results, f, indent=2)

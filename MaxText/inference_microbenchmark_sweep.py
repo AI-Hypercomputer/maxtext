@@ -133,8 +133,6 @@ def main():
     try:
       microbenchmark_results = inference_microbenchmark.main(config, inference_metadata=inference_metadata)
       metrics = microbenchmark_results['flattened_results']
-      print(f"@@results {results}")
-      print(f"@@metrics {metrics}")
       metrics = {k.lower(): v for k, v in metrics.items()}
       dimensions_json['oom'] = 'False'
     except xla_extension.XlaRuntimeError:
