@@ -20,6 +20,7 @@ import jax
 import json
 import sys
 
+from collections.abc import MutableMapping
 from typing import Any, Dict, Optional
 
 from jetstream.engine import token_utils
@@ -172,16 +173,28 @@ def collate_results(config, results, model_size, cache_size, num_model_params, i
   return results
 
 
+def flatten_dict(dictionary, prefix='', sep='_'):
+  results = []
+  for k, v in dictionary.items():
+    new_key = str(prefix) + sep + str(k) if prefix else k
+    if isinstance(v, MutableMapping):
+      results.extend(flatten_dict(v, new_key, sep=sep).items())
+    else:
+      results.append((new_key, v))
+  return dict(results)
+
+
 def write_results(results, filename, flatten_microbenchmark_results):
   """Write the results microbenchmark results to a json file."""
   if flatten_microbenchmark_results:
-    flattened_results = {}
-    for key, value in results.items():
-      if isinstance(value, dict):
-        flattened_results.update(value)
-      else:
-        flattened_results[key] = value
-    results['flattened_results'] = flattened_results
+    results['flattened_results'] = flatten_dict(results)
+    # flattened_results = {}
+    # for key, value in results.items():
+    #   if isinstance(value, dict):
+    #     flattened_results.update(value)
+    #   else:
+    #     flattened_results[key] = value
+    # results['flattened_results'] = flattened_results
   if filename != "":
     with open(filename, "w", encoding="utf-8") as f:
       json.dump(results, f, indent=2)
