@@ -418,7 +418,7 @@ def get_quantization_local_shard_count(raw_keys):
     return raw_keys["quantization_local_shard_count"]
 
 def using_pipeline_parallelism(raw_keys):
-  return raw_keys['ici_pipeline_parallelism'] > 1 or raw_keys['dcn_pipeline_parallelism'] > 1
+  return int(raw_keys['ici_pipeline_parallelism']) > 1 or int(raw_keys['dcn_pipeline_parallelism']) > 1
 
 class HyperParameters:  # pylint: disable=missing-class-docstring
 
