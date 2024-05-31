@@ -1,0 +1,3 @@
+[submodule "xpk"]
+	path = xpk
+	url = git@github.com:google/xpk.git
