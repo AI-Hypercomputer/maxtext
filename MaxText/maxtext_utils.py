@@ -30,6 +30,7 @@ from input_pipeline import input_pipeline_interface
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
+
 def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config):
   """Get the shardings (both state and data) for train_step"""
   functional_train = get_functional_train_step(train_step, model, config)
@@ -132,9 +133,7 @@ def calculate_tflops_training_per_device(config, log=True):
       ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
   )
   # megatron tflops calculation does not account for causality in attention
-  attention_tflops = (
-      attention_flops * config.num_decoder_layers * 3 / 10**12
-  )
+  attention_tflops = attention_flops * config.num_decoder_layers * 3 / 10**12
 
   total_tflops = learnable_weight_tflops + attention_tflops
 
@@ -206,6 +205,7 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance=0.02):
       f"Number of unsharded parameters exceeds tolerance {tolerance * 100}% " "of total parameters."
   )
 
+
 def apply_gradient_clipping(raw_grads, state, clipping_threshold):
   """Applies gradient clipping to raw gradients, with special handing for FLAX fp8 stats.
 
@@ -222,8 +222,8 @@ def apply_gradient_clipping(raw_grads, state, clipping_threshold):
     # Scales + Amax History for Delayed Tensor Scaling SHOULD NOT be clipped or affect clipping
     fp8_stats = raw_grads.pop(OVERWRITE_WITH_GRADIENT)
     grads, _ = gradient_clip_transformation.update(raw_grads, state, None)
-    grads[OVERWRITE_WITH_GRADIENT] = fp8_stats # pytype: disable=unsupported-operands
-    raw_grads[OVERWRITE_WITH_GRADIENT] = fp8_stats # pytype: disable=unsupported-operands
+    grads[OVERWRITE_WITH_GRADIENT] = fp8_stats  # pytype: disable=unsupported-operands
+    raw_grads[OVERWRITE_WITH_GRADIENT] = fp8_stats  # pytype: disable=unsupported-operands
   else:
     grads, _ = gradient_clip_transformation.update(raw_grads, state, None)
 

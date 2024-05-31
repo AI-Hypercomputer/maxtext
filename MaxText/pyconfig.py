@@ -56,6 +56,7 @@ def validate_attention_type(s: str) -> None:
   if s not in valid_attention_types:  # currently supported attention
     raise ValueError("Invalid attention type was passed. Valid options ", valid_attention_types)
 
+
 def validate_profiler_type(s: str) -> None:
   valid_profiler_types = ("", "nsys", "xplane")
   if s not in valid_profiler_types:  # currently supported attention
@@ -267,19 +268,29 @@ class _HyperParameters:
 
     if using_pipeline_parallelism(raw_keys):
       raw_keys["using_pipeline_parallelism"] = True
-      num_stages = int(raw_keys['ici_pipeline_parallelism'] * raw_keys['dcn_pipeline_parallelism'])
-      if raw_keys['num_pipeline_repeats'] == -1:
-        num_pipeline_repeats, remainder = divmod(raw_keys['num_decoder_layers'], num_stages * raw_keys['num_layers_per_pipeline_stage'])
-        assert not remainder, f"The number of layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) times the number of stages ({num_stages}) must divide the number of decoder layers ({raw_keys['num_decoder_layers']}) "
-        raw_keys['num_pipeline_repeats'] = num_pipeline_repeats
-      assert num_stages * raw_keys['num_pipeline_repeats'] * raw_keys['num_layers_per_pipeline_stage'] == raw_keys['num_decoder_layers'], f"The product of pipeline stages ({num_stages}), repeats ({raw_keys['num_pipeline_repeats']}), and layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) must be equal to the number of layers ({raw_keys['num_decoder_layers']})"
-      if raw_keys['num_pipeline_microbatches'] == -1:
-        raw_keys['num_pipeline_microbatches'] = num_stages
-      assert raw_keys['num_pipeline_microbatches'] % num_stages == 0, f"The number of microbatches ({raw_keys['num_pipeline_microbatches']}) must be divisible by the number of stages ({num_stages})"
-      assert raw_keys['global_batch_size_to_train_on'] % raw_keys['num_pipeline_microbatches'] == 0, f"The global batch size ({raw_keys['global_batch_size_to_train_on']}) must be divisible by the number of microbatches ({raw_keys['num_pipeline_microbatches']})"
+      num_stages = int(raw_keys["ici_pipeline_parallelism"] * raw_keys["dcn_pipeline_parallelism"])
+      if raw_keys["num_pipeline_repeats"] == -1:
+        num_pipeline_repeats, remainder = divmod(
+            raw_keys["num_decoder_layers"], num_stages * raw_keys["num_layers_per_pipeline_stage"]
+        )
+        assert (
+            not remainder
+        ), f"The number of layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) times the number of stages ({num_stages}) must divide the number of decoder layers ({raw_keys['num_decoder_layers']}) "
+        raw_keys["num_pipeline_repeats"] = num_pipeline_repeats
+      assert (
+          num_stages * raw_keys["num_pipeline_repeats"] * raw_keys["num_layers_per_pipeline_stage"]
+          == raw_keys["num_decoder_layers"]
+      ), f"The product of pipeline stages ({num_stages}), repeats ({raw_keys['num_pipeline_repeats']}), and layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) must be equal to the number of layers ({raw_keys['num_decoder_layers']})"
+      if raw_keys["num_pipeline_microbatches"] == -1:
+        raw_keys["num_pipeline_microbatches"] = num_stages
+      assert (
+          raw_keys["num_pipeline_microbatches"] % num_stages == 0
+      ), f"The number of microbatches ({raw_keys['num_pipeline_microbatches']}) must be divisible by the number of stages ({num_stages})"
+      assert (
+          raw_keys["global_batch_size_to_train_on"] % raw_keys["num_pipeline_microbatches"] == 0
+      ), f"The global batch size ({raw_keys['global_batch_size_to_train_on']}) must be divisible by the number of microbatches ({raw_keys['num_pipeline_microbatches']})"
     else:
       raw_keys["using_pipeline_parallelism"] = False
-
 
     print_system_information()
 
@@ -417,8 +428,10 @@ def get_quantization_local_shard_count(raw_keys):
   else:
     return raw_keys["quantization_local_shard_count"]
 
+
 def using_pipeline_parallelism(raw_keys):
-  return int(raw_keys['ici_pipeline_parallelism']) > 1 or int(raw_keys['dcn_pipeline_parallelism']) > 1
+  return int(raw_keys["ici_pipeline_parallelism"]) > 1 or int(raw_keys["dcn_pipeline_parallelism"]) > 1
+
 
 class HyperParameters:  # pylint: disable=missing-class-docstring
 

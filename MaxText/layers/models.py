@@ -142,8 +142,10 @@ class DecoderLayer(nn.Module):
 
     return layer_output, None if cfg.scan_layers else layer_output
 
+
 class SequentialBlockDecoderLayers(nn.Module):
   """Sequential unscanned series of decoder layers."""
+
   decoder_layer: nn.Module
   num_decoder_layers: int
   config: Config
@@ -154,13 +156,14 @@ class SequentialBlockDecoderLayers(nn.Module):
   def __call__(self, inputs: jnp.ndarray, decoder_segment_ids, decoder_positions, deterministic, model_mode) -> jnp.ndarray:
     for lyr in range(self.num_decoder_layers):
       inputs = self.decoder_layer(config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant)(
-        inputs,
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        model_mode,
-        )
+          inputs,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+      )
     return inputs
+
 
 class Decoder(nn.Module):
   """A stack of decoder layers as a part of an encoder-decoder architecture."""
@@ -212,26 +215,26 @@ class Decoder(nn.Module):
     params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
     cache_spec = 0
     scan_fn = nn.scan(
-      decoder_layer,
-      variable_axes={
-          "params": params_spec,
-          "cache": cache_spec,
-          "intermediates": 0,
-          "aqt": 0,
-          "_overwrite_with_gradient": 0,
-      },
-      split_rngs={
-          "params": True,
-          "dropout": cfg.enable_dropout,
-      },
-      in_axes=(
-          nn.broadcast,
-          nn.broadcast,
-          nn.broadcast,
-          nn.broadcast,
-      ),
-      length=length,
-      metadata_params={nn.PARTITION_NAME: metdata_axis_name},
+        decoder_layer,
+        variable_axes={
+            "params": params_spec,
+            "cache": cache_spec,
+            "intermediates": 0,
+            "aqt": 0,
+            "_overwrite_with_gradient": 0,
+        },
+        split_rngs={
+            "params": True,
+            "dropout": cfg.enable_dropout,
+        },
+        in_axes=(
+            nn.broadcast,
+            nn.broadcast,
+            nn.broadcast,
+            nn.broadcast,
+        ),
+        length=length,
+        metadata_params={nn.PARTITION_NAME: metdata_axis_name},
     )
     return scan_fn(config=cfg, mesh=mesh, name="layers", quant=self.quant)
 
@@ -317,25 +320,33 @@ class Decoder(nn.Module):
 
     RemattedBlockLayer = nn.remat(  # pylint: disable=invalid-name
         BlockLayer,
-        prevent_cse=True,
+        prevent_cse=not cfg.scan_layers,
         policy=policy,
         static_argnums=(-1, -2, -3, -4, -5),
     )
     if cfg.using_pipeline_parallelism:
-        if cfg.num_layers_per_pipeline_stage == 1:
-          stage_module = RemattedBlockLayer(config=cfg, mesh=mesh, quant=self.quant)
-        elif cfg.scan_layers:
-          stage_module = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_layers_per_pipeline_stage, "layers_per_stage", mesh)
-        elif not cfg.scan_layers:
-          stage_module=SequentialBlockDecoderLayers(decoder_layer=RemattedBlockLayer, num_decoder_layers=cfg.num_layers_per_pipeline_stage, config=cfg, mesh=mesh,quant=self.quant)
-
-        y = pipeline.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)(
-            y,
-            decoder_segment_ids,
-            decoder_positions,
-            deterministic,
-            model_mode,
+      if cfg.num_layers_per_pipeline_stage == 1:
+        stage_module = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
+      elif cfg.scan_layers:
+        stage_module = self.scan_decoder_layers(
+            cfg, RemattedBlockLayer, cfg.num_layers_per_pipeline_stage, "layers_per_stage", mesh
         )
+      elif not cfg.scan_layers:
+        stage_module = SequentialBlockDecoderLayers(
+            decoder_layer=RemattedBlockLayer,
+            num_decoder_layers=cfg.num_layers_per_pipeline_stage,
+            config=cfg,
+            mesh=mesh,
+            quant=self.quant,
+        )
+
+      y = pipeline.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+      )
     else:
       if cfg.scan_layers:
         y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
@@ -381,7 +392,9 @@ class Decoder(nn.Module):
       )(
           y
       )  # We do not quantize the logits matmul.
-    logits = nn.with_logical_constraint(logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab"))
+    logits = nn.with_logical_constraint(
+        logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
+    )
     logits = logits.astype(jnp.float32)
     return logits
 

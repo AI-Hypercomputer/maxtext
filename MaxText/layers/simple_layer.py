@@ -28,9 +28,9 @@ class SimpleDecoderLayer(nn.Module):
 
   def setup(self):
     self.weight_mat = self.param(
-      'weights',
-      nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
-      (self.config.emb_dim, self.config.emb_dim)
+        "weights",
+        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
+        (self.config.emb_dim, self.config.emb_dim),
     )
 
   def __call__(self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode) -> jnp.ndarray:

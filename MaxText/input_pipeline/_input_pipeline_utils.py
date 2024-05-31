@@ -48,7 +48,9 @@ class HFNormalizeFeatures(grain.MapTransform):
 class HFDataSource(grain.RandomAccessDataSource):
   """A class that makes HuggingFace IterableDataset a grain datasource without random access support"""
 
-  def __init__(self, dataset: datasets.IterableDataset, dataloading_host_index: int, dataloading_host_count: int, num_threads: int):
+  def __init__(
+      self, dataset: datasets.IterableDataset, dataloading_host_index: int, dataloading_host_count: int, num_threads: int
+  ):
     self.dataset = dataset
     self.num_threads = num_threads
     self.dataloading_host_count = dataloading_host_count

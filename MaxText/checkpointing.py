@@ -58,7 +58,7 @@ def create_orbax_checkpoint_manager(
           save_interval_steps=save_interval_steps,
           enable_async_checkpointing=use_async,
       ),
-      logger=orbax_logger
+      logger=orbax_logger,
   )
   max_logging.log("Checkpoint manager created!")
   return mngr
@@ -210,28 +210,24 @@ def setup_checkpoint_logger(config) -> composite_logger.CompositeLogger | None:
   Args:
     config
   Returns:
-    CompositeLogger 
+    CompositeLogger
   """
   orbax_cloud_logger = None
   orbax_standard_logger = None
   max_logging.log("Setting up checkpoint logger...")
   if config.enable_checkpoint_cloud_logger:
     logger_name = f"checkpoint_{config.run_name}"
-    options = cloud_logger.CloudLoggerOptions(
-        job_name=config.run_name, logger_name=logger_name
-    )
+    options = cloud_logger.CloudLoggerOptions(job_name=config.run_name, logger_name=logger_name)
     orbax_cloud_logger = cloud_logger.CloudLogger(options=options)
-    max_logging.log("Sucessfully set up checkpoint cloud logger.")
+    max_logging.log("Successfully set up checkpoint cloud logger.")
 
   if config.enable_checkpoint_standard_logger:
     orbax_standard_logger = standard_logger.StandardLogger()
-    max_logging.log("Sucessfully set up checkpoint standard logger.")
+    max_logging.log("Successfully set up checkpoint standard logger.")
 
   orbax_logger = None
   if orbax_cloud_logger is not None and orbax_standard_logger is not None:
-    orbax_logger = composite_logger.CompositeLogger(
-        orbax_cloud_logger, orbax_standard_logger
-    )
-    max_logging.log("Sucessfully set up checkpoint composite logger.")
+    orbax_logger = composite_logger.CompositeLogger(orbax_cloud_logger, orbax_standard_logger)
+    max_logging.log("Successfully set up checkpoint composite logger.")
 
   return orbax_logger

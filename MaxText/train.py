@@ -311,14 +311,14 @@ def record_goodput(recorder, config, step=None, job_start=False, job_end=False):
     if step is not None:
       recorder.record_step_start_time(step)
 
+
 def check_example_batch(config, example_batch):
   if config.max_checkify:
-    jittable_f = checkify.checkify(
-        lambda x: checkify.check(jnp.any(x > -1), "Batch contains bad synthetic data!")
-    )
+    jittable_f = checkify.checkify(lambda x: checkify.check(jnp.any(x > -1), "Batch contains bad synthetic data!"))
     # Check if inputs in batch contains bad synthetic data.
-    err, _ = jax.jit(jittable_f)(example_batch['inputs'][: config.global_batch_size_to_train_on, :])
+    err, _ = jax.jit(jittable_f)(example_batch["inputs"][: config.global_batch_size_to_train_on, :])
     err.throw()
+
 
 def setup_mesh_and_model(config):
   """Set up the mesh and the model for training
@@ -388,9 +388,9 @@ def setup_train_loop(config):
 
   if config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-    params_sharded_tolerance=0.1
+    params_sharded_tolerance = 0.1
   else:
-    params_sharded_tolerance=0.02
+    params_sharded_tolerance = 0.02
   maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, tolerance=params_sharded_tolerance)
 
   return (

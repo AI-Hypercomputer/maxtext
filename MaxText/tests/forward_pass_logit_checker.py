@@ -37,6 +37,7 @@ maxtext_parent_dir = os.path.dirname(current_dir)
 sys.path.append(maxtext_parent_dir)
 
 import max_logging
+
 max_logging.log(f"Added parent directory = {maxtext_parent_dir}")
 
 import common_types
@@ -49,33 +50,31 @@ import train
 
 
 def get_data(golden_data, golden_data_index, config):
-  """ Get the golden data for the test indexed at golden_data_index"""
+  """Get the golden data for the test indexed at golden_data_index"""
 
   max_logging.log(f"Comparing forward pass for golden data index = {golden_data_index} ")
   max_logging.log(f"config.global_batch_size_to_train_on={config.global_batch_size_to_train_on}")
   s = (config.global_batch_size_to_train_on, config.max_target_length)
-  ids = np.asarray(golden_data[golden_data_index]['tokens'], dtype=np.int32)
+  ids = np.asarray(golden_data[golden_data_index]["tokens"], dtype=np.int32)
 
-  logits = np.asarray(golden_data[golden_data_index]['logits'], dtype=np.float32)
+  logits = np.asarray(golden_data[golden_data_index]["logits"], dtype=np.float32)
   max_logging.log(f" prompt=\"{golden_data[golden_data_index]['prompt']}\" raw ids={ids}, logits.shape = {logits.shape}")
-
 
   decoder_segment_ids = jax.numpy.zeros(s) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
   decoder_positions = jnp.stack(
       [jnp.arange(config.max_target_length, dtype=jnp.int32) for _ in range(config.global_batch_size_to_train_on)]
   )
 
-  ids = jnp.stack(
-      [ids for _ in range(config.global_batch_size_to_train_on)]
-  )
+  ids = jnp.stack([ids for _ in range(config.global_batch_size_to_train_on)])
   max_logging.log(f"ids={ids}, decoder_segment_ids = {decoder_segment_ids}, decoder_positions= {decoder_positions}")
 
   return ids, decoder_segment_ids, decoder_positions, logits
 
+
 def main(config):
   """Test the Whole Model of model_name"""
 
-  #initialize the Llama2-7b model with weights from Meta
+  # initialize the Llama2-7b model with weights from Meta
   (
       init_rng,
       _,
@@ -87,15 +86,14 @@ def main(config):
       _,
       _,
       state,
-    ) = train.setup_train_loop(config)
+  ) = train.setup_train_loop(config)
 
-  input_golden_data_path = "MaxText/test_assets/golden_data_"+config.model_name+".jsonl"
-  with jsonlines.open(input_golden_data_path, 'r') as f:
+  input_golden_data_path = "MaxText/test_assets/golden_data_" + config.model_name + ".jsonl"
+  with jsonlines.open(input_golden_data_path, "r") as f:
     golden_data = list(f)
 
-
   for golden_data_index in range(len(golden_data)):
-    ids, decoder_segment_ids, decoder_positions, golden_logits = get_data(golden_data,golden_data_index,config)
+    ids, decoder_segment_ids, decoder_positions, golden_logits = get_data(golden_data, golden_data_index, config)
 
     full_train_logits = model.apply(
         state.params,
@@ -107,10 +105,7 @@ def main(config):
     )
 
     max_logging.log(f"{golden_logits[0] =}, {full_train_logits[0, 0, :]=}")
-    assert jax.numpy.allclose(
-            full_train_logits[0, :, :], golden_logits, rtol=1e-01, atol=1e-01, equal_nan=False
-        )
-
+    assert jax.numpy.allclose(full_train_logits[0, :, :], golden_logits, rtol=1e-01, atol=1e-01, equal_nan=False)
 
 
 if __name__ == "__main__":

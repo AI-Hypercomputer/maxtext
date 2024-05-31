@@ -60,15 +60,17 @@ class TokenizerTest(unittest.TestCase):
   @pytest.mark.skip(reason="mohitkhatwani@ will fix this")
   @pytest.mark.tpu
   def test_tokenize(self):
-    text = 'This is a test'
-    self.assertTrue(np.array_equal(self.source_tokenizer.tokenize(text).numpy()[1:-1],
-                                    self.test_tokenizer.tokenize(text).numpy()))
+    text = "This is a test"
+    self.assertTrue(
+        np.array_equal(self.source_tokenizer.tokenize(text).numpy()[1:-1], self.test_tokenizer.tokenize(text).numpy())
+    )
 
   @pytest.mark.tpu
   def test_detokenize(self):
     tokens = [66, 12, 10, 698]
-    self.assertEqual(np.asarray(self.source_tokenizer.detokenize(tokens)), 
-                     np.asarray(self.test_tokenizer.detokenize(tokens)))
+    self.assertEqual(
+        np.asarray(self.source_tokenizer.detokenize(tokens)), np.asarray(self.test_tokenizer.detokenize(tokens))
+    )
 
 
 if __name__ == "__main__":

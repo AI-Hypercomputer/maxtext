@@ -86,6 +86,7 @@ def summarize_size_from_pytree(params):
   num_bytes = calculate_bytes_from_pytree(params)
   return num_params, num_bytes, num_bytes / num_params
 
+
 def initialize_summary_writer(config):
   return writer.SummaryWriter(config.tensorboard_dir) if jax.process_index() == 0 else None
 
@@ -193,8 +194,10 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
   """
   if (
-      raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and
-      raw_keys["compile_topology_num_slices"] == -1 and not raw_keys["enable_single_controller"]
+      raw_keys["enable_checkpointing"]
+      and raw_keys["async_checkpointing"]
+      and raw_keys["compile_topology_num_slices"] == -1
+      and not raw_keys["enable_single_controller"]
   ) or raw_keys["hardware"] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
     jax.distributed.initialize()
@@ -661,13 +664,17 @@ def summarize_pytree_data(params, name="Params", raw=False):
   if not raw:
     num_params_in_billions = num_params / 1e9
     total_param_size_in_gb = total_param_size / 1e9
-    print(f"{name} stats: \n"
-          f"\tTotal number of params: {num_params_in_billions:.3f} billion \n"	
-          f"\tTotal memory usage: {total_param_size_in_gb:.3f} GB \n"	
-          f"\tAvg size: {avg_param_size:.3f} bytes\n")	
+    print(
+        f"{name} stats: \n"
+        f"\tTotal number of params: {num_params_in_billions:.3f} billion \n"
+        f"\tTotal memory usage: {total_param_size_in_gb:.3f} GB \n"
+        f"\tAvg size: {avg_param_size:.3f} bytes\n"
+    )
   else:
-    print(f"{name} stats: \n"
-            f"\tTotal number of params: {num_params:.3f} \n"
-            f"\tTotal memory usage: {total_param_size:.3f} bytes \n"
-            f"\tAvg size: {avg_param_size:.3f} bytes\n")
+    print(
+        f"{name} stats: \n"
+        f"\tTotal number of params: {num_params:.3f} \n"
+        f"\tTotal memory usage: {total_param_size:.3f} bytes \n"
+        f"\tAvg size: {avg_param_size:.3f} bytes\n"
+    )
   return num_params, total_param_size, avg_param_size
