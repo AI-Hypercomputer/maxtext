@@ -143,6 +143,14 @@ class Pipeline(nn.Module):
     sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(*dims_mapping))
     return jax.lax.with_sharding_constraint(x, sharding)
 
+    def get_microbatch_and_repeat_ids(self, loop_iteration):
+    '''Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and non-circular'''
+    # Stage 0 has processed one microbatch every loop_iter, but Stage 1 is one behind due to bubble, etc for other stages
+    microbatches_processed = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0) 
+    microbatch_ids = microbatches_processed % self.config.num_pipeline_microbatches
+    repeat_ids = microbatches_processed // self.config.num_pipeline_microbatches
+    return microbatch_ids, repeat_ids
+
   def vmap_parallel_gather(self, weights, repeat_ids, repeat_dim_in_weights, stages_dim_in_weights):
     """Use vmap to implement a sharded parallel gather.
 
@@ -171,14 +179,6 @@ class Pipeline(nn.Module):
     stage_weights = jax.vmap(_gather_one, in_axes=(stages_dim_in_weights, 0), out_axes=gathered_weights_stage_dim)(weights, repeat_ids)
     stage_weights = self.shard_dim_by_stages(stage_weights, gathered_weights_stage_dim)
     return stage_weights
-
-  def get_microbatch_and_repeat_ids(self, loop_iteration):
-    '''Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and non-circular'''
-    # Stage 0 has processed one microbatch every loop_iter, but Stage 1 is one behind due to bubble, etc for other stages
-    microbatches_processed = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0) 
-    microbatch_ids = microbatches_processed % self.config.num_pipeline_microbatches
-    repeat_ids = microbatches_processed // self.config.num_pipeline_microbatches
-    return microbatch_ids, repeat_ids
 
   def vmap_gather(self, xs, ids, ids_dim):
     """Use vmap to implement a stage-wise sharded gather.
@@ -372,7 +372,6 @@ class Pipeline(nn.Module):
     loop_state = self.init_states(inputs)
     
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
-    print(f"{total_iterations=} {self.num_stages=}", flush=True)
 
     def func_to_scan(model,loop_state, xs):
        # nn.scan can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
