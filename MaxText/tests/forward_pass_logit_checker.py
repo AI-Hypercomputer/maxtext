@@ -33,12 +33,12 @@ import argparse
 import sys
 import os
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-maxtext_parent_dir = os.path.dirname(current_dir)
-sys.path.append(maxtext_parent_dir)
+# current_dir = os.path.dirname(os.path.abspath(__file__))
+# maxtext_parent_dir = os.path.dirname(current_dir)
+sys.path.append("/tmp/maxtext")
 
-import max_logging
-max_logging.log(f"Added parent directory = {maxtext_parent_dir}")
+# import max_logging
+# max_logging.log(f"Added parent directory = {maxtext_parent_dir}")
 
 import common_types
 import jax
@@ -53,12 +53,12 @@ def get_data(golden_data, golden_data_index, config):
   """ Get the golden data for the test indexed at golden_data_index"""
 
   max_logging.log(f"Comparing forward pass for golden data index = {golden_data_index} ")
-  max_logging.log(f"config.global_batch_size_to_train_on={config.global_batch_size_to_train_on}")
+  print(f"config.global_batch_size_to_train_on={config.global_batch_size_to_train_on}")
   s = (config.global_batch_size_to_train_on, config.max_target_length)
   ids = np.asarray(golden_data[golden_data_index]['tokens'], dtype=np.int32)
 
   logits = np.asarray(golden_data[golden_data_index]['logits'], dtype=np.float32)
-  max_logging.log(f" prompt=\"{golden_data[golden_data_index]['prompt']}\" raw ids={ids}, logits.shape = {logits.shape}")
+  print(f" prompt=\"{golden_data[golden_data_index]['prompt']}\" raw ids={ids}, logits.shape = {logits.shape}")
 
 
   decoder_segment_ids = jax.numpy.zeros(s) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
@@ -69,7 +69,7 @@ def get_data(golden_data, golden_data_index, config):
   ids = jnp.stack(
       [ids for _ in range(config.global_batch_size_to_train_on)]
   )
-  max_logging.log(f"ids={ids}, decoder_segment_ids = {decoder_segment_ids}, decoder_positions= {decoder_positions}")
+  print(f"ids={ids}, decoder_segment_ids = {decoder_segment_ids}, decoder_positions= {decoder_positions}")
 
   return ids, decoder_segment_ids, decoder_positions, logits
 
@@ -107,7 +107,7 @@ def main(config, test_args):
         rngs={"aqt": init_rng},
     )
 
-    max_logging.log(f"{golden_logits[0] =}, {full_train_logits[0, 0, :]=}")
+    print(f"{golden_logits[0] =}, {full_train_logits[0, 0, :]=}")
     token_size = int(test_args.token_size) if test_args.token_size else golden_logits.shape[0]
     assert jax.numpy.allclose(
             full_train_logits[0, :token_size, :], golden_logits[:token_size, :], rtol=float(test_args.rtol), atol=float(test_args.atol), equal_nan=False
