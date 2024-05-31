@@ -105,7 +105,7 @@ def create_orbax_emergency_checkpoint_manager(
           save_interval_steps=persistent_save_interval_steps, max_to_keep=3
       ),
   )
-  local_checkpoint_dir = epath.Path(local_checkpoint_dir) / f"process_{orbax.checkpoint.multihost.process_index()}"
+  # local_checkpoint_dir = epath.Path(local_checkpoint_dir) / f"process_{orbax.checkpoint.multihost.process_index()}"
   emergency_mngr = emergency_checkpoint_manager.CheckpointManager(
       local_checkpoint_dir,
       p,
