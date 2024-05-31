@@ -317,13 +317,13 @@ class Decoder(nn.Module):
 
     RemattedBlockLayer = nn.remat(  # pylint: disable=invalid-name
         BlockLayer,
-        prevent_cse=not cfg.scan_layers,
+        prevent_cse=True,
         policy=policy,
         static_argnums=(-1, -2, -3, -4, -5),
     )
     if cfg.using_pipeline_parallelism:
         if cfg.num_layers_per_pipeline_stage == 1:
-          stage_module = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
+          stage_module = RemattedBlockLayer(config=cfg, mesh=mesh, quant=self.quant)
         elif cfg.scan_layers:
           stage_module = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_layers_per_pipeline_stage, "layers_per_stage", mesh)
         elif not cfg.scan_layers:

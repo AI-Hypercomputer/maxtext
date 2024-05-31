@@ -292,6 +292,20 @@ class Pipeline(nn.Module):
         "is_initializing": self.is_initializing(),
         "x_times": self.num_stages}
     )
+
+    if self.remat_policy is not None:
+      remat_policy = jax.checkpoint_policies.save_from_both_policies(
+          self.remat_policy,
+          jax.checkpoint_policies.save_only_these_names('iteration_input')
+      )
+    else:
+      remat_policy = jax.checkpoint_policies.save_only_these_names('iteration_input')
+    vmap_func = nn.remat(
+      vmap_func,
+      prevent_cse=True,
+      policy=remat_policy,
+      static_argnums=5
+    )
     return vmap_func
 
   def run_one_iteration(self, loop_state, positions, segment_ids, deterministic, model_mode, decoder_layer_instance):
@@ -440,6 +454,7 @@ class Pipeline(nn.Module):
         remat_fn = nn.remat(
           func_to_scan,
           prevent_cse=False, # prevent_cse not used with scan
+          # this is crazy fast
           policy=remat_policy
         )
         scan_func = nn.scan(
