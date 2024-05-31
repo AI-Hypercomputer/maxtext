@@ -194,3 +194,8 @@ else
     pip3 install -U -r requirements.txt
 fi
 [ -d ".git" ] && pre-commit install
+
+
+pip install libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html -U --pre
+pip install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
+pip install git+https://github.com/google/jax

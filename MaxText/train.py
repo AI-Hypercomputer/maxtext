@@ -333,6 +333,8 @@ def setup_mesh_and_model(config):
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
+   max_logging.log(f"The mesh on {jax.process_index()} is {mesh}")
+  max_logging.log(f"devices_array on {jax.process_index()} is {devices_array}")
 
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)

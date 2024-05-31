@@ -82,9 +82,3 @@ echo ""
 echo "You can run MaxText and your development tests inside of the docker image. Changes to your workspace will automatically
 be reflected inside the docker container."
 echo "Once you want you upload your docker container to GCR, take a look at docker_upload_runner.sh"
-
-
-pip install libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html -U --pre
-pip install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
-pip install git+https://github.com/google/jax
-pip install 'git+https://github.com/google/orbax/#subdirectory=checkpoint'
