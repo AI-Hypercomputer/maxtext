@@ -284,6 +284,9 @@ inference_microbenchmark_stages: "prefill,generate"
 inference_microbenchmark_loop_iters: 10
 inference_microbenchmark_log_file_path: ""
 
+# Maxengine Metrics
+prometheus_port: 0
+
 # Checkpoint Structured logging
 enable_checkpoint_cloud_logger: False
 enable_checkpoint_standard_logger: False
