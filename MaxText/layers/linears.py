@@ -265,6 +265,7 @@ class MoeBlock(nn.Module):
     num_experts_per_tok: Number of experts for each token.
     kernel_init: Kernel function, passed to the dense layers.
     kernel_axes: Tuple with axes to apply kernel function.
+    weight_dtype: Type for the weights.
     dtype: Type for the dense layer.
   """
 
@@ -273,40 +274,81 @@ class MoeBlock(nn.Module):
   num_experts_per_tok: int
   kernel_init: NdInitializer
   kernel_axes: Tuple[str, ...]
+  weight_dtype: DType = jnp.float32
   dtype: DType = jnp.float32
 
+  def generate_kernels(self, num_experts, base_emb_dim, mlp_dim):
+    
+    kernel_in_axis = np.arange(1)
+    kernel_out_axis = np.arange(1, 2)
+    kernel_init = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
+
+    kernel_axes = ('exp', 'embed', 'mlp')
+    wo_kernel_axes = ('exp', 'mlp', 'embed')
+    
+    w0_kernel = self.param(
+        'wi_0',
+        nn.with_logical_partitioning(kernel_init, kernel_axes),
+        (num_experts, base_emb_dim, mlp_dim),
+        self.weight_dtype,
+        kernel_in_axis,
+        kernel_out_axis,
+      )
+    w0_kernel = jnp.asarray(w0_kernel, self.dtype)
+    w1_kernel = self.param(
+        'wi_1',
+        nn.with_logical_partitioning(kernel_init, kernel_axes),
+        (num_experts, base_emb_dim, mlp_dim),
+        self.weight_dtype,
+        kernel_in_axis,
+        kernel_out_axis,
+      )
+    w1_kernel = jnp.asarray(w1_kernel, self.dtype)
+    wo_kernel = self.param(
+        'wo',
+        nn.with_logical_partitioning(kernel_init, wo_kernel_axes),
+        (num_experts, mlp_dim, base_emb_dim),
+        self.weight_dtype,
+        kernel_in_axis,
+        kernel_out_axis,
+      )
+    wo_kernel = jnp.asarray(wo_kernel, self.dtype)
+    return w0_kernel, w1_kernel, wo_kernel
+
   @nn.compact
-  def __call__(self, inputs, deterministic: bool = False):
+  def __call__(self, inputs):
+    cfg = self.config
+    inputs = inputs.astype(cfg.dtype)
     gate_logits = DenseGeneral(
-        self.num_experts,
-        dtype=self.dtype,
-        kernel_init=self.kernel_init,
-        kernel_axes=self.kernel_axes,
-        name="gate",
-        quant=self.quant,
-    )(inputs)
+            self.num_experts,
+            dtype=self.dtype,
+            kernel_init=self.kernel_init,
+            kernel_axes=self.kernel_axes,
+            name="gate")(inputs)
+    
+    top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+    flattened_top_k_weights = top_k_weights.reshape(-1, self.num_experts_per_tok)
 
-    weights, selected_experts = lax.top_k(gate_logits, self.num_experts_per_tok)
-    weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1)
-    mlp_lnx = jnp.zeros_like(inputs)
-    weights = weights.astype(self.dtype)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    softmax_probs = jax.nn.softmax(flattened_top_k_weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
+    softmax_probs = softmax_probs.reshape(gate_logits.shape[:-1] + (self.num_experts_per_tok,))
 
-    # TODO(ranran): have a better solution to remove the loop here
-    for k in range(self.num_experts):
-      weights_exp = jnp.sum(jnp.multiply(selected_experts == k, weights), axis=-1)
-      mlp_lnx_exp = MlpBlock(
-          intermediate_dim=self.config.mlp_dim,
-          activations=self.config.mlp_activations,
-          intermediate_dropout_rate=self.config.dropout_rate,
-          dtype=self.dtype,
-          weight_dtype=self.weight_dtype,
-          name=f"mlp_{k}",
-          config=self.config,
-      )(inputs, deterministic=deterministic)
+    weights = jnp.zeros_like(gate_logits)
+    index_update = (jnp.arange(gate_logits.shape[0])[:, None, None], jnp.arange(gate_logits.shape[1])[:, None], top_k_indices)
+    weights = weights.at[index_update].set(softmax_probs)
 
-      mlp_lnx_exp = nn.with_logical_constraint(mlp_lnx_exp, ("activation_batch", "activation_length", "activation_embed"))
-      mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
-      mlp_lnx += mlp_lnx_exp
-
-    return mlp_lnx
+    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts,
+                                                            cfg.base_emb_dim,
+                                                            cfg.mlp_dim)
+    
+    with jax.named_scope("wi_0"):
+      layer_w0 = jnp.einsum("BLE,NEH -> BLNH", inputs, w0_kernel)
+    with jax.named_scope("wi_1"):
+      layer_w1 = jnp.einsum("BLE,NEH -> BLNH", inputs, w1_kernel)
+    layer_w0_act = _convert_to_activation_function(cfg.mlp_activations[0])(layer_w0)
+    layer_multiply = jnp.multiply(layer_w0_act, layer_w1)
+    with jax.named_scope("wo"):
+      intermediate_layer = jnp.einsum("BLNH,NHE -> BLNE", layer_multiply, wo_kernel)
+    with jax.named_scope("w_sum"):
+      output = jnp.einsum("BLNE,BLN -> BLE", intermediate_layer, weights)
+    
+    return output
