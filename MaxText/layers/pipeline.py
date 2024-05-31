@@ -143,7 +143,7 @@ class Pipeline(nn.Module):
     sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(*dims_mapping))
     return jax.lax.with_sharding_constraint(x, sharding)
 
-    def get_microbatch_and_repeat_ids(self, loop_iteration):
+  def get_microbatch_and_repeat_ids(self, loop_iteration):
     '''Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and non-circular'''
     # Stage 0 has processed one microbatch every loop_iter, but Stage 1 is one behind due to bubble, etc for other stages
     microbatches_processed = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0) 
@@ -373,20 +373,7 @@ class Pipeline(nn.Module):
     
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1 
 
-    def func_to_scan(model,loop_state, xs):
-       # nn.scan can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
-       # the run_one_iteration in this method - the first argument model (i.e. self) is a nn.module instance.
-       return model.run_one_iteration(loop_state, positions, segment_ids, deterministic, model_mode, model.layers), None
-
-    variable_carry = []
-    variable_broadcast = ["params"] # All loop iterations need the weights for the full pipeline.  
-    if self.is_mutable_collection("non_trainable"):
-      variable_carry.append("non_trainable")
-    else:
-      variable_broadcast.append("non_trainable")
-
-    if self.is_initializing():
-     
+    if self.is_initializing():     
      vmap_func = self.get_main_vmap_func()
      if self.config.num_pipeline_repeats > 1:
        # To shard the weights on initialization for the circular pipeline we create weights of
@@ -411,7 +398,6 @@ class Pipeline(nn.Module):
         )
        
        example_inputs = jax.lax.broadcast(example_inputs, [self.config.num_pipeline_repeats])
-
        example_segmentation = jax.lax.broadcast(example_segmentation, [self.config.num_pipeline_repeats]) if example_segmentation is not None else None
        example_position = jax.lax.broadcast(example_position, [self.config.num_pipeline_repeats]) if example_position is not None else None
 
@@ -427,38 +413,49 @@ class Pipeline(nn.Module):
      broadcasted_stage_outpus = jax.lax.broadcast(stage_outputs[0], [self.config.global_batch_size_to_train_on // self.microbatch_size])
      return jnp.reshape(broadcasted_stage_outpus, [self.config.global_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim])
 
+    def run_iteration_scannable(model,loop_state, xs):
+       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
+       # the run_one_iteration in this method - the first argument model (i.e. self) is a nn.module instance.
+       return model.run_one_iteration(loop_state, positions, segment_ids, deterministic, model_mode, model.layers), None
+    if self.remat_policy is not None:
+      remat_policy = jax.checkpoint_policies.save_from_both_policies(
+          self.remat_policy,
+          jax.checkpoint_policies.save_only_these_names('iteration_input')
+      )
+    else:
+      remat_policy = jax.checkpoint_policies.save_only_these_names('iteration_input')
+    run_one_iteration_rematted = nn.remat(
+      run_iteration_scannable,
+      prevent_cse=False, # prevent_cse not used with scan
+      policy=remat_policy
+    )
+
     # The scan cannot be used on init since it broadcasts the weights, which aren't yet initialized.
     if self.config.scan_pipeline_iterations and not self.is_initializing():
-        if self.remat_policy is not None:
-          remat_policy = jax.checkpoint_policies.save_from_both_policies(
-              self.remat_policy,
-              jax.checkpoint_policies.save_only_these_names('iteration_input')
-          )
-        else:
-          remat_policy = jax.checkpoint_policies.save_only_these_names('iteration_input')
-        remat_fn = nn.remat(
-          func_to_scan,
-          prevent_cse=False, # prevent_cse not used with scan
-          policy=remat_policy
+      variable_carry = []
+      variable_broadcast = ["params"] # All loop iterations need the weights for the full pipeline.  
+      if self.is_mutable_collection("non_trainable"):
+        variable_carry.append("non_trainable")
+      else:
+        variable_broadcast.append("non_trainable")
+      run_all_iterations_scanned = nn.scan(
+        run_one_iteration_rematted,
+        variable_axes={
+          "summaries": 0,
+          "aux_loss": 0,
+          "intermediates": 0,
+          "hyper_params": 0,
+        },
+        variable_broadcast=variable_broadcast,
+        variable_carry=variable_carry,
+        # Dropout/aqt keys will be split for each iteration.
+        split_rngs={"random": True},
+        length=total_iterations,
         )
-        scan_func = nn.scan(
-          remat_fn,
-          variable_axes={
-            "summaries": 0,
-            "aux_loss": 0,
-            "intermediates": 0,
-            "hyper_params": 0,
-          },
-          variable_broadcast=variable_broadcast,
-          variable_carry=variable_carry,
-          # Dropout/aqt keys will be split for each iteration.
-          split_rngs={"random": True},
-          length=total_iterations,
-          )
-        loop_state, _ = scan_func(self, loop_state, None)
+      loop_state, _ = run_all_iterations_scanned(self, loop_state, None)
     else:
         for loop_iteration in range(total_iterations):
-            loop_state = self.run_one_iteration(loop_state, positions, segment_ids, deterministic, model_mode, self.layers)
+            loop_state, _ = run_one_iteration_rematted(self, loop_state, None)
 
     # The final output is located in the input/output array, however the output microbatches may be permuted relative to the input
     final_output = self.permute_output_ms_dim(loop_state["state_io"])
