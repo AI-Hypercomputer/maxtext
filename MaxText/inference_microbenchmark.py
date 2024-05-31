@@ -297,7 +297,9 @@ def main(config, inference_metadata: Optional[Dict[str, Any]] = None):
   results = collate_results(config, benchmark_results, model_size, cache_size, num_model_params)
   print_results_for_analyze(results)
   if inference_metadata:
-    flatten_microbenchmark_results = pyconfig.string_to_bool(inference_metadata.get('flatten_microbenchmark_results', 'false'))
+    flatten_microbenchmark_results = pyconfig.string_to_bool(
+      inference_metadata.get('flatten_microbenchmark_results', 'false')
+    )
   else:
     flatten_microbenchmark_results = 'false'
   results = write_results(
