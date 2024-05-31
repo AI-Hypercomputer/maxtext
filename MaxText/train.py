@@ -330,15 +330,6 @@ def setup_mesh_and_model(config):
 
   init_rng = random.PRNGKey(config.init_weights_seed)
   writer = max_utils.initialize_summary_writer(config)
-  logger = checkpointing.setup_checkpoint_logger(config)
-  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      config.checkpoint_dir,
-      config.enable_checkpointing,
-      config.async_checkpointing,
-      config.checkpoint_period,
-      config.dataset_type,
-      logger,
-  )
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
@@ -348,6 +339,19 @@ def setup_mesh_and_model(config):
   model = Transformer(config, mesh, quant=quant)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
+
+  abstract_state, _, _ = max_utils.get_abstract_state(
+      model, tx, config, init_rng, mesh, is_training=True
+  )
+  checkpoint_manager = (
+      checkpointing.create_orbax_emergency_checkpoint_manager(
+          config.local_checkpoint_dir,
+          config.checkpoint_dir,
+          mesh,
+          abstract_state,
+          config.checkpoint_period,
+      )
+  )
   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
 
 
@@ -450,8 +454,6 @@ def train_loop(config, state=None):
     print("Loading the compiled function...", flush=True)
     # Need to pass train signature and state to determine i/o shapes of train_state for now.
     p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
-    # TODO: p_eval_step is not yet supported in load_compiled
-    p_eval_step = None
     print("Loaded compiled function!", flush=True)
   else:
     p_train_step = jax.jit(
@@ -470,8 +472,6 @@ def train_loop(config, state=None):
           static_argnums=static_argnums_eval,
           donate_argnums=donate_argnums_eval,
       )
-    else:
-      p_eval_step = None
 
   local_metrics_file = open(config.metrics_file, "a", encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
