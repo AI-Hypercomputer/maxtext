@@ -109,7 +109,7 @@ def calculate_tflops_training_per_device(config, log=True):
   if config.num_experts > 1:
     # MoE: brute force implementation
     gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
-    total_ffn_flops = gate_flops + config.num_experts * total_ffn_flops
+    total_ffn_flops = gate_flops + config.num_experts_per_tok * total_ffn_flops
 
   qkv_flops = (
       2
