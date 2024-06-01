@@ -43,6 +43,12 @@ export TPU_STDERR_LOG_LEVEL=0
 export TF_CPP_MIN_LOG_LEVEL=0
 export TPU_MIN_LOG_LEVEL=0
 
+# hlo dump
+export XLA_FLAGS="--xla_dump_to=/tmp/xla_dump_file --xla_dump_hlo_pass_re=spmd|sharding"
+
+WORK_ID=$(curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/agent-worker-number)
+echo "WORK_ID=${WORK_ID}"
+
 # Train
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_megacore_fusion_allow_ags=false --xla_enable_async_collective_permute=true --xla_tpu_enable_ag_backward_pipelining=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
 python3 MaxText/$EXECUTABLE MaxText/configs/base.yml\
@@ -52,3 +58,7 @@ python3 MaxText/$EXECUTABLE MaxText/configs/base.yml\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\
     dataset_path=$DATASET_PATH use_iota_embed=true reuse_example_batch=1\
     dataset_type=synthetic gcs_metrics=true attention='flash' quantization="int8"
+
+if [[ $WORK_ID == '0' ]];then
+  gsutil -m cp -r /tmp/xla_dump_file "$OUTPUT_PATH/$RUN_NAME/xla"
+fi
