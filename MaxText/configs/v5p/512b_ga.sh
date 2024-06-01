@@ -46,7 +46,7 @@ export TPU_MIN_LOG_LEVEL=0
 # hlo dump
 export XLA_FLAGS="--xla_dump_to=/tmp/xla_dump_file --xla_dump_hlo_pass_re=spmd|sharding"
 
-WORK_ID=$(curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/agent-worker-number)
+WORK_ID=$(grep '^WORKER_ID' /tmp/tpu-env | cut -d "'" -f 2)
 echo "WORK_ID=${WORK_ID}"
 
 # Train
