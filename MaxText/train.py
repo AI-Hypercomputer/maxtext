@@ -580,6 +580,7 @@ def train_loop(config, state=None):
   mllog_utils.init_print(config, start_step)
   mllog_utils.init_stop()
   mllog_utils.run_start()
+  mllog_utils.block_start(config)
 
   prof = profiler.Profiler(config)
   for step in np.arange(start_step, config.steps):
@@ -627,7 +628,7 @@ def train_loop(config, state=None):
         eval_batch_count += 1
       eval_loss = cumulative_eval_metrics["total_loss"] / (cumulative_eval_metrics["total_weights"] + EPS)
       max_logging.log(f"average loss after {step=}: {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
-      mllog_utils.early_stop_check(config, step, eval_loss)
+      mllog_utils.early_stop_check(config, step, eval_loss, start_step)
       if eval_loss <= config.target_eval_loss:
         max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
         prof.deactivate()
