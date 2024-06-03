@@ -176,9 +176,9 @@ def configure_kv_quantization(config: Config):
   return False if not config.quantize_kvcache else True
 
 
-def quantize_kv(kv: Array):
+def quantize_kv(kv: Array, kv_axis: int):
   """Quantize key/values stored in kvcache."""
-  scale = jnp.max(jnp.abs(kv), axis=-1, keepdims=True)
+  scale = jnp.max(jnp.abs(kv), axis=kv_axis, keepdims=True)
   value = jnp.int8(jnp.rint(kv * (MAX_INT8 / scale)))
   return value, scale
 
