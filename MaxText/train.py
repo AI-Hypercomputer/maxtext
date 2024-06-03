@@ -519,6 +519,18 @@ def train_loop(config, state=None):
   local_metrics_file = open(config.metrics_file, "a", encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
+  if config.overwrite_ckpt_step > 0:
+    # hack overwrite state
+    def map_fn(key_path, value):
+      key_path_str = jax.tree_util.keystr(key_path)
+      if key_path_str in  (".step", ".opt_state[0].count", ".opt_state[1].count", ".opt_state.count", ".opt_state[<flat index 0>]"):
+        max_logging.log(f"overwrite step: {key_path_str}")
+        return jnp.array(config.overwrite_ckpt_step, dtype=jnp.int32)
+      else:
+        return value
+
+    state = jax.tree_util.tree_map_with_path(map_fn, state)
+
   start_step = get_first_step(state)  # this is the start_step for training
   first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
   if config.profiler != "" and first_profiling_step >= config.steps:
