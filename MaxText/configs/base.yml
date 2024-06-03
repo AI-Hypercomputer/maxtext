@@ -292,3 +292,4 @@ enable_checkpoint_standard_logger: False
 enable_single_controller: False
 
 overwrite_ckpt_step: -1
+pre_compile: True

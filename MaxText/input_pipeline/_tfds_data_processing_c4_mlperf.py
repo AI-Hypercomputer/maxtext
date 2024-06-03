@@ -205,17 +205,26 @@ def get_datasets(
 ):
   """Load and return dataset of batched examples for use during training."""
   # Training dataset.
-  read_config = tfds.ReadConfig(
+  train_read_config = tfds.ReadConfig(
+    shuffle_seed = config.data_shuffle_seed,
+    skip_prefetch = True,
+    input_context = tf.distribute.InputContext(
+      input_pipeline_id=dataloading_host_index,
+      num_input_pipelines=dataloading_host_count,
+    ),
+  )
+  # distributed file read
+  train_ds_builder = tfds.builder(config.dataset_name)
+  train_ds_builder.download_and_prepare()
+  train_ds = train_ds_builder.as_dataset(split='train2', read_config=train_read_config, shuffle_files=config.enable_data_shuffling)
+
+  eval_read_config = tfds.ReadConfig(
       shuffle_seed=config.data_shuffle_seed,
   )
-  train_ds_builder = tfds.builder(config.dataset_name)
-  train_ds = train_ds_builder.as_dataset(split="train2", read_config=read_config, shuffle_files=config.enable_data_shuffling)
-
   eval_ds_builder = tfds.builder(config.eval_dataset_name)
-  eval_ds = eval_ds_builder.as_dataset(split="validation_tokenized_5662seqs", read_config=read_config, shuffle_files=False)
+  eval_ds = eval_ds_builder.as_dataset(split="validation_tokenized_5662seqs", read_config=eval_read_config, shuffle_files=False)
 
   # shard the dataset as soon as it is loaded
-  train_ds = train_ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
   train_ds = rekey(train_ds, {"inputs": None, "targets": "text"})
 
   eval_ds = eval_ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
