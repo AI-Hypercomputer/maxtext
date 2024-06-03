@@ -290,3 +290,5 @@ enable_checkpoint_standard_logger: False
 
 # Single-controller
 enable_single_controller: False
+
+overwrite_ckpt_step: -1
