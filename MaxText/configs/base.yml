@@ -375,3 +375,4 @@ enable_single_controller: False
 allow_split_physical_axes: False
 
 overwrite_ckpt_step: -1
+pre_compile: True

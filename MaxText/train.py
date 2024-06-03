@@ -48,7 +48,7 @@ import register_jax_proxy_backend
 from vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
-from input_pipeline.input_pipeline_interface import create_data_iterator
+from input_pipeline.input_pipeline_interface import create_data_iterator, get_shaped_batch, get_shaped_batch_eval
 from layers import models
 
 import jax.numpy as jnp
@@ -433,6 +433,7 @@ def setup_train_loop(config):
       data_iterator,
       eval_data_iterator,
       state,
+      tx,
   )
 
 
@@ -459,6 +460,7 @@ def train_loop(config, state=None):
       data_iterator,
       eval_data_iterator,
       state,
+      tx,
   ) = setup_train_loop(config)
   # pylint: disable=line-too-long
   (
@@ -496,6 +498,39 @@ def train_loop(config, state=None):
     # TODO: p_eval_step is not yet supported in load_compiled
     p_eval_step = None
     print("Loaded compiled function!", flush=True)
+  elif config.pre_compile:
+    train_shaped_batch = get_shaped_batch(config)
+    # pre compile graph
+    shaped_rng = jax.ShapeDtypeStruct(init_rng.shape, init_rng.dtype)
+    # Shaped state
+    abstract_state, state_mesh_annotations, _ =  max_utils.get_abstract_state(model, tx, config, init_rng, mesh)
+    # Shaped batch
+    func_input_args = (abstract_state, train_shaped_batch, shaped_rng)
+    func_input_kwargs = {}
+
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      p_train_step_lower = jax.jit(
+        functional_train,
+        in_shardings=in_shard_train,
+        out_shardings=out_shard_train,
+        static_argnums=static_argnums_train,
+        donate_argnums=donate_argnums_train).lower(*func_input_args, **func_input_kwargs)
+
+    p_train_step = p_train_step_lower.compile()
+
+    if eval_data_iterator:
+      eval_shaped_batch = get_shaped_batch_eval(config, mesh)
+      func_input_args = (abstract_state, eval_shaped_batch, shaped_rng)
+      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        p_eval_step_lower = jax.jit(
+          functional_eval,
+          in_shardings=in_shard_eval,
+          out_shardings=out_shard_eval,
+          static_argnums=static_argnums_eval,
+          donate_argnums=donate_argnums_eval,
+        ).lower(*func_input_args, **func_input_kwargs)
+
+      p_eval_step = p_eval_step_lower.compile()
   else:
     p_train_step = jax.jit(
         functional_train,
