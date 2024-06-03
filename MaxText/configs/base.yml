@@ -165,11 +165,10 @@ per_device_batch_size: 12.0
 expansion_factor_real_data: -1 # if -1 then all hosts will load real data, else total_hosts//expansion_factor_real_data will pull data from GCS.
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
-# dataset_type must be c4, c4-array_record, hf or synthetic
+# dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md
-dataset_type: c4
-# for TFDS input pipeline (dataset_type=c4) and Grain input pipeline (dataset_type:c4-array_record)
-# TODO (aireenmei): will rename the flags to be more clear (corresponding to each input pipeline)
+dataset_type: tfds
+# for TFDS input pipeline (dataset_type=tfds)
 dataset_path: ""
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
@@ -179,9 +178,9 @@ hf_path: ''
 hf_data_dir: ''
 hf_data_files: ''
 hf_access_token: ''
-
-# Setting for grain
-grain_worker_count: 4
+# for Grain input pipeline (dataset_type=grain)
+grain_data_files: ''
+grain_worker_count: 1
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
