@@ -213,6 +213,7 @@ logical_axis_rules: [
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence']],
                       ['embed_no_exp', ['fsdp', 'sequence']],
                       ['norm', 'tensor'],
+                      ['bias', 'tensor'],
                       ['heads', ['tensor', 'autoregressive']],
                       ['layers', 'stage'],
                       ['kv', []],
