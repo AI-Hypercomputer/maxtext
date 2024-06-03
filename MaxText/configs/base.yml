@@ -171,7 +171,7 @@ dataset_type: c4
 # for TFDS input pipeline (dataset_type=c4) and Grain input pipeline (dataset_type:c4-array_record)
 # TODO (aireenmei): will rename the flags to be more clear (corresponding to each input pipeline)
 dataset_path: "gs://mlperf-llm-public2"
-dataset_name: 'c4/en:3.0.1'
+dataset_name: 'c4/en:3.0.4'
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
 # for HuggingFace input pipeline (dataset_type=hf)
