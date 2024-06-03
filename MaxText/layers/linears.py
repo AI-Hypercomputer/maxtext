@@ -99,6 +99,7 @@ class DenseGeneral(nn.Module):
   kernel_axes: Tuple[str, ...] = ()
   quant: Optional[Quant] = None
   use_bias: bool = False
+  bias_axis: Tuple[str, ...] = ()
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -147,7 +148,9 @@ class DenseGeneral(nn.Module):
     output = compute_dot_general(inputs, kernel, axis, contract_ind)
 
     if self.use_bias:
-      bias_axes, bias_shape = self.kernel_axes[-len(features) :], kernel_shape[-len(features) :]
+      bias_shape = kernel_shape[-len(features) :]
+      bias_axes = self.bias_axis if self.bias_axis else self.kernel_axes[-len(features) :]
+
       bias = self.param(
           "bias",
           nn.with_logical_partitioning(bias_init, bias_axes),
@@ -261,6 +264,7 @@ class MlpBlock(nn.Module):
         name="wo",
         quant=self.quant,
         use_bias=self.use_bias,
+        bias_axis=("bias", ),
     )(x)
 
     output = checkpoint_name(output, "mlpwo")
