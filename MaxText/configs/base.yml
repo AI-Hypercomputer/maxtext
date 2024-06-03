@@ -223,7 +223,7 @@ max_corpus_chars: 10_000_000
 dataset_type: tfds
 # for TFDS input pipeline (dataset_type=tfds)
 dataset_path: "gs://mlperf-llm-public2"
-dataset_name: 'c4/en:3.0.1'
+dataset_name: 'c4/en:3.0.4'
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
 # for HuggingFace input pipeline (dataset_type=hf)
