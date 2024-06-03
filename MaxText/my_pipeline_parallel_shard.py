@@ -14,8 +14,6 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 global mesh
 mesh = Mesh(jax.devices(), ('stages',))
 
-def parallel_body():
-  # rawr
 def predict(params, inputs):
   for layer in params:
     inputs = jnp.dot(inputs, layer)
@@ -46,7 +44,10 @@ def stage_fn(layer, inputs):
   return jax.nn.relu(inputs)
 
 def predict_pp(params, inputs):
-  outputs = spmd_pipeline(stage_fn, params, inputs)
+  if args.use_overlapped:
+    outputs = spmd_pipeline_overlapped(stage_fn, params, inputs)
+  else:
+    outputs = spmd_pipeline(stage_fn, params, inputs)
   return outputs
 
 @partial(shard_map, mesh=mesh, in_specs=((P('stages')), P('stages')),
@@ -64,17 +65,71 @@ def get_real_permute_pairs(loop_iteration, num_stages):
   else:
     return [(i, (i+1) % num_stages) for i in range(loop_iteration + 1)]
 
+# overlapped
+# non-overallped
+def spmd_pipeline_overlapped(fn, stage_params, inputs):
+  stage = jax.lax.axis_index('stages')
+  outputs = jnp.zeros_like(inputs) * jnp.nan
+  #state = jnp.zeros((args.microbatch_size, args.embed_size)) * jnp.nan
+  current_input = jnp.zeros((args.microbatch_size, args.embed_size)) * jnp.nan
+  prev_output = jnp.zeros((args.microbatch_size, args.embed_size)) * jnp.nan
+
+
+  # TODO: double the bubble stages
+  for loop_iter in range(args.num_microbatches+args.num_layers-1):
+    # Push new input into stage 0
+    current_input = current_input.at[:].set(jnp.where(stage == 0, inputs[loop_iter % args.microbatches_per_stage], current_input[:]))
+
+
+
+    # compute
+    # new_previous_output = compute(current_input)
+    # We want to pass something of shape [embed, embed] instead, so we index away the first unit axis.
+    # Fake/ poorly named argument, just repeating the same matmul per layer
+    new_previous_output = current_input
+    for _ in range(args.num_layers_per_stage):
+      # Shard map is rank preserving, so the params have shape [1,embed,embed] inside each shard
+      new_previous_output = fn(stage_params[0], new_previous_output)
+
+    # Store outputs
+    # This stores the last stages output, may need to be modified because larger initial bubble
+    outputs = outputs.at[(loop_iter-args.num_layers+1) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, new_previous_output, outputs[(loop_iter-args.num_layers+1) % args.microbatches_per_stage]))
+
+
+    # communicate (permute)
+    # next_input = communicate_collective_permte(previous_output)
+    # state, inputs, outputs = shift(loop_iter, state, inputs, outputs)
+
+    # Split the 3 rotations into their own function for easier xprof code tracing
+    next_input = shift_stages(loop_iter, prev_output)
+    inputs = shift_inputs(loop_iter, inputs)
+    outputs = shift_outputs(loop_iter, outputs)
+    #next_input, inputs, outputs = shift(loop_iter, prev_output, inputs, outputs)
+
+    current_input, prev_output = next_input, new_previous_output
+
+  outputs = jax.lax.ppermute(outputs, 'stages', [(i, (i+1) % args.num_stages) for i in range(args.num_stages)])
+  return outputs
+
+# non-overallped
 def spmd_pipeline(fn, stage_params, inputs):
   stage = jax.lax.axis_index('stages')
   outputs = jnp.zeros_like(inputs) * jnp.nan
   state = jnp.zeros((args.microbatch_size, args.embed_size)) * jnp.nan
   for loop_iter in range(args.num_microbatches+args.num_layers-1):
     state = state.at[:].set(jnp.where(stage == 0, inputs[loop_iter % args.microbatches_per_stage], state[:]))
-    # Shard map is rank preserving, so the params have shape [1,embed,embed] inside each shard
-    # We want to pass something of shape [embed, embed] instead, so we index away the first unit axis.
-    state = fn(stage_params[0], state)
+    inputs = shift_inputs(loop_iter, inputs)
+     # Fake/ poorly named argument, just repeating the same matmul per layer
+    for _ in range(args.num_layers_per_stage):
+      # Shard map is rank preserving, so the params have shape [1,embed,embed] inside each shard
+      # We want to pass something of shape [embed, embed] instead, so we index away the first unit axis.
+      state = fn(stage_params[0], state)
     outputs = outputs.at[(loop_iter-args.num_layers+1) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, state, outputs[(loop_iter-args.num_layers+1) % args.microbatches_per_stage]))
-    state, inputs, outputs = shift(loop_iter, state, inputs, outputs)
+
+    state = shift_stages(loop_iter, state)
+    # inputs = shift_inputs(loop_iter, inputs)
+    outputs = shift_outputs(loop_iter, outputs)
+    #state, inputs, outputs = shift(loop_iter, state, inputs, outputs)
   outputs = jax.lax.ppermute(outputs, 'stages', [(i, (i+1) % args.num_stages) for i in range(args.num_stages)])
   return outputs
 
@@ -97,6 +152,29 @@ def shift(i, state, inputs, outputs):
     outputs = sh(outputs, +1)
   return state, inputs, outputs
 
+def shift_stages(i, state):
+  sh = lambda x, d: jax.lax.ppermute(x, 'stages', [(i, (i+d) % args.num_stages) for i in range(args.num_stages)])
+  if args.remove_dummy_comms:
+    permute_pairs = get_real_permute_pairs(i, args.num_stages)
+    state_sh = lambda x, d: jax.lax.ppermute(x, 'stages', permute_pairs)
+  else:
+    state_sh = sh
+  
+  state = state_sh(state, +1)
+  return state
+
+def shift_inputs(i, inputs):
+  sh = lambda x, d: jax.lax.ppermute(x, 'stages', [(i, (i+d) % args.num_stages) for i in range(args.num_stages)])
+  if (i % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage):
+    inputs = sh(inputs, +1)
+  return inputs
+
+def shift_outputs(i, outputs):
+  sh = lambda x, d: jax.lax.ppermute(x, 'stages', [(i, (i+d) % args.num_stages) for i in range(args.num_stages)])
+  if ((i-args.num_layers+1) % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage):
+    outputs = sh(outputs, +1)
+  return outputs
+
 def main():
   import argparse
   parser = argparse.ArgumentParser(description='Sharding and size settings')
@@ -106,6 +184,8 @@ def main():
   parser.add_argument('--embed_size', type=int, default=2048)
   parser.add_argument('--num_microbatches', type=int, default=4)
   parser.add_argument('--remove_dummy_comms', action=argparse.BooleanOptionalAction, default=True)
+  parser.add_argument('--use_overlapped', action=argparse.BooleanOptionalAction, default=False)
+  parser.add_argument('--num_layers_per_stage', type=int, default=1) # Fake/ poorly named argument, just repeating the same matmul per layer to increase the model AI
   global args
   args = parser.parse_args()
     
