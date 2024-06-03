@@ -20,6 +20,9 @@ import jax
 import json
 import sys
 
+from collections.abc import MutableMapping
+from typing import Any, Dict, Optional
+
 from jetstream.engine import token_utils
 
 import max_utils
@@ -170,10 +173,25 @@ def collate_results(config, results, model_size, cache_size, num_model_params, i
   return results
 
 
-def write_results(results, filename):
+def flatten_dict(dictionary, prefix='', sep='_'):
+  results = []
+  for k, v in dictionary.items():
+    new_key = str(prefix) + sep + str(k) if prefix else k
+    if isinstance(v, MutableMapping):
+      results.extend(flatten_dict(v, new_key, sep=sep).items())
+    else:
+      results.append((new_key, v))
+  return dict(results)
+
+
+def write_results(results, filename, flatten_microbenchmark_results):
+  """Write the results microbenchmark results to a json file."""
+  if flatten_microbenchmark_results:
+    results['flattened_results'] = flatten_dict(results)
   if filename != "":
     with open(filename, "w", encoding="utf-8") as f:
       json.dump(results, f, indent=2)
+  return results
 
 
 def print_results_for_analyze(results):
@@ -218,7 +236,7 @@ def summarize_prefill_result(engine, params, tokens, true_length):
   }
 
 
-def main(config):
+def main(config, inference_metadata: Optional[Dict[str, Any]] = None):
   engine = maxengine.MaxEngine(config)
   params = engine.load_params()
   prefill_lengths = [int(l) for l in config.inference_microbenchmark_prefill_lengths.split(",")]
@@ -277,8 +295,19 @@ def main(config):
       config, engine, params, decode_state, engine.max_concurrent_decodes, cache_size, model_size, benchmark_loop_iters)
 
   results = collate_results(config, benchmark_results, model_size, cache_size, num_model_params)
-  write_results(results, filename=config.inference_microbenchmark_log_file_path)
   print_results_for_analyze(results)
+  if inference_metadata:
+    flatten_microbenchmark_results = pyconfig.string_to_bool(
+      inference_metadata.get('flatten_microbenchmark_results', 'false')
+    )
+  else:
+    flatten_microbenchmark_results = 'false'
+  results = write_results(
+    results,
+    filename=config.inference_microbenchmark_log_file_path,
+    flatten_microbenchmark_results=flatten_microbenchmark_results
+  )
+  return results
 
 
 if __name__ == "__main__":

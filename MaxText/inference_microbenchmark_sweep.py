@@ -1,0 +1,156 @@
+"""
+Copyright 2024 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+     https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
+
+"""Sweep across inference microbenchmarks."""
+
+import os
+import sys
+import json
+import jsonlines
+import inference_microbenchmark
+import max_utils
+import pyconfig
+from jax._src.lib import xla_extension
+
+
+def main():
+  """
+  User needs to set the config's inference_metadata_file, which is a path to a
+  json file.
+
+  This json should contain the following keys:
+    - key_value_axis_order_product_id_list: comma separated string of key_value_axis_order_product_id
+    - prefill_key_axis_order_list: comma delimited string of prefill_key_axis_order
+    - prefill_value_axis_order_list: comma delimited string of prefill_value_axis_order
+    - ar_key_axis_order_list: comma delimited string of ar_key_axis_order
+    - ar_value_axis_order_list: comma delimited string of ar_value_axis_order
+    - accelerator: name of the accelerator
+    - flatten_microbenchmark_results: Whether or not to flatten results. Should
+      be true
+  """
+  pyconfig.initialize(sys.argv)
+  config = pyconfig.config
+  base_run_name = config.run_name
+
+  with open(config.inference_metadata_file, encoding='utf-8') as json_file:
+    inference_metadata = json.load(json_file)
+    print(f"inference_metadata: {inference_metadata}")
+
+  key_value_axis_order_product_id_list = inference_metadata['key_value_axis_order_product_id_list'].split(':')
+  prefill_key_axis_order_list = inference_metadata['prefill_key_axis_order_list'].split(':')
+  prefill_value_axis_order_list = inference_metadata['prefill_value_axis_order_list'].split(':')
+  ar_key_axis_order_list = inference_metadata['ar_key_axis_order_list'].split(':')
+  ar_value_axis_order_list = inference_metadata['ar_value_axis_order_list'].split(':')
+
+  start_key_value_axis_order_product_id = key_value_axis_order_product_id_list[0]
+  end_key_value_axis_order_product_id = key_value_axis_order_product_id_list[-1]
+
+  results = []
+  for (
+    key_value_axis_order_product_id,
+    prefill_key_axis_order,
+    prefill_value_axis_order,
+    ar_key_axis_order,
+    ar_value_axis_order,
+  ) in zip(
+    key_value_axis_order_product_id_list,
+    prefill_key_axis_order_list,
+    prefill_value_axis_order_list,
+    ar_key_axis_order_list,
+    ar_value_axis_order_list,
+  ):
+    print(f"key_value_axis_order_product_id {key_value_axis_order_product_id}")
+    print(f"prefill_key_axis_order {prefill_key_axis_order}")
+    print(f"prefill_value_axis_order {prefill_value_axis_order}")
+    print(f"ar_key_axis_order {ar_key_axis_order}")
+    print(f"ar_value_axis_order {ar_value_axis_order}")
+
+    run_tag = (
+      f"{key_value_axis_order_product_id}-{prefill_key_axis_order.replace(',','')}-{ar_key_axis_order.replace(',','')}"
+    )
+    run_name = f"{base_run_name}/{run_tag}"
+
+    tensorboard_dir = os.path.join(config.base_output_directory, run_name, "tensorboard", "")
+    pyconfig._config.keys['prefill_key_axis_order'] = prefill_key_axis_order # pylint: disable=protected-access
+    pyconfig._config.keys['prefill_value_axis_order'] = prefill_value_axis_order # pylint: disable=protected-access
+    pyconfig._config.keys['ar_key_axis_order'] = ar_key_axis_order # pylint: disable=protected-access
+    pyconfig._config.keys['ar_value_axis_order'] = ar_value_axis_order # pylint: disable=protected-access
+    pyconfig._config.keys['tensorboard_dir'] = tensorboard_dir # pylint: disable=protected-access
+    pyconfig._config.keys['run_name'] = run_name # pylint: disable=protected-access
+    max_utils.write_config_raw_keys_for_gcs(pyconfig._config.keys) # pylint: disable=protected-access
+
+    # Prepare metadata (dimensions) json for XLML
+    dimensions_json = {
+      "base_output_directory": config.base_output_directory,
+      "model_name": config.model_name,
+      "tokenizer": config.tokenizer_path,
+      "weight_dtype": config.weight_dtype,
+      "inference_microbenchmark_prefill_lengths": f"{config.inference_microbenchmark_prefill_lengths}",
+      "inference_microbenchmark_stages": config.inference_microbenchmark_stages,
+      "inference_microbenchmark_loop_iters": f"{config.inference_microbenchmark_loop_iters}",
+      "max_prefill_predict_length": f"{config.max_prefill_predict_length}",
+      "max_target_length": f"{config.max_target_length}",
+      "per_device_batch_size": f"{config.per_device_batch_size}",
+      "ici_fsdp_parallelism": f"{config.ici_fsdp_parallelism}",
+      "ici_autoregressive_parallelism": f"{config.ici_autoregressive_parallelism}",
+      "ici_tensor_parallelism": f"{config.ici_tensor_parallelism}",
+      "profiler": f"{config.profiler}",
+      "scan_layers": f"{config.scan_layers}",
+      "quantization": config.quantization,
+      "quantize_kvcache": f"{config.quantize_kvcache}",
+      "attention": config.attention,
+      "key_value_axis_order_product_id": f"{key_value_axis_order_product_id}",
+      "prefill_key_axis_order": f"{prefill_key_axis_order}",
+      "prefill_value_axis_order": f"{prefill_value_axis_order}",
+      "ar_key_axis_order": f"{ar_key_axis_order}",
+      "ar_value_axis_order": f"{ar_value_axis_order}",
+      "run_name": f"{run_name}",
+      "run_tag": f"{run_tag}",
+      "config_json_string": json.dumps(
+          pyconfig._config.keys, # pylint: disable=protected-access
+          default=lambda x: f"<<non-serializable: {type(x).__qualname__}>>"
+        )
+    }
+    dimensions_json = {
+      **dimensions_json,
+      **inference_metadata,
+    }
+    try:
+      microbenchmark_results = inference_microbenchmark.main(config, inference_metadata=inference_metadata)
+      metrics = microbenchmark_results['flattened_results']
+      metrics = {k.lower(): v for k, v in metrics.items()}
+      dimensions_json['oom'] = 'False'
+      print(f"Completed run {key_value_axis_order_product_id} out of: "
+            f"{start_key_value_axis_order_product_id} to {end_key_value_axis_order_product_id}")
+    except xla_extension.XlaRuntimeError:
+      # OOM
+      metrics = {}
+      dimensions_json['oom'] = 'True'
+      print(f"Failed at run {key_value_axis_order_product_id} out of: "
+            f"{start_key_value_axis_order_product_id} to {end_key_value_axis_order_product_id}")
+
+    final = {'metrics': metrics, 'dimensions': dimensions_json}
+    print(f"Result: {final}")
+    results.append(final)
+
+  print(f"All results {results}")
+  path = 'inference_microbenchmark_sweep_results.jsonl'
+  with jsonlines.open(path, mode="w") as writer:
+    writer.write_all(results)
+
+
+if __name__ == "__main__":
+  main()
