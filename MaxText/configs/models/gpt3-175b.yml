@@ -32,7 +32,6 @@ use_iota_embed: True
 fused_qkv: True
 opt_type: "adam_pax"
 decoder_block: "gpt3"
-dataset_path: "gs://mlperf-llm-public2"
 dataset_name: "c4/en:3.0.4"
 eval_dataset_name: "c4/en:3.0.5"
 gradient_clipping_threshold: 1.
