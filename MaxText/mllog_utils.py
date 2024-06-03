@@ -30,6 +30,17 @@ def run_start():
   if jax.process_index() == 0:
     mllogger.start(mllog.constants.RUN_START)
 
+def block_start(config):
+  if jax.process_index() == 0:
+    eval_frequency_tokens = config.eval_interval * config.global_batch_size_to_train_on * config.max_target_length
+    mllogger.start(
+      mllog.constants.BLOCK_START,
+      metadata={
+        'epoch_count': eval_frequency_tokens,
+        'first_epoch_num': 0,
+      },
+    )
+
 def init_print(config, start_step):
   """an initial mllog for mlperf sumbission compliance check."""
   if jax.process_index() == 0:
@@ -58,12 +69,12 @@ def init_print(config, start_step):
     mllogger.event(mllog.constants.EVAL_SAMPLES, 24567)
     mllogger.event(mllog.constants.SEED, config.data_shuffle_seed)
 
-def early_stop_check(config, step, eval_loss):
+def early_stop_check(config, step, eval_loss, start_step):
   """an early stop function with mllog for mlperf sumbission compliance check."""
   is_early_stop = eval_loss <= config.target_eval_loss
   if jax.process_index() == 0:
     eval_frequency_tokens = config.eval_interval * config.global_batch_size_to_train_on * config.max_target_length
-    current_epoch_num = step * config.global_batch_size_to_train_on * config.max_target_length
+    current_epoch_num = (step - start_step) * config.global_batch_size_to_train_on * config.max_target_length
     first_epoch_num = current_epoch_num - eval_frequency_tokens
     mllogger.end(
       mllog.constants.BLOCK_STOP,
