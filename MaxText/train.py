@@ -40,6 +40,7 @@ import checkpointing
 import max_utils
 import maxtext_utils
 import max_logging
+import mllog_utils
 import optimizers
 import profiler
 import pyconfig
@@ -409,6 +410,7 @@ def setup_train_loop(config):
     data_iterator:
     state: the initialized train state
   """
+  mllog_utils.init_start()
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
 
@@ -575,6 +577,10 @@ def train_loop(config, state=None):
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
+  mllog_utils.init_print(config, start_step)
+  mllog_utils.init_stop()
+  mllog_utils.run_start()
+
   prof = profiler.Profiler(config)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
@@ -621,6 +627,7 @@ def train_loop(config, state=None):
         eval_batch_count += 1
       eval_loss = cumulative_eval_metrics["total_loss"] / (cumulative_eval_metrics["total_weights"] + EPS)
       max_logging.log(f"average loss after {step=}: {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
+      mllog_utils.early_stop_check(config, step, eval_loss)
       if eval_loss <= config.target_eval_loss:
         max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
         prof.deactivate()
