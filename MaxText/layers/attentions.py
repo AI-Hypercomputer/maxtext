@@ -766,9 +766,6 @@ class AttentionOp(nn.Module):
     assert cached_prefill_key_var[0].value.shape == self.cached_kv_shape((batch, self.max_prefill_predict_length, heads, kv_head_size), self.prefill_key_axis_order)
     assert cached_prefill_value_var[0].value.shape == self.cached_kv_shape((batch, self.max_prefill_predict_length, heads, kv_head_size), self.prefill_value_axis_order)
 
-    assert cached_prefill_key_var[0].value.shape == self.cached_kv_shape((batch, self.max_prefill_predict_length, heads, kv_head_size), self.prefill_key_axis_order)
-    assert cached_prefill_value_var[0].value.shape == self.cached_kv_shape((batch, self.max_prefill_predict_length, heads, kv_head_size), self.prefill_value_axis_order)
-
     cached_prefill = (
         self.prefill_cache_var_model_var(cached_prefill_key_var, key.dtype, self.prefill_key_axis_order),
         self.prefill_cache_var_model_var(cached_prefill_value_var, value.dtype, self.prefill_value_axis_order),
