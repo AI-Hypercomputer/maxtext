@@ -335,55 +335,85 @@ class AttentionOp(nn.Module):
     """Query-Key product.
 
     Args:
-      query: Query projection, in shape of [b, t, n, d], where b: batch size, t:
-        query length, n: number of heads, d: project dimension.
-      key: Key projection in shape of [b, s, n_kv, d] for where s: key length, n_kv is
-        kv heads (sometimes k). The number of group for query is n // n_kv (sometimes g).
+      query: Query projection, in shape of [b, t, n, d]
+      key: Key projection in shape of [b, s, n_kv, d]
 
     Returns:
-      results in shape [b, n_kv, n // n_kv,  t, s].
+      results in shape [b, n_kv, n // n_kv, t, s].
+
+    Annotations:
+      b: batch size
+      t: query length
+      s: key / value length
+      d: head / kv dimension
+      n: number of query heads
+      n_kv: number of kv heads, sometimes annotated as k
+      n // n_kv: number of group for query, sometimes annotated with g
     """
     b, t, n, d = query.shape
     n_kv = key.shape[-2]
     assert n_kv == self.num_kv_heads
     query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
     result = jnp.einsum("btkgd,bskd->bkgts", query, key)
-    return result  # (4, 8, 1, 1, 6)
+    return result
 
   def wv_product(self, attn_weights: Array, value: Array) -> Array:
     """weighted value product.
 
     Args:
-      attn_weights: Computed results of qk_einsum, in shape [batch_size, num_kv_heads, group_size, q_len, k_len].
-      value: Value projection, in shape of [batch_size, v_len, num_kv_heads, kv_dim].
+      attn_weights: Computed results of qk_einsum, in shape [b, n_kv, n // n_kv, t, s]
+      value: Value projection, in shape of [b, s, n_kv, d]
 
     Returns:
-      result in shape [batch_size, q_len, num_kv_heads * group_size, kv_dim]
+      result in shape [b, t, n, d]
+
+    Annotations:
+      b: batch size
+      t: query length
+      s: key / value length
+      d: head / kv dimension
+      n: number of query heads
+      n_kv: number of kv heads, sometimes annotated as k
+      n // n_kv: number of group for query, sometimes annotated with g
     """
     out = jnp.einsum("bkgts,bskd->btkgd", attn_weights, value)
     b, t, n_kv, g, d = out.shape
     result = jnp.reshape(out, (b, t, n_kv * g, d))
     return result
 
-  def revert_kvlen_axis(self, kv, cached_axis_order):
-    """Revert key/value length axis.
+  def revert_kv_cache(self, kv, cached_axis_order):
+    """Revert key/value cache to logical shape.
 
     Args:
-      kv: in shape [b, ..., n, d, s].
+      kv: reshaped kv as defined in cached_axis_order
 
     Returns:
-      reshaped kv as [b, ..., s, n, d]
+      revert kv to logical shape as [b, s, n_kv, d]
+
+    Annotations:
+      b: batch size
+      s: key / value length
+      n_kv: number of kv heads, sometimes annotated as k
+      d: head / kv dimension
+
     """
     return jax.numpy.moveaxis(kv, (0, 1, 2, 3), cached_axis_order)
 
-  def move_kvlen_axis(self, kv, cached_axis_order):
-    """Move key/value length axis to the end.
+  def reshape_kv_cache(self, kv, cached_axis_order):
+    """Reshape key/value cache as defined in cached_axis_order.
 
     Args:
-      kv: in shape [b, ..., s, n, d].
+      kv: in logical shape as [b, s, n_kv, d]
 
     Returns:
-      reshaped kv as [b, ..., n, d, s]
+      reshaped kv as defined in cached_axis_order
+
+    Annotations:
+      b: batch size
+      s: key / value length
+      n_kv: number of kv heads, sometimes annotated as k
+      d: head / kv dimension
+
     """
     axis_order_to_index_mapping = {a:i for i, a in enumerate(cached_axis_order)}
     axis_destination = tuple([i for a, i in sorted(axis_order_to_index_mapping.items())])
@@ -395,14 +425,21 @@ class AttentionOp(nn.Module):
   def cached_kv_shape(self, kv_shape, cached_axis_order):
     """Cached KV shape.
 
-    The key and value have dimension [batch, length, num_heads, head_dim], but
-    we cache them as [length, num_heads, batch, head_dim, ] for optimized read/write performance.
+    The key and value have dimension [b, s, n_kv, d], but
+    we cache them as defined in cached_axis_order for optimized read/write performance.
 
     Args:
-      kv_shape: shape of key or value for caching, as [b, ..., s, n, d].
+      kv_shape: shape of key or value for caching, as [b, s, n_kv, d].
 
     Returns:
-      Swapped kv_shape as [b, ..., n, d, s] for cache.
+      Swapped kv_shape as defined in cached_axis_order for cache.
+
+    Annotations:
+      b: batch size
+      s: key / value length
+      n_kv: number of kv heads, sometimes annotated as k
+      d: head / kv dimension
+
     """
     return tuple([kv_shape[i] for i in cached_axis_order])
 
@@ -577,8 +614,8 @@ class AttentionOp(nn.Module):
     prefill_key_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.prefill_key_axis_order)
     prefill_value_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.prefill_value_axis_order)
 
-    key_shaped_for_cache = self.move_kvlen_axis(key, self.prefill_key_axis_order)
-    value_shaped_for_cache = self.move_kvlen_axis(value, self.prefill_value_axis_order)
+    key_shaped_for_cache = self.reshape_kv_cache(key, self.prefill_key_axis_order)
+    value_shaped_for_cache = self.reshape_kv_cache(value, self.prefill_value_axis_order)
 
     if self.quantize_kvcache:
       key_shaped_for_cache, key_scale = quantizations.quantize_kv(key_shaped_for_cache, prefill_key_layout.index(CACHE_KV))
@@ -619,9 +656,9 @@ class AttentionOp(nn.Module):
     cached_value_var, cached_value_scale_var = cached_value_vars
 
     # In order to update the key, value caches with the current key and
-    # value, we move the length axis to the back
-    one_token_key_shaped_for_cache = self.move_kvlen_axis(one_token_key, self.ar_key_axis_order)
-    one_token_value_shaped_for_cache = self.move_kvlen_axis(one_token_value, self.ar_value_axis_order)
+    # value, we reshape the one_token_key and one_token_value
+    one_token_key_shaped_for_cache = self.reshape_kv_cache(one_token_key, self.ar_key_axis_order)
+    one_token_value_shaped_for_cache = self.reshape_kv_cache(one_token_value, self.ar_value_axis_order)
 
     ar_key_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.ar_key_axis_order)
     ar_value_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.ar_value_axis_order)
@@ -669,16 +706,16 @@ class AttentionOp(nn.Module):
       ar_key = quantizations.unquantize_kv(cached_key_var.value, cached_key_scale_var.value, one_token_key.dtype)
       ar_value = quantizations.unquantize_kv(cached_value_var.value, cached_value_scale_var.value, one_token_value.dtype)
 
-    # Move the keys and values back to their original shapes.
-    return self.revert_kvlen_axis(ar_key, self.ar_key_axis_order), self.revert_kvlen_axis(ar_value, self.ar_value_axis_order)
+    # Revert the keys and values back to original logical shapes.
+    return self.revert_kv_cache(ar_key, self.ar_key_axis_order), self.revert_kv_cache(ar_value, self.ar_value_axis_order)
 
   def prefill_cache_var_model_var(self, cache_var, target_dtype, cache_axis_order):
     if not self.quantize_kvcache:
-      return self.revert_kvlen_axis(cache_var[0].value, cache_axis_order)
+      return self.revert_kv_cache(cache_var[0].value, cache_axis_order)
     else:
       raw_cache, quant_scale = cache_var
       raw_cache_unquantized = quantizations.unquantize_kv(raw_cache.value, quant_scale.value, target_dtype)
-      return self.revert_kvlen_axis(raw_cache_unquantized, cache_axis_order)
+      return self.revert_kv_cache(raw_cache_unquantized, cache_axis_order)
 
   def kv_cache_autoregressive(
       self,
@@ -722,10 +759,12 @@ class AttentionOp(nn.Module):
     )
     cache_ar_index.value = jnp.mod(cache_ar_index.value + 1, self.max_target_length - self.max_prefill_predict_length)
 
-    # Prep and return both prefill and ar caches
+    # The below retrieves the existing prefill cache variables, not creating new ones
     cached_prefill_key_var, cached_prefill_value_var, cached_prefill_segment_id = self._get_prefill_cache(
         batch, heads, kv_head_size, self.quantize_kvcache
     )
+    assert cached_prefill_key_var[0].value.shape == self.cached_kv_shape((batch, self.max_prefill_predict_length, heads, kv_head_size), self.prefill_key_axis_order)
+    assert cached_prefill_value_var[0].value.shape == self.cached_kv_shape((batch, self.max_prefill_predict_length, heads, kv_head_size), self.prefill_value_axis_order)
 
     assert cached_prefill_key_var[0].value.shape == self.cached_kv_shape((batch, self.max_prefill_predict_length, heads, kv_head_size), self.prefill_key_axis_order)
     assert cached_prefill_value_var[0].value.shape == self.cached_kv_shape((batch, self.max_prefill_predict_length, heads, kv_head_size), self.prefill_value_axis_order)
@@ -740,15 +779,15 @@ class AttentionOp(nn.Module):
   def kv_cache(self, key: Array, value: Array, decoder_segment_ids: Array, model_mode: str) -> tuple:
     """KV cache takes the current state and updates the state accordingly.
 
-    The key and value have dimension [batch, length, num_heads, head_dim],
-    but we cache them as [batch, num_heads, head_dim, length] as a TPU
+    The key and value have dimension [b, s, n_kv, d],
+    but we cache them with a reshape as defined in *_axis_order config as a TPU
     fusion optimization. This also enables the "scatter via one-hot
     broadcast" trick, which means we do a one-hot broadcast instead of a
     scatter/gather operations, resulting in a 3-4x speedup in practice.
 
     Args:
-      key: in shape [b, s, n, d].
-      value: in shape [b, s, n, d].
+      key: in shape [b, s, n_kv, d].
+      value: in shape [b, s, n_kv, d].
       model_mode: model mode controlling model
 
     Returns:
