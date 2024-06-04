@@ -76,11 +76,13 @@ def spmd_pipeline_overlapped(fn, stage_params, inputs):
 
 
   # TODO: double the bubble stages
-  for loop_iter in range(args.num_microbatches+args.num_layers-1):
+
+  #num_total_iterations = args.num_microbatches+args.num_layers-1 # regular
+  num_total_iterations = args.num_microbatches + 2 * (args.num_layers-1) # double bubble
+  for loop_iter in range(num_total_iterations):
     # Push new input into stage 0
     current_input = current_input.at[:].set(jnp.where(stage == 0, inputs[loop_iter % args.microbatches_per_stage], current_input[:]))
-
-
+    inputs = shift_inputs(loop_iter, inputs)
 
     # compute
     # new_previous_output = compute(current_input)
@@ -92,8 +94,8 @@ def spmd_pipeline_overlapped(fn, stage_params, inputs):
       new_previous_output = fn(stage_params[0], new_previous_output)
 
     # Store outputs
-    # This stores the last stages output, may need to be modified because larger initial bubble
-    outputs = outputs.at[(loop_iter-args.num_layers+1) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, new_previous_output, outputs[(loop_iter-args.num_layers+1) % args.microbatches_per_stage]))
+    output_offset = loop_iter - 2 * (args.num_stages - 1) # regular just loop_iter - (args.num_stages - 1)
+    outputs = outputs.at[output_offset % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, new_previous_output, outputs[output_offset % args.microbatches_per_stage]))
 
 
     # communicate (permute)
@@ -102,7 +104,7 @@ def spmd_pipeline_overlapped(fn, stage_params, inputs):
 
     # Split the 3 rotations into their own function for easier xprof code tracing
     next_input = shift_stages(loop_iter, prev_output)
-    inputs = shift_inputs(loop_iter, inputs)
+    # inputs = shift_inputs(loop_iter, inputs)
     outputs = shift_outputs(loop_iter, outputs)
     #next_input, inputs, outputs = shift(loop_iter, prev_output, inputs, outputs)
 
