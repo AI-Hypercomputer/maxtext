@@ -39,7 +39,7 @@ import max_utils
 import maxtext_utils
 import max_logging
 import optimizers
-import profiler
+# import profiler
 import pyconfig
 # pylint: disable-next=unused-import
 import register_jax_proxy_backend
@@ -494,10 +494,11 @@ def train_loop(config, state=None):
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
-  prof = profiler.Profiler(config)
+  # prof = profiler.Profiler(config)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
-      prof.activate()
+      max_utils.activate_profiler(config)
+      # prof.activate()
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       example_batch = load_next_batch(data_iterator, example_batch, config)
@@ -534,11 +535,13 @@ def train_loop(config, state=None):
       max_logging.log(f"average loss after {step=}: {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
       if eval_loss <= config.target_eval_loss:
         max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
-        prof.deactivate()
+        max_utils.deactivate_profiler(config)
+        # prof.deactivate()
         break
 
     if step == last_profiling_step:
-      prof.deactivate()
+      max_utils.deactivate_profiler(config)
+      # prof.deactivate()
 
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()

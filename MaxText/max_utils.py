@@ -669,3 +669,13 @@ def summarize_pytree_data(params, name="Params", raw=False):
             f"\tTotal memory usage: {total_param_size:.3f} bytes \n"
             f"\tAvg size: {avg_param_size:.3f} bytes\n")
   return num_params, total_param_size, avg_param_size
+
+def activate_profiler(config, optional_postfix=""):
+  if config.enable_profiler and (config.upload_all_profiler_results or jax.process_index() == 0):
+    output_path = os.path.join(config.tensorboard_dir, optional_postfix)
+    jax.profiler.start_trace(output_path)
+
+
+def deactivate_profiler(config):
+  if config.enable_profiler and (config.upload_all_profiler_results or jax.process_index() == 0):
+    jax.profiler.stop_trace()

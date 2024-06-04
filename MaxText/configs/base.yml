@@ -210,6 +210,7 @@ autoregressive_decode_assert: ""
 # For nsys profiler, pass the training command to nsys command
 # e.g. nsys profile -s none --force-overwrite true --capture-range=cudaProfilerApi --capture-range-end=stop {training command} 
 profiler: "" # Supported profiler: '', xplane, nsys
+enable_profiler: false
 # If set to true, upload all profiler results from all hosts. Otherwise, only upload the profiler result from the first host.
 upload_all_profiler_results: False
 # Skip first n steps for profiling, to omit things like compilation and to give
