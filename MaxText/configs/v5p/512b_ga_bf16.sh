@@ -16,8 +16,6 @@ echo "Running 512b.sh"
 
 
 # Stop execution if any command exits with error
-set -e
-
 export PLATFORM="gce"
 export EXECUTABLE="train.py" # or train_compile.py
 
