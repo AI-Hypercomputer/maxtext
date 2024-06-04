@@ -52,6 +52,7 @@ echo "WORK_ID=${WORK_ID}"
 # Train
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_megacore_fusion_allow_ags=false --xla_enable_async_collective_permute=true --xla_tpu_enable_ag_backward_pipelining=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
 python3 MaxText/$EXECUTABLE MaxText/configs/base.yml\
+    skip_first_n_steps_for_profiler=15 profiler=xplane\
     steps=20 per_device_batch_size=2 enable_checkpointing=false\
     remat_policy=save_qkv_proj global_parameter_scale=512\
     ici_fsdp_parallelism=-1 ici_tensor_parallelism=8\
@@ -62,3 +63,5 @@ python3 MaxText/$EXECUTABLE MaxText/configs/base.yml\
 if [[ $WORK_ID == '0' ]];then
   gsutil -m cp -r /tmp/xla_dump_file "$OUTPUT_PATH/$RUN_NAME/xla"
 fi
+
+gsutil -m cp -r /tmp/tpu_logs "$OUTPUT_PATH/$RUN_NAME/tpu_logs"
