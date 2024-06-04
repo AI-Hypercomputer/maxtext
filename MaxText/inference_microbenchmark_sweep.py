@@ -43,6 +43,7 @@ def main():
   """
   pyconfig.initialize(sys.argv)
   config = pyconfig.config
+  base_run_name = config.run_name
 
   with open(config.inference_metadata_file, encoding='utf-8') as json_file:
     inference_metadata = json.load(json_file)
@@ -53,6 +54,9 @@ def main():
   prefill_value_axis_order_list = inference_metadata['prefill_value_axis_order_list'].split(':')
   ar_key_axis_order_list = inference_metadata['ar_key_axis_order_list'].split(':')
   ar_value_axis_order_list = inference_metadata['ar_value_axis_order_list'].split(':')
+
+  start_key_value_axis_order_product_id = key_value_axis_order_product_id_list[0]
+  end_key_value_axis_order_product_id = key_value_axis_order_product_id_list[-1]
 
   results = []
   for (
@@ -74,25 +78,17 @@ def main():
     print(f"ar_key_axis_order {ar_key_axis_order}")
     print(f"ar_value_axis_order {ar_value_axis_order}")
 
-    # Manually update the config
-    # Don't set key_value_axis_order_product_id; otherwise it will recompute
-    # ar_key_axis_order and ar_value_axis_order
-    quant = 'bf16' if not config.quantization else config.quantization
-    run_name = (
-      f"{inference_metadata['accelerator']}-{config.model_name}-"
-      f"{quant}-{key_value_axis_order_product_id}-{prefill_key_axis_order}-"
-      f"{ar_key_axis_order}"
+    run_tag = (
+      f"{key_value_axis_order_product_id}-{prefill_key_axis_order.replace(',','')}-{ar_key_axis_order.replace(',','')}"
     )
+    run_name = f"{base_run_name}/{run_tag}"
+
     tensorboard_dir = os.path.join(config.base_output_directory, run_name, "tensorboard", "")
-    checkpoint_dir = os.path.join(config.base_output_directory, run_name, "checkpoint", "")
-    metrics_dir = os.path.join(config.base_output_directory, run_name, "metrics", "")
     pyconfig._config.keys['prefill_key_axis_order'] = prefill_key_axis_order # pylint: disable=protected-access
     pyconfig._config.keys['prefill_value_axis_order'] = prefill_value_axis_order # pylint: disable=protected-access
     pyconfig._config.keys['ar_key_axis_order'] = ar_key_axis_order # pylint: disable=protected-access
     pyconfig._config.keys['ar_value_axis_order'] = ar_value_axis_order # pylint: disable=protected-access
     pyconfig._config.keys['tensorboard_dir'] = tensorboard_dir # pylint: disable=protected-access
-    pyconfig._config.keys['checkpoint_dir'] = checkpoint_dir # pylint: disable=protected-access
-    pyconfig._config.keys['metrics_dir'] = metrics_dir # pylint: disable=protected-access
     pyconfig._config.keys['run_name'] = run_name # pylint: disable=protected-access
     max_utils.write_config_raw_keys_for_gcs(pyconfig._config.keys) # pylint: disable=protected-access
 
@@ -121,6 +117,8 @@ def main():
       "prefill_value_axis_order": f"{prefill_value_axis_order}",
       "ar_key_axis_order": f"{ar_key_axis_order}",
       "ar_value_axis_order": f"{ar_value_axis_order}",
+      "run_name": f"{run_name}",
+      "run_tag": f"{run_tag}",
       "config_json_string": json.dumps(
           pyconfig._config.keys, # pylint: disable=protected-access
           default=lambda x: f"<<non-serializable: {type(x).__qualname__}>>"
@@ -135,10 +133,14 @@ def main():
       metrics = microbenchmark_results['flattened_results']
       metrics = {k.lower(): v for k, v in metrics.items()}
       dimensions_json['oom'] = 'False'
+      print(f"Completed run {key_value_axis_order_product_id} out of: "
+            f"{start_key_value_axis_order_product_id} to {end_key_value_axis_order_product_id}")
     except xla_extension.XlaRuntimeError:
       # OOM
       metrics = {}
       dimensions_json['oom'] = 'True'
+      print(f"Failed at run {key_value_axis_order_product_id} out of: "
+            f"{start_key_value_axis_order_product_id} to {end_key_value_axis_order_product_id}")
 
     final = {'metrics': metrics, 'dimensions': dimensions_json}
     print(f"Result: {final}")
