@@ -100,6 +100,7 @@ class LlamaDecoderLayer(nn.Module):
         prefill_value_axis_order=tuple([int(i) for i in cfg.prefill_value_axis_order.split(",")]),
         ar_key_axis_order=tuple([int(i) for i in cfg.ar_key_axis_order.split(",")]),
         ar_value_axis_order=tuple([int(i) for i in cfg.ar_value_axis_order.split(",")]),
+        reshape_q=cfg.reshape_q,
     )
 
     attention_lnx = attention_layer(

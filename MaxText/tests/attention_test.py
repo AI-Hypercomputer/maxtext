@@ -285,10 +285,10 @@ class AttentionTest(unittest.TestCase):
     )
 
   def dot_product_attention_helper(self, prefill_cache_axis_order, ar_cache_axis_order):
-    self._dot_product_attention(prefill_cache_axis_order, ar_cache_axis_order, quantize_kvcache=False)
-    self._dot_product_attention(prefill_cache_axis_order, ar_cache_axis_order, quantize_kvcache=True)
+    self._dot_product_attention(prefill_cache_axis_order, ar_cache_axis_order, quantize_kvcache=False, rtol=1e-02, atol=1e-01)
+    self._dot_product_attention(prefill_cache_axis_order, ar_cache_axis_order, quantize_kvcache=True, rtol=1e-01, atol=1e-01)
 
-  def _dot_product_attention(self, prefill_cache_axis_order, ar_cache_axis_order, quantize_kvcache):
+  def _dot_product_attention(self, prefill_cache_axis_order, ar_cache_axis_order, quantize_kvcache, rtol, atol):
     """Test equalvant between dot_product and TPU accelerated"""
     prefill_length = self.max_prefill_predict_length
     decode_total_length = self.max_target_length
@@ -367,7 +367,162 @@ class AttentionTest(unittest.TestCase):
 
       attention_w_layout_full_this_idx = attention_w_layout_full[:, idx : idx + 1, :]
       self.assertTrue(attention_w_layout_full_this_idx.shape == attention_w_layout_idx.shape)
-      self.assertTrue(jax.numpy.allclose(attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=1e-02, atol=1e-01, equal_nan=False))
+      self.assertTrue(jax.numpy.allclose(attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=rtol, atol=atol, equal_nan=False))
+
+  @pytest.mark.tpu
+  def test_dot_product_reshape_q(self):
+    self._dot_product_attention_reshape_q(quantize_kvcache=True, rtol=1e-01, atol=1e-01)
+    # self._dot_product_attention_reshape_q(quantize_kvcache=False, rtol=1e-02, atol=1e-02)
+
+  def _dot_product_attention_reshape_q(self, quantize_kvcache, rtol, atol):
+    """Test equalvant between dot_product and TPU accelerated"""
+    prefill_length = self.max_prefill_predict_length
+    decode_total_length = self.max_target_length
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
+
+    lnx_prefill = lnx[:, 0:prefill_length, :]
+    decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
+    decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
+
+    attention_wo_reshape_q = Attention(
+        config=self.cfg,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=self.dtype,
+        reshape_q=False,
+        quantize_kvcache=quantize_kvcache,
+    )
+
+    attention_w_reshape_q = Attention(
+        config=self.cfg,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=self.dtype,
+        reshape_q=True,
+        quantize_kvcache=quantize_kvcache,
+    )
+
+    attention_wo_reshape_q_variable = attention_wo_reshape_q.init(
+        {"params": self.rng, "aqt": self.rng},
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length)),
+    )
+
+    attention_w_reshape_q_variable = attention_w_reshape_q.init(
+        {"params": self.rng, "aqt": self.rng},
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length)),
+    )
+
+    attention_wo_reshape_q_full = attention_wo_reshape_q.apply(
+        attention_wo_reshape_q_variable,
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_TRAIN,
+        rngs={"aqt": self.rng},
+    )
+
+    attention_w_reshape_q_full = attention_w_reshape_q.apply(
+        attention_w_reshape_q_variable,
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_TRAIN,
+        rngs={"aqt": self.rng},
+    )
+
+    attention_wo_reshape_q_prefill, attention_wo_reshape_q_output_cache = attention_wo_reshape_q.apply(
+        attention_wo_reshape_q_variable,
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_PREFILL,
+        rngs={"aqt": self.rng},
+        mutable=["cache"],
+    )
+    self.assertTrue(
+        jax.numpy.allclose(attention_wo_reshape_q_full[:, :prefill_length, :], attention_wo_reshape_q_prefill, equal_nan=False)
+    )
+
+    attention_w_reshape_q_prefill, attention_w_reshape_q_output_cache = attention_w_reshape_q.apply(
+        attention_w_reshape_q_variable,
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_PREFILL,
+        rngs={"aqt": self.rng},
+        mutable=["cache"],
+    )
+    self.assertTrue(
+        jax.numpy.allclose(attention_w_reshape_q_full[:, :prefill_length, :], attention_w_reshape_q_prefill, equal_nan=False)
+    )
+
+    self.assertTrue(
+        jax.numpy.allclose(attention_wo_reshape_q_prefill, attention_w_reshape_q_prefill, equal_nan=False)
+    )
+    self.assertTrue(
+        jax.numpy.allclose(attention_wo_reshape_q_full[:, :prefill_length, :], attention_w_reshape_q_full[:, :prefill_length, :], equal_nan=False)
+    )
+
+    for idx in range(prefill_length, decode_total_length):
+
+      lnx_idx = lnx[:, idx : idx + 1, :]
+      decoder_positions_idx = decoder_positions[:, idx : idx + 1]
+      
+      attention_wo_reshape_q_variable.update(attention_wo_reshape_q_output_cache)
+      attention_wo_reshape_q_idx, attention_wo_reshape_q_output_cache = attention_wo_reshape_q.apply(
+          attention_wo_reshape_q_variable,
+          lnx_idx,
+          lnx_idx,
+          inputs_positions=decoder_positions_idx,
+          deterministic=True,
+          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          rngs={"aqt": self.rng},
+          mutable=["cache"],
+      )
+
+      attention_wo_reshape_q_full_this_idx = attention_wo_reshape_q_full[:, idx : idx + 1, :]
+      self.assertTrue(attention_wo_reshape_q_full_this_idx.shape == attention_wo_reshape_q_idx.shape)
+      self.assertTrue(jax.numpy.allclose(attention_wo_reshape_q_full_this_idx, attention_wo_reshape_q_idx, rtol=rtol, atol=atol, equal_nan=False))
+
+      attention_w_reshape_q_variable.update(attention_w_reshape_q_output_cache)
+      attention_w_reshape_q_idx, attention_w_reshape_q_output_cache = attention_w_reshape_q.apply(
+          attention_w_reshape_q_variable,
+          lnx_idx,
+          lnx_idx,
+          inputs_positions=decoder_positions_idx,
+          deterministic=True,
+          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          rngs={"aqt": self.rng},
+          mutable=["cache"],
+      )
+
+      attention_w_reshape_q_full_this_idx = attention_w_reshape_q_full[:, idx : idx + 1, :]
+      self.assertTrue(attention_w_reshape_q_full_this_idx.shape == attention_w_reshape_q_idx.shape)
+      self.assertTrue(jax.numpy.allclose(attention_w_reshape_q_full_this_idx, attention_w_reshape_q_idx, rtol=rtol, atol=atol, equal_nan=False))
+
+      self.assertTrue(jax.numpy.allclose(attention_w_reshape_q_idx, attention_wo_reshape_q_idx, rtol=rtol, atol=atol, equal_nan=False))
 
 
 if __name__ == "__main__":

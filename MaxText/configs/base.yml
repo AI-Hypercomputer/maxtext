@@ -291,6 +291,7 @@ prefill_key_axis_order: "1,2,0,3"
 prefill_value_axis_order: "1,2,0,3"
 ar_key_axis_order: "1,2,0,3"
 ar_value_axis_order: "1,2,0,3"
+reshape_q: False
 
 # Maxengine Metrics
 prometheus_port: 0
