@@ -125,11 +125,11 @@ class MistralDecoderLayer(nn.Module):
     if cfg.num_experts > 1:
       # TODO(ranran): remove for loop implementation after adding expert parallelism
       if cfg.moe_matmul:
-        max_logging.log("Running MoE matmul implementation.")
         mlp_lnx = linears.MoeBlock(
             config=cfg,
             num_experts=cfg.num_experts,
             num_experts_per_tok=cfg.num_experts_per_tok,
+            mesh=mesh,
             kernel_init=initializers.nd_dense_init(1.0, 'fan_in', 'truncated_normal'),
             kernel_axes=('embed', 'mlp'),
             dtype=cfg.dtype,
