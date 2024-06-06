@@ -111,9 +111,6 @@ class PipelineParallelismTest(unittest.TestCase):
         for layer in range(config.num_decoder_layers):
             cur_layer_params = get_cur_layer_params(params, layer)
             cur_layer_params['params'] = cur_layer_params['params']['layers']
-            if config.num_pipeline_repeats > 1 and config.num_layers_per_pipeline_stage > 1:
-              cur_layer_params['params'] = meta.remove_axis(cur_layer_params['params'], 0, {nn.PARTITION_NAME:"circular_repeats"})
-              cur_layer_params['params'] = meta.remove_axis(cur_layer_params['params'], 0, {nn.PARTITION_NAME:"layers"})
             reg_layer_activations, _ = single_pipeline_stage.apply(cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode)
         return reg_layer_activations
 
