@@ -289,7 +289,9 @@ def main(config, inference_metadata: Optional[Dict[str, Any]] = None):
         prefill_true_lengths[prefill_length],
         benchmark_loop_iters
       )
-      benchmark_results["insert"][prefill_length]["time_in_ms"] = prefill_insert_time - benchmark_results["prefill"][prefill_length]["time_in_ms"]
+      benchmark_results["insert"][prefill_length]["time_in_ms"] = (
+        prefill_insert_time - benchmark_results["prefill"][prefill_length]["time_in_ms"]
+      )
 
   if "generate" in stages_to_benchmark:
     benchmark_results["autoregressive"], decode_state = ar_benchmark(
