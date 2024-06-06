@@ -509,6 +509,8 @@ def train_loop(config, state=None):
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, step=step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        #jax.ad_checkpoint.print_saved_residuals(p_train_step, state, example_batch, nextrng)
+        #assert 1 > 2
         state, metrics = p_train_step(state, example_batch, nextrng)
 
     new_time = datetime.datetime.now()

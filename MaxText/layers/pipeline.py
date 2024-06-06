@@ -426,9 +426,10 @@ class Pipeline(nn.Module):
       remat_policy = jax.checkpoint_policies.save_only_these_names('iteration_input')
     run_one_iteration_rematted = nn.remat(
       run_iteration_scannable,
-      prevent_cse=False, # prevent_cse not used with scan
+      prevent_cse=True, # prevent_cse not used with scan
       policy=remat_policy
     )
+    #run_one_iteration_rematted = run_iteration_scannable
 
     # The scan cannot be used on init since it broadcasts the weights, which aren't yet initialized.
     if self.config.scan_pipeline_iterations and not self.is_initializing():

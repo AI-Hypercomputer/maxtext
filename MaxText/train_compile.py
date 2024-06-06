@@ -167,6 +167,5 @@ def main(argv: Sequence[str]) -> None:
   print(f"Cost analysis: {compiled.cost_analysis()}")
   print(f"Memory analysis: {compiled.memory_analysis()}")
 
-
 if __name__ == "__main__":
   app.run(main)

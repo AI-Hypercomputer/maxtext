@@ -24,19 +24,25 @@ def my_outer_vmap_func(y, x):
     big_x = jax.lax.broadcast(x, [VMAP_DIM])
     def my_broadcast(leaf):
         return jax.lax.broadcast(leaf, [VMAP_DIM])
-        
+    jax.vmap()
     big_y = jax.tree.map(my_broadcast, y)
-    breakpoint()
     vmap_inner = jax.vmap(my_inner_func)
     for _ in range(NUM_OUTER_LOOPS):
         big_x = vmap_inner(big_y, big_x)
     return jnp.sum(big_x, axis=0)
-    
+
+def my_outer_vmap_activations_func(y, x):
+    big_x = jax.lax.broadcast(x, [VMAP_DIM])
+    vmap_inner = jax.vmap(my_inner_func, in_axes=[None, 0])
+    for _ in range(NUM_OUTER_LOOPS):
+        big_x = vmap_inner(y, big_x)
+    return jnp.sum(big_x, axis=0)
 
 def my_loss_func(y,x):
-    #x = my_outer_func(y, x)
-    x = my_inner_func(y, x)
-    #x = my_outer_vmap_func(y, x)
+    x = my_outer_func(y, x)
+    #x = my_inner_func(y, x)
+    # x = my_outer_vmap_func(y, x)
+    x = my_outer_vmap_activations_func(y, x)
     return jnp.linalg.norm(x - x_targets)
 
 NUM_INNER_LOOPS = 3
