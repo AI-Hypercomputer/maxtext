@@ -101,14 +101,7 @@ class PipelineParallelismTest(unittest.TestCase):
     def regular_sequential_layers(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):     
         def get_cur_layer_params(params, layer_idx):
           def get_cur_layer_params_arr(leaf):
-            # Reshape layers into a linear list of layers, e.g. [repeat, stage] into [layers]  
-            if config.num_pipeline_repeats > 1 and config.num_layers_per_pipeline_stage == 1:
-              new_shape = (leaf.shape[0] * leaf.shape[1],) + leaf.shape[2:]
-              leaf = jnp.reshape(leaf, new_shape) # [repeat, stage] -> [layers]  
-            elif config.num_pipeline_repeats > 1 and config.num_layers_per_pipeline_stage > 1:
-              new_shape = (leaf.shape[0] * leaf.shape[1] * leaf.shape[2],) + leaf.shape[3:]
-              leaf = jnp.reshape(leaf, new_shape) # [repeat, stage, layers_per_stage] -> [layers]
-            elif config.num_pipeline_repeats == 1 and config.num_layers_per_pipeline_stage > 1:
+            if config.num_layers_per_pipeline_stage > 1:
               new_shape = (leaf.shape[0] * leaf.shape[1],) + leaf.shape[2:]
               leaf = jnp.reshape(leaf, new_shape) # [stage, layers_per_stage] -> [layers]
             return leaf[layer_idx]
@@ -132,40 +125,6 @@ class PipelineParallelismTest(unittest.TestCase):
     assert_same_output_and_grad(regular_sequential_layers_dummy_loss, pipeline_parallelism_dummy_loss, init_pipeline_params, inputs, inputs_segmentation, inputs_position, deterministic, model_mode, dummy_targets)
 
   @pytest.mark.tpu
-  def test_circular_minimum_microbatches_same_output_and_grad(self):
-     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 4 microbatches
-     pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
-        enable_checkpointing=False,
-        run_name="circular_minimum_microbatches",
-        max_target_length=128,
-        base_emb_dim=28,
-        ici_pipeline_parallelism=4,
-        base_num_decoder_layers=8,
-        num_pipeline_microbatches=4,
-        per_device_batch_size=4
-     )
-     config = pyconfig.config
-     self.assert_pipeline_same_output_and_grad(config)
-
-  @pytest.mark.tpu
-  def test_circular_extra_microbatches_same_output_and_grad(self):
-     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
-     pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
-        enable_checkpointing=False,
-        run_name="circular_extra_microbatches",
-        max_target_length=128,
-        base_emb_dim=28,
-        ici_pipeline_parallelism=4,
-        base_num_decoder_layers=8,
-        num_pipeline_microbatches=8,
-        per_device_batch_size=4
-     )
-     config = pyconfig.config
-     self.assert_pipeline_same_output_and_grad(config)
-
-  @pytest.mark.tpu
   def test_non_circular_same_output_and_grad(self):
      # 4 stages, 4 layers (no circular repeats, 1 layer per stage), 4 microbatches
      pyconfig.initialize(
@@ -183,8 +142,8 @@ class PipelineParallelismTest(unittest.TestCase):
      self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu
-  def test_full_train(self):
-    # Run a full train.py call with 4 stages, 32 layers (2 layers per stage, 4 circular repeats), 8 microbatches
+  def test_full_train_non_circular(self):
+    # Run a full train.py call with 4 stages, 32 layers (8 layers per stage), 8 microbatches
     train_main([
           None,
           "configs/base.yml",
@@ -204,7 +163,7 @@ class PipelineParallelismTest(unittest.TestCase):
           "steps=3",
           "enable_checkpointing=False",
           "ici_pipeline_parallelism=4",
-          "num_layers_per_pipeline_stage=2",
+          "num_layers_per_pipeline_stage=8",
           "num_pipeline_microbatches=8",
           
     ])
