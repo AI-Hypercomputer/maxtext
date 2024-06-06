@@ -17,6 +17,7 @@ limitations under the License.
 """Inference microbenchmark for prefill and autoregressive steps."""
 import datetime
 import jax
+import jax.numpy as jnp
 import json
 import sys
 
@@ -235,6 +236,156 @@ def summarize_prefill_result(engine, params, tokens, true_length):
     "avg_cache_param_size": avg_prefill_cache_param_size,
   }
 
+# NOTE: this logic goes into jetstream or caller of maxengine.py (micro benchmark script)
+def get_tokens_multipack(dataset, vocab, batch_size, max_seq_length):
+  prefill_true_lengths = {}
+  prefill_tokens = {}
+  prefill_token_indices = {}
+  prefill_token_sizes = {}
+  prefill_data_indices = {}
+  data_idx = 0
+  for i in range(batch_size):
+    final_tokens, final_true_length = jax.numpy.zeros(max_seq_length), 0
+    while True:
+      print(f"Processing batch {i}, data_idx {data_idx}")
+      cur_tokens, cur_true_length = token_utils.tokenize_and_pad(
+        dataset[data_idx]['input'], vocab, is_bos=True, prefill_lengths=[max_seq_length]
+      )
+      if final_true_length + cur_true_length >= max_seq_length:
+        prefill_tokens[i] = final_tokens
+        prefill_true_lengths[i] = final_true_length
+        break
+      if not final_true_length:
+        final_tokens = cur_tokens
+      else:
+        final_tokens = jax.numpy.concatenate(
+          [final_tokens[:final_true_length], cur_tokens[:cur_true_length]])
+        final_tokens = jnp.resize(final_tokens, max_seq_length)
+      if i not in prefill_token_indices:
+        prefill_token_indices[i] = []
+        prefill_token_sizes[i] = []
+        prefill_data_indices[i] = []
+      prefill_token_indices[i].append(final_true_length)
+      prefill_token_sizes[i].append(cur_true_length)
+      prefill_data_indices[i].append(data_idx) 
+      final_true_length += cur_true_length
+      data_idx += 1
+ 
+  return prefill_tokens, prefill_true_lengths, prefill_token_indices, prefill_token_sizes, prefill_data_indices
+
+# NOTE: This logic went into maxengine.py - prefill call
+def get_position_and_indicators(prefill_token_sizes, prefill_true_lengths, max_seq_length):
+  positions = {}
+  seq_indicators = {}
+  for i in range(len(prefill_token_sizes)):
+    cur_positions = []
+    cur_indicators = []
+    for idx, l in enumerate(prefill_token_sizes[i]):
+      cur_indicators.append(jnp.full(l, idx + 1))
+      cur_positions.append(jnp.arange(0, l))
+    cur_indicators.append(jnp.zeros(max_seq_length - prefill_true_lengths[i]))
+    cur_positions.append(jnp.zeros(max_seq_length - prefill_true_lengths[i])) 
+    positions[i] = jnp.expand_dims(jnp.concatenate(cur_positions), 0)
+    seq_indicators[i] = jnp.expand_dims(jnp.concatenate(cur_indicators), 0)
+  return positions, seq_indicators
+
+# NOTE: on jetstream side
+def get_tokens(dataset, vocab, batch_size):
+  prefill_true_lengths = {}
+  prefill_tokens = {}
+  for i in range(0, batch_size):
+    prefill_tokens[i], prefill_true_lengths[i] = token_utils.tokenize_and_pad(
+      dataset[i]['input'], vocab, is_bos=True, prefill_lengths=[1024]
+    )
+  return prefill_tokens, prefill_true_lengths
+
+# NOTE: calling prefill to generate kv cache
+def get_kv_cache(config, engine, params, decode_state, prompt_tokens, prompt_true_lengths, multiprompt_sizes):
+  prefill_results = {}
+  batch_size = len(prompt_tokens)
+  total_slots = engine.max_concurrent_decodes
+  for i in range(batch_size):
+    prefill_results[i] = engine.prefill(
+      params=params, padded_tokens=prompt_tokens[i], true_length=prompt_true_lengths[i], multiprompt_sizes=multiprompt_sizes
+    )
+  jax.block_until_ready(decode_state)
+  return prefill_results
+
+# NOTE: This logic went into maxengine.py - prefill call
+def unpack_kv_cache(prefill_results, prefill_token_sizes, prefill_data_indices, max_seq_length):
+  split_prefill_results = {}
+  for i in range(batch_size):
+    end_idx = 0
+    for j, length in enumerate(prefill_token_sizes[i]):
+      start_idx = 0
+      end_idx = start_idx + length
+
+      def _split_cache(partial_cache):
+        return jnp.resize(partial_cache[start_idx:end_idx, :, :, :], (max_seq_length, *partial_cache.shape[1:]))
+
+      cur_cache = jax.tree_util.tree_map(_split_cache, prefill_results[i]["cache"])
+      cur_prefill_result = {
+        # TODO: The logits field below is incorrectly set
+        "logits": prefill_results[i]["logits"].copy(),
+        "cache": cur_cache,
+        "next_pos": prefill_results[i]["next_pos"].copy(),
+        "generated_tokens": prefill_results[i]["generated_tokens"].copy(),
+      }
+      split_prefill_results[prefill_data_indices[i][j]] = cur_kv_cache
+  return split_prefill_results
+
+
+# NOTE: Prefill + Insert, need to integrate into JetStream
+def get_answer(config, engine, params, decode_state, prompt_tokens, prompt_true_lengths):
+  batch_size = len(prompt_tokens)
+  total_slots = engine.max_concurrent_decodes
+  prefill_results = get_kv_cache(config, engine, params, decode_state, prompt_tokens, prompt_true_lengths)
+  for i in range(batch_size):
+    decode_state = engine.insert(prefill_results[i], decode_state, int(i % total_slots))
+  jax.block_until_ready(decode_state)
+  max_utils.delete_pytree(prefill_results) 
+ 
+  steps = range(config.max_prefill_predict_length, config.max_target_length)
+  sampled_tokens_list = []
+  for _ in steps:
+    decode_state, sampled_tokens = engine.generate(params, decode_state)
+    sampled_tokens_list.append(sampled_tokens)
+  jax.block_until_ready(decode_state)
+  max_utils.delete_pytree(decode_state)
+  return sampled_tokens_list 
+
+def get_answer_one_batch(config, engine, params, decode_state, dataset, vocab):
+  batch_size = engine.max_concurrent_decodes
+  prompt_tokens, prompt_true_lengths = get_tokens(dataset, vocab, batch_size) 
+  return get_answer(config, engine, params, decode_state, prompt_tokens, prompt_true_lengths)
+
+def tokens_to_text(tokenizer, sampled_tokens_list, batch_size):
+  text_output = []
+  for slot in range(batch_size):
+    results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
+    text = tokenizer.detokenize(results)
+    # print(f"slot {slot} text:\n{text}")
+    text_output.append(text)
+  return text_output
+
+def load_dataset(datafile):
+  import pandas
+  samples = pandas.read_pickle(datafile)
+  return [{"input": row["input"], "output": row["output"]} for _, row in samples.iterrows()]
+ 
+def init_engine(datafile):
+  x = "inference_microbenchmark.py configs/base.yml run_name=inference_benchmark model_name=llama2-7b tokenizer_path=/home/vipannalla/maxtext/assets/tokenizer.llama2 async_checkpointing=false ici_tensor_parallelism=-1 ici_fsdp_parallelism=1 ici_autoregressive_parallelism=1 max_prefill_predict_length=1024 max_target_length=2048 scan_layers=false weight_dtype=bfloat16 per_device_batch_size=1 load_parameters_path=gs://inference-benchmarks/models/llama2-7b/2024-04-25-14-01/param-only-decode-ckpt-maxtext/checkpoints/0/items"
+  sysv = [b for b in x.split(' ') if len(b) > 0]
+  pyconfig.initialize(sysv)
+  config = pyconfig.config
+  engine = maxengine.MaxEngine(config)
+  params = engine.load_params()
+  decode_state = engine.init_decode_state()
+  batch_size = engine.max_concurrent_decodes
+  metadata = engine.get_tokenizer()
+  vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
+  dataset = load_dataset(datafile)
+  return config, engine, params, decode_state, vocab, batch_size, dataset
 
 def main(config, inference_metadata: Optional[Dict[str, Any]] = None):
   engine = maxengine.MaxEngine(config)

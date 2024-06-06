@@ -21,13 +21,22 @@ import maxengine
 import os
 import pyconfig
 import sys
+import json
+
+def read_openorca_dataset(filepath, print_stats=True):
+  assert os.path.exists(filepath), f'input dataset file: {filepath}  does not exist'
+  # Read file
+  with open(filepath) as f:
+    dataset = json.load(f)
+  return dataset
 
 
 def main(config):
   engine = maxengine.MaxEngine(config)
   params = engine.load_params()
 
-  text = config.prompt
+  dataset = read_openorca_dataset("/home/vipannalla/local/openorca_output_100.json")
+  text =  dataset[0]['prompt'] # config.prompt
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
   tokens, true_length = tokenizer_model.encode(

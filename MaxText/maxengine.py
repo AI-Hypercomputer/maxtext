@@ -14,7 +14,7 @@
 
 """Implementation of Engine API for MaxText"""
 import functools
-from typing import Any, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Union
 
 import flax
 from flax import linen as nn
@@ -35,7 +35,8 @@ from jetstream.engine import token_utils
 
 import max_utils
 import inference_utils
-
+import checkpointing
+from train import save_checkpoint
 
 Prefix = Any
 Params = Any
@@ -77,6 +78,17 @@ class MaxEngine(engine_api.Engine):
     self.kv_cache_annotations_named = None
     self.kv_cache_shardings = None
     self.state_mesh_annotations = None
+
+  def _save_decode_checkpoint(config, state, checkpoint_manager):
+    """Generate checkpoint for decode from the training_state."""
+    with jax.spmd_mode("allow_all"):
+      decode_state = max_utils.init_decode_state(
+        None, jax.tree_util.tree_map(lambda x: x.astype(jax.numpy.bfloat16), state.params))
+    if checkpoint_manager is not None:
+      if save_checkpoint(checkpoint_manager, 0, decode_state):
+        max_logging.log(f"saved an decode checkpoint at {config.checkpoint_dir}")
+    checkpoint_manager.wait_until_finished()
+
 
   def load_params(self, *args, **kwargs) -> Params:
     """Load Parameters, typically from GCS"""
@@ -137,7 +149,8 @@ class MaxEngine(engine_api.Engine):
       existing_prefix: Optional[jax.Array] = None,
       padded_tokens: jax.Array,
       true_length: int,
-  ) -> Tuple[Prefix, engine_api.ResultTokens]:
+      multiprompt_sizes: Optional[jax.Array] = None
+  ) -> Union[Tuple[Prefix, engine_api.ResultTokens], List[Tuple[Prefix, engine_api.ResultTokens]]]:
     """Computes a kv-cache for a new generate request.
 
     Args:
@@ -147,6 +160,9 @@ class MaxEngine(engine_api.Engine):
       padded_tokens: Logically appended tokens to any existing prefix, this is
         what we compute prefill on.
       true_length: The real length of the tokens, pre-pad.
+         there is only one prompt.
+      multiprompt_sizes: In case multiple prompts are packed, provides sizes of each prompt.
+          If this is not provided, prefill assumes there is only one prompt.
     Returns:
       kv_cache: For the resulting text.
     """
@@ -154,13 +170,35 @@ class MaxEngine(engine_api.Engine):
       raise ValueError("We don't know what to do with existing_prefix")
 
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
-    positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
-
+    print(f"input_tokens shape - {input_tokens.shape}, dtype- {input_tokens.dtype}")
     zero_to_n = jnp.arange(0, padded_tokens.shape[0])
     ones_to_keep = zero_to_n < true_length
     one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
-    sequence_indicator = jnp.expand_dims(one_d_output, 0)
+    if multiprompt_sizes:
+      max_seq_length = input_tokens.shape[1]
+      cur_positions = []
+      cur_indicators = []
+      indicators = jnp.zeros(max_seq_length, dtype=jnp.int32)
+      positions = jnp.zeros(max_seq_length, dtype=jnp.int32)
+      start_idx = 0
+      for idx, l in enumerate(multiprompt_sizes):
+        cur_mask = jnp.arange(0, max_seq_length)
+        cur_mask = jnp.logical_and(cur_mask >= start_idx, cur_mask < start_idx + l)
+        cur_ind = cur_mask * (idx + 1)
+        indicators += cur_ind
+        cur_pos = jnp.arange(0, max_seq_length)
+        cur_pos = jnp.where(cur_mask, cur_pos, 0)
+        cur_pos = cur_pos - start_idx
+        positions += cur_pos
+        start_idx += l
+      positions = jnp.expand_dims(positions, 0)
+      sequence_indicator = jnp.expand_dims(indicators, 0)
+    else:
+      positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
+      sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
+    print(f"position shape - {positions.shape}, dtype- {positions.dtype}")
+    print(f"sequence_indicator shape - {sequence_indicator.shape}, dtype- {sequence_indicator.dtype}")
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       flat_logits, new_vars = self.model.apply(
           params,
@@ -175,42 +213,96 @@ class MaxEngine(engine_api.Engine):
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
     generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
-    selected_logits = jax.lax.dynamic_slice(
-        flat_logits, (0, true_length - 1, 0), (flat_logits.shape[0], 1, flat_logits.shape[2])
-    )
-    selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
+    def _get_first_token_result(logits):
+      # sampling first token
+      first_generated_token = inference_utils.sampling(
+          logits,
+          self.rng,
+          self.config.decode_sampling_strategy,
+          topk=self.config.decode_sampling_top_k,
+          nucleus_topp=self.config.decode_sampling_nucleus_p,
+          temperature=self.config.decode_sampling_temperature,
+      )
 
-    # sampling first token
-    first_generated_token = inference_utils.sampling(
-        selected_logits,
-        self.rng,
-        self.config.decode_sampling_strategy,
-        topk=self.config.decode_sampling_top_k,
-        nucleus_topp=self.config.decode_sampling_nucleus_p,
-        temperature=self.config.decode_sampling_temperature,
-    )
+      all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
+      result = engine_api.ResultTokens(
+          data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
+          # Tokens are shape [batch, speculations], so when we concatenate
+          # tokens, validity and length along their index 1 dimension then they
+          # occupy 0:speculations.
+          tokens_idx=(0, 1),
+          # Validity occupies the same amount of space, but next in line.
+          valid_idx=(1, 2),
+          # And lengths is rank 1.
+          length_idx=(2, 3),
+          samples_per_slot=1,
+      )
+      return first_generated_token, result
 
-    all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
-    result = engine_api.ResultTokens(
-        data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
-        # Tokens are shape [batch, speculations], so when we concatenate
-        # tokens, validity and length along their index 1 dimension then they
-        # occupy 0:speculations.
-        tokens_idx=(0, 1),
-        # Validity occupies the same amount of space, but next in line.
-        valid_idx=(1, 2),
-        # And lengths is rank 1.
-        length_idx=(2, 3),
-        samples_per_slot=1,
-    )
+    if multiprompt_sizes:
+      split_prefill_results = []
+      end_idx = 0
+      unboxed_cache = max_utils.unbox_logicallypartioned(new_vars["cache"])
+      for prompt_len in multiprompt_sizes:
+        start_idx = end_idx
+        end_idx = start_idx + prompt_len 
 
-    return {
-        "logits": selected_logits,
-        "cache": new_vars["cache"],
-        "next_pos": next_pos,
-        "generated_tokens": generated_tokens,
-        "tokens": first_generated_token
-    }, result
+        def _split_cache(path, full_cache):
+          path_key = path[-1].key
+          if path_key in [
+            "cache_ar_index",
+            "cached_ar_key",
+            "cached_ar_value",
+            "cached_ar_key_scale",
+            "cached_ar_value_scale"
+          ]:
+            return full_cache
+          # decoder_segment_ids -- (batch, sequence). eg. (1, 1024)
+          elif path_key in ["cache_ar_segment_id", "cache_prefill_segment_id"]:
+            prompt_cache = jax.lax.dynamic_slice_in_dim(full_cache, start_idx, prompt_len, axis=0)
+            return jnp.resize(prompt_cache, (max_seq_length, *full_cache.shape[1:]))
+          # key, value - (sequence, num_heads, batch, head_dim). eg. (1024, 32, 1, 128)
+          elif path_key in [
+            "cached_prefill_key",
+            "cached_prefill_value",
+            "cached_prefill_key_scale",
+            "cached_prefill_value_scale",
+          ]:
+            prompt_cache = jax.lax.dynamic_slice_in_dim(full_cache, start_idx, prompt_len, axis=0) 
+            # extract (start, end) from token dim and resize it to max_len (1024)
+            return jnp.resize(prompt_cache, (max_seq_length, *full_cache.shape[1:]))
+          else:
+            raise ValueError(f"Unexpected path to split the prefill result - {path_key}")
+
+        cur_cache = jax.tree_util.tree_map_with_path(_split_cache, unboxed_cache)
+        cur_cache = jax.lax.with_sharding_constraint(cur_cache, self.kv_cache_shardings)
+        cur_logits = jax.lax.dynamic_slice(
+            flat_logits, (0, end_idx - 1, 0), (flat_logits.shape[0], 1, flat_logits.shape[2])
+        )
+        cur_logits = jax.lax.with_sharding_constraint(cur_logits, self.replicated_sharding)
+        first_generated_token, result = _get_first_token_result(cur_logits)
+        cur_prefill_result = {
+            "logits": cur_logits,
+            "cache": cur_cache,
+            "next_pos": next_pos.copy(),
+            "generated_tokens": generated_tokens.copy(),
+            "tokens": first_generated_token
+        }
+        split_prefill_results.append((cur_prefill_result, result))
+      return split_prefill_results
+    else:
+      selected_logits = jax.lax.dynamic_slice(
+          flat_logits, (0, true_length - 1, 0), (flat_logits.shape[0], 1, flat_logits.shape[2])
+      )
+      selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
+      first_generated_token, result = _get_first_token_result(selected_logits)
+      return {
+          "logits": selected_logits,
+          "cache": new_vars["cache"],
+          "next_pos": next_pos,
+          "generated_tokens": generated_tokens,
+          "tokens": first_generated_token
+      }, result
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def generate(self, params: Params, decode_state: DecodeState) -> Tuple[DecodeState, engine_api.ResultTokens]:
@@ -439,3 +531,9 @@ class MaxEngine(engine_api.Engine):
   def colocated_cpus(self) -> None:
     """CPU devices colocated with the engine's accelerators."""
     raise NotImplementedError
+
+  @property
+  def enable_multi_prompt_packing(self) -> bool:
+    """Enabled packing multiple prompts into single prefix call."""
+    # TODO: add this to config
+    return True
