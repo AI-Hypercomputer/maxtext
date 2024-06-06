@@ -109,7 +109,7 @@ def prefill_insert_benchmark(
       f"\tPrefill + Insert step average time: {prefill_insert_average_ms:.3f} ms\n\n\n\n"
   )
   result_dict = {
-      "insert_time_in_ms": prefill_insert_average_ms
+      "time_in_ms": prefill_insert_average_ms
   }
   return result_dict, decode_state
 
@@ -204,11 +204,11 @@ def print_results_for_analyze(results):
       prefill_bucket_size_to_ms[int(k)] = round(v["time_in_ms"], 3)
     print(f"PREFILL_BUCKET_SIZE_TO_MS = {prefill_bucket_size_to_ms}")
 
-  if "prefill-insert" in results:
+  if "insert" in results:
     insert_bucket_size_to_ms = {}
-    for k, v in results["prefill-insert"].items():
-      insert_bucket_size_to_ms[int(k)] = round(v["insert_time_in_ms"], 3)
-    print(f"PREFILL_INSERT_BUCKET_SIZE_TO_MS = {insert_bucket_size_to_ms}")
+    for k, v in results["insert"].items():
+      insert_bucket_size_to_ms[int(k)] = round(v["time_in_ms"], 3)
+    print(f"INSERT_BUCKET_SIZE_TO_MS = {insert_bucket_size_to_ms}")
 
   if "autoregressive" in results:
     print(f"SYSTEM_TIME_PER_DECODE_TOKEN_MS = {results['autoregressive']['step_in_ms_per_seq']}")
@@ -279,7 +279,7 @@ def main(config, inference_metadata: Optional[Dict[str, Any]] = None):
         benchmark_loop_iters
       )
 
-      benchmark_results["prefill-insert"][prefill_length], decode_state = prefill_insert_benchmark(
+      prefill_insert_time, decode_state = prefill_insert_benchmark(
         config,
         engine,
         decode_state,
@@ -289,6 +289,7 @@ def main(config, inference_metadata: Optional[Dict[str, Any]] = None):
         prefill_true_lengths[prefill_length],
         benchmark_loop_iters
       )
+      benchmark_results["insert"][prefill_length]["time_in_ms"] = prefill_insert_time - benchmark_results["prefill"][prefill_length]["time_in_ms"]
 
   if "generate" in stages_to_benchmark:
     benchmark_results["autoregressive"], decode_state = ar_benchmark(
