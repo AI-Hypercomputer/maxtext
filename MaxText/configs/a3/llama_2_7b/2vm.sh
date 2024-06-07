@@ -5,7 +5,7 @@ echo "Running 2vm.sh"
 # For A3+, you can set DEVICE_TYPE as `h100-mega-80gb-8`.
 #
 # python3 xpk/xpk.py workload create --cluster ${CLUSTER_NAME} \
-# --workload ${WORKLOAD_NAME} --docker-image=${LOCAL_IMAGE_NAME} \
+# --workload ${WORKLOAD_NAME} --docker-image ${LOCAL_IMAGE_NAME} \
 # --device-type ${DEVICE_TYPE} --num-nodes 2 \
 # --command "bash MaxText/configs/a3/llama_2_7b/2vm.sh"
 
@@ -32,7 +32,6 @@ export XLA_FLAGS="--xla_dump_to=$OUTPUT_PATH/$RUN_NAME/HLO_dumps/
  --xla_gpu_enable_while_loop_double_buffering=true --xla_gpu_enable_triton_softmax_fusion=false
  --xla_gpu_enable_all_gather_combine_by_dim=false --xla_gpu_enable_reduce_scatter_combine_by_dim=false
  --xla_disable_hlo_passes=rematerialization"
-
 
 # 2 node, DCN_DP=2, ICI_FSDP=8
 python MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME hardware=gpu \
