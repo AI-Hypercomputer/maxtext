@@ -21,16 +21,17 @@ IF YOU MODIFY THIS FILE YOU SHOULD ALSO ADD CORRESPONDING MODIFICATIONS TO
 UserFacingNameToSystemCharacteristics in xpk/xpk.py !!!!! """
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
 class SystemCharacteristics:
   platform: str
-  topology_name: str
-  chip_config_name: str  # 'megacore' or 'default'
-  chips_per_host_bounds: tuple
+  topology_name: Optional[str]
+  chip_config_name: Optional[str]  # 'megacore' or 'default'
+  chips_per_host_bounds: Optional[tuple]
   devices_per_slice: int
-  wrap: tuple
+  wrap: Optional[tuple]
 
 
 UserFacingNameToSystemCharacteristics = {
@@ -150,6 +151,11 @@ UserFacingNameToSystemCharacteristics = {
     "v5p-12288": SystemCharacteristics("tpu", "v5:16x16x24", "megacore", (2, 2, 1), 6144, (True, True, True)),
     "v5p-13824": SystemCharacteristics("tpu", "v5:12x24x24", "megacore", (2, 2, 1), 6912, (True, True, True)),
     "v5p-17920": SystemCharacteristics("tpu", "v5:16x20x28", "megacore", (2, 2, 1), 8960, (True, True, True)),
+    # A3 - H100. The chips within each host have high-speed interconnect, while communication
+    # across hosts will occur over DCN. This makes the "slice" topology of A3 fixed to a single host.
+    # To use AoT compilation with multihost, the `compile_topology_num_slices` flag should be
+    # specified to the number of hosts.
+    "a3": SystemCharacteristics("gpu", None, None, None, 8, None)
 }
 
 
