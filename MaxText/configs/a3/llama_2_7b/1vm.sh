@@ -13,7 +13,7 @@ echo "Running 1vm.sh"
 set -e
 
 export OUTPUT_PATH="gs://maxtext-experiments-multipod"
-export RUN_NAME="llama-2-1vm-$(date +%Y-%m-%d-%H-%M)"
+export RUN_NAME="llama2-7b-1vm-$(date +%Y-%m-%d-%H-%M)"
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -33,7 +33,7 @@ export XLA_FLAGS="--xla_dump_to=$OUTPUT_PATH/$RUN_NAME/HLO_dumps/
  --xla_disable_hlo_passes=rematerialization"
 
 # 1 node, DCN_DP=1, ICI_FSDP=8
-python MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME hardware=gpu \
+python MaxText/train.py MaxText/configs/base.yml hardware=gpu \
     steps=30 dcn_data_parallelism=1 ici_fsdp_parallelism=8 per_device_batch_size=4 max_target_length=4096 model_name=llama2-7b \
     enable_checkpointing=false attention=cudnn_flash_te remat_policy=minimal_flash use_iota_embed=true scan_layers=false \
     dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_PATH logits_dot_in_fp32=false profiler=xplane
