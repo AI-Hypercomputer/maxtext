@@ -126,7 +126,7 @@ logical_axis_rules: [
                       ['vocab', ['tensor', 'autoregressive']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'sequence']],
                       ['embed', ['fsdp', 'sequence']],
-                      ['norm', 'tensor'],
+                      ['norm', 'fsdp'],
                       ['heads', ['tensor', 'autoregressive']],
                       ['kv', []],
                       ['cache_batch', []],
