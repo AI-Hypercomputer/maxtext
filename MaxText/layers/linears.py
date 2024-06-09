@@ -33,6 +33,7 @@ import max_logging
 
 try:
   from jax.experimental.pallas.ops.tpu import megablox as mblx
+  # import megablox as mblx
 except ImportError:
   max_logging.log("JAX megablox is available for TPU only.")
   pass
@@ -285,8 +286,8 @@ class MoeBlock(nn.Module):
   mesh: Mesh
   kernel_init: NdInitializer
   kernel_axes: Tuple[str, ...]
-  weight_dtype: DType = jnp.float32
-  dtype: DType = jnp.float32
+  weight_dtype: DType = jnp.bfloat16 # todo: check type
+  dtype: DType = jnp.bfloat16
 
   def generate_kernels(self, num_experts, base_emb_dim, mlp_dim):
     
@@ -340,7 +341,7 @@ class MoeBlock(nn.Module):
     # sort inputs for number of selected experts
     sorted_inputs = jnp.take(repeat_inputs, indices=sorted_selected_experts, axis=0).astype(self.dtype)
     group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
-
+    # breakpoint()
     return sorted_inputs, sorted_selected_experts, weights, group_size
 
   def unpermute(self, intermediate, inputs, sorted_selected_experts, weights):
@@ -355,24 +356,61 @@ class MoeBlock(nn.Module):
   def call_gmm(self, inputs, group_sizes, mlp_activation, w0_kernel, w1_kernel, wo_kernel):
     # TODO(ranran): currently megablox works well on single host, and
     #               will add sharding properly to improve performance.
+    # kernel_axes = ('exp', 'embed', 'mlp')
+    # wo_kernel_axes = ('exp', 'mlp', 'embed')
+    tile_size = (8192, 128, 128)
+    # tile_size = None
     @functools.partial(
         shard_map.shard_map,
         mesh=self.mesh,
         in_specs=(
-              (nn.logical_to_mesh_axes((None, None))),
+              (nn.logical_to_mesh_axes(('test', None))),
               (nn.logical_to_mesh_axes((None, None, None))),
               (nn.logical_to_mesh_axes((None,))),
           ),
-        out_specs=(nn.logical_to_mesh_axes((None, None))),
+        out_specs=(nn.logical_to_mesh_axes(('test', None))),
         check_rep=False,
     )
     def gmm(inputs, kernel, group_sizes):
       hs_shape = inputs.shape
-      # pad lengh is the 1st dimension of tiling size in gmm call
+      # pad length is the 1st dimension of tiling size in gmm call
       pad_length = 512
       if hs_shape[0] % pad_length:
         pad_length = pad_length - hs_shape[0] % pad_length
-        inputs = jax.lax.pad(inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0,0,0)])
+        inputs = jax.lax.pad(inputs, 0.0, [(0, pad_length, 0), (0,0,0)])
+        # inputs = jax.lax.pad(inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0,0,0)])
+
+      inputs = inputs.astype(self.dtype)
+      kernel = kernel.astype(self.weight_dtype)
+      output = mblx.gmm(lhs=inputs, 
+                        rhs=kernel, 
+                        group_sizes=group_sizes,
+                        preferred_element_type=jnp.bfloat16,
+                        tiling=tile_size)
+      
+      if hs_shape[0] % pad_length:
+        output = output[:hs_shape[0]]
+      return output
+  
+    @functools.partial(
+        shard_map.shard_map,
+        mesh=self.mesh,
+        in_specs=(
+              (nn.logical_to_mesh_axes(('test', None))),
+              (nn.logical_to_mesh_axes((None, None, None))),
+              (nn.logical_to_mesh_axes((None,))),
+          ),
+        out_specs=(nn.logical_to_mesh_axes(('test', None))),
+        check_rep=False,
+    )
+    def gmm2(inputs, kernel, group_sizes):
+      hs_shape = inputs.shape
+      # pad length is the 1st dimension of tiling size in gmm call
+      pad_length = 512
+      if hs_shape[0] % pad_length:
+        pad_length = pad_length - hs_shape[0] % pad_length
+        # inputs = jax.lax.pad(inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0,0,0)])
+        inputs = jax.lax.pad(inputs, 0.0, [(0, pad_length, 0), (0,0,0)])
 
       inputs = inputs.astype(self.dtype)
       kernel = kernel.astype(self.weight_dtype)
@@ -380,22 +418,28 @@ class MoeBlock(nn.Module):
       output = mblx.gmm(lhs=inputs, 
                         rhs=kernel, 
                         group_sizes=group_sizes,
-                        tiling=(512, 512, 512))
-      
+                        preferred_element_type=jnp.bfloat16,
+                        tiling=(tile_size[0], tile_size[2], tile_size[1]) if tile_size else None)
+
       if hs_shape[0] % pad_length:
         output = output[:hs_shape[0]]
       return output
-    
+
+    # inputs: (batch * selected_exp * sequence, emb_dim) - (262144, 4096)
+    # w0_kernel: (num_exp, emb_dim, mlp) -> (8, 4096, 14336)
+    # w1_kernel: (num_exp, emb_dim, mlp)
+    # o_kernel: (num_exp, mlp, emb_dim) - > (8, 14336, 4096)
     layer_w0 = gmm(inputs, w0_kernel, group_sizes)
     layer_w1 = gmm(inputs, w1_kernel, group_sizes)
     layer_act = _convert_to_activation_function(mlp_activation)(layer_w0)
     intermediate_layer = jnp.multiply(layer_act, layer_w1)
-    output = gmm(intermediate_layer, wo_kernel, group_sizes)
+    output = gmm2(intermediate_layer, wo_kernel, group_sizes)
     return output
 
   @nn.compact
   def __call__(self, inputs):
     cfg = self.config
+    # inputs = nn.with_logical_constraint(inputs, ('test', None, None))
     inputs = inputs.astype(cfg.dtype)
     gate_logits = DenseGeneral(
             self.num_experts,
@@ -408,6 +452,7 @@ class MoeBlock(nn.Module):
     flattened_top_k_weights = top_k_weights.reshape(-1, self.num_experts_per_tok)
 
     softmax_probs = jax.nn.softmax(flattened_top_k_weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
+    # softmax_probs = jax.nn.softmax(flattened_top_k_weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
     softmax_probs = softmax_probs.reshape(gate_logits.shape[:-1] + (self.num_experts_per_tok,))
 
     weights = jnp.zeros_like(gate_logits)

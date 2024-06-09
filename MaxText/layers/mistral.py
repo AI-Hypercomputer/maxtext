@@ -70,7 +70,6 @@ class MistralDecoderLayer(nn.Module):
     mesh = self.mesh
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
-
     lnx_rms = models.RMSNorm(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -79,7 +78,6 @@ class MistralDecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
     )
     lnx = lnx_rms(inputs)
-
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
 
     # Self-attention block
@@ -121,7 +119,7 @@ class MistralDecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
     )(intermediate_inputs)
     hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_length", "activation_embed"))
-
+    # breakpoint()
     if cfg.num_experts > 1:
       # TODO(ranran): remove for loop implementation after adding expert parallelism
       if cfg.moe_matmul:
@@ -131,7 +129,7 @@ class MistralDecoderLayer(nn.Module):
             num_experts_per_tok=cfg.num_experts_per_tok,
             mesh=mesh,
             kernel_init=initializers.nd_dense_init(1.0, 'fan_in', 'truncated_normal'),
-            kernel_axes=('embed', 'mlp'),
+            kernel_axes=(None, 'test'),
             dtype=cfg.dtype,
         )(hidden_states)
         mlp_lnx = nn.with_logical_constraint(
