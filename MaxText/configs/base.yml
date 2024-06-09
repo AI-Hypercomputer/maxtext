@@ -95,7 +95,7 @@ param_scan_axis: 1
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
 
 # Combine matmuls for QKV and MLP
-fused_qkv: False
+fused_qkv: True
 fused_mlp: False
 
 record_internal_nn_metrics: 0
