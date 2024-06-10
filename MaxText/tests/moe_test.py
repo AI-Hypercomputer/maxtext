@@ -162,6 +162,10 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
 
       # print("get_moe_output expected_variables", variables)
       # breakpoint()
+      # from jax.sharding import PartitionSpec
+      # sharding = jax.sharding.NamedSharding(mesh, PartitionSpec(None))
+      # jax.device_put(moe_variables, device=sharding)
+      # jax.device_put(hidden_states, device=sharding)
       time.simple_timeit(jax.jit(model.apply), moe_variables, hidden_states, tries=10, task="matmul")
       output = jax.jit(model.apply)(moe_variables, hidden_states)
       # output = model.apply(moe_variables, hidden_states)
