@@ -1,0 +1,27 @@
+base_config: "base.yml"
+
+# WIP
+
+model_name: "llama2-70b"
+logical_axis_rules: [
+                      ['activation_batch', ['data', 'fsdp', 'fsdp_transpose',]],
+                      ['activation_heads', ['tensor','sequence']],
+                      ['activation_length', 'sequence'],
+                      ['activation_embed', 'tensor'],
+                      ['activation_mlp', 'tensor'],
+                      ['activation_kv', 'tensor'],
+                      ['activation_vocab', ['tensor', 'sequence']],
+                      ['activation_vocab', 'tensor'],
+                      ['activation_vocab', 'sequence'],
+                      ['mlp', ['fsdp_transpose', 'tensor', 'autoregressive']],
+                      ['vocab', ['tensor', 'autoregressive']],
+                      ['embed', ['fsdp', 'fsdp_transpose', 'sequence']],
+                      ['embed', ['fsdp', 'sequence']],
+                      ['norm', 'tensor'],
+                      ['heads', []],
+                      ['kv', ['tensor', 'autoregressive']],
+                      ['cache_batch', []],
+                      ['cache_heads', []],
+                      ['cache_kv', ['autoregressive', 'tensor']],
+                      ['cache_sequence', []],
+                    ]
