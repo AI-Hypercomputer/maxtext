@@ -50,7 +50,7 @@ hf_data_files: 'gs://<bucket>/<folder>/*-train-*.parquet'  # match the train fil
 tokenizer_path: 'google-t5/t5-large'  # for using https://huggingface.co/google-t5/t5-large
 ```
 #### Limitations & Recommendations
-1. Streaming data directly from HuggingFace Hub may be impacted by the traffic of the server. During peak hours you may encounter "504 Server Error: Gateway Time-out". It's recommended to download the HuggingFace dataset to a GCS buckt or disk for the most stable experience.
+1. Streaming data directly from HuggingFace Hub may be impacted by the traffic of the server. During peak hours you may encounter "504 Server Error: Gateway Time-out". It's recommended to download the HuggingFace dataset to a GCS bucket or disk for the most stable experience.
 2. Streaming data directly from HuggingFace Hub works in multihost settings with a samll number of hosts. We have encountered "read time out" error with host number > 16.
 3. Multihost data input is achieved through HuggingFace's `datasets.distributed.split_dataset_by_node` API, which is more performant when (data shards/files) % (number of host reading data) == 0. To give MaxText users a performant experience, we follow this rule and will use data shards up to the number that's divisible by number of host reading data. For instance if your dataset has 100 shards, and you use 8 hosts, at most 96/100 shards of data will be used since 96%8==0. You can reshard or combine shards if you want to utilize the whole dataset.
 
