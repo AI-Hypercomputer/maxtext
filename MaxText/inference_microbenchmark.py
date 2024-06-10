@@ -290,7 +290,7 @@ def main(config, inference_metadata: Optional[Dict[str, Any]] = None):
         benchmark_loop_iters
       )
       benchmark_results["insert"][prefill_length]["time_in_ms"] = (
-        prefill_insert_time - benchmark_results["prefill"][prefill_length]["time_in_ms"]
+        prefill_insert_time["time_in_ms"] - benchmark_results["prefill"][prefill_length]["time_in_ms"]
       )
 
   if "generate" in stages_to_benchmark:
