@@ -158,7 +158,7 @@ class Pipeline(nn.Module):
       return jnp.concatenate([last, except_last], axis=0)
     new_shift = _rotate_right(output)
 
-    # Rotate stream_io left/up by 1 on rotating ms index (stream_buf_idx), replacing the last/bottom with the last stage output
+    # Rotate stream_io left/up by 1 on rotating micro/stage index (stream_buf_idx), replacing the last/bottom with the last stage output
     stream_buf_idx = loop_iteration % self.microbatches_per_stage
     stream_slice = old_state_io[:, stream_buf_idx]
     def _update_state_io(state_in, stream_slice, output):
@@ -181,7 +181,7 @@ class Pipeline(nn.Module):
     }
     return new_loop_state
    
-  def permute_output_ms_dim(self, output):
+  def permute_output_micro_per_stage_dim(self, output):
     # The first real output (batch 0) takes a certain amount of loop iterations to finish and be pushed to state_io - it will land on a different index of state_io depending on the number of iterations.
     first_output_num_iters = self.num_stages - 1
     # The first term above is a multiple of num_pipeline_microbatches and thus could be ignored since its also a multiple of microbatches_per_stage, but we keep it for clairty
@@ -314,7 +314,7 @@ class Pipeline(nn.Module):
             loop_state, _ = run_one_iteration_rematted(self, loop_state, None)
 
     # The final output is located in the input/output array, however the output microbatches may be permuted relative to the input
-    final_output = self.permute_output_ms_dim(loop_state["state_io"])
+    final_output = self.permute_output_micro_per_stage_dim(loop_state["state_io"])
 
     # reshape outputs to match input shape of total batch instead of microbatches [batch, sequence, embed]
     final_output = jnp.reshape(final_output, (self.config.global_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim))
