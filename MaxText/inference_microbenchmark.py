@@ -256,7 +256,7 @@ def main(config, inference_metadata: Optional[Dict[str, Any]] = None):
 
     benchmark_results["prefill-result-sizes"] = {}
     benchmark_results["prefill"] = {}
-    benchmark_results["prefill-insert"] = {}
+    benchmark_results["insert"] = {}
     prefill_tokens = {}
     prefill_true_lengths = {}
 
