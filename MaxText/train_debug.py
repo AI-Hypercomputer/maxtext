@@ -400,7 +400,16 @@ def setup_train_loop(config):
       data_iterator,
       eval_data_iterator,
       state,
+      tx
   )
+
+def check_trees_equal(tree1, tree2):
+  def check_same(key, v1, v2):
+     assert jax.numpy.allclose(
+            v1, v2, rtol=1e-06, atol=1e-06
+        )
+  jax.tree_util.tree_map_with_path(check_same, tree1, tree2)
+  print('Hooray, values are close enough!')
 
 
 def train_loop(config, state=None):
@@ -426,6 +435,7 @@ def train_loop(config, state=None):
       data_iterator,
       eval_data_iterator,
       state,
+      tx
   ) = setup_train_loop(config)
   # pylint: disable=line-too-long
   (
@@ -520,6 +530,19 @@ def train_loop(config, state=None):
         checkpoint_manager.wait_until_finished()
         sys.exit()
 
+      if step == config.checkpoint_period:
+        print(f'====== At step {config.checkpoint_period}!!! =====')
+        # print(state.params)
+        print('----------------------------------------------------')
+        # import pdb;pdb.set_trace()
+        state_check, state_mesh_annotations_check, _, _ = max_utils.setup_training_state(
+          model, data_iterator,
+          tx, config, init_rng, mesh, checkpoint_manager)
+        # print(state_check.params)
+        check_trees_equal(state.params, state_check.params)
+        sys.exit()
+
+
     write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
 
     if config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
@@ -542,7 +565,7 @@ def train_loop(config, state=None):
 
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()
-  # write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config)  # final step metrics
+  write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config)  # final step metrics
   max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, job_end=True)
   return state

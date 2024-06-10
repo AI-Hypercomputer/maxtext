@@ -17,6 +17,7 @@ limitations under the License.
 """ Common Max Utils needed by multiple modules"""
 import checkpointing
 import common_types
+import datetime
 import functools
 import time
 import socket
@@ -428,6 +429,7 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
+    checkpoint_load_start = datetime.datetime.now()
     restored, raw_params = checkpointing.load_state_if_possible(
         checkpoint_manager,
         data_iterator,
@@ -437,7 +439,11 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
         config.enable_single_replica_ckpt_restoring,
         config.dataset_type,
     )
-
+    jax.block_until_ready(restored)
+    checkpoint_load_end = datetime.datetime.now()
+    if restored is not None:  # Checkpoint was available for restore
+      if jax.process_index() == 0:
+        max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint restored in : {checkpoint_load_end - checkpoint_load_start}")
     if restored:
       if "iter" in restored and restored["iter"] is not None:
         data_iterator.local_iterator = restored["iter"]
@@ -449,7 +455,7 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
         state = state.replace(params=raw_params)
 
   state = unbox_logicallypartioned(state)
-  return state, state_mesh_annotations, data_iterator
+  return state, state_mesh_annotations, data_iterator, tx
 
 
 # Learning Rate Schedule
@@ -660,9 +666,9 @@ def summarize_pytree_data(params, name="Params", raw=False):
     num_params_in_billions = num_params / 1e9
     total_param_size_in_gb = total_param_size / 1e9
     print(f"{name} stats: \n"
-          f"\tTotal number of params: {num_params_in_billions:.3f} billion \n"	
-          f"\tTotal memory usage: {total_param_size_in_gb:.3f} GB \n"	
-          f"\tAvg size: {avg_param_size:.3f} bytes\n")	
+          f"\tTotal number of params: {num_params_in_billions:.3f} billion \n"
+          f"\tTotal memory usage: {total_param_size_in_gb:.3f} GB \n"
+          f"\tAvg size: {avg_param_size:.3f} bytes\n")
   else:
     print(f"{name} stats: \n"
             f"\tTotal number of params: {num_params:.3f} \n"
