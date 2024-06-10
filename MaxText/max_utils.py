@@ -17,6 +17,7 @@
 """ Common Max Utils needed by multiple modules"""
 import checkpointing
 import common_types
+import datetime
 import functools
 import time
 import socket
@@ -405,19 +406,23 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    restored, raw_params = checkpointing.load_state_if_possible(checkpoint_manager,
-                                                data_iterator,
-                                                config.load_parameters_path,
-                                                config.load_full_state_path,
-                                                unboxed_abstract_state,
-                                                config.enable_single_replica_ckpt_restoring,
-                                                config.dataset_type,
-                                                )
+    checkpoint_load_start = datetime.datetime.now()
+    restored, raw_params = checkpointing.load_state_if_possible(
+        checkpoint_manager,
+        data_iterator,
+        config.load_parameters_path,
+        config.load_full_state_path,
+        unboxed_abstract_state,
+        config.enable_single_replica_ckpt_restoring,
+        config.dataset_type,
+    )
+    jax.block_until_ready(restored)
+    checkpoint_load_end = datetime.datetime.now()
 
     if restored:
-      if 'iter' in restored and restored['iter'] is not None:
-        data_iterator.local_iterator = restored['iter']
-      state = restored['items']
+      if "iter" in restored and restored["iter"] is not None:
+        data_iterator.local_iterator = restored["iter"]
+      state = restored["items"]
     else:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       state = jax.jit(
@@ -434,9 +439,9 @@ def setup_initial_state(model, data_iterator, tx, config, rng, mesh, checkpoint_
     if jax.process_index() == 0:
       max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint restored in : {checkpoint_load_end - checkpoint_load_start}")
       import sys; sys.exit()
-      
+
   state = unbox_logicallypartioned(state)
-  return state, state_mesh_annotations, data_iterator
+  return state, state_mesh_annotations, data_iterator, tx
 
 
 # Learning Rate Schedule
@@ -618,5 +623,41 @@ def print_pytree_shape(print_str, ptree):
 
 def print_model_vars(print_str, model_vars):
   for k in model_vars:
-    print(f'{print_str} key{k}:')
-    print(f'\t {model_vars[k]}')
+    print(f"{print_str} key{k}:")
+    print(f"\t {model_vars[k]}")
+
+
+def get_project():
+  completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
+  project_outputs = completed_command.stdout.decode().strip().split("\n")
+  if len(project_outputs) < 1 or project_outputs[-1] == "":
+    max_logging.log("You must specify config.vertex_tensorboard_project or set 'gcloud config set project <project>'")
+    return None
+  return project_outputs[-1]
+
+
+def delete_pytree(p):
+  def delete_leaf(leaf):
+    if isinstance(leaf, jax.Array):
+      leaf.delete()
+    del leaf
+
+  jax.tree_util.tree_map(delete_leaf, p)
+
+
+def summarize_pytree_data(params, name="Params", raw=False):
+  """Generate basic metrics of a given Pytree."""
+  num_params, total_param_size, avg_param_size = summarize_size_from_pytree(params)
+  if not raw:
+    num_params_in_billions = num_params / 1e9
+    total_param_size_in_gb = total_param_size / 1e9
+    print(f"{name} stats: \n"
+          f"\tTotal number of params: {num_params_in_billions:.3f} billion \n"
+          f"\tTotal memory usage: {total_param_size_in_gb:.3f} GB \n"
+          f"\tAvg size: {avg_param_size:.3f} bytes\n")
+  else:
+    print(f"{name} stats: \n"
+            f"\tTotal number of params: {num_params:.3f} \n"
+            f"\tTotal memory usage: {total_param_size:.3f} bytes \n"
+            f"\tAvg size: {avg_param_size:.3f} bytes\n")
+  return num_params, total_param_size, avg_param_size
