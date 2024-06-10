@@ -121,6 +121,9 @@ hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' 
 mesh_axes: ['stage', 'data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose',]],
+                       # For pipeline parallelism the pre and post decoder layer tensors' batch dimension is sharded by stages.
+                       # Microbatches are sharded by stage, so moving out of and into this sharding should be a local reshape.
+                       # The "stage" needs to be listed first since the microbatch dimension is first before the reshape.
                       ['activation_embed_and_logits_batch', ['stage', 'data', 'fsdp', 'fsdp_transpose']],
                       ['activation_heads', ['tensor','sequence']],
                       ['activation_length', 'sequence'],
