@@ -129,7 +129,7 @@ class MistralDecoderLayer(nn.Module):
             num_experts_per_tok=cfg.num_experts_per_tok,
             mesh=mesh,
             kernel_init=initializers.nd_dense_init(1.0, 'fan_in', 'truncated_normal'),
-            kernel_axes=(None, 'test'),
+            kernel_axes=('embed', 'mlp'),
             dtype=cfg.dtype,
         )(hidden_states)
         mlp_lnx = nn.with_logical_constraint(

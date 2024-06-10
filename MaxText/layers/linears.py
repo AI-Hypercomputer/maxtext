@@ -295,8 +295,10 @@ class MoeBlock(nn.Module):
     kernel_out_axis = np.arange(1, 2)
     kernel_init = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
 
-    kernel_axes = ('exp', 'embed', 'mlp')
-    wo_kernel_axes = ('exp', 'mlp', 'embed')
+    # kernel_axes = ('exp', 'embed', 'mlp')
+    # wo_kernel_axes = ('exp', 'mlp', 'embed')
+    kernel_axes = (None, 'test', None)
+    wo_kernel_axes = (None, 'test', None)
     
     w0_kernel = self.param(
         'wi_0',
@@ -358,8 +360,8 @@ class MoeBlock(nn.Module):
     #               will add sharding properly to improve performance.
     # kernel_axes = ('exp', 'embed', 'mlp')
     # wo_kernel_axes = ('exp', 'mlp', 'embed')
-    tile_size = (8192, 128, 128)
-    # tile_size = None
+    
+    tile_size = (4096, 128, 128)
     @functools.partial(
         shard_map.shard_map,
         mesh=self.mesh,
@@ -374,7 +376,7 @@ class MoeBlock(nn.Module):
     def gmm(inputs, kernel, group_sizes):
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
-      pad_length = 512
+      pad_length = tile_size[0]
       if hs_shape[0] % pad_length:
         pad_length = pad_length - hs_shape[0] % pad_length
         inputs = jax.lax.pad(inputs, 0.0, [(0, pad_length, 0), (0,0,0)])
@@ -391,55 +393,48 @@ class MoeBlock(nn.Module):
       if hs_shape[0] % pad_length:
         output = output[:hs_shape[0]]
       return output
-  
-    @functools.partial(
-        shard_map.shard_map,
-        mesh=self.mesh,
-        in_specs=(
-              (nn.logical_to_mesh_axes(('test', None))),
-              (nn.logical_to_mesh_axes((None, None, None))),
-              (nn.logical_to_mesh_axes((None,))),
-          ),
-        out_specs=(nn.logical_to_mesh_axes(('test', None))),
-        check_rep=False,
-    )
-    def gmm2(inputs, kernel, group_sizes):
-      hs_shape = inputs.shape
-      # pad length is the 1st dimension of tiling size in gmm call
-      pad_length = 512
-      if hs_shape[0] % pad_length:
-        pad_length = pad_length - hs_shape[0] % pad_length
-        # inputs = jax.lax.pad(inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0,0,0)])
-        inputs = jax.lax.pad(inputs, 0.0, [(0, pad_length, 0), (0,0,0)])
 
-      inputs = inputs.astype(self.dtype)
-      kernel = kernel.astype(self.weight_dtype)
-
-      output = mblx.gmm(lhs=inputs, 
-                        rhs=kernel, 
-                        group_sizes=group_sizes,
-                        preferred_element_type=jnp.bfloat16,
-                        tiling=(tile_size[0], tile_size[2], tile_size[1]) if tile_size else None)
-
-      if hs_shape[0] % pad_length:
-        output = output[:hs_shape[0]]
-      return output
-
-    # inputs: (batch * selected_exp * sequence, emb_dim) - (262144, 4096)
-    # w0_kernel: (num_exp, emb_dim, mlp) -> (8, 4096, 14336)
-    # w1_kernel: (num_exp, emb_dim, mlp)
-    # o_kernel: (num_exp, mlp, emb_dim) - > (8, 14336, 4096)
     layer_w0 = gmm(inputs, w0_kernel, group_sizes)
     layer_w1 = gmm(inputs, w1_kernel, group_sizes)
     layer_act = _convert_to_activation_function(mlp_activation)(layer_w0)
     intermediate_layer = jnp.multiply(layer_act, layer_w1)
-    output = gmm2(intermediate_layer, wo_kernel, group_sizes)
+    output = gmm(intermediate_layer, wo_kernel, group_sizes)
     return output
+  
+    # inputs: (batch * selected_exp * sequence, emb_dim) - (262144, 4096)
+    # w0_kernel: (num_exp, emb_dim, mlp) -> (8, 4096, 14336)
+    # w1_kernel: (num_exp, emb_dim, mlp)
+    # o_kernel: (num_exp, mlp, emb_dim) - > (8, 14336, 4096)
+
+    # @functools.partial(
+    #     shard_map.shard_map,
+    #     mesh=self.mesh,
+    #     in_specs=(
+    #           (nn.logical_to_mesh_axes(('test', None))),
+    #           (nn.logical_to_mesh_axes((None, None, None))),
+    #           (nn.logical_to_mesh_axes((None, None, None))),
+    #           (nn.logical_to_mesh_axes((None, None, None))),
+    #           (nn.logical_to_mesh_axes((None,))),
+    #       ),
+    #     out_specs=(nn.logical_to_mesh_axes(('test', None))),
+    #     check_rep=False,
+    # )
+    # def inner_fn(x, w0, w1, wo, gs):
+    #   tile_size = (4096, 128, 128)
+    #   layer_w0 = gmm(x, w0, gs, tile_size)
+    #   layer_w1 = gmm(x, w1, gs, tile_size)
+    #   layer_act = _convert_to_activation_function(mlp_activation)(layer_w0)
+    #   intermediate_layer = jnp.multiply(layer_act, layer_w1)
+    #   output = gmm(intermediate_layer, wo, gs, (tile_size[0], tile_size[2], tile_size[1]))
+    #   # breakpoint()
+    #   return output
+    
+    # output = inner_fn(inputs, w0_kernel, w1_kernel, wo_kernel, group_sizes)
+    # return output
 
   @nn.compact
   def __call__(self, inputs):
     cfg = self.config
-    # inputs = nn.with_logical_constraint(inputs, ('test', None, None))
     inputs = inputs.astype(cfg.dtype)
     gate_logits = DenseGeneral(
             self.num_experts,
@@ -452,7 +447,6 @@ class MoeBlock(nn.Module):
     flattened_top_k_weights = top_k_weights.reshape(-1, self.num_experts_per_tok)
 
     softmax_probs = jax.nn.softmax(flattened_top_k_weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
-    # softmax_probs = jax.nn.softmax(flattened_top_k_weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
     softmax_probs = softmax_probs.reshape(gate_logits.shape[:-1] + (self.num_experts_per_tok,))
 
     weights = jnp.zeros_like(gate_logits)
@@ -467,7 +461,7 @@ class MoeBlock(nn.Module):
       max_logging.log("Running MoE megablox implementation.")
       sorted_hidden_states, sorted_selected_experts, weights, group_sizes = self.permute(inputs,
                                                                                          gate_logits,
-                                                                                         cfg.emb_dim)      
+                                                                                         cfg.emb_dim)                                                                                   
       intermediate_output = self.call_gmm(sorted_hidden_states,
                                           group_sizes,
                                           cfg.mlp_activations[0],
