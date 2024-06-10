@@ -136,10 +136,13 @@ logical_axis_rules: [
                        # The "stage" needs to be listed first since the microbatch dimension is first before the reshape.
                       ['activation_embed_and_logits_batch', ['stage', 'data', 'fsdp', 'fsdp_transpose']],
                       ['activation_heads', ['tensor','sequence']],
+                      ['activation_kv_heads', ['tensor','sequence']],
                       ['activation_length', 'sequence'],
                       ['activation_embed', 'tensor'],
                       ['activation_mlp', 'tensor'],
                       ['activation_kv', 'tensor'],
+                      ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose',]],
+                      ['activation_kv_head_dim', 'tensor'],
                       ['activation_vocab', ['tensor', 'sequence']],
                       ['activation_vocab', 'tensor'],
                       ['activation_vocab', 'sequence'],
@@ -152,6 +155,8 @@ logical_axis_rules: [
                       ['heads', ['tensor', 'autoregressive']],
                       ['layers', 'stage'],
                       ['kv', []],
+                      ['kv_heads', ['tensor', 'autoregressive']],
+                      ['kv_head_dim', []],
                       ['cache_batch', []],
                       ['cache_heads', ['autoregressive', 'tensor']],
                       ['cache_kv', []],
@@ -327,3 +332,6 @@ enable_checkpoint_standard_logger: False
 
 # Single-controller
 enable_single_controller: False
+
+# Split physical axes for https://jax.readthedocs.io/en/latest/_autosummary/jax.experimental.mesh_utils.create_device_mesh.html
+allow_split_physical_axes: False

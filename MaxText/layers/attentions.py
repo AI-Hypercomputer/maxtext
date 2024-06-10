@@ -49,9 +49,12 @@ Quant = quantizations.AqtQuantization
 AxisNames = common_types.AxisNames
 AxisIdxes = common_types.AxisIdxes
 BATCH = common_types.BATCH
+KV_BATCH = common_types.KV_BATCH
 LENGTH = common_types.LENGTH
 HEAD = common_types.HEAD
+KV_HEAD = common_types.KV_HEAD
 D_KV = common_types.D_KV
+KV_HEAD_DIM = common_types.KV_HEAD_DIM
 CACHE_BATCH = common_types.CACHE_BATCH
 CACHE_SEQUENCE = common_types.CACHE_SEQUENCE
 CACHE_HEADS = common_types.CACHE_HEADS
@@ -759,9 +762,6 @@ class AttentionOp(nn.Module):
     assert cached_ar_key_var[0].value.shape == self.cached_kv_shape((batch, self.max_target_length - self.max_prefill_predict_length, heads, kv_head_size), self.ar_key_axis_order)
     assert cached_ar_value_var[0].value.shape == self.cached_kv_shape((batch, self.max_target_length - self.max_prefill_predict_length, heads, kv_head_size), self.ar_value_axis_order)
 
-    key = nn.with_logical_constraint(key, (BATCH, LENGTH, HEAD, D_KV))
-    value = nn.with_logical_constraint(value, (BATCH, LENGTH, HEAD, D_KV))
-
     ar_key, ar_value = self.update_ar_key_value(key, value, cached_ar_key_var, cached_ar_value_var, cache_ar_index.value)
     active_indicator = jnp.zeros((batch, 1), dtype=jnp.int32) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     cached_ar_segment_id.value = jax.lax.dynamic_update_index_in_dim(
@@ -909,9 +909,11 @@ class Attention(nn.Module):
   quant: Optional[Quant] = None
   quantize_kvcache: bool = False
 
-  query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
-  key_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
-  value_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  # Shard the query activation as the same as the key and value.
+  # TODO: Find a better sharding axis name.
+  query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
+  key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
+  value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
 
   prefill_key_axis_order: AxisIdxes = (1, 2, 0, 3)
@@ -961,11 +963,13 @@ class Attention(nn.Module):
     if self.num_query_heads % self.num_kv_heads != 0:
       raise ValueError("Invalid num_kv_heads for GQA.")
 
+    kernel_axes = ("embed", "kv_heads", "kv_head_dim")
+
     kv_proj = DenseGeneral(
         features=(self.num_kv_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed", "heads", "kv"),
+        kernel_axes=kernel_axes,
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name=proj_name,
