@@ -90,6 +90,11 @@ class Pipeline(nn.Module):
     # Setup potential input from state_io, which has a rotating microbatch index (size of microbatches_per_stage)
     state_io_batch_idx = loop_iteration % self.microbatches_per_stage
     first_stage_in = state_io[:,state_io_batch_idx]
+    # Note that first_stage_in may correspond to bubble computation during the last few iterations.
+    # However these bubble computation results remain in the shift buffer (do not make it back to state_io) and are thus discarded / not returned.
+    # The final returned output is stored in the state_io, which has the appropriate total size of num_microbatches. The state_io will not contain bubble results
+    # at the end of the last iteration.
+    
 
     def select_state_or_input(first_stage_in, shift):
         # Selects input for stage 0, shift for other stages
@@ -292,7 +297,7 @@ class Pipeline(nn.Module):
     )
 
     # The scan cannot be used on init since it broadcasts the weights, which aren't yet initialized.
-    if self.config.scan_pipeline_iterations and not self.is_initializing():
+    if self.config.scan_pipeline_iterations:
       variable_carry = []
       variable_broadcast = ["params"] # All loop iterations need the weights for the full pipeline.  
       if self.is_mutable_collection("non_trainable"):
