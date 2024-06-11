@@ -24,6 +24,7 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
+from jax.sharding import PartitionSpec
 
 MAX_INT8 = 127.5
 
@@ -186,3 +187,21 @@ def quantize_kv(kv: Array, kv_axis: int):
 def unquantize_kv(value: Array, scale: Array, dtype: jnp.dtype):
   """Unquantize key/values stored in kvcache."""
   return value.astype(dtype) * scale / MAX_INT8
+
+
+def update_aqt_annotations(config, state_logical_annotations):
+  mlp_weight_in_spec = PartitionSpec('embed', 'mlp')
+  mlp_weight_out_spec = PartitionSpec('mlp', 'embed')
+  attention_weight_qkv_spec = PartitionSpec('embed', 'heads', 'kv')
+  attention_weight_out_spec = PartitionSpec('heads', 'kv', 'embed')
+  num_layers = config.base_num_decoder_layers
+  # TBD - sharding for the scale.
+  for i in range(num_layers):
+    state_logical_annotations.params['aqt']['decoder'][f'layers_{i}']['mlp']['wi_0']['AqtDotGeneral_0']['qrhs']['value'] = mlp_weight_in_spec
+    state_logical_annotations.params['aqt']['decoder'][f'layers_{i}']['mlp']['wi_1']['AqtDotGeneral_0']['qrhs']['value'] = mlp_weight_in_spec
+    state_logical_annotations.params['aqt']['decoder'][f'layers_{i}']['mlp']['wo']['AqtDotGeneral_0']['qrhs']['value'] = mlp_weight_out_spec
+    state_logical_annotations.params['aqt']['decoder'][f'layers_{i}']['self_attention']['query']['AqtDotGeneral_0']['qrhs']['value'] = attention_weight_qkv_spec
+    state_logical_annotations.params['aqt']['decoder'][f'layers_{i}']['self_attention']['key']['AqtDotGeneral_0']['qrhs']['value'] = attention_weight_qkv_spec
+    state_logical_annotations.params['aqt']['decoder'][f'layers_{i}']['self_attention']['value']['AqtDotGeneral_0']['qrhs']['value'] = attention_weight_qkv_spec
+    state_logical_annotations.params['aqt']['decoder'][f'layers_{i}']['self_attention']['out']['AqtDotGeneral_0']['qrhs']['value'] = attention_weight_qkv_spec
+  return state_logical_annotations

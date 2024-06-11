@@ -26,6 +26,7 @@ import orbax.checkpoint
 import grain.python as grain
 
 import max_logging
+import max_utils
 from multihost_dataloading import MultiHostDataLoadIterator
 from flax.training import train_state
 
@@ -188,9 +189,13 @@ def load_state_if_possible(
     # memory, we instead specify here that we are just restoring the params field of the checkpoint
     # (which itself may be a dictionary containing a key named 'params').
     restore_args = orbax.checkpoint.checkpoint_utils.construct_restore_args(abstract_unboxed_pre_state.params)
+    print("\n Before loading params\n")
+    max_utils.print_mem_stats()
     restored = ckptr.restore(
         p, item={"params": abstract_unboxed_pre_state.params}, transforms={}, restore_args={"params": restore_args}
     )
+    print("\n After loading params\n")
+    max_utils.print_mem_stats()
     return None, restored["params"]
 
   elif load_full_state_from_path != "":
@@ -221,17 +226,17 @@ def setup_checkpoint_logger(config) -> composite_logger.CompositeLogger | None:
         job_name=config.run_name, logger_name=logger_name
     )
     orbax_cloud_logger = cloud_logger.CloudLogger(options=options)
-    max_logging.log("Sucessfully set up checkpoint cloud logger.")
+    max_logging.log("Successfully set up checkpoint cloud logger.")
 
   if config.enable_checkpoint_standard_logger:
     orbax_standard_logger = standard_logger.StandardLogger()
-    max_logging.log("Sucessfully set up checkpoint standard logger.")
+    max_logging.log("Successfully set up checkpoint standard logger.")
 
   orbax_logger = None
   if orbax_cloud_logger is not None and orbax_standard_logger is not None:
     orbax_logger = composite_logger.CompositeLogger(
         orbax_cloud_logger, orbax_standard_logger
     )
-    max_logging.log("Sucessfully set up checkpoint composite logger.")
+    max_logging.log("Successfully set up checkpoint composite logger.")
 
   return orbax_logger
