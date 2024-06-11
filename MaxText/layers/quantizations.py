@@ -190,6 +190,7 @@ def unquantize_kv(value: Array, scale: Array, dtype: jnp.dtype):
 
 
 def update_aqt_annotations(config, state_logical_annotations):
+  gate_weight_spec = PartitionSpec('embed', 'mlp')
   mlp_weight_in_spec = PartitionSpec('embed', 'mlp')
   mlp_weight_out_spec = PartitionSpec('mlp', 'embed')
   attention_weight_qkv_spec = PartitionSpec('embed', 'heads', 'kv')
@@ -197,9 +198,16 @@ def update_aqt_annotations(config, state_logical_annotations):
   num_layers = config.base_num_decoder_layers
   # TBD - sharding for the scale.
   for i in range(num_layers):
-    state_logical_annotations.params['aqt']['decoder'][f'layers_{i}']['mlp']['wi_0']['AqtDotGeneral_0']['qrhs']['value'] = mlp_weight_in_spec
-    state_logical_annotations.params['aqt']['decoder'][f'layers_{i}']['mlp']['wi_1']['AqtDotGeneral_0']['qrhs']['value'] = mlp_weight_in_spec
-    state_logical_annotations.params['aqt']['decoder'][f'layers_{i}']['mlp']['wo']['AqtDotGeneral_0']['qrhs']['value'] = mlp_weight_out_spec
+    if config.num_experts > 1:
+      state_logical_annotations.params['aqt']['decoder'][f'layers_{i}']['gate']['AqtDotGeneral_0']['qrhs']['value'] = gate_weight_spec
+      for k in range(config.num_experts):
+        state_logical_annotations.params['aqt']['decoder'][f'layers_{i}'][f'mlp_{k}']['wi_0']['AqtDotGeneral_0']['qrhs']['value'] = mlp_weight_in_spec
+        state_logical_annotations.params['aqt']['decoder'][f'layers_{i}'][f'mlp_{k}']['wi_1']['AqtDotGeneral_0']['qrhs']['value'] = mlp_weight_in_spec
+        state_logical_annotations.params['aqt']['decoder'][f'layers_{i}'][f'mlp_{k}']['wo']['AqtDotGeneral_0']['qrhs']['value'] = mlp_weight_out_spec
+    else:
+      state_logical_annotations.params['aqt']['decoder'][f'layers_{i}']['mlp']['wi_0']['AqtDotGeneral_0']['qrhs']['value'] = mlp_weight_in_spec
+      state_logical_annotations.params['aqt']['decoder'][f'layers_{i}']['mlp']['wi_1']['AqtDotGeneral_0']['qrhs']['value'] = mlp_weight_in_spec
+      state_logical_annotations.params['aqt']['decoder'][f'layers_{i}']['mlp']['wo']['AqtDotGeneral_0']['qrhs']['value'] = mlp_weight_out_spec
     state_logical_annotations.params['aqt']['decoder'][f'layers_{i}']['self_attention']['query']['AqtDotGeneral_0']['qrhs']['value'] = attention_weight_qkv_spec
     state_logical_annotations.params['aqt']['decoder'][f'layers_{i}']['self_attention']['key']['AqtDotGeneral_0']['qrhs']['value'] = attention_weight_qkv_spec
     state_logical_annotations.params['aqt']['decoder'][f'layers_{i}']['self_attention']['value']['AqtDotGeneral_0']['qrhs']['value'] = attention_weight_qkv_spec

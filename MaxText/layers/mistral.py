@@ -138,7 +138,7 @@ class MistralDecoderLayer(nn.Module):
             mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')
         )
       else:
-        max_logging.log("Running MoE for loop implementation.")
+        #max_logging.log("Running MoE for loop implementation.")
         gate_logits = linears.DenseGeneral(
             cfg.num_experts,
             weight_dtype=cfg.weight_dtype,
@@ -164,6 +164,7 @@ class MistralDecoderLayer(nn.Module):
                 weight_dtype=cfg.weight_dtype,
                 name=f"mlp_{k}",
                 config=cfg,
+                quant=self.quant,
             )(hidden_states, deterministic=deterministic)
             mlp_lnx_exp = nn.with_logical_constraint(mlp_lnx_exp, ("activation_batch", "activation_length", "activation_embed"))
             mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
@@ -177,6 +178,7 @@ class MistralDecoderLayer(nn.Module):
           weight_dtype=cfg.weight_dtype,
           name="mlp",
           config=cfg,
+          quant=self.quant,
       )(hidden_states, deterministic=deterministic)
       mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
 

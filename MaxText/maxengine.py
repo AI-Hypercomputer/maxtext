@@ -87,6 +87,9 @@ class MaxEngine(engine_api.Engine):
       self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
 
     state, self.state_mesh_annotations = max_utils.setup_decode_state(self.model, self.config, self.rng, self._mesh, None)
+    print("LOAD_PARAMS: After initializing abstract outputs")
+    max_utils.print_mem_stats()
+
     self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), state.params
     )
@@ -94,13 +97,16 @@ class MaxEngine(engine_api.Engine):
     self.kv_cache_shardings = jax.tree_util.tree_map(
       lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations)
 
+    print("LOAD_PARAMS: After kv cache sharding")
+    max_utils.print_mem_stats()
     if not self.model.quant or self.config.load_from_quantized_checkpoint:
       self.abstract_params = jax.tree_util.tree_map(
           lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), state.params
       )
+      print("LOAD_PARAMS: returning early")
       return state.params
     else:
-      self.model.quant.quant_mode = quantizations.get_quant_mode("convert")
+      self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
 
       @jax.jit
       def model_apply(_p, _rng):
@@ -355,6 +361,8 @@ class MaxEngine(engine_api.Engine):
           "generated_tokens": generated_tokens,
       }
 
+    print("INIT_DECODE_STATE: After initializing abstract outputs")
+    max_utils.print_mem_stats()
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
       abstract_outputs = jax.eval_shape(init, self.abstract_params)
     logical_annotations = nn.get_partition_spec(abstract_outputs)
@@ -371,6 +379,8 @@ class MaxEngine(engine_api.Engine):
       return jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), abstract_outputs)
 
     cache = initialize()["cache"]
+    print("INIT_DECODE_STATE: After initializing abstract outputs with zeros")
+    max_utils.print_mem_stats()
 
     def is_lp(k):
       return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
@@ -378,6 +388,8 @@ class MaxEngine(engine_api.Engine):
     self.kv_cache_annotations_named = jax.tree_util.tree_map(lambda x: tuple(x.names), cache, is_leaf=is_lp)
     del cache
     zeroed = max_utils.unbox_logicallypartioned(initialize())
+    print("INIT_DECODE_STATE: After creating new unboxed cache")
+    max_utils.print_mem_stats()
     return zeroed
 
   @property
