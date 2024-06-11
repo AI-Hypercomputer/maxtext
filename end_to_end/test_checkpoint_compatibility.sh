@@ -24,8 +24,8 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME steps=3 ${m
     max_target_length=128 per_device_batch_size=1\
     metrics_file=run_1_metrics.txt checkpoint_period=2 async_checkpointing=false\
     dataset_path=/tmp/gcsfuse base_output_directory=$OUTPUT_PATH\
-    dataset_type=c4-array_record grain_worker_count=0 attention=$ATTENTION\
-    dataset_name=array-record/c4/en/3.0.1 eval_dataset_name=array-record/c4/en/3.0.1
+    dataset_type=grain grain_worker_count=0 attention=$ATTENTION\
+    grain_data_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*
 
 echo
 echo "Finished Run_1 at step 2"
@@ -46,8 +46,8 @@ python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME steps=7 ${m
     max_target_length=128 per_device_batch_size=1\
     metrics_file=run_3_metrics.txt checkpoint_period=2 async_checkpointing=false\
     dataset_path=/tmp/gcsfuse base_output_directory=$OUTPUT_PATH\
-    dataset_type=c4-array_record grain_worker_count=0 attention=$ATTENTION\
-    dataset_name=array-record/c4/en/3.0.1 eval_dataset_name=array-record/c4/en/3.0.1
+    dataset_type=grain grain_worker_count=0 attention=$ATTENTION\
+    grain_data_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*
 
 python3 end_to_end/tpu/eval_assert.py test_start_step run_2_metrics.txt 3.0
 python3 end_to_end/tpu/eval_assert.py test_start_step run_3_metrics.txt 5.0
