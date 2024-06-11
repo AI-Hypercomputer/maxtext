@@ -29,8 +29,7 @@ then
     export M_RUN_NAME=$RUN_NAME
 fi
 
-export XLA_FLAGS="--xla_dump_to=$OUTPUT_PATH/$M_RUN_NAME/HLO_dumps/
- --xla_dump_hlo_pass_re=.* --xla_gpu_all_reduce_contiguous=true
+export XLA_FLAGS="--xla_dump_to=$OUTPUT_PATH/$M_RUN_NAME/HLO_dumps/ --xla_dump_hlo_pass_re=.*
  --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_triton_gemm=false
  --xla_gpu_graph_level=0 --xla_gpu_enable_highest_priority_async_stream=true
  --xla_gpu_all_reduce_combine_threshold_bytes=134217728 --xla_gpu_all_gather_combine_threshold_bytes=134217728
