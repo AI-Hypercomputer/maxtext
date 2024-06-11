@@ -1,7 +1,4 @@
 echo "Running 8vm.sh"
-# Example command to invoke this script
-# bash MaxText/configs/a3/llama_2_7b/8vm.sh
-#
 # Example command to invoke this script via XPK
 # python3 xpk/xpk.py workload create --cluster ${CLUSTER_NAME} \
 # --workload ${WORKLOAD_NAME} --docker-image=gcr.io/supercomputer-testing/${LOCAL_IMAGE_NAME} \
@@ -20,10 +17,6 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
-export CUDA_DEVICE_MAX_CONNECTIONS=1
-export NVTE_FUSED_ATTN=1
-export NCCL_DEBUG=VERSION
 export XLA_FLAGS="--xla_dump_to=$OUTPUT_PATH/$RUN_NAME/HLO_dumps/
 --xla_gpu_enable_latency_hiding_scheduler=true
 --xla_gpu_enable_triton_gemm=false --xla_gpu_graph_level=0
