@@ -254,6 +254,11 @@ class Pipeline(nn.Module):
 
     loop_state = self.init_states(inputs)
     
+    # Each microbatch should go through each stage - so there is num_micro * num_stages compute to perform
+    # Each iteration is vmapped by num_stages, so the number of iterations should be num_micro * num_stages / num_stages = num_micro
+    # However due to the pipeline bubble some iterations process less than num_stages microbatches. It takes
+    # num_micro - 1 iterations for the last microbatch to enter the pipeline, then num_stages more iterations to complete the pipeline.
+    # Thus the total iterations is num_micro + num_stages - 1, and we may consider the num_stages - 1 as bubble. 
     total_iterations = self.config.num_pipeline_microbatches + self.num_stages  - 1 
 
     if self.is_initializing():     
