@@ -4,6 +4,7 @@ echo "Running 2vm.sh"
 # For A3, you can set DEVICE_TYPE as `h100-80gb-8`.
 # For A3+, you can set DEVICE_TYPE as `h100-mega-80gb-8`.
 #
+# export RUN_NAME="llama2-7b-2vm-$(date +%Y-%m-%d-%H-%M)"
 # python3 xpk/xpk.py workload create --cluster ${CLUSTER_NAME} \
 # --workload ${WORKLOAD_NAME} --docker-image ${LOCAL_IMAGE_NAME} \
 # --device-type ${DEVICE_TYPE} --num-nodes 2 \
@@ -13,7 +14,6 @@ echo "Running 2vm.sh"
 set -e
 
 export OUTPUT_PATH="gs://maxtext-experiments-multipod"
-export RUN_NAME="llama2-7b-2vm-$(date +%Y-%m-%d-%H-%M)"
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -21,7 +21,15 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
-export XLA_FLAGS="--xla_dump_to=$OUTPUT_PATH/$RUN_NAME/HLO_dumps/
+# The setup accommodates two cases:
+# 1) Passing the 'RUN_NAME' variable at runtime
+# 2) Propagating the 'M_RUN_NAME' variable within an Airflow sweeping workflow
+if [ -n "$RUN_NAME" ];
+then
+    export M_RUN_NAME=$RUN_NAME
+fi
+
+export XLA_FLAGS="--xla_dump_to=$OUTPUT_PATH/$M_RUN_NAME/HLO_dumps/
  --xla_dump_hlo_pass_re=.* --xla_gpu_all_reduce_contiguous=true
  --xla_gpu_enable_latency_hiding_scheduler=true
  --xla_gpu_enable_triton_gemm=false --xla_gpu_graph_level=0
