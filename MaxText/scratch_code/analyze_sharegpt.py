@@ -14,10 +14,16 @@
 
 import argparse
 import json
+import pandas 
+import os
 
 PREFILL_BUCKET_SIZE_TO_MS = {64: 9.174, 128: 11.087, 256: 18.468, 512: 29.128, 1024: 58.386}
 SYSTEM_TIME_PER_DECODE_TOKEN_MS = 0.32591875
-MAX_INPUT_TOKENS = 1024
+
+PREFILL_BUCKET_SIZE_TO_MS = {1024: 121.789, 2048: 243.69}
+PREFILL_BUCKET_SIZE_TO_MS = {128: 15.287, 256: 30.768, 512: 61.828, 1024: 123.554, 2048: 247.067}
+SYSTEM_TIME_PER_DECODE_TOKEN_MS = 0.4161825
+MAX_INPUT_TOKENS = 2048
 MAX_OUTPUT_TOKENS = 1024
 
 
@@ -43,7 +49,17 @@ def get_prefill_and_generate_times(filename=""):
   return prefill_bucket_size_to_ms, microbenchmark_results["AutoRegressive"]["ar_step_in_ms_per_seq"]
 
 
-def get_conversations_from_file(filename, max_input_tokens, max_output_tokens):
+def load_open_orca(filename, max_input_tokens, max_output_tokens):
+  convo_token_numbers = []
+  # read pickle file
+  samples = pandas.read_pickle(os.path.join(filename))
+  for _, row in samples.iterrows():
+    num_input_tokens = tokens_in_input_str(row["input"])
+    num_output_tokens = tokens_in_input_str(row["output"])
+    convo_token_numbers.append((num_input_tokens, num_output_tokens))
+  return convo_token_numbers
+
+def load_from_sharegpt(filename, max_input_tokens, max_output_tokens):
   convo_token_numbers = []
   with open(filename, "r") as f:
     loaded_share_gpt = json.load(f)
@@ -53,6 +69,15 @@ def get_conversations_from_file(filename, max_input_tokens, max_output_tokens):
     num_input_tokens = tokens_in_input_str(example["conversations"][0]["value"])
     num_output_tokens = tokens_in_input_str(example["conversations"][1]["value"])
     convo_token_numbers.append((num_input_tokens, num_output_tokens))
+  return convo_token_numbers
+
+def get_conversations_from_file(filename, max_input_tokens, max_output_tokens, filetype="shapegpt"):
+
+  convo_token_numbers = []
+  if filetype == "sharegpt":
+    convo_token_numbers = load_from_sharegpt(filename, max_input_tokens, max_output_tokens)
+  else:
+    convo_token_numbers = load_open_orca(filename, max_input_tokens, max_output_tokens)
 
   num_convos = len(convo_token_numbers)
   kept_convos = [c for c in convo_token_numbers if c[0] <= max_input_tokens and c[1] <= max_output_tokens]
@@ -103,9 +128,10 @@ if __name__ == "__main__":
       "-t", "--mb_timing_file", type=str, default="", help="a json file containing microbenchmark timing results"
   )
   parser.add_argument("-v", "--verbose", action="store_true")
+  parser.add_argument("-f", "--filetype", type=str,  default="sharegpt", choices=["sharegpt", "openorca"], help="file type")
   args = parser.parse_args()
 
-  convos = get_conversations_from_file(args.convo_file, MAX_INPUT_TOKENS, MAX_OUTPUT_TOKENS)
+  convos = get_conversations_from_file(args.convo_file, MAX_INPUT_TOKENS, MAX_OUTPUT_TOKENS, args.filetype)
   total_input_tokens, total_output_tokens = get_num_tokens_in_convos(convos)
   prefill_time_ms_buckets, generate_time_ms = get_prefill_and_generate_times(filename=args.mb_timing_file)
   total_time_seconds, _, _ = compute_times(convos, prefill_time_ms_buckets, generate_time_ms, args.verbose)

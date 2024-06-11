@@ -1,8 +1,9 @@
-export TOKENIZER_PATH=assets/tokenizer.llama2
-export MAX_PREFILL_PREDICT_LENGTH=1024
-export MAX_TARGET_LENGTH=2048
-export MODEL_NAME=llama2-7b
+export TOKENIZER_PATH=/home/vipannalla/tokenizer.mistral
+export MAX_PREFILL_PREDICT_LENGTH=2048
+export MAX_TARGET_LENGTH=4096
+# export MODEL_NAME=llama2-7b
 # export MODEL_NAME=llama2-70b
+export MODEL_NAME=mixtral-8x7b
 export ICI_FSDP_PARALLELISM=1
 export ICI_AUTOREGRESSIVE_PARALLELISM=1
 export ICI_TENSOR_PARALLELISM=-1
@@ -11,7 +12,7 @@ export WEIGHT_DTYPE=bfloat16
 export PER_DEVICE_BATCH_SIZE=11
 export QUANTIZATION="int8"
 export QUANTIZE_KVCACHE=true
-export LOAD_PARAMETERS_PATH=gs://${USER}-bkt/checkpoints/quantized/${MODEL_NAME}-chat
+export LOAD_PARAMETERS_PATH=gs://${USER}-bkt/checkpoints/quantized/${MODEL_NAME}-instruct
 
 python MaxText/decode.py \
   MaxText/configs/base.yml \
