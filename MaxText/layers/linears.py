@@ -289,7 +289,7 @@ class MoeBlock(nn.Module):
   weight_dtype: DType = jnp.bfloat16 # todo: check type
   dtype: DType = jnp.bfloat16
 
-  def generate_kernels(self, num_experts, base_emb_dim, mlp_dim):
+  def generate_kernels(self, num_experts, emb_dim, mlp_dim):
     
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
@@ -303,7 +303,7 @@ class MoeBlock(nn.Module):
     w0_kernel = self.param(
         'wi_0',
         nn.with_logical_partitioning(kernel_init, kernel_axes),
-        (num_experts, base_emb_dim, mlp_dim),
+        (num_experts, emb_dim, mlp_dim),
         self.weight_dtype,
         kernel_in_axis,
         kernel_out_axis,
@@ -312,7 +312,7 @@ class MoeBlock(nn.Module):
     w1_kernel = self.param(
         'wi_1',
         nn.with_logical_partitioning(kernel_init, kernel_axes),
-        (num_experts, base_emb_dim, mlp_dim),
+        (num_experts, emb_dim, mlp_dim),
         self.weight_dtype,
         kernel_in_axis,
         kernel_out_axis,
@@ -321,7 +321,7 @@ class MoeBlock(nn.Module):
     wo_kernel = self.param(
         'wo',
         nn.with_logical_partitioning(kernel_init, wo_kernel_axes),
-        (num_experts, mlp_dim, base_emb_dim),
+        (num_experts, mlp_dim, emb_dim),
         self.weight_dtype,
         kernel_in_axis,
         kernel_out_axis,
@@ -456,7 +456,7 @@ class MoeBlock(nn.Module):
     weights = weights.at[index_update].set(softmax_probs)
 
     w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts,
-                                                            cfg.base_emb_dim,
+                                                            cfg.emb_dim,
                                                             cfg.mlp_dim)
 
     if cfg.megablox:
