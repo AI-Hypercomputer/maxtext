@@ -51,6 +51,11 @@ def string_to_bool(s: str) -> bool:
 _yaml_types_to_parser = {str: str, int: int, float: float, bool: string_to_bool}
 
 
+def validate_compute_axis_order(s: str) -> None:
+  valid_compute_axis_order = ("0,1,2,3", "0,2,1,3")
+  if s not in valid_compute_axis_order:  # currently supported compute_axis_order
+    raise ValueError("Invalid compute_axis_order was passed. Valid options ", valid_compute_axis_order)
+
 def validate_attention_type(s: str) -> None:
   valid_attention_types = ("autoselected", "dot_product", "flash", "cudnn_flash_te")
   if s not in valid_attention_types:  # currently supported attention
@@ -65,6 +70,7 @@ def validate_profiler_type(s: str) -> None:
 def validate_keys(keys):
   validate_attention_type(keys["attention"])
   validate_profiler_type(keys["profiler"])
+  validate_compute_axis_order(keys["compute_axis_order"])
 
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"
