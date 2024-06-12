@@ -304,10 +304,13 @@ inference_microbenchmark_log_file_path: ""
 # KV Cache layout control
 # Logical layout: 0,1,2,3 ; CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV
 # Default layout: 1,2,0,3 ; CACHE_SEQUENCE, CACHE_HEADS, CACHE_BATCH, CACHE_KV
-prefill_key_axis_order: "1,2,0,3"
-prefill_value_axis_order: "1,2,0,3"
-ar_key_axis_order: "1,2,0,3"
-ar_value_axis_order: "1,2,0,3"
+prefill_cache_axis_order: "1,2,0,3"
+ar_cache_axis_order: "1,2,0,3"
+
+# Compute layout control
+# Default layout: 0,1,2,3 ; BATCH, LENGTH, HEAD, D_KV
+compute_axis_order: "0,1,2,3"
+
 reshape_q: False
 
 # Maxengine Metrics

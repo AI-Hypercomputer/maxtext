@@ -258,38 +258,41 @@ class AttentionTest(unittest.TestCase):
 
   @pytest.mark.tpu
   def test_dot_product_1203_1203(self):
-    self.dot_product_attention_helper(
-      prefill_cache_axis_order=(1,2,0,3),
-      ar_cache_axis_order=(1,2,0,3)
-    )
+    self.dot_product_attention_helper(prefill_cache_axis_order=(1,2,0,3), ar_cache_axis_order=(1,2,0,3))
 
   @pytest.mark.tpu
   def test_dot_product_1203_2130(self):
-    self.dot_product_attention_helper(
-      prefill_cache_axis_order=(1,2,0,3),
-      ar_cache_axis_order=(2,1,3,0)
-    )
+    self.dot_product_attention_helper(prefill_cache_axis_order=(1,2,0,3), ar_cache_axis_order=(2,1,3,0))
 
   @pytest.mark.tpu
   def test_dot_product_2130_1203(self):
-    self.dot_product_attention_helper(
-      prefill_cache_axis_order=(2,1,3,0),
-      ar_cache_axis_order=(1,2,0,3)
-    )
+    self.dot_product_attention_helper(prefill_cache_axis_order=(2,1,3,0), ar_cache_axis_order=(1,2,0,3))
 
   @pytest.mark.tpu
   def test_dot_product_2130_2130(self):
-    self.dot_product_attention_helper(
-      prefill_cache_axis_order=(2,1,3,0),
-      ar_cache_axis_order=(2,1,3,0),
-    )
+    self.dot_product_attention_helper(prefill_cache_axis_order=(2,1,3,0), ar_cache_axis_order=(2,1,3,0))
+
+  @pytest.mark.tpu
+  def test_dot_product_0213_0213(self):
+    self.dot_product_attention_helper(prefill_cache_axis_order=(0,2,1,3), ar_cache_axis_order=(0,2,1,3))
 
   def dot_product_attention_helper(self, prefill_cache_axis_order, ar_cache_axis_order):
-    self._dot_product_attention(prefill_cache_axis_order, ar_cache_axis_order, quantize_kvcache=False, rtol=1e-02, atol=1e-01)
-    self._dot_product_attention(prefill_cache_axis_order, ar_cache_axis_order, quantize_kvcache=True, rtol=1e-01, atol=1e-01)
+    self._dot_product_attention(
+      prefill_cache_axis_order, ar_cache_axis_order, compute_axis_order=(0,1,2,3), quantize_kvcache=False)
+    self._dot_product_attention(
+      prefill_cache_axis_order, ar_cache_axis_order, compute_axis_order=(0,1,2,3), quantize_kvcache=True)
+    self._dot_product_attention(
+      prefill_cache_axis_order, ar_cache_axis_order, compute_axis_order=(0,2,1,3), quantize_kvcache=False)
+    self._dot_product_attention(
+      prefill_cache_axis_order, ar_cache_axis_order, compute_axis_order=(0,2,1,3), quantize_kvcache=True)
 
-  def _dot_product_attention(self, prefill_cache_axis_order, ar_cache_axis_order, quantize_kvcache, rtol, atol):
+  def _dot_product_attention(self, prefill_cache_axis_order, ar_cache_axis_order, compute_axis_order, quantize_kvcache):
     """Test equalvant between different layout control in dot_product"""
+
+    rtol, atol = 1e-02, 1e-02
+    if quantize_kvcache:
+      rtol, atol = 1e-02, 1e-01
+
     prefill_length = self.max_prefill_predict_length
     decode_total_length = self.max_target_length
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
@@ -308,10 +311,9 @@ class AttentionTest(unittest.TestCase):
         mesh=self.mesh,
         attention_kernel="dot_product",
         dtype=self.dtype,
-        prefill_key_axis_order=prefill_cache_axis_order,
-        prefill_value_axis_order=prefill_cache_axis_order,
-        ar_key_axis_order=ar_cache_axis_order,
-        ar_value_axis_order=ar_cache_axis_order,
+        prefill_cache_axis_order=prefill_cache_axis_order,
+        ar_cache_axis_order=ar_cache_axis_order,
+        compute_axis_order=compute_axis_order,
         quantize_kvcache=quantize_kvcache,
     )
 
@@ -371,11 +373,18 @@ class AttentionTest(unittest.TestCase):
 
   @pytest.mark.tpu
   def test_dot_product_reshape_q(self):
-    self._dot_product_attention_reshape_q(quantize_kvcache=True, rtol=1e-01, atol=1e-01)
-    self._dot_product_attention_reshape_q(quantize_kvcache=False, rtol=1e-02, atol=1e-02)
+    self._dot_product_attention_reshape_q(quantize_kvcache=True, compute_axis_order=(0,1,2,3))
+    self._dot_product_attention_reshape_q(quantize_kvcache=False, compute_axis_order=(0,1,2,3))
+    self._dot_product_attention_reshape_q(quantize_kvcache=True, compute_axis_order=(0,2,1,3))
+    self._dot_product_attention_reshape_q(quantize_kvcache=False, compute_axis_order=(0,2,1,3))
 
-  def _dot_product_attention_reshape_q(self, quantize_kvcache, rtol, atol):
+  def _dot_product_attention_reshape_q(self, quantize_kvcache, compute_axis_order):
     """Test equalvant between q and reshape q in dot_product"""
+
+    rtol, atol = 1e-02, 1e-02
+    if quantize_kvcache:
+      rtol, atol = 1e-02, 1e-01
+
     prefill_length = self.max_prefill_predict_length
     decode_total_length = self.max_target_length
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
@@ -396,6 +405,7 @@ class AttentionTest(unittest.TestCase):
         dtype=self.dtype,
         reshape_q=False,
         quantize_kvcache=quantize_kvcache,
+        compute_axis_order=compute_axis_order,
     )
 
     attention_w_reshape_q = Attention(
@@ -410,6 +420,7 @@ class AttentionTest(unittest.TestCase):
         dtype=self.dtype,
         reshape_q=True,
         quantize_kvcache=quantize_kvcache,
+        compute_axis_order=compute_axis_order
     )
 
     attention_wo_reshape_q_variable = attention_wo_reshape_q.init(

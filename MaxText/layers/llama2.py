@@ -96,10 +96,9 @@ class LlamaDecoderLayer(nn.Module):
         name="self_attention",
         quant=self.quant,
         quantize_kvcache=cfg.quantize_kvcache,
-        prefill_key_axis_order=tuple([int(i) for i in cfg.prefill_key_axis_order.split(",")]),
-        prefill_value_axis_order=tuple([int(i) for i in cfg.prefill_value_axis_order.split(",")]),
-        ar_key_axis_order=tuple([int(i) for i in cfg.ar_key_axis_order.split(",")]),
-        ar_value_axis_order=tuple([int(i) for i in cfg.ar_value_axis_order.split(",")]),
+        prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
+        ar_cache_axis_order=tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
+        compute_axis_order=tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
         reshape_q=cfg.reshape_q,
     )
 
