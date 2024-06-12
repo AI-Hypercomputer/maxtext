@@ -312,7 +312,7 @@ def gmm(
     lhs: jnp.ndarray,
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
-    preferred_element_type: jnp.dtype = jnp.float32,
+    preferred_element_type: jnp.dtype = jnp.bfloat16,
     tiling: Optional[Union[tuple[int, int, int], LutFn]] = (128, 128, 128),
     group_offset: Optional[jnp.ndarray] = None,
     existing_out: Optional[jnp.ndarray] = None,
@@ -574,7 +574,7 @@ def tgmm(
     lhs: jnp.ndarray,
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
-    preferred_element_type: jnp.dtype = jnp.float32,
+    preferred_element_type: jnp.dtype = jnp.bfloat16,
     tiling: Optional[Union[tuple[int, int, int], LutFn]] = (128, 128, 128),
     group_offset: Optional[jnp.ndarray] = None,
     num_actual_groups: Optional[int] = None,
@@ -798,10 +798,12 @@ def tgmm(
 def _gmm_tiling_lut(m: int, k: int, n: int) -> tuple[int, int, int] | None:
   """Get the best known tiling configuration for the given problem size."""
   tiling_lut = {
-      "14336_4096": (4096, 128, 128),  # m=49152 81.81%
-      "4096_14336": (4096, 128, 128),  # m=49152 77.70%
+      # "14336_4096": (4096, 128, 128),  # m=49152 81.81%
+      # "4096_14336": (4096, 128, 128),  # m=49152 77.70%
       # "65536_14336_4096": (512, 1024, 1024),  # 84.72%
       # "65536_4096_14336": (512, 1024, 1024),  # 80.35%
+      "14336_4096": (512, 1024, 1024),  # 84.72%
+      "4096_14336": (512, 1024, 1024),  # 80.35%
   }
   # Try specific m lookup.
   key = "_".join(map(str, [k, n, m]))
@@ -818,10 +820,10 @@ def _gmm_tiling_lut(m: int, k: int, n: int) -> tuple[int, int, int] | None:
 def _tgmm_tiling_lut(m: int, k: int, n: int) -> tuple[int, int, int] | None:
   """Get the best known tiling configuration for the given problem size."""
   tiling_lut = {
-    "14336_4096": (4096, 128, 128),  # m=49152 80.96%
-    "4096_14336": (4096, 128, 128),  # m=49152 79.80%
-    # "65536_14336_4096": (128, 896, 2048),  # 83.37%
-    # "65536_4096_14336": (128, 1024, 1792),  # 82.14%
+    # "14336_4096": (4096, 128, 128),  # m=49152 80.96%
+    # "4096_14336": (4096, 128, 128),  # m=49152 79.80%
+    "14336_4096": (128, 896, 2048),  # 83.37%
+    "4096_14336": (128, 1024, 1792),  # 82.14%
   }
   # Try specific m lookup.
   key = "_".join(map(str, [k, n, m]))

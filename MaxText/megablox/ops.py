@@ -31,7 +31,7 @@ def _gmm_fwd(
     lhs: jnp.ndarray,
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
-    preferred_element_type: jnp.dtype = jnp.float32,
+    preferred_element_type: jnp.dtype = jnp.bfloat16,
     tiling: tuple[int, int, int] = (128, 128, 128),
     group_offset: Optional[jnp.ndarray] = None,
     existing_out: Optional[jnp.ndarray] = None,

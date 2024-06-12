@@ -32,8 +32,8 @@ from jax.experimental import shard_map
 import max_logging
 
 try:
-  from jax.experimental.pallas.ops.tpu import megablox as mblx
-  # import megablox as mblx
+  # from jax.experimental.pallas.ops.tpu import megablox as mblx
+  import megablox as mblx
 except ImportError:
   max_logging.log("JAX megablox is available for TPU only.")
   pass
@@ -298,7 +298,7 @@ class MoeBlock(nn.Module):
     # kernel_axes = ('exp', 'embed', 'mlp')
     # wo_kernel_axes = ('exp', 'mlp', 'embed')
     kernel_axes = (None, 'test', None)
-    wo_kernel_axes = (None, 'test', None)
+    wo_kernel_axes = (None, None, 'test')
     
     w0_kernel = self.param(
         'wi_0',
@@ -327,6 +327,12 @@ class MoeBlock(nn.Module):
         kernel_out_axis,
       )
     wo_kernel = jnp.asarray(wo_kernel, self.dtype)
+    
+    # from jax.sharding import PartitionSpec
+    # fsdp_sharding = jax.sharding.NamedSharding(self.mesh, PartitionSpec('fsdp'))
+    # w0_kernel = jax.device_put(w0_kernel, device=fsdp_sharding)
+    # w1_kernel = jax.device_put(w1_kernel, device=fsdp_sharding)
+    # wo_kernel = jax.device_put(wo_kernel, device=fsdp_sharding)
     return w0_kernel, w1_kernel, wo_kernel
 
   def permute(self, inputs, gate_logits, emb_dim):
@@ -362,6 +368,7 @@ class MoeBlock(nn.Module):
     # wo_kernel_axes = ('exp', 'mlp', 'embed')
     
     tile_size = (self.config.tile_size_0, self.config.tile_size_1, self.config.tile_size_2)
+    # tile_size = None
     # tile_size = (4096, 128, 128)
     # tile_size = (512, 512, 512)
     @functools.partial(
@@ -378,7 +385,7 @@ class MoeBlock(nn.Module):
     def gmm(inputs, kernel, group_sizes):
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
-      pad_length = tile_size[0]
+      pad_length = tile_size[0] if tile_size else 512
       if hs_shape[0] % pad_length:
         pad_length = pad_length - hs_shape[0] % pad_length
         inputs = jax.lax.pad(inputs, 0.0, [(0, pad_length, 0), (0,0,0)])
@@ -395,6 +402,10 @@ class MoeBlock(nn.Module):
       if hs_shape[0] % pad_length:
         output = output[:hs_shape[0]]
       return output
+
+    # from jax.sharding import PartitionSpec
+    # replicated_sharding = jax.sharding.NamedSharding(self.mesh, PartitionSpec(None))
+    # w0_kernel, w1_kernel, wo_kernel = jax.device_put((w0_kernel, w1_kernel, wo_kernel), device=replicated_sharding)
 
     layer_w0 = gmm(inputs, w0_kernel, group_sizes)
     layer_w1 = gmm(inputs, w1_kernel, group_sizes)
@@ -463,7 +474,11 @@ class MoeBlock(nn.Module):
       max_logging.log("Running MoE megablox implementation.")
       sorted_hidden_states, sorted_selected_experts, weights, group_sizes = self.permute(inputs,
                                                                                          gate_logits,
-                                                                                         cfg.emb_dim)                                                                                   
+                                                                                        cfg.emb_dim)
+      from jax.sharding import PartitionSpec
+      replicated_sharding = jax.sharding.NamedSharding(self.mesh, PartitionSpec(None))
+      w0_kernel, w1_kernel, wo_kernel = jax.device_put((w0_kernel, w1_kernel, wo_kernel), device=replicated_sharding)
+                                                                                       
       intermediate_output = self.call_gmm(sorted_hidden_states,
                                           group_sizes,
                                           cfg.mlp_activations[0],
