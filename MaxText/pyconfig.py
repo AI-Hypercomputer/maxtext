@@ -275,6 +275,15 @@ class _HyperParameters:
     raw_keys["num_slices"] = get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
 
+    if using_pipeline_parallelism(raw_keys):
+      raw_keys["using_pipeline_parallelism"] = True
+      num_stages = int(raw_keys['ici_pipeline_parallelism'] * raw_keys['dcn_pipeline_parallelism'])
+      if raw_keys['num_pipeline_microbatches'] == -1:
+        raw_keys['num_pipeline_microbatches'] = num_stages
+    else:
+      raw_keys["using_pipeline_parallelism"] = False
+
+
     print_system_information()
 
     # Write raw_keys to GCS before type conversions
@@ -411,6 +420,8 @@ def get_quantization_local_shard_count(raw_keys):
   else:
     return raw_keys["quantization_local_shard_count"]
 
+def using_pipeline_parallelism(raw_keys) -> bool:
+  return int(raw_keys['ici_pipeline_parallelism']) > 1 or int(raw_keys['dcn_pipeline_parallelism']) > 1
 
 class HyperParameters:  # pylint: disable=missing-class-docstring
 
