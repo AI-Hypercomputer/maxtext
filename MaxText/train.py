@@ -27,12 +27,14 @@ import functools
 
 from typing import Sequence
 from absl import app
+from etils import epath
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 import grain.python as grain
 import jax
 import numpy as np
 import orbax.checkpoint
+import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 
 import checkpointing
 import max_utils
@@ -333,6 +335,9 @@ def setup_mesh_and_model(config):
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
+  
+  if emergency_checkpoint_manager.should_restore_mesh_from_metadata(epath.Path(config.checkpoint_dir)):
+    mesh = emergency_checkpoint_manager.consistent_restore_mesh_from_metadata(epath.Path(config.checkpoint_dir), mesh)
   
   max_logging.log(f"The mesh on {jax.process_index()} is {mesh}")
   max_logging.log(f"devices_array on {jax.process_index()} is {devices_array}")
