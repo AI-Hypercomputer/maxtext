@@ -155,6 +155,19 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
       wi_1 = jnp.concatenate(exp_wi_1, axis=0, dtype=cfg.weight_dtype)
       wo = jnp.concatenate(exp_wo, axis=0, dtype=cfg.weight_dtype)
 
+      kernel = nn.with_logical_constraint(
+            kernel, ('embed', 'mlp')
+        )
+      wi_0 = nn.with_logical_constraint(
+            wi_0, (None, 'test', None)
+        )
+      wi_1 = nn.with_logical_constraint(
+            wi_1, (None, 'test', None)
+        )
+      wo = nn.with_logical_constraint(
+            wo, (None, 'test', None)
+        )
+
       moe_variables = {'params': {'gate': {'kernel': kernel}, 
                                   'wi_0': wi_0, 
                                   'wi_1': wi_1,
@@ -163,9 +176,15 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
       # print("get_moe_output expected_variables", variables)
       # breakpoint()
       # from jax.sharding import PartitionSpec
-      # sharding = jax.sharding.NamedSharding(mesh, PartitionSpec(None))
-      # jax.device_put(moe_variables, device=sharding)
-      # jax.device_put(hidden_states, device=sharding)
+      # fsdp_sharding = jax.sharding.NamedSharding(mesh, PartitionSpec('fsdp'))
+      # moe_variables = jax.device_put(moe_variables, device=fsdp_sharding)
+      # hidden_states = jax.device_put(hidden_states, device=fsdp_sharding)
+      
+      hidden_states = nn.with_logical_constraint(
+            hidden_states, ('activation_batch', 'activation_length', 'activation_embed')
+        )
+      
+      
       time.simple_timeit(jax.jit(model.apply), moe_variables, hidden_states, tries=10, task="matmul")
       output = jax.jit(model.apply)(moe_variables, hidden_states)
       # output = model.apply(moe_variables, hidden_states)
@@ -186,6 +205,11 @@ class MoeTest(unittest.TestCase):
       weight_dtype='bfloat16',
       moe_matmul=True,
       megablox=True,
+      ici_fsdp_parallelism=4,
+      per_device_batch_size=4,
+      dataset_type='synthetic',
+      attention='flash',
+      max_target_length=4096,
     )
 
     self.cfg = pyconfig.config

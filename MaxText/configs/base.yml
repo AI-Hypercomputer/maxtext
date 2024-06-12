@@ -304,6 +304,6 @@ enable_checkpoint_standard_logger: False
 # Single-controller
 enable_single_controller: False
 
-tile_size_0: 4096
-tile_size_1: 128
-tile_size_2: 128
+tile_size_0: 512
+tile_size_1: 512
+tile_size_2: 512

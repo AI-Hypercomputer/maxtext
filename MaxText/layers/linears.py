@@ -361,9 +361,9 @@ class MoeBlock(nn.Module):
     # kernel_axes = ('exp', 'embed', 'mlp')
     # wo_kernel_axes = ('exp', 'mlp', 'embed')
     
-    # tile_size = (self.config.tile_size_0, self.config.tile_size_1, self.config.tile_size_2)
+    tile_size = (self.config.tile_size_0, self.config.tile_size_1, self.config.tile_size_2)
     # tile_size = (4096, 128, 128)
-    tile_size = (512, 512, 512)
+    # tile_size = (512, 512, 512)
     @functools.partial(
         shard_map.shard_map,
         mesh=self.mesh,
