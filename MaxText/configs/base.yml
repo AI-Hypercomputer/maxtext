@@ -240,7 +240,7 @@ adam_eps_root: 0. # A small constant applied to denominator inside the square ro
 adam_weight_decay: 0.1 # AdamW Weight decay
 
 # Stack trace parameters
-collect_stack_trace: False
+collect_stack_trace: True
 stack_trace_to_cloud: False  # Uploads to cloud logging if True, else to the console if False.
 stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds.
 
@@ -304,6 +304,6 @@ enable_checkpoint_standard_logger: False
 # Single-controller
 enable_single_controller: False
 
-tile_size_0: 4096
-tile_size_1: 256
-tile_size_2: 256
+tile_size_0: 512
+tile_size_1: 512
+tile_size_2: 512

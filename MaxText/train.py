@@ -120,11 +120,11 @@ def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step
       raise ValueError(f"When writing metrics, {_buffered_step=} was none")
     write_metrics_to_tensorboard(writer, _buffered_metrics, _buffered_step, config)
 
-    if config.metrics_file:
-      max_utils.write_metrics_locally(_buffered_metrics, _buffered_step, config, local_metrics_file)
+    # if config.metrics_file:
+    #   max_utils.write_metrics_locally(_buffered_metrics, _buffered_step, config, local_metrics_file)
 
-    if config.gcs_metrics and jax.process_index() == 0:
-      running_gcs_metrics = max_utils.write_metrics_for_gcs(_buffered_metrics, _buffered_step, config, running_gcs_metrics)
+    # if config.gcs_metrics and jax.process_index() == 0:
+    #   running_gcs_metrics = max_utils.write_metrics_for_gcs(_buffered_metrics, _buffered_step, config, running_gcs_metrics)
 
   _buffered_step = step
   _buffered_metrics = metrics
@@ -133,11 +133,11 @@ def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step
 def write_metrics_to_tensorboard(writer, metrics, step, config):
   """Writes metrics to tensorboard"""
   with jax.spmd_mode("allow_all"):
-    if jax.process_index() == 0:
-      for metric_name in metrics.get("scalar", []):
-        writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
-      for metric_name in metrics.get("scalars", []):
-        writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
+    # if jax.process_index() == 0:
+    #   for metric_name in metrics.get("scalar", []):
+    #     writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
+    #   for metric_name in metrics.get("scalars", []):
+    #     writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
 
     full_log = step % config.log_period == 0
 
@@ -147,9 +147,9 @@ def write_metrics_to_tensorboard(writer, metrics, step, config):
         f"loss: {metrics['scalar']['learning/loss']:.3f}"
     )
 
-    if full_log and jax.process_index() == 0:
-      max_logging.log(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
-      writer.flush()
+    # if full_log and jax.process_index() == 0:
+    #   max_logging.log(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
+    #   writer.flush()
 
 
 def save_checkpoint(checkpoint_manager, step, state, dataset_type="c4", data_iterator=None):
@@ -339,7 +339,7 @@ def setup_mesh_and_model(config):
   """
 
   init_rng = random.PRNGKey(config.init_weights_seed)
-  writer = max_utils.initialize_summary_writer(config)
+  # writer = max_utils.initialize_summary_writer(config)
   logger = checkpointing.setup_checkpoint_logger(config)
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       config.checkpoint_dir,
@@ -358,7 +358,7 @@ def setup_mesh_and_model(config):
   model = Transformer(config, mesh, quant=quant)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
-  return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
+  return init_rng, None, checkpoint_manager, mesh, model, learning_rate_schedule, tx
 
 
 def setup_train_loop(config):
@@ -451,9 +451,9 @@ def train_loop(config, state=None):
   per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(config)
 
   # Write train config params, num model params, and XLA flags to tensorboard
-  max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
-  max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
-  max_utils.add_config_to_summary_writer(config, writer)
+  # max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
+  # max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
+  # max_utils.add_config_to_summary_writer(config, writer)
 
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != "":
@@ -543,7 +543,7 @@ def train_loop(config, state=None):
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()
   write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config)  # final step metrics
-  max_utils.close_summary_writer(writer)
+  # max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, job_end=True)
   return state
 

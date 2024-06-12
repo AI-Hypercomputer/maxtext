@@ -106,7 +106,7 @@ def get_expected_output(rng, hidden_states, cfg):
 
       # print("get_expected_output variables", variables)
       # breakpoint()
-      time.simple_timeit(jax.jit(model.apply), variables, hidden_states, tries=10, task="loop")
+      # time.simple_timeit(jax.jit(model.apply), variables, hidden_states, tries=10, task="loop")
 
       output = jax.jit(model.apply)(variables, hidden_states)
       return variables, output
@@ -191,7 +191,7 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
                                                                   cfg.base_emb_dim)))
       moe_variables = jax.device_put(moe_variables, device=fsdp_sharding)
       # breakpoint()
-      jax.debug.visualize_array_sharding(moe_variables['params']['gate']['kernel'].value)
+      # jax.debug.visualize_array_sharding(moe_variables['params']['gate']['kernel'].value)
       
       time.simple_timeit(jax.jit(model.apply), moe_variables, hidden_states, tries=10, task="matmul")
       output = jax.jit(model.apply)(moe_variables, hidden_states)
@@ -214,7 +214,7 @@ class MoeTest(unittest.TestCase):
       moe_matmul=True,
       megablox=True,
       ici_fsdp_parallelism=4,
-      per_device_batch_size=4,
+      per_device_batch_size=16,
       dataset_type='synthetic',
       attention='flash',
       max_target_length=4096,
