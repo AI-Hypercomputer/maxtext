@@ -36,7 +36,7 @@ google-cloud-logging==3.10.0
 google-cloud-resource-manager==1.12.3
 google-cloud-storage==2.15.0
 google-crc32c==1.5.0
-google-jetstream==0.2.2
+google-jetstream @git+https://github.com/Bslabe123/JetStream.git@invert_slots_available_metric
 google-pasta==0.2.0
 google-resumable-media==2.7.0
 googleapis-common-protos==1.63.0

@@ -29,5 +29,5 @@ tensorboardx
 tensorboard-plugin-profile
 transformers
 git+https://github.com/mlperf/logging.git
-google-jetstream
+google-jetstream @git+https://github.com/Bslabe123/JetStream.git@invert_slots_available_metric
 jsonlines
