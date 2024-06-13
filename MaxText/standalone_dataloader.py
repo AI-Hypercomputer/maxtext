@@ -66,7 +66,8 @@ def main(argv: Sequence[str]) -> None:
   max_logging.log(f"Found {jax.device_count()} devices.")
   max_logging.log(f"Found {jax.process_count()} processes.")
   max_logging.log(f"Found {jax.devices()} devices.")
-  os.environ["TFDS_DATA_DIR"] = config.dataset_path
+  if config.dataset_type == 'tfds':
+    os.environ["TFDS_DATA_DIR"] = config.dataset_path
   data_load_loop(config)
 
 

@@ -95,3 +95,18 @@ class HfDataProcessingTest(unittest.TestCase):
     self.assertTrue((batch1["targets_segmentation"] == batch2["targets_segmentation"]).all())
     self.assertTrue((batch1["inputs_position"] == batch2["inputs_position"]).all())
     self.assertTrue((batch1["targets_position"] == batch2["targets_position"]).all())
+
+  def test_for_loop_repeatable(self):
+    def get_first_batch(iterator):
+      batch = None
+      for batch in iterator:
+        break
+      return batch
+
+    train_batch1 = get_first_batch(self.train_iter)
+    train_batch2 = get_first_batch(self.train_iter)
+    self.assertTrue((train_batch1["inputs"] == train_batch2["inputs"]).all())
+    self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())
+
+if __name__ == "__main__":
+  unittest.main()

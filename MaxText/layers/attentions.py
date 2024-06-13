@@ -24,7 +24,6 @@ from jax import lax
 from jax import random
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
-from jax.experimental.pallas.ops import attention as pallas_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 import jax.numpy as jnp
@@ -114,6 +113,7 @@ class AttentionOp(nn.Module):
   prefill_value_axis_order: AxisIdxes = (1, 2, 0, 3)
   ar_key_axis_order: AxisIdxes = (1, 2, 0, 3)
   ar_value_axis_order: AxisIdxes = (1, 2, 0, 3)
+  reshape_q: bool = False
   dropout_rate: float = 0.0
   dtype: DType = jnp.float32
   quant: Optional[Quant] = None
@@ -278,7 +278,7 @@ class AttentionOp(nn.Module):
     )
     return dpa_layer(query, key, value, mask=attn_mask)
 
-  def compute_local_attention(self, attn_weights: Array, value: Array) -> tuple[Array, Array, Array]:
+  def compute_local_attention(self, attn_weights: Array, value: Array, q_seq_len: int) -> tuple[Array, Array, Array]:
     """Computes the attention of a local subset of the kv cache.
     Local attention results will need to be combined with any other local attentions and normalized
     Based on https://github.com/google-research/google-research/blob/master/scaling_transformer_inference_efficiency/attention.py
@@ -304,7 +304,12 @@ class AttentionOp(nn.Module):
     local_max = jnp.reshape(local_max, (local_max.shape[0], local_max.shape[1], local_max.shape[2] * local_max.shape[3], 1))
     local_sum = jnp.reshape(local_sum, (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1))
 
-    local_out = self.wv_product(local_exps, value)
+    local_out = self.wv_product(local_exps, value, q_seq_len)
+
+    if self.reshape_q and q_seq_len == 1:
+      local_max = local_max[:,0:1,:,:]
+      local_sum = local_sum[:,0:1,:,:]
+
     return local_out, local_max, local_sum
 
   def apply_attention_dot(
@@ -321,7 +326,8 @@ class AttentionOp(nn.Module):
       query = query.astype(jnp.float32)
       key = key.astype(jnp.float32)
 
-    attn_weights = self.qk_product(query, key)
+    q_seq_len = query.shape[1]
+    attn_weights = self.qk_product(query, key, q_seq_len)
 
     # Casting softmaxt computation for float32 for model stability.
     if self.float32_logits:
@@ -329,9 +335,9 @@ class AttentionOp(nn.Module):
     attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
-    return self.compute_local_attention(attn_weights, value)
+    return self.compute_local_attention(attn_weights, value, q_seq_len)
 
-  def qk_product(self, query: Array, key: Array) -> Array:
+  def qk_product(self, query: Array, key: Array, q_seq_len: int) -> Array:
     """Query-Key product.
 
     Args:
@@ -354,10 +360,12 @@ class AttentionOp(nn.Module):
     n_kv = key.shape[-2]
     assert n_kv == self.num_kv_heads
     query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
+    if self.reshape_q and q_seq_len == 1:
+      query = jnp.broadcast_to(query, (b, 2, n_kv, n // n_kv, d))
     result = jnp.einsum("btkgd,bskd->bkgts", query, key)
     return result
 
-  def wv_product(self, attn_weights: Array, value: Array) -> Array:
+  def wv_product(self, attn_weights: Array, value: Array, q_seq_len: int) -> Array:
     """weighted value product.
 
     Args:
@@ -379,6 +387,8 @@ class AttentionOp(nn.Module):
     out = jnp.einsum("bkgts,bskd->btkgd", attn_weights, value)
     b, t, n_kv, g, d = out.shape
     result = jnp.reshape(out, (b, t, n_kv * g, d))
+    if self.reshape_q and q_seq_len == 1:
+      result = result[:, 0:1, :, :]
     return result
 
   def revert_kv_cache(self, kv, cached_axis_order):
@@ -908,6 +918,7 @@ class Attention(nn.Module):
   prefill_value_axis_order: AxisIdxes = (1, 2, 0, 3)
   ar_key_axis_order: AxisIdxes = (1, 2, 0, 3)
   ar_value_axis_order: AxisIdxes = (1, 2, 0, 3)
+  reshape_q: bool = False
 
   def query_projection(self, inputs_q: Array) -> Array:
     """Query projection."""
@@ -1067,6 +1078,7 @@ class Attention(nn.Module):
         prefill_value_axis_order = self.prefill_value_axis_order,
         ar_key_axis_order = self.ar_key_axis_order,
         ar_value_axis_order = self.ar_value_axis_order,
+        reshape_q = self.reshape_q,
     )
 
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)

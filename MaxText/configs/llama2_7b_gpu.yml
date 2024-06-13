@@ -10,10 +10,33 @@ enable_checkpointing: False
 attention: "cudnn_flash_te"
 remat_policy: "minimal"
 use_iota_embed: True
-scan_layers: False
+scan_layers: True
 dataset_type: "synthetic"
 async_checkpointing: False
 logits_dot_in_fp32: False
 
 per_device_batch_size: 4
 max_target_length: 4096
+
+logical_axis_rules: [
+                      ['activation_batch', ['data', 'fsdp', 'fsdp_transpose',]],
+                      ['activation_heads', ['tensor','sequence']],
+                      ['activation_length', 'sequence'],
+                      ['activation_embed', 'tensor'],
+                      ['activation_mlp', 'tensor'],
+                      ['activation_kv', 'tensor'],
+                      ['activation_vocab', ['tensor', 'sequence']],
+                      ['activation_vocab', 'tensor'],
+                      ['activation_vocab', 'sequence'],
+                      ['mlp', ['fsdp_transpose', 'tensor', 'autoregressive']],
+                      ['vocab', ['tensor', 'autoregressive']],
+                      ['embed', ['fsdp', 'fsdp_transpose', 'sequence']],
+                      ['embed', ['fsdp', 'sequence']],
+                      ['norm', 'fsdp'],
+                      ['heads', ['tensor', 'autoregressive']],
+                      ['kv', []],
+                      ['cache_batch', []],
+                      ['cache_heads', ['autoregressive', 'tensor']],
+                      ['cache_kv', []],
+                      ['cache_sequence', []],
+                    ]

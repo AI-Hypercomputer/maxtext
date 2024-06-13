@@ -16,55 +16,57 @@ export JAX_COORDINATOR_PORT=$JAX_COORDINATOR_PORT
 export JAX_COORDINATOR_ADDRESS=$JAX_COORDINATOR_ADDRESS
 
 set_nccl_gpudirect_tcpx_specific_configuration() {
-  if [[ "$USE_GPUDIRECT" == "tcpx" ]]; then
-    echo "Using GPUDirect-TCPX"
+  if [[ "$USE_GPUDIRECT" == "tcpx" ]] || [[ "$USE_GPUDIRECT" == "fastrak" ]]; then
+    export CUDA_DEVICE_MAX_CONNECTIONS=1
     export NCCL_CROSS_NIC=0
-    export NCCL_ALGO=Ring
-    export NCCL_PROTO=Simple
     export NCCL_DEBUG=INFO
-    export NCCL_NET_GDR_LEVEL=PIX
-    export NCCL_P2P_PXN_LEVEL=0
-    export NCCL_DEBUG_SUBSYS=INIT,GRAPH,ENV,TUNING,NET,VERSION
-    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/tcpx/lib64"
-    export NCCL_GPUDIRECTTCPX_FORCE_ACK=0
-    export NCCL_GPUDIRECTTCPX_TX_COMPLETION_NANOSLEEP=1000
     export NCCL_DYNAMIC_CHUNK_SIZE=524288
-    export NCCL_P2P_NET_CHUNKSIZE=524288
-    export NCCL_P2P_PCI_CHUNKSIZE=524288
-    export NCCL_P2P_NVL_CHUNKSIZE=1048576
-    export NCCL_NSOCKS_PERTHREAD=4
-    export NCCL_SOCKET_NTHREADS=1
-    export NCCL_MAX_NCHANNELS=12
-    export NCCL_MIN_NCHANNELS=12
-    export NCCL_GPUDIRECTTCPX_PROGRAM_FLOW_STEERING_WAIT_MICROS=1000000
-    export NCCL_SOCKET_IFNAME=eth0
-    export NCCL_GPUDIRECTTCPX_TX_BINDINGS="eth1:8-21,112-125;eth2:8-21,112-125;eth3:60-73,164-177;eth4:60-73,164-177"
-    export NCCL_GPUDIRECTTCPX_RX_BINDINGS="eth1:22-35,124-139;eth2:22-35,124-139;eth3:74-87,178-191;eth4:74-87,178-191"
-    export NCCL_GPUDIRECTTCPX_SOCKET_IFNAME=eth1,eth2,eth3,eth4
-    export NCCL_GPUDIRECTTCPX_CTRL_DEV=eth0
+    export NCCL_NET_GDR_LEVEL=PIX
     export NCCL_NVLS_ENABLE=0
-  elif [[ "$USE_GPUDIRECT" == "fastrak" ]]; then
-    echo "Using GPUDirect-TCPFasTrak"
-    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/tcpxo/lib64"
-    export NCCL_FASTRAK_CTRL_DEV=eth0
-    export NCCL_FASTRAK_IFNAME=eth1,eth2,eth3,eth4,eth5,eth6,eth7,eth8
-    export NCCL_SOCKET_IFNAME=eth0
-    export NCCL_CROSS_NIC=0
-    export NCCL_ALGO=Ring
-    export NCCL_PROTO=Simple
-    export NCCL_MIN_NCHANNELS=4
-    export NCCL_DYNAMIC_CHUNK_SIZE=524288
     export NCCL_P2P_NET_CHUNKSIZE=524288
-    export NCCL_P2P_PCI_CHUNKSIZE=524288
     export NCCL_P2P_NVL_CHUNKSIZE=1048576
-    export NCCL_FASTRAK_NUM_FLOWS=2
-    export NCCL_FASTRAK_USE_SNAP=1
-    export NCCL_FASTRAK_ENABLE_CONTROL_CHANNEL=0
-    export NCCL_BUFFSIZE=8388608
-    export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-    export NCCL_NET_GDR_LEVEL=PIX
-    export NCCL_FASTRAK_ENABLE_HOTPATH_LOGGING=0
-    export NCCL_FASTRAK_USE_LLCM=1
+    export NCCL_P2P_PCI_CHUNKSIZE=524288
+    export NCCL_PROTO=Simple
+    export NCCL_SOCKET_IFNAME=eth0
+    export NVTE_FUSED_ATTN=1
+    export TF_CPP_MAX_LOG_LEVEL=100
+    export TF_CPP_VMODULE=profile_guided_latency_estimator=10
+    export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
+
+    if [[ "$USE_GPUDIRECT" == "tcpx" ]]; then
+      echo "Using GPUDirect-TCPX"
+      export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/tcpx/lib64"
+      export NCCL_ALGO=Ring
+      export NCCL_DEBUG_SUBSYS=INIT,GRAPH,ENV,TUNING,NET,VERSION
+      export NCCL_GPUDIRECTTCPX_CTRL_DEV=eth0
+      export NCCL_GPUDIRECTTCPX_FORCE_ACK=0
+      export NCCL_GPUDIRECTTCPX_PROGRAM_FLOW_STEERING_WAIT_MICROS=1000000
+      export NCCL_GPUDIRECTTCPX_RX_BINDINGS="eth1:22-35,124-139;eth2:22-35,124-139;eth3:74-87,178-191;eth4:74-87,178-191"
+      export NCCL_GPUDIRECTTCPX_SOCKET_IFNAME=eth1,eth2,eth3,eth4
+      export NCCL_GPUDIRECTTCPX_TX_BINDINGS="eth1:8-21,112-125;eth2:8-21,112-125;eth3:60-73,164-177;eth4:60-73,164-177"
+      export NCCL_GPUDIRECTTCPX_TX_COMPLETION_NANOSLEEP=1000
+      export NCCL_MAX_NCHANNELS=12
+      export NCCL_MIN_NCHANNELS=12
+      export NCCL_NSOCKS_PERTHREAD=4
+      export NCCL_P2P_PXN_LEVEL=0
+      export NCCL_SOCKET_NTHREADS=1
+    elif [[ "$USE_GPUDIRECT" == "fastrak" ]]; then
+      echo "Using GPUDirect-TCPFasTrak"
+      export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+      export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/tcpxo/lib64"
+      export NCCL_ALGO=Ring,Tree
+      export NCCL_BUFFSIZE=8388608
+      export NCCL_FASTRAK_CTRL_DEV=eth0
+      export NCCL_FASTRAK_ENABLE_CONTROL_CHANNEL=0
+      export NCCL_FASTRAK_ENABLE_HOTPATH_LOGGING=0
+      export NCCL_FASTRAK_IFNAME=eth1,eth2,eth3,eth4,eth5,eth6,eth7,eth8
+      export NCCL_FASTRAK_NUM_FLOWS=2
+      export NCCL_FASTRAK_USE_LLCM=1
+      export NCCL_FASTRAK_USE_SNAP=1
+      export NCCL_MIN_NCHANNELS=4
+      export NCCL_TUNER_CONFIG_PATH=/usr/local/nvidia/lib64/a3plus_tuner_config.textproto
+      export NCCL_TUNER_PLUGIN=libnccl-tuner.so
+    fi
   else
     echo "NOT using GPUDirect"
   fi

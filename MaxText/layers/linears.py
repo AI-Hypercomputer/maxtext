@@ -28,10 +28,19 @@ from layers import normalizations
 from layers import quantizations
 import numpy as np
 from jax.ad_checkpoint import checkpoint_name
+from jax.experimental import shard_map
+import max_logging
+
+try:
+  from jax.experimental.pallas.ops.tpu import megablox as mblx
+except ImportError:
+  max_logging.log("JAX megablox is available for TPU only.")
+  pass
 
 Array = common_types.Array
 Config = common_types.Config
 DType = common_types.DType
+Mesh = common_types.Mesh
 NdInitializer = initializers.NdInitializer
 
 nd_dense_init = initializers.nd_dense_init
@@ -263,6 +272,7 @@ class MoeBlock(nn.Module):
   Attributes:
     num_experts: Number of experts.
     num_experts_per_tok: Number of experts for each token.
+    mesh: Mesh, device mesh.
     kernel_init: Kernel function, passed to the dense layers.
     kernel_axes: Tuple with axes to apply kernel function.
     weight_dtype: Type for the weights.
@@ -272,12 +282,13 @@ class MoeBlock(nn.Module):
   config: Config
   num_experts: int
   num_experts_per_tok: int
+  mesh: Mesh
   kernel_init: NdInitializer
   kernel_axes: Tuple[str, ...]
   weight_dtype: DType = jnp.float32
   dtype: DType = jnp.float32
 
-  def generate_kernels(self, num_experts, base_emb_dim, mlp_dim):
+  def generate_kernels(self, num_experts, emb_dim, mlp_dim):
     
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
@@ -289,7 +300,7 @@ class MoeBlock(nn.Module):
     w0_kernel = self.param(
         'wi_0',
         nn.with_logical_partitioning(kernel_init, kernel_axes),
-        (num_experts, base_emb_dim, mlp_dim),
+        (num_experts, emb_dim, mlp_dim),
         self.weight_dtype,
         kernel_in_axis,
         kernel_out_axis,
@@ -298,7 +309,7 @@ class MoeBlock(nn.Module):
     w1_kernel = self.param(
         'wi_1',
         nn.with_logical_partitioning(kernel_init, kernel_axes),
-        (num_experts, base_emb_dim, mlp_dim),
+        (num_experts, emb_dim, mlp_dim),
         self.weight_dtype,
         kernel_in_axis,
         kernel_out_axis,
@@ -307,13 +318,80 @@ class MoeBlock(nn.Module):
     wo_kernel = self.param(
         'wo',
         nn.with_logical_partitioning(kernel_init, wo_kernel_axes),
-        (num_experts, mlp_dim, base_emb_dim),
+        (num_experts, mlp_dim, emb_dim),
         self.weight_dtype,
         kernel_in_axis,
         kernel_out_axis,
       )
     wo_kernel = jnp.asarray(wo_kernel, self.dtype)
     return w0_kernel, w1_kernel, wo_kernel
+
+  def permute(self, inputs, gate_logits, emb_dim):
+    """Permute tokens to group by expert to fit gmm call."""
+
+    # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
+    inputs_2d = jnp.reshape(inputs, (-1, emb_dim))
+    weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+    weights = jax.nn.softmax(weights.astype(self.weight_dtype), axis=-1).astype(self.dtype)
+    flatten_selected_experts = jnp.ravel(selected_experts)
+    indices_to_sort_by_expert = jnp.argsort(flatten_selected_experts)
+    # repeat inputs for number of active experts
+    repeat_inputs = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
+    # sort inputs for number of selected experts
+    sorted_inputs = jnp.take(repeat_inputs, indices=indices_to_sort_by_expert, axis=0).astype(self.dtype)
+    group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
+
+    return sorted_inputs, indices_to_sort_by_expert, weights, group_size
+
+  def unpermute(self, intermediate, inputs, indices_to_sort_by_expert, weights):
+    """Unpermute tokens to original order and combine weights."""
+
+    unsort_output = jnp.take(intermediate, indices=jnp.argsort(indices_to_sort_by_expert), axis=0)
+    flatten_weights = jnp.ravel(weights)
+    combined_output = jnp.multiply(unsort_output, flatten_weights[:, None])
+    groups = jnp.reshape(combined_output, (-1, self.num_experts_per_tok, combined_output.shape[1]))
+    return jnp.sum(groups, axis=1).reshape(inputs.shape).astype(self.dtype)
+
+  def call_gmm(self, inputs, group_sizes, mlp_activation, w0_kernel, w1_kernel, wo_kernel):
+    # TODO(ranran): currently megablox works well on single host, and
+    #               will add sharding properly to improve performance.
+    @functools.partial(
+        shard_map.shard_map,
+        mesh=self.mesh,
+        in_specs=(
+              (nn.logical_to_mesh_axes((None, None))),
+              (nn.logical_to_mesh_axes((None, None, None))),
+              (nn.logical_to_mesh_axes((None,))),
+          ),
+        out_specs=(nn.logical_to_mesh_axes((None, None))),
+        check_rep=False,
+    )
+    def gmm(inputs, kernel, group_sizes):
+      hs_shape = inputs.shape
+      # pad lengh is the 1st dimension of tiling size in gmm call
+      pad_length = 512
+      if hs_shape[0] % pad_length:
+        pad_length = pad_length - hs_shape[0] % pad_length
+        inputs = jax.lax.pad(inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0,0,0)])
+
+      inputs = inputs.astype(self.dtype)
+      kernel = kernel.astype(self.weight_dtype)
+
+      output = mblx.gmm(lhs=inputs,
+                        rhs=kernel,
+                        group_sizes=group_sizes,
+                        tiling=(512, 512, 512))
+
+      if hs_shape[0] % pad_length:
+        output = output[:hs_shape[0]]
+      return output
+
+    layer_w0 = gmm(inputs, w0_kernel, group_sizes)
+    layer_w1 = gmm(inputs, w1_kernel, group_sizes)
+    layer_act = _convert_to_activation_function(mlp_activation)(layer_w0)
+    intermediate_layer = jnp.multiply(layer_act, layer_w1)
+    output = gmm(intermediate_layer, wo_kernel, group_sizes)
+    return output
 
   @nn.compact
   def __call__(self, inputs):
@@ -337,18 +415,35 @@ class MoeBlock(nn.Module):
     weights = weights.at[index_update].set(softmax_probs)
 
     w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts,
-                                                            cfg.base_emb_dim,
+                                                            cfg.emb_dim,
                                                             cfg.mlp_dim)
-    
-    with jax.named_scope("wi_0"):
-      layer_w0 = jnp.einsum("BLE,NEH -> BLNH", inputs, w0_kernel)
-    with jax.named_scope("wi_1"):
-      layer_w1 = jnp.einsum("BLE,NEH -> BLNH", inputs, w1_kernel)
-    layer_w0_act = _convert_to_activation_function(cfg.mlp_activations[0])(layer_w0)
-    layer_multiply = jnp.multiply(layer_w0_act, layer_w1)
-    with jax.named_scope("wo"):
-      intermediate_layer = jnp.einsum("BLNH,NHE -> BLNE", layer_multiply, wo_kernel)
-    with jax.named_scope("w_sum"):
-      output = jnp.einsum("BLNE,BLN -> BLE", intermediate_layer, weights)
-    
+
+    if cfg.megablox:
+      max_logging.log("Running MoE megablox implementation.")
+      sorted_hidden_states, indices_to_sort_by_expert, weights, group_sizes = self.permute(inputs,
+                                                                                         gate_logits,
+                                                                                         cfg.emb_dim)
+      intermediate_output = self.call_gmm(sorted_hidden_states,
+                                          group_sizes,
+                                          cfg.mlp_activations[0],
+                                          w0_kernel,
+                                          w1_kernel,
+                                          wo_kernel)
+      output = self.unpermute(intermediate_output,
+                              inputs,
+                              indices_to_sort_by_expert,
+                              weights)
+    else:
+      max_logging.log("Running MoE matmul implementation.")
+      with jax.named_scope("wi_0"):
+        layer_w0 = jnp.einsum("BLE,NEH -> BLNH", inputs, w0_kernel)
+      with jax.named_scope("wi_1"):
+        layer_w1 = jnp.einsum("BLE,NEH -> BLNH", inputs, w1_kernel)
+      layer_w0_act = _convert_to_activation_function(cfg.mlp_activations[0])(layer_w0)
+      layer_multiply = jnp.multiply(layer_w0_act, layer_w1)
+      with jax.named_scope("wo"):
+        intermediate_layer = jnp.einsum("BLNH,NHE -> BLNE", layer_multiply, wo_kernel)
+      with jax.named_scope("w_sum"):
+        output = jnp.einsum("BLNE,BLN -> BLE", intermediate_layer, weights)
+
     return output

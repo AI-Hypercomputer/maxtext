@@ -20,7 +20,7 @@ import sys
 import pyconfig
 
 import maxengine_config
-from jetstream.core import server_lib
+from jetstream.core import server_lib, config_lib
 
 # _PORT = flags.DEFINE_integer('port', 9000, 'port to listen on')
 # _THREADS = flags.DEFINE_integer(
@@ -38,9 +38,9 @@ def main(config):
   devices = server_lib.get_devices()
   server_config = maxengine_config.get_server_config("MaxtextInterleavedServer", config)
 
-  metrics_server_config : server_lib.MetricsServerConfig | None = None
+  metrics_server_config : config_lib.MetricsServerConfig | None = None
   if config.prometheus_port != 0:
-    metrics_server_config = server_lib.MetricsServerConfig(
+    metrics_server_config = config_lib.MetricsServerConfig(
         port=config.prometheus_port
       )
 
