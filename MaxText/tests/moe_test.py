@@ -179,23 +179,23 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
       fsdp_sharding = jax.sharding.NamedSharding(mesh, PartitionSpec('fsdp'))
       replicated_sharding = jax.sharding.NamedSharding(mesh, PartitionSpec(None))
       # moe_variables = jax.device_put(moe_variables, device=fsdp_sharding)
-      # hidden_states = jax.device_put(hidden_states, device=fsdp_sharding)
+      hidden_states = jax.device_put(hidden_states, device=fsdp_sharding)
       
-      hidden_states = nn.with_logical_constraint(
-            hidden_states, ('activation_batch', 'activation_length', 'activation_embed')
-        )
-      
+      #hidden_states = nn.with_logical_constraint(
+      #      hidden_states, ('activation_batch', 'activation_length', 'activation_embed')
+      #  )
+      print('hidden states shape', hidden_states.shape)
       rng = jax.random.PRNGKey(40)
-      moe_variables = model.init(rng, jax.random.normal(rng, (int(cfg.per_device_batch_size), 
-                                                                  cfg.max_target_length, 
-                                                                  cfg.base_emb_dim)))
+      #moe_variables = model.init(rng, jax.random.normal(rng, (int(cfg.per_device_batch_size) * 4 , 
+      #                                                            cfg.max_target_length, 
+      #                                                            cfg.base_emb_dim)))
       moe_variables = jax.device_put(moe_variables, device=fsdp_sharding)
       # breakpoint()
       # jax.debug.visualize_array_sharding(moe_variables['params']['gate']['kernel'].value)
       
       time.simple_timeit(jax.jit(model.apply), moe_variables, hidden_states, tries=10, task="matmul")
-      output = jax.jit(model.apply)(moe_variables, hidden_states)
-      # output = model.apply(moe_variables, hidden_states)
+      # output = jax.jit(model.apply)(moe_variables, hidden_states)
+      output = model.apply(moe_variables, hidden_states)
       return output
 
 
@@ -204,6 +204,7 @@ class MoeTest(unittest.TestCase):
   def setUp(self):
     import os
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+
     pyconfig.initialize(
       [None, 'configs/base.yml'],
       run_name='test',
@@ -214,7 +215,7 @@ class MoeTest(unittest.TestCase):
       moe_matmul=True,
       megablox=True,
       ici_fsdp_parallelism=4,
-      per_device_batch_size=16,
+      per_device_batch_size=8,
       dataset_type='synthetic',
       attention='flash',
       max_target_length=4096,
@@ -223,7 +224,7 @@ class MoeTest(unittest.TestCase):
     self.cfg = pyconfig.config
     self.rng = jax.random.PRNGKey(42)
 
-    self.hidden_states = jax.random.uniform(self.rng, (int(self.cfg.per_device_batch_size),
+    self.hidden_states = jax.random.uniform(self.rng, (int(self.cfg.per_device_batch_size) * 4,
                                             self.cfg.max_target_length,
                                             self.cfg.base_emb_dim), dtype=self.cfg.dtype)
     # print(f"{self.hidden_states.shape}=")
@@ -235,8 +236,8 @@ class MoeTest(unittest.TestCase):
   def test_moe_block(self):
     variables, expected_output = get_expected_output(self.rng, self.hidden_states, self.cfg)
     actual_output = get_moe_output(variables, self.hidden_states, self.cfg, self.mesh)
-    # print("expected_output", expected_output)
-    # print("actual_output", actual_output)
+    print("expected_output", expected_output.shape)
+    print("actual_output", actual_output.shape)
     # breakpoint()
     self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 

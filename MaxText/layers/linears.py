@@ -30,6 +30,7 @@ import numpy as np
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
 import max_logging
+from jax.sharding import PartitionSpec
 
 try:
   # from jax.experimental.pallas.ops.tpu import megablox as mblx
@@ -340,7 +341,9 @@ class MoeBlock(nn.Module):
 
     # reshape inputs (batch, sequence, emb) to 2D
     inputs_2d = jnp.reshape(inputs, (-1, emb_dim))
+    # print('inputs_2d', inputs_2d.shape)
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+    # print('gate_logits', gate_logits.shape)
     weights = jax.nn.softmax(weights.astype(self.weight_dtype), axis=-1).astype(self.dtype)
     flatten_selected_experts = jnp.ravel(selected_experts)
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
@@ -355,34 +358,41 @@ class MoeBlock(nn.Module):
   def unpermute(self, intermediate, inputs, sorted_selected_experts, weights):
     """Unpermute tokens to original order and combine weights."""
 
+    # print("unpermute:...")
+    # print(f"intermediate: {intermediate.shape}")
+    # print(f"inputs: {inputs.shape}")
     unsort_output = jnp.take(intermediate, indices=jnp.argsort(sorted_selected_experts), axis=0)
     flatten_weights = jnp.ravel(weights)
     combined_output = jnp.multiply(unsort_output, flatten_weights[:, None])
+    # print(f"combined_output: {combined_output.shape}")
     groups = jnp.reshape(combined_output, (-1, self.num_experts_per_tok, combined_output.shape[1]))
-    return jnp.sum(groups, axis=1).reshape(inputs.shape).astype(self.dtype)
+    # print(f"groups: {groups.shape}")
+    return jnp.sum(groups, axis=1).reshape(-1, self.config.max_target_length, self.config.emb_dim).astype(self.dtype)
   
-  def call_gmm(self, inputs, group_sizes, mlp_activation, w0_kernel, w1_kernel, wo_kernel):
+  def call_gmm(self, inputs, gate_logits, config, w0_kernel, w1_kernel, wo_kernel):
     # TODO(ranran): currently megablox works well on single host, and
     #               will add sharding properly to improve performance.
     # kernel_axes = ('exp', 'embed', 'mlp')
     # wo_kernel_axes = ('exp', 'mlp', 'embed')
     
-    tile_size = (self.config.tile_size_0, self.config.tile_size_1, self.config.tile_size_2)
-    # tile_size = None
-    # tile_size = (4096, 128, 128)
-    # tile_size = (512, 512, 512)
-    @functools.partial(
-        shard_map.shard_map,
-        mesh=self.mesh,
-        in_specs=(
-              (nn.logical_to_mesh_axes(('test', None))),
-              (nn.logical_to_mesh_axes((None, None, None))),
-              (nn.logical_to_mesh_axes((None,))),
-          ),
-        out_specs=(nn.logical_to_mesh_axes(('test', None))),
-        check_rep=False,
-    )
+    # tile_size = (self.config.tile_size_0, self.config.tile_size_1, self.config.tile_size_2)
+    tile_size = None
+    # @functools.partial(
+    #     shard_map.shard_map,
+    #     mesh=self.mesh,
+    #     in_specs=(
+    #           (nn.logical_to_mesh_axes(('test', None))),
+    #           (nn.logical_to_mesh_axes((None, None, None))),
+    #           (nn.logical_to_mesh_axes((None,))),
+    #       ),
+    #     out_specs=(nn.logical_to_mesh_axes(('test', None))),
+    #     check_rep=False,
+    # )
     def gmm(inputs, kernel, group_sizes):
+      # print(f"inside")
+      # print(f"inputs: {inputs.shape}")
+      # print(f"kernel: {kernel.shape}")
+      # print(f"group_size: {group_sizes}")
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
       pad_length = tile_size[0] if tile_size else 512
@@ -403,47 +413,42 @@ class MoeBlock(nn.Module):
         output = output[:hs_shape[0]]
       return output
 
-    # from jax.sharding import PartitionSpec
-    # replicated_sharding = jax.sharding.NamedSharding(self.mesh, PartitionSpec(None))
-    # w0_kernel, w1_kernel, wo_kernel = jax.device_put((w0_kernel, w1_kernel, wo_kernel), device=replicated_sharding)
-
-    layer_w0 = gmm(inputs, w0_kernel, group_sizes)
-    layer_w1 = gmm(inputs, w1_kernel, group_sizes)
-    layer_act = _convert_to_activation_function(mlp_activation)(layer_w0)
-    intermediate_layer = jnp.multiply(layer_act, layer_w1)
-    output = gmm(intermediate_layer, wo_kernel, group_sizes)
-    return output
+    @functools.partial(
+        shard_map.shard_map,
+        mesh=self.mesh,
+        in_specs=(
+              (PartitionSpec('fsdp', None, None),
+              PartitionSpec('fsdp', None, None),
+              PartitionSpec(None, None, None),
+              PartitionSpec(None, None, None),
+              PartitionSpec(None, None, None),
+          )),
+        out_specs=PartitionSpec('fsdp', None, None),
+        check_rep=False,
+    )
+    def inner_fn(x, logits, w0, w1, wo):
+      x, sorted_selected_experts, weights, group_sizes = self.permute(x,logits,config.emb_dim)
+      # breakpoint()
+      layer_w0 = gmm(x, w0, group_sizes)
+      layer_w1 = gmm(x, w1, group_sizes)
+      layer_act = _convert_to_activation_function(config.mlp_activations[0])(layer_w0)
+      intermediate_layer = jnp.multiply(layer_act, layer_w1)
+      intermediate_output = gmm(intermediate_layer, wo, group_sizes)
+      # print(f"intermediate_output.shape: {intermediate_output.shape}")
+      # print(f"x.shape: {x.shape}")
+      output = self.unpermute(intermediate_output,
+                              x,
+                              sorted_selected_experts,
+                              weights)
+      # print(f"unpermute: {output.shape}")
+      return output
+    # print(f"inner_fn inputs: {inputs.shape}")
+    return inner_fn(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
   
     # inputs: (batch * selected_exp * sequence, emb_dim) - (262144, 4096)
     # w0_kernel: (num_exp, emb_dim, mlp) -> (8, 4096, 14336)
     # w1_kernel: (num_exp, emb_dim, mlp)
     # o_kernel: (num_exp, mlp, emb_dim) - > (8, 14336, 4096)
-
-    # @functools.partial(
-    #     shard_map.shard_map,
-    #     mesh=self.mesh,
-    #     in_specs=(
-    #           (nn.logical_to_mesh_axes(('test', None))),
-    #           (nn.logical_to_mesh_axes((None, None, None))),
-    #           (nn.logical_to_mesh_axes((None, None, None))),
-    #           (nn.logical_to_mesh_axes((None, None, None))),
-    #           (nn.logical_to_mesh_axes((None,))),
-    #       ),
-    #     out_specs=(nn.logical_to_mesh_axes(('test', None))),
-    #     check_rep=False,
-    # )
-    # def inner_fn(x, w0, w1, wo, gs):
-    #   tile_size = (4096, 128, 128)
-    #   layer_w0 = gmm(x, w0, gs, tile_size)
-    #   layer_w1 = gmm(x, w1, gs, tile_size)
-    #   layer_act = _convert_to_activation_function(mlp_activation)(layer_w0)
-    #   intermediate_layer = jnp.multiply(layer_act, layer_w1)
-    #   output = gmm(intermediate_layer, wo, gs, (tile_size[0], tile_size[2], tile_size[1]))
-    #   # breakpoint()
-    #   return output
-    
-    # output = inner_fn(inputs, w0_kernel, w1_kernel, wo_kernel, group_sizes)
-    # return output
 
   @nn.compact
   def __call__(self, inputs):
@@ -472,23 +477,28 @@ class MoeBlock(nn.Module):
 
     if cfg.megablox:
       max_logging.log("Running MoE megablox implementation.")
-      sorted_hidden_states, sorted_selected_experts, weights, group_sizes = self.permute(inputs,
-                                                                                         gate_logits,
-                                                                                        cfg.emb_dim)
-      from jax.sharding import PartitionSpec
-      replicated_sharding = jax.sharding.NamedSharding(self.mesh, PartitionSpec(None))
-      w0_kernel, w1_kernel, wo_kernel = jax.device_put((w0_kernel, w1_kernel, wo_kernel), device=replicated_sharding)
+      return self.call_gmm(inputs, gate_logits, cfg, w0_kernel, w1_kernel, wo_kernel)
+      # sorted_hidden_states, sorted_selected_experts, weights, group_sizes = self.permute(inputs,
+      #                                                                                    gate_logits,
+      #                                                                                    cfg.emb_dim)
+      # from jax.sharding import PartitionSpec
+      # replicated_sharding = jax.sharding.NamedSharding(self.mesh, PartitionSpec(None))
+      # w0_kernel, w1_kernel, wo_kernel = jax.device_put((w0_kernel, w1_kernel, wo_kernel), device=replicated_sharding)
                                                                                        
-      intermediate_output = self.call_gmm(sorted_hidden_states,
-                                          group_sizes,
-                                          cfg.mlp_activations[0],
-                                          w0_kernel,
-                                          w1_kernel,
-                                          wo_kernel)
-      output = self.unpermute(intermediate_output,
-                              inputs,
-                              sorted_selected_experts,
-                              weights)
+      # print("before")
+      # print(f"sorted_hidden_states: {sorted_hidden_states.shape}")
+      # print(f"group_sizes: {group_sizes}")
+      # print(f"w0_kernel: {w0_kernel.shape}")
+      # intermediate_output = self.call_gmm(sorted_hidden_states,
+      #                                     group_sizes,
+      #                                     cfg.mlp_activations[0],
+      #                                     w0_kernel,
+      #                                     w1_kernel,
+      #                                     wo_kernel)
+      # output = self.unpermute(intermediate_output,
+      #                         inputs,
+      #                         sorted_selected_experts,
+      #                         weights)
     else:
       max_logging.log("Running MoE matmul implementation.")
       with jax.named_scope("wi_0"):

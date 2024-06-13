@@ -240,7 +240,7 @@ adam_eps_root: 0. # A small constant applied to denominator inside the square ro
 adam_weight_decay: 0.1 # AdamW Weight decay
 
 # Stack trace parameters
-collect_stack_trace: True
+collect_stack_trace: False
 stack_trace_to_cloud: False  # Uploads to cloud logging if True, else to the console if False.
 stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds.
 
