@@ -133,22 +133,33 @@ def load_state_if_possible(
       def map_to_pspec(data):
         pspec = data.sharding.spec
         mesh = data.sharding.mesh
+        replica_axis_index = 0  # for maxtext data is the first dimension
         if not enable_single_replica_ckpt_restoring:
           return orbax.checkpoint.type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
+        array_handler = orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(
+          replica_axis_index=0,
+          # primary_replica_id=2,
+          memory_limit_bytes=1024 * 1024 * 1000  # 1000 MB limit
+          )
         orbax.checkpoint.type_handlers.register_type_handler(
-            jax.Array, orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(), override=True
+            jax.Array,
+            array_handler,
+            # orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(
+            #   replica_axis_index=0
+            # ),
+            override=True
         )
-        orbax.checkpoint.type_handlers.register_type_handler(
-            jax.Array, orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(), override=True
-        )
-        replica_axis_index = 0  # for maxtext data is the first dimension
+        # orbax.checkpoint.type_handlers.register_type_handler(
+        #     jax.Array, orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(), override=True
+        # )
+
         replica_devices = _replica_devices(mesh.devices, replica_axis_index)
         replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
         single_replica_sharding = jax.sharding.NamedSharding(replica_mesh, pspec)
         return orbax.checkpoint.type_handlers.SingleReplicaArrayRestoreArgs(
             sharding=jax.sharding.NamedSharding(mesh, pspec),
             single_replica_sharding=single_replica_sharding,
-            replica_axis_index=replica_axis_index,
+            # replica_axis_index=replica_axis_index,
             global_shape=data.shape,
             dtype=data.dtype,
         )
@@ -210,7 +221,7 @@ def setup_checkpoint_logger(config) -> composite_logger.CompositeLogger | None:
   Args:
     config
   Returns:
-    CompositeLogger 
+    CompositeLogger
   """
   orbax_cloud_logger = None
   orbax_standard_logger = None
@@ -221,17 +232,17 @@ def setup_checkpoint_logger(config) -> composite_logger.CompositeLogger | None:
         job_name=config.run_name, logger_name=logger_name
     )
     orbax_cloud_logger = cloud_logger.CloudLogger(options=options)
-    max_logging.log("Sucessfully set up checkpoint cloud logger.")
+    max_logging.log("Successfully set up checkpoint cloud logger.")
 
   if config.enable_checkpoint_standard_logger:
     orbax_standard_logger = standard_logger.StandardLogger()
-    max_logging.log("Sucessfully set up checkpoint standard logger.")
+    max_logging.log("Successfully set up checkpoint standard logger.")
 
   orbax_logger = None
   if orbax_cloud_logger is not None and orbax_standard_logger is not None:
     orbax_logger = composite_logger.CompositeLogger(
         orbax_cloud_logger, orbax_standard_logger
     )
-    max_logging.log("Sucessfully set up checkpoint composite logger.")
+    max_logging.log("Successfully set up checkpoint composite logger.")
 
   return orbax_logger
