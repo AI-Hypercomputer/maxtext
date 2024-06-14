@@ -15,12 +15,14 @@
 """CLI Utility for Running Inference on a Single Stream"""
 
 import jax
+import json
 
 import maxengine
 from jetstream.engine import token_utils
 
 import os
 import pyconfig
+import random
 import sys
 
 
@@ -28,37 +30,54 @@ def main(config):
   engine = maxengine.MaxEngine(config)
   params = engine.load_params()
 
-  text = config.prompt
+  texts = [
+    "Summarize the main ideas of Jeff Walker's Product Launch Formula into bullet points as it pertains to a growth marketing agency implementing these strategies and tactics for their clients...",
+  ]
+  steps_list = [
+    256,
+  ]
   metadata = engine.get_tokenizer()
   vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
   tokenizer = vocab.tokenizer
-  tokens, true_length = token_utils.tokenize_and_pad(
-      text, vocab, is_bos=True, prefill_lengths=[config.max_prefill_predict_length]
-  )
-  assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
-  assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
-  prefill_result = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
-  slot = 0
-
   decode_state = engine.init_decode_state()
-  decode_state = engine.insert(prefill_result, decode_state, slot=slot)
+  slot_results = {}
+  for i in range(1):
+    slot = i % 32
+    text = texts[0]
+    steps = steps_list[i % len(steps_list)]
+    print(f"\nIter {i}, {slot=}, {steps=}")
+    tokens, true_length = token_utils.tokenize_and_pad(
+        text, vocab, is_bos=True, prefill_lengths=[config.max_prefill_predict_length]
+    )
+    assert tokens.size <= config.max_prefill_predict_length, "can't take too many tokens"
+    assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
+    prefill_result = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
 
-  steps = range(config.max_prefill_predict_length, config.max_target_length)
-  sampled_tokens_list = []
-  for _ in steps:
-    decode_state, sampled_tokens = engine.generate(params, decode_state)
-    sampled_tokens_list.append(sampled_tokens)
+    decode_state = engine.insert(prefill_result, decode_state, slot=slot)
+    # jax.debug.print("decode_state: {}", decode_state)
 
-  results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
-  output = tokenizer.detokenize(results)
-  print(f"Input `{text}` -> `{output}`")
+    # steps = range(config.max_prefill_predict_length, config.max_target_length)
+    # steps = range(config.max_prefill_predict_length, config.max_prefill_predict_length + 12)
+    sampled_tokens_list = []
+    for _ in range(steps):
+      decode_state, sampled_tokens = engine.generate(params, decode_state)
+      sampled_tokens_list.append(sampled_tokens)
 
-  if config.autoregressive_decode_assert != "":
-    assert (
-        output == config.autoregressive_decode_assert
-    ), f"generated text mismatch {output=} {config.autoregressive_decode_assert=}"
+    results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
+    output = tokenizer.detokenize(results)
+    # print(type(output))
+    # print(f"Input `{text}` -> `{output}`")
 
+    if output not in slot_results:
+      slot_results[output] = set()
+    slot_results[output].add(i)
+      
+    if config.autoregressive_decode_assert != "":
+      assert (
+          output == config.autoregressive_decode_assert
+      ), f"generated text mismatch {output=} {config.autoregressive_decode_assert=}"
 
+  print(slot_results)
 def validate_config(config):
   assert config.load_full_state_path == "", (
       "Decode doesn't operate on full states! Convert to parameter checkpoint first." "Using generate_param_only_checkpoint."

@@ -248,7 +248,7 @@ class MaxEngine(engine_api.Engine):
 
     def copy(path, partial_cache, full_cache, annotations):
       path_key = path[-1].key
-      if path_key in ["cache_ar_index", "cached_ar_key", "cached_ar_value", "cached_ar_key_scale", "cached_ar_value_scale"]:
+      if path_key in ["cache_ar_index", "cached_ar_key_scale", "cached_ar_value_scale"]:
         return full_cache  # we don't even zero these out because we can mask them out.
 
       batch_idx = annotations.index("cache_batch") if "cache_batch" in annotations else -1
@@ -261,6 +261,11 @@ class MaxEngine(engine_api.Engine):
         s[batch_idx] = 1
         zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
         return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
+      elif path_key in ["cached_ar_value", "cached_ar_key"]:
+        s = list(full_cache.shape)
+        s[batch_idx] = 1
+        zeros = jnp.zeros(tuple(s), dtype=jnp.bfloat16)
+        return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
       elif path_key == "cache_prefill_segment_id":
         s = list(full_cache.shape)
         s[batch_idx] = 1
@@ -270,6 +275,9 @@ class MaxEngine(engine_api.Engine):
         ## copy prefill cachce
         full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
         return full_cache
+      elif path_key == "cache_ar_lengths":
+        # jax.debug.print("cache_ar_lengths: {}", full_cache)
+        return full_cache.at[slot].set(0)
       elif path_key in [
           "cached_prefill_key",
           "cached_prefill_value",
