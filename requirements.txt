@@ -29,5 +29,5 @@ tensorboardx
 tensorboard-plugin-profile
 transformers
 git+https://github.com/mlperf/logging.git
-google-jetstream @ git+https://github.com/Bslabe123/jetstream.git@backlog_metrics
+google-jetstream @ git+https://github.com/Bslabe123/JetStream.gitt@backlog_metrics
 jsonlines
