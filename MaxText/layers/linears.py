@@ -49,6 +49,7 @@ bias_init = initializers.default_bias_init
 RMSNorm = normalizations.RMSNorm
 Quant = quantizations.AqtQuantization
 
+BATCH = "activation_batch"
 
 def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
   """Convert a string to an activation function."""
@@ -250,7 +251,7 @@ class MlpBlock(nn.Module):
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
         x, deterministic=deterministic
     )  # Broadcast along length.
-    x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
+    x = nn.with_logical_constraint(x, (BATCH, "activation_length", "activation_mlp"))
     output = DenseGeneral(
         inputs.shape[-1],
         dtype=self.dtype,
@@ -289,14 +290,15 @@ class MoeBlock(nn.Module):
   dtype: DType = jnp.float32
 
   def generate_kernels(self, num_experts, emb_dim, mlp_dim):
-    
+
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
     kernel_init = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
 
-    kernel_axes = ('exp', 'embed', 'mlp')
-    wo_kernel_axes = ('exp', 'mlp', 'embed')
-    
+    # The first axes is expert
+    kernel_axes = (None, 'embed', 'mlp')
+    wo_kernel_axes = (None, 'mlp', 'embed')
+
     w0_kernel = self.param(
         'wi_0',
         nn.with_logical_partitioning(kernel_init, kernel_axes),
@@ -343,29 +345,20 @@ class MoeBlock(nn.Module):
 
     return sorted_inputs, indices_to_sort_by_expert, weights, group_size
 
-  def unpermute(self, intermediate, inputs, indices_to_sort_by_expert, weights):
+  def unpermute(self, intermediate, indices_to_sort_by_expert, weights):
     """Unpermute tokens to original order and combine weights."""
 
     unsort_output = jnp.take(intermediate, indices=jnp.argsort(indices_to_sort_by_expert), axis=0)
     flatten_weights = jnp.ravel(weights)
     combined_output = jnp.multiply(unsort_output, flatten_weights[:, None])
     groups = jnp.reshape(combined_output, (-1, self.num_experts_per_tok, combined_output.shape[1]))
-    return jnp.sum(groups, axis=1).reshape(inputs.shape).astype(self.dtype)
+    return jnp.sum(groups, axis=1).reshape(-1, self.config.max_target_length, self.config.emb_dim).astype(self.dtype)
 
-  def call_gmm(self, inputs, group_sizes, mlp_activation, w0_kernel, w1_kernel, wo_kernel):
-    # TODO(ranran): currently megablox works well on single host, and
-    #               will add sharding properly to improve performance.
-    @functools.partial(
-        shard_map.shard_map,
-        mesh=self.mesh,
-        in_specs=(
-              (nn.logical_to_mesh_axes((None, None))),
-              (nn.logical_to_mesh_axes((None, None, None))),
-              (nn.logical_to_mesh_axes((None,))),
-          ),
-        out_specs=(nn.logical_to_mesh_axes((None, None))),
-        check_rep=False,
-    )
+  def megablox(self, inputs, gate_logits, config, w0_kernel, w1_kernel, wo_kernel):
+    # TODO(ranran): need to changes in JAX repo to enable optimized tile_size 
+    #               instead of the static default tile_size (512, 512, 512)
+    tile_size = (512, 512, 512)
+
     def gmm(inputs, kernel, group_sizes):
       hs_shape = inputs.shape
       # pad lengh is the 1st dimension of tiling size in gmm call
@@ -376,22 +369,43 @@ class MoeBlock(nn.Module):
 
       inputs = inputs.astype(self.dtype)
       kernel = kernel.astype(self.weight_dtype)
-
       output = mblx.gmm(lhs=inputs,
                         rhs=kernel,
                         group_sizes=group_sizes,
-                        tiling=(512, 512, 512))
+                        preferred_element_type=jnp.bfloat16,
+                        tiling=tile_size)
 
       if hs_shape[0] % pad_length:
         output = output[:hs_shape[0]]
       return output
 
-    layer_w0 = gmm(inputs, w0_kernel, group_sizes)
-    layer_w1 = gmm(inputs, w1_kernel, group_sizes)
-    layer_act = _convert_to_activation_function(mlp_activation)(layer_w0)
-    intermediate_layer = jnp.multiply(layer_act, layer_w1)
-    output = gmm(intermediate_layer, wo_kernel, group_sizes)
-    return output
+    # Currently, we only support data parallelism with Megablox (sharding on batch dimensions)
+    @functools.partial(
+        shard_map.shard_map,
+        mesh=self.mesh,
+        in_specs=(
+              (nn.logical_to_mesh_axes((BATCH, None, None))),
+              (nn.logical_to_mesh_axes((BATCH, None, None))),
+              (nn.logical_to_mesh_axes((None, None, None))),
+              (nn.logical_to_mesh_axes((None, None, None))),
+              (nn.logical_to_mesh_axes((None, None, None))),
+          ),
+        out_specs=(nn.logical_to_mesh_axes((BATCH, None, None))),
+        check_rep=False,
+    )
+    def wrapper(x, logits, w0, w1, wo):
+      x, sorted_selected_experts, weights, group_sizes = self.permute(x, logits, config.emb_dim)
+
+      layer_w0 = gmm(x, w0, group_sizes)
+      layer_w1 = gmm(x, w1, group_sizes)
+      layer_act = _convert_to_activation_function(config.mlp_activations[0])(layer_w0)
+      intermediate_layer = jnp.multiply(layer_act, layer_w1)
+      intermediate_output = gmm(intermediate_layer, wo, group_sizes)
+      output = self.unpermute(intermediate_output,
+                              sorted_selected_experts,
+                              weights)
+      return output
+    return wrapper(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
 
   @nn.compact
   def __call__(self, inputs):
@@ -400,10 +414,11 @@ class MoeBlock(nn.Module):
     gate_logits = DenseGeneral(
             self.num_experts,
             dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
             kernel_init=self.kernel_init,
             kernel_axes=self.kernel_axes,
             name="gate")(inputs)
-    
+
     top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     flattened_top_k_weights = top_k_weights.reshape(-1, self.num_experts_per_tok)
 
@@ -420,19 +435,7 @@ class MoeBlock(nn.Module):
 
     if cfg.megablox:
       max_logging.log("Running MoE megablox implementation.")
-      sorted_hidden_states, indices_to_sort_by_expert, weights, group_sizes = self.permute(inputs,
-                                                                                         gate_logits,
-                                                                                         cfg.emb_dim)
-      intermediate_output = self.call_gmm(sorted_hidden_states,
-                                          group_sizes,
-                                          cfg.mlp_activations[0],
-                                          w0_kernel,
-                                          w1_kernel,
-                                          wo_kernel)
-      output = self.unpermute(intermediate_output,
-                              inputs,
-                              indices_to_sort_by_expert,
-                              weights)
+      return self.megablox(inputs, gate_logits, cfg, w0_kernel, w1_kernel, wo_kernel)
     else:
       max_logging.log("Running MoE matmul implementation.")
       with jax.named_scope("wi_0"):
