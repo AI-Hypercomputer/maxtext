@@ -349,10 +349,19 @@ class _HyperParameters:
       raw_keys = validate_and_update_keys(raw_keys, model_vars, config_name)
     return updated_keys
 
+def validate_megablox_parallelism(raw_keys):
+  if raw_keys["megablox"] and (using_tensor_parallelism(raw_keys) or
+                               using_sequence_parallelism(raw_keys) or
+                               using_pipeline_parallelism(raw_keys)):
+    raise ValueError("Currently we only support Megablox wih data parallelism.")
 
 def validate_and_update_keys(raw_keys, model_keys, config_name: str):
   """Validate and update model specific config keys"""
   max_logging.log("Updating following parameters in config\n")
+
+  # Currently, Megablox only supports data parallelism
+  validate_megablox_parallelism(raw_keys)
+
   for k in model_keys:
     max_logging.log(f"{k}: {model_keys[k]}")
     if k not in raw_keys:
@@ -436,6 +445,12 @@ def get_quantization_local_shard_count(raw_keys):
 
 def using_pipeline_parallelism(raw_keys) -> bool:
   return int(raw_keys['ici_pipeline_parallelism']) > 1 or int(raw_keys['dcn_pipeline_parallelism']) > 1
+
+def using_tensor_parallelism(raw_keys) -> bool:
+  return int(raw_keys['ici_tensor_parallelism']) > 1 or int(raw_keys['dcn_tensor_parallelism']) > 1
+
+def using_sequence_parallelism(raw_keys) -> bool:
+  return int(raw_keys['ici_sequence_parallelism']) > 1 or int(raw_keys['dcn_sequence_parallelism']) > 1
 
 class HyperParameters:  # pylint: disable=missing-class-docstring
 
