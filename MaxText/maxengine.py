@@ -106,7 +106,7 @@ class MaxEngine(engine_api.Engine):
       print("LOAD_PARAMS: returning early")
       return state.params
     else:
-      self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
+      self.model.quant.quant_mode = quantizations.get_quant_mode("convert")
 
       @jax.jit
       def model_apply(_p, _rng):
