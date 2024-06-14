@@ -342,6 +342,7 @@ class AttentionOp(nn.Module):
     # Casting softmaxt computation for float32 for model stability.
     if model_mode == common_types.MODEL_MODE_TRAIN and self.float32_logits:
       attn_weights = attn_weights.astype(jnp.float32)
+ 
     attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
@@ -736,8 +737,8 @@ class AttentionOp(nn.Module):
       cached_key_scale_var.value = ar_key_scale
       cached_value_scale_var.value = ar_value_scale
 
-      ar_key = quantizations.unquantize_kv(cached_key_var.value, cached_key_scale_var.value, one_token_key.dtype)
-      ar_value = quantizations.unquantize_kv(cached_value_var.value, cached_value_scale_var.value, one_token_value.dtype)
+      #ar_key = quantizations.unquantize_kv(cached_key_var.value, cached_key_scale_var.value, one_token_key.dtype)
+      #ar_value = quantizations.unquantize_kv(cached_value_var.value, cached_value_scale_var.value, one_token_value.dtype)
 
     # Revert the keys and values back to original logical shapes.
     return self.revert_kv_cache(ar_key, self.ar_cache_axis_order), self.revert_kv_cache(ar_value, self.ar_cache_axis_order)
@@ -870,10 +871,12 @@ class AttentionOp(nn.Module):
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
     if ar_kv_cache is None:
+      print(f"attention_op: mode: {model_mode}, Query dtype: {query.dtype}, Key dtype: {prefill_kv_cache[0].dtype}, value dtype: {prefill_kv_cache[1].dtype}")
       if prefill_exponentials_sum is not None:
         return prefill_unnormalized_output / prefill_exponentials_sum
       return prefill_unnormalized_output
 
+    print(f"attention_op: mode: {model_mode}, Query dtype: {query.dtype}, Key dtype: {ar_kv_cache[0].dtype}, value dtype: {ar_kv_cache[1].dtype}")
     ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = self.apply_attention(
         query=query,
         key=ar_kv_cache[0],
@@ -1072,9 +1075,11 @@ class Attention(nn.Module):
       key = self.kv_projection(inputs_kv, proj_name="key")
       value = self.kv_projection(inputs_kv, proj_name="value")
 
+    # print(f"Before rotary: Query dtype: {query.dtype}, Key dtype: {key.dtype}, value dtype: {value.dtype}")
     # apply ROPE
-    query = RotaryEmbedding(embedding_dims=self.head_dim, name="query_rotary")(inputs=query, position=inputs_positions)
+    query = RotaryEmbedding(embedding_dims=self.head_dim, name="query_rotary", cast_as_fprop_dtype=(model_mode == common_types.MODEL_MODE_TRAIN))(inputs=query, position=inputs_positions)
     key = self.key_rotary(key, inputs_positions)
+    # print(f"After rotary: Query dtype: {query.dtype}, Key dtype: {key.dtype}, value dtype: {value.dtype}")
 
     # annotate with sharding constraint.
     query = nn.with_logical_constraint(query, self.query_axis_names)
