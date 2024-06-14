@@ -888,8 +888,8 @@ class Attention(nn.Module):
   max_target_length: int
   mesh: Mesh
   attention_kernel: str
-  dtype: DType = jnp.float32
-  weight_dtype: DType = jnp.float32
+  dtype: DType = jnp.bfloat16
+  weight_dtype: DType = jnp.bfloat16
   max_prefill_predict_length: int = -1
   dropout_rate: float = 0.0
   kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal")

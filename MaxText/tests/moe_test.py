@@ -119,7 +119,7 @@ def get_moe_output(variables, hidden_states, cfg, mesh):
           num_experts_per_tok=cfg.num_experts_per_tok,
           mesh=mesh,
           kernel_init=initializers.nd_dense_init(1.0, 'fan_in', 'truncated_normal'),
-          kernel_axes=(None, 'test'),
+          kernel_axes=('embed', 'mlp'),
           dtype=cfg.dtype,
       )
       # print("jax.tree_util.tree_structure(variables)")
