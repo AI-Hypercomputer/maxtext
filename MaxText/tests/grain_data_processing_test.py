@@ -49,36 +49,32 @@ class GrainDataProcessingTest(unittest.TestCase):
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
         base_output_directory="gs://max-experiments/",
-        dataset_path="/tmp/gcsfuse",
+        dataset_type="grain",
+        grain_data_files="/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*",
         tokenizer_path="../assets/tokenizer",
         enable_checkpointing=False,
-        dataset_type="c4-array_record",
-        dataset_name="array-record/c4/en/3.0.1",
-        eval_dataset_name="array-record/c4/en/3.0.1",
     )
     self.config = pyconfig.config
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
-    self.train_ds, self.eval_ds = self._get_datasets()
-    self.train_iter, self.eval_iter, self.predict_iter = self._get_preprocessed_datasets()
+    self.train_ds = self._get_datasets()
+    self.train_iter = self._get_preprocessed_datasets()
 
   def _get_datasets(self):
     print("Sharding dataset in ", jax.process_count(), " shards")
-    train_ds, eval_ds = _grain_data_processing.get_datasets(config=self.config)
-    return train_ds, eval_ds
+    train_ds, _ = _grain_data_processing.get_datasets(config=self.config)
+    return train_ds
 
   def _get_preprocessed_datasets(self):
     process_indices = input_pipeline_interface.get_process_loading_real_data(self.config, self.mesh)
-    train_iter, eval_iter, test_iter = _grain_data_processing.preprocess_dataset(
+    train_iter, _, _ = _grain_data_processing.preprocess_dataset(
         self.config,
         dataloading_host_index=process_indices.index(jax.process_index()),
         dataloading_host_count=len(process_indices),
         global_mesh=self.mesh,
-        train_ds=self.train_ds,
-        eval_ds=self.eval_ds,
-        vocab_path=self.config.tokenizer_path,
+        dataset=self.train_ds
     )
-    return train_iter, eval_iter, test_iter
+    return train_iter
 
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
@@ -97,40 +93,10 @@ class GrainDataProcessingTest(unittest.TestCase):
         },
     )
 
-  def test_eval_ds(self):
-    expected_shape = [jax.device_count(), self.config.max_target_length]
-    batch = next(self.eval_iter)
-    self.assertEqual(
-        {k: list(v.shape) for k, v in batch.items()},
-        {
-            "inputs": expected_shape,
-            "inputs_position": expected_shape,
-            "inputs_segmentation": expected_shape,
-            "targets": expected_shape,
-            "targets_position": expected_shape,
-            "targets_segmentation": expected_shape,
-        },
-    )
-
-  def test_predict_ds(self):
-    expected_shape = [jax.device_count(), self.config.max_target_length]
-    batch = next(self.predict_iter)
-    self.assertEqual(
-        {k: list(v.shape) for k, v in batch.items()},
-        {
-            "inputs": expected_shape,
-            "inputs_position": expected_shape,
-            "inputs_segmentation": expected_shape,
-            "targets": expected_shape,
-            "targets_position": expected_shape,
-            "targets_segmentation": expected_shape,
-        },
-    )
-
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
-    self.train_ds, _ = self._get_datasets()
-    train_iter, _, _ = self._get_preprocessed_datasets()
+    self.train_ds = self._get_datasets()
+    train_iter = self._get_preprocessed_datasets()
     batch2 = next(train_iter)
     self.assertTrue((batch1["inputs"] == batch2["inputs"]).all())
     self.assertTrue((batch1["targets"] == batch2["targets"]).all())
@@ -146,10 +112,10 @@ class GrainDataProcessingTest(unittest.TestCase):
         break
       return batch
 
-    eval_batch1 = get_first_batch(self.eval_iter)
-    eval_batch2 = get_first_batch(self.eval_iter)
-    self.assertTrue((eval_batch1["inputs"] == eval_batch2["inputs"]).all())
-    self.assertTrue((eval_batch1["targets"] == eval_batch2["targets"]).all())
+    train_batch1 = get_first_batch(self.train_iter)
+    train_batch2 = get_first_batch(self.train_iter)
+    self.assertTrue((train_batch1["inputs"] == train_batch2["inputs"]).all())
+    self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ enable_checkpointing: False
 attention: "cudnn_flash_te"
 remat_policy: "minimal"
 use_iota_embed: True
-scan_layers: False
+scan_layers: True
 dataset_type: "synthetic"
 async_checkpointing: False
 logits_dot_in_fp32: False
