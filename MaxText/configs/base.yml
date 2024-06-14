@@ -319,3 +319,7 @@ enable_checkpoint_standard_logger: False
 
 # Single-controller
 enable_single_controller: False
+
+# Jax Profiler
+enable_jax_profiler: False
+jax_profiler_port: 9999
