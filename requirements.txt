@@ -29,6 +29,6 @@ tensorboardx
 tensorboard-plugin-profile
 tiktoken
 transformers
-git+https://github.com/mlperf/logging.git
+mlperf-logging@git+https://github.com/mlperf/logging.git
 google-jetstream
 jsonlines
