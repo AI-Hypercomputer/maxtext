@@ -21,6 +21,9 @@ import functools
 import time
 import socket
 import subprocess
+from etils import epath
+import shutil
+import re
 
 import max_logging
 
@@ -45,6 +48,47 @@ from tensorboardX import writer
 from google.cloud import storage
 
 import orbax.checkpoint
+
+
+def get_metadata(key):
+  import requests  # pytype: disable=import-error
+  import time  # pytype: disable=import-error
+  # Based on https://github.com/tensorflow/tensorflow/pull/40317
+  gce_metadata_endpoint = 'http://' + os.environ.get(
+      'GCE_METADATA_IP', 'metadata.google.internal')
+
+  retry_count = 0
+  retrySeconds = 0.500
+  api_resp = None
+
+  while retry_count < 6:
+    api_resp = requests.get(
+        f'{gce_metadata_endpoint}/computeMetadata/v1/instance/attributes/{key}',
+        headers={'Metadata-Flavor': 'Google'})
+    if api_resp.status_code == 200:
+      break
+    retry_count += 1
+    time.sleep(retrySeconds)
+
+  if api_resp is None:
+    raise RuntimeError(f"Getting metadata['{key}'] failed for 6 tries")
+  return api_resp.text, api_resp.status_code
+
+
+def get_tpu_env_value(key):
+  def get_tpu_env_value_from_metadata(key):
+    tpu_env_data = get_metadata('tpu-env')[0]
+    key_value_pairs = tpu_env_data.split('\n')
+    for key_value_pair in key_value_pairs:
+      # Typical line is MEGASCALE_NUM_SLICES: '2'
+      if ':' in key_value_pair:
+        row_key, value = re.split(':', key_value_pair, 1)
+        row_key = row_key.strip()
+        if row_key == key:
+          return value.strip().strip("'")
+    return None
+  value = os.environ.get(key, None)
+  return value if value is not None else get_tpu_env_value_from_metadata(key)
 
 
 def find_nans_and_infs(pytree):
@@ -185,6 +229,15 @@ def upload_blob(destination_gcs_name, source_file_name):
   blob = bucket.blob(prefix_name)
   blob.upload_from_filename(source_file_name)
 
+def delete_all_local_things():
+  max_logging.log("Deleting local checkpoints and id files...")
+  files = os.listdir("/xfgu-cache")
+  for f in files:
+    if f != 'remote' and f != 'id_file.txt':
+      shutil.rmtree(f'/xfgu-cache/{f}')
+    if f == 'id_file.txt':
+      os.remove('/xfgu-cache/id_file.txt')
+
 
 def maybe_initialize_jax_distributed_system(raw_keys):
   """The best recipe to initialize the Jax Distributed System has varied over time. We keep a layer of
@@ -194,12 +247,43 @@ def maybe_initialize_jax_distributed_system(raw_keys):
 
   For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
   """
+  # delete_all_local_things()
+  
   if (
       raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and
       raw_keys["compile_topology_num_slices"] == -1 and not raw_keys["enable_single_controller"]
   ) or raw_keys["hardware"] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
-    jax.distributed.initialize()
+
+    DIR = "/xfgu-cache"
+    ID_FILE = "id_file.txt"
+    files = os.listdir(DIR)
+    if ID_FILE in files:
+      max_logging.log("An ID file from a previous run exists, using the saved ID...")
+      with open(DIR + "/" + ID_FILE, 'r') as f:
+        process_id = int(f.readlines()[0])
+        coordinator_address_file = epath.Path('gs://in-mem-test/logs/xfgu-e2e-test/coordinator_address.txt')
+        if process_id == 0:
+          slice_id = get_tpu_env_value('MEGASCALE_SLICE_ID')
+          coordinator_address = f"xfgu-e2e-test-slice-job-{slice_id}-{int(str(os.environ.get('TPU_WORKER_ID')))}.xfgu-e2e-test"
+          coordinator_address_file.write_text(coordinator_address)
+        else:
+          t = 0
+          while t <= 30:
+            if coordinator_address_file.exists():
+              coordinator_address = coordinator_address_file.read_text()
+              break
+            t += 1
+            time.sleep(1)
+
+      max_logging.log(f"Using the saved process_id of {process_id} and the 0'th process's address {coordinator_address} to initialize JAX distributed runtime...")
+      jax.distributed.initialize(coordinator_address=f"{coordinator_address}:8476", process_id=process_id)
+    else:
+      jax.distributed.initialize()
+      process_id = jax._src.distributed.global_state.process_id
+      with open(DIR + "/" + ID_FILE, 'w') as f:
+        f.write(str(process_id))
+
     orbax.checkpoint.multihost.utils.initialize_runtime_to_distributed_ids()
     max_logging.log("Jax distributed system initialized!")
   elif is_gpu_backend(raw_keys):

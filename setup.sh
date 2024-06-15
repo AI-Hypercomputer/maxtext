@@ -196,9 +196,9 @@ fi
 [ -d ".git" ] && pre-commit install
 
 
-pip install libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html -U --pre
-pip install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
-pip install git+https://github.com/google/jax
-yes | pip3 uninstall orbax-checkpoint
-pip install git+https://github.com/google/orbax.git@test_642305012#subdirectory=checkpoint
+# pip install libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html -U --pre
+# pip install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
+# pip install git+https://github.com/google/jax
+# yes | pip3 uninstall orbax-checkpoint
+# pip install git+https://github.com/google/orbax.git@test_642305012#subdirectory=checkpoint
 # pip install git+https://github.com/google/orbax/#subdirectory=checkpoint

@@ -99,10 +99,10 @@ def create_orbax_emergency_checkpoint_manager(
 
   options = emergency_checkpoint_manager.CheckpointManagerOptions(
       local=LocalCheckpointOptions(
-          save_interval_steps=2, max_to_keep=2
+          save_interval_steps=8, max_to_keep=2
       ),
       persistent=PersistentCheckpointOptions(
-          save_interval_steps=persistent_save_interval_steps, max_to_keep=10
+          save_interval_steps=persistent_save_interval_steps, max_to_keep=20
       ),
   )
   # local_checkpoint_dir = epath.Path(local_checkpoint_dir) / f"process_{orbax.checkpoint.multihost.process_index()}"
@@ -178,6 +178,8 @@ def load_state_if_possible(
 
   if checkpoint_manager is not None:
     max_logging.log("checkpoint manager exists so trying to load this run's existing checkpoint")
+
+    checkpoint_manager.reload()
 
     latest_step = checkpoint_manager.latest_step()
     if latest_step is not None:

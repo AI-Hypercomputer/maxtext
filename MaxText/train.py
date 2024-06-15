@@ -23,6 +23,8 @@ limitations under the License.
 import datetime
 import os
 import sys
+import time
+import shutil
 import functools
 
 from typing import Sequence
@@ -51,6 +53,7 @@ from input_pipeline.input_pipeline_interface import create_data_iterator_with_to
 from layers import models
 
 import jax.numpy as jnp
+from orbax.checkpoint import multihost
 from jax import random
 from jax.sharding import Mesh
 from jax.experimental import checkify
@@ -66,6 +69,21 @@ from ml_goodput_measurement import goodput
 
 Transformer = models.Transformer
 EPS = 1e-8
+
+
+class TestClass:
+  """Class to run equality assertions."""
+
+  def assertSameElements(self, a, b):  # pylint: disable=invalid-name
+    assert len(a) == len(b)
+    for x, y in zip(a, b):
+      assert x == y
+
+  def assertEqual(self, a, b):  # pylint: disable=invalid-name
+    assert a == b
+
+  def assertIsInstance(self, a, b):  # pylint: disable=invalid-name
+    assert isinstance(a, b)
 
 
 def validate_train_config(config):
@@ -335,10 +353,14 @@ def setup_mesh_and_model(config):
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
-  
+  max_logging.log(f"the original mesh.device_ids is {[int(id) for id in mesh.device_ids.flatten()]}")
+
   if emergency_checkpoint_manager.should_restore_mesh_from_metadata(epath.Path(config.checkpoint_dir)):
     mesh = emergency_checkpoint_manager.consistent_restore_mesh_from_metadata(epath.Path(config.checkpoint_dir), mesh)
-  
+    if multihost.process_index() == 0:
+      max_logging.log(f"runtime_to_distributed_ids is: {multihost.utils.runtime_to_distributed_ids()}")
+      max_logging.log(f"mesh.device_ids is {[int(id) for id in mesh.device_ids.flatten()]}")
+
   max_logging.log(f"The mesh on {jax.process_index()} is {mesh}")
   max_logging.log(f"devices_array on {jax.process_index()} is {devices_array}")
 
@@ -385,23 +407,46 @@ def setup_train_loop(config):
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
   data_iterator, eval_data_iterator, _ = create_data_iterator_with_tokenizer(config, mesh)
 
-  state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(
+  local_state, local_state_mesh_annotations, data_iterator = max_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
 
-  maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh)
+  # max_logging.log(f"restored state from local is: {local_state}")
+  # max_logging.log(f'local_state_mesh_annotations from local is {local_state_mesh_annotations}')
+  
+  # files = os.listdir("/xfgu-cache")
+  # for f in files:
+  #   if f != 'remote' and f != 'id_file.txt':
+  #     shutil.rmtree(f'/xfgu-cache/{f}')
+  # max_logging.log("local checkpoints deleted, now restoring from GCS")
+
+  # state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(
+  #     model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
+  # )
+
+  # max_logging.log(f"restored state from GCS is: {state}")
+  # max_logging.log(f'state_mesh_annotations from GCS is {state_mesh_annotations}')
+
+  # test_class = TestClass()
+  # orbax.checkpoint.test_utils.assert_tree_equal(test_class, local_state_mesh_annotations, state_mesh_annotations)
+  # max_logging.log("No issues comparing the two state_mesh_annotations")
+
+  # orbax.checkpoint.test_utils.assert_tree_equal(test_class, local_state, state)
+  # max_logging.log("No issues comparing the two states")
+
+  maxtext_utils.assert_params_sufficiently_sharded(local_state.params, mesh)
 
   return (
       init_rng,
       writer,
       checkpoint_manager,
-      state_mesh_annotations,
+      local_state_mesh_annotations,
       model,
       mesh,
       learning_rate_schedule,
       data_iterator,
       eval_data_iterator,
-      state,
+      local_state,
   )
 
 
