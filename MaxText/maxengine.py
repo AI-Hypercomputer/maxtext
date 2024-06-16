@@ -251,7 +251,12 @@ class MaxEngine(engine_api.Engine):
       if path_key in ["cache_ar_index", "cached_ar_key", "cached_ar_value", "cached_ar_key_scale", "cached_ar_value_scale"]:
         return full_cache  # we don't even zero these out because we can mask them out.
 
-      batch_idx = annotations.index("cache_batch") if "cache_batch" in annotations else -1
+      batch_idx = -1
+      if "cache_batch" in annotations:
+        batch_idx = annotations.index("cache_batch")
+      elif "cache_scale_batch" in annotations:
+        batch_idx = annotations.index("cache_scale_batch")
+
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
 

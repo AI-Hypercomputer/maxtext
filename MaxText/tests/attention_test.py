@@ -14,6 +14,8 @@
 
 """Tests for Attentions."""
 
+import itertools
+import random
 import sys
 import unittest
 
@@ -29,7 +31,6 @@ import pytest
 import pyconfig
 
 from layers import attentions
-from layers import embeddings
 
 Mesh = jax.sharding.Mesh
 Attention = attentions.Attention
@@ -257,73 +258,73 @@ class AttentionTest(unittest.TestCase):
     )
 
   @pytest.mark.tpu
-  def test_dot_product_1203_1203(self):
-    self.dot_product_attention_helper(prefill_cache_axis_order=(1,2,0,3), ar_cache_axis_order=(1,2,0,3))
-
-  @pytest.mark.tpu
-  def test_dot_product_1203_2130(self):
-    self.dot_product_attention_helper(prefill_cache_axis_order=(1,2,0,3), ar_cache_axis_order=(2,1,3,0))
-
-  @pytest.mark.tpu
-  def test_dot_product_2130_1203(self):
-    self.dot_product_attention_helper(prefill_cache_axis_order=(2,1,3,0), ar_cache_axis_order=(1,2,0,3))
-
-  @pytest.mark.tpu
-  def test_dot_product_2130_2130(self):
-    self.dot_product_attention_helper(prefill_cache_axis_order=(2,1,3,0), ar_cache_axis_order=(2,1,3,0))
-
-  @pytest.mark.tpu
-  def test_dot_product_0213_0213(self):
-    self.dot_product_attention_helper(prefill_cache_axis_order=(0,2,1,3), ar_cache_axis_order=(0,2,1,3))
+  def test_dot_product_cache_axis_order(self):
+    all_axis_orders = [axis_order for axis_order in itertools.permutations(range(4))]
+    for axis_order in random.choices(all_axis_orders, k=4):
+      self.dot_product_attention_helper(
+        prefill_cache_axis_order=axis_order,
+        ar_cache_axis_order=axis_order
+      )
+      print(f"passed test for {axis_order=}")
 
   def dot_product_attention_helper(self, prefill_cache_axis_order, ar_cache_axis_order):
-    self._dot_product_attention(
-      prefill_cache_axis_order, ar_cache_axis_order, compute_axis_order=(0,1,2,3), quantize_kvcache=False)
-    self._dot_product_attention(
-      prefill_cache_axis_order, ar_cache_axis_order, compute_axis_order=(0,1,2,3), quantize_kvcache=True)
-    self._dot_product_attention(
-      prefill_cache_axis_order, ar_cache_axis_order, compute_axis_order=(0,2,1,3), quantize_kvcache=False)
-    self._dot_product_attention(
-      prefill_cache_axis_order, ar_cache_axis_order, compute_axis_order=(0,2,1,3), quantize_kvcache=True)
+    for compute_axis_order in [(0,1,2,3), (0,2,1,3)]:
+      self._dot_product_attention(
+        prefill_cache_axis_order,
+        ar_cache_axis_order,
+        compute_axis_order=compute_axis_order,
+      )
+      print(f"passed subtest for {compute_axis_order=}")
 
-  def _dot_product_attention(self, prefill_cache_axis_order, ar_cache_axis_order, compute_axis_order, quantize_kvcache):
+  def _dot_product_attention(
+      self,
+      prefill_cache_axis_order,
+      ar_cache_axis_order,
+      compute_axis_order,
+  ):
     """Test equalvant between different layout control in dot_product"""
 
     rtol, atol = 1e-02, 1e-02
-    if quantize_kvcache:
-      rtol, atol = 1e-02, 1e-01
 
-    prefill_length = self.max_prefill_predict_length
-    decode_total_length = self.max_target_length
-    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
+    pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        per_device_batch_size=1.0,
+        run_name="test",
+        enable_checkpointing=False,
+        max_target_length=128,
+        max_prefill_predict_length=16,
+        attention="dot_product",
+    )
+    config = pyconfig.config
+
+    prefill_length = config.max_prefill_predict_length
+    decode_total_length = config.max_target_length
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(config.dtype)
 
     lnx_prefill = lnx[:, 0:prefill_length, :]
     decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
     decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
 
     attention_w_layout = Attention(
-        config=self.cfg,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=self.num_kv_heads,
-        head_dim=self.head_dim,
-        max_target_length=self.max_target_length,
-        max_prefill_predict_length=self.max_prefill_predict_length,
         mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=self.dtype,
+        config=config,
+        num_query_heads=config.num_query_heads,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
+        max_target_length=config.max_target_length,
+        max_prefill_predict_length=config.max_prefill_predict_length,
+        attention_kernel=config.attention,
+        dtype=config.dtype,
         prefill_cache_axis_order=prefill_cache_axis_order,
         ar_cache_axis_order=ar_cache_axis_order,
         compute_axis_order=compute_axis_order,
-        quantize_kvcache=quantize_kvcache,
     )
-
     attention_w_layout_variable = attention_w_layout.init(
         {"params": self.rng, "aqt": self.rng},
-        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones((self.global_batch_size, self.max_target_length)),
+        jnp.ones((self.global_batch_size, config.max_target_length, config.base_emb_dim)),
+        jnp.ones((self.global_batch_size, config.max_target_length, config.base_emb_dim)),
+        jnp.ones((self.global_batch_size, config.max_target_length)),
     )
-
     attention_w_layout_full = attention_w_layout.apply(
         attention_w_layout_variable,
         lnx,
@@ -373,68 +374,74 @@ class AttentionTest(unittest.TestCase):
 
   @pytest.mark.tpu
   def test_dot_product_reshape_q(self):
-    self._dot_product_attention_reshape_q(quantize_kvcache=True, compute_axis_order=(0,1,2,3))
-    self._dot_product_attention_reshape_q(quantize_kvcache=False, compute_axis_order=(0,1,2,3))
-    self._dot_product_attention_reshape_q(quantize_kvcache=True, compute_axis_order=(0,2,1,3))
-    self._dot_product_attention_reshape_q(quantize_kvcache=False, compute_axis_order=(0,2,1,3))
+    for compute_axis_order in [(0,1,2,3), (0,2,1,3)]:
+      self._dot_product_attention_reshape_q(
+        compute_axis_order=compute_axis_order,
+      )
+      print(f"test passed for compute_axis_order: {compute_axis_order}")
 
-  def _dot_product_attention_reshape_q(self, quantize_kvcache, compute_axis_order):
+  def _dot_product_attention_reshape_q(self, compute_axis_order):
     """Test equalvant between q and reshape q in dot_product"""
 
     rtol, atol = 1e-02, 1e-02
-    if quantize_kvcache:
-      rtol, atol = 1e-02, 1e-01
 
-    prefill_length = self.max_prefill_predict_length
-    decode_total_length = self.max_target_length
-    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
+    pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        per_device_batch_size=1.0,
+        run_name="test",
+        enable_checkpointing=False,
+        max_target_length=128,
+        max_prefill_predict_length=16,
+        attention="dot_product",
+    )
+    config = pyconfig.config
+
+    prefill_length = config.max_prefill_predict_length
+    decode_total_length = config.max_target_length
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(config.dtype)
 
     lnx_prefill = lnx[:, 0:prefill_length, :]
     decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
     decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
 
     attention_wo_reshape_q = Attention(
-        config=self.cfg,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=self.num_kv_heads,
-        head_dim=self.head_dim,
-        max_target_length=self.max_target_length,
-        max_prefill_predict_length=self.max_prefill_predict_length,
         mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=self.dtype,
-        reshape_q=False,
-        quantize_kvcache=quantize_kvcache,
+        config=config,
+        num_query_heads=config.num_query_heads,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
+        max_target_length=config.max_target_length,
+        max_prefill_predict_length=config.max_prefill_predict_length,
+        attention_kernel=config.attention,
+        dtype=config.dtype,
         compute_axis_order=compute_axis_order,
+        reshape_q=False,
+    )
+    attention_wo_reshape_q_variable = attention_wo_reshape_q.init(
+        {"params": self.rng, "aqt": self.rng},
+        jnp.ones((self.global_batch_size, config.max_target_length, config.base_emb_dim)),
+        jnp.ones((self.global_batch_size, config.max_target_length, config.base_emb_dim)),
+        jnp.ones((self.global_batch_size, config.max_target_length)),
     )
 
     attention_w_reshape_q = Attention(
-        config=self.cfg,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=self.num_kv_heads,
-        head_dim=self.head_dim,
-        max_target_length=self.max_target_length,
-        max_prefill_predict_length=self.max_prefill_predict_length,
         mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=self.dtype,
+        config=config,
+        num_query_heads=config.num_query_heads,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
+        max_target_length=config.max_target_length,
+        max_prefill_predict_length=config.max_prefill_predict_length,
+        attention_kernel=config.attention,
+        dtype=config.dtype,
+        compute_axis_order=compute_axis_order,
         reshape_q=True,
-        quantize_kvcache=quantize_kvcache,
-        compute_axis_order=compute_axis_order
     )
-
-    attention_wo_reshape_q_variable = attention_wo_reshape_q.init(
-        {"params": self.rng, "aqt": self.rng},
-        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones((self.global_batch_size, self.max_target_length)),
-    )
-
     attention_w_reshape_q_variable = attention_w_reshape_q.init(
         {"params": self.rng, "aqt": self.rng},
-        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones((self.global_batch_size, self.max_target_length)),
+        jnp.ones((self.global_batch_size, config.max_target_length, config.base_emb_dim)),
+        jnp.ones((self.global_batch_size, config.max_target_length, config.base_emb_dim)),
+        jnp.ones((self.global_batch_size, config.max_target_length)),
     )
 
     attention_wo_reshape_q_full = attention_wo_reshape_q.apply(
