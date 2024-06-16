@@ -15,10 +15,11 @@
 """Quantization library."""
 
 import functools
+from typing import Optional
 
 from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2.flax import aqt_flax
-from common_types import Array, Config
+import common_types
 from dataclasses import dataclass
 import flax.linen as nn
 import jax
@@ -26,6 +27,15 @@ import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
 
 MAX_INT8 = 127.5
+
+Array = common_types.Array
+Config = common_types.Config
+DType = common_types.DType
+AxisNames = common_types.AxisNames
+AxisIdxes = common_types.AxisIdxes
+CACHE_SEQUENCE = common_types.CACHE_SEQUENCE
+CACHE_HEADS = common_types.CACHE_HEADS
+CACHE_KV = common_types.CACHE_KV
 
 
 @dataclass
@@ -176,13 +186,37 @@ def configure_kv_quantization(config: Config):
   return False if not config.quantize_kvcache else True
 
 
-def quantize_kv(kv: Array, kv_axis: int):
+def quantize_kv(kv: Array, kv_quant_axis: str, axis_names: AxisNames):
   """Quantize key/values stored in kvcache."""
-  scale = jnp.max(jnp.abs(kv), axis=kv_axis, keepdims=True)
+  if kv_quant_axis == "d":
+    kv_quant_axis = axis_names.index(CACHE_KV)
+  elif kv_quant_axis == "sd":
+    kv_quant_axis = (
+      axis_names.index(CACHE_SEQUENCE),
+      axis_names.index(CACHE_KV)
+    )
+  elif kv_quant_axis == "hd":
+    kv_quant_axis = (
+      axis_names.index(CACHE_HEADS),
+      axis_names.index(CACHE_KV)
+    )
+  scale = jnp.max(jnp.abs(kv), axis=kv_quant_axis, keepdims=True)
   value = jnp.int8(jnp.rint(kv * (MAX_INT8 / scale)))
   return value, scale
 
 
-def unquantize_kv(value: Array, scale: Array, dtype: jnp.dtype):
+def unquantize_kv(value: Array, scale: Array, dtype: DType):
   """Unquantize key/values stored in kvcache."""
+  return value.astype(dtype) * scale / MAX_INT8
+
+
+def unquantize_attn_weights(
+    value: Array,
+    scale: Array,
+    dtype: DType,
+    scale_axis_order_for_attn_weights: Optional[AxisIdxes] = None):
+  """Unquantize attention weights."""
+  if scale_axis_order_for_attn_weights:
+    value_scale = jnp.transpose(value_scale, axes=scale_axis_order_for_attn_weights)
+  scale = scale[:,:,:,None,:]
   return value.astype(dtype) * scale / MAX_INT8

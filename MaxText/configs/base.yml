@@ -61,6 +61,9 @@ save_config_to_gcs: False
 dtype: "bfloat16"
 quantization: "" #defaults to no quantization, i.e. bf16. possible alternative setting is 'int8' or use fp8 to run with 8-bit floating-point GeMMs on NVIDIA GPUs.
 quantize_kvcache: False
+cast_qk_rotary: False
+unquantize_target: "kv"
+kv_quant_axis: "d"
 
 # Shard the range finding operation for quantization. By default this is set to number of slices.
 quantization_local_shard_count: -1

@@ -100,6 +100,9 @@ class LlamaDecoderLayer(nn.Module):
         ar_cache_axis_order=tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
         compute_axis_order=tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
         reshape_q=cfg.reshape_q,
+        unquantize_target=cfg.unquantize_target,
+        cast_qk_rotary=cfg.cast_qk_rotary,
+        kv_quant_axis=cfg.kv_quant_axis,
     )
 
     attention_lnx = attention_layer(
