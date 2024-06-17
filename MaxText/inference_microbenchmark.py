@@ -39,7 +39,7 @@ def prefill_benchmark_loop(engine, params, tokens, true_length, iters):
   """Inner loop for benchmarking prefill step."""
   start = datetime.datetime.now()
   for _ in range(iters):
-    prefill_result = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
+    prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
   jax.block_until_ready(prefill_result)
   end = datetime.datetime.now()
   del prefill_result
@@ -51,7 +51,7 @@ def prefill_benchmark(
 ):
   """Handles warmup, running prefill benchmark, and printing results."""
   for _ in range(_WARMUP_ITERS):
-    prefill_result = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
+    prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
   jax.block_until_ready(prefill_result)
   del prefill_result
 
@@ -81,7 +81,7 @@ def prefill_insert_benchmark_loop(
   prof.activate()
   start = datetime.datetime.now()
   for i in range(iters):
-    prefill_result = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
+    prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
     decode_state = engine.insert(prefill_result, decode_state, int(i % total_slots))
     del prefill_result
   jax.block_until_ready(decode_state)
@@ -96,7 +96,7 @@ def prefill_insert_benchmark(
   """Handles warmup, running insert benchmark, and printing results."""
 
   for i in range(_WARMUP_ITERS):
-    prefill_result = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
+    prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
     decode_state = engine.insert(prefill_result, decode_state, int(i % total_slots))
     del prefill_result
   jax.block_until_ready(decode_state)
@@ -217,7 +217,7 @@ def print_results_for_analyze(results):
 def summarize_prefill_result(engine, params, tokens, true_length):
   """Summarize Prefill result."""
   print(f"Prefill result of length {tokens.size}:\n")
-  prefill_result = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
+  prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
   jax.block_until_ready(prefill_result)
   num_prefill_logits_params, total_prefill_logits_size, avg_prefill_logits_param_size = (
     max_utils.summarize_pytree_data(prefill_result["logits"], name="Prefill Logits", raw=True)
