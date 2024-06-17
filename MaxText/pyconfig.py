@@ -92,6 +92,8 @@ def validate_model_name(s: str) -> bool:
       "llama2-70b",
       "mistral-7b",
       "mixtral-test",
+      "mixtral-moe-1t",
+      "mixtral-moe-single",
       "mixtral-8x7b",
       "gemma-7b",
       "gemma-2b",
@@ -256,11 +258,18 @@ class _HyperParameters:
       raw_keys["steps"] = raw_keys["learning_rate_schedule_steps"]
 
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys["global_parameter_scale"])
+    # raw_keys["num_experts"] = raw_keys["global_parameter_scale"] * raw_keys["num_experts"] // 2
     raw_keys["emb_dim"] = 2**emb_scale * raw_keys["base_emb_dim"]
     raw_keys["num_query_heads"] = 2**num_head_scale * raw_keys["base_num_query_heads"]
     raw_keys["num_kv_heads"] = 2**num_head_scale * raw_keys["base_num_kv_heads"]
     raw_keys["mlp_dim"] = 2**mlp_dim_scale * raw_keys["base_mlp_dim"]
     raw_keys["num_decoder_layers"] = 2**layer_scale * raw_keys["base_num_decoder_layers"]
+    max_logging.log(f"num_experts is: {raw_keys['num_experts']}")
+    max_logging.log(f"emb_dim is: {raw_keys['emb_dim']}")
+    max_logging.log(f"num_query_heads is: {raw_keys['num_query_heads']}")
+    max_logging.log(f"num_kv_heads is: {raw_keys['num_kv_heads']}")
+    max_logging.log(f"mlp_dim is: {raw_keys['mlp_dim']}")
+    max_logging.log(f"num_decoder_layers is: {raw_keys['num_decoder_layers']}")
 
     raw_keys["global_batch_size_to_load"], raw_keys["global_batch_size_to_train_on"] = calculate_global_batch_sizes(raw_keys)
     raw_keys["num_slices"] = get_num_slices(raw_keys)

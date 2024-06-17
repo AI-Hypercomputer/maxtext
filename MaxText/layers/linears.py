@@ -375,8 +375,8 @@ class MoeBlock(nn.Module):
 
   def call_gmm(self, inputs, gate_logits, config, w0_kernel, w1_kernel, wo_kernel):
     # TODO(ranran): update the static default tile_size
-    # tile_size = (512, 512, 512)
-    tile_size = None
+    tile_size = (512, 512, 512)
+    # tile_size = None
     # replicated_sharding = jax.sharding.NamedSharding(self.mesh, PartitionSpec(None))
 
     def gmm(inputs, kernel, group_sizes):
