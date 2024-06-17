@@ -758,18 +758,14 @@ class AttentionOp(nn.Module):
     one_hot_indices = one_hot_indices.astype(int)
 
     ar_key = cached_key_var.value
+
     if use_ragged:
-      ar_key = ar_key.at[lengths[:], :, :, :].set(one_token_key_shaped_for_cache[0, :, :, :])
-      # ar_key = ar_key.at[lengths[1], :, 1, :].set(one_token_key_shaped_for_cache[0, :, 1, :])
-      # ar_key = ar_key.at[lengths[2], :, 2, :].set(one_token_key_shaped_for_cache[0, :, 2, :])
-      # ar_key = ar_key.at[lengths[3], :, 3, :].set(one_token_key_shaped_for_cache[0, :, 3, :])
+      positions = [slice(None)] * len(ar_key.shape)
+      positions[ar_key_layout.index(CACHE_SEQUENCE)] = lengths
+      ar_key = ar_key.at[jnp.index_exp[tuple(positions)]].set(one_token_key_shaped_for_cache)
     else:
       ar_key = jax.lax.dynamic_update_index_in_dim(ar_key, one_token_key_shaped_for_cache, jnp.squeeze(one_hot_indices), ar_key_layout.index(CACHE_SEQUENCE))
-      # ar_key = ar_key.at[jnp.squeeze(one_hot_indices), :, :, :].set(one_token_key_shaped_for_cache[0, :, :, :])
-      # ar_key = ar_key.at[jnp.squeeze(one_hot_indices), :, 0, :].set(one_token_key_shaped_for_cache[0, :, 0, :])
-      # ar_key = ar_key.at[jnp.squeeze(one_hot_indices), :, 1, :].set(one_token_key_shaped_for_cache[0, :, 1, :])
-      # ar_key = ar_key.at[jnp.squeeze(one_hot_indices), :, 2, :].set(one_token_key_shaped_for_cache[0, :, 2, :])
-      # ar_key = ar_key.at[jnp.squeeze(one_hot_indices), :, 3, :].set(one_token_key_shaped_for_cache[0, :, 3, :])
+
     ar_key = nn.with_logical_constraint(
         ar_key,
         ar_key_layout
@@ -778,17 +774,12 @@ class AttentionOp(nn.Module):
 
     ar_value = cached_value_var.value
     if use_ragged:
-      ar_value = ar_value.at[lengths[:], :, :, :].set(one_token_value_shaped_for_cache[0, :, :, :])
-      # ar_value = ar_value.at[lengths[1], :, 1, :].set(one_token_value_shaped_for_cache[0, :, 1, :])
-      # ar_value = ar_value.at[lengths[2], :, 2, :].set(one_token_value_shaped_for_cache[0, :, 2, :])
-      # ar_value = ar_value.at[lengths[3], :, 3, :].set(one_token_value_shaped_for_cache[0, :, 3, :])
+      positions = [slice(None)] * len(ar_value.shape)
+      positions[ar_value_layout.index(CACHE_SEQUENCE)] = lengths
+      ar_value = ar_value.at[jnp.index_exp[tuple(positions)]].set(one_token_value_shaped_for_cache)
     else:
       ar_value = jax.lax.dynamic_update_index_in_dim(ar_value, one_token_value_shaped_for_cache, jnp.squeeze(one_hot_indices), ar_key_layout.index(CACHE_SEQUENCE))
-      # ar_value = ar_value.at[jnp.squeeze(one_hot_indices), :, :, :].set(one_token_value_shaped_for_cache[0, :, :, :])
-      # ar_value = ar_value.at[jnp.squeeze(one_hot_indices), :, 0, :].set(one_token_value_shaped_for_cache[0, :, 0, :])
-      # ar_value = ar_value.at[jnp.squeeze(one_hot_indices), :, 1, :].set(one_token_value_shaped_for_cache[0, :, 1, :])
-      # ar_value = ar_value.at[jnp.squeeze(one_hot_indices), :, 2, :].set(one_token_value_shaped_for_cache[0, :, 2, :])
-      # ar_value = ar_value.at[jnp.squeeze(one_hot_indices), :, 3, :].set(one_token_value_shaped_for_cache[0, :, 3, :])
+
     ar_value = nn.with_logical_constraint(
         ar_value,
         ar_value_layout,
