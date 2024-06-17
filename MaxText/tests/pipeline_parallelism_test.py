@@ -101,7 +101,14 @@ class PipelineParallelismTest(unittest.TestCase):
     def regular_sequential_layers(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):     
         def get_cur_layer_params(params, layer_idx):
           def get_cur_layer_params_arr(leaf):
-            if config.num_layers_per_pipeline_stage > 1:
+            # Reshape layers into a linear list of layers, e.g. [repeat, stage] into [layers]  
+            if config.num_pipeline_repeats > 1 and config.num_layers_per_pipeline_stage == 1:
+              new_shape = (leaf.shape[0] * leaf.shape[1],) + leaf.shape[2:]
+              leaf = jnp.reshape(leaf, new_shape) # [repeat, stage] -> [layers]  
+            elif config.num_pipeline_repeats > 1 and config.num_layers_per_pipeline_stage > 1:
+              new_shape = (leaf.shape[0] * leaf.shape[1] * leaf.shape[2],) + leaf.shape[3:]
+              leaf = jnp.reshape(leaf, new_shape) # [repeat, stage, layers_per_stage] -> [layers]
+            elif config.num_pipeline_repeats == 1 and config.num_layers_per_pipeline_stage > 1:
               new_shape = (leaf.shape[0] * leaf.shape[1],) + leaf.shape[2:]
               leaf = jnp.reshape(leaf, new_shape) # [stage, layers_per_stage] -> [layers]
             return leaf[layer_idx]
@@ -111,6 +118,9 @@ class PipelineParallelismTest(unittest.TestCase):
         for layer in range(config.num_decoder_layers):
             cur_layer_params = get_cur_layer_params(params, layer)
             cur_layer_params['params'] = cur_layer_params['params']['layers']
+            if config.num_pipeline_repeats > 1 and config.num_layers_per_pipeline_stage > 1:
+              cur_layer_params['params'] = meta.remove_axis(cur_layer_params['params'], 0, {nn.PARTITION_NAME:"circular_repeats"})
+              cur_layer_params['params'] = meta.remove_axis(cur_layer_params['params'], 0, {nn.PARTITION_NAME:"layers"})
             reg_layer_activations, _ = single_pipeline_stage.apply(cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode)
         return reg_layer_activations
 
@@ -120,6 +130,40 @@ class PipelineParallelismTest(unittest.TestCase):
        return loss
 
     assert_same_output_and_grad(regular_sequential_layers_dummy_loss, pipeline_parallelism_dummy_loss, init_pipeline_params, inputs, inputs_segmentation, inputs_position, deterministic, model_mode, dummy_targets)
+
+  @pytest.mark.tpu
+  def test_circular_minimum_microbatches_same_output_and_grad(self):
+     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 4 microbatches
+     pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        enable_checkpointing=False,
+        run_name="circular_minimum_microbatches",
+        max_target_length=128,
+        base_emb_dim=28,
+        ici_pipeline_parallelism=4,
+        base_num_decoder_layers=8,
+        num_pipeline_microbatches=4,
+        per_device_batch_size=4
+     )
+     config = pyconfig.config
+     self.assert_pipeline_same_output_and_grad(config)
+
+  @pytest.mark.tpu
+  def test_circular_extra_microbatches_same_output_and_grad(self):
+     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
+     pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        enable_checkpointing=False,
+        run_name="circular_extra_microbatches",
+        max_target_length=128,
+        base_emb_dim=28,
+        ici_pipeline_parallelism=4,
+        base_num_decoder_layers=8,
+        num_pipeline_microbatches=8,
+        per_device_batch_size=4
+     )
+     config = pyconfig.config
+     self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu
   def test_non_circular_same_output_and_grad(self):
@@ -137,6 +181,33 @@ class PipelineParallelismTest(unittest.TestCase):
      )
      config = pyconfig.config
      self.assert_pipeline_same_output_and_grad(config)
+
+  @pytest.mark.tpu
+  def test_full_train_circular(self):
+    # Run a full train.py call with 4 stages, 32 layers (2 layers per stage, 4 circular repeats), 8 microbatches
+    train_main([
+          None,
+          "configs/base.yml",
+          r"base_output_directory=gs://runner-maxtext-logs",
+          "run_name=runner_pipeline_parallelism_test",
+          r"dataset_path=gs://maxtext-dataset",
+          "base_emb_dim=28",
+          "base_num_query_heads=4",
+          "base_num_kv_heads=4",
+          "base_mlp_dim=32",
+          "base_num_decoder_layers=32",
+          "head_dim=128",
+          "per_device_batch_size=2",
+          "max_target_length=1024",
+          "vocab_size=32",
+          "dataset_type=synthetic",
+          "steps=3",
+          "enable_checkpointing=False",
+          "ici_pipeline_parallelism=4",
+          "num_layers_per_pipeline_stage=2",
+          "num_pipeline_microbatches=8",
+
+    ])
 
   @pytest.mark.tpu
   def test_full_train_non_circular(self):
