@@ -92,21 +92,18 @@ def make_hf_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos, process
 
 def make_grain_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos, process_indices):
   """Make train iterator and tokenizer for C4 dataset"""
-  train_ds, eval_ds = _grain_data_processing.get_datasets(config=config)
-  sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
+  train_ds, _ = _grain_data_processing.get_datasets(config=config)
+
   train_iter, _, _ = _grain_data_processing.preprocess_dataset(
       config,
       dataloading_host_index=process_indices.index(jax.process_index()),
       dataloading_host_count=len(process_indices),
       global_mesh=mesh,
-      train_ds=train_ds,
-      eval_ds=eval_ds,
-      vocab_path=config.tokenizer_path,
-      data_shuffle_seed=config.data_shuffle_seed,
+      dataset=train_ds,
       add_bos=add_bos,
       add_eos=add_eos,
   )
-  return train_iter, None, sp_tokenizer
+  return train_iter, None, None
 
 
 class SyntheticDataIterator:
@@ -204,9 +201,9 @@ def make_mixed_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
   if config.expansion_factor_real_data != -1:  # assert number of hosts loading real data
     assert len(process_indices) == jax.process_count() // config.expansion_factor_real_data
   if jax.process_index() in process_indices:
-    if config.dataset_type == "c4":
+    if config.dataset_type == "tfds":
       return make_c4_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos, process_indices)
-    elif config.dataset_type == "c4-array_record":
+    elif config.dataset_type == "grain":
       return make_grain_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos, process_indices)
     elif config.dataset_type == "c4_mlperf":
       print("Overwrite both add_bos and add_eos to False")
@@ -222,10 +219,10 @@ def make_mixed_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos):
 def create_data_iterator_with_tokenizer(config, mesh, add_bos=True, add_eos=True):
   if config.dataset_type == "synthetic":
     return SyntheticDataIterator(config, mesh), None, get_tokenizer(config.tokenizer_path, add_bos, add_eos)
-  elif config.dataset_type in ("c4", "c4-array_record", "c4_mlperf", "hf"):
+  elif config.dataset_type in ("tfds", "grain", "c4_mlperf", "hf"):
     return make_mixed_train_iterator_and_tokenizer(config, mesh, add_bos, add_eos)
   else:
-    assert False, "dataset type not implemented"
+    assert False, f"Unknown dataset_type {config.dataset_type}, dataset_type must be synthetic, tfds, grain, hf or c4_mlperf"
 
 
 def get_shaped_batch(config):

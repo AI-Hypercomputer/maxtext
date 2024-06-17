@@ -53,9 +53,9 @@ def preprocess_dataset(
 ):
   """preprocess dataset"""
   # Set global batch size.
-  batch_size = config.global_batch_size_to_load
+  global_batch_size = config.global_batch_size_to_load
 
-  assert batch_size % global_mesh.size == 0, "Batch size should be divisible number of global devices."
+  assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible number of global devices."
 
   if config.enable_data_shuffling:
     dataset = dataset.shuffle(seed=config.data_shuffle_seed)
@@ -83,14 +83,14 @@ def preprocess_dataset(
   if packing:
     operations.append(
         grain.experimental.PackAndBatchOperation(
-            batch_size=batch_size // jax.process_count(),
+            batch_size=global_batch_size // jax.process_count(),
             length_struct={"inputs": config.max_target_length, "targets": config.max_target_length},
         )
     )
     operations.append(_input_pipeline_utils.ReformatPacking())
   else:
     operations.append(_input_pipeline_utils.PadToMaxLength(config.max_target_length))
-    operations.append(grain.Batch(batch_size=batch_size // jax.process_count(), drop_remainder=True))
+    operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=True))
 
   if shift:
     operations.append(_input_pipeline_utils.ShiftData(axis=1))

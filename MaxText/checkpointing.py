@@ -35,7 +35,7 @@ def create_orbax_checkpoint_manager(
     enable_checkpointing: bool,
     use_async: bool,
     save_interval_steps: int,
-    dataset_type: Optional[str] = "c4",
+    dataset_type: Optional[str] = "tfds",
     orbax_logger: Optional[abstract_logger.AbstractLogger] = None,
 ):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
@@ -45,7 +45,7 @@ def create_orbax_checkpoint_manager(
   max_logging.log("Creating checkpoint manager...")
   p = epath.Path(checkpoint_dir)
 
-  if dataset_type == "c4-array_record":
+  if dataset_type == "grain":
     item_names = ("items", "iter")
   else:
     item_names = ("items",)
@@ -97,7 +97,7 @@ def load_state_if_possible(
     load_full_state_from_path: str,
     abstract_unboxed_pre_state: train_state.TrainState,
     enable_single_replica_ckpt_restoring: Optional[bool] = False,
-    dataset_type: Optional[str] = "c4",
+    dataset_type: Optional[str] = "tfds",
 ):
   """Loads TrainState as possible from the inputs.
 
@@ -157,7 +157,7 @@ def load_state_if_possible(
           map_to_pspec,
           abstract_unboxed_pre_state,
       )
-      if dataset_type == "c4-array_record" and data_iterator is not None:
+      if dataset_type == "grain" and data_iterator is not None:
         return (
             checkpoint_manager.restore(
                 latest_step,
