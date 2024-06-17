@@ -206,7 +206,7 @@ class PipelineParallelismTest(unittest.TestCase):
           "ici_pipeline_parallelism=4",
           "num_layers_per_pipeline_stage=2",
           "num_pipeline_microbatches=8",
-
+          "tokenizer_path=../assets/tokenizer.llama2"          
     ])
 
   @pytest.mark.tpu
@@ -233,7 +233,7 @@ class PipelineParallelismTest(unittest.TestCase):
           "ici_pipeline_parallelism=4",
           "num_layers_per_pipeline_stage=8",
           "num_pipeline_microbatches=8",
-          
+          "tokenizer_path=../assets/tokenizer.llama2"          
     ])
 
 if __name__ == "__main__":
