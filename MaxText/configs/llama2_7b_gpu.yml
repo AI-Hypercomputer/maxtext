@@ -18,8 +18,13 @@ logits_dot_in_fp32: False
 per_device_batch_size: 4
 max_target_length: 4096
 
+mesh_axes: ['stage', 'data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose',]],
+                       # For pipeline parallelism the pre and post decoder layer tensors' batch dimension is sharded by stages.
+                       # Microbatches are sharded by stage, so moving out of and into this sharding should be a local reshape.
+                       # The "stage" needs to be listed first since the microbatch dimension is first before the reshape.
+                      ['activation_embed_and_logits_batch', ['stage', 'data', 'fsdp', 'fsdp_transpose']],
                       ['activation_heads', ['tensor','sequence']],
                       ['activation_length', 'sequence'],
                       ['activation_embed', 'tensor'],
@@ -28,15 +33,19 @@ logical_axis_rules: [
                       ['activation_vocab', ['tensor', 'sequence']],
                       ['activation_vocab', 'tensor'],
                       ['activation_vocab', 'sequence'],
+                      ['activation_stage','stage'],
                       ['mlp', ['fsdp_transpose', 'tensor', 'autoregressive']],
                       ['vocab', ['tensor', 'autoregressive']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'sequence']],
                       ['embed', ['fsdp', 'sequence']],
                       ['norm', 'fsdp'],
                       ['heads', ['tensor', 'autoregressive']],
+                      ['layers', 'stage'],
                       ['kv', []],
                       ['cache_batch', []],
                       ['cache_heads', ['autoregressive', 'tensor']],
                       ['cache_kv', []],
                       ['cache_sequence', []],
                     ]
+# Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
+data_sharding: [['stage', 'data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']]
