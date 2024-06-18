@@ -31,3 +31,5 @@ transformers
 git+https://github.com/mlperf/logging.git
 google-jetstream
 jsonlines
+google-cloud-aiplatform==1.50.0
+shapely==1.8.5.post1
