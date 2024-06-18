@@ -78,7 +78,6 @@ def main():
     pyconfig._config.keys['ar_cache_axis_order'] = ar_cache_axis_order # pylint: disable=protected-access
     pyconfig._config.keys['tensorboard_dir'] = tensorboard_dir # pylint: disable=protected-access
     pyconfig._config.keys['run_name'] = run_name # pylint: disable=protected-access
-    max_utils.write_config_raw_keys_for_gcs(pyconfig._config.keys) # pylint: disable=protected-access
 
     # Prepare metadata (dimensions) json for XLML
     dimensions_json = {
