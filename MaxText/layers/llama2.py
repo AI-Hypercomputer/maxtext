@@ -38,6 +38,16 @@ DType = common_types.DType
 Mesh = common_types.Mesh
 ScanIn = common_types.ScanIn
 
+AxisNames = common_types.AxisNames
+BATCH = common_types.BATCH
+KV_BATCH = common_types.KV_BATCH
+LENGTH = common_types.LENGTH
+HEAD = common_types.HEAD
+KV_HEAD = common_types.KV_HEAD
+D_KV = common_types.D_KV
+KV_HEAD_DIM = common_types.KV_HEAD_DIM
+
+
 Embed = embeddings.Embed
 Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
