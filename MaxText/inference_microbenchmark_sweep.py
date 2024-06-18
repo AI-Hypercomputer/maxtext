@@ -32,11 +32,9 @@ def main():
   json file.
 
   This json should contain the following keys:
-    - key_value_axis_order_product_id_list: comma separated string of key_value_axis_order_product_id
-    - prefill_key_axis_order_list: comma delimited string of prefill_key_axis_order
-    - prefill_value_axis_order_list: comma delimited string of prefill_value_axis_order
-    - ar_key_axis_order_list: comma delimited string of ar_key_axis_order
-    - ar_value_axis_order_list: comma delimited string of ar_value_axis_order
+    - two_axis_order_product_id_list: comma separated string of two_axis_order_product_id
+    - prefill_cache_axis_order_list: comma delimited string of prefill_cache_axis_order
+    - ar_cache_axis_order_list: comma delimited string of ar_cache_axis_order
     - accelerator: name of the accelerator
     - flatten_microbenchmark_results: Whether or not to flatten results. Should
       be true
@@ -49,45 +47,35 @@ def main():
     inference_metadata = json.load(json_file)
     print(f"inference_metadata: {inference_metadata}")
 
-  key_value_axis_order_product_id_list = inference_metadata['key_value_axis_order_product_id_list'].split(':')
-  prefill_key_axis_order_list = inference_metadata['prefill_key_axis_order_list'].split(':')
-  prefill_value_axis_order_list = inference_metadata['prefill_value_axis_order_list'].split(':')
-  ar_key_axis_order_list = inference_metadata['ar_key_axis_order_list'].split(':')
-  ar_value_axis_order_list = inference_metadata['ar_value_axis_order_list'].split(':')
+  two_axis_order_product_id_list = inference_metadata['two_axis_order_product_id_list'].split(':')
+  prefill_cache_axis_order_list = inference_metadata['prefill_cache_axis_order_list'].split(':')
+  ar_cache_axis_order_list = inference_metadata['ar_cache_axis_order_list'].split(':')
 
-  start_key_value_axis_order_product_id = key_value_axis_order_product_id_list[0]
-  end_key_value_axis_order_product_id = key_value_axis_order_product_id_list[-1]
+  start_two_axis_order_product_id = two_axis_order_product_id_list[0]
+  end_two_axis_order_product_id = two_axis_order_product_id_list[-1]
 
   results = []
   for (
-    key_value_axis_order_product_id,
-    prefill_key_axis_order,
-    prefill_value_axis_order,
-    ar_key_axis_order,
-    ar_value_axis_order,
+    two_axis_order_product_id,
+    prefill_cache_axis_order,
+    ar_cache_axis_order,
   ) in zip(
-    key_value_axis_order_product_id_list,
-    prefill_key_axis_order_list,
-    prefill_value_axis_order_list,
-    ar_key_axis_order_list,
-    ar_value_axis_order_list,
+    two_axis_order_product_id_list,
+    prefill_cache_axis_order_list,
+    ar_cache_axis_order_list,
   ):
-    print(f"key_value_axis_order_product_id {key_value_axis_order_product_id}")
-    print(f"prefill_key_axis_order {prefill_key_axis_order}")
-    print(f"prefill_value_axis_order {prefill_value_axis_order}")
-    print(f"ar_key_axis_order {ar_key_axis_order}")
-    print(f"ar_value_axis_order {ar_value_axis_order}")
+    print(f"two_axis_order_product_id {two_axis_order_product_id}")
+    print(f"prefill_cache_axis_order {prefill_cache_axis_order}")
+    print(f"ar_cache_axis_order {ar_cache_axis_order}")
 
     run_tag = (
-      f"{key_value_axis_order_product_id}-{prefill_key_axis_order.replace(',','')}-{ar_key_axis_order.replace(',','')}"
+      f"{two_axis_order_product_id}-{prefill_cache_axis_order.replace(',','')}-{ar_cache_axis_order.replace(',','')}"
     )
     run_name = f"{base_run_name}/{run_tag}"
 
     tensorboard_dir = os.path.join(config.base_output_directory, run_name, "tensorboard", "")
-    pyconfig._config.keys['prefill_key_axis_order'] = prefill_key_axis_order # pylint: disable=protected-access
-    pyconfig._config.keys['prefill_value_axis_order'] = prefill_value_axis_order # pylint: disable=protected-access
-    pyconfig._config.keys['ar_key_axis_order'] = ar_key_axis_order # pylint: disable=protected-access
-    pyconfig._config.keys['ar_value_axis_order'] = ar_value_axis_order # pylint: disable=protected-access
+    pyconfig._config.keys['prefill_cache_axis_order'] = prefill_cache_axis_order # pylint: disable=protected-access
+    pyconfig._config.keys['ar_cache_axis_order'] = ar_cache_axis_order # pylint: disable=protected-access
     pyconfig._config.keys['tensorboard_dir'] = tensorboard_dir # pylint: disable=protected-access
     pyconfig._config.keys['run_name'] = run_name # pylint: disable=protected-access
     max_utils.write_config_raw_keys_for_gcs(pyconfig._config.keys) # pylint: disable=protected-access
@@ -112,11 +100,12 @@ def main():
       "quantization": config.quantization,
       "quantize_kvcache": f"{config.quantize_kvcache}",
       "attention": config.attention,
-      "key_value_axis_order_product_id": f"{key_value_axis_order_product_id}",
-      "prefill_key_axis_order": f"{prefill_key_axis_order}",
-      "prefill_value_axis_order": f"{prefill_value_axis_order}",
-      "ar_key_axis_order": f"{ar_key_axis_order}",
-      "ar_value_axis_order": f"{ar_value_axis_order}",
+      "two_axis_order_product_id": f"{two_axis_order_product_id}",
+      "prefill_cache_axis_order": f"{prefill_cache_axis_order}",
+      "ar_cache_axis_order": f"{ar_cache_axis_order}",
+      "compute_axis_order": f"{config.compute_axis_order}",
+      "reshape_q": f"{config.reshape_q}",
+      "kv_quant_axis": f"{config.kv_quant_axis}",
       "run_name": f"{run_name}",
       "run_tag": f"{run_tag}",
       "config_json_string": json.dumps(
@@ -133,14 +122,14 @@ def main():
       metrics = microbenchmark_results['flattened_results']
       metrics = {k.lower(): v for k, v in metrics.items()}
       dimensions_json['oom'] = 'False'
-      print(f"Completed run {key_value_axis_order_product_id} out of: "
-            f"{start_key_value_axis_order_product_id} to {end_key_value_axis_order_product_id}")
+      print(f"Completed run {two_axis_order_product_id} out of: "
+            f"{start_two_axis_order_product_id} to {end_two_axis_order_product_id}")
     except xla_extension.XlaRuntimeError:
       # OOM
       metrics = {}
       dimensions_json['oom'] = 'True'
-      print(f"Failed at run {key_value_axis_order_product_id} out of: "
-            f"{start_key_value_axis_order_product_id} to {end_key_value_axis_order_product_id}")
+      print(f"Failed at run {two_axis_order_product_id} out of: "
+            f"{start_two_axis_order_product_id} to {end_two_axis_order_product_id}")
 
     final = {'metrics': metrics, 'dimensions': dimensions_json}
     print(f"Result: {final}")
