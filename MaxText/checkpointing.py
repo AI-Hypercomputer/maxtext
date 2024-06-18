@@ -139,7 +139,7 @@ def load_state_if_possible(
         array_handler = orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(
           replica_axis_index=0,
           # primary_replica_id=2,
-          memory_limit_bytes=1024 * 1024 * 1000  # 1000 MB limit
+          memory_limit_bytes=1024 * 1024 * 100  # 100 MB limit
           )
         orbax.checkpoint.type_handlers.register_type_handler(
             jax.Array,
