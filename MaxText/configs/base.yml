@@ -330,6 +330,10 @@ reshape_q: False
 # Maxengine Metrics
 prometheus_port: 0
 
+# Maxengine server
+enable_jax_profiler: False
+jax_profiler_port: 9999
+
 # Checkpoint Structured logging
 enable_checkpoint_cloud_logger: False
 enable_checkpoint_standard_logger: False
