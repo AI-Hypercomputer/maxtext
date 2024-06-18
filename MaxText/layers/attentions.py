@@ -71,6 +71,12 @@ dynamic_vector_slice_in_dim = jax.vmap(lax.dynamic_slice_in_dim, in_axes=(None, 
 # pytype: disable=attribute-error
 
 
+def validate_compute_axis_order(s: AxisIdxes) -> None:
+  valid_compute_axis_order = ((0,1,2,3), (0,2,1,3))
+  if s not in valid_compute_axis_order:  # currently supported compute_axis_order
+    raise ValueError("Invalid compute_axis_order was passed. Valid options ", valid_compute_axis_order)
+
+
 def apply_mask_to_logits(logits: Array, mask: Array):
   """Applies a floating-point mask to a set of logits.
 
@@ -112,10 +118,9 @@ class AttentionOp(nn.Module):
   float32_logits: bool = False
   flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
   kv_cache_logical_layout: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
-  prefill_key_axis_order: AxisIdxes = (1, 2, 0, 3)
-  prefill_value_axis_order: AxisIdxes = (1, 2, 0, 3)
-  ar_key_axis_order: AxisIdxes = (1, 2, 0, 3)
-  ar_value_axis_order: AxisIdxes = (1, 2, 0, 3)
+  prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
+  ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
+  compute_axis_order: AxisIdxes = (0, 1, 2, 3)
   reshape_q: bool = False
   dropout_rate: float = 0.0
   dtype: DType = jnp.float32
@@ -281,7 +286,7 @@ class AttentionOp(nn.Module):
     )
     return dpa_layer(query, key, value, mask=attn_mask)
 
-  def compute_local_attention(self, attn_weights: Array, value: Array, q_seq_len: int) -> tuple[Array, Array, Array]:
+  def compute_local_attention(self, attn_weights: Array, value: Array, q_seq_len: int, model_mode: str) -> tuple[Array, Array, Array]:
     """Computes the attention of a local subset of the kv cache.
     Local attention results will need to be combined with any other local attentions and normalized
     Based on https://github.com/google-research/google-research/blob/master/scaling_transformer_inference_efficiency/attention.py
@@ -307,11 +312,12 @@ class AttentionOp(nn.Module):
     local_max = jnp.reshape(local_max, (local_max.shape[0], local_max.shape[1], local_max.shape[2] * local_max.shape[3], 1))
     local_sum = jnp.reshape(local_sum, (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1))
 
-    local_out = self.wv_product(local_exps, value, q_seq_len)
+    local_out = self.wv_product(local_exps, value, model_mode)
 
     if self.reshape_q and q_seq_len == 1:
       local_max = local_max[:,0:1,:,:]
       local_sum = local_sum[:,0:1,:,:]
+      local_out = local_out[:,0:1,:,:]
 
     return local_out, local_max, local_sum
 
@@ -324,23 +330,24 @@ class AttentionOp(nn.Module):
       model_mode: str = common_types.MODEL_MODE_TRAIN,
   ):
     """Apply Attention."""
+    validate_compute_axis_order(self.compute_axis_order)
     # Casting qk_product and softmaxt computation for float32 for model stability.
-    if self.float32_qk_product:
+    if model_mode == common_types.MODEL_MODE_TRAIN and self.float32_qk_product:
       query = query.astype(jnp.float32)
       key = key.astype(jnp.float32)
 
     q_seq_len = query.shape[1]
-    attn_weights = self.qk_product(query, key, q_seq_len)
+    attn_weights = self.qk_product(query, key, q_seq_len, model_mode)
 
     # Casting softmaxt computation for float32 for model stability.
-    if self.float32_logits:
+    if model_mode == common_types.MODEL_MODE_TRAIN and self.float32_logits:
       attn_weights = attn_weights.astype(jnp.float32)
     attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
-    return self.compute_local_attention(attn_weights, value, q_seq_len)
+    return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode)
 
-  def qk_product(self, query: Array, key: Array, q_seq_len: int) -> Array:
+  def qk_product(self, query: Array, key: Array, q_seq_len: int, model_mode: str) -> Array:
     """Query-Key product.
 
     Args:
@@ -362,13 +369,21 @@ class AttentionOp(nn.Module):
     b, t, n, d = query.shape
     n_kv = key.shape[-2]
     assert n_kv == self.num_kv_heads
-    query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
-    if self.reshape_q and q_seq_len == 1:
-      query = jnp.broadcast_to(query, (b, 2, n_kv, n // n_kv, d))
-    result = jnp.einsum("btkgd,bskd->bkgts", query, key)
+    if model_mode == common_types.MODEL_MODE_TRAIN or self.compute_axis_order == (0,1,2,3):
+      query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
+      if self.reshape_q and q_seq_len == 1:
+        query = jnp.broadcast_to(query, (b, 2, n_kv, n // n_kv, d))
+      result = jnp.einsum("btkgd,bskd->bkgts", query, key)
+    elif self.compute_axis_order == (0,2,1,3):
+      query = jnp.transpose(query, axes=self.compute_axis_order)
+      key = jnp.transpose(key, axes=self.compute_axis_order)
+      query = jnp.reshape(query, (b, n_kv, n // n_kv, t, d))
+      if self.reshape_q and q_seq_len == 1:
+        query = jnp.broadcast_to(query, (b, n_kv, n // n_kv, 2, d))
+      result = jnp.einsum("bkgtd,bksd->bkgts", query, key)
     return result
 
-  def wv_product(self, attn_weights: Array, value: Array, q_seq_len: int) -> Array:
+  def wv_product(self, attn_weights: Array, value: Array, model_mode: str) -> Array:
     """weighted value product.
 
     Args:
@@ -387,11 +402,16 @@ class AttentionOp(nn.Module):
       n_kv: number of kv heads, sometimes annotated as k
       n // n_kv: number of group for query, sometimes annotated with g
     """
-    out = jnp.einsum("bkgts,bskd->btkgd", attn_weights, value)
-    b, t, n_kv, g, d = out.shape
-    result = jnp.reshape(out, (b, t, n_kv * g, d))
-    if self.reshape_q and q_seq_len == 1:
-      result = result[:, 0:1, :, :]
+    if model_mode == common_types.MODEL_MODE_TRAIN or self.compute_axis_order == (0,1,2,3):
+      out = jnp.einsum("bkgts,bskd->btkgd", attn_weights, value)
+      b, t, n_kv, g, d = out.shape
+      result = jnp.reshape(out, (b, t, n_kv * g, d))
+    elif self.compute_axis_order == (0,2,1,3):
+      value = jnp.transpose(value, axes=self.compute_axis_order)
+      out = jnp.einsum("bkgts,bksd->bkgtd", attn_weights, value)
+      b, n_kv, g, t, d = out.shape
+      result = jnp.reshape(out, (b, n_kv * g, t, d))
+      result = jnp.transpose(result, axes=self.compute_axis_order)
     return result
 
   def revert_kv_cache(self, kv, cached_axis_order):
@@ -461,11 +481,11 @@ class AttentionOp(nn.Module):
 
     cache_logical_shape = (batch, self.max_prefill_predict_length, heads, kv_head_size)
 
-    key_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.prefill_key_axis_order)
-    value_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.prefill_value_axis_order)
+    key_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.prefill_cache_axis_order)
+    value_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.prefill_cache_axis_order)
 
-    key_shape = self.cached_kv_shape(cache_logical_shape, self.prefill_key_axis_order)
-    value_shape = self.cached_kv_shape(cache_logical_shape, self.prefill_value_axis_order)
+    key_shape = self.cached_kv_shape(cache_logical_shape, self.prefill_cache_axis_order)
+    value_shape = self.cached_kv_shape(cache_logical_shape, self.prefill_cache_axis_order)
 
     cached_key = self.variable(
         "cache",
@@ -493,8 +513,8 @@ class AttentionOp(nn.Module):
 
       cache_logical_shape_scale = (batch, self.max_prefill_predict_length, heads, 1)
 
-      key_shape_scale = self.cached_kv_shape(cache_logical_shape_scale, self.prefill_key_axis_order)
-      value_shape_scale = self.cached_kv_shape(cache_logical_shape_scale, self.prefill_value_axis_order)
+      key_shape_scale = self.cached_kv_shape(cache_logical_shape_scale, self.prefill_cache_axis_order)
+      value_shape_scale = self.cached_kv_shape(cache_logical_shape_scale, self.prefill_cache_axis_order)
 
       cached_key_scale_var = self.variable(
           "cache",
@@ -524,11 +544,11 @@ class AttentionOp(nn.Module):
 
     cache_logical_shape = (batch, cache_length, heads, kv_head_size)
 
-    key_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.ar_key_axis_order)
-    value_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.ar_value_axis_order)
+    key_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.ar_cache_axis_order)
+    value_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.ar_cache_axis_order)
 
-    key_shape = self.cached_kv_shape(cache_logical_shape, self.ar_key_axis_order)
-    value_shape = self.cached_kv_shape(cache_logical_shape, self.ar_value_axis_order)
+    key_shape = self.cached_kv_shape(cache_logical_shape, self.ar_cache_axis_order)
+    value_shape = self.cached_kv_shape(cache_logical_shape, self.ar_cache_axis_order)
 
     # TODO(b/339703100): investigate the issue why with_logical_partitioning doesn't enforce sharding
     cached_key = self.variable(
@@ -567,8 +587,8 @@ class AttentionOp(nn.Module):
 
       cache_logical_shape_scale = (batch, cache_length, heads, 1)
 
-      key_shape_scale = self.cached_kv_shape(cache_logical_shape_scale, self.ar_key_axis_order)
-      value_shape_scale = self.cached_kv_shape(cache_logical_shape_scale, self.ar_value_axis_order)
+      key_shape_scale = self.cached_kv_shape(cache_logical_shape_scale, self.ar_cache_axis_order)
+      value_shape_scale = self.cached_kv_shape(cache_logical_shape_scale, self.ar_cache_axis_order)
 
       cached_key_scale_var = self.variable(
           "cache",
@@ -619,16 +639,16 @@ class AttentionOp(nn.Module):
     )
     cached_ar_key_var, cached_ar_value_var, _, _ = self._get_ar_cache(batch, heads, kv_head_size, self.quantize_kvcache)  # initialize it now
 
-    assert cached_prefill_key_var[0].value.shape == self.cached_kv_shape((batch, self.max_prefill_predict_length, heads, kv_head_size), self.prefill_key_axis_order)
-    assert cached_prefill_value_var[0].value.shape == self.cached_kv_shape((batch, self.max_prefill_predict_length, heads, kv_head_size), self.prefill_value_axis_order)
-    assert cached_ar_key_var[0].value.shape == self.cached_kv_shape((batch, self.max_target_length - self.max_prefill_predict_length, heads, kv_head_size), self.ar_key_axis_order)
-    assert cached_ar_value_var[0].value.shape == self.cached_kv_shape((batch, self.max_target_length - self.max_prefill_predict_length, heads, kv_head_size), self.ar_value_axis_order)
+    assert cached_prefill_key_var[0].value.shape == self.cached_kv_shape((batch, self.max_prefill_predict_length, heads, kv_head_size), self.prefill_cache_axis_order)
+    assert cached_prefill_value_var[0].value.shape == self.cached_kv_shape((batch, self.max_prefill_predict_length, heads, kv_head_size), self.prefill_cache_axis_order)
+    assert cached_ar_key_var[0].value.shape == self.cached_kv_shape((batch, self.max_target_length - self.max_prefill_predict_length, heads, kv_head_size), self.ar_cache_axis_order)
+    assert cached_ar_value_var[0].value.shape == self.cached_kv_shape((batch, self.max_target_length - self.max_prefill_predict_length, heads, kv_head_size), self.ar_cache_axis_order)
 
-    prefill_key_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.prefill_key_axis_order)
-    prefill_value_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.prefill_value_axis_order)
+    prefill_key_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.prefill_cache_axis_order)
+    prefill_value_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.prefill_cache_axis_order)
 
-    key_shaped_for_cache = self.reshape_kv_cache(key, self.prefill_key_axis_order)
-    value_shaped_for_cache = self.reshape_kv_cache(value, self.prefill_value_axis_order)
+    key_shaped_for_cache = self.reshape_kv_cache(key, self.prefill_cache_axis_order)
+    value_shaped_for_cache = self.reshape_kv_cache(value, self.prefill_cache_axis_order)
 
     if self.quantize_kvcache:
       key_shaped_for_cache, key_scale = quantizations.quantize_kv(key_shaped_for_cache, prefill_key_layout.index(CACHE_KV))
@@ -670,11 +690,11 @@ class AttentionOp(nn.Module):
 
     # In order to update the key, value caches with the current key and
     # value, we reshape the one_token_key and one_token_value
-    one_token_key_shaped_for_cache = self.reshape_kv_cache(one_token_key, self.ar_key_axis_order)
-    one_token_value_shaped_for_cache = self.reshape_kv_cache(one_token_value, self.ar_value_axis_order)
+    one_token_key_shaped_for_cache = self.reshape_kv_cache(one_token_key, self.ar_cache_axis_order)
+    one_token_value_shaped_for_cache = self.reshape_kv_cache(one_token_value, self.ar_cache_axis_order)
 
-    ar_key_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.ar_key_axis_order)
-    ar_value_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.ar_value_axis_order)
+    ar_key_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.ar_cache_axis_order)
+    ar_value_layout = self.cached_kv_layout(self.kv_cache_logical_layout, self.ar_cache_axis_order)
 
     if self.quantize_kvcache:
       one_token_key_shaped_for_cache, one_token_key_scale = quantizations.quantize_kv(one_token_key_shaped_for_cache, ar_key_layout.index(CACHE_KV))
@@ -720,7 +740,7 @@ class AttentionOp(nn.Module):
       ar_value = quantizations.unquantize_kv(cached_value_var.value, cached_value_scale_var.value, one_token_value.dtype)
 
     # Revert the keys and values back to original logical shapes.
-    return self.revert_kv_cache(ar_key, self.ar_key_axis_order), self.revert_kv_cache(ar_value, self.ar_value_axis_order)
+    return self.revert_kv_cache(ar_key, self.ar_cache_axis_order), self.revert_kv_cache(ar_value, self.ar_cache_axis_order)
 
   def prefill_cache_var_model_var(self, cache_var, target_dtype, cache_axis_order):
     if not self.quantize_kvcache:
@@ -759,8 +779,8 @@ class AttentionOp(nn.Module):
         batch, heads, kv_head_size, self.quantize_kvcache
     )
 
-    assert cached_ar_key_var[0].value.shape == self.cached_kv_shape((batch, self.max_target_length - self.max_prefill_predict_length, heads, kv_head_size), self.ar_key_axis_order)
-    assert cached_ar_value_var[0].value.shape == self.cached_kv_shape((batch, self.max_target_length - self.max_prefill_predict_length, heads, kv_head_size), self.ar_value_axis_order)
+    assert cached_ar_key_var[0].value.shape == self.cached_kv_shape((batch, self.max_target_length - self.max_prefill_predict_length, heads, kv_head_size), self.ar_cache_axis_order)
+    assert cached_ar_value_var[0].value.shape == self.cached_kv_shape((batch, self.max_target_length - self.max_prefill_predict_length, heads, kv_head_size), self.ar_cache_axis_order)
 
     ar_key, ar_value = self.update_ar_key_value(key, value, cached_ar_key_var, cached_ar_value_var, cache_ar_index.value)
     active_indicator = jnp.zeros((batch, 1), dtype=jnp.int32) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
@@ -773,12 +793,12 @@ class AttentionOp(nn.Module):
     cached_prefill_key_var, cached_prefill_value_var, cached_prefill_segment_id = self._get_prefill_cache(
         batch, heads, kv_head_size, self.quantize_kvcache
     )
-    assert cached_prefill_key_var[0].value.shape == self.cached_kv_shape((batch, self.max_prefill_predict_length, heads, kv_head_size), self.prefill_key_axis_order)
-    assert cached_prefill_value_var[0].value.shape == self.cached_kv_shape((batch, self.max_prefill_predict_length, heads, kv_head_size), self.prefill_value_axis_order)
+    assert cached_prefill_key_var[0].value.shape == self.cached_kv_shape((batch, self.max_prefill_predict_length, heads, kv_head_size), self.prefill_cache_axis_order)
+    assert cached_prefill_value_var[0].value.shape == self.cached_kv_shape((batch, self.max_prefill_predict_length, heads, kv_head_size), self.prefill_cache_axis_order)
 
     cached_prefill = (
-        self.prefill_cache_var_model_var(cached_prefill_key_var, key.dtype, self.prefill_key_axis_order),
-        self.prefill_cache_var_model_var(cached_prefill_value_var, value.dtype, self.prefill_value_axis_order),
+        self.prefill_cache_var_model_var(cached_prefill_key_var, key.dtype, self.prefill_cache_axis_order),
+        self.prefill_cache_var_model_var(cached_prefill_value_var, value.dtype, self.prefill_cache_axis_order),
         cached_prefill_segment_id.value,
     )
     return cached_prefill, (ar_key, ar_value, cached_ar_segment_id.value)
@@ -916,10 +936,9 @@ class Attention(nn.Module):
   value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
 
-  prefill_key_axis_order: AxisIdxes = (1, 2, 0, 3)
-  prefill_value_axis_order: AxisIdxes = (1, 2, 0, 3)
-  ar_key_axis_order: AxisIdxes = (1, 2, 0, 3)
-  ar_value_axis_order: AxisIdxes = (1, 2, 0, 3)
+  prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
+  ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
+  compute_axis_order: AxisIdxes = (0, 1, 2, 3)
   reshape_q: bool = False
 
   def query_projection(self, inputs_q: Array) -> Array:
@@ -1078,10 +1097,9 @@ class Attention(nn.Module):
         num_kv_heads=self.num_kv_heads,
         dropout_rate=self.dropout_rate,
         dtype=self.dtype,
-        prefill_key_axis_order = self.prefill_key_axis_order,
-        prefill_value_axis_order = self.prefill_value_axis_order,
-        ar_key_axis_order = self.ar_key_axis_order,
-        ar_value_axis_order = self.ar_value_axis_order,
+        prefill_cache_axis_order=self.prefill_cache_axis_order,
+        ar_cache_axis_order=self.ar_cache_axis_order,
+        compute_axis_order=self.compute_axis_order,
         reshape_q = self.reshape_q,
     )
 
