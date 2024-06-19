@@ -61,6 +61,13 @@ save_config_to_gcs: False
 dtype: "bfloat16"
 quantization: "" #defaults to no quantization, i.e. bf16. possible alternative setting is 'int8' or use fp8 to run with 8-bit floating-point GeMMs on NVIDIA GPUs.
 quantize_kvcache: False
+# Valid kv_quant_axis values:
+#   - "" is valid only when quantize_kvcache is False
+#   - "dkv" over kv_dimensions
+#   - "heads_and_dkv" over kv_heads and kv_dimensions
+# Default to "heads_and_dkv" for faster compution, kv_quant_axis is not used when quantize_kvcache is False
+#   - "dkv" is expected with better accuracy but degraded computation 
+kv_quant_axis: "heads_and_dkv"
 
 # Shard the range finding operation for quantization. By default this is set to number of slices.
 quantization_local_shard_count: -1
