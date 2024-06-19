@@ -57,6 +57,13 @@ def validate_compute_axis_order(s: str) -> None:
   if s not in valid_compute_axis_order:  # currently supported compute_axis_order
     raise ValueError("Invalid compute_axis_order was passed. Valid options ", valid_compute_axis_order)
 
+def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
+  valid_kv_quant_axis = ("", "dkv", "heads_and_dkv")
+  if s not in valid_kv_quant_axis:  # currently supported kv_quant_axis
+    raise ValueError("Invalid kv_quant_axis was passed. Valid options ", valid_kv_quant_axis)
+  if quantize_kvcache and s == "":
+    raise ValueError("kv_quant_axis can not be '' when quantize_kvcache is True")
+
 def validate_attention_type(s: str) -> None:
   valid_attention_types = ("autoselected", "dot_product", "flash", "cudnn_flash_te")
   if s not in valid_attention_types:  # currently supported attention
@@ -72,6 +79,7 @@ def validate_keys(keys):
   validate_attention_type(keys["attention"])
   validate_profiler_type(keys["profiler"])
   validate_compute_axis_order(keys["compute_axis_order"])
+  validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
 
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"
