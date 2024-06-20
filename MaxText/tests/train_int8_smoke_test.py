@@ -44,6 +44,7 @@ class Train(unittest.TestCase):
         "steps=10",
         "enable_checkpointing=False",
         "quantization=int8",
+        "tokenizer_path=../assets/tokenizer.llama2",
     ])
 
 

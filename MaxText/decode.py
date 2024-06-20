@@ -17,7 +17,6 @@
 import jax
 
 import maxengine
-from jetstream.engine import token_utils
 
 import os
 import pyconfig
@@ -30,10 +29,9 @@ def main(config):
 
   text = config.prompt
   metadata = engine.get_tokenizer()
-  vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
-  tokenizer = vocab.tokenizer
-  tokens, true_length = token_utils.tokenize_and_pad(
-      text, vocab, is_bos=True, prefill_lengths=[config.max_prefill_predict_length]
+  tokenizer_model = engine.build_tokenizer(metadata)
+  tokens, true_length = tokenizer_model.encode(
+      text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length]
   )
   assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
   assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
@@ -50,7 +48,7 @@ def main(config):
     sampled_tokens_list.append(sampled_tokens)
 
   results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
-  output = tokenizer.detokenize(results)
+  output = tokenizer_model.decode(results)
   print(f"Input `{text}` -> `{output}`")
 
   if config.autoregressive_decode_assert != "":

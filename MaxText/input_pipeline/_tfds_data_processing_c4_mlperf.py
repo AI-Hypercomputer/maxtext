@@ -237,7 +237,7 @@ def preprocess_dataset(
 ):
   """Pre-process the dataset and return iterators for mlperf training."""
   # tokenize
-  train_ds = train_ds.map(tokenizer.TokenizeOp(sp_tokenizer, data_keys=("targets",)), num_parallel_calls=AUTOTUNE)
+  train_ds = train_ds.map(lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)), num_parallel_calls=AUTOTUNE)
 
   train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
   train_ds = split_tokens_to_targets_length(train_ds, config.max_target_length)
