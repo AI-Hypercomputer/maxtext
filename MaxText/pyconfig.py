@@ -259,6 +259,16 @@ class _HyperParameters:
       _HyperParameters.configure_gpt3_task(raw_keys)
     _HyperParameters.user_init(raw_keys)
 
+    if not os.path.isfile(raw_keys["tokenizer_path"]):
+      # Try and find the tokenizer path relative to the config file.
+      tokenizer_path = os.path.join(
+          os.path.dirname(config_name),
+          raw_keys["tokenizer_path"],
+      )
+
+      if os.path.isfile(tokenizer_path):
+        raw_keys["tokenizer_path"] = tokenizer_path
+
     self.keys = raw_keys
     keys = [k for k in raw_keys]  # pylint: disable=unnecessary-comprehension
     keys.sort()
