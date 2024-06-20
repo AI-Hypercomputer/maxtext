@@ -336,23 +336,22 @@ class MoeBlock(nn.Module):
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     weights = jax.nn.softmax(weights.astype(self.weight_dtype), axis=-1).astype(self.dtype)
     flatten_selected_experts = jnp.ravel(selected_experts)
-    indices_to_sort_by_expert = jnp.argsort(flatten_selected_experts)
-    # repeat inputs for number of active experts
-    repeat_inputs = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
+    sorted_selected_experts = jnp.argsort(flatten_selected_experts) 
+    sorted_indices = sorted_selected_experts // self.num_experts_per_tok
     # sort inputs for number of selected experts
-    sorted_inputs = jnp.take(repeat_inputs, indices=indices_to_sort_by_expert, axis=0).astype(self.dtype)
+    sorted_inputs = jnp.take(inputs_2d, indices=sorted_indices, axis=0).astype(self.dtype)
     group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
+    return sorted_inputs, sorted_selected_experts, weights, group_size
 
-    return sorted_inputs, indices_to_sort_by_expert, weights, group_size
-
-  def unpermute(self, intermediate, indices_to_sort_by_expert, weights):
+  def unpermute(self, intermediate, sorted_selected_experts, weights):
     """Unpermute tokens to original order and combine weights."""
 
-    unsort_output = jnp.take(intermediate, indices=jnp.argsort(indices_to_sort_by_expert), axis=0)
-    flatten_weights = jnp.ravel(weights)
-    combined_output = jnp.multiply(unsort_output, flatten_weights[:, None])
-    groups = jnp.reshape(combined_output, (-1, self.num_experts_per_tok, combined_output.shape[1]))
-    return jnp.sum(groups, axis=1).reshape(-1, self.config.max_target_length, self.config.emb_dim).astype(self.dtype)
+    unsort_intermediate = jnp.take(intermediate, indices=jnp.argsort(sorted_selected_experts), axis=0)
+    reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
+    reshaped_intermediate = jnp.reshape(unsort_intermediate, (-1, self.num_experts_per_tok, self.config.emb_dim)) 
+    with jax.named_scope("weight_sum"):
+      output = jnp.einsum("BKE,BK -> BE", reshaped_intermediate, reshaped_weights)
+    return output.reshape(-1, self.config.max_target_length, self.config.emb_dim).astype(self.dtype) 
 
   def megablox(self, inputs, gate_logits, config, w0_kernel, w1_kernel, wo_kernel):
     # TODO(ranran): need to changes in JAX repo to enable optimized tile_size 
