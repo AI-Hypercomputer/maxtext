@@ -33,6 +33,7 @@ import grain.python as grain
 import jax
 import numpy as np
 import orbax.checkpoint
+import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 
 import checkpointing
 import max_utils
@@ -154,6 +155,11 @@ def write_metrics_to_tensorboard(writer, metrics, step, config):
 
 def save_checkpoint(checkpoint_manager, step, state, dataset_type="c4", data_iterator=None):
   """Wrapper for saving checkpoint"""
+  if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
+    return checkpoint_manager.save(
+      step, args=orbax.checkpoint.args.PyTreeSave(state)
+  )
+
   if dataset_type == "grain":
     return checkpoint_manager.save(
         step,
@@ -340,15 +346,7 @@ def setup_mesh_and_model(config):
 
   init_rng = random.PRNGKey(config.init_weights_seed)
   writer = max_utils.initialize_summary_writer(config)
-  logger = checkpointing.setup_checkpoint_logger(config)
-  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      config.checkpoint_dir,
-      config.enable_checkpointing,
-      config.async_checkpointing,
-      config.checkpoint_period,
-      config.dataset_type,
-      logger,
-  )
+
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
@@ -358,6 +356,32 @@ def setup_mesh_and_model(config):
   model = Transformer(config, mesh, quant=quant)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
+
+  if config.enable_emergency_checkpoint:
+    abstract_state, _, _ = max_utils.get_abstract_state(
+      model, tx, config, init_rng, mesh, is_training=True
+    )
+    checkpoint_manager = (
+      checkpointing.create_orbax_emergency_checkpoint_manager(
+          config.local_checkpoint_directory,
+          config.checkpoint_dir,
+          mesh,
+          abstract_state,
+          config.local_checkpoint_period,
+          config.checkpoint_period,
+      )
+    )
+  else:
+    logger = checkpointing.setup_checkpoint_logger(config)
+    checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+        config.checkpoint_dir,
+        config.enable_checkpointing,
+        config.async_checkpointing,
+        config.checkpoint_period,
+        config.dataset_type,
+        logger,
+    )
+
   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
 
 

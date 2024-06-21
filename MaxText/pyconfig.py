@@ -15,7 +15,7 @@ limitations under the License.
 """
 
 # pytype: skip-file
-# pylint: disable=missing-module-docstring, bare-except, consider-using-generator
+# pylint: disable=missing-module-docstring, bare-except, consider-using-generator, missing-function-docstring
 from collections import OrderedDict
 import math
 import os
@@ -87,6 +87,11 @@ def validate_keys(keys):
   assert (
       keys["load_parameters_path"] == "" or keys["load_full_state_path"] == ""
   ), "At most one of `load_parameters_path` or `load_full_state_path` should be set"
+  if keys["enable_emergency_checkpoint"]:
+    assert keys["local_checkpoint_directory"] != "", "A local checkpoint directory must be specified when using emergency checkpoint"
+    assert keys["local_checkpoint_period"] > 0, "A positive local checkpoint period must be specified when using emergency checkpoint"
+  else:
+    max_logging.log("Not using emergency checkpoint, ignoring local_checkpoint_directory and local_checkpoint_period")
 
 
 def validate_data_input(keys):

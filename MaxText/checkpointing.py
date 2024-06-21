@@ -18,17 +18,24 @@ limitations under the License.
 
 from typing import Optional, Union
 from etils import epath
-
-from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions
+import orbax.checkpoint
 from orbax.checkpoint.logging import abstract_logger, cloud_logger, standard_logger, composite_logger
+from orbax.checkpoint import pytree_checkpoint_handler, type_handlers
+from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, PyTree
+import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import jax
 import numpy as np
-import orbax.checkpoint
 import grain.python as grain
 
 import max_logging
 from multihost_dataloading import MultiHostDataLoadIterator
 from flax.training import train_state
+
+PyTreeCheckpointHandler = pytree_checkpoint_handler.PyTreeCheckpointHandler
+LocalCheckpointOptions = emergency_checkpoint_manager.LocalCheckpointOptions
+PersistentCheckpointOptions = (
+    emergency_checkpoint_manager.PersistentCheckpointOptions
+)
 
 
 def create_orbax_checkpoint_manager(
@@ -63,6 +70,53 @@ def create_orbax_checkpoint_manager(
   )
   max_logging.log("Checkpoint manager created!")
   return mngr
+
+
+def create_orbax_emergency_checkpoint_manager(
+    local_checkpoint_dir: str,
+    persistent_checkpoint_dir: str,
+    global_mesh: jax.sharding.Mesh,
+    abstract_state: PyTree,
+    local_save_interval_steps: int,
+    persistent_save_interval_steps: int,
+):
+  """Returns an emergency checkpoint."""
+  max_logging.log("Creating emergency checkpoint manager...")
+
+  local_registry = type_handlers.create_type_handler_registry(
+      (
+          jax.Array,
+          type_handlers.ArrayHandler(primary_host=None, replica_id=None),
+      ),
+  )
+
+  local_checkpoint_handler = PyTreeCheckpointHandler(
+      use_ocdbt=True,
+      use_zarr3=True,
+      primary_host=None,
+      type_handler_registry=local_registry,
+  )
+
+  options = emergency_checkpoint_manager.CheckpointManagerOptions(
+      local=LocalCheckpointOptions(
+          save_interval_steps=local_save_interval_steps
+      ),
+      persistent=PersistentCheckpointOptions(
+          save_interval_steps=persistent_save_interval_steps
+      ),
+  )
+
+  emergency_mngr = emergency_checkpoint_manager.CheckpointManager(
+      local_checkpoint_dir,
+      epath.Path(persistent_checkpoint_dir),
+      global_mesh=global_mesh,
+      abstract_state=abstract_state,
+      options=options,
+      local_state_handler=local_checkpoint_handler,
+  )
+
+  max_logging.log("Emergency checkpoint manager created!")
+  return emergency_mngr
 
 
 def _find_idx(array: np.ndarray, replica_axis_idx: int):
