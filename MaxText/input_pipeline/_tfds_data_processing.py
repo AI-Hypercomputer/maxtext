@@ -198,8 +198,8 @@ def preprocess_dataset(
 ):
   """Pre-process the dataset and return iterators"""
   # Tokenize data.
-  train_ds = train_ds.map(tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
-  eval_ds = eval_ds.map(tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
+  train_ds = train_ds.map(lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x), num_parallel_calls=AUTOTUNE)
+  eval_ds = eval_ds.map(lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x), num_parallel_calls=AUTOTUNE)
 
   # Set global batch size.
   global_batch_size_to_load = config.global_batch_size_to_load

@@ -113,8 +113,8 @@ class RotaryEmbedding(nn.Module):
     embedding_dims: Dimension of the embedding to be generated.
   """
 
-  min_timescale: int = 1
-  max_timescale: int = 10_000
+  min_timescale: int
+  max_timescale: int
   embedding_dims: int = 0
   cast_as_fprop_dtype: bool = True
   fprop_dtype: DType = jnp.bfloat16
