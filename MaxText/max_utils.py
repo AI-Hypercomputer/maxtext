@@ -337,8 +337,8 @@ def create_device_mesh(config, devices=None):
   multi_slice_env = num_slices > 1
 
   dcn_parallelism = [
-      config.dcn_pipeline_parallelism,
       config.dcn_data_parallelism,
+      config.dcn_pipeline_parallelism,
       config.dcn_fsdp_parallelism,
       config.dcn_fsdp_transpose_parallelism,
       config.dcn_sequence_parallelism,
@@ -346,8 +346,8 @@ def create_device_mesh(config, devices=None):
       config.dcn_autoregressive_parallelism,
   ]
   ici_parallelism = [
-      config.ici_pipeline_parallelism,
       config.ici_data_parallelism,
+      config.ici_pipeline_parallelism,
       config.ici_fsdp_parallelism,
       config.ici_fsdp_transpose_parallelism,
       config.ici_sequence_parallelism,
