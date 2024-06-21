@@ -82,6 +82,8 @@ def validate_data_input(keys):
         f"dataset_type set to hf, will use {keys['hf_path']=}, {keys['hf_data_dir']=} and {keys['hf_data_files']=} to read data"
     )
     assert keys["hf_path"] != "", "hf_path can't be empty when dataset_type=hf"
+    if not keys['hf_data_files']:
+      keys['hf_data_files'] = None
   elif keys["dataset_type"] == "grain":
     max_logging.log(
         f"dataset_type set to grain, will use {keys['grain_data_files']=} as data files, and {keys['grain_worker_count']} workers"
