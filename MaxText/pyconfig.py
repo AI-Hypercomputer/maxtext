@@ -95,6 +95,7 @@ def validate_model_name(s: str) -> bool:
       "mixtral-moe-1t",
       "mixtral-moe-single",
       "mixtral-8x7b",
+      "mixtral-8x7b-test",
       "gemma-7b",
       "gemma-2b",
       "gpt3-175b",
