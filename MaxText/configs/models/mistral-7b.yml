@@ -25,4 +25,5 @@ vocab_size: 32000
 enable_dropout: False
 logits_via_embedding: False
 normalization_layer_epsilon: 1.0e-5
+rope_max_timescale: 1_000_000
 decoder_block: "mistral"
