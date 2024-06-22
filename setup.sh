@@ -186,7 +186,7 @@ else
     exit 1
 fi
 
-# Install dependencies from requirements.txt
+# Install dependencies from requirements.txt or requirements_gpu.txt
 cd $run_name_folder_path && pip install --upgrade pip
 if [[ "$MODE" == "pinned" ]]; then
     pip3 install -U -r requirements_gpu.txt -c constraints_gpu.txt
