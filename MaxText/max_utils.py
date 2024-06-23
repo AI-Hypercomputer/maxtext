@@ -208,16 +208,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
 
   For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
   """
-  if (
-      raw_keys["enable_checkpointing"]
-      and raw_keys["async_checkpointing"]
-      and raw_keys["compile_topology_num_slices"] == -1
-      and not raw_keys["enable_single_controller"]
-  ) or raw_keys["hardware"] == "gpu_multiprocess":
-    max_logging.log("Attempting to initialize the jax distributed system...")
-    jax.distributed.initialize()
-    max_logging.log("Jax distributed system initialized!")
-  elif is_gpu_backend(raw_keys):
+  if is_gpu_backend(raw_keys):
     max_logging.log(
         "Attempting to initialize the jax distributed system for GPU backend..."
     )
@@ -229,6 +220,15 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     )
     initialize_jax_for_cpu()
     max_logging.log("Jax distributed system initialized on CPUs!")
+  elif (
+      raw_keys["enable_checkpointing"]
+      and raw_keys["async_checkpointing"]
+      and raw_keys["compile_topology_num_slices"] == -1
+      and not raw_keys["enable_single_controller"]
+  ) or raw_keys["hardware"] == "gpu_multiprocess":
+    max_logging.log("Attempting to initialize the jax distributed system...")
+    jax.distributed.initialize()
+    max_logging.log("Jax distributed system initialized!")
 
 
 def initialize_jax_for_gpu():
@@ -317,7 +317,6 @@ def fill_unspecified_mesh_axes(
     parallelism_vals[parallelism_vals.index(-1)] = int(determined_val)
 
   target_type = "slices" if parallelism_type == "DCN" else "devices per slice"
-
   assert (
       np.prod(parallelism_vals) == target_product
   ), f"Number of {target_type} {target_product} does not match\
