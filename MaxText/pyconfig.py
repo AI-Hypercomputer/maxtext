@@ -356,7 +356,7 @@ def validate_megablox_parallelism(raw_keys):
   if raw_keys["megablox"] and (using_tensor_parallelism(raw_keys) or
                                using_sequence_parallelism(raw_keys) or
                                using_pipeline_parallelism(raw_keys)):
-    raise ValueError("Currently we only support Megablox wih data parallelism.")
+    raise ValueError("Currently we only support Megablox with data parallelism.")
 
 def validate_and_update_keys(raw_keys, model_keys, config_name: str):
   """Validate and update model specific config keys"""
@@ -430,6 +430,10 @@ def get_num_target_devices(raw_keys):
 
 
 def get_num_slices(raw_keys):
+  """ Calculate num_slices based on number of devices. """
+  if raw_keys['hardware'] == 'cpu':
+    max_logging.log(" Setting num_slices=1 for CPU hardware type")
+    return 1
   if int(raw_keys["compile_topology_num_slices"]) > 0:
     return raw_keys["compile_topology_num_slices"]
   else:
