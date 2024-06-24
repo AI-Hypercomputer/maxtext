@@ -1,0 +1,115 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: xpk-test-workload
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue  # Name of the LocalQueue
+    xpk.google.com/workload: xpk-test-workload
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool # 1:1 job replica to node pool assignment
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  replicatedJobs:
+    - name: slice-job
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1024    # Equal to the number of VMs per slice
+          completions: 1024    # Same as the above.
+          backoffLimit: 0   # When any pod fails, the job is failed
+          template:
+            metadata:
+              labels:
+                xpk.google.com/workload: xpk-test-workload
+              annotations: # required for GCSFuse
+                gke-gcsfuse/volumes: "true"
+                gke-gcsfuse/cpu-limit: "0"
+                gke-gcsfuse/memory-limit: "0"
+                gke-gcsfuse/ephemeral-storage-limit: "0"
+            
+            spec:
+              schedulerName: default-scheduler
+              restartPolicy: Never
+              affinity:
+                nodeAffinity:
+                  requiredDuringSchedulingIgnoredDuringExecution:
+                    nodeSelectorTerms:
+                    - matchExpressions:
+                      - key: cloud.google.com/gke-nodepool
+                        operator: NotIn
+                        values:
+                        - default-pool
+
+              nodeSelector:
+                
+                
+                
+              priorityClassName: medium
+              hostNetwork: true
+              dnsPolicy: ClusterFirstWithHostNet
+              terminationGracePeriodSeconds: 30
+              serviceAccountName: bernardhan-benchmark
+              containers:
+              - name: jax-tpu
+                image: gcr.io/gcs-tess/bernardhan_runner
+                
+                env: 
+                - name: REPLICATED_JOB_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+                - name: JOB_INDEX
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/job-index']
+                - name: JOB_COMPLETION_INDEX
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+                - name: PROCESSES_IN_JOB
+                  value: "1024"
+                - name: JAX_PROCESS_COUNT
+                  value: "1024"
+                
+                - name: JOBSET_NAME
+                  value: "xpk-test-workload"
+                - name: JAX_COORDINATOR_ADDRESS
+                  value: "$(JOBSET_NAME)-$(REPLICATED_JOB_NAME)-0-0.$(JOBSET_NAME)"
+  
+                ports:
+                - containerPort: 8471
+                - containerPort: 8080
+                - containerPort: 1234
+                securityContext:
+                  privileged: true
+                command:
+                - bash
+                - -c
+                - |                  
+                  echo XPK Start: $(date) ; _sigterm() ( kill -SIGTERM $! 2>/dev/null;); trap _sigterm SIGTERM;(JAX_PLATFORMS=cpu python3 MaxText/standalone_dataloader.py MaxText/configs/base.yml base_output_directory=gs://llukai-tess/maxtext-output dataset_path=gs://llukai-tess/maxtext-dataset steps=100 hardware='cpu' epochs=2 enable_checkpointing=False global_parameter_scale=128 per_device_batch_size=2) & PID=$!; while kill -0 $PID 2>/dev/null; do sleep 5; done; wait $PID; EXIT_CODE=$? ;  echo XPK End: $(date); echo EXIT_CODE=$EXIT_CODE;
+                # resources:
+                #   requests:
+                #     memory: "60Gi"
+                volumeMounts:
+                - mountPath: /dev/shm
+                  name: dshm-2
+                - mountPath: /mnt/gcsfuse
+                  name: gcs-fuse-csi-ephemeral
+                  readOnly: true
+  
+              volumes:
+              - emptyDir:
+                  medium: Memory
+                name: dshm-2
+              - name: gcs-fuse-csi-ephemeral
+                csi:
+                  driver: gcsfuse.csi.storage.gke.io
+                  readOnly: true
+                  volumeAttributes:
+                      bucketName: "xai-hf-dataset-parquet"
+                      mountOptions: "debug_fuse"
+                      metadataCacheTtlSeconds: "-1"
+                      metadataStatCacheCapacity: "-1"
+                      metadataTypeCacheCapacity: "-1"
+                      fileCacheCapacity: "100Gi"

@@ -346,3 +346,6 @@ enable_single_controller: False
 
 # Split physical axes for https://jax.readthedocs.io/en/latest/_autosummary/jax.experimental.mesh_utils.create_device_mesh.html
 allow_split_physical_axes: False
+
+# Attributes needed for the distributed training loop using standalone_dataloader.
+epochs: 2
