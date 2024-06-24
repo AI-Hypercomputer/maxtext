@@ -57,6 +57,13 @@ def validate_compute_axis_order(s: str) -> None:
   if s not in valid_compute_axis_order:  # currently supported compute_axis_order
     raise ValueError("Invalid compute_axis_order was passed. Valid options ", valid_compute_axis_order)
 
+def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
+  valid_kv_quant_axis = ("", "dkv", "heads_and_dkv")
+  if s not in valid_kv_quant_axis:  # currently supported kv_quant_axis
+    raise ValueError("Invalid kv_quant_axis was passed. Valid options ", valid_kv_quant_axis)
+  if quantize_kvcache and s == "":
+    raise ValueError("kv_quant_axis can not be '' when quantize_kvcache is True")
+
 def validate_attention_type(s: str) -> None:
   valid_attention_types = ("autoselected", "dot_product", "flash", "cudnn_flash_te")
   if s not in valid_attention_types:  # currently supported attention
@@ -72,6 +79,7 @@ def validate_keys(keys):
   validate_attention_type(keys["attention"])
   validate_profiler_type(keys["profiler"])
   validate_compute_axis_order(keys["compute_axis_order"])
+  validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
 
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"
@@ -356,7 +364,7 @@ def validate_megablox_parallelism(raw_keys):
   if raw_keys["megablox"] and (using_tensor_parallelism(raw_keys) or
                                using_sequence_parallelism(raw_keys) or
                                using_pipeline_parallelism(raw_keys)):
-    raise ValueError("Currently we only support Megablox wih data parallelism.")
+    raise ValueError("Currently we only support Megablox with data parallelism.")
 
 def validate_and_update_keys(raw_keys, model_keys, config_name: str):
   """Validate and update model specific config keys"""
@@ -430,6 +438,10 @@ def get_num_target_devices(raw_keys):
 
 
 def get_num_slices(raw_keys):
+  """ Calculate num_slices based on number of devices. """
+  if raw_keys['hardware'] == 'cpu':
+    max_logging.log(" Setting num_slices=1 for CPU hardware type")
+    return 1
   if int(raw_keys["compile_topology_num_slices"]) > 0:
     return raw_keys["compile_topology_num_slices"]
   else:

@@ -39,7 +39,7 @@ def prefill_benchmark_loop(engine, params, tokens, true_length, iters):
     prefill_result = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
   jax.block_until_ready(prefill_result)
   end = datetime.datetime.now()
-  max_utils.delete_pytree(prefill_result)
+  del prefill_result
   return (end - start).total_seconds()
 
 
@@ -50,7 +50,7 @@ def prefill_benchmark(
   for _ in range(_WARMUP_ITERS):
     prefill_result = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
   jax.block_until_ready(prefill_result)
-  max_utils.delete_pytree(prefill_result)
+  del prefill_result
 
   print(f"Prefill benchmark results for length {tokens.size}:\n")
   time_in_s = prefill_benchmark_loop(engine, params, tokens, true_length, iters)
@@ -80,7 +80,7 @@ def prefill_insert_benchmark_loop(
   for i in range(iters):
     prefill_result = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
     decode_state = engine.insert(prefill_result, decode_state, int(i % total_slots))
-    max_utils.delete_pytree(prefill_result)
+    del prefill_result
   jax.block_until_ready(decode_state)
   end = datetime.datetime.now()
   prof.deactivate()
@@ -95,7 +95,7 @@ def prefill_insert_benchmark(
   for i in range(_WARMUP_ITERS):
     prefill_result = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
     decode_state = engine.insert(prefill_result, decode_state, int(i % total_slots))
-    max_utils.delete_pytree(prefill_result)
+    del prefill_result
   jax.block_until_ready(decode_state)
 
   print(f"Prefill and insert benchmark results for length {tokens.size}:\n")
@@ -207,7 +207,7 @@ def summarize_prefill_result(engine, params, tokens, true_length):
   num_prefill_cache_params, total_prefill_cache_size, avg_prefill_cache_param_size = (
     max_utils.summarize_pytree_data(prefill_result["cache"], name="Prefill Cache")
   )
-  max_utils.delete_pytree(prefill_result)
+  del prefill_result
   return {
     "num_prefill_logits_params": num_prefill_logits_params,
     "total_prefill_logits_size": total_prefill_logits_size,
