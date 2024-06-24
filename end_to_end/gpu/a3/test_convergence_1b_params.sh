@@ -1,7 +1,7 @@
 #!/bin/bash
 set -ex
 
-echo "Running test_convergence_125m_params.sh"
+echo "Running test_convergence_1b_params.sh"
 # Run this on NVIDIA A3 to achieve a loss value of ~3.9 after 2500 steps (NVIDIA A3)
 #
 # Command Flags:
@@ -12,10 +12,11 @@ echo "Running test_convergence_125m_params.sh"
 # QUANTIZATION (Optional, default is '')
 #
 # Example to invoke this script:
-# bash end_to_end/gpu/a3/test_convergence_125m_params.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>" LOSS_THRESHOLD=100.0
+# bash end_to_end/gpu/a3/test_convergence_1b_params.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>" LOSS_THRESHOLD=100.0
 
 export LOSS_THRESHOLD=100.0 # Set to large value so test is guaranteed to pass.
 export STEPS=2550
+
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -48,7 +49,6 @@ fi
 
 TRAIN_CMD="python MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME hardware=gpu \
         steps=$STEPS dcn_data_parallelism=1 learning_rate=3e-4 \
-        base_emb_dim=1024 base_num_query_heads=8 base_num_kv_heads=8 base_mlp_dim=3584 base_num_decoder_layers=8 \
         ici_fsdp_parallelism=8 metrics_file=metrics.txt per_device_batch_size=4 \
         max_target_length=2048 enable_checkpointing=false attention=dot_product \
         remat_policy=minimal quantization=$QUANTIZATION gradient_clipping_threshold=1.0 use_iota_embed=true \
