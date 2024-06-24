@@ -35,6 +35,7 @@ load_parameters_path: ""
 # e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/items/NUMBER or NUMBER/items
 load_full_state_path: ""
 
+
 # If enable_checkpointing is true, an asynchronous checkpointer will be used if
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the synchronous one.
@@ -61,12 +62,15 @@ save_config_to_gcs: False
 dtype: "bfloat16"
 quantization: "" #defaults to no quantization, i.e. bf16. possible alternative setting is 'int8' or use fp8 to run with 8-bit floating-point GeMMs on NVIDIA GPUs.
 quantize_kvcache: False
+checkpoint_is_quantized: False # Set to True if reading from a saved aqt quantized checkpoint
+# Saves params quantized on fly at following path
+save_quantized_params_path: ""
 # Valid kv_quant_axis values:
 #   - "" is valid only when quantize_kvcache is False
 #   - "dkv" indicates quantize kv cache over the cache_kv, i.e. kv dimension axis
 #   - "heads_and_dkv" indicates quantize kv cache over cache_heads and cache_kv axes
 # Default to "heads_and_dkv" for faster compution, kv_quant_axis is not used when quantize_kvcache is False
-#   - "dkv" is expected with better accuracy but degraded computation 
+#   - "dkv" is expected with better accuracy but degraded computation
 kv_quant_axis: "heads_and_dkv"
 
 # Shard the range finding operation for quantization. By default this is set to number of slices.
@@ -104,8 +108,8 @@ logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedd
 # perform the circular transfer (last stage to first) asynchronously.
 # The bubble fraction is (num_stages - 1) / (num_pipeline_repeats * num_pipeline_microbatches + num_stages - 1)
 num_layers_per_pipeline_stage: 1
-# The number of repeats will be set to num_decoder_layers / (num_pipeline_stages * num_layers_per_pipeline_stage) 
-num_pipeline_repeats: -1 
+# The number of repeats will be set to num_decoder_layers / (num_pipeline_stages * num_layers_per_pipeline_stage)
+num_pipeline_repeats: -1
 # num_pipeline_microbatches must be a multiple of the number of pipeline stages. By default it is set to the number of stages.
 # Note the microbatch_size is given by global_batch_size / num_pipeline_microbatches, where global_batch_size = per_device_batch_size * num_devices
 num_pipeline_microbatches: -1
@@ -245,7 +249,7 @@ prefill_cache_dir: "" # If set and load_from_prefill_dir, decode.py reads from d
 autoregressive_decode_assert: ""
 
 # For nsys profiler, pass the training command to nsys command
-# e.g. nsys profile -s none --force-overwrite true --capture-range=cudaProfilerApi --capture-range-end=stop {training command} 
+# e.g. nsys profile -s none --force-overwrite true --capture-range=cudaProfilerApi --capture-range-end=stop {training command}
 profiler: "" # Supported profiler: '', xplane, nsys
 # If set to true, upload all profiler results from all hosts. Otherwise, only upload the profiler result from the first host.
 upload_all_profiler_results: False
@@ -315,7 +319,7 @@ vertex_tensorboard_project: ""
 # Vertex AI supported regions: https://cloud.google.com/vertex-ai/docs/general/locations#available-regions
 vertex_tensorboard_region: ""
 
-# If set to True, MaxText will perform extra checks using jax.checkify. Note that this will effect performance. 
+# If set to True, MaxText will perform extra checks using jax.checkify. Note that this will effect performance.
 max_checkify: False
 
 # Inference

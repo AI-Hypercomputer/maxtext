@@ -92,7 +92,8 @@ def _save_decode_checkpoint(config, state, checkpoint_manager):
   """Generate checkpoint for decode from the training_state."""
   with jax.spmd_mode("allow_all"):
     decode_state = max_utils.init_decode_state(
-      None, jax.tree_util.tree_map(lambda x: x.astype(jax.numpy.bfloat16), state.params))
+      jax.tree_util.tree_map(lambda x: x.astype(jax.numpy.bfloat16), state.params)
+      )
   if checkpoint_manager is not None:
     if save_checkpoint(checkpoint_manager, 0, decode_state):
       max_logging.log(f"saved an decode checkpoint at {config.checkpoint_dir}")

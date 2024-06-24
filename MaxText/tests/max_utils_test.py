@@ -76,10 +76,7 @@ class MaxUtilsInitState(unittest.TestCase):
     )
 
   def test_init_decode_state(self):
-    decode_state = max_utils.init_decode_state(self.model.apply, self.params)
-    self.assertEqual(decode_state.apply_fn, self.model.apply)
-    output = decode_state.apply_fn(self.params, self.input)
-    self.assertEqual(output.tolist(), self.output.tolist())
+    decode_state = max_utils.init_decode_state(self.params)
     self.assertEqual(decode_state.tx, None)
     self.assertEqual(decode_state.opt_state, {})
     self.assertEqual(decode_state.step, 0)
@@ -126,8 +123,8 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
 
   def _test_init_initial_state_driver(self, is_training):
     state_under_test = max_utils.init_initial_state(self.model, self.tx, self.config, is_training, self.key3)
-    self.assertEqual(state_under_test.apply_fn, self.model.apply)
     if is_training:
+      self.assertEqual(state_under_test.apply_fn, self.model.apply)
       self.assertEqual(state_under_test.tx, self.tx)
       self.assertNotEqual(state_under_test.opt_state, {})
     else:
@@ -161,7 +158,7 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
 
   def test_setup_decode_state(self):
     rng = random.PRNGKey(0)
-    state, _ = max_utils.setup_decode_state(self.model, self.config, rng, self.mesh, None)
+    state, _ = max_utils.setup_decode_state(self.model, self.config, rng, self.mesh)
     self.assertEqual(state.tx, None)
     self.assertEqual(state.opt_state, {})
 
