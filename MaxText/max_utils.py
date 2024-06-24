@@ -229,14 +229,15 @@ def upload_blob(destination_gcs_name, source_file_name):
   blob = bucket.blob(prefix_name)
   blob.upload_from_filename(source_file_name)
 
-def delete_all_local_things():
+def delete_all_local_things(dir):
   max_logging.log("Deleting local checkpoints and id files...")
-  files = os.listdir("/xfgu-cache")
+  max_logging.log(f"local directory: {dir}")
+  files = os.listdir(dir)
   for f in files:
     if f != 'remote' and f != 'id_file.txt':
-      shutil.rmtree(f'/xfgu-cache/{f}')
+      shutil.rmtree(f'{dir}/{f}')
     if f == 'id_file.txt':
-      os.remove('/xfgu-cache/id_file.txt')
+      os.remove(f'{dir}/id_file.txt')
 
 
 def maybe_initialize_jax_distributed_system(raw_keys):
@@ -247,25 +248,30 @@ def maybe_initialize_jax_distributed_system(raw_keys):
 
   For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
   """
-  # delete_all_local_things()
   
   if (
       raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and
       raw_keys["compile_topology_num_slices"] == -1 and not raw_keys["enable_single_controller"]
   ) or raw_keys["hardware"] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
-
-    DIR = "/xfgu-cache"
+    DIR = raw_keys["local_checkpoint_dir"]
+    delete_all_local_things(dir=DIR)
     ID_FILE = "id_file.txt"
     files = os.listdir(DIR)
     if ID_FILE in files:
       max_logging.log("An ID file from a previous run exists, using the saved ID...")
       with open(DIR + "/" + ID_FILE, 'r') as f:
         process_id = int(f.readlines()[0])
-        coordinator_address_file = epath.Path('gs://in-mem-test/logs/xfgu-e2e-test/coordinator_address.txt')
+        gcs_path = os.path.join(raw_keys["base_output_directory"], raw_keys["run_name"],"logs", "coordinator_address.txt")
+        coordinator_address_file = epath.Path(gcs_path)
         if process_id == 0:
+          RUN_NAME = raw_keys["run_name"]
+          if RUN_NAME == "":
+            RUN_NAME = os.environ.get("JOBSET_NAME")  # using XPK default
+
           slice_id = get_tpu_env_value('MEGASCALE_SLICE_ID')
-          coordinator_address = f"xfgu-e2e-test-slice-job-{slice_id}-{int(str(os.environ.get('TPU_WORKER_ID')))}.xfgu-e2e-test"
+          coordinator_address = f"{RUN_NAME}-slice-job-{slice_id}-{int(str(os.environ.get('TPU_WORKER_ID')))}.{RUN_NAME}"
+          max_logging.log(f"Coordinator address: {coordinator_address}")
           coordinator_address_file.write_text(coordinator_address)
         else:
           t = 0

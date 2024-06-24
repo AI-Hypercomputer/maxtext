@@ -1,0 +1,66 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: abhinavsing-maxtext-in-mem-job
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue  # Name of the LocalQueue
+    xpk.google.com/workload: abhinavsing-max-in-mem-job
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool # 1:1 job replica to node pool assignment
+spec:
+  failurePolicy:
+    maxRestarts: 4
+  replicatedJobs:
+    - name: slice-job
+      replicas: 3
+      template:
+        spec:
+          parallelism: 2    # Equal to the number of VMs per slice
+          completions: 2    # Same as the above.
+          backoffLimit: 0   # When any pod fails, the job is failed
+          template:
+            metadata:
+              labels:
+                xpk.google.com/workload: abhinavsing-max-in-mem-job
+            spec:
+              schedulerName: default-scheduler
+              restartPolicy: Never
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu-v4-podslice
+                cloud.google.com/gke-tpu-topology: 2x2x2
+                node.kubernetes.io/instance-type: ct4p-hightpu-4t
+              priorityClassName: medium
+              hostNetwork: true
+              dnsPolicy: ClusterFirstWithHostNet
+              containers:
+              - name: jax-tpu
+                image: gcr.io/tpu-prod-multislice-feature/abhinavsing_in_memory_runner:latest
+                env: 
+                - name: JOBSET_NAME
+                  value: "abhinavsing-max-in-mem-job"
+                ports:
+                - containerPort: 8471
+                - containerPort: 8080
+                - containerPort: 8431 # Port to export TPU runtime metrics, if supported.
+                securityContext:
+                  privileged: true
+                command:
+                - bash
+                - -c
+                - |
+                  echo XPK Start: $(date) ; _sigterm() ( kill -SIGTERM $! 2>/dev/null;); trap _sigterm SIGTERM;(python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=gs://abhinavsing-bucket-prod/ dataset_path=gs://abhinavsing-bucket-prod/dataset/ steps=10000 per_device_batch_size=6 enable_checkpoint_cloud_logger=True checkpoint_period=8 local_checkpoint_dir=/abhinavsing-cache) & PID=$!; while kill -0 $PID 2>/dev/null; do sleep 5; done; wait $PID; EXIT_CODE=$? ;  echo XPK End: $(date); echo EXIT_CODE=$EXIT_CODE;   
+                resources:
+                  limits:
+                    google.com/tpu: 4
+                volumeMounts:
+                - mountPath: /dev/shm
+                  name: dshm-2
+                - mountPath: /abhinavsing-cache
+                  name: cache
+              volumes:
+              - emptyDir:
+                  medium: Memory
+                name: dshm-2
+              - name: cache
+                csi:
+                  driver: nodecache.csi.storage.gke.io
