@@ -797,6 +797,8 @@ def tgmm(
 
 def _gmm_tiling_lut(m: int, k: int, n: int) -> tuple[int, int, int] | None:
   """Get the best known tiling configuration for the given problem size."""
+  # return (512, 1024, 1024)
+
   tiling_lut = {
       # "14336_4096": (4096, 128, 128),  # m=49152 81.81%
       # "4096_14336": (4096, 128, 128),  # m=49152 77.70%
@@ -819,6 +821,8 @@ def _gmm_tiling_lut(m: int, k: int, n: int) -> tuple[int, int, int] | None:
 
 def _tgmm_tiling_lut(m: int, k: int, n: int) -> tuple[int, int, int] | None:
   """Get the best known tiling configuration for the given problem size."""
+  # return (128, 896, 2048)
+
   tiling_lut = {
     # "14336_4096": (4096, 128, 128),  # m=49152 80.96%
     # "4096_14336": (4096, 128, 128),  # m=49152 79.80%
