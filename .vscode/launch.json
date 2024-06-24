@@ -25,10 +25,15 @@
       "justMyCode": false,
       "python": "python3",
       "program": "${workspaceFolder}/MaxText/train.py",
-      "args": ["MaxText/configs/base.yml", 
+      "args": ["MaxText/configs/base.yml",
+               "model_name=gpt3-175b", 
                "run_name=runner_$(date +%Y-%m-%d-%H-%M)", 
                "base_output_directory=gs://test-maxtext-output",
-               "dataset_path=gs://test-maxtext-dataset",
+               "dataset_path=gs://mlperf-exp-us-east1-cp0",
+               "dataset_name=c4/en:3.0.7",
+               "dataset_type=c4_mlperf",
+               "tokenizer_path=gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model",
+               "remat_policy=minimal",
                "steps=2",
                "enable_checkpointing=false"]
     }
