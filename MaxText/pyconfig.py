@@ -320,6 +320,13 @@ class _HyperParameters:
     if raw_keys["final_logits_soft_cap"] == 0.0:
       raw_keys["final_logits_soft_cap"] = None
 
+    raw_keys["diloco_num_workers"] = diloco_num_workers(raw_keys)
+    if raw_keys["diloco_num_workers"] > 1:
+      assert raw_keys["diloco_sync_period"] > 0, f"diloco_sync_period must be positive when using DiLoCo"
+      # Adjust data sharding to reflect DiLoCo shaping. Input data will have shape
+      # NumClients x StepsBetweenSyncs x ClientBatch x Sequence
+      raw_keys["data_sharding"] = ["client", None, *raw_keys["data_sharding"]]
+
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys["global_parameter_scale"])
     raw_keys["emb_dim"] = 2**emb_scale * raw_keys["base_emb_dim"]
     raw_keys["num_query_heads"] = 2**num_head_scale * raw_keys["base_num_query_heads"]
@@ -328,6 +335,8 @@ class _HyperParameters:
     raw_keys["num_decoder_layers"] = 2**layer_scale * raw_keys["base_num_decoder_layers"]
 
     raw_keys["global_batch_size_to_load"], raw_keys["global_batch_size_to_train_on"], raw_keys["micro_batch_size_to_train_on"] = calculate_global_batch_sizes(raw_keys)
+    assert raw_keys["global_batch_size_to_train_on"] % raw_keys["diloco_num_workers"] == 0, \
+      f"Global batch ({raw_keys['global_batch_size_to_train_on']}) must be divisible by diloco_num_workers ({raw_keys['diloco_num_workers']}) with DiLoCo training"
     raw_keys["num_slices"] = get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
 
@@ -520,6 +529,9 @@ def get_quantization_local_shard_count(raw_keys):
     return raw_keys["num_slices"]
   else:
     return raw_keys["quantization_local_shard_count"]
+
+def diloco_num_workers(raw_keys) -> bool:
+  return int(raw_keys["ici_client_parallelism"]) * int(raw_keys["dcn_client_parallelism"])
 
 def using_pipeline_parallelism(raw_keys) -> bool:
   return int(raw_keys['ici_pipeline_parallelism']) > 1 or int(raw_keys['dcn_pipeline_parallelism']) > 1

@@ -175,7 +175,7 @@ jax_cache_dir: "~/jax_cache"
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
 # Parallelism
-mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']
+mesh_axes: ['client', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose',]],
                        # For pipeline parallelism the pre and post decoder layer tensors' batch dimension is sharded by stages.
@@ -223,6 +223,7 @@ dcn_sequence_parallelism: 1  # never recommended
 dcn_tensor_parallelism: 1 # never recommended
 dcn_pipeline_parallelism: 1
 dcn_autoregressive_parallelism: 1 # never recommended
+dcn_client_parallelism: 1
 ici_data_parallelism: 1
 ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
 ici_fsdp_transpose_parallelism: 1
@@ -230,6 +231,7 @@ ici_sequence_parallelism: 1
 ici_tensor_parallelism: 1
 ici_autoregressive_parallelism: 1
 ici_pipeline_parallelism: 1
+ici_client_parallelism: 1
 
 # The number of TPU slices is automatically determined, you should not set this explicitly. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
@@ -273,6 +275,12 @@ grain_worker_count: 1
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
 log_period: 100 # Flushes Tensorboard
+
+# DiLoCo Parameters
+# Each worker replica will execute `client_sync_period` training steps before global synchronization.
+diloco_sync_period: 20
+diloco_outer_momentum: 0.9
+diloco_outer_lr: 0.7
 
 # We take inspiration from Llama2's learning rate (LR) schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
 # Learning rate schedule has either two or three parts:

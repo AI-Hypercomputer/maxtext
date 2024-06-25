@@ -24,9 +24,16 @@ import optax
 import jax.numpy as jnp
 
 
-def get_optimizer(config, learning_rate_schedule):
+def get_optimizer(config, learning_rate_schedule, inner_diloco=False):
   """create optimizer"""
-  if config.opt_type == "adamw":
+  if config.diloco_num_workers > 1 and not inner_diloco:
+    # When training DiLoCo (https://arxiv.org/pdf/2311.08105), use SGD with Nesterov momentum for the outer optimizer
+    return optax.sgd(
+      config.diloco_outer_lr,
+      momentum=config.diloco_outer_momentum,
+      nesterov=True,
+    )
+  elif config.opt_type == "adamw":
     # Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
     return optax.adamw(
         learning_rate_schedule,

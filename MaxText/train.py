@@ -43,6 +43,7 @@ import max_logging
 import optimizers
 import profiler
 import pyconfig
+from diloco import get_diloco_train_step
 from vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
@@ -503,6 +504,7 @@ def train_loop(config, state=None):
       eval_data_iterator,
       state,
   ) = setup_train_loop(config)
+  train_step_fn = get_diloco_train_step(config, train_step) if config.diloco_num_workers > 1 else train_step 
   # pylint: disable=line-too-long
   (
       functional_train,
@@ -510,7 +512,7 @@ def train_loop(config, state=None):
       out_shard_train,
       static_argnums_train,
       donate_argnums_train,
-  ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config)
+  ) = maxtext_utils.get_functional_train_with_signature(train_step_fn, mesh, state_mesh_annotations, model, config)
 
   if eval_data_iterator:
     # pylint: disable=line-too-long
