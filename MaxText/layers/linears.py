@@ -392,11 +392,12 @@ class MoeBlock(nn.Module):
 
       inputs = inputs.astype(self.dtype)
       kernel = kernel.astype(self.weight_dtype)
-      output = mblx.gmm(lhs=inputs, 
-                        rhs=kernel, 
-                        group_sizes=group_sizes,
-                        preferred_element_type=jnp.bfloat16,
-                        tiling=tile_size)
+      with jax.named_scope("gmm_call"):
+        output = mblx.gmm(lhs=inputs, 
+                          rhs=kernel, 
+                          group_sizes=group_sizes,
+                          preferred_element_type=jnp.bfloat16,
+                          tiling=tile_size)
       
       if hs_shape[0] % pad_length:
         output = output[:hs_shape[0]]
