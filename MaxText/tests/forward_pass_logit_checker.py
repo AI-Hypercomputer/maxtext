@@ -106,9 +106,11 @@ def main(config, test_args):
         enable_dropout=False,
         rngs={"aqt": init_rng},
     )
-
-    max_logging.log(f"{golden_logits[0] =}, {full_train_logits[0, 0, :]=}")
+    full_train_logits = jax.experimental.multihost_utils.process_allgather(full_train_logits)
+    max_logging.log(f"{golden_logits[0]=}")
+    max_logging.log(f"{full_train_logits[0, 0, :]=}")
     token_size = int(test_args.token_size) if test_args.token_size else golden_logits.shape[0]
+    max_logging.log(f"Max Difference {np.max(np.subtract(full_train_logits[0, :token_size, :], golden_logits[:token_size, :]))}")
     assert jax.numpy.allclose(
             full_train_logits[0, :token_size, :], golden_logits[:token_size, :], rtol=float(test_args.rtol), atol=float(test_args.atol), equal_nan=False
         )
