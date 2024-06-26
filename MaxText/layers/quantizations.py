@@ -154,13 +154,14 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
 def _get_aqt_key_paths(aqt_vars):
   """Generate a list of paths which have aqt state"""
   aqt_tree_flat, _ = jax.tree_util.tree_flatten_with_path(aqt_vars)
+  print("aqt_tree_flat: ", aqt_tree_flat)
   aqt_key_paths = []
   for k, _ in aqt_tree_flat:
     pruned_keys = []
     for d in list(k):
       if "AqtDotGeneral" in d.key:
         pruned_keys.append(jax.tree_util.DictKey(key="kernel"))
-        break
+        # break
       else:
         assert "Aqt" not in d.key, f"Unexpected Aqt op {d.key} in {k}."
         pruned_keys.append(d)
@@ -171,11 +172,15 @@ def _get_aqt_key_paths(aqt_vars):
 def remove_quantized_params(params, aqt_vars):
   """Remove param values with aqt tensors to Null to optimize memory."""
   aqt_paths = _get_aqt_key_paths(aqt_vars)
+  print("aqt_paths: ", aqt_paths)
   tree_flat, tree_struct = tree_flatten_with_path(params)
+  print("params_tree_flat: ", tree_flat)
+  print("params_tree_struct: ", tree_struct)
   for i, (k, v) in enumerate(tree_flat):
     if k in aqt_paths:
       v = {}
     tree_flat[i] = v
+  assert False
   return tree_unflatten(tree_struct, tree_flat)
 
 
