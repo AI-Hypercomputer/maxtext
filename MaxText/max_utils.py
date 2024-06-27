@@ -28,6 +28,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
+import orbax.checkpoint as ocp
 
 
 import json
@@ -228,6 +229,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   ) or raw_keys["hardware"] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
     jax.distributed.initialize()
+    ocp.multihost.utils.initialize_runtime_to_distributed_ids()
     max_logging.log("Jax distributed system initialized!")
 
 
