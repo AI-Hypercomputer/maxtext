@@ -115,7 +115,7 @@ class DenseGeneral(nn.Module):
       """Computes a dot_general operation that may be quantized."""
       dot_general = lax.dot_general
       if self.quant:
-        dot_general_cls = self.quant.dot_general_cls()
+        dot_general_cls = self.quant.dot_general_cls(mesh_axes=self.kernel_axes)
         dot_general = dot_general_cls()
       return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
 
@@ -336,7 +336,7 @@ class MoeBlock(nn.Module):
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     weights = jax.nn.softmax(weights.astype(self.weight_dtype), axis=-1).astype(self.dtype)
     flatten_selected_experts = jnp.ravel(selected_experts)
-    sorted_selected_experts = jnp.argsort(flatten_selected_experts) 
+    sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     sorted_indices = sorted_selected_experts // self.num_experts_per_tok
     # sort inputs for number of selected experts
     sorted_inputs = jnp.take(inputs_2d, indices=sorted_indices, axis=0).astype(self.dtype)
@@ -348,19 +348,19 @@ class MoeBlock(nn.Module):
 
     unsort_intermediate = jnp.take(intermediate, indices=jnp.argsort(sorted_selected_experts), axis=0)
     reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
-    reshaped_intermediate = jnp.reshape(unsort_intermediate, (-1, self.num_experts_per_tok, self.config.emb_dim)) 
+    reshaped_intermediate = jnp.reshape(unsort_intermediate, (-1, self.num_experts_per_tok, self.config.emb_dim))
     with jax.named_scope("weight_sum"):
       output = jnp.einsum("BKE,BK -> BE", reshaped_intermediate, reshaped_weights)
-    return output.reshape(-1, self.config.max_target_length, self.config.emb_dim).astype(self.dtype) 
+    return output.reshape(-1, self.config.max_target_length, self.config.emb_dim).astype(self.dtype)
 
   def megablox(self, inputs, gate_logits, config, w0_kernel, w1_kernel, wo_kernel):
-    # TODO(ranran): need to changes in JAX repo to enable optimized tile_size 
+    # TODO(ranran): need to changes in JAX repo to enable optimized tile_size
     #               instead of the static default tile_size (512, 512, 512)
     tile_size = (512, 512, 512)
 
     def gmm(inputs, kernel, group_sizes):
       hs_shape = inputs.shape
-      # pad lengh is the 1st dimension of tiling size in gmm call
+      # pad length is the 1st dimension of tiling size in gmm call
       pad_length = 512
       if hs_shape[0] % pad_length:
         pad_length = pad_length - hs_shape[0] % pad_length

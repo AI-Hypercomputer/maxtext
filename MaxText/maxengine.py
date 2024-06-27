@@ -80,6 +80,11 @@ class MaxEngine(engine_api.Engine):
   def load_params(self, *args, **kwargs) -> Params:
     """Load Parameters, typically from GCS"""
     # pylint: disable=unused-argument
+
+    if self.model.quant and self.config.checkpoint_is_quantized:
+      print("Loading from the quantized checkpoint...")
+      self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
+
     state, self.state_mesh_annotations = max_utils.setup_decode_state(self.model, self.config, self.rng, self._mesh, None)
     self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), state.params
@@ -88,40 +93,40 @@ class MaxEngine(engine_api.Engine):
     self.kv_cache_shardings = jax.tree_util.tree_map(
       lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations)
 
-    if not self.model.quant:
-      self.abstract_params = jax.tree_util.tree_map(
-          lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), state.params
-      )
-      return state.params
+    if self.model.quant and not self.config.checkpoint_is_quantized:
+      params = self.quantize_params(state)
     else:
-      self.model.quant.quant_mode = quantizations.get_quant_mode("convert")
+      params = state.params
+    max_utils.print_mem_stats('After load_params')
+    return params
 
-      @jax.jit
-      def model_apply(_p, _rng):
-        return self.model.apply(
-            _p | {"aqt": {}},
-            jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-            jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-            decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-            enable_dropout=False,
-            model_mode=common_types.MODEL_MODE_PREFILL,
-            rngs={"params": _rng},
-            mutable=True,
+  def quantize_params(self, state):
+    """Forward pass to quantize decode params."""
+    self.model.quant.quant_mode = quantizations.get_quant_mode("convert")
+    @jax.jit
+    def model_apply(_p, _rng):
+      return self.model.apply(
+        _p | {"aqt": {}},
+        jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
+        jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
+        decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
+        enable_dropout=False,
+        model_mode=common_types.MODEL_MODE_PREFILL,
+        rngs={"params": _rng},
+        mutable=True,
         )
 
-      _, new_vars = model_apply(state.params, self.rng)
-
-      params = {}
-      params["aqt"] = new_vars["aqt"]
-      # Remove param values which have corresponding qtensors in aqt to save memory.
-      params["params"] = quantizations.remove_quantized_params(state.params["params"], new_vars["aqt"])
-
-      self.abstract_params = jax.tree_util.tree_map(
-          lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), params
+    _, new_vars = model_apply(state.params, self.rng)
+    # Remove param values which have corresponding qtensors in aqt to save memory.
+    params = {}
+    params["aqt"] = new_vars["aqt"]
+    params["params"] = quantizations.remove_quantized_params(state.params["params"], new_vars["aqt"])
+    self.abstract_params = jax.tree_util.tree_map(
+      lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), params
       )
-
-      self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
-      return params
+    max_utils.save_quantized_checkpoint_if_configured(self.config, params)
+    self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
+    return params
 
   @functools.partial(jax.jit, static_argnums=(0,))
   def prefill(
