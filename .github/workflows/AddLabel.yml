@@ -21,6 +21,7 @@ on:
       - completed
   pull_request_review:
   pull_request_review_comment:
+  push:
   workflow_dispatch:
 
 jobs:
