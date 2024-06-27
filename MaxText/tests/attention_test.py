@@ -14,6 +14,8 @@
 
 """Tests for Attentions."""
 
+import itertools
+import random
 import sys
 import unittest
 
@@ -29,7 +31,6 @@ import pytest
 import pyconfig
 
 from layers import attentions
-from layers import embeddings
 
 Mesh = jax.sharding.Mesh
 Attention = attentions.Attention
@@ -58,6 +59,7 @@ class AttentionTest(unittest.TestCase):
     self.num_kv_heads = self.cfg.num_kv_heads
     self.num_query_heads = self.cfg.num_query_heads
     self.max_target_length = self.cfg.max_target_length
+    self.max_prefill_predict_length = self.cfg.max_prefill_predict_length
     self.head_dim = self.cfg.head_dim
     self.embed_dim = self.cfg.base_emb_dim
     self.dtype = self.cfg.dtype
@@ -254,6 +256,291 @@ class AttentionTest(unittest.TestCase):
     self.assertTrue(
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False)
     )
+
+  @pytest.mark.tpu
+  def test_dot_product_cache_axis_order(self):
+    all_axis_orders = [axis_order for axis_order in itertools.permutations(range(4))]
+    for axis_order in random.choices(all_axis_orders, k=4):
+      self.dot_product_attention_helper(
+        prefill_cache_axis_order=axis_order,
+        ar_cache_axis_order=axis_order
+      )
+      print(f"passed test for {axis_order=}")
+
+  def dot_product_attention_helper(self, prefill_cache_axis_order, ar_cache_axis_order):
+    for compute_axis_order in [(0,1,2,3), (0,2,1,3)]:
+      self._dot_product_attention(
+        prefill_cache_axis_order,
+        ar_cache_axis_order,
+        compute_axis_order=compute_axis_order,
+      )
+      print(f"passed subtest for {compute_axis_order=}")
+
+  def _dot_product_attention(
+      self,
+      prefill_cache_axis_order,
+      ar_cache_axis_order,
+      compute_axis_order,
+  ):
+    """Test equalvant between different layout control in dot_product"""
+
+    rtol, atol = 1e-02, 1e-02
+
+    pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        per_device_batch_size=1.0,
+        run_name="test",
+        enable_checkpointing=False,
+        max_target_length=128,
+        max_prefill_predict_length=16,
+        attention="dot_product",
+    )
+    config = pyconfig.config
+
+    prefill_length = config.max_prefill_predict_length
+    decode_total_length = config.max_target_length
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(config.dtype)
+
+    lnx_prefill = lnx[:, 0:prefill_length, :]
+    decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
+    decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
+
+    attention_w_layout = Attention(
+        mesh=self.mesh,
+        config=config,
+        num_query_heads=config.num_query_heads,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
+        max_target_length=config.max_target_length,
+        max_prefill_predict_length=config.max_prefill_predict_length,
+        attention_kernel=config.attention,
+        dtype=config.dtype,
+        prefill_cache_axis_order=prefill_cache_axis_order,
+        ar_cache_axis_order=ar_cache_axis_order,
+        compute_axis_order=compute_axis_order,
+    )
+    attention_w_layout_variable = attention_w_layout.init(
+        {"params": self.rng, "aqt": self.rng},
+        jnp.ones((self.global_batch_size, config.max_target_length, config.base_emb_dim)),
+        jnp.ones((self.global_batch_size, config.max_target_length, config.base_emb_dim)),
+        jnp.ones((self.global_batch_size, config.max_target_length)),
+    )
+    attention_w_layout_full = attention_w_layout.apply(
+        attention_w_layout_variable,
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_TRAIN,
+        rngs={"aqt": self.rng},
+    )
+
+    attention_w_layout_prefill, attention_w_layout_output_cache = attention_w_layout.apply(
+        attention_w_layout_variable,
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_PREFILL,
+        rngs={"aqt": self.rng},
+        mutable=["cache"],
+    )
+    self.assertTrue(
+        jax.numpy.allclose(attention_w_layout_full[:, :prefill_length, :], attention_w_layout_prefill, equal_nan=False)
+    )
+
+    for idx in range(prefill_length, decode_total_length):
+
+      lnx_idx = lnx[:, idx : idx + 1, :]
+      decoder_positions_idx = decoder_positions[:, idx : idx + 1]
+      
+      attention_w_layout_variable.update(attention_w_layout_output_cache)
+      attention_w_layout_idx, attention_w_layout_output_cache = attention_w_layout.apply(
+          attention_w_layout_variable,
+          lnx_idx,
+          lnx_idx,
+          inputs_positions=decoder_positions_idx,
+          deterministic=True,
+          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          rngs={"aqt": self.rng},
+          mutable=["cache"],
+      )
+
+      attention_w_layout_full_this_idx = attention_w_layout_full[:, idx : idx + 1, :]
+      self.assertTrue(attention_w_layout_full_this_idx.shape == attention_w_layout_idx.shape)
+      self.assertTrue(jax.numpy.allclose(attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=rtol, atol=atol, equal_nan=False))
+
+  @pytest.mark.tpu
+  def test_dot_product_reshape_q(self):
+    for compute_axis_order in [(0,1,2,3), (0,2,1,3)]:
+      self._dot_product_attention_reshape_q(
+        compute_axis_order=compute_axis_order,
+      )
+      print(f"test passed for compute_axis_order: {compute_axis_order}")
+
+  def _dot_product_attention_reshape_q(self, compute_axis_order):
+    """Test equalvant between q and reshape q in dot_product"""
+
+    rtol, atol = 1e-02, 1e-02
+
+    pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        per_device_batch_size=1.0,
+        run_name="test",
+        enable_checkpointing=False,
+        max_target_length=128,
+        max_prefill_predict_length=16,
+        attention="dot_product",
+    )
+    config = pyconfig.config
+
+    prefill_length = config.max_prefill_predict_length
+    decode_total_length = config.max_target_length
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(config.dtype)
+
+    lnx_prefill = lnx[:, 0:prefill_length, :]
+    decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
+    decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
+
+    attention_wo_reshape_q = Attention(
+        mesh=self.mesh,
+        config=config,
+        num_query_heads=config.num_query_heads,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
+        max_target_length=config.max_target_length,
+        max_prefill_predict_length=config.max_prefill_predict_length,
+        attention_kernel=config.attention,
+        dtype=config.dtype,
+        compute_axis_order=compute_axis_order,
+        reshape_q=False,
+    )
+    attention_wo_reshape_q_variable = attention_wo_reshape_q.init(
+        {"params": self.rng, "aqt": self.rng},
+        jnp.ones((self.global_batch_size, config.max_target_length, config.base_emb_dim)),
+        jnp.ones((self.global_batch_size, config.max_target_length, config.base_emb_dim)),
+        jnp.ones((self.global_batch_size, config.max_target_length)),
+    )
+
+    attention_w_reshape_q = Attention(
+        mesh=self.mesh,
+        config=config,
+        num_query_heads=config.num_query_heads,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
+        max_target_length=config.max_target_length,
+        max_prefill_predict_length=config.max_prefill_predict_length,
+        attention_kernel=config.attention,
+        dtype=config.dtype,
+        compute_axis_order=compute_axis_order,
+        reshape_q=True,
+    )
+    attention_w_reshape_q_variable = attention_w_reshape_q.init(
+        {"params": self.rng, "aqt": self.rng},
+        jnp.ones((self.global_batch_size, config.max_target_length, config.base_emb_dim)),
+        jnp.ones((self.global_batch_size, config.max_target_length, config.base_emb_dim)),
+        jnp.ones((self.global_batch_size, config.max_target_length)),
+    )
+
+    attention_wo_reshape_q_full = attention_wo_reshape_q.apply(
+        attention_wo_reshape_q_variable,
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_TRAIN,
+        rngs={"aqt": self.rng},
+    )
+
+    attention_w_reshape_q_full = attention_w_reshape_q.apply(
+        attention_w_reshape_q_variable,
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_TRAIN,
+        rngs={"aqt": self.rng},
+    )
+
+    attention_wo_reshape_q_prefill, attention_wo_reshape_q_output_cache = attention_wo_reshape_q.apply(
+        attention_wo_reshape_q_variable,
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_PREFILL,
+        rngs={"aqt": self.rng},
+        mutable=["cache"],
+    )
+    self.assertTrue(
+        jax.numpy.allclose(attention_wo_reshape_q_full[:, :prefill_length, :], attention_wo_reshape_q_prefill, equal_nan=False)
+    )
+
+    attention_w_reshape_q_prefill, attention_w_reshape_q_output_cache = attention_w_reshape_q.apply(
+        attention_w_reshape_q_variable,
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_PREFILL,
+        rngs={"aqt": self.rng},
+        mutable=["cache"],
+    )
+    self.assertTrue(
+        jax.numpy.allclose(attention_w_reshape_q_full[:, :prefill_length, :], attention_w_reshape_q_prefill, equal_nan=False)
+    )
+
+    self.assertTrue(
+        jax.numpy.allclose(attention_wo_reshape_q_prefill, attention_w_reshape_q_prefill, equal_nan=False)
+    )
+    self.assertTrue(
+        jax.numpy.allclose(attention_wo_reshape_q_full[:, :prefill_length, :], attention_w_reshape_q_full[:, :prefill_length, :], equal_nan=False)
+    )
+
+    for idx in range(prefill_length, decode_total_length):
+
+      lnx_idx = lnx[:, idx : idx + 1, :]
+      decoder_positions_idx = decoder_positions[:, idx : idx + 1]
+      
+      attention_wo_reshape_q_variable.update(attention_wo_reshape_q_output_cache)
+      attention_wo_reshape_q_idx, attention_wo_reshape_q_output_cache = attention_wo_reshape_q.apply(
+          attention_wo_reshape_q_variable,
+          lnx_idx,
+          lnx_idx,
+          inputs_positions=decoder_positions_idx,
+          deterministic=True,
+          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          rngs={"aqt": self.rng},
+          mutable=["cache"],
+      )
+
+      attention_wo_reshape_q_full_this_idx = attention_wo_reshape_q_full[:, idx : idx + 1, :]
+      self.assertTrue(attention_wo_reshape_q_full_this_idx.shape == attention_wo_reshape_q_idx.shape)
+      self.assertTrue(jax.numpy.allclose(attention_wo_reshape_q_full_this_idx, attention_wo_reshape_q_idx, rtol=rtol, atol=atol, equal_nan=False))
+
+      attention_w_reshape_q_variable.update(attention_w_reshape_q_output_cache)
+      attention_w_reshape_q_idx, attention_w_reshape_q_output_cache = attention_w_reshape_q.apply(
+          attention_w_reshape_q_variable,
+          lnx_idx,
+          lnx_idx,
+          inputs_positions=decoder_positions_idx,
+          deterministic=True,
+          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          rngs={"aqt": self.rng},
+          mutable=["cache"],
+      )
+
+      attention_w_reshape_q_full_this_idx = attention_w_reshape_q_full[:, idx : idx + 1, :]
+      self.assertTrue(attention_w_reshape_q_full_this_idx.shape == attention_w_reshape_q_idx.shape)
+      self.assertTrue(jax.numpy.allclose(attention_w_reshape_q_full_this_idx, attention_w_reshape_q_idx, rtol=rtol, atol=atol, equal_nan=False))
+
+      self.assertTrue(jax.numpy.allclose(attention_w_reshape_q_idx, attention_wo_reshape_q_idx, rtol=rtol, atol=atol, equal_nan=False))
 
 
 if __name__ == "__main__":

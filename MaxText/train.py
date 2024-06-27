@@ -32,18 +32,20 @@ from flax.linen import partitioning as nn_partitioning
 import grain.python as grain
 import jax
 import numpy as np
-import optax
 import orbax.checkpoint
+import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 
 import checkpointing
 import max_utils
 import maxtext_utils
 import max_logging
 import optimizers
+import profiler
 import pyconfig
 # pylint: disable-next=unused-import
 import register_jax_proxy_backend
 from vertex_tensorboard import VertexTensorboardManager
+# Placeholder: internal
 
 from input_pipeline.input_pipeline_interface import create_data_iterator_with_tokenizer
 from layers import models
@@ -153,7 +155,12 @@ def write_metrics_to_tensorboard(writer, metrics, step, config):
 
 def save_checkpoint(checkpoint_manager, step, state, dataset_type="c4", data_iterator=None):
   """Wrapper for saving checkpoint"""
-  if dataset_type == "c4-array_record":
+  if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
+    return checkpoint_manager.save(
+      step, args=orbax.checkpoint.args.PyTreeSave(state)
+  )
+
+  if dataset_type == "grain":
     return checkpoint_manager.save(
         step,
         args=orbax.checkpoint.args.Composite(
@@ -226,7 +233,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   )
   one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
   xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
-  xent = nn.with_logical_constraint(xent, ("activation_batch", "activation_length"))
+  xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
   # Mask out paddings at the end of each example.
   xent = xent * (data["targets_segmentation"] != 0)
   total_loss = jnp.sum(xent)
@@ -261,7 +268,7 @@ def train_step(model, config, state, data, dropout_rng):
   intermediate_outputs = aux["intermediate_outputs"]
 
   if config.gradient_clipping_threshold > 0:
-    grads, _ = optax.clip_by_global_norm(config.gradient_clipping_threshold).update(raw_grads, state, None)
+    grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
   else:
     grads = raw_grads
   new_state = state.apply_gradients(grads=grads)
@@ -339,15 +346,7 @@ def setup_mesh_and_model(config):
 
   init_rng = random.PRNGKey(config.init_weights_seed)
   writer = max_utils.initialize_summary_writer(config)
-  logger = checkpointing.setup_checkpoint_logger(config)
-  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      config.checkpoint_dir,
-      config.enable_checkpointing,
-      config.async_checkpointing,
-      config.checkpoint_period,
-      config.dataset_type,
-      logger,
-  )
+
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
@@ -357,6 +356,32 @@ def setup_mesh_and_model(config):
   model = Transformer(config, mesh, quant=quant)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
+
+  if config.enable_emergency_checkpoint:
+    abstract_state, _, _ = max_utils.get_abstract_state(
+      model, tx, config, init_rng, mesh, is_training=True
+    )
+    checkpoint_manager = (
+      checkpointing.create_orbax_emergency_checkpoint_manager(
+          config.local_checkpoint_directory,
+          config.checkpoint_dir,
+          mesh,
+          abstract_state,
+          config.local_checkpoint_period,
+          config.checkpoint_period,
+      )
+    )
+  else:
+    logger = checkpointing.setup_checkpoint_logger(config)
+    checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+        config.checkpoint_dir,
+        config.enable_checkpointing,
+        config.async_checkpointing,
+        config.checkpoint_period,
+        config.dataset_type,
+        logger,
+    )
+
   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
 
 
@@ -386,7 +411,12 @@ def setup_train_loop(config):
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
 
-  maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh)
+  if config.using_pipeline_parallelism:
+    # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
+    params_sharded_tolerance=0.1
+  else:
+    params_sharded_tolerance=0.02
+  maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, tolerance=params_sharded_tolerance)
 
   return (
       init_rng,
@@ -487,16 +517,16 @@ def train_loop(config, state=None):
 
   start_step = get_first_step(state)  # this is the start_step for training
   first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
-  if config.enable_profiler and first_profiling_step >= config.steps:
+  if config.profiler != "" and first_profiling_step >= config.steps:
     raise ValueError("Profiling requested but initial profiling step set past training final step")
   last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1, first_profiling_step, config.steps - 1)
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
-
+  prof = profiler.Profiler(config)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
-      max_utils.activate_profiler(config)
+      prof.activate()
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       example_batch = load_next_batch(data_iterator, example_batch, config)
@@ -533,11 +563,11 @@ def train_loop(config, state=None):
       max_logging.log(f"average loss after {step=}: {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
       if eval_loss <= config.target_eval_loss:
         max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
-        max_utils.deactivate_profiler(config)
+        prof.deactivate()
         break
 
     if step == last_profiling_step:
-      max_utils.deactivate_profiler(config)
+      prof.deactivate()
 
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()

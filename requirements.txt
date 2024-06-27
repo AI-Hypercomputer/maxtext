@@ -1,9 +1,9 @@
-jax>=0.4.23
-jaxlib>=0.4.23
-orbax-checkpoint>=0.5.11
+jax>=0.4.30
+jaxlib>=0.4.30
+orbax-checkpoint>=0.5.20
 absl-py
 array-record
-aqtp
+aqtp==0.7.4
 cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
 datasets
@@ -27,7 +27,8 @@ tensorflow>=2.13.0
 tensorflow-datasets
 tensorboardx
 tensorboard-plugin-profile
+tiktoken
 transformers
-git+https://github.com/mlperf/logging.git
+mlperf-logging@git+https://github.com/mlperf/logging.git
 google-jetstream
 jsonlines

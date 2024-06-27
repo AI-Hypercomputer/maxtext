@@ -18,6 +18,7 @@ limitations under the License.
 """Utils that are only interesting to MaxText. """
 
 import jax
+import optax
 import max_utils
 from jax.sharding import PartitionSpec as P
 from jax.experimental.serialize_executable import deserialize_and_load
@@ -27,6 +28,7 @@ import pickle
 import functools
 from input_pipeline import input_pipeline_interface
 
+OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
 def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config):
   """Get the shardings (both state and data) for train_step"""
@@ -107,7 +109,7 @@ def calculate_tflops_training_per_device(config, log=True):
   if config.num_experts > 1:
     # MoE: brute force implementation
     gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
-    total_ffn_flops = gate_flops + config.num_experts * total_ffn_flops
+    total_ffn_flops = gate_flops + config.num_experts_per_tok * total_ffn_flops
 
   qkv_flops = (
       2
@@ -192,7 +194,7 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance=0.02):
   """
   total_num_params = max_utils.calculate_num_params_from_pytree(params)
   product_num_devices_for_weight_sharding = 1
-  for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor"]:
+  for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor", "stage"]:
     product_num_devices_for_weight_sharding *= mesh.shape[axis]
   total_num_params_per_chip = max_utils.calculate_total_params_per_chip(params)
   perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
@@ -203,3 +205,26 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance=0.02):
   assert total_num_params_per_chip / perfectly_sharded_params_per_chip - 1 < tolerance, (
       f"Number of unsharded parameters exceeds tolerance {tolerance * 100}% " "of total parameters."
   )
+
+def apply_gradient_clipping(raw_grads, state, clipping_threshold):
+  """Applies gradient clipping to raw gradients, with special handing for FLAX fp8 stats.
+
+  Args:
+    raw_grads: A pytree of raw gradients.
+    state: The current optimizer state.
+    clipping_threshold: The gradient clipping threshold.
+
+  Returns:
+    A pytree of clipped gradients.
+  """
+  gradient_clip_transformation = optax.clip_by_global_norm(clipping_threshold)
+  if OVERWRITE_WITH_GRADIENT in raw_grads:
+    # Scales + Amax History for Delayed Tensor Scaling SHOULD NOT be clipped or affect clipping
+    fp8_stats = raw_grads.pop(OVERWRITE_WITH_GRADIENT)
+    grads, _ = gradient_clip_transformation.update(raw_grads, state, None)
+    grads[OVERWRITE_WITH_GRADIENT] = fp8_stats # pytype: disable=unsupported-operands
+    raw_grads[OVERWRITE_WITH_GRADIENT] = fp8_stats # pytype: disable=unsupported-operands
+  else:
+    grads, _ = gradient_clip_transformation.update(raw_grads, state, None)
+
+  return grads

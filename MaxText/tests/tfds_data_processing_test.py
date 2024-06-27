@@ -72,7 +72,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
   def _get_preprocessed_datasets(self):
     mesh_shape_1d = (len(jax.devices()),)
     mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), self.config.mesh_axes)
-    sp_tokenizer = input_pipeline_interface.get_tokenizer(self.config.tokenizer_path)
+    sp_tokenizer = input_pipeline_interface.get_tokenizer(self.config.tokenizer_path, add_bos = True, add_eos = False)
     train_iter, eval_iter, test_iter = _tfds_data_processing.preprocess_dataset(
         self.config, mesh, self.train_ds, self.eval_ds, sp_tokenizer
     )

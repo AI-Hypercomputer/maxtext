@@ -20,7 +20,7 @@ import sys
 import pyconfig
 
 import maxengine_config
-from jetstream.core import server_lib
+from jetstream.core import server_lib, config_lib
 
 # _PORT = flags.DEFINE_integer('port', 9000, 'port to listen on')
 # _THREADS = flags.DEFINE_integer(
@@ -37,6 +37,13 @@ def main(config):
   # No devices for local cpu test. A None for prefill and a None for generate.
   devices = server_lib.get_devices()
   server_config = maxengine_config.get_server_config("MaxtextInterleavedServer", config)
+
+  metrics_server_config : config_lib.MetricsServerConfig | None = None
+  if config.prometheus_port != 0:
+    metrics_server_config = config_lib.MetricsServerConfig(
+        port=config.prometheus_port
+      )
+
   # We separate credential from run so that we can unit test it with
   # local credentials.
   # TODO: Add grpc credentials for OSS.
@@ -45,6 +52,9 @@ def main(config):
       port=9000,
       config=server_config,
       devices=devices,
+      metrics_server_config=metrics_server_config,
+      enable_jax_profiler=config.enable_jax_profiler if config.enable_jax_profiler else False,
+      jax_profiler_port=config.jax_profiler_port if config.jax_profiler_port else 9999
   )
   jetstream_server.wait_for_termination()
 

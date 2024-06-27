@@ -1,0 +1,4 @@
+base_config: "base.yml"
+
+enable_jax_profiler: False
+jax_profiler_port: 9999

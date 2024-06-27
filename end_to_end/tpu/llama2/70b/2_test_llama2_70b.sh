@@ -5,7 +5,7 @@
 
 # The flow of this file is as follows:
 # 1. Run decoding, finetuning of Llama2-70B with the converted checkpoint obtained from end_to_end/tpu/llama2/70b/1_test_llama2_70b.sh. Also, run pretraining of Llama2-70B
-# 2. Convert the scanned checkpoint from step 1 into unscanned checkpoint format and run more efficient decoding.
+# 2. Run more efficient decoding with the unscanned checkpoint obtained from end_to_end/tpu/llama2/70b/1_test_llama2_70b.sh.
 # 3. Run decoding from the finetuned checkpoint from step 1
 
 

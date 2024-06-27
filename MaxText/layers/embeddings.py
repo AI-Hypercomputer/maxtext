@@ -82,7 +82,7 @@ class Embed(nn.Module):
       output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
     else:
       output = jnp.asarray(self.embedding, self.dtype)[inputs]
-    output = nn.with_logical_constraint(output, ("activation_batch", "activation_length", "activation_embed"))
+    output = nn.with_logical_constraint(output, ("activation_embed_and_logits_batch", "activation_length", "activation_embed"))
     return output
 
   def attend(self, query: Array) -> Array:
@@ -113,8 +113,8 @@ class RotaryEmbedding(nn.Module):
     embedding_dims: Dimension of the embedding to be generated.
   """
 
-  min_timescale: int = 1
-  max_timescale: int = 10_000
+  min_timescale: int
+  max_timescale: int
   embedding_dims: int = 0
   cast_as_fprop_dtype: bool = True
   fprop_dtype: DType = jnp.bfloat16
