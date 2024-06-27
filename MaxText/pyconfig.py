@@ -323,9 +323,7 @@ class _HyperParameters:
     raw_keys["diloco_num_workers"] = diloco_num_workers(raw_keys)
     if raw_keys["diloco_num_workers"] > 1:
       assert raw_keys["diloco_sync_period"] > 0, f"diloco_sync_period must be positive when using DiLoCo"
-      # Adjust data sharding to reflect DiLoCo shaping. Input data will have shape
-      # NumClients x StepsBetweenSyncs x ClientBatch x Sequence
-      raw_keys["data_sharding"] = ["client", None, *raw_keys["data_sharding"]]
+      assert raw_keys["steps"]
 
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys["global_parameter_scale"])
     raw_keys["emb_dim"] = 2**emb_scale * raw_keys["base_emb_dim"]
@@ -480,6 +478,9 @@ def get_individual_scales(scale):
 def calculate_global_batch_sizes(raw_keys):
   """Calculates target global batch size from target devices and per_device_batch"""
   per_device_batch_size = raw_keys["per_device_batch_size"]
+  if raw_keys["diloco_num_workers"] > 0:
+    # Scale the batch size per outer step by the number of inner optimization steps to run.
+    per_device_batch_size *= raw_keys["diloco_sync_period"]
   expansion_factor_real_data = raw_keys["expansion_factor_real_data"]
   num_devices = get_num_target_devices(raw_keys)
   if per_device_batch_size < 1.0:

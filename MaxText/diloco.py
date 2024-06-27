@@ -53,9 +53,15 @@ def get_diloco_train_step(config, train_step):
     start_step_in_clients = drjax.broadcast(state.step)
     #init_rng_in_clients = drjax.broadcast(init_rng)
 
+    # Shape must be NumClients x StepsBetweenSync x ClientBatch x Seq.
+    # DrJax will map over the NumClients axis, and DiLoCo will scan over the
+    # StepsBetweenSync axis.
+    data_shape = (config.diloco_num_workers, config.diloco_sync_period, config.global_batch_size_to_load // config.diloco_num_workers // config.diloco_sync_period, -1)
+    data_in_clients = jax.tree_map(lambda x: x.reshape(data_shape), data)
+
     # Run optimization locally on each worker. The final state within each worker
     # is discarded, only the aggregate change from each worker is reported.
-    local_grads, local_metrics = drjax.map_fn(worker_round, (start_step_in_clients, params_in_clients, data))
+    local_grads, local_metrics = drjax.map_fn(worker_round, (start_step_in_clients, params_in_clients, data_in_clients))
 
     # DiLoCo Algorithm
     # Average the outer gradients across workers

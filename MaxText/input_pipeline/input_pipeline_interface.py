@@ -52,13 +52,6 @@ class SyntheticDataIterator:
   def raw_generate_synthetic_data(config):
     """Generates a single batch of synthetic data"""
     data_shape = (config.global_batch_size_to_load, config.max_target_length)
-    if config.diloco_num_workers> 1:
-      # Generate an input of shape NumClients x StepsBetweenSyncs x ClientBatch x Sequence
-      num_workers = config.diloco_num_workers
-      steps_per_sync = config.diloco_sync_period
-      client_batch = config.global_batch_size_to_load // config.diloco_num_workers
-      seq = config.max_target_length
-      data_shape = (num_workers, steps_per_sync, client_batch, seq)
     output = {}
     output["inputs"] = jax.numpy.zeros(data_shape, dtype=jax.numpy.int32)
     output["inputs_position"] = jax.numpy.zeros(data_shape, dtype=jax.numpy.int32)
