@@ -23,6 +23,7 @@ limitations under the License.
 import datetime
 import os
 import sys
+from etils import epath
 import functools
 
 from typing import Sequence
@@ -350,6 +351,9 @@ def setup_mesh_and_model(config):
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
+
+  if emergency_checkpoint_manager.should_restore_mesh_from_metadata(epath.Path(config.checkpoint_dir)):
+    mesh = emergency_checkpoint_manager.consistent_restore_mesh_from_metadata(epath.Path(config.checkpoint_dir), mesh)
 
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
