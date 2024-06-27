@@ -25,6 +25,7 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
+from typing import Tuple, Sequence
 
 MAX_INT8 = 127.5
 
@@ -40,9 +41,19 @@ CACHE_KV = common_types.CACHE_KV
 class Quantization:
   """Base class for quantization configurations"""
 
-  def dot_general_cls(self):
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Placeholder for dot_general implementation in subclasses."""
     pass
+
+
+def _rhs_axis_metadata_wrapper(x: jnp.ndarray, no_sharding_axis: Sequence[int], mesh_axes: Tuple[str, ...], is_tiled: bool):
+  mesh_axes = list(mesh_axes)
+  assert is_tiled == False
+  if mesh_axes is not None and len(mesh_axes) > 0:
+    for no_shard_idx in no_sharding_axis:
+      mesh_axes[no_shard_idx] = None
+
+  return nn.with_logical_partitioning((lambda: x), mesh_axes)()
 
 
 @dataclass
@@ -52,14 +63,20 @@ class AqtQuantization:
   quant_dg: aqt_config.DotGeneral
   quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
 
-  def dot_general_cls(self):
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
+    rhs_axis_metadata_wrapper = None
+    if self.quant_mode != aqt_flax.QuantMode.CONVERT:
+      rhs_axis_metadata_wrapper = functools.partial(
+        _rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=False)
     aqt_dg_cls = functools.partial(
         aqt_flax.AqtDotGeneral,
         self.quant_dg,
         rhs_quant_mode=self.quant_mode,
         lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
         rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
+        rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
+        use_legacy_freezer=False,
     )
     return aqt_dg_cls
 
@@ -82,7 +99,7 @@ class Fp8Quantization(Quantization):
 
   quant_mode = "train"
 
-  def dot_general_cls(self):
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
     return nn.Fp8DotGeneralOp
 
