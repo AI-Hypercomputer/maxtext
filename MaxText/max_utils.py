@@ -80,7 +80,7 @@ def get_tpu_env_value(key):
     tpu_env_data = get_metadata('tpu-env')[0]
     key_value_pairs = tpu_env_data.split('\n')
     for key_value_pair in key_value_pairs:
-      # Typical line is MEGASCALE_NUM_SLICES: '2'
+      # Typical line is MEGASCALE_NU  M_SLICES: '2'
       if ':' in key_value_pair:
         row_key, value = re.split(':', key_value_pair, 1)
         row_key = row_key.strip()
@@ -248,6 +248,8 @@ def maybe_initialize_jax_distributed_system(raw_keys):
 
   For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
   """
+  if not raw_keys["restore_emergency_checkpoint"]:
+      delete_all_local_things(dir=DIR)
   
   if (
       raw_keys["enable_checkpointing"] and raw_keys["async_checkpointing"] and
@@ -255,7 +257,8 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   ) or raw_keys["hardware"] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
     DIR = raw_keys["local_checkpoint_dir"]
-    delete_all_local_things(dir=DIR)
+
+
     ID_FILE = "id_file.txt"
     files = os.listdir(DIR)
     if ID_FILE in files:
