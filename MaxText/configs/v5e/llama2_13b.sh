@@ -1,4 +1,4 @@
-# Llama2 70B model.
+# Llama2 13B model.
 # This config will work out of the box for any number of v5e-256 slices.
 #
 # Command Flags:
@@ -8,10 +8,10 @@
 # PLATFORM (Optional, can be "gke" or "gce", default is "gce")
 #
 # Example to invoke this script:
-# bash MaxText/configs/v5e/llama2_70b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>" PLATFORM="gke"
+# bash MaxText/configs/v5e/llama2_13b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>" PLATFORM="gke"
 #
 # Example to AOT compile:
-# bash MaxText/configs/v5e/llama2_70b.sh EXECUTABLE=train_compile.py M_COMPILE_TOPOLOGY=v5e-256 M_COMPILE_TOPOLOGY_NUM_SLICES=2
+# bash MaxText/configs/v5e/llama2_13b.sh EXECUTABLE=train_compile.py M_COMPILE_TOPOLOGY=v5e-256 M_COMPILE_TOPOLOGY_NUM_SLICES=2
 
 
 # Stop execution if any command exits with error
@@ -40,7 +40,7 @@ bash preflight.sh PLATFORM=$PLATFORM
 # Train
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
 
-python MaxText/$EXECUTABLE MaxText/configs/base.yml model_name=llama2-70b\
+python MaxText/$EXECUTABLE MaxText/configs/base.yml model_name=llama2-13b\
   base_output_directory=$OUTPUT_PATH dataset_path=${DATASET_PATH}\
-  tokenizer_path=assets/tokenizer.llama2 per_device_batch_size=2 remat_policy=qkv_proj_offloaded\
+  tokenizer_path=assets/tokenizer.llama2 per_device_batch_size=8 remat_policy=qkv_proj_offloaded\
   steps=30 enable_checkpointing=false use_iota_embed=true
