@@ -175,7 +175,7 @@ jax_cache_dir: "~/jax_cache"
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
 # Parallelism
-mesh_axes: ['client', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']
+mesh_axes: ['clients', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose',]],
                        # For pipeline parallelism the pre and post decoder layer tensors' batch dimension is sharded by stages.
@@ -210,7 +210,7 @@ logical_axis_rules: [
                       ['cache_sequence', []],
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
-data_sharding: [['client', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']]
+data_sharding: [['clients', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'autoregressive']]
 
 # One axis for each parallelism type may hold a placeholder (-1)
 # value to auto-shard based on available slices and devices.

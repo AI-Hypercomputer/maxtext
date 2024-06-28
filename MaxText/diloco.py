@@ -4,8 +4,12 @@ import max_logging
 import optimizers
 from flax.training import train_state
 
+from functools import partial
+from jax.experimental.shard_map import shard_map
+from jax.sharding import PartitionSpec as P
 
-def get_diloco_train_step(config, train_step):
+
+def get_diloco_train_step(config, mesh, train_step):
   # Defer import until needed
   import drjax
 
@@ -21,7 +25,7 @@ def get_diloco_train_step(config, train_step):
     """
 
     def scan_fn(carry, data):
-      """ Executes a single inner optimization step.  """
+      """ Executes a single inner optimization step. """
       state, step = carry
       nextrng = jax.jit(jax.random.fold_in)(dropout_rng, step)
       state, metrics = train_step(model, config, state, data, nextrng)
@@ -48,20 +52,25 @@ def get_diloco_train_step(config, train_step):
 
     max_logging.log('Running training with DiLoCo')
 
+    # Reshard the inputs to the appropriate shape. We reshape each device's data
+    # locally using shard_map, since reshaping the global tensor will incur
+    # cross-worker collectives due to device placement of the shards.
+    # TODO(jonbolin): Can this be avoided?
+    @partial(shard_map, mesh=mesh, in_specs=P(*config.data_sharding),
+             out_specs=P('clients', None, config.data_sharding[0][1:]))
+    def reshape_inputs(inputs):
+      # Within shard_map, we are reshaping a single device's input data.
+      # Global shape will be NumClients x StepsBetweenSync x ClientBatch x Seq
+      return inputs.reshape((1, config.diloco_sync_period, int(config.per_device_batch_size), -1))
+
     # Broadcast model parameters
     params_in_clients = drjax.broadcast(state.params)
     start_step_in_clients = drjax.broadcast(state.step)
-    #init_rng_in_clients = drjax.broadcast(init_rng)
-
-    # Shape must be NumClients x StepsBetweenSync x ClientBatch x Seq.
-    # DrJax will map over the NumClients axis, and DiLoCo will scan over the
-    # StepsBetweenSync axis.
-    data_shape = (config.diloco_num_workers, config.diloco_sync_period, config.global_batch_size_to_load // config.diloco_num_workers // config.diloco_sync_period, -1)
-    data_in_clients = jax.tree_map(lambda x: x.reshape(data_shape), data)
+    reshaped_data = jax.tree_map(reshape_inputs, data)
 
     # Run optimization locally on each worker. The final state within each worker
     # is discarded, only the aggregate change from each worker is reported.
-    local_grads, local_metrics = drjax.map_fn(worker_round, (start_step_in_clients, params_in_clients, data_in_clients))
+    local_grads, local_metrics = drjax.map_fn(worker_round, (start_step_in_clients, params_in_clients, reshaped_data))
 
     # DiLoCo Algorithm
     # Average the outer gradients across workers

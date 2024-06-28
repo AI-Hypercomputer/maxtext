@@ -33,7 +33,7 @@ OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
 def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config):
   """Get the shardings (both state and data) for train_step"""
-  train_step = get_diloco_train_step(config, train_step) if config.diloco_num_workers > 1 else train_step 
+  train_step = get_diloco_train_step(config, mesh, train_step) if config.diloco_num_workers > 1 else train_step
   functional_train = get_functional_train_step(train_step, model, config)
   functional_train.__name__ = "train_step"
   data_pspec = P(*config.data_sharding)
