@@ -139,7 +139,7 @@ def load_state_if_possible(
         array_handler = orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(
           replica_axis_index=0,
           # primary_replica_id=2,
-          memory_limit_bytes=1024 * 1024 * 100  # 100 MB limit
+          # memory_limit_bytes=1024 * 1024 * 100  # 100 MB limit
           )
         orbax.checkpoint.type_handlers.register_type_handler(
             jax.Array,
@@ -152,9 +152,11 @@ def load_state_if_possible(
         # orbax.checkpoint.type_handlers.register_type_handler(
         #     jax.Array, orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(), override=True
         # )
-
+        # import pdb; pdb.set_trace()
         replica_devices = _replica_devices(mesh.devices, replica_axis_index)
+        print('+++++++++ replica devices', replica_devices)
         replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
+        print('+++++++++ replica mesh', replica_mesh)
         single_replica_sharding = jax.sharding.NamedSharding(replica_mesh, pspec)
         return orbax.checkpoint.type_handlers.SingleReplicaArrayRestoreArgs(
             sharding=jax.sharding.NamedSharding(mesh, pspec),

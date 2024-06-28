@@ -4,22 +4,25 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 import numpy as np
 
-print('initializing....')
-jax.distributed.initialize()
-print('finished initialize')
+print('initializing....', flush=True)
+# jax.distributed.initialize()
+print('devices', jax.devices())
+print('local:', jax.local_devices())
+print('finished initialize', flush=True)
+print('device_count:', jax.device_count(), flush=True)
 mesh_rows = 2
 mesh_cols =  jax.device_count() // 2
-print('jax.device_count', jax.device_count())
-print('mesh columns', mesh_cols)
+# print('jax.device_count', jax.device_count(), flush=True)
+print('mesh columns', mesh_cols, flush=True)
 
 global_shape = (4, 8)
 mesh = Mesh(
   np.array(jax.devices()).reshape(mesh_rows, mesh_cols),
   ('x', 'y'))
 
-print('mesh.shape', mesh.shape)
-print('mesh', mesh)
-
+# print('mesh.shape', mesh.shape, flush=True)
+print('mesh', mesh, flush=True)
+print('mesh.devices', mesh.devices)
 
 sharding = jax.sharding.NamedSharding(mesh, P(('x', 'y'),))
 rows_per_device = 2
@@ -33,15 +36,19 @@ per_host_data = per_host_generator() # replace with your own per-host data pipel
 
 
 global_shape = (rows_per_device * len(sharding.device_set), ) + per_device_shape[1:]
-print('sharding device_set', sharding.device_set)
-print('global shape', rows_per_device * len(sharding.device_set), per_device_shape[1:], global_shape)
-print('mesh.devices', mesh.devices)
-print('mesh.local_devices', mesh.local_devices)
+print('sharding device_set', sharding.device_set, flush=True)
+print('global shape', rows_per_device * len(sharding.device_set), per_device_shape[1:], global_shape, flush=True)
+print('mesh.devices', mesh.devices, flush=True)
+print('mesh.local_devices', mesh.local_devices, flush=True)
 per_device_data = np.split(per_host_data, len(mesh.local_devices), axis = 0) # per device data, but on host
-print('per device data, but on host', per_device_data)
+print('per device data, but on host', per_device_data, flush=True)
 per_device_data_on_device = jax.device_put(per_device_data, mesh.local_devices) # per device data, now on device
-print('per device data, now on device', per_device_data_on_device)
+print('per device data, now on device', per_device_data_on_device, flush=True)
 output_global_array = jax.make_array_from_single_device_arrays(global_shape, sharding, per_device_data_on_device)
+print('output_global_array shard 0', output_global_array.addressable_data(0), flush=True)
 jax.debug.visualize_array_sharding(output_global_array)
-print(output_global_array.addressable_data(0).shape == per_device_shape)
-print(output_global_array.shape == global_shape)
+# print()
+print(output_global_array.addressable_data(0).shape,
+      output_global_array.addressable_data(0).shape == per_device_shape,
+      flush=True)
+print(output_global_array.shape, output_global_array.shape == global_shape, flush=True)
