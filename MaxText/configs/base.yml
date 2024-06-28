@@ -68,6 +68,7 @@ quantize_kvcache: False
 # Default to "heads_and_dkv" for faster compution, kv_quant_axis is not used when quantize_kvcache is False
 #   - "dkv" is expected with better accuracy but degraded computation
 kv_quant_axis: "heads_and_dkv"
+kv_quant_dtype: "int8"
 checkpoint_is_quantized: False # Set to True if reading from a saved aqt quantized checkpoint
 # Saves params quantized on fly at following path
 save_quantized_params_path: ""

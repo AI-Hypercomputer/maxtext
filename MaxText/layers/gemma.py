@@ -47,6 +47,7 @@ DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
 nd_dense_init = initializers.nd_dense_init
 Quant = quantizations.AqtQuantization
+KVQuant = quantizations.KVQuant
 
 
 # Decoder and Model definitions
@@ -93,7 +94,7 @@ class GemmaDecoderLayer(nn.Module):
         float32_qk_product=True,
         float32_logits=True,
         quant=self.quant,
-        quantize_kvcache=cfg.quantize_kvcache,
+        kv_quant=quantizations.configure_kv_quant(cfg),
     )
 
     attention_lnx = attention_layer(

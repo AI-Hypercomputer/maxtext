@@ -53,6 +53,7 @@ NdInitializer = initializers.NdInitializer
 Initializer = initializers.Initializer
 nd_dense_init = initializers.nd_dense_init
 Quant = quantizations.AqtQuantization
+KVQuant = quantizations.KVQuant
 
 
 # -----------------------------------------
@@ -144,12 +145,14 @@ class Gpt3MultiHeadAttention(nn.Module):
   float32_logits: bool = True  # cast logits in float32 for stability.
   fused_qkv: bool = True
   quant: Optional[Quant] = None
+  kv_quant: Optional[KVQuant] = None
   use_bias: bool = True
 
   query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
   key_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
   value_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
   out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+
 
   def qkv_projection(self, inputs: Array, proj_name: str):
     """Fused QKV projection"""
@@ -233,7 +236,7 @@ class Gpt3MultiHeadAttention(nn.Module):
         float32_qk_product=self.float32_qk_product,
         float32_logits=self.float32_logits,
         quant=self.quant,
-        quantize_kvcache=self.config.quantize_kvcache,
+        kv_quant=self.kv_quant,
         num_query_heads=self.num_heads,
         num_kv_heads=self.num_heads,
         dtype=self.dtype,
@@ -306,6 +309,7 @@ class Gpt3DecoderLayer(nn.Module):
         fused_qkv=cfg.fused_qkv,
         use_bias=True,
         quant=self.quant,
+        kv_quant=quantizations.configure_kv_quant(cfg)
     )
 
     attention_lnx = attention_layer(
