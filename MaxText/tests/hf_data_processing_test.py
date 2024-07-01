@@ -40,31 +40,19 @@ class HfDataProcessingTest(unittest.TestCase):
         base_output_directory="gs://max-experiments/",
         hf_path="parquet",
         hf_data_dir="",
-        hf_data_files="gs://maxtext-dataset/hf/c4/c4-train-00000-of-01637.parquet",
+        hf_train_files="gs://maxtext-dataset/hf/c4/c4-train-00000-of-01637.parquet",
         tokenizer_path="google-t5/t5-large",
         enable_checkpointing=False,
     )
     self.config = pyconfig.config
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
+    self.process_indices = input_pipeline_interface.get_process_loading_real_data(self.config, self.mesh)
+    self.train_iter = self._get_train_iterator()
 
-    self.train_ds = self._get_datasets()
-    self.train_iter = self._get_preprocessed_datasets()
-
-  def _get_datasets(self):
-    train_ds, _ = _hf_data_processing.get_datasets(config=self.config)
-    return train_ds
-
-  def _get_preprocessed_datasets(self):
-    process_indices = input_pipeline_interface.get_process_loading_real_data(self.config, self.mesh)
-    print("Sharding dataset in ", len(process_indices), " shards")
-    train_iter, _, _ = _hf_data_processing.preprocess_dataset(
-        self.config,
-        process_indices.index(jax.process_index()),
-        len(process_indices),
-        self.mesh,
-        self.train_ds,
-    )
+  def _get_train_iterator(self):
+    train_iter, _ = _hf_data_processing.make_hf_iterator(
+      self.config, self.mesh, True, True, self.process_indices)
     return train_iter
 
   def test_train_ds(self):
@@ -86,8 +74,7 @@ class HfDataProcessingTest(unittest.TestCase):
 
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
-    self.train_ds = self._get_datasets()
-    train_iter = self._get_preprocessed_datasets()
+    train_iter = self._get_train_iterator()
     batch2 = next(train_iter)
     self.assertTrue((batch1["inputs"] == batch2["inputs"]).all())
     self.assertTrue((batch1["targets"] == batch2["targets"]).all())

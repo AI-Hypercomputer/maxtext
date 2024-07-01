@@ -31,7 +31,7 @@ then
     echo "Mounting $DATASET_PATH to /tmp/gcsfuse/"
     bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$DATASET_PATH MOUNT_PATH=/tmp/gcsfuse/
     DATASET_PATH=/tmp/gcsfuse/
-    CMD_DATA=" grain_worker_count=0 dataset_type=grain grain_data_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*"
+    CMD_DATA=" grain_worker_count=0 dataset_type=grain grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*"
 fi
 
 #Train

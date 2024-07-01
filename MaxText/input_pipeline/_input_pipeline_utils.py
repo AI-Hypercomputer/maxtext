@@ -25,13 +25,46 @@ import grain.python as grain
 import numpy as np
 import tensorflow as tf
 import max_logging
+import tokenizer
 
 Features = Dict[str, tf.Tensor]
+AUTOTUNE = tf.data.experimental.AUTOTUNE
 
+########## Functions used by TFDS pipeline
 
-def tokenization(example, tokenizer, max_length):
+def normalize_features(ds):
+  """Normalize text feature keys."""
+
+  def _normalize_features(features):
+    features["inputs"] = features.pop("text")
+    features["targets"] = features["inputs"]
+    return features
+
+  return ds.map(_normalize_features, num_parallel_calls=AUTOTUNE)
+
+def get_tokenizer(tokenizer_path, add_bos, add_eos):
+  # Load tokenizer
+  tokenizer_model = tokenizer.build_tokenizer(tokenizer_path, add_bos, add_eos)
+  return tokenizer_model
+
+def filter_keys(record):
+  return {"inputs": record["inputs"], "targets": record["targets"]}
+
+def truncate_to_max_allowable_length(x, max_length):
+  x["inputs"] = x["inputs"][:max_length]
+  x["targets"] = x["targets"][:max_length]
+  return x
+
+def shift_data_by_truncation(x):
+  x["inputs"] = x["inputs"][:-1]
+  x["targets"] = x["targets"][1:]
+  return x
+
+########## Functions used by HF pipeline
+
+def tokenization(example, hf_tokenizer, max_length):
   """Tokenize a HuggingFace dataset"""
-  return tokenizer(example["text"], truncation=True, max_length=max_length)
+  return hf_tokenizer(example["text"], truncation=True, max_length=max_length)
 
 
 @dataclasses.dataclass
@@ -97,6 +130,7 @@ class HFDataSource(grain.RandomAccessDataSource):
       except StopIteration:
         self._update_shard(idx)
 
+########## Functions used by Grain pipeline
 
 @dataclasses.dataclass
 class ParseFeatures(grain.MapTransform):

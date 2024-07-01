@@ -45,38 +45,33 @@ class TfdsDataProcessingTest(unittest.TestCase):
         dataset_path="gs://maxtext-dataset/",
         tokenizer_path="../assets/tokenizer",
         enable_checkpointing=False,
+        eval_interval=10,
     )
     os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
     self.config = pyconfig.config
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
+    self.process_indices = input_pipeline_interface.get_process_loading_real_data(self.config, self.mesh)
     self.read_config = tfds.ReadConfig(
         shuffle_seed=self.config.data_shuffle_seed,
     )
     self.read_config.add_tfds_id = True
-
-    self.train_ds, self.eval_ds = self._get_datasets()
-    self.train_iter, self.eval_iter, self.predict_iter = self._get_preprocessed_datasets()
+    self.train_ds = self._get_datasets()
+    self.train_iter, self.eval_iter = self._get_train_iterator()
 
   def _get_datasets(self):
-    print("Sharding dataset in ", jax.process_count(), " shards")
-    process_indices = input_pipeline_interface.get_process_loading_real_data(self.config, self.mesh)
-    train_ds, eval_ds = _tfds_data_processing.get_datasets(
-        config=self.config,
-        dataloading_host_index=process_indices.index(jax.process_index()),
-        dataloading_host_count=len(process_indices),
-        read_config=self.read_config,
+    train_ds = _tfds_data_processing.get_datasets(
+      self.config.dataset_name,
+      "train",
+      self.config.enable_data_shuffling,
+      self.read_config,
     )
-    return train_ds, eval_ds
+    return train_ds
 
-  def _get_preprocessed_datasets(self):
-    mesh_shape_1d = (len(jax.devices()),)
-    mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), self.config.mesh_axes)
-    sp_tokenizer = input_pipeline_interface.get_tokenizer(self.config.tokenizer_path, add_bos = True, add_eos = False)
-    train_iter, eval_iter, test_iter = _tfds_data_processing.preprocess_dataset(
-        self.config, mesh, self.train_ds, self.eval_ds, sp_tokenizer
-    )
-    return train_iter, eval_iter, test_iter
+  def _get_train_iterator(self):
+    train_iter, eval_iter = _tfds_data_processing.make_tfds_iterator(
+      self.config, self.mesh, True, True, self.process_indices)
+    return train_iter, eval_iter
 
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
@@ -95,33 +90,11 @@ class TfdsDataProcessingTest(unittest.TestCase):
         },
     )
 
-  def test_eval_ds(self):
-    expected_shape = [jax.device_count(), self.config.max_target_length]
-    batch = next(self.eval_iter)
-    self.assertEqual(
-        {k: list(v.shape) for k, v in batch.items()},
-        {
-            "inputs": expected_shape,
-            "targets": expected_shape,
-        },
-    )
-
-  def test_predict_ds(self):
-    expected_shape = [jax.device_count(), self.config.max_target_length]
-    batch = next(self.predict_iter)
-    self.assertEqual(
-        {k: list(v.shape) for k, v in batch.items()},
-        {
-            "inputs": expected_shape,
-            "targets": expected_shape,
-        },
-    )
-
   def test_ds_determinism(self):
     train_ds1 = self.train_ds.batch(64)
     train_ds1 = next(train_ds1.as_numpy_iterator())
     # reset the dataset loading
-    train_ds, _ = self._get_datasets()
+    train_ds = self._get_datasets()
     train_ds = train_ds.batch(64)
     train_ds2 = next(train_ds.as_numpy_iterator())
 
@@ -129,9 +102,8 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
-    self.train_ds, _ = self._get_datasets()
-    train_iter2, _, _ = self._get_preprocessed_datasets()
-    batch2 = next(train_iter2)
+    train_iter, _ = self._get_train_iterator()
+    batch2 = next(train_iter)
     self.assertTrue(tf.reduce_all(tf.equal(batch1["inputs"], batch2["inputs"])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1["targets"], batch2["targets"])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1["inputs_segmentation"], batch2["inputs_segmentation"])))

@@ -32,7 +32,11 @@ The HuggingFace pipeline supports streaming directly from HuggingFace Hub, or fr
 dataset_type: hf
 hf_path: 'allenai/c4'  # for using https://huggingface.co/datasets/allenai/c4
 hf_data_dir: 'en'
-hf_data_files: ''
+hf_train_files: ''
+# set eval_interval > 0 to use the specified eval dataset, otherwise, only metrics on the train set will be calculated.
+eval_interval: 10000
+hf_eval_split: 'validation'
+hf_eval_files: ''
 # for HF pipeline, tokenizer_path can be a path in HuggingFace Hub, 
 # or a local path containing tokenizer in a format supported by transformers.AutoTokenizer
 tokenizer_path: 'google-t5/t5-large'  # for using https://huggingface.co/google-t5/t5-large
@@ -44,7 +48,11 @@ hf_access_token: ''  # provide token if using gated dataset or tokenizer
 dataset_type: hf
 hf_path: 'parquet'  # or json, arrow, etc.
 hf_data_dir: ''
-hf_data_files: 'gs://<bucket>/<folder>/*-train-*.parquet'  # match the train files
+hf_train_files: 'gs://<bucket>/<folder>/*-train-*.parquet'   # match the train files
+# set eval_interval > 0 to use the specified eval dataset. Otherwise, only metrics on the train set will be calculated.
+eval_interval: 10000
+hf_eval_split: ''
+hf_eval_files: 'gs://<bucket>/<folder>/*-validation-*.parquet'  # match the val files
 # for HF pipeline, tokenizer_path can be a path in HuggingFace Hub, 
 # or a local path containing tokenizer in a format supported by transformers.AutoTokenizer
 tokenizer_path: 'google-t5/t5-large'  # for using https://huggingface.co/google-t5/t5-large
@@ -74,7 +82,7 @@ Grain ensures determinism in data input pipelines by saving the pipeline's state
 ```
 bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$BUCKET_NAME MOUNT_PATH=$MOUNT_PATH
 ```
-3. Set `dataset_type=grain` and set `grain_data_files` to match the ArrayRecord files via a local path since the bucket has been mounted.
+3. Set `dataset_type=grain` and set `grain_train_files` to match the ArrayRecord files via a local path since the bucket has been mounted.
 4. Tune `grain_worker_count` for performance. This parameter controls the number of child process used by Grain (more details in [behind_the_scene](https://github.com/google/grain/blob/main/docs/behind_the_scenes.md), [code](https://github.com/google/grain/blob/main/grain/_src/python/grain_pool.py)). If you use a large number of workers, please check your config for gcsfuse in [setup_gcsfuse.sh](https://github.com/google/maxtext/blob/main/setup_gcsfuse.sh) to avoid gcsfuse throttling.
 5. Example command:
 ```
@@ -84,8 +92,14 @@ MOUNT_PATH=/tmp/gcsfuse && \
 python3 MaxText/train.py MaxText/configs/base.yml \
 run_name=<RUN_NAME> base_output_directory=gs://<MY_BUCKET>  \
 dataset_type=grain \
-grain_data_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record* \
+grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record* \
 grain_worker_count=2
+```
+6. Using validation set for eval
+When setting eval_interval > 0, eval will be run with a specified eval dataset. Example config:
+```
+eval_interval: 10000
+grain_eval_files: '/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-validation.array_record*'
 ```
 
 ### TFDS pipeline
@@ -98,6 +112,10 @@ bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
 ```
 dataset_type: tfds
 dataset_name: 'c4/en:3.0.1'
+# set eval_interval > 0 to use the specified eval dataset. Otherwise, only metrics on the train set will be calculated.
+eval_interval: 10000
+eval_dataset_name: 'c4/en:3.0.1'
+eval_split: 'validation'
 # TFDS input pipeline only supports tokenizer in spm format
 tokenizer_path: "assets/tokenizer.llama2"
 ```

@@ -34,7 +34,7 @@ then
     echo "Mounting $DATASET_PATH to /tmp/gcsfuse/"
     bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$DATASET_PATH MOUNT_PATH=/tmp/gcsfuse/
     DATASET_PATH=/tmp/gcsfuse/
-    CMD_DATA=" grain_data_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*"
+    CMD_DATA=" grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*"
 fi
 
 if [ "$DATASET_TYPE" == "hf" ]
@@ -42,7 +42,7 @@ then
     # We use a local copy of tokenizer from https://huggingface.co/meta-llama/Llama-2-7b-hf
     # Alternatively, you can set tokenizer_path="meta-llama/Llama-2-7b-hf" and hf_access_token="<your-token>" after gaining access through HF website.
     gsutil cp -r gs://maxtext-dataset/hf/llama2-tokenizer assets
-    CMD_DATA=" hf_path=parquet hf_data_files=gs://maxtext-dataset/hf/c4/c4-train-*.parquet dataset_type=hf tokenizer_path=assets/llama2-tokenizer"
+    CMD_DATA=" hf_path=parquet hf_train_files=gs://maxtext-dataset/hf/c4/c4-train-*.parquet dataset_type=hf tokenizer_path=assets/llama2-tokenizer"
 fi
 
 TRAIN_CMD="python3 MaxText/train.py MaxText/configs/base.yml\
