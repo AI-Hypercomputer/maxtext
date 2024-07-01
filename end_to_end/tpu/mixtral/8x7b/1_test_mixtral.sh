@@ -22,13 +22,9 @@ fi
 pip3 install torch
 gcloud storage cp -r gs://maxtext-external/mixtral-8x7B-v0.1-Instruct /tmp
 
-# Convert it to MaxText(orbax) format - scanned ckpt (for loop implementation)
+# Convert it to MaxText(orbax) format - scanned ckpt
 JAX_PLATFORMS=cpu python3 MaxText/llama_or_mistral_ckpt.py --base-model-path=/tmp/mixtral-8x7B-v0.1-Instruct --model-size=mixtral-8x7b --maxtext-model-path=${BASE_OUTPUT_PATH}${MODEL_VARIATION}/scanned_ckpt/
 echo "Wrote MaxText compatible scanned checkpoint to ${BASE_OUTPUT_PATH}${MODEL_VARIATION}/scanned_ckpt"
-
-# Convert it to MaxText(orbax) format - scanned ckpt (matmul implementation)
-JAX_PLATFORMS=cpu python3 MaxText/llama_or_mistral_ckpt.py --base-model-path=/tmp/mixtral-8x7B-v0.1-Instruct --model-size=mixtral-8x7b --maxtext-model-path=${BASE_OUTPUT_PATH}${MODEL_VARIATION}/matmul_scanned_ckpt/ --moe-matmul=True
-echo "Wrote MaxText compatible scanned checkpoint to ${BASE_OUTPUT_PATH}${MODEL_VARIATION}/matmul_scanned_ckpt"
 
 # Generate unscanned ckpt for efficient decoding test
 export SCANNED_CHECKPOINT=${BASE_OUTPUT_PATH}${MODEL_VARIATION}/scanned_ckpt/0/items
