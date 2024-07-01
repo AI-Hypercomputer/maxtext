@@ -81,7 +81,9 @@ class Embed(nn.Module):
       one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
       output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
     else:
+      # breakpoint()
       output = jnp.asarray(self.embedding, self.dtype)[inputs]
+      # breakpoint()
     output = nn.with_logical_constraint(output, ("activation_batch", "activation_length", "activation_embed"))
     return output
 

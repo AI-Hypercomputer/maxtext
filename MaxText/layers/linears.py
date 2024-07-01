@@ -147,6 +147,9 @@ class DenseGeneral(nn.Module):
 
     contract_ind = tuple(range(0, len(axis)))
     output = compute_dot_general(inputs, kernel, axis, contract_ind)
+    print(f"dense general: inputs: {inputs.shape}")
+    print(f"dense general: kernel: {kernel.shape}")
+    print(f"dense general: output: {output.shape}")
 
     if self.use_bias:
       bias_axes, bias_shape = self.kernel_axes[-len(features) :], kernel_shape[-len(features) :]
@@ -375,9 +378,9 @@ class MoeBlock(nn.Module):
 
   def call_gmm(self, inputs, gate_logits, config, w0_kernel, w1_kernel, wo_kernel):
     # TODO(ranran): update the static default tile_size
-    # tile_size = (512, 512, 512)
+    tile_size = (512, 1024, 1024)
 
-    tile_size = None
+    # tile_size = None
     # replicated_sharding = jax.sharding.NamedSharding(self.mesh, PartitionSpec(None))
 
     def gmm(inputs, kernel, group_sizes):
@@ -418,12 +421,13 @@ class MoeBlock(nn.Module):
     )
     def inner_fn(x, logits, w0, w1, wo):
       x, sorted_selected_experts, weights, group_sizes = self.permute(x, logits, config.emb_dim)
-
+      print(f"inner_fn")
       layer_w0 = gmm(x, w0, group_sizes)
       layer_w1 = gmm(x, w1, group_sizes)
       layer_act = _convert_to_activation_function(config.mlp_activations[0])(layer_w0)
       intermediate_layer = jnp.multiply(layer_act, layer_w1)
       intermediate_output = gmm(intermediate_layer, wo, group_sizes)
+      # breakpoint()
       output = self.unpermute(intermediate_output,
                               sorted_selected_experts,
                               weights)
@@ -434,6 +438,7 @@ class MoeBlock(nn.Module):
   def __call__(self, inputs):
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
+    print(f"gate inputs: {inputs.shape}")
     gate_logits = DenseGeneral(
             self.num_experts,
             dtype=self.dtype,
@@ -442,6 +447,7 @@ class MoeBlock(nn.Module):
             kernel_axes=self.kernel_axes,
             name="gate",
             quant=self.quant)(inputs)
+    
     
     top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     flattened_top_k_weights = top_k_weights.reshape(-1, self.num_experts_per_tok)

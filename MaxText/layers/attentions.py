@@ -920,6 +920,7 @@ class Attention(nn.Module):
       # pylint: disable=no-value-for-parameter
       return self.kernel_init(*args) / depth_scaling
 
+    print("query_projection")
     query_proj = DenseGeneral(
         features=(self.num_query_heads, self.head_dim),
         axis=-1,
@@ -949,6 +950,7 @@ class Attention(nn.Module):
     if self.num_query_heads % self.num_kv_heads != 0:
       raise ValueError("Invalid num_kv_heads for GQA.")
 
+    print("kv_proj")
     kv_proj = DenseGeneral(
         features=(self.num_kv_heads, self.head_dim),
         axis=-1,
@@ -1038,8 +1040,11 @@ class Attention(nn.Module):
       value = self.kv_projection(inputs_kv, proj_name="value")
 
     # apply ROPE
+    # breakpoint()
     query = RotaryEmbedding(embedding_dims=self.head_dim, name="query_rotary")(inputs=query, position=inputs_positions)
+    # breakpoint()
     key = self.key_rotary(key, inputs_positions)
+    # breakpoint()
 
     # annotate with sharding constraint.
     query = nn.with_logical_constraint(query, self.query_axis_names)

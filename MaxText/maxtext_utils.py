@@ -103,12 +103,15 @@ def calculate_tflops_training_per_device(config, log=True):
       * config.emb_dim
       * len(config.mlp_activations)
   )
+  print(f"ffn1_flops: {ffn1_flops}")
   ffn2_flops = 2 * config.per_device_batch_size * config.max_target_length * config.mlp_dim * config.emb_dim
+  print(f"ffn2_flops: {ffn2_flops}")
   total_ffn_flops = ffn1_flops + ffn2_flops
 
   if config.num_experts > 1:
     # MoE: brute force implementation
     gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
+    print(f"gate_flops: {gate_flops}")
     total_ffn_flops = gate_flops + config.num_experts_per_tok * total_ffn_flops
 
   qkv_flops = (
@@ -119,14 +122,17 @@ def calculate_tflops_training_per_device(config, log=True):
       * (config.num_query_heads + 2 * config.num_kv_heads)
       * config.head_dim
   )
+  print(f"qkv_flops: {qkv_flops}")
   attention_flops = (
       4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
   )
+  print(f"attention_flops: {attention_flops}")
   projection_flops = (
       2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_query_heads * config.head_dim
   )
+  print(f"projection_flops: {projection_flops}")
   embedding_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.vocab_size
-
+  print(f"embedding_flops: {embedding_flops}")
   # multiply by 3 for both feed forward and back proporgation flops
   learnable_weight_tflops = (
       ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
