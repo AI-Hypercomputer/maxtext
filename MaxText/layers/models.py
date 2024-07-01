@@ -92,12 +92,11 @@ class DecoderLayer(nn.Module):
         dropout_rate=cfg.dropout_rate,
         name="self_attention",
         quant=self.quant,
-        quantize_kvcache=cfg.quantize_kvcache,
+        kv_quant=quantizations.configure_kv_quant(cfg),
         prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
         ar_cache_axis_order=tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
         compute_axis_order=tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
         reshape_q=cfg.reshape_q,
-        kv_quant_axis=cfg.kv_quant_axis,
     )
 
     attention_lnx = attention_layer(

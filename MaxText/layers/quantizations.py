@@ -28,6 +28,7 @@ from jax.tree_util import tree_flatten_with_path, tree_unflatten
 from typing import Tuple, Sequence
 
 MAX_INT8 = 127.5
+MAX_INT4 = 7.5
 
 Array = common_types.Array
 Config = common_types.Config
@@ -195,26 +196,54 @@ def remove_quantized_params(params, aqt_vars):
     tree_flat[i] = v
   return tree_unflatten(tree_struct, tree_flat)
 
+def configure_kv_quant(config):
+  return None if not config.quantize_kvcache else KVQuant(config)
 
-def configure_kv_quantization(config: Config):
-  """Configure kv quantization based on user config."""
-  return False if not config.quantize_kvcache else True
+class KVQuant:
+  axis_cfg = ""
+  dtype = None
+
+  def __init__(self, config:Config):
+    assert config.quantize_kvcache
+    self.axis_cfg = config.kv_quant_axis
+    self.dtype = self._get_dtype(config.kv_quant_dtype)
+
+  def _get_dtype(self, dtype_cfg: str):
+    if dtype_cfg == "int4":
+      return jnp.int4
+    if dtype_cfg == "int8":
+      return jnp.int8
+    raise ValueError(f"Invalid kv_quant_dtype: {dtype_cfg}")
+
+  def _get_max_axis(self, axis_names: AxisNames):
+    if self.axis_cfg == "dkv":
+      return axis_names.index(CACHE_KV)
+    if self.axis_cfg == "heads_and_dkv":
+      return (
+        axis_names.index(CACHE_HEADS),
+        axis_names.index(CACHE_KV)
+        )
+    raise ValueError(f"Invalid KV quant axis cfg: {self.axis_cfg}")
+
+  def quantize(self, kv: Array, axis_names: AxisNames):
+    """Quantize key/values stored in kvcache."""
+    assert self.axis_cfg, 'KV quant axis cannot be None'
+    max_axis = self._get_max_axis(axis_names)
+    scale = jnp.max(jnp.abs(kv), axis=max_axis, keepdims=True)
+    if self.dtype == jnp.int8:
+      value = jnp.int8(jnp.rint(kv * (MAX_INT8 / scale)))
+      return value, scale
+    if self.dtype == jnp.int4:
+      value = jnp.int4(jnp.rint(kv * (MAX_INT4 / scale)))
+      return value, scale
+    raise ValueError(f"Invalid KV quant dtype:{self.dtype}.")
 
 
-def quantize_kv(kv: Array, kv_quant_axis: str, axis_names: AxisNames):
-  """Quantize key/values stored in kvcache."""
-  if kv_quant_axis == "dkv":
-    max_axis_over = axis_names.index(CACHE_KV)
-  elif kv_quant_axis == "heads_and_dkv":
-    max_axis_over = (
-      axis_names.index(CACHE_HEADS),
-      axis_names.index(CACHE_KV)
-    )
-  scale = jnp.max(jnp.abs(kv), axis=max_axis_over, keepdims=True)
-  value = jnp.int8(jnp.rint(kv * (MAX_INT8 / scale)))
-  return value, scale
+  def unquantize(self, value: Array, scale: Array, dtype: jnp.dtype):
+    """Unquantize key/values stored in kvcache."""
+    if self.dtype == jnp.int8:
+      return value.astype(dtype) * scale / MAX_INT8
+    if self.dtype == jnp.int4:
+      return value.astype(dtype) * scale / MAX_INT4
+    raise ValueError(f"Invalid KV quant dtype: {self.dtype}.")
 
-
-def unquantize_kv(value: Array, scale: Array, dtype: jnp.dtype):
-  """Unquantize key/values stored in kvcache."""
-  return value.astype(dtype) * scale / MAX_INT8

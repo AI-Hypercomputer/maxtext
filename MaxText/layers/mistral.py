@@ -97,7 +97,7 @@ class MistralDecoderLayer(nn.Module):
         dropout_rate=cfg.dropout_rate,
         name="self_attention",
         quant=self.quant,
-        quantize_kvcache=cfg.quantize_kvcache,
+        kv_quant=quantizations.configure_kv_quant(cfg),
     )
 
     attention_lnx = attention_layer(
