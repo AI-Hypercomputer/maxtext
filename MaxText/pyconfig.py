@@ -392,6 +392,30 @@ def validate_megablox_parallelism(raw_keys):
                                using_pipeline_parallelism(raw_keys)):
     raise ValueError("Currently we only support Megablox with data parallelism.")
 
+def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):
+  new_logical_axis = set()
+  replacements = []
+  for logical_axis, mesh_axes in new_logical_axis_rules:
+    logical_axis_exists = any(rule for rule in old_logical_axis_rules if rule[0] == logical_axis)
+    if not logical_axis_exists:
+      continue
+    replacements.append((logical_axis, mesh_axes))
+    new_logical_axis.add(logical_axis)
+  old_logical_rules_filtered = [(old_logical_axis, old_mesh_axes) for old_logical_axis, old_mesh_axes
+                                  in old_logical_axis_rules if old_logical_axis not in new_logical_axis]
+  return old_logical_rules_filtered + replacements
+
+
+def update_model_keys(raw_keys, model_keys, key):
+  """Update `key` value in `raw_keys` from the value in `model_keys`. """
+  assert key in model_keys and key in raw_keys
+  if key == 'logical_axis_rules':
+    raw_keys[key] = create_new_logical_axis_rules(
+      old_logical_axis_rules=raw_keys[key],
+      new_logical_axis_rules=model_keys[key])
+    return
+  raw_keys[key] = model_keys[key]
+
 def validate_and_update_keys(raw_keys, model_keys, config_name: str):
   """Validate and update model specific config keys"""
   max_logging.log("Updating following parameters in config\n")
@@ -407,7 +431,7 @@ def validate_and_update_keys(raw_keys, model_keys, config_name: str):
     elif not isinstance(raw_keys[k], type(model_keys[k])):
       raise ValueError(f"Type of key:{k} does not match with {type(model_keys[k])}")
     else:
-      raw_keys[k] = model_keys[k]
+      update_model_keys(raw_keys, model_keys, k)
   return raw_keys
 
 
