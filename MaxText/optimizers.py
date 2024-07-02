@@ -22,20 +22,14 @@ import jax
 
 import optax
 import jax.numpy as jnp
+from collections import namedtuple
 
 
-def get_optimizer(config, learning_rate_schedule, inner_diloco=False):
+def get_optimizer(config, learning_rate_schedule):
   """create optimizer"""
-  if config.diloco_num_workers > 1 and not inner_diloco:
-    # When training DiLoCo (https://arxiv.org/pdf/2311.08105), use SGD with Nesterov momentum for the outer optimizer
-    return optax.sgd(
-      config.diloco_outer_lr,
-      momentum=config.diloco_outer_momentum,
-      nesterov=True,
-    )
-  elif config.opt_type == "adamw":
+  if config.opt_type == "adamw":
     # Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
-    return optax.adamw(
+    tx = optax.adamw(
         learning_rate_schedule,
         b1=config.adam_b1,
         b2=config.adam_b2,
@@ -44,7 +38,7 @@ def get_optimizer(config, learning_rate_schedule, inner_diloco=False):
         weight_decay=config.adam_weight_decay,
     )
   elif config.opt_type == "adam_pax":
-    return adam_pax(
+    tx = adam_pax(
         learning_rate_schedule,
         beta1=config.adam_b1,
         beta2=config.adam_b2,
@@ -55,6 +49,16 @@ def get_optimizer(config, learning_rate_schedule, inner_diloco=False):
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")
 
+  if config.diloco_num_workers > 1:
+    # DiLoCo has an outer optimizer (sgd) and an inner optimizer (adamw)
+    diloco_tx = namedtuple('DiLoCoTX', ['sgd', 'adam'])
+    sgd = optax.sgd(
+      config.diloco_outer_lr,
+      momentum=config.diloco_outer_momentum,
+      nesterov=True,
+    )
+    return diloco_tx(sgd, tx)
+  return tx
 
 def adam_pax(
     learning_rate_fn: optax.Schedule,

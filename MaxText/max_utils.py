@@ -39,6 +39,7 @@ import flax
 from flax.training import train_state
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
+from diloco import DiLoCoTrainState
 
 import optax
 import os
@@ -467,9 +468,12 @@ def init_decode_state(apply_fn, params):
   return state
 
 
-def init_training_state(apply_fn, params, tx):
+def init_training_state(config, apply_fn, params, tx):
   """Init train state with null opt state for decode."""
-  state = train_state.TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
+  if config.diloco_num_workers > 1:
+    state = DiLoCoTrainState.create(config, apply_fn=apply_fn, params=params, tx=tx)
+  else:
+    state = train_state.TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
   return state
 
 
@@ -488,7 +492,7 @@ def init_initial_state(model, tx, config, is_training, key):
       jnp.ones(input_shape, dtype=jnp.int32),
   )
   if is_training:
-    return init_training_state(model.apply, model_vars, tx)
+    return init_training_state(config, model.apply, model_vars, tx)
   return init_decode_state(model.apply, model_vars)
 
 
@@ -778,6 +782,12 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
     abstract_state = jax.eval_shape(init_state_partial, rng)
 
   state_logical_annotations = nn.get_partition_spec(abstract_state)
+  if config.diloco_num_workers > 1:
+    from jax.sharding import PartitionSpec as P
+    state_logical_annotations = state_logical_annotations.replace(
+      adam_state=jax.tree.map(lambda s: P('clients', *s), state_logical_annotations.adam_state)
+    )
+
 
   state_mesh_shardings = nn.logical_to_mesh_sharding(
       state_logical_annotations, mesh, config.logical_axis_rules
