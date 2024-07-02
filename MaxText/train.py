@@ -24,6 +24,7 @@ import datetime
 import os
 import sys
 import functools
+import profiler
 
 from typing import Sequence
 from absl import app
@@ -481,16 +482,17 @@ def train_loop(config, state=None):
 
   start_step = get_first_step(state)  # this is the start_step for training
   first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
-  if config.enable_profiler and first_profiling_step >= config.steps:
+  if config.profiler != "" and first_profiling_step >= config.steps:
     raise ValueError("Profiling requested but initial profiling step set past training final step")
   last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1, first_profiling_step, config.steps - 1)
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
+  prof = profiler.Profiler(config)
 
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
-      max_utils.activate_profiler(config)
+      prof.activate()
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       example_batch = load_next_batch(data_iterator, example_batch, config)
@@ -527,11 +529,11 @@ def train_loop(config, state=None):
       max_logging.log(f"average loss after {step=}: {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
       if eval_loss <= config.target_eval_loss:
         max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
-        max_utils.deactivate_profiler(config)
+        prof.deactivate()
         break
 
     if step == last_profiling_step:
-      max_utils.deactivate_profiler(config)
+      prof.deactivate()
 
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()

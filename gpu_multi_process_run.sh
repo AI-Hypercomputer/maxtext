@@ -14,6 +14,7 @@ set -o pipefail
 export GPUS_PER_NODE=$GPUS_PER_NODE
 export JAX_COORDINATOR_PORT=$JAX_COORDINATOR_PORT
 export JAX_COORDINATOR_ADDRESS=$JAX_COORDINATOR_ADDRESS
+export JAX_NUM_PROCESSES=$((NNODES * GPUS_PER_NODE))
 
 set_nccl_gpudirect_tcpx_specific_configuration() {
   if [[ "$USE_GPUDIRECT" == "tcpx" ]]; then
@@ -45,29 +46,26 @@ set_nccl_gpudirect_tcpx_specific_configuration() {
     export NCCL_NVLS_ENABLE=0
   elif [[ "$USE_GPUDIRECT" == "fastrak" ]]; then
     echo "Using GPUDirect-TCPFasTrak"
-    export NCCL_DEBUG_SUBSYS=INIT,GRAPH,ENV,TUNING,NET,VERSION
-    export NCCL_DEBUG=INFO
-    export NCCL_FASTRAK_ENABLE_HOTPATH_LOGGING=0
-    export LD_LIBRARY_PATH="/usr/local/fastrak/lib64:${LD_LIBRARY_PATH}"
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/tcpxo/lib64"
     export NCCL_FASTRAK_CTRL_DEV=eth0
     export NCCL_FASTRAK_IFNAME=eth1,eth2,eth3,eth4,eth5,eth6,eth7,eth8
     export NCCL_SOCKET_IFNAME=eth0
     export NCCL_CROSS_NIC=0
     export NCCL_ALGO=Ring
     export NCCL_PROTO=Simple
-    export NCCL_MAX_NCHANNELS=16
-    export NCCL_MIN_NCHANNELS=16
-    export NCCL_SOCKET_NTHREADS=4
-    export NCCL_DYNAMIC_CHUNK_SIZE=524288
+    export NCCL_MIN_NCHANNELS=4
     export NCCL_DYNAMIC_CHUNK_SIZE=524288
     export NCCL_P2P_NET_CHUNKSIZE=524288
     export NCCL_P2P_PCI_CHUNKSIZE=524288
     export NCCL_P2P_NVL_CHUNKSIZE=1048576
-    export NCCL_FASTRAK_NUM_FLOWS=8
-    export NCCL_FASTRAK_FLOWS_PER_GROUP=2
-    export NCCL_BUFFSIZE=4194304
+    export NCCL_FASTRAK_NUM_FLOWS=2
+    export NCCL_FASTRAK_USE_SNAP=1
+    export NCCL_FASTRAK_ENABLE_CONTROL_CHANNEL=0
+    export NCCL_BUFFSIZE=8388608
     export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export NCCL_NET_GDR_LEVEL=PIX
+    export NCCL_FASTRAK_ENABLE_HOTPATH_LOGGING=0
+    export NCCL_FASTRAK_USE_LLCM=1
   else
     echo "NOT using GPUDirect"
   fi
@@ -145,9 +143,13 @@ resolve_coordinator_ip
 set -e
 
 PIDS=()
-eval ${COMMAND} &
-PID=$!
-PIDS+=($PID)
+for ((LOCAL_DEVICE_ID=0; LOCAL_DEVICE_ID <= $((GPUS_PER_NODE - 1)); LOCAL_DEVICE_ID++)); do
+  PROCESS_ID=$(($GPUS_PER_NODE*$NODE_RANK + $LOCAL_DEVICE_ID))
+  LOCAL_DEVICE_ID=$LOCAL_DEVICE_ID PROCESS_ID=$PROCESS_ID ${COMMAND} &
+  PID=$!
+  PIDS+=($PID)
+  echo "Launched MaxText/train.py for local_device_id: $LOCAL_DEVICE_ID process_id: $PROCESS_ID and PID $PID"
+done
 
 wait_all_success_or_exit "${PIDS[@]}"
 

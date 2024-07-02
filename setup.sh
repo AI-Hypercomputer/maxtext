@@ -151,12 +151,9 @@ elif [[ $MODE == "nightly" ]]; then
     if [[ $DEVICE == "gpu" ]]; then
         echo "Installing jax-nightly, jaxlib-nightly"
         # Install jax-nightly
-        pip3 install --pre -U jax -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
-        # Install jaxlib-nightly
-        pip3 install -U --pre jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_cuda12_releases.html
+        pip3 install -U --pre jax[cuda12] -f https://storage.googleapis.com/jax-releases/nightly/wheels/jax_cuda12_plugin-0.4.29.dev20240531-cp310-cp310-manylinux2014_x86_64.whl
         # Install prebuilt Transformer Engine for GPU builds.
-        pip3 install "transformer-engine==1.5.0+297459b" \
-          --extra-index-url https://us-python.pkg.dev/gce-ai-infra/maxtext-build-support-packages/simple/
+        pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
     elif [[ $DEVICE == "tpu" ]]; then
         echo "Installing jax-nightly, jaxlib-nightly"
         # Install jax-nightly

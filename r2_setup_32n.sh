@@ -1,0 +1,34 @@
+#!/bin/bash
+cat << EOF > env.txt
+NCCL_FASTRAK_CTRL_DEV=eth0
+NCCL_FASTRAK_IFNAME=eth1,eth2,eth3,eth4,eth5,eth6,eth7,eth8
+NCCL_SOCKET_IFNAME=eth0
+NCCL_CROSS_NIC=0
+NCCL_ALGO=Ring,Tree
+NCCL_PROTO=Simple
+NCCL_MIN_NCHANNELS=4
+NCCL_DYNAMIC_CHUNK_SIZE=524288
+NCCL_P2P_NET_CHUNKSIZE=524288
+NCCL_P2P_PCI_CHUNKSIZE=524288
+NCCL_P2P_NVL_CHUNKSIZE=1048576
+NCCL_FASTRAK_NUM_FLOWS=2
+NCCL_FASTRAK_USE_SNAP=1
+NCCL_FASTRAK_ENABLE_CONTROL_CHANNEL=0
+NCCL_BUFFSIZE=8388608
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+NCCL_NET_GDR_LEVEL=PIX
+NCCL_FASTRAK_ENABLE_HOTPATH_LOGGING=0
+NCCL_FASTRAK_USE_LLCM=1
+NCCL_DEBUG=VERSION
+TF_CPP_VMODULE=profile_guided_latency_estimator=10
+TF_CPP_MIN_LOG_LEVEL=0
+TF_CPP_MAX_LOG_LEVEL=100
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.94
+CUDA_DEVICE_MAX_CONNECTIONS=1
+NVTE_FUSED_ATTN=1
+NCCL_NVLS_ENABLE=0
+NCCL_TUNER_PLUGIN=libnccl-tuner.so
+NCCL_TUNER_CONFIG_PATH=/usr/local/nvidia/lib64/a3plus_tuner_config.textproto
+NCCL_FASTRAK_ENABLE_CONTROL_CHANNEL=0
+XLA_FLAGS=--xla_dump_to=gs://runner-maxtext-logs/llama2-70b-$(date +%Y-%m-%d-%H-%M)/HLO_dumps/ --xla_dump_hlo_pass_re=.* --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_triton_gemm=false --xla_gpu_graph_level=0 --xla_gpu_enable_highest_priority_async_stream=true --xla_gpu_all_reduce_combine_threshold_bytes=2147483648 --xla_gpu_all_gather_combine_threshold_bytes=2147483648 --xla_gpu_reduce_scatter_combine_threshold_bytes=33554432 --xla_gpu_enable_pipelined_all_gather=true --xla_gpu_enable_pipelined_reduce_scatter=true --xla_gpu_enable_pipelined_all_reduce=true --xla_gpu_enable_while_loop_double_buffering=true --xla_gpu_enable_triton_softmax_fusion=false --xla_gpu_enable_all_gather_combine_by_dim=false --xla_gpu_enable_reduce_scatter_combine_by_dim=false --xla_disable_hlo_passes=rematerialization --xla_gpu_pgle_profile_file_or_directory_path=gs://runner-maxtext-logs/maxtext-llama2-70b-07-01-2024-nv-profile/tensorboard/llama2-70b-32n-min.pbtxt
+EOF
