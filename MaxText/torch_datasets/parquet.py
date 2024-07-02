@@ -29,18 +29,12 @@ class ParquetDataset(IterableDataset):
         self.columns = columns
         self.batch_size = batch_size
 
-        self.worker_info = torch.utils.data.get_worker_info()
-        if self.worker_info is None:
-            print("Single-process data loading detected", flush=True)
-        else:
-            print("Multi-process data loading detected", flush=True)
-            assert self.worker_info.num_workers < len(
-                allocated_parquet_files
-            ), "Need each worker process to be at least reading one Parquet file"
-
     def __iter__(self):
-        if self.worker_info is None:
+        worker_info = torch.utils.data.get_worker_info()
+
+        if worker_info is None:
             # Single-process data loading.
+            print("Single-process data loading detected", flush=True)
             for each_parquet_file in self.allocated_parquet_files:
                 table = pq.ParquetFile(each_parquet_file)
                 for batch in table.iter_batches(
@@ -49,14 +43,14 @@ class ParquetDataset(IterableDataset):
                     yield from batch.to_pylist()
         else:
             # Multi-process data loading.
+            print("Multi-process data loading detected", flush=True)
             per_worker = int(
                 math.ceil(
-                    len(self.allocated_parquet_files)
-                    / float(self.worker_info.num_workers)
+                    len(self.allocated_parquet_files) / float(worker_info.num_workers)
                 )
             )
 
-            worker_id = self.worker_info.id
+            worker_id = worker_info.id
             start = worker_id * per_worker
             end = min(start + per_worker, len(self.allocated_parquet_files))
 
@@ -66,17 +60,3 @@ class ParquetDataset(IterableDataset):
                     batch_size=self.batch_size, columns=self.columns
                 ):
                     yield from batch.to_pylist()
-
-
-# if __name__ == "__main__":
-#     ds = ParquetDataset(
-#         ["/usr/local/google/home/bernardhan/maxtext/MaxText/torch/0000.parquet"],
-#         columns=["outputs", "image_base64_str"],
-#     )
-
-#     print(asizeof.asizeof(ds))
-#     for each in ds:
-#         break
-
-#     # print(ds.table.shape)
-#     # print(ds[0])

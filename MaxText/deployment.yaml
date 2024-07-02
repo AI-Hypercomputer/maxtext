@@ -42,8 +42,39 @@ spec:
                         - default-pool
 
               nodeSelector:
-                
-                
+                cloud.google.com/gke-ephemeral-storage-local-ssd: "true"
+              
+              # Needed for GCSFuse.
+              initContainers:
+              - name: gke-gcsfuse-sidecar
+                image: gcr.io/gcs-tess/ayushsethi-custom-csi/gcs-fuse-csi-driver-sidecar-mounter:v1.4.0-36-gb83e1b73-dirty
+                restartPolicy: Always
+                env:
+                - name: NATIVE_SIDECAR
+                  value: "TRUE"
+                # resources:
+                #   requests:
+                #     cpu: 250m
+                #     memory: 256Mi
+                #     ephemeral-storage: 1Ti
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop:
+                    - ALL
+                  readOnlyRootFilesystem: true
+                  runAsGroup: 65534
+                  runAsNonRoot: true
+                  runAsUser: 65534
+                  seccompProfile:
+                    type: RuntimeDefault
+                volumeMounts:
+                - mountPath: /gcsfuse-tmp
+                  name: gke-gcsfuse-tmp
+                - mountPath: /gcsfuse-buffer
+                  name: gke-gcsfuse-buffer
+                - mountPath: /gcsfuse-cache
+                  name: gke-gcsfuse-cache
                 
               priorityClassName: medium
               hostNetwork: true
@@ -51,8 +82,8 @@ spec:
               terminationGracePeriodSeconds: 30
               serviceAccountName: bernardhan-benchmark
               containers:
-              - name: jax-tpu
-                image: gcr.io/gcs-tess/bernardhan_runner
+              - name: jax-cpu
+                image: gcr.io/gcs-tess/bernardhan_runner_test
                 
                 env: 
                 - name: REPLICATED_JOB_NAME
@@ -86,30 +117,47 @@ spec:
                 command:
                 - bash
                 - -c
-                - |                  
-                  echo XPK Start: $(date) ; _sigterm() ( kill -SIGTERM $! 2>/dev/null;); trap _sigterm SIGTERM;(JAX_PLATFORMS=cpu python3 MaxText/standalone_dataloader.py MaxText/configs/base.yml base_output_directory=gs://llukai-tess/maxtext-output dataset_path=gs://llukai-tess/maxtext-dataset steps=100 hardware='cpu' epochs=2 enable_checkpointing=False global_parameter_scale=128 per_device_batch_size=2) & PID=$!; while kill -0 $PID 2>/dev/null; do sleep 5; done; wait $PID; EXIT_CODE=$? ;  echo XPK End: $(date); echo EXIT_CODE=$EXIT_CODE;
-                # resources:
-                #   requests:
-                #     memory: "60Gi"
+                - |
+                  # Temporary fix to solve the slow pod initialization errors by specifically asking for all pods to be ready.
+                  while true; do
+                    kubectl wait --for=jsonpath='{.status.replicatedJobsStatus[0].ready}'=1 jobset/xpk-test-workload
+                    if [ $? -eq 0 ]; then
+                      echo "Pods are ready!"
+                      break
+                    else
+                      echo "Pods are not ready! Sleeping for 5s before checking again"
+                      sleep 5
+                    fi
+                  done
+     
+                  export COMMON_RUN_FLAGS="enable_checkpointing=False ici_data_parallelism=8 ici_fsdp_parallelism=128";
+                  export BENCHMARK_RUN_FLAGS="hardware=cpu epochs=2 local_batch_size=32 prefetch_factor=2 data_loader_num_workers=2 per_step_computation_time=0";
+                  echo XPK Start: $(date) ; _sigterm() ( kill -SIGTERM $! 2>/dev/null;); trap _sigterm SIGTERM;(JAX_PLATFORMS=cpu python3 MaxText/standalone_dataloader.py MaxText/configs/base.yml ${BENCHMARK_RUN_FLAGS} ${COMMON_RUN_FLAGS}) & PID=$!; while kill -0 $PID 2>/dev/null; do sleep 5; done; wait $PID; EXIT_CODE=$? ;  echo XPK End: $(date); echo EXIT_CODE=$EXIT_CODE;
+
                 volumeMounts:
-                - mountPath: /dev/shm
-                  name: dshm-2
                 - mountPath: /mnt/gcsfuse
                   name: gcs-fuse-csi-ephemeral
                   readOnly: true
   
               volumes:
-              - emptyDir:
-                  medium: Memory
-                name: dshm-2
               - name: gcs-fuse-csi-ephemeral
                 csi:
                   driver: gcsfuse.csi.storage.gke.io
                   readOnly: true
                   volumeAttributes:
-                      bucketName: "xai-hf-dataset-parquet"
-                      mountOptions: "debug_fuse"
-                      metadataCacheTtlSeconds: "-1"
-                      metadataStatCacheCapacity: "-1"
-                      metadataTypeCacheCapacity: "-1"
-                      fileCacheCapacity: "100Gi"
+                    skipCSIBucketAccessCheck: "true"
+                    bucketName: "xai-hf-dataset-parquet"
+                    # mountOptions: "debug_fuse,uid=1001,gid=3003"
+                    # mountOptions: "debug_fuse,uid=1001,gid=3003,file-cache:enable-parallel-downloads:false"
+                    mountOptions: "debug_fuse,max-conns-per-host=0,uid=1001,gid=3003,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:10,file-cache:download-chunk-size-mb:200"
+                    metadataCacheTtlSeconds: "-1"
+                    metadataStatCacheCapacity: "-1"
+                    metadataTypeCacheCapacity: "-1"
+                    fileCacheCapacity: "-1"
+                    fileCacheForRangeRead: "true"
+              - name: gke-gcsfuse-tmp
+                emptyDir: { }
+              - name: gke-gcsfuse-buffer
+                emptyDir: { }
+              - name: gke-gcsfuse-cache
+                emptyDir: { }
