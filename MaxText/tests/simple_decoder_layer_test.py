@@ -28,6 +28,7 @@ class SimpleDecoderLayerTest(unittest.TestCase):
           "decoder_block=simple",
           "enable_checkpointing=False",
           "tokenizer_path=../assets/tokenizer.llama2",
+          "steps=3"
     ])
 
 if __name__ == "__main__":
