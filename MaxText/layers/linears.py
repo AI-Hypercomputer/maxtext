@@ -351,7 +351,7 @@ class MoeBlock(nn.Module):
     reshaped_intermediate = jnp.reshape(unsort_intermediate, (-1, self.num_experts_per_tok, self.config.emb_dim))
     with jax.named_scope("weight_sum"):
       output = jnp.einsum("BKE,BK -> BE", reshaped_intermediate, reshaped_weights)
-    return output.reshape(-1, self.config.max_target_length, self.config.emb_dim).astype(self.dtype)
+    return output.reshape(int(self.config.per_device_batch_size), -1, self.config.emb_dim).astype(self.dtype)
 
   def megablox(self, inputs, gate_logits, config, w0_kernel, w1_kernel, wo_kernel):
     # TODO(ranran): need to changes in JAX repo to enable optimized tile_size
