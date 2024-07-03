@@ -45,6 +45,10 @@ def get_optimizer(config, learning_rate_schedule):
         epsilon_root=config.adam_eps_root,
         weight_decay=config.adam_weight_decay,
     )
+  elif config.opt_type == "sgd":
+    return optax.sgd(
+        learning_rate_schedule,
+    )
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")
 
