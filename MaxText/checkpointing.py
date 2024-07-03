@@ -17,6 +17,7 @@ limitations under the License.
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
 from typing import Optional, Union
+from absl import flags
 from etils import epath
 import orbax.checkpoint
 from orbax.checkpoint.logging import abstract_logger, cloud_logger, standard_logger, composite_logger
@@ -81,6 +82,7 @@ def create_orbax_emergency_checkpoint_manager(
     persistent_save_interval_steps: int,
 ):
   """Returns an emergency checkpoint."""
+  flags.FLAGS.experimental_orbax_use_distributed_process_id = True
   max_logging.log("Creating emergency checkpoint manager...")
 
   local_registry = type_handlers.create_type_handler_registry(
@@ -220,6 +222,16 @@ def load_state_if_possible(
           map_to_pspec,
           abstract_unboxed_pre_state,
       )
+
+      if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
+        return (
+          checkpoint_manager.restore(
+            latest_step,
+            args=orbax.checkpoint.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args),
+          ),
+          None,
+        )
+
       if dataset_type == "grain" and data_iterator is not None:
         return (
             checkpoint_manager.restore(
