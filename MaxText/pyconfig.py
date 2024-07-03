@@ -396,8 +396,9 @@ def validate_and_update_keys(raw_keys, model_keys, config_name: str):
   """Validate and update model specific config keys"""
   max_logging.log("Updating following parameters in config\n")
 
-  # Currently, Megablox only supports data parallelism
-  validate_megablox_parallelism(raw_keys)
+  if raw_keys["num_experts"] > 1:
+    # Currently, Megablox only supports data parallelism
+    validate_megablox_parallelism(raw_keys)
 
   for k in model_keys:
     max_logging.log(f"{k}: {model_keys[k]}")
