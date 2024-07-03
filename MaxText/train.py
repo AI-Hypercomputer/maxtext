@@ -64,6 +64,7 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 from layers import quantizations
 
 from ml_goodput_measurement import goodput
+from monitoring import GoodputMonitor
 
 Transformer = models.Transformer
 EPS = 1e-8
@@ -596,7 +597,6 @@ def main(argv: Sequence[str]) -> None:
   vertex_tensorboard_manager = VertexTensorboardManager()
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
-
   debug_config = debug_configuration.DebugConfig(
       stack_trace_config=stack_trace_configuration.StackTraceConfig(
           collect_stack_trace=config.collect_stack_trace,
@@ -605,6 +605,10 @@ def main(argv: Sequence[str]) -> None:
       )
   )
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
+  if config.monitor_goodput:
+    logger_name = f'goodput_{config.run_name}'
+    goodput_monitor = GoodputMonitor(config.run_name, logger_name, config.tensorboard_dir, config.goodput_upload_interval_seconds)
+    goodput_monitor.start_uploader()
   with diagnostic.diagnose(diagnostic_config):
     train_loop(config)
 
