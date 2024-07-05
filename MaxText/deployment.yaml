@@ -1,3 +1,5 @@
+# Use Static provisioning to define a PV for Cloud Storage buckets.
+# https://cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/cloud-storage-fuse-csi-driver#provision-static.
 apiVersion: v1
 kind: PersistentVolume
 metadata:
