@@ -1,3 +1,48 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: gcs-distributed-training-pv
+spec:
+  accessModes:
+  - ReadWriteMany
+  capacity:
+    storage: 64Gi
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: gcsfuse-sc # dummy storage class
+  claimRef:
+    name: training-test-claim
+    namespace: default
+  mountOptions:
+  - debug_fuse
+  - implicit-dirs #avoid if possible
+  - max-conns-per-host=0
+  - metadata-cache:ttl-secs:-1
+  - metadata-cache:stat-cache-max-size-mb:-1
+  - metadata-cache:type-cache-max-size-mb:-1
+#  - file-system:kernel-list-cache-ttl-secs:-1
+  - file-cache:max-size-mb:-1
+  - file-cache:cache-file-for-range-read:true
+  - file-cache:enable-parallel-downloads:true
+  csi:
+    driver: gcsfuse.csi.storage.gke.io
+    volumeHandle: xai-hf-dataset-parquet-10g # unique bucket name. xai-hf-dataset-parquet-10g for the 10G * 12K dataset.
+    volumeAttributes:
+      skipCSIBucketAccessCheck: "true"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: training-test-claim
+  namespace: default
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 64Gi
+  volumeName: gcs-distributed-training-pv
+  storageClassName: gcsfuse-sc # dummy storage class
+---
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
@@ -15,8 +60,8 @@ spec:
       replicas: 1
       template:
         spec:
-          parallelism: 1024    # Equal to the number of VMs per slice
-          completions: 1024    # Same as the above.
+          parallelism: 256    # Equal to the number of VMs per slice
+          completions: 256    # Same as the above.
           backoffLimit: 0   # When any pod fails, the job is failed
           template:
             metadata:
@@ -29,6 +74,46 @@ spec:
                 gke-gcsfuse/ephemeral-storage-limit: "0"
             
             spec:
+              initContainers:
+              # Metadata Prefetch native sidecar.
+              - name: metadata-prefetch-container
+                image: alpine:3.20
+                restartPolicy: Always
+                command:
+                - "/bin/sh"
+                - "-c"
+                - |
+                  _term() { 
+                    echo "Caught SIGTERM signal: Terminating..." 
+                    kill -TERM "$child" 2>/dev/null
+                    exit 0
+                  }
+
+                  trap _term SIGTERM
+
+                  echo "Starting ls on the bucket..."
+                  # Redirect output to /dev/null to prevent storage of output.
+                  ls -R /mnt/gcsfuse > /dev/null && \
+                  echo "Metadata prefetch complete. Going to sleep..." && \
+                  sleep infinite &
+
+                  child=$! 
+                  wait "$child"
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop:
+                    - ALL
+                  readOnlyRootFilesystem: true
+                  runAsGroup: 65534
+                  runAsNonRoot: true
+                  runAsUser: 65534
+                  seccompProfile:
+                    type: RuntimeDefault
+                volumeMounts:
+                - name: gcs-pvc
+                  mountPath: /mnt/gcsfuse
+
               schedulerName: default-scheduler
               restartPolicy: Never
               affinity:
@@ -43,38 +128,6 @@ spec:
 
               nodeSelector:
                 cloud.google.com/gke-ephemeral-storage-local-ssd: "true"
-              
-              # Needed for GCSFuse.
-              initContainers:
-              - name: gke-gcsfuse-sidecar
-                image: gcr.io/gcs-tess/ayushsethi-custom-csi/gcs-fuse-csi-driver-sidecar-mounter:v1.4.0-36-gb83e1b73-dirty
-                restartPolicy: Always
-                env:
-                - name: NATIVE_SIDECAR
-                  value: "TRUE"
-                # resources:
-                #   requests:
-                #     cpu: 250m
-                #     memory: 256Mi
-                #     ephemeral-storage: 1Ti
-                securityContext:
-                  allowPrivilegeEscalation: false
-                  capabilities:
-                    drop:
-                    - ALL
-                  readOnlyRootFilesystem: true
-                  runAsGroup: 65534
-                  runAsNonRoot: true
-                  runAsUser: 65534
-                  seccompProfile:
-                    type: RuntimeDefault
-                volumeMounts:
-                - mountPath: /gcsfuse-tmp
-                  name: gke-gcsfuse-tmp
-                - mountPath: /gcsfuse-buffer
-                  name: gke-gcsfuse-buffer
-                - mountPath: /gcsfuse-cache
-                  name: gke-gcsfuse-cache
                 
               priorityClassName: medium
               hostNetwork: true
@@ -99,9 +152,9 @@ spec:
                     fieldRef:
                       fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
                 - name: PROCESSES_IN_JOB
-                  value: "1024"
+                  value: "256"
                 - name: JAX_PROCESS_COUNT
-                  value: "1024"
+                  value: "256"
                 
                 - name: JOBSET_NAME
                   value: "xpk-test-workload"
@@ -118,46 +171,16 @@ spec:
                 - bash
                 - -c
                 - |
-                  # Temporary fix to solve the slow pod initialization errors by specifically asking for all pods to be ready.
-                  while true; do
-                    kubectl wait --for=jsonpath='{.status.replicatedJobsStatus[0].ready}'=1 jobset/xpk-test-workload
-                    if [ $? -eq 0 ]; then
-                      echo "Pods are ready!"
-                      break
-                    else
-                      echo "Pods are not ready! Sleeping for 5s before checking again"
-                      sleep 5
-                    fi
-                  done
-     
-                  export COMMON_RUN_FLAGS="enable_checkpointing=False ici_data_parallelism=8 ici_fsdp_parallelism=128";
-                  export BENCHMARK_RUN_FLAGS="hardware=cpu epochs=2 local_batch_size=32 prefetch_factor=2 data_loader_num_workers=2 per_step_computation_time=0";
+                  export COMMON_RUN_FLAGS="enable_checkpointing=False ici_data_parallelism=8 ici_fsdp_parallelism=32 hardware=cpu";
+                  export BENCHMARK_RUN_FLAGS="dataset_bucket=xai-hf-dataset-parquet-10g epochs=2 local_batch_size=32 prefetch_factor=2 data_loader_num_workers=2 per_step_computation_time=0";
                   echo XPK Start: $(date) ; _sigterm() ( kill -SIGTERM $! 2>/dev/null;); trap _sigterm SIGTERM;(JAX_PLATFORMS=cpu python3 MaxText/standalone_dataloader.py MaxText/configs/base.yml ${BENCHMARK_RUN_FLAGS} ${COMMON_RUN_FLAGS}) & PID=$!; while kill -0 $PID 2>/dev/null; do sleep 5; done; wait $PID; EXIT_CODE=$? ;  echo XPK End: $(date); echo EXIT_CODE=$EXIT_CODE;
 
                 volumeMounts:
                 - mountPath: /mnt/gcsfuse
-                  name: gcs-fuse-csi-ephemeral
+                  name: gcs-pvc
                   readOnly: true
   
               volumes:
-              - name: gcs-fuse-csi-ephemeral
-                csi:
-                  driver: gcsfuse.csi.storage.gke.io
-                  readOnly: true
-                  volumeAttributes:
-                    skipCSIBucketAccessCheck: "true"
-                    bucketName: "xai-hf-dataset-parquet"
-                    # mountOptions: "debug_fuse,uid=1001,gid=3003"
-                    # mountOptions: "debug_fuse,uid=1001,gid=3003,file-cache:enable-parallel-downloads:false"
-                    mountOptions: "debug_fuse,max-conns-per-host=0,uid=1001,gid=3003,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:10,file-cache:download-chunk-size-mb:200"
-                    metadataCacheTtlSeconds: "-1"
-                    metadataStatCacheCapacity: "-1"
-                    metadataTypeCacheCapacity: "-1"
-                    fileCacheCapacity: "-1"
-                    fileCacheForRangeRead: "true"
-              - name: gke-gcsfuse-tmp
-                emptyDir: { }
-              - name: gke-gcsfuse-buffer
-                emptyDir: { }
-              - name: gke-gcsfuse-cache
-                emptyDir: { }
+              - name: gcs-pvc
+                persistentVolumeClaim:
+                  claimName: training-test-claim
