@@ -25,12 +25,15 @@
       "justMyCode": false,
       "python": "python3",
       "program": "${workspaceFolder}/MaxText/train.py",
-      "args": ["MaxText/configs/base.yml", 
-               "run_name=runner_$(date +%Y-%m-%d-%H-%M)", 
-               "base_output_directory=gs://test-maxtext-output",
-               "dataset_path=gs://test-maxtext-dataset",
-               "steps=2",
-               "enable_checkpointing=false"]
+      "args": ["MaxText/configs/base.yml",
+                "run_name=runner_$(date +%Y-%m-%d-%H-%M)", 
+                "base_output_directory=gs://test-maxtext-output",
+                "dataset_path=gs://mlperf-exp-us-east1-cp0",
+                "dataset_name=c4/en:3.0.7",
+                "dataset_type=c4_mlperf",
+                "eval_dataset_name=c4/en:3.0.5",
+                "steps=2",
+                "enable_checkpointing=false"]
     },
     {
       "name": "Debug MaxText Inference Microbenchmark",
