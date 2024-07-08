@@ -49,7 +49,6 @@ class DecodeState:
   generate_cache: jax.Array
   generate_cache_index: int
   generate_lengths: jax.Array
-  generated_token: jax.Array
 
 
 class MaxEngine(engine_api.Engine):
@@ -137,7 +136,7 @@ class MaxEngine(engine_api.Engine):
       existing_prefix: Optional[jax.Array] = None,
       padded_tokens: jax.Array,
       true_length: int,
-  ) -> Tuple[Prefix, engine_api.ResultTokens]:
+  ) -> Prefix:
     """Computes a kv-cache for a new generate request.
 
     Args:
@@ -180,9 +179,20 @@ class MaxEngine(engine_api.Engine):
     )
     selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
 
-    # sampling first token
-    first_generated_token = inference_utils.sampling(
-        selected_logits,
+    return {
+        "logits": selected_logits,
+        "cache": new_vars["cache"],
+        "next_pos": next_pos,
+        "generated_tokens": generated_tokens,
+    }
+
+  @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
+  def generate(self, params: Params, decode_state: DecodeState) -> Tuple[DecodeState, engine_api.ResultTokens]:
+    """Run one generate step"""
+    previous_logits = decode_state["logits"]
+
+    new_token = inference_utils.sampling(
+        previous_logits,
         self.rng,
         self.config.decode_sampling_strategy,
         topk=self.config.decode_sampling_top_k,
@@ -190,38 +200,10 @@ class MaxEngine(engine_api.Engine):
         temperature=self.config.decode_sampling_temperature,
     )
 
-    all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
-    result = engine_api.ResultTokens(
-        data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
-        # Tokens are shape [batch, speculations], so when we concatenate
-        # tokens, validity and length along their index 1 dimension then they
-        # occupy 0:speculations.
-        tokens_idx=(0, 1),
-        # Validity occupies the same amount of space, but next in line.
-        valid_idx=(1, 2),
-        # And lengths is rank 1.
-        length_idx=(2, 3),
-        samples_per_slot=1,
-    )
-
-    return {
-        "logits": selected_logits,
-        "cache": new_vars["cache"],
-        "next_pos": next_pos,
-        "generated_tokens": generated_tokens,
-        "tokens": first_generated_token
-    }, result
-
-  @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
-  def generate(self, params: Params, decode_state: DecodeState) -> Tuple[DecodeState, engine_api.ResultTokens]:
-    """Run one generate step"""
-    previous_token = decode_state["tokens"]
-
-    # run one step generation
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       out_logits, new_vars = self.model.apply(
           params | {"cache": decode_state["cache"]},
-          previous_token,
+          new_token,
           decode_state["next_pos"],
           enable_dropout=False,
           model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
@@ -229,20 +211,8 @@ class MaxEngine(engine_api.Engine):
           mutable=["cache"],
       )
 
-    out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
-    new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
-
-    # sampling tokens
-    new_token = inference_utils.sampling(
-        out_logits,
-        self.rng,
-        self.config.decode_sampling_strategy,
-        topk=self.config.decode_sampling_top_k,
-        nucleus_topp=self.config.decode_sampling_nucleus_p,
-        temperature=self.config.decode_sampling_temperature,
-    )
-
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
+
     result = engine_api.ResultTokens(
         data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
         # Tokens are shape [batch, speculations], so when we concatenate
@@ -256,12 +226,14 @@ class MaxEngine(engine_api.Engine):
         samples_per_slot=1,
     )
 
+    out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
+    new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
+
     return {
         "logits": out_logits,
         "cache": new_cache,
         "next_pos": decode_state["next_pos"] + 1,
         "generated_tokens": decode_state["generated_tokens"] + 1,
-        "tokens": new_token
     }, result
 
   @functools.partial(
@@ -328,14 +300,10 @@ class MaxEngine(engine_api.Engine):
     inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
         decode_state["generated_tokens"], unboxed_prefix["generated_tokens"], slot, 0
     )
-    inserted_tokens = jax.lax.dynamic_update_index_in_dim(
-      decode_state["tokens"], unboxed_prefix["tokens"], slot, 0
-    )
 
     inserted_logits = jax.lax.with_sharding_constraint(inserted_logits, self.replicated_sharding)
     inserted_generated_tokens = jax.lax.with_sharding_constraint(inserted_generated_tokens, self.replicated_sharding)
     inserted_next_pos = jax.lax.with_sharding_constraint(inserted_next_pos, self.replicated_sharding)
-    inserted_tokens = jax.lax.with_sharding_constraint(inserted_tokens, self.replicated_sharding)
     inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
 
     return {
@@ -343,7 +311,6 @@ class MaxEngine(engine_api.Engine):
         "cache": inserted_cache,
         "next_pos": inserted_next_pos,
         "generated_tokens": inserted_generated_tokens,
-        "tokens": inserted_tokens
     }
 
   def get_prefix_destination_sharding(self) -> Any:
@@ -382,13 +349,11 @@ class MaxEngine(engine_api.Engine):
 
       next_pos = jnp.zeros((int(self.config.per_device_batch_size * jax.device_count()), 1), dtype=jnp.int32)
       generated_tokens = jnp.zeros((int(self.config.per_device_batch_size * jax.device_count()), 1), dtype=jnp.int32)
-      tokens = jnp.zeros((int(self.config.per_device_batch_size * jax.device_count()), 1), dtype=jnp.int32)
       return {
           "logits": jnp.zeros((int(self.config.per_device_batch_size * jax.device_count()), 1, self.config.vocab_size)),
           "cache": cache["cache"],
           "next_pos": next_pos,
           "generated_tokens": generated_tokens,
-          "tokens": tokens
       }
 
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
