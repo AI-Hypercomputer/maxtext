@@ -278,6 +278,7 @@ class MoeBlock(nn.Module):
     kernel_axes: Tuple with axes to apply kernel function.
     weight_dtype: Type for the weights.
     dtype: Type for the dense layer.
+    quant: Optional quantization config, no quantization if None.
   """
 
   config: Config
@@ -288,6 +289,7 @@ class MoeBlock(nn.Module):
   kernel_axes: Tuple[str, ...]
   weight_dtype: DType = jnp.float32
   dtype: DType = jnp.float32
+  quant: Optional[Quant] = None
 
   def generate_kernels(self, num_experts, emb_dim, mlp_dim):
 
@@ -411,6 +413,7 @@ class MoeBlock(nn.Module):
             self.num_experts,
             dtype=self.dtype,
             weight_dtype=self.weight_dtype,
+            quant=self.quant,
             kernel_init=self.kernel_init,
             kernel_axes=self.kernel_axes,
             name="gate")(inputs)
