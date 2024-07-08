@@ -59,8 +59,23 @@ save_config_to_gcs: False
 
 # Activation dtypes.
 dtype: "bfloat16"
-quantization: "" #defaults to no quantization, i.e. bf16. possible alternative setting is 'int8' or use fp8 to run with 8-bit floating-point GeMMs on NVIDIA GPUs.
-quantize_kvcache: False
+# Used to configure quantization in the transformer layers, defaults to null implying bf16.
+# Possible alternative settings are as follows:
+# 'int8' for dynamic range quantization using 8-bits
+# 'int8w' for weights only quantization using 8-bits
+# 'int4w' for weights only quantization using 4-bits
+# 'intmp' for mixed precision weight only quantization based on config file
+# 'fp8' for 8-bit floating-point GeMMs on NVIDIA GPUs.
+quantization: ""
+# Path to file with quantization config - only used for mixed precision.
+# Example configs in ../Maxtext/configs/quantization
+# Allows us to configure different bits, tiling and scale for quantizing selected weights.
+# Bits represents number of bits to quantize to,
+# tile-size represents the tiling sized used in AQT tiled_dot_general,
+# Value of scale is used to scale the abs_max value used for AQT quantization
+# Defaults values are 8 bits, tile-size=-1 (no tiling) and scale=1.
+quant_cfg_path: ""
+quantize_kvcache: False # Set to True to quantize KV Cache values, defaults to False
 # Valid kv_quant_axis values:
 #   - "" is valid only when quantize_kvcache is False
 #   - "dkv" indicates quantize kv cache over the cache_kv, i.e. kv dimension axis
