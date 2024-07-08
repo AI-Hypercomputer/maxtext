@@ -26,57 +26,45 @@ from input_pipeline import _input_pipeline_utils
 import multihost_dataloading
 
 
-def get_datasets(config: ml_collections.ConfigDict):
-  """Load huggingface dataset"""
-  train_ds = datasets.load_dataset(
-      config.hf_path,
-      data_dir=config.hf_data_dir,
-      data_files=config.hf_data_files,
-      split="train",
-      streaming=True,
-      token=config.hf_access_token,
-  )
-  return train_ds, None
-
-
-def preprocess_dataset(
-    config: ml_collections.ConfigDict,
+def preprocessing_pipeline(
     dataloading_host_index,
     dataloading_host_count,
     global_mesh,
     dataset,
+    tokenizer_path,
+    global_batch_size,
+    max_target_length,
+    shuffle,
+    data_shuffle_seed,
     add_bos=True,
     add_eos=True,
     packing=True,
     shift=True,
     num_threads=1,
 ):
-  """preprocess dataset"""
-  # Set global batch size.
-  global_batch_size = config.global_batch_size_to_load
+  """pipeline for preprocessing HF dataset"""
 
   assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible number of global devices."
 
-  if config.enable_data_shuffling:
-    dataset = dataset.shuffle(seed=config.data_shuffle_seed)
+  if shuffle:
+    dataset = dataset.shuffle(seed=data_shuffle_seed)
 
   tokenizer = transformers.AutoTokenizer.from_pretrained(
-      config.tokenizer_path,
+      tokenizer_path,
       add_bos_token=add_bos,
       add_eos_token=add_eos,
-      model_max_length=config.max_target_length,
+      model_max_length=max_target_length,
       legacy=False,
   )
 
   dataset = dataset.map(
       _input_pipeline_utils.tokenization,
       batched=True,
-      fn_kwargs={"tokenizer": tokenizer, "max_length": config.max_target_length - 1},
+      fn_kwargs={"hf_tokenizer": tokenizer, "max_length": max_target_length - 1},
   )
   dataset = dataset.select_columns(["input_ids"])
 
   dataset = _input_pipeline_utils.HFDataSource(dataset, dataloading_host_index, dataloading_host_count, num_threads)
-
   operations = []
   operations.append(_input_pipeline_utils.HFNormalizeFeatures())
 
@@ -84,12 +72,12 @@ def preprocess_dataset(
     operations.append(
         grain.experimental.PackAndBatchOperation(
             batch_size=global_batch_size // jax.process_count(),
-            length_struct={"inputs": config.max_target_length, "targets": config.max_target_length},
+            length_struct={"inputs": max_target_length, "targets": max_target_length},
         )
     )
     operations.append(_input_pipeline_utils.ReformatPacking())
   else:
-    operations.append(_input_pipeline_utils.PadToMaxLength(config.max_target_length))
+    operations.append(_input_pipeline_utils.PadToMaxLength(max_target_length))
     operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=True))
 
   if shift:
@@ -117,7 +105,68 @@ def preprocess_dataset(
       read_options=grain.ReadOptions(num_threads=num_threads, prefetch_buffer_size=128),
   )
 
-  train_iter = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
+  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
 
   # Return multi-host jax.Array prep iterator
-  return train_iter, None, None
+  return multihost_gen
+
+def make_hf_iterator(
+    config: ml_collections.ConfigDict,
+    global_mesh,
+    add_bos,
+    add_eos,
+    process_indices,
+  ):
+  """Load, preprocess dataset and return iterators"""
+  train_ds = datasets.load_dataset(
+      config.hf_path,
+      data_dir=config.hf_data_dir,
+      data_files=config.hf_train_files,
+      split="train",
+      streaming=True,
+      token=config.hf_access_token,
+  )
+  train_iter = preprocessing_pipeline(
+    dataloading_host_index=process_indices.index(jax.process_index()),
+    dataloading_host_count=len(process_indices),
+    global_mesh=global_mesh,
+    dataset=train_ds,
+    tokenizer_path=config.tokenizer_path,
+    global_batch_size=config.global_batch_size_to_load,
+    max_target_length=config.max_target_length,
+    shuffle=config.enable_data_shuffling,
+    data_shuffle_seed=config.data_shuffle_seed,
+    add_bos=add_bos,
+    add_eos=add_eos,
+  )
+
+  if config.eval_interval > 0:
+    eval_ds = datasets.load_dataset(
+      config.hf_path,
+      data_dir=config.hf_data_dir,
+      data_files=config.hf_eval_files,
+      split=config.hf_eval_split,
+      streaming=True,
+      token=config.hf_access_token,
+    )
+    if config.eval_per_device_batch_size > 0:
+      eval_batch_size = config.eval_per_device_batch_size * global_mesh.size
+    else:
+      eval_batch_size = config.global_batch_size_to_load
+    eval_iter = preprocessing_pipeline(
+      dataloading_host_index=process_indices.index(jax.process_index()),
+      dataloading_host_count=len(process_indices),
+      global_mesh=global_mesh,
+      dataset=eval_ds,
+      tokenizer_path=config.tokenizer_path,
+      global_batch_size=eval_batch_size,
+      max_target_length=config.max_target_length,
+      shuffle=False,
+      data_shuffle_seed=config.data_shuffle_seed,
+      add_bos=add_bos,
+      add_eos=add_eos,
+    )
+  else:
+    eval_iter = None
+
+  return train_iter, eval_iter
