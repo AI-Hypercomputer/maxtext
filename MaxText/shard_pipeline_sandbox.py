@@ -77,8 +77,12 @@ def spmd_pipeline_overlapped(fn, stage_params, inputs):
 
   # TODO: double the bubble stages
 
-  #num_total_iterations = args.num_microbatches+args.num_layers-1 # regular
-  num_total_iterations = args.num_microbatches + 2 * (args.num_layers-1) # double bubble
+  if args.use_overlapped:
+    num_total_iterations = args.num_microbatches + 2 * (args.num_layers-1) # double bubble
+  else:
+    num_total_iterations = args.num_microbatches + args.num_layers - 1 # regular
+
+  # TODO (this should be re-written into its own method so it can be scanned, inputs including circ_storage)
   for loop_iter in range(num_total_iterations):
     # Push new input into stage 0
     current_input = current_input.at[:].set(jnp.where(stage == 0, inputs[loop_iter % args.microbatches_per_stage], current_input[:]))
@@ -118,9 +122,37 @@ def spmd_pipeline(fn, stage_params, inputs):
   stage = jax.lax.axis_index('stages')
   outputs = jnp.zeros_like(inputs) * jnp.nan
   state = jnp.zeros((args.microbatch_size, args.embed_size)) * jnp.nan
+  # Each stage has their own circ_storage, don't need leading num_stages
+  #circ_storage = jnp.zeros((args.num_stages, args.num_microbatches, args.microbatch_size, args.embed_size))
+  circ_storage = jnp.zeros((args.num_microbatches, args.microbatch_size, args.embed_size))
+  # TODO: wrap this in a function that can be scanned
   for loop_iter in range(args.num_microbatches+args.num_layers-1):
-    state = state.at[:].set(jnp.where(stage == 0, inputs[loop_iter % args.microbatches_per_stage], state[:]))
+
+    # Begin grabbing state 0 
+
+
+
+
+    # grab new input from either inputs or circ_storage
+    state_io_batch_idx = loop_iter % args.microbatches_per_stage
+    state_io_slice = inputs[state_io_batch_idx]
+
+    if args.use_circ_storage:
+        # Setup potential input from circ_storage, which also has a rotating index for microbatch, size of num_microbatches
+        circ_storage_batch_idx = loop_iter % args.num_microbatches
+        circular_stage_in = circ_storage[:,circ_storage_batch_idx]
+    else:
+        # The last stage immediately flows into the first stage, use this rotated shift instead of circular storage
+        circular_stage_in = state
+ 
+    # For early loop iterations we grab a new input for stage 0 from the state_io. Once each microbatch has left state_io
+    # we instead grab from the last stage's output (possibly buffered when num_microbatches > num_stages, e.g. from circ_storage).
+    first_stage_in = jnp.where(loop_iter < args.num_microbatches, state_io_slice, circular_stage_in)
+
+    #state = state.at[:].set(jnp.where(stage == 0, inputs[loop_iter % args.microbatches_per_stage], state[:]))
+    state = state.at[:].set(jnp.where(stage == 0, first_stage_in, state[:]))
     inputs = shift_inputs(loop_iter, inputs)
+    # End grabbing state 0
      # Fake/ poorly named argument, just repeating the same matmul per layer
     for _ in range(args.num_layers_per_stage):
       # Shard map is rank preserving, so the params have shape [1,embed,embed] inside each shard
@@ -191,6 +223,13 @@ def main():
   global args
   args = parser.parse_args()
     
+  args.microbatches_per_stage = args.num_microbatches // args.num_stages
+  args.num_repeat = args.num_layers // (args.num_stages * args.num_layers_per_stage)
+  if args.num_repeat > 1 and args.num_microbatches > args.num_stages:
+    args.use_circ_straoge = True
+  else:
+    args.use_circ_storage = False
+
   params, batch = init(jax.random.PRNGKey(0), args.num_layers, args.embed_size, args.batch_size)
   print(f"input size is {batch[0].shape}")
 
