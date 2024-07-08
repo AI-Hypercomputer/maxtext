@@ -73,6 +73,13 @@ MODEL_PARAMS_DICT = {
         "dims_per_head": 128,
         "vocab": 32000,
     },
+    "llama3-8b": {
+        "num_layers": 32,
+        "num_heads": 32,
+        "num_kv_heads": 8,
+        "dims_per_head": 128,
+        "vocab": 128256,
+    },
     "mistral-7b": {
         "num_layers": 32,
         "num_heads": 32,
@@ -97,7 +104,7 @@ MODEL_PARAMS_DICT = {
 SIMULATED_CPU_DEVICES_COUNT = 16
 
 
-def convert(base_model_path, maxtext_model_path, model_size, moe_matmul):
+def convert(base_model_path, maxtext_model_path, model_size):
   """
   Function to convert the checkpoint at base_model_path into Orbax checkpoint
   for MaxText and save at maxtext_model_path
@@ -106,7 +113,6 @@ def convert(base_model_path, maxtext_model_path, model_size, moe_matmul):
   base_model_path: checkpoint path
   maxtext_model_path: Path to save the MaxText checkpoint to
   model_size: llama2-7b to 70b, mistral-7b, or mixtral-8x7b
-  moe_matmul: Indicate if run MoE block through matmul, otherwise through for loop
   """
   """Convert model to maxtext."""
   model_params = MODEL_PARAMS_DICT[model_size]
@@ -128,7 +134,7 @@ def convert(base_model_path, maxtext_model_path, model_size, moe_matmul):
   pytorch_vars = [pytorch_vars[i] for i in sorted(list(pytorch_vars.keys()))]
 
   if num_experts:
-    layer_key = "MoeBlock_0" if moe_matmul else "gate"
+    layer_key = "MoeBlock_0"
   else:
     layer_key = "mlp"
   jax_weights = {
@@ -165,10 +171,7 @@ def convert(base_model_path, maxtext_model_path, model_size, moe_matmul):
     layer_weight["gate"] = {"kernel": []}
 
     for k in range(num_experts):
-      if moe_matmul:
-        jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"] = {}
-      else:
-        jax_weights["decoder"]["layers"][f"mlp_{k}"] = {}
+      jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"] = {}
       layer_weight[f"mlp_{k}"] = {
           "wi_0": {"kernel": []},
           "wi_1": {"kernel": []},
@@ -301,35 +304,23 @@ def convert(base_model_path, maxtext_model_path, model_size, moe_matmul):
   else:
     layer_weight["gate"]["kernel"] = np.array(layer_weight["gate"]["kernel"])
     layer_weight["gate"]["kernel"] = np.transpose(layer_weight["gate"]["kernel"], axes=(1, 0, 2))
-    if moe_matmul:
-      jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["kernel"] = layer_weight["gate"]["kernel"]
-      all_wi_0 = []
-      all_wi_1 = []
-      all_wo = []
-    else:
-      jax_weights["decoder"]["layers"]["gate"] = layer_weight["gate"]
+    jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["kernel"] = layer_weight["gate"]["kernel"]
+    all_wi_0 = []
+    all_wi_1 = []
+    all_wo = []
 
     for k in range(num_experts):
       layer_weight[f"mlp_{k}"]["wi_0"]["kernel"] = np.array(layer_weight[f"mlp_{k}"]["wi_0"]["kernel"])
       layer_weight[f"mlp_{k}"]["wi_1"]["kernel"] = np.array(layer_weight[f"mlp_{k}"]["wi_1"]["kernel"])
       layer_weight[f"mlp_{k}"]["wo"]["kernel"] = np.array(layer_weight[f"mlp_{k}"]["wo"]["kernel"])
 
-      if moe_matmul:
-        all_wi_0.append(layer_weight[f"mlp_{k}"]["wi_0"]["kernel"])
-        all_wi_1.append(layer_weight[f"mlp_{k}"]["wi_1"]["kernel"])
-        all_wo.append(layer_weight[f"mlp_{k}"]["wo"]["kernel"])
-      else:
-        # swap the layer index
-        layer_weight[f"mlp_{k}"]["wi_0"]["kernel"] = np.transpose(layer_weight[f"mlp_{k}"]["wi_0"]["kernel"], axes=(1, 0, 2))
-        layer_weight[f"mlp_{k}"]["wi_1"]["kernel"] = np.transpose(layer_weight[f"mlp_{k}"]["wi_1"]["kernel"], axes=(1, 0, 2))
-        layer_weight[f"mlp_{k}"]["wo"]["kernel"] = np.transpose(layer_weight[f"mlp_{k}"]["wo"]["kernel"], axes=(1, 0, 2))
+      all_wi_0.append(layer_weight[f"mlp_{k}"]["wi_0"]["kernel"])
+      all_wi_1.append(layer_weight[f"mlp_{k}"]["wi_1"]["kernel"])
+      all_wo.append(layer_weight[f"mlp_{k}"]["wo"]["kernel"])
 
-        jax_weights["decoder"]["layers"][f"mlp_{k}"] = layer_weight[f"mlp_{k}"]
-
-    if moe_matmul:
-      jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_0"] = np.array(all_wi_0)
-      jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_1"] = np.array(all_wi_1)
-      jax_weights["decoder"]["layers"]["MoeBlock_0"]["wo"] = np.array(all_wo)
+    jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_0"] = np.array(all_wi_0)
+    jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_1"] = np.array(all_wi_1)
+    jax_weights["decoder"]["layers"]["MoeBlock_0"]["wo"] = np.array(all_wo)
 
   mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
   s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))  # shards first axis
@@ -378,7 +369,6 @@ if __name__ == "__main__":
   parser.add_argument("--base-model-path", type=str, required=True)
   parser.add_argument("--maxtext-model-path", type=str, required=True)
   parser.add_argument("--model-size", type=str, required=True)
-  parser.add_argument("--moe-matmul", type=bool, required=False, default=False)
 
   args = parser.parse_args()
 
@@ -387,4 +377,4 @@ if __name__ == "__main__":
 
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"
 
-  convert(args.base_model_path, args.maxtext_model_path, args.model_size, args.moe_matmul)
+  convert(args.base_model_path, args.maxtext_model_path, args.model_size)

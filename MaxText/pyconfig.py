@@ -14,7 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-# pylint: disable=missing-module-docstring, bare-except, consider-using-generator
+# pytype: skip-file
+# pylint: disable=missing-module-docstring, bare-except, consider-using-generator, missing-function-docstring
 from collections import OrderedDict
 import math
 import os
@@ -51,6 +52,18 @@ def string_to_bool(s: str) -> bool:
 _yaml_types_to_parser = {str: str, int: int, float: float, bool: string_to_bool}
 
 
+def validate_compute_axis_order(s: str) -> None:
+  valid_compute_axis_order = ("0,1,2,3", "0,2,1,3")
+  if s not in valid_compute_axis_order:  # currently supported compute_axis_order
+    raise ValueError("Invalid compute_axis_order was passed. Valid options ", valid_compute_axis_order)
+
+def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
+  valid_kv_quant_axis = ("", "dkv", "heads_and_dkv")
+  if s not in valid_kv_quant_axis:  # currently supported kv_quant_axis
+    raise ValueError("Invalid kv_quant_axis was passed. Valid options ", valid_kv_quant_axis)
+  if quantize_kvcache and s == "":
+    raise ValueError("kv_quant_axis can not be '' when quantize_kvcache is True")
+
 def validate_attention_type(s: str) -> None:
   valid_attention_types = ("autoselected", "dot_product", "flash", "cudnn_flash_te")
   if s not in valid_attention_types:  # currently supported attention
@@ -65,6 +78,8 @@ def validate_profiler_type(s: str) -> None:
 def validate_keys(keys):
   validate_attention_type(keys["attention"])
   validate_profiler_type(keys["profiler"])
+  validate_compute_axis_order(keys["compute_axis_order"])
+  validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
 
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"
@@ -72,25 +87,43 @@ def validate_keys(keys):
   assert (
       keys["load_parameters_path"] == "" or keys["load_full_state_path"] == ""
   ), "At most one of `load_parameters_path` or `load_full_state_path` should be set"
+  if keys["enable_emergency_checkpoint"]:
+    assert keys["local_checkpoint_directory"] != "", "A local checkpoint directory must be specified when using emergency checkpoint"
+    assert keys["local_checkpoint_period"] > 0, "A positive local checkpoint period must be specified when using emergency checkpoint"
+  else:
+    max_logging.log("Not using emergency checkpoint, ignoring local_checkpoint_directory and local_checkpoint_period")
 
 
 def validate_data_input(keys):
   """validate provided parameters for data input"""
   if keys["dataset_type"] == "hf":
     max_logging.log(
-        f"dataset_type set to hf, will use {keys['hf_path']=}, {keys['hf_data_dir']=} and {keys['hf_data_files']=} to read data"
+        f"dataset_type set to hf, will use {keys['hf_path']=}, {keys['hf_data_dir']=} and {keys['hf_train_files']=} to read data"
     )
     assert keys["hf_path"] != "", "hf_path can't be empty when dataset_type=hf"
+    if not keys['hf_train_files']:
+      keys['hf_train_files'] = None
+    if not keys['hf_eval_files']:
+      keys['hf_eval_files'] = None
+    if keys['hf_eval_files']:
+      keys['hf_eval_split'] = 'train'
+    if keys['eval_interval'] > 0:
+      assert keys['hf_eval_split'], "Please specify hf_eval_split or set eval_interval to <=0."
+
   elif keys["dataset_type"] == "grain":
     max_logging.log(
-        f"dataset_type set to grain, will use {keys['grain_data_files']=} as data files, and {keys['grain_worker_count']} workers"
+        f"dataset_type set to grain, will use {keys['grain_train_files']=} as data files, and {keys['grain_worker_count']} workers"
     )
-    assert keys['grain_data_files'] != "", "grain_data_files can't be empty when dataset_type=grain"
+    assert keys['grain_train_files'] != "", "grain_train_files can't be empty when dataset_type=grain"
+    if keys['eval_interval'] > 0:
+      assert keys['grain_eval_files'], "Please specify grain_eval_files or set eval_interval to <=0."
   elif keys["dataset_type"] == "tfds":
     max_logging.log(
         f"dataset_type set to tfds, will use {keys['dataset_path']=} and {keys['dataset_name']=}"
     )
     assert keys['dataset_name'] != "", "dataset_name can't be empty when dataset_type=tfds"
+    if keys['eval_interval'] > 0:
+      assert keys["eval_split"], "Please specify eval_split or set eval_interval to <=0."
 
 def validate_model_name(s: str) -> bool:
   """Validate provided model name."""
@@ -100,6 +133,7 @@ def validate_model_name(s: str) -> bool:
       "llama2-7b",
       "llama2-13b",
       "llama2-70b",
+      "llama3-8b",
       "mistral-7b",
       "mixtral-8x7b",
       "gemma-7b",
@@ -241,6 +275,16 @@ class _HyperParameters:
       _HyperParameters.configure_gpt3_task(raw_keys)
     _HyperParameters.user_init(raw_keys)
 
+    if not os.path.isfile(raw_keys["tokenizer_path"]):
+      # Try and find the tokenizer path relative to the config file.
+      tokenizer_path = os.path.join(
+          os.path.dirname(config_name),
+          raw_keys["tokenizer_path"],
+      )
+
+      if os.path.isfile(tokenizer_path):
+        raw_keys["tokenizer_path"] = tokenizer_path
+
     self.keys = raw_keys
     keys = [k for k in raw_keys]  # pylint: disable=unnecessary-comprehension
     keys.sort()
@@ -278,8 +322,15 @@ class _HyperParameters:
     if using_pipeline_parallelism(raw_keys):
       raw_keys["using_pipeline_parallelism"] = True
       num_stages = int(raw_keys['ici_pipeline_parallelism'] * raw_keys['dcn_pipeline_parallelism'])
+      if raw_keys['num_pipeline_repeats'] == -1:
+        num_pipeline_repeats, remainder = divmod(raw_keys['num_decoder_layers'], num_stages * raw_keys['num_layers_per_pipeline_stage'])
+        assert not remainder, f"The number of layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) times the number of stages ({num_stages}) must divide the number of decoder layers ({raw_keys['num_decoder_layers']}) "
+        raw_keys['num_pipeline_repeats'] = num_pipeline_repeats
+      assert num_stages * raw_keys['num_pipeline_repeats'] * raw_keys['num_layers_per_pipeline_stage'] == raw_keys['num_decoder_layers'], f"The product of pipeline stages ({num_stages}), repeats ({raw_keys['num_pipeline_repeats']}), and layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) must be equal to the number of layers ({raw_keys['num_decoder_layers']})"
       if raw_keys['num_pipeline_microbatches'] == -1:
         raw_keys['num_pipeline_microbatches'] = num_stages
+      assert raw_keys['num_pipeline_microbatches'] % num_stages == 0, f"The number of microbatches ({raw_keys['num_pipeline_microbatches']}) must be divisible by the number of stages ({num_stages})"
+      assert raw_keys['global_batch_size_to_train_on'] % raw_keys['num_pipeline_microbatches'] == 0, f"The global batch size ({raw_keys['global_batch_size_to_train_on']}) must be divisible by the number of microbatches ({raw_keys['num_pipeline_microbatches']})"
     else:
       raw_keys["using_pipeline_parallelism"] = False
 
@@ -335,10 +386,20 @@ class _HyperParameters:
       raw_keys = validate_and_update_keys(raw_keys, model_vars, config_name)
     return updated_keys
 
+def validate_megablox_parallelism(raw_keys):
+  if raw_keys["megablox"] and (using_tensor_parallelism(raw_keys) or
+                               using_sequence_parallelism(raw_keys) or
+                               using_pipeline_parallelism(raw_keys)):
+    raise ValueError("Currently we only support Megablox with data parallelism.")
 
 def validate_and_update_keys(raw_keys, model_keys, config_name: str):
   """Validate and update model specific config keys"""
   max_logging.log("Updating following parameters in config\n")
+
+  if raw_keys["num_experts"] > 1:
+    # Currently, Megablox only supports data parallelism
+    validate_megablox_parallelism(raw_keys)
+
   for k in model_keys:
     max_logging.log(f"{k}: {model_keys[k]}")
     if k not in raw_keys:
@@ -404,6 +465,10 @@ def get_num_target_devices(raw_keys):
 
 
 def get_num_slices(raw_keys):
+  """ Calculate num_slices based on number of devices. """
+  if raw_keys['hardware'] == 'cpu':
+    max_logging.log(" Setting num_slices=1 for CPU hardware type")
+    return 1
   if int(raw_keys["compile_topology_num_slices"]) > 0:
     return raw_keys["compile_topology_num_slices"]
   else:
@@ -422,6 +487,12 @@ def get_quantization_local_shard_count(raw_keys):
 
 def using_pipeline_parallelism(raw_keys) -> bool:
   return int(raw_keys['ici_pipeline_parallelism']) > 1 or int(raw_keys['dcn_pipeline_parallelism']) > 1
+
+def using_tensor_parallelism(raw_keys) -> bool:
+  return int(raw_keys['ici_tensor_parallelism']) > 1 or int(raw_keys['dcn_tensor_parallelism']) > 1
+
+def using_sequence_parallelism(raw_keys) -> bool:
+  return int(raw_keys['ici_sequence_parallelism']) > 1 or int(raw_keys['dcn_sequence_parallelism']) > 1
 
 class HyperParameters:  # pylint: disable=missing-class-docstring
 

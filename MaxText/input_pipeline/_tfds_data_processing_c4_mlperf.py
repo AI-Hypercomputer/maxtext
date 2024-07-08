@@ -32,6 +32,7 @@ from jax.experimental import multihost_utils
 import tokenizer
 import multihost_dataloading
 import sequence_packing
+from input_pipeline._input_pipeline_utils import get_tokenizer
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
@@ -237,7 +238,7 @@ def preprocess_dataset(
 ):
   """Pre-process the dataset and return iterators for mlperf training."""
   # tokenize
-  train_ds = train_ds.map(tokenizer.TokenizeOp(sp_tokenizer, data_keys=("targets",)), num_parallel_calls=AUTOTUNE)
+  train_ds = train_ds.map(lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)), num_parallel_calls=AUTOTUNE)
 
   train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
   train_ds = split_tokens_to_targets_length(train_ds, config.max_target_length)
@@ -288,3 +289,23 @@ def preprocess_dataset(
 
   # Return multi-host jax.Array prep iterator
   return train_multihost_gen, eval_multihost_gen
+
+def make_c4_mlperf_iterator(
+    config: ml_collections.ConfigDict,
+    global_mesh,
+    add_bos,
+    add_eos,
+    process_indices,
+):
+  """Make train iterator and tokenizer for customized C4 dataset for mlperf gpt3 training."""
+  train_ds, eval_ds = get_datasets(
+      config=config,
+      dataloading_host_index=process_indices.index(jax.process_index()),
+      dataloading_host_count=len(process_indices),
+  )
+  sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
+  train_iter, eval_iter = preprocess_dataset(
+      config, global_mesh, train_ds, eval_ds, sp_tokenizer,
+      data_shuffle_seed=config.data_shuffle_seed
+  )
+  return train_iter, eval_iter

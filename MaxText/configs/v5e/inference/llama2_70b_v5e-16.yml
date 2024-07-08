@@ -1,0 +1,37 @@
+base_config: "inference_jetstream.yml"
+
+# WIP
+# tensor = 8, autoregressive=2
+# per_device_batch_size=6
+# weight bf16, kv cache bf16
+# around 29ms per decode step
+
+model_name: "llama2-70b"
+sharding_strategy: "experimental"
+attention: 'dot_product'
+allow_split_physical_axes: True
+
+logical_axis_rules: [
+                      ['embed', []],
+                      ['vocab', ['tensor', 'autoregressive']],
+                      ['activation_batch', []],
+                      ['activation_length', []],
+                      ['activation_embed', []],
+                      ['activation_vocab', ['tensor']],
+                      ['heads', ['tensor', 'autoregressive']],
+                      ['kv', []],
+                      ['kv_heads', ['tensor']],
+                      ['kv_head_dim', ['autoregressive']],
+                      ['activation_kv_batch', ['autoregressive']],
+                      ['activation_kv_heads', ['tensor']],
+                      ['activation_kv_head_dim', []],
+                      ['activation_heads', ['tensor']],
+                      ['activation_kv', ['tensor', 'autoregressive']],
+                      ['norm', []],
+                      ['mlp', ['tensor', 'autoregressive']],
+                      ['activation_mlp', ['tensor', 'autoregressive']],
+                      ['cache_batch', ['autoregressive']],
+                      ['cache_sequence', []],
+                      ['cache_heads', ['tensor']],
+                      ['cache_kv', []],
+                    ]

@@ -32,6 +32,7 @@ class Train(unittest.TestCase):
         "run_name=runner_test",
         r"dataset_path=gs://maxtext-dataset",
         "enable_checkpointing=False",
+        "tokenizer_path=../assets/tokenizer.llama2",
     ])
 
 

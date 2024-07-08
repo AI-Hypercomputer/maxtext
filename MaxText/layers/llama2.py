@@ -38,6 +38,16 @@ DType = common_types.DType
 Mesh = common_types.Mesh
 ScanIn = common_types.ScanIn
 
+AxisNames = common_types.AxisNames
+BATCH = common_types.BATCH
+KV_BATCH = common_types.KV_BATCH
+LENGTH = common_types.LENGTH
+HEAD = common_types.HEAD
+KV_HEAD = common_types.KV_HEAD
+D_KV = common_types.D_KV
+KV_HEAD_DIM = common_types.KV_HEAD_DIM
+
+
 Embed = embeddings.Embed
 Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
@@ -95,11 +105,10 @@ class LlamaDecoderLayer(nn.Module):
         dropout_rate=cfg.dropout_rate,
         name="self_attention",
         quant=self.quant,
-        quantize_kvcache=cfg.quantize_kvcache,
-        prefill_key_axis_order=tuple([int(i) for i in cfg.prefill_key_axis_order.split(",")]),
-        prefill_value_axis_order=tuple([int(i) for i in cfg.prefill_value_axis_order.split(",")]),
-        ar_key_axis_order=tuple([int(i) for i in cfg.ar_key_axis_order.split(",")]),
-        ar_value_axis_order=tuple([int(i) for i in cfg.ar_value_axis_order.split(",")]),
+        kv_quant=quantizations.configure_kv_quant(cfg),
+        prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
+        ar_cache_axis_order=tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
+        compute_axis_order=tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
         reshape_q=cfg.reshape_q,
     )
 

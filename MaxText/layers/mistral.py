@@ -97,7 +97,7 @@ class MistralDecoderLayer(nn.Module):
         dropout_rate=cfg.dropout_rate,
         name="self_attention",
         quant=self.quant,
-        quantize_kvcache=cfg.quantize_kvcache,
+        kv_quant=quantizations.configure_kv_quant(cfg),
     )
 
     attention_lnx = attention_layer(
@@ -123,51 +123,19 @@ class MistralDecoderLayer(nn.Module):
     hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_length", "activation_embed"))
 
     if cfg.num_experts > 1:
-      # TODO(ranran): remove for loop implementation after adding expert parallelism
-      if cfg.moe_matmul:
-        mlp_lnx = linears.MoeBlock(
-            config=cfg,
-            num_experts=cfg.num_experts,
-            num_experts_per_tok=cfg.num_experts_per_tok,
-            mesh=mesh,
-            kernel_init=initializers.nd_dense_init(1.0, 'fan_in', 'truncated_normal'),
-            kernel_axes=('embed', 'mlp'),
-            dtype=cfg.dtype,
-        )(hidden_states)
-        mlp_lnx = nn.with_logical_constraint(
-            mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')
-        )
-      else:
-        max_logging.log("Running MoE for loop implementation.")
-        gate_logits = linears.DenseGeneral(
-            cfg.num_experts,
-            weight_dtype=cfg.weight_dtype,
-            dtype=cfg.dtype,
-            kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-            kernel_axes=("embed", "mlp"),
-            name="gate",
-            quant=self.quant,
-        )(hidden_states)
-        weights, selected_experts = jax.lax.top_k(gate_logits, cfg.num_experts_per_tok)
-        weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1)
-        mlp_lnx = jnp.zeros_like(hidden_states)
-        weights = weights.astype(cfg.dtype)
-        mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
-
-        for k in range(cfg.num_experts):
-            weights_exp = jnp.sum(jnp.multiply(selected_experts == k, weights), axis=-1)
-            mlp_lnx_exp = linears.MlpBlock(
-                intermediate_dim=cfg.mlp_dim,
-                activations=cfg.mlp_activations,
-                intermediate_dropout_rate=cfg.dropout_rate,
-                dtype=cfg.dtype,
-                weight_dtype=cfg.weight_dtype,
-                name=f"mlp_{k}",
-                config=cfg,
-            )(hidden_states, deterministic=deterministic)
-            mlp_lnx_exp = nn.with_logical_constraint(mlp_lnx_exp, ("activation_batch", "activation_length", "activation_embed"))
-            mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
-            mlp_lnx += mlp_lnx_exp
+      mlp_lnx = linears.MoeBlock(
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=initializers.nd_dense_init(1.0, 'fan_in', 'truncated_normal'),
+          kernel_axes=('embed', 'mlp'),
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+      )(hidden_states)
+      mlp_lnx = nn.with_logical_constraint(
+          mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')
+      )
     else:
       mlp_lnx = linears.MlpBlock(
           intermediate_dim=cfg.mlp_dim,

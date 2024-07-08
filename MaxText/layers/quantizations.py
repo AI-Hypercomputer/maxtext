@@ -15,26 +15,46 @@
 """Quantization library."""
 
 import functools
+from typing import Optional
 
 from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2.flax import aqt_flax
-from common_types import Array, Config
+import common_types
 from dataclasses import dataclass
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
+from typing import Tuple, Sequence
 
 MAX_INT8 = 127.5
+MAX_INT4 = 7.5
+
+Array = common_types.Array
+Config = common_types.Config
+AxisIdxes = common_types.AxisIdxes
+AxisNames = common_types.AxisNames
+CACHE_HEADS = common_types.CACHE_HEADS
+CACHE_KV = common_types.CACHE_KV
 
 
 @dataclass
 class Quantization:
   """Base class for quantization configurations"""
 
-  def dot_general_cls(self):
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Placeholder for dot_general implementation in subclasses."""
     pass
+
+
+def _rhs_axis_metadata_wrapper(x: jnp.ndarray, no_sharding_axis: Sequence[int], mesh_axes: Tuple[str, ...], is_tiled: bool):
+  mesh_axes = list(mesh_axes)
+  assert is_tiled == False
+  if mesh_axes is not None and len(mesh_axes) > 0:
+    for no_shard_idx in no_sharding_axis:
+      mesh_axes[no_shard_idx] = None
+
+  return nn.with_logical_partitioning((lambda: x), mesh_axes)()
 
 
 @dataclass
@@ -44,14 +64,20 @@ class AqtQuantization:
   quant_dg: aqt_config.DotGeneral
   quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
 
-  def dot_general_cls(self):
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
+    rhs_axis_metadata_wrapper = None
+    if self.quant_mode != aqt_flax.QuantMode.CONVERT:
+      rhs_axis_metadata_wrapper = functools.partial(
+        _rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=False)
     aqt_dg_cls = functools.partial(
         aqt_flax.AqtDotGeneral,
         self.quant_dg,
         rhs_quant_mode=self.quant_mode,
         lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
         rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
+        rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
+        use_legacy_freezer=False,
     )
     return aqt_dg_cls
 
@@ -74,7 +100,7 @@ class Fp8Quantization(Quantization):
 
   quant_mode = "train"
 
-  def dot_general_cls(self):
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
     return nn.Fp8DotGeneralOp
 
@@ -170,19 +196,54 @@ def remove_quantized_params(params, aqt_vars):
     tree_flat[i] = v
   return tree_unflatten(tree_struct, tree_flat)
 
+def configure_kv_quant(config):
+  return None if not config.quantize_kvcache else KVQuant(config)
 
-def configure_kv_quantization(config: Config):
-  """Configure kv quantization based on user config."""
-  return False if not config.quantize_kvcache else True
+class KVQuant:
+  axis_cfg = ""
+  dtype = None
+
+  def __init__(self, config:Config):
+    assert config.quantize_kvcache
+    self.axis_cfg = config.kv_quant_axis
+    self.dtype = self._get_dtype(config.kv_quant_dtype)
+
+  def _get_dtype(self, dtype_cfg: str):
+    if dtype_cfg == "int4":
+      return jnp.int4
+    if dtype_cfg == "int8":
+      return jnp.int8
+    raise ValueError(f"Invalid kv_quant_dtype: {dtype_cfg}")
+
+  def _get_max_axis(self, axis_names: AxisNames):
+    if self.axis_cfg == "dkv":
+      return axis_names.index(CACHE_KV)
+    if self.axis_cfg == "heads_and_dkv":
+      return (
+        axis_names.index(CACHE_HEADS),
+        axis_names.index(CACHE_KV)
+        )
+    raise ValueError(f"Invalid KV quant axis cfg: {self.axis_cfg}")
+
+  def quantize(self, kv: Array, axis_names: AxisNames):
+    """Quantize key/values stored in kvcache."""
+    assert self.axis_cfg, 'KV quant axis cannot be None'
+    max_axis = self._get_max_axis(axis_names)
+    scale = jnp.max(jnp.abs(kv), axis=max_axis, keepdims=True)
+    if self.dtype == jnp.int8:
+      value = jnp.int8(jnp.rint(kv * (MAX_INT8 / scale)))
+      return value, scale
+    if self.dtype == jnp.int4:
+      value = jnp.int4(jnp.rint(kv * (MAX_INT4 / scale)))
+      return value, scale
+    raise ValueError(f"Invalid KV quant dtype:{self.dtype}.")
 
 
-def quantize_kv(kv: Array, kv_axis: int):
-  """Quantize key/values stored in kvcache."""
-  scale = jnp.max(jnp.abs(kv), axis=kv_axis, keepdims=True)
-  value = jnp.int8(jnp.rint(kv * (MAX_INT8 / scale)))
-  return value, scale
+  def unquantize(self, value: Array, scale: Array, dtype: jnp.dtype):
+    """Unquantize key/values stored in kvcache."""
+    if self.dtype == jnp.int8:
+      return value.astype(dtype) * scale / MAX_INT8
+    if self.dtype == jnp.int4:
+      return value.astype(dtype) * scale / MAX_INT4
+    raise ValueError(f"Invalid KV quant dtype: {self.dtype}.")
 
-
-def unquantize_kv(value: Array, scale: Array, dtype: jnp.dtype):
-  """Unquantize key/values stored in kvcache."""
-  return value.astype(dtype) * scale / MAX_INT8

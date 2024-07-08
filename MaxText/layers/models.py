@@ -92,11 +92,11 @@ class DecoderLayer(nn.Module):
         dropout_rate=cfg.dropout_rate,
         name="self_attention",
         quant=self.quant,
-        quantize_kvcache=cfg.quantize_kvcache,
-        prefill_key_axis_order=tuple([int(i) for i in cfg.prefill_key_axis_order.split(",")]),
-        prefill_value_axis_order=tuple([int(i) for i in cfg.prefill_value_axis_order.split(",")]),
-        ar_key_axis_order=tuple([int(i) for i in cfg.ar_key_axis_order.split(",")]),
-        ar_value_axis_order=tuple([int(i) for i in cfg.ar_value_axis_order.split(",")]),
+        kv_quant=quantizations.configure_kv_quant(cfg),
+        prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
+        ar_cache_axis_order=tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
+        compute_axis_order=tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
+        reshape_q=cfg.reshape_q,
     )
 
     attention_lnx = attention_layer(
@@ -202,7 +202,7 @@ class Decoder(nn.Module):
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma", "simple"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
