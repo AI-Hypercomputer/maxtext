@@ -132,6 +132,7 @@ class MistralDecoderLayer(nn.Module):
           kernel_axes=('embed', 'mlp'),
           dtype=cfg.dtype,
           weight_dtype=cfg.weight_dtype,
+          quant=self.quant,
       )(hidden_states)
       mlp_lnx = nn.with_logical_constraint(
           mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')
@@ -145,6 +146,7 @@ class MistralDecoderLayer(nn.Module):
           weight_dtype=cfg.weight_dtype,
           name="mlp",
           config=cfg,
+          quant=self.quant,
       )(hidden_states, deterministic=deterministic)
       mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
 
