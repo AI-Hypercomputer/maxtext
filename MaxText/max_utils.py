@@ -21,6 +21,7 @@ import functools
 import time
 import socket
 import subprocess
+from etils import epath
 
 import max_logging
 
@@ -29,6 +30,7 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
 import orbax.checkpoint as ocp
+import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 
 
 import json
@@ -228,8 +230,10 @@ def maybe_initialize_jax_distributed_system(raw_keys):
       and not raw_keys["enable_single_controller"]
   ) or raw_keys["hardware"] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
-    jax.distributed.initialize()
-    ocp.multihost.utils.initialize_runtime_to_distributed_ids()
+    if not raw_keys['enable_emergency_checkpoint']:
+      jax.distributed.initialize()
+    else:
+      initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
     max_logging.log("Jax distributed system initialized!")
 
 
@@ -264,6 +268,69 @@ def initialize_jax_for_cpu():
       process_id=pid,
       num_processes=int(os.environ.get("JAX_PROCESS_COUNT")),
   )
+
+
+def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
+  """Initialize JAX distributed runtime for TPUs when emergency checkpointing is used.
+  Currently, this only works for two scenarios:
+    1) A fresh run where no ID files exist on any nodes,
+    2) A "restore" run where the pods land on the same set of nodes as the previous run.
+  For Scenario #2 specifically, note the following cases where it will not work:
+    a) Some slices have failed, or
+    b) In a shared cluster, the pods land on a different set of nodes in the "restore run.
+  
+  Ongoing work outside of MaxText would get rid of these restrictions.
+  
+  TODO: Update this function to incorporate the ongoing work once available.
+  """
+  ID_FILE = "id_file.txt"
+
+  local_id_file = epath.Path(raw_keys["local_checkpoint_directory"]) / ID_FILE
+  if local_id_file.exists():
+    max_logging.log("An ID file from a previous run exists, initializing JAX distributed runtime using the saved ID.")
+    process_id = int(local_id_file.read_text())
+    coordinator_address_file = _get_coordinator_address_file(raw_keys)
+    if process_id == 0:
+      coordinator_address = _get_coordinator_address_for_emergency_checkpointing(raw_keys)
+      coordinator_address_file.write_text(coordinator_address)
+    else:
+      coordinator_address = _retrieve_coordinator_address(coordinator_address_file)
+    max_logging.log(f"Using the saved process_id of {process_id} and the 0'th process's address {coordinator_address}"
+                    " to initialize JAX distributed runtime...")
+    jax.distributed.initialize(coordinator_address=coordinator_address, process_id=process_id)
+  else:
+    max_logging.log("No ID file from a previous run exists, initializing JAX distributed runtime without args.")
+    jax.distributed.initialize()
+    process_id = jax._src.distributed.global_state.process_id  # pylint: disable=protected-access
+    local_id_file.write_text(str(process_id))
+
+  ocp.multihost.utils.initialize_runtime_to_distributed_ids()
+
+
+def _get_run_name(raw_keys):
+  if raw_keys["run_name"] != "":
+    return raw_keys["run_name"]
+  return os.environ.get("JOBSET_NAME")
+
+
+def _get_coordinator_address_file(raw_keys):
+  COORDINATOR_ADDRESS_FILE = "coordinator_address.txt"
+  return epath.Path(os.path.join(raw_keys["base_output_directory"], _get_run_name(raw_keys), COORDINATOR_ADDRESS_FILE))
+
+
+def _get_coordinator_address_for_emergency_checkpointing(raw_keys):
+  run_name = _get_run_name(raw_keys)
+  slice_id = os.environ.get('MEGASCALE_SLICE_ID')
+  worker_id = os.environ.get('TPU_WORKER_ID')
+  return f"{run_name}-slice-job-{slice_id}-{worker_id}.{run_name}:8476"
+
+
+def _retrieve_coordinator_address(coordinator_address_file):
+  for _ in range(30):
+    if coordinator_address_file.exists():
+      return coordinator_address_file.read_text()
+    time.sleep(1)
+  return ""
 
 
 def is_cpu_backend(raw_keys):
@@ -543,9 +610,12 @@ def setup_initial_state(
     )
 
     if restored:
-      if "iter" in restored and restored["iter"] is not None:
-        data_iterator.local_iterator = restored["iter"]
-      state = restored["items"]
+      if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
+        state = restored
+      else:
+        if "iter" in restored and restored["iter"] is not None:
+          data_iterator.local_iterator = restored["iter"]
+        state = restored["items"]
     else:
       init_state_partial = functools.partial(
           init_initial_state, model, tx, config, is_training
@@ -844,8 +914,11 @@ def save_quantized_checkpoint_if_configured(config, params):
 
 def print_mem_stats(label:str):
   print(f'\nMemstats: {label}:')
-  for d in jax.local_devices():
-    stats = d.memory_stats()
-    used = round(stats['bytes_in_use']/2**30, 2)
-    limit = round(stats['bytes_limit']/2**30, 2)
-    print(f"\tUsing (GB) {used} / {limit} ({used/limit:%}) on {d}")
+  try:
+    for d in jax.local_devices():
+      stats = d.memory_stats()
+      used = round(stats['bytes_in_use']/2**30, 2)
+      limit = round(stats['bytes_limit']/2**30, 2)
+      print(f"\tUsing (GB) {used} / {limit} ({used/limit:%}) on {d}")
+  except (RuntimeError, KeyError):
+    print("\tMemstats unavailable.")

@@ -98,21 +98,32 @@ def validate_data_input(keys):
   """validate provided parameters for data input"""
   if keys["dataset_type"] == "hf":
     max_logging.log(
-        f"dataset_type set to hf, will use {keys['hf_path']=}, {keys['hf_data_dir']=} and {keys['hf_data_files']=} to read data"
+        f"dataset_type set to hf, will use {keys['hf_path']=}, {keys['hf_data_dir']=} and {keys['hf_train_files']=} to read data"
     )
     assert keys["hf_path"] != "", "hf_path can't be empty when dataset_type=hf"
-    if not keys['hf_data_files']:
-      keys['hf_data_files'] = None
+    if not keys['hf_train_files']:
+      keys['hf_train_files'] = None
+    if not keys['hf_eval_files']:
+      keys['hf_eval_files'] = None
+    if keys['hf_eval_files']:
+      keys['hf_eval_split'] = 'train'
+    if keys['eval_interval'] > 0:
+      assert keys['hf_eval_split'], "Please specify hf_eval_split or set eval_interval to <=0."
+
   elif keys["dataset_type"] == "grain":
     max_logging.log(
-        f"dataset_type set to grain, will use {keys['grain_data_files']=} as data files, and {keys['grain_worker_count']} workers"
+        f"dataset_type set to grain, will use {keys['grain_train_files']=} as data files, and {keys['grain_worker_count']} workers"
     )
-    assert keys['grain_data_files'] != "", "grain_data_files can't be empty when dataset_type=grain"
+    assert keys['grain_train_files'] != "", "grain_train_files can't be empty when dataset_type=grain"
+    if keys['eval_interval'] > 0:
+      assert keys['grain_eval_files'], "Please specify grain_eval_files or set eval_interval to <=0."
   elif keys["dataset_type"] == "tfds":
     max_logging.log(
         f"dataset_type set to tfds, will use {keys['dataset_path']=} and {keys['dataset_name']=}"
     )
     assert keys['dataset_name'] != "", "dataset_name can't be empty when dataset_type=tfds"
+    if keys['eval_interval'] > 0:
+      assert keys["eval_split"], "Please specify eval_split or set eval_interval to <=0."
 
 def validate_model_name(s: str) -> bool:
   """Validate provided model name."""
@@ -385,8 +396,9 @@ def validate_and_update_keys(raw_keys, model_keys, config_name: str):
   """Validate and update model specific config keys"""
   max_logging.log("Updating following parameters in config\n")
 
-  # Currently, Megablox only supports data parallelism
-  validate_megablox_parallelism(raw_keys)
+  if raw_keys["num_experts"] > 1:
+    # Currently, Megablox only supports data parallelism
+    validate_megablox_parallelism(raw_keys)
 
   for k in model_keys:
     max_logging.log(f"{k}: {model_keys[k]}")
