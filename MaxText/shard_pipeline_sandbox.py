@@ -123,10 +123,23 @@ def spmd_pipeline(fn, stage_params, inputs):
   if args.use_circ_storage:
     circ_storage_mover = jnp.zeros_like(state) * jnp.nan
     circ_storage = jnp.zeros((args.num_microbatches, args.microbatch_size, args.embed_size))
+  else:
+    circ_storage_mover, circ_storage = None, None
   # TODO: wrap this in a function that can be scanned
   #total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1
   num_total_iterations = args.num_microbatches * args.num_repeats + args.num_stages - 1 # regular
-  for loop_iter in range(num_total_iterations):
+
+  loop_state = {"loop_iter": 0, "state": state, "circ_storage": circ_storage, "circ_storage_mover": circ_storage_mover}
+  def run_iteration_scannable(loop_state, xs):
+    # loop state consists of:
+    # loop_iteration,
+    # state,
+    # circ_storage
+    # circ_storage_mover
+    loop_iter = loop_state["loop_iter"]
+    state = loop_state["state"]
+    circ_storage = loop_state["circ_storage"]
+    circ_storage_mover = loop_state["circ_storage_mover"]
 
     # grab new input from either inputs or circ_storage
     state_io_batch_idx = loop_iter % args.microbatches_per_stage
@@ -173,10 +186,16 @@ def spmd_pipeline(fn, stage_params, inputs):
 
     
     state = shift_stages(loop_iter, state)
+    loop_state = {"loop_iter": loop_iter + 1, "state": state, "circ_storage": circ_storage, "circ_storage_mover": circ_storage_mover}
+    return loop_state, None
+  
+  run_iteration_scanned = jax.lax.scan(run_iteration_scannable, length=num_total_iterations)
 
-    # inputs = shift_inputs(loop_iter, inputs)
-    outputs = shift_outputs(loop_iter, outputs)
-    #state, inputs, outputs = shift(loop_iter, state, inputs, outputs)
+  
+
+  # inputs = shift_inputs(loop_iter, inputs)
+  outputs = shift_outputs(loop_iter, outputs)
+  #state, inputs, outputs = shift(loop_iter, state, inputs, outputs)
   outputs = jax.lax.ppermute(outputs, 'stages', [(i, (i+1) % args.num_stages) for i in range(args.num_stages)])
   return outputs
 
