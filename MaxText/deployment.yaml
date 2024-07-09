@@ -27,7 +27,7 @@ spec:
   - file-cache:enable-parallel-downloads:true
   csi:
     driver: gcsfuse.csi.storage.gke.io
-    volumeHandle: xai-hf-dataset-parquet-10g # unique bucket name. xai-hf-dataset-parquet-10g for the 10G * 12K dataset.
+    volumeHandle: xai-hf-dataset-parquet # unique bucket name. xai-hf-dataset-parquet-10g for the 10G * 12K dataset.
     volumeAttributes:
       skipCSIBucketAccessCheck: "true"
 ---
@@ -62,8 +62,8 @@ spec:
       replicas: 1
       template:
         spec:
-          parallelism: 256    # Equal to the number of VMs per slice
-          completions: 256    # Same as the above.
+          parallelism: 1024    # Equal to the number of VMs per slice
+          completions: 1024    # Same as the above.
           backoffLimit: 0   # When any pod fails, the job is failed
           template:
             metadata:
@@ -138,7 +138,7 @@ spec:
               serviceAccountName: bernardhan-benchmark
               containers:
               - name: jax-cpu
-                image: gcr.io/gcs-tess/bernardhan_runner_test
+                image: gcr.io/gcs-tess/bernardhan_ckpt_runner_test
                 
                 env: 
                 - name: REPLICATED_JOB_NAME
@@ -154,9 +154,9 @@ spec:
                     fieldRef:
                       fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
                 - name: PROCESSES_IN_JOB
-                  value: "256"
+                  value: "1024"
                 - name: JAX_PROCESS_COUNT
-                  value: "256"
+                  value: "1024"
                 
                 - name: JOBSET_NAME
                   value: "xpk-test-workload"
@@ -173,8 +173,8 @@ spec:
                 - bash
                 - -c
                 - |
-                  export COMMON_RUN_FLAGS="enable_checkpointing=False ici_data_parallelism=8 ici_fsdp_parallelism=32 hardware=cpu";
-                  export BENCHMARK_RUN_FLAGS="dataset_bucket=xai-hf-dataset-parquet-10g epochs=2 local_batch_size=32 prefetch_factor=2 data_loader_num_workers=2 per_step_computation_time=0";
+                  export COMMON_RUN_FLAGS="enable_checkpointing=False ici_data_parallelism=8 ici_fsdp_parallelism=128 hardware=cpu";
+                  export BENCHMARK_RUN_FLAGS="dataset_bucket=xai-hf-dataset-parquet epochs=2 local_batch_size=32 prefetch_factor=2 data_loader_num_workers=2 per_step_computation_time=0";
                   echo XPK Start: $(date) ; _sigterm() ( kill -SIGTERM $! 2>/dev/null;); trap _sigterm SIGTERM;(JAX_PLATFORMS=cpu python3 MaxText/standalone_dataloader.py MaxText/configs/base.yml ${BENCHMARK_RUN_FLAGS} ${COMMON_RUN_FLAGS}) & PID=$!; while kill -0 $PID 2>/dev/null; do sleep 5; done; wait $PID; EXIT_CODE=$? ;  echo XPK End: $(date); echo EXIT_CODE=$EXIT_CODE;
 
                 volumeMounts:

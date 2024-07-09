@@ -30,10 +30,15 @@ import random
 
 import pyconfig
 from train import validate_train_config, setup_train_loop, setup_mesh_and_model
+import storage_utils
 
 from torch_datasets.parquet import ParquetDataset
 from torch.utils.data import DataLoader
 
+TOTAL_TRAINING_TIME_DIRECTORY = "total_training_time"
+PER_STEP_DATA_LOADING_TIME_DIRECTORY = "per_step_data_loading_time"
+PER_STEP_TIME_DIRECTORY = "per_step_time"
+PER_EPOCH_TIME_DIRECTORY = "per_epoch_time"
 
 def split_list(lst, n):
   """Splits a list into roughly equal sized sublists and pads.
@@ -78,9 +83,9 @@ def parquet_data_loader(config):
   # [Short-term]: we know what the mount path is, and we know what the dataset is.
   # Therefore, we save the listing process which will create a listing storm.
   # TODO: create an option to create a list storm if opted in.
-  parquet_files = [f"/mnt/gcsfuse/{i:04d}.parquet" for i in range(10000)]
+  parquet_files = [os.path.join(config.dataset_directory, f"{i:04d}.parquet") for i in range(10000)]
   if config.dataset_bucket == "xai-hf-dataset-parquet-10g":
-    parquet_files = [f"/mnt/gcsfuse/{i:05d}.parquet" for i in range(12000)]
+    parquet_files = [os.path.join(config.dataset_directory, f"{i:05d}.parquet") for i in range(12000)]
 
   worker_id = jax.process_index()
 
@@ -110,10 +115,10 @@ def data_load_loop(config):
   data_loader = parquet_data_loader(config)
 
   # Record per-step per-epoch data loading times.
-  data_loading_time = [[] for _ in range(config.epochs)]
+  per_step_data_loading_time = []
 
   # Record per-step times, which includes data loading, simulated computation time, and barrier wait time.
-  step_time = [[] for _ in range(config.epochs)]
+  step_time = []
 
   # Record per-epoch total time.
   epoch_times = []
@@ -133,8 +138,8 @@ def data_load_loop(config):
           f"STANDALONE DATALOADER : Host {jax.process_index()} got a batch in {step_data_loading_end - step_data_loading_start} seconds on epoch {i} step {step_count}"
       )
 
-      data_loading_time[i].append(
-          (step_data_loading_end - step_data_loading_start).total_seconds()
+      per_step_data_loading_time.append(
+          [jax.process_index(), i, step_count, (step_data_loading_end - step_data_loading_start).total_seconds()]
       )
 
       # Simulate Accelerator Computation Time.
@@ -159,7 +164,7 @@ def data_load_loop(config):
 
       # Count the per-step time.
       step_end = datetime.datetime.now()
-      step_time[i].append((step_end - step_start).total_seconds())
+      step_time.append([jax.process_index(), i, step_count, (step_end - step_start).total_seconds()])
       step_start = step_end
       # Reset the start time of computing data loading.
       step_data_loading_start = datetime.datetime.now()
@@ -168,7 +173,7 @@ def data_load_loop(config):
     max_logging.log(
         f"STANDALONE DATALOADER : Host {jax.process_index()} completed epoch {i} using {epoch_end - epoch_start} seconds"
     )
-    epoch_times.append((epoch_end - epoch_start).total_seconds())
+    epoch_times.append([jax.process_index(), i, (epoch_end - epoch_start).total_seconds()])
 
   training_end = datetime.datetime.now()
   time_to_load_first_batch = training_end - training_start
@@ -176,18 +181,50 @@ def data_load_loop(config):
   max_logging.log(
       f"STANDALONE DATALOADER Metrics: Training completed in {time_to_load_first_batch} seconds, on host {jax.process_index()}"
   )
-  for i in range(config.epochs):
-    max_logging.log(
-        f"STANDALONE DATALOADER Metrics: Per-epoch total times for epoch {i} on host {jax.process_index()}: {epoch_times[i]}."
-    )
-    max_logging.log(
-        f"STANDALONE DATALOADER Metrics: Per-step data loading times for epoch {i} on host {jax.process_index()}: {data_loading_time[i]}."
-    )
-    max_logging.log(
-        f"STANDALONE DATALOADER Metrics: Per-step times for epoch {i} on host {jax.process_index()}: {step_time[i]}.",
-    )
 
-
+  max_logging.log(
+      f"STANDALONE DATALOADER Metrics: Per-epoch total times on host {jax.process_index()}: {epoch_times}."
+  )
+  max_logging.log(
+      f"STANDALONE DATALOADER Metrics: Per-step data loading times on host {jax.process_index()}: {per_step_data_loading_time}."
+  )
+  max_logging.log(
+      f"STANDALONE DATALOADER Metrics: Per-step times on host {jax.process_index()}: {step_time}.",
+  )
+  
+  if config.gcs_metrics_bucket:
+    max_logging.log(f"Uploading metrics to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()}")
+    base_name = f"{jax.process_index()}.csv"
+    # Upload total training time.
+    storage_utils.upload_csv(
+        config.gcs_metrics_bucket, 
+        os.path.join(config.run_name, TOTAL_TRAINING_TIME_DIRECTORY, base_name), 
+        [[jax.process_index(), time_to_load_first_batch.total_seconds()]]
+    )
+    
+    # Upload per-step data loading time.
+    storage_utils.upload_csv(
+        config.gcs_metrics_bucket, 
+        os.path.join(config.run_name, PER_STEP_DATA_LOADING_TIME_DIRECTORY, base_name), 
+        per_step_data_loading_time
+    )
+    
+    # Upload per-step total time.
+    storage_utils.upload_csv(
+        config.gcs_metrics_bucket, 
+        os.path.join(config.run_name, PER_STEP_TIME_DIRECTORY, base_name), 
+        step_time
+    )
+    
+    # Upload per epoch time.
+    storage_utils.upload_csv(
+        config.gcs_metrics_bucket, 
+        os.path.join(config.run_name, PER_EPOCH_TIME_DIRECTORY, base_name), 
+        epoch_times
+    )
+    
+    max_logging.log(f"Finished uploading metrics to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()}")
+    
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_cpu_enable_gloo_collectives", True)
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"

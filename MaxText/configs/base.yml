@@ -365,5 +365,10 @@ prefetch_factor: 2
 data_loader_num_workers: 2
 # Number of seconds to sleep in between steps. This will not block prefetching.
 per_step_computation_time: 0.0
+# The directory to which the dataset is stored.
+dataset_directory: "/mnt/gcsfuse"
+# The bucket that holds metrics gathered from each running pod.
+gcs_metrics_bucket: "distributed-training-metrics"
+### Parameters used for GCSFuse
 # The GCS bucket that holds the dataset.
 dataset_bucket: xai-hf-dataset-parquet
