@@ -12,13 +12,6 @@ RUN curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyri
 # Install the Google Cloud SDK
 RUN apt-get update && apt-get install -y google-cloud-sdk
 
-# Install kubectl
-RUN apt-get update && \
-    apt-get install -y curl && \
-    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && \
-    install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && \
-    rm kubectl
-
 # Set the default Python version to 3.10
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.10 1
 
