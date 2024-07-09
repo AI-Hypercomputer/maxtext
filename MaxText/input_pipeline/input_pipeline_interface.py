@@ -115,7 +115,8 @@ def get_process_loading_real_data(config, mesh):
   batch_cutoff = config.global_batch_size_to_train_on
   process_loading_real_data = set()
   for p, indices in devices_indices_map.items():
-    if indices[0].stop <= batch_cutoff:
+    print(f"{p=}, {indices=}")
+    if not indices[0].stop or indices[0].stop <= batch_cutoff:
       process_loading_real_data.add(p.process_index)
   return list(process_loading_real_data)
 
@@ -123,6 +124,7 @@ def get_process_loading_real_data(config, mesh):
 def make_mixed_train_iterator(config, mesh, add_bos, add_eos):
   """Return iterators according to dataset_type"""
   process_indices = get_process_loading_real_data(config, mesh)
+  print(f"get_process_loading_real_data {process_indices=}")
   if config.expansion_factor_real_data != -1:  # assert number of hosts loading real data
     assert len(process_indices) == jax.process_count() // config.expansion_factor_real_data
   if jax.process_index() in process_indices:
