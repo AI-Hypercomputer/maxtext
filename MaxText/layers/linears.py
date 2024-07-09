@@ -364,7 +364,7 @@ class MoeBlock(nn.Module):
         inputs = jax.lax.pad(inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0,0,0)])
 
       inputs = inputs.astype(self.dtype)
-      kernel = kernel.astype(self.weight_dtype)
+      kernel = kernel.astype(self.dtype)
       output = mblx.gmm(lhs=inputs,
                         rhs=kernel,
                         group_sizes=group_sizes,
