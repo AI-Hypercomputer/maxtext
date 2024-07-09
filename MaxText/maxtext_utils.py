@@ -92,6 +92,9 @@ def load_compiled(config, partial_train, state):
   p_train_step = deserialize_and_load(serialized_compiled, in_tree, out_tree)
   return p_train_step
 
+def calculate_tokens_training_per_device(config):
+  """Calculate training Tokens per device"""
+  return config.max_target_length * config.per_device_batch_size
 
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
