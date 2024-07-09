@@ -128,15 +128,9 @@ def spmd_pipeline(fn, stage_params, inputs):
   num_total_iterations = args.num_microbatches * args.num_repeats + args.num_stages - 1 # regular
   for loop_iter in range(num_total_iterations):
 
-    # Begin grabbing state 0 
-
-
-
-
     # grab new input from either inputs or circ_storage
     state_io_batch_idx = loop_iter % args.microbatches_per_stage
     state_io_slice = inputs[state_io_batch_idx]
-
     if args.use_circ_storage:
         # Setup potential input from circ_storage, which also has a rotating index for microbatch, size of num_microbatches
         circ_storage_batch_idx = loop_iter % args.num_microbatches
@@ -149,11 +143,10 @@ def spmd_pipeline(fn, stage_params, inputs):
     # we instead grab from the last stage's output (possibly buffered when num_microbatches > num_stages, e.g. from circ_storage).
     first_stage_in = jnp.where(loop_iter < args.num_microbatches, state_io_slice, circular_stage_in)
 
-    #state = state.at[:].set(jnp.where(stage == 0, inputs[loop_iter % args.microbatches_per_stage], state[:]))
     state = state.at[:].set(jnp.where(stage == 0, first_stage_in, state[:]))
     inputs = shift_inputs(loop_iter, inputs)
-    # End grabbing state 0
-     # Fake/ poorly named argument, just repeating the same matmul per layer
+
+     # Fake/ poorly named argument, just repeating the same matmul per layer to increase model AI
     for _ in range(args.num_layers_per_stage):
       # Shard map is rank preserving, so the params have shape [1,embed,embed] inside each shard
       # We want to pass something of shape [embed, embed] instead, so we index away the first unit axis.
