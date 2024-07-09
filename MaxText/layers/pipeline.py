@@ -236,7 +236,6 @@ class Pipeline(nn.Module):
           # The offset is the previous iterations microbatch ID of the last stage, so that for example microbatch 0 will
           # be placed in index 0 of the num_microbatches axis. 
           offset = (loop_iteration - (self.num_stages - 1) - 1) % self.config.num_pipeline_microbatches # Note extra -1 b/c grabbing from the previous output - using circ_storage_mover before it is updated
-          breakpoint()
           return jax.lax.dynamic_update_slice_in_dim(circ_storage_in, rotated, offset, axis=1)
       new_circ_storage = _rotate_right_and_update(old_circ_storage_mover, old_circ_storage)
       new_circ_storage_mover = output
