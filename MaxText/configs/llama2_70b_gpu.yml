@@ -16,5 +16,3 @@ logits_dot_in_fp32: False
 
 per_device_batch_size: 6
 max_target_length: 4096
-
-logical_axis_rules: [['norm', 'fsdp']]
