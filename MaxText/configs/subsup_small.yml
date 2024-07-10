@@ -119,7 +119,7 @@ scan_pipeline_iterations: True # This can be set independently of scan_layers, w
 remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
-attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
+attention: 'flash' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
 
 # Combine matmuls for QKV and MLP
 fused_qkv: False
