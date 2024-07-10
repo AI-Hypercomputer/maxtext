@@ -119,7 +119,7 @@ scan_pipeline_iterations: True # This can be set independently of scan_layers, w
 remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
-attention: 'flash' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
+attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
 
 # Combine matmuls for QKV and MLP
 fused_qkv: False
@@ -214,7 +214,7 @@ num_slices: -1
 # Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 vocab_size: 151808 # powers of 2 for sharding
 tokenizer_path: "assets/tokenizer.llama2"
-per_device_batch_size: 9.0
+per_device_batch_size: 12.0
 expansion_factor_real_data: -1 # if -1 then all hosts will load real data, else total_hosts//expansion_factor_real_data will pull data from GCS.
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
@@ -323,6 +323,8 @@ target_eval_loss: 0.  # early stop once reaching target eval_loss
 
 # Goodput parameters
 enable_goodput_recording: False
+monitor_goodput: False
+goodput_upload_interval_seconds: 60
 
 # Vertex AI Tensorboard Configurations - https://github.com/google/maxtext/tree/main/getting_started/Use_Vertex_AI_Tensorboard.md
 # Set to True for GCE, False if running via XPK
