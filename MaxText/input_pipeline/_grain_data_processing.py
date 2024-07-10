@@ -54,7 +54,8 @@ def preprocessing_pipeline(
     drop_remainder=True,
 ):
   """Use grain to pre-process the dataset and return iterators"""
-  assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible number of global devices."
+  if global_mesh:
+    assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible number of global devices."
 
   operations = []
   operations.append(_input_pipeline_utils.ParseFeatures())
@@ -94,10 +95,12 @@ def preprocessing_pipeline(
       worker_count=grain_worker_count,
   )
 
-  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
-
-  # Return multi-host jax.Array prep iterator
-  return multihost_gen
+  if global_mesh:
+    multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
+    # Return multi-host jax.Array prep iterator
+    return multihost_gen
+  else:
+    return iter(dataloader)
 
 def make_grain_iterator(
     config: ml_collections.ConfigDict,
@@ -107,6 +110,13 @@ def make_grain_iterator(
     process_indices,
 ):
   """Load, preprocess dataset and return iterators"""
+  if not process_indices:
+    dataloading_host_index = 0
+    dataloading_host_count = 1
+  else:
+    dataloading_host_index = process_indices.index(jax.process_index())
+    dataloading_host_count = len(process_indices)
+
   train_ds = get_datasets(config.grain_train_files)
   train_iter = preprocessing_pipeline(
     dataset=train_ds,
@@ -115,8 +125,8 @@ def make_grain_iterator(
     global_mesh=global_mesh,
     max_target_length=config.max_target_length,
     grain_worker_count=config.grain_worker_count,
-    dataloading_host_index=process_indices.index(jax.process_index()),
-    dataloading_host_count=len(process_indices),
+    dataloading_host_index=dataloading_host_index,
+    dataloading_host_count=dataloading_host_count,
     shuffle=config.enable_data_shuffling,
     data_shuffle_seed=config.data_shuffle_seed,
     add_bos=add_bos,

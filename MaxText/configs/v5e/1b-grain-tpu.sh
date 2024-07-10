@@ -18,6 +18,7 @@ echo "Running 1b.sh"
 # Stop execution if any command exits with error
 set -e -x
 
+#apt update && apt install -y dnsutils
 dig google.com
 pip freeze
 
@@ -49,15 +50,15 @@ DATASET_PATH=/tmp/gcsfuse
 # Train
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
 
-JAX_PLATFORMS=tpu python3 MaxText/standalone_dataloader.py MaxText/configs/base.yml \
+JAX_PLATFORMS=tpu python3 MaxText/dummy_dataloader.py MaxText/configs/base.yml \
     steps=100 per_device_batch_size=8 \
     enable_checkpointing=False \
     max_target_length=2048 global_parameter_scale=1 \
     base_output_directory=gs://aireenmei-multipod/grain_scale \
     grain_train_files=/tmp/gcsfuse/maxtext-dataset/array-record/c4/en/3.0.1/c4-train.array_record-* \
     dataset_type=grain \
-    grain_worker_count=2
-#   run_name=aireen-$(date +%Y%m%d-%H-%M)
+    grain_worker_count=2 \
+    run_name=aireen-$(date +%Y%m%d-%H-%M)
     # grain_eval_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-validation* \
     # eval_per_device_batch_size=4 eval_interval=10 eval_batch_num=5 \
 
