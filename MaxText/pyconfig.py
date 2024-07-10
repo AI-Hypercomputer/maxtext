@@ -146,6 +146,8 @@ def validate_model_name(s: str) -> bool:
       "gpt3-22b",
       "gpt3-6b",
       "gpt3-52k",
+      "subsup_small",
+      "subsup_large"
   )
   if s not in valid_model_names:
     raise ValueError("Invalid model name was passed. Valid options ", valid_model_names)
