@@ -76,7 +76,7 @@ save_quantized_params_path: ""
 # Shard the range finding operation for quantization. By default this is set to number of slices.
 quantization_local_shard_count: -1
 
-decoder_block: "llama2" # which style of DecoderBlock to use.
+decoder_block: "mistral" # which style of DecoderBlock to use.
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
@@ -275,7 +275,7 @@ profiler_steps: 5
 
 # When dropout is false the model is a deterministic function of the
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
-enable_dropout: True
+enable_dropout: False
 enable_data_shuffling: True
 data_shuffle_seed: 0
 init_weights_seed: 0
@@ -304,7 +304,7 @@ use_untrainable_positional_embedding: False
 trainable_position_size: -1  # enable gpt3 position embedding with a positive trainable_position_size
 # Rope parameters
 rope_min_timescale: 1
-rope_max_timescale: 10_000
+rope_max_timescale: 1_000_000
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
