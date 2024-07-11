@@ -29,6 +29,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 from jax import numpy as jnp
 import numpy as np
+import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 
 import checkpointing
 import max_utils
@@ -61,7 +62,8 @@ def checkpoint_loop(config, state=None):
         checkpoint_manager, None, config.load_parameters_path, config.load_full_state_path, unboxed_abstract_state
     )
     if state:
-      state = state["items"]
+      if not isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
+        state = state["items"]
 
   jax.block_until_ready(state)
   checkpoint_load_end = datetime.datetime.now()
