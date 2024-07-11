@@ -15,13 +15,13 @@
 """Grouped matrix multiplication operations with custom VJPs."""
 
 import jax
-from jax.experimental.pallas.ops.tpu.megablox import gmm as backend
+from megablox import gmm as backend
 import jax.numpy as jnp
 
 
 gmm = jax.custom_vjp(
     backend.gmm,
-    nondiff_argnums=(3, 4, 7, 8),
+    nondiff_argnums=(3, 4, 7, 8, 9),
 )
 
 
@@ -35,6 +35,7 @@ def _gmm_fwd(
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
     interpret: bool = False,
+    quantization: bool = False,
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -56,6 +57,7 @@ def _gmm_fwd(
       existing_out,
       transpose_rhs=transpose_rhs,
       interpret=interpret,
+      quantization=quantization,
   )
   return out, (lhs, rhs, group_sizes, group_offset, rhs.shape[0])
 
@@ -65,6 +67,7 @@ def _gmm_bwd(
     tiling: tuple[int, int, int],
     transpose_rhs: bool,
     interpret: bool,
+    quantization: bool,
     residual: tuple[
         jnp.ndarray,
         jnp.ndarray,
@@ -86,6 +89,7 @@ def _gmm_bwd(
       group_offset,
       transpose_rhs=not transpose_rhs,
       interpret=interpret,
+      quantization=quantization,
   )
   grad_rhs = backend.tgmm(
       lhs.swapaxes(0, 1),
@@ -96,6 +100,7 @@ def _gmm_bwd(
       group_offset,
       num_actual_groups,
       interpret=interpret,
+      quantization=quantization,
   )
 
   # NOTE: If the rhs transposition is fused into the forward pass we need to

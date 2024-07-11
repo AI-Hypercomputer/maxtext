@@ -30,12 +30,13 @@ import numpy as np
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
 import max_logging
+import megablox as mblx
 
-try:
-  from jax.experimental.pallas.ops.tpu import megablox as mblx
-except ImportError:
-  max_logging.log("JAX megablox is available for TPU only.")
-  pass
+# try:
+#   from jax.experimental.pallas.ops.tpu import megablox as mblx
+# except ImportError:
+#   max_logging.log("JAX megablox is available for TPU only.")
+#   pass
 
 Array = common_types.Array
 Config = common_types.Config
@@ -367,11 +368,13 @@ class MoeBlock(nn.Module):
 
       inputs = inputs.astype(self.dtype)
       kernel = kernel.astype(self.dtype)
+      is_quantization = True if self.quant else False
       output = mblx.gmm(lhs=inputs,
                         rhs=kernel,
                         group_sizes=group_sizes,
                         preferred_element_type=jnp.bfloat16,
-                        tiling=tile_size)
+                        tiling=tile_size,
+                        quantization=is_quantization)
 
       if hs_shape[0] % pad_length:
         output = output[:hs_shape[0]]
@@ -395,10 +398,13 @@ class MoeBlock(nn.Module):
       x, sorted_selected_experts, weights, group_sizes = self.permute(x, logits, config.emb_dim)
 
       layer_w0 = gmm(x, w0, group_sizes)
+      print("layer_w0 = gmm(x, w0, group_sizes)")
       layer_w1 = gmm(x, w1, group_sizes)
+      print("layer_w1 = gmm(x, w1, group_sizes)")
       layer_act = _convert_to_activation_function(config.mlp_activations[0])(layer_w0)
       intermediate_layer = jnp.multiply(layer_act, layer_w1)
       intermediate_output = gmm(intermediate_layer, wo, group_sizes)
+      print("intermediate_output = gmm(intermediate_layer, wo, group_sizes)")
       output = self.unpermute(intermediate_output,
                               sorted_selected_experts,
                               weights)
