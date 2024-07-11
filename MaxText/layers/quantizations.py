@@ -15,10 +15,14 @@
 """Quantization library."""
 
 import functools
+import json
+import re
 from typing import Optional
 
 from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2.flax import aqt_flax
+from aqt.jax.v2 import tiled_dot_general
+from aqt.jax.v2 import calibration
 import common_types
 from dataclasses import dataclass
 import flax.linen as nn
@@ -47,9 +51,41 @@ class Quantization:
     pass
 
 
-def _rhs_axis_metadata_wrapper(x: jnp.ndarray, no_sharding_axis: Sequence[int], mesh_axes: Tuple[str, ...], is_tiled: bool):
+def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
+  del lhs, rhs
+
+  (lhs_ca, rhs_ca), _ = dimension_numbers
+  ret = tiled_dot_general.Cfg(
+      lhs=tiled_dot_general.TensorTiling(contraction_axes=[], remaining_axes=[]),
+      rhs=tiled_dot_general.TensorTiling(contraction_axes=[], remaining_axes=[]),
+  )
+
+  for lhs_idx, rhs_idx in zip(lhs_ca, rhs_ca):
+    ret.lhs.contraction_axes.append(
+        tiled_dot_general.AxisTiling(axis=lhs_idx, tile_size=tile_size, tile_count=None)
+    )
+    ret.rhs.contraction_axes.append(
+        tiled_dot_general.AxisTiling(
+            axis=rhs_idx, tile_size=tile_size, tile_count=None
+        )
+    )
+
+  return ret
+
+
+def _rhs_axis_metadata_wrapper(x: jnp.ndarray, tile_map, no_sharding_axis: Sequence[int], mesh_axes: Tuple[str, ...], is_tiled: bool):
   mesh_axes = list(mesh_axes)
-  assert is_tiled == False
+  if is_tiled:
+    # tile_map is a mapping between original rank and a list of new, tiled rank.
+    if len(mesh_axes) < len(tile_map):
+      mesh_axes = [None] * (len(tile_map) - len(mesh_axes)) + mesh_axes
+    new_mesh_axes = [None] * len(x.shape)
+    for orig_rank, new_rank in tile_map.items():
+      assert new_rank
+      assert len(new_rank) <= 2
+      new_mesh_axes[new_rank[-1]] = mesh_axes[orig_rank]
+    mesh_axes = new_mesh_axes
+
   if mesh_axes is not None and len(mesh_axes) > 0:
     for no_shard_idx in no_sharding_axis:
       mesh_axes[no_shard_idx] = None
@@ -64,31 +100,58 @@ class AqtQuantization:
   quant_dg: aqt_config.DotGeneral
   quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
 
+  def _get_mixed_precision_cfg(self):
+    quant_dg = None
+    is_tiled=False
+    tiling_fn=None
+    module_path = '/'.join(nn.module._context.module_stack[-1].path)
+    for layer_name_re, layer_quant_dg in self.quant_dg.items():
+      if re.fullmatch(layer_name_re, module_path):
+        quant_dg, tile_size = layer_quant_dg
+    if quant_dg is None:
+      quant_dg, tile_size = self.quant_dg['default']
+    if tile_size != -1:
+      is_tiled=True
+      tiling_fn = functools.partial(_tiling_fn, tile_size=tile_size)
+    return quant_dg, is_tiled, tiling_fn
+
+  def _get_rhs_axis_metadata_wrapper(self, mesh_axes: Tuple[str, ...] = (), is_tiled: bool = False):
+    if self.quant_mode == aqt_flax.QuantMode.CONVERT:
+      return None
+    return functools.partial(_rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=is_tiled)
+
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
-    rhs_axis_metadata_wrapper = None
-    if self.quant_mode != aqt_flax.QuantMode.CONVERT:
-      rhs_axis_metadata_wrapper = functools.partial(
-        _rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=False)
+    if isinstance(self.quant_dg, dict):
+      quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
+    else:
+      quant_dg, is_tiled, tiling_fn  = self.quant_dg, False, None
+    rhs_axis_metadata_wrapper=self._get_rhs_axis_metadata_wrapper(
+      mesh_axes, is_tiled)
     aqt_dg_cls = functools.partial(
         aqt_flax.AqtDotGeneral,
-        self.quant_dg,
+        quant_dg,
         rhs_quant_mode=self.quant_mode,
         lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
         rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
         rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
         use_legacy_freezer=False,
+        tiling_fn=tiling_fn
     )
     return aqt_dg_cls
 
-  def einsum(self):
+  def einsum(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns einsum configured with aqt params."""
+    rhs_axis_metadata_wrapper=self._get_rhs_axis_metadata_wrapper(
+      mesh_axes)
     aqt_einsum = functools.partial(
         aqt_flax.AqtEinsum(
             cfg=self.quant_dg,
             lhs_quant_mode=self.quant_mode,
             lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
             rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
+            rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
+            use_legacy_freezer=False,
         )
     )
     return aqt_einsum
@@ -104,37 +167,67 @@ class Fp8Quantization(Quantization):
     """Returns dot_general configured with aqt params."""
     return nn.Fp8DotGeneralOp
 
+def _get_int8_quant_config(config):
+  drhs_bits = None
+  drhs_accumulator_dtype = None
+  drhs_local_aqt = None
+  if config.quantization_local_shard_count != 0:
+    drhs_bits = 8
+    drhs_accumulator_dtype = jnp.int32
+    drhs_local_aqt = aqt_config.LocalAqt(
+      contraction_axis_shard_count=config.quantization_local_shard_count
+      )
+  return aqt_config.config_v3(
+    fwd_bits=8,
+    dlhs_bits=8,
+    drhs_bits=drhs_bits,
+    rng_type="jax.uniform",
+    dlhs_local_aqt=None,
+    drhs_local_aqt=drhs_local_aqt,
+    fwd_accumulator_dtype=jnp.int32,
+    dlhs_accumulator_dtype=jnp.int32,
+    drhs_accumulator_dtype=drhs_accumulator_dtype,
+    )
+
+
+def _get_weight_only_quant_config(lhs_bits=None, rhs_bits=None):
+  return aqt_config.dot_general_make(lhs_bits=lhs_bits, rhs_bits=rhs_bits)
+
+
+def _get_mixed_precision_quant_config(config, config_file):
+  """Set quantization params based on user configuration."""
+  with open(config_file, "r") as infile:
+    mixed_precision_config = json.load(infile)
+  ret_config = {}
+  ret_config["default"] = [aqt_config.dot_general_make(lhs_bits=None, rhs_bits=8), -1]
+  for layer_name_re, layer_quantization_config in mixed_precision_config.items():
+    rhs_num_bits = layer_quantization_config.get("bits", 8)
+    tile_size = layer_quantization_config.get("tile_size", -1)
+    scale = layer_quantization_config.get("scale", 1.0)
+    aqt_dg = aqt_config.dot_general_make(lhs_bits=None, rhs_bits=rhs_num_bits)
+    if scale < 1.0:
+      aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(
+        calibration.AbsMaxCalibration, scale=scale)
+    ret_config[layer_name_re] = [aqt_dg, tile_size]
+  return ret_config
+
 
 def _get_quant_config(config):
   """Set quantization params based on user configuration."""
   if not config.quantization or config.quantization == "":
     return None
-  elif config.quantization == "int8":
-    if config.quantization_local_shard_count == 0:
-      drhs_bits = None
-      drhs_accumulator_dtype = None
-      drhs_local_aqt = None
-    else:
-      drhs_bits = 8
-      drhs_accumulator_dtype = jnp.int32
-      drhs_local_aqt = aqt_config.LocalAqt(
-          contraction_axis_shard_count=config.quantization_local_shard_count
-      )
-    return aqt_config.config_v3(
-        fwd_bits=8,
-        dlhs_bits=8,
-        drhs_bits=drhs_bits,
-        rng_type="jax.uniform",
-        dlhs_local_aqt=None,
-        drhs_local_aqt=drhs_local_aqt,
-        fwd_accumulator_dtype=jnp.int32,
-        dlhs_accumulator_dtype=jnp.int32,
-        drhs_accumulator_dtype=drhs_accumulator_dtype,
-    )
-  elif config.quantization == "fp8":
+  if config.quantization == "int8":
+    return _get_int8_quant_config(config)
+  if config.quantization == "int8w":
+    return _get_weight_only_quant_config(lhs_bits=None, rhs_bits=8)
+  if config.quantization == "int4w":
+    return _get_weight_only_quant_config(lhs_bits=None, rhs_bits=4)
+  if config.quantization == "intmp":
+    assert config.quant_cfg_path, "Must specify quant_cfg for mixed precision quantization"
+    return _get_mixed_precision_quant_config(config, config.quant_cfg_path)
+  if config.quantization == "fp8":
     return "fp8"
-  else:
-    raise ValueError(f"Invalid value configured for quantization {config.quantization}.")
+  raise ValueError(f"Invalid value configured for quantization {config.quantization}.")
 
 
 def in_convert_mode(quant):
