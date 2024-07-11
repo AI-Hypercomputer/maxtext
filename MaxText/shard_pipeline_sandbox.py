@@ -129,7 +129,7 @@ def spmd_pipeline(fn, stage_params, inputs):
   #total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1
   num_total_iterations = args.num_microbatches * args.num_repeats + args.num_stages - 1 # regular
 
-  loop_state = {"loop_iter": 0, "state": state, "circ_storage": circ_storage, "circ_storage_mover": circ_storage_mover}
+  loop_state = {"loop_iter": 0, "state": state, "inputs":inputs, "outputs": outputs, "circ_storage": circ_storage, "circ_storage_mover": circ_storage_mover}
   def run_iteration_scannable(loop_state, xs):
     # loop state consists of:
     # loop_iteration,
@@ -138,6 +138,8 @@ def spmd_pipeline(fn, stage_params, inputs):
     # circ_storage_mover
     loop_iter = loop_state["loop_iter"]
     state = loop_state["state"]
+    inputs = loop_state["inputs"]
+    outputs = loop_state["outputs"]
     circ_storage = loop_state["circ_storage"]
     circ_storage_mover = loop_state["circ_storage_mover"]
 
@@ -183,20 +185,18 @@ def spmd_pipeline(fn, stage_params, inputs):
     # originally used num_layers where I believe we should use num_stages
     #outputs = outputs.at[(loop_iter-args.num_layers+1) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, state, outputs[(loop_iter-args.num_layers+1) % args.microbatches_per_stage]))
     outputs = outputs.at[(loop_iter - output_offset) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, state, outputs[(loop_iter - output_offset) % args.microbatches_per_stage]))
-
-    
     state = shift_stages(loop_iter, state)
-    loop_state = {"loop_iter": loop_iter + 1, "state": state, "circ_storage": circ_storage, "circ_storage_mover": circ_storage_mover}
+    # inputs = shift_inputs(loop_iter, inputs)
+    outputs = shift_outputs(loop_iter, outputs)
+    #state, inputs, outputs = shift(loop_iter, state, inputs, outputs)
+    loop_state = {"loop_iter": loop_iter + 1, "state": state, "inputs":inputs, "outputs": outputs, "circ_storage": circ_storage, "circ_storage_mover": circ_storage_mover}
     return loop_state, None
   
-  run_iteration_scanned = jax.lax.scan(run_iteration_scannable, length=num_total_iterations)
-
-  
-
-  # inputs = shift_inputs(loop_iter, inputs)
-  outputs = shift_outputs(loop_iter, outputs)
-  #state, inputs, outputs = shift(loop_iter, state, inputs, outputs)
-  outputs = jax.lax.ppermute(outputs, 'stages', [(i, (i+1) % args.num_stages) for i in range(args.num_stages)])
+  loop_state_final, _ = jax.lax.scan(run_iteration_scannable, loop_state,length=num_total_iterations)
+  # run_iteration_scanned = jax.lax.scan(run_iteration_scannable, loop_state,length=num_total_iterations)
+  # loop_state_final = run_iteration_scanned(loop_state, None)
+  breakpoint()
+  outputs = jax.lax.ppermute(loop_state_final["outputs"], 'stages', [(i, (i+1) % args.num_stages) for i in range(args.num_stages)])
   return outputs
 
 def shift(i, state, inputs, outputs):
@@ -231,14 +231,16 @@ def shift_stages(i, state):
 
 def shift_inputs(i, inputs):
   sh = lambda x, d: jax.lax.ppermute(x, 'stages', [(i, (i+d) % args.num_stages) for i in range(args.num_stages)])
-  if (i % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage):
-    inputs = sh(inputs, +1)
+  inputs = jnp.where((i % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage), sh(inputs, +1), inputs)
+  # if (i % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage):
+  #   inputs = sh(inputs, +1)
   return inputs
 
 def shift_outputs(i, outputs):
   sh = lambda x, d: jax.lax.ppermute(x, 'stages', [(i, (i+d) % args.num_stages) for i in range(args.num_stages)])
-  if ((i-args.num_layers+1) % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage):
-    outputs = sh(outputs, +1)
+  outputs = jnp.where(((i-args.num_layers+1) % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage), sh(outputs, +1), outputs)
+  # if ((i-args.num_layers+1) % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage):
+  #   outputs = sh(outputs, +1)
   return outputs
 
 def main():
