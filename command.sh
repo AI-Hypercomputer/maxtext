@@ -13,9 +13,7 @@ gcloud config set compute/zone ${ZONE}
 
 # Install deps
 python3 multihost_runner.py --TPU_PREFIX=$TPU_NAME \
---COMMAND="\
-    git clone -b v5p_moe https://github.com/google/maxtext.git;\
-    cd maxtext && bash setup.sh;"
+--COMMAND="bash setup.sh MODE=stable;"
 
 # Start training small model
 BATCH_SIZE=3
@@ -24,7 +22,7 @@ MAXTEXT_OUTPUT_PATH=gs://tony-moe
 
 python3 multihost_runner.py --TPU_PREFIX=$TPU_NAME \
 --COMMAND="\
-    python3 MaxText/train.py MaxText/configs/MaxText/configs/base.yml model_name=subsup_small \
+    python3 MaxText/train.py MaxText/configs/base.yml model_name=subsup_small \
     base_output_directory=${MAXTEXT_OUTPUT_PATH} run_name=${RUN_NAME} \
     enable_checkpointing=false async_checkpointing=false \
     per_device_batch_size=${BATCH_SIZE} \
