@@ -18,8 +18,8 @@ import functools
 import json
 import re
 from typing import Optional
-
 from aqt.jax.v2 import config as aqt_config
+from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2.flax import aqt_flax
 from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
@@ -40,6 +40,7 @@ AxisIdxes = common_types.AxisIdxes
 AxisNames = common_types.AxisNames
 CACHE_HEADS = common_types.CACHE_HEADS
 CACHE_KV = common_types.CACHE_KV
+KVTensor = aqt_tensor.QTensor
 
 
 @dataclass
@@ -331,12 +332,42 @@ class KVQuant:
       return value, scale
     raise ValueError(f"Invalid KV quant dtype:{self.dtype}.")
 
+  def einsum_fn_with_rhs_qtensor(
+    self,
+    kv: Array| aqt_tensor.QTensor,
+    rhs_dequant_mode=None,
+    rhs_calibration_mode=None
+    ):
+    # Assumes kv is already quantized.
+    einsum = jnp.einsum
+    if isinstance(kv, aqt_tensor.QTensor):
+      num_bits = 4 if kv.qvalue.dtype == jnp.int4 else 8
+      kv_cfg = aqt_config.dot_general_make(
+        lhs_bits=None,
+        rhs_bits=num_bits,
+        bwd_bits=None,
+        use_fwd_quant=False,
+        )
+      if rhs_dequant_mode:
+        aqt_config.set_fwd_dequant_mode(
+          kv_cfg, rhs_dequant_mode=rhs_dequant_mode
+        )
+      if rhs_calibration_mode:
+        aqt_config.set_fwd_calibration_mode(
+          kv_cfg,
+          rhs_calibration_mode=rhs_calibration_mode,
+      )
+      einsum = aqt_flax.AqtEinsum(
+        rhs_quant_mode=aqt_flax.QuantMode.TRAIN,
+        lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+        rhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+        cfg=kv_cfg
+        )
+    return einsum
 
-  def unquantize(self, value: Array, scale: Array, dtype: jnp.dtype):
-    """Unquantize key/values stored in kvcache."""
-    if self.dtype == jnp.int8:
-      return value.astype(dtype) * scale / MAX_INT8
-    if self.dtype == jnp.int4:
-      return value.astype(dtype) * scale / MAX_INT4
-    raise ValueError(f"Invalid KV quant dtype: {self.dtype}.")
-
+  def einsum_fn_with_rhs_qtensor_and_dequant(self, value):
+    return self.einsum_fn_with_rhs_qtensor(
+      value,
+      rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
+      rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS
+      )
