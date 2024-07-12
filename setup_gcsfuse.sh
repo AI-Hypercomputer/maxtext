@@ -17,7 +17,7 @@
 # Description:
 # bash setup_gcsfuse.sh DATASET_GCS_BUCKET=maxtext-dataset MOUNT_PATH=dataset
 
-set -e
+set -e -x
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -50,3 +50,5 @@ mkdir -p $MOUNT_PATH
 gcsfuse -o ro --implicit-dirs --http-client-timeout=5s --max-conns-per-host=2000 \
         --debug_fuse_errors --debug_fuse --debug_gcs --debug_invariants --debug_mutex \
         --log-file=$HOME/gcsfuse.json "$DATASET_GCS_BUCKET" "$MOUNT_PATH"
+
+ls $MOUNT_PATH | head
