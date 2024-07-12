@@ -73,7 +73,7 @@ class Pipeline(nn.Module):
 
     if self.config.activation_forwarding:
       prev_outputs = jnp.zeros((self.num_stages,) + inputs.shape[1:], dtype=inputs.dtype)
-      prev_outputs = nn.with_logical_constraint(shift, ("activation_stage", "activation_batch", "activation_length", "activation_embed"),rules=self.config.logical_axis_rules,mesh=self.mesh)
+      prev_outputs = nn.with_logical_constraint(prev_outputs, ("activation_stage", "activation_batch", "activation_length", "activation_embed"),rules=self.config.logical_axis_rules,mesh=self.mesh)
     else:
       prev_outputs = None
 
@@ -300,6 +300,7 @@ class Pipeline(nn.Module):
       # nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance.
       return body_instance(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
+
     vmap_func = nn.vmap(
       func_to_vmap,
       in_axes=(0, 0, 0, None, None),
@@ -312,6 +313,24 @@ class Pipeline(nn.Module):
         "is_initializing": self.is_initializing(),
         "x_times": self.num_stages}
     )
+
+    def maybe_remove_layers(weights):
+      if self.config.num_layers_per_pipeline_stage > 1:
+        layers_metadata_params={
+          nn.PARTITION_NAME: "layers_per_stage",
+        }
+        breakpoint()
+        #weights = meta.remove_axis(weights, 0, layers_metadata_params) # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
+      return weights
+
+    vmap_func = nn.map_variables(
+      vmap_func,
+      mapped_collections=["params", "non_trainable", "summaries", "intermediates"],
+      mutable=True,
+      trans_in_fn=maybe_remove_layers,
+    )
+
+
     return vmap_func
 
   def run_one_iteration(self, loop_state, positions, segment_ids, deterministic, model_mode, decoder_layer_instance):
@@ -331,6 +350,8 @@ class Pipeline(nn.Module):
 
    vmap_func = self.get_main_vmap_func()
 
+   print("BP 1", flush=True)
+   breakpoint()
    if self.config.num_pipeline_repeats > 1:
     _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
 
@@ -358,6 +379,46 @@ class Pipeline(nn.Module):
         trans_in_fn=prepare_vars_for_main_vmap,
     )
 
+
+    # scan_fn = nn.scan(
+    #   decoder_layer,
+    #   variable_axes={
+    #       "params": params_spec,
+    #       "cache": cache_spec,
+    #       "intermediates": 0,
+    #       "aqt": 0,
+    #       "_overwrite_with_gradient": 0,
+    #   },
+    #   split_rngs={
+    #       "params": True,
+    #       "dropout": cfg.enable_dropout,
+    #   },
+    #   in_axes=(
+    #       nn.broadcast,
+    #       nn.broadcast,
+    #       nn.broadcast,
+    #       nn.broadcast,
+    #   ),
+    #   length=length,
+    #   metadata_params={nn.PARTITION_NAME: metdata_axis_name},
+    # )
+
+
+   if self.config.num_layers_per_pipeline_stage > 1:
+      # layers_metadata_params={
+      #   nn.PARTITION_NAME: "layers_per_stage",
+      #   'sub_weight_split_dims_mapping': (None,),
+      #   "is_initializing": self.is_initializing(),
+      #   "x_times": self.config.num_pipeline_repeats,
+      #   'optimizer_dims_mapping': None,
+      # }
+      layers_metadata_params={
+        nn.PARTITION_NAME: "layers_per_stage",
+      }
+      breakpoint()
+      #weights = meta.remove_axis(weights, 0, layers_metadata_params) # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
+     
+     
    stages_output = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
    if self.config.scan_layers:
      stages_output = stages_output[0]
@@ -403,7 +464,9 @@ class Pipeline(nn.Module):
       total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + 2 * (self.num_stages  - 1)
 
     if self.is_initializing():     
+     print("Starting to initialize...", flush=True)
      vmap_func = self.get_main_vmap_func()
+     print("Successfully get vmap...", flush=True)
 
      if self.config.num_pipeline_repeats > 1:
        # To shard the weights on initialization for the circular pipeline we create weights of
@@ -426,12 +489,32 @@ class Pipeline(nn.Module):
             'optimizer_dims_mapping': None,
           }
         )
+       
+
 
        example_inputs = jax.lax.broadcast(example_inputs, [self.config.num_pipeline_repeats])
        example_segmentation = jax.lax.broadcast(example_segmentation, [self.config.num_pipeline_repeats]) if example_segmentation is not None else None
        example_position = jax.lax.broadcast(example_position, [self.config.num_pipeline_repeats]) if example_position is not None else None
+     def maybe_remove_layers(weights):
+      if self.config.num_layers_per_pipeline_stage > 1:
+        layers_metadata_params={
+          nn.PARTITION_NAME: "layers_per_stage",
+        }
+        breakpoint()
+        #weights = meta.remove_axis(weights, 0, layers_metadata_params) # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
+      return weights
+
+     vmap_func = nn.map_variables(
+      vmap_func,
+      mapped_collections=["params", "non_trainable", "summaries", "intermediates"],
+      mutable=True,
+      trans_in_fn=maybe_remove_layers,
+      trans_out_fn=maybe_remove_layers,
+     )
      # We only need to run one set of stages to initialize the variables, instead of looping over all microbatches for the full total_iterations.
+     print("About to execute inti vmap...", flush=True)
      stage_outputs = vmap_func(self.layers, example_inputs, example_segmentation, example_position, deterministic, model_mode)
+     print("Finisihed init vmap!", flush=True)
      if self.config.scan_layers:
        stage_outputs = stage_outputs[0]
 
