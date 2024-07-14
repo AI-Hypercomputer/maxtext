@@ -894,7 +894,7 @@ class Attention(nn.Module):
     """Projection for Key and Value.
 
     Args:
-      inputs_kv: inputs_kv: key/values of shape `[batch, kv_length,
+      inputs_kv: key/values of shape `[batch, kv_length,
         num_kv_heads, kv_dim]`.
       proj_name: name of projection, `key` or `value`.
 
