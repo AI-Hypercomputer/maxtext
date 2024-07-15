@@ -404,7 +404,7 @@ def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules
       continue
     replacements.append((logical_axis, mesh_axes))
     new_logical_axis.add(logical_axis)
-  old_logical_rules_filtered = [(old_logical_axis, old_mesh_axes) for old_logical_axis, old_mesh_axes
+  old_logical_rules_filtered = [(old_logical_axis, _lists_to_tuples(old_mesh_axes)) for old_logical_axis, old_mesh_axes
                                   in old_logical_axis_rules if old_logical_axis not in new_logical_axis]
   return old_logical_rules_filtered + replacements
 
