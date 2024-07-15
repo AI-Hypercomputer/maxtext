@@ -49,7 +49,7 @@ python3 MaxText/$EXECUTABLE MaxText/configs/base.yml\
     ici_fsdp_parallelism=16 ici_tensor_parallelism=16\
     dataset_path=$DATASET_PATH\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\
-    use_iota_embed=true reuse_example_batch=1\
+    use_iota_embed=true\
     attention='flash' gcs_metrics=true\
     fused_qkv=True fused_mlp=True\
     
