@@ -47,22 +47,28 @@ DATASET_PATH=/tmp/gcsfuse
 
 # Train
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
-export GCS_RESOLVE_REFRESH_SECS=60
-export GCS_REQUEST_CONNECTION_TIMEOUT_SECS=300
-export GCS_METADATA_REQUEST_TIMEOUT_SECS=300
-export GCS_READ_REQUEST_TIMEOUT_SECS=300
-export GCS_WRITE_REQUEST_TIMEOUT_SECS=600
+# export GCS_RESOLVE_REFRESH_SECS=60
+# export GCS_REQUEST_CONNECTION_TIMEOUT_SECS=300
+# export GCS_METADATA_REQUEST_TIMEOUT_SECS=300
+# export GCS_READ_REQUEST_TIMEOUT_SECS=300
+# export GCS_WRITE_REQUEST_TIMEOUT_SECS=600
+# export JAX_COORDINATOR_ADDRESS="10.128.0.34"
+export JOB_INDEX=0
+export JOB_COMPLETION_INDEX=0
+export PROCESSES_IN_JOB=1
+export JAX_PROCESS_COUNT=1
 
 
-JAX_PLATFORMS=cpu python3 MaxText/$EXECUTABLE MaxText/configs/base.yml \
+JAX_PLATFORMS=cpu python3 MaxText/standalone_dataloader.py MaxText/configs/base.yml \
     steps=100 per_device_batch_size=32 \
     enable_checkpointing=False \
     max_target_length=2048 global_parameter_scale=1 \
-    base_output_directory=$OUTPUT_PATH \
+    base_output_directory=gs://aireenmei-us-central1/grain_scale \
     grain_train_files=/tmp/gcsfuse/maxtext-dataset/array-record/c4/en/3.0.1/c4-train.array_record-* \
     dataset_type=grain \
     hardware='cpu' \
-    grain_worker_count=2
+    grain_worker_count=1 \
+    run_name=aireen-$(date +%Y%m%d-%H-%M)
 
 gsutil cp $HOME/gcsfuse.json ${OUTPUT_PATH}/${M_RUN_NAME}/
 
