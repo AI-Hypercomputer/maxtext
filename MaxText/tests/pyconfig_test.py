@@ -82,7 +82,7 @@ class PyconfigTest(unittest.TestCase):
       'megablox': None,
       'foo': ['bar', 'baz'],
       'logical_axis_rules': [
-        ('activation', ['data', 'fsdp']),
+        ('activation', ('data', 'fsdp')),
         ('norm', 'fsdp')
       ]
     })
