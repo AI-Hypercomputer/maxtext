@@ -36,6 +36,7 @@ from layers import models
 from layers import quantizations
 from typing import Sequence
 from absl import app
+import os
 import pickle
 import accelerator_to_spec_map
 import train
@@ -125,6 +126,7 @@ def save_compiled(compiled, save_name):
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   print("Starting train_compile.py...", flush=True)
 
   # Parse and validate configuration
