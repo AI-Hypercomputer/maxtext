@@ -42,7 +42,7 @@ bash preflight.sh PLATFORM=$PLATFORM
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
 
 python3 MaxText/$EXECUTABLE MaxText/configs/base.yml\
-    steps=30 per_device_batch_size=1 enable_checkpointing=false\
+    steps=30 per_device_batch_size=0.5 enable_checkpointing=false\
     remat_policy=qkv_proj_offloaded global_parameter_scale=128\
     ici_fsdp_parallelism=16 ici_tensor_parallelism=16\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\
