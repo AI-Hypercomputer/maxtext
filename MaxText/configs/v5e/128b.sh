@@ -35,6 +35,8 @@ then
     export M_RUN_NAME=$RUN_NAME
 fi
 
+export DATASET_PATH="gs://maxtext-dataset/"
+
 # Set up network
 bash preflight.sh PLATFORM=$PLATFORM
 
@@ -45,6 +47,7 @@ python3 MaxText/$EXECUTABLE MaxText/configs/base.yml\
     steps=30 per_device_batch_size=0.5 enable_checkpointing=false\
     remat_policy=qkv_proj_offloaded global_parameter_scale=128\
     ici_fsdp_parallelism=16 ici_tensor_parallelism=16\
+    dataset_path=$DATASET_PATH\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\
     use_iota_embed=true reuse_example_batch=1\
     attention='flash' gcs_metrics=true\
