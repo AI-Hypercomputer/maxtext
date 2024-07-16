@@ -211,18 +211,22 @@ def get_datasets(
   )
   train_ds_builder = tfds.builder(config.dataset_name)
   train_ds = train_ds_builder.as_dataset(split="train2", read_config=read_config, shuffle_files=config.enable_data_shuffling)
+  print(f'{train_ds=}')
 
   eval_ds_builder = tfds.builder(config.eval_dataset_name)
   eval_ds = eval_ds_builder.as_dataset(split="validation_tokenized_5662seqs", read_config=read_config, shuffle_files=False)
+  print(f'{eval_ds=}')
 
   # shard the dataset as soon as it is loaded
   train_ds = train_ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
   train_ds = rekey(train_ds, {"inputs": None, "targets": "text"})
+  print(f"{train_ds=} sharding finished")
 
   eval_ds = eval_ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
   # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and split to target_length
   #   mainly to avoid eval sequences change depending on the number of hosts
   eval_ds = rekey(eval_ds, {"inputs": None, "targets": "ids"})
+  print(f"{eval_ds=} sharding finished")
 
   return train_ds, eval_ds
 
@@ -305,12 +309,15 @@ def make_c4_mlperf_iterator(
     process_indices,
 ):
   """Make train iterator and tokenizer for customized C4 dataset for mlperf gpt3 training."""
+  print("start get_datasets")
   train_ds, eval_ds = get_datasets(
       config=config,
       dataloading_host_index=process_indices.index(jax.process_index()),
       dataloading_host_count=len(process_indices),
   )
+  print("finish get_datasets")
   sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
+  print("finish get_tokenizer")
   train_iter, eval_iter = preprocess_dataset(
       config, global_mesh, train_ds, eval_ds, sp_tokenizer,
       data_shuffle_seed=config.data_shuffle_seed
