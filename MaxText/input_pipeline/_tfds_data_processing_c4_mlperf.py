@@ -33,6 +33,7 @@ import tokenizer
 import multihost_dataloading
 import sequence_packing
 from input_pipeline._input_pipeline_utils import get_tokenizer
+import max_logging
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
@@ -186,7 +187,7 @@ def _pad_to_batch_size(
 
   pad_num = num_batches * batch_size - local_num
   assert pad_num >= 0
-  print(
+  max_logging.log(
       f"Eval data has {local_num} local entries, padding now with " f"{pad_num} extra entries to get {num_batches} batches."
   )
 
@@ -211,22 +212,22 @@ def get_datasets(
   )
   train_ds_builder = tfds.builder(config.dataset_name)
   train_ds = train_ds_builder.as_dataset(split="train2", read_config=read_config, shuffle_files=config.enable_data_shuffling)
-  print(f'{train_ds=}')
+  max_logging.log(f'{train_ds=}')
 
   eval_ds_builder = tfds.builder(config.eval_dataset_name)
   eval_ds = eval_ds_builder.as_dataset(split="validation_tokenized_5662seqs", read_config=read_config, shuffle_files=False)
-  print(f'{eval_ds=}')
+  max_logging.log(f'{eval_ds=}')
 
   # shard the dataset as soon as it is loaded
   train_ds = train_ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
   train_ds = rekey(train_ds, {"inputs": None, "targets": "text"})
-  print(f"{train_ds=} sharding finished")
+  max_logging.log(f"{train_ds=} sharding finished")
 
   eval_ds = eval_ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
   # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and split to target_length
   #   mainly to avoid eval sequences change depending on the number of hosts
   eval_ds = rekey(eval_ds, {"inputs": None, "targets": "ids"})
-  print(f"{eval_ds=} sharding finished")
+  max_logging.log(f"{eval_ds=} sharding finished")
 
   return train_ds, eval_ds
 
@@ -242,16 +243,22 @@ def preprocess_dataset(
 ):
   """Pre-process the dataset and return iterators for mlperf training."""
   # tokenize
+  max_logging.log("preprocess start")
   train_ds = train_ds.map(lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)), num_parallel_calls=AUTOTUNE)
+  max_logging.log("tokenize")
 
   train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
+  max_logging.log("reduce_concat_tokens")
   train_ds = split_tokens_to_targets_length(train_ds, config.max_target_length)
+  max_logging.log("split_tokens_to_targets_length")
   train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
+  max_logging.log("shuffle")
 
   # note eval_ds is pre tokenized, reduce_concated and split to target_length
   #   mainly to avoid eval sequences change depending on the number of hosts
   train_ds = sequence_packing.pack_dataset(train_ds, config.max_target_length)
   eval_ds = sequence_packing.pack_dataset(eval_ds, config.max_target_length)
+  max_logging.log("sequence_packing")
 
   def format_fn(x, eos_id: int = 1, pad_id: int = 0):
     x["inputs"] = x["targets"]
@@ -265,6 +272,7 @@ def preprocess_dataset(
 
   train_ds = train_ds.map(format_fn, num_parallel_calls=AUTOTUNE)
   eval_ds = eval_ds.map(format_fn, num_parallel_calls=AUTOTUNE)
+  max_logging.log("format_fn")
 
   # Set global batch size.
   global_batch_size_to_load = config.global_batch_size_to_load
@@ -273,7 +281,7 @@ def preprocess_dataset(
     eval_batch_size = config.eval_per_device_batch_size * global_mesh.size
   else:
     eval_batch_size = global_batch_size_to_load
-  print(f"{global_batch_size_to_load=} {eval_batch_size=}")
+  max_logging.log(f"{global_batch_size_to_load=} {eval_batch_size=}")
 
   assert global_batch_size_to_load % global_mesh.size == 0, "Batch size should be divisible number of global devices."
 
@@ -285,7 +293,7 @@ def preprocess_dataset(
 
   assert eval_batch_size % global_mesh.size == 0, "Eval Batch size should be divisible number of global devices."
   eval_ds = _pad_to_batch_size(eval_ds, eval_batch_size // jax.process_count())
-  print("_pad_to_batch_size finished")
+  max_logging.log("_pad_to_batch_size finished")
   eval_ds = eval_ds.batch(eval_batch_size // jax.process_count(), drop_remainder=False)
   # We are running eval over exactly one epoch.
   # We explicitly cache the entire epoch (in memory) to ensure that it is the
@@ -309,18 +317,18 @@ def make_c4_mlperf_iterator(
     process_indices,
 ):
   """Make train iterator and tokenizer for customized C4 dataset for mlperf gpt3 training."""
-  print("start get_datasets")
+  max_logging.log("start get_datasets")
   train_ds, eval_ds = get_datasets(
       config=config,
       dataloading_host_index=process_indices.index(jax.process_index()),
       dataloading_host_count=len(process_indices),
   )
-  print("finish get_datasets")
+  max_logging.log("finish get_datasets")
   sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
-  print("finish get_tokenizer")
+  max_logging.log("finish get_tokenizer")
   train_iter, eval_iter = preprocess_dataset(
       config, global_mesh, train_ds, eval_ds, sp_tokenizer,
       data_shuffle_seed=config.data_shuffle_seed
   )
-  print("preprocess_dataset finished")
+  max_logging.log("preprocess_dataset finished")
   return train_iter, eval_iter
