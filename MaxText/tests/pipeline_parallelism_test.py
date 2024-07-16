@@ -195,7 +195,7 @@ class PipelineParallelismTest(unittest.TestCase):
         base_num_decoder_layers=8,
         num_pipeline_microbatches=8,
         per_device_batch_size=4,
-        activation_forwarding=True
+        pipeline_activation_forwarding=True
      )
      config = pyconfig.config
      self.assert_pipeline_same_output_and_grad(config)

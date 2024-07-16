@@ -52,7 +52,7 @@ class Pipeline(nn.Module):
     self.microbatch_size = self.config.global_batch_size_to_train_on // self.config.num_pipeline_microbatches
     microbatches_per_stage = self.config.num_pipeline_microbatches // self.num_stages
     self.microbatches_per_stage = microbatches_per_stage
-    if self.config.activation_forwarding:
+    if self.config.pipeline_activation_forwarding:
       # With activation forwarding, each microbatch takes two loop iterations to move onto the next stage,
       # The first loop iteration computes with that microbatch, the second one moves the results.
       self.microbatch_iterations_per_stage = 2
@@ -65,7 +65,7 @@ class Pipeline(nn.Module):
 
         Returns a dictionary with properties
           shift: zeros shape [num_stages, micro_size, sequence, embed]
-          prev_outputs: same shape as shift, only used when activation_forwarding is set to true
+          prev_outputs: same shape as shift, only used when pipeline_activation_forwarding is set to true
           state_io: reshaped inputs [num_stages, microbatches/stages, micro_size, sequence, embed]
           circ_storage: zeros [num_stages, microbatches, micro_size, sequence, embed]
           circ_storage_mover: zeros[num_stages, micro_size, sequence, embed]
@@ -77,7 +77,7 @@ class Pipeline(nn.Module):
     shift = jnp.zeros((self.num_stages,) + inputs.shape[1:], dtype=inputs.dtype)
     shift = nn.with_logical_constraint(shift, ("activation_stage", "activation_batch", "activation_length", "activation_embed"),rules=self.config.logical_axis_rules,mesh=self.mesh)
 
-    if self.config.activation_forwarding:
+    if self.config.pipeline_activation_forwarding:
       prev_outputs = jnp.zeros((self.num_stages,) + inputs.shape[1:], dtype=inputs.dtype)
       prev_outputs = nn.with_logical_constraint(prev_outputs, ("activation_stage", "activation_batch", "activation_length", "activation_embed"),rules=self.config.logical_axis_rules,mesh=self.mesh)
     else:
@@ -166,7 +166,7 @@ class Pipeline(nn.Module):
 
   def get_microbatch_and_repeat_ids(self, loop_iteration):
     '''Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and non-circular'''
-    # Stage 0 has processed one microbatch every loop_iter, but Stage 1 is one behind due to bubble, etc for other stage
+    # Stage 0 has processed one microbatch every loop_iter, but Stage 1 is one behind due to bubble, etc for other stages
     microbatches_processed = jnp.maximum(loop_iteration - self.microbatch_iterations_per_stage * jnp.arange(self.num_stages), 0) 
     microbatch_ids = microbatches_processed % self.config.num_pipeline_microbatches
     repeat_ids = microbatches_processed // self.config.num_pipeline_microbatches
@@ -240,7 +240,7 @@ class Pipeline(nn.Module):
       last = jax.lax.slice_in_dim(output_in, self.num_stages - 1, self.num_stages, axis=0)
       except_last = jax.lax.slice_in_dim(output_in, 0, self.num_stages - 1, axis=0)
       return jnp.concatenate([last, except_last], axis=0)
-    if self.config.activation_forwarding:
+    if self.config.pipeline_activation_forwarding:
       new_shift = _rotate_right(old_prev_outputs)
       new_prev_outputs = output
     else:

@@ -128,7 +128,7 @@ num_pipeline_repeats: -1
 # Note the microbatch_size is given by global_batch_size / num_pipeline_microbatches, where global_batch_size = per_device_batch_size * num_devices
 num_pipeline_microbatches: -1
 scan_pipeline_iterations: True # This can be set independently of scan_layers, which is relevant when num_layers_per_pipeline_stage > 1.
-activation_forwarding: False # Delays the activation forwarding by one activation, which greatly simplifies the compiler's task to overlap
+pipeline_activation_forwarding: False # Delays the activation forwarding by one iteration, which greatly simplifies the compiler's task to overlap
 # the communication with the compute, at the cost of doubling the bubble.
 # Additionally this requires num_microbatches >= num_stages * 2 for a full (efficient) pipeline
 
