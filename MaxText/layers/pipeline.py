@@ -52,6 +52,12 @@ class Pipeline(nn.Module):
     self.microbatch_size = self.config.global_batch_size_to_train_on // self.config.num_pipeline_microbatches
     microbatches_per_stage = self.config.num_pipeline_microbatches // self.num_stages
     self.microbatches_per_stage = microbatches_per_stage
+    if self.config.activation_forwarding:
+      # With activation forwarding, each microbatch takes two loop iterations to move onto the next stage,
+      # The first loop iteration computes that microbatch, the second one moves it.
+      self.microbatch_steps_per_stage = 2
+    else:
+      self.microbatch_steps_per_stage = 1
 
   def init_states(self, inputs):
     '''Initialize components of state: state_io, shift, circular_storage and circular_storage_mover
@@ -160,8 +166,9 @@ class Pipeline(nn.Module):
 
   def get_microbatch_and_repeat_ids(self, loop_iteration):
     '''Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and non-circular'''
-    # Stage 0 has processed one microbatch every loop_iter, but Stage 1 is one behind due to bubble, etc for other stages
-    microbatches_processed = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0) 
+    # Stage 0 has processed one microbatch every loop_iter, but Stage 1 is one behind due to bubble, etc for other stage
+    
+    microbatches_processed = jnp.maximum(loop_iteration - self.microbatch_steps_per_stage * jnp.arange(self.num_stages), 0) 
     microbatch_ids = microbatches_processed % self.config.num_pipeline_microbatches
     repeat_ids = microbatches_processed // self.config.num_pipeline_microbatches
     return microbatch_ids, repeat_ids
@@ -248,8 +255,13 @@ class Pipeline(nn.Module):
           rotated = _rotate_right(circ_storage_mover_in)
           rotated = jnp.expand_dims(rotated, 1)
           # The offset is the previous iterations microbatch ID of the last stage, so that for example microbatch 0 will
-          # be placed in index 0 of the num_microbatches axis. 
-          offset = (loop_iteration - (self.num_stages - 1) - 1) % self.config.num_pipeline_microbatches # Note extra -1 b/c grabbing from the previous output - using circ_storage_mover before it is updated
+          # be placed in index 0 of the num_microbatches axis.
+          if self.config.activation_forwarding:
+            microbatch_steps_per_stage = 2
+          else:
+            microbatch_steps_per_stage = 1
+          offset = (loop_iteration - microbatch_steps_per_stage * (self.num_stages - 1) - 1) % self.config.num_pipeline_microbatches # Note extra -1 b/c grabbing from the previous output - using circ_storage_mover before it is updated
+          #offset = (loop_iteration - (self.num_stages - 1) - 1) % self.config.num_pipeline_microbatches # Note extra -1 b/c grabbing from the previous output - using circ_storage_mover before it is updated
           return jax.lax.dynamic_update_slice_in_dim(circ_storage_in, rotated, offset, axis=1)
       new_circ_storage = _rotate_right_and_update(old_circ_storage_mover, old_circ_storage)
       new_circ_storage_mover = output
@@ -319,7 +331,6 @@ class Pipeline(nn.Module):
         layers_metadata_params={
           nn.PARTITION_NAME: "layers_per_stage",
         }
-        breakpoint()
         #weights = meta.remove_axis(weights, 0, layers_metadata_params) # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
       return weights
 
@@ -351,7 +362,6 @@ class Pipeline(nn.Module):
    vmap_func = self.get_main_vmap_func()
 
    print("BP 1", flush=True)
-   breakpoint()
    if self.config.num_pipeline_repeats > 1:
     _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
 
@@ -415,7 +425,6 @@ class Pipeline(nn.Module):
       layers_metadata_params={
         nn.PARTITION_NAME: "layers_per_stage",
       }
-      breakpoint()
       #weights = meta.remove_axis(weights, 0, layers_metadata_params) # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
      
      
@@ -500,7 +509,6 @@ class Pipeline(nn.Module):
         layers_metadata_params={
           nn.PARTITION_NAME: "layers_per_stage",
         }
-        breakpoint()
         #weights = meta.remove_axis(weights, 0, layers_metadata_params) # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
       return weights
 
