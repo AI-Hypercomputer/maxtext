@@ -264,17 +264,24 @@ def preprocess_dataset(
 
   # Set global batch size.
   global_batch_size_to_load = config.global_batch_size_to_load
+  print(f"{global_batch_size_to_load=} {eval_batch_size=}")
 
   if config.eval_per_device_batch_size > 0:
     eval_batch_size = config.eval_per_device_batch_size * global_mesh.size
   else:
     eval_batch_size = global_batch_size_to_load
 
+  assert global_batch_size_to_load % global_mesh.size == 0, "Batch size should be divisible number of global devices."
+
+
   train_ds = train_ds.batch(global_batch_size_to_load // jax.process_count(), drop_remainder=True)
 
   # ensure array split in an equal division for each device
   # pad zeros up to the same batch_size among all processes
+
+  assert eval_batch_size % global_mesh.size == 0, "Eval Batch size should be divisible number of global devices."
   eval_ds = _pad_to_batch_size(eval_ds, eval_batch_size // jax.process_count())
+  print("_pad_to_batch_size finished")
   eval_ds = eval_ds.batch(eval_batch_size // jax.process_count(), drop_remainder=False)
   # We are running eval over exactly one epoch.
   # We explicitly cache the entire epoch (in memory) to ensure that it is the
@@ -308,4 +315,5 @@ def make_c4_mlperf_iterator(
       config, global_mesh, train_ds, eval_ds, sp_tokenizer,
       data_shuffle_seed=config.data_shuffle_seed
   )
+  print("preprocess_dataset finished")
   return train_iter, eval_iter
