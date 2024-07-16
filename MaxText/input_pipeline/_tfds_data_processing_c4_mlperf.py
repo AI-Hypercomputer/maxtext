@@ -182,8 +182,10 @@ def _pad_to_batch_size(
     local_num = _get_num_examples(ds)
   local_num_batches = (local_num + batch_size - 1) // batch_size
   # Find the max number of batches required across all Jax processes.
+  max_logging.log(f"{local_num_batches=}")
   num_batches_all = multihost_utils.process_allgather(jnp.array([local_num_batches]), tiled=False)
   num_batches = np.max(num_batches_all)
+  max_logging.log(f"{num_batches=}")
 
   pad_num = num_batches * batch_size - local_num
   assert pad_num >= 0
@@ -287,6 +289,7 @@ def preprocess_dataset(
 
 
   train_ds = train_ds.batch(global_batch_size_to_load // jax.process_count(), drop_remainder=True)
+  max_logging.log("train_ds batch finished")
 
   # ensure array split in an equal division for each device
   # pad zeros up to the same batch_size among all processes
