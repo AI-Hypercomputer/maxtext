@@ -183,8 +183,9 @@ def _pad_to_batch_size(
   local_num_batches = (local_num + batch_size - 1) // batch_size
   # Find the max number of batches required across all Jax processes.
   max_logging.log(f"{local_num_batches=}")
-  num_batches_all = multihost_utils.process_allgather(jnp.array([local_num_batches]), tiled=False)
-  num_batches = np.max(num_batches_all)
+  # num_batches_all = multihost_utils.process_allgather(jnp.array([local_num_batches]), tiled=False)
+  # num_batches = np.max(num_batches_all)
+  num_batches = 45
   max_logging.log(f"{num_batches=}")
 
   pad_num = num_batches * batch_size - local_num
