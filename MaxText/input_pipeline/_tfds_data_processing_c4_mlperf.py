@@ -264,12 +264,12 @@ def preprocess_dataset(
 
   # Set global batch size.
   global_batch_size_to_load = config.global_batch_size_to_load
-  print(f"{global_batch_size_to_load=} {eval_batch_size=}")
 
   if config.eval_per_device_batch_size > 0:
     eval_batch_size = config.eval_per_device_batch_size * global_mesh.size
   else:
     eval_batch_size = global_batch_size_to_load
+  print(f"{global_batch_size_to_load=} {eval_batch_size=}")
 
   assert global_batch_size_to_load % global_mesh.size == 0, "Batch size should be divisible number of global devices."
 
