@@ -43,4 +43,4 @@ export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xl
 python MaxText/$EXECUTABLE MaxText/configs/base.yml model_name=llama2-7b\
   base_output_directory=$OUTPUT_PATH dataset_path=${DATASET_PATH}\
   tokenizer_path=assets/tokenizer.llama2 per_device_batch_size=4 remat_policy=save_qkv_proj\
-  steps=30 enable_checkpointing=false use_iota_embed=true
+  steps=15 enable_checkpointing=false use_iota_embed=true

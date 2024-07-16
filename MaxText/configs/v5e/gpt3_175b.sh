@@ -41,7 +41,7 @@ bash preflight.sh PLATFORM=$PLATFORM
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true --xla_tpu_spmd_rng_bit_generator_unsafe=true"
 
 python3 MaxText/$EXECUTABLE MaxText/configs/base.yml model_name=gpt3-175b\
-  steps=30 per_device_batch_size=0.5 enable_checkpointing=false\
+  steps=15 per_device_batch_size=0.5 enable_checkpointing=false\
   remat_policy=full ici_fsdp_parallelism=-1 ici_tensor_parallelism=16\
   max_target_length=2048 base_output_directory=$OUTPUT_PATH\
   reuse_example_batch=1 dataset_type=synthetic gcs_metrics=true\
