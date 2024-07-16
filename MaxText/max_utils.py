@@ -272,65 +272,41 @@ def initialize_jax_for_cpu():
 
 def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
   """Initialize JAX distributed runtime for TPUs when emergency checkpointing is used.
-  Currently, this only works for two scenarios:
-    1) A fresh run where no ID files exist on any nodes,
-    2) A "restore" run where the pods land on the same set of nodes as the previous run.
-  For Scenario #2 specifically, note the following cases where it will not work:
-    a) Some slices have failed, or
-    b) In a shared cluster, the pods land on a different set of nodes in the "restore run.
-  
-  Ongoing work outside of MaxText would get rid of these restrictions.
-  
-  TODO: Update this function to incorporate the ongoing work once available.
+  The information required to initialize JAX distributed runtime will be written by GKE to
+  the local checkpoint directory. This function retrieves that information and initializes
+  JAX distributed runtime.
   """
-  ID_FILE = "id_file.txt"
+  process_id, coordinator_address = _retrieve_jax_init_info(raw_keys)
 
-  local_id_file = epath.Path(raw_keys["local_checkpoint_directory"]) / ID_FILE
-  if local_id_file.exists():
-    max_logging.log("An ID file from a previous run exists, initializing JAX distributed runtime using the saved ID.")
-    process_id = int(local_id_file.read_text())
-    coordinator_address_file = _get_coordinator_address_file(raw_keys)
-    if process_id == 0:
-      coordinator_address = _get_coordinator_address_for_emergency_checkpointing(raw_keys)
-      coordinator_address_file.write_text(coordinator_address)
-    else:
-      coordinator_address = _retrieve_coordinator_address(coordinator_address_file)
-    max_logging.log(f"Using the saved process_id of {process_id} and the 0'th process's address {coordinator_address}"
-                    " to initialize JAX distributed runtime...")
-    jax.distributed.initialize(coordinator_address=coordinator_address, process_id=process_id)
+  if process_id != "" and coordinator_address != "":
+    max_logging.log(f"Using {process_id} as the process_id and {coordinator_address} as the"
+                    " coordinator_address to initialize JAX distributed runtime...")
+    jax.distributed.initialize(coordinator_address=coordinator_address, process_id=int(process_id))
   else:
-    max_logging.log("No ID file from a previous run exists, initializing JAX distributed runtime without args.")
+    max_logging.log("Initializing JAX distributed runtime without args when emergency checkpointing is"
+                    " enabled. This should not happen and your workload may have unexpected behavior.")
     jax.distributed.initialize()
-    process_id = jax._src.distributed.global_state.process_id  # pylint: disable=protected-access
-    local_id_file.write_text(str(process_id))
 
   ocp.multihost.utils.initialize_runtime_to_distributed_ids()
 
 
-def _get_run_name(raw_keys):
-  if raw_keys["run_name"] != "":
-    return raw_keys["run_name"]
-  return os.environ.get("JOBSET_NAME")
-
-
-def _get_coordinator_address_file(raw_keys):
-  COORDINATOR_ADDRESS_FILE = "coordinator_address.txt"
-  return epath.Path(os.path.join(raw_keys["base_output_directory"], _get_run_name(raw_keys), COORDINATOR_ADDRESS_FILE))
-
-
-def _get_coordinator_address_for_emergency_checkpointing(raw_keys):
-  run_name = _get_run_name(raw_keys)
-  slice_id = os.environ.get('MEGASCALE_SLICE_ID')
-  worker_id = os.environ.get('TPU_WORKER_ID')
-  return f"{run_name}-slice-job-{slice_id}-{worker_id}.{run_name}:8476"
-
-
-def _retrieve_coordinator_address(coordinator_address_file):
-  for _ in range(30):
-    if coordinator_address_file.exists():
-      return coordinator_address_file.read_text()
+def _retrieve_jax_init_info(raw_keys):
+  """Retrieve JAX init info from a local file."""
+  JAX_INIT_INFO_FILE = "jax-init-info.txt"
+  local_jax_init_info_file = epath.Path(raw_keys["local_checkpoint_directory"]) / JAX_INIT_INFO_FILE
+  # Allow time for the JAX init info file to be populated by GKE. This is needed because the file is
+  # only populated when the worker with process id of 0 is determined. After a disruption, although some
+  # workers might be up and running, the init info file won't be populated until the node with process id
+  # of 0 is known and this could take time. Using 900 seconds for now and it needs to be increased if the
+  # "repair" time is longer.
+  for i in range(900):
+    if local_jax_init_info_file.exists():
+      return local_jax_init_info_file.read_text().split('\n')[:2]
+    max_logging.log(f"Unable to locate {JAX_INIT_INFO_FILE} after {i} seconds, sleeping for 1 second before retrying...")
     time.sleep(1)
-  return ""
+  max_logging.log(f"Unable to locate {JAX_INIT_INFO_FILE} after 900 seconds,"
+                  "returning empty process id and coordinator address.")
+  return "", ""
 
 
 def is_cpu_backend(raw_keys):
