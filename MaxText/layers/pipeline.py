@@ -54,7 +54,7 @@ class Pipeline(nn.Module):
     self.microbatches_per_stage = microbatches_per_stage
     if self.config.activation_forwarding:
       # With activation forwarding, each microbatch takes two loop iterations to move onto the next stage,
-      # The first loop iteration computes that microbatch, the second one moves it.
+      # The first loop iteration computes with that microbatch, the second one moves the results.
       self.microbatch_iterations_per_stage = 2
     else:
       self.microbatch_iterations_per_stage = 1
@@ -167,7 +167,6 @@ class Pipeline(nn.Module):
   def get_microbatch_and_repeat_ids(self, loop_iteration):
     '''Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and non-circular'''
     # Stage 0 has processed one microbatch every loop_iter, but Stage 1 is one behind due to bubble, etc for other stage
-    
     microbatches_processed = jnp.maximum(loop_iteration - self.microbatch_iterations_per_stage * jnp.arange(self.num_stages), 0) 
     microbatch_ids = microbatches_processed % self.config.num_pipeline_microbatches
     repeat_ids = microbatches_processed // self.config.num_pipeline_microbatches
@@ -257,7 +256,6 @@ class Pipeline(nn.Module):
           # The offset is the previous iterations microbatch ID of the last stage, so that for example microbatch 0 will
           # be placed in index 0 of the num_microbatches axis.
           offset = (loop_iteration - self.microbatch_iterations_per_stage * (self.num_stages - 1) - 1) % self.config.num_pipeline_microbatches # Note extra -1 b/c grabbing from the previous output - using circ_storage_mover before it is updated
-          #offset = (loop_iteration - (self.num_stages - 1) - 1) % self.config.num_pipeline_microbatches # Note extra -1 b/c grabbing from the previous output - using circ_storage_mover before it is updated
           return jax.lax.dynamic_update_slice_in_dim(circ_storage_in, rotated, offset, axis=1)
       new_circ_storage = _rotate_right_and_update(old_circ_storage_mover, old_circ_storage)
       new_circ_storage_mover = output
@@ -305,7 +303,6 @@ class Pipeline(nn.Module):
       # nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance.
       return body_instance(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
-
     vmap_func = nn.vmap(
       func_to_vmap,
       in_axes=(0, 0, 0, None, None),
@@ -318,8 +315,6 @@ class Pipeline(nn.Module):
         "is_initializing": self.is_initializing(),
         "x_times": self.num_stages}
     )
-
-
     return vmap_func
 
   def run_one_iteration(self, loop_state, positions, segment_ids, deterministic, model_mode, decoder_layer_instance):
@@ -365,7 +360,6 @@ class Pipeline(nn.Module):
         mutable=True,
         trans_in_fn=prepare_vars_for_main_vmap,
     )
-     
    stages_output = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
    if self.config.scan_layers:
      stages_output = stages_output[0]
@@ -405,13 +399,10 @@ class Pipeline(nn.Module):
     # num_micro * repeat iterations for the last microbatch to start the final repeat, then an additional num_stages - 1 to finish the final repeat.
     # Thus the total iterations is num_micro * repeat + num_stages - 1, and we may consider the num_stages - 1 as bubble.
     # Note the bubble doubles with activation forwarding
-     
     total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.microbatch_iterations_per_stage * (self.num_stages  - 1)
 
     if self.is_initializing():     
-     print("Starting to initialize...", flush=True)
      vmap_func = self.get_main_vmap_func()
-     print("Successfully get vmap...", flush=True)
 
      if self.config.num_pipeline_repeats > 1:
        # To shard the weights on initialization for the circular pipeline we create weights of
@@ -434,13 +425,10 @@ class Pipeline(nn.Module):
             'optimizer_dims_mapping': None,
           }
         )
-       
-
 
        example_inputs = jax.lax.broadcast(example_inputs, [self.config.num_pipeline_repeats])
        example_segmentation = jax.lax.broadcast(example_segmentation, [self.config.num_pipeline_repeats]) if example_segmentation is not None else None
        example_position = jax.lax.broadcast(example_position, [self.config.num_pipeline_repeats]) if example_position is not None else None
-
      # We only need to run one set of stages to initialize the variables, instead of looping over all microbatches for the full total_iterations.
      stage_outputs = vmap_func(self.layers, example_inputs, example_segmentation, example_position, deterministic, model_mode)
      if self.config.scan_layers:

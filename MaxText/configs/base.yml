@@ -129,7 +129,8 @@ num_pipeline_repeats: -1
 num_pipeline_microbatches: -1
 scan_pipeline_iterations: True # This can be set independently of scan_layers, which is relevant when num_layers_per_pipeline_stage > 1.
 activation_forwarding: False # Delays the activation forwarding by one activation, which greatly simplifies the compiler's task to overlap
-# the communication with the compute, at the cost of doubling the bubble. Additionally this requires num_microbatches >= num_stages * 2
+# the communication with the compute, at the cost of doubling the bubble.
+# Additionally this requires num_microbatches >= num_stages * 2 for a full (efficient) pipeline
 
 # Choose 'remat_policy' between 'minimal', 'save_dot_except_mlpwi', 'save_dot_except_mlp', 'save_qkv_proj', 'qkv_proj_offloaded', 'minimal_offloaded' and 'full'.
 # These options offer a trade-off between speed (fastest to slowest) and HBM usage (highest to lowest)

@@ -183,12 +183,12 @@ class PipelineParallelismTest(unittest.TestCase):
      self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu
-  def test_activation_forwarding(self):
-     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 4 microbatches
+  def test_activation_forwarding_same_output_and_grad(self):
+     # 4 stages, activation forwarding, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
      pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         enable_checkpointing=False,
-        run_name="circular_minimum_microbatches",
+        run_name="activation_forwarding",
         max_target_length=128,
         base_emb_dim=28,
         ici_pipeline_parallelism=4,
