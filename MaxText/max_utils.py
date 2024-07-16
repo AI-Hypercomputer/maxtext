@@ -221,7 +221,10 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     max_logging.log(
         "Attempting to initialize the jax distributed system for CPU backend..."
     )
-    initialize_jax_for_cpu()
+    if not raw_keys['enable_emergency_checkpoint']:
+      initialize_jax_for_cpu()
+    else:
+      initialize_jax_for_emergency_checkpointing(raw_keys)
     max_logging.log("Jax distributed system initialized on CPUs!")
   elif (
       raw_keys["enable_checkpointing"]
@@ -233,7 +236,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     if not raw_keys['enable_emergency_checkpoint']:
       jax.distributed.initialize()
     else:
-      initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
+      initialize_jax_for_emergency_checkpointing(raw_keys)
     max_logging.log("Jax distributed system initialized!")
 
 
@@ -270,8 +273,8 @@ def initialize_jax_for_cpu():
   )
 
 
-def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
-  """Initialize JAX distributed runtime for TPUs when emergency checkpointing is used.
+def initialize_jax_for_emergency_checkpointing(raw_keys):
+  """Initialize JAX distributed runtime for TPUs or CPUs, to enable emergency checkpointing.
   Currently, this only works for two scenarios:
     1) A fresh run where no ID files exist on any nodes,
     2) A "restore" run where the pods land on the same set of nodes as the previous run.
@@ -297,10 +300,19 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
       coordinator_address = _retrieve_coordinator_address(coordinator_address_file)
     max_logging.log(f"Using the saved process_id of {process_id} and the 0'th process's address {coordinator_address}"
                     " to initialize JAX distributed runtime...")
-    jax.distributed.initialize(coordinator_address=coordinator_address, process_id=process_id)
+    if is_cpu_backend(raw_keys):
+      # For CPUs, JAX_PROCESS_COUNT is provided via XPK. It is the total number of processes.
+      jax.distributed.initialize(coordinator_address=coordinator_address, process_id=process_id,
+                                num_processes=int(os.environ.get("JAX_PROCESS_COUNT")))
+    else:
+      # For TPUs, num_processes is optional.
+      jax.distributed.initialize(coordinator_address=coordinator_address, process_id=process_id)
   else:
     max_logging.log("No ID file from a previous run exists, initializing JAX distributed runtime without args.")
-    jax.distributed.initialize()
+    if is_cpu_backend(raw_keys):
+      initialize_jax_for_cpu()
+    else:
+      jax.distributed.initialize()
     process_id = jax._src.distributed.global_state.process_id  # pylint: disable=protected-access
     local_id_file.write_text(str(process_id))
 
@@ -312,17 +324,31 @@ def _get_run_name(raw_keys):
     return raw_keys["run_name"]
   return os.environ.get("JOBSET_NAME")
 
-
 def _get_coordinator_address_file(raw_keys):
   COORDINATOR_ADDRESS_FILE = "coordinator_address.txt"
   return epath.Path(os.path.join(raw_keys["base_output_directory"], _get_run_name(raw_keys), COORDINATOR_ADDRESS_FILE))
 
+def _get_cpu_address():
+  """Designate current JAX process as the JAX coordinator for CPUs."""
+  # Note that port 1234 is chosen for CPU JAX coordinator in XPK.
+  hostname = socket.gethostname()
+  IPAddr = socket.gethostbyname(hostname)
+  return f"{IPAddr}:1234"
 
-def _get_coordinator_address_for_emergency_checkpointing(raw_keys):
+def _get_tpu_address(raw_keys):
+  """Designate current JAX process as the MXLA coordinator for TPUs."""
   run_name = _get_run_name(raw_keys)
   slice_id = os.environ.get('MEGASCALE_SLICE_ID')
   worker_id = os.environ.get('TPU_WORKER_ID')
   return f"{run_name}-slice-job-{slice_id}-{worker_id}.{run_name}:8476"
+
+def _get_coordinator_address_for_emergency_checkpointing(raw_keys):
+  """Get the JAX coordinator for CPUs or MXLA coordinator for TPUs."""
+  # For CPUs:
+  if is_cpu_backend(raw_keys):
+    return _get_cpu_address()
+  # Default - for TPUs:
+  return _get_tpu_address(raw_keys)
 
 
 def _retrieve_coordinator_address(coordinator_address_file):
