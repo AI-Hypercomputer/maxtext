@@ -93,7 +93,6 @@ def validate_keys(keys):
   else:
     max_logging.log("Not using emergency checkpoint, ignoring local_checkpoint_directory and local_checkpoint_period")
   if keys["num_experts"] > 1:
-    # Currently, Megablox only supports data parallelism
     validate_megablox_parallelism(keys)
 
 
@@ -391,10 +390,13 @@ class _HyperParameters:
     return updated_keys
 
 def validate_megablox_parallelism(raw_keys):
-  if raw_keys["megablox"] and (using_tensor_parallelism(raw_keys) or
-                               using_sequence_parallelism(raw_keys) or
+  if raw_keys["megablox"] and (using_sequence_parallelism(raw_keys) or
                                using_pipeline_parallelism(raw_keys)):
-    raise ValueError("Currently we only support Megablox with data parallelism.")
+    raise ValueError("Currently we only support Megablox with data and tensor parallelism.")
+  tensor_parallelism = raw_keys["ici_tensor_parallelism"] * raw_keys["dcn_tensor_parallelism"]
+  if raw_keys["megablox"] and using_tensor_parallelism(raw_keys) and (raw_keys["emb_dim"] % tensor_parallelism):
+    raise ValueError(f"The embedding dimension {raw_keys['emb_dim']} is not divisible by tensor parallelism setting {tensor_parallelism}.")
+
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):
   new_logical_axis = set()
