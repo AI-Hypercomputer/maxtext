@@ -216,7 +216,7 @@ vocab_size: 32_000 # powers of 2 for sharding
 tokenizer_path: "assets/tokenizer.llama2"
 per_device_batch_size: 12.0
 expansion_factor_real_data: -1 # if -1 then all hosts will load real data, else total_hosts//expansion_factor_real_data will pull data from GCS.
-eval_per_device_batch_size: 0
+eval_per_device_batch_size: 1
 max_corpus_chars: 10_000_000
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md
