@@ -33,6 +33,7 @@ import tokenizer
 import multihost_dataloading
 import sequence_packing
 from input_pipeline._input_pipeline_utils import get_tokenizer
+import max_logging
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
@@ -186,7 +187,7 @@ def _pad_to_batch_size(
 
   pad_num = num_batches * batch_size - local_num
   assert pad_num >= 0
-  print(
+  max_logging.log(
       f"Eval data has {local_num} local entries, padding now with " f"{pad_num} extra entries to get {num_batches} batches."
   )
 
@@ -199,122 +200,160 @@ def _pad_to_batch_size(
   return ds.concatenate(pad_ds)
 
 
-def get_datasets(
-    config: ml_collections.ConfigDict,
-    dataloading_host_index,
-    dataloading_host_count,
-):
-  """Load and return dataset of batched examples for use during training."""
-  # Training dataset.
-  train_read_config = tfds.ReadConfig(
-    shuffle_seed = config.data_shuffle_seed,
-    skip_prefetch = True,
-    input_context = tf.distribute.InputContext(
-      input_pipeline_id=dataloading_host_index,
-      num_input_pipelines=dataloading_host_count,
-    ),
-  )
-  # distributed file read
-  train_ds_builder = tfds.builder(config.dataset_name)
-  train_ds_builder.download_and_prepare()
-  train_ds = train_ds_builder.as_dataset(split='train2', read_config=train_read_config, shuffle_files=config.enable_data_shuffling)
-
-  eval_read_config = tfds.ReadConfig(
-      shuffle_seed=config.data_shuffle_seed,
-  )
-  eval_ds_builder = tfds.builder(config.eval_dataset_name)
-  eval_ds = eval_ds_builder.as_dataset(split="validation_tokenized_5662seqs", read_config=eval_read_config, shuffle_files=False)
-
-  # shard the dataset as soon as it is loaded
-  train_ds = rekey(train_ds, {"inputs": None, "targets": "text"})
-
-  eval_ds = eval_ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
-  # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and split to target_length
-  #   mainly to avoid eval sequences change depending on the number of hosts
-  eval_ds = rekey(eval_ds, {"inputs": None, "targets": "ids"})
-
-  return train_ds, eval_ds
+def get_eval_global_batch_size_to_load(config: ml_collections.ConfigDict, global_mesh) -> int:
+  """Calculate the global batch size for evaluation."""
+  if config.eval_per_device_batch_size > 0:
+    return config.eval_per_device_batch_size * global_mesh.size
+  else:
+    return config.global_batch_size_to_load
 
 
-def preprocess_dataset(
-    config: ml_collections.ConfigDict,
-    global_mesh,
-    train_ds,
-    eval_ds,
-    sp_tokenizer,
+def get_dataset(
+    dataset_name: str,
+    split: str,
+    dataloading_host_index: int,
+    dataloading_host_count: int,
+    enable_data_shuffling: bool = False,
     data_shuffle_seed: int = 0,
-    shuffle_buffer_size: int = 128,
-):
-  """Pre-process the dataset and return iterators for mlperf training."""
-  # tokenize
+    shard_in_read: bool = False,
+) -> tf.data.Dataset:
+  """Load and return a dataset of examples."""
+  if shard_in_read:
+    # shard dataset in reading
+    read_config = tfds.ReadConfig(
+      shuffle_seed = data_shuffle_seed,
+      input_context = tf.distribute.InputContext(
+        input_pipeline_id=dataloading_host_index,
+        num_input_pipelines=dataloading_host_count,
+      ),
+    )
+    ds_builder = tfds.builder(dataset_name)
+    ds_builder.download_and_prepare()
+    ds = ds_builder.as_dataset(split=split, read_config=read_config, shuffle_files=enable_data_shuffling)
+  else:
+    # shard dataset after reading
+    read_config = tfds.ReadConfig(shuffle_seed=data_shuffle_seed)
+    ds_builder = tfds.builder(dataset_name)
+    ds = ds_builder.as_dataset(split=split, read_config=read_config, shuffle_files=enable_data_shuffling)
+    ds = ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
+  return ds
+
+
+def format_fn(x, eos_id: int = 1, pad_id: int = 0):
+  """Format function for c4_mlperf."""
+  x["inputs"] = x["targets"]
+  x["inputs_position"] = x["targets_position"]
+  x["targets"] = _shift_left_and_pad(x["targets"], eos_id)
+  x["inputs_segmentation"] = tf.where(
+      tf.logical_and(x["targets"] != eos_id, x["targets"] != pad_id), x["targets_segmentation"], 0
+  )
+  x["targets_segmentation"] = x["inputs_segmentation"]
+  return x
+
+
+def preprocess_train_dataset(
+    train_ds: tf.data.Dataset,
+    sp_tokenizer,
+    train_global_batch_size_to_load: int,
+    max_target_length: int,
+    shuffle_buffer_size: int,
+    data_shuffle_seed: int,
+) -> tf.data.Dataset:
+  """Preprocess the training dataset."""
   train_ds = train_ds.map(lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)), num_parallel_calls=AUTOTUNE)
 
   train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
-  train_ds = split_tokens_to_targets_length(train_ds, config.max_target_length)
+  train_ds = split_tokens_to_targets_length(train_ds, max_target_length)
   train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
-
-  # note eval_ds is pre tokenized, reduce_concated and split to target_length
-  #   mainly to avoid eval sequences change depending on the number of hosts
-  train_ds = sequence_packing.pack_dataset(train_ds, config.max_target_length)
-  eval_ds = sequence_packing.pack_dataset(eval_ds, config.max_target_length)
-
-  def format_fn(x, eos_id: int = 1, pad_id: int = 0):
-    x["inputs"] = x["targets"]
-    x["inputs_position"] = x["targets_position"]
-    x["targets"] = _shift_left_and_pad(x["targets"], eos_id)
-    x["inputs_segmentation"] = tf.where(
-        tf.logical_and(x["targets"] != eos_id, x["targets"] != pad_id), x["targets_segmentation"], 0
-    )
-    x["targets_segmentation"] = x["inputs_segmentation"]
-    return x
+  train_ds = sequence_packing.pack_dataset(train_ds, max_target_length)
 
   train_ds = train_ds.map(format_fn, num_parallel_calls=AUTOTUNE)
+  train_ds = train_ds.batch(train_global_batch_size_to_load // jax.process_count(), drop_remainder=True)
+  train_ds = train_ds.prefetch(AUTOTUNE)
+  return train_ds
+
+
+def preprocess_eval_dataset(
+    eval_ds: tf.data.Dataset,
+    eval_global_batch_size_to_load: int,
+    max_target_length: int,
+    num_examples: Optional[int] = None,
+) -> tf.data.Dataset:
+  """Preprocess the evaluation dataset."""
+  eval_ds = sequence_packing.pack_dataset(eval_ds, max_target_length)
+
   eval_ds = eval_ds.map(format_fn, num_parallel_calls=AUTOTUNE)
-
-  # Set global batch size.
-  global_batch_size_to_load = config.global_batch_size_to_load
-
-  if config.eval_per_device_batch_size > 0:
-    eval_batch_size = config.eval_per_device_batch_size * global_mesh.size
-  else:
-    eval_batch_size = global_batch_size_to_load
-
-  train_ds = train_ds.batch(global_batch_size_to_load // jax.process_count(), drop_remainder=True)
 
   # ensure array split in an equal division for each device
   # pad zeros up to the same batch_size among all processes
-  eval_ds = _pad_to_batch_size(eval_ds, eval_batch_size // jax.process_count())
-  eval_ds = eval_ds.batch(eval_batch_size // jax.process_count(), drop_remainder=False)
+  eval_ds = _pad_to_batch_size(eval_ds, eval_global_batch_size_to_load // jax.process_count(), num_examples)
+  eval_ds = eval_ds.batch(eval_global_batch_size_to_load // jax.process_count(), drop_remainder=False)
+
   # We are running eval over exactly one epoch.
   # We explicitly cache the entire epoch (in memory) to ensure that it is the
   # same across different iterations.
   eval_ds = eval_ds.cache()
-
-  train_ds = train_ds.prefetch(AUTOTUNE)
   eval_ds = eval_ds.prefetch(AUTOTUNE)
 
+  return eval_ds
+
+
+def make_c4_mlperf_train_iterator(
+  config: ml_collections.ConfigDict,
+  global_mesh,
+  add_bos,
+  add_eos,
+  process_indices,
+):
+  """Make train iterator of customized C4 dataset for mlperf gpt3 training."""
+  train_ds = get_dataset(
+    dataset_name=config.dataset_name,
+    split="train2",
+    dataloading_host_index=process_indices.index(jax.process_index()),
+    dataloading_host_count=len(process_indices),
+    enable_data_shuffling=config.enable_data_shuffling,
+    data_shuffle_seed=config.data_shuffle_seed,
+  )
+  train_ds = rekey(train_ds, {"inputs": None, "targets": "text"})
+
+  sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
+  train_ds = preprocess_train_dataset(
+      train_ds,
+      sp_tokenizer=sp_tokenizer,
+      train_global_batch_size_to_load=config.global_batch_size_to_load,
+      max_target_length=config.max_target_length,
+      shuffle_buffer_size=128,
+      data_shuffle_seed=config.data_shuffle_seed,
+  )
   train_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(train_ds, global_mesh)
+  return train_multihost_gen
+
+
+def make_c4_mlperf_eval_iterator(
+  config: ml_collections.ConfigDict,
+  global_mesh,
+  process_indices,
+):
+  """Make eval iterator of customized C4 dataset for mlperf gpt3 training."""
+  eval_ds = get_dataset(
+    dataset_name=config.eval_dataset_name,
+    split="validation_tokenized_5662seqs",
+    dataloading_host_index=process_indices.index(jax.process_index()),
+    dataloading_host_count=len(process_indices),
+    enable_data_shuffling=False,
+  )
+  # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and split to target_length
+  #   mainly to avoid eval sequences change depending on the number of hosts
+  eval_ds = rekey(eval_ds, {"inputs": None, "targets": "ids"})
+  eval_global_batch_size_to_load = get_eval_global_batch_size_to_load(config, global_mesh)
+
+  eval_ds = preprocess_eval_dataset(
+      eval_ds,
+      eval_global_batch_size_to_load=eval_global_batch_size_to_load,
+      max_target_length=config.max_target_length,
+  )
+
   eval_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(eval_ds, global_mesh)
 
   # Return multi-host jax.Array prep iterator
-  return train_multihost_gen, eval_multihost_gen
-
-def make_c4_mlperf_iterator(
-    config: ml_collections.ConfigDict,
-    global_mesh,
-    add_bos,
-    add_eos,
-    process_indices,
-):
-  """Make train iterator and tokenizer for customized C4 dataset for mlperf gpt3 training."""
-  train_ds, eval_ds = get_datasets(
-      config=config,
-      dataloading_host_index=process_indices.index(jax.process_index()),
-      dataloading_host_count=len(process_indices),
-  )
-  sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
-  train_iter, eval_iter = preprocess_dataset(
-      config, global_mesh, train_ds, eval_ds, sp_tokenizer,
-      data_shuffle_seed=config.data_shuffle_seed
-  )
-  return train_iter, eval_iter
+  return eval_multihost_gen
