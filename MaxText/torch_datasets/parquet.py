@@ -29,13 +29,12 @@ import math
 
 class FileParallelRandomRead(IterableDataset):
   def __init__(self, allocated_parquet_files: Iterable[str], columns=None, batch_size=1000):
-
+    super(ParquetDataset).__init__()
     max_logging.log("Using FileParallelRandomRead")
     # batch_size is basically chunk size
     self.allocated_parquet_files = allocated_parquet_files
     self.columns = columns
     self.batch_size = batch_size
-
 
   def __iter__(self):
     """File Parallel Random Read iterator.
@@ -103,6 +102,7 @@ class ParquetDataset(IterableDataset):
     worker_info = torch.utils.data.get_worker_info()
 
     if worker_info is None:
+      print("Single-process data loading detected", flush=True)
       # Single-process data loading.
       for each_parquet_file in self.allocated_parquet_files:
         table = pq.ParquetFile(each_parquet_file)
