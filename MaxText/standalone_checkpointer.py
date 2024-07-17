@@ -29,6 +29,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 from jax import numpy as jnp
 import numpy as np
+import storage_utils
 
 import checkpointing
 import max_utils
@@ -40,6 +41,8 @@ from layers import models
 
 Transformer = models.Transformer
 
+CHECKPOINT_RESTORE_TIME_DIRECTORY = "ckpt_restore_time"
+CHECKPOINT_WRITE_TIME_DIRECTORY = "ckpt_write_time"
 
 def checkpoint_loop(config, state=None):
   """Main Checkpointing loop.
@@ -50,6 +53,8 @@ def checkpoint_loop(config, state=None):
     ckpt_path:
   Returns:
   """
+  ckpt_read_time = []
+  ckpt_write_time = []
   init_rng, _, checkpoint_manager, mesh, model, _, tx = setup_mesh_and_model(config)
 
   unboxed_abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
@@ -65,6 +70,9 @@ def checkpoint_loop(config, state=None):
 
   jax.block_until_ready(state)
   checkpoint_load_end = datetime.datetime.now()
+  checkpoint_read_time = (checkpoint_load_end - checkpoint_load_start).total_seconds()
+  ckpt_read_time.append([jax.process_index(), checkpoint_read_time])
+  
   if state is not None:  # Checkpoint was available for restore
     if jax.process_index() == 0:
       max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint restored in : {checkpoint_load_end - checkpoint_load_start}")
@@ -81,8 +89,26 @@ def checkpoint_loop(config, state=None):
       if save_checkpoint(checkpoint_manager, step, state):
         checkpoint_manager.wait_until_finished()
         end_time = datetime.datetime.now()
+        checkpoint_write_time = (end_time - start_time).total_seconds()
+        ckpt_write_time.append([jax.process_index(), checkpoint_write_time])
         if jax.process_index() == 0:
           max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint saved in {end_time - start_time} ,step {step}, on host 0")
+          
+  if config.gcs_metrics_bucket:
+    max_logging.log(f"Uploading metrics to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()}")
+    
+    base_name = f"{jax.process_index()}.csv"
+    storage_utils.upload_csv(
+        config.gcs_metrics_bucket, 
+        os.path.join(config.run_name, CHECKPOINT_RESTORE_TIME_DIRECTORY, base_name), 
+        ckpt_read_time
+    )
+    storage_utils.upload_csv(
+        config.gcs_metrics_bucket, 
+        os.path.join(config.run_name, CHECKPOINT_WRITE_TIME_DIRECTORY, base_name), 
+        ckpt_write_time
+    )
+    max_logging.log(f"Finished uploading metrics to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()}")
 
   return state
 
