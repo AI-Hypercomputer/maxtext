@@ -56,7 +56,8 @@ def main(config):
       devices=devices,
       metrics_server_config=metrics_server_config,
       enable_jax_profiler=config.enable_jax_profiler if config.enable_jax_profiler else False,
-      jax_profiler_port=config.jax_profiler_port if config.jax_profiler_port else 9999
+      jax_profiler_port=config.jax_profiler_port if config.jax_profiler_port else 9999,
+      enable_model_warmup=config.enable_model_warmup if config.enable_model_warmup else False
   )
   jetstream_server.wait_for_termination()
 
