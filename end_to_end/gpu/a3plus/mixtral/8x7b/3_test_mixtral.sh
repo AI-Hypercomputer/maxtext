@@ -23,7 +23,6 @@ export DATASET_PATH=gs://maxtext-dataset
 
 # `SCANNED_CHECKPOINT` refers to the checkpoint that used for both `train.py` and `decode.py` 
 export SCANNED_CHECKPOINT=${BASE_OUTPUT_PATH}${MODEL_VARIATION}/scanned_ckpt/0/items
-export MATMUL_SCANNED_CHECKPOINT=${BASE_OUTPUT_PATH}${MODEL_VARIATION}/matmul_scanned_ckpt/0/items
 
 mkdir /tmp/HLO_dumps
 
@@ -40,12 +39,20 @@ export XLA_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true
 
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.65
 export TF_FORCE_GPU_ALLOW_GROWTH=true
+export JAX_TRACEBACK_FILTERING=off
+
+# python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} \
+#     run_name=moe-train-matmul per_device_batch_size=0.5 model_name=mixtral-8x7b ici_fsdp_parallelism=8 \
+#     ici_tensor_parallelism=1 skip_first_n_steps_for_profiler=5 steps=10 dtype=bfloat16 \
+#     weight_dtype=bfloat16 max_target_length=128 megablox=False \
+#     profiler=xplane attention=dot_product dataset_type=synthetic tokenizer_path=assets/tokenizer.mistral hardware=gpu
 
 python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} \
-    run_name=moe-train-forloop per_device_batch_size=0.5 model_name=mixtral-8x7b ici_fsdp_parallelism=-1 \
-    ici_tensor_parallelism=1 skip_first_n_steps_for_profiler=5 steps=10 dtype=bfloat16 \
-    weight_dtype=bfloat16 max_target_length=128 moe_matmul=False megablox=False \
-    profiler=xplane attention=dot_product dataset_type=synthetic tokenizer_path=assets/tokenizer.mistral hardware=gpu
+    run_name=moe-train-matmul per_device_batch_size=1 model_name=mixtral-8x7b \
+    tokenizer_path=assets/tokenizer.mistral ici_fsdp_parallelism=-1 ici_tensor_parallelism=1 \
+    max_target_length=128 attention=cudnn_flash_te weight_dtype=bfloat16\
+    dataset_type=synthetic megablox=False hardware=gpu
+
 
 # python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} \
 #     run_name=moe-train-matmul per_device_batch_size=1 model_name=mixtral-8x7b ici_fsdp_parallelism=-1 \
