@@ -32,7 +32,7 @@ import pyconfig
 from train import validate_train_config, setup_train_loop, setup_mesh_and_model
 import storage_utils
 
-from torch_datasets.parquet import ParquetDataset
+from torch_datasets.parquet import ParquetDataset, FileParallelRandomRead
 from torch.utils.data import DataLoader
 
 TOTAL_TRAINING_TIME_DIRECTORY = "total_training_time"
@@ -91,7 +91,7 @@ def parquet_data_loader(config):
 
   sublists = split_list(parquet_files, jax.process_count())
 
-  dataset = ParquetDataset(
+  dataset = FileParallelRandomRead(
       allocated_parquet_files=sublists[worker_id],
       batch_size=batch_size,
       columns=["outputs", "image_base64_str"],
