@@ -102,8 +102,8 @@ class ParquetDataset(IterableDataset):
     worker_info = torch.utils.data.get_worker_info()
 
     if worker_info is None:
-      print("Single-process data loading detected", flush=True)
       # Single-process data loading.
+      print("Single-process data loading detected", flush=True)
       for each_parquet_file in self.allocated_parquet_files:
         table = pq.ParquetFile(each_parquet_file)
         for batch in table.iter_batches(
