@@ -24,7 +24,7 @@ from jax.sharding import PartitionSpec as P
 
 from input_pipeline._tfds_data_processing import make_tfds_iterator
 from input_pipeline._grain_data_processing import make_grain_iterator
-from input_pipeline._tfds_data_processing_c4_mlperf import make_c4_mlperf_iterator
+from input_pipeline._tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator
 from input_pipeline._hf_data_processing import make_hf_iterator
 import multihost_dataloading
 
@@ -129,20 +129,44 @@ def make_mixed_train_iterator(config, mesh):
       return make_tfds_iterator(config, mesh, process_indices)
     elif config.dataset_type == "grain":
       return make_grain_iterator(config, mesh, process_indices)
-    elif config.dataset_type == "c4_mlperf":
-      print("Overwrite both add_bos and add_eos to False")
-      return make_c4_mlperf_iterator(config, mesh, add_bos=False, add_eos=False, process_indices=process_indices)
     elif config.dataset_type == "hf":
       return make_hf_iterator(config, mesh, process_indices)
   else:
     return BadSyntheticDataIterator(config, mesh), None
 
 
+def make_c4_mlperf_iterator(config, mesh):
+  """Return iterators for c4_mlperf"""
+  # TODO: Merge this function into make_mixed_train_iterator after:
+  #   we independently split process_indices for training and evaluation iterators.
+  process_indices = get_process_loading_real_data(config, mesh)
+  if config.expansion_factor_real_data != -1:  # assert number of hosts loading real data
+    assert len(process_indices) == jax.process_count() // config.expansion_factor_real_data
+  print("Overwrite both add_bos and add_eos to False")
+  if jax.process_index() in process_indices:
+    train_iterator = make_c4_mlperf_train_iterator(config, mesh, add_bos=False, add_eos=False, process_indices=process_indices)
+  else:
+    train_iterator = BadSyntheticDataIterator(config, mesh)
+
+  if config.eval_per_device_batch_size >= 0:
+    effective_eval_per_device_batch_size = config.eval_per_device_batch_size
+  else:
+    effective_eval_per_device_batch_size = config.per_device_batch_size
+
+  assert effective_eval_per_device_batch_size >= 1.0, f"{effective_eval_per_device_batch_size=} is less than 1, which is not supported."
+  # Use all processes for evaluation until split is handled independently
+  eval_process_indices = list(range(jax.process_count()))
+  eval_iterator = make_c4_mlperf_eval_iterator(config, mesh, eval_process_indices)
+  return train_iterator, eval_iterator
+
+
 def create_data_iterator(config, mesh):
   if config.dataset_type == "synthetic":
     return SyntheticDataIterator(config, mesh), None
-  elif config.dataset_type in ("tfds", "grain", "c4_mlperf", "hf"):
+  elif config.dataset_type in ("tfds", "grain", "hf"):
     return make_mixed_train_iterator(config, mesh)
+  elif config.dataset_type == "c4_mlperf":
+    return make_c4_mlperf_iterator(config, mesh)
   else:
     assert False, f"Unknown dataset_type {config.dataset_type}, dataset_type must be synthetic, tfds, grain, hf or c4_mlperf"
 
