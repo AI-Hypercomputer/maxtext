@@ -73,15 +73,21 @@ class SyntheticDataIterator:
 class BadSyntheticDataIterator:
   """Creates a Bad synthetic data iterator for loading on subset of hosts"""
 
-  def __init__(self, config, mesh):
+  def __init__(self, config, mesh, total_batches: int = None):
     self.mesh = mesh
     dataset = BadSyntheticDataIterator.get_bad_synthetic_data(config)
     self.data_generator = multihost_dataloading.MultiHostDataLoadIterator(dataset, self.mesh)
+    self.total_batches = total_batches
+    self.current_batch = 0
 
   def __iter__(self):
+    self.current_batch = 0
     return self.data_generator
 
   def __next__(self):
+    if self.total_batches and self.current_batch >= self.total_batches:
+      raise StopIteration
+    self.current_batch += 1
     return next(self.data_generator)
 
   @staticmethod
