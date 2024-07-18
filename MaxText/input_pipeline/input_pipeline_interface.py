@@ -136,7 +136,7 @@ def make_mixed_train_iterator(config, mesh, add_bos, add_eos):
     elif config.dataset_type == "hf":
       return make_hf_iterator(config, mesh, add_bos, add_eos, process_indices)
   else:
-    return BadSyntheticDataIterator(config, mesh), None
+    return BadSyntheticDataIterator(config, mesh), BadSyntheticDataIterator(config, mesh)
 
 
 def create_data_iterator(config, mesh, add_bos=True, add_eos=True):
