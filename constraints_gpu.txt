@@ -90,7 +90,7 @@ nvidia-nvjitlink-cu12==12.5.40
 oauthlib==3.2.2
 opt-einsum==3.3.0
 optax==0.2.2
-orbax-checkpoint==0.5.20
+orbax-checkpoint==0.5.21
 packaging==24.0
 pandas==2.2.2
 platformdirs==4.2.2
