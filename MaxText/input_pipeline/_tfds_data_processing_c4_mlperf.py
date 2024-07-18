@@ -182,6 +182,7 @@ def _pad_to_batch_size(
     local_num = _get_num_examples(ds)
   local_num_batches = (local_num + batch_size - 1) // batch_size
   # Find the max number of batches required across all Jax processes.
+  max_logging.log("right before process_allgather")
   num_batches_all = multihost_utils.process_allgather(jnp.array([local_num_batches]), tiled=False)
   num_batches = np.max(num_batches_all)
 
@@ -233,6 +234,7 @@ def get_datasets(
     data_shuffle_seed=config.data_shuffle_seed,
   )
   train_ds = rekey(train_ds, {"inputs": None, "targets": "text"})
+  max_logging.log(f"get_datasets {train_ds=}")
 
   # use different dataloading_host_index and dataloading_host_count
   # TODO: add expansion_factor_real_data support for eval dataset
@@ -244,6 +246,7 @@ def get_datasets(
   # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and split to target_length
   #   mainly to avoid eval sequences change depending on the number of hosts
   eval_ds = rekey(eval_ds, {"inputs": None, "targets": "ids"})
+  max_logging.log(f"get_datasets {eval_ds=}")
   return train_ds, eval_ds
 
 def format_fn(x, eos_id: int = 1, pad_id: int = 0):
@@ -320,6 +323,7 @@ def preprocess_datasets(
     process_indices,
 ) -> Tuple[multihost_dataloading.MultiHostDataLoadIterator, multihost_dataloading.MultiHostDataLoadIterator]:
   """Preprocess datasets and return iterators for mlperf training."""
+  max_logging.log(f"start preprocess_train_dataset")
   train_ds = preprocess_train_dataset(
       train_ds,
       dataloading_host_index=process_indices.index(jax.process_index()),
@@ -330,7 +334,9 @@ def preprocess_datasets(
       shuffle_buffer_size=128,
       data_shuffle_seed=config.data_shuffle_seed,
   )
+  max_logging.log(f"finish preprocess_train_dataset")
 
+  max_logging.log(f"start preprocess_eval_dataset")
   eval_global_batch_size_to_load = get_eval_global_batch_size_to_load(config, global_mesh)
 
   eval_ds = preprocess_eval_dataset(
@@ -340,6 +346,7 @@ def preprocess_datasets(
       eval_global_batch_size_to_load=eval_global_batch_size_to_load,
       max_target_length=config.max_target_length,
   )
+  max_logging.log(f"finish preprocess_eval_dataset")
 
   train_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(train_ds, global_mesh)
   eval_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(eval_ds, global_mesh)
