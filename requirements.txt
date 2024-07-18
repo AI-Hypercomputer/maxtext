@@ -30,6 +30,5 @@ tensorboard-plugin-profile
 tiktoken
 transformers
 mlperf-logging@git+https://github.com/mlperf/logging.git
-google-jetstream
-git+https://github.com/Bslabe123/JetStream.git@model_load_time_metric
+google-jetstream@git+https://github.com/Bslabe123/JetStream.git@model_load_time_metric
 jsonlines
