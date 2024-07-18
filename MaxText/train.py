@@ -364,7 +364,7 @@ def setup_mesh_and_model(config):
   model = Transformer(config, mesh, quant=quant)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
-
+  logger = checkpointing.setup_checkpoint_logger(config)
   if config.enable_emergency_checkpoint:
     abstract_state, _, _ = max_utils.get_abstract_state(
       model, tx, config, init_rng, mesh, is_training=True
@@ -377,10 +377,10 @@ def setup_mesh_and_model(config):
           abstract_state,
           config.local_checkpoint_period,
           config.checkpoint_period,
+          logger,
       )
     )
   else:
-    logger = checkpointing.setup_checkpoint_logger(config)
     checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
         config.checkpoint_dir,
         config.enable_checkpointing,
