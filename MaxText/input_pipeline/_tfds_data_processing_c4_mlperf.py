@@ -211,8 +211,6 @@ def get_eval_global_batch_size_to_load(config: ml_collections.ConfigDict, global
 def get_dataset(
     dataset_name: str,
     split: str,
-    dataloading_host_index: int,
-    dataloading_host_count: int,
     enable_data_shuffling: bool = False,
     data_shuffle_seed: int = 0,
 ) -> tf.data.Dataset:
@@ -220,22 +218,17 @@ def get_dataset(
   read_config = tfds.ReadConfig(shuffle_seed=data_shuffle_seed)
   ds_builder = tfds.builder(dataset_name)
   ds = ds_builder.as_dataset(split=split, read_config=read_config, shuffle_files=enable_data_shuffling)
-  ds = ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
   return ds
 
 
 def get_datasets(
     config: ml_collections.ConfigDict,
-    dataloading_host_index,
-    dataloading_host_count,
 ):
   """Load and return dataset of batched examples for use during training."""
   # Training dataset.
   train_ds = get_dataset(
     dataset_name=config.dataset_name,
     split="train2",
-    dataloading_host_index=dataloading_host_index,
-    dataloading_host_count=dataloading_host_count,
     enable_data_shuffling=config.enable_data_shuffling,
     data_shuffle_seed=config.data_shuffle_seed,
   )
@@ -246,8 +239,6 @@ def get_datasets(
   eval_ds = get_dataset(
     dataset_name=config.eval_dataset_name,
     split="validation_tokenized_5662seqs",
-    dataloading_host_index=jax.process_index(),
-    dataloading_host_count=jax.process_count(),
     enable_data_shuffling=False,
   )
   # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and split to target_length
@@ -269,6 +260,8 @@ def format_fn(x, eos_id: int = 1, pad_id: int = 0):
 
 def preprocess_train_dataset(
     train_ds: tf.data.Dataset,
+    dataloading_host_index: int,
+    dataloading_host_count: int,
     sp_tokenizer,
     train_global_batch_size_to_load: int,
     max_target_length: int,
@@ -276,6 +269,7 @@ def preprocess_train_dataset(
     data_shuffle_seed: int,
 ) -> tf.data.Dataset:
   """Preprocess the training dataset."""
+  train_ds = train_ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
   train_ds = train_ds.map(lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)), num_parallel_calls=AUTOTUNE)
 
   train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
@@ -291,11 +285,14 @@ def preprocess_train_dataset(
 
 def preprocess_eval_dataset(
     eval_ds: tf.data.Dataset,
+    dataloading_host_index: int,
+    dataloading_host_count: int,
     eval_global_batch_size_to_load: int,
     max_target_length: int,
     num_examples: Optional[int] = None,
 ) -> tf.data.Dataset:
   """Preprocess the evaluation dataset."""
+  eval_ds = eval_ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
   eval_ds = sequence_packing.pack_dataset(eval_ds, max_target_length)
 
   eval_ds = eval_ds.map(format_fn, num_parallel_calls=AUTOTUNE)
@@ -320,10 +317,13 @@ def preprocess_datasets(
     train_ds: tf.data.Dataset,
     eval_ds: tf.data.Dataset,
     sp_tokenizer,
+    process_indices,
 ) -> Tuple[multihost_dataloading.MultiHostDataLoadIterator, multihost_dataloading.MultiHostDataLoadIterator]:
   """Preprocess datasets and return iterators for mlperf training."""
   train_ds = preprocess_train_dataset(
       train_ds,
+      dataloading_host_index=process_indices.index(jax.process_index()),
+      dataloading_host_count=len(process_indices),
       sp_tokenizer=sp_tokenizer,
       train_global_batch_size_to_load=config.global_batch_size_to_load,
       max_target_length=config.max_target_length,
@@ -335,6 +335,8 @@ def preprocess_datasets(
 
   eval_ds = preprocess_eval_dataset(
       eval_ds,
+      dataloading_host_index=jax.process_index(),
+      dataloading_host_count=jax.process_count(),
       eval_global_batch_size_to_load=eval_global_batch_size_to_load,
       max_target_length=config.max_target_length,
   )
@@ -361,11 +363,9 @@ def make_c4_mlperf_iterator(
 
   train_ds, eval_ds = get_datasets(
       config=config,
-      dataloading_host_index=process_indices.index(jax.process_index()),
-      dataloading_host_count=len(process_indices),
   )
   sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
   train_iter, eval_iter = preprocess_datasets(
-      config, global_mesh, train_ds, eval_ds, sp_tokenizer,
+      config, global_mesh, train_ds, eval_ds, sp_tokenizer, process_indices
   )
   return train_iter, eval_iter
