@@ -80,6 +80,7 @@ def create_orbax_emergency_checkpoint_manager(
     abstract_state: PyTree,
     local_save_interval_steps: int,
     persistent_save_interval_steps: int,
+    orbax_logger: Optional[abstract_logger.AbstractLogger] = None,
 ):
   """Returns an emergency checkpoint."""
   flags.FLAGS.experimental_orbax_use_distributed_process_id = True
@@ -115,6 +116,7 @@ def create_orbax_emergency_checkpoint_manager(
       abstract_state=abstract_state,
       options=options,
       local_state_handler=local_checkpoint_handler,
+      logger=orbax_logger
   )
 
   max_logging.log("Emergency checkpoint manager created!")
