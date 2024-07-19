@@ -49,9 +49,6 @@ bias_init = initializers.default_bias_init
 RMSNorm = normalizations.RMSNorm
 Quant = quantizations.AqtQuantization
 
-BATCH = common_types.BATCH
-EMBED = common_types.EMBED
-
 def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
   """Convert a string to an activation function."""
   if fn_or_string == "linear":
@@ -252,7 +249,7 @@ class MlpBlock(nn.Module):
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
         x, deterministic=deterministic
     )  # Broadcast along length.
-    x = nn.with_logical_constraint(x, (BATCH, "activation_length", "activation_mlp"))
+    x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
     output = DenseGeneral(
         inputs.shape[-1],
         dtype=self.dtype,
@@ -380,32 +377,32 @@ class MoeBlock(nn.Module):
         output = output[:hs_shape[0]]
       return output
 
-    # Currently, we only support data parallelism with Megablox (sharding on batch dimensions)
+    # Currently, we only support data and tensor parallelism with Megablox.
+    # We all gather the input activations over tensor parallelism to follow strategy
+    # in https://parsa.epfl.ch/course-info/cs723/papers/Megatron.pdf.
     @functools.partial(
         shard_map.shard_map,
         mesh=self.mesh,
         in_specs=(
-              (nn.logical_to_mesh_axes((BATCH, None, EMBED))),
-              (nn.logical_to_mesh_axes((BATCH, None, None))),
-              (nn.logical_to_mesh_axes((None, EMBED, None))),
-              (nn.logical_to_mesh_axes((None, EMBED, None))),
-              (nn.logical_to_mesh_axes((None, None, EMBED))),
+              (nn.logical_to_mesh_axes(("activation_batch", None, None))),
+              (nn.logical_to_mesh_axes(("activation_batch", None, None))),
+              (nn.logical_to_mesh_axes((None, None, "mlp"))),
+              (nn.logical_to_mesh_axes((None, None, "mlp"))),
+              (nn.logical_to_mesh_axes((None, "mlp", None))),
           ),
-        out_specs=(nn.logical_to_mesh_axes((BATCH, None, EMBED))),
+        out_specs=(nn.logical_to_mesh_axes(("activation_batch", None, "activation_embed"))),
         check_rep=False,
     )
     def wrapper(x, logits, w0, w1, wo):
       x, sorted_selected_experts, weights, group_sizes = self.permute(x, logits)
       layer_w0 = gmm(x, w0, group_sizes)
-      tensor_parallelism = self.config.ici_tensor_parallelism * self.config.dcn_tensor_parallelism
-      if tensor_parallelism > 1:
-        layer_w0 = jax.lax.psum(layer_w0, 'tensor')
       layer_w1 = gmm(x, w1, group_sizes)
-      if tensor_parallelism > 1:
-        layer_w1 = jax.lax.psum(layer_w1, 'tensor')
       layer_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       intermediate_layer = jnp.multiply(layer_act, layer_w1)
       intermediate_output = gmm(intermediate_layer, wo, group_sizes)
+      tensor_parallelism = self.config.ici_tensor_parallelism * self.config.dcn_tensor_parallelism
+      if tensor_parallelism > 1:
+        intermediate_output = jax.lax.psum_scatter(intermediate_output, 'tensor', scatter_dimension=1, tiled=True)
       output = self.unpermute(intermediate_output,
                               sorted_selected_experts,
                               weights)
