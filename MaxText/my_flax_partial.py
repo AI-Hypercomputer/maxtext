@@ -7,6 +7,7 @@ from jax import lax
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec
 from jax.experimental import shard_map
+from flax import linen as nn
 
 
 devices = jax.devices()
@@ -18,15 +19,51 @@ fsdp = 2
 tensor = 1
 
 mesh = Mesh(mesh_utils.create_device_mesh((stage, fsdp, tensor), jax.devices()), ["stage", "fsdp", "tensor"])
+logical_axis_rules =(
+   ("batch", "fsdp"),
+   ("embed", "tensor"),
+   ("stage", "stage")
+)
+
 
 def S(*specs):
   return NamedSharding(mesh, PartitionSpec(*specs))
 
-def my_regular_activation_times_weight(activations, weights):
-    assert activations.ndim == 2
-    activations = lax.with_sharding_constraint(activations, S("fsdp", "tensor"))
-    weights = lax.with_sharding_constraint(weights, S("fsdp", "tensor"))
-    return activations @ weights
+class SimpleDecoderLayer(nn.Module):
+  def setup(self):
+    self.weight_mat = self.param(
+      'weights',
+      nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
+      (embed, embed)
+    )
+
+  def __call__(self, inputs: jnp.ndarray):
+    # Assuming inputs are [batch, embed]
+    return inputs @ self.weight_mat.astype(inputs.dtype)
+
+sdl = SimpleDecoderLayer()
+def func_to_pipeline(body_instance, inputs):
+   return body_instance(inputs)
+
+class MyMultipleBeast(nn.Module):
+    @nn.compact
+    def __call__(self, stage_inputs: jnp.ndarray):
+       # Inputs should be [stage, batch, embed]
+       vmap_sdl = nn.vmap(
+          func_to_pipeline,
+          in_axes=(0),
+          spmd_axis_name='stage',
+          variable_axes={'params': 0},
+          split_rngs={'params':  self.is_initializing()},
+          metadata_params={
+            nn.PARTITION_NAME: "layers",
+            'sub_weight_split_dims_mapping': (None),
+            "is_initializing": self.is_initializing(),
+            "x_times": self.num_stages}
+       )
+       return vmap_sdl(stage_inputs)
+
+       
 
 @functools.partial(
     shard_map.shard_map,
