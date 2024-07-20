@@ -377,6 +377,7 @@ def setup_mesh_and_model(config):
           abstract_state,
           config.local_checkpoint_period,
           config.checkpoint_period,
+          config.async_checkpointing,
           logger,
       )
     )

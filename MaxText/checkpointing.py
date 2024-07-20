@@ -80,6 +80,7 @@ def create_orbax_emergency_checkpoint_manager(
     abstract_state: PyTree,
     local_save_interval_steps: int,
     persistent_save_interval_steps: int,
+    use_async: bool,
     orbax_logger: Optional[abstract_logger.AbstractLogger] = None,
 ):
   """Returns an emergency checkpoint."""
@@ -102,10 +103,12 @@ def create_orbax_emergency_checkpoint_manager(
 
   options = emergency_checkpoint_manager.CheckpointManagerOptions(
       local=LocalCheckpointOptions(
-          save_interval_steps=local_save_interval_steps
+          save_interval_steps=local_save_interval_steps,
+          enable_async_checkpointing=use_async,
       ),
       persistent=PersistentCheckpointOptions(
-          save_interval_steps=persistent_save_interval_steps
+          save_interval_steps=persistent_save_interval_steps,
+          enable_async_checkpointing=use_async,
       ),
   )
 
