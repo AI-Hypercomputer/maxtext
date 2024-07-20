@@ -40,6 +40,9 @@ def my_regular_activation_times_weight(activations, weights):
     auto = {"fsdp", "tensor"} # everything except stage
 )
 def my_partial_shard_map(activations, weights):
+    # activations are shape [stage, batch, embed], the blocked version in this partial shard map
+    # will be blocked along the stage axis stage times, so each block is only [1, batch, embed]
+    # we want to remove this leading 1 dimension so it is the original shape w/o pipeling of [batch, embed]
     return my_regular_activation_times_weight(activations[0], weights[0])
 
 def create_inputs():
