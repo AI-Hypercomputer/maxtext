@@ -894,8 +894,9 @@ def print_mem_stats(label:str):
   try:
     for d in jax.local_devices():
       stats = d.memory_stats()
+      print(f"mem_stat dict: {stats}")
       used = round(stats['bytes_in_use']/2**30, 2)
       limit = round(stats['bytes_limit']/2**30, 2)
       print(f"\tUsing (GB) {used} / {limit} ({used/limit:%}) on {d}")
-  except (RuntimeError, KeyError):
+  except (RuntimeError, KeyError, TypeError):
     print("\tMemstats unavailable.")
