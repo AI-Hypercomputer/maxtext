@@ -51,6 +51,21 @@ class DecodeState:
   generate_lengths: jax.Array
   generated_token: jax.Array
 
+class MaxEngineConfig:  # pylint: disable=missing-class-docstring
+  def __init__(self, keys):
+    # self.keys = keys
+    self.__dict__['keys'] = keys
+
+  def __getattr__(self, attr):
+    if attr not in self.keys:
+      raise ValueError(f"Requested key {attr}, not in config")
+    return self.keys[attr]
+
+  def __setattr__(self, attr, value):
+    raise ValueError
+
+  def get_keys(self):
+    return self.keys
 
 class MaxEngine(engine_api.Engine):
   """The computational core of the generative model server.
@@ -439,3 +454,41 @@ class MaxEngine(engine_api.Engine):
   def colocated_cpus(self) -> None:
     """CPU devices colocated with the engine's accelerators."""
     raise NotImplementedError
+
+def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_target_length):
+  import copy
+  import pyconfig
+  args_str = "MaxText/maxengine_server.py configs/base.yml"
+  args = [b for b in args_str.split(' ') if len(b) > 0]
+
+  # Common for llama70b
+  args.append("model_name=llama2-70b")
+  args.append("tokenizer_path=/home/vipannalla/maxtext/assets/tokenizer.llama2")
+  args.append("scan_layers=false")
+  args.append("async_checkpointing=false")
+  args.append("ici_fsdp_parallelism=1")
+  args.append("ici_autoregressive_parallelism=1")
+  args.append("ici_tensor_parallelism=-1")
+  args.append("weight_dtype=bfloat16")
+  args.append("attention=dot_product")
+  #args.append("")
+
+  # quantization related
+  args.append("checkpoint_is_quantized=True")
+  args.append("load_parameters_path=gs://msingh-bkt/checkpoints/quant_llama2-70b-chat/mlperf_070924/int8w_")
+  args.append("quantization=int8w")
+  args.append("quantize_kvcache=True")
+
+  # axis tuning related
+  args.append("compute_axis_order=0,1,2,3")
+  args.append("ar_cache_axis_order=0,1,2,3")
+
+  # batch and cache related
+  args.append(f"max_prefill_predict_length={max_prefill_predict_length}")
+  args.append(f"max_target_length={max_target_length}")
+  args.append(f"per_device_batch_size={batch_size}")
+
+  pyconfig.initialize(args)
+  cfg = MaxEngineConfig(copy.deepcopy(pyconfig._config.keys))
+  engine = MaxEngine(cfg)
+  return engine
