@@ -35,7 +35,9 @@ class SimpleDecoderLayer(nn.Module):
     )
 
   def __call__(self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode):
+    #ag_weights = nn.with_logical_constraint(self.weight_mat, (None, None)).astype(inputs.dtype)
     if self.config.scan_layers:
+      #return inputs @ ag_weights, None
       return inputs @ self.weight_mat.astype(inputs.dtype), None
     else:
       return inputs @ self.weight_mat.astype(inputs.dtype)
