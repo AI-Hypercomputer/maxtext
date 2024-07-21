@@ -17,6 +17,7 @@ limitations under the License.
 """Operations used by Grain"""
 
 import dataclasses
+import warnings
 from typing import Dict
 from threading import current_thread
 import datasets
@@ -32,23 +33,13 @@ AUTOTUNE = tf.data.experimental.AUTOTUNE
 
 ########## Functions used by TFDS pipeline
 
-def normalize_features(ds):
-  """Normalize text feature keys."""
-
-  def _normalize_features(features):
-    features["inputs"] = features.pop("text")
-    features["targets"] = features["inputs"]
-    return features
-
-  return ds.map(_normalize_features, num_parallel_calls=AUTOTUNE)
+def normalize_features(x, column_name):
+  return {"inputs": x[column_name], "targets": x[column_name]}
 
 def get_tokenizer(tokenizer_path, add_bos, add_eos):
   # Load tokenizer
   tokenizer_model = tokenizer.build_tokenizer(tokenizer_path, add_bos, add_eos)
   return tokenizer_model
-
-def filter_keys(record):
-  return {"inputs": record["inputs"], "targets": record["targets"]}
 
 def truncate_to_max_allowable_length(x, max_length):
   x["inputs"] = x["inputs"][:max_length]
@@ -62,19 +53,20 @@ def shift_data_by_truncation(x):
 
 ########## Functions used by HF pipeline
 
-def tokenization(example, hf_tokenizer, max_length):
+def tokenization(example, hf_tokenizer, max_length, column_name):
   """Tokenize a HuggingFace dataset"""
-  return hf_tokenizer(example["text"], truncation=True, max_length=max_length)
+  return hf_tokenizer(example[column_name], truncation=True, max_length=max_length)
 
 
 @dataclasses.dataclass
 class HFNormalizeFeatures(grain.MapTransform):
   """Normalize feature keys for HuggingFace input"""
-
+  def __init__(self, column_name):
+    self.column_name = column_name
   def map(self, features):
     return {
-        "inputs": np.asarray(features["input_ids"], dtype=np.int32),
-        "targets": np.asarray(features["input_ids"], dtype=np.int32),
+        "inputs": np.asarray(features[self.column_name], dtype=np.int32),
+        "targets": np.asarray(features[self.column_name], dtype=np.int32),
     }
 
 
@@ -91,25 +83,38 @@ class HFDataSource(grain.RandomAccessDataSource):
     self.dataset_shards = [dataloading_host_index * self.num_threads + i for i in range(self.num_threads)]
     self.datasets = [split_dataset_by_node(dataset, world_size=self.n_shards, rank=x) for x in self.dataset_shards]
     self.data_iters = []
+    self.out_of_data =False
 
   def _check_shard_count(self):
-    if self.n_shards % (self.dataloading_host_count * self.num_threads) != 0:
+    if self.n_shards < (self.dataloading_host_count * self.num_threads):
+      warnings.warn(f"WARNING: Inefficient dataloading. Your train or eval dataset contains {self.n_shards} shards, "
+                      "smaller than number of host loading data. This is known to lead to inefficient dataloading. " 
+                      "Please reshard the data, or use a subset of hosts for dataloading by setting expansion_factor_real_data."
+                      "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#limitations--recommendations"
+                      )
+      self.n_shards = self.dataloading_host_count * self.num_threads
+    elif self.n_shards % (self.dataloading_host_count * self.num_threads) > 0:
       usable_shards = (
           self.n_shards
           // (self.dataloading_host_count * self.num_threads)
           * (self.dataloading_host_count * self.num_threads)
       )
-      max_logging.log(f"Dataset contains {self.n_shards} shards, but only {usable_shards} shards will be used.")
-      max_logging.log("Make (dataset shards) % (number of host loading data) == 0 to use all shards of data")
+      warnings.warn(f"Dataset contains {self.n_shards} shards, but only {usable_shards} shards will be used."
+                    "Make (dataset shards) % (number of host loading data) == 0 to use all shards of data"
+                    "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#limitations--recommendations"
+                    )
 
   def _update_shard(self, idx):
-    max_logging.log(f"Updating host {self.dataloading_host_index} dataset {idx}, was on shard {self.dataset_shards[idx]}")
-    self.dataset_shards[idx] += self.dataloading_host_count * self.num_threads
-    max_logging.log(f"New shard is {self.dataset_shards[idx]}")
-    if self.dataset_shards[idx] > self.n_shards:
-      raise ValueError(f"Run out of shards, shard {self.dataset_shards[idx]} is not available")
-    self.datasets[idx] = split_dataset_by_node(self.dataset, world_size=self.n_shards, rank=self.dataset_shards[idx])
-    self.data_iters[idx] = iter(self.datasets[idx])
+    if self.dataset_shards[idx] < self.n_shards:
+      max_logging.log(f"Updating host {self.dataloading_host_index} dataset {idx}, was on shard {self.dataset_shards[idx]}")
+      self.dataset_shards[idx] += self.dataloading_host_count * self.num_threads
+      max_logging.log(f"New shard is {self.dataset_shards[idx]}")
+      self.datasets[idx] = split_dataset_by_node(self.dataset, world_size=self.n_shards, rank=self.dataset_shards[idx])
+      self.data_iters[idx] = iter(self.datasets[idx])
+    else:
+      max_logging.log(f"Run out of shards on host {self.dataloading_host_index}, shard {self.dataset_shards[idx]} is not available")
+      self.out_of_data = True
+
 
   def __len__(self):
     """Return length of the HF dataset. Since HuggingFace IterableDataset does not have length,
@@ -125,6 +130,8 @@ class HFDataSource(grain.RandomAccessDataSource):
 
     while True:
       try:
+        if self.out_of_data:
+          return None
         data = next(self.data_iters[idx])
         return data
       except StopIteration:
@@ -135,21 +142,34 @@ class HFDataSource(grain.RandomAccessDataSource):
 @dataclasses.dataclass
 class ParseFeatures(grain.MapTransform):
   """Parse serialized example"""
+  def __init__(self, data_column, tokenize):
+    self.data_column = data_column
+    if tokenize:
+      self.dtype = tf.string
+    else:
+      self.dtype = tf.int64
 
   def map(self, features):
     def _parse(example):
-      parsed = tf.io.parse_example(example, {"text": tf.io.FixedLenFeature(shape=(), dtype=tf.string)})
+      parsed = tf.io.parse_example(example, {
+        self.data_column: tf.io.FixedLenSequenceFeature([], dtype=self.dtype, allow_missing=True)
+        })
       return parsed
 
     return _parse(features)
 
-
 @dataclasses.dataclass
 class NormalizeFeatures(grain.MapTransform):
   """Normalize text feature keys."""
+  def __init__(self, column_name, tokenize):
+    self.column_name = column_name
+    self.tokenize = tokenize
 
   def map(self, features):
-    return {"inputs": features["text"].numpy().decode(), "targets": features["text"].numpy().decode()}
+    if self.tokenize:
+      return {"inputs": features[self.column_name].numpy()[0].decode(), "targets": features[self.column_name].numpy()[0].decode()}
+    else:
+      return {"inputs": features[self.column_name].numpy(), "targets": features[self.column_name].numpy()}
 
 
 @dataclasses.dataclass
@@ -226,3 +246,4 @@ class ShiftData(grain.MapTransform):
 
   def map(self, data):
     return shift_and_refine(data, axis=self.axis)
+

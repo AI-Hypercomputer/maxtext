@@ -31,7 +31,10 @@ def preprocessing_pipeline(
     dataloading_host_count,
     global_mesh,
     dataset,
+    data_column_name,
+    tokenize,
     tokenizer_path,
+    hf_access_token,
     global_batch_size,
     max_target_length,
     shuffle,
@@ -41,6 +44,7 @@ def preprocessing_pipeline(
     packing=True,
     shift=True,
     num_threads=1,
+    drop_remainder=True,
 ):
   """pipeline for preprocessing HF dataset"""
 
@@ -49,24 +53,28 @@ def preprocessing_pipeline(
   if shuffle:
     dataset = dataset.shuffle(seed=data_shuffle_seed)
 
-  tokenizer = transformers.AutoTokenizer.from_pretrained(
-      tokenizer_path,
-      add_bos_token=add_bos,
-      add_eos_token=add_eos,
-      model_max_length=max_target_length,
-      legacy=False,
-  )
+  if tokenize:
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        tokenizer_path,
+        add_bos_token=add_bos,
+        add_eos_token=add_eos,
+        model_max_length=max_target_length,
+        legacy=False,
+        token=hf_access_token,
+    )
 
-  dataset = dataset.map(
-      _input_pipeline_utils.tokenization,
-      batched=True,
-      fn_kwargs={"hf_tokenizer": tokenizer, "max_length": max_target_length - 1},
-  )
-  dataset = dataset.select_columns(["input_ids"])
+    dataset = dataset.map(
+        _input_pipeline_utils.tokenization,
+        batched=True,
+        fn_kwargs={"hf_tokenizer": tokenizer, "max_length": max_target_length - 1, "column_name": data_column_name},
+    )
+    dataset = dataset.select_columns(["input_ids"]).rename_column("input_ids", data_column_name)
+  else:
+    dataset = dataset.select_columns([data_column_name])
 
   dataset = _input_pipeline_utils.HFDataSource(dataset, dataloading_host_index, dataloading_host_count, num_threads)
   operations = []
-  operations.append(_input_pipeline_utils.HFNormalizeFeatures())
+  operations.append(_input_pipeline_utils.HFNormalizeFeatures(data_column_name))
 
   if packing:
     operations.append(
@@ -78,7 +86,7 @@ def preprocessing_pipeline(
     operations.append(_input_pipeline_utils.ReformatPacking())
   else:
     operations.append(_input_pipeline_utils.PadToMaxLength(max_target_length))
-    operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=True))
+    operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=drop_remainder))
 
   if shift:
     operations.append(_input_pipeline_utils.ShiftData(axis=1))
@@ -113,8 +121,6 @@ def preprocessing_pipeline(
 def make_hf_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
-    add_bos,
-    add_eos,
     process_indices,
   ):
   """Load, preprocess dataset and return iterators"""
@@ -131,13 +137,16 @@ def make_hf_iterator(
     dataloading_host_count=len(process_indices),
     global_mesh=global_mesh,
     dataset=train_ds,
+    data_column_name=config.train_data_column,
+    tokenize=config.tokenize_train_data,
     tokenizer_path=config.tokenizer_path,
+    hf_access_token=config.hf_access_token,
     global_batch_size=config.global_batch_size_to_load,
     max_target_length=config.max_target_length,
     shuffle=config.enable_data_shuffling,
     data_shuffle_seed=config.data_shuffle_seed,
-    add_bos=add_bos,
-    add_eos=add_eos,
+    add_bos=config.add_bos,
+    add_eos=config.add_eos,
   )
 
   if config.eval_interval > 0:
@@ -158,13 +167,16 @@ def make_hf_iterator(
       dataloading_host_count=len(process_indices),
       global_mesh=global_mesh,
       dataset=eval_ds,
+      data_column_name=config.eval_data_column,
+      tokenize=config.tokenize_eval_data,
       tokenizer_path=config.tokenizer_path,
+      hf_access_token=config.hf_access_token,
       global_batch_size=eval_batch_size,
       max_target_length=config.max_target_length,
       shuffle=False,
       data_shuffle_seed=config.data_shuffle_seed,
-      add_bos=add_bos,
-      add_eos=add_eos,
+      add_bos=config.add_bos,
+      add_eos=config.add_eos,
     )
   else:
     eval_iter = None
