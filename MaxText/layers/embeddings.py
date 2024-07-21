@@ -15,6 +15,7 @@
 """Embedding Layers."""
 
 from typing import Any, Optional
+import common_types
 
 from flax import linen as nn
 import jax
@@ -53,9 +54,10 @@ class Embed(nn.Module):
   embedding_init: Initializer = default_embed_init
 
   def setup(self):
+    embedding_axis_names = (common_types.VOCAB, common_types.EMBED)
     self.embedding = self.param(
         "embedding",
-        with_logical_partitioning(self.embedding_init, ("vocab", "embed")),
+        with_logical_partitioning(self.embedding_init, embedding_axis_names),
         (self.num_embeddings, self.features),
         self.config.weight_dtype,
     )
@@ -82,7 +84,13 @@ class Embed(nn.Module):
       output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
     else:
       output = jnp.asarray(self.embedding, self.dtype)[inputs]
-    output = nn.with_logical_constraint(output, ("activation_embed_and_logits_batch", "activation_length", "activation_embed"))
+    output_axis_names = (
+      common_types.ACTIVATION_EMBED_AND_LOGITS_BATCH,
+      common_types.ACTIVATION_LENGTH,
+      common_types.ACTIVATION_EMBED
+    )
+    output = jnp.asarray(output)
+    output = nn.with_logical_constraint(output, output_axis_names)
     return output
 
   def attend(self, query: Array) -> Array:

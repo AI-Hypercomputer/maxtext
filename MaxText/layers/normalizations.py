@@ -20,6 +20,7 @@ from flax import linen as nn
 from jax import lax
 import jax.numpy as jnp
 from layers import initializers
+import common_types
 
 Initializer = initializers.Initializer
 
@@ -30,7 +31,7 @@ class RMSNorm(nn.Module):
   epsilon: float = 1e-6
   dtype: Any = jnp.float32
   weight_dtype: Any = jnp.float32
-  kernel_axes: Tuple[str, ...] = ()
+  kernel_axes: Tuple[str, ...] = (common_types.NORM, )
   scale_init: Initializer = nn.initializers.ones
 
   @nn.compact

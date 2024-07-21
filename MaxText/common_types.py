@@ -33,14 +33,28 @@ ScanIn = partitioning.ScanIn
 AxisNames = tuple[str, ...]
 AxisIdxes = tuple[int, ...]
 
-BATCH = "activation_batch"
-LENGTH = "activation_length"
-EMBED = "activation_embed"
-HEAD = "activation_heads"
-KV_BATCH = "activation_kv_batch"
-KV_HEAD = "activation_kv_heads"
-KV_HEAD_DIM = "activation_kv_head_dim"
-D_KV = "activation_kv"
+NORM = "norm"
+VOCAB = "vocab"
+MLP = "mlp"
+LAYERS = "layers"
+
+EMBED = "embed"
+HEADS = "heads"
+KV_HEADS = "kv_heads"
+KV = "kv"
+QKV = "qkv"
+
+ACTIVATION_EMBED = "activation_embed"
+ACTIVATION_EMBED_AND_LOGITS_BATCH = "activation_embed_and_logits_batch"
+ACTIVATION_BATCH = "activation_batch"
+ACTIVATION_LENGTH_NO_HEADS = "activation_length_no_heads"
+ACTIVATION_LENGTH = "activation_length"
+ACTIVATION_HEADS = "activation_heads"
+ACTIVATION_KV_HEADS = "activation_kv_heads"
+ACTIVATION_KV = "activation_kv"
+ACTIVATION_MLP = "activation_mlp"
+ACTIVATION_VOCAB = "activation_vocab"
+
 CACHE_BATCH = "cache_batch"
 CACHE_SEQUENCE = "cache_sequence"
 CACHE_HEADS = "cache_heads"

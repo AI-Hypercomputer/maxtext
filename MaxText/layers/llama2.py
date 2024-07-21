@@ -38,16 +38,6 @@ DType = common_types.DType
 Mesh = common_types.Mesh
 ScanIn = common_types.ScanIn
 
-AxisNames = common_types.AxisNames
-BATCH = common_types.BATCH
-KV_BATCH = common_types.KV_BATCH
-LENGTH = common_types.LENGTH
-HEAD = common_types.HEAD
-KV_HEAD = common_types.KV_HEAD
-D_KV = common_types.D_KV
-KV_HEAD_DIM = common_types.KV_HEAD_DIM
-
-
 Embed = embeddings.Embed
 Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
@@ -77,18 +67,18 @@ class LlamaDecoderLayer(nn.Module):
     cfg = self.config
     mesh = self.mesh
 
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+    inputs_axis_names = (common_types.ACTIVATION_BATCH, common_types.ACTIVATION_LENGTH, common_types.ACTIVATION_EMBED)
+    inputs = nn.with_logical_constraint(inputs, inputs_axis_names)
 
     lnx_rms = models.RMSNorm(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_layer_norm",
-        kernel_axes=("norm",),
         epsilon=cfg.normalization_layer_epsilon,
     )
     lnx = lnx_rms(inputs)
 
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
+    lnx = nn.with_logical_constraint(lnx, inputs_axis_names)
 
     # Self-attention block
     attention_layer = Attention(
@@ -121,7 +111,7 @@ class LlamaDecoderLayer(nn.Module):
         model_mode=model_mode,
     )
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    attention_lnx = nn.with_logical_constraint(attention_lnx, inputs_axis_names)
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
@@ -129,10 +119,9 @@ class LlamaDecoderLayer(nn.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="post_self_attention_layer_norm",
-        kernel_axes=("norm",),
         epsilon=cfg.normalization_layer_epsilon,
     )(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_length", "activation_embed"))
+    hidden_states = nn.with_logical_constraint(hidden_states, inputs_axis_names)
 
     # MLP block.
     mlp_lnx = linears.MlpBlock(
@@ -145,16 +134,14 @@ class LlamaDecoderLayer(nn.Module):
         config=cfg,
         quant=self.quant,
     )(hidden_states, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, inputs_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs
 
     layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
 
     layer_output = nn.with_logical_constraint(
-        layer_output,
-        ("activation_batch", "activation_length", "activation_embed"),
-    )
+        layer_output, inputs_axis_names)
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))

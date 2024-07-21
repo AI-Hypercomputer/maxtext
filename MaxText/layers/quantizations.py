@@ -38,8 +38,7 @@ Array = common_types.Array
 Config = common_types.Config
 AxisIdxes = common_types.AxisIdxes
 AxisNames = common_types.AxisNames
-CACHE_HEADS = common_types.CACHE_HEADS
-CACHE_KV = common_types.CACHE_KV
+
 KVTensor = aqt_tensor.QTensor
 
 
@@ -311,11 +310,11 @@ class KVQuant:
 
   def _get_max_axis(self, axis_names: AxisNames):
     if self.axis_cfg == "dkv":
-      return axis_names.index(CACHE_KV)
+      return axis_names.index(common_types.CACHE_KV)
     if self.axis_cfg == "heads_and_dkv":
       return (
-        axis_names.index(CACHE_HEADS),
-        axis_names.index(CACHE_KV)
+        axis_names.index(common_types.CACHE_HEADS),
+        axis_names.index(common_types.CACHE_KV)
         )
     raise ValueError(f"Invalid KV quant axis cfg: {self.axis_cfg}")
 

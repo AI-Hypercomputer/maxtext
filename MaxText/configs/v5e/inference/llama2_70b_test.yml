@@ -1,0 +1,28 @@
+base_config: "base.yml"
+
+logical_axis_rules: [
+                      ['norm', ['tensor', 'autoregressive']],
+                      ['embed', []],
+                      ['vocab', ['tensor', 'autoregressive']],
+                      ['heads', ['tensor', 'autoregressive']],
+                      ['kv_heads', ['tensor']],
+                      ['kv', ['autoregressive']],
+                      ['activation_embed_and_logits_batch', []],
+                      ['activation_batch', []],
+                      ['activation_length', []],
+                      ['activation_embed', ['tensor', 'autoregressive']],
+                      ['activation_vocab', ['tensor', 'autoregressive']],
+                      ['activation_heads', ['tensor', 'autoregressive']],
+                      ['activation_kv_heads', ['tensor']],
+                      ['activation_kv', []],
+                      ['mlp', ['tensor', 'autoregressive']],
+                      ['activation_mlp', ['tensor', 'autoregressive']],
+                      ['cache_batch', ['autoregressive']],
+                      ['cache_sequence', []],
+                      ['cache_heads', ['tensor']],
+                      ['cache_kv', []],
+                      ['cache_scale_batch', ['autoregressive']],
+                      ['cache_scale_sequence', []],
+                      ['cache_scale_heads', []],
+                      ['cache_scale_kv', []],
+                    ]

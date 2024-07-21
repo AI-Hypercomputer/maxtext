@@ -49,21 +49,6 @@ KVTensor = quantizations.KVTensor
 
 AxisNames = common_types.AxisNames
 AxisIdxes = common_types.AxisIdxes
-BATCH = common_types.BATCH
-KV_BATCH = common_types.KV_BATCH
-LENGTH = common_types.LENGTH
-HEAD = common_types.HEAD
-KV_HEAD = common_types.KV_HEAD
-D_KV = common_types.D_KV
-KV_HEAD_DIM = common_types.KV_HEAD_DIM
-CACHE_BATCH = common_types.CACHE_BATCH
-CACHE_SEQUENCE = common_types.CACHE_SEQUENCE
-CACHE_HEADS = common_types.CACHE_HEADS
-CACHE_KV = common_types.CACHE_KV
-CACHE_SCALE_BATCH = common_types.CACHE_SCALE_BATCH
-CACHE_SCALE_SEQUENCE = common_types.CACHE_SCALE_SEQUENCE
-CACHE_SCALE_HEADS = common_types.CACHE_SCALE_HEADS
-CACHE_SCALE_KV = common_types.CACHE_SCALE_KV
 DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
 
@@ -116,9 +101,11 @@ class AttentionOp(nn.Module):
   float32_qk_product: bool = False
   max_prefill_predict_length: int = -1
   float32_logits: bool = False
-  flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
-  cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
-  cache_scale_logical_axis_names: AxisNames = (CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV)
+  flash_axis_names: AxisNames = (common_types.ACTIVATION_BATCH, common_types.ACTIVATION_HEADS, common_types.ACTIVATION_LENGTH, common_types.ACTIVATION_KV)
+  key_axis_names: AxisNames = (common_types.ACTIVATION_BATCH, common_types.ACTIVATION_LENGTH, common_types.ACTIVATION_KV_HEADS, common_types.ACTIVATION_KV)
+  value_axis_names: AxisNames = (common_types.ACTIVATION_BATCH, common_types.ACTIVATION_LENGTH, common_types.ACTIVATION_KV_HEADS, common_types.ACTIVATION_KV)
+  cache_logical_axis_names: AxisNames = (common_types.CACHE_BATCH, common_types.CACHE_SEQUENCE, common_types.CACHE_HEADS, common_types.CACHE_KV)
+  cache_scale_logical_axis_names: AxisNames = (common_types.CACHE_SCALE_BATCH, common_types.CACHE_SCALE_SEQUENCE, common_types.CACHE_SCALE_HEADS, common_types.CACHE_SCALE_KV)
   prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
   ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
   compute_axis_order: AxisIdxes = (0, 1, 2, 3)
@@ -206,15 +193,16 @@ class AttentionOp(nn.Module):
 
   def tpu_flash_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None) -> Array:
     """TPU Flash Attention."""
-    # Transpose to ('batch', 'heads', 'length', 'kv')
+    # Transpose to (common_types.ACTIVATION_BATCH, common_types.ACTIVATION_HEADS, common_types.ACTIVATION_LENGTH, common_types.ACTIVATION_KV)
     query = jnp.transpose(query, axes=(0, 2, 1, 3))
+    # Transpose to (common_types.ACTIVATION_BATCH, common_types.ACTIVATION_KV_HEADS, common_types.ACTIVATION_LENGTH, common_types.ACTIVATION_KV)
     key = jnp.transpose(key, axes=(0, 2, 1, 3))
     value = jnp.transpose(value, axes=(0, 2, 1, 3))
 
     if decoder_segment_ids is not None:
       decoder_segment_ids = splash_attention_kernel.SegmentIds(decoder_segment_ids, decoder_segment_ids)
     axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
-    segment_axis_names = nn.logical_to_mesh_axes((BATCH, "activation_length_no_heads"))
+    segment_axis_names = nn.logical_to_mesh_axes((common_types.ACTIVATION_BATCH, common_types.ACTIVATION_LENGTH_NO_HEADS))
 
     @functools.partial(
         shard_map,
@@ -476,7 +464,7 @@ class AttentionOp(nn.Module):
     cached_segment_id_var = self.variable(
         "cache",
         "cache_prefill_segment_id",
-        nn.with_logical_partitioning(jnp.zeros, (CACHE_BATCH, CACHE_SEQUENCE)),
+        nn.with_logical_partitioning(jnp.zeros, (common_types.CACHE_BATCH, common_types.CACHE_SEQUENCE)),
         (cache_logical_shape[0], self.max_prefill_predict_length),
         jnp.int32,
     )
@@ -525,11 +513,6 @@ class AttentionOp(nn.Module):
         cache_shape,
         dtype,
     )
-    cached_key_var.value = nn.with_logical_constraint(
-        cached_key_var.value,
-        cache_axis_names,
-    )
-
     cached_value_var = self.variable(
         "cache",
         "cached_ar_value",
@@ -537,15 +520,10 @@ class AttentionOp(nn.Module):
         cache_shape,
         dtype,
     )
-    cached_value_var.value = nn.with_logical_constraint(
-        cached_value_var.value,
-        cache_axis_names,
-    )
-
     cached_segment_id_var = self.variable(
         "cache",
         "cache_ar_segment_id",
-        nn.with_logical_partitioning(jnp.zeros, (CACHE_BATCH, CACHE_SEQUENCE)),
+        nn.with_logical_partitioning(jnp.zeros, (common_types.CACHE_BATCH, common_types.CACHE_SEQUENCE)),
         (cache_logical_shape[0], cache_length),
         jnp.int32,
     )
@@ -562,12 +540,20 @@ class AttentionOp(nn.Module):
           cache_scale_shape,
           jnp.bfloat16,
       )
+      cached_key_scale_var.value = nn.with_logical_constraint(
+          cached_key_scale_var.value,
+          cache_scale_axis_names,
+      )
       cached_value_scale_var = self.variable(
           "cache",
           "cached_ar_value_scale",
           nn.with_logical_partitioning(jnp.zeros, cache_scale_axis_names),
           cache_scale_shape,
           jnp.bfloat16,
+      )
+      cached_value_scale_var.value = nn.with_logical_constraint(
+          cached_value_scale_var.value,
+          cache_scale_axis_names,
       )
     else:
       cached_key_scale_var = None
@@ -601,7 +587,16 @@ class AttentionOp(nn.Module):
     assert key.dtype == value.dtype, "Key and Value Dtypes should match."
 
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(batch, heads, kv_head_size)
-    _ = self._get_ar_cache_vars(batch, heads, kv_head_size)  # initialize it now
+    cached_ar_key_vars, cached_ar_value_vars, cached_ar_segment_id_var, cache_ar_index_var = self._get_ar_cache_vars(batch, heads, kv_head_size)  # initialize it now
+
+    cached_ar_key_vars[0].value = nn.with_logical_constraint(
+        cached_ar_key_vars[0].value,
+        self.transpose_tuple(self.key_axis_names, self.ar_cache_axis_order)
+    )
+    cached_ar_value_vars[0].value = nn.with_logical_constraint(
+        cached_ar_value_vars[0].value,
+        self.transpose_tuple(self.value_axis_names, self.ar_cache_axis_order)
+    )
 
     key_shaped_for_cache = jnp.transpose(key, self.prefill_cache_axis_order)
     value_shaped_for_cache = jnp.transpose(value, self.prefill_cache_axis_order)
@@ -663,7 +658,7 @@ class AttentionOp(nn.Module):
     one_hot_indices = one_hot_indices.astype(int)
     ar_cache_update_idx = jnp.squeeze(one_hot_indices)
 
-    ar_cache_update_axis = ar_cache_axis_names.index(CACHE_SEQUENCE)
+    ar_cache_update_axis = ar_cache_axis_names.index(common_types.CACHE_SEQUENCE)
     cached_key_var.value = jax.lax.dynamic_update_index_in_dim(
       cached_key_var.value, one_token_key_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis)
     cached_key_var.value = nn.with_logical_constraint(cached_key_var.value, ar_cache_axis_names)
@@ -673,7 +668,7 @@ class AttentionOp(nn.Module):
 
     if self.kv_quant:
       ar_cache_scale_axis_names = self.transpose_tuple(self.cache_scale_logical_axis_names, self.ar_cache_axis_order)
-      ar_cache_scale_update_axis = ar_cache_scale_axis_names.index(CACHE_SCALE_SEQUENCE)
+      ar_cache_scale_update_axis = ar_cache_scale_axis_names.index(common_types.CACHE_SCALE_SEQUENCE)
       cached_key_scale_var.value = jax.lax.dynamic_update_index_in_dim(
           cached_key_scale_var.value, one_token_key_scale_shaped_for_cache, ar_cache_update_idx, ar_cache_scale_update_axis)
       cached_value_scale_var.value = jax.lax.dynamic_update_index_in_dim(
@@ -877,12 +872,10 @@ class Attention(nn.Module):
   quant: Optional[Quant] = None
   kv_quant: Optional[KVQuant] = None
 
-  # Shard the query activation as the same as the key and value.
-  # TODO: Find a better sharding axis name.
-  query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  query_axis_names: AxisNames = (common_types.ACTIVATION_BATCH, common_types.ACTIVATION_LENGTH, common_types.ACTIVATION_HEADS, common_types.ACTIVATION_KV)
+  key_axis_names: AxisNames = (common_types.ACTIVATION_BATCH, common_types.ACTIVATION_LENGTH, common_types.ACTIVATION_KV_HEADS, common_types.ACTIVATION_KV)
+  value_axis_names: AxisNames = (common_types.ACTIVATION_BATCH, common_types.ACTIVATION_LENGTH, common_types.ACTIVATION_KV_HEADS, common_types.ACTIVATION_KV)
+  out_axis_names: AxisNames = (common_types.ACTIVATION_BATCH, common_types.ACTIVATION_LENGTH, common_types.ACTIVATION_HEADS, common_types.ACTIVATION_KV)
 
   prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
   ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
@@ -906,7 +899,7 @@ class Attention(nn.Module):
         features=(self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=query_init,
-        kernel_axes=("embed", "heads", "kv"),
+        kernel_axes=(common_types.EMBED, common_types.HEADS, common_types.KV),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="query",
@@ -931,13 +924,11 @@ class Attention(nn.Module):
     if self.num_query_heads % self.num_kv_heads != 0:
       raise ValueError("Invalid num_kv_heads for GQA.")
 
-    kernel_axes = ("embed", "kv_heads", "kv_head_dim")
-
     kv_proj = DenseGeneral(
         features=(self.num_kv_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=kernel_axes,
+        kernel_axes=(common_types.EMBED, common_types.KV_HEADS, common_types.KV),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name=proj_name,
@@ -952,7 +943,7 @@ class Attention(nn.Module):
         features=(3, self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed", "qkv", "heads", "kv"),
+        kernel_axes=(common_types.EMBED, common_types.QKV, common_types.HEADS, common_types.KV),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name=proj_name,
@@ -967,7 +958,7 @@ class Attention(nn.Module):
         features=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
-        kernel_axes=("heads", "kv", "embed"),
+        kernel_axes=(common_types.HEADS, common_types.KV, common_types.EMBED),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="out",
@@ -1053,6 +1044,8 @@ class Attention(nn.Module):
         ar_cache_axis_order=self.ar_cache_axis_order,
         compute_axis_order=self.compute_axis_order,
         reshape_q=self.reshape_q,
+        key_axis_names=self.key_axis_names,
+        value_axis_names=self.value_axis_names,
     )
 
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)

@@ -65,8 +65,8 @@ class DecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
-
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+    inputs_axis_names = (common_types.ACTIVATION_BATCH, common_types.ACTIVATION_LENGTH, common_types.ACTIVATION_EMBED)
+    inputs = nn.with_logical_constraint(inputs, inputs_axis_names)
 
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = RMSNorm(
@@ -76,7 +76,7 @@ class DecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=("norm",),
     )(inputs)
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
+    lnx = nn.with_logical_constraint(lnx, inputs_axis_names)
 
     attention_layer = Attention(
         config=self.config,
@@ -108,7 +108,7 @@ class DecoderLayer(nn.Module):
         model_mode=model_mode,
     )
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    attention_lnx = nn.with_logical_constraint(attention_lnx, inputs_axis_names)
 
     # MLP block.
     mlp_lnx = linears.MlpBlock(
@@ -121,7 +121,7 @@ class DecoderLayer(nn.Module):
         config=cfg,
         quant=self.quant,
     )(lnx, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, inputs_axis_names)
 
     next_layer_addition = mlp_lnx + attention_lnx
 
@@ -131,9 +131,7 @@ class DecoderLayer(nn.Module):
 
     layer_output = next_layer_addition_dropped_out + inputs
     layer_output = nn.with_logical_constraint(
-        layer_output,
-        ("activation_batch", "activation_length", "activation_embed"),
-    )
+        layer_output, inputs_axis_names)
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
@@ -364,7 +362,6 @@ class Decoder(nn.Module):
         weight_dtype=cfg.weight_dtype,
         name="decoder_norm",
         epsilon=cfg.normalization_layer_epsilon,
-        kernel_axes=("norm",),
     )(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
 
@@ -380,12 +377,13 @@ class Decoder(nn.Module):
           cfg.vocab_size,
           weight_dtype=cfg.weight_dtype,
           dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-          kernel_axes=("embed", "vocab"),
+          kernel_axes=(common_types.EMBED, common_types.VOCAB),
           name="logits_dense",
       )(
           y
       )  # We do not quantize the logits matmul.
-    logits = nn.with_logical_constraint(logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab"))
+    logits_axis_names = (common_types.ACTIVATION_EMBED_AND_LOGITS_BATCH, common_types.ACTIVATION_LENGTH, common_types.ACTIVATION_VOCAB)
+    logits = nn.with_logical_constraint(logits, logits_axis_names)
     logits = logits.astype(jnp.float32)
     return logits
 
