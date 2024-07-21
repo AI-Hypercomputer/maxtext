@@ -62,7 +62,7 @@ class GrainDataProcessingTest(unittest.TestCase):
 
   def _get_train_iterator(self):
     train_iter, _ = _grain_data_processing.make_grain_iterator(
-      self.config, self.mesh, True, True, self.process_indices)
+      self.config, self.mesh, self.process_indices)
     return train_iter
 
   def test_train_ds(self):

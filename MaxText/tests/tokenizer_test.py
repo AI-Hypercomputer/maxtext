@@ -19,7 +19,7 @@ limitations under the License.
 
 import numpy as np
 import train_tokenizer
-from input_pipeline import input_pipeline_interface
+from input_pipeline import _input_pipeline_utils
 import unittest
 import pytest
 import tensorflow_datasets as tfds
@@ -38,7 +38,7 @@ class TokenizerTest(unittest.TestCase):
     assets_path = "tests"
     vocab_model_name = "test_tokenizer"
     cls.tokenizer_path = os.path.join(assets_path, vocab_model_name)
-    cls.source_tokenizer = input_pipeline_interface.get_tokenizer("../assets/tokenizer", add_bos=False, add_eos=False)
+    cls.source_tokenizer = _input_pipeline_utils.get_tokenizer("../assets/tokenizer", add_bos=False, add_eos=False)
     os.environ["TFDS_DATA_DIR"] = dataset_path
     read_config = tfds.ReadConfig(
         shuffle_seed=0,
@@ -51,7 +51,7 @@ class TokenizerTest(unittest.TestCase):
         vocab_size=cls.vocab_size,
         max_corpus_chars=cls.max_corpus_chars,
     )
-    cls.test_tokenizer = input_pipeline_interface.get_tokenizer(cls.tokenizer_path, add_bos=False, add_eos=False)
+    cls.test_tokenizer = _input_pipeline_utils.get_tokenizer(cls.tokenizer_path, add_bos=False, add_eos=False)
 
   @classmethod
   def tearDownClass(cls):
@@ -78,7 +78,7 @@ class TikTokenTest(unittest.TestCase):
   def setUpClass(cls):
     dataset_name = "c4/en:3.0.1"
     dataset_path = "gs://maxtext-dataset"
-    cls.source_tokenizer = input_pipeline_interface.get_tokenizer("../assets/tokenizer_llama3.tiktoken", add_bos=False, add_eos=False)
+    cls.source_tokenizer = _input_pipeline_utils.get_tokenizer("../assets/tokenizer_llama3.tiktoken", add_bos=False, add_eos=False)
     os.environ["TFDS_DATA_DIR"] = dataset_path
     read_config = tfds.ReadConfig(
         shuffle_seed=0,

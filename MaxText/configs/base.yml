@@ -225,19 +225,26 @@ ici_pipeline_parallelism: 1
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
 num_slices: -1
 
-# Tokenizer and Dataset
-# Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
+# Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
 tokenizer_path: "assets/tokenizer.llama2"
+tokenize_train_data: True  # False if the dataset is pre-tokenized
+tokenize_eval_data: True  # False if the dataset is pre-tokenized
+add_bos: True
+add_eos: True
+
+# Dataset
 per_device_batch_size: 12.0
 expansion_factor_real_data: -1 # if -1 then all hosts will load real data, else total_hosts//expansion_factor_real_data will pull data from GCS.
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
+train_data_column: 'text'
+eval_data_column: 'text'
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md
 dataset_type: tfds
 # for TFDS input pipeline (dataset_type=tfds)
-dataset_path: ""
+dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
 eval_split: 'validation'
@@ -333,7 +340,7 @@ decode_sampling_top_k: 0 # set if you're doing top-k
 decode_sampling_temperature: 1.
 
 eval_interval: -1  # the specific number of train step between eval_step
-eval_batch_num: -1  # only run this number of batches for eval, for debugging use
+eval_steps: -1  # only run this number of batches for eval, for debugging use
 target_eval_loss: 0.  # early stop once reaching target eval_loss
 
 # Goodput parameters

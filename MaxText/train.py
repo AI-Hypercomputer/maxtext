@@ -563,17 +563,17 @@ def train_loop(config, state=None):
     if config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
       assert eval_data_iterator
       cumulative_eval_metrics = {"total_loss": 0.0, "total_weights": 0.0}
-      eval_batch_count = 0
+      eval_step_count = 0
       for eval_batch in eval_data_iterator:
-        if config.eval_batch_num > 0 and eval_batch_count >= config.eval_batch_num:
+        if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
           break
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           eval_metrics = p_eval_step(state, eval_batch, nextrng)
         cumulative_eval_metrics["total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
         cumulative_eval_metrics["total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
-        eval_batch_count += 1
+        eval_step_count += 1
       eval_loss = cumulative_eval_metrics["total_loss"] / (cumulative_eval_metrics["total_weights"] + EPS)
-      max_logging.log(f"average loss after {step=}: {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
+      max_logging.log(f"average loss after {step=}: {eval_step_count=}, {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
       if eval_loss <= config.target_eval_loss:
         max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
         prof.deactivate()
