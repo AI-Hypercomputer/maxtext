@@ -1,0 +1,8 @@
+{
+  ".*/query": {"bits": 4, "scale": 0.8},
+  ".*/key": {"bits": 4, "scale": 0.9},
+  ".*/value": {"bits": 8},
+  ".*/out": {"bits": 4},
+  ".*/wi_0": {"bits": 4},
+  ".*/wo": {"bits": 4}
+}
