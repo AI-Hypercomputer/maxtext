@@ -99,7 +99,7 @@ class BadSyntheticDataIterator:
         np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
     )
     output["targets_segmentation"] = tf.data.Dataset.from_tensor_slices(
-        np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
+        np.zeros((1, config.max_target_length), dtype=jax.numpy.int32)
     )
     dataset = tf.data.Dataset.zip((output))  # pytype: disable=wrong-arg-types
     dataset = dataset.repeat()
