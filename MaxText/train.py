@@ -587,7 +587,7 @@ def train_loop(config, state=None):
     if step == first_profiling_step:
       prof.activate()
 
-    if step == start_step:
+    if config.enable_checkpointing and step == start_step:
       assert eval_data_iterator
       cumulative_eval_metrics = {"total_loss": 0.0, "total_weights": 0.0}
       eval_batch_count = 0
@@ -595,7 +595,7 @@ def train_loop(config, state=None):
         if config.eval_batch_num > 0 and eval_batch_count >= config.eval_batch_num:
           break
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-          eval_metrics = p_eval_step(state, eval_batch, nextrng)
+          eval_metrics = p_eval_step(state, eval_batch, init_rng)
         cumulative_eval_metrics["total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
         cumulative_eval_metrics["total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
         eval_batch_count += 1
