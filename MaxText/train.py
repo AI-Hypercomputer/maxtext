@@ -602,7 +602,7 @@ def main(argv: Sequence[str]) -> None:
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
-  if config.monitor_goodput and jax.process_index == 0:
+  if config.monitor_goodput and jax.process_index() == 0:
     logger_name = f'goodput_{config.run_name}'
     goodput_monitor = monitoring.GoodputMonitor(
       job_name=config.run_name,
@@ -612,6 +612,7 @@ def main(argv: Sequence[str]) -> None:
       monitoring_enabled=True
     )
     goodput_monitor.start_goodput_uploader()
+    max_logging.log("Started Goodput upload to Tensorboard in the background!")
   debug_config = debug_configuration.DebugConfig(
       stack_trace_config=stack_trace_configuration.StackTraceConfig(
           collect_stack_trace=config.collect_stack_trace,
