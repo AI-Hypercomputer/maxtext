@@ -51,8 +51,10 @@ def preprocessing_pipeline(
     max_target_length: int,
     dataloading_host_index,
     dataloading_host_count,
+    data_column_name,
     shuffle: bool = False,
     data_shuffle_seed=0,
+    tokenize: bool = True,
     add_bos: bool = True,
     add_eos: bool = True,
     num_epochs: Optional[int] = 1,
@@ -64,15 +66,16 @@ def preprocessing_pipeline(
 ):
   """pipeline for preprocessing TFDS dataset."""
   dataset = dataset.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
-  dataset = _input_pipeline_utils.normalize_features(dataset)
-  tokenizer_model = _input_pipeline_utils.get_tokenizer(tokenizer_path, add_bos, add_eos)
-  dataset = dataset.map(lambda x: tokenizer.TokenizeOp(tokenizer=tokenizer_model, features=x), num_parallel_calls=AUTOTUNE)
-  dataset = dataset.map(_input_pipeline_utils.filter_keys, num_parallel_calls=AUTOTUNE)
+  dataset = dataset.map(lambda x: _input_pipeline_utils.normalize_features(x, data_column_name), num_parallel_calls=AUTOTUNE)
+
+  if tokenize:
+    tokenizer_model = _input_pipeline_utils.get_tokenizer(tokenizer_path, add_bos, add_eos)
+    dataset = dataset.map(lambda x: tokenizer.TokenizeOp(tokenizer=tokenizer_model, features=x), num_parallel_calls=AUTOTUNE)
 
   if max_target_length > 0:
     # We can take upto max_length+1 because there would be truncation by 1 token
     # for both inputs and targets
-    dataset = dataset.map(lambda x: _input_pipeline_utils.truncate_to_max_allowable_length(x, max_target_length + 1))
+    dataset = dataset.map(lambda x: _input_pipeline_utils.truncate_to_max_allowable_length(x, max_target_length + 1), num_parallel_calls=AUTOTUNE)
 
   # Shuffle and repeat.
   if shuffle:
@@ -113,8 +116,6 @@ def preprocessing_pipeline(
 def make_tfds_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
-    add_bos,
-    add_eos,
     process_indices,
 ):
   """load dataset, preprocess and return iterators"""
@@ -135,15 +136,17 @@ def make_tfds_iterator(
     max_target_length=config.max_target_length,
     dataloading_host_index=process_indices.index(jax.process_index()),
     dataloading_host_count=len(process_indices),
+    data_column_name=config.train_data_column,
     shuffle=config.enable_data_shuffling,
     data_shuffle_seed=config.data_shuffle_seed,
-    add_bos=add_bos,
-    add_eos=add_eos,
+    tokenize=config.tokenize_train_data,
+    add_bos=config.add_bos,
+    add_eos=config.add_eos,
   )
 
   if config.eval_interval > 0:
     eval_ds = get_datasets(
-      dataset_name=config.dataset_name,
+      dataset_name=config.eval_dataset_name,
       data_split=config.eval_split,
       shuffle_files=False,
     )
@@ -161,10 +164,12 @@ def make_tfds_iterator(
         max_target_length=config.max_target_length,
         dataloading_host_index=process_indices.index(jax.process_index()),
         dataloading_host_count=len(process_indices),
+        data_column_name=config.eval_data_column,
         shuffle=False,
         data_shuffle_seed=config.data_shuffle_seed,
-        add_bos=add_bos,
-        add_eos=add_eos,
+        tokenize=config.tokenize_eval_data,
+        add_bos=config.add_bos,
+        add_eos=config.add_eos,
     )
   else:
     eval_iter = None
