@@ -104,7 +104,6 @@ def create_orbax_emergency_checkpoint_manager(
   options = emergency_checkpoint_manager.CheckpointManagerOptions(
       local=LocalCheckpointOptions(
           save_interval_steps=local_save_interval_steps,
-          enable_async_checkpointing=use_async,
       ),
       persistent=PersistentCheckpointOptions(
           save_interval_steps=persistent_save_interval_steps,
