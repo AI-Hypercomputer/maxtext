@@ -88,7 +88,7 @@ def data_loader_strategy_type(config) -> Type[IterableDataset]:
   if name in DATA_LOADER_STRATEGIES_BY_NAME:
     return DATA_LOADER_STRATEGIES_BY_NAME[name]
   raise ValueError(f'data_loader_strategy of \'{name}\' is not one of the following '
-                   f'support strategies: {DATA_LOADER_STRATEGIES_BY_NAME.keys()}')
+                   f'supported strategies: {DATA_LOADER_STRATEGIES_BY_NAME.keys()}')
 
 
 def parquet_data_loader(config):
