@@ -16,7 +16,7 @@ limitations under the License.
 
 """Input pipeline for gpt3 c4 mlperf dataset."""
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import functools
 

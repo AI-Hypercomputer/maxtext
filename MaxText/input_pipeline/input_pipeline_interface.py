@@ -26,7 +26,6 @@ from input_pipeline._tfds_data_processing import make_tfds_iterator
 from input_pipeline._grain_data_processing import make_grain_iterator
 from input_pipeline._tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator
 from input_pipeline._hf_data_processing import make_hf_iterator
-from input_pipeline._input_pipeline_utils import get_tokenizer
 import multihost_dataloading
 
 
@@ -134,12 +133,12 @@ def make_mixed_train_iterator(config, mesh, add_bos, add_eos):
       return make_hf_iterator(config, mesh, add_bos, add_eos, process_indices)
   else:
     return BadSyntheticDataIterator(config, mesh), None
-  
 
-def make_c4_mlperf_iterator(config, mesh, add_bos, add_eos):
+
+def make_c4_mlperf_iterator(config, mesh):
   """Return iterators for c4_mlperf"""
   # TODO: combine into make_mixed_train_iterator once:
-  #   we have split process_indices for train and eval iterator independently 
+  #   we have split process_indices for train and eval iterator independently
   process_indices = get_process_loading_real_data(config, mesh)
   if config.expansion_factor_real_data != -1:  # assert number of hosts loading real data
     assert len(process_indices) == jax.process_count() // config.expansion_factor_real_data
@@ -148,7 +147,7 @@ def make_c4_mlperf_iterator(config, mesh, add_bos, add_eos):
     train_iterator = make_c4_mlperf_train_iterator(config, mesh, add_bos=False, add_eos=False, process_indices=process_indices)
   else:
     train_iterator = BadSyntheticDataIterator(config, mesh)
-  eval_iterator = make_c4_mlperf_eval_iterator(config, mesh, process_indices) 
+  eval_iterator = make_c4_mlperf_eval_iterator(config, mesh, process_indices)
   return train_iterator, eval_iterator
 
 
@@ -158,7 +157,7 @@ def create_data_iterator(config, mesh, add_bos=True, add_eos=True):
   elif config.dataset_type in ("tfds", "grain", "hf"):
     return make_mixed_train_iterator(config, mesh, add_bos, add_eos)
   elif config.dataset_type == "c4_mlperf":
-    return make_c4_mlperf_eval_iterator(config, mesh, add_bos, add_eos)
+    return make_c4_mlperf_iterator(config, mesh)
   else:
     assert False, f"Unknown dataset_type {config.dataset_type}, dataset_type must be synthetic, tfds, grain, hf or c4_mlperf"
 
