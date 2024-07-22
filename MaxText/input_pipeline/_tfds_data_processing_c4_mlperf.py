@@ -314,14 +314,25 @@ def preprocess_eval_dataset(
   return eval_ds
 
 
-def preprocess_datasets(
-    config: ml_collections.ConfigDict,
-    global_mesh,
-    train_ds: tf.data.Dataset,
-    eval_ds: tf.data.Dataset,
-    sp_tokenizer,
-) -> Tuple[multihost_dataloading.MultiHostDataLoadIterator, multihost_dataloading.MultiHostDataLoadIterator]:
-  """Preprocess datasets and return iterators for mlperf training."""
+def make_c4_mlperf_train_iterator(
+  config: ml_collections.ConfigDict,
+  global_mesh,
+  add_bos,
+  add_eos,
+  process_indices,
+):
+  """Make train iterator of customized C4 dataset for mlperf gpt3 training."""
+  train_ds = get_dataset(
+    dataset_name=config.dataset_name,
+    split="train2",
+    dataloading_host_index=process_indices.index(jax.process_index()),
+    dataloading_host_count=len(process_indices),
+    enable_data_shuffling=config.enable_data_shuffling,
+    data_shuffle_seed=config.data_shuffle_seed,
+  )
+  train_ds = rekey(train_ds, {"inputs": None, "targets": "text"})
+
+  sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
   train_ds = preprocess_train_dataset(
       train_ds,
       sp_tokenizer=sp_tokenizer,
@@ -330,7 +341,26 @@ def preprocess_datasets(
       shuffle_buffer_size=128,
       data_shuffle_seed=config.data_shuffle_seed,
   )
+  train_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(train_ds, global_mesh)
+  return train_multihost_gen
 
+
+def make_c4_mlperf_eval_iterator(
+  config: ml_collections.ConfigDict,
+  global_mesh,
+  process_indices,
+):
+  """Make eval iterator of customized C4 dataset for mlperf gpt3 training."""
+  eval_ds = get_dataset(
+    dataset_name=config.eval_dataset_name,
+    split="validation_tokenized_5662seqs",
+    dataloading_host_index=process_indices.index(jax.process_index()),
+    dataloading_host_count=len(process_indices),
+    enable_data_shuffling=False,
+  )
+  # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and split to target_length
+  #   mainly to avoid eval sequences change depending on the number of hosts
+  eval_ds = rekey(eval_ds, {"inputs": None, "targets": "ids"})
   eval_global_batch_size_to_load = get_eval_global_batch_size_to_load(config, global_mesh)
 
   eval_ds = preprocess_eval_dataset(
@@ -339,33 +369,7 @@ def preprocess_datasets(
       max_target_length=config.max_target_length,
   )
 
-  train_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(train_ds, global_mesh)
   eval_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(eval_ds, global_mesh)
 
   # Return multi-host jax.Array prep iterator
-  return train_multihost_gen, eval_multihost_gen
-
-
-def make_c4_mlperf_iterator(
-    config: ml_collections.ConfigDict,
-    global_mesh,
-    add_bos,
-    add_eos,
-    process_indices,
-):
-  """Make train iterator and tokenizer for customized C4 dataset for mlperf gpt3 training."""
-  # TODO: remove assertion once support eval_per_device_batch_size < 1.
-  eval_global_batch_size_to_load = get_eval_global_batch_size_to_load(config, global_mesh)
-  eval_per_device_batch_size_to_load = eval_global_batch_size_to_load // global_mesh.size
-  assert eval_per_device_batch_size_to_load >= 1, f"{eval_per_device_batch_size_to_load=} is not yet supported if it is less than 1."
-
-  train_ds, eval_ds = get_datasets(
-      config=config,
-      dataloading_host_index=process_indices.index(jax.process_index()),
-      dataloading_host_count=len(process_indices),
-  )
-  sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
-  train_iter, eval_iter = preprocess_datasets(
-      config, global_mesh, train_ds, eval_ds, sp_tokenizer,
-  )
-  return train_iter, eval_iter
+  return eval_multihost_gen
