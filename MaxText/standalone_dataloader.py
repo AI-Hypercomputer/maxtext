@@ -33,7 +33,7 @@ import pyconfig
 from train import validate_train_config, setup_train_loop, setup_mesh_and_model
 import storage_utils
 
-from torch_datasets.parquet import FileParallelRandomRead, FileParallelRangeRead
+from torch_datasets.parquet import FileParallelRandomRead, FileParallelSequentialRead
 from torch.utils.data import DataLoader, IterableDataset
 
 TOTAL_TRAINING_TIME_DIRECTORY = "total_training_time"
@@ -42,7 +42,7 @@ PER_STEP_TIME_DIRECTORY = "per_step_time"
 PER_EPOCH_TIME_DIRECTORY = "per_epoch_time"
 
 DATA_LOADER_STRATEGIES_BY_NAME = MappingProxyType({
-    'FileParallelRangeRead': FileParallelRangeRead,
+    'FileParallelSequentialRead': FileParallelSequentialRead,
     'FileParallelRandomRead': FileParallelRandomRead, 
 })
 
@@ -88,7 +88,7 @@ def data_loader_strategy_type(config) -> Type[IterableDataset]:
   if name in DATA_LOADER_STRATEGIES_BY_NAME:
     return DATA_LOADER_STRATEGIES_BY_NAME[name]
   raise ValueError(f'data_loader_strategy of \'{name}\' is not one of the following '
-                   f'support strategies: {DATA_LOADER_STRATEGIES_BY_NAME.keys()}')
+                   f'supported strategies: {DATA_LOADER_STRATEGIES_BY_NAME.keys()}')
 
 
 def parquet_data_loader(config):

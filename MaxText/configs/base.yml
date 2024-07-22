@@ -373,4 +373,4 @@ gcs_metrics_bucket: "distributed-training-metrics"
 # The GCS bucket that holds the dataset.
 dataset_bucket: xai-hf-dataset-parquet
 # The strategy used for reading the dataset.
-data_loader_strategy_name: FileParallelRangeRead
+data_loader_strategy_name: FileParallelSequentialRead

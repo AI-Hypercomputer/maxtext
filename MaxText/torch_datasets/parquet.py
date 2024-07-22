@@ -113,11 +113,11 @@ class FileParallelRandomRead(ParquetIterableDataset):
         yield element
 
 
-class FileParallelRangeRead(ParquetIterableDataset):
-  """File Parallel, Random Read implementation for Parquet files."""
+class FileParallelSequentialRead(ParquetIterableDataset):
+  """File Parallel, Sequential Read implementation for Parquet files."""
 
   def _iter_impl(self, assigned_parquet_files: Iterable[str]) -> Iterable:
-    """File Parallel Random Read iterator."""
+    """File Parallel, Sequential Read iterator."""
     for each_parquet_file in assigned_parquet_files:
       table = pq.ParquetFile(each_parquet_file)
       for batch in table.iter_batches(
