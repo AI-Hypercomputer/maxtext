@@ -372,3 +372,5 @@ gcs_metrics_bucket: "distributed-training-metrics"
 ### Parameters used for GCSFuse
 # The GCS bucket that holds the dataset.
 dataset_bucket: xai-hf-dataset-parquet
+# The strategy used for reading the dataset.
+data_loader_strategy_name: FileParallelRangeRead

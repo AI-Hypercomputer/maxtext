@@ -21,7 +21,8 @@ import os
 
 import max_logging
 
-from typing import Sequence
+from typing import Sequence, Type
+from types import MappingProxyType
 import datetime
 from absl import app
 
@@ -32,13 +33,18 @@ import pyconfig
 from train import validate_train_config, setup_train_loop, setup_mesh_and_model
 import storage_utils
 
-from torch_datasets.parquet import ParquetDataset, FileParallelRandomRead
-from torch.utils.data import DataLoader
+from torch_datasets.parquet import FileParallelRandomRead, FileParallelRangeRead
+from torch.utils.data import DataLoader, IterableDataset
 
 TOTAL_TRAINING_TIME_DIRECTORY = "total_training_time"
 PER_STEP_DATA_LOADING_TIME_DIRECTORY = "per_step_data_loading_time"
 PER_STEP_TIME_DIRECTORY = "per_step_time"
 PER_EPOCH_TIME_DIRECTORY = "per_epoch_time"
+
+DATA_LOADER_STRATEGIES_BY_NAME = MappingProxyType({
+    'FileParallelRangeRead': FileParallelRangeRead,
+    'FileParallelRandomRead': FileParallelRandomRead, 
+})
 
 def split_list(lst, n):
   """Splits a list into roughly equal sized sublists and pads.
@@ -77,6 +83,14 @@ def split_list(lst, n):
   return sublists
 
 
+def data_loader_strategy_type(config) -> Type[IterableDataset]:
+  name = config.data_loader_strategy_name
+  if name in DATA_LOADER_STRATEGIES_BY_NAME:
+    return DATA_LOADER_STRATEGIES_BY_NAME[name]
+  raise ValueError(f'data_loader_strategy of \'{name}\' is not one of the following '
+                   f'support strategies: {DATA_LOADER_STRATEGIES_BY_NAME.keys()}')
+
+
 def parquet_data_loader(config):
   batch_size = config.local_batch_size
 
@@ -91,7 +105,9 @@ def parquet_data_loader(config):
 
   sublists = split_list(parquet_files, jax.process_count())
 
-  dataset = FileParallelRandomRead(
+  strategy_type = data_loader_strategy_type(config)
+
+  dataset = strategy_type(
       allocated_parquet_files=sublists[worker_id],
       batch_size=batch_size,
       columns=["outputs", "image_base64_str"],
