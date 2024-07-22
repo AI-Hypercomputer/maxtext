@@ -144,30 +144,48 @@ class MyMultipleBeast(nn.Module):
        if not self.is_initializing():
           repeat_ids = jnp.array([2,0])
           #breakpoint()
-          weights = self.gather_weights(repeat_ids)
-          breakpoint()
+          stage_weights = self.gather_weights(repeat_ids)
 
-       
-       
+          def get_stage_partition_spec(weight_partition_spec):
+             def get_stage_partition_spec_leaf(leaf_partition_spec):
+                new_partition_spec = [None] * len(leaf_partition_spec)
+                new_partition_spec[0] = "stage"
+                return PartitionSpec(*new_partition_spec)
+             return jax.tree.map(get_stage_partition_spec_leaf, weight_partition_spec)
 
-       
+          stage_weight_partition_spec = get_stage_partition_spec(nn.get_partition_spec(stage_weights))
 
-@functools.partial(
-    shard_map.shard_map,
-    mesh=mesh,
-    in_specs=(
-        PartitionSpec("stage", None, None), #S("stage", "fsdp", "tensor"),
-        PartitionSpec("stage", None, None)
-    ),
-    out_specs=PartitionSpec("stage", None, None),
-    check_rep=False,
-    auto = {"fsdp", "tensor"} # everything except stage
-)
-def my_partial_shard_map(activations, weights):
-    # activations are shape [stage, batch, embed], the blocked version in this partial shard map
-    # will be blocked along the stage axis stage times, so each block is only [1, batch, embed]
-    # we want to remove this leading 1 dimension so it is the original shape w/o pipeling of [batch, embed]
-    return my_regular_activation_times_weight(activations[0], weights[0])
+          def remove_leading_singleton_stage_dim(arr_pytree):
+             def remove_leading_singleton_stage_dim_leaf(arr):
+                assert arr.shape[0] == 1
+                # may need some flax remove metadata
+                return arr[0]
+             return jax.tree.map(remove_leading_singleton_stage_dim_leaf, arr_pytree)
+
+          @functools.partial(
+            shard_map.shard_map,
+            mesh=mesh,
+            in_specs=(
+                PartitionSpec("stage", None, None), # [stage, batch ,embed]
+                stage_weight_partition_spec, # weights partition spec
+            ),
+            out_specs=PartitionSpec("stage", None, None),
+            check_rep=False,
+            auto = {"fsdp", "tensor"} # everything except stage
+          )
+          def run_microbatch_iteration(individual_activations, individual_weights):
+              # Remove leading singleton stage dimension
+              individual_activations = remove_leading_singleton_stage_dim(individual_activations)
+              individual_weights = remove_leading_singleton_stage_dim(individual_weights)
+              
+              # run computation
+              output_activation = self.layers.apply(individual_weights, individual_activations)
+
+              # add back a stage dimension
+              output_activation=jnp.expand_dims(output_activation, axis=0)
+              return output_activation
+          
+          return run_microbatch_iteration(stage_inputs, stage_weights)
 
 def create_inputs():
     def create_activations():
@@ -183,27 +201,15 @@ def create_inputs():
 
 with mesh:
     # regular w/o stages and w/o shard_map over stages
-    if 1:
-        activations, weights = jax.jit(create_inputs)()
-        stage_inputs = jax.lax.broadcast(activations, [stage])
-        sdl = SimpleDecoderLayer()
-        my_pipeline = MyMultipleBeast(layers=sdl)
-        init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), stage_inputs)
-        jit_pipeline = jax.jit(my_pipeline.apply)
-        outputs = jit_pipeline(init_pipeline_params, stage_inputs)
-        sum_outputs = jnp.sum(outputs)
-        print(f"{sum_outputs=}", flush=True)
-
-    # with stages and with shard map
-    # create_input_vmap_func = jax.vmap(create_inputs, axis_size=stage, axis_name="stage")
-    # activations, weights = jax.jit(create_input_vmap_func)()
-    # print(f"{activations.shape}")
-    # jit_my_shard_map = jax.jit(my_partial_shard_map)
-    # ret = jit_my_shard_map(activations, weights)
-    # sum_outputs = jnp.sum(ret)
-    # print(f"{sum_outputs=}", flush=True)
-
-
-
+    activations, weights = jax.jit(create_inputs)()
+    stage_inputs = jax.lax.broadcast(activations, [stage])
+    sdl = SimpleDecoderLayer()
+    my_pipeline = MyMultipleBeast(layers=sdl)
+    init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), stage_inputs)
+    # can do weights_partition_spec = nn.get_partition_spec(init_pipeline_params) here
+    jit_pipeline = jax.jit(my_pipeline.apply)
+    outputs = jit_pipeline(init_pipeline_params, stage_inputs)
+    sum_outputs = jnp.sum(outputs)
+    print(f"{sum_outputs=}", flush=True)
 
 
