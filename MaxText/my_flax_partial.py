@@ -84,7 +84,10 @@ class MyMultipleBeast(nn.Module):
       repeat_ids = self.shard_dim_by_stages(repeat_ids, 0)
       weights = self.shard_dim_by_stages(weights, stages_dim_in_weights)
       stage_weights = jax.vmap(_gather_one, in_axes=(stages_dim_in_weights, 0), out_axes=gathered_weights_stage_dim)(weights, repeat_ids)
+
       stage_weights = self.shard_dim_by_stages(stage_weights, gathered_weights_stage_dim)
+
+      
       # may need to remove axis here = meta.remove_axis(weights, 0, circular_metadata_params)
       return stage_weights
 
@@ -145,15 +148,29 @@ class MyMultipleBeast(nn.Module):
           repeat_ids = jnp.array([2,0])
           #breakpoint()
           stage_weights = self.gather_weights(repeat_ids)
+          circular_metadata_params={
+            nn.PARTITION_NAME: "circular_repeats",
+            'sub_weight_split_dims_mapping': (None,),
+            "is_initializing": self.is_initializing(),
+            "x_times": REPEATS,
+            'optimizer_dims_mapping': None,
+          }
+          from flax.core import meta
+          stage_weights = meta.remove_axis(stage_weights, 0, circular_metadata_params)
+          # remove layers key from pytree, e.g. instead of params -> layers -> weights, just params -> weights
+          stage_weights['params'] = stage_weights['params']['layers']
 
           def get_stage_partition_spec(weight_partition_spec):
              def get_stage_partition_spec_leaf(leaf_partition_spec):
                 new_partition_spec = [None] * len(leaf_partition_spec)
                 new_partition_spec[0] = "stage"
                 return PartitionSpec(*new_partition_spec)
-             return jax.tree.map(get_stage_partition_spec_leaf, weight_partition_spec)
+             partition_spec_tree = jax.tree.map(get_stage_partition_spec_leaf, weight_partition_spec)
+
+             return partition_spec_tree
 
           stage_weight_partition_spec = get_stage_partition_spec(nn.get_partition_spec(stage_weights))
+          #breakpoint()
 
           def remove_leading_singleton_stage_dim(arr_pytree):
              def remove_leading_singleton_stage_dim_leaf(arr):
@@ -179,6 +196,7 @@ class MyMultipleBeast(nn.Module):
               individual_weights = remove_leading_singleton_stage_dim(individual_weights)
               
               # run computation
+              #breakpoint()
               output_activation = self.layers.apply(individual_weights, individual_activations)
 
               # add back a stage dimension
@@ -204,6 +222,10 @@ with mesh:
     activations, weights = jax.jit(create_inputs)()
     stage_inputs = jax.lax.broadcast(activations, [stage])
     sdl = SimpleDecoderLayer()
+    # init_sdl = sdl.init(jax.random.PRNGKey(0), activations)
+    # sdl_output = sdl.apply(init_sdl, activations)
+    # breakpoint()
+
     my_pipeline = MyMultipleBeast(layers=sdl)
     init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), stage_inputs)
     # can do weights_partition_spec = nn.get_partition_spec(init_pipeline_params) here
