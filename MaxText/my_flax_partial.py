@@ -9,12 +9,14 @@ from jax.sharding import PartitionSpec
 from jax.experimental import shard_map
 from flax import linen as nn
 
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
 devices = jax.devices()
 
 
-BATCH=512
-EMBED=2048
+BATCH=32768
+EMBED=4096
 REPEATS=3
 stage = 2
 GLOBAL_BATCH = stage * BATCH # assumes 1 microbatch per stage
@@ -199,8 +201,13 @@ class MyMultipleBeast(nn.Module):
               #breakpoint()
               output_activation = self.layers.apply(individual_weights, individual_activations)
 
+              # permute
+              jax.lax.ppermute(output_activation, 'stage', [(i, (i+1) % stage) for i in range(stage)])
+
               # add back a stage dimension
               output_activation=jnp.expand_dims(output_activation, axis=0)
+
+
               return output_activation
           
           return run_microbatch_iteration(stage_inputs, stage_weights)
@@ -230,6 +237,9 @@ with mesh:
     init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), stage_inputs)
     # can do weights_partition_spec = nn.get_partition_spec(init_pipeline_params) here
     jit_pipeline = jax.jit(my_pipeline.apply)
+
+    import timing_util
+    timing_util.simple_timeit(jit_pipeline, init_pipeline_params, stage_inputs, task = 'partial_shard_pp')
     outputs = jit_pipeline(init_pipeline_params, stage_inputs)
     sum_outputs = jnp.sum(outputs)
     print(f"{sum_outputs=}", flush=True)
