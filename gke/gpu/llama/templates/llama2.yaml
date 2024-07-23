@@ -2,8 +2,9 @@
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: maxtext-llama2
+  name: ninacai-maxtext-llama2
   labels:
+    nvidia-devtools-sidecar-injector: enabled
     xpk.google.com/workload: maxtext-llama2
 spec:
   failurePolicy:
