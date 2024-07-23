@@ -335,7 +335,7 @@ vertex_tensorboard_project: ""
 vertex_tensorboard_region: ""
 
 # If set to True, MaxText will perform extra checks using jax.checkify. Note that this will effect performance.
-max_checkify: False
+max_checkify: True
 
 # Inference
 inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
