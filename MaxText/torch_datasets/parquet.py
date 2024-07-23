@@ -81,24 +81,20 @@ class FileParallelRandomRead(ParquetIterableDataset):
   def _iter_impl(self, assigned_parquet_files: Iterable[str]) -> Iterable:
     """File Parallel Random Read iterator.
 
-    Some facts:
+    Notes:
       - Parquet metadata for all row groups is at the beginning of the file which
         makes getting the metadata for row groups cheap.
-
-    Some implementation details:
       - Row groups that are not a multiple of the batch size will return partial batches
         on the last read of the row group.
       - The reading of the row groups within a parquet file is random.
     """
     for single_parquest_file in assigned_parquet_files:
+      # Explicitly disable buffering to better simulate random reading of row groups.
       parquet_file = pq.ParquetFile(single_parquest_file, buffer_size = 0, pre_buffer = 0)
       # Randomize the row groups
       randomized_row_groups = self._random_iterator(range(parquet_file.num_row_groups))
       for current_row_group in randomized_row_groups:
         max_logging.log(f"row_group {current_row_group} has {parquet_file.metadata.row_group(current_row_group).num_rows} rows")
-        # TODO: Read batch size until all row groups have been read.
-        # Currently, a partial batch may be returned for each row group.
-        # Does this even matter since the method is returning a itr?
         for batch in parquet_file.iter_batches(
           row_groups = [current_row_group],
           batch_size=self.batch_size,
