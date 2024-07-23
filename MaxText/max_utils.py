@@ -909,9 +909,15 @@ def debug_array(array, array_name):
   n_shards = len(array.addressable_shards)
   total_size_across_n_shards = single_shard.data.size * n_shards
   total_nbytes_across_n_shards = single_shard.data.nbytes * n_shards
+    
+  try:
+    sharding = array.sharding.spec
+  except AttributeError:
+    sharding = array.sharding
+
   print(f"\t\tdtype: {array.dtype}")
   print(f"\t\tshape: {array.shape}")
-  print(f"\t\tsharding spec: {array.sharding.spec}")
+  print(f"\t\tsharding spec: {sharding}")
   print(f"\t\tdevice local layouer: {array.layout.device_local_layout}")
   print(f"\t\tsize (across n shards): {array.size} ({total_size_across_n_shards})")
   print(f"\t\tbytes (across n shards): {array.nbytes} ({total_nbytes_across_n_shards})")
