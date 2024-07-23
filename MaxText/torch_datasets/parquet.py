@@ -82,8 +82,6 @@ class FileParallelRandomRead(ParquetIterableDataset):
     """File Parallel Random Read iterator.
 
     Notes:
-      - Parquet metadata for all row groups is at the beginning of the file which
-        makes getting the metadata for row groups cheap.
       - Row groups that are not a multiple of the batch size will return partial batches
         on the last read of the row group.
       - The reading of the row groups within a parquet file is random.
