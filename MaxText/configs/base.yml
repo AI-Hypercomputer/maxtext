@@ -372,3 +372,6 @@ gcs_metrics_bucket: "distributed-training-metrics"
 ### Parameters used for GCSFuse
 # The GCS bucket that holds the dataset.
 dataset_bucket: xai-hf-dataset-parquet
+# The strategy used for reading the dataset. The options for this field are specified by the keys of
+# `DATA_LOADER_STRATEGIES_BY_NAME` in MaxText/standalone_dataloader.py.
+data_loader_strategy_name: FileParallelSequentialRead
