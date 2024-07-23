@@ -458,19 +458,21 @@ class MaxEngine(engine_api.Engine):
 def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_target_length):
   import copy
   import pyconfig
-  args_str = "MaxText/maxengine_server.py configs/base.yml"
+  args_str = "MaxText/maxengine_server.py configs/v5e/inference/llama2_70b_test.yml"
   args = [b for b in args_str.split(' ') if len(b) > 0]
 
   # Common for llama70b
   args.append("model_name=llama2-70b")
-  args.append("tokenizer_path=/home/vipannalla/maxtext/assets/tokenizer.llama2")
+  args.append("tokenizer_path=/maxtext/assets/tokenizer.llama2")
   args.append("scan_layers=false")
   args.append("async_checkpointing=false")
   args.append("ici_fsdp_parallelism=1")
-  args.append("ici_autoregressive_parallelism=1")
-  args.append("ici_tensor_parallelism=-1")
+  args.append("ici_autoregressive_parallelism=2")
+  args.append("ici_tensor_parallelism=8")
+  args.append("allow_split_physical_axes=True")
   args.append("weight_dtype=bfloat16")
   args.append("attention=dot_product")
+  args.append("reshape_q=True")
   #args.append("")
 
   # quantization related
@@ -480,8 +482,9 @@ def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_
   args.append("quantize_kvcache=True")
 
   # axis tuning related
-  args.append("compute_axis_order=0,1,2,3")
-  args.append("ar_cache_axis_order=0,1,2,3")
+  args.append("compute_axis_order=0,2,1,3")
+  args.append("prefill_cache_axis_order=0,2,1,3")
+  args.append("ar_cache_axis_order=0,2,1,3")
 
   # batch and cache related
   args.append(f"max_prefill_predict_length={max_prefill_predict_length}")

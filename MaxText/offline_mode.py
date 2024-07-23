@@ -311,9 +311,9 @@ def main(argv):
   log.info(f"Counts by bucket {counts_by_bucket}")
 
   length_and_batch = (
-      (256, 216),
-      (512, 108),
-      (1024, 54),
+      (256, 128),
+      (512, 128),
+      (1024, 64),
   )
   engines = []
   params = None

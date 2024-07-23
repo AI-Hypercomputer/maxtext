@@ -3,19 +3,19 @@ me=$(basename "$0")
 
 if [ -z "$BASEDIR"];
 then
-  BASEDIR=/home/vipannalla/inference_mlperf4.1
+  BASEDIR=/inference_mlperf4.1
 fi
 
 USER_CONFIG=$BASEDIR/language/llama2-70b/tpu/user.conf
 
 if [ -z "$DATA_DISK_DIR"];
 then
-  DATA_DISK_DIR=/home/vipannalla/loadgen_run_data
+  DATA_DISK_DIR=/loadgen_run_data
 fi
 
 DATASET_PATH=${DATA_DISK_DIR}/processed-data.pkl
-TOTAL_SAMPLE_COUNT=1000
-LOG_INTERVAL=200
+TOTAL_SAMPLE_COUNT=24576
+LOG_INTERVAL=1000
 
 # HF model id
 TOKENIZER_PATH="meta-llama/Llama-2-70b-chat-hf"
@@ -44,7 +44,7 @@ echo "BATCH_SIZE_EXP: ${BATCH_SIZE_EXP}"
 echo "OUTPUT_LOG_DIR: ${OUTPUT_LOG_DIR}"
 echo "USER_CONFIG: ${USER_CONFIG}"
 
-python -m offline_mode \
+python3 -m offline_mode \
         --mlperf_test_mode=accuracy \
 	--input_mode tokenized \
         --output_mode tokenized \
