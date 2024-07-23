@@ -587,21 +587,21 @@ def train_loop(config, state=None):
     if step == first_profiling_step:
       prof.activate()
 
-    # if config.enable_checkpointing and step == start_step:
-    #   assert eval_data_iterator
-    #   cumulative_eval_metrics = {"total_loss": 0.0, "total_weights": 0.0}
-    #   eval_batch_count = 0
-    #   for eval_batch in eval_data_iterator:
-    #     if config.eval_batch_num > 0 and eval_batch_count >= config.eval_batch_num:
-    #       break
-    #     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    #       eval_metrics = p_eval_step(state, eval_batch, init_rng)
-    #     cumulative_eval_metrics["total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
-    #     cumulative_eval_metrics["total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
-    #     eval_batch_count += 1
-    #   eval_loss = cumulative_eval_metrics["total_loss"] / (cumulative_eval_metrics["total_weights"] + EPS)
-    #   max_logging.log(f"average loss after {step=}: {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
-    #   mllog_utils.early_stop_check(config, step, eval_loss, start_step)
+    if config.enable_checkpointing and step == start_step:
+      assert eval_data_iterator
+      cumulative_eval_metrics = {"total_loss": 0.0, "total_weights": 0.0}
+      eval_batch_count = 0
+      for eval_batch in eval_data_iterator:
+        if config.eval_batch_num > 0 and eval_batch_count >= config.eval_batch_num:
+          break
+        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          eval_metrics = p_eval_step(state, eval_batch, init_rng)
+        cumulative_eval_metrics["total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
+        cumulative_eval_metrics["total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
+        eval_batch_count += 1
+      eval_loss = cumulative_eval_metrics["total_loss"] / (cumulative_eval_metrics["total_weights"] + EPS)
+      max_logging.log(f"average loss after {step=}: {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
+      mllog_utils.early_stop_check(config, step, eval_loss, start_step)
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       example_batch = load_next_batch(data_iterator, example_batch, config)
