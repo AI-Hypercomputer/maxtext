@@ -141,6 +141,18 @@ class Pipeline(nn.Module):
     stages_in = nn.with_logical_constraint(stages_in, ("activation_stage", "activation_batch", "activation_length", "activation_embed"), rules=self.config.logical_axis_rules, mesh=self.mesh)
     return stages_in
 
+  def shard_weight_dim_by_stages(self, x, dim: int):
+    # Shards a dimension by stages. Currently the sharding of other dimensions are left up the compiler, alternatively
+    # we may want to copy over the sharding from the other input axes.
+    dims_mapping = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
+    dims_mapping[dim] = "stage"
+    dims_mapping = tuple(dims_mapping)
+    if x.ndim == 3 and False:
+      sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec("stage", "fsdp", "tensor"))
+    else:
+      sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(*dims_mapping))
+    return jax.lax.with_sharding_constraint(x, sharding)
+
   def shard_dim_by_stages(self, x, dim: int):
     # Shards a dimension by stages. Currently the sharding of other dimensions are left up the compiler, alternatively
     # we may want to copy over the sharding from the other input axes.
@@ -178,7 +190,7 @@ class Pipeline(nn.Module):
     repeat_ids = self.shard_dim_by_stages(repeat_ids, 0)
     weights = self.shard_dim_by_stages(weights, stages_dim_in_weights)
     stage_weights = jax.vmap(_gather_one, in_axes=(stages_dim_in_weights, 0), out_axes=gathered_weights_stage_dim)(weights, repeat_ids)
-    stage_weights = self.shard_dim_by_stages(stage_weights, gathered_weights_stage_dim)
+    stage_weights = self.shard_weight_dim_by_stages(stage_weights, gathered_weights_stage_dim)
     return stage_weights
 
   def vmap_gather(self, xs, ids, ids_dim):
