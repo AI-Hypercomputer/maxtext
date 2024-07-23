@@ -6,7 +6,7 @@ logical_axis_rules: [
                       ['vocab', ['tensor', 'autoregressive']],
                       ['heads', ['tensor', 'autoregressive']],
                       ['kv_heads', ['tensor']],
-                      ['kv', ['autoregressive']],
+                      ['kv', []],
                       ['activation_embed_and_logits_batch', []],
                       ['activation_batch', []],
                       ['activation_length', []],
