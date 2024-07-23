@@ -21,7 +21,7 @@ logical_axis_rules: [
                       ['cache_sequence', []],
                       ['cache_heads', ['tensor']],
                       ['cache_kv', []],
-                      ['cache_scale_batch', ['autoregressive']],
+                      ['cache_scale_batch', []],
                       ['cache_scale_sequence', []],
                       ['cache_scale_heads', []],
                       ['cache_scale_kv', []],
