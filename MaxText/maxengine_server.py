@@ -14,6 +14,7 @@
 
 """Runs a server with maxtext."""
 
+import asyncio
 import jax
 import os
 import sys
@@ -22,7 +23,7 @@ import pyconfig
 # pylint: disable-next=unused-import
 import register_jax_proxy_backend
 import maxengine_config
-from jetstream.core import server_lib, config_lib
+from jetstream.core import async_server_lib, server_lib, config_lib
 
 # _PORT = flags.DEFINE_integer('port', 9000, 'port to listen on')
 # _THREADS = flags.DEFINE_integer(
@@ -35,7 +36,7 @@ from jetstream.core import server_lib, config_lib
 # )
 
 
-def main(config):
+async def main(config):
   # No devices for local cpu test. A None for prefill and a None for generate.
   devices = server_lib.get_devices()
   server_config = maxengine_config.get_server_config("MaxtextInterleavedServer", config)
@@ -49,7 +50,7 @@ def main(config):
   # We separate credential from run so that we can unit test it with
   # local credentials.
   # TODO: Add grpc credentials for OSS.
-  jetstream_server = server_lib.run(
+  jetstream_server = await async_server_lib.run(
       threads=256,
       port=9000,
       config=server_config,
@@ -58,7 +59,7 @@ def main(config):
       enable_jax_profiler=config.enable_jax_profiler if config.enable_jax_profiler else False,
       jax_profiler_port=config.jax_profiler_port if config.jax_profiler_port else 9999
   )
-  jetstream_server.wait_for_termination()
+  await jetstream_server.wait_for_termination()
 
 
 if __name__ == "__main__":
@@ -66,4 +67,4 @@ if __name__ == "__main__":
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   pyconfig.initialize(sys.argv)
   cfg = pyconfig.config
-  main(cfg)
+  asyncio.run(main(cfg))
