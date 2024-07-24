@@ -51,6 +51,7 @@ def assert_same_output_and_grad(f1, f2, *inputs):
   f2_grad = pytree_ravel(f2_grad)
 
   print("Asserting...", flush=True)
+  print(f"{f1_value=} {f2_value=}", flush=True)
   assert jax.numpy.allclose(f1_value, f2_value, rtol=1e-2, equal_nan=False)
   assert jax.numpy.allclose(f1_grad, f2_grad, rtol=1e-2, equal_nan=False)
   print("Asserted!!!", flush=True)
@@ -176,7 +177,7 @@ my_pipeline = pipeline.Pipeline(
     mesh=mesh
 )
 init_pipeline_params = my_pipeline.init(jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
-#breakpoint()
+breakpoint()
 #to_jit = functools.partial(my_pipeline.apply, deterministic=deterministic, model_mode=model_mode)
 
 # jit_pipeline = jax.jit(my_pipeline.apply, static_argnums=(4,5))

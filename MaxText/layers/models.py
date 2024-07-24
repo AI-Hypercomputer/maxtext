@@ -332,14 +332,37 @@ class Decoder(nn.Module):
           stage_module = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_layers_per_pipeline_stage, "layers_per_stage", mesh)
         elif not cfg.scan_layers:
           stage_module=SequentialBlockDecoderLayers(decoder_layer=RemattedBlockLayer, num_decoder_layers=cfg.num_layers_per_pipeline_stage, config=cfg, mesh=mesh,quant=self.quant)
-
-        y = pipeline.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)(
+        pipeline_module = pipeline.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)
+        if self.is_initializing():
+          y = pipeline_module(y,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode)
+          # pipeline_params = pipeline_module.init(
+          #   jax.random.PRNGKey(0),
+          #   y,
+          #   decoder_segment_ids,
+          #   decoder_positions,
+          #   deterministic,
+          #   model_mode,)
+          #breakpoint()
+        else:
+          print("We aren't initializing anymore", flush=True)
+          try:
+            inputs = self.variables['params']['decoder']['SimpleDecoderLayer_0']
+          except:
+            inputs = self.variables['params']['SimpleDecoderLayer_0']
+          input_vars = {'params': {'layers': inputs}}
+          breakpoint()
+          y = pipeline_module.apply(input_vars, y, decoder_segment_ids, decoder_positions, deterministic, model_mode)
+          y = pipeline_module.apply(
+            input_vars,
             y,
             decoder_segment_ids,
             decoder_positions,
             deterministic,
-            model_mode,
-        )
+            model_mode)
     else:
       if cfg.scan_layers:
         y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
