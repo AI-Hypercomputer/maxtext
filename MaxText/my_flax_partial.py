@@ -147,6 +147,7 @@ class MyMultipleBeast(nn.Module):
           return jnp.reshape(broadcasted_stage_outpus, [GLOBAL_BATCH, EMBED])
        
        if not self.is_initializing():
+          breakpoint()
           repeat_ids = jnp.array([2,0])
           stage_weights = self.gather_weights(repeat_ids)
           circular_metadata_params={

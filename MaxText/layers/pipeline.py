@@ -347,9 +347,8 @@ class Pipeline(nn.Module):
     stages_output = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
    else:
     # get weights
-    print("we are trying here", flush=True)
-    breakpoint()
-    print(dir(self.layers))
+    # print("we are trying here", flush=True)
+    # print(dir(self.layers))
     #stage_weights = prepare_vars_for_main_vmap(self.variables)
     stage_weights = prepare_vars_for_main_vmap(self.layers.variables)
     
@@ -376,13 +375,10 @@ class Pipeline(nn.Module):
         PartitionSpec("stage", None, None), # segments = [stage, batch, sequence]
         PartitionSpec("stage", None, None), # positions = [stage, batch, sequence]
     ),
-    out_specs=(
-      PartitionSpec("stage", None, None, None), # [stage, batch, sequence, embed]
-      None # dummy for scanning
-    ),
+    out_specs=PartitionSpec("stage", None, None, None), # [stage, batch, sequence, embed]
     check_rep=False,
     auto = {"fsdp", "tensor"} # everything except stage
-  )
+    )
     def run_microbatch_iteration(individual_weights, individual_activations, individual_segments, individual_positions):
       # Remove leading singleton stage dimension
       def remove_leading_singleton_stage_dim(arr_pytree):
@@ -398,21 +394,21 @@ class Pipeline(nn.Module):
       individual_weights = remove_leading_singleton_stage_dim(individual_weights)
       
       # run computation
-      #breakpoint()
-      output_activation = decoder_layer_instance.apply(individual_weights, individual_activations, individual_segments, individual_positions, deterministic, model_mode)
+      output_activation, _ = decoder_layer_instance.apply(individual_weights, individual_activations, individual_segments, individual_positions, deterministic, model_mode)
 
       # permute
       # jax.lax.ppermute(output_activation, 'stage', [(i, (i+1) % stage) for i in range(stage)])
 
       # add back a stage dimension
       output_activation=jnp.expand_dims(output_activation, axis=0)
+      #breakpoint()
 
 
       return output_activation
     #stages_output = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
     stages_output = run_microbatch_iteration(stage_weights, stages_inputs, stages_segment_ids, stages_positions)
 
-   if self.config.scan_layers:
+   if self.config.scan_layers and not use_shard_map:
      stages_output = stages_output[0]
 
    new_state = self.get_new_loop_state(stages_output, loop_state)
@@ -491,7 +487,9 @@ class Pipeline(nn.Module):
        stage_outputs = stage_outputs[0] # Remove extra dimension created for the circular vmap
      broadcasted_stage_outpus = jax.lax.broadcast(stage_outputs[0], [self.config.global_batch_size_to_train_on // self.microbatch_size])
      return jnp.reshape(broadcasted_stage_outpus, [self.config.global_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim])
-
+    else:
+      print("We are not initializing!", flush=False)
+      #breakpoint()
     def run_iteration_scannable(model,loop_state, xs):
        # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
        # the run_one_iteration in this method - the first argument model (i.e. self) is a nn.module instance.
