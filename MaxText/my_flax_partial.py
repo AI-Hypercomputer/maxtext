@@ -148,7 +148,6 @@ class MyMultipleBeast(nn.Module):
        
        if not self.is_initializing():
           repeat_ids = jnp.array([2,0])
-          #breakpoint()
           stage_weights = self.gather_weights(repeat_ids)
           circular_metadata_params={
             nn.PARTITION_NAME: "circular_repeats",

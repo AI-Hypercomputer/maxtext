@@ -347,9 +347,13 @@ class Pipeline(nn.Module):
     stages_output = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
    else:
     # get weights
-    stage_weights = prepare_vars_for_main_vmap(self.variables)
+    print("we are trying here", flush=True)
     breakpoint()
-    stage_weights['params'] = stage_weights['params']['layers']
+    print(dir(self.layers))
+    #stage_weights = prepare_vars_for_main_vmap(self.variables)
+    stage_weights = prepare_vars_for_main_vmap(self.layers.variables)
+    
+    #stage_weights['params'] = stage_weights['params']['layers']
 
     def get_stage_partition_spec(weight_partition_spec):
       def get_stage_partition_spec_leaf(leaf_partition_spec):
