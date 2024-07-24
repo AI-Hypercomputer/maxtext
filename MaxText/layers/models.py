@@ -315,6 +315,10 @@ class Decoder(nn.Module):
                 "context",
             ),
         )
+      elif cfg.remat_policy == "save_out_proj":
+        policy = jax.checkpoint_policies.save_only_these_names(
+            "out_proj",
+        )
       else:
         assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None

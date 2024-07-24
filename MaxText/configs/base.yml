@@ -129,7 +129,7 @@ num_pipeline_repeats: -1
 num_pipeline_microbatches: -1
 scan_pipeline_iterations: True # This can be set independently of scan_layers, which is relevant when num_layers_per_pipeline_stage > 1.
 
-# Choose 'remat_policy' between 'minimal', 'save_dot_except_mlpwi', 'save_dot_except_mlp', 'save_qkv_proj', 'qkv_proj_offloaded', 'minimal_offloaded' and 'full'.
+# Choose 'remat_policy' between 'minimal', 'save_dot_except_mlpwi', 'save_dot_except_mlp', 'save_qkv_proj', 'qkv_proj_offloaded', 'minimal_offloaded', 'save_out_proj' and 'full'.
 # These options offer a trade-off between speed (fastest to slowest) and HBM usage (highest to lowest)
 remat_policy: 'full'
 scan_layers: True
