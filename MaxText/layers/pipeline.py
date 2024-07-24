@@ -23,6 +23,7 @@ from flax import linen as nn
 import common_types
 import functools
 from typing import Any
+from jax.experimental import shard_map
 
 class Pipeline(nn.Module):
   """Module that implements pipelining across stages.
@@ -340,12 +341,79 @@ class Pipeline(nn.Module):
         trans_in_fn=prepare_vars_for_main_vmap,
     )
 
-   stages_output = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+   # TODO: Replace this by shard_map =D
+   use_shard_map = True
+   if not use_shard_map:
+    stages_output = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+   else:
+    # get weights
+    stage_weights = prepare_vars_for_main_vmap(self.variables)
+    breakpoint()
+    stage_weights['params'] = stage_weights['params']['layers']
+
+    def get_stage_partition_spec(weight_partition_spec):
+      def get_stage_partition_spec_leaf(leaf_partition_spec):
+        new_partition_spec = [None] * len(leaf_partition_spec)
+        new_partition_spec[0] = "stage"
+        from jax.sharding import PartitionSpec
+        return PartitionSpec(*new_partition_spec)
+      partition_spec_tree = jax.tree.map(get_stage_partition_spec_leaf, weight_partition_spec)
+      return partition_spec_tree
+
+    stage_weight_partition_spec = get_stage_partition_spec(nn.get_partition_spec(stage_weights))
+
+    from jax.sharding import PartitionSpec
+    @functools.partial(
+    shard_map.shard_map,
+    mesh=self.mesh,
+    in_specs=(
+        stage_weight_partition_spec, # weights partition spec
+        PartitionSpec("stage", None, None, None), # inputs = [stage, batch, sequence, embed]
+        PartitionSpec("stage", None, None), # segments = [stage, batch, sequence]
+        PartitionSpec("stage", None, None), # positions = [stage, batch, sequence]
+    ),
+    out_specs=(
+      PartitionSpec("stage", None, None, None), # [stage, batch, sequence, embed]
+      None # dummy for scanning
+    ),
+    check_rep=False,
+    auto = {"fsdp", "tensor"} # everything except stage
+  )
+    def run_microbatch_iteration(individual_weights, individual_activations, individual_segments, individual_positions):
+      # Remove leading singleton stage dimension
+      def remove_leading_singleton_stage_dim(arr_pytree):
+            def remove_leading_singleton_stage_dim_leaf(arr):
+              assert arr.shape[0] == 1
+              # may need some flax remove metadata
+              return arr[0]
+            return jax.tree.map(remove_leading_singleton_stage_dim_leaf, arr_pytree)
+      
+      individual_activations = remove_leading_singleton_stage_dim(individual_activations)
+      individual_segments = remove_leading_singleton_stage_dim(individual_segments)
+      individual_positions = remove_leading_singleton_stage_dim(individual_positions)
+      individual_weights = remove_leading_singleton_stage_dim(individual_weights)
+      
+      # run computation
+      #breakpoint()
+      output_activation = decoder_layer_instance.apply(individual_weights, individual_activations, individual_segments, individual_positions, deterministic, model_mode)
+
+      # permute
+      # jax.lax.ppermute(output_activation, 'stage', [(i, (i+1) % stage) for i in range(stage)])
+
+      # add back a stage dimension
+      output_activation=jnp.expand_dims(output_activation, axis=0)
+
+
+      return output_activation
+    #stages_output = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+    stages_output = run_microbatch_iteration(stage_weights, stages_inputs, stages_segment_ids, stages_positions)
+
    if self.config.scan_layers:
      stages_output = stages_output[0]
 
    new_state = self.get_new_loop_state(stages_output, loop_state)
    return new_state
+  
 
   @nn.compact
   def __call__(self, inputs: jnp.ndarray, segment_ids: jnp.ndarray, positions:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
