@@ -801,14 +801,14 @@ def get_kv_cache_annotations(model, config, rng, mesh):
   def init_kv_cache(model, config):
     input_shape = (
         config.global_batch_size_to_load,
-        config.max_prefill_predict_length,
+        1,
     )
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
         jnp.ones(input_shape),
         jnp.ones(input_shape),
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
     )
     return model_vars["cache"]
 
@@ -818,6 +818,7 @@ def get_kv_cache_annotations(model, config, rng, mesh):
   state_logical_annotations = nn.get_partition_spec(abstract_state)
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  print("zhihaoshan mesh", state_mesh_annotations)
   return state_mesh_annotations
 
 

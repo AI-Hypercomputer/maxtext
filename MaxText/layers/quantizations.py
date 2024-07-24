@@ -89,7 +89,8 @@ def _rhs_axis_metadata_wrapper(x: jnp.ndarray, tile_map, no_sharding_axis: Seque
 
   if mesh_axes is not None and len(mesh_axes) > 0:
     for no_shard_idx in no_sharding_axis:
-      mesh_axes[no_shard_idx] = None
+      if no_shard_idx < len(mesh_axes):
+        mesh_axes[no_shard_idx] = None
 
   return nn.with_logical_partitioning((lambda: x), mesh_axes)()
 

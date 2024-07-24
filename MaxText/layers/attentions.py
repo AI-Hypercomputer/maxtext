@@ -451,12 +451,17 @@ class AttentionOp(nn.Module):
     raise f"Invalid config for kv_quant_axis:{self.kv_quant.axis_cfg}"
 
 
-  def _get_prefill_cache_vars(self, batch, heads, kv_head_size):
+  def _get_prefill_cache_vars(self, batch, heads, kv_head_size, model_mode):
 
     dtype = self._get_cached_kv_dtype(self.dtype)
     cache_logical_shape = (batch, self.max_prefill_predict_length, heads, kv_head_size)
 
-    cache_axis_names = self.transpose_tuple(self.cache_logical_axis_names, self.prefill_cache_axis_order)
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      cache_logical_axis_names = ("cache_batch_prefill", CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
+    else:
+      cache_logical_axis_names = self.cache_logical_axis_names
+
+    cache_axis_names = self.transpose_tuple(cache_logical_axis_names, self.prefill_cache_axis_order)
     cache_shape = self.transpose_tuple(cache_logical_shape, self.prefill_cache_axis_order)
 
     cached_key_var = self.variable(
@@ -508,13 +513,18 @@ class AttentionOp(nn.Module):
     value_vars = (cached_value_var, cached_value_scale_var)
     return key_vars, value_vars, cached_segment_id_var
 
-  def _get_ar_cache_vars(self, batch, heads, kv_head_size):
+  def _get_ar_cache_vars(self, batch, heads, kv_head_size, model_mode):
 
     dtype = self._get_cached_kv_dtype(self.dtype)
     cache_length = self.max_target_length - self.max_prefill_predict_length
     cache_logical_shape = (batch, cache_length, heads, kv_head_size)
 
-    cache_axis_names = self.transpose_tuple(self.cache_logical_axis_names, self.ar_cache_axis_order)
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      cache_logical_axis_names = ("cache_batch_prefill", CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
+    else:
+      cache_logical_axis_names = self.cache_logical_axis_names
+
+    cache_axis_names = self.transpose_tuple(cache_logical_axis_names, self.ar_cache_axis_order)
     cache_shape = self.transpose_tuple(cache_logical_shape, self.ar_cache_axis_order)
 
     # TODO(b/339703100): investigate the issue why with_logical_partitioning doesn't enforce sharding
@@ -600,8 +610,8 @@ class AttentionOp(nn.Module):
     batch, _, heads, kv_head_size = key.shape
     assert key.dtype == value.dtype, "Key and Value Dtypes should match."
 
-    cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(batch, heads, kv_head_size)
-    _ = self._get_ar_cache_vars(batch, heads, kv_head_size)  # initialize it now
+    cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_PREFILL)
+    _ = self._get_ar_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_PREFILL)  # initialize it now
 
     key_shaped_for_cache = jnp.transpose(key, self.prefill_cache_axis_order)
     value_shaped_for_cache = jnp.transpose(value, self.prefill_cache_axis_order)
@@ -722,11 +732,11 @@ class AttentionOp(nn.Module):
     batch, sequence, heads, kv_head_size = key.shape
     if sequence != 1:
       raise ValueError(f"Sequence length should be 1 during autoregression, got {sequence=}")
-    is_initialized = self.has_variable("cache", "cache_ar_index")
-    if not is_initialized:
-      raise ValueError("Error, we can't do autoregression if we haven't seeded the KV Cache.")
+#    is_initialized = self.has_variable("cache", "cache_ar_index")
+#    if not is_initialized:
+#      self.kv_cache_prefill(jnp.ones((1, 1024, heads, kv_head_size), dtype=jnp.bfloat16), jnp.ones((1, 1024, heads, kv_head_size), dtype=jnp.bfloat16), jnp.ones((1, 1024), dtype=jnp.bfloat16))
 
-    cached_ar_key_vars, cached_ar_value_vars, cached_ar_segment_id_var, cache_ar_index_var = self._get_ar_cache_vars(batch, heads, kv_head_size)
+    cached_ar_key_vars, cached_ar_value_vars, cached_ar_segment_id_var, cache_ar_index_var = self._get_ar_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_AUTOREGRESSIVE)
 
     self.update_ar_key_value(key, value, cached_ar_key_vars, cached_ar_value_vars, cache_ar_index_var.value)
     active_indicator = jnp.zeros((batch, 1), dtype=jnp.int32) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
@@ -736,7 +746,7 @@ class AttentionOp(nn.Module):
     cache_ar_index_var.value = jnp.mod(cache_ar_index_var.value + 1, self.max_target_length - self.max_prefill_predict_length)
 
     # The below retrieves the existing prefill cache variables, not creating new ones
-    cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(batch, heads, kv_head_size)
+    cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_AUTOREGRESSIVE)
 
     cached_prefill = (
         self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order),
@@ -906,7 +916,7 @@ class Attention(nn.Module):
         features=(self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=query_init,
-        kernel_axes=("embed", "heads", "kv"),
+        kernel_axes=("embed", "q_heads", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="query",
@@ -931,7 +941,7 @@ class Attention(nn.Module):
     if self.num_query_heads % self.num_kv_heads != 0:
       raise ValueError("Invalid num_kv_heads for GQA.")
 
-    kernel_axes = ("embed", "kv_heads", "kv_head_dim")
+    kernel_axes = ("embed", "kv_heads", "kv_head_dim_proj")
 
     kv_proj = DenseGeneral(
         features=(self.num_kv_heads, self.head_dim),
@@ -1027,12 +1037,17 @@ class Attention(nn.Module):
                              embedding_dims=self.head_dim, name="query_rotary")(inputs=query, position=inputs_positions)
     key = self.key_rotary(key, inputs_positions)
 
-    # annotate with sharding constraint.
-    query = nn.with_logical_constraint(query, self.query_axis_names)
+
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      query = nn.with_logical_constraint(query, ("activation_prefill_batch", LENGTH, KV_HEAD, KV_HEAD_DIM))
+      key = nn.with_logical_constraint(key, ("activation_prefill_batch", LENGTH, KV_HEAD, KV_HEAD_DIM))
+      value = nn.with_logical_constraint(value, ("activation_prefill_batch", LENGTH, KV_HEAD, KV_HEAD_DIM))
+    else:
+      query = nn.with_logical_constraint(query, self.query_axis_names)
+      key = nn.with_logical_constraint(key, self.key_axis_names)
+      value = nn.with_logical_constraint(value, self.value_axis_names)
     query = checkpoint_name(query, "query_proj")
-    key = nn.with_logical_constraint(key, self.key_axis_names)
     key = checkpoint_name(key, "key_proj")
-    value = nn.with_logical_constraint(value, self.value_axis_names)
     value = checkpoint_name(value, "value_proj")
 
     assert not self.config.quantize_kvcache or self.kv_quant
@@ -1058,6 +1073,11 @@ class Attention(nn.Module):
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)
 
     out = nn.with_logical_constraint(out, self.out_axis_names)
+
+   # if model_mode == common_types.MODEL_MODE_PREFILL:
+   #   key = nn.with_logical_constraint(key, ("None", "None1", "None2", "None3"))
+   #   value = nn.with_logical_constraint(value,  ("None", "None1", "None2", "None3"))
+
 
     # apply output projection,  output dim is set to the input dim.
     out = self.out_projection(inputs_q.shape[-1], out)
