@@ -45,7 +45,7 @@ python3 MaxText/$EXECUTABLE MaxText/configs/base.yml\
     steps=30 per_device_batch_size=1 enable_checkpointing=false\
     skip_first_n_steps_for_profiler=15 profiler=xplane\
     remat_policy=qkv_proj_offloaded global_parameter_scale=128\
-    ici_fsdp_parallelism=-1 ici_tensor_parallelism=-1\
+    ici_fsdp_parallelism=4 ici_tensor_parallelism=4\
     max_target_length=2048 base_output_directory=gs://akshu-v5e-becolo\
     use_iota_embed=true reuse_example_batch=1\
     dataset_type=synthetic attention='flash' gcs_metrics=true\
