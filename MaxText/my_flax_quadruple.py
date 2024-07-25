@@ -147,6 +147,7 @@ class MyMultipleBeast(nn.Module):
           return jnp.reshape(broadcasted_stage_outpus, [GLOBAL_BATCH, EMBED])
        
        if not self.is_initializing():
+          breakpoint()
           repeat_ids = jnp.array([2,0])
           stage_weights = self.gather_weights(repeat_ids)
           circular_metadata_params={
@@ -223,11 +224,19 @@ def create_inputs():
         return weights
     return create_activations(), create_weights()
 
-class myTransformer(nn.Module):
-   pipeline: nn.Module
 
+class myDecoder(nn.Module):
+   @nn.compact
    def __call__(self, inputs):
-    return self.pipeline(inputs)
+      sdl = SimpleDecoderLayer()
+      return MyMultipleBeast(layers=sdl)(inputs)
+
+class myTransformer(nn.Module):
+
+   def setup(self):
+      self.decoder = myDecoder()
+   def __call__(self, inputs):
+    return self.decoder(inputs)
 
 
 
@@ -248,7 +257,7 @@ with mesh:
     run_pipeline = False
     if run_transformer:
         # transformer
-        my_transformer = myTransformer(pipeline=my_pipeline)
+        my_transformer = myTransformer()
         init_transformer_params= my_transformer.init(jax.random.PRNGKey(0), stage_inputs)
         jit_transformer = jax.jit(my_transformer.apply)
         #timing_util.simple_timeit(jit_transformer, init_transformer_params, stage_inputs, task = 'transformer')
