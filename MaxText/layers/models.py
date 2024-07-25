@@ -173,6 +173,7 @@ class Decoder(nn.Module):
   shared_embedding: nn.Module
   mesh: Mesh
   quant: Optional[Quant] = None
+  pipeline_module: Optional[nn.Module] = None
 
   def get_decoder_layer(self):
     if self.config.decoder_block == "default":
@@ -337,7 +338,8 @@ class Decoder(nn.Module):
         elif not cfg.scan_layers:
           stage_module=SequentialBlockDecoderLayers(decoder_layer=RemattedBlockLayer, num_decoder_layers=cfg.num_layers_per_pipeline_stage, config=cfg, mesh=mesh,quant=self.quant)
 
-        y = pipeline.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)(
+        # y =pipeline.Pipeline
+        y = self.pipeline_module(
             y,
             decoder_segment_ids,
             decoder_positions,
@@ -418,7 +420,11 @@ class Transformer(nn.Module):
         config=cfg,
     )
 
-    self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
+    from layers import simple_layer
+    sdl = simple_layer.SimpleDecoderLayer
+    stage_module = sdl(config=self.config, mesh=self.mesh, quant=self.quant) # missing remat!
+    pipeline_module = pipeline.Pipeline(config=self.config, mesh=self.mesh, layers=stage_module)
+    self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant, pipeline_module=pipeline_module)
 
   def __call__(
       self,

@@ -74,6 +74,9 @@ class LlamaDecoderLayer(nn.Module):
       deterministic,
       model_mode,
   ):
+    if not self.is_initializing():
+      print("we are not initializing!", flush=True)
+      breakpoint()
     cfg = self.config
     mesh = self.mesh
 
