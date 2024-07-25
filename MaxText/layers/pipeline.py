@@ -354,16 +354,25 @@ class Pipeline(nn.Module):
     
     #stage_weights['params'] = stage_weights['params']['layers']
 
-    def get_stage_partition_spec(weight_partition_spec):
-      def get_stage_partition_spec_leaf(leaf_partition_spec):
-        new_partition_spec = [None] * len(leaf_partition_spec)
+    # def get_stage_partition_spec(weight_partition_spec):
+    #   def get_stage_partition_spec_leaf(leaf_partition_spec):
+    #     new_partition_spec = [None] * len(leaf_partition_spec)
+    #     new_partition_spec[0] = "stage"
+    #     from jax.sharding import PartitionSpec
+    #     return PartitionSpec(*new_partition_spec)
+    #   partition_spec_tree = jax.tree.map(get_stage_partition_spec_leaf, weight_partition_spec)
+    #   return partition_spec_tree
+
+    def get_stage_partition_spec(stage_weights):
+      def get_stage_partition_spec_leaf(leaf_weight):
+        new_partition_spec = [None] * leaf_weight.ndim # ????? maybe should replace by ndim
         new_partition_spec[0] = "stage"
         from jax.sharding import PartitionSpec
         return PartitionSpec(*new_partition_spec)
-      partition_spec_tree = jax.tree.map(get_stage_partition_spec_leaf, weight_partition_spec)
+      partition_spec_tree = jax.tree.map(get_stage_partition_spec_leaf, stage_weights)
       return partition_spec_tree
-
-    stage_weight_partition_spec = get_stage_partition_spec(nn.get_partition_spec(stage_weights))
+    
+    stage_weight_partition_spec = get_stage_partition_spec(stage_weights)
 
     from jax.sharding import PartitionSpec
     @functools.partial(
@@ -489,7 +498,6 @@ class Pipeline(nn.Module):
      return jnp.reshape(broadcasted_stage_outpus, [self.config.global_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim])
     else:
       print("We are not initializing!", flush=False)
-      #breakpoint()
     def run_iteration_scannable(model,loop_state, xs):
        # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
        # the run_one_iteration in this method - the first argument model (i.e. self) is a nn.module instance.

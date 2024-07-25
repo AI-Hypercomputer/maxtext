@@ -227,8 +227,6 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     for k, v in data.items():
       data[k] = v[: config.global_batch_size_to_train_on, :]
 
-  print("We are about to call model.apply", flush=True)
-  breakpoint()
   logits, intermediate_outputs = model.apply(
       params,
       data["inputs"],

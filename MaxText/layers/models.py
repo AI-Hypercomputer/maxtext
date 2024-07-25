@@ -173,6 +173,7 @@ class Decoder(nn.Module):
   shared_embedding: nn.Module
   mesh: Mesh
   quant: Optional[Quant] = None
+  pipeline_module: Optional[nn.Module] = None
 
   def get_decoder_layer(self):
     if self.config.decoder_block == "default":
@@ -332,33 +333,8 @@ class Decoder(nn.Module):
           stage_module = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_layers_per_pipeline_stage, "layers_per_stage", mesh)
         elif not cfg.scan_layers:
           stage_module=SequentialBlockDecoderLayers(decoder_layer=RemattedBlockLayer, num_decoder_layers=cfg.num_layers_per_pipeline_stage, config=cfg, mesh=mesh,quant=self.quant)
-        pipeline_module = pipeline.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)
-        if self.is_initializing():
-          y = pipeline_module(y,
-            decoder_segment_ids,
-            decoder_positions,
-            deterministic,
-            model_mode)
-          # pipeline_params = pipeline_module.init(
-          #   jax.random.PRNGKey(0),
-          #   y,
-          #   decoder_segment_ids,
-          #   decoder_positions,
-          #   deterministic,
-          #   model_mode,)
-          #breakpoint()
-        else:
-          print("We aren't initializing anymore", flush=True)
-          try:
-            inputs = self.variables['params']['decoder']['SimpleDecoderLayer_0']
-          except:
-            inputs = self.variables['params']['SimpleDecoderLayer_0']
-          input_vars = {'params': {'layers': inputs}}
-          breakpoint()
-          y = pipeline_module.apply(input_vars, y, decoder_segment_ids, decoder_positions, deterministic, model_mode)
-          y = pipeline_module.apply(
-            input_vars,
-            y,
+        #pipeline_module = pipeline.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)
+        y = self.pipeline_module(y,
             decoder_segment_ids,
             decoder_positions,
             deterministic,
@@ -437,7 +413,11 @@ class Transformer(nn.Module):
         config=cfg,
     )
 
-    self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
+    from layers import simple_layer
+    sdl = simple_layer.SimpleDecoderLayer
+    stage_module = sdl(config=self.config, mesh=self.mesh, quant=self.quant) # missing remat!
+    pipeline_module = pipeline.Pipeline(config=self.config, mesh=self.mesh, layers=stage_module)
+    self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant, pipeline_module=pipeline_module)
 
   def __call__(
       self,
