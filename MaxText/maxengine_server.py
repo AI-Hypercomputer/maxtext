@@ -36,7 +36,7 @@ from jetstream.core import async_server_lib, server_lib, config_lib
 # )
 
 
-async def main(config):
+def main(config):
   # No devices for local cpu test. A None for prefill and a None for generate.
   devices = server_lib.get_devices()
   server_config = maxengine_config.get_server_config("MaxtextInterleavedServer", config)
@@ -50,7 +50,8 @@ async def main(config):
   # We separate credential from run so that we can unit test it with
   # local credentials.
   # TODO: Add grpc credentials for OSS.
-  jetstream_server = await async_server_lib.run(
+  jetstream_server = async_server_lib.run(
+      threads=256,
       port=9000,
       config=server_config,
       devices=devices,
@@ -58,7 +59,8 @@ async def main(config):
       enable_jax_profiler=config.enable_jax_profiler if config.enable_jax_profiler else False,
       jax_profiler_port=config.jax_profiler_port if config.jax_profiler_port else 9999
   )
-  await jetstream_server.wait_for_termination()
+  jetstream_server.wait_for_termination()
+  # await jetstream_server.wait_for_termination()
 
 
 if __name__ == "__main__":
@@ -66,4 +68,5 @@ if __name__ == "__main__":
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   pyconfig.initialize(sys.argv)
   cfg = pyconfig.config
-  asyncio.run(main(cfg))
+  main(cfg)
+  # asyncio.run(main(cfg))
