@@ -32,6 +32,7 @@ import pandas as pd
 import mlperf_loadgen as lg
 from maxengine import create_engine_from_config_flags
 import offline_inference
+import register_jax_proxy_backend
 
 _MLPERF_ID="llama2-70b"
 
@@ -311,9 +312,9 @@ def main(argv):
   log.info(f"Counts by bucket {counts_by_bucket}")
 
   length_and_batch = (
-      (256, 216),
-      (512, 108),
-      (1024, 54),
+      (256, 48),
+      (512, 24),
+      (1024, 12),
   )
   engines = []
   params = None
