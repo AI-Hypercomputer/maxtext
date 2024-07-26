@@ -37,6 +37,9 @@ jobs:
     - name: build jax nightly image
       run : |
         bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_jax_nightly MODE=nightly DEVICE=tpu PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_jax_nightly
+    - name: build jax stable stack image
+      run : |
+        bash docker_maxtext_jax_stable_stack_image_upload.sh PROJECT_ID=tpu-prod-env-multipod BASEIMAGE=us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/tpu:jax0.4.30-rev1 CLOUD_IMAGE_NAME=maxtext-jax-stable-stack IMAGE_TAG=jax0.4.30-rev1 MAXTEXT_REQUIREMENTS_FILE=requirements_with_jax_stable_stack.txt
   gpu:
     strategy:
       fail-fast: false
