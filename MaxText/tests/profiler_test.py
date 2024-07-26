@@ -66,8 +66,8 @@ class TpuJAXTest(unittest.TestCase):
       if "name" in event and event["name"] == "thread_name":
         thread_names.append((event["args"]["name"]))
     expected_threads = [
-        "TensorFlow Name Scope",
-        "TensorFlow Ops",
+        "Framework Name Scope",
+        "Framework Ops",
         "XLA Modules",
         "XLA Ops",
         "XLA TraceMe",
