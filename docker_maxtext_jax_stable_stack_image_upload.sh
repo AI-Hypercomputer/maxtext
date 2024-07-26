@@ -59,6 +59,9 @@ if [[ ! -v MAXTEXT_REQUIREMENTS_FILE ]]; then
   exit 1
 fi
 
+# Default: Don't delete local image
+DELETE_LOCAL_IMAGE="${DELETE_LOCAL_IMAGE:-false}"
+
 gcloud auth configure-docker us-docker.pkg.dev --quiet
 
 COMMIT_HASH=$(git rev-parse --short HEAD)
@@ -80,3 +83,8 @@ docker build --no-cache \
 docker push us-docker.pkg.dev/${PROJECT_ID}/${CLOUD_IMAGE_NAME}/tpu:${FULL_IMAGE_TAG}
 
 echo "All done, check out your artifacts at: us-docker.pkg.dev/${PROJECT_ID}/${CLOUD_IMAGE_NAME}/tpu:${FULL_IMAGE_TAG}"
+
+if [ "$DELETE_LOCAL_IMAGE" == "true" ]; then
+  docker rmi us-docker.pkg.dev/${PROJECT_ID}/${CLOUD_IMAGE_NAME}/tpu:${FULL_IMAGE_TAG}
+  echo "Local image deleted."
+fi
