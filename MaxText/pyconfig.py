@@ -151,6 +151,9 @@ def validate_model_name(s: str) -> bool:
       "llama2-70b",
       "llama3-8b",
       "llama3-70b",
+      "llama3.1-8b",
+      "llama3.1-70b",
+      "llama3.1-405b",
       "mistral-7b",
       "mixtral-8x7b",
       "mixtral-8x22b",
@@ -165,7 +168,7 @@ def validate_model_name(s: str) -> bool:
       "gpt3-52k",
   )
   if s not in valid_model_names:
-    raise ValueError("Invalid model name was passed. Valid options ", valid_model_names)
+    raise ValueError(f"Invalid model name was passed. Got {s}, Valid options {valid_model_names}")
 
 
 def validate_no_keys_overwritten_twice(keys1: list[str], keys2: list[str]):

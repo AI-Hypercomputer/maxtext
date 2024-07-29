@@ -47,7 +47,9 @@ import jax.numpy as jnp
 import numpy as np
 import pyconfig
 import jsonlines
-import train
+import max_utils
+from layers import models
+from layers import quantizations
 
 
 def get_data(golden_data, golden_data_index, config):
@@ -76,18 +78,13 @@ def main(config, test_args):
   """Test the Whole Model of model_name"""
 
   # initialize the model with weights from reference ckpt
-  (
-      init_rng,
-      _,
-      _,
-      _,
-      model,
-      _,
-      _,
-      _,
-      _,
-      state,
-  ) = train.setup_train_loop(config)
+  init_rng = jax.random.PRNGKey(config.init_weights_seed)
+  init_rng, rng1 = jax.random.split(init_rng)
+  devices_array = max_utils.create_device_mesh(config)
+  mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
+  quant = quantizations.configure_quantization(config)
+  model = models.Transformer(config, mesh=mesh, quant=quant)
+  state, _ = max_utils.setup_decode_state(model, config, rng1, mesh, None)
 
   input_golden_data_path = "MaxText/test_assets/golden_data_" + config.model_name + ".jsonl"
   with jsonlines.open(input_golden_data_path, "r") as f:
