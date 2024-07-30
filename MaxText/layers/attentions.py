@@ -902,7 +902,7 @@ class Attention(nn.Module):
   quant: Optional[Quant] = None
   kv_quant: Optional[KVQuant] = None
 
-  attention_type: str = AttentionType.GLOBAL  # Default to global attention
+  attention_type: AttentionType = AttentionType.GLOBAL  # Default to global attention
   attn_logits_soft_cap: float | None = None
   sliding_window_size: int | None = None
 
