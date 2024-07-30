@@ -59,9 +59,15 @@ def create_orbax_checkpoint_manager(
   else:
     item_names = ("items",)
 
+  # local storage checkpoint needs parent directory created
+  p.mkdir(exist_ok=True, parents=True)
+  # we need to use ocdbt and zarr3 to control max file size in the checkpoint
+  # omitting `iter` uses default handler for `iter`
+  item_handlers = dict(items=PyTreeCheckpointHandler(use_ocdbt=True, use_zarr3=True))
   mngr = CheckpointManager(
       p,
       item_names=item_names,
+      item_handlers=item_handlers,
       options=CheckpointManagerOptions(
           create=True,
           save_interval_steps=save_interval_steps,
