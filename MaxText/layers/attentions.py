@@ -15,6 +15,7 @@
 """Attentions Layers."""
 
 import enum
+import enum
 import functools
 import math
 from typing import Any, Optional
@@ -33,6 +34,11 @@ from layers import embeddings
 from layers import initializers
 from layers import linears
 from layers import quantizations
+
+
+class AttentionType(enum.Enum):
+  GLOBAL = "global"
+  LOCAL_SLIDING = "local_sliding"
 
 
 class AttentionType(enum.Enum):
@@ -136,6 +142,9 @@ class AttentionOp(nn.Module):
   attention_type: AttentionType = AttentionType.GLOBAL  # Default to global attention
   attn_logits_soft_cap: float | None = None
   sliding_window_size: int | None = None
+  attention_type: AttentionType = AttentionType.GLOBAL  # Default to global attention
+  attn_logits_soft_cap: float | None = None
+  sliding_window_size: int | None = None
 
   def check_attention_inputs(self, query: Array, key: Array| KVTensor, value: Array| KVTensor) -> None:
     """Check attention inputs."""
@@ -169,12 +178,27 @@ class AttentionOp(nn.Module):
 
     output_mask = None
 
+    output_mask = None
+
     if (mask is not None) and (causal_mask is not None):
       output_mask = jnp.logical_and(mask, causal_mask)
     elif mask is not None:
       output_mask = mask
     elif causal_mask is not None:
       output_mask = causal_mask
+
+    if self.attention_type == AttentionType.LOCAL_SLIDING and output_mask is not None:
+      if self.sliding_window_size is None:
+        raise ValueError(
+            'Sliding_window_size must be set if Local Sliding attention type'
+        )
+
+      all_ones = jnp.ones_like(output_mask)
+      sliding_mask = jnp.triu(
+          all_ones, -1 * self.sliding_window_size + 1
+      ) * jnp.tril(all_ones, self.sliding_window_size - 1)
+      output_mask = sliding_mask * output_mask
+    
 
     if self.attention_type == AttentionType.LOCAL_SLIDING and output_mask is not None:
       if self.sliding_window_size is None:
@@ -211,6 +235,7 @@ class AttentionOp(nn.Module):
                             Use `dot_product` instead."""
         )
       return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
+      return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
     elif self.attention_kernel == "cudnn_flash_te":
       if isinstance(key, KVTensor):
         key = key.dequant()
@@ -225,6 +250,7 @@ class AttentionOp(nn.Module):
     else:
       raise ValueError(f"Unexpected attention kernel {self.attention_kernel=}.")
 
+  def tpu_flash_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None, attn_logits_soft_cap: float | None = None) -> Array:
   def tpu_flash_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None, attn_logits_soft_cap: float | None = None) -> Array:
     """TPU Flash Attention."""
     # Transpose to ('batch', 'heads', 'length', 'kv')
@@ -268,6 +294,7 @@ class AttentionOp(nn.Module):
       masks = [splash_attention_mask.CausalMask(shape=(query.shape[2], query.shape[2])) for i in range(query.shape[1])]
       multi_head_mask = splash_attention_mask.MultiHeadMask(masks=masks)
       splash_kernel = splash_attention_kernel.make_splash_mha(
+          mask=multi_head_mask, head_shards=1, q_seq_shards=1, block_sizes=block_sizes, attn_logits_soft_cap=attn_logits_soft_cap,
           mask=multi_head_mask, head_shards=1, q_seq_shards=1, block_sizes=block_sizes, attn_logits_soft_cap=attn_logits_soft_cap,
       )
 
@@ -371,6 +398,10 @@ class AttentionOp(nn.Module):
 
     q_seq_len = query.shape[1]
     attn_weights = self.qk_product(query, key, q_seq_len, model_mode)
+
+    if self.attn_logits_soft_cap:
+      attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
+      attn_weights = attn_weights * self.attn_logits_soft_cap
 
     if self.attn_logits_soft_cap:
       attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
@@ -902,7 +933,7 @@ class Attention(nn.Module):
   quant: Optional[Quant] = None
   kv_quant: Optional[KVQuant] = None
 
-  attention_type: AttentionType = AttentionType.GLOBAL  # Default to global attention
+  attention_type: str = AttentionType.GLOBAL  # Default to global attention
   attn_logits_soft_cap: float | None = None
   sliding_window_size: int | None = None
 
@@ -1082,6 +1113,9 @@ class Attention(nn.Module):
         ar_cache_axis_order=self.ar_cache_axis_order,
         compute_axis_order=self.compute_axis_order,
         reshape_q=self.reshape_q,
+        attention_type=self.attention_type,
+        attn_logits_soft_cap=self.attn_logits_soft_cap,
+        sliding_window_size=self.sliding_window_size,
         attention_type=self.attention_type,
         attn_logits_soft_cap=self.attn_logits_soft_cap,
         sliding_window_size=self.sliding_window_size,
