@@ -24,6 +24,7 @@ from typing import Any, Union
 
 import jax
 from jax.experimental.compilation_cache import compilation_cache
+from layers.attentions import AttentionType
 import accelerator_to_spec_map
 import max_logging
 import max_utils
@@ -64,10 +65,16 @@ def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
   if quantize_kvcache and s == "":
     raise ValueError("kv_quant_axis can not be '' when quantize_kvcache is True")
 
+def validate_attention_kernel(s: str) -> None:
+  valid_attention_kernels = ("autoselected", "dot_product", "flash", "cudnn_flash_te")
+  if s not in valid_attention_kernels:  # currently supported attention
+    raise ValueError("Invalid attention kernel was passed. Valid options ", valid_attention_kernels)
+
 def validate_attention_type(s: str) -> None:
-  valid_attention_types = ("autoselected", "dot_product", "flash", "cudnn_flash_te")
+  valid_attention_types = (attention_type.value for attention_type in AttentionType)
   if s not in valid_attention_types:  # currently supported attention
     raise ValueError("Invalid attention type was passed. Valid options ", valid_attention_types)
+
 
 def validate_profiler_type(s: str) -> None:
   valid_profiler_types = ("", "nsys", "xplane")
@@ -76,7 +83,8 @@ def validate_profiler_type(s: str) -> None:
 
 
 def validate_keys(keys):
-  validate_attention_type(keys["attention"])
+  validate_attention_kernel(keys["attention"])
+  validate_attention_type(keys["attention_type"])
   validate_profiler_type(keys["profiler"])
   validate_compute_axis_order(keys["compute_axis_order"])
   validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
@@ -141,6 +149,7 @@ def validate_model_name(s: str) -> bool:
       "mixtral-8x7b",
       "gemma-7b",
       "gemma-2b",
+      "gemma2-9b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
@@ -310,6 +319,9 @@ class _HyperParameters:
       raw_keys["learning_rate_schedule_steps"] = raw_keys["steps"]
     if raw_keys["steps"] == -1:
       raw_keys["steps"] = raw_keys["learning_rate_schedule_steps"]
+
+    if raw_keys["attn_logits_soft_cap"] == 0.0:
+      raw_keys["attn_logits_soft_cap"] = None
 
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys["global_parameter_scale"])
     raw_keys["emb_dim"] = 2**emb_scale * raw_keys["base_emb_dim"]

@@ -55,7 +55,7 @@ def main(raw_args=None) -> None:
   parser.add_argument("--maxtext_model_path", type=str, required=True)
   parser.add_argument("--model_size", type=str, required=True)
   args = parser.parse_args(raw_args)
-  if args.model_size not in ("2b", "7b"):
+  if args.model_size not in ("2b", "7b", "9b"):
     raise NotImplementedError
 
   print("Loading checkpoint")
@@ -98,7 +98,7 @@ def main(raw_args=None) -> None:
   for layer_idx in range(num_layers):
     in_layer_name = "layer_" + str(layer_idx)
     # attention block
-    if args.model_size == "2b":  # MQA
+    if args.model_size in ("2b","9b"):  # MQA
       self_attention["query"]["kernel"].append(
           params["transformer"][in_layer_name]["attn"]["q_einsum"]["w"].transpose((1, 0, 2)) * head_dim**-0.5
       )
