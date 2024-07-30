@@ -135,6 +135,9 @@ remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
+attention_type: 'global'
+sliding_window_size: 0
+attn_logits_soft_cap: 0.0
 
 # Combine matmuls for QKV and MLP
 fused_qkv: False
