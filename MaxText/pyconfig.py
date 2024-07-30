@@ -320,7 +320,7 @@ class _HyperParameters:
       raw_keys["learning_rate_schedule_steps"] = raw_keys["steps"]
     if raw_keys["steps"] == -1:
       raw_keys["steps"] = raw_keys["learning_rate_schedule_steps"]
-    
+
     if raw_keys["attn_logits_soft_cap"] == 0.0:
       raw_keys["attn_logits_soft_cap"] = None
 
