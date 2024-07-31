@@ -338,16 +338,15 @@ class MoeBlock(nn.Module):
     weights = jax.nn.softmax(weights.astype(self.weight_dtype), axis=-1).astype(self.dtype)
     flatten_selected_experts = jnp.ravel(selected_experts)
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
-    sorted_indices = sorted_selected_experts // self.num_experts_per_tok
     # sort inputs for number of selected experts
-    sorted_inputs = jnp.take(inputs_2d, indices=sorted_indices, axis=0).astype(self.dtype)
+    sorted_inputs = jnp.take(inputs_2d, indices=sorted_selected_experts, axis=0, unique_indices=True).astype(self.dtype)
     group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
     return sorted_inputs, sorted_selected_experts, weights, group_size
 
   def unpermute(self, intermediate, sorted_selected_experts, weights):
     """Unpermute tokens to original order and combine weights."""
 
-    unsort_intermediate = jnp.take(intermediate, indices=jnp.argsort(sorted_selected_experts), axis=0)
+    unsort_intermediate = jnp.take(intermediate, indices=jnp.argsort(sorted_selected_experts), axis=0, unique_indices=True)
     reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
     tensor_parallelism = self.config.ici_tensor_parallelism * self.config.dcn_tensor_parallelism
     reshaped_intermediate = jnp.reshape(unsort_intermediate, (-1, self.num_experts_per_tok, self.config.emb_dim // tensor_parallelism))
