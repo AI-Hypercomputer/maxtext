@@ -192,7 +192,7 @@ class MaxEngine(engine_api.Engine):
 
     all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
     result = engine_api.ResultTokens(
-        int_data=jnp.concatenate(
+        data=jnp.concatenate(
             (first_generated_token, all_valid, generated_tokens), axis=1
         ),
         # Tokens are shape [batch, speculations], so when we concatenate
@@ -246,7 +246,7 @@ class MaxEngine(engine_api.Engine):
 
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
     result = engine_api.ResultTokens(
-        int_data=jnp.concatenate(
+        data=jnp.concatenate(
             (new_token, all_valid, decode_state["generated_tokens"]), axis=1
         ),
         # Tokens are shape [batch, speculations], so when we concatenate
