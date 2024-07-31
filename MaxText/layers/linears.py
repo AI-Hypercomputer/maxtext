@@ -340,7 +340,8 @@ class MoeBlock(nn.Module):
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     sorted_indices = sorted_selected_experts // self.num_experts_per_tok
     # sort inputs for number of selected experts
-    sorted_inputs = jnp.take(inputs_2d, indices=sorted_indices, axis=0).astype(self.dtype)
+    # sorted_inputs = jnp.take(inputs_2d, indices=sorted_indices, axis=0).astype(self.dtype)
+    sorted_inputs = jnp.take(inputs_2d, indices=sorted_selected_experts, axis=0, unique_indices=True).astype(self.dtype)
     group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
     return sorted_inputs, sorted_selected_experts, weights, group_size
 
@@ -356,7 +357,7 @@ class MoeBlock(nn.Module):
     return output.reshape(-1, self.config.max_target_length, self.config.emb_dim // tensor_parallelism).astype(self.dtype)
 
   def megablox(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
-    tile_size = (512, 1024, 1024)
+    tile_size = (256, 2048, 1536)
     def gmm(inputs, kernel, group_sizes):
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
