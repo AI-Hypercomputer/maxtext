@@ -115,7 +115,7 @@ elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
             pip3 install jax[tpu]==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
         else
             echo "Installing stable jax, jaxlib, libtpu for tpu"
-            pip3 install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+            pip3 install 'jax[tpu]>0.4' -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
         fi
 
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
