@@ -1,7 +1,7 @@
 # AOT Command:
 python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_small per_device_batch_size=9 compile_topology=v5p-256 compile_topology_num_slices=1
 
-python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_small per_device_batch_size=10 compile_topology=v5p-1024 compile_topology_num_slices=1
+python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_small per_device_batch_size=8 compile_topology=v5p-1024 compile_topology_num_slices=1
 
 python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_small per_device_batch_size=9 compile_topology=v5p-2048 compile_topology_num_slices=1
 
@@ -9,10 +9,14 @@ python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_smal
 
 python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_large per_device_batch_size=7 compile_topology=v5p-12288 compile_topology_num_slices=1
 
-python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_large per_device_batch_size=2 compile_topology=v5p-2048 compile_topology_num_slices=1
+python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_large per_device_batch_size=2 compile_topology=v5p-1024 compile_topology_num_slices=1
 
 python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_large per_device_batch_size=2 remat_policy=qkv_proj_offloaded compile_topology=v5p-1024 compile_topology_num_slices=1 
 
+
+python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_small per_device_batch_size=8 \
+remat_policy=save_out_proj \
+compile_topology=v5p-1024 compile_topology_num_slices=1
 
 python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_small \
 per_device_batch_size=4 \
@@ -74,15 +78,18 @@ python3 multihost_runner.py --TPU_PREFIX=$TPU_NAME \
 
 yes | gcloud alpha compute tpus queued-resources delete $QR_NAME --async --force
 
-BUCKET_NAME=gs://tony-moe/7_25/
+export XLA_FLAGS="--xla_dump_to=/tmp/xla_dump/"
+export LIBTPU_INIT_ARGS="--xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_megacore_fusion_allow_ags=false --xla_enable_async_collective_permute=true --xla_tpu_enable_ag_backward_pipelining=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true --xla_tpu_scoped_vmem_limit_kib=81920"
+
+BUCKET_NAME=gs://tony-moe/7_29/
 MAXTEXT_OUTPUT_PATH=$BUCKET_NAME
 TPU_TYPE=v5p-1024
 MODEL=subsup_small
 BATCH_SIZE=8
 VERSION=v2-alpha-tpuv5
 xla_tpu_scoped_vmem_limit_kib=81920
-ici_tensor_parallelism=1
-RUN_NAME=${TPU_TYPE}_${MODEL}_test_per_device_batch_size$BATCH_SIZE-ici_tensor_parallelism$ici_tensor_parallelism-xla_tpu_scoped_vmem_limit_kib$xla_tpu_scoped_vmem_limit_kib
+ici_tensor_parallelism=8
+RUN_NAME=${TPU_TYPE}_${MODEL}_test2_per_device_batch_size$BATCH_SIZE-ici_tensor_parallelism$ici_tensor_parallelism-xla_tpu_scoped_vmem_limit_kib$xla_tpu_scoped_vmem_limit_kib
 NODE_COUNT=1
 
 python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME="$RUN_NAME" --BUCKET_NAME="$BUCKET_NAME" \
@@ -99,9 +106,10 @@ python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME="$RUN_NAME" --BUCKE
     profiler=xplane \
     ici_tensor_parallelism=${ici_tensor_parallelism}"
 
-BUCKET_NAME=gs://tony-moe/7_25/
+
+BUCKET_NAME=gs://tony-moe/7_29/
 MAXTEXT_OUTPUT_PATH=$BUCKET_NAME
-TPU_TYPE=v5p-2048
+TPU_TYPE=v5p-1024
 MODEL=subsup_large
 BATCH_SIZE=2
 VERSION=v2-alpha-tpuv5
