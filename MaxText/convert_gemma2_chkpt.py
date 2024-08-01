@@ -71,6 +71,7 @@ def main(raw_args=None) -> None:
   print(f"num_heads: {num_heads}")
   print(f"head_dim: {head_dim}")
   
+  query_pre_attn_scalar = None
   if args.model_size in ("9b"):
     query_pre_attn_scalar = head_dim**-0.5
   elif args.model_size in ("27b"):
