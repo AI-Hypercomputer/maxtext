@@ -70,7 +70,7 @@ def main(raw_args=None) -> None:
   print(f"embed_dim: {embed_dim}")
   print(f"num_heads: {num_heads}")
   print(f"head_dim: {head_dim}")
-  
+
   query_pre_attn_scalar = None
   if args.model_size in ("9b"):
     query_pre_attn_scalar = head_dim**-0.5
@@ -121,9 +121,7 @@ def main(raw_args=None) -> None:
   for layer_idx in range(0, num_layers, 2):
     in_layer_name_local = "layer_" + str(layer_idx)
     in_layer_name_global = "layer_" + str(layer_idx+1)
-    # attention block
-    # breakpoint()
-    
+
     ######################## layer local attention ########################
     self_attention_local["query"]["kernel"].append(
         params["transformer"][in_layer_name_local]["attn"]["q_einsum"]["w"].transpose((1, 0, 2)) * query_pre_attn_scalar
@@ -135,26 +133,24 @@ def main(raw_args=None) -> None:
         params["transformer"][in_layer_name_local]["attn"]["kv_einsum"]["w"][1].transpose((1, 0, 2))
     )
     self_attention_local["out"]["kernel"].append(params["transformer"][in_layer_name_local]["attn"]["attn_vec_einsum"]["w"])
-    
+
     # mlp
-    # original shape in ckpt (14336, 3584) [MLP, EMB]  -> gemma1 [EMB, MLP]
     layer_weight["mlp_local"]["wi_0"]["kernel"].append(np.transpose(params["transformer"][in_layer_name_local]["mlp"]["gating_einsum"]["w"][0]))
-    # original shape in ckpt (14336, 3584)
     layer_weight["mlp_local"]["wi_1"]["kernel"].append(np.transpose(params["transformer"][in_layer_name_local]["mlp"]["gating_einsum"]["w"][1]))
     layer_weight["mlp_local"]["wo"]["kernel"].append(params["transformer"][in_layer_name_local]["mlp"]["linear"]["w"])
-    
+
     layer_weight["pre_self_attention_norm_local"]["scale"].append(
         params["transformer"][in_layer_name_local]["pre_attention_norm"]["scale"] + 1
     )
     layer_weight["pre_ffw_norm_local"]["scale"].append(params["transformer"][in_layer_name_local]["pre_ffw_norm"]["scale"] + 1)
-    
+
     layer_weight["post_self_attention_norm_local"]["scale"].append(
       params["transformer"][in_layer_name_local]["post_attention_norm"]["scale"] + 1
     )
     layer_weight["post_ffw_norm_local"]["scale"].append(params["transformer"][in_layer_name_local]["post_ffw_norm"]["scale"] + 1)
-    
+
     ######################## layer global attention ########################
-    
+
     self_attention_global["query"]["kernel"].append(
         params["transformer"][in_layer_name_global]["attn"]["q_einsum"]["w"].transpose((1, 0, 2)) * query_pre_attn_scalar
     )
@@ -165,29 +161,27 @@ def main(raw_args=None) -> None:
         params["transformer"][in_layer_name_global]["attn"]["kv_einsum"]["w"][1].transpose((1, 0, 2))
     )
     self_attention_global["out"]["kernel"].append(params["transformer"][in_layer_name_global]["attn"]["attn_vec_einsum"]["w"])
-    
+
     # mlp
     layer_weight["mlp_global"]["wi_0"]["kernel"].append(np.transpose(params["transformer"][in_layer_name_global]["mlp"]["gating_einsum"]["w"][0]))
     layer_weight["mlp_global"]["wi_1"]["kernel"].append(np.transpose(params["transformer"][in_layer_name_global]["mlp"]["gating_einsum"]["w"][1]))
     layer_weight["mlp_global"]["wo"]["kernel"].append(params["transformer"][in_layer_name_global]["mlp"]["linear"]["w"])
-    
+
     layer_weight["pre_self_attention_norm_global"]["scale"].append(
         params["transformer"][in_layer_name_global]["pre_attention_norm"]["scale"] + 1
     )
     layer_weight["pre_ffw_norm_global"]["scale"].append(params["transformer"][in_layer_name_global]["pre_ffw_norm"]["scale"] + 1)
-    
+
     layer_weight["post_self_attention_norm_global"]["scale"].append(
       params["transformer"][in_layer_name_global]["post_attention_norm"]["scale"] + 1
     )
     layer_weight["post_ffw_norm_global"]["scale"].append(params["transformer"][in_layer_name_global]["post_ffw_norm"]["scale"] + 1)
-      
-    
 
   self_attention_local["query"]["kernel"] = np.array(self_attention_local["query"]["kernel"]).transpose((1, 0, 2, 3))
   self_attention_local["key"]["kernel"] = np.array(self_attention_local["key"]["kernel"]).transpose((1, 0, 2, 3))
   self_attention_local["value"]["kernel"] = np.array(self_attention_local["value"]["kernel"]).transpose((1, 0, 2, 3))
   self_attention_local["out"]["kernel"] = np.array(self_attention_local["out"]["kernel"]).transpose((1, 0, 2, 3))
-  
+
   self_attention_global["query"]["kernel"] = np.array(self_attention_global["query"]["kernel"]).transpose((1, 0, 2, 3))
   self_attention_global["key"]["kernel"] = np.array(self_attention_global["key"]["kernel"]).transpose((1, 0, 2, 3))
   self_attention_global["value"]["kernel"] = np.array(self_attention_global["value"]["kernel"]).transpose((1, 0, 2, 3))
@@ -196,11 +190,11 @@ def main(raw_args=None) -> None:
   layer_weight["mlp_local"]["wi_0"]["kernel"] = np.array(layer_weight["mlp_local"]["wi_0"]["kernel"]).transpose((1, 0, 2))
   layer_weight["mlp_local"]["wi_1"]["kernel"] = np.array(layer_weight["mlp_local"]["wi_1"]["kernel"]).transpose((1, 0, 2))
   layer_weight["mlp_local"]["wo"]["kernel"] = np.array(layer_weight["mlp_local"]["wo"]["kernel"]).transpose((1, 0, 2))
-  
+
   layer_weight["mlp_global"]["wi_0"]["kernel"] = np.array(layer_weight["mlp_global"]["wi_0"]["kernel"]).transpose((1, 0, 2))
   layer_weight["mlp_global"]["wi_1"]["kernel"] = np.array(layer_weight["mlp_global"]["wi_1"]["kernel"]).transpose((1, 0, 2))
   layer_weight["mlp_global"]["wo"]["kernel"] = np.array(layer_weight["mlp_global"]["wo"]["kernel"]).transpose((1, 0, 2))
-  
+
   layer_weight["pre_self_attention_norm_local"]["scale"] = np.array(layer_weight["pre_self_attention_norm_local"]["scale"]).transpose(
       (1, 0)
   )
@@ -209,7 +203,7 @@ def main(raw_args=None) -> None:
       (1, 0)
   )
   layer_weight["post_ffw_norm_local"]["scale"] = np.array(layer_weight["post_ffw_norm_local"]["scale"]).transpose((1, 0))
-  
+
   layer_weight["pre_self_attention_norm_global"]["scale"] = np.array(layer_weight["pre_self_attention_norm_global"]["scale"]).transpose(
       (1, 0)
   )
@@ -221,7 +215,7 @@ def main(raw_args=None) -> None:
 
   layer_weight["self_attention_local"] = copy.deepcopy(self_attention_local)
   layer_weight["self_attention_global"] = copy.deepcopy(self_attention_global)
-  
+
   jax_weights["decoder"]["layers"] = copy.deepcopy(layer_weight)
   jax_weights = jax.tree_util.tree_map(jnp.array, jax_weights)
 
@@ -232,8 +226,6 @@ def main(raw_args=None) -> None:
       return x
 
   jax_weights = jax.tree_util.tree_map(astype_fn, jax_weights)
-  
-  # breakpoint()
 
   enable_checkpointing = True
   async_checkpointing = False
