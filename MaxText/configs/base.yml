@@ -140,6 +140,10 @@ attention: 'autoselected' # Supported attention: autoselected, dot_product, flas
 attention_type: 'global'
 sliding_window_size: 0
 attn_logits_soft_cap: 0.0
+final_logits_soft_cap: 0.0
+use_post_attn_norm: False
+use_post_ffw_norm: False
+
 
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention_type: 'global'  # Supported attention_type: global, local_sliding
