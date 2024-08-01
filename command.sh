@@ -23,6 +23,13 @@ python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_larg
 
 python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_small \
 per_device_batch_size=2 \
+
+python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_large per_device_batch_size=6 compile_topology=v5p-12288 compile_topology_num_slices=1 \
+remat_policy=save_out_proj
+
+
+python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_small per_device_batch_size=8 \
+remat_policy=save_out_proj \
 compile_topology=v5p-1024 compile_topology_num_slices=1
 
 
@@ -42,10 +49,10 @@ compile_topology=v5p-1024 compile_topology_num_slices=1
 
 PROJECT_ID=cloud-tpu-best-effort-colo 
 ZONE=europe-west1-c
-TPU_NAME=v5p-256-moe-test4
+TPU_NAME=v5p-1024-moe-test
 QR_NAME=$TPU_NAME
 NODE_PREFIX=${QR_NAME}
-TPU_TYPE=v5p-256
+TPU_TYPE=v5p-1024
 VERSION=v2-alpha-tpuv5
 
 gcloud config set project ${PROJECT_ID}
@@ -58,8 +65,7 @@ gcloud alpha compute tpus queued-resources create ${QR_NAME} \
 --zone=${ZONE} \
 --runtime-version=${VERSION} \
 --node-id=${QR_NAME} \
---description noteardown \
---reserved 
+--description noteardown 
 
 gcloud alpha compute tpus queued-resources list --filter=$QR_NAME
 
@@ -123,19 +129,20 @@ python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME="$RUN_NAME" --BUCKE
     ici_tensor_parallelism=${ici_tensor_parallelism}"
 
 
-BUCKET_NAME=gs://tony-moe/7_29/
+BUCKET_NAME=gs://tony-moe/7_31/
 MAXTEXT_OUTPUT_PATH=$BUCKET_NAME
 TPU_TYPE=v5p-1024
 MODEL=subsup_large
 BATCH_SIZE=2
 VERSION=v2-alpha-tpuv5
+remat_policy=full
 xla_tpu_scoped_vmem_limit_kib=81920
-ici_tensor_parallelism=8
-RUN_NAME=${TPU_TYPE}_${MODEL}_test2_per_device_batch_size$BATCH_SIZE-ici_tensor_parallelism$ici_tensor_parallelism-xla_tpu_scoped_vmem_limit_kib$xla_tpu_scoped_vmem_limit_kib
+ici_tensor_parallelism=1
+RUN_NAME=${TPU_TYPE}_${MODEL}_test1_per_device_batch_size$BATCH_SIZE-ici_tensor_parallelism$ici_tensor_parallelism-xla_tpu_scoped_vmem_limit_kib$xla_tpu_scoped_vmem_limit_kib-$remat_policy
 NODE_COUNT=1
 
 python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME="$RUN_NAME" --BUCKET_NAME="$BUCKET_NAME" \
---TPU_TYPE=$TPU_TYPE --VERSION=$VERSION --CQR_EXTRA_ARGS="--reserved" \
+--TPU_TYPE=$TPU_TYPE --VERSION=$VERSION \
 --COMMAND="\
     bash setup.sh MODE=stable;\
     export LIBTPU_INIT_ARGS=\"--xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_megacore_fusion_allow_ags=false --xla_enable_async_collective_permute=true --xla_tpu_enable_ag_backward_pipelining=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true --xla_tpu_scoped_vmem_limit_kib=${xla_tpu_scoped_vmem_limit_kib}\"
@@ -143,6 +150,7 @@ python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME="$RUN_NAME" --BUCKE
     base_output_directory=${MAXTEXT_OUTPUT_PATH} run_name=${RUN_NAME} \
     enable_checkpointing=false async_checkpointing=false \
     per_device_batch_size=${BATCH_SIZE} \
+    remat_policy=${remat_policy} \
     skip_first_n_steps_for_profiler=5 steps=10 \
     tokenizer_path=assets/tokenizer.mistral dataset_type=synthetic \
     profiler=xplane \
