@@ -296,8 +296,8 @@ class MoeBlock(nn.Module):
     kernel_init = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
 
     # The first axes is expert
-    kernel_axes = (None, 'embed', 'mlp')
-    wo_kernel_axes = (None, 'mlp', 'embed')
+    kernel_axes = (None, None, 'fsdp')
+    wo_kernel_axes = (None, 'fsdp', None)
 
     w0_kernel = self.param(
         'wi_0',
