@@ -138,6 +138,10 @@ attention: 'autoselected' # Supported attention: autoselected, dot_product, flas
 attention_type: 'global'
 sliding_window_size: 0
 attn_logits_soft_cap: 0.0
+final_logits_soft_cap: 0.0
+use_post_attn_norm: False
+use_post_ffw_norm: False
+
 
 # Combine matmuls for QKV and MLP
 fused_qkv: False

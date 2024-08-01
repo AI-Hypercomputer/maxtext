@@ -17,9 +17,10 @@ export MODEL_VARIATION='9b'
 
 
 # After downloading checkpoints, copy them to GCS bucket at $CHKPT_BUCKET \
-# Please use separate GCS paths for uploading model weights from kaggle ($CHKPT_BUCKET) and MaxText compatible weights ($BASE_OUTPUT_PATH).
+# Please use separate GlsS paths for uploading model weights from kaggle ($CHKPT_BUCKET) and MaxText compatible weights ($BASE_OUTPUT_PATH).
 # Non-Googlers please remember to point CHKPT_BUCKET to GCS buckets that you own
-export CHKPT_BUCKET=gs://maxtext-gemma/flax
+export CHKPT_BUCKET=gs://zyc_maxtext/gemma/gemma-9b/ckpt
+export BASE_OUTPUT_PATH=gs://zyc_maxtext/runner-maxtext-logs/gemma-9b
 
 if [ -z "${BASE_OUTPUT_PATH}" ]; then
     # Non-Googlers please remember to point BASE_OUTPUT_PATH to GCS buckets that you own, this script uses internal buckets for testing.
@@ -31,7 +32,7 @@ fi
 echo "Converted checkpoints are stored at ${BASE_OUTPUT_PATH}"
 
 
-JAX_PLATFORMS=cpu python MaxText/convert_gemma_chkpt.py --base_model_path ${CHKPT_BUCKET} --maxtext_model_path ${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_chkpt --model_size ${MODEL_VARIATION}
+JAX_PLATFORMS=cpu python MaxText/convert_gemma2_chkpt.py --base_model_path ${CHKPT_BUCKET} --maxtext_model_path ${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_chkpt --model_size ${MODEL_VARIATION}
 echo "Wrote MaxText compatible checkpoint to ${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_chkpt"
 
 # We define `CONVERTED_CHECKPOINT` to refer to the checkpoint subdirectory.
@@ -39,8 +40,21 @@ export CONVERTED_CHECKPOINT=${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_chkpt
 # Note that the `CONVERTED_CHECKPOINT` is in a `scanned` format which is great for training but for efficient decoding performance we want the checkpoint in an `unscanned` format.
 # We can do this by running `MaxText/generate_param_only_checkpoint.py` on `CONVERTED_CHECKPOINT` with `force_unroll=true`. 
 export RUN_NAME=unscanned_chkpt
+JAX_PLATFORMS=cpu python MaxText/generate_param_only_checkpoint.py MaxText/configs/base.yml async_checkpointing=false base_output_directory=${BASE_OUTPUT_PATH} load_parameters_path=${CONVERTED_CHECKPOINT} run_name=${RUN_NAME} model_name='gemma2-9b' force_unroll=true
+echo "Written MaxText compatible unscanned checkpoint to ${BASE_OUTPUT_PATH}/${RUN_NAME}/checkpoints/0/items"
 
+
+############# test decode
 export UNSCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/${RUN_NAME}/checkpoints/0/items
+python MaxText/decode.py MaxText/configs/base.yml tokenizer_path=assets/tokenizer.gemma load_parameters_path=${UNSCANNED_CKPT_PATH} per_device_batch_size=1 run_name=runner_$(date +%Y-%m-%d-%H-%M) max_prefill_predict_length=8 max_target_length=16 dataset_type=synthetic steps=10 async_checkpointing=false scan_layers=false model_name=gemma2-9b prompt="I love to"
 
-JAX_PLATFORMS=cpu python MaxText/generate_param_only_checkpoint.py MaxText/configs/base.yml async_checkpointing=false base_output_directory=${BASE_OUTPUT_PATH} load_parameters_path=${CONVERTED_CHECKPOINT} run_name=${RUN_NAME} model_name=gemma-9b force_unroll=true
-echo "Written MaxText compatible unscanned checkpoint to ${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/${RUN_NAME}/checkpoints/0/items"
+python MaxText/decode.py MaxText/configs/base.yml tokenizer_path=assets/tokenizer.gemma load_parameters_path=${CONVERTED_CHECKPOINT} per_device_batch_size=1 run_name=runner_$(date +%Y-%m-%d-%H-%M) max_prefill_predict_length=8 max_target_length=16 dataset_type=synthetic steps=10 async_checkpointing=false model_name=gemma2-9b prompt="I love to"
+############## test 2b config
+# export BASE_OUTPUT_PATH=gs://zyc_maxtext/runner-maxtext-logs/gemma-2b/
+# export DATASET_PATH=gs://maxtext-dataset
+
+# python MaxText/train.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} dataset_path=${DATASET_PATH} tokenizer_path=assets/tokenizer.gemma per_device_batch_size=1 run_name=runner_pretrain_1 max_target_length=8192 steps=5 enable_checkpointing=false model_name=gemma-2b
+
+# compare with golden logits
+
+python3 MaxText/tests/forward_pass_logit_checker.py  MaxText/configs/base.yml tokenizer_path=assets/tokenizer.gemma load_parameters_path=${UNSCANNED_CKPT_PATH} run_name=forward_pass_test_gemma2-9b per_device_batch_size=1 model_name=gemma2-9b max_prefill_predict_length=4 max_target_length=4 dataset_type=synthetic scan_layers=false 
