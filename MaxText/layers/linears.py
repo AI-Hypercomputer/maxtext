@@ -319,7 +319,7 @@ class MoeBlock(nn.Module):
     w1_kernel = jnp.asarray(w1_kernel, self.dtype)
     wo_kernel = self.param(
         'wo',
-        nn.with_logical_partitioning(kernel_init, wo_kernel_axes),
+        nn.with_logical_partitioning(kernel_init, kernel_axes),
         (num_experts, mlp_dim, emb_dim),
         self.weight_dtype,
         kernel_in_axis,
