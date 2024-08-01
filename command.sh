@@ -1,7 +1,7 @@
 # AOT Command:
 python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_small per_device_batch_size=9 compile_topology=v5p-256 compile_topology_num_slices=1
 
-python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_small per_device_batch_size=8 compile_topology=v5p-1024 compile_topology_num_slices=1
+python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_small per_device_batch_size=12 compile_topology=v5p-1024 compile_topology_num_slices=1
 
 python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_small per_device_batch_size=9 compile_topology=v5p-2048 compile_topology_num_slices=1
 
@@ -14,15 +14,31 @@ python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_larg
 python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_large per_device_batch_size=2 remat_policy=qkv_proj_offloaded compile_topology=v5p-1024 compile_topology_num_slices=1 
 
 
-python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_small per_device_batch_size=8 \
-remat_policy=save_out_proj \
+python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_large per_device_batch_size=4 compile_topology=v5p-4096 compile_topology_num_slices=1
+
+
+
+python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_large per_device_batch_size=7 compile_topology=v5p-12288 compile_topology_num_slices=1
+
+
+python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_small \
+per_device_batch_size=2 \
 compile_topology=v5p-1024 compile_topology_num_slices=1
+
 
 python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_small \
 per_device_batch_size=4 \
 ici_tensor_parallelism=8 ici_fsdp_parallelism=64 \
 compile_topology=v5p-1024 compile_topology_num_slices=1
 
+
+python3 MaxText/train_compile.py MaxText/configs/base.yml model_name=subsup_large \
+per_device_batch_size=2 remat_policy=save_out_proj \
+compile_topology=v5p-1024 compile_topology_num_slices=1
+
+python3 MaxText/train.py MaxText/configs/base.yml model_name=subsup_large \
+per_device_batch_size=2 remat_policy=save_out_proj \
+compile_topology=v5p-1024 compile_topology_num_slices=1
 
 PROJECT_ID=cloud-tpu-best-effort-colo 
 ZONE=europe-west1-c

@@ -32,3 +32,4 @@ rope_max_timescale: 1_000_000
 decoder_block: "mistral"
 dtype: "bfloat16" 
 weight_dtype: "bfloat16"
+logits_dot_in_fp32: False
