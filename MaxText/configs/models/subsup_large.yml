@@ -14,11 +14,11 @@
 
 # model config for subsup-large
 
-base_emb_dim: 7168
+base_emb_dim: 8192
 base_num_query_heads: 112
 max_target_length: 8192
 base_num_kv_heads: 8
-base_mlp_dim: 7168
+base_mlp_dim: 8192
 base_num_decoder_layers: 96
 head_dim: 128
 mlp_activations: ["relu","linear"]

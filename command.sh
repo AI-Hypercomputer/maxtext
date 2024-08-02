@@ -129,23 +129,23 @@ python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME="$RUN_NAME" --BUCKE
     ici_tensor_parallelism=${ici_tensor_parallelism}"
 
 
-BUCKET_NAME=gs://tony-moe/7_31/
+BUCKET_NAME=gs://tony-moe/8_2/
 MAXTEXT_OUTPUT_PATH=$BUCKET_NAME
-TPU_TYPE=v5p-1024
+TPU_TYPE=v5p-2048
 MODEL=subsup_large
 BATCH_SIZE=2
 VERSION=v2-alpha-tpuv5
 remat_policy=full
 xla_tpu_scoped_vmem_limit_kib=81920
 ici_tensor_parallelism=1
-RUN_NAME=${TPU_TYPE}_${MODEL}_test1_per_device_batch_size$BATCH_SIZE-ici_tensor_parallelism$ici_tensor_parallelism-xla_tpu_scoped_vmem_limit_kib$xla_tpu_scoped_vmem_limit_kib-$remat_policy
+RUN_NAME=${TPU_TYPE}_${MODEL}_test_per_device_batch_size$BATCH_SIZE-ici_tensor_parallelism$ici_tensor_parallelism-xla_tpu_scoped_vmem_limit_kib$xla_tpu_scoped_vmem_limit_kib-$remat_policy
 NODE_COUNT=1
 
 python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME="$RUN_NAME" --BUCKET_NAME="$BUCKET_NAME" \
 --TPU_TYPE=$TPU_TYPE --VERSION=$VERSION \
 --COMMAND="\
     bash setup.sh MODE=stable;\
-    export LIBTPU_INIT_ARGS=\"--xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_megacore_fusion_allow_ags=false --xla_enable_async_collective_permute=true --xla_tpu_enable_ag_backward_pipelining=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true --xla_tpu_scoped_vmem_limit_kib=${xla_tpu_scoped_vmem_limit_kib}\"
+    export LIBTPU_INIT_ARGS=\"xla_tpu_enable_async_collective_fusion_with_mosaic_custom_call=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_megacore_fusion_allow_ags=false --xla_enable_async_collective_permute=true --xla_tpu_enable_ag_backward_pipelining=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true --xla_tpu_scoped_vmem_limit_kib=${xla_tpu_scoped_vmem_limit_kib}\"
     python3 MaxText/train.py MaxText/configs/base.yml model_name=${MODEL} \
     base_output_directory=${MAXTEXT_OUTPUT_PATH} run_name=${RUN_NAME} \
     enable_checkpointing=false async_checkpointing=false \
