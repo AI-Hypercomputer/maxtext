@@ -94,7 +94,7 @@ def load_compiled(config, partial_train, state):
 
 def calculate_tokens_training_per_device(config):
   """Calculate training Tokens per device"""
-  return config.max_target_length * config.per_device_batch_size
+  return config.max_target_length * config.per_device_batch_size * config.gradient_accumulation_steps
 
 def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops):
   """
@@ -171,6 +171,8 @@ def calculate_tflops_training_per_device(config, log=True):
         )
     )
 
+  learnable_weight_tflops = learnable_weight_tflops * config.gradient_accumulation_steps
+  attention_tflops = attention_tflops * config.gradient_accumulation_steps
   total_tflops = learnable_weight_tflops + attention_tflops
 
   if log:

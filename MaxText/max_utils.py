@@ -479,7 +479,7 @@ def init_initial_state(model, tx, config, is_training, key):
 
   Args: model, tx, config, is_training, key
   """
-  input_shape = (config.global_batch_size_to_load, config.max_target_length)
+  input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
   model_vars = model.init(
       {"params": key, "dropout": key, "aqt": key},
       jnp.ones(input_shape, dtype=jnp.int32),
@@ -803,7 +803,7 @@ def get_kv_cache_annotations(model, config, rng, mesh):
 
   def init_kv_cache(model, config):
     input_shape = (
-        config.global_batch_size_to_load,
+        config.micro_batch_size_to_train_on,
         config.max_prefill_predict_length,
     )
 
