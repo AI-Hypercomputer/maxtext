@@ -58,6 +58,9 @@ CACHE_HEADS = common_types.CACHE_HEADS
 CACHE_KV = common_types.CACHE_KV
 DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
+kBLOCK_1 = 8192
+kBLOCK_2 = 8192
+kBLOCK_3 = 8192
 
 nd_dense_init = initializers.nd_dense_init
 shard_map = shard_map.shard_map
@@ -99,6 +102,7 @@ def _maybe_aqt_einsum(quant: Quant):
 
 
 class AttentionOp(nn.Module):
+  config: Config
   mesh: Mesh
   attention_kernel: str
   max_target_length: int
@@ -198,6 +202,10 @@ class AttentionOp(nn.Module):
     axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
     segment_axis_names = nn.logical_to_mesh_axes((BATCH, "activation_length_no_heads"))
 
+    kBLOCK_1 = self.config.sa_block_q
+    kBLOCK_2 = self.config.sa_block_q_dkv
+    kBLOCK_3 = self.config.sa_block_q_dq
+    print(f"KBLOCK VALUES: {kBLOCK_1} {kBLOCK_2} {kBLOCK_3}")
     @functools.partial(
         shard_map,
         mesh=self.mesh,
@@ -215,15 +223,22 @@ class AttentionOp(nn.Module):
         assert (
             query.shape[2] == decoder_segment_ids.q.shape[1]
         ), "Sharding along sequence dimension not allowed in tpu kernel attention"
+      block_1 = kBLOCK_1
+      block_2 = kBLOCK_2
+      block_3 = kBLOCK_3
+      print(f"KBLOCK VALUES inside shmap: {kBLOCK_1} {kBLOCK_2} {kBLOCK_3}")
+      print(f"query shape {query.shape[2]} key shape {key.shape[2]}")
       block_sizes = splash_attention_kernel.BlockSizes(
-          block_q=min(512, query.shape[2]),
-          block_kv_compute=min(512, key.shape[2]),
-          block_kv=min(512, key.shape[2]),
-          block_q_dkv=min(512, query.shape[2]),
-          block_kv_dkv=min(512, key.shape[2]),
-          block_kv_dkv_compute=min(512, query.shape[2]),
-          block_q_dq=min(512, query.shape[2]),
-          block_kv_dq=min(512, query.shape[2]),
+          block_q=block_1,
+          block_kv_compute=block_1,
+          block_kv=block_1,
+
+          block_q_dkv=block_2,
+          block_kv_dkv=block_2,
+          block_kv_dkv_compute=block_2,
+
+          block_q_dq=block_3,
+          block_kv_dq=block_3,
       )
 
       masks = [splash_attention_mask.CausalMask(shape=(query.shape[2], query.shape[2])) for i in range(query.shape[1])]
@@ -1062,6 +1077,7 @@ class Attention(nn.Module):
     value = checkpoint_name(value, "value_proj")
 
     attention_op = AttentionOp(
+        config = self.config,
         mesh=self.mesh,
         attention_kernel=self.attention_kernel,
         max_target_length=self.max_target_length,
