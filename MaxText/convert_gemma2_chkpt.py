@@ -54,7 +54,7 @@ def main(raw_args=None) -> None:
   parser.add_argument("--maxtext_model_path", type=str, required=True)
   parser.add_argument("--model_size", type=str, required=True)
   args = parser.parse_args(raw_args)
-  if args.model_size not in ("9b", "27b"):
+  if args.model_size not in ("2b", "9b", "27b"):
     raise NotImplementedError("only implemented for gemma 2 classes")
 
   print("Loading checkpoint")
@@ -72,10 +72,16 @@ def main(raw_args=None) -> None:
   print(f"head_dim: {head_dim}")
 
   query_pre_attn_scalar = None
-  if args.model_size in ("9b"):
+  if args.model_size in ("2b", "9b"):
     query_pre_attn_scalar = head_dim**-0.5
   elif args.model_size in ("27b"):
     query_pre_attn_scalar = (embed_dim // num_heads)**-0.5
+
+  transpose_gating_einsum = True
+  if args.model_size in ("2b"):
+    transpose_gating_einsum = False
+  elif args.model_size in ("9b", "27b"):
+    transpose_gating_einsum = True
 
   jax_weights = {
       "decoder": {
@@ -135,8 +141,13 @@ def main(raw_args=None) -> None:
     self_attention_local["out"]["kernel"].append(params["transformer"][in_layer_name_local]["attn"]["attn_vec_einsum"]["w"])
 
     # mlp
-    layer_weight["mlp_local"]["wi_0"]["kernel"].append(np.transpose(params["transformer"][in_layer_name_local]["mlp"]["gating_einsum"]["w"][0]))
-    layer_weight["mlp_local"]["wi_1"]["kernel"].append(np.transpose(params["transformer"][in_layer_name_local]["mlp"]["gating_einsum"]["w"][1]))
+    if transpose_gating_einsum:
+      layer_weight["mlp_local"]["wi_0"]["kernel"].append(np.transpose(params["transformer"][in_layer_name_local]["mlp"]["gating_einsum"]["w"][0]))
+      layer_weight["mlp_local"]["wi_1"]["kernel"].append(np.transpose(params["transformer"][in_layer_name_local]["mlp"]["gating_einsum"]["w"][1]))
+    else:
+      layer_weight["mlp_local"]["wi_0"]["kernel"].append(params["transformer"][in_layer_name_local]["mlp"]["gating_einsum"]["w"][0])
+      layer_weight["mlp_local"]["wi_1"]["kernel"].append(params["transformer"][in_layer_name_local]["mlp"]["gating_einsum"]["w"][1])
+
     layer_weight["mlp_local"]["wo"]["kernel"].append(params["transformer"][in_layer_name_local]["mlp"]["linear"]["w"])
 
     layer_weight["pre_self_attention_norm_local"]["scale"].append(
@@ -163,8 +174,13 @@ def main(raw_args=None) -> None:
     self_attention_global["out"]["kernel"].append(params["transformer"][in_layer_name_global]["attn"]["attn_vec_einsum"]["w"])
 
     # mlp
-    layer_weight["mlp_global"]["wi_0"]["kernel"].append(np.transpose(params["transformer"][in_layer_name_global]["mlp"]["gating_einsum"]["w"][0]))
-    layer_weight["mlp_global"]["wi_1"]["kernel"].append(np.transpose(params["transformer"][in_layer_name_global]["mlp"]["gating_einsum"]["w"][1]))
+    if transpose_gating_einsum:
+      layer_weight["mlp_global"]["wi_0"]["kernel"].append(np.transpose(params["transformer"][in_layer_name_global]["mlp"]["gating_einsum"]["w"][0]))
+      layer_weight["mlp_global"]["wi_1"]["kernel"].append(np.transpose(params["transformer"][in_layer_name_global]["mlp"]["gating_einsum"]["w"][1]))
+    else:
+      layer_weight["mlp_global"]["wi_0"]["kernel"].append(params["transformer"][in_layer_name_global]["mlp"]["gating_einsum"]["w"][0])
+      layer_weight["mlp_global"]["wi_1"]["kernel"].append(params["transformer"][in_layer_name_global]["mlp"]["gating_einsum"]["w"][1])
+
     layer_weight["mlp_global"]["wo"]["kernel"].append(params["transformer"][in_layer_name_global]["mlp"]["linear"]["w"])
 
     layer_weight["pre_self_attention_norm_global"]["scale"].append(
