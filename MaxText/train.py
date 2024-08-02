@@ -79,6 +79,9 @@ def validate_train_config(config):
   if not config.base_output_directory.startswith("gs://"):
     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
   assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive integer."
+  if config.quantization=='fp8':
+    # pylint: disable=line-too-long
+    assert config.gradient_accumulation_steps == 1, "fp8 can't be used with gradient_accumulation_steps right now. Please use other quantization or set gradient_accumulation_steps to 1"
 
 
 def get_first_step(state):
@@ -158,6 +161,11 @@ def write_metrics_to_tensorboard(writer, metrics, step, config):
       max_logging.log(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
       writer.flush()
 
+def clear_buffered_metrics():
+  global _buffered_step
+  global _buffered_metrics
+  _buffered_step = None
+  _buffered_metrics = None
 
 def save_checkpoint(checkpoint_manager, step, state, dataset_type="c4", data_iterator=None):
   """Wrapper for saving checkpoint"""
@@ -226,7 +234,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   # decimate proportion of data when per_device_batch_size<1
   if is_train:
     for k, v in data.items():
-      data[k] = v[: config.global_batch_size_to_train_on, :]
+      data[k] = v[: config.micro_batch_size_to_train_on, :]
 
   logits, intermediate_outputs = model.apply(
       params,
@@ -268,9 +276,38 @@ def train_step(model, config, state, data, dropout_rng):
     rng2: A new rng key that can be used in future calls.
 
   """
-  train_loss_fn = functools.partial(loss_fn, model, config, data, dropout_rng, is_train=True)
-  grad_fn = jax.value_and_grad(train_loss_fn, has_aux=True)
-  (loss, aux), raw_grads = grad_fn(state.params)
+  if config.gradient_accumulation_steps > 1:
+    def accumulate_gradient(acc_grad_and_loss, data):
+      grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
+      (_, aux), cur_batch_gradient = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
+      acc_grad_and_loss['loss'] += aux['total_loss']
+      acc_grad_and_loss['grad'] = jax.tree_util.tree_map(
+        lambda x, y: x * aux['total_weights'] + y,
+        cur_batch_gradient,
+        acc_grad_and_loss['grad'])
+      acc_grad_and_loss['total_weights'] += aux['total_weights']
+      return acc_grad_and_loss, aux
+
+    def reshape_to_microbatch_accumulations(batch_arr):
+      ''' Reshape global batch to microbatches, assuming batch axis is leading.'''
+      microbatches = config.gradient_accumulation_steps
+      microbatch_shape = (microbatches,  batch_arr.shape[0] // microbatches) + batch_arr.shape[1:]
+      return jnp.reshape(batch_arr, microbatch_shape)
+
+    data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
+    init_grad = jax.tree_util.tree_map(jnp.zeros_like, state.params)
+    init_grad_and_loss = {'loss': 0.0, 'grad': init_grad, 'total_weights':0}
+
+    grad_and_loss, aux = jax.lax.scan(
+      accumulate_gradient,
+      init_grad_and_loss,
+      data,
+      length = config.gradient_accumulation_steps)
+    loss = grad_and_loss['loss'] / grad_and_loss['total_weights']
+    raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss['total_weights'], grad_and_loss['grad'])
+  else:
+    grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
+    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
 
@@ -591,6 +628,7 @@ def train_loop(config, state=None):
   write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config)  # final step metrics
   max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, job_end=True)
+  clear_buffered_metrics()
   return state
 
 

@@ -49,7 +49,7 @@ class Pipeline(nn.Module):
   def setup(self):
     self.num_stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
     self.use_circ_storage = self.config.num_pipeline_repeats > 1 and self.config.num_pipeline_microbatches > self.num_stages
-    self.microbatch_size = self.config.global_batch_size_to_train_on // self.config.num_pipeline_microbatches
+    self.pipeline_microbatch_size = self.config.micro_batch_size_to_train_on // self.config.num_pipeline_microbatches
     microbatches_per_stage = self.config.num_pipeline_microbatches // self.num_stages
     self.microbatches_per_stage = microbatches_per_stage
 
@@ -73,7 +73,7 @@ class Pipeline(nn.Module):
     # state_io (state input output) at first holds all of the input batches, but also will hold the outputs as the pipeline runs/finishes
     # state_io has shape [num_stages, microbatches/stages, micro_size, sequence, embed]
     state_io = jnp.reshape(inputs, (self.num_stages, self.microbatches_per_stage) + inputs.shape[1:])
-    # We shard the microbatch_size axis by data/fsdp, not num_microbatches since those are looped over.
+    # We shard the pipeline_microbatch_size axis by data/fsdp, not num_microbatches since those are looped over.
     state_io = nn.with_logical_constraint(state_io, ("activation_stage", None, "activation_batch", "activation_length", "activation_embed"),rules=self.config.logical_axis_rules, mesh=self.mesh) 
 
     # circ_storage is used to hold the final pipeline stage outputs before it is used for the next repeat. It is only needed
@@ -353,18 +353,18 @@ class Pipeline(nn.Module):
     Has the same signature of a single decoder layer, and expects the same shapes, e.g. the inputs should have shape [global_batch], and internally
     this will be reshapped into microbatches.
     '''
-    # Reshape inputs of [global_batch, ...] to [microbatches, microbatch_sizes, ...]
-    inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length, self.config.emb_dim))
+    # Reshape inputs of [global_batch, ...] to [microbatches, pipeline_microbatch_sizes, ...]
+    inputs = inputs.reshape((self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length, self.config.emb_dim))
     example_inputs = jax.lax.broadcast(inputs[0], [self.num_stages]) # dummy inputs fed to initialize the module weights.
     if positions is not None:
-      positions = positions.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
+      positions = positions.reshape((self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length))
       example_position = jax.lax.broadcast(positions[0], [self.num_stages])
       position_idx = 0
     else:
       example_position = None
       position_idx = None
     if segment_ids is not None:
-      segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.microbatch_size, self.config.max_target_length))
+      segment_ids = segment_ids.reshape((self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length))
       example_segmentation = jax.lax.broadcast(segment_ids[0], [self.num_stages])
       segment_idx = 0
     else:
@@ -414,11 +414,11 @@ class Pipeline(nn.Module):
        stage_outputs = stage_outputs[0]
 
      # We return something of the correct shape (global_batch, sequence, embed) by reshaping a single stages output which has
-     # shape [microbatch_size, sequence, embed]
+     # shape [pipeline_microbatch_size, sequence, embed]
      if self.config.num_pipeline_repeats > 1:
        stage_outputs = stage_outputs[0] # Remove extra dimension created for the circular vmap
-     broadcasted_stage_outpus = jax.lax.broadcast(stage_outputs[0], [self.config.global_batch_size_to_train_on // self.microbatch_size])
-     return jnp.reshape(broadcasted_stage_outpus, [self.config.global_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim])
+     broadcasted_stage_outpus = jax.lax.broadcast(stage_outputs[0], [self.config.micro_batch_size_to_train_on // self.pipeline_microbatch_size])
+     return jnp.reshape(broadcasted_stage_outpus, [self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim])
 
     def run_iteration_scannable(model,loop_state, xs):
        # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
@@ -468,6 +468,6 @@ class Pipeline(nn.Module):
     final_output = self.permute_output_micro_per_stage_dim(loop_state["state_io"])
 
     # reshape outputs to match input shape of total batch instead of microbatches [batch, sequence, embed]
-    final_output = jnp.reshape(final_output, (self.config.global_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim))
+    final_output = jnp.reshape(final_output, (self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim))
                                
     return final_output

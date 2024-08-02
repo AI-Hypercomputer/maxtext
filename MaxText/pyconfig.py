@@ -327,7 +327,7 @@ class _HyperParameters:
     raw_keys["mlp_dim"] = 2**mlp_dim_scale * raw_keys["base_mlp_dim"]
     raw_keys["num_decoder_layers"] = 2**layer_scale * raw_keys["base_num_decoder_layers"]
 
-    raw_keys["global_batch_size_to_load"], raw_keys["global_batch_size_to_train_on"] = calculate_global_batch_sizes(raw_keys)
+    raw_keys["global_batch_size_to_load"], raw_keys["global_batch_size_to_train_on"], raw_keys["micro_batch_size_to_train_on"] = calculate_global_batch_sizes(raw_keys)
     raw_keys["num_slices"] = get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
 
@@ -342,7 +342,7 @@ class _HyperParameters:
       if raw_keys['num_pipeline_microbatches'] == -1:
         raw_keys['num_pipeline_microbatches'] = num_stages
       assert raw_keys['num_pipeline_microbatches'] % num_stages == 0, f"The number of microbatches ({raw_keys['num_pipeline_microbatches']}) must be divisible by the number of stages ({num_stages})"
-      assert raw_keys['global_batch_size_to_train_on'] % raw_keys['num_pipeline_microbatches'] == 0, f"The global batch size ({raw_keys['global_batch_size_to_train_on']}) must be divisible by the number of microbatches ({raw_keys['num_pipeline_microbatches']})"
+      assert raw_keys['micro_batch_size_to_train_on'] % raw_keys['num_pipeline_microbatches'] == 0, f"The batch size ({raw_keys['micro_batch_size_to_train_on']}) must be divisible by the number of microbatches ({raw_keys['num_pipeline_microbatches']})"
     else:
       raw_keys["using_pipeline_parallelism"] = False
 
@@ -476,17 +476,19 @@ def calculate_global_batch_sizes(raw_keys):
   if per_device_batch_size < 1.0:
     # For per_device_batch_size<1, we load the data as if per_device_batch_size=1
     if expansion_factor_real_data != -1:
-      global_batch_size_to_load = num_devices * expansion_factor_real_data
+      micro_batch_size_to_load = num_devices * expansion_factor_real_data
     else:
-      global_batch_size_to_load = num_devices
+      micro_batch_size_to_load = num_devices
   else:
     if expansion_factor_real_data != -1:
-      global_batch_size_to_load = int(num_devices * per_device_batch_size * expansion_factor_real_data)
+      micro_batch_size_to_load = int(num_devices * per_device_batch_size * expansion_factor_real_data)
     else:
-      global_batch_size_to_load = int(num_devices * per_device_batch_size)
+      micro_batch_size_to_load = int(num_devices * per_device_batch_size)
 
-  global_batch_size_to_train_on = int(num_devices * per_device_batch_size)
-  return global_batch_size_to_load, global_batch_size_to_train_on
+  micro_batch_size_to_train_on = int(num_devices * per_device_batch_size)
+  global_batch_size_to_load = int(micro_batch_size_to_load * raw_keys["gradient_accumulation_steps"])
+  global_batch_size_to_train_on = int(micro_batch_size_to_train_on * raw_keys["gradient_accumulation_steps"])
+  return global_batch_size_to_load, global_batch_size_to_train_on, micro_batch_size_to_train_on
 
 
 def get_num_target_devices(raw_keys):
