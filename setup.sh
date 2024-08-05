@@ -143,6 +143,9 @@ elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
             echo "Installing stable jax, jaxlib, libtpu for NVIDIA gpu"
             pip3 install "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
         fi
+
+        pip3 install 'git+https://github.com/google/orbax/#subdirectory=checkpoint'
+
         export NVTE_FRAMEWORK=jax
         pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
     fi

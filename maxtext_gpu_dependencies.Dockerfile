@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:experimental
-ARG BASEIMAGE=ghcr.io/nvidia/jax:base
+ARG BASEIMAGE=ghcr.io/nvidia/jax:maxtext-2024-06-30
 FROM $BASEIMAGE
 
 # Stopgaps measure to circumvent gpg key setup issue.
