@@ -328,9 +328,6 @@ class _HyperParameters:
     if raw_keys["final_logits_soft_cap"] == 0.0:
       raw_keys["final_logits_soft_cap"] = None
 
-    if raw_keys["attn_logits_soft_cap"] == 0.0:
-      raw_keys["attn_logits_soft_cap"] = None
-
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys["global_parameter_scale"])
     raw_keys["emb_dim"] = 2**emb_scale * raw_keys["base_emb_dim"]
     raw_keys["num_query_heads"] = 2**num_head_scale * raw_keys["base_num_query_heads"]
