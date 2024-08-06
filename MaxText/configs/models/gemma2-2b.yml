@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# model config for gemma-7b
+# model config for gemma-2B
 
 base_emb_dim: 2304
 base_num_query_heads: 8
