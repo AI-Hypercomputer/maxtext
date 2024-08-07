@@ -296,6 +296,25 @@ class Pipeline(nn.Module):
     )
     return vmap_func
 
+  def get_main_vmap_func_run(self):
+    def func_to_vmap(body_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
+      # nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance.
+      return body_instance.apply(weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+
+    vmap_func = nn.vmap(
+      func_to_vmap,
+      in_axes=(0, 0, 0, 0, None, None),
+      spmd_axis_name='stage',
+      variable_axes={'params': 0},
+      split_rngs={'params':  self.is_initializing()},
+      metadata_params={
+        nn.PARTITION_NAME: "layers",
+        'sub_weight_split_dims_mapping': (None),
+        "is_initializing": self.is_initializing(),
+        "x_times": self.num_stages}
+    )
+    return vmap_func
+
   def run_one_iteration(self, loop_state, positions, segment_ids, deterministic, model_mode, decoder_layer_instance):
    '''Run one loop iteration - gets weights and inputs for each stage, run the stages in parallel, and update the loop state.'''
    state_io = loop_state['state_io']
@@ -311,8 +330,8 @@ class Pipeline(nn.Module):
    stages_positions = self.vmap_gather(positions, microbatch_ids, 0) if positions is not None else None
    stages_segment_ids = self.vmap_gather(segment_ids, microbatch_ids, 0) if segment_ids is not None else None
 
-   vmap_func = self.get_main_vmap_func()
-
+   vmap_func = self.get_main_vmap_func_run()
+   weights = None
    if self.config.num_pipeline_repeats > 1:
     _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
 
@@ -332,15 +351,18 @@ class Pipeline(nn.Module):
       weights = meta.remove_axis(weights, 0, circular_metadata_params) # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
       weights = gather_weights_for_stages_in(weights)
       return weights
+    breakpoint()
+    weights = prepare_vars_for_main_vmap(self.variables)
 
-    vmap_func = nn.map_variables(
-        vmap_func,
-        mapped_collections=["params", "non_trainable", "summaries", "intermediates"],
-        mutable=True,
-        trans_in_fn=prepare_vars_for_main_vmap,
-    )
+    # vmap_func = nn.map_variables(
+    #     vmap_func,
+    #     mapped_collections=["params", "non_trainable", "summaries", "intermediates"],
+    #     mutable=True,
+    #     trans_in_fn=prepare_vars_for_main_vmap,
+    # )
 
-   stages_output = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+
+   stages_output = vmap_func(decoder_layer_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
    if self.config.scan_layers:
      stages_output = stages_output[0]
 
