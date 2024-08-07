@@ -402,8 +402,7 @@ class _HyperParameters:
     return updated_keys
 
 def validate_megablox_parallelism(raw_keys):
-  if raw_keys["megablox"] and (using_sequence_parallelism(raw_keys) or
-                               using_pipeline_parallelism(raw_keys)):
+  if raw_keys["megablox"] and (using_sequence_parallelism(raw_keys)):
     raise ValueError("Currently we only support Megablox with data and tensor parallelism.")
   tensor_parallelism = raw_keys["ici_tensor_parallelism"] * raw_keys["dcn_tensor_parallelism"]
   if raw_keys["megablox"] and using_tensor_parallelism(raw_keys) and (raw_keys["emb_dim"] % tensor_parallelism):
