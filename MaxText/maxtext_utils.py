@@ -139,6 +139,10 @@ def calculate_tflops_training_per_device(config, log=True):
       attention_flops * config.num_decoder_layers * 3 / 10**12
   )
 
+  # in gemma2 we combine [local attention, global attention] into one decoder block, so need to multiply the attention_flops by 2
+  if config.decoder_block == 'gemma2':
+    attention_flops = attention_flops * 2
+  
   total_tflops = learnable_weight_tflops + attention_tflops
 
   if log:
