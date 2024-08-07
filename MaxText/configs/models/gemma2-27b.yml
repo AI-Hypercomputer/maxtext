@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# model config for gemma2-9B
+# model config for gemma2-27B
 
-base_emb_dim: 3584
-base_num_query_heads: 16
-base_num_kv_heads: 8
-base_mlp_dim: 14336
-base_num_decoder_layers: 21 # half of the real number of layers because we merge [local_attention, global_attention] into one layer 
-head_dim: 256
+base_emb_dim: 4608
+base_num_query_heads: 32
+base_num_kv_heads: 16
+base_mlp_dim: 36864
+base_num_decoder_layers: 23 # half of the real number of layers because we merge [local_attention, global_attention] into one layer 
+head_dim: 128
 mlp_activations: ["gelu","linear"]
 vocab_size: 256128
 decoder_block: "gemma2"
