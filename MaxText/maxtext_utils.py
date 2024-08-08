@@ -97,6 +97,8 @@ def calculate_tokens_training_per_device(config):
   return config.max_target_length * config.per_device_batch_size
 
 def calculate_tflops_training_per_device(config, log=True):
+  num_decoder_layers = config.num_decoder_layers * 2 if config.decoder_block == 'gemma2' else config.num_decoder_layers
+  
   """Calculate training TFLOP"""
   ffn1_flops = (
       2
@@ -132,17 +134,12 @@ def calculate_tflops_training_per_device(config, log=True):
 
   # multiply by 3 for both feed forward and back proporgation flops
   learnable_weight_tflops = (
-      ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
+      ((total_ffn_flops + qkv_flops + projection_flops) * num_decoder_layers + embedding_flops) * 3 / 10**12
   )
   # megatron tflops calculation does not account for causality in attention
   attention_tflops = (
-      attention_flops * config.num_decoder_layers * 3 / 10**12
+      attention_flops * num_decoder_layers * 3 / 10**12
   )
-
-  # in gemma2 we combine [local attention, global attention] into one decoder block, so need to multiply the
-  # attention_flops by 2
-  if config.decoder_block == 'gemma2':
-    attention_flops = attention_flops * 2
 
   total_tflops = learnable_weight_tflops + attention_tflops
 
