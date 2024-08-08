@@ -16,6 +16,7 @@
 
 import jax
 
+import max_utils
 import maxengine
 
 import os
@@ -70,4 +71,5 @@ if __name__ == "__main__":
   pyconfig.initialize(sys.argv)
   cfg = pyconfig.config
   validate_config(cfg)
+  max_utils.print_system_information()
   main(cfg)

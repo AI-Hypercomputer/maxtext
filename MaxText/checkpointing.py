@@ -21,7 +21,7 @@ from absl import flags
 from etils import epath
 import orbax.checkpoint
 from orbax.checkpoint.logging import abstract_logger, cloud_logger, standard_logger, composite_logger
-from orbax.checkpoint import pytree_checkpoint_handler, type_handlers
+from orbax.checkpoint import pytree_checkpoint_handler
 from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, PyTree
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import jax
@@ -86,20 +86,6 @@ def create_orbax_emergency_checkpoint_manager(
   flags.FLAGS.experimental_orbax_use_distributed_process_id = True
   max_logging.log("Creating emergency checkpoint manager...")
 
-  local_registry = type_handlers.create_type_handler_registry(
-      (
-          jax.Array,
-          type_handlers.ArrayHandler(primary_host=None, replica_id=None),
-      ),
-  )
-
-  local_checkpoint_handler = PyTreeCheckpointHandler(
-      use_ocdbt=True,
-      use_zarr3=True,
-      primary_host=None,
-      type_handler_registry=local_registry,
-  )
-
   options = emergency_checkpoint_manager.CheckpointManagerOptions(
       local=LocalCheckpointOptions(
           save_interval_steps=local_save_interval_steps
@@ -108,15 +94,14 @@ def create_orbax_emergency_checkpoint_manager(
           save_interval_steps=persistent_save_interval_steps
       ),
   )
-
   emergency_mngr = emergency_checkpoint_manager.CheckpointManager(
       local_checkpoint_dir,
       epath.Path(persistent_checkpoint_dir),
       global_mesh=global_mesh,
       abstract_state=abstract_state,
       options=options,
-      local_state_handler=local_checkpoint_handler,
-      logger=orbax_logger
+      local_state_handler=emergency_checkpoint_manager.local_checkpoint_handler(),
+      logger=orbax_logger,
   )
 
   max_logging.log("Emergency checkpoint manager created!")
@@ -263,7 +248,7 @@ def load_state_if_possible(
     max_logging.log(f"restoring full state from {load_full_state_from_path=}")
     p = epath.Path(load_full_state_from_path)
     ckptr = orbax.checkpoint.StandardCheckpointer()
-    restored = ckptr.restore(p, args=orbax.checkpoint.args.StandardRestore(abstract_unboxed_pre_state))
+    restored = ckptr.restore(p, abstract_unboxed_pre_state)
     return {"items": restored}, None
 
   else:
@@ -335,4 +320,3 @@ def save_params_to_path(checkpoint_dir, params):
     force=True
     )
   print(f"Quantized params checkpoint saved at: {checkpoint_dir}")
-
