@@ -21,7 +21,7 @@ from absl import flags
 from etils import epath
 import orbax.checkpoint
 from orbax.checkpoint.logging import abstract_logger, cloud_logger, standard_logger, composite_logger
-from orbax.checkpoint import pytree_checkpoint_handler, type_handlers
+from orbax.checkpoint import pytree_checkpoint_handler
 from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, PyTree
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import jax

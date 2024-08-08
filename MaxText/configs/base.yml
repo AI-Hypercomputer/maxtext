@@ -103,15 +103,17 @@ base_num_kv_heads: 16
 base_mlp_dim: 7168
 base_num_decoder_layers: 16
 head_dim: 128
-# mixture of experts (moe)
-num_experts: 1
-num_experts_per_tok: 1
-megablox: True
 mlp_activations: ["silu", "linear"]
 dropout_rate: 0
 logits_via_embedding: False
 normalize_embedding_logits: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
+
+# mixture of experts (moe)
+num_experts: 1
+num_experts_per_tok: 1
+megablox: True
+capacity_factor: -1 # a factor to decide expert capacity for token dropping, and no dropping by default
 
 # pipeline parallelism
 # The number of decoder layers is equal to the product of num_stages, num_layers_per_pipeline_stage and num_pipeline_repeats.
@@ -136,12 +138,15 @@ scan_layers: True
 param_scan_axis: 1
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
-attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
-
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
-attention_type: 'global'  # Supported attention_type: global, local_sliding
+attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
+attention_type: 'global' # Supported attention_type: global, local_sliding
 sliding_window_size: 0
 attn_logits_soft_cap: 0.0
+final_logits_soft_cap: 0.0
+use_post_attn_norm: False
+use_post_ffw_norm: False
+
 
 # Combine matmuls for QKV and MLP
 fused_qkv: False
@@ -311,6 +316,10 @@ init_weights_seed: 0
 
 # You may disable clipping by setting gradient_clipping_threshold to zero.
 gradient_clipping_threshold: 1.0
+
+# Instead of updating the weights every step, you may effectively use a larger
+# batch by accumulating the gradient over a set of steps.
+gradient_accumulation_steps: 1
 
 # AdamW optimizer parameters
 # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
