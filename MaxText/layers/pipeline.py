@@ -152,6 +152,29 @@ class Pipeline(nn.Module):
     dims_mapping = tuple(dims_mapping)
     sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(*dims_mapping))
     return jax.lax.with_sharding_constraint(x, sharding)
+  
+  def shard_pytree_by_stages(self, x):
+    def shard_dim_by_stages(x):
+      # Shards a dimension by stages. Currently the sharding of other dimensions are left up the compiler, alternatively
+      # we may want to copy over the sharding from the other input axes.
+      dims_mapping = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
+      dims_mapping[0] = "stage"
+      dims_mapping = tuple(dims_mapping)
+      sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(*dims_mapping))
+      return jax.lax.with_sharding_constraint(x, sharding)
+    return jax.tree_util.tree_map(shard_dim_by_stages, x)
+  
+  def pytree_force_ag(self, x):
+    def force_ag(x):
+      # Shards a dimension by stages. Currently the sharding of other dimensions are left up the compiler, alternatively
+      # we may want to copy over the sharding from the other input axes.
+      dims_mapping = [None] * x.ndim
+      dims_mapping[0] = "stage"
+      dims_mapping = tuple(dims_mapping)
+      sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(*dims_mapping))
+      return jax.lax.with_sharding_constraint(x, sharding)
+    return jax.tree_util.tree_map(force_ag, x)
+  
 
   def get_microbatch_and_repeat_ids(self, loop_iteration):
     '''Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and non-circular'''
@@ -374,19 +397,18 @@ class Pipeline(nn.Module):
       weights = meta.remove_axis(weights, 0, circular_metadata_params) # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
       weights = gather_weights_for_stages_in(weights)
       return weights
-    
-
-    # def select_current_repeat_or_new(maybe_new_weights, repeat_ids, last_repeat_ids):
-    #   return jax.lax.select(repeat_ids == last_repeat_ids, loop_state.repeat_weights, maybe_new_weights)
-
 
     def select_current_repeat_or_new(maybe_new_weights, repeat_ids, last_repeat_ids):
       equality_mask = jnp.equal(repeat_ids, last_repeat_ids)
+      maybe_new_weights = self.pytree_force_ag(maybe_new_weights)
+      repeat_weights = self.pytree_force_ag(loop_state['repeat_weights'])
       def select_fn(repeat_weights, new_weights):
           boolean_arr = jnp.expand_dims(equality_mask, axis=range(1,repeat_weights.ndim))
-          repeat_weights_list = jnp.where(boolean_arr, repeat_weights, new_weights)
-          return jnp.stack(repeat_weights_list)      
-      return jax.tree_map(select_fn, loop_state['repeat_weights'], maybe_new_weights)
+          repeat_weights = jnp.where(boolean_arr, repeat_weights, new_weights)
+          return repeat_weights
+      repeat_weights =  jax.tree_map(select_fn, repeat_weights, maybe_new_weights)
+      repeat_weights = self.pytree_force_ag(repeat_weights)    
+      return repeat_weights
   
     maybe_new_weights = prepare_vars_for_main_vmap(self.layers.variables)
     repeat_weights = select_current_repeat_or_new(maybe_new_weights, repeat_ids, last_repeat_ids)
