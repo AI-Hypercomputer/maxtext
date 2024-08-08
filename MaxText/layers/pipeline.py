@@ -96,12 +96,14 @@ class Pipeline(nn.Module):
     else:
        circ_storage_mover = None
 
+    repeat_weights = self.prepare_vars_for_main_vmap_2(self.layers.variables, 0)
     init_loop_state = {
       "state_io": state_io,
       "shift": shift,
       "circ_storage": circ_storage,
       "circ_storage_mover": circ_storage_mover,
-      "loop_iteration": 0
+      "loop_iteration": 0,
+      "repeat_weights": repeat_weights
     }
     return init_loop_state
 
@@ -205,7 +207,7 @@ class Pipeline(nn.Module):
     outs = jax.vmap(_gather_one, in_axes=(None, 0), out_axes=ids_dim)(xs, ids)
     return self.shard_dim_by_stages(outs, 0)
 
-  def get_new_loop_state(self,output, loop_state):
+  def get_new_loop_state(self,output, repeat_weights, loop_state):
     '''
       Update the various buffers given the output of the most recent iteration
       * state_io: rotates left/up by 1 (the whole created in the last slot is filled with the most recent pipeline output)
@@ -265,7 +267,8 @@ class Pipeline(nn.Module):
       "shift": new_shift,
       "circ_storage": new_circ_storage,
       "circ_storage_mover": new_circ_storage_mover,
-      "loop_iteration": loop_iteration + 1
+      "loop_iteration": loop_iteration + 1,
+      "repeat_weights": repeat_weights
     }
     return new_loop_state
    
@@ -316,6 +319,24 @@ class Pipeline(nn.Module):
     )
     return vmap_func
 
+  def prepare_vars_for_main_vmap_2(self, weights, loop_iteration):
+    _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
+    def gather_weights_for_stages_in(weights):
+      return jax.tree.map(
+          functools.partial(
+              self.vmap_parallel_gather, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1),
+          weights)
+    circular_metadata_params={
+      nn.PARTITION_NAME: "circular_repeats",
+      'sub_weight_split_dims_mapping': (None,),
+      "is_initializing": self.is_initializing(),
+      "x_times": self.config.num_pipeline_repeats,
+      'optimizer_dims_mapping': None,
+    }
+    weights = meta.remove_axis(weights, 0, circular_metadata_params) # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
+    weights = gather_weights_for_stages_in(weights)
+    return weights
+  
   def run_one_iteration(self, loop_state, positions, segment_ids, deterministic, model_mode, decoder_layer_instance):
    '''Run one loop iteration - gets weights and inputs for each stage, run the stages in parallel, and update the loop state.'''
    state_io = loop_state['state_io']
@@ -335,6 +356,7 @@ class Pipeline(nn.Module):
 
    if self.config.num_pipeline_repeats > 1:
     _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
+    _, last_repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration - 1)
 
     def prepare_vars_for_main_vmap(weights):
       def gather_weights_for_stages_in(weights):
@@ -352,8 +374,22 @@ class Pipeline(nn.Module):
       weights = meta.remove_axis(weights, 0, circular_metadata_params) # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
       weights = gather_weights_for_stages_in(weights)
       return weights
-    weights = prepare_vars_for_main_vmap(self.layers.variables)
+    
 
+    # def select_current_repeat_or_new(maybe_new_weights, repeat_ids, last_repeat_ids):
+    #   return jax.lax.select(repeat_ids == last_repeat_ids, loop_state.repeat_weights, maybe_new_weights)
+
+
+    def select_current_repeat_or_new(maybe_new_weights, repeat_ids, last_repeat_ids):
+      equality_mask = jnp.equal(repeat_ids, last_repeat_ids)
+      def select_fn(repeat_weights, new_weights):
+          boolean_arr = jnp.expand_dims(equality_mask, axis=range(1,repeat_weights.ndim))
+          repeat_weights_list = jnp.where(boolean_arr, repeat_weights, new_weights)
+          return jnp.stack(repeat_weights_list)      
+      return jax.tree_map(select_fn, loop_state['repeat_weights'], maybe_new_weights)
+  
+    maybe_new_weights = prepare_vars_for_main_vmap(self.layers.variables)
+    repeat_weights = select_current_repeat_or_new(maybe_new_weights, repeat_ids, last_repeat_ids)
     vmap_func = nn.map_variables(
         vmap_func,
         mapped_collections=["params", "non_trainable", "summaries", "intermediates"],
@@ -364,7 +400,7 @@ class Pipeline(nn.Module):
    # TODO: Replace this by shard_map =D
    use_shard_map = False
    if not use_shard_map:
-    stages_output = vmap_func(decoder_layer_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+    stages_output = vmap_func(decoder_layer_instance, repeat_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
    else:
     # get weights
     # print("we are trying here", flush=True)
@@ -430,7 +466,6 @@ class Pipeline(nn.Module):
 
       # add back a stage dimension
       output_activation=jnp.expand_dims(output_activation, axis=0)
-      #breakpoint()
 
 
       return output_activation
@@ -440,7 +475,7 @@ class Pipeline(nn.Module):
    if self.config.scan_layers and not use_shard_map:
      stages_output = stages_output[0]
 
-   new_state = self.get_new_loop_state(stages_output, loop_state)
+   new_state = self.get_new_loop_state(stages_output, repeat_weights, loop_state)
    return new_state
   
 
@@ -468,7 +503,6 @@ class Pipeline(nn.Module):
       example_segmentation = None
       segment_idx = None
 
-    loop_state = self.init_states(inputs)
     
     # Each microbatch should go through each stage (with repeats) - so there is num_micro * (num_stages * repeats) compute to perform
     # Each iteration is vmapped by num_stages, so the number of iterations should be num_micro * num_stages * repeats / num_stages = num_micro * repeats
@@ -518,6 +552,7 @@ class Pipeline(nn.Module):
      return jnp.reshape(broadcasted_stage_outpus, [self.config.global_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim])
     else:
       print("We are not initializing!", flush=False)
+    loop_state = self.init_states(inputs)
     def run_iteration_scannable(model,loop_state, xs):
        # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
        # the run_one_iteration in this method - the first argument model (i.e. self) is a nn.module instance.
