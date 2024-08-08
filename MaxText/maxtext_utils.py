@@ -96,11 +96,32 @@ def calculate_tokens_training_per_device(config):
   """Calculate training Tokens per device"""
   return config.max_target_length * config.per_device_batch_size
 
+def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops):
+  """
+  Calculate training TFLOP for Gemma2 as in Gemma2 we combine [local_attention, global_attention] into one decoder
+  layer and we use sliding window attention in local_attention
+  """
+  attention_flops = (
+      # global attention
+      4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
+      +
+      # local attention
+      4 * config.per_device_batch_size * config.max_target_length * min(config.sliding_window_size, config.max_target_length)
+      * config.num_query_heads * config.head_dim
+  )
+  attention_tflops = (
+      attention_flops * config.num_decoder_layers * 3 / 10**12
+  )
+
+  # multiply num_decoder_layers by 2 because we combine [local_attention, global_attention] into one decoder layer
+  learnable_weight_tflops = (
+      ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers * 2 + embedding_flops) * 3 / 10**12
+  )
+
+  return attention_tflops, learnable_weight_tflops
+
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
-
-  num_decoder_layers = config.num_decoder_layers * 2 if config.decoder_block == 'gemma2' else config.num_decoder_layers
-
   ffn1_flops = (
       2
       * config.per_device_batch_size
@@ -135,12 +156,20 @@ def calculate_tflops_training_per_device(config, log=True):
 
   # multiply by 3 for both feed forward and back proporgation flops
   learnable_weight_tflops = (
-      ((total_ffn_flops + qkv_flops + projection_flops) * num_decoder_layers + embedding_flops) * 3 / 10**12
+      ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
   )
   # megatron tflops calculation does not account for causality in attention
   attention_tflops = (
-      attention_flops * num_decoder_layers * 3 / 10**12
+      attention_flops * config.num_decoder_layers * 3 / 10**12
   )
+
+  # override for gemma2 decoder tflop calculation
+  if config.decoder_block == 'gemma2':
+    attention_tflops, learnable_weight_tflops = (
+        calculate_gemma2_tflops_training_per_device(
+            config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
+        )
+    )
 
   total_tflops = learnable_weight_tflops + attention_tflops
 
