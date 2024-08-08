@@ -172,12 +172,6 @@ _config = None
 config = None
 
 
-def print_system_information():
-  max_logging.log(f"System Information: Jax Version: {jax.__version__}")
-  max_logging.log(f"System Information: Jaxlib Version: {jax.lib.__version__}")
-  max_logging.log(f"System Information: Jax Backend: {jax.lib.xla_bridge.get_backend().platform_version}")
-
-
 def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any], list[Any]]:
   return tuple(_lists_to_tuples(x) for x in l) if isinstance(l, list) else l
 
@@ -348,9 +342,6 @@ class _HyperParameters:
       assert raw_keys['global_batch_size_to_train_on'] % raw_keys['num_pipeline_microbatches'] == 0, f"The global batch size ({raw_keys['global_batch_size_to_train_on']}) must be divisible by the number of microbatches ({raw_keys['num_pipeline_microbatches']})"
     else:
       raw_keys["using_pipeline_parallelism"] = False
-
-
-    print_system_information()
 
     # Write raw_keys to GCS before type conversions
     max_utils.write_config_raw_keys_for_gcs(raw_keys)
