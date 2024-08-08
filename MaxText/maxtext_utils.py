@@ -97,9 +97,10 @@ def calculate_tokens_training_per_device(config):
   return config.max_target_length * config.per_device_batch_size
 
 def calculate_tflops_training_per_device(config, log=True):
-  num_decoder_layers = config.num_decoder_layers * 2 if config.decoder_block == 'gemma2' else config.num_decoder_layers
-  
   """Calculate training TFLOP"""
+
+  num_decoder_layers = config.num_decoder_layers * 2 if config.decoder_block == 'gemma2' else config.num_decoder_layers
+
   ffn1_flops = (
       2
       * config.per_device_batch_size
