@@ -393,3 +393,5 @@ enable_single_controller: False
 allow_split_physical_axes: False
 
 only_fwd: False # Whether to run only forward pass or both fwd + bwd
+
+use_shmap: True

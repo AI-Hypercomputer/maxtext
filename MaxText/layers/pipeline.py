@@ -342,8 +342,7 @@ class Pipeline(nn.Module):
     )
 
    # shmap =D
-   use_shard_map = True
-   if not use_shard_map:
+   if not self.config.use_shmap:
     stages_output = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
    else:
     # get weights
@@ -417,7 +416,7 @@ class Pipeline(nn.Module):
     #stages_output = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
     stages_output = run_microbatch_iteration(stage_weights, stages_inputs, stages_segment_ids, stages_positions)
 
-   if self.config.scan_layers and not use_shard_map:
+   if self.config.scan_layers and not self.config.use_shmap:
      stages_output = stages_output[0]
 
    new_state = self.get_new_loop_state(stages_output, loop_state)
