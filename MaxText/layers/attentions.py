@@ -187,7 +187,7 @@ class AttentionOp(nn.Module):
           all_ones, -1 * self.sliding_window_size + 1
       ) * jnp.tril(all_ones, self.sliding_window_size - 1)
       output_mask = sliding_mask * output_mask
-    
+
     return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
 
   def apply_attention(self, query: Array, key: Array| KVTensor, value: Array| KVTensor, decoder_segment_ids: Array | None, model_mode: str):
