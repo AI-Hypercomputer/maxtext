@@ -42,7 +42,7 @@ spec:
                 emptyDir:
               containers:
               - name: fastrak-daemon
-                image: us-docker.pkg.dev/gce-ai-infra/gpudirect-tcpxo/tcpgpudmarxd-dev:v1.0.8
+                image: us-docker.pkg.dev/gce-ai-infra/gpudirect-tcpxo/tcpgpudmarxd-dev:v1.0.9
                 imagePullPolicy: Always
                 command: 
                 - "bash"
@@ -144,7 +144,7 @@ spec:
                   - name: TF_CPP_MAX_LOG_LEVEL
                     value: "100"
                   - name: XLA_PYTHON_CLIENT_MEM_FRACTION
-                    value: "0.85"
+                    value: "0.94"
                   - name: CUDA_DEVICE_MAX_CONNECTIONS
                     value: "1"
                   - name: NVTE_FUSED_ATTN
@@ -157,6 +157,10 @@ spec:
                     value: "/usr/local/nvidia/lib64/a3plus_tuner_config.textproto"
                   - name: NCCL_FASTRAK_ENABLE_CONTROL_CHANNEL
                     value: "0"
+                  - name: NCCL_SHIMNET_GUEST_CONFIG_CHECKER_CONFIG_FILE
+                    value: "/usr/local/nvidia/lib64/a3plus_guest_config.textproto"
+                  - name: NCCL_FASTRAK_PLUGIN_ACCEPT_TIMEOUT_MS
+                    value: "600000"
 
                 command:
                   - "bash"
