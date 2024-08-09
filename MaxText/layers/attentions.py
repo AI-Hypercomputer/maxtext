@@ -237,6 +237,7 @@ class AttentionOp(nn.Module):
     axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
     segment_axis_names = nn.logical_to_mesh_axes((BATCH, "activation_length_no_heads"))
 
+    breakpoint()
     @functools.partial(
         shard_map,
         mesh=self.mesh,
