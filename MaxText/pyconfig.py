@@ -149,6 +149,7 @@ def validate_model_name(s: str) -> bool:
       "mixtral-8x7b",
       "gemma-7b",
       "gemma-2b",
+      "gemma2-2b",
       "gemma2-9b",
       "gpt3-175b",
       "gpt3-22b",
@@ -316,6 +317,8 @@ class _HyperParameters:
 
     if raw_keys["attn_logits_soft_cap"] == 0.0:
       raw_keys["attn_logits_soft_cap"] = None
+    if raw_keys["final_logits_soft_cap"] == 0.0:
+      raw_keys["final_logits_soft_cap"] = None
 
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys["global_parameter_scale"])
     raw_keys["emb_dim"] = 2**emb_scale * raw_keys["base_emb_dim"]
