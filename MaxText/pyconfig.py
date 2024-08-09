@@ -271,6 +271,7 @@ class _HyperParameters:
     # We initialize the jax distributed system here because it must be done before device backend is initialized.
     max_utils.maybe_initialize_jax_distributed_system(raw_keys)
 
+    # Don't cache to ensure compilation dump
     # if raw_keys["jax_cache_dir"]:
     #   compilation_cache.set_cache_dir(os.path.expanduser(raw_keys["jax_cache_dir"]))
 
