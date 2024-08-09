@@ -268,21 +268,22 @@ def train_step(model, config, state, data, dropout_rng):
 
   """
   train_loss_fn = functools.partial(loss_fn, model, config, data, dropout_rng, is_train=True)
-  grad_fn = jax.value_and_grad(train_loss_fn, has_aux=True)
-  (loss, aux), raw_grads = grad_fn(state.params)
+  loss, aux = train_loss_fn(state.params)
+  # grad_fn = jax.value_and_grad(train_loss_fn, has_aux=True)
+  # (loss, aux), raw_grads = grad_fn(state.params)
   intermediate_outputs = aux["intermediate_outputs"]
 
-  if config.gradient_clipping_threshold > 0:
-    grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
-  else:
-    grads = raw_grads
-  new_state = state.apply_gradients(grads=grads)
+  # if config.gradient_clipping_threshold > 0:
+  #   grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
+  # else:
+  #   grads = raw_grads
+  # new_state = state.apply_gradients(grads=grads)
   metrics = {
       "scalar": {
           "learning/loss": loss,
-          "learning/grad_norm": max_utils.l2norm_pytree(grads),
-          "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
-          "learning/param_norm": max_utils.l2norm_pytree(new_state.params),
+          # "learning/grad_norm": max_utils.l2norm_pytree(grads),
+          # "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
+          # "learning/param_norm": max_utils.l2norm_pytree(new_state.params),
       },
       "scalars": {},
   }
@@ -290,7 +291,7 @@ def train_step(model, config, state, data, dropout_rng):
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
-  return new_state, metrics
+  return state, metrics
 
 
 def eval_step(model, config, state, data, dropout_rng):
@@ -504,8 +505,8 @@ def train_loop(config, state=None):
   else:
     p_train_step = jax.jit(
         functional_train,
-        in_shardings=in_shard_train,
-        out_shardings=out_shard_train,
+        # in_shardings=in_shard_train,
+        # out_shardings=out_shard_train,
         static_argnums=static_argnums_train,
         donate_argnums=donate_argnums_train,
     )

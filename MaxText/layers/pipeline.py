@@ -341,7 +341,7 @@ class Pipeline(nn.Module):
         trans_in_fn=prepare_vars_for_main_vmap,
     )
 
-   # TODO: Replace this by shard_map =D
+   # shmap =D
    use_shard_map = True
    if not use_shard_map:
     stages_output = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
