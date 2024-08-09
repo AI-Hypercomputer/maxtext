@@ -73,11 +73,22 @@ class HFNormalizeFeatures(grain.MapTransform):
 class HFDataSource(grain.RandomAccessDataSource):
   """A class that makes HuggingFace IterableDataset a grain datasource without random access support"""
 
-  def __init__(self, dataset: datasets.IterableDataset, dataloading_host_index: int, dataloading_host_count: int, num_threads: int):
+  def __init__(self,
+                dataset: datasets.IterableDataset,
+                dataloading_host_index: int,
+                dataloading_host_count: int,
+                num_threads: int,
+                generate_padding_example: bool,
+                max_target_length: int,
+                data_column_name: str
+                ):
     self.dataset = dataset
     self.num_threads = num_threads
     self.dataloading_host_count = dataloading_host_count
     self.dataloading_host_index = dataloading_host_index
+    self.generate_padding_example = generate_padding_example
+    self.max_target_lenth = max_target_length
+    self.data_column_name = data_column_name
     self.n_shards = dataset.n_shards
     self._check_shard_count()
     self.dataset_shards = [dataloading_host_index * self.num_threads + i for i in range(self.num_threads)]
@@ -105,15 +116,18 @@ class HFDataSource(grain.RandomAccessDataSource):
                     )
 
   def _update_shard(self, idx):
-    if self.dataset_shards[idx] < self.n_shards:
+    new_shard = self.dataset_shards[idx] + self.dataloading_host_count * self.num_threads
+    if new_shard < self.n_shards:
       max_logging.log(f"Updating host {self.dataloading_host_index} dataset {idx}, was on shard {self.dataset_shards[idx]}")
-      self.dataset_shards[idx] += self.dataloading_host_count * self.num_threads
-      max_logging.log(f"New shard is {self.dataset_shards[idx]}")
+      max_logging.log(f"New shard is {new_shard}")
+      self.dataset_shards[idx] = new_shard
       self.datasets[idx] = split_dataset_by_node(self.dataset, world_size=self.n_shards, rank=self.dataset_shards[idx])
       self.data_iters[idx] = iter(self.datasets[idx])
     else:
       max_logging.log(f"Run out of shards on host {self.dataloading_host_index}, shard {self.dataset_shards[idx]} is not available")
       self.out_of_data = True
+      if self.generate_padding_example:
+        max_logging.log(f"Host {self.dataloading_host_index} will start generating all-0 padding examples until step number is met.")
 
 
   def __len__(self):
@@ -131,7 +145,10 @@ class HFDataSource(grain.RandomAccessDataSource):
     while True:
       try:
         if self.out_of_data:
-          return None
+          if self.generate_padding_example:
+            return {self.data_column_name: np.zeros(self.max_target_lenth, dtype=np.int32)}
+          else:
+            return None
         data = next(self.data_iters[idx])
         return data
       except StopIteration:
