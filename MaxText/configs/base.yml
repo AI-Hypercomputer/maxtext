@@ -312,6 +312,9 @@ init_weights_seed: 0
 # You may disable clipping by setting gradient_clipping_threshold to zero.
 gradient_clipping_threshold: 1.0
 
+# Use gradient accumulation to update the weight every x steps.
+gradient_accumulation_steps: 1
+
 # AdamW optimizer parameters
 # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
 opt_type: "adamw"  # one of "adam_pax" or "adamw"

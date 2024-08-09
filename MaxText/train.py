@@ -55,6 +55,7 @@ import jax.numpy as jnp
 from jax import random
 from jax.sharding import Mesh
 from jax.experimental import checkify
+from jax.tree_util import tree_map
 
 from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
@@ -79,7 +80,10 @@ def validate_train_config(config):
   if not config.base_output_directory.startswith("gs://"):
     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
   assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive integer."
-
+  
+  if config.quantization=='fp8':
+    # pylint: disable=line-too-long
+    assert config.gradient_accumulation_steps == 1, "fp8 can't be used with gradient_accumulation_steps right now. Please use other quantization or set gradient_accumulation_steps to 1"
 
 def get_first_step(state):
   with jax.spmd_mode("allow_all"):
@@ -146,12 +150,31 @@ def write_metrics_to_tensorboard(writer, metrics, step, config):
 
     full_log = step % config.log_period == 0
 
-    max_logging.log(
+    log_message = (
+      f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
+      f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
+      f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
+      f"loss: {metrics['scalar']['learning/loss']:.3f}"
+    )
+
+    if config.gradient_accumulation_steps == 1:
+      log_message = (
         f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
         f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
         f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
         f"loss: {metrics['scalar']['learning/loss']:.3f}"
-    )
+      )
+    else:
+      log_message = (
+        # pylint: disable=line-too-long
+        f"completed step: {step}, seconds per gradient accumulation step: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
+        f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
+        f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
+        f"loss: {metrics['scalar']['learning/loss']:.3f}, "
+        f"gradient_accumulation_steps: {config.gradient_accumulation_steps}" 
+      )
+
+    max_logging.log(log_message)
 
     if full_log and jax.process_index() == 0:
       max_logging.log(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
@@ -251,6 +274,13 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   }
   return loss, aux
 
+def train_substep(model, config, state, data, dropout_rng):
+    train_loss_fn = functools.partial(loss_fn, model, config, data, dropout_rng, is_train=True)
+    grad_fn = jax.value_and_grad(train_loss_fn, has_aux=True)
+
+    (loss, aux), raw_grads = grad_fn(state.params)
+
+    return loss, aux, raw_grads
 
 def train_step(model, config, state, data, dropout_rng):
   """
@@ -267,21 +297,27 @@ def train_step(model, config, state, data, dropout_rng):
     rng2: A new rng key that can be used in future calls.
 
   """
-  train_loss_fn = functools.partial(loss_fn, model, config, data, dropout_rng, is_train=True)
-  grad_fn = jax.value_and_grad(train_loss_fn, has_aux=True)
-  (loss, aux), raw_grads = grad_fn(state.params)
-  intermediate_outputs = aux["intermediate_outputs"]
+  # Initialize grads_accumulation using params
+  raw_grads_accumulation = tree_map(jnp.zeros_like, state.params)
 
+  for grad_accumulate_substep in range(config.gradient_accumulation_steps):
+    loss, aux, raw_grads = train_substep(model, config, state, data[grad_accumulate_substep], dropout_rng)
+    intermediate_outputs = aux["intermediate_outputs"]
+    raw_grads_accumulation = tree_map(lambda x, y: x + y, raw_grads_accumulation, raw_grads)
+
+  final_raw_grads = tree_map(lambda x: x / config.gradient_accumulation_steps, raw_grads_accumulation)
+  
   if config.gradient_clipping_threshold > 0:
-    grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
+    final_grads = maxtext_utils.apply_gradient_clipping(final_raw_grads, state, config.gradient_clipping_threshold)
   else:
-    grads = raw_grads
-  new_state = state.apply_gradients(grads=grads)
+    final_grads = final_raw_grads
+
+  new_state = state.apply_gradients(grads=final_grads)
   metrics = {
       "scalar": {
           "learning/loss": loss,
-          "learning/grad_norm": max_utils.l2norm_pytree(grads),
-          "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
+          "learning/grad_norm": max_utils.l2norm_pytree(final_grads),
+          "learning/raw_grad_norm": max_utils.l2norm_pytree(final_raw_grads),
           "learning/param_norm": max_utils.l2norm_pytree(new_state.params),
       },
       "scalars": {},
@@ -531,6 +567,7 @@ def train_loop(config, state=None):
   last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1, first_profiling_step, config.steps - 1)
 
   example_batch = None
+  example_batch_arr= []
   last_step_completion = datetime.datetime.now()
   prof = profiler.Profiler(config)
   for step in np.arange(start_step, config.steps):
@@ -538,15 +575,18 @@ def train_loop(config, state=None):
       prof.activate()
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
-      example_batch = load_next_batch(data_iterator, example_batch, config)
-      check_example_batch(config, example_batch=example_batch)
+      for _ in range(config.gradient_accumulation_steps):
+        example_batch = load_next_batch(data_iterator, example_batch, config)
+        check_example_batch(config, example_batch=example_batch)
+        example_batch_arr.append(example_batch)
+
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, step=step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, metrics = p_train_step(state, example_batch, nextrng)
+        state, metrics = p_train_step(state, example_batch_arr, nextrng)
 
     new_time = datetime.datetime.now()
-    record_scalar_metrics(metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
+    record_scalar_metrics(metrics, (new_time - last_step_completion)/config.gradient_accumulation_steps, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
