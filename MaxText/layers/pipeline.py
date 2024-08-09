@@ -393,8 +393,6 @@ class Pipeline(nn.Module):
 
       # add back a stage dimension
       output_activation=jnp.expand_dims(output_activation, axis=0)
-      #breakpoint()
-
 
       return output_activation
     stages_output = run_microbatch_iteration(stage_weights, stages_inputs, stages_segment_ids, stages_positions)
@@ -477,6 +475,7 @@ class Pipeline(nn.Module):
        stage_outputs = stage_outputs[0] # Remove extra dimension created for the circular vmap
      broadcasted_stage_outpus = jax.lax.broadcast(stage_outputs[0], [self.config.global_batch_size_to_train_on // self.microbatch_size])
      return jnp.reshape(broadcasted_stage_outpus, [self.config.global_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim])
+
     def run_iteration_scannable(model,loop_state, xs):
        # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
        # the run_one_iteration in this method - the first argument model (i.e. self) is a nn.module instance.

@@ -333,7 +333,6 @@ class Decoder(nn.Module):
           stage_module = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_layers_per_pipeline_stage, "layers_per_stage", mesh)
         elif not cfg.scan_layers:
           stage_module=SequentialBlockDecoderLayers(decoder_layer=RemattedBlockLayer, num_decoder_layers=cfg.num_layers_per_pipeline_stage, config=cfg, mesh=mesh,quant=self.quant)
-        #pipeline_module = pipeline.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)
         y = self.pipeline_module(y,
             decoder_segment_ids,
             decoder_positions,
