@@ -505,8 +505,8 @@ def train_loop(config, state=None):
   else:
     p_train_step = jax.jit(
         functional_train,
-        # in_shardings=in_shard_train,
-        # out_shardings=out_shard_train,
+        in_shardings=in_shard_train,
+        out_shardings=out_shard_train,
         static_argnums=static_argnums_train,
         donate_argnums=donate_argnums_train,
     )

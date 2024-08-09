@@ -87,7 +87,6 @@ class DenseGeneral(nn.Module):
     kernel_init: initializer function for the weight matrix.
     use_bias: whether to add bias in linear transformation
     quant: quantization config, defaults to None implying no quantization.
-    all_gather_axes: indexes of axes to all gather before computation via a sharding constraint
   """
 
   features: Union[Iterable[int], int]
@@ -98,7 +97,6 @@ class DenseGeneral(nn.Module):
   kernel_axes: Tuple[str, ...] = ()
   quant: Optional[Quant] = None
   use_bias: bool = False
-  all_gather_axes: Tuple[int] = ()
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -142,11 +140,6 @@ class DenseGeneral(nn.Module):
           kernel_out_axis,
       )
     kernel = jnp.asarray(kernel, self.dtype)
-    if len(self.all_gather_axes) > 0:
-      sharding_constraint = list(self.kernel_axes)
-      for idx in self.all_gather_axes:
-        sharding_constraint[idx] = None # All gather alongs this axes
-      kernel = nn.with_logical_constraint(kernel, tuple(sharding_constraint))
 
     contract_ind = tuple(range(0, len(axis)))
     output = compute_dot_general(inputs, kernel, axis, contract_ind)
@@ -229,7 +222,6 @@ class MlpBlock(nn.Module):
           name="wi",
           quant=self.quant,
           use_bias=self.use_bias,
-          all_gather_axes=(0,) if cfg.force_fsdp_ag else ()
       )(inputs)
       for idx, act_fn in enumerate(self.activations):
         y = _convert_to_activation_function(act_fn)(x[:, :, idx, ...])
@@ -246,7 +238,6 @@ class MlpBlock(nn.Module):
             name=dense_name,
             quant=self.quant,
             use_bias=self.use_bias,
-            all_gather_axes=(0,) if cfg.force_fsdp_ag else ()
         )(inputs)
         x = _convert_to_activation_function(act_fn)(x)
         activations.append(x)
@@ -268,7 +259,6 @@ class MlpBlock(nn.Module):
         name="wo",
         quant=self.quant,
         use_bias=self.use_bias,
-        all_gather_axes=(1,) if cfg.force_fsdp_ag else ()
     )(x)
 
     output = checkpoint_name(output, "mlpwo")

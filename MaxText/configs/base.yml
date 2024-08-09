@@ -44,7 +44,6 @@ checkpoint_period: 10_000
 # enables one replica to read the ckpt then broadcast to the rest
 enable_single_replica_ckpt_restoring: False
 
-force_fsdp_ag: False
 force_unroll: False # during generate_param_only_checkpoint should we unroll the loop?
 ############################### END CHECKPOINTING ##################################
 

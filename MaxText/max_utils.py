@@ -509,7 +509,6 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     state, state_mesh_annotations, _ = setup_initial_state(
       model, None, None, config, rng, mesh, checkpoint_manager, False
       )
-    #breakpoint()
   else:
     # Load params from checkpoint
     max_logging.log(f"Loading decode params from {config.load_parameters_path}")

@@ -341,26 +341,10 @@ class Pipeline(nn.Module):
         trans_in_fn=prepare_vars_for_main_vmap,
     )
 
-   # shmap =D
    if not self.config.use_shmap:
     stages_output = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
    else:
-    # get weights
-    # print("we are trying here", flush=True)
-    # print(dir(self.layers))
-    #stage_weights = prepare_vars_for_main_vmap(self.variables)
     stage_weights = prepare_vars_for_main_vmap(self.layers.variables)
-    
-    #stage_weights['params'] = stage_weights['params']['layers']
-
-    # def get_stage_partition_spec(weight_partition_spec):
-    #   def get_stage_partition_spec_leaf(leaf_partition_spec):
-    #     new_partition_spec = [None] * len(leaf_partition_spec)
-    #     new_partition_spec[0] = "stage"
-    #     from jax.sharding import PartitionSpec
-    #     return PartitionSpec(*new_partition_spec)
-    #   partition_spec_tree = jax.tree.map(get_stage_partition_spec_leaf, weight_partition_spec)
-    #   return partition_spec_tree
 
     def get_stage_partition_spec(stage_weights):
       def get_stage_partition_spec_leaf(leaf_weight):
@@ -404,7 +388,7 @@ class Pipeline(nn.Module):
       # run computation
       output_activation, _ = decoder_layer_instance.apply(individual_weights, individual_activations, individual_segments, individual_positions, deterministic, model_mode)
 
-      # permute
+      # we could permute explicitly here (or in a different call) instead of rotating rows of stage outputs
       # jax.lax.ppermute(output_activation, 'stage', [(i, (i+1) % stage) for i in range(stage)])
 
       # add back a stage dimension
@@ -413,7 +397,6 @@ class Pipeline(nn.Module):
 
 
       return output_activation
-    #stages_output = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
     stages_output = run_microbatch_iteration(stage_weights, stages_inputs, stages_segment_ids, stages_positions)
 
    if self.config.scan_layers and not self.config.use_shmap:
@@ -421,7 +404,6 @@ class Pipeline(nn.Module):
 
    new_state = self.get_new_loop_state(stages_output, loop_state)
    return new_state
-  
 
   @nn.compact
   def __call__(self, inputs: jnp.ndarray, segment_ids: jnp.ndarray, positions:jnp.ndarray, deterministic: bool, model_mode=common_types.MODEL_MODE_TRAIN) -> jnp.ndarray:
@@ -495,8 +477,6 @@ class Pipeline(nn.Module):
        stage_outputs = stage_outputs[0] # Remove extra dimension created for the circular vmap
      broadcasted_stage_outpus = jax.lax.broadcast(stage_outputs[0], [self.config.global_batch_size_to_train_on // self.microbatch_size])
      return jnp.reshape(broadcasted_stage_outpus, [self.config.global_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim])
-    else:
-      print("We are not initializing!", flush=False)
     def run_iteration_scannable(model,loop_state, xs):
        # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
        # the run_one_iteration in this method - the first argument model (i.e. self) is a nn.module instance.
