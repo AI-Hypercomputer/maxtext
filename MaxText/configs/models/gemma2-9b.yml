@@ -1,4 +1,4 @@
-# Copyright 2023 Google LLC
+# Copyright 2024 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,15 +18,16 @@ base_emb_dim: 3584
 base_num_query_heads: 16
 base_num_kv_heads: 8
 base_mlp_dim: 14336
-base_num_decoder_layers: 42
+base_num_decoder_layers: 21 # half of the real number of layers because we merge [local_attention, global_attention] into one layer 
 head_dim: 256
 mlp_activations: ["gelu","linear"]
 vocab_size: 256128
-decoder_block: "gemma"
+decoder_block: "gemma2"
 normalization_layer_epsilon: 1.e-06
 logits_via_embedding: True
-# final_logit_softcap: 30.0
+attention: "dot_product"
+final_logits_soft_cap: 30.0
 attn_logits_soft_cap: 50.0
 sliding_window_size: 4096
-# use_post_attn_norm: True
-# use_post_ffw_norm: True
+use_post_attn_norm: True
+use_post_ffw_norm: True
