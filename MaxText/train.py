@@ -150,6 +150,7 @@ def write_metrics_to_tensorboard(writer, metrics, step, config):
         f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
         f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
         f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
+        f"total_weights: {metrics['scalar']['learning/total_weights']}, "
         f"loss: {metrics['scalar']['learning/loss']:.3f}"
     )
 
@@ -271,6 +272,7 @@ def train_step(model, config, state, data, dropout_rng):
   grad_fn = jax.value_and_grad(train_loss_fn, has_aux=True)
   (loss, aux), raw_grads = grad_fn(state.params)
   intermediate_outputs = aux["intermediate_outputs"]
+  total_weights = aux["total_weights"]
 
   if config.gradient_clipping_threshold > 0:
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
@@ -280,6 +282,7 @@ def train_step(model, config, state, data, dropout_rng):
   metrics = {
       "scalar": {
           "learning/loss": loss,
+          "learning/total_weights": total_weights,
           "learning/grad_norm": max_utils.l2norm_pytree(grads),
           "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
           "learning/param_norm": max_utils.l2norm_pytree(new_state.params),
@@ -571,6 +574,7 @@ def train_loop(config, state=None):
           eval_metrics = p_eval_step(state, eval_batch, nextrng)
         cumulative_eval_metrics["total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
         cumulative_eval_metrics["total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
+        max_logging.log(f"Completed eval step {eval_step_count}")
         eval_step_count += 1
       eval_loss = cumulative_eval_metrics["total_loss"] / (cumulative_eval_metrics["total_weights"] + EPS)
       max_logging.log(f"average loss after {step=}: {eval_step_count=}, {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
