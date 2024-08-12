@@ -13,6 +13,7 @@
 #  limitations under the License.
 
 """Tests for Attentions."""
+# python MaxText/attentions_test.py MaxText/configs/base.yml global_parameter_scale=128 per_device_batch_size=4
 
 import itertools
 import random
