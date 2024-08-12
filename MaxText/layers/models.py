@@ -325,7 +325,8 @@ class Decoder(nn.Module):
 
     RemattedBlockLayer = nn.remat(  # pylint: disable=invalid-name
         BlockLayer,
-        prevent_cse=not cfg.scan_layers,
+        #prevent_cse=not cfg.scan_layers,
+        prevent_cse=True,
         policy=policy,
         static_argnums=(-1, -2, -3, -4, -5),
     )

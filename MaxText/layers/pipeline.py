@@ -433,7 +433,8 @@ class Pipeline(nn.Module):
       remat_policy = jax.checkpoint_policies.save_only_these_names('iteration_input')
     run_one_iteration_rematted = nn.remat(
       run_iteration_scannable,
-      prevent_cse=not self.config.scan_pipeline_iterations, # prevent_cse not used with scan
+      #prevent_cse=not self.config.scan_pipeline_iterations, # prevent_cse not used with scan
+      prevent_cse=True,
       policy=remat_policy
     )
 
