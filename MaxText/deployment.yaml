@@ -21,14 +21,15 @@ spec:
   - metadata-cache:ttl-secs:-1
   - metadata-cache:stat-cache-max-size-mb:-1
   - metadata-cache:type-cache-max-size-mb:-1
-#  - file-system:kernel-list-cache-ttl-secs:-1
+  - file-system:kernel-list-cache-ttl-secs:-1
   - file-cache:max-size-mb:-1
-  - file-cache:cache-file-for-range-read:true
-  - file-cache:enable-parallel-downloads:true
+  - file-cache:cache-file-for-range-read:false
+  - file-cache:enable-parallel-downloads:false
   csi:
     driver: gcsfuse.csi.storage.gke.io
     volumeHandle: xai-hf-dataset-parquet # unique bucket name. xai-hf-dataset-parquet-10g for the 10G * 12K dataset.
     volumeAttributes:
+      # enableMetrics: "true"
       skipCSIBucketAccessCheck: "true"
 ---
 apiVersion: v1
@@ -62,8 +63,8 @@ spec:
       replicas: 1
       template:
         spec:
-          parallelism: 1024    # Equal to the number of VMs per slice
-          completions: 1024    # Same as the above.
+          parallelism: 64    # Equal to the number of VMs per slice
+          completions: 64    # Same as the above.
           backoffLimit: 0   # When any pod fails, the job is failed
           template:
             metadata:
@@ -79,28 +80,16 @@ spec:
               initContainers:
               # Metadata Prefetch native sidecar.
               - name: metadata-prefetch-container
-                image: alpine:3.20
+                image: ubuntu:22.04
                 restartPolicy: Always
                 command:
                 - "/bin/sh"
                 - "-c"
                 - |
-                  _term() { 
-                    echo "Caught SIGTERM signal: Terminating..." 
-                    kill -TERM "$child" 2>/dev/null
-                    exit 0
-                  }
-
-                  trap _term SIGTERM
-
-                  echo "Starting ls on the bucket..."
-                  # Redirect output to /dev/null to prevent storage of output.
-                  ls -R /mnt/gcsfuse > /dev/null && \
-                  echo "Metadata prefetch complete. Going to sleep..." && \
-                  sleep infinite &
-
-                  child=$! 
-                  wait "$child"
+                   echo "Starting ls on the bucket..."
+                   # Redirect output to /dev/null to prevent storage of output.
+                   echo "Metadata prefetch for /mnt/gcsfuse..." && ls -R /mnt/gcsfuse > /dev/null && echo "Metadata prefetch for /mnt/gcsfuse complete." &
+                   tail -f /dev/null
                 securityContext:
                   allowPrivilegeEscalation: false
                   capabilities:
@@ -138,7 +127,7 @@ spec:
               serviceAccountName: bernardhan-benchmark
               containers:
               - name: jax-cpu
-                image: gcr.io/gcs-tess/bernardhan_ckpt_runner_test
+                image: gcr.io/gcs-tess/bernardhan_test_n
                 
                 env: 
                 - name: REPLICATED_JOB_NAME
@@ -154,9 +143,9 @@ spec:
                     fieldRef:
                       fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
                 - name: PROCESSES_IN_JOB
-                  value: "1024"
+                  value: "64"
                 - name: JAX_PROCESS_COUNT
-                  value: "1024"
+                  value: "64"
                 
                 - name: JOBSET_NAME
                   value: "xpk-test-workload"
@@ -173,8 +162,8 @@ spec:
                 - bash
                 - -c
                 - |
-                  export COMMON_RUN_FLAGS="enable_checkpointing=False ici_data_parallelism=8 ici_fsdp_parallelism=128 hardware=cpu";
-                  export BENCHMARK_RUN_FLAGS="dataset_bucket=xai-hf-dataset-parquet epochs=2 local_batch_size=32 prefetch_factor=2 data_loader_num_workers=2 per_step_computation_time=0";
+                  export COMMON_RUN_FLAGS="enable_checkpointing=False hardware=cpu";
+                  export BENCHMARK_RUN_FLAGS="run_name=bernardhan-testing-new-step dataset_directory=/mnt/gcsfuse epochs=2 max_steps=100 local_batch_size=32 prefetch_factor=2 data_loader_num_workers=20 per_step_interval=1.0 data_loader_strategy_name=FileParallelSequentialRead gcs_metrics_bucket=distributed-training-metrics";
                   echo XPK Start: $(date) ; _sigterm() ( kill -SIGTERM $! 2>/dev/null;); trap _sigterm SIGTERM;(JAX_PLATFORMS=cpu python3 MaxText/standalone_dataloader.py MaxText/configs/base.yml ${BENCHMARK_RUN_FLAGS} ${COMMON_RUN_FLAGS}) & PID=$!; while kill -0 $PID 2>/dev/null; do sleep 5; done; wait $PID; EXIT_CODE=$? ;  echo XPK End: $(date); echo EXIT_CODE=$EXIT_CODE;
 
                 volumeMounts:
