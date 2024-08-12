@@ -249,10 +249,10 @@ class Pipeline(nn.Module):
       except_last = jax.lax.slice_in_dim(output_in, 0, self.num_stages - 1, axis=0)
       return jnp.concatenate([last, except_last], axis=0)
     if self.config.pipeline_activation_forwarding:
-      new_shift = _rotate_right(old_prev_outputs)
+      #new_shift = _rotate_right(old_prev_outputs)
       new_prev_outputs = output
     else:
-      new_shift = _rotate_right(output)
+      #new_shift = _rotate_right(output)
       new_prev_outputs = None
 
     if self.use_circ_storage:
@@ -289,7 +289,7 @@ class Pipeline(nn.Module):
     
     new_loop_state = {
       "state_io": new_state,
-      "shift": new_shift,
+      "shift": loop_state["shift"], #new_shift,
       "prev_outputs": new_prev_outputs,
       "circ_storage": new_circ_storage,
       "circ_storage_mover": new_circ_storage_mover,
@@ -382,6 +382,7 @@ class Pipeline(nn.Module):
    if self.config.scan_layers:
      stages_output = stages_output[0]
 
+   loop_state["shift"] = new_shift
    new_state = self.get_new_loop_state(stages_output, loop_state)
    return new_state
 
