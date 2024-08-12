@@ -234,6 +234,14 @@ class Pipeline(nn.Module):
     old_circ_storage = loop_state["circ_storage"]
     old_circ_storage_mover = loop_state["circ_storage_mover"]
     loop_iteration = loop_state["loop_iteration"]
+
+    # Rotate via shamp
+    def _rotate_right_via_shmap(output_in):
+      # Use lax.slice to avoid generating a gather.
+      last = jax.lax.slice_in_dim(output_in, self.num_stages - 1, self.num_stages, axis=0)
+      except_last = jax.lax.slice_in_dim(output_in, 0, self.num_stages - 1, axis=0)
+      return jnp.concatenate([last, except_last], axis=0)
+  
     # Shift becomes a rotated-right version of the previous output
     def _rotate_right(output_in):
       # Use lax.slice to avoid generating a gather.
@@ -317,12 +325,22 @@ class Pipeline(nn.Module):
     )
     return vmap_func
 
+  def rotate_right(self, arr):
+    # Use lax.slice to avoid generating a gather.
+    last = jax.lax.slice_in_dim(arr, self.num_stages - 1, self.num_stages, axis=0)
+    except_last = jax.lax.slice_in_dim(arr, 0, self.num_stages - 1, axis=0)
+    return jnp.concatenate([last, except_last], axis=0)
+    
   def run_one_iteration(self, loop_state, positions, segment_ids, deterministic, model_mode, decoder_layer_instance):
    '''Run one loop iteration - gets weights and inputs for each stage, run the stages in parallel, and update the loop state.'''
    state_io = loop_state['state_io']
    shift = loop_state["shift"]
    circ_storage = loop_state["circ_storage"]
    loop_iteration = loop_state["loop_iteration"]
+   prev_outputs = loop_state["prev_outputs"]
+
+   # rotate prev outputs before doing the computation
+   new_shift = self.rotate_right(prev_outputs)
 
    microbatch_ids, _ = self.get_microbatch_and_repeat_ids(loop_iteration)
 
