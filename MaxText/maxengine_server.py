@@ -19,8 +19,6 @@ import os
 import sys
 import pyconfig
 
-# pylint: disable-next=unused-import
-import register_jax_proxy_backend
 import maxengine_config
 from jetstream.core import server_lib, config_lib
 

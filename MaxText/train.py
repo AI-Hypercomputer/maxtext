@@ -43,8 +43,6 @@ import max_logging
 import optimizers
 import profiler
 import pyconfig
-# pylint: disable-next=unused-import
-import register_jax_proxy_backend
 from vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
