@@ -372,7 +372,8 @@ class _HyperParameters:
     raw_keys["learning_rate_schedule_steps"] = decay_end_step
     raw_keys["warmup_steps_fraction"] = warmup_steps / decay_end_step
     global_batch_size_to_train_on = calculate_global_batch_sizes(raw_keys)[1]
-    raw_keys["eval_interval"] = math.ceil(24567 / global_batch_size_to_train_on)
+    if raw_keys["dataset_type"] != "synthetic":
+      raw_keys["eval_interval"] = math.ceil(24567 / global_batch_size_to_train_on)
 
   @staticmethod
   def update_model_vars(base_config_path, raw_keys, config_name: str):
