@@ -363,15 +363,15 @@ local_batch_size: 32
 prefetch_factor: 2
 # Number of data loader workers (per pod).
 data_loader_num_workers: 2
-# Number of seconds to sleep in between steps. This will not block prefetching.
-per_step_computation_time: 0.0
+# Number of seconds that represents a step interval. Default to 1 second.
+per_step_interval: 1.0
+# Stop training after this number of global steps. Default to -1, which means that the training
+# will instead be stopped by the epochs instead.
+max_steps: -1
 # The directory to which the dataset is stored.
 dataset_directory: "/mnt/gcsfuse"
 # The bucket that holds metrics gathered from each running pod.
 gcs_metrics_bucket: "distributed-training-metrics"
-### Parameters used for GCSFuse
-# The GCS bucket that holds the dataset.
-dataset_bucket: xai-hf-dataset-parquet
 # The strategy used for reading the dataset. The options for this field are specified by the keys of
 # `DATA_LOADER_STRATEGIES_BY_NAME` in MaxText/standalone_dataloader.py.
 data_loader_strategy_name: FileParallelSequentialRead

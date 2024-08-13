@@ -34,6 +34,7 @@ class ParquetIterableDataset(abc.ABC, IterableDataset):
   """
   def __init__(self, allocated_parquet_files: Iterable[str], columns=None, batch_size=1000):
     max_logging.log(f'Using {self.__class__.__name__} strategy.')
+    max_logging.log(f'Allocated with the following data files: {allocated_parquet_files}.')
     self.allocated_parquet_files = allocated_parquet_files
     self.columns = columns
     self.batch_size = batch_size

@@ -261,6 +261,7 @@ def initialize_jax_for_cpu():
       coordinator_address=coordinator_address,
       process_id=pid,
       num_processes=int(os.environ.get("JAX_PROCESS_COUNT")),
+      initialization_timeout=3000,
   )
 
 
