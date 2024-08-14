@@ -52,6 +52,7 @@ jobs:
         docker tag maxtext_base_image gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ matrix.device.type }}
     - name: Upload the image
       run: |
+        gcloud auth configure-docker --quiet
         docker push gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ matrix.device.type }}
 
   common:
@@ -89,6 +90,8 @@ jobs:
       options: ${{ matrix.device.container_resource_option }}
     steps:
     - uses: actions/checkout@v4
+    - name: Set up GCR authentication
+      run: gcloud auth configure-docker --quiet
     - name: Test gsutil installation
       run: which gsutil >/dev/null 2>&1 || { echo >&2 "gsutil is required but not installed. Aborting"; exit 24;}
     - name: Test with pytest
@@ -133,6 +136,8 @@ jobs:
       options: "--privileged"
     steps:
     - uses: actions/checkout@v4
+    - name: Set up GCR authentication
+      run: gcloud auth configure-docker --quiet
     - name: Validate Pedagogical Example, Shmap_collective_matmul
       run: python3 pedagogical_examples/shmap_collective_matmul.py
 
@@ -155,6 +160,8 @@ jobs:
       options: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
     steps:
     - uses: actions/checkout@v4
+    - name: Set up GCR authentication
+      run: gcloud auth configure-docker --quiet
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
     - name: Test train.py with flash attention
