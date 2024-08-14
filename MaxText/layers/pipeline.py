@@ -23,8 +23,10 @@ from flax import linen as nn
 import common_types
 import functools
 from typing import Any
+from jax.experimental import shard_map
+from jax.sharding import NamedSharding, Mesh, PartitionSpec as P
 
-sdclass Pipeline(nn.Module):
+class Pipeline(nn.Module):
   """Module that implements pipelining across stages.
   
   This module will loop over microbatches and execute the main body with a vmap for both the inputs and weights.
@@ -324,13 +326,25 @@ sdclass Pipeline(nn.Module):
         "x_times": self.num_stages}
     )
     return vmap_func
-
+  
   
   def rotate_right_shmap(self, arr):
-    # Use lax.slice to avoid generating a gather.
-    last = jax.lax.slice_in_dim(arr, self.num_stages - 1, self.num_stages, axis=0)
-    except_last = jax.lax.slice_in_dim(arr, 0, self.num_stages - 1, axis=0)
-    return jnp.concatenate([last, except_last], axis=0)
+    axis_names = nn.logical_to_mesh_axes(("activation_stage", "activation_batch", "activation_length", "activation_embed"), rules=self.config.logical_axis_rules)
+    print(f"{axis_names=}")
+    axis_names = P(*("stage", "data", "sequence", "tensor"))
+    print(f"{axis_names=}")
+    @functools.partial(
+      shard_map.shard_map,
+      mesh=self.mesh,
+      in_specs=axis_names,
+      out_specs=axis_names,
+      check_rep=False,
+    )
+    def rotate_shmap(arr):
+      arr = jax.lax.ppermute(arr, 'stage', [(i, (i+1) % self.num_stages) for i in range(self.num_stages)])
+      return arr
+    #return arr
+    return rotate_shmap(arr)
 
   def rotate_right(self, arr):
     # Use lax.slice to avoid generating a gather.
@@ -347,7 +361,8 @@ sdclass Pipeline(nn.Module):
    prev_outputs = loop_state["prev_outputs"]
 
    # rotate prev outputs before doing the computation
-   new_shift = self.rotate_right(prev_outputs)
+   #new_shift = self.rotate_right(prev_outputs)
+   new_shift = self.rotate_right_shmap(prev_outputs)
 
    microbatch_ids, _ = self.get_microbatch_and_repeat_ids(loop_iteration)
 
