@@ -335,7 +335,7 @@ class MoeBlock(nn.Module):
     inputs_shape = inputs.shape
     inputs_2d = jnp.reshape(inputs, (inputs_shape[0] * inputs_shape[1], inputs_shape[2]))
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-    weights = jax.nn.softmax(weights.astype(self.weight_dtype), axis=-1).astype(self.dtype)
+    weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.dtype)
     flatten_selected_experts = jnp.ravel(selected_experts)
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     sorted_indices = sorted_selected_experts // self.num_experts_per_tok
@@ -409,12 +409,40 @@ class MoeBlock(nn.Module):
       return output
     return wrapper(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
 
-  def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
-    top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-    flattened_top_k_weights = top_k_weights.reshape(-1, self.num_experts_per_tok)
+  def generate_masks(self, inputs, top_k_indices):
+      # calculate expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
+      batch_size, seq_len, _ = inputs.shape
+      tokens_per_batch = batch_size * seq_len * self.num_experts_per_tok
+      expert_capacity = int((tokens_per_batch / self.num_experts) * self.config.capacity_factor)
+      max_logging.log(f"Applying potential token dropping with an expert_capacity of {expert_capacity}")
 
-    softmax_probs = jax.nn.softmax(flattened_top_k_weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
-    softmax_probs = softmax_probs.reshape(gate_logits.shape[:-1] + (self.num_experts_per_tok,))
+      # calculate expert mask and drop tokens if needed
+      # shape of output expert mask: (batch, sequence, num_experts_per_tok)
+      # 
+      # A small example:
+      # give num_experts=4 & num_experts_per_tok=2, and two tokens are routed to expert [0, 1] & [1, 3],
+      # then expert_mask becomes [[[[1, 0, 0, 0],[0, 1, 0, 0]], [[0, 1, 0, 0],[0, 0, 0, 1]]]],
+      # after cumsum, expert_token_count becomes [[[[1, 0, 0, 0],[1, 1, 0, 0]], [[1, 2, 0, 0],[1, 2, 0, 1]]]],
+      # if we set expert_capacity=1, 
+      # trunc_expert_mask becomes [[[[1, 0, 0, 0],[0, 1, 0, 0]], [[0, 0, 0, 0],[0, 0, 0, 1]]]],
+      # so the 2nd token for expert #1 ([0, 1] & [1, 3]) is dropped, output of updated_expert_mask is [[[1, 1],[0, 1]]].
+      expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
+      reshaped_expert_mask = jnp.reshape(expert_mask, (batch_size, seq_len * self.num_experts_per_tok, self.num_experts))
+      expert_token_count = jnp.cumsum(reshaped_expert_mask, axis=1)
+      expert_token_count = jnp.reshape(expert_token_count, ((batch_size, seq_len, self.num_experts_per_tok, self.num_experts)))
+      trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity)
+      updated_expert_mask = jnp.sum(trunc_expert_mask, axis=3)
+      return updated_expert_mask
+
+  def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
+    # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
+    top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+    softmax_probs = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+
+    # token dropping if needed
+    if self.config.capacity_factor > 0:
+      expert_mask = self.generate_masks(inputs, top_k_indices)
+      softmax_probs *= expert_mask
 
     weights = jnp.zeros_like(gate_logits)
     index_update = (jnp.arange(gate_logits.shape[0])[:, None, None], jnp.arange(gate_logits.shape[1])[:, None], top_k_indices)
