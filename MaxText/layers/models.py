@@ -238,6 +238,7 @@ class Decoder(nn.Module):
             "value_proj",
             "key_proj",
             "qkv_proj",
+            "context",
             "out_proj",
         )
       elif cfg.remat_policy == "save_qkv_proj":

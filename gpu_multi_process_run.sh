@@ -14,6 +14,7 @@ set -o pipefail
 export GPUS_PER_NODE=$GPUS_PER_NODE
 export JAX_COORDINATOR_PORT=$JAX_COORDINATOR_PORT
 export JAX_COORDINATOR_ADDRESS=$JAX_COORDINATOR_ADDRESS
+export JAX_NUM_PROCESSES=$((NNODES * GPUS_PER_NODE))
 
 set_nccl_gpudirect_tcpx_specific_configuration() {
   if [[ "$USE_GPUDIRECT" == "tcpx" ]] || [[ "$USE_GPUDIRECT" == "fastrak" ]]; then
@@ -31,8 +32,6 @@ set_nccl_gpudirect_tcpx_specific_configuration() {
     export NVTE_FUSED_ATTN=1
     export TF_CPP_MAX_LOG_LEVEL=100
     export TF_CPP_VMODULE=profile_guided_latency_estimator=10
-    export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
-
     if [[ "$USE_GPUDIRECT" == "tcpx" ]]; then
       echo "Using GPUDirect-TCPX"
       export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/tcpx/lib64"
@@ -50,6 +49,7 @@ set_nccl_gpudirect_tcpx_specific_configuration() {
       export NCCL_NSOCKS_PERTHREAD=4
       export NCCL_P2P_PXN_LEVEL=0
       export NCCL_SOCKET_NTHREADS=1
+      export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
     elif [[ "$USE_GPUDIRECT" == "fastrak" ]]; then
       echo "Using GPUDirect-TCPFasTrak"
       export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
@@ -66,6 +66,9 @@ set_nccl_gpudirect_tcpx_specific_configuration() {
       export NCCL_MIN_NCHANNELS=4
       export NCCL_TUNER_CONFIG_PATH=/usr/local/nvidia/lib64/a3plus_tuner_config.textproto
       export NCCL_TUNER_PLUGIN=libnccl-tuner.so
+      export NCCL_SHIMNET_GUEST_CONFIG_CHECKER_CONFIG_FILE=/usr/local/nvidia/lib64/a3plus_guest_config.textproto
+      export NCCL_FASTRAK_PLUGIN_ACCEPT_TIMEOUT_MS=600000
+      export XLA_PYTHON_CLIENT_MEM_FRACTION=0.94
     fi
   else
     echo "NOT using GPUDirect"
@@ -144,9 +147,13 @@ resolve_coordinator_ip
 set -e
 
 PIDS=()
-eval ${COMMAND} &
-PID=$!
-PIDS+=($PID)
+for ((LOCAL_DEVICE_ID=0; LOCAL_DEVICE_ID <= $((GPUS_PER_NODE - 1)); LOCAL_DEVICE_ID++)); do
+  PROCESS_ID=$(($GPUS_PER_NODE*$NODE_RANK + $LOCAL_DEVICE_ID))
+  LOCAL_DEVICE_ID=$LOCAL_DEVICE_ID PROCESS_ID=$PROCESS_ID eval ${COMMAND} &
+  PID=$!
+  PIDS+=($PID)
+  echo "Launched MaxText/train.py for local_device_id: $LOCAL_DEVICE_ID process_id: $PROCESS_ID and PID $PID"
+done
 
 wait_all_success_or_exit "${PIDS[@]}"
 
