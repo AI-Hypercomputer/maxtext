@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:experimental
-ARG BASEIMAGE=ghcr.io/nvidia/jax:base
+ARG BASEIMAGE=ghcr.io/nvidia/jax:maxtext-2024-07-17
 FROM $BASEIMAGE
 
 # Stopgaps measure to circumvent gpg key setup issue.
@@ -42,8 +42,8 @@ WORKDIR /deps
 COPY . .
 RUN ls .
 
-RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
-RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} DEVICE=${ENV_DEVICE}
+# RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
+# RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} DEVICE=${ENV_DEVICE}
 
 
 WORKDIR /deps
