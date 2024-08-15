@@ -95,7 +95,8 @@ def get_train_iter(config, mesh):
 
 
 def test_tpu_flash_attention(attention_op, query, key, value, decoder_segment_ids):
-  out = attention_op(query, key, value, decoder_segment_ids, common_types.MODEL_MODE_TRAIN)
+  with jax.named_scope("attention_op"):
+    out = attention_op(query, key, value, decoder_segment_ids, common_types.MODEL_MODE_TRAIN)
   return out
 
 
