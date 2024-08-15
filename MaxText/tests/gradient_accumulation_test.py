@@ -19,6 +19,8 @@ import pytest
 import string
 import random
 from train import main as train_main
+import sys
+import subprocess
 
 def generate_random_string(length=10):
     characters = string.ascii_letters  # Include letters, digits, and punctuation
@@ -31,36 +33,22 @@ class GradientAccumulationTest(unittest.TestCase):
   def test_grad_accumulate_same_loss(self):
     random_suffix = generate_random_string()
     run_accumulate_metrics_file = f"/tmp/runner_grad_accumulate_{random_suffix}.txt"
-    print(f"{run_accumulate_metrics_file=}")
     run_regular_metrics_file = f"/tmp/runner_regular_{random_suffix}.txt"
-    print(f"{run_regular_metrics_file=}")
-    shared_maxtext_args = [
-       None,
-        "configs/base.yml",
-          r"base_output_directory=gs://runner-maxtext-logs",
-          r"dataset_path=gs://maxtext-dataset",
-          "gradient_clipping_threshold=0", # Ensures we are testing raw scales of gradients (clipping off)
-          "enable_checkpointing=False",
-          "base_emb_dim=256",
-          "base_num_decoder_layers=4",
-          "tokenizer_path=../assets/tokenizer.llama2",
-          "steps=50"
-    ]
-    # Run with gradient accumulation with accumulate_steps=10, per_device_batch=1 --> simulating per_device_batch=10
-    train_main(shared_maxtext_args + [
-          "run_name=runner_grad_accumulate",
-          f"metrics_file={run_accumulate_metrics_file}",
-          "per_device_batch_size=1",
-          "gradient_accumulation_steps=10",       
-    ])
-
-    #Run without gradient accumulation with per_device_batch=10
-    train_main(shared_maxtext_args + [
-          "run_name=runner_grad_accumulate_regular",
-          f"metrics_file={run_regular_metrics_file}",
-          "per_device_batch_size=10",
-          "gradient_accumulation_steps=1",       
-    ])
+    
+    cmd = ["bash", "tests/gradient_accumulation_script.sh", run_accumulate_metrics_file, run_regular_metrics_file]
+    try:
+      result = subprocess.run(
+            cmd,                # Command to run the script
+            check=True,         # Raise an exception if the script fails
+            stdout=sys.stdout,  # Stream to stdout
+            stderr=sys.stdout,  # Stream to stdout
+            text=True           # Decode output and error as text
+      )
+      return result
+    except subprocess.CalledProcessError as e:
+      print(f"Error running script: {e.returncode}")
+      print(f"Output: {e.stdout}")
+      print(f"Error: {e.stderr}")
 
     # Assert losses roughly equal
     with open(run_accumulate_metrics_file, 'r', encoding='utf8') as accum_run,\

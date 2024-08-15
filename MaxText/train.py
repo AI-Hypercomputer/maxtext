@@ -305,6 +305,7 @@ def train_step(model, config, state, data, dropout_rng):
       length = config.gradient_accumulation_steps)
     loss = grad_and_loss['loss'] / grad_and_loss['total_weights']
     raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss['total_weights'], grad_and_loss['grad'])
+    aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)
   else:
     grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
@@ -584,7 +585,6 @@ def train_loop(config, state=None):
       record_goodput(recorder, config, step=step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, nextrng)
-
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
     last_step_completion = new_time
