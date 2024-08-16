@@ -40,6 +40,7 @@ TOTAL_TRAINING_TIME_DIRECTORY = "total_training_time"
 PER_STEP_DATA_LOADING_TIME_DIRECTORY = "per_step_data_loading_time"
 PER_STEP_TIME_DIRECTORY = "per_step_time"
 PER_EPOCH_TIME_DIRECTORY = "per_epoch_time"
+HYPER_PARAMETERS_FILE_NAME = "hyperparameters.csv"
 
 DATA_LOADER_STRATEGIES_BY_NAME = MappingProxyType({
     'FileParallelSequentialRead': FileParallelSequentialRead,
@@ -263,6 +264,23 @@ def data_load_loop(config):
         os.path.join(config.run_name, PER_EPOCH_TIME_DIRECTORY, base_name), 
         epoch_times
     )
+    
+    # Upload hyperparameters. Only need to upload from rank 0 as the same hyperparameters
+    # are used across the fleet.
+    if jax.process_index() == 0:
+      hyperparameters = {
+          "epochs": config.epochs,
+          "local_batch_size": config.local_batch_size,
+          "prefetch_factor": config.prefetch_factor,
+          "data_loader_num_workers": config.data_loader_num_workers,
+          "per_step_interval": config.per_step_interval,
+          "max_steps": config.max_steps
+      }
+      storage_utils.upload_csv(
+          config.gcs_metrics_bucket,
+          os.path.join(config.run_name, HYPER_PARAMETERS_FILE_NAME),
+          [list(hyperparameters.keys()), list(hyperparameters.values())]
+      )
     
     max_logging.log(f"Finished uploading metrics to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()}")
     
