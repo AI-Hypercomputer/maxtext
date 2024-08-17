@@ -25,6 +25,15 @@ import os
 import sys
 from etils import epath
 import functools
+import warnings
+#warnings.filterwarnings("error")
+#warnings.simplefilter("error", category=FutureWarning)
+import logging
+logging.basicConfig(level=logging.DEBUG) 
+
+import jax
+
+# Set JAX logging level to DEBUG
 
 from typing import Sequence
 from absl import app
@@ -51,6 +60,7 @@ from layers import models
 
 import jax.numpy as jnp
 from jax import random
+
 from jax.sharding import Mesh
 from jax.experimental import checkify
 
@@ -432,6 +442,15 @@ def setup_mesh_and_model(config):
   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
 
 
+def print_coord_vars():
+  import os
+  print(f"MEGASCALE_SLICE_ID: {os.environ.get('MEGASCALE_SLICE_ID')}")
+  print(f"MEGASCALE_NUM_SLICES: {os.environ.get('MEGASCALE_NUM_SLICES')}")
+  print(f"MEGASCALE_COORDINATOR_ADDRESS: {os.environ.get('MEGASCALE_COORDINATOR_ADDRESS')}")
+  print(f"TPU_WORKER_ID: {os.environ.get('TPU_WORKER_ID')}")
+  print(f"TPU_WORKER_HOSTNAMES: {os.environ.get('TPU_WORKER_HOSTNAMES')}")
+  
+
 def setup_train_loop(config):
   """Set up prerequisites for the training loop -
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
@@ -669,4 +688,5 @@ def main(argv: Sequence[str]) -> None:
 
 
 if __name__ == "__main__":
+  print_coord_vars()
   app.run(main)
