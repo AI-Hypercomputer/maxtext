@@ -27,6 +27,10 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
+# Use 64b parameters if not set.
+PARAMETERS="${PARAMETERS:-64}"
+echo "Using ${PARAMETERS}b parameters"
+
 # The setup accommodates two cases:
 # 1) Passing the 'RUN_NAME' variable at runtime
 # 2) Propagating the 'M_RUN_NAME' variable within an Airflow sweeping workflow
@@ -43,10 +47,11 @@ export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xl
 JAX_PLATFORMS=cpu python3 MaxText/$EXECUTABLE MaxText/configs/base.yml\
     steps=$STEPS checkpoint_period=$CHECKPOINT_PERIOD per_device_batch_size=1 enable_checkpointing=true\
     async_checkpointing=false\
-    remat_policy=full global_parameter_scale=64\
+    remat_policy=full global_parameter_scale=$PARAMETERS\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\
     hardware=$HARDWARE\
     use_iota_embed=true reuse_example_batch=1\
     dataset_type=synthetic attention='flash' gcs_metrics=true\
     load_full_state_path=$PREVIOUS_STATE\
-    gcs_metrics_bucket=$GCS_METRICS_BUCKET
+    gcs_metrics_bucket=$GCS_METRICS_BUCKET\
+    step_time_seconds=$STEP_TIME_SECONDS
