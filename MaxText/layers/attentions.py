@@ -24,8 +24,8 @@ import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
-from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
 
 import common_types
@@ -265,8 +265,22 @@ class AttentionOp(nn.Module):
           block_kv_dq=min(512, query.shape[2]),
       )
 
-      masks = [splash_attention_mask.CausalMask(shape=(query.shape[2], query.shape[2])) for i in range(query.shape[1])]
-      multi_head_mask = splash_attention_mask.MultiHeadMask(masks=masks)
+      mask = splash_attention_mask.CausalMask(shape=(query.shape[2], query.shape[2]))
+
+      # Apply local masking if local sliding attention is enabled.
+      if self.attention_type == AttentionType.LOCAL_SLIDING:
+        if self.sliding_window_size is None:
+          raise ValueError(
+              'Sliding_window_size must be set if Local Sliding attention type'
+          )
+        mask &= splash_attention_mask.LocalMask(
+            shape=(query.shape[2], query.shape[2]),
+            window_size=(self.sliding_window_size, self.sliding_window_size),
+            offset=0,
+        )
+
+      # Create multi-head mask
+      multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) *  query.shape[1])
       splash_kernel = splash_attention_kernel.make_splash_mha(
           mask=multi_head_mask, head_shards=1, q_seq_shards=1, block_sizes=block_sizes, attn_logits_soft_cap=attn_logits_soft_cap,
       )
