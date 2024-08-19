@@ -98,10 +98,11 @@ class AotHloIdenticalTest(unittest.TestCase):
         assert files_equal, f"AOT Compiled and real HLO files are not identical for test {test_name}!"
         print("AOT Compiled and train HLO files are identical for test {test_name}!")
 
-    @pytest.mark.tpu
+    # TODO (mattdavidow)
+    @pytest.mark.skip(reason="Issue w/ kernels_test. Error: The TPU is already in use by process...")
     def test_default_hlo_match(self):
         self.assert_compile_and_real_match_hlo("default_run", None)
 
-    @pytest.mark.tpu
+    @pytest.mark.skip(reason="Issue w/ kernels_test. Error: The TPU is already in use by process...")
     def test_int8_hlo_match(self):
         self.assert_compile_and_real_match_hlo("int8", "quantization=int8")
