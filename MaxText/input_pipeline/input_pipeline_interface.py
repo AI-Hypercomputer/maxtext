@@ -129,7 +129,8 @@ def make_mixed_train_iterator(config, mesh, add_bos, add_eos):
     if config.dataset_type == "tfds":
       return make_tfds_iterator(config, mesh, add_bos, add_eos, process_indices)
     elif config.dataset_type == "grain":
-      return make_grain_iterator(config, mesh, add_bos, add_eos, process_indices)
+      # Hardcoding this for now
+      return make_grain_iterator(config, mesh, False, False, process_indices)
     elif config.dataset_type == "hf":
       return make_hf_iterator(config, mesh, add_bos, add_eos, process_indices)
   else:
