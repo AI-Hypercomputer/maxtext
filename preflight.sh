@@ -1,10 +1,9 @@
 #!/bin/bash
 echo "Running preflight.sh"
 # Command Flags:
-# PLATFORM (Required, must be "gke" or "gce")
 #
 # Example to invoke this script:
-# bash preflight.sh PLATFORM=[GCE or GKE]
+# bash preflight.sh
 
 # Warning:
 # For any dependencies, please add them into `setup.sh` or `maxtext_dependencies.Dockerfile`. 
@@ -18,11 +17,6 @@ for ARGUMENT in "$@"; do
     IFS='=' read -r KEY VALUE <<< "$ARGUMENT"
     export "$KEY"="$VALUE"
 done
-
-if [ -z $PLATFORM ]; then
-    echo "Error: PLATFORM flag is missing."
-    exit 1
-fi
 
 # Check if sudo is available
 if command -v sudo >/dev/null 2>&1; then

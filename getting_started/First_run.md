@@ -15,9 +15,10 @@ multiple hosts.
 
 1. [Create and SSH to the single-host VM of your choice.](https://cloud.google.com/tpu/docs/users-guide-tpu-vm#creating_a_cloud_tpu_vm_with_gcloud) We recommend a `v4-8`.
 2. Clone MaxText onto that TPUVM.
-3. Within the root directory of that `git` repo, install dependencies by running:
+3. Within the root directory of that `git` repo, install dependencies and pre-commit hook by running:
 ```
 bash setup.sh
+pre-commit install
 ```
 4. After installation completes, run training with the command on synthetic data:
 ```
@@ -66,9 +67,9 @@ Failed to execute XLA Runtime executable: run time error: custom call 'xla.gpu.a
 ## Getting Starting: Multihost development
 There are three patterns for running MaxText with more than one host.
 
-1. [GKE, recommended] [Running Maxtext with xpk](getting_started/Run_MaxText_via_xpk.md) - Quick Experimentation and Production support
-2. [GCE] [Running Maxtext with Multihost Jobs](getting_started/Run_MaxText_via_multihost_job.md) - Long Running Production Jobs with Queued Resources
-3. [GCE] [Running Maxtext with Multihost Runner](getting_started/Run_MaxText_via_multihost_runner.md) -  Fast experiments via multiple ssh connections.
+1. [GKE, recommended] [Running Maxtext with xpk](Run_MaxText_via_xpk.md) - Quick Experimentation and Production support
+2. [GCE] [Running Maxtext with Multihost Jobs](Run_MaxText_via_multihost_job.md) - Long Running Production Jobs with Queued Resources
+3. [GCE] [Running Maxtext with Multihost Runner](Run_MaxText_via_multihost_runner.md) -  Fast experiments via multiple ssh connections.
 
 ## Getting Starting: Preflight Optimizations
 

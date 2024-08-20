@@ -115,7 +115,7 @@ elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
             pip3 install jax[tpu]==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
         else
             echo "Installing stable jax, jaxlib, libtpu for tpu"
-            pip3 install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+            pip3 install 'jax[tpu]>0.4' -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
         fi
 
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
@@ -143,20 +143,18 @@ elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
             echo "Installing stable jax, jaxlib, libtpu for NVIDIA gpu"
             pip3 install "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
         fi
-        pip3 install "transformer-engine==1.5.0+297459b" \
-          --extra-index-url https://us-python.pkg.dev/gce-ai-infra/maxtext-build-support-packages/simple/
+        export NVTE_FRAMEWORK=jax
+        pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
     fi
 elif [[ $MODE == "nightly" ]]; then
 # Nightly mode
     if [[ $DEVICE == "gpu" ]]; then
         echo "Installing jax-nightly, jaxlib-nightly"
         # Install jax-nightly
-        pip3 install --pre -U jax -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
-        # Install jaxlib-nightly
-        pip3 install -U --pre jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_cuda12_releases.html
-        # Install prebuilt Transformer Engine for GPU builds.
-        pip3 install "transformer-engine==1.5.0+297459b" \
-          --extra-index-url https://us-python.pkg.dev/gce-ai-infra/maxtext-build-support-packages/simple/
+        pip3 install --pre -U 'jax[cuda12]' -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+        # Install Transformer Engine
+        export NVTE_FRAMEWORK=jax
+        pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
     elif [[ $DEVICE == "tpu" ]]; then
         echo "Installing jax-nightly, jaxlib-nightly"
         # Install jax-nightly
@@ -193,4 +191,3 @@ if [[ "$MODE" == "pinned" ]]; then
 else
     pip3 install -U -r requirements.txt
 fi
-[ -d ".git" ] && pre-commit install

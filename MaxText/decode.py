@@ -16,6 +16,7 @@
 
 import jax
 
+import max_utils
 import maxengine
 
 import os
@@ -35,7 +36,7 @@ def main(config):
   )
   assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
   assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
-  prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
+  prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
   slot = 0
 
   decode_state = engine.init_decode_state()
@@ -43,6 +44,7 @@ def main(config):
 
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list = []
+  sampled_tokens_list.append(first_token)
   for _ in steps:
     decode_state, sampled_tokens = engine.generate(params, decode_state)
     sampled_tokens_list.append(sampled_tokens)
@@ -69,4 +71,5 @@ if __name__ == "__main__":
   pyconfig.initialize(sys.argv)
   cfg = pyconfig.config
   validate_config(cfg)
+  max_utils.print_system_information()
   main(cfg)

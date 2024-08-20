@@ -59,8 +59,23 @@ save_config_to_gcs: False
 
 # Activation dtypes.
 dtype: "bfloat16"
-quantization: "" #defaults to no quantization, i.e. bf16. possible alternative setting is 'int8' or use fp8 to run with 8-bit floating-point GeMMs on NVIDIA GPUs.
-quantize_kvcache: False
+# Used to configure quantization in the transformer layers, defaults to null implying bf16.
+# Possible alternative settings are as follows:
+# 'int8' for dynamic range quantization using 8-bits
+# 'int8w' for weights only quantization using 8-bits
+# 'int4w' for weights only quantization using 4-bits
+# 'intmp' for mixed precision weight only quantization based on config file
+# 'fp8' for 8-bit floating-point GeMMs on NVIDIA GPUs.
+quantization: ""
+# Path to file with quantization config - only used for mixed precision.
+# Example configs in ../Maxtext/configs/quantization
+# Allows us to configure different bits, tiling and scale for quantizing selected weights.
+# Bits represents number of bits to quantize to,
+# tile-size represents the tiling sized used in AQT tiled_dot_general,
+# Value of scale is used to scale the abs_max value used for AQT quantization
+# Defaults values are 8 bits, tile-size=-1 (no tiling) and scale=1.
+quant_cfg_path: ""
+quantize_kvcache: False # Set to True to quantize KV Cache values, defaults to False
 # Valid kv_quant_axis values:
 #   - "" is valid only when quantize_kvcache is False
 #   - "dkv" indicates quantize kv cache over the cache_kv, i.e. kv dimension axis
@@ -114,12 +129,22 @@ num_pipeline_repeats: -1
 num_pipeline_microbatches: -1
 scan_pipeline_iterations: True # This can be set independently of scan_layers, which is relevant when num_layers_per_pipeline_stage > 1.
 
-# Choose 'remat_policy' between 'minimal', 'save_dot_except_mlpwi', 'save_dot_except_mlp', 'save_qkv_proj', 'qkv_proj_offloaded', 'minimal_offloaded' and 'full'.
+# Choose 'remat_policy' between 'minimal', 'save_dot_except_mlpwi', 'save_dot_except_mlp', 'save_qkv_proj', 'qkv_proj_offloaded', 'minimal_offloaded', 'save_out_proj' and 'full'.
 # These options offer a trade-off between speed (fastest to slowest) and HBM usage (highest to lowest)
 remat_policy: 'full'
 scan_layers: True
 param_scan_axis: 1
+
+# The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
+# The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
+attention_type: 'global' # Supported attention_type: global, local_sliding
+sliding_window_size: 0
+attn_logits_soft_cap: 0.0
+final_logits_soft_cap: 0.0
+use_post_attn_norm: False
+use_post_ffw_norm: False
+
 
 # Combine matmuls for QKV and MLP
 fused_qkv: False
@@ -210,14 +235,21 @@ ici_pipeline_parallelism: 1
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
 num_slices: -1
 
-# Tokenizer and Dataset
-# Replace with your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
+# Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
 tokenizer_path: "assets/tokenizer.llama2"
+tokenize_train_data: True  # False if the dataset is pre-tokenized
+tokenize_eval_data: True  # False if the dataset is pre-tokenized
+add_bos: True
+add_eos: True
+
+# Dataset
 per_device_batch_size: 12.0
 expansion_factor_real_data: -1 # if -1 then all hosts will load real data, else total_hosts//expansion_factor_real_data will pull data from GCS.
 eval_per_device_batch_size: 0
 max_corpus_chars: 10_000_000
+train_data_column: 'text'
+eval_data_column: 'text'
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md
 dataset_type: tfds
@@ -283,6 +315,10 @@ init_weights_seed: 0
 # You may disable clipping by setting gradient_clipping_threshold to zero.
 gradient_clipping_threshold: 1.0
 
+# Instead of updating the weights every step, you may effectively use a larger
+# batch by accumulating the gradient over a set of steps.
+gradient_accumulation_steps: 1
+
 # AdamW optimizer parameters
 # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
 opt_type: "adamw"  # one of "adam_pax" or "adamw"
@@ -318,11 +354,13 @@ decode_sampling_top_k: 0 # set if you're doing top-k
 decode_sampling_temperature: 1.
 
 eval_interval: -1  # the specific number of train step between eval_step
-eval_batch_num: -1  # only run this number of batches for eval, for debugging use
+eval_steps: -1  # only run this number of batches for eval, for debugging use
 target_eval_loss: 0.  # early stop once reaching target eval_loss
 
 # Goodput parameters
 enable_goodput_recording: False
+monitor_goodput: False
+goodput_upload_interval_seconds: 60
 
 # Vertex AI Tensorboard Configurations - https://github.com/google/maxtext/tree/main/getting_started/Use_Vertex_AI_Tensorboard.md
 # Set to True for GCE, False if running via XPK
@@ -343,6 +381,8 @@ inference_microbenchmark_stages: "prefill,generate"
 inference_microbenchmark_loop_iters: 10
 inference_microbenchmark_log_file_path: ""
 inference_metadata_file: "" # path to a json file
+enable_model_warmup: False
+
 
 # KV Cache layout control
 # Logical layout: 0,1,2,3 ; CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV

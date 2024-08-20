@@ -36,6 +36,7 @@ from layers import models
 from layers import quantizations
 from typing import Sequence
 from absl import app
+import os
 import pickle
 import accelerator_to_spec_map
 import train
@@ -55,13 +56,21 @@ def validate_config(config):
 def get_topology_mesh(config):
   """Get the target hardware devices, and create configured mesh with them"""
   target_hardware = accelerator_to_spec_map.get_system_characteristics(config.compile_topology)
-  topology_devices = get_topology_desc(
-      platform=target_hardware.platform,
-      topology_name=target_hardware.topology_name,
-      chip_config_name=target_hardware.chip_config_name,
-      chips_per_host_bounds=target_hardware.chips_per_host_bounds,
-      num_slices=config.compile_topology_num_slices,
-  ).devices
+  if target_hardware.platform == 'gpu':
+    # Disable sharded autotuning. This is an optimization to distribute
+    # autotuning across the fleet, but can cause hangs with AoT compilation.
+    os.environ['XLA_FLAGS'] = os.environ.get('XLA_FLAGS', '') + ' --xla_gpu_shard_autotuning=false'
+    jax.config.update('mock_num_gpu_processes', config.compile_topology_num_slices)
+    topology_devices = jax.devices()
+  else:
+    topology_devices = get_topology_desc(
+        platform=target_hardware.platform,
+        topology_name=target_hardware.topology_name,
+        chip_config_name=target_hardware.chip_config_name,
+        chips_per_host_bounds=target_hardware.chips_per_host_bounds,
+        num_slices=config.compile_topology_num_slices,
+        wrap=target_hardware.wrap,
+    ).devices
   topology_device_mesh = max_utils.create_device_mesh(config, topology_devices)
   topology_mesh = Mesh(topology_device_mesh, config.mesh_axes)
   return topology_mesh
@@ -125,6 +134,7 @@ def save_compiled(compiled, save_name):
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   print("Starting train_compile.py...", flush=True)
 
   # Parse and validate configuration
@@ -134,6 +144,10 @@ def main(argv: Sequence[str]) -> None:
 
   # Create target mesh
   topology_mesh = get_topology_mesh(config)
+
+  # Print system information after building the compile topology to avoid
+  # prematurely initializing the backend.
+  max_utils.print_system_information()
 
   # Get shaped inputs
   shaped_train_args, shaped_train_kwargs, state_mesh_annotations, model = get_shaped_inputs(topology_mesh, config)

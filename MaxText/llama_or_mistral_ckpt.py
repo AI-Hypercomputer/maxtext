@@ -80,6 +80,13 @@ MODEL_PARAMS_DICT = {
         "dims_per_head": 128,
         "vocab": 128256,
     },
+    "llama3-70b": {
+        "num_layers": 80,
+        "num_heads": 64,
+        "num_kv_heads": 8,
+        "dims_per_head": 128,
+        "vocab": 128256,
+    },
     "mistral-7b": {
         "num_layers": 32,
         "num_heads": 32,
@@ -137,6 +144,14 @@ def convert(base_model_path, maxtext_model_path, model_size):
     layer_key = "MoeBlock_0"
   else:
     layer_key = "mlp"
+  if model_size[:6] == 'llama3':
+    token_embedder = np.concatenate(
+      [var["tok_embeddings.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=0
+    )
+  else:
+    token_embedder = np.concatenate(
+      [var["tok_embeddings.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=1
+    )[:vocab_size, :]
   jax_weights = {
       "decoder": {
           "layers": {
@@ -153,9 +168,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
           },
       },
       "token_embedder": {
-          "embedding": np.concatenate(
-              [var["tok_embeddings.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=1
-          )[:vocab_size, :]
+          "embedding": token_embedder
       },
   }
 
