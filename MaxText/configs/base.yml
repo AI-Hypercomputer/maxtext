@@ -393,3 +393,4 @@ allow_split_physical_axes: False
 
 # Attributes needed for the MaxText checkpointing loop using standalone_checkpointer.
 gcs_metrics_bucket: distributed-checkpointing-metrics
+per_step_interval: 0.0
