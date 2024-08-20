@@ -22,6 +22,7 @@ limitations under the License.
 
 import datetime
 import os
+import time
 
 from typing import Sequence
 from absl import app
@@ -97,6 +98,8 @@ def checkpoint_loop(config, state=None):
       time_to_wait = config.step_time_seconds - elapsed_time.total_seconds()
       if time_to_wait > 0:
         max_logging.log(f"Waiting {time_to_wait} seconds to reach step time of {config.step_time_seconds} seconds for step {step}")
+        time.sleep(time_to_wait)
+    jax.experimental.multihost_utils.sync_global_devices("Barrier after step")
           
   if config.gcs_metrics_bucket:
     max_logging.log(f"Uploading write metrics to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()}")
@@ -115,10 +118,12 @@ def checkpoint_loop(config, state=None):
       # A barrier to sync all hosts before starting to save checkpoint
       jax.experimental.multihost_utils.sync_global_devices("Barrier before restore")
       try:
-        checkpoint_manager.restore(
+        state = checkpoint_manager.restore(
               step,
               args=orbax.checkpoint.args.Composite(items=orbax.checkpoint.args.PyTreeRestore(item=unboxed_abstract_state)),
             )
+        if state:
+          state = state["items"]
       except FileNotFoundError:
         # No checkpoint was found for the step, presumably because one was not produced for the step. Continue on.
         continue
