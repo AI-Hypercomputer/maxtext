@@ -54,4 +54,4 @@ JAX_PLATFORMS=cpu python3 MaxText/$EXECUTABLE MaxText/configs/base.yml\
     dataset_type=synthetic attention='flash' gcs_metrics=true\
     load_full_state_path=$PREVIOUS_STATE\
     gcs_metrics_bucket=$GCS_METRICS_BUCKET\
-    step_time_seconds=$STEP_TIME_SECONDS
+    per_step_interval=$PER_STEP_INTERVAL

@@ -86,6 +86,7 @@ def checkpoint_loop(config, state=None):
     if checkpoint_manager is not None:
       # A barrier to sync all hosts before starting to save checkpoint
       jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
+      start_time = datetime.datetime.now()
       if save_checkpoint(checkpoint_manager, step, state):
         checkpoint_manager.wait_until_finished()
         end_time = datetime.datetime.now()
@@ -95,9 +96,9 @@ def checkpoint_loop(config, state=None):
           max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint saved in {end_time - start_time} ,step {step}, on host 0")
     if jax.process_index() == 0:
       elapsed_time = datetime.datetime.now() - start_time
-      time_to_wait = config.step_time_seconds - elapsed_time.total_seconds()
+      time_to_wait = config.per_step_interval - elapsed_time.total_seconds()
       if time_to_wait > 0:
-        max_logging.log(f"Waiting {time_to_wait} seconds to reach step time of {config.step_time_seconds} seconds for step {step}")
+        max_logging.log(f"Waiting {time_to_wait} seconds to reach step time of {config.per_step_interval} seconds for step {step}")
         time.sleep(time_to_wait)
     jax.experimental.multihost_utils.sync_global_devices("Barrier after step")
           
@@ -114,9 +115,9 @@ def checkpoint_loop(config, state=None):
 
   for step in np.arange(start_step, config.steps):
     if checkpoint_manager is not None:
-      start_time = datetime.datetime.now()
       # A barrier to sync all hosts before starting to save checkpoint
       jax.experimental.multihost_utils.sync_global_devices("Barrier before restore")
+      start_time = datetime.datetime.now()
       try:
         state = checkpoint_manager.restore(
               step,
