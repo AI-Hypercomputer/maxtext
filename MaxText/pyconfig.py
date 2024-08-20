@@ -279,10 +279,10 @@ class _HyperParameters:
       compilation_cache.set_cache_dir(os.path.expanduser(raw_keys["jax_cache_dir"]))
 
     if raw_keys["jax_persistent_cache_min_entry_size_bytes"]:
-      jax.config.update("jax_persistent_cache_min_entry_size_bytes", os.path.expanduser(raw_keys["jax_persistent_cache_min_entry_size_bytes"]))
+      jax.config.update("jax_persistent_cache_min_entry_size_bytes", raw_keys["jax_persistent_cache_min_entry_size_bytes"])
 
     if raw_keys["jax_persistent_cache_min_compile_time_secs"]:
-      jax.config.update("jax_persistent_cache_min_compile_time_secs", os.path.expanduser(raw_keys["jax_persistent_cache_min_compile_time_secs"]))
+      jax.config.update("jax_persistent_cache_min_compile_time_secs", raw_keys["jax_persistent_cache_min_compile_time_secs"])
 
     if raw_keys["model_name"] == "gpt3-175b":
       _HyperParameters.configure_gpt3_task(raw_keys)
