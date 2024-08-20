@@ -251,7 +251,7 @@ class Pipeline(nn.Module):
       except_last = jax.lax.slice_in_dim(output_in, 0, self.num_stages - 1, axis=0)
       return jnp.concatenate([last, except_last], axis=0)
     if self.config.pipeline_activation_forwarding:
-      #new_shift = _rotate_right(old_prev_outputs)
+      new_shift = _rotate_right(old_prev_outputs)
       new_prev_outputs = output
     else:
       #new_shift = _rotate_right(output)
