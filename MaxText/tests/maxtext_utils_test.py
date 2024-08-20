@@ -44,5 +44,34 @@ class TestGradientClipping(unittest.TestCase):
         for param_name, raw_value in raw_grads[maxtext_utils.OVERWRITE_WITH_GRADIENT].items():
             self.assertTrue(jnp.array_equal(raw_value, clipped_grads[maxtext_utils.OVERWRITE_WITH_GRADIENT][param_name]))
 
+class TestNestedValueRetrieval(unittest.TestCase):
+    def setUp(self):
+        self.test_dict = {
+            "level1": {
+                "level2": {
+                    "key": 0.1,
+                }
+            },
+            "empty_level": {}
+        }
+
+    def test_valid_nested_key(self):
+        nested_key = ("level1", "level2", "key")
+        expected_value = 0.1
+        result = maxtext_utils.get_nested_value(self.test_dict, nested_key, 0.0)
+        self.assertEqual(result, expected_value)
+
+    def test_invalid_nested_key(self):
+        nested_key = ("level1", "nonexistent", "key")
+        expected_value = 0.0
+        result = maxtext_utils.get_nested_value(self.test_dict, nested_key, 0.0)
+        self.assertEqual(result, expected_value)
+
+    def test_empty_level(self):
+        nested_key = ("empty_level", "key")
+        expected_value = None
+        result = maxtext_utils.get_nested_value(self.test_dict, nested_key)
+        self.assertEqual(result, expected_value)
+
 if __name__ == '__main__':
     unittest.main()

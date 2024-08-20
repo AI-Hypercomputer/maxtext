@@ -100,8 +100,9 @@ def summarize_size_from_pytree(params):
 
 
 def initialize_summary_writer(config):
+  summary_writer_path = os.path.join(config.tensorboard_dir, config.run_name)
   return (
-      writer.SummaryWriter(config.tensorboard_dir)
+      writer.SummaryWriter(summary_writer_path)
       if jax.process_index() == 0
       else None
   )
@@ -122,7 +123,7 @@ def _prepare_metrics_for_json(metrics, step, run_name):
   return metrics_dict
 
 
-def write_metrics_locally(metrics, step, config, file):
+def write_metrics_locally(metrics, step, config, file, is_training=True):
   """Writes metrics locally for testing"""
   if step == 0:
     file.truncate(0)
@@ -130,7 +131,7 @@ def write_metrics_locally(metrics, step, config, file):
   metrics_dict = _prepare_metrics_for_json(metrics, step, config.run_name)
   file.write(str(json.dumps(metrics_dict)) + "\n")
 
-  if step == config.steps - 1:
+  if is_training and step == config.steps - 1:
     file.close()
 
 
@@ -147,11 +148,11 @@ def add_text_to_summary_writer(key, value, summary_writer):
     summary_writer.add_text(key, value)
 
 
-def write_metrics_for_gcs(metrics, step, config, running_metrics):
+def write_metrics_for_gcs(metrics, step, config, running_metrics, is_training=True):
   """Writes metrics to gcs"""
   metrics_dict_step = _prepare_metrics_for_json(metrics, step, config.run_name)
   running_metrics.append(metrics_dict_step)
-  if (step + 1) % config.log_period == 0 or step == config.steps - 1:
+  if is_training and (step + 1) % config.log_period == 0 or step == config.steps - 1:
     start_step = (step // config.log_period) * config.log_period
     metrics_filename = f"metrics_step_{start_step:06}_to_step_{step:06}.txt"
     with open(metrics_filename, "w", encoding="utf8") as metrics_for_gcs:
@@ -390,6 +391,7 @@ def create_device_mesh(config, devices=None):
       config.dcn_fsdp_transpose_parallelism,
       config.dcn_sequence_parallelism,
       config.dcn_tensor_parallelism,
+      config.dcn_expert_parallelism,
       config.dcn_autoregressive_parallelism,
   ]
   ici_parallelism = [
@@ -399,6 +401,7 @@ def create_device_mesh(config, devices=None):
       config.ici_fsdp_transpose_parallelism,
       config.ici_sequence_parallelism,
       config.ici_tensor_parallelism,
+      config.ici_expert_parallelism,
       config.ici_autoregressive_parallelism,
   ]
 
