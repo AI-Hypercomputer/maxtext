@@ -171,6 +171,10 @@ local_checkpoint_period: 0
 # Jax cache directory
 jax_cache_dir: "~/jax_cache"
 
+# Jax persistent cache thresholds
+jax_persistent_cache_min_entry_size_bytes: 0
+jax_persistent_cache_min_compile_time_secs: 1
+
 # Hardware
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
