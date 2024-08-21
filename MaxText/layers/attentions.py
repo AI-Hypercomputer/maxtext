@@ -25,9 +25,11 @@ from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
+from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
 import common_types
+import page_managers
 from kernels.ragged_attention import ragged_gqa
 from kernels.ragged_attention import ragged_mha
 from layers import embeddings
@@ -131,6 +133,191 @@ def apply_mask_to_logits(logits: Array, mask: Array):
   return jnp.where((mask >= DEFAULT_MASK_VALUE * 0.5), logits, DEFAULT_MASK_VALUE)
 
 
+class PagedAttentionOp(nn.Module):
+
+  num_pages: int
+  page_size: int
+  max_pages_per_slot: int
+  max_pages_per_prefill: int
+  block_size: int
+  pages_per_compute_block: int
+
+  num_kv_heads: int
+  kv_head_dim_size: int
+  dtype: DType = jnp.float32
+
+  kv_pages_axis_names: AxisNames = ("kv_heads", "num_pages", "page_size", "kv_head_dim_size")
+
+  def init_or_get_kv_pages(self, model_mode: str):
+    """Get paged attention op."""
+
+    num_pages = self.num_pages
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      num_pages = self.max_pages_per_prefill
+
+    kv_pages_shape = (self.num_kv_heads, num_pages, self.page_size, self.kv_head_dim_size)
+    key_pages_var = self.variable(
+        "cache",
+        "key_pages",
+        nn.with_logical_partitioning(jnp.zeros, self.kv_pages_axis_names),
+        kv_pages_shape,
+        self.dtype,
+    )
+    value_pages_var = self.variable(
+        "cache",
+        "value_pages",
+        nn.with_logical_partitioning(jnp.zeros, self.kv_pages_axis_names),
+        kv_pages_shape,
+        self.dtype,
+    )
+    key_pages_var.value = nn.with_logical_constraint(key_pages_var.value, self.kv_pages_axis_names)
+    value_pages_var.value = nn.with_logical_constraint(value_pages_var.value, self.kv_pages_axis_names)
+    return key_pages_var, value_pages_var
+
+  def dot_product_attention(
+      self,
+      query: Array,
+      key: Array,
+      value: Array,
+  ) -> Array:
+    """Apply Dot Product Attention.
+
+    Annotations:
+      b: batch size
+      t: query length
+      s: key / value length
+      d: head / kv dimension
+      n: number of query heads
+      n_kv: number of kv heads, sometimes annotated as k
+      n // n_kv: number of group for query, sometimes annotated with g
+    """
+    b, t, n, d = query.shape
+    _, _, n_kv, _ = key.shape
+    query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
+    attn_weights = jnp.einsum("btkgd,bskd->bkgts", query, key)
+    max_attn_weights = jnp.max(attn_weights, axis=-1, keepdims=True)
+    exps_attn_weights = jnp.exp(attn_weights - max_attn_weights)
+    attn = jnp.einsum("bkgts,bskd->btkgd", exps_attn_weights, value)
+    return jnp.reshape(attn, (b, t, n, d))
+
+  @nn.compact
+  def __call__(
+    self,
+    query: Array,
+    key: Array,
+    value: Array,
+    decoder_segment_ids: Array,
+    model_mode: str,
+    page_state: page_managers.PageState
+  ) -> Array:
+
+    key_pages_var, value_pages_var = self.init_or_get_kv_pages(model_mode)
+
+    self.update(key_pages_var, value_pages_var, key, value, model_mode, page_state)
+
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      return self.dot_product_attention(query, key, value)
+
+    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      query = jnp.squeeze(query, axis=1)
+      result = paged_attention(
+        q=query,
+        k_pages=key_pages_var.value,
+        v_pages=value_pages_var.value,
+        lengths=page_state.seq_lengths,
+        page_indices=page_state.seq_page_idx_mappings,
+        pages_per_compute_block=self.pages_per_compute_block
+      )
+      return jnp.expand_dims(result, axis=1)
+
+  def update(
+      self,
+      key_pages_var: nn.Variable,
+      value_pages_var: nn.Variable,
+      key: Array,
+      value: Array,
+      model_mode: str,
+      page_state: Optional[page_managers.PageState] = None
+  ) -> None:
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
+    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      self.update_decode_step_pages(key_pages_var, value_pages_var, key, value, page_state)
+
+  def update_prefill_step_pages(
+      self,
+      key_pages_var: nn.Variable,
+      value_pages_var: nn.Variable,
+      key: Array,
+      value: Array,
+  ) -> None:
+    """Update pages for prefill step."""
+    assert key.shape == value.shape, f"prefill_step key/value should have the same shape, but getting {key.shape=} and {value.shape=} instead"
+    b, t, n_kv, d = key.shape
+    assert b == 1, f"prefill_step key/value should be 1, but getting {b} instead"
+    assert t % self.page_size == 0
+    assert key_pages_var.value.shape == value_pages_var.value.shape, f"prefill_step key/value_pages_var should have the same shape, but getting {key_pages_var.shape=} and {value_pages_var.shape=} instead"
+    v_n_kv, v_n_p, v_p, v_d = key_pages_var.value.shape
+    assert v_n_kv == n_kv, f"{v_n_kv=} {n_kv=}"
+    assert v_p == self.page_size, f"{v_p=} {self.page_size=}"
+    assert v_d == d, f"{v_d=} {d=}"
+    assert v_n_p == self.max_pages_per_prefill, f"{v_n_p=} {self.max_pages_per_prefill=}"
+    key = jnp.squeeze(key)
+    value = jnp.squeeze(value)
+    key = jnp.transpose(key, axes=(1, 0, 2))
+    value = jnp.transpose(value, axes=(1, 0, 2))
+    key = jnp.reshape(key, shape=(n_kv, t // self.page_size, self.page_size, d))
+    value = jnp.reshape(value, shape=(n_kv, t // self.page_size, self.page_size, d))
+    key_pages_var.value = nn.with_logical_constraint(key, self.kv_pages_axis_names)
+    value_pages_var.value = nn.with_logical_constraint(value, self.kv_pages_axis_names)
+
+  def update_decode_step_pages(
+      self,
+      key_pages_var: nn.Variable,
+      value_pages_var: nn.Variable,
+      key: Array,
+      value: Array,
+      page_state: page_managers.PageState,
+  ) -> None:
+    """Update pages for decode step."""
+
+    assert key.shape == value.shape, f"decode_step key/value should have the same shape, but getting {key.shape=} and {value.shape=} instead"
+    b, t, n_kv, d = key.shape
+    assert t == 1, f"decode_step key/value length should be 1, but getting {t} instead"
+    assert key_pages_var.value.shape == value_pages_var.value.shape, f"decode_step key/value_pages_var should have the same shape, but getting {key_pages_var.shape=} and {value_pages_var.shape=} instead"
+    v_n_kv, v_n_p, v_p, v_d = key_pages_var.value.shape
+    assert v_n_kv == n_kv, f"{v_n_kv=} {n_kv=}"
+    assert v_p == self.page_size, f"{v_p=} {self.page_size=}"
+    assert v_d == d, f"{v_d=} {d=}"
+    assert v_n_p == self.num_pages, f"{v_n_p=} {self.num_pages=}"
+
+    seq_page_indices = page_state.seq_page_indices
+    seq_page_slice_indices = page_state.seq_page_slice_indices
+
+    zeros = jnp.zeros(shape=(b, self.page_size, n_kv, d), dtype=key.dtype)
+
+    def _update_page_slice(update_target, page_slice_idx, update_page_slice):
+      return jax.lax.dynamic_update_slice_in_dim(update_target, update_page_slice, page_slice_idx, axis=0)
+
+    keys = jax.vmap(_update_page_slice)(zeros, seq_page_slice_indices, key)
+    values = jax.vmap(_update_page_slice)(zeros, seq_page_slice_indices, value)
+
+    keys = jnp.transpose(keys, axes=(2, 0, 1, 3))
+    values = jnp.transpose(values, axes=(2, 0, 1, 3))
+
+    def _update_pages(slot, state):
+      update_target, update_pages, page_indices = state
+      update_page = jax.lax.dynamic_index_in_dim(update_pages, slot, axis=1)
+      updated_target = jax.lax.dynamic_update_slice_in_dim(update_target, update_page, page_indices[slot], axis=1)
+      updated_state = updated_target, update_pages, page_indices
+      return updated_state
+
+    key_pages_var.value, _, _ = jax.lax.fori_loop(0, b, _update_pages, (key_pages_var.value, keys, seq_page_indices))
+    value_pages_var.value, _, _ = jax.lax.fori_loop(0, b, _update_pages, (value_pages_var.value, values, seq_page_indices))
+    key_pages_var.value = nn.with_logical_constraint(key_pages_var.value, self.kv_pages_axis_names)
+    value_pages_var.value = nn.with_logical_constraint(value_pages_var.value, self.kv_pages_axis_names)
+
+
 class AttentionOp(nn.Module):
   config: Config
   mesh: Mesh
@@ -231,6 +418,7 @@ class AttentionOp(nn.Module):
         self.attention_kernel == "dot_product"
         or (self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
+        or (self.attention_kernel == "paged")
     ):
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
     elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
@@ -1244,6 +1432,7 @@ class Attention(nn.Module):
       *,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
+      page_state: Optional[page_managers.PageState] = None,
   ):
     """Applies Attention on the input data.
 
@@ -1295,7 +1484,22 @@ class Attention(nn.Module):
     value = checkpoint_name(value, "value_proj")
 
     assert not self.config.quantize_kvcache or self.kv_quant
-    attention_op = AttentionOp(
+
+    if self.attention_kernel == "paged" and model_mode != common_types.MODEL_MODE_TRAIN:
+      assert self.config.block_size % self.config.page_size == 0
+      attention_op = PagedAttentionOp(
+        num_pages=self.config.num_pages,
+        page_size=self.config.page_size,
+        max_pages_per_slot=self.config.max_target_length // self.config.page_size,
+        max_pages_per_prefill=self.config.max_prefill_predict_length // self.config.page_size,
+        block_size=self.config.block_size,
+        pages_per_compute_block=self.config.block_size // self.config.page_size,
+        num_kv_heads=self.num_kv_heads,
+        kv_head_dim_size=self.head_dim,
+        dtype=self.dtype,
+      )
+    else:
+      attention_op = AttentionOp(
         config=self.config,
         mesh=self.mesh,
         attention_kernel=self.attention_kernel,
@@ -1320,7 +1524,7 @@ class Attention(nn.Module):
         ragged_block_size=self.ragged_block_size,
     )
 
-    out = attention_op(query, key, value, decoder_segment_ids, model_mode)
+    out = attention_op(query, key, value, decoder_segment_ids, model_mode, page_state=page_state)
 
     out = nn.with_logical_constraint(out, self.out_axis_names)
 
