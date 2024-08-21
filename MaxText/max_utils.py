@@ -1082,3 +1082,25 @@ def print_system_information():
   max_logging.log(f"System Information: Jax Version: {jax.__version__}")
   max_logging.log(f"System Information: Jaxlib Version: {jax.lib.__version__}")
   max_logging.log(f"System Information: Jax Backend: {jax.lib.xla_bridge.get_backend().platform_version}")
+
+def debug_array(array, array_name):
+  """Debug array sizing and sharding across chips."""
+  print(f"\t{array_name}:")
+  if isinstance(array, flax.linen.spmd.LogicallyPartitioned):
+    array = array.value
+  single_shard = array.addressable_shards[0]
+  n_shards = len(array.addressable_shards)
+  total_size_across_n_shards = single_shard.data.size * n_shards
+  total_nbytes_across_n_shards = single_shard.data.nbytes * n_shards
+  print(f"\t\tdtype: {array.dtype}")
+  print(f"\t\tshape: {array.shape}")
+  print(f"\t\tsharding spec: {array.sharding.spec}")
+  print(f"\t\tdevice local layouer: {array.layout.device_local_layout}")
+  print(f"\t\tsize (across n shards): {array.size} ({total_size_across_n_shards})")
+  print(f"\t\tbytes (across n shards): {array.nbytes} ({total_nbytes_across_n_shards})")
+
+
+def debug_qtensor(qtensor, qtensor_name):
+  """Debug qtensor sizing and sharding across chips."""
+  debug_array(qtensor.qvalue, f"{qtensor_name} qvalue")
+  debug_array(qtensor.scale[0], f"{qtensor_name} scale")

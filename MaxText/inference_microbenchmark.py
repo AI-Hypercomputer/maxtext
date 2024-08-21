@@ -223,6 +223,69 @@ def print_results_for_analyze(results):
     print(f"SYSTEM_TIME_PER_DECODE_TOKEN_MS = {results['autoregressive']['step_in_ms_per_seq']}")
 
 
+def debug_params(params):
+  """Debug params."""
+  print("\nGeneral Params:")
+  max_utils.debug_array(params['params']['token_embedder']['embedding'], 'token_embedder')
+  max_utils.debug_array(params['params']['decoder']['layers_0']['pre_self_attention_layer_norm']['scale'], 'pre_self_attention_layer_norm')
+  max_utils.debug_array(params['params']['decoder']['layers_0']['post_self_attention_layer_norm']['scale'], 'post_self_attention_layer_norm')
+  max_utils.debug_array(params['params']['decoder']['decoder_norm']['scale'], 'decoder_norm')
+  max_utils.debug_array(params['params']['decoder']['logits_dense']['kernel'], 'logits_dense')
+
+  print("\nAttention Params:")
+  if 'aqt' in params:
+    aqt_self_attention = params['aqt']['decoder']['layers_0']['self_attention']
+    aqt_mlp = params['aqt']['decoder']['layers_0']['mlp']
+    max_utils.debug_qtensor(aqt_self_attention['query']['AqtDotGeneral_0']['qrhs']['frozen'], 'aqt/query')
+    max_utils.debug_qtensor(aqt_self_attention['key']['AqtDotGeneral_0']['qrhs']['frozen'], 'aqt/key')
+    max_utils.debug_qtensor(aqt_self_attention['value']['AqtDotGeneral_0']['qrhs']['frozen'], 'aqt/value')
+    max_utils.debug_qtensor(aqt_self_attention['out']['AqtDotGeneral_0']['qrhs']['frozen'], 'aqt/out')
+    max_utils.debug_qtensor(aqt_mlp['wi_0']['AqtDotGeneral_0']['qrhs']['frozen'], 'aqt/wi_0')
+    max_utils.debug_qtensor(aqt_mlp['wi_1']['AqtDotGeneral_0']['qrhs']['frozen'], 'aqt/wi_1')
+    max_utils.debug_qtensor(aqt_mlp['wo']['AqtDotGeneral_0']['qrhs']['frozen'], 'aqt/wo')
+  else:
+    self_attention = params['params']['decoder']['layers_0']['self_attention']
+    mlp = params['params']['decoder']['layers_0']['mlp']
+    max_utils.debug_array(self_attention['query']['kernel'], 'query')
+    max_utils.debug_array(self_attention['key']['kernel'], 'key')
+    max_utils.debug_array(self_attention['value']['kernel'], 'value')
+    max_utils.debug_array(self_attention['out']['kernel'], 'out')
+    max_utils.debug_array(mlp['wi_0']['kernel'], 'wi_0')
+    max_utils.debug_array(mlp['wi_1']['kernel'], 'wi_1')
+    max_utils.debug_array(mlp['wo']['kernel'], 'wo')
+
+def debug_cache(cache, cache_type, attention_kernel):
+  """Debug cache."""
+  print(f"\n{cache_type} Cache:")
+  print(f"\nattention kernel: {attention_kernel}:")
+  if attention_kernel == "paged":
+    page_manager_keys = [
+      "page_status",
+      "seq_lengths",
+      "seq_num_pages",
+      "seq_page_idx_mappings",
+      "seq_page_indices",
+      "seq_page_slice_indices",
+    ]
+    for page_manager_key in page_manager_keys:
+      max_utils.debug_array(cache['page_manager'][page_manager_key], page_manager_key)
+
+    attention_op = cache['decoder']['layers_0']['self_attention']['PagedAttentionOp_0']
+    max_utils.debug_array(attention_op['key_pages'], 'key_pages')
+    max_utils.debug_array(attention_op['value_pages'], 'value_pages')
+  else:
+    attention_op = cache['decoder']['layers_0']['self_attention']['AttentionOp_0']
+    max_utils.debug_array(attention_op['cached_prefill_key'], 'cached_prefill_key')
+    max_utils.debug_array(attention_op['cached_prefill_value'], 'cached_prefill_value')
+    max_utils.debug_array(attention_op['cached_ar_key'], 'cached_ar_key')
+    max_utils.debug_array(attention_op['cached_ar_value'], 'cached_ar_value')
+    if 'cached_prefill_key_scale' in attention_op:
+      max_utils.debug_array(attention_op['cached_prefill_key_scale'], 'cached_prefill_key_scale')
+      max_utils.debug_array(attention_op['cached_prefill_value_scale'], 'cached_prefill_value_scale')
+      max_utils.debug_array(attention_op['cached_ar_key_scale'], 'cached_ar_key_scale')
+      max_utils.debug_array(attention_op['cached_ar_value_scale'], 'cached_ar_value_scale')
+
+
 def summarize_prefill_result(engine, params, tokens, true_length):
   """Summarize Prefill result."""
   print(f"Prefill result of length {tokens.size}:\n")
@@ -262,6 +325,9 @@ def main(config, inference_metadata: Optional[Dict[str, Any]] = None):
   decode_state = engine.init_decode_state(rng_init_decode)
   _, cache_size, _ = max_utils.summarize_pytree_data(decode_state["cache"], name="Cache")
   num_model_params, model_size, _ = max_utils.summarize_pytree_data(params, name="Model")
+
+  debug_params(params)
+  debug_cache(decode_state['cache'], 'Decode State', engine.config.attention)
 
   benchmark_results = {}
   if "prefill" in stages_to_benchmark:
