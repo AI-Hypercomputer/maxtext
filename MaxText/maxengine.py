@@ -28,6 +28,7 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
 import common_types
+import page_managers
 from jetstream.engine import engine_api
 from jetstream.engine import tokenizer_pb2
 from jetstream.engine import tokenizer_api
@@ -90,9 +91,6 @@ class MaxEngine(engine_api.Engine):
     self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), state.params
     )
-    self.kv_cache_annotations = max_utils.get_kv_cache_annotations(self.model, self.config, self.rng, self._mesh)
-    self.kv_cache_shardings = jax.tree_util.tree_map(
-      lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations)
 
     if self.model.quant and not self.config.checkpoint_is_quantized:
       params = self.quantize_params(state)
@@ -137,6 +135,7 @@ class MaxEngine(engine_api.Engine):
       existing_prefix: Optional[jax.Array] = None,
       padded_tokens: jax.Array,
       true_length: int,
+      slot: int = 0,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -171,6 +170,8 @@ class MaxEngine(engine_api.Engine):
           model_mode=common_types.MODEL_MODE_PREFILL,
           rngs={"params": self.rng},
           mutable=["cache"],
+          slot=slot,
+          true_length=true_length,
       )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
@@ -324,9 +325,36 @@ class MaxEngine(engine_api.Engine):
       else:
         raise ValueError(f"We don't have a strategy for inserting {path_key}")
 
-    inserted_cache = jax.tree_util.tree_map_with_path(
-        copy, unboxed_prefix["cache"], decode_state["cache"], self.kv_cache_annotations_named
-    )
+    if self.config.attention == "paged":
+      def copy_paged(path, prefix_cache, decode_state_cache):
+        if path[-2].key == "page_manager":
+          return prefix_cache
+        path_key = path[-1].key
+        if path_key in ["key_pages", "value_pages"]:
+          def _update_pages(prefix_page_idx, state):
+            decode_state_pages, prefix_pages, seq_page_idx_mappings = state
+            prefix_page = jax.lax.dynamic_index_in_dim(prefix_pages, prefix_page_idx, axis=1)
+            decode_state_pages = jax.lax.dynamic_update_slice_in_dim(decode_state_pages, prefix_page, seq_page_idx_mappings[prefix_page_idx], axis=1)
+            return decode_state_pages, prefix_pages, seq_page_idx_mappings
+          decode_state_cache, _, _ = jax.lax.fori_loop(
+            0,
+            prefix["cache"]["page_manager"]["seq_num_pages"].value[slot],
+            _update_pages,
+            (decode_state_cache, prefix_cache, prefix["cache"]["page_manager"]["seq_page_idx_mappings"].value[slot])
+          )
+          return decode_state_cache
+        else:
+          raise ValueError(f"We don't have a strategy for inserting {path_key} for paged attention.")
+
+      inserted_cache = jax.tree_util.tree_map_with_path(
+          copy_paged,
+          unboxed_prefix["cache"],
+          decode_state["cache"],
+      )
+    else:
+      inserted_cache = jax.tree_util.tree_map_with_path(
+          copy, unboxed_prefix["cache"], decode_state["cache"], self.kv_cache_annotations_named
+      )
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0)
     inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
@@ -369,17 +397,21 @@ class MaxEngine(engine_api.Engine):
 
     # pylint: disable=unused-argument
     def init(abstract_params):
-      x = jnp.ones(
-          (int(self.config.per_device_batch_size * jax.device_count()), self.config.max_prefill_predict_length),
-          dtype=jnp.int32,
-      )
+      input_shape = (int(self.config.per_device_batch_size * jax.device_count()), self.config.max_prefill_predict_length)
+      model_mode = common_types.MODEL_MODE_PREFILL
+      decoder_segment_ids=jnp.zeros(input_shape, dtype=jnp.int32) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+      if self.config.attention == "paged":
+        input_shape = (int(self.config.per_device_batch_size * jax.device_count()), 1)
+        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE
+        decoder_segment_ids=None
+      x = jnp.ones(input_shape, dtype=jnp.int32)
       _, cache = self.model.apply(
           abstract_params,
           x,
           x,
-          decoder_segment_ids=jnp.zeros(x.shape, dtype=jnp.int32) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR,
+          decoder_segment_ids=decoder_segment_ids,
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
+          model_mode=model_mode,
           rngs={"params": self.rng},
           mutable=["cache"],
       )
@@ -415,6 +447,11 @@ class MaxEngine(engine_api.Engine):
     def is_lp(k):
       return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
 
+    cache_logical_annotations = nn.get_partition_spec(cache)
+    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      self.kv_cache_annotations = nn.logical_to_mesh(cache_logical_annotations)
+    self.kv_cache_shardings = jax.tree_util.tree_map(
+      lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations)
     self.kv_cache_annotations_named = jax.tree_util.tree_map(lambda x: tuple(x.names), cache, is_leaf=is_lp)
     del cache
     zeroed = max_utils.unbox_logicallypartioned(initialize())
