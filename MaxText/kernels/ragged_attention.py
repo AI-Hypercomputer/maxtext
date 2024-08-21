@@ -92,6 +92,51 @@ def reference_mha(
     out_axes=2)(q, k, v, lengths)
 
 
+@functools.partial(jax.jit, static_argnames=["mask_value"])
+def reference_gqa(
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    lengths: jax.Array,
+    mask_value: float = DEFAULT_MASK_VALUE,
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+  """Vanilla attention GQA implementation for reference.
+
+  Args:
+    q: A [batch_size, num_q_heads, head_dim] jax.Array.
+    k: A [batch_size, num_kv_heads, max_seq_len, head_dim] jax.Array.
+    v: A [batch_size, num_kv_heads, max_seq_len, head_dim] jax.Array.
+    lengths: A i32[batch_size] jax.Array.
+    mask_value: The value used for padding in attention. By default it is a very
+      negative floating point number.
+
+  Returns:
+    The output of attention([batch_size, num_heads, head_dim]), along with the
+    max logit ([batch_size, num_heads]) and softmax denominator ([batch_size,
+    num_heads]).
+  """
+  batch_size, num_q_heads, head_dim = q.shape
+  _, num_kv_heads, max_seq_len, _ = k.shape
+  assert k.shape == v.shape
+  assert num_q_heads % num_kv_heads == 0
+
+  q = q.reshape(batch_size, num_kv_heads, num_q_heads // num_kv_heads, head_dim)
+
+  logits = jnp.einsum(
+      "bhgd,bhtd->bhgt", q.astype(jnp.float32), k.astype(jnp.float32)
+  )
+  mask = jnp.arange(max_seq_len)[None] < lengths[:, None]
+  logits = logits + jnp.where(mask, 0.0, mask_value)[:, None, None, :]
+  logits_max = logits.max(axis=-1)
+  unnormalized = jnp.exp(logits - logits_max[..., None])
+  denominator = unnormalized.sum(axis=-1)
+  o = (
+      jnp.einsum("bhgt,bhtd->bhgd", unnormalized.astype(v.dtype), v)
+      / denominator[..., None]
+  )
+  return o.reshape(batch_size, num_q_heads, head_dim), (logits_max, denominator)
+
+
 def ragged_flash_attention_kernel(
     lengths_ref,
     q_ref,
@@ -298,5 +343,62 @@ def ragged_mha(
   )(query, key, value, lengths)
   m = jnp.expand_dims(m, axis=-1)
   l = jnp.expand_dims(l, axis=-1)
+  o = o * l 
+  return o, m, l
+
+
+@functools.partial(
+  jax.jit,
+  static_argnames=[
+    "block_size",
+    "mask_value",
+  ],
+)
+def ragged_gqa(
+  query: jax.Array, 
+  key: jax.Array, 
+  value: jax.Array, 
+  lengths: jax.Array,
+  *,
+  block_size: int = 256,
+  mask_value: float = DEFAULT_MASK_VALUE,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+  """Ragged group query attention.
+
+  Args:
+    q: A [batch_size, 1, num_heads_q, head_dim] jax.Array.
+    k: A [batch_size, seq_len, num_heads_kv, head_dim] jax.Array.
+    v: A [batch_size, seq_len, num_heads_kv, head_dim] jax.Array.
+    lengths: A i32[batch_size] jax.Array.
+    block_size: Value defining the Pallas block length in the seq_len dimension
+    mask_value: The value used for padding in attention. By default it is a very
+      negative floating point number.
+
+  Returns:
+    The output of attention([batch_size, num_heads, head_dim]), along with the
+    max logit ([batch_size, num_heads, 1]) and softmax denominator ([batch_size,
+    num_heads, 1]).
+  """
+  batch_size, _, num_heads_q, head_dim = query.shape
+  _, seq_len, num_heads_kv, _ = key.shape
+  
+  query = jnp.squeeze(query)        # (b, n_q, d)
+  query = query.reshape(batch_size, num_heads_kv, num_heads_q // num_heads_kv, head_dim)  # (b, n_kv, n_q // n_kv, d)
+  key = jnp.swapaxes(key, 1, 2)     # (b, n_kv, s, d)
+  value = jnp.swapaxes(value, 1, 2) # (b, n_kv, s, d)
+  o, m, l  = jax.vmap(
+    functools.partial(
+      ragged_mqa,
+      block_size=block_size,
+      mask_value=mask_value,
+      # cost_estimate=cost_estimate,
+    ),
+    in_axes=(1, 1, 1, None),
+    out_axes=1,
+  )(query, key, value, lengths)
+
+  m = jnp.reshape(m, (batch_size, 1, num_heads_q, 1))
+  l = jnp.reshape(l, (batch_size, 1, num_heads_q, 1))
+  o = jnp.reshape(o, (batch_size, 1, num_heads_q, head_dim))
   o = o * l 
   return o, m, l
