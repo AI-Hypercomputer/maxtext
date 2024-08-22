@@ -238,16 +238,10 @@ class AttentionOp(nn.Module):
   
   def ragged_attention(self, query: Array, key: Array | KVTensor, value: Array | KVTensor, lengths: Array, block_size: int) -> tuple[Array, Array, Array]:
     """Ragged Attention."""
-    # assert (
-    #     query.shape[2] == key.shape[2] == value.shape[2]
-    # ), "Ragged attention currently expects QKV to have the same number of heads."
+    if isinstance(query, KVTensor) or isinstance(query, KVTensor):
+      raise TypeError("Ragged attention does not currently support quantized tensors.")
     b = nn.logical_to_mesh_axes(self.ragged_lengths_names)
     bsnd = nn.logical_to_mesh_axes(self.cache_logical_axis_names)
-    # if isinstance(key, KVTensor):
-    #   key = key.dequant()
-    # if isinstance(value, KVTensor):
-    #   value = value.dequant()
-
     @functools.partial(
         shard_map,
         mesh=self.mesh,
@@ -745,8 +739,6 @@ class AttentionOp(nn.Module):
     # value, we reshape the one_token_key and one_token_value
     one_token_key_shaped_for_cache = jnp.transpose(one_token_key, self.ar_cache_axis_order)
     one_token_value_shaped_for_cache = jnp.transpose(one_token_value, self.ar_cache_axis_order)
-    # print(f"\nupdate_ar_key_value - {one_token_key_shaped_for_cache.shape=}")
-    # print(f"update_ar_key_value - {cached_key_var.value.shape=}")
 
     ar_cache_axis_names = self.transpose_tuple(self.cache_logical_axis_names, self.ar_cache_axis_order)
     if self.kv_quant:
@@ -758,6 +750,7 @@ class AttentionOp(nn.Module):
 
     ar_cache_update_idx = jnp.squeeze(one_hot_indices)
     ar_cache_update_axis = ar_cache_axis_names.index(CACHE_SEQUENCE)
+
     if use_ragged_attention:
       def key_body(i, val):
         return val.at[i, :, lengths[i], :].set(one_token_key_shaped_for_cache[i, :, 0, :])
@@ -949,9 +942,6 @@ class AttentionOp(nn.Module):
       unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
       exponentials_maxes = [prefill_exponentials_max, ar_exponentials_max]
       exponentials_sums = [prefill_exponentials_sum, ar_exponentials_sum]
-      # print(f"\n{unnormalized_outputs[0].shape=}, {unnormalized_outputs[1].shape=}")
-      # print(f"{exponentials_maxes[0].shape=}, {exponentials_maxes[1].shape=}")
-      # print(f"{exponentials_sums[0].shape=}, {exponentials_sums[1].shape=}")
       return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
     else:
       return prefill_unnormalized_output / prefill_exponentials_sum

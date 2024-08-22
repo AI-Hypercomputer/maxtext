@@ -99,7 +99,7 @@ def reference_gqa(
     v: jax.Array,
     lengths: jax.Array,
     mask_value: float = DEFAULT_MASK_VALUE,
-) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Vanilla attention GQA implementation for reference.
 
   Args:
@@ -115,17 +115,17 @@ def reference_gqa(
     max logit ([batch_size, num_heads]) and softmax denominator ([batch_size,
     num_heads]).
   """
-  batch_size, num_q_heads, head_dim = q.shape
-  _, num_kv_heads, max_seq_len, _ = k.shape
+  batch_size, num_heads_q, head_dim = q.shape
+  _, num_heads_kv, seq_len, _ = k.shape
   assert k.shape == v.shape
-  assert num_q_heads % num_kv_heads == 0
+  assert num_heads_q % num_heads_kv == 0
 
-  q = q.reshape(batch_size, num_kv_heads, num_q_heads // num_kv_heads, head_dim)
+  q = q.reshape(batch_size, num_heads_kv, num_heads_q // num_heads_kv, head_dim)
 
   logits = jnp.einsum(
       "bhgd,bhtd->bhgt", q.astype(jnp.float32), k.astype(jnp.float32)
   )
-  mask = jnp.arange(max_seq_len)[None] < lengths[:, None]
+  mask = jnp.arange(seq_len)[None] < lengths[:, None]
   logits = logits + jnp.where(mask, 0.0, mask_value)[:, None, None, :]
   logits_max = logits.max(axis=-1)
   unnormalized = jnp.exp(logits - logits_max[..., None])
@@ -134,8 +134,10 @@ def reference_gqa(
       jnp.einsum("bhgt,bhtd->bhgd", unnormalized.astype(v.dtype), v)
       / denominator[..., None]
   )
-  return o.reshape(batch_size, num_q_heads, head_dim), (logits_max, denominator)
-
+  logits_max = logits_max.reshape(batch_size, 1, num_heads_q, 1)
+  denominator = denominator.reshape(batch_size, 1, num_heads_q, 1)
+  o = o.reshape(batch_size, 1, num_heads_q, head_dim)
+  return o, logits_max, denominator
 
 def ragged_flash_attention_kernel(
     lengths_ref,
@@ -366,7 +368,7 @@ def ragged_gqa(
   """Ragged group query attention.
 
   Args:
-    q: A [batch_size, 1, num_heads_q, head_dim] jax.Array.
+    q: A [batch_size, num_heads_q, head_dim] jax.Array.
     k: A [batch_size, seq_len, num_heads_kv, head_dim] jax.Array.
     v: A [batch_size, seq_len, num_heads_kv, head_dim] jax.Array.
     lengths: A i32[batch_size] jax.Array.
@@ -379,10 +381,25 @@ def ragged_gqa(
     max logit ([batch_size, num_heads, 1]) and softmax denominator ([batch_size,
     num_heads, 1]).
   """
+  cost_analysis = (
+    reference_gqa.lower(
+      jnp.squeeze(query),
+      jnp.swapaxes(key, 1, 2),
+      jnp.swapaxes(value, 1, 2),
+      lengths,
+      mask_value=mask_value,
+    )
+    .compile()
+    .cost_analysis()[0]
+  )
+  cost_estimate = pltpu.CostEstimate(
+    flops=int(cost_analysis["flops"]),
+    transcendentals=int(cost_analysis["transcendentals"]),
+    bytes_accessed=int(cost_analysis["bytes accessed"]),
+  )
   batch_size, _, num_heads_q, head_dim = query.shape
-  _, seq_len, num_heads_kv, _ = key.shape
+  _, _, num_heads_kv, _ = key.shape
   
-  query = jnp.squeeze(query)        # (b, n_q, d)
   query = query.reshape(batch_size, num_heads_kv, num_heads_q // num_heads_kv, head_dim)  # (b, n_kv, n_q // n_kv, d)
   key = jnp.swapaxes(key, 1, 2)     # (b, n_kv, s, d)
   value = jnp.swapaxes(value, 1, 2) # (b, n_kv, s, d)
@@ -391,7 +408,7 @@ def ragged_gqa(
       ragged_mqa,
       block_size=block_size,
       mask_value=mask_value,
-      # cost_estimate=cost_estimate,
+      cost_estimate=cost_estimate,
     ),
     in_axes=(1, 1, 1, None),
     out_axes=1,
