@@ -316,17 +316,17 @@ def train_step(model, config, state, data, dropout_rng):
   else:
     grads = raw_grads
   new_state = state.apply_gradients(grads=grads)
-  metrics = {
-      "scalar": {
-          "learning/loss": loss,
-          "learning/total_weights": total_weights,
-          "learning/grad_norm": max_utils.l2norm_pytree(grads),
-          "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
-          "learning/param_norm": max_utils.l2norm_pytree(new_state.params),
-      },
-      "scalars": {},
-  }
-  #metrics = {'scalar': {'learning/loss': loss}, 'scalars': {}}
+  # metrics = {
+  #     "scalar": {
+  #         "learning/loss": loss,
+  #         "learning/total_weights": total_weights,
+  #         "learning/grad_norm": max_utils.l2norm_pytree(grads),
+  #         "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
+  #         "learning/param_norm": max_utils.l2norm_pytree(new_state.params),
+  #     },
+  #     "scalars": {},
+  # }
+  metrics = {'scalar': {'learning/loss': loss}, 'scalars': {}}
 
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
@@ -640,7 +640,7 @@ def train_loop(config, state=None):
         state, metrics = p_train_step(state, example_batch, nextrng)
 
     new_time = datetime.datetime.now()
-    record_scalar_metrics(metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
+    # record_scalar_metrics(metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
     step_time_delta = new_time - last_step_completion
     max_logging.log(f"completed step: {step}, seconds: {step_time_delta.total_seconds()}, "
           f"TFLOP/s/device: {per_device_tflops / step_time_delta.total_seconds()}, "
@@ -656,7 +656,7 @@ def train_loop(config, state=None):
         checkpoint_manager.wait_until_finished()
         sys.exit()
 
-    write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
+    # write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
 
     if config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
       assert eval_data_iterator
@@ -684,7 +684,7 @@ def train_loop(config, state=None):
 
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()
-  write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config)  # final step metrics
+  # write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config)  # final step metrics
   max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, job_end=True)
   clear_buffered_metrics()
