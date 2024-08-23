@@ -39,3 +39,29 @@ class SimpleDecoderLayer(nn.Module):
       return inputs @ self.weight_mat.astype(inputs.dtype), None
     else:
       return inputs @ self.weight_mat.astype(inputs.dtype)
+
+class MlpDecoderLayer(nn.Module):
+  config: common_types.Config
+  mesh: Mesh
+  quant: Optional[quantizations.AqtQuantization] = None
+
+  def setup(self):
+    self.ff_1 = self.param(
+      'ff_1',
+      nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
+      (self.config.emb_dim, self.config.mlp_dim)
+    )
+    self.ff_2 = self.param(
+      'ff_2',
+      nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("mlp", "embed")),
+      (self.config.mlp_dim, self.config.emb_dim)
+    )
+
+
+  def __call__(self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode):
+    intermediate = inputs @ self.ff_1.astype(inputs.dtype)
+    output = intermediate @ self.ff_2.astype(inputs.dtype)
+    if self.config.scan_layers:
+      return output, None
+    else:
+      return output
