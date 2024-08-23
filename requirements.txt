@@ -9,7 +9,7 @@ cloud-tpu-diagnostics
 datasets
 gcsfs
 google-cloud-storage
-grain-nightly
+#grain-nightly
 flax>=0.8.0
 ml-collections
 ml-goodput-measurement
