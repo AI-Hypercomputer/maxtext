@@ -24,13 +24,13 @@ import unittest
 
 from absl import flags
 from jax import random
-from kernels.ragged_attention import ragged_mha, reference_mha, ragged_mqa, reference_mqa
+from kernels.ragged_attention import ragged_mha, reference_mha, ragged_mqa, reference_mqa, ragged_gqa, reference_gqa
 
 
 class RaggedAttentionTest(unittest.TestCase):
   """Tests for ragged attention kernel."""
   batch_size = 4
-  num_kv_heads = 32
+  num_kv_heads = 8
   num_query_heads = 32
   max_prefill_predict_length = 256
   max_target_length = 512
@@ -51,21 +51,35 @@ class RaggedAttentionTest(unittest.TestCase):
 
     ragged_out, ragged_max, ragged_denom = ragged_mqa(q, k, v, lengths)
     reference_out, reference_max, reference_denom = reference_mqa(q, k, v, lengths)
-    assert jnp.allclose(ragged_out, reference_out, rtol=0.0, atol=1e-1), f"Max difference {jnp.max(abs(ragged_out - reference_out))} > 1e-1"
+    assert jnp.allclose(ragged_out, reference_out, rtol=0.0, atol=1e-1), f"Max difference {jnp.max(abs(ragged_out - reference_out))} > 1e-3"
 
 
   @pytest.mark.tpu
   def test_ragged_mha(self):
+    k1, k2, k3 = random.split(self.key, 3)
+    q = random.normal(k1, (self.batch_size, 1, self.num_kv_heads, self.head_dim), dtype=self.dtype)
+    k = random.normal(k2, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype)
+    v = random.normal(k3, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype)
+    lengths = jnp.array(np.random.randint(1, self.max_target_length, self.batch_size), dtype=jnp.int32)
+
+    ragged_out, ragged_max, ragged_denom = ragged_mha(q, k, v, lengths)
+    ragged_out = ragged_out / ragged_denom
+    reference_out, reference_max, reference_denom = reference_mha(q, k, v, lengths)
+    assert jnp.allclose(ragged_out, reference_out, rtol=0.0, atol=1e-1), f"Max difference {jnp.max(abs(ragged_out - reference_out))} > 1e-3"
+
+
+  @pytest.mark.tpu
+  def test_ragged_gqa(self):
     k1, k2, k3 = random.split(self.key, 3)
     q = random.normal(k1, (self.batch_size, 1, self.num_query_heads, self.head_dim), dtype=self.dtype)
     k = random.normal(k2, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype)
     v = random.normal(k3, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype)
     lengths = jnp.array(np.random.randint(1, self.max_target_length, self.batch_size), dtype=jnp.int32)
 
-    ragged_out, ragged_max, ragged_denom = ragged_mha(q, k, v, lengths)
-    reference_out, reference_max, reference_denom = reference_mha(q, k, v, lengths)
+    ragged_out, ragged_max, ragged_denom = ragged_gqa(q, k, v, lengths)
     ragged_out = ragged_out / ragged_denom
-    assert jnp.allclose(ragged_out, reference_out, rtol=0.0, atol=1e-1), f"Max difference {jnp.max(abs(ragged_out - reference_out))} > 1e-1"
+    reference_out, reference_max, reference_denom = reference_gqa(jnp.squeeze(q), jnp.swapaxes(k, 1, 2), jnp.swapaxes(v, 1, 2), lengths)
+    assert jnp.allclose(ragged_out, reference_out, rtol=0.0, atol=1e-1), f"Max difference {jnp.max(abs(ragged_out - reference_out))} > 1e-3"
 
 
 if __name__ == "__main__":
