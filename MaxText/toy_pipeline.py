@@ -1,15 +1,37 @@
 import jax
 from jax import numpy as jnp
 from functools import partial
-
 from jax.sharding import NamedSharding, Mesh, PartitionSpec as P
 from jax.experimental.shard_map import shard_map
 from jax.experimental import mesh_utils
-
-import timing_util
-
+import random
+import string
+import datetime
 import os
+
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+
+def simple_timeit(f, *args, tries=10, task=None):
+  """Simple utility to time a function for multiple runs"""
+  assert task is not None
+
+  trace_name = f"t_{task}_" + "".join(random.choice(string.ascii_uppercase + string.digits) for _ in range(10))
+  trace_dir = f"gs://mattdavidow-br/{trace_name}"
+
+  outcomes_ms = []
+  jax.block_until_ready(f(*args))  # warm it up!
+  jax.profiler.start_trace(trace_dir)
+
+  for _ in range(tries):
+    s = datetime.datetime.now()
+    jax.block_until_ready(f(*args))
+    e = datetime.datetime.now()
+    outcomes_ms.append(1000 * (e - s).total_seconds())
+  jax.profiler.stop_trace()
+
+  average_time_ms = sum(outcomes_ms) / len(outcomes_ms)
+  print(f"{task}: average time milliseconds: {average_time_ms:.2f}, trace {trace_dir}")
+  return average_time_ms
 
 global mesh
 mesh = Mesh(jax.devices(), ('stages',))
@@ -252,7 +274,7 @@ def main():
   parser.add_argument('--batch_size', type=int, default=16)
   parser.add_argument('--embed_size', type=int, default=2048)
   parser.add_argument('--num_microbatches', type=int, default=4)
-  parser.add_argument('--remove_dummy_comms', action=argparse.BooleanOptionalAction, default=True)
+  parser.add_argument('--remove_dummy_comms', action=argparse.BooleanOptionalAction, default=False)
   parser.add_argument('--use_overlapped', action=argparse.BooleanOptionalAction, default=False)
   parser.add_argument('--num_layers_per_stage', type=int, default=1) # Fake/ poorly named argument, just repeating the same matmul per layer to increase the model AI
   parser.add_argument('--shift_io', action=argparse.BooleanOptionalAction, default=True) # Needs to be true for correctness, but these shifts do not appear hidden on trace (they should be), and add complexity to HLO
@@ -289,7 +311,7 @@ def main():
   print(f"pipeline loss {jax.jit(loss_pp)(params_sharded, batch_sharded)}")
   jit_pipeline = jax.jit(loss_pp)
 
-  timing_util.simple_timeit(jit_pipeline, params_sharded, batch_sharded, tries = 3, task = 'shard_pp')
+  simple_timeit(jit_pipeline, params_sharded, batch_sharded, tries = 3, task = 'shard_pp')
   
 
 main()
