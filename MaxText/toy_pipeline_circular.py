@@ -70,7 +70,7 @@ def get_real_permute_pairs(loop_iteration, num_stages):
     return [(i, (i+1) % num_stages) for i in range(loop_iteration + 1)]
 
 def get_repeat_idx(loop_iter, stage_idx, num_stages):
-    repeat_idx = (loop_iter - stage_idx) // num_stages # should be loop_iter - 2 * stage_idx for overlapped
+    repeat_idx = (loop_iter - args.micro_per_stage * stage_idx) // num_stages # should be loop_iter - 2 * stage_idx for overlapped
     repeat_idx = jnp.minimum(repeat_idx, num_stages)
     repeat_idx = jnp.maximum(repeat_idx, 0)
     return repeat_idx
@@ -144,13 +144,13 @@ def spmd_pipeline(fn, stage_params, inputs):
         rotated = jnp.expand_dims(rotated, 0) # Don't think we need this
         # The offset is the previous iterations microbatch ID of the last stage, so that for example microbatch 0 will
         # be placed in index 0 of the num_microbatches axis. 
-        offset = (loop_iter - (args.num_stages - 1) - 1) % args.num_microbatches # Note extra -1 b/c grabbing from the previous output - using circ_storage_mover before it is updated
+        offset = (loop_iter - args.micro_per_stage * (args.num_stages - 1) - 1) % args.num_microbatches # Note extra -1 b/c grabbing from the previous output - using circ_storage_mover before it is updated
         return jax.lax.dynamic_update_slice_in_dim(circ_storage_in, rotated, offset, axis=0)
       circ_storage = _rotate_right_and_update(circ_storage_mover, circ_storage)
       circ_storage_mover = state_output
 
     # Push last pipeline stage to output. In order to keep the same permutation order of outputs as inputs we push to a specific microbatches_per_stage index (so that first real output lands on idx 0)
-    output_offset = args.num_stages - 1
+    output_offset = args.micro_per_stage * (args.num_stages - 1)
     outputs = outputs.at[(loop_iter - output_offset) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, state, outputs[(loop_iter - output_offset) % args.microbatches_per_stage]))
     if args.overlapped:
       new_state = shift_stages(loop_iter, prev_outputs)
@@ -268,7 +268,7 @@ def main():
     args.micro_per_stage = 2
   else:
     args.micro_per_stage = 1
-  
+  print(args)
 
   global_batch_size = args.microbatch_size * args.num_microbatches
   params, batch = init(jax.random.PRNGKey(0), args.num_layers, args.embed_size, args.mlp_size, global_batch_size)
