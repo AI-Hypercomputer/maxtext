@@ -612,6 +612,7 @@ def train_loop(config, state=None):
         return value
 
     state = jax.tree_util.tree_map_with_path(map_fn, state)
+    jax.block_until_ready(state)
 
   start_step = get_first_step(state)  # this is the start_step for training
   first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
@@ -621,6 +622,7 @@ def train_loop(config, state=None):
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
+  p_random_next = jax.jit(jax.random.fold_in).lower(init_rng, start_step).compile()
   mllog_utils.init_print(config, start_step)
   mllog_utils.init_stop()
   mllog_utils.run_start()
@@ -634,7 +636,7 @@ def train_loop(config, state=None):
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       example_batch = load_next_batch(data_iterator, example_batch, config)
       check_example_batch(config, example_batch=example_batch)
-      nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
+      nextrng = p_random_next(init_rng, step)
       record_goodput(recorder, config, step=step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, nextrng)
