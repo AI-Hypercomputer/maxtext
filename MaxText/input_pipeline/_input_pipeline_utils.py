@@ -164,12 +164,15 @@ class ArrayRecordDataSourceWithPadding(grain.ArrayRecordDataSource):
     self.data_column_name = data_column_name
     self.max_target_length = max_target_length
   
+  def __len__(self):
+    return super().__len__() + self.max_target_length
+  
   def __getitem__(self, index):
     if index >= super().__len__():
       if not self.out_of_data:
         max_logging.log(f"Failed to retrive data for {index=}, you may run out of data, grain data loader will start producint all-0 padding data")
         self.out_of_data = True
-      return {self.data_column_name: np.zeros(self.max_target_length, dtype=np.int32)}
+      return {self.data_column_name: np.zeros(self.max_target_length // 2, dtype=np.int32)}
     else:
       return super().__getitem__(index)
 
