@@ -44,7 +44,6 @@ def init(key_init, num_layers, embed_size, mlp_size, batch_size):
 
 def stage_fn(layer, inputs):
   for _ in range(args.matmul_repeats):
-    breakpoint()
     intermediate = jnp.dot(inputs, layer['ff1'])
     intermediate = jax.nn.relu(intermediate)
     inputs = jnp.dot(intermediate, layer['ff2'])
@@ -69,12 +68,24 @@ def get_real_permute_pairs(loop_iteration, num_stages):
   else:
     return [(i, (i+1) % num_stages) for i in range(loop_iteration + 1)]
 
-def get_circular_weights(pytree):
-    # this method is super wrong, we need to first reshape weights to stages, repeats instead of just layers
-    # before passing into this method
-    def get_index_zero(arr):
-        return arr[0]
-    return jax.tree.map(get_index_zero, pytree)
+def get_repeat_idx(loop_iter, stage_idx, num_stages):
+    repeat_idx = (loop_iter - stage_idx) // num_stages # should be loop_iter - 2 * stage_idx for overlapped
+    repeat_idx = jnp.minimum(repeat_idx, num_stages)
+    repeat_idx = jnp.maximum(repeat_idx, 0)
+    return repeat_idx
+
+def get_circular_weights(pytree, loop_iter, stage_idx, num_stages):
+    repeat_idx = get_repeat_idx(loop_iter, stage_idx, num_stages)
+    def get_repeat_from_arr(arr):
+        return arr[0,repeat_idx] # shmap is rank preserving, first 0 should should correspond to stage dimension of length 1 after shard map
+    return jax.tree.map(get_repeat_from_arr, pytree)
+
+def reshape_weights_for_circular(pytree):
+    def reshape_arr(arr):
+        cur_shape = arr.shape
+        return jnp.reshape(arr, (args.num_stages, cur_shape[0] // args.num_stages) + cur_shape[1:])
+    return jax.tree.map(reshape_arr, pytree)
+
 def spmd_pipeline(fn, stage_params, inputs):
   stage = jax.lax.axis_index('stages')
   outputs = jnp.zeros_like(inputs) * jnp.nan
@@ -115,10 +126,7 @@ def spmd_pipeline(fn, stage_params, inputs):
       # This is needed for correctness - this pushes new inputs to the top to be moved into the first pipeline
       inputs = shift_inputs(loop_iter, inputs)
 
-
-    # Shard map is rank preserving, so the params have shape [1,embed,embed] inside each shard
-    # We want to pass something of shape [embed, embed] instead, so we index away the first unit axis.
-    weights = get_circular_weights(stage_params)
+    weights = get_circular_weights(stage_params, loop_state["loop_iter"], stage, args.num_stages)
     state = fn(weights, state) # TODO - this doesn't actually use the right layer of params for circular pipeline
 
     # Updates
@@ -250,7 +258,8 @@ def main():
   params_stacked = jax.tree.map(jnp.stack, params)
   params_stacked = my_jnp_stack(params)
 
-  params_sharded = jax.device_put(params_stacked, NamedSharding(mesh, P('stages')))
+  params_circular = reshape_weights_for_circular(params_stacked)
+  params_sharded = jax.device_put(params_circular, NamedSharding(mesh, P('stages')))
   
   batch_sharded = jax.device_put(batch, NamedSharding(mesh, P('stages')))
 
