@@ -626,8 +626,8 @@ def train_loop(config, state=None):
   mllog_utils.run_start()
   mllog_utils.block_start(config)
 
-  prof.activate()
   prof = profiler.Profiler(config)
+  prof.activate()
   for step in np.arange(start_step, config.steps):
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
