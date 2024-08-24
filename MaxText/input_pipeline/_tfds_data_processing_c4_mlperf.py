@@ -220,7 +220,7 @@ def get_dataset(
   """Load and return a dataset of examples."""
   # enable shard_in_read in training dataset with host_count large than 1024, which means 4096 chip or 8192 core
   # we need this in v5p-12288
-  if dataloading_host_count > 1024 and split == "train2":
+  if split == "train2":
     shard_in_read = True
     max_logging.log(
         f"overwriting {shard_in_read=} with {dataloading_host_count=}"
