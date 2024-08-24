@@ -254,7 +254,7 @@ class Pipeline(nn.Module):
       new_shift = _rotate_right(old_prev_outputs)
       new_prev_outputs = output
     else:
-      #new_shift = _rotate_right(output)
+      new_shift = _rotate_right(output)
       new_prev_outputs = None
 
     if self.use_circ_storage:
