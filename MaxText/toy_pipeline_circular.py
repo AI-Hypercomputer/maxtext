@@ -6,6 +6,8 @@ from functools import partial
 from jax.sharding import NamedSharding, Mesh, PartitionSpec as P
 from jax.experimental.shard_map import shard_map
 
+import numpy as np
+
 import os
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
@@ -84,7 +86,9 @@ def get_circular_weights(pytree, loop_iter, stage_idx, num_stages):
 def reshape_weights_for_circular(pytree):
     def reshape_arr(arr):
         cur_shape = arr.shape
-        return jnp.reshape(arr, (args.num_stages, cur_shape[0] // args.num_stages) + cur_shape[1:])
+        arr_repeat_first = jnp.reshape(arr, (cur_shape[0] // args.num_stages, args.num_stages) + cur_shape[1:])
+        arr_stage_first = jnp.transpose(arr_repeat_first, axes = (1,0) + tuple(np.arange(len(cur_shape) + 1)[2:]))
+        return arr_stage_first
     return jax.tree.map(reshape_arr, pytree)
 
 def spmd_pipeline(fn, stage_params, inputs):
@@ -151,7 +155,7 @@ def spmd_pipeline(fn, stage_params, inputs):
 
     # Push last pipeline stage to output. In order to keep the same permutation order of outputs as inputs we push to a specific microbatches_per_stage index (so that first real output lands on idx 0)
     output_offset = args.micro_per_stage * (args.num_stages - 1)
-    outputs = outputs.at[(loop_iter - output_offset) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, state, outputs[(loop_iter - output_offset) % args.microbatches_per_stage]))
+    outputs = outputs.at[(loop_iter - output_offset) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, state_output, outputs[(loop_iter - output_offset) % args.microbatches_per_stage]))
     if args.overlapped:
       new_state = shift_stages(loop_iter, prev_outputs)
       new_prev_outputs = state_output
