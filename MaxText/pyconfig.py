@@ -24,6 +24,7 @@ from typing import Any, Union
 
 import jax
 from jax.experimental.compilation_cache import compilation_cache
+from layers.attentions import AttentionType
 import accelerator_to_spec_map
 import max_logging
 import max_utils
@@ -64,10 +65,16 @@ def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
   if quantize_kvcache and s == "":
     raise ValueError("kv_quant_axis can not be '' when quantize_kvcache is True")
 
+def validate_attention_kernel(s: str) -> None:
+  valid_attention_kernels = ("autoselected", "dot_product", "flash", "cudnn_flash_te")
+  if s not in valid_attention_kernels:  # currently supported attention
+    raise ValueError("Invalid attention kernel was passed. Valid options ", valid_attention_kernels)
+
 def validate_attention_type(s: str) -> None:
-  valid_attention_types = ("autoselected", "dot_product", "flash", "cudnn_flash_te")
+  valid_attention_types = (attention_type.value for attention_type in AttentionType)
   if s not in valid_attention_types:  # currently supported attention
     raise ValueError("Invalid attention type was passed. Valid options ", valid_attention_types)
+
 
 def validate_profiler_type(s: str) -> None:
   valid_profiler_types = ("", "nsys", "xplane")
@@ -76,7 +83,8 @@ def validate_profiler_type(s: str) -> None:
 
 
 def validate_keys(keys):
-  validate_attention_type(keys["attention"])
+  validate_attention_kernel(keys["attention"])
+  validate_attention_type(keys["attention_type"])
   validate_profiler_type(keys["profiler"])
   validate_compute_axis_order(keys["compute_axis_order"])
   validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
@@ -93,7 +101,6 @@ def validate_keys(keys):
   else:
     max_logging.log("Not using emergency checkpoint, ignoring local_checkpoint_directory and local_checkpoint_period")
   if keys["num_experts"] > 1:
-    # Currently, Megablox only supports data parallelism
     validate_megablox_parallelism(keys)
 
 
@@ -142,6 +149,8 @@ def validate_model_name(s: str) -> bool:
       "mixtral-8x7b",
       "gemma-7b",
       "gemma-2b",
+      "gemma2-2b",
+      "gemma2-9b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
@@ -162,12 +171,6 @@ def validate_no_keys_overwritten_twice(keys1: list[str], keys2: list[str]):
 
 _config = None
 config = None
-
-
-def print_system_information():
-  max_logging.log(f"System Information: Jax Version: {jax.__version__}")
-  max_logging.log(f"System Information: Jaxlib Version: {jax.lib.__version__}")
-  max_logging.log(f"System Information: Jax Backend: {jax.lib.xla_bridge.get_backend().platform_version}")
 
 
 def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any], list[Any]]:
@@ -312,6 +315,11 @@ class _HyperParameters:
     if raw_keys["steps"] == -1:
       raw_keys["steps"] = raw_keys["learning_rate_schedule_steps"]
 
+    if raw_keys["attn_logits_soft_cap"] == 0.0:
+      raw_keys["attn_logits_soft_cap"] = None
+    if raw_keys["final_logits_soft_cap"] == 0.0:
+      raw_keys["final_logits_soft_cap"] = None
+
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys["global_parameter_scale"])
     raw_keys["emb_dim"] = 2**emb_scale * raw_keys["base_emb_dim"]
     raw_keys["num_query_heads"] = 2**num_head_scale * raw_keys["base_num_query_heads"]
@@ -319,7 +327,7 @@ class _HyperParameters:
     raw_keys["mlp_dim"] = 2**mlp_dim_scale * raw_keys["base_mlp_dim"]
     raw_keys["num_decoder_layers"] = 2**layer_scale * raw_keys["base_num_decoder_layers"]
 
-    raw_keys["global_batch_size_to_load"], raw_keys["global_batch_size_to_train_on"] = calculate_global_batch_sizes(raw_keys)
+    raw_keys["global_batch_size_to_load"], raw_keys["global_batch_size_to_train_on"], raw_keys["micro_batch_size_to_train_on"] = calculate_global_batch_sizes(raw_keys)
     raw_keys["num_slices"] = get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
 
@@ -334,12 +342,9 @@ class _HyperParameters:
       if raw_keys['num_pipeline_microbatches'] == -1:
         raw_keys['num_pipeline_microbatches'] = num_stages
       assert raw_keys['num_pipeline_microbatches'] % num_stages == 0, f"The number of microbatches ({raw_keys['num_pipeline_microbatches']}) must be divisible by the number of stages ({num_stages})"
-      assert raw_keys['global_batch_size_to_train_on'] % raw_keys['num_pipeline_microbatches'] == 0, f"The global batch size ({raw_keys['global_batch_size_to_train_on']}) must be divisible by the number of microbatches ({raw_keys['num_pipeline_microbatches']})"
+      assert raw_keys['micro_batch_size_to_train_on'] % raw_keys['num_pipeline_microbatches'] == 0, f"The batch size ({raw_keys['micro_batch_size_to_train_on']}) must be divisible by the number of microbatches ({raw_keys['num_pipeline_microbatches']})"
     else:
       raw_keys["using_pipeline_parallelism"] = False
-
-
-    print_system_information()
 
     # Write raw_keys to GCS before type conversions
     max_utils.write_config_raw_keys_for_gcs(raw_keys)
@@ -367,7 +372,8 @@ class _HyperParameters:
     raw_keys["learning_rate_schedule_steps"] = decay_end_step
     raw_keys["warmup_steps_fraction"] = warmup_steps / decay_end_step
     global_batch_size_to_train_on = calculate_global_batch_sizes(raw_keys)[1]
-    raw_keys["eval_interval"] = math.ceil(24567 / global_batch_size_to_train_on)
+    if raw_keys["dataset_type"] != "synthetic":
+      raw_keys["eval_interval"] = math.ceil(24567 / global_batch_size_to_train_on)
 
   @staticmethod
   def update_model_vars(base_config_path, raw_keys, config_name: str):
@@ -391,10 +397,13 @@ class _HyperParameters:
     return updated_keys
 
 def validate_megablox_parallelism(raw_keys):
-  if raw_keys["megablox"] and (using_tensor_parallelism(raw_keys) or
-                               using_sequence_parallelism(raw_keys) or
+  if raw_keys["megablox"] and (using_sequence_parallelism(raw_keys) or
                                using_pipeline_parallelism(raw_keys)):
-    raise ValueError("Currently we only support Megablox with data parallelism.")
+    raise ValueError("Currently we only support Megablox with data and tensor parallelism.")
+  tensor_parallelism = raw_keys["ici_tensor_parallelism"] * raw_keys["dcn_tensor_parallelism"]
+  if raw_keys["megablox"] and using_tensor_parallelism(raw_keys) and (raw_keys["emb_dim"] % tensor_parallelism):
+    raise ValueError(f"The embedding dimension {raw_keys['emb_dim']} is not divisible by tensor parallelism setting {tensor_parallelism}.")
+
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):
   new_logical_axis = set()
@@ -467,17 +476,19 @@ def calculate_global_batch_sizes(raw_keys):
   if per_device_batch_size < 1.0:
     # For per_device_batch_size<1, we load the data as if per_device_batch_size=1
     if expansion_factor_real_data != -1:
-      global_batch_size_to_load = num_devices * expansion_factor_real_data
+      micro_batch_size_to_load = num_devices * expansion_factor_real_data
     else:
-      global_batch_size_to_load = num_devices
+      micro_batch_size_to_load = num_devices
   else:
     if expansion_factor_real_data != -1:
-      global_batch_size_to_load = int(num_devices * per_device_batch_size * expansion_factor_real_data)
+      micro_batch_size_to_load = int(num_devices * per_device_batch_size * expansion_factor_real_data)
     else:
-      global_batch_size_to_load = int(num_devices * per_device_batch_size)
+      micro_batch_size_to_load = int(num_devices * per_device_batch_size)
 
-  global_batch_size_to_train_on = int(num_devices * per_device_batch_size)
-  return global_batch_size_to_load, global_batch_size_to_train_on
+  micro_batch_size_to_train_on = int(num_devices * per_device_batch_size)
+  global_batch_size_to_load = int(micro_batch_size_to_load * raw_keys["gradient_accumulation_steps"])
+  global_batch_size_to_train_on = int(micro_batch_size_to_train_on * raw_keys["gradient_accumulation_steps"])
+  return global_batch_size_to_load, global_batch_size_to_train_on, micro_batch_size_to_train_on
 
 
 def get_num_target_devices(raw_keys):

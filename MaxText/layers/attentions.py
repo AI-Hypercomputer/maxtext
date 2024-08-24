@@ -14,6 +14,7 @@
 
 """Attentions Layers."""
 
+import enum
 import functools
 import math
 from typing import Any, Optional
@@ -23,8 +24,8 @@ import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
-from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
 
 import common_types
@@ -32,6 +33,11 @@ from layers import embeddings
 from layers import initializers
 from layers import linears
 from layers import quantizations
+
+
+class AttentionType(enum.Enum):
+  GLOBAL = "global"
+  LOCAL_SLIDING = "local_sliding"
 
 
 Array = common_types.Array
@@ -45,6 +51,7 @@ RotaryEmbedding = embeddings.RotaryEmbedding
 NdInitializer = initializers.NdInitializer
 Quant = quantizations.AqtQuantization
 KVQuant = quantizations.KVQuant
+KVTensor = quantizations.KVTensor
 
 AxisNames = common_types.AxisNames
 AxisIdxes = common_types.AxisIdxes
@@ -106,11 +113,6 @@ def apply_mask_to_logits(logits: Array, mask: Array):
   return jnp.where((mask >= DEFAULT_MASK_VALUE * 0.5), logits, DEFAULT_MASK_VALUE)
 
 
-def _maybe_aqt_einsum(quant: Quant):
-  """Maybe overwrite dot general with aqt_dot_general."""
-  return jnp.einsum if quant is None else quant.einsum()
-
-
 class AttentionOp(nn.Module):
   mesh: Mesh
   attention_kernel: str
@@ -131,8 +133,11 @@ class AttentionOp(nn.Module):
   dtype: DType = jnp.float32
   quant: Optional[Quant] = None
   kv_quant: Optional[KVQuant] = None
+  attention_type: AttentionType = AttentionType.GLOBAL  # Default to global attention
+  attn_logits_soft_cap: float | None = None
+  sliding_window_size: int | None = None
 
-  def check_attention_inputs(self, query: Array, key: Array, value: Array) -> None:
+  def check_attention_inputs(self, query: Array, key: Array| KVTensor, value: Array| KVTensor) -> None:
     """Check attention inputs."""
 
     assert key.ndim == value.ndim, "k, v must have same rank."
@@ -162,18 +167,30 @@ class AttentionOp(nn.Module):
       col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
       causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
 
+    output_mask = None
+
     if (mask is not None) and (causal_mask is not None):
       output_mask = jnp.logical_and(mask, causal_mask)
     elif mask is not None:
       output_mask = mask
     elif causal_mask is not None:
       output_mask = causal_mask
-    else:
-      output_mask = None
+
+    if self.attention_type == AttentionType.LOCAL_SLIDING and output_mask is not None:
+      if self.sliding_window_size is None:
+        raise ValueError(
+            'Sliding_window_size must be set if Local Sliding attention type'
+        )
+
+      all_ones = jnp.ones_like(output_mask)
+      sliding_mask = jnp.triu(
+          all_ones, -1 * self.sliding_window_size + 1
+      ) * jnp.tril(all_ones, self.sliding_window_size - 1)
+      output_mask = sliding_mask * output_mask
 
     return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
 
-  def apply_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None, model_mode: str):
+  def apply_attention(self, query: Array, key: Array| KVTensor, value: Array| KVTensor, decoder_segment_ids: Array | None, model_mode: str):
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
     if (
@@ -183,13 +200,22 @@ class AttentionOp(nn.Module):
     ):
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
     elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
+      if isinstance(key, KVTensor):
+        key = key.dequant()
+      if isinstance(value, KVTensor):
+        value = value.dequant()
+
       if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
         raise ValueError(
             """Decode not supported with flash attention.
                             Use `dot_product` instead."""
         )
-      return self.tpu_flash_attention(query, key, value, decoder_segment_ids), None, None
+      return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
     elif self.attention_kernel == "cudnn_flash_te":
+      if isinstance(key, KVTensor):
+        key = key.dequant()
+      if isinstance(value, KVTensor):
+        value = value.dequant()
       if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
         raise ValueError(
             """Decode not supported with flash attention.
@@ -199,7 +225,7 @@ class AttentionOp(nn.Module):
     else:
       raise ValueError(f"Unexpected attention kernel {self.attention_kernel=}.")
 
-  def tpu_flash_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None) -> Array:
+  def tpu_flash_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None, attn_logits_soft_cap: float | None = None) -> Array:
     """TPU Flash Attention."""
     # Transpose to ('batch', 'heads', 'length', 'kv')
     query = jnp.transpose(query, axes=(0, 2, 1, 3))
@@ -239,10 +265,24 @@ class AttentionOp(nn.Module):
           block_kv_dq=min(512, query.shape[2]),
       )
 
-      masks = [splash_attention_mask.CausalMask(shape=(query.shape[2], query.shape[2])) for i in range(query.shape[1])]
-      multi_head_mask = splash_attention_mask.MultiHeadMask(masks=masks)
+      mask = splash_attention_mask.CausalMask(shape=(query.shape[2], query.shape[2]))
+
+      # Apply local masking if local sliding attention is enabled.
+      if self.attention_type == AttentionType.LOCAL_SLIDING:
+        if self.sliding_window_size is None:
+          raise ValueError(
+              'Sliding_window_size must be set if Local Sliding attention type'
+          )
+        mask &= splash_attention_mask.LocalMask(
+            shape=(query.shape[2], query.shape[2]),
+            window_size=(self.sliding_window_size, self.sliding_window_size),
+            offset=0,
+        )
+
+      # Create multi-head mask
+      multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) *  query.shape[1])
       splash_kernel = splash_attention_kernel.make_splash_mha(
-          mask=multi_head_mask, head_shards=1, q_seq_shards=1, block_sizes=block_sizes
+          mask=multi_head_mask, head_shards=1, q_seq_shards=1, block_sizes=block_sizes, attn_logits_soft_cap=attn_logits_soft_cap,
       )
 
       return jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids)
@@ -291,7 +331,7 @@ class AttentionOp(nn.Module):
     )
     return dpa_layer(query, key, value, mask=attn_mask)
 
-  def compute_local_attention(self, attn_weights: Array, value: Array, q_seq_len: int, model_mode: str) -> tuple[Array, Array, Array]:
+  def compute_local_attention(self, attn_weights: Array, value: Array | KVTensor, q_seq_len: int, model_mode: str) -> tuple[Array, Array, Array]:
     """Computes the attention of a local subset of the kv cache.
     Local attention results will need to be combined with any other local attentions and normalized
     Based on https://github.com/google-research/google-research/blob/master/scaling_transformer_inference_efficiency/attention.py
@@ -329,8 +369,8 @@ class AttentionOp(nn.Module):
   def apply_attention_dot(
       self,
       query: Array,
-      key: Array,
-      value: Array,
+      key: Array| KVTensor,
+      value: Array| KVTensor,
       decoder_segment_ids: Array | None,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
   ):
@@ -338,11 +378,17 @@ class AttentionOp(nn.Module):
     validate_compute_axis_order(self.compute_axis_order)
     # Casting qk_product and softmaxt computation for float32 for model stability.
     if model_mode == common_types.MODEL_MODE_TRAIN and self.float32_qk_product:
+      if isinstance(key, KVTensor):
+        key = key.dequant()
       query = query.astype(jnp.float32)
       key = key.astype(jnp.float32)
 
     q_seq_len = query.shape[1]
     attn_weights = self.qk_product(query, key, q_seq_len, model_mode)
+
+    if self.attn_logits_soft_cap:
+      attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
+      attn_weights = attn_weights * self.attn_logits_soft_cap
 
     # Casting softmaxt computation for float32 for model stability.
     if model_mode == common_types.MODEL_MODE_TRAIN and self.float32_logits:
@@ -352,7 +398,7 @@ class AttentionOp(nn.Module):
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
     return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode)
 
-  def qk_product(self, query: Array, key: Array, q_seq_len: int, model_mode: str) -> Array:
+  def qk_product(self, query: Array, key: Array| KVTensor, q_seq_len: int, model_mode: str) -> Array:
     """Query-Key product.
 
     Args:
@@ -371,6 +417,9 @@ class AttentionOp(nn.Module):
       n_kv: number of kv heads, sometimes annotated as k
       n // n_kv: number of group for query, sometimes annotated with g
     """
+    einsum = jnp.einsum
+    if self.kv_quant:
+      einsum = self.kv_quant.einsum_fn_with_rhs_qtensor(key)
     b, t, n, d = query.shape
     n_kv = key.shape[-2]
     assert n_kv == self.num_kv_heads
@@ -378,17 +427,17 @@ class AttentionOp(nn.Module):
       query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
       if self.reshape_q and q_seq_len == 1:
         query = jnp.broadcast_to(query, (b, 2, n_kv, n // n_kv, d))
-      result = jnp.einsum("btkgd,bskd->bkgts", query, key)
+      result = einsum("btkgd,bskd->bkgts", query, key)
     elif self.compute_axis_order == (0,2,1,3):
       query = jnp.transpose(query, axes=self.compute_axis_order)
-      key = jnp.transpose(key, axes=self.compute_axis_order)
+      key = jax.tree.map(lambda x: jnp.transpose(x, axes=self.compute_axis_order), key)
       query = jnp.reshape(query, (b, n_kv, n // n_kv, t, d))
       if self.reshape_q and q_seq_len == 1:
         query = jnp.broadcast_to(query, (b, n_kv, n // n_kv, 2, d))
-      result = jnp.einsum("bkgtd,bksd->bkgts", query, key)
+      result = einsum("bkgtd,bksd->bkgts", query, key)
     return result
 
-  def wv_product(self, attn_weights: Array, value: Array, model_mode: str) -> Array:
+  def wv_product(self, attn_weights: Array, value: Array | KVTensor, model_mode: str) -> Array:
     """weighted value product.
 
     Args:
@@ -407,13 +456,17 @@ class AttentionOp(nn.Module):
       n_kv: number of kv heads, sometimes annotated as k
       n // n_kv: number of group for query, sometimes annotated with g
     """
+
+    einsum = jnp.einsum
+    if self.kv_quant:
+      einsum = self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(value)
     if model_mode == common_types.MODEL_MODE_TRAIN or self.compute_axis_order == (0,1,2,3):
-      out = jnp.einsum("bkgts,bskd->btkgd", attn_weights, value)
+      out = einsum("bkgts,bskd->btkgd", attn_weights, value)
       b, t, n_kv, g, d = out.shape
       result = jnp.reshape(out, (b, t, n_kv * g, d))
     elif self.compute_axis_order == (0,2,1,3):
-      value = jnp.transpose(value, axes=self.compute_axis_order)
-      out = jnp.einsum("bkgts,bksd->bkgtd", attn_weights, value)
+      value = jax.tree.map(lambda x: jnp.transpose(x, axes=self.compute_axis_order), value)
+      out = einsum("bkgts,bksd->bkgtd", attn_weights, value)
       b, n_kv, g, t, d = out.shape
       result = jnp.reshape(out, (b, n_kv * g, t, d))
       result = self.reverse_transepose(result, self.compute_axis_order)
@@ -667,14 +720,24 @@ class AttentionOp(nn.Module):
 
     return
 
-  def get_cached_values(self, cache_vars, target_dtype, cache_axis_order):
+  def get_cached_values(self, cache_vars, target_dtype, cache_axis_order) -> jax.Array | KVTensor:
     cache_var, cache_scale_var = cache_vars
-    cached_value = cache_var.value
+    cache_value = cache_var.value
     if cache_scale_var is not None:
-      cached_scale_value = cache_scale_var.value
-      cached_value = self.kv_quant.unquantize(cached_value, cached_scale_value, target_dtype)
+      scale_value = cache_scale_var.value
+      dtype = cache_value.dtype
+      if dtype == jnp.int8:
+        scale_value /= quantizations.MAX_INT8
+      elif dtype == jnp.int4:
+        scale_value /= quantizations.MAX_INT4
 
-    cache_value_in_logical_shape = self.reverse_transepose(cached_value, cache_axis_order)
+      cache_value = KVTensor(
+        qvalue=cache_value,
+        scale=[scale_value],
+        scale_t=None,
+        dequant_dtype=target_dtype
+      )
+    cache_value_in_logical_shape = jax.tree.map(lambda x: self.reverse_transepose(x, cache_axis_order), cache_value)
     return cache_value_in_logical_shape
 
   def kv_cache_autoregressive(
@@ -853,6 +916,10 @@ class Attention(nn.Module):
   quant: Optional[Quant] = None
   kv_quant: Optional[KVQuant] = None
 
+  attention_type: AttentionType = AttentionType.GLOBAL  # Default to global attention
+  attn_logits_soft_cap: float | None = None
+  sliding_window_size: int | None = None
+
   # Shard the query activation as the same as the key and value.
   # TODO: Find a better sharding axis name.
   query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
@@ -1029,6 +1096,9 @@ class Attention(nn.Module):
         ar_cache_axis_order=self.ar_cache_axis_order,
         compute_axis_order=self.compute_axis_order,
         reshape_q=self.reshape_q,
+        attention_type=self.attention_type,
+        attn_logits_soft_cap=self.attn_logits_soft_cap,
+        sliding_window_size=self.sliding_window_size,
     )
 
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)
