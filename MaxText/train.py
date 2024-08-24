@@ -626,10 +626,9 @@ def train_loop(config, state=None):
   mllog_utils.run_start()
   mllog_utils.block_start(config)
 
+  prof.activate()
   prof = profiler.Profiler(config)
   for step in np.arange(start_step, config.steps):
-    if step == first_profiling_step:
-      prof.activate()
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       example_batch = load_next_batch(data_iterator, example_batch, config)
@@ -642,9 +641,9 @@ def train_loop(config, state=None):
     new_time = datetime.datetime.now()
     # record_scalar_metrics(metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
     step_time_delta = new_time - last_step_completion
-    # max_logging.log(f"completed step: {step}, seconds: {step_time_delta.total_seconds()}, "
-    #       f"TFLOP/s/device: {per_device_tflops / step_time_delta.total_seconds()}, "
-    #       f"loss: {metrics['scalar']['learning/loss']:.3f}")
+    max_logging.log(f"completed step: {step}, seconds: {step_time_delta.total_seconds()}, "
+          f"TFLOP/s/device: {per_device_tflops / step_time_delta.total_seconds()}, "
+          f"loss: {metrics['scalar']['learning/loss']:.3f}")
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
