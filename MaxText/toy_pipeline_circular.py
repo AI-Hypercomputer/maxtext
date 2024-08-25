@@ -192,14 +192,16 @@ def shift_stages(i, state):
 
 def shift_inputs(i, inputs):
   # basically the same as shift_stages, except no option to remove dummy comms (although removing dummy comms should also work)
+  # and only happens once every microbatches_per_stage
   sh = lambda x, d: jax.lax.ppermute(x, 'stages', [(i, (i+d) % args.num_stages) for i in range(args.num_stages)])
   inputs = jnp.where((i % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage), sh(inputs, +1), inputs)
   return inputs
 
 def shift_outputs(i, outputs):
-  # This is the same method as shift_inputs (also basically the same as shift_stages)
+  # This is the same method as shift_inputs, although happens at a slightly different offset of every microbatches_per_stage
   sh_outputs = lambda x, d: jax.lax.ppermute(x, 'stages', [(i, (i+d) % args.num_stages) for i in range(args.num_stages)])
-  outputs = jnp.where(((i-args.num_layers+1) % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage), sh_outputs(outputs, +1), outputs)
+  #outputs = jnp.where(((i-args.num_layers+1) % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage), sh_outputs(outputs, +1), outputs)
+  outputs = jnp.where(((i-args.micro_per_stage * (args.num_stages - 1)) % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage), sh_outputs(outputs, +1), outputs)
   return outputs
 
 def my_jnp_stack(list_of_pytrees):
@@ -291,9 +293,7 @@ def main():
     print(f"regular output norm {jnp.linalg.norm(regular_predictions)}", flush=True)
     print(f"pipeline output norm {jnp.linalg.norm(pipeline_predictions)}", flush=True)
     print(f"diff output norm {jnp.linalg.norm(regular_predictions - pipeline_predictions)}", flush=True)
-    
-    
-  
+
   if args.run_timing_script:
     jit_pipeline = jax.jit(loss_pp)
     simple_timeit(jit_pipeline, params_sharded, batch_sharded, tries = 3, task = 'shard_pp')
