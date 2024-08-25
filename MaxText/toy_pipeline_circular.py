@@ -24,7 +24,7 @@ def loss(params, batch):
   # loss function for non-pipeline (used to assert correctness)
   inputs, targets = batch
   predictions = predict(params, inputs)
-  return jnp.mean(jnp.sum((predictions - targets)**2, axis=-1))
+  return jnp.mean(jnp.sum((predictions - targets)**2, axis=-1)), predictions
 
 def init_layer(key, embed_size, mlp_size):
     # Initialize parameters for a layer
@@ -57,12 +57,12 @@ def predict_pp(params, inputs):
         shard_map,
         mesh=mesh,
         in_specs=((P('stages')), P('stages')),
-        out_specs=P())
+        out_specs=(P(),P('stages')))
 def loss_pp(params, batch):
   inputs, targets = batch
   predictions = predict_pp(params, inputs.reshape(args.microbatches_per_stage, args.microbatch_size, -1)).reshape(args.microbatches_per_stage * args.microbatch_size, -1)
   local_loss = jnp.mean(jnp.sum((predictions - targets)**2, axis=-1))
-  return jax.lax.pmean(local_loss, 'stages')
+  return jax.lax.pmean(local_loss, 'stages'), predictions
 
 def get_real_permute_pairs(loop_iteration, num_stages):
   if loop_iteration >= num_stages:
@@ -285,8 +285,15 @@ def main():
   batch_sharded = jax.device_put(batch, NamedSharding(mesh, P('stages')))
 
   if args.check_correctness:
-    print(f"regular loss {jax.jit(loss)(params, batch)}")
-    print(f"pipeline loss {jax.jit(loss_pp)(params_sharded, batch_sharded)}")
+    regular_loss, regular_predictions = jax.jit(loss)(params, batch)
+    pipeline_loss, pipeline_predictions = jax.jit(loss_pp)(params_sharded, batch_sharded)
+    print(f"regular loss {regular_loss}")
+    print(f"pipeline loss {pipeline_loss}")
+    print(f"regular output norm {jnp.linalg.norm(regular_predictions)}", flush=True)
+    print(f"pipeline output norm {jnp.linalg.norm(pipeline_predictions)}", flush=True)
+    print(f"diff output norm {jnp.linalg.norm(regular_predictions - pipeline_predictions)}", flush=True)
+    
+    
   
   if args.run_timing_script:
     jit_pipeline = jax.jit(loss_pp)
