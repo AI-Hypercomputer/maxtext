@@ -177,8 +177,7 @@ def spmd_pipeline(fn, stage_params, inputs):
       loop_state, _ = run_iteration_scannable(loop_state, None)
     loop_state_final = loop_state
   # outputs needs one more permute
-  #outputs = jax.lax.ppermute(loop_state_final["outputs"], 'stages', [(i, (i+1) % args.num_stages) for i in range(args.num_stages)])
-  outputs = loop_state_final["outputs"]
+  outputs = jax.lax.ppermute(loop_state_final["outputs"], 'stages', [(i, (i+1) % args.num_stages) for i in range(args.num_stages)])
   return outputs
 
 def shift_stages(i, state):
