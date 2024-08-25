@@ -154,7 +154,10 @@ def spmd_pipeline(fn, stage_params, inputs):
 
     # Push last pipeline stage to output. In order to keep the same permutation order of outputs as inputs we push to a specific microbatches_per_stage index (so that first real output lands on idx 0)
     output_offset = args.micro_per_stage * (args.num_stages - 1)
-    outputs = outputs.at[(loop_iter - output_offset) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, state_output, outputs[(loop_iter - output_offset) % args.microbatches_per_stage]))
+    #outputs = outputs.at[(loop_iter - output_offset) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, state_output, outputs[(loop_iter - output_offset) % args.microbatches_per_stage]))
+    # Insteaq set output to previous so really really no depenency on current output
+    # If we use this for real need to update some bookeeping
+    outputs = outputs.at[(loop_iter - output_offset) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, prev_outputs, outputs[(loop_iter - output_offset) % args.microbatches_per_stage]))
     if args.overlapped:
       new_state = shift_stages(loop_iter, prev_outputs)
       new_prev_outputs = state_output
