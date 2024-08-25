@@ -72,9 +72,8 @@ def get_real_permute_pairs(loop_iteration, num_stages):
     return [(i, (i+1) % num_stages) for i in range(loop_iteration + 1)]
 
 def get_repeat_idx(loop_iter, stage_idx, num_stages):
-    repeat_idx = (loop_iter - args.micro_per_stage * stage_idx) // num_stages # should be loop_iter - 2 * stage_idx for overlapped
-    repeat_idx = jnp.minimum(repeat_idx, num_stages)
-    repeat_idx = jnp.maximum(repeat_idx, 0)
+    microbatches_processed = jnp.maximum(loop_iter - args.micro_per_stage * stage_idx, 0)
+    repeat_idx = microbatches_processed // args.num_microbatches # should be loop_iter - 2 * stage_idx for overlapped
     return repeat_idx
 
 def get_circular_weights(pytree, loop_iter, stage_idx, num_stages):
