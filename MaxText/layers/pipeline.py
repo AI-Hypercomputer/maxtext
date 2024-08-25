@@ -50,7 +50,7 @@ class Pipeline(nn.Module):
 
   def setup(self):
     self.num_stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
-    self.use_circ_storage = self.config.num_pipeline_repeats > 1 and self.config.num_pipeline_microbatches > self.num_stages
+    self.use_circ_storage = self.config.num_pipeline_repeats > 1 and self.config.num_pipeline_microbatches > self.num_stages and not self.config.pipeline_activation_forwarding
     self.microbatch_size = self.config.global_batch_size_to_train_on // self.config.num_pipeline_microbatches
     microbatches_per_stage = self.config.num_pipeline_microbatches // self.num_stages
     self.microbatches_per_stage = microbatches_per_stage
@@ -287,7 +287,9 @@ class Pipeline(nn.Module):
         stream_slice = jnp.expand_dims(stream_slice, 1)
         return jax.lax.dynamic_update_slice_in_dim(
             state_in, stream_slice, stream_buf_idx, axis=1)
+    # TODO: This makes some bookkeeping off for correctness
     new_state = _update_state_io(old_state_io, stream_slice, output)
+    #new_state = _update_state_io(old_state_io, stream_slice, old_prev_outputs)
     
     new_loop_state = {
       "state_io": new_state,
@@ -362,7 +364,7 @@ class Pipeline(nn.Module):
 
    # rotate prev outputs before doing the computation
    #new_shift = self.rotate_right(prev_outputs)
-   new_shift = self.rotate_right_shmap(prev_outputs)
+   #new_shift = self.rotate_right_shmap(prev_outputs)
 
    microbatch_ids, _ = self.get_microbatch_and_repeat_ids(loop_iteration)
 
@@ -404,7 +406,7 @@ class Pipeline(nn.Module):
    if self.config.scan_layers:
      stages_output = stages_output[0]
 
-   loop_state["shift"] = new_shift
+   #loop_state["shift"] = new_shift
    new_state = self.get_new_loop_state(stages_output, loop_state)
    return new_state
 
