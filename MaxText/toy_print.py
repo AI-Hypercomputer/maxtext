@@ -176,8 +176,7 @@ def spmd_pipeline(fn, stage_params, inputs):
       # This is needed for correctness, we are rotating outputs down over stages so they are spread evenly across stages
       outputs = shift_outputs(loop_iter, outputs)
     if args.debug:
-        jax.debug.print("Finished iteration {loop_iter}, outputs are {outputs}",loop_iter=loop_iter, outputs=outputs)
-        print_shard_map_arr(outputs)
+        print_shard_map_arr(outputs, loop_iter)
     loop_state = {"loop_iter": loop_iter + 1, "state": new_state, "inputs":inputs, "outputs": outputs, "circ_storage": circ_storage, "circ_storage_mover": circ_storage_mover, "prev_outputs":new_prev_outputs}
     return loop_state, None
   
@@ -201,16 +200,18 @@ def spmd_pipeline(fn, stage_params, inputs):
     loop_state_final["outputs"] = jax.lax.ppermute(loop_state_final["outputs"], 'stages', [(i, (i+1) % args.num_stages) for i in range(args.num_stages)])
   # outputs needs one more permute
   outputs = jax.lax.ppermute(loop_state_final["outputs"], 'stages', [(i, (i+1) % args.num_stages) for i in range(args.num_stages)])
-
+  if args.debug:
+    print_shard_map_arr(outputs, loop_state_final['loop_iter'])
   return outputs
 
-def print_shard_map_arr(arr):
+def print_shard_map_arr(arr, loop_iter):
     arr_copy = arr
     arr_list = [arr]
     for _ in range(args.num_stages - 1):
         arr_copy = jax.lax.ppermute(arr_copy, 'stages', [(s, (s+1) % args.num_stages) for s in range(args.num_stages)])
         arr_list.append(arr_copy)
-    jax.debug.print("arr_list {arr_list}",arr_list=arr_list)
+    happy_arr = jnp.squeeze(jnp.stack(arr_list))
+    jax.debug.print("Iter: {loop_iter} \n {happy_arr} \n",loop_iter=loop_iter, happy_arr=happy_arr)
     
 
 def shift_stages(i, state):
@@ -243,6 +244,12 @@ def iterations_to_transfer_first_real_output():
   if args.overlapped:
     iters = iters + 1 # Since we are delaying, it takes 1 extra iteration to send microbatch 0
   return iters
+
+def need_circ_storage():
+    if args.overlapped:
+        return args.num_microbatches > 2 * args.num_stages
+    else:
+        return args.num_micro_batches > args.num_stages
 
 def my_jnp_stack(list_of_pytrees):
     layers = len(list_of_pytrees)
@@ -306,10 +313,7 @@ def main():
   args.num_repeats = args.num_layers // args.num_stages
   assert not args.scan_iterations or not args.remove_dummy_comms, "Removing dummy comms does not work with scanning, that is a large part of what we need to fix!"
   print(f"Pipelining using {args.num_stages} stages, {args.num_repeats} repeats, {args.num_microbatches} microbatches.")
-  if args.num_repeats > 1 and args.num_microbatches > args.num_stages and not args.overlapped:
-    args.use_circ_storage = True
-  else:
-    args.use_circ_storage = False
+  args.use_circ_storage = need_circ_storage()
   if args.overlapped:
     args.micro_per_stage = 2
   else:
