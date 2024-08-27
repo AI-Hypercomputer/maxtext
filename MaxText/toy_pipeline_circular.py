@@ -136,7 +136,7 @@ def spmd_pipeline(fn, stage_params, inputs):
       inputs = shift_inputs(loop_iter, inputs)
 
     weights = get_circular_weights(stage_params, loop_state["loop_iter"], stage, args.num_stages)
-    state_output = fn(weights, state) # TODO - this doesn't actually use the right layer of params for circular pipeline
+    state_output = fn(weights, state)
 
     # Updates
     if args.use_circ_storage:
@@ -153,11 +153,15 @@ def spmd_pipeline(fn, stage_params, inputs):
       circ_storage_mover = state_output
 
     # Push last pipeline stage to output. In order to keep the same permutation order of outputs as inputs we push to a specific microbatches_per_stage index (so that first real output lands on idx 0)
-    output_offset = args.micro_per_stage * (args.num_stages - 1)
-    #outputs = outputs.at[(loop_iter - output_offset) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, state_output, outputs[(loop_iter - output_offset) % args.microbatches_per_stage]))
-    # Insteaq set output to previous so really really no depenency on current output
-    # If we use this for real need to update some bookeeping
-    outputs = outputs.at[(loop_iter - output_offset) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, prev_outputs, outputs[(loop_iter - output_offset) % args.microbatches_per_stage]))
+    #output_offset = args.micro_per_stage * (args.num_stages - 1)
+    output_offset = args.iters_for_first_output
+    if args.overlapped:
+      #Insteaq set output to previous so really really no depenency on current output
+      output_to_write = prev_outputs # TODO: this affects correctness
+    else:
+      output_to_write = state_output
+    outputs = outputs.at[(loop_iter - output_offset) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, output_to_write, outputs[(loop_iter - output_offset) % args.microbatches_per_stage]))
+
     if args.overlapped:
       new_state = shift_stages(loop_iter, prev_outputs)
       new_prev_outputs = state_output
@@ -179,8 +183,18 @@ def spmd_pipeline(fn, stage_params, inputs):
     for loop_iter in range(num_total_iterations):
       loop_state, _ = run_iteration_scannable(loop_state, None)
     loop_state_final = loop_state
+
+  if args.overlapped:
+    # Push final microbatch still stored in prev_outputs
+    loop_iter = loop_state_final['loop_iter']
+    final_output = loop_state_final['prev_outputs']
+    output_offset = args.iters_for_first_output
+    outputs = loop_state_final["outputs"]
+    loop_state_final["outputs"] = outputs.at[(loop_iter - output_offset) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, final_output, outputs[(loop_iter - output_offset) % args.microbatches_per_stage]))
   # outputs needs one more permute
   outputs = jax.lax.ppermute(loop_state_final["outputs"], 'stages', [(i, (i+1) % args.num_stages) for i in range(args.num_stages)])
+
+  outputs = jax.lax.ppermute(outputs, 'stages', [(i, (i+1) % args.num_stages) for i in range(args.num_stages)])
   return outputs
 
 def shift_stages(i, state):
@@ -200,12 +214,19 @@ def shift_inputs(i, inputs):
   inputs = jnp.where((i % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage), sh(inputs, +1), inputs)
   return inputs
 
-def shift_outputs(i, outputs):
+def shift_outputs(loop_iter, outputs):
   # This is the same method as shift_inputs, although happens at a slightly different offset of every microbatches_per_stage
-  sh_outputs = lambda x, d: jax.lax.ppermute(x, 'stages', [(i, (i+d) % args.num_stages) for i in range(args.num_stages)])
+  sh_outputs = lambda x, d: jax.lax.ppermute(x, 'stages', [(s, (s+d) % args.num_stages) for s in range(args.num_stages)])
   #outputs = jnp.where(((i-args.num_layers+1) % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage), sh_outputs(outputs, +1), outputs)
-  outputs = jnp.where(((i-args.micro_per_stage * (args.num_stages - 1)) % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage), sh_outputs(outputs, +1), outputs)
+  outputs = jnp.where(((loop_iter - args.iters_for_first_output) % args.microbatches_per_stage) == (-1 % args.microbatches_per_stage), sh_outputs(outputs, +1), outputs)
   return outputs
+
+def iterations_to_transfer_first_real_output():
+  # Return the number of iterations it takes for microbatch 0 to finish the last stage of the last repeat
+  iters = args.num_microbatches * (args.num_repeats -1) + args.micro_per_stage * (args.num_stages - 1)
+  if args.overlapped:
+    iters = iters + 1 # Since we are delaying, it takes 1 extra iteration to send microbatch 0
+  return iters
 
 def my_jnp_stack(list_of_pytrees):
     layers = len(list_of_pytrees)
@@ -276,6 +297,7 @@ def main():
     args.micro_per_stage = 2
   else:
     args.micro_per_stage = 1
+  args.iters_for_first_output = iterations_to_transfer_first_real_output()
   print(args)
 
   global_batch_size = args.microbatch_size * args.num_microbatches
@@ -296,6 +318,7 @@ def main():
     print(f"regular output norm {jnp.linalg.norm(regular_predictions)}", flush=True)
     print(f"pipeline output norm {jnp.linalg.norm(pipeline_predictions)}", flush=True)
     print(f"diff output norm {jnp.linalg.norm(regular_predictions - pipeline_predictions)}", flush=True)
+    #breakpoint()
 
   if args.run_timing_script:
     jit_pipeline = jax.jit(loss_pp)
