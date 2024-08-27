@@ -42,7 +42,6 @@ BATCH = common_types.BATCH
 LENGTH = common_types.LENGTH
 HEAD = common_types.HEAD
 D_KV = common_types.D_KV
-DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
 
 nd_dense_init = initializers.nd_dense_init
@@ -95,6 +94,8 @@ class GemmaDecoderLayer(nn.Module):
         float32_logits=True,
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
+        use_ragged_attention=cfg.use_ragged_attention,
+        ragged_block_size=cfg.ragged_block_size,
     )
 
     attention_lnx = attention_layer(
