@@ -191,10 +191,10 @@ def spmd_pipeline(fn, stage_params, inputs):
     output_offset = args.iters_for_first_output
     outputs = loop_state_final["outputs"]
     loop_state_final["outputs"] = outputs.at[(loop_iter - output_offset) % args.microbatches_per_stage].set(jnp.where(stage == args.num_stages-1, final_output, outputs[(loop_iter - output_offset) % args.microbatches_per_stage]))
+    loop_state_final["outputs"] = jax.lax.ppermute(loop_state_final["outputs"], 'stages', [(i, (i+1) % args.num_stages) for i in range(args.num_stages)])
   # outputs needs one more permute
   outputs = jax.lax.ppermute(loop_state_final["outputs"], 'stages', [(i, (i+1) % args.num_stages) for i in range(args.num_stages)])
 
-  outputs = jax.lax.ppermute(outputs, 'stages', [(i, (i+1) % args.num_stages) for i in range(args.num_stages)])
   return outputs
 
 def shift_stages(i, state):
