@@ -246,10 +246,7 @@ def iterations_to_transfer_first_real_output():
   return iters
 
 def need_circ_storage():
-    if args.overlapped:
-        return args.num_microbatches > 2 * args.num_stages
-    else:
-        return args.num_micro_batches > args.num_stages
+    return args.num_microbatches > micro_per_stage * args.num_stages
 
 def my_jnp_stack(list_of_pytrees):
     layers = len(list_of_pytrees)
@@ -289,7 +286,7 @@ def simple_timeit(f, *args, tries=10, task=None):
 def main():
   import argparse
   parser = argparse.ArgumentParser(description='Sharding and size settings')
-  parser.add_argument('--debug', action=argparse.BooleanOptionalAction, default=True)
+  parser.add_argument('--debug', action=argparse.BooleanOptionalAction, default=False)
   parser.add_argument('--num_stages', type=int, default=4)
   parser.add_argument('--num_layers', type=int, default=8)
   parser.add_argument('--microbatch_size', type=int, default=4096)
