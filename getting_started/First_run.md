@@ -15,9 +15,10 @@ multiple hosts.
 
 1. [Create and SSH to the single-host VM of your choice.](https://cloud.google.com/tpu/docs/users-guide-tpu-vm#creating_a_cloud_tpu_vm_with_gcloud) We recommend a `v4-8`.
 2. Clone MaxText onto that TPUVM.
-3. Within the root directory of that `git` repo, install dependencies by running:
+3. Within the root directory of that `git` repo, install dependencies and pre-commit hook by running:
 ```
 bash setup.sh
+pre-commit install
 ```
 4. After installation completes, run training with the command on synthetic data:
 ```

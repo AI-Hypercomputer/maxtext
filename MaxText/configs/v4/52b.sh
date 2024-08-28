@@ -20,10 +20,9 @@ echo "Running 52b.sh"
 # OUTPUT_PATH (Required, unless base_output_directory is already set in base.yml)
 # DATASET_PATH (Required, unless dataset_path is already set in base.yml)
 # RUN_NAME (Required, unless run_name is already set in base.yml or running with XPK/GKE)
-# PLATFORM (Optional, can be "gke" or "gce", default is "gce")
 #
 # Example to invoke this script:
-# bash MaxText/configs/v4/52b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>" PLATFORM="gke"
+# bash MaxText/configs/v4/52b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>"
 #
 # Example to AOT compile:
 # bash MaxText/configs/v4/52b.sh EXECUTABLE=train_compile.py M_COMPILE_TOPOLOGY=v4-384 M_COMPILE_TOPOLOGY_NUM_SLICES=2
@@ -32,7 +31,6 @@ echo "Running 52b.sh"
 # Stop execution if any command exits with error
 set -e
 
-export PLATFORM="gce"
 export EXECUTABLE="train.py" # or train_compile.py
 
 # Set environment variables
@@ -50,7 +48,7 @@ then
 fi
 
 # Set up network optimizations
-bash preflight.sh PLATFORM=$PLATFORM
+bash preflight.sh
 
 # Train
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true TPU_MEGACORE=MEGACORE_DENSE"

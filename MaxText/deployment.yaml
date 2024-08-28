@@ -1,63 +1,14 @@
 # Use Static provisioning to define a PV for Cloud Storage buckets.
 # https://cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/cloud-storage-fuse-csi-driver#provision-static.
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: gcs-checkpointing-pv
-spec:
-  accessModes:
-  - ReadWriteMany
-  capacity:
-    storage: 64Gi
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: gcsfuse-sc # dummy storage class
-  claimRef:
-    name: ckpt-test-claim
-    # Need to create the namespace in GKE. Or you can use "default" for testing.
-    namespace: test-ns
-  mountOptions:
-  - debug_fuse
-  - implicit-dirs #avoid if possible
-  - max-conns-per-host=0
-  # Needed for uplift renaming limit in checkpointing tests.
-  - rename-dir-limit=200000
-  - metadata-cache:ttl-secs:-1
-  - metadata-cache:stat-cache-max-size-mb:-1
-  - metadata-cache:type-cache-max-size-mb:-1
-# - file-system:kernel-list-cache-ttl-secs:-1
-  - file-cache:max-size-mb:-1
-  - file-cache:cache-file-for-range-read:true
-  # Experiment with this flag on and off.
-  # - file-cache:enable-parallel-downloads:true
-  csi:
-    driver: gcsfuse.csi.storage.gke.io
-    volumeHandle: xai-scale-testing-checkpoint
-    volumeAttributes:
-      enableMetrics: "true"
-      skipCSIBucketAccessCheck: "true"
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: ckpt-test-claim
-  # Need to create the namespace in GKE. Or you can use "default" for testing.
-  namespace: test-ns
-spec:
-  accessModes:
-  - ReadWriteOnce
-  resources:
-    requests:
-      storage: 64Gi
-  volumeName: gcs-checkpointing-pv
-  storageClassName: gcsfuse-sc # dummy storage class
----
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: chkpt-test
+  # Modify this name to distinguish your workload from others.
+  # Make sure to modify all occurrences of the name in this file.
+  name: bernardhan-test-checkpointing-node-attrs
   labels:
-    kueue.x-k8s.io/queue-name: multislice-queue  # Name of the LocalQueue
-    xpk.google.com/workload: chkpt-test
+    # kueue.x-k8s.io/queue-name: multislice-queue  # Name of the LocalQueue
+    xpk.google.com/workload: bernardhan-test-checkpointing-node-attrs
   annotations:
     alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool # 1:1 job replica to node pool assignment
 spec:
@@ -69,20 +20,13 @@ spec:
       template:
         spec:
           # Modify the following two values if you intend to run the workload in smaller scale.
-          parallelism: 1024    # Equal to the number of VMs per slice
-          completions: 1024    # Same as the above.
+          parallelism: 64    # Equal to the number of VMs per slice
+          completions: 64    # Same as the above.
           backoffLimit: 0   # When any pod fails, the job is failed
           template:
             metadata:
               labels:
-                xpk.google.com/workload: chkpt-test
-              # Required for GCSFuse.
-              # For other storage solutions, please modify this section.
-              annotations:
-                gke-gcsfuse/volumes: "true"
-                gke-gcsfuse/cpu-limit: "0"
-                gke-gcsfuse/memory-limit: "0"
-                gke-gcsfuse/ephemeral-storage-limit: "0"
+                xpk.google.com/workload: bernardhan-test-checkpointing-node-attrs
             spec:
               schedulerName: default-scheduler
               restartPolicy: Never
@@ -96,23 +40,22 @@ spec:
                         values:
                         - default-pool
 
-              # For GCSFuse: to make sure that the pods are running on nodes with L-SSDs.
-              # For other storage solutions that do not need L-SSDs, please remove this line.
-              nodeSelector:
-                cloud.google.com/gke-ephemeral-storage-local-ssd: "true"
-
               priorityClassName: high
               hostNetwork: true
               dnsPolicy: ClusterFirstWithHostNet
               terminationGracePeriodSeconds: 30
-              # For GCSFuse: the setup of K8S SA is needed. https://cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/cloud-storage-fuse-csi-driver#authentication
-              # For other storage solutions that do not need the K8S SA, please remove this line.
-              serviceAccountName: bernardhan-benchmark
+              topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: DoNotSchedule
+                labelSelector:
+                  matchLabels:
+                    job-name: bernardhan-test-checkpointing-node-attrs
               containers:
               - name: jax-cpu
-                image: gcr.io/gcs-tess/distributed_maxtext_checkpointing_benchmark
+                image: gcr.io/gcs-tess/bernardhan_test_checkpointing_node_attrs
 
-                env: 
+                env:
                 - name: REPLICATED_JOB_NAME
                   valueFrom:
                     fieldRef:
@@ -125,16 +68,32 @@ spec:
                   valueFrom:
                     fieldRef:
                       fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+                - name: MY_NODE_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: spec.nodeName
+                - name: MY_POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: MY_POD_IP
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: status.podIP
+                - name: MY_NODE_IP
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: status.hostIP
                 # Modify the following two values too, if you intend to run the workload in smaller scale.
                 - name: PROCESSES_IN_JOB
-                  value: "1024"
+                  value: "64"
                 - name: JAX_PROCESS_COUNT
-                  value: "1024"
+                  value: "64"
                 - name: JOBSET_NAME
-                  value: "chkpt-test"
+                  value: "bernardhan-test-checkpointing-node-attrs"
                 - name: JAX_COORDINATOR_ADDRESS
                   value: "$(JOBSET_NAME)-$(REPLICATED_JOB_NAME)-0-0.$(JOBSET_NAME)"
-  
+
                 ports:
                 - containerPort: 8471
                 - containerPort: 8080
@@ -146,28 +105,50 @@ spec:
                 - -c
                 - |
                   # Modify the following values for the checkpoint workload.
-                  export BENCHMARK_RUN_FLAGS="RUN_NAME=bernardhan-ckpt-test STEPS=60 CHECKPOINT_PERIOD=50 OUTPUT_PATH=/mnt/gcsfuse/test-output PREVIOUS_STATE=/mnt/gcsfuse/maxtext-output/64b-real/checkpoints/0/items GCS_METRICS_BUCKET=distributed-checkpointing-metrics"
+                  # Please double check on the workload section of the README file to
+                  # understand the implications of the RUN_NAME parameter. Note that the actual
+                  # run name will be the RUN_NAME + "-" + the run number.
+                  export RUN_NAME=bernardhan-test-node-attrs-3
 
-                  echo XPK Start: $(date) ; _sigterm() ( kill -SIGTERM $! 2>/dev/null;); trap _sigterm SIGTERM;(bash MaxText/configs/v5e/64b.sh ${BENCHMARK_RUN_FLAGS} EXECUTABLE=standalone_checkpointer.py HARDWARE='cpu' PLATFORM=gke) & PID=$!; while kill -0 $PID 2>/dev/null; do sleep 5; done; wait $PID; EXIT_CODE=$? ;  echo XPK End: $(date); echo EXIT_CODE=$EXIT_CODE;   
+                  # RUNS is the number of times to run the benchmark. The run number will be
+                  # added to the end of the RUN_NAME.
+                  export RUNS=1
 
-                resources:
-                  requests:
-                    # Requesting 20 CPU cores as the node machine is n2-32, this is to
-                    # ensure that one pod is scheduled per node.
-                    cpu: 20000m
+                  # PARAMETERS is the number of parameters in the model (in billions).
+                  export PARAMETERS=64
 
-                volumeMounts:
-                # For other storage solutions, please modify the mount path and modify the PATH variables.
-                - mountPath: /dev/shm
-                  name: dshm-2
-                - mountPath: /mnt/gcsfuse
-                  name: gcs-pvc
-                  readOnly: false
-  
+                  # STEPS is the number of steps to run.
+                  export STEPS=60
+
+                  # CHECKPOINT_PERIOD is the number of steps between each checkpoint.
+                  #   Roughly ((STEPS - 1) // CHECKPOINT_PERIOD + 1) checkpoint restores and writes
+                  #   will be performed per run.
+                  #   The total number of checkpoint restores and writes will be roughly
+                  #   RUNS * ((STEPS - 1) // CHECKPOINT_PERIOD + 1).
+                  export CHECKPOINT_PERIOD=50
+
+                  # PER_STEP_INTERVAL is the minimum time each step should take. Note that it cannot
+                  # be 300 seconds or more because the barriers will timeout.
+                  export PER_STEP_INTERVAL=0.0
+
+                  # OUTPUT_PATH is the path to write the checkpoints to. Make sure it is the path
+                  #   mounted with your storage solution.
+                  export OUTPUT_PATH="gs://xai-scale-testing-checkpoint/bernardhan-test-node-attrs/"
+
+                  # PREVIOUS_STATE is the path to the previous checkpoint to restore from. Make sure
+                  #   it is the path mounted with your storage solution and prefilled with the checkpoint.
+                  export PREVIOUS_STATE="gs://xai-scale-testing-checkpoint/maxtext-output/64b-real/checkpoints/0/items"
+
+                  # GCS_METRICS_BUCKET is the GCS bucket to write metrics to.
+                  export GCS_METRICS_BUCKET="distributed-checkpointing-metrics"
+
+                  for i in $(seq 1 $RUNS); do
+                    export RUN_NAME_WITH_NUMBER=${RUN_NAME}-${i}
+                    export BENCHMARK_RUN_FLAGS="RUN_NAME=${RUN_NAME_WITH_NUMBER} STEPS=${STEPS} CHECKPOINT_PERIOD=${CHECKPOINT_PERIOD} OUTPUT_PATH=${OUTPUT_PATH} PREVIOUS_STATE=${PREVIOUS_STATE} GCS_METRICS_BUCKET=${GCS_METRICS_BUCKET} PER_STEP_INTERVAL=${PER_STEP_INTERVAL} PARAMETERS=${PARAMETERS}"
+                    echo XPK Start: $(date) ; _sigterm() ( kill -SIGTERM $! 2>/dev/null;); trap _sigterm SIGTERM;(bash MaxText/configs/v5e/64b.sh ${BENCHMARK_RUN_FLAGS} EXECUTABLE=standalone_checkpointer.py HARDWARE='cpu' PLATFORM=gke) & PID=$!; while kill -0 $PID 2>/dev/null; do sleep 5; done; wait $PID; EXIT_CODE=$? ;  echo XPK End: $(date); echo EXIT_CODE=$EXIT_CODE;
+                  done
+
               volumes:
               - emptyDir:
                   medium: Memory
                 name: dshm-2
-              - name: gcs-pvc
-                persistentVolumeClaim:
-                  claimName: ckpt-test-claim

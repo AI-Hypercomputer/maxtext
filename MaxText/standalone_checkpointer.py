@@ -23,6 +23,7 @@ limitations under the License.
 import datetime
 import os
 import time
+import requests
 
 from typing import Sequence
 from absl import app
@@ -45,6 +46,7 @@ Transformer = models.Transformer
 
 CHECKPOINT_RESTORE_TIME_DIRECTORY = "ckpt_restore_time"
 CHECKPOINT_WRITE_TIME_DIRECTORY = "ckpt_write_time"
+NODE_ATTRIBUTES_TIME_DIRECTORY = "node-attributes"
 
 def checkpoint_loop(config, state=None):
   """Main Checkpointing loop.
@@ -55,8 +57,30 @@ def checkpoint_loop(config, state=None):
     ckpt_path:
   Returns:
   """
+  
+  if config.gcs_metrics_bucket:
+    max_logging.log(f"Uploading node attributes to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()}")
+    base_name = f"{jax.process_index()}.csv"
+    node_attributes = {
+        'rank': jax.process_index(),
+        'pod_name': os.environ.get('MY_POD_NAME', ''),
+        'pod_ip': os.environ.get('MY_POD_IP', ''),
+        'node_name': os.environ.get('MY_NODE_NAME', ''),
+        'node_ip': os.environ.get('MY_NODE_IP', ''),
+        'compute_instance_id': get_compute_instance_id(),
+    }
+    
+    storage_utils.upload_csv(
+        config.gcs_metrics_bucket, 
+        os.path.join(config.run_name, NODE_ATTRIBUTES_TIME_DIRECTORY, base_name), 
+        [list(node_attributes.keys()), list(node_attributes.values())] # convert into headers and values
+    )
+    max_logging.log(f"Finished uploading node attributes to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()} for run {config.run_name}")
+
   ckpt_read_time = []
+  ckpt_read_time.append(["rank", "checkpoint_num", "checkpoint_restore_time"]) # header for checkpoint restore metrics.
   ckpt_write_time = []
+  ckpt_write_time.append(["rank", "checkpoint_num", "checkpoint_write_time"]) # header for checkpoint write metrics.
   init_rng, _, checkpoint_manager, mesh, model, _, tx = setup_mesh_and_model(config)
 
   unboxed_abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
@@ -80,6 +104,7 @@ def checkpoint_loop(config, state=None):
     state, _, _ = max_utils.setup_training_state(model, None, tx, config, init_rng, mesh, checkpoint_manager)
   state = add_entropy_to_checkpoint(state)
 
+  ckpt_write_idx = 0
   start_step = get_first_step(state)  # this is the start_step for training
   for step in np.arange(start_step, config.steps):
     start_time = datetime.datetime.now()
@@ -91,7 +116,8 @@ def checkpoint_loop(config, state=None):
         checkpoint_manager.wait_until_finished()
         end_time = datetime.datetime.now()
         checkpoint_write_time = (end_time - start_time).total_seconds()
-        ckpt_write_time.append([jax.process_index(), checkpoint_write_time])
+        ckpt_write_time.append([jax.process_index(), ckpt_write_idx, checkpoint_write_time])
+        ckpt_write_idx += 1
         if jax.process_index() == 0:
           max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint saved in {end_time - start_time} ,step {step}, on host 0")
     if jax.process_index() == 0:
@@ -113,6 +139,7 @@ def checkpoint_loop(config, state=None):
     )
     max_logging.log(f"Finished uploading write metrics to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()}  for run {config.run_name}")
 
+  ckpt_read_idx = 0
   for step in np.arange(start_step, config.steps):
     if checkpoint_manager is not None:
       # A barrier to sync all hosts before starting to save checkpoint
@@ -131,7 +158,8 @@ def checkpoint_loop(config, state=None):
       jax.block_until_ready(state)
       end_time = datetime.datetime.now()
       checkpoint_restore_time = (end_time - start_time).total_seconds()
-      ckpt_read_time.append([jax.process_index(), checkpoint_restore_time])
+      ckpt_read_time.append([jax.process_index(), ckpt_read_idx, checkpoint_restore_time])
+      ckpt_read_idx += 1
       if jax.process_index() == 0:
         max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint restored in {end_time - start_time} ,step {step}, on host 0")
   
@@ -163,6 +191,25 @@ def add_entropy_to_checkpoint(state):
     new_opt = [opt_0] + list(state.opt_state[1:])
     state = state.replace(opt_state=new_opt)
     return state
+  
+
+def get_compute_instance_id():
+  """Get the compute instance id from the metadata server."""
+  metadata_server_url = (
+      'http://metadata.google.internal/computeMetadata/v1/instance/id'
+  )
+  headers = {'Metadata-Flavor': 'Google'}
+
+  try:
+    response = requests.get(metadata_server_url, headers=headers)
+    response.raise_for_status()  # Raise an exception for bad status codes
+
+    instance_id = response.text
+    return instance_id
+
+  except requests.exceptions.RequestException as e:
+    max_logging.log('Error fetching instance ID:', e)
+  return ''
 
 
 def main(argv: Sequence[str]) -> None:

@@ -9,7 +9,7 @@ echo "Running 256b.sh"
 # PLATFORM (Optional, can be "gke" or "gce", default is "gce")
 #
 # Example to invoke this script:
-# bash MaxText/configs/v5p/256b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>" PLATFORM="gke"
+# bash MaxText/configs/v5p/256b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>"
 #
 # Example to AOT compile:
 # bash MaxText/configs/v5p/256b.sh EXECUTABLE=train_compile.py M_COMPILE_TOPOLOGY=v5p-1024 M_COMPILE_TOPOLOGY_NUM_SLICES=2
@@ -18,7 +18,6 @@ echo "Running 256b.sh"
 # Stop execution if any command exits with error
 set -e
 
-export PLATFORM="gce"
 export EXECUTABLE="train.py" # or train_compile.py
 
 # Set environment variables
@@ -36,7 +35,7 @@ then
 fi
 
 # Set up network optimizations
-bash preflight.sh PLATFORM=$PLATFORM
+bash preflight.sh
 
 # Train
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_megacore_fusion_allow_ags=false --xla_enable_async_collective_permute=true --xla_tpu_enable_ag_backward_pipelining=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
