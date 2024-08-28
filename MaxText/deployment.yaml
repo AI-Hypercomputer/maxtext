@@ -108,7 +108,7 @@ spec:
                   # Please double check on the workload section of the README file to
                   # understand the implications of the RUN_NAME parameter. Note that the actual
                   # run name will be the RUN_NAME + "-" + the run number.
-                  export RUN_NAME=bernardhan-test-node-attrs-2
+                  export RUN_NAME=bernardhan-test-node-attrs-3
 
                   # RUNS is the number of times to run the benchmark. The run number will be
                   # added to the end of the RUN_NAME.

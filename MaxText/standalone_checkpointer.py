@@ -62,6 +62,7 @@ def checkpoint_loop(config, state=None):
     max_logging.log(f"Uploading node attributes to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()}")
     base_name = f"{jax.process_index()}.csv"
     node_attributes = {
+        'rank': jax.process_index(),
         'pod_name': os.environ.get('MY_POD_NAME', ''),
         'pod_ip': os.environ.get('MY_POD_IP', ''),
         'node_name': os.environ.get('MY_NODE_NAME', ''),
