@@ -207,7 +207,6 @@ class PipelineParallelismTest(unittest.TestCase):
           "num_layers_per_pipeline_stage=2",
           "num_pipeline_microbatches=8",
           "tokenizer_path=../assets/tokenizer.llama2",
-
     ])
 
   @pytest.mark.tpu
