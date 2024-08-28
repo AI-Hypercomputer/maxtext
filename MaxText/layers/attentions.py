@@ -28,8 +28,8 @@ from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_ke
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
 import common_types
-from maxtext.kernels.ragged_attention import ragged_gqa
-from maxtext.kernels.ragged_attention import ragged_mha
+from kernels.ragged_attention import ragged_gqa
+from kernels.ragged_attention import ragged_mha
 from layers import embeddings
 from layers import initializers
 from layers import linears
