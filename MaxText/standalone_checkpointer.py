@@ -77,7 +77,9 @@ def checkpoint_loop(config, state=None):
     max_logging.log(f"Finished uploading node attributes to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()} for run {config.run_name}")
 
   ckpt_read_time = []
+  ckpt_read_time.append(["rank", "checkpoint_num", "checkpoint_restore_time"]) # header for checkpoint restore metrics.
   ckpt_write_time = []
+  ckpt_write_time.append(["rank", "checkpoint_num", "checkpoint_write_time"]) # header for checkpoint write metrics.
   init_rng, _, checkpoint_manager, mesh, model, _, tx = setup_mesh_and_model(config)
 
   unboxed_abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
