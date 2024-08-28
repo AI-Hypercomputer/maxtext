@@ -191,3 +191,11 @@ if [[ "$MODE" == "pinned" ]]; then
 else
     pip3 install -U -r requirements.txt
 fi
+
+#################################
+# Changes needed to test in-memory checkpointing
+#################################
+
+# Add dev orbax from github changes
+yes | pip3 uninstall orbax-checkpoint
+pip3 install git+https://github.com/google/orbax.git@test_665048272#subdirectory=checkpoint
