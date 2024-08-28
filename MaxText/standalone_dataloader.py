@@ -18,6 +18,7 @@ limitations under the License.
 # See github.com/google/maxtext/issues/20 for more
 import jax
 import os
+import requests
 
 import max_logging
 
@@ -40,6 +41,8 @@ TOTAL_TRAINING_TIME_DIRECTORY = "total_training_time"
 PER_STEP_DATA_LOADING_TIME_DIRECTORY = "per_step_data_loading_time"
 PER_STEP_TIME_DIRECTORY = "per_step_time"
 PER_EPOCH_TIME_DIRECTORY = "per_epoch_time"
+NODE_ATTRIBUTES_TIME_DIRECTORY = "node-attributes"
+
 HYPER_PARAMETERS_FILE_NAME = "hyperparameters.csv"
 
 DATA_LOADER_STRATEGIES_BY_NAME = MappingProxyType({
@@ -47,6 +50,24 @@ DATA_LOADER_STRATEGIES_BY_NAME = MappingProxyType({
     'FileParallelRandomRead': FileParallelRandomRead, 
 })
 STEP_BARRIER_MSG = "Synchronize all processes within a step"
+
+def get_compute_instance_id():
+  """Get the compute instance id from the metadata server."""
+  metadata_server_url = (
+      'http://metadata.google.internal/computeMetadata/v1/instance/id'
+  )
+  headers = {'Metadata-Flavor': 'Google'}
+
+  try:
+    response = requests.get(metadata_server_url, headers=headers)
+    response.raise_for_status()  # Raise an exception for bad status codes
+
+    instance_id = response.text
+    return instance_id
+
+  except requests.exceptions.RequestException as e:
+    max_logging.log('Error fetching instance ID:', e)
+  return ''
 
 def split_list(lst, n):
   """Splits a list into roughly equal sized sublists and pads.
@@ -160,12 +181,19 @@ def data_load_loop(config):
 
   # Record per-step per-epoch data loading times.
   per_step_data_loading_time = []
+  per_step_data_loading_time.append(["rank", "epoch", "step", "per_step_data_loading_time"])
 
   # Record per-step times, which includes data loading, simulated computation time, and barrier wait time.
   step_time = []
+  step_time.append(["rank", "epoch", "step", "per_step_time"])
 
   # Record per-epoch total time.
   epoch_times = []
+  epoch_times.append(["rank", "epoch", "per_epoch_time"])
+  
+  # Record total training time.
+  total_training_time = []
+  total_training_time.append(["rank", "total_training_time"])
 
   jax.experimental.multihost_utils.sync_global_devices("Barrier before training steps start")
   training_start = datetime.datetime.now()
@@ -220,6 +248,7 @@ def data_load_loop(config):
 
   training_end = datetime.datetime.now()
   training_time = (training_end - training_start).total_seconds()
+  total_training_time.append([jax.process_index(), training_time])
 
   max_logging.log(
       f"STANDALONE DATALOADER Metrics: Training completed in {training_time} seconds, on host {jax.process_index()}"
@@ -241,7 +270,7 @@ def data_load_loop(config):
     storage_utils.upload_csv(
         config.gcs_metrics_bucket, 
         os.path.join(config.run_name, TOTAL_TRAINING_TIME_DIRECTORY, base_name), 
-        [[jax.process_index(), training_time]]
+        total_training_time
     )
     
     # Upload per-step data loading time.
@@ -265,6 +294,22 @@ def data_load_loop(config):
         epoch_times
     )
     
+    # Upload node attributes.
+    node_attributes = {
+        'rank': jax.process_index(),
+        'pod_name': os.environ.get('MY_POD_NAME', ''),
+        'pod_ip': os.environ.get('MY_POD_IP', ''),
+        'node_name': os.environ.get('MY_NODE_NAME', ''),
+        'node_ip': os.environ.get('MY_NODE_IP', ''),
+        'compute_instance_id': get_compute_instance_id(),
+    }
+    
+    storage_utils.upload_csv(
+        config.gcs_metrics_bucket, 
+        os.path.join(config.run_name, NODE_ATTRIBUTES_TIME_DIRECTORY, base_name), 
+        [list(node_attributes.keys()), list(node_attributes.values())] # convert into headers and values
+    )
+    
     # Upload hyperparameters. Only need to upload from rank 0 as the same hyperparameters
     # are used across the fleet.
     if jax.process_index() == 0:
@@ -279,7 +324,7 @@ def data_load_loop(config):
       storage_utils.upload_csv(
           config.gcs_metrics_bucket,
           os.path.join(config.run_name, HYPER_PARAMETERS_FILE_NAME),
-          [list(hyperparameters.keys()), list(hyperparameters.values())]
+          [list(hyperparameters.keys()), list(hyperparameters.values())] # convert into headers and values
       )
     
     max_logging.log(f"Finished uploading metrics to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()}")
