@@ -30,6 +30,8 @@ from kernels.ragged_attention import ragged_mha, ragged_gqa
 import jax.numpy as jnp
 
 import common_types
+from kernels.ragged_attention import ragged_gqa
+from kernels.ragged_attention import ragged_mha
 from layers import embeddings
 from layers import initializers
 from layers import linears
