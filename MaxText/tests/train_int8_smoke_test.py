@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-""" Smoke test for int8"""
+"""Smoke test for int8"""
 import os
 import unittest
 from train import main as train_main
