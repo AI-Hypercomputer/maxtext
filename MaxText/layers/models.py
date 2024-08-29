@@ -359,14 +359,7 @@ class Decoder(nn.Module):
         )
       else:
         for lyr in range(cfg.num_decoder_layers):
-          # y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
-          #     y,
-          #     decoder_segment_ids,
-          #     decoder_positions,
-          #     deterministic,
-          #     model_mode,
-          # )
-          y = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)(
+          y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
               y,
               decoder_segment_ids,
               decoder_positions,

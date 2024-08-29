@@ -30,7 +30,6 @@
                "base_output_directory=gs://test-maxtext-output",
                "dataset_path=gs://test-maxtext-dataset",
                "quantization=fp8d",
-               "remat_policy=full",
                "steps=2",
                "enable_checkpointing=false"]
     },
