@@ -409,12 +409,20 @@ class MoeBlock(nn.Module):
       return output
     return wrapper(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
 
-  def generate_masks(self, top_k_indices):
+  def reshape_and_update_weights(self, weights, indices):
+    # input of weights & indices: (batch_size, seq_len, num_experts_per_tok)
+    # output of updated weights: (batch_size, seq_len, num_experts)
+    update_weights = jnp.zeros((weights.shape[0], weights.shape[1], self.num_experts), dtype=self.dtype)
+    index_update = (jnp.arange(weights.shape[0])[:, None, None], jnp.arange(weights.shape[1])[:, None], indices)
+    update_weights = update_weights.at[index_update].set(weights)
+    return update_weights
+
+  def generate_masks(self, top_k_indices, softmax_probs):
       # calculate expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
       batch_size, seq_len, _ = top_k_indices.shape
-      tokens_per_batch = batch_size * seq_len * self.num_experts_per_tok
-      expert_capacity = int((tokens_per_batch / self.num_experts) * self.config.capacity_factor)
-      max_logging.log(f"Applying potential token dropping with an expert_capacity of {expert_capacity}")
+      tokens_per_batch = seq_len * self.num_experts_per_tok
+      expert_capacity_per_batch = int((tokens_per_batch / self.num_experts) * self.config.capacity_factor)
+      max_logging.log(f"Applying potential token dropping with a batch expert_capacity of {expert_capacity_per_batch}")
 
       # calculate expert mask and drop tokens if needed
       # shape of output expert mask: (batch, sequence, num_experts_per_tok)
@@ -427,39 +435,65 @@ class MoeBlock(nn.Module):
       # trunc_expert_mask becomes [[[[1, 0, 0, 0],[0, 1, 0, 0]], [[0, 0, 0, 0],[0, 0, 0, 1]]]],
       # so the 2nd token for expert #1 ([0, 1] & [1, 3]) is dropped, output of updated_expert_mask is [[[1, 1],[0, 1]]].
       expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
-      reshaped_expert_mask = jnp.reshape(expert_mask, (batch_size, seq_len * self.num_experts_per_tok, self.num_experts))
-      expert_token_count = jnp.cumsum(reshaped_expert_mask, axis=1)
-      expert_token_count = jnp.reshape(expert_token_count, ((batch_size, seq_len, self.num_experts_per_tok, self.num_experts)))
-      trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity)
+      expert_mask_fused = jnp.reshape(expert_mask, (batch_size, seq_len * self.num_experts_per_tok, self.num_experts))
+      expert_token_count_fused = jnp.cumsum(expert_mask_fused, axis=1)
+      expert_token_count = jnp.reshape(expert_token_count_fused, ((batch_size, seq_len, self.num_experts_per_tok, self.num_experts)))
+      trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
       updated_expert_mask = jnp.sum(trunc_expert_mask, axis=3)
-      return updated_expert_mask
+
+      # reshape & update weights
+      softmax_probs *= updated_expert_mask
+      weights = self.reshape_and_update_weights(softmax_probs, top_k_indices)
+
+      # calculate token position in expert capacity dimension
+      expert_token_position_fused = expert_mask_fused * expert_token_count_fused
+      expert_token_position = jnp.reshape(expert_token_position_fused, (batch_size, seq_len, self.num_experts_per_tok, self.num_experts))
+      combined_expert_mask = jnp.sum(trunc_expert_mask, axis=2)
+      combined_expert_token_position = jnp.sum(expert_token_position, axis=2) * combined_expert_mask
+      expert_token_position_in_capacity = jax.nn.one_hot(combined_expert_token_position, num_classes=expert_capacity_per_batch+1, dtype=jnp.int32)
+
+      # shape of combine_mask is (batch_size, seq_len, num_experts, expert_capacity_per_batch + 1),
+      # and cut 0-dimension which is always 0
+      combine_mask = (weights[..., None] * expert_token_position_in_capacity)
+      combine_mask = combine_mask[..., 1:]
+      dispatch_mask = combine_mask.astype(bool)
+      return dispatch_mask, combine_mask
 
   def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
     # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
     top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     softmax_probs = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
 
-    # token dropping if needed
     if self.config.capacity_factor > 0:
-      expert_mask = self.generate_masks(top_k_indices)
-      softmax_probs *= expert_mask
-
-    weights = jnp.zeros_like(gate_logits)
-    index_update = (jnp.arange(gate_logits.shape[0])[:, None, None], jnp.arange(gate_logits.shape[1])[:, None], top_k_indices)
-    weights = weights.at[index_update].set(softmax_probs)
-
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
-    with jax.named_scope("wi_0"):
-      layer_w0 = jnp.einsum("BLE,NEH -> BLNH", inputs, w0_kernel)
-    with jax.named_scope("wi_1"):
-      layer_w1 = jnp.einsum("BLE,NEH -> BLNH", inputs, w1_kernel)
-    layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
-    layer_multiply = jnp.multiply(layer_w0_act, layer_w1)
-    with jax.named_scope("wo"):
-      intermediate_layer = jnp.einsum("BLNH,NHE -> BLNE", layer_multiply, wo_kernel)
-    with jax.named_scope("w_sum"):
-      output = jnp.einsum("BLNE,BLN -> BLE", intermediate_layer, weights)
-    return output
+      # token dropping if needed
+      dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
+      with jax.named_scope("dispatch"):
+        dispatch = jnp.einsum("BSM,BSEC -> BECM", inputs, dispatch_mask)
+      with jax.named_scope("wi_0"):
+        layer_w0 = jnp.einsum("BECM,EMH -> BECH", dispatch, w0_kernel)
+      with jax.named_scope("wi_1"):
+        layer_w1 = jnp.einsum("BECM,EMH -> BECH", dispatch, w1_kernel)
+      layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
+      layer_multiply = jnp.multiply(layer_w0_act, layer_w1)
+      with jax.named_scope("wo"):
+        intermediate_layer = jnp.einsum("BECH,EHM -> BECM", layer_multiply, wo_kernel)
+      with jax.named_scope("combine"):
+        output = jnp.einsum("BECM,BSEC -> BSM", intermediate_layer, combine_mask)
+      return output
+    else:
+      weights = self.reshape_and_update_weights(softmax_probs, top_k_indices)
+      inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+      with jax.named_scope("wi_0"):
+        layer_w0 = jnp.einsum("BSM,EMH -> BSEH", inputs, w0_kernel)
+      with jax.named_scope("wi_1"):
+        layer_w1 = jnp.einsum("BSM,EMH -> BSEH", inputs, w1_kernel)
+      layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
+      layer_multiply = jnp.multiply(layer_w0_act, layer_w1)
+      with jax.named_scope("wo"):
+        intermediate_layer = jnp.einsum("BSEH,EHM -> BSEM", layer_multiply, wo_kernel)
+      with jax.named_scope("w_sum"):
+        output = jnp.einsum("BSEM,BSE -> BSM", intermediate_layer, weights)
+      return output
 
   @nn.compact
   def __call__(self, inputs):
