@@ -19,7 +19,7 @@ python MaxText/inference_microbenchmark.py \
     ici_fsdp_parallelism=1 \
     ici_tensor_parallelism=-1 \
     ici_autoregressive_parallelism=1 \
-    inference_microbenchmark_prefill_lengths=64,128,256,512,1024 \
+    inference_microbenchmark_prefill_lengths=256 \
     inference_microbenchmark_stages=prefill,generate \
     inference_microbenchmark_loop_iters=1 \
     run_name=$(date +%Y-%m-%d-%H-%M) \

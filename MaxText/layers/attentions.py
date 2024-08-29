@@ -135,6 +135,7 @@ def apply_mask_to_logits(logits: Array, mask: Array):
 
 class PagedAttentionOp(nn.Module):
 
+  mesh: Mesh
   num_pages: int
   page_size: int
   max_pages_per_slot: int
@@ -146,7 +147,8 @@ class PagedAttentionOp(nn.Module):
   kv_head_dim_size: int
   dtype: DType = jnp.float32
 
-  kv_pages_axis_names: AxisNames = ("kv_heads", "num_pages", "page_size", "kv_head_dim_size")
+  query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  kv_pages_axis_names: AxisNames = ("paged_kv_heads", "num_pages", "page_size", "paged_kv_head_dim_size")
 
   def init_or_get_kv_pages(self, model_mode: str):
     """Get paged attention op."""
@@ -219,16 +221,60 @@ class PagedAttentionOp(nn.Module):
       return self.dot_product_attention(query, key, value)
 
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      query = jnp.squeeze(query, axis=1)
-      result = paged_attention(
-        q=query,
-        k_pages=key_pages_var.value,
-        v_pages=value_pages_var.value,
-        lengths=page_state.seq_lengths,
-        page_indices=page_state.seq_page_idx_mappings,
-        pages_per_compute_block=self.pages_per_compute_block
+
+      # b: batch_size
+      # s: sequence length
+      # n: query heads
+
+      # k: kv_heads
+      # x: num_pages
+      # p: page_size
+
+      # d: kv_head_dim_size
+      bsnd = nn.logical_to_mesh_axes(self.query_axis_names)
+      kxpd = nn.logical_to_mesh_axes(self.kv_pages_axis_names)
+
+      @functools.partial(
+        shard_map,
+        mesh=self.mesh,
+        in_specs=(
+            bsnd,
+            kxpd,
+            kxpd,
+            None,
+            None,
+            None,
+        ),
+        out_specs=bsnd,
+        check_rep=False,
       )
-      return jnp.expand_dims(result, axis=1)
+      def wrap_paged_attention(
+          q,
+          k_pages,
+          v_pages,
+          lengths,
+          page_indices,
+          pages_per_compute_block
+      ):
+        q = jnp.squeeze(q, axis=1)
+        result = paged_attention(
+          q=q,
+          k_pages=k_pages,
+          v_pages=v_pages,
+          lengths=lengths,
+          page_indices=page_indices,
+          pages_per_compute_block=pages_per_compute_block
+        )
+        return jnp.expand_dims(result, axis=1)
+
+      return wrap_paged_attention(
+          query,
+          key_pages_var.value,
+          value_pages_var.value,
+          page_state.seq_lengths,
+          page_state.seq_page_idx_mappings,
+          self.pages_per_compute_block
+      )
 
   def update(
       self,
@@ -1488,6 +1534,7 @@ class Attention(nn.Module):
     if self.attention_kernel == "paged" and model_mode != common_types.MODEL_MODE_TRAIN:
       assert self.config.block_size % self.config.page_size == 0
       attention_op = PagedAttentionOp(
+        mesh=self.mesh,
         num_pages=self.config.num_pages,
         page_size=self.config.page_size,
         max_pages_per_slot=self.config.max_target_length // self.config.page_size,
