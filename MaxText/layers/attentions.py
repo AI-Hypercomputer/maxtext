@@ -202,6 +202,71 @@ class PagedAttentionOp(nn.Module):
     attn = jnp.einsum("bkgts,bskd->btkgd", exps_attn_weights, value)
     return jnp.reshape(attn, (b, t, n, d))
 
+  def paged_attention(
+      self,
+      query: Array,
+      key_pages_var: nn.Variable,
+      value_pages_var: nn.Variable,
+      page_state: page_managers.PageState,
+  ) -> Array:
+    """Apply Paged Attention.
+
+    Annotations:
+      b: batch_size
+      s: sequence length
+      n: query heads
+
+      k: kv_heads
+      x: num_pages
+      p: page_size
+
+      d: kv_head_dim_size
+    """
+    bsnd = nn.logical_to_mesh_axes(self.query_axis_names)
+    kxpd = nn.logical_to_mesh_axes(self.kv_pages_axis_names)
+
+    @functools.partial(
+      shard_map,
+      mesh=self.mesh,
+      in_specs=(
+          bsnd,
+          kxpd,
+          kxpd,
+          None,
+          None,
+          None,
+      ),
+      out_specs=bsnd,
+      check_rep=False,
+    )
+    def wrap_paged_attention(
+        q,
+        k_pages,
+        v_pages,
+        lengths,
+        page_indices,
+        pages_per_compute_block
+    ):
+      q = jnp.squeeze(q, axis=1)
+      result = paged_attention(
+        q=q,
+        k_pages=k_pages,
+        v_pages=v_pages,
+        lengths=lengths,
+        page_indices=page_indices,
+        pages_per_compute_block=pages_per_compute_block
+      )
+      return jnp.expand_dims(result, axis=1)
+
+    return wrap_paged_attention(
+        query,
+        key_pages_var.value,
+        value_pages_var.value,
+        page_state.seq_lengths,
+        page_state.seq_page_idx_mappings,
+        self.pages_per_compute_block
+    )
+
   @nn.compact
   def __call__(
     self,
@@ -214,67 +279,12 @@ class PagedAttentionOp(nn.Module):
   ) -> Array:
 
     key_pages_var, value_pages_var = self.init_or_get_kv_pages(model_mode)
-
     self.update(key_pages_var, value_pages_var, key, value, model_mode, page_state)
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
       return self.dot_product_attention(query, key, value)
-
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-
-      # b: batch_size
-      # s: sequence length
-      # n: query heads
-
-      # k: kv_heads
-      # x: num_pages
-      # p: page_size
-
-      # d: kv_head_dim_size
-      bsnd = nn.logical_to_mesh_axes(self.query_axis_names)
-      kxpd = nn.logical_to_mesh_axes(self.kv_pages_axis_names)
-
-      @functools.partial(
-        shard_map,
-        mesh=self.mesh,
-        in_specs=(
-            bsnd,
-            kxpd,
-            kxpd,
-            None,
-            None,
-            None,
-        ),
-        out_specs=bsnd,
-        check_rep=False,
-      )
-      def wrap_paged_attention(
-          q,
-          k_pages,
-          v_pages,
-          lengths,
-          page_indices,
-          pages_per_compute_block
-      ):
-        q = jnp.squeeze(q, axis=1)
-        result = paged_attention(
-          q=q,
-          k_pages=k_pages,
-          v_pages=v_pages,
-          lengths=lengths,
-          page_indices=page_indices,
-          pages_per_compute_block=pages_per_compute_block
-        )
-        return jnp.expand_dims(result, axis=1)
-
-      return wrap_paged_attention(
-          query,
-          key_pages_var.value,
-          value_pages_var.value,
-          page_state.seq_lengths,
-          page_state.seq_page_idx_mappings,
-          self.pages_per_compute_block
-      )
+      return self.paged_attention(query, key_pages_var, value_pages_var, page_state)
 
   def update(
       self,
@@ -285,6 +295,7 @@ class PagedAttentionOp(nn.Module):
       model_mode: str,
       page_state: Optional[page_managers.PageState] = None
   ) -> None:
+    """Update KV Pages."""
     if model_mode == common_types.MODEL_MODE_PREFILL:
       self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
