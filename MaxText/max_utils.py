@@ -42,10 +42,13 @@ from flax.linen import partitioning as nn_partitioning
 
 import optax
 import os
-from typing import Tuple
+from typing import Any, Tuple
 from tensorboardX import writer
 
 from google.cloud import storage
+
+class TrainState(train_state.TrainState):
+  calibration_stats: Any
 
 
 def find_nans_and_infs(pytree):
@@ -461,13 +464,13 @@ def unbox_logicallypartioned(boxed_pytree):
 
 def init_decode_state(apply_fn, params):
   """Init train state with null opt state for decode."""
-  state = train_state.TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
+  state = TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={}, calibration_stats=None)  # type: ignore
   return state
 
 
 def init_training_state(apply_fn, params, tx):
   """Init train state with null opt state for decode."""
-  state = train_state.TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
+  state = TrainState.create(apply_fn=apply_fn, params=params, calibration_stats=params.get("calibration_stats"),  tx=tx)
   return state
 
 
