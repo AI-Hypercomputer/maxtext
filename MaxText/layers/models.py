@@ -202,11 +202,15 @@ class Decoder(nn.Module):
       from layers import simple_layer
 
       return simple_layer.SimpleDecoderLayer
+    elif self.config.decoder_block == "simple_mlp":
+      from layers import simple_layer
+
+      return simple_layer.SimpleMlpDecoderLayer
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma", "gemma2", "simple"):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma", "gemma2", "simple", "simple_mlp"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
