@@ -325,7 +325,8 @@ class _HyperParameters:
     raw_keys["num_decoder_layers"] = 2**layer_scale * raw_keys["base_num_decoder_layers"]
 
     raw_keys["global_batch_size_to_load"], raw_keys["global_batch_size_to_train_on"] = calculate_global_batch_sizes(raw_keys)
-    raw_keys["num_slices"] = get_num_slices(raw_keys)
+    if raw_keys["num_slices"] <= 0:
+      raw_keys["num_slices"] = get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
 
     if using_pipeline_parallelism(raw_keys):

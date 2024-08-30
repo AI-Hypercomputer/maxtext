@@ -80,15 +80,23 @@ parser.add_argument('--ZONE', type=str, default=None,
 parser.add_argument('--SCRIPT_DIR', type=str, default=os.getcwd(),
                     help="The local location of the directory to copy to the CPUs and run the main command from. \
                           Defaults to current working directory.")
-parser.add_argument('--COMMAND', type=str, default=None, required=True,
+parser.add_argument('--COMMAND', type=str, default=None,
                     help="Main command to run on each CPU. \
                           This command is run from a copied version of SCRIPT_DIR on each CPU worker.")
-parser.add_argument('--RUN_NAME', type=str, default=default_run_name(),
+parser.add_argument('--RUN_NAME', type=str, default=None,
                     help="Name for the code directory on the CPU")
 parser.add_argument('--USE_EXISTING_FOLDER', type=str, default="False",
                     help='If true, use the existing code directory on the CPU')
 parser.add_argument('--INTERNAL_IP', type=str, default="False",
                     help="Set true if running script locally from a CPU or GCE instance, false otherwise.")
+parser.add_argument('--BATCH_SIZE', type=int, default=None,
+                    help='Sending ssh request in a batched manner.')
+parser.add_argument('--NUM_SLICE', type=int, default=None,
+                    help='Use a subset of slices.')
+parser.add_argument('--UPDATE_FILE', type=str, default=None,
+                    help='The path of the file to update (overwrite)')
+# parser.add_argument('--SCP_ONLY', type=int, default=False,
+#                     help='The path of the file to update (overwrite)')
 args = parser.parse_args()
 args.USE_EXISTING_FOLDER = args.USE_EXISTING_FOLDER.lower() == "true"
 args.INTERNAL_IP = args.INTERNAL_IP.lower() == "true"
@@ -99,6 +107,12 @@ if not args.CPU_PREFIX:
 if args.USE_EXISTING_FOLDER is True and not args.RUN_NAME:
   raise ValueError("When USE_EXISTING_FOLDER is true, RUN_NAME must be specified.")
 
+if args.UPDATE_FILE and not args.RUN_NAME:
+  raise ValueError("When UPDATE_FILE is true, RUN_NAME must be specified.")
+
+if not args.RUN_NAME:
+  args.RUN_NAME = default_run_name()
+  
 Slice = namedtuple('Slice', ['name', 'slice_num', 'num_workers', 'version'])
 
 def ip_address_from_machine_name(slice):
@@ -112,7 +126,7 @@ def ip_address_from_machine_name(slice):
   ip_address = completed_command.stdout.decode().strip().split('\n')[0]
   return ip_address
 
-def get_slices():
+def get_slices(num_slice_to_use):
   """ Returns a list of slices matching CPU_PREFIX """
   command = [
       "gcloud", "compute", "instances", "list",
@@ -129,11 +143,22 @@ def get_slices():
   instances = completed_command.stdout.decode()
   instance_list = instances.strip().split('\n')
   instance_list = filter_instances(instance_list[1:], args.CPU_PREFIX) # First row is headers
-  num_slices = len(instance_list)
+  available_slices = len(instance_list)
+  if num_slice_to_use is not None and num_slice_to_use < available_slices:
+    num_slices = num_slice_to_use
+    #instance_list = instance_list[:num_slices]
+  else:
+    num_slices = available_slices
+    
+  if num_slices > 0:
+    slice_nums = set([i for i in range(num_slices)])
+  else:
+    slice_nums = set([0])
+    
   slices = [None for _ in range(num_slices)]
 
   if num_slices > 0:
-    print(f"{num_slices} slices found.", flush=True)
+    print(f"{available_slices} slices found. Using {num_slices} slices", flush=True)
   else:
     print(f"No CPUs found with name {args.CPU_PREFIX} or matching regex {args.CPU_PREFIX}-[0-9]+ "
     "in project {args.PROJECT} and zone {args.ZONE}.")
@@ -149,13 +174,14 @@ def get_slices():
   ]
   completed_command = subprocess.run(command, capture_output=True, check=True)
   num_workers = len(completed_command.stdout.decode().strip().split('\n'))
-
+  #import pdb; pdb.set_trace()
   for slice_name, version in zip(slice_names, slice_versions):
-    if num_slices > 1:
+    if num_slices > 0:
       slice_num = int(slice_name.split('-')[-1])
     else:
       slice_num = 0
-    slices[slice_num] = Slice(slice_name, slice_num, num_workers, version)
+    if slice_num in slice_nums:
+      slices[slice_num] = Slice(slice_name, slice_num, num_workers, version)
   return slices
 
 def filter_instances(instance_list, tpu_prefix):
@@ -175,6 +201,13 @@ def write_kill_script(kill_processes_script_name):
 
 def kill_existing_processes_str():
   return """#!/bin/bash
+if screen -ls | grep -q 'Attached' || screen -ls | grep -q 'Detached'; then
+    # Kill all screen sessions
+    pkill screen
+    echo "All screen sessions have been killed."
+else
+    echo "No screen sessions found."
+fi
 _CPU_VERSION_NAME="${1}"
 device_name="accel"
 if [[ "${_CPU_VERSION_NAME}" =~ ^v5.* ]]; then
@@ -237,7 +270,48 @@ def scps(slices, run_name_dir, zip_name):
 
   return return_code
 
-def execute_main_command(main_command, slices, local_log_dir, zip_name, coordinator_address):
+def scp_file(slices, run_name, file_path, batch_size):
+  """ Zip the script directory, scp it to the CPUs, and unzip it there. """
+  original_working_directory = os.getcwd()
+  os.chdir(args.SCRIPT_DIR) # To tar script_dir, it is most convenient to cd there.
+
+  # Zip script directory
+  # Save the zip both to the logging directory, and the script directory.
+  # It will be removed from the script directory after the transfer to the CPUs
+  #file_path = os.path.join("./", file_path)
+  destination_path = os.path.join("~/", run_name, file_path)
+  destination_dir = os.path.split(destination_path)[0]
+
+  # Move zip file to each tpuvm worker
+  commands = []
+  worker_list = []
+  for cur_slice in slices:
+    for worker_num in range(cur_slice.num_workers):
+      if args.ACCESS_VM_VIA_BEYONDCORP is False:
+        command = [
+          "gcloud", "compute", "scp", file_path,
+          f"{cur_slice.name}:{destination_dir}", "--strict-host-key-checking=no", f"--project={args.PROJECT}", f"--zone={args.ZONE}"
+        ]
+        if args.INTERNAL_IP:
+          command.append("--internal-ip")
+      else:
+        user = getpass.getuser()
+        dest = user+"_google_com@nic0."+cur_slice.name+"."+args.ZONE+".c."+args.PROJECT+".internal.gcpnode.com"
+        command = ["scp", "-o", "StrictHostKeyChecking=no", file_path, f"{dest}:{destination_dir}"]
+      commands.append(command)
+      worker_list.append([cur_slice.slice_num, worker_num])
+  # print(commands)
+  return_code, _ = run_commands(commands, batch_size, 0, "SCP", worker_list, is_shell=False)
+  if return_code != 0:
+    print("Failed to scp file with error code ", return_code)
+    return return_code
+
+  # Cleanup
+  os.chdir(original_working_directory)
+
+  return return_code
+
+def execute_main_command(main_command, slices, local_log_dir, zip_name, coordinator_address, batch_size):
   """ Run the main command on each worker, logging each separately. """
   kill_script_name = "kill_existing_processes.sh" # File written on worker machines
   commands = []
@@ -257,12 +331,15 @@ def execute_main_command(main_command, slices, local_log_dir, zip_name, coordina
       write_kill_script_command = f"echo '{kill_existing_processes_str()}' > {kill_script_name}"
       kill_existing_command = f"bash {kill_script_name} {cur_slice.version}"
       export_coordinator_vars_command = f"export JAX_COORDINATOR_ADDRESS={coordinator_address}; export JAX_PROCESS_ID={process_id}; export JAX_PROCESS_COUNT={cur_slice.num_workers*len(slices)}"
+      
       process_id += 1
 
       if args.USE_EXISTING_FOLDER is False:
         remote_command_list = [mkdir_command , mv_zip_command , cd_command , unzip_command ,
                         write_kill_script_command , kill_existing_command , export_coordinator_vars_command, main_command]
       else:
+        # if args.UPDATE_FILE:
+        #   overwrite_file_command = 
         remote_command_list = [cd_command, write_kill_script_command , kill_existing_command , export_coordinator_vars_command, main_command]
       remote_command_list_str = " && ".join(remote_command_list)
       if args.ACCESS_VM_VIA_BEYONDCORP is False:
@@ -279,14 +356,21 @@ def execute_main_command(main_command, slices, local_log_dir, zip_name, coordina
         command = ["ssh", "-o", "StrictHostKeyChecking=no", dest, remote_command_list_str]  
         commands.append(command)
       worker_list.append([slice_num, worker_num])
-  return_code, return_codes = run_commands(commands, 0, "MAIN COMMAND", worker_list, output_logs=output_logs)
+  return_code, return_codes = run_commands(commands, batch_size, 0, "MAIN COMMAND", worker_list, output_logs=output_logs)
   if return_code > 0:
-    failure_index = next((i for i, x in enumerate(return_codes) if x), None)
-    print(f"Main command failed on slice {worker_list[failure_index][0]} worker"\
-        f" {worker_list[failure_index][1]} with error code {return_codes[failure_index]}, see logs for details", flush=True)
+    #failure_index = next((i for i, x in enumerate(return_codes) if x), None)
+    for i, x in enumerate(return_codes):
+      if x is None or x > 0:
+        print(f"Main command failed on slice {worker_list[i][0]} worker {worker_list[i][1]} with error code {r}, see logs for details")
+        
+    #failure_index = [i for i, x in enumerate(return_codes) if x]
+    
+    #print(f"{return_code=}, {failure_index=}")
+    # print(f"Main command failed on slice {worker_list[failure_index][0]} worker"\
+    #     f" {worker_list[failure_index][1]} with error code {return_codes[failure_index]}, see logs for details", flush=True)
   return return_code
 
-def run_commands(commands, id_to_print, jobname, worker_list, is_shell=False, output_logs=None, fail_fast=True):
+def run_commands(commands, batch_size, id_to_print, jobname, worker_list, is_shell=False, output_logs=None, fail_fast=True):
   ''' Runs commands in parallel.
   Inputs:
      commands: list of n commands, each command is a a list of strings
@@ -298,56 +382,110 @@ def run_commands(commands, id_to_print, jobname, worker_list, is_shell=False, ou
      fail_fast: If true, when one command fails immediately terminate others
   '''
 
-  children = []
-  start_time = datetime.now()
-  for i, command in enumerate(commands):
-    if output_logs and i == id_to_print:
-      persistent_log = open(output_logs[i], "w", encoding="utf-8")
-      output_log = Tee(sys.stdout, persistent_log)
-    elif output_logs:
-      output_log = open(output_logs[i], "w", encoding="utf-8")
-    elif i == id_to_print:
-      output_log = None
-    else:
-      output_log = subprocess.DEVNULL
-    if args.ACCESS_VM_VIA_BEYONDCORP is True:
-      # add time so VM access can be provided with security key for every ssh and scp request.
-      time.sleep(3)
-    children.append(subprocess.Popen(command, stdout=output_log, stderr=output_log, shell=is_shell))
+  all_children = []
+  all_returncodes = []
+  if batch_size is None:
+    batch_size = len(commands)
+  for batch in range(len(commands) // batch_size):
+    start_time = datetime.now()
+    children = []
+    print(f"Sending {batch=} of {batch_size} commands")
+    for i in range(batch * batch_size, batch * batch_size + batch_size):
+      if output_logs and i == id_to_print:
+        persistent_log = open(output_logs[i], "w", encoding="utf-8")
+        output_log = Tee(sys.stdout, persistent_log)
+      elif output_logs:
+        output_log = open(output_logs[i], "w", encoding="utf-8")
+      elif i == id_to_print:
+        output_log = None
+      else:
+        output_log = subprocess.DEVNULL
+      if args.ACCESS_VM_VIA_BEYONDCORP is True:
+        # add time so VM access can be provided with security key for every ssh and scp request.
+        time.sleep(3)
+      # if (i+1) % 64 == 0:
+      #   time.sleep(5)
+      if (i+1) % 256 == 0:
+        print(f"Cool down 40s for every 256 requests")
+        time.sleep(40)
+      if is_shell:
+        children.append(subprocess.Popen(" ".join(commands[i]), stdout=output_log, stderr=output_log, shell=is_shell))
+      else:
+        children.append(subprocess.Popen(commands[i], stdout=output_log, stderr=output_log, shell=is_shell))
 
-  while True:
-    returncodes = [child.poll() for child in children]
-    max_returncode = max([0]+[r for r in returncodes if r is not None])
-    completed = len([r for r in returncodes if r is not None])
-    total = len(returncodes)
-    seconds_elapsed = (datetime.now() - start_time).total_seconds()
-    if completed < total:
-      slow_worker_index = returncodes.index(None)
-      slow_worker = worker_list[slow_worker_index]
-      slow_str = f", slice {slow_worker[0]} worker {slow_worker[1]} still working"
-    else:
-      slow_str = ""
-    print(f"[t={seconds_elapsed:.2f}, {jobname}] Completed {completed}/{total}{slow_str}...")
+    retry_counts = [0] * batch_size
+    
+    while True:
+      returncodes = [child.poll() for child in children]
+      max_returncode = 0
+      completed = 0
+      incomplete_index = []
+      failure_index = []
+      for i, r in enumerate(returncodes):
+        if r is None:
+          incomplete_index.append(i)
+        elif r != 0:
+          failure_index.append(i)
+          max_returncode = max(max_returncode, r)
+        else:
+          completed += 1
+      #max_returncode = max([0]+[r for r in returncodes if r is not None])
+      #completed = len([r for r in returncodes if r is not None and r == 0])
+      total = len(returncodes)
+      seconds_elapsed = (datetime.now() - start_time).total_seconds()
+      #if completed < total:
+        #slow_worker_index = returncodes.index(None)
+        #slow_worker = worker_list[slow_worker_index]
+      if len(incomplete_index) > 0:
+        slow_worker = worker_list[incomplete_index[0]]
+        slow_str = f", slice {slow_worker[0]} worker {slow_worker[1]} still working"
+      elif len(failure_index) > 0:
+        slow_worker = worker_list[failure_index[0]]
+        slow_str = f", slice {slow_worker[0]} worker {slow_worker[1]} failed, may retry"
+      else:
+        slow_str = ""
+      print(f"[t={seconds_elapsed:.2f}, {jobname}] Completed {completed}/{total}{slow_str}...")
 
-    if seconds_elapsed >= 60 and not 0 in returncodes and jobname == "SCP":
-      print("SCP operation timed out - terminating all processes."\
-        " Please check that --INTERNAL_IP flag is set correctly.")
-      for child in children:
-        child.terminate()
-      max_returncode = 255
-      break
+      if seconds_elapsed >= 300 and not 0 in returncodes and jobname == "SCP":
+        print("SCP operation timed out - terminating all processes."\
+          " Please check that --INTERNAL_IP flag is set correctly.")
+        for child in children:
+          child.terminate()
+        max_returncode = 255
+        break
 
+      if max_returncode > 0:
+        # if fail_fast and max_returncode > 0 and max(retry_counts) > 3:
+        #   print(f"Terminating all {jobname} processes since at least one failed after 3 retries.")
+        # for child in children:
+        #   child.terminate()
+        # break
+        
+        for i in range(len(returncodes)):
+          if returncodes[i] is not None and returncodes[i] > 0:
+            if retry_counts[i] > 5:
+              if fail_fast:
+                print(f"Terminating all {jobname} processes since at least one failed after 3 retries.")
+                for child in children:
+                  child.terminate()
+                break
+            retry_counts[i] += 1
+            time.sleep(0.5)
+            print(f"Retrying for slice {i}, the previous return code is {returncodes[i]}. {5-retry_counts[i]} reties left")
+            #returncodes[i] = None
+            children[i] = subprocess.Popen(commands[i], stdout=output_log, stderr=output_log, shell=is_shell)
+
+      if completed == total:
+        break
+
+      time.sleep(1)
+      
+    all_returncodes += returncodes
     if fail_fast and max_returncode > 0:
-      print(f"Terminating all {jobname} processes since at least one failed.")
-      for child in children:
-        child.terminate()
       break
-
-    if completed == total:
-      break
-
-    time.sleep(1)
-  return max_returncode, returncodes
+    
+    #time.sleep(3)
+  return max_returncode, all_returncodes
 
 def assert_script_dir_exists(script_dir):
   if not os.path.isdir(script_dir):
@@ -396,7 +534,7 @@ def main() -> None:
   assert_script_dir_exists(args.SCRIPT_DIR)
 
   ##### Step 1: Get the workers #####
-  slices = get_slices()
+  slices = get_slices(args.NUM_SLICE)
   if not slices:
     print(f"Failed to retrieve slices {args.CPU_PREFIX} in project {args.PROJECT} zone {args.ZONE}", flush=True)
     return 1
@@ -410,21 +548,28 @@ def main() -> None:
 
   if args.USE_EXISTING_FOLDER is False:
     ##### Step 2 when using a new folder: Zip code and move it to the CPUs #####
-    return_code = scps(slices, local_log_dir, zip_name)
+    return_code = scps(slices, local_log_dir, zip_name, args.BATCH_SIZE)
     if return_code > 0:
       print(f"Moving the directory {args.SCRIPT_DIR} to the VMs failed with error code {return_code}")
       return return_code
+    
+  if args.UPDATE_FILE is not None:
+    return_code = scp_file(slices, args.RUN_NAME, args.UPDATE_FILE, args.BATCH_SIZE)
+    if return_code > 0:
+      print(f"Moving the file {args.UPDATE_FILE} to the VMs failed with error code {return_code}")
+      return return_code    
 
   ##### Step 3: Unzip if using a new folder, kill existing processes, and run #####
-  print(f"Running main command, logs located in: {local_log_dir}", flush=True)
-  return_code = execute_main_command(args.COMMAND, slices, local_log_dir, zip_name, coordinator_address)
-  if return_code == 0:
-    print(f"Main command completed successfully, logs located in: {local_log_dir}", flush=True)
-    print("Multihost runner finished successfully!", flush=True)
-    return 0
-  else:
-    print(f"Main command finished with errors, check the logs located in: {local_log_dir}", flush=True)
-    return return_code
+  if args.COMMAND:
+    print(f"Running main command, logs located in: {local_log_dir}", flush=True)
+    return_code = execute_main_command(args.COMMAND, slices, local_log_dir, zip_name, coordinator_address, args.BATCH_SIZE)
+    if return_code == 0:
+      print(f"Main command completed successfully, logs located in: {local_log_dir}", flush=True)
+      print("Multihost runner finished successfully!", flush=True)
+      return 0
+    else:
+      print(f"Main command finished with errors, check the logs located in: {local_log_dir}", flush=True)
+      return return_code
 
 if __name__ == '__main__':
   main()

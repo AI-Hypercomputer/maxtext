@@ -243,7 +243,7 @@ add_eos: True
 # Dataset
 per_device_batch_size: 12.0
 expansion_factor_real_data: -1 # if -1 then all hosts will load real data, else total_hosts//expansion_factor_real_data will pull data from GCS.
-eval_per_device_batch_size: 0
+eval_per_device_batch_size: -1
 max_corpus_chars: 10_000_000
 train_data_column: 'text'
 eval_data_column: 'text'
@@ -266,6 +266,8 @@ hf_access_token: ''
 grain_train_files: ''
 grain_eval_files: ''
 grain_worker_count: 1
+# Standalone_dataloader
+standalone_dataloader_sync_interval: 100
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
