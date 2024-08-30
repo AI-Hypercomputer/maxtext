@@ -47,7 +47,6 @@ class PageManager(nn.Module):
   max_target_length: int
   max_prefill_predict_length: int
   max_pages_per_slot: int
-  max_pages_per_prefill: int
 
   def init_or_get_vars(self):
     page_status_var = self.variable(
