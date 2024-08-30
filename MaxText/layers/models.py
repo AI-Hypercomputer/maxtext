@@ -432,7 +432,6 @@ class Transformer(nn.Module):
       max_target_length=self.config.max_target_length,
       max_prefill_predict_length=self.config.max_prefill_predict_length,
       max_pages_per_slot=self.config.max_target_length // self.config.page_size,
-      max_pages_per_prefill=self.config.max_prefill_predict_length // self.config.page_size
     )
 
   def __call__(
