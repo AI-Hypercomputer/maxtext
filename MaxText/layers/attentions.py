@@ -751,14 +751,25 @@ class AttentionOp(nn.Module):
 
 
     ar_cache_update_idx = jnp.squeeze(one_hot_indices)
-    ar_cache_update_axis = ar_cache_axis_names.index(CACHE_SEQUENCE)
+    ar_cache_sequence_axis = ar_cache_update_axis = ar_cache_axis_names.index(CACHE_SEQUENCE)
+    ar_cache_batch_axis = ar_cache_axis_names.index(CACHE_BATCH)
 
     if use_ragged_attention:
+      cache_locations = [slice(None)] * 4 
+      new_token_locations = [slice(None)] * 4
+      new_token_locations[ar_cache_sequence_axis] = 0 
+
       def key_body(i, val):
-        return val.at[i, :, lengths[i], :].set(one_token_key_shaped_for_cache[i, :, 0, :])
+        cache_locations[ar_cache_batch_axis] = i
+        cache_locations[ar_cache_sequence_axis] = lengths[i]
+        new_token_locations[ar_cache_batch_axis] = i
+        return val.at[tuple(cache_locations)].set(one_token_key_shaped_for_cache[tuple(new_token_locations)])
 
       def value_body(i, val):
-        return val.at[i, :, lengths[i], :].set(one_token_value_shaped_for_cache[i, :, 0, :])
+        cache_locations[ar_cache_batch_axis] = i
+        cache_locations[ar_cache_sequence_axis] = lengths[i]
+        new_token_locations[ar_cache_batch_axis] = i
+        return val.at[tuple(cache_locations)].set(one_token_value_shaped_for_cache[tuple(new_token_locations)])
 
       cached_key_var.value = jax.lax.fori_loop(0, one_token_key_shaped_for_cache.shape[0], key_body, cached_key_var.value, unroll=8)
       cached_value_var.value = jax.lax.fori_loop(0, one_token_value_shaped_for_cache.shape[0], value_body, cached_value_var.value, unroll=8)
