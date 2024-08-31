@@ -406,7 +406,7 @@ class MoeBlock(nn.Module):
       output = self.unpermute(intermediate_output,
                               sorted_selected_experts,
                               weights)
-      return output
+      return output, None
     return wrapper(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
 
   def reshape_and_update_weights(self, weights, indices):
@@ -459,14 +459,26 @@ class MoeBlock(nn.Module):
       dispatch_mask = combine_mask.astype(bool)
       return dispatch_mask, combine_mask
 
+  # See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details.
+  def load_balance_loss(self, top_k_indices, logits):
+    expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
+    summed_expert_mask = jnp.sum(expert_mask, axis=2)
+    # Get fraction of tokens dispatched to each expert
+    density = jnp.mean(summed_expert_mask, axis=1)
+    # get fraction of probability allocated to each expert
+    density_prob = jnp.mean(logits, axis=1)
+    loss = jnp.mean(density * density_prob) * (self.num_experts ** 2) * self.config.load_balance_loss_weight
+    return loss
+
   def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
+    softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
     # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
-    top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-    softmax_probs = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+    top_k_weights, top_k_indices = jax.lax.top_k(softmax_probs, self.num_experts_per_tok)
 
     if self.config.capacity_factor > 0:
       # token dropping if needed
-      dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
+      dispatch_mask, combine_mask = self.generate_masks(top_k_indices, top_k_weights)
+      loss = self.load_balance_loss(top_k_indices, softmax_probs)
       with jax.named_scope("dispatch"):
         dispatch = jnp.einsum("BSM,BSEC -> BECM", inputs, dispatch_mask)
       with jax.named_scope("wi_0"):
@@ -479,9 +491,9 @@ class MoeBlock(nn.Module):
         intermediate_layer = jnp.einsum("BECH,EHM -> BECM", layer_multiply, wo_kernel)
       with jax.named_scope("combine"):
         output = jnp.einsum("BECM,BSEC -> BSM", intermediate_layer, combine_mask)
-      return output
+      return output, loss
     else:
-      weights = self.reshape_and_update_weights(softmax_probs, top_k_indices)
+      weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
       with jax.named_scope("wi_0"):
         layer_w0 = jnp.einsum("BSM,EMH -> BSEH", inputs, w0_kernel)
@@ -493,7 +505,7 @@ class MoeBlock(nn.Module):
         intermediate_layer = jnp.einsum("BSEH,EHM -> BSEM", layer_multiply, wo_kernel)
       with jax.named_scope("w_sum"):
         output = jnp.einsum("BSEM,BSE -> BSM", intermediate_layer, weights)
-      return output
+      return output, None
 
   @nn.compact
   def __call__(self, inputs):

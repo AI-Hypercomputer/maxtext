@@ -251,10 +251,18 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   total_loss = jnp.sum(xent)
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
   loss = total_loss / (total_weights + EPS)
+  # get moe load balance loss
+  moe_lb_loss = 0.0
+  if config.num_experts > 1:
+    nested_key = ("intermediates", "decoder", "layers", "moe_lb_loss")
+    total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
+    moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
+    loss += moe_lb_loss
   aux = {
       "intermediate_outputs": intermediate_outputs,
       "total_loss": total_loss,
       "total_weights": total_weights,
+      "moe_lb_loss": moe_lb_loss,
   }
   return loss, aux
 
@@ -279,6 +287,7 @@ def train_step(model, config, state, data, dropout_rng):
       grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
       (_, aux), cur_batch_gradient = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
       acc_grad_and_loss['loss'] += aux['total_loss']
+      acc_grad_and_loss['moe_lb_loss'] += aux['moe_lb_loss']
       acc_grad_and_loss['grad'] = jax.tree_util.tree_map(
         lambda x, y: x * aux['total_weights'] + y,
         cur_batch_gradient,
@@ -294,14 +303,15 @@ def train_step(model, config, state, data, dropout_rng):
 
     data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
     init_grad = jax.tree_util.tree_map(jnp.zeros_like, state.params)
-    init_grad_and_loss = {'loss': 0.0, 'grad': init_grad, 'total_weights':0}
+    init_grad_and_loss = {'loss': 0.0, 'grad': init_grad, 'total_weights':0, 'moe_lb_loss':0.0}
 
     grad_and_loss, aux = jax.lax.scan(
       accumulate_gradient,
       init_grad_and_loss,
       data,
       length = config.gradient_accumulation_steps)
-    loss = grad_and_loss['loss'] / grad_and_loss['total_weights']
+    loss = (grad_and_loss['loss'] / grad_and_loss['total_weights']
+            + grad_and_loss['moe_lb_loss'] / config.gradient_accumulation_steps)
     raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss['total_weights'], grad_and_loss['grad'])
     aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)
   else:
@@ -309,6 +319,7 @@ def train_step(model, config, state, data, dropout_rng):
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
+  moe_lb_loss = aux["moe_lb_loss"]
 
   if config.gradient_clipping_threshold > 0:
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
@@ -318,6 +329,7 @@ def train_step(model, config, state, data, dropout_rng):
   metrics = {
       "scalar": {
           "learning/loss": loss,
+          "learning/moe_lb_loss": moe_lb_loss,
           "learning/total_weights": total_weights,
           "learning/grad_norm": max_utils.l2norm_pytree(grads),
           "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
@@ -338,8 +350,13 @@ def eval_step(model, config, state, data, dropout_rng):
   loss, aux = eval_loss_fn(state.params)
   total_loss = aux["total_loss"]
   total_weights = aux["total_weights"]
+  moe_lb_loss = aux["moe_lb_loss"]
   metrics = {
-      "scalar": {"evaluation/loss": loss, "evaluation/total_loss": total_loss, "evaluation/total_weights": total_weights}
+      "scalar": {"evaluation/loss": loss, 
+                 "evaluation/total_loss": total_loss,
+                 "evaluation/total_weights": total_weights,
+                 "evaluation/moe_lb_loss": moe_lb_loss},
+
   }
 
   return metrics
@@ -598,7 +615,7 @@ def train_loop(config, state=None):
 
     if config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
       assert eval_data_iterator
-      cumulative_eval_metrics = {"total_loss": 0.0, "total_weights": 0.0}
+      cumulative_eval_metrics = {"total_loss": 0.0, "total_weights": 0.0, "moe_lb_loss": 0.0}
       eval_step_count = 0
       for eval_batch in eval_data_iterator:
         if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
@@ -607,9 +624,10 @@ def train_loop(config, state=None):
           eval_metrics = p_eval_step(state, eval_batch, nextrng)
         cumulative_eval_metrics["total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
         cumulative_eval_metrics["total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
+        cumulative_eval_metrics["moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
         max_logging.log(f"Completed eval step {eval_step_count}")
         eval_step_count += 1
-      eval_loss = cumulative_eval_metrics["total_loss"] / (cumulative_eval_metrics["total_weights"] + EPS)
+      eval_loss = cumulative_eval_metrics["total_loss"] / (cumulative_eval_metrics["total_weights"] + EPS) + cumulative_eval_metrics["moe_lb_loss"] / eval_step_count
       max_logging.log(f"average loss after {step=}: {eval_step_count=}, {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
       if eval_loss <= config.target_eval_loss:
         max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
