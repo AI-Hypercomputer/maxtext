@@ -265,3 +265,23 @@ def apply_gradient_clipping(raw_grads, state, clipping_threshold):
     grads, _ = gradient_clip_transformation.update(raw_grads, state, None)
 
   return grads
+
+def get_nested_value(dictionary, nested_key, default=None):
+  """
+  Retrieves a value from a nested key in a dictionary.
+
+  Args:
+      dictionary: The dictionary to search in.
+      nested_key: A tuple representing the nested key, e.g., ('level1', 'level2', 'key').
+      default: The value to return if the nested key is not found.
+
+  Returns:
+      The value associated with the nested key, or the default value if not found.
+  """
+  current_level = dictionary
+
+  for key in nested_key:
+    if not isinstance(current_level, dict) or key not in current_level:
+      return default
+    current_level = current_level[key]
+  return current_level
