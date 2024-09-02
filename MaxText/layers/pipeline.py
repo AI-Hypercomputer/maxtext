@@ -285,6 +285,7 @@ class Pipeline(nn.Module):
         return jax.lax.dynamic_update_slice_in_dim(
             state_in, stream_slice, stream_buf_idx, axis=1)
     new_state = _update_state_io(old_state_io, stream_slice, output)
+    #new_state = _update_state_io(old_state_io, stream_slice, old_prev_outputs)
     
     new_loop_state = {
       "state_io": new_state,
@@ -366,9 +367,11 @@ class Pipeline(nn.Module):
         trans_in_fn=prepare_vars_for_main_vmap,
     )
 
-   stages_output = vmap_func(decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
-   if self.config.scan_layers:
-     stages_output = stages_output[0]
+   stages_output = stages_inputs
+   for _ in range(self.config.fake_layers_per_pipeline_stage):
+    stages_output = vmap_func(decoder_layer_instance, stages_output, stages_segment_ids, stages_positions, deterministic, model_mode)
+    if self.config.scan_layers:
+      stages_output = stages_output[0]
 
    new_state = self.get_new_loop_state(stages_output, loop_state)
    return new_state

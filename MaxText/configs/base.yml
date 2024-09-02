@@ -124,6 +124,7 @@ capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, a
 # perform the circular transfer (last stage to first) asynchronously.
 # The bubble fraction is (num_stages - 1) / (num_pipeline_repeats * num_pipeline_microbatches + num_stages - 1)
 num_layers_per_pipeline_stage: 1
+fake_layers_per_pipeline_stage: 1
 # The number of repeats will be set to num_decoder_layers / (num_pipeline_stages * num_layers_per_pipeline_stage)
 num_pipeline_repeats: -1
 # num_pipeline_microbatches must be a multiple of the number of pipeline stages. By default it is set to the number of stages.
