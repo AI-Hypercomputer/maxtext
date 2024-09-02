@@ -55,7 +55,7 @@ class Pipeline(nn.Module):
     self.use_circ_storage = self.need_circ_storage()
 
   def need_circ_storage(self):
-    return self.config.num_pipeline_repeats > 1 and self.config.num_pipeline_microbatches * self.forwarding_delay > self.num_stages
+    return self.config.num_pipeline_repeats > 1 and self.config.num_pipeline_microbatches  > self.num_stages * self.forwarding_delay
 
   def iterations_to_complete_first_microbatch_one_repeat(self):
     # Return the number of iterations it takes for microbatch 0 to finish a repeat
