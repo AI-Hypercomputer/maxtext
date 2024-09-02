@@ -100,20 +100,9 @@ class HFDataSource(grain.RandomAccessDataSource):
     if self.n_shards < (self.dataloading_host_count * self.num_threads):
       warnings.warn(f"WARNING: Inefficient dataloading. Your train or eval dataset contains {self.n_shards} shards, "
                       "smaller than number of host loading data. This is known to lead to inefficient dataloading. " 
-                      "Please reshard the data, or use a subset of hosts for dataloading by setting expansion_factor_real_data."
-                      "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#limitations--recommendations"
+                      "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#multihost-dataloading-best-practice"
                       )
       self.n_shards = self.dataloading_host_count * self.num_threads
-    elif self.n_shards % (self.dataloading_host_count * self.num_threads) > 0:
-      usable_shards = (
-          self.n_shards
-          // (self.dataloading_host_count * self.num_threads)
-          * (self.dataloading_host_count * self.num_threads)
-      )
-      warnings.warn(f"Dataset contains {self.n_shards} shards, but only {usable_shards} shards will be used."
-                    "Make (dataset shards) % (number of host loading data) == 0 to use all shards of data"
-                    "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#limitations--recommendations"
-                    )
 
   def _update_shard(self, idx):
     new_shard = self.dataset_shards[idx] + self.dataloading_host_count * self.num_threads
