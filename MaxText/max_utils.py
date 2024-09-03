@@ -103,8 +103,9 @@ def summarize_size_from_pytree(params):
 
 
 def initialize_summary_writer(config):
+  summary_writer_path = os.path.join(config.tensorboard_dir, config.run_name)
   return (
-      writer.SummaryWriter(config.tensorboard_dir)
+      writer.SummaryWriter(summary_writer_path)
       if jax.process_index() == 0
       else None
   )
