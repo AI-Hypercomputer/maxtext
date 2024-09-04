@@ -17,8 +17,10 @@ limitations under the License.
 """Operations used by Grain"""
 
 import dataclasses
+import json
+from etils import epath
 import warnings
-from typing import Dict
+from typing import Dict, Any, Optional, TypeVar
 from threading import current_thread
 import datasets
 from datasets.distributed import split_dataset_by_node
@@ -77,13 +79,11 @@ class HFDataSource(grain.RandomAccessDataSource):
                 dataset: datasets.IterableDataset,
                 dataloading_host_index: int,
                 dataloading_host_count: int,
-                num_threads: int,
                 generate_padding_example: bool,
                 max_target_length: int,
                 data_column_name: str
                 ):
     self.dataset = dataset
-    self.num_threads = num_threads
     self.dataloading_host_count = dataloading_host_count
     self.dataloading_host_index = dataloading_host_index
     self.generate_padding_example = generate_padding_example
@@ -91,40 +91,41 @@ class HFDataSource(grain.RandomAccessDataSource):
     self.data_column_name = data_column_name
     self.n_shards = dataset.n_shards
     self._check_shard_count()
-    self.dataset_shards = [dataloading_host_index * self.num_threads + i for i in range(self.num_threads)]
-    self.datasets = [split_dataset_by_node(dataset, world_size=self.n_shards, rank=x) for x in self.dataset_shards]
-    self.data_iters = []
+    self.current_data_shard = dataloading_host_index
+    self.dataset = split_dataset_by_node(dataset, world_size=self.n_shards, rank=self.current_data_shard)
+    self.data_iter = None
+    self.state_dict = {}
     self.out_of_data =False
 
   def _check_shard_count(self):
-    if self.n_shards < (self.dataloading_host_count * self.num_threads):
+    if self.n_shards < (self.dataloading_host_count):
       warnings.warn(f"WARNING: Inefficient dataloading. Your train or eval dataset contains {self.n_shards} shards, "
                       "smaller than number of host loading data. This is known to lead to inefficient dataloading. " 
                       "Please reshard the data, or use a subset of hosts for dataloading by setting expansion_factor_real_data."
                       "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#limitations--recommendations"
                       )
-      self.n_shards = self.dataloading_host_count * self.num_threads
-    elif self.n_shards % (self.dataloading_host_count * self.num_threads) > 0:
+      self.n_shards = self.dataloading_host_count
+    elif self.n_shards % (self.dataloading_host_count) > 0:
       usable_shards = (
           self.n_shards
-          // (self.dataloading_host_count * self.num_threads)
-          * (self.dataloading_host_count * self.num_threads)
+          // self.dataloading_host_count
+          * self.dataloading_host_count
       )
       warnings.warn(f"Dataset contains {self.n_shards} shards, but only {usable_shards} shards will be used."
                     "Make (dataset shards) % (number of host loading data) == 0 to use all shards of data"
                     "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#limitations--recommendations"
                     )
 
-  def _update_shard(self, idx):
-    new_shard = self.dataset_shards[idx] + self.dataloading_host_count * self.num_threads
+  def _update_shard(self):
+    new_shard = self.current_data_shard + self.dataloading_host_count
     if new_shard < self.n_shards:
-      max_logging.log(f"Updating host {self.dataloading_host_index} dataset {idx}, was on shard {self.dataset_shards[idx]}")
+      max_logging.log(f"Updating host {self.dataloading_host_index} dataset, was on shard {self.current_data_shard}")
       max_logging.log(f"New shard is {new_shard}")
-      self.dataset_shards[idx] = new_shard
-      self.datasets[idx] = split_dataset_by_node(self.dataset, world_size=self.n_shards, rank=self.dataset_shards[idx])
-      self.data_iters[idx] = iter(self.datasets[idx])
+      self.current_data_shard = new_shard
+      self.dataset = split_dataset_by_node(self.dataset, world_size=self.n_shards, rank=self.current_data_shard)
+      self.data_iter = iter(self.dataset)
     else:
-      max_logging.log(f"Run out of shards on host {self.dataloading_host_index}, shard {self.dataset_shards[idx]} is not available")
+      max_logging.log(f"Run out of shards on host {self.dataloading_host_index}, shard {new_shard} is not available")
       self.out_of_data = True
       if self.generate_padding_example:
         max_logging.log(f"Host {self.dataloading_host_index} will start generating all-0 padding examples until step number is met.")
@@ -138,9 +139,8 @@ class HFDataSource(grain.RandomAccessDataSource):
   def __getitem__(self, index):
     """Since HuggingFace IterableDataset does not support random access by index.
     The next item in the iterator is returned."""
-    if not self.data_iters:
-      self.data_iters = [iter(x) for x in self.datasets]
-    idx = int(current_thread().name.split("_")[1])
+    if not self.data_iter:
+      self.data_iter = iter(self.dataset)
 
     while True:
       try:
@@ -149,10 +149,12 @@ class HFDataSource(grain.RandomAccessDataSource):
             return {self.data_column_name: np.zeros(self.max_target_lenth, dtype=np.int32)}
           else:
             return None
-        data = next(self.data_iters[idx])
+        data = next(self.data_iter)
+        self.state_dict = self.dataset.state_dict()
+        # max_logging.log(f"{self.state_dict=}")
         return data
       except StopIteration:
-        self._update_shard(idx)
+        self._update_shard()
 
 ########## Functions used by Grain pipeline
 

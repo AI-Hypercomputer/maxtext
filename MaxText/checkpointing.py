@@ -23,12 +23,14 @@ import orbax.checkpoint
 from orbax.checkpoint.logging import abstract_logger, cloud_logger, standard_logger, composite_logger
 from orbax.checkpoint import pytree_checkpoint_handler
 from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, PyTree
+from orbax.checkpoint.handlers import handler_registration
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import jax
 import numpy as np
 import grain.python as grain
 
 import max_logging
+from checkpoint_handlers import HFCheckpointRestore
 from multihost_dataloading import MultiHostDataLoadIterator
 from flax.training import orbax_utils, train_state
 
@@ -36,6 +38,9 @@ PyTreeCheckpointHandler = pytree_checkpoint_handler.PyTreeCheckpointHandler
 LocalCheckpointOptions = emergency_checkpoint_manager.LocalCheckpointOptions
 PersistentCheckpointOptions = (
     emergency_checkpoint_manager.PersistentCheckpointOptions
+)
+DefaultCheckpointHandlerRegistry = (
+    handler_registration.DefaultCheckpointHandlerRegistry
 )
 
 
@@ -56,6 +61,8 @@ def create_orbax_checkpoint_manager(
 
   if dataset_type == "grain":
     item_names = ("items", "iter")
+  elif dataset_type == "hf":
+    item_names = ("items", "hf_iter")
   else:
     item_names = ("items",)
 
@@ -226,6 +233,17 @@ def load_state_if_possible(
                 args=orbax.checkpoint.args.Composite(
                     items=orbax.checkpoint.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args),
                     iter=grain.PyGrainCheckpointRestore(data_iterator.local_iterator),
+                ),
+            ),
+            None,
+        )
+      elif dataset_type == "hf" and data_iterator is not None:
+        return (
+            checkpoint_manager.restore(
+                latest_step,
+                args=orbax.checkpoint.args.Composite(
+                    items=orbax.checkpoint.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args),
+                    hf_iter=HFCheckpointRestore(data_iterator.dataloader._data_source.state_dict),
                 ),
             ),
             None,

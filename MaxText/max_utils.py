@@ -594,6 +594,8 @@ def setup_initial_state(
       else:
         if "iter" in restored and restored["iter"] is not None:
           data_iterator.local_iterator = restored["iter"]
+        if "hf_iter" in restored and restored["hf_iter"] is not None:
+          data_iterator.dataloader._data_source.dataset = restored["hf_iter"]
         state = restored["items"]
     else:
       init_state_partial = functools.partial(

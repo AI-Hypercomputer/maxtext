@@ -45,7 +45,7 @@ import profiler
 import pyconfig
 from vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
-
+from checkpoint_handlers import HFCheckpointSave
 from input_pipeline.input_pipeline_interface import create_data_iterator
 from layers import models
 
@@ -178,6 +178,15 @@ def save_checkpoint(checkpoint_manager, step, state, dataset_type="c4", data_ite
         args=orbax.checkpoint.args.Composite(
             items=orbax.checkpoint.args.PyTreeSave(item=state),
             iter=grain.PyGrainCheckpointSave(data_iterator.local_iterator),
+        ),
+    )
+  elif dataset_type == "hf":
+    #import pdb; pdb.set_trace()
+    return checkpoint_manager.save(
+        step,
+        args=orbax.checkpoint.args.Composite(
+            items=orbax.checkpoint.args.PyTreeSave(item=state),
+            hf_iter=HFCheckpointSave(data_iterator.dataloader._data_source.state_dict),
         ),
     )
   else:

@@ -43,7 +43,6 @@ def preprocessing_pipeline(
     add_eos=True,
     packing=True,
     shift=True,
-    num_threads=1,
     drop_remainder=False,
     generate_padding_example=False,
 ):
@@ -76,7 +75,6 @@ def preprocessing_pipeline(
   dataset = _input_pipeline_utils.HFDataSource(dataset,
                                                 dataloading_host_index,
                                                 dataloading_host_count,
-                                                num_threads,
                                                 generate_padding_example,
                                                 max_target_length,
                                                 data_column_name)
@@ -117,7 +115,7 @@ def preprocessing_pipeline(
       sampler=dummy_index_sampler,
       worker_count=1,  # only supports one worker for now, more workers results in duplicated data
       worker_buffer_size=1,
-      read_options=grain.ReadOptions(num_threads=num_threads, prefetch_buffer_size=128),
+      read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=128),
   )
 
   multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
