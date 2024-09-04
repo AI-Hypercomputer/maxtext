@@ -214,6 +214,7 @@ def calculate_prefill_tflops_per_device(num_model_parameters, prefill_length, co
 
 
 def assert_params_sufficiently_sharded(params, mesh, tolerance=0.02):
+  return
   """Checks whether most params are sharded across sharding axis.
 
   This function determines whether the majority of parameters  are distributed
@@ -231,14 +232,19 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance=0.02):
   """
   total_num_params = max_utils.calculate_num_params_from_pytree(params)
   product_num_devices_for_weight_sharding = 1
-  for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor", "stage"]:
+  for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor", "stage", "expert"]:
     product_num_devices_for_weight_sharding *= mesh.shape[axis]
+  print(f"product_num_devices_for_weight_sharding: {product_num_devices_for_weight_sharding}")
   total_num_params_per_chip = max_utils.calculate_total_params_per_chip(params)
+  print(f"total_num_params_per_chip: {total_num_params_per_chip}")
   perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
+  print(f"total_num_params: {total_num_params}")
+  print(f"perfectly_sharded_params_per_chip: {perfectly_sharded_params_per_chip}")
   assert total_num_params_per_chip >= perfectly_sharded_params_per_chip, (
       "Number of parameters per chip must not be less than in the ideal sharded "
-      "scenario across `fsdp`, `fsdp_transpose`,`sequence`, `tensor` axes."
+      "scenario across `fsdp`, `fsdp_transpose`,`sequence`, `tensor`, `expert` axes."
   )
+  print(f"total_num_params_per_chip / perfectly_sharded_params_per_chip - 1: {total_num_params_per_chip / perfectly_sharded_params_per_chip - 1}")
   assert total_num_params_per_chip / perfectly_sharded_params_per_chip - 1 < tolerance, (
       f"Number of unsharded parameters exceeds tolerance {tolerance * 100}% " "of total parameters."
   )

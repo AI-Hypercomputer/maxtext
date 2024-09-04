@@ -35,10 +35,12 @@ AxisNames = tuple[str, ...]
 AxisIdxes = tuple[int, ...]
 
 BATCH = "activation_batch"
+BATCH_EXP = "activation_batch_exp"
 LENGTH = "activation_length"
 EMBED = "activation_embed"
 HEAD = "activation_heads"
 KV_BATCH = "activation_kv_batch"
+KV_BATCH_EXP = "activation_kv_batch_exp"
 KV_HEAD = "activation_kv_heads"
 KV_HEAD_DIM = "activation_kv_head_dim"
 D_KV = "activation_kv"

@@ -57,7 +57,9 @@ KVTensor = quantizations.KVTensor
 AxisNames = common_types.AxisNames
 AxisIdxes = common_types.AxisIdxes
 BATCH = common_types.BATCH
+BATCH_EXP = common_types.BATCH_EXP
 KV_BATCH = common_types.KV_BATCH
+KV_BATCH_EXP = common_types.KV_BATCH_EXP
 LENGTH = common_types.LENGTH
 HEAD = common_types.HEAD
 KV_HEAD = common_types.KV_HEAD
@@ -123,7 +125,7 @@ class AttentionOp(nn.Module):
   float32_qk_product: bool = False
   max_prefill_predict_length: int = -1
   float32_logits: bool = False
-  flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
+  flash_axis_names: AxisNames = (BATCH_EXP, HEAD, LENGTH, D_KV)
   cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
   cache_scale_logical_axis_names: AxisNames = (CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV)
   ragged_qkv_axis_names: AxisNames = (CACHE_BATCH, CACHE_HEADS, CACHE_SEQUENCE, CACHE_KV)
@@ -273,7 +275,7 @@ class AttentionOp(nn.Module):
     if decoder_segment_ids is not None:
       decoder_segment_ids = splash_attention_kernel.SegmentIds(decoder_segment_ids, decoder_segment_ids)
     axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
-    segment_axis_names = nn.logical_to_mesh_axes((BATCH, "activation_length_no_heads"))
+    segment_axis_names = nn.logical_to_mesh_axes((BATCH_EXP, "activation_length_no_heads"))
 
     @functools.partial(
         shard_map,
@@ -996,10 +998,10 @@ class Attention(nn.Module):
 
   # Shard the query activation as the same as the key and value.
   # TODO: Find a better sharding axis name.
-  query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  query_axis_names: AxisNames = (KV_BATCH_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM)
+  key_axis_names: AxisNames = (KV_BATCH_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM)
+  value_axis_names: AxisNames = (KV_BATCH_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM)
+  out_axis_names: AxisNames = (BATCH_EXP, LENGTH, HEAD, D_KV)
 
   prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
   ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
@@ -1023,7 +1025,7 @@ class Attention(nn.Module):
         features=(self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=query_init,
-        kernel_axes=("embed", "heads", "kv"),
+        kernel_axes=("embed_exp", "heads", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="query",
@@ -1048,7 +1050,7 @@ class Attention(nn.Module):
     if self.num_query_heads % self.num_kv_heads != 0:
       raise ValueError("Invalid num_kv_heads for GQA.")
 
-    kernel_axes = ("embed", "kv_heads", "kv_head_dim")
+    kernel_axes = ("embed_exp", "kv_heads", "kv_head_dim")
 
     kv_proj = DenseGeneral(
         features=(self.num_kv_heads, self.head_dim),
@@ -1069,7 +1071,7 @@ class Attention(nn.Module):
         features=(3, self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed", "qkv", "heads", "kv"),
+        kernel_axes=("embed_exp", "qkv", "heads", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name=proj_name,
@@ -1084,7 +1086,7 @@ class Attention(nn.Module):
         features=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
-        kernel_axes=("heads", "kv", "embed"),
+        kernel_axes=("heads", "kv", "embed_exp"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="out",
