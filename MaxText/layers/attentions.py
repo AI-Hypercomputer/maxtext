@@ -293,14 +293,14 @@ class AttentionOp(nn.Module):
             query.shape[2] == decoder_segment_ids.q.shape[1]
         ), "Sharding along sequence dimension not allowed in tpu kernel attention"
       block_sizes = splash_attention_kernel.BlockSizes(
-          block_q=min(512, query.shape[2]),
-          block_kv_compute=min(512, key.shape[2]),
-          block_kv=min(512, key.shape[2]),
-          block_q_dkv=min(512, query.shape[2]),
-          block_kv_dkv=min(512, key.shape[2]),
-          block_kv_dkv_compute=min(512, query.shape[2]),
-          block_q_dq=min(512, query.shape[2]),
-          block_kv_dq=min(512, query.shape[2]),
+          block_q=2048,
+          block_kv_compute=2048,
+          block_kv=2048,
+          block_q_dkv=2048,
+          block_kv_dkv=2048,
+          block_kv_dkv_compute=2048,
+          block_q_dq=2048,
+          block_kv_dq=2048,
       )
 
       mask = splash_attention_mask.CausalMask(shape=(query.shape[2], query.shape[2]))
