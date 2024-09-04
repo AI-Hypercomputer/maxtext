@@ -113,9 +113,12 @@ class FileParallelSequentialRead(ParquetIterableDataset):
 
   def _iter_impl(self, assigned_parquet_files: Iterable[str]) -> Iterable:
     """File Parallel, Sequential Read iterator."""
+    worker_info = torch.utils.data.get_worker_info()
     for each_parquet_file in assigned_parquet_files:
       table = pq.ParquetFile(each_parquet_file)
       for batch in table.iter_batches(
           batch_size=self.batch_size, columns=self.columns
       ):
-        yield from batch.to_pylist()
+        res = batch.to_pylist()
+        max_logging.log(f"Worker {worker_info.id} retrieving a batch from {each_parquet_file}")
+        yield from res
