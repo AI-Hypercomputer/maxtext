@@ -879,12 +879,12 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   )
 
 
-def get_kv_cache_annotations(model, config, rng, mesh):
+def get_prefill_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
     input_shape = (
-        config.micro_batch_size_to_train_on,
+        config.global_batch_size_to_load,
         config.max_prefill_predict_length,
     )
 
@@ -893,6 +893,32 @@ def get_kv_cache_annotations(model, config, rng, mesh):
         jnp.ones(input_shape),
         jnp.ones(input_shape),
         model_mode=common_types.MODEL_MODE_PREFILL,
+    )
+    return model_vars["cache"]
+
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
+    abstract_state = jax.eval_shape(init_kv_cache_partial)
+  state_logical_annotations = nn.get_partition_spec(abstract_state)
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  return state_mesh_annotations
+
+
+def get_kv_cache_annotations(model, config, rng, mesh):
+  """Get a shaped abstraction of the state (including optimizer)"""
+
+  def init_kv_cache(model, config):
+    input_shape = (
+        config.global_batch_size_to_load,
+        1,
+    )
+
+    model_vars = model.init(
+        {"params": rng, "dropout": rng, "aqt": rng},
+        jnp.ones(input_shape),
+        jnp.ones(input_shape),
+        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
     )
     return model_vars["cache"]
 

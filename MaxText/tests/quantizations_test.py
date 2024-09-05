@@ -48,9 +48,13 @@ class QuantTestModule(nn.Module):
     return res_einsum, res_dg
 
 
-def _configure_quantization(quant_str="", quant_cfg_path="", mode_str="train"):
+def _configure_quantization(quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False):
   pyconfig.initialize(
-      [None, "configs/base.yml"], enable_checkpointing=False, quantization=quant_str, quant_cfg_path=quant_cfg_path
+      [None, "configs/base.yml"],
+      enable_checkpointing=False,
+      quantization=quant_str,
+      quant_cfg_path=quant_cfg_path,
+      replicate_quant_scale=replicate_scale,
   )
   config = pyconfig.config
   quant = quantizations.configure_quantization(config, mode_str)
@@ -79,6 +83,15 @@ class QuantizationTest(unittest.TestCase):
     for quant_mode in ["train", "serve", "convert"]:
       quant = _configure_quantization(quant_str="", mode_str=quant_mode)
       self.assertEqual(quant, None)
+
+  def test_configure_quantization_replicate_scale(self):
+    for quant_mode in ["train", "serve", "convert"]:
+      quant = _configure_quantization(quant_str="int8", mode_str=quant_mode)
+      self.assertEqual(quant.replicate_scale, False)
+
+    for quant_mode in ["train", "serve", "convert"]:
+      quant = _configure_quantization(quant_str="int8", mode_str=quant_mode, replicate_scale=True)
+      self.assertEqual(quant.replicate_scale, True)
 
   def test_configure_quantization_is_int8(self):
     for quant_mode in ["train", "serve", "convert"]:
