@@ -32,6 +32,7 @@ echo "Running 52b.sh"
 set -e
 
 export EXECUTABLE="train.py" # or train_compile.py
+export RUN_PREFLIGHT="true"
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -48,7 +49,9 @@ then
 fi
 
 # Set up network optimizations
-bash preflight.sh
+if [ "$RUN_PREFLIGHT" = "true" ]; then
+    bash preflight.sh
+fi
 
 # Train
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true TPU_MEGACORE=MEGACORE_DENSE"
