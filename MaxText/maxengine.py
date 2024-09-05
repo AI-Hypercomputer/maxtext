@@ -366,16 +366,15 @@ class MaxEngine(engine_api.Engine):
     # pylint: disable=unused-argument
     def init(abstract_params):
       x = jnp.ones(
-          (int(self.config.per_device_batch_size * jax.device_count()), self.config.max_prefill_predict_length),
+          (int(self.config.per_device_batch_size * jax.device_count()), 1),
           dtype=jnp.int32,
       )
       _, cache = self.model.apply(
           abstract_params,
           x,
           x,
-          decoder_segment_ids=jnp.zeros(x.shape, dtype=jnp.int32) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR,
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
+          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
           rngs={"params": self.rng},
           mutable=["cache"],
       )
@@ -412,7 +411,7 @@ class MaxEngine(engine_api.Engine):
       return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
 
     self.kv_cache_annotations_named = jax.tree_util.tree_map(lambda x: tuple(x.names), cache, is_leaf=is_lp)
-    del cache
+    max_utils.delete_pytree(cache)
     zeroed = max_utils.unbox_logicallypartioned(initialize())
     return zeroed
 
