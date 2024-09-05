@@ -240,7 +240,7 @@ def main(config, inference_metadata: Optional[Dict[str, Any]] = None):
 
   text = config.prompt
   metadata = engine.get_tokenizer()
-  vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
+  tokenizer = engine.build_tokenizer(metadata)
 
   decode_state = engine.init_decode_state()
   _, cache_size, _ = max_utils.summarize_pytree_data(decode_state["cache"], name="Cache")
@@ -256,8 +256,8 @@ def main(config, inference_metadata: Optional[Dict[str, Any]] = None):
     prefill_true_lengths = {}
 
     for prefill_length in prefill_lengths:
-      prefill_tokens[prefill_length], prefill_true_lengths[prefill_length] = token_utils.tokenize_and_pad(
-          text, vocab, is_bos=True, prefill_lengths=[prefill_length]
+      prefill_tokens[prefill_length], prefill_true_lengths[prefill_length] = tokenizer.encode(
+        text, is_bos=True, prefill_lengths=[prefill_length]
       )
       benchmark_results["prefill-result-sizes"][prefill_length] = summarize_prefill_result(
           engine, params, prefill_tokens[prefill_length], prefill_true_lengths[prefill_length]

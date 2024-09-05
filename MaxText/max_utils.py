@@ -748,15 +748,15 @@ def get_kv_cache_annotations(model, config, rng, mesh):
 
   def init_kv_cache(model, config):
     input_shape = (
-        config.micro_batch_size_to_train_on,
-        config.max_prefill_predict_length,
+        config.global_batch_size_to_load,
+        1,
     )
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
         jnp.ones(input_shape),
         jnp.ones(input_shape),
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
     )
     return model_vars["cache"]
 

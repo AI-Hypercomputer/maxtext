@@ -5,6 +5,7 @@ base_config: "inference_jetstream.yml"
 # weight bf16, kv cache bf16
 
 model_name: "llama3-70b"
+tokenizer_path: "assets/tokenizer_llama3.tiktoken"
 sharding_strategy: "experimental"
 attention: 'dot_product'
 allow_split_physical_axes: True
