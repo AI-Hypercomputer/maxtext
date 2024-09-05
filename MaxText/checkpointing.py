@@ -24,6 +24,9 @@ from orbax.checkpoint.logging import abstract_logger, cloud_logger, standard_log
 from orbax.checkpoint import pytree_checkpoint_handler
 from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, PyTree
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+from orbax.checkpoint.multihost.utils import is_pathways_on_cloud_backend
+from previewutilities.persistence.pathways_orbax_handler import pathways_local_state_handler
+
 import jax
 import numpy as np
 import grain.python as grain
@@ -94,13 +97,22 @@ def create_orbax_emergency_checkpoint_manager(
           save_interval_steps=persistent_save_interval_steps
       ),
   )
+  max_logging.log(
+      "Determining if this is a pathways on cloud backend:"
+      f" {is_pathways_on_cloud_backend()}"
+  )
+  local_state_handler = (
+      pathways_local_state_handler()
+      if is_pathways_on_cloud_backend()
+      else emergency_checkpoint_manager.local_checkpoint_handler()
+  )
   emergency_mngr = emergency_checkpoint_manager.CheckpointManager(
       local_checkpoint_dir,
       epath.Path(persistent_checkpoint_dir),
       global_mesh=global_mesh,
       abstract_state=abstract_state,
       options=options,
-      local_state_handler=emergency_checkpoint_manager.local_checkpoint_handler(),
+      local_state_handler=local_state_handler,
       logger=orbax_logger,
   )
 
