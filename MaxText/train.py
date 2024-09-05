@@ -66,6 +66,7 @@ from ml_goodput_measurement import monitoring
 
 Transformer = models.Transformer
 EPS = 1e-8
+_CHUNK_BYTE_SIZE = 2 * 1024 **3
 
 
 def validate_train_config(config):
@@ -167,22 +168,35 @@ def clear_buffered_metrics():
 
 def save_checkpoint(checkpoint_manager, step, state, dataset_type="c4", data_iterator=None):
   """Wrapper for saving checkpoint"""
+  # specify chunk_byte_size to force orbax to control maximum file size in checkpoint
+  save_args = jax.tree.map(
+      lambda _: orbax.checkpoint.SaveArgs(chunk_byte_size=_CHUNK_BYTE_SIZE), state
+  )
+
   if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
     return checkpoint_manager.save(
-      step, args=orbax.checkpoint.args.PyTreeSave(state)
+      step, args=orbax.checkpoint.args.PyTreeSave(
+          item=state, save_args=save_args, ocdbt_target_data_file_size=_CHUNK_BYTE_SIZE
+      )
   )
 
   if dataset_type == "grain":
     return checkpoint_manager.save(
         step,
         args=orbax.checkpoint.args.Composite(
-            items=orbax.checkpoint.args.PyTreeSave(item=state),
+            items=orbax.checkpoint.args.PyTreeSave(
+                item=state, save_args=save_args, ocdbt_target_data_file_size=_CHUNK_BYTE_SIZE
+            ),
             iter=grain.PyGrainCheckpointSave(data_iterator.local_iterator),
         ),
     )
   else:
     return checkpoint_manager.save(
-        step, args=orbax.checkpoint.args.Composite(items=orbax.checkpoint.args.PyTreeSave(item=state))
+        step, args=orbax.checkpoint.args.Composite(
+            items=orbax.checkpoint.args.PyTreeSave(
+                item=state, save_args=save_args, ocdbt_target_data_file_size=_CHUNK_BYTE_SIZE
+            )
+        )
     )
 
 
