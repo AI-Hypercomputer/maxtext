@@ -391,6 +391,7 @@ def create_device_mesh(config, devices=None):
       config.dcn_fsdp_transpose_parallelism,
       config.dcn_sequence_parallelism,
       config.dcn_tensor_parallelism,
+      config.dcn_expert_parallelism,
       config.dcn_autoregressive_parallelism,
   ]
   ici_parallelism = [
@@ -400,6 +401,7 @@ def create_device_mesh(config, devices=None):
       config.ici_fsdp_transpose_parallelism,
       config.ici_sequence_parallelism,
       config.ici_tensor_parallelism,
+      config.ici_expert_parallelism,
       config.ici_autoregressive_parallelism,
   ]
 

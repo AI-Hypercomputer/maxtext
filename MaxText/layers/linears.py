@@ -296,8 +296,8 @@ class MoeBlock(nn.Module):
     kernel_init = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
 
     # The first axes is expert
-    kernel_axes = (None, 'embed', 'mlp')
-    wo_kernel_axes = (None, 'mlp', 'embed')
+    kernel_axes = ('exp', 'embed_no_exp', 'mlp')
+    wo_kernel_axes = ('exp', 'mlp', 'embed_no_exp')
 
     w0_kernel = self.param(
         'wi_0',
@@ -439,22 +439,20 @@ class MoeBlock(nn.Module):
       expert_token_count_fused = jnp.cumsum(expert_mask_fused, axis=1)
       expert_token_count = jnp.reshape(expert_token_count_fused, ((batch_size, seq_len, self.num_experts_per_tok, self.num_experts)))
       trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
-      updated_expert_mask = jnp.sum(trunc_expert_mask, axis=3)
+      combined_expert_mask = jnp.sum(trunc_expert_mask, axis=2)
 
       # reshape & update weights
-      softmax_probs *= updated_expert_mask
-      weights = self.reshape_and_update_weights(softmax_probs, top_k_indices)
+      softmax_probs *= combined_expert_mask
 
       # calculate token position in expert capacity dimension
       expert_token_position_fused = expert_mask_fused * expert_token_count_fused
       expert_token_position = jnp.reshape(expert_token_position_fused, (batch_size, seq_len, self.num_experts_per_tok, self.num_experts))
-      combined_expert_mask = jnp.sum(trunc_expert_mask, axis=2)
       combined_expert_token_position = jnp.sum(expert_token_position, axis=2) * combined_expert_mask
       expert_token_position_in_capacity = jax.nn.one_hot(combined_expert_token_position, num_classes=expert_capacity_per_batch+1, dtype=jnp.int32)
 
       # shape of combine_mask is (batch_size, seq_len, num_experts, expert_capacity_per_batch + 1),
       # and cut 0-dimension which is always 0
-      combine_mask = (weights[..., None] * expert_token_position_in_capacity)
+      combine_mask = (softmax_probs[..., None] * expert_token_position_in_capacity)
       combine_mask = combine_mask[..., 1:]
       dispatch_mask = combine_mask.astype(bool)
       return dispatch_mask, combine_mask
@@ -477,18 +475,25 @@ class MoeBlock(nn.Module):
 
     if self.config.capacity_factor > 0:
       # token dropping if needed
-      dispatch_mask, combine_mask = self.generate_masks(top_k_indices, top_k_weights)
+      dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
+      dispatch_mask = nn.with_logical_constraint(dispatch_mask, ("activation_batch", "activation_length", None, None))
+      combine_mask = nn.with_logical_constraint(combine_mask, ("activation_batch", "activation_length", None, None))
       loss = self.load_balance_loss(top_k_indices, softmax_probs)
+      inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
       with jax.named_scope("dispatch"):
         dispatch = jnp.einsum("BSM,BSEC -> BECM", inputs, dispatch_mask)
+        dispatch = nn.with_logical_constraint(dispatch, ("activation_batch_no_exp", "activation_exp", None, "activation_embed"))
       with jax.named_scope("wi_0"):
         layer_w0 = jnp.einsum("BECM,EMH -> BECH", dispatch, w0_kernel)
+        layer_w0 = nn.with_logical_constraint(layer_w0, ("activation_batch_no_exp", "activation_exp", None, "activation_mlp"))
       with jax.named_scope("wi_1"):
         layer_w1 = jnp.einsum("BECM,EMH -> BECH", dispatch, w1_kernel)
+        layer_w1 = nn.with_logical_constraint(layer_w1, ("activation_batch_no_exp", "activation_exp", None, "activation_mlp"))
       layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1)
       with jax.named_scope("wo"):
         intermediate_layer = jnp.einsum("BECH,EHM -> BECM", layer_multiply, wo_kernel)
+        intermediate_layer = nn.with_logical_constraint(intermediate_layer, ("activation_batch_no_exp", "activation_exp", None, "activation_embed"))
       with jax.named_scope("combine"):
         output = jnp.einsum("BECM,BSEC -> BSM", intermediate_layer, combine_mask)
       return output, loss
