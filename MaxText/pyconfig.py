@@ -405,7 +405,8 @@ class _HyperParameters:
 
 def validate_megablox_parallelism(raw_keys):
   if raw_keys["megablox"] and (using_sequence_parallelism(raw_keys) or
-                               using_pipeline_parallelism(raw_keys)):
+                               using_pipeline_parallelism(raw_keys) or
+                               using_expert_parallelism(raw_keys)):
     raise ValueError("Currently we only support Megablox with data and tensor parallelism.")
   tensor_parallelism = raw_keys["ici_tensor_parallelism"] * raw_keys["dcn_tensor_parallelism"]
   if raw_keys["megablox"] and using_tensor_parallelism(raw_keys) and (raw_keys["emb_dim"] % tensor_parallelism):
@@ -536,6 +537,9 @@ def using_tensor_parallelism(raw_keys) -> bool:
 
 def using_sequence_parallelism(raw_keys) -> bool:
   return int(raw_keys['ici_sequence_parallelism']) > 1 or int(raw_keys['dcn_sequence_parallelism']) > 1
+
+def using_expert_parallelism(raw_keys) -> bool:
+  return int(raw_keys['ici_expert_parallelism']) > 1 or int(raw_keys['dcn_expert_parallelism']) > 1
 
 class HyperParameters:  # pylint: disable=missing-class-docstring
 
