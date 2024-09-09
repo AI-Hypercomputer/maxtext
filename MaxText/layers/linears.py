@@ -470,7 +470,7 @@ class MoeBlock(nn.Module):
     loss = jnp.mean(density * density_prob) * (self.num_experts ** 2) * self.config.load_balance_loss_weight
     return loss
 
-  def get_einsum(self, rhs_mesh_axes: Tuple[str, ...] = ()):
+  def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = ()):
     if self.quant:
       einsum_op = self.quant.einsum(rhs_mesh_axes)
     else:
