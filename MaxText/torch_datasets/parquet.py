@@ -17,10 +17,13 @@ limitations under the License.
 import random
 import abc
 from typing import Iterable
+import time
 
 import torch
 from torch.utils.data import IterableDataset
 import pyarrow.parquet as pq
+import string
+import random
 
 
 import max_logging
@@ -32,12 +35,13 @@ class ParquetIterableDataset(abc.ABC, IterableDataset):
   
   Implementers must override the `_iter_impl` method.
   """
-  def __init__(self, allocated_parquet_files: Iterable[str], columns=None, batch_size=1000):
+  def __init__(self, allocated_parquet_files: Iterable[str], columns=None, batch_size=1000, config=None):
     max_logging.log(f'Using {self.__class__.__name__} strategy.')
     max_logging.log(f'Allocated with the following data files: {allocated_parquet_files}.')
     self.allocated_parquet_files = allocated_parquet_files
     self.columns = columns
     self.batch_size = batch_size
+    self.config = config
 
   @abc.abstractmethod
   def _iter_impl(self, assigned_parquet_files: Iterable[str]) -> Iterable:
@@ -110,12 +114,28 @@ class FileParallelRandomRead(ParquetIterableDataset):
 
 class FileParallelSequentialRead(ParquetIterableDataset):
   """File Parallel, Sequential Read implementation for Parquet files."""
-
+  def _construct_data_sample(self, target_size):
+    if target_size < 101:
+        target_size = 101
+    output_len = 100
+    output = "".join(random.choices(string.ascii_letters, k=output_len))
+    image_base64_str = "".join(random.choices(string.ascii_letters, k=target_size - output_len))
+    return {"outputs": output, "image_base64_str": image_base64_str}
+  
   def _iter_impl(self, assigned_parquet_files: Iterable[str]) -> Iterable:
     """File Parallel, Sequential Read iterator."""
+    worker_info = torch.utils.data.get_worker_info()
     for each_parquet_file in assigned_parquet_files:
       table = pq.ParquetFile(each_parquet_file)
       for batch in table.iter_batches(
           batch_size=self.batch_size, columns=self.columns
       ):
-        yield from batch.to_pylist()
+        # The actual obtained data sample is not used to return but keeping
+        # it here to account for the actual data loading time from filesystem.
+        res = batch.to_pylist()
+        max_logging.log(f"Worker {worker_info.id} retrieving a batch from {each_parquet_file}")
+        
+        # generated_res = [self._construct_data_sample(self.config.rough_desired_simulated_data_sample_size) for _ in range(self.batch_size)]
+        # yield from generated_res
+        for _ in range(self.batch_size):
+          yield self._construct_data_sample(self.config.rough_desired_simulated_data_sample_size)

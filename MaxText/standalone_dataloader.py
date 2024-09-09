@@ -136,12 +136,16 @@ def parquet_data_loader(config):
       allocated_parquet_files=sublists[worker_id],
       batch_size=batch_size,
       columns=["outputs", "image_base64_str"],
+      config=config,
   )
   data_loader = DataLoader(
       dataset=dataset,
       num_workers=config.data_loader_num_workers,
       batch_size=batch_size,
+      # batch_size=1,
       prefetch_factor=config.prefetch_factor,
+      pin_memory=config.pin_memory,
+      persistent_workers=config.persistent_workers,
   )
   return data_loader
 
@@ -206,7 +210,9 @@ def data_load_loop(config):
     local_steps = 0
     step_data_loading_start = datetime.datetime.now()
     step_start = datetime.datetime.now()
-    for _ in data_loader:
+    # for outputs, image_base64_strs in data_loader:
+    for batch in data_loader:
+      max_logging.log(f"STANDALONE DATALOADER : Obtained {len(batch['outputs'])} outputs and {len(batch['image_base64_str'])} images.")
       step_data_loading_end = datetime.datetime.now()
       data_loading_interval = (step_data_loading_end - step_data_loading_start).total_seconds()
       max_logging.log(
