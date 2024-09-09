@@ -289,19 +289,19 @@ class MoeBlock(nn.Module):
   dtype: DType = jnp.float32
   quant: Optional[Quant] = None
 
+  # The first axes is expert
+  wi_kernel_axes = ('exp', 'embed_no_exp', 'mlp')
+  wo_kernel_axes = ('exp', 'mlp', 'embed_no_exp')
+
   def generate_kernels(self, num_experts, emb_dim, mlp_dim):
 
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
     kernel_init = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
 
-    # The first axes is expert
-    self.kernel_axes = ('exp', 'embed_no_exp', 'mlp')
-    self.wo_kernel_axes = ('exp', 'mlp', 'embed_no_exp')
-
     w0_kernel = self.param(
         'wi_0',
-        nn.with_logical_partitioning(kernel_init, self.kernel_axes),
+        nn.with_logical_partitioning(kernel_init, self.wi_kernel_axes),
         (num_experts, emb_dim, mlp_dim),
         self.weight_dtype,
         kernel_in_axis,
@@ -310,7 +310,7 @@ class MoeBlock(nn.Module):
     w0_kernel = jnp.asarray(w0_kernel, self.dtype)
     w1_kernel = self.param(
         'wi_1',
-        nn.with_logical_partitioning(kernel_init, self.kernel_axes),
+        nn.with_logical_partitioning(kernel_init, self.wi_kernel_axes),
         (num_experts, emb_dim, mlp_dim),
         self.weight_dtype,
         kernel_in_axis,
@@ -518,9 +518,9 @@ class MoeBlock(nn.Module):
       weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
       with jax.named_scope("wi_0"):
-        layer_w0 = self.get_einsum(rhs_mesh_axes=self.kernel_axes)("BSM,EMH -> BSEH", inputs, w0_kernel)
+        layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)("BSM,EMH -> BSEH", inputs, w0_kernel)
       with jax.named_scope("wi_1"):
-        layer_w1 = self.get_einsum(rhs_mesh_axes=self.kernel_axes)("BSM,EMH -> BSEH", inputs, w1_kernel)
+        layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)("BSM,EMH -> BSEH", inputs, w1_kernel)
       layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1)
       with jax.named_scope("wo"):
