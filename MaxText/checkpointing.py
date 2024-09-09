@@ -101,20 +101,29 @@ def create_orbax_emergency_checkpoint_manager(
       "Determining if this is a pathways on cloud backend:"
       f" {is_pathways_on_cloud_backend()}"
   )
-  local_state_handler = (
-      pathways_local_state_handler()
-      if is_pathways_on_cloud_backend()
-      else emergency_checkpoint_manager.local_checkpoint_handler()
-  )
-  emergency_mngr = emergency_checkpoint_manager.CheckpointManager(
-      local_checkpoint_dir,
-      epath.Path(persistent_checkpoint_dir),
-      global_mesh=global_mesh,
-      abstract_state=abstract_state,
-      options=options,
-      local_state_handler=local_state_handler,
-      logger=orbax_logger,
-  )
+
+  if is_pathways_on_cloud_backend():
+    local_state_handler = pathways_local_state_handler()
+    emergency_mngr = emergency_checkpoint_manager.PathwaysCheckpointManager(
+        local_checkpoint_dir,
+        epath.Path(persistent_checkpoint_dir),
+        global_mesh=global_mesh,
+        abstract_state=abstract_state,
+        options=options,
+        local_state_handler=local_state_handler,
+        logger=orbax_logger,
+    )
+  else:
+    local_state_handler = emergency_checkpoint_manager.local_checkpoint_handler()
+    emergency_mngr = emergency_checkpoint_manager.CheckpointManager(
+        local_checkpoint_dir,
+        epath.Path(persistent_checkpoint_dir),
+        global_mesh=global_mesh,
+        abstract_state=abstract_state,
+        options=options,
+        local_state_handler=local_state_handler,
+        logger=orbax_logger,
+    )
 
   max_logging.log("Emergency checkpoint manager created!")
   return emergency_mngr
@@ -222,7 +231,7 @@ def load_state_if_possible(
           abstract_unboxed_pre_state,
       )
 
-      if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
+      if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager) or isinstance(checkpoint_manager, emergency_checkpoint_manager.PathwaysCheckpointManager):
         return (
           checkpoint_manager.restore(
             latest_step,

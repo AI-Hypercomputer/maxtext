@@ -169,7 +169,7 @@ def clear_buffered_metrics():
 
 def save_checkpoint(checkpoint_manager, step, state, dataset_type="c4", data_iterator=None):
   """Wrapper for saving checkpoint"""
-  if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
+  if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager) or isinstance(checkpoint_manager, emergency_checkpoint_manager.PathwaysCheckpointManager):
     return checkpoint_manager.save(
       step, args=orbax.checkpoint.args.PyTreeSave(state)
   )

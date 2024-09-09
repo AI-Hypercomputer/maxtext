@@ -589,7 +589,7 @@ def setup_initial_state(
     )
 
     if restored:
-      if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
+      if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager) or isinstance(checkpoint_manager, emergency_checkpoint_manager.PathwaysCheckpointManager):
         state = restored
       else:
         if "iter" in restored and restored["iter"] is not None:

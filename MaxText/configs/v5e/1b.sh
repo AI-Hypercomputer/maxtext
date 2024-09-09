@@ -1,5 +1,5 @@
-echo "Running 8b.sh"
-# 8B parameter model.
+echo "Running 1b.sh"
+# 1B parameter model.
 # This config will work out of the box for any number of v5e-256 slices.
 #
 # Command Flags:
@@ -8,10 +8,10 @@ echo "Running 8b.sh"
 # RUN_NAME (Required, unless run_name is already set in base.yml or running with XPK/GKE)
 #
 # Example to invoke this script:
-# bash MaxText/configs/v5e/8b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>"
+# bash MaxText/configs/v5e/1b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>"
 #
 # Example to AOT compile:
-# bash MaxText/configs/v5e/8b.sh EXECUTABLE=train_compile.py M_COMPILE_TOPOLOGY=v5e-256 M_COMPILE_TOPOLOGY_NUM_SLICES=2
+# bash MaxText/configs/v5e/1b.sh EXECUTABLE=train_compile.py M_COMPILE_TOPOLOGY=v5e-256 M_COMPILE_TOPOLOGY_NUM_SLICES=2
 
 
 # Stop execution if any command exits with error
