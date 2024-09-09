@@ -47,11 +47,13 @@ export JAX_TRACEBACK_FILTERING=off
 #     weight_dtype=bfloat16 max_target_length=128 megablox=False \
 #     profiler=xplane attention=dot_product dataset_type=synthetic tokenizer_path=assets/tokenizer.mistral hardware=gpu
 
+
+mv ./megablox /usr/local/lib/python3.10/dist-packages/jax/experimental/pallas/ops/tpu/megablox
 python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} \
     run_name=moe-train-matmul per_device_batch_size=1 model_name=mixtral-8x7b \
     tokenizer_path=assets/tokenizer.mistral ici_fsdp_parallelism=-1 ici_tensor_parallelism=1 \
     max_target_length=128 attention=cudnn_flash_te weight_dtype=bfloat16\
-    dataset_type=synthetic megablox=False hardware=gpu
+    dataset_type=synthetic megablox=True hardware=gpu
 
 
 # python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} \
