@@ -481,21 +481,21 @@ class MoeBlock(nn.Module):
       loss = self.load_balance_loss(top_k_indices, softmax_probs)
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
       with jax.named_scope("dispatch"):
-        dispatch = jnp.einsum("BSM,BSEC -> BECM", inputs, dispatch_mask)
-        dispatch = nn.with_logical_constraint(dispatch, ("activation_batch_no_exp", "activation_exp", None, "activation_embed"))
+        dispatch = jnp.einsum("BSM,BSEC -> EBCM", inputs, dispatch_mask)
+        dispatch = nn.with_logical_constraint(dispatch, ("activation_exp", "activation_batch_no_exp", None, "activation_embed"))
       with jax.named_scope("wi_0"):
-        layer_w0 = jnp.einsum("BECM,EMH -> BECH", dispatch, w0_kernel)
-        layer_w0 = nn.with_logical_constraint(layer_w0, ("activation_batch_no_exp", "activation_exp", None, "activation_mlp"))
+        layer_w0 = jnp.einsum("EBCM,EMH -> EBCH", dispatch, w0_kernel)
+        layer_w0 = nn.with_logical_constraint(layer_w0, ("activation_exp", "activation_batch_no_exp", None, "activation_mlp"))
       with jax.named_scope("wi_1"):
-        layer_w1 = jnp.einsum("BECM,EMH -> BECH", dispatch, w1_kernel)
-        layer_w1 = nn.with_logical_constraint(layer_w1, ("activation_batch_no_exp", "activation_exp", None, "activation_mlp"))
+        layer_w1 = jnp.einsum("EBCM,EMH -> EBCH", dispatch, w1_kernel)
+        layer_w1 = nn.with_logical_constraint(layer_w1, ("activation_exp", "activation_batch_no_exp", None, "activation_mlp"))
       layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1)
       with jax.named_scope("wo"):
-        intermediate_layer = jnp.einsum("BECH,EHM -> BECM", layer_multiply, wo_kernel)
-        intermediate_layer = nn.with_logical_constraint(intermediate_layer, ("activation_batch_no_exp", "activation_exp", None, "activation_embed"))
+        intermediate_layer = jnp.einsum("EBCH,EHM -> EBCM", layer_multiply, wo_kernel)
+        intermediate_layer = nn.with_logical_constraint(intermediate_layer, ("activation_exp", "activation_batch_no_exp", None, "activation_embed"))
       with jax.named_scope("combine"):
-        output = jnp.einsum("BECM,BSEC -> BSM", intermediate_layer, combine_mask)
+        output = jnp.einsum("EBCM,BSEC -> BSM", intermediate_layer, combine_mask)
       return output, loss
     else:
       weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
