@@ -100,8 +100,9 @@ def summarize_size_from_pytree(params):
 
 
 def initialize_summary_writer(config):
+  summary_writer_path = os.path.join(config.tensorboard_dir, config.run_name)
   return (
-      writer.SummaryWriter(config.tensorboard_dir)
+      writer.SummaryWriter(summary_writer_path)
       if jax.process_index() == 0
       else None
   )
@@ -390,6 +391,7 @@ def create_device_mesh(config, devices=None):
       config.dcn_fsdp_transpose_parallelism,
       config.dcn_sequence_parallelism,
       config.dcn_tensor_parallelism,
+      config.dcn_expert_parallelism,
       config.dcn_autoregressive_parallelism,
   ]
   ici_parallelism = [
@@ -399,6 +401,7 @@ def create_device_mesh(config, devices=None):
       config.ici_fsdp_transpose_parallelism,
       config.ici_sequence_parallelism,
       config.ici_tensor_parallelism,
+      config.ici_expert_parallelism,
       config.ici_autoregressive_parallelism,
   ]
 

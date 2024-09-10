@@ -207,8 +207,25 @@ class PipelineParallelismTest(unittest.TestCase):
           "num_layers_per_pipeline_stage=2",
           "num_pipeline_microbatches=8",
           "tokenizer_path=../assets/tokenizer.llama2",
-
     ])
+
+  @pytest.mark.tpu
+  def test_delay_activation_forwarding_same_output_and_grad(self):
+     # 4 stages, delayed activation forwarding, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
+     pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        enable_checkpointing=False,
+        run_name="activation_forwarding",
+        max_target_length=128,
+        base_emb_dim=28,
+        ici_pipeline_parallelism=4,
+        base_num_decoder_layers=8,
+        num_pipeline_microbatches=8,
+        per_device_batch_size=4,
+        pipeline_delay_activation_forwarding=True
+     )
+     config = pyconfig.config
+     self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu
   def test_full_train_non_circular(self):

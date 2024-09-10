@@ -147,10 +147,12 @@ def validate_model_name(s: str) -> bool:
       "llama3-70b",
       "mistral-7b",
       "mixtral-8x7b",
+      "mixtral-8x22b",
       "gemma-7b",
       "gemma-2b",
       "gemma2-2b",
       "gemma2-9b",
+      "gemma2-27b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
@@ -340,9 +342,14 @@ class _HyperParameters:
         raw_keys['num_pipeline_repeats'] = num_pipeline_repeats
       assert num_stages * raw_keys['num_pipeline_repeats'] * raw_keys['num_layers_per_pipeline_stage'] == raw_keys['num_decoder_layers'], f"The product of pipeline stages ({num_stages}), repeats ({raw_keys['num_pipeline_repeats']}), and layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) must be equal to the number of layers ({raw_keys['num_decoder_layers']})"
       if raw_keys['num_pipeline_microbatches'] == -1:
-        raw_keys['num_pipeline_microbatches'] = num_stages
+        if raw_keys['pipeline_delay_activation_forwarding']:
+          raw_keys['num_pipeline_microbatches'] = 2 * num_stages
+        else:
+          raw_keys['num_pipeline_microbatches'] = num_stages
       assert raw_keys['num_pipeline_microbatches'] % num_stages == 0, f"The number of microbatches ({raw_keys['num_pipeline_microbatches']}) must be divisible by the number of stages ({num_stages})"
       assert raw_keys['micro_batch_size_to_train_on'] % raw_keys['num_pipeline_microbatches'] == 0, f"The batch size ({raw_keys['micro_batch_size_to_train_on']}) must be divisible by the number of microbatches ({raw_keys['num_pipeline_microbatches']})"
+      if raw_keys["pipeline_delay_activation_forwarding"]:
+        assert raw_keys['num_pipeline_microbatches'] >= 2 * num_stages, f"Delayed activation forwarding requires at least 2 * num_stages microbatches, but {num_stages} stages are used with {raw_keys['num_pipeline_microbatches']} microbatches"
     else:
       raw_keys["using_pipeline_parallelism"] = False
 
@@ -398,7 +405,8 @@ class _HyperParameters:
 
 def validate_megablox_parallelism(raw_keys):
   if raw_keys["megablox"] and (using_sequence_parallelism(raw_keys) or
-                               using_pipeline_parallelism(raw_keys)):
+                               using_pipeline_parallelism(raw_keys) or
+                               using_expert_parallelism(raw_keys)):
     raise ValueError("Currently we only support Megablox with data and tensor parallelism.")
   tensor_parallelism = raw_keys["ici_tensor_parallelism"] * raw_keys["dcn_tensor_parallelism"]
   if raw_keys["megablox"] and using_tensor_parallelism(raw_keys) and (raw_keys["emb_dim"] % tensor_parallelism):
@@ -529,6 +537,9 @@ def using_tensor_parallelism(raw_keys) -> bool:
 
 def using_sequence_parallelism(raw_keys) -> bool:
   return int(raw_keys['ici_sequence_parallelism']) > 1 or int(raw_keys['dcn_sequence_parallelism']) > 1
+
+def using_expert_parallelism(raw_keys) -> bool:
+  return int(raw_keys['ici_expert_parallelism']) > 1 or int(raw_keys['dcn_expert_parallelism']) > 1
 
 class HyperParameters:  # pylint: disable=missing-class-docstring
 

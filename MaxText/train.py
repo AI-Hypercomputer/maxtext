@@ -27,8 +27,9 @@ import os
 import sys
 from etils import epath
 import functools
+import time
 
-from typing import Sequence
+from typing import Sequence, Optional
 from absl import app
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
@@ -68,6 +69,7 @@ from ml_goodput_measurement import monitoring
 
 Transformer = models.Transformer
 EPS = 1e-8
+_CHUNK_BYTE_SIZE = 2 * 1024 **3
 
 
 def validate_train_config(config):
@@ -167,24 +169,59 @@ def clear_buffered_metrics():
   _buffered_step = None
   _buffered_metrics = None
 
-def save_checkpoint(checkpoint_manager, step, state, dataset_type="c4", data_iterator=None):
-  """Wrapper for saving checkpoint"""
+def save_checkpoint(
+    checkpoint_manager,
+    step,
+    state,
+    dataset_type="c4",
+    data_iterator=None,
+    config: Optional[pyconfig.config] = None,
+) -> bool:
+  """Wrapper for saving checkpoint."""
+  if config and config.enable_checkpointing:
+    if (step % config.checkpoint_period == 0) or (
+        config.enable_emergency_checkpoint
+        and step % config.local_checkpoint_period == 0
+    ):
+      blocking_until_ready_start = time.time()
+      max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
+      # We block here on the step finishing so that our checkpointing metrics
+      # measure only checkpointing time, not training time.
+      jax.block_until_ready(state)
+      max_logging.log(
+          f"Waited {time.time() - blocking_until_ready_start} seconds for step "
+          f"{step} to finish before starting checkpointing."
+      )
+
+  # specify chunk_byte_size to force orbax to control maximum file size in checkpoint
+  save_args = jax.tree.map(
+      lambda _: orbax.checkpoint.SaveArgs(chunk_byte_size=_CHUNK_BYTE_SIZE), state
+  )
+
   if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager) or isinstance(checkpoint_manager, emergency_checkpoint_manager.PathwaysCheckpointManager):
     return checkpoint_manager.save(
-      step, args=orbax.checkpoint.args.PyTreeSave(state)
+      step, args=orbax.checkpoint.args.PyTreeSave(
+          item=state, save_args=save_args, ocdbt_target_data_file_size=_CHUNK_BYTE_SIZE
+      )
   )
 
   if dataset_type == "grain":
     return checkpoint_manager.save(
         step,
         args=orbax.checkpoint.args.Composite(
-            items=orbax.checkpoint.args.PyTreeSave(item=state),
+            items=orbax.checkpoint.args.PyTreeSave(
+                item=state, save_args=save_args, ocdbt_target_data_file_size=_CHUNK_BYTE_SIZE
+            ),
             iter=grain.PyGrainCheckpointSave(data_iterator.local_iterator),
         ),
     )
   else:
     return checkpoint_manager.save(
-        step, args=orbax.checkpoint.args.Composite(items=orbax.checkpoint.args.PyTreeSave(item=state))
+        step, args=orbax.checkpoint.args.Composite(
+            items=orbax.checkpoint.args.PyTreeSave(
+                item=state, save_args=save_args, ocdbt_target_data_file_size=_CHUNK_BYTE_SIZE
+            )
+        )
     )
 
 
@@ -253,10 +290,18 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   total_loss = jnp.sum(xent)
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
   loss = total_loss / (total_weights + EPS)
+  # get moe load balance loss
+  moe_lb_loss = 0.0
+  if config.num_experts > 1:
+    nested_key = ("intermediates", "decoder", "layers", "moe_lb_loss")
+    total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
+    moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
+    loss += moe_lb_loss
   aux = {
       "intermediate_outputs": intermediate_outputs,
       "total_loss": total_loss,
       "total_weights": total_weights,
+      "moe_lb_loss": moe_lb_loss,
   }
   return loss, aux
 
@@ -281,6 +326,7 @@ def train_step(model, config, state, data, dropout_rng):
       grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
       (_, aux), cur_batch_gradient = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
       acc_grad_and_loss['loss'] += aux['total_loss']
+      acc_grad_and_loss['moe_lb_loss'] += aux['moe_lb_loss']
       acc_grad_and_loss['grad'] = jax.tree_util.tree_map(
         lambda x, y: x * aux['total_weights'] + y,
         cur_batch_gradient,
@@ -296,14 +342,15 @@ def train_step(model, config, state, data, dropout_rng):
 
     data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
     init_grad = jax.tree_util.tree_map(jnp.zeros_like, state.params)
-    init_grad_and_loss = {'loss': 0.0, 'grad': init_grad, 'total_weights':0}
+    init_grad_and_loss = {'loss': 0.0, 'grad': init_grad, 'total_weights':0, 'moe_lb_loss':0.0}
 
     grad_and_loss, aux = jax.lax.scan(
       accumulate_gradient,
       init_grad_and_loss,
       data,
       length = config.gradient_accumulation_steps)
-    loss = grad_and_loss['loss'] / grad_and_loss['total_weights']
+    loss = (grad_and_loss['loss'] / grad_and_loss['total_weights']
+            + grad_and_loss['moe_lb_loss'] / config.gradient_accumulation_steps)
     raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss['total_weights'], grad_and_loss['grad'])
     aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)
   else:
@@ -311,6 +358,7 @@ def train_step(model, config, state, data, dropout_rng):
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
+  moe_lb_loss = aux["moe_lb_loss"]
 
   if config.gradient_clipping_threshold > 0:
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
@@ -320,6 +368,7 @@ def train_step(model, config, state, data, dropout_rng):
   metrics = {
       "scalar": {
           "learning/loss": loss,
+          "learning/moe_lb_loss": moe_lb_loss,
           "learning/total_weights": total_weights,
           "learning/grad_norm": max_utils.l2norm_pytree(grads),
           "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
@@ -340,8 +389,13 @@ def eval_step(model, config, state, data, dropout_rng):
   loss, aux = eval_loss_fn(state.params)
   total_loss = aux["total_loss"]
   total_weights = aux["total_weights"]
+  moe_lb_loss = aux["moe_lb_loss"]
   metrics = {
-      "scalar": {"evaluation/loss": loss, "evaluation/total_loss": total_loss, "evaluation/total_weights": total_weights}
+      "scalar": {"evaluation/loss": loss, 
+                 "evaluation/total_loss": total_loss,
+                 "evaluation/total_weights": total_weights,
+                 "evaluation/moe_lb_loss": moe_lb_loss},
+
   }
 
   return metrics
@@ -465,12 +519,9 @@ def setup_train_loop(config):
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
 
-  if config.using_pipeline_parallelism:
+  if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-    params_sharded_tolerance=0.1
-  else:
-    params_sharded_tolerance=0.02
-  maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, tolerance=params_sharded_tolerance)
+    maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, tolerance=0.02)
 
   return (
       init_rng,
@@ -596,7 +647,7 @@ def train_loop(config, state=None):
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
-      if save_checkpoint(checkpoint_manager, int(step), state, config.dataset_type, data_iterator):
+      if save_checkpoint(checkpoint_manager, int(step), state, config.dataset_type, data_iterator, config):
         max_logging.log(f"saved a checkpoint at step {step}")
 
       # Upon preemption, exit when and only when all ongoing saves are complete.
@@ -608,7 +659,7 @@ def train_loop(config, state=None):
 
     if config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
       assert eval_data_iterator
-      cumulative_eval_metrics = {"total_loss": 0.0, "total_weights": 0.0}
+      cumulative_eval_metrics = {"total_loss": 0.0, "total_weights": 0.0, "moe_lb_loss": 0.0}
       eval_step_count = 0
       for eval_batch in eval_data_iterator:
         if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
@@ -617,9 +668,10 @@ def train_loop(config, state=None):
           eval_metrics = p_eval_step(state, eval_batch, nextrng)
         cumulative_eval_metrics["total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
         cumulative_eval_metrics["total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
+        cumulative_eval_metrics["moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
         max_logging.log(f"Completed eval step {eval_step_count}")
         eval_step_count += 1
-      eval_loss = cumulative_eval_metrics["total_loss"] / (cumulative_eval_metrics["total_weights"] + EPS)
+      eval_loss = cumulative_eval_metrics["total_loss"] / (cumulative_eval_metrics["total_weights"] + EPS) + cumulative_eval_metrics["moe_lb_loss"] / eval_step_count
       max_logging.log(f"average loss after {step=}: {eval_step_count=}, {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
       if eval_loss <= config.target_eval_loss:
         max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")

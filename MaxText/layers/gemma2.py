@@ -42,7 +42,6 @@ BATCH = common_types.BATCH
 LENGTH = common_types.LENGTH
 HEAD = common_types.HEAD
 D_KV = common_types.D_KV
-DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
 
 nd_dense_init = initializers.nd_dense_init
