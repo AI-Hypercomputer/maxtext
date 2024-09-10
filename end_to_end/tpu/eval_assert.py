@@ -23,30 +23,22 @@ from google.cloud import storage
 import json
 
 
-def compute_avg_metric(metrics_file, target, start_line=10):
-  """ Reads and computes average of target value
-  If start_line is negative then uses the last lines, e.g. start from end + 1 - |start_line|"""
-  
-
-  avg = 0
-  i = 0
+def get_last_n_data(metrics_file, target, n=10):
+  last_n_data = []
   with open(metrics_file, 'r', encoding='utf8') as file:
     lines = file.readlines()
-    if start_line < 0:
-      start_line = len(lines) + start_line
-    for line in lines:
-      # skip the first start_line lines for burn in
-      if i >= start_line:
-        vals = json.loads(line)
-        avg += vals[target]
-      i+=1
-    avg /= (i-start_line)
-
-  return avg
-
+    for line in lines[::-1]:
+      metrics = json.loads(line)
+      if target in metrics:
+        last_n_data.append(metrics[target])
+        if len(last_n_data) >= n:
+          break
+  return last_n_data
+      
 
 def assert_metric_average(metrics_file, threshold, target):
-  avg_value = compute_avg_metric(metrics_file, target)
+  last_n_data = get_last_n_data(metrics_file, target)
+  avg_value = sum(last_n_data) / len(last_n_data)
   # Checks for acceptable performance by asserting that the average metric (e.g. TFLOPs)
   # is greater than the threshold.
   print(f'avg value of target {target} is {avg_value}')
@@ -57,10 +49,11 @@ def test_final_loss(metrics_file, target_loss):
   target_loss = float(target_loss)
   with open(metrics_file, 'r', encoding='utf8') as metrics:
     use_last_n_data = 10
-    avg_final_loss = compute_avg_metric(metrics_file, 'learning/loss', start_line= -1 * use_last_n_data)
-    print(f"Mean of last {use_last_n_data} losses is {avg_final_loss}")
+    last_n_data = get_last_n_data(metrics_file, 'learning/loss', use_last_n_data)
+    avg_last_n_data = sum(last_n_data) / len(last_n_data)
+    print(f"Mean of last {len(last_n_data)} losses is {avg_last_n_data}")
     print(f"Target loss is {target_loss}")
-    assert avg_final_loss < target_loss
+    assert avg_last_n_data < target_loss
     print('Final loss test passed.')
 
 def test_checkpointing(metrics_file, target, dataset_type):
