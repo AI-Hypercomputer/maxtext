@@ -31,6 +31,8 @@ jobs:
     runs-on: ["self-hosted", "tpu", "${{ matrix.device-type }}"]
     steps:
     - uses: actions/checkout@v3
+    - name: Cleanup old docker images
+      run: docker system prune --all --force
     - name: build jax stable image
       run : |
         bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_jax_stable MODE=stable DEVICE=tpu PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_jax_stable
@@ -48,6 +50,8 @@ jobs:
     runs-on: ["self-hosted", "gpu", "${{ matrix.device-type }}"]
     steps:
     - uses: actions/checkout@v3
+    - name: Cleanup old docker images
+      run: docker system prune --all --force
     - name: build jax stable image
       run : |
         bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_gpu_jax_stable MODE=stable DEVICE=gpu PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_gpu_local_jax_stable
