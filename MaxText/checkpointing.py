@@ -16,30 +16,32 @@ limitations under the License.
 
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
-from typing import Optional, Union
+from typing import Any, Optional, Union
 from absl import flags
 from etils import epath
-import orbax.checkpoint
-from orbax.checkpoint.logging import abstract_logger, cloud_logger, standard_logger, composite_logger
-from orbax.checkpoint import pytree_checkpoint_handler
-from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions, PyTree
+from flax.training import orbax_utils, train_state
+import grain.python as grain
+import jax
+import max_logging
+from multihost_dataloading import MultiHostDataLoadIterator
+import numpy as np
+import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 from orbax.checkpoint.multihost.utils import is_pathways_on_cloud_backend
 from previewutilities.persistence.pathways_orbax_handler import pathways_local_state_handler
 
-import jax
-import numpy as np
-import grain.python as grain
-
-import max_logging
-from multihost_dataloading import MultiHostDataLoadIterator
-from flax.training import orbax_utils, train_state
-
-PyTreeCheckpointHandler = pytree_checkpoint_handler.PyTreeCheckpointHandler
+CheckpointManager = ocp.CheckpointManager
+CheckpointManagerOptions = ocp.CheckpointManagerOptions
+PyTreeCheckpointHandler = ocp.PyTreeCheckpointHandler
 LocalCheckpointOptions = emergency_checkpoint_manager.LocalCheckpointOptions
 PersistentCheckpointOptions = (
     emergency_checkpoint_manager.PersistentCheckpointOptions
 )
+
+abstract_logger = ocp.logging.abstract_logger
+cloud_logger = ocp.logging.cloud_logger
+composite_logger = ocp.logging.composite_logger
+standard_logger = ocp.logging.standard_logger
 
 
 def create_orbax_checkpoint_manager(
@@ -62,9 +64,15 @@ def create_orbax_checkpoint_manager(
   else:
     item_names = ("items",)
 
+  # local storage checkpoint needs parent directory created
+  p.mkdir(exist_ok=True, parents=True)
+  # we need to use ocdbt and zarr3 to control max file size in the checkpoint
+  # omitting `iter` uses default handler for `iter`
+  item_handlers = {"items": PyTreeCheckpointHandler(use_ocdbt=True, use_zarr3=True)}
   mngr = CheckpointManager(
       p,
       item_names=item_names,
+      item_handlers=item_handlers,
       options=CheckpointManagerOptions(
           create=True,
           save_interval_steps=save_interval_steps,
@@ -80,7 +88,7 @@ def create_orbax_emergency_checkpoint_manager(
     local_checkpoint_dir: str,
     persistent_checkpoint_dir: str,
     global_mesh: jax.sharding.Mesh,
-    abstract_state: PyTree,
+    abstract_state: Any,
     local_save_interval_steps: int,
     persistent_save_interval_steps: int,
     orbax_logger: Optional[abstract_logger.AbstractLogger] = None,
@@ -199,27 +207,22 @@ def load_state_if_possible(
         pspec = data.sharding.spec
         mesh = data.sharding.mesh
         if not enable_single_replica_ckpt_restoring:
-          return orbax.checkpoint.type_handlers.ArrayRestoreArgs(
-              mesh=mesh, mesh_axes=pspec)
+          return ocp.type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
         replica_axis_index = 0
         replica_devices = _replica_devices(mesh.devices, replica_axis_index)
         replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
         single_replica_sharding = jax.sharding.NamedSharding(
             replica_mesh, pspec)
 
-        array_handler = (
-            orbax.checkpoint.type_handlers.SingleReplicaArrayHandler(
-                replica_axis_index=0,
-                broadcast_memory_limit_bytes=1024 * 1024 * 1000  # 1000 MB limit
-                )
-            )
-        orbax.checkpoint.type_handlers.register_type_handler(
-            jax.Array,
-            array_handler,
-            override=True
-            )
+        array_handler = ocp.type_handlers.SingleReplicaArrayHandler(
+            replica_axis_index=0,
+            broadcast_memory_limit_bytes=1024 * 1024 * 1000,  # 1000 MB limit
+        )
+        ocp.type_handlers.register_type_handler(
+            jax.Array, array_handler, override=True
+        )
 
-        return orbax.checkpoint.type_handlers.SingleReplicaArrayRestoreArgs(
+        return ocp.type_handlers.SingleReplicaArrayRestoreArgs(
             sharding=jax.sharding.NamedSharding(mesh, pspec),
             single_replica_sharding=single_replica_sharding,
             global_shape=data.shape,
@@ -233,20 +236,27 @@ def load_state_if_possible(
 
       if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager) or isinstance(checkpoint_manager, emergency_checkpoint_manager.PathwaysCheckpointManager):
         return (
-          checkpoint_manager.restore(
-            latest_step,
-            args=orbax.checkpoint.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args),
-          ),
-          None,
+            checkpoint_manager.restore(
+                latest_step,
+                args=ocp.args.PyTreeRestore(
+                    item=abstract_unboxed_pre_state, restore_args=restore_args
+                ),
+            ),
+            None,
         )
 
       if dataset_type == "grain" and data_iterator is not None:
         return (
             checkpoint_manager.restore(
                 latest_step,
-                args=orbax.checkpoint.args.Composite(
-                    items=orbax.checkpoint.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args),
-                    iter=grain.PyGrainCheckpointRestore(data_iterator.local_iterator),
+                args=ocp.args.Composite(
+                    items=ocp.args.PyTreeRestore(
+                        item=abstract_unboxed_pre_state,
+                        restore_args=restore_args,
+                    ),
+                    iter=grain.PyGrainCheckpointRestore(
+                        data_iterator.local_iterator
+                    ),
                 ),
             ),
             None,
@@ -255,8 +265,11 @@ def load_state_if_possible(
         return (
             checkpoint_manager.restore(
                 latest_step,
-                args=orbax.checkpoint.args.Composite(
-                    items=orbax.checkpoint.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args)
+                args=ocp.args.Composite(
+                    items=ocp.args.PyTreeRestore(
+                        item=abstract_unboxed_pre_state,
+                        restore_args=restore_args,
+                    )
                 ),
             ),
             None,
@@ -268,7 +281,7 @@ def load_state_if_possible(
   elif load_full_state_from_path != "":
     max_logging.log(f"restoring full state from {load_full_state_from_path=}")
     p = epath.Path(load_full_state_from_path)
-    ckptr = orbax.checkpoint.StandardCheckpointer()
+    ckptr = ocp.StandardCheckpointer()
     restored = ckptr.restore(p, abstract_unboxed_pre_state)
     return {"items": restored}, None
 
@@ -314,12 +327,14 @@ def load_params_from_path(load_parameters_from_path, abstract_unboxed_params):
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
   ckpt = epath.Path(load_parameters_from_path)
-  ckptr = orbax.checkpoint.PyTreeCheckpointer()
+  ckptr = ocp.PyTreeCheckpointer()
   # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
   # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
   # memory, we instead specify here that we are just restoring the params field of the checkpoint
   # (which itself may be a dictionary containing a key named 'params').
-  restore_args = orbax.checkpoint.checkpoint_utils.construct_restore_args(abstract_unboxed_params)
+  restore_args = ocp.checkpoint_utils.construct_restore_args(
+      abstract_unboxed_params
+  )
   restored = ckptr.restore(
     ckpt,
     item={"params": abstract_unboxed_params},
@@ -332,7 +347,7 @@ def load_params_from_path(load_parameters_from_path, abstract_unboxed_params):
 def save_params_to_path(checkpoint_dir, params):
   """Save decode params in checkpoint at specified path."""
   assert checkpoint_dir, "checkpoint_dir is not defined."
-  orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+  orbax_checkpointer = ocp.PyTreeCheckpointer()
   save_args = orbax_utils.save_args_from_target({"params":params})
   orbax_checkpointer.save(
     checkpoint_dir,
