@@ -76,7 +76,7 @@ def checkpoint_loop(config, state=None):
         [list(node_attributes.keys()), list(node_attributes.values())] # convert into headers and values
     )
     max_logging.log(f"Finished uploading node attributes to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()} for run {config.run_name}")
-
+  ocdbt_target_data_file_size = config.ocdbt_target_data_file_size if config.ocdbt_target_data_file_size > 0 else None
   ckpt_read_time = []
   ckpt_read_time.append(["rank", "checkpoint_num", "checkpoint_restore_time"]) # header for checkpoint restore metrics.
   ckpt_write_time = []
@@ -104,6 +104,7 @@ def checkpoint_loop(config, state=None):
     state, _, _ = max_utils.setup_training_state(model, None, tx, config, init_rng, mesh, checkpoint_manager)
   state = add_entropy_to_checkpoint(state)
 
+  ckpt_read_idx = 0
   ckpt_write_idx = 0
   start_step = get_first_step(state)  # this is the start_step for training
   for step in np.arange(start_step, config.steps):
@@ -112,7 +113,7 @@ def checkpoint_loop(config, state=None):
       # A barrier to sync all hosts before starting to save checkpoint
       jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
       start_time = datetime.datetime.now()
-      if save_checkpoint(checkpoint_manager, step, state):
+      if save_checkpoint(checkpoint_manager=checkpoint_manager, step=step, state=state, ocdbt_target_data_file_size=ocdbt_target_data_file_size):
         checkpoint_manager.wait_until_finished()
         end_time = datetime.datetime.now()
         checkpoint_write_time = (end_time - start_time).total_seconds()
@@ -127,23 +128,9 @@ def checkpoint_loop(config, state=None):
         max_logging.log(f"Waiting {time_to_wait} seconds to reach step time of {config.per_step_interval} seconds for step {step}")
         time.sleep(time_to_wait)
     jax.experimental.multihost_utils.sync_global_devices("Barrier after step")
-          
-  if config.gcs_metrics_bucket:
-    max_logging.log(f"Uploading write metrics to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()}")
     
-    base_name = f"{jax.process_index()}.csv"
-    storage_utils.upload_csv(
-        config.gcs_metrics_bucket, 
-        os.path.join(config.run_name, CHECKPOINT_WRITE_TIME_DIRECTORY, base_name), 
-        ckpt_write_time
-    )
-    max_logging.log(f"Finished uploading write metrics to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()}  for run {config.run_name}")
-
-  ckpt_read_idx = 0
-  for step in np.arange(start_step, config.steps):
+    # Restore from the checkpoint that was just saved.
     if checkpoint_manager is not None:
-      # A barrier to sync all hosts before starting to save checkpoint
-      jax.experimental.multihost_utils.sync_global_devices("Barrier before restore")
       start_time = datetime.datetime.now()
       try:
         state = checkpoint_manager.restore(
@@ -164,9 +151,16 @@ def checkpoint_loop(config, state=None):
         max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint restored in {end_time - start_time} ,step {step}, on host 0")
   
   if config.gcs_metrics_bucket:
-    max_logging.log(f"Uploading restore metrics to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()}")
-    
     base_name = f"{jax.process_index()}.csv"
+    max_logging.log(f"Uploading write metrics to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()}")
+    storage_utils.upload_csv(
+        config.gcs_metrics_bucket, 
+        os.path.join(config.run_name, CHECKPOINT_WRITE_TIME_DIRECTORY, base_name), 
+        ckpt_write_time
+    )
+    max_logging.log(f"Finished uploading write metrics to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()}  for run {config.run_name}")
+    
+    max_logging.log(f"Uploading restore metrics to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()}")
     storage_utils.upload_csv(
         config.gcs_metrics_bucket, 
         os.path.join(config.run_name, CHECKPOINT_RESTORE_TIME_DIRECTORY, base_name), 
@@ -174,6 +168,17 @@ def checkpoint_loop(config, state=None):
     )
     max_logging.log(f"Finished uploading restore metrics to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()} for run {config.run_name}")
 
+  # Make sure that all the additional checkpoints are deleted before exiting.
+  checkpoint_manager.close()
+  # The need of a super long barrer operation:
+  #  1. Only the rank 0 is doing the background delete and all other ranks will exit the workload.
+  #  2. Other ranks exiting the workload causes the JAX distributed runtime to wait for rank 0 to exit.
+  #  3. The wait is currently at 5 min and not easily modified (requires a rebuild of the JAX dependency).
+  # Therefore, we use a barrier with a crazy long timeout to make sure that rank 0 can delete all the
+  # checkpoints and signal the other processes to exit.
+  client = jax._src.distributed.global_state.client
+  client.wait_at_barrier(barrier_id="waiting for deletion to complete", timeout_in_ms=config.final_ckpts_deletion_timeout_in_s * 1000)
+  
   return state
 
 

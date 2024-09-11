@@ -165,7 +165,7 @@ def clear_buffered_metrics():
   _buffered_step = None
   _buffered_metrics = None
 
-def save_checkpoint(checkpoint_manager, step, state, dataset_type="c4", data_iterator=None):
+def save_checkpoint(checkpoint_manager, step, state, dataset_type="c4", data_iterator=None, ocdbt_target_data_file_size=None):
   """Wrapper for saving checkpoint"""
   if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
     return checkpoint_manager.save(
@@ -176,13 +176,13 @@ def save_checkpoint(checkpoint_manager, step, state, dataset_type="c4", data_ite
     return checkpoint_manager.save(
         step,
         args=orbax.checkpoint.args.Composite(
-            items=orbax.checkpoint.args.PyTreeSave(item=state),
+            items=orbax.checkpoint.args.PyTreeSave(item=state, ocdbt_target_data_file_size=ocdbt_target_data_file_size),
             iter=grain.PyGrainCheckpointSave(data_iterator.local_iterator),
         ),
     )
   else:
     return checkpoint_manager.save(
-        step, args=orbax.checkpoint.args.Composite(items=orbax.checkpoint.args.PyTreeSave(item=state))
+        step, args=orbax.checkpoint.args.Composite(items=orbax.checkpoint.args.PyTreeSave(item=state, ocdbt_target_data_file_size=ocdbt_target_data_file_size))
     )
 
 
@@ -427,6 +427,8 @@ def setup_mesh_and_model(config):
         config.checkpoint_period,
         config.dataset_type,
         logger,
+        max_to_keep=config.max_ckpts_to_keep,
+        enable_background_delete=config.enable_background_delete,
     )
 
   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
