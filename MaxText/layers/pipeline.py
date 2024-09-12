@@ -284,8 +284,8 @@ class Pipeline(nn.Module):
         stream_slice = jnp.expand_dims(stream_slice, 1)
         return jax.lax.dynamic_update_slice_in_dim(
             state_in, stream_slice, stream_buf_idx, axis=1)
-    new_state = _update_state_io(old_state_io, stream_slice, output)
-    #new_state = _update_state_io(old_state_io, stream_slice, old_prev_outputs)
+    #new_state = _update_state_io(old_state_io, stream_slice, output)
+    new_state = _update_state_io(old_state_io, stream_slice, old_prev_outputs)
     
     new_loop_state = {
       "state_io": new_state,
