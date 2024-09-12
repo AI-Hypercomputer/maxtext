@@ -19,7 +19,7 @@ limitations under the License.
 from typing import Dict, Iterable, Union, Literal, Sequence, Collection, List
 from pathlib import Path
 import tensorflow as tf
-import tensorflow_text as tftxt
+import sentencepiece as sp
 import max_logging
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
@@ -191,7 +191,8 @@ class SentencePieceTokenizer:
     max_logging.log(f"Tokenizer path: {model_path}")
     with tf.io.gfile.GFile(model_path, "rb") as model_fp:
       sp_model = model_fp.read()
-    self.sp_tokenizer = tftxt.SentencepieceTokenizer(model=sp_model, add_bos=add_bos, add_eos=add_eos, reverse=False)
+    # this tokenizer is ONLY compatible with previous tftxt sp tokenizer if reverse=False
+    self.sp_tokenizer = sp.SentencePieceProcessor(model_proto=sp_model, add_bos=add_bos, add_eos=add_eos, reverse=False)
 
   def encode(self, s: str) -> List[int]:
     return self.sp_tokenizer.tokenize(s)
@@ -223,5 +224,5 @@ def TokenizeOp(tokenizer, features: Features, data_keys: Iterable[str] = ("input
     if isinstance(tokenizer, TikTokenTokenizer):
       features[k] = tf.py_function(_process_string, [features[k]], Tout=[tf.int32])[0]
     elif isinstance(tokenizer, SentencePieceTokenizer):
-      features[k] = tokenizer.encode(features[k])
+      features[k] = tf.py_function(_process_string, [features[k]], Tout=[tf.int32])[0]
   return features
