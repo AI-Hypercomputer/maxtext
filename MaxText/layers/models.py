@@ -363,22 +363,22 @@ class Decoder(nn.Module):
         )
       else:
         for lyr in range(cfg.num_decoder_layers):
-          # y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
-          #     y,
-          #     decoder_segment_ids,
-          #     decoder_positions,
-          #     deterministic,
-          #     model_mode,
-          # )
-
-          # Remat not working w/Mutable Arrays so switching to BlockLayer for now
-          y = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)(
+          y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
               y,
               decoder_segment_ids,
               decoder_positions,
               deterministic,
               model_mode,
           )
+
+          # Switching to BlockLayer for now to avoid MutableArray issue
+          # y = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)(
+          #     y,
+          #     decoder_segment_ids,
+          #     decoder_positions,
+          #     deterministic,
+          #     model_mode,
+          # )
 
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
