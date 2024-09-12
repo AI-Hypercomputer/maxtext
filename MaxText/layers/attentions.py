@@ -38,6 +38,10 @@ from layers import linears
 from layers import quantizations
 
 
+# pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
+# pytype: disable=attribute-error
+
+
 class AttentionType(enum.Enum):
   GLOBAL = "global"
   LOCAL_SLIDING = "local_sliding"
@@ -80,9 +84,6 @@ nd_dense_init = initializers.nd_dense_init
 shard_map = shard_map.shard_map
 
 dynamic_vector_slice_in_dim = jax.vmap(lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
-
-# pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
-# pytype: disable=attribute-error
 
 
 def validate_compute_axis_order(s: AxisIdxes) -> None:
@@ -237,7 +238,7 @@ class AttentionOp(nn.Module):
     else:
       raise ValueError(f"Unexpected attention kernel {self.attention_kernel=}.")
 
-  
+
   def ragged_attention(self, query: Array, key: Array | KVTensor, value: Array | KVTensor, lengths: Array, block_size: int) -> tuple[Array, Array, Array]:
     """Ragged Attention."""
     if isinstance(query, KVTensor) or isinstance(query, KVTensor):
@@ -755,9 +756,9 @@ class AttentionOp(nn.Module):
     ar_cache_batch_axis = ar_cache_axis_names.index(CACHE_BATCH)
 
     if use_ragged_attention:
-      cache_locations = [slice(None)] * 4 
+      cache_locations = [slice(None)] * 4
       new_token_locations = [slice(None)] * 4
-      new_token_locations[ar_cache_sequence_axis] = 0 
+      new_token_locations[ar_cache_sequence_axis] = 0
 
       def key_body(i, val):
         cache_locations[ar_cache_batch_axis] = i
@@ -774,7 +775,7 @@ class AttentionOp(nn.Module):
       cached_key_var.value = jax.lax.fori_loop(0, one_token_key_shaped_for_cache.shape[0], key_body, cached_key_var.value, unroll=8)
       cached_value_var.value = jax.lax.fori_loop(0, one_token_value_shaped_for_cache.shape[0], value_body, cached_value_var.value, unroll=8)
 
-    else: 
+    else:
       one_hot_indices = one_hot_indices.astype(int)
       cached_key_var.value = jax.lax.dynamic_update_index_in_dim(
         cached_key_var.value, one_token_key_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis)
@@ -783,7 +784,7 @@ class AttentionOp(nn.Module):
 
     cached_key_var.value = nn.with_logical_constraint(cached_key_var.value, ar_cache_axis_names)
     cached_value_var.value = nn.with_logical_constraint(cached_value_var.value, ar_cache_axis_names)
-    
+
 
     if self.kv_quant:
       ar_cache_scale_axis_names = self.transpose_tuple(self.cache_scale_logical_axis_names, self.ar_cache_axis_order)
