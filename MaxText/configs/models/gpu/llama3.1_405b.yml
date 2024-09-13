@@ -6,7 +6,7 @@ hardware: "gpu"
 steps: 10
 model_name: "llama3.1-405b"
 enable_checkpointing: False
-attention: "cudnn_flash_te"
+#attention: "cudnn_flash_te"
 remat_policy: "full"
 use_iota_embed: True
 scan_layers: True
@@ -14,5 +14,4 @@ dataset_type: "synthetic"
 async_checkpointing: False
 logits_dot_in_fp32: False
 
-per_device_batch_size: 1
 max_target_length: 4096
