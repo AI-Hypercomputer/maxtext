@@ -67,7 +67,7 @@ from ml_goodput_measurement import monitoring
 
 Transformer = models.Transformer
 EPS = 1e-8
-_CHUNK_BYTE_SIZE = 2 * 1024 **3
+_CHUNK_BYTE_SIZE = 200 * 1024 **2
 
 
 def validate_train_config(config):
@@ -399,7 +399,7 @@ def eval_step(model, config, state, data, dropout_rng):
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
   metrics = {
-      "scalar": {"evaluation/loss": loss, 
+      "scalar": {"evaluation/loss": loss,
                  "evaluation/total_loss": total_loss,
                  "evaluation/total_weights": total_weights,
                  "evaluation/moe_lb_loss": moe_lb_loss},

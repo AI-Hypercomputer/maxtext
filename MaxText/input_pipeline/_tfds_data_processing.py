@@ -99,7 +99,7 @@ def preprocessing_pipeline(
   if shuffle:
     dataset = dataset.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
 
-  dataset = dataset.repeat(num_epochs)
+  dataset = dataset.repeat()
 
   # Shift inputs for teacher-forced training
   if shift:
