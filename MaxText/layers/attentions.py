@@ -399,33 +399,6 @@ class PagedAttentionOp(nn.Module):
         pages_per_compute_block
     ):
       q = jnp.squeeze(q, axis=1)
-      # print(f"\nwrap_paged_attention - {q.shape=}")
-      # print(f"wrap_paged_attention - {k_pages.shape=}")
-      # print(f"wrap_paged_attention - {v_pages.shape=}")
-      # print(f"wrap_paged_attention - {lengths.shape=}")
-      # print(f"wrap_paged_attention - {page_indices.shape=}")
-      # print(f"wrap_paged_attention - {pages_per_compute_block=}")
-      # batch_q=32, num_heads_q=32, head_dim=128
-      # num_heads_kv=32, num_pages=2048, page_size=16, head_dim=128
-      # query.shape=(32, 32, 128) 
-      # key_pages_var.value.shape=(32, 2048, 16, 128)
-      # value_pages_var.value.shape=(32, 2048, 16, 128)
-
-      # lengths.shape=(32,)
-      # page_indices.shape=(32, 128)
-      # pages_per_compute_block=32
-      ##  This means that each kernel runs on 32 pages (16 tokens each) during each call. 32*16 == 512 elements
-
-      # Paged Attention kernel expects sizes:
-        # q: A [batch_size, num_heads, head_dim] jax.Array.
-        # k_pages: A [num_kv_heads, total_num_pages, page_size, head_dim] jax.Array.
-        # v_pages: A [num_kv_heads, total_num_pages, page_size, head_dim] jax.Array.
-        # lengths: A i32[batch_size] jax.Array the length of each example.
-        # page_indices: A i32[batch_size, pages_per_sequence] jax.Array. Each entry
-        #   should be in the range of [0, total_num_pages), indicating where to locate
-        #   the page in `k_pages` or `v_pages`.
-        # pages_per_compute_block: how many pages to be processed in one flash
-        #   attention block in the pallas kernel.
       result = paged_attention(
         q=q,
         k_pages=k_pages,
@@ -434,6 +407,7 @@ class PagedAttentionOp(nn.Module):
         page_indices=page_indices,
         pages_per_compute_block=pages_per_compute_block
       )
+      # jax.debug.print("paged_attention - result: {}", result)
       return jnp.expand_dims(result, axis=1)
 
     return wrap_paged_attention(
