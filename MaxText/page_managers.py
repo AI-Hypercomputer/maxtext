@@ -116,8 +116,8 @@ class PageManager(nn.Module):
     def _release_page(i, state):
       seq_page_idx_mappings, page_status = state
       page_idx = seq_page_idx_mappings[slot][i]
-      page_status.at[page_idx].set(0)
-      seq_page_idx_mappings.at[slot,i].set(0)
+      page_status = page_status.at[page_idx].set(0)
+      seq_page_idx_mappings = seq_page_idx_mappings.at[slot,i].set(0)
       return seq_page_idx_mappings, page_status
 
     seq_page_idx_mappings, page_status = jax.lax.fori_loop(
@@ -127,10 +127,10 @@ class PageManager(nn.Module):
       (seq_page_idx_mappings, page_status)
     )
 
-    seq_lengths.at[slot].set(0)
-    seq_num_pages.at[slot].set(0)
-    seq_page_indices.at[slot].set(0)
-    seq_page_slice_indices.at[slot].set(0)
+    seq_lengths = seq_lengths.at[slot].set(0)
+    seq_num_pages = seq_num_pages.at[slot].set(0)
+    seq_page_indices = seq_page_indices.at[slot].set(0)
+    seq_page_slice_indices = seq_page_slice_indices.at[slot].set(0)
 
     page_status_var.value = page_status
     seq_page_idx_mappings_var.value = seq_page_idx_mappings
@@ -177,6 +177,7 @@ class PageManager(nn.Module):
       seq_page_slice_indices_var
     )
 
+    jax.debug.print("reserve_prefix_slot_pages - true_length: {}", true_length)
     page_status = page_status_var.value
     seq_page_idx_mappings = seq_page_idx_mappings_var.value
     seq_lengths = seq_lengths_var.value
@@ -199,10 +200,10 @@ class PageManager(nn.Module):
     def _reserve_page(i, state):
       slot, seq_page_idx_mappings, page_status, seq_page_indices = state
       # assert jnp.count_nonzero(page_status[1:]) != self.num_pages-1, "All pages are in use."
-      page_idx = jnp.where((page_status[1:]==0), size=1)[0][0]
-      page_status.at[page_idx].set(1)
-      seq_page_idx_mappings.at[slot, i].set(page_idx)
-      seq_page_indices.at[slot].set(page_idx)
+      page_idx = jnp.where((page_status[1:]==0), size=1)[0][0] + 1
+      page_status = page_status.at[page_idx].set(1)
+      seq_page_idx_mappings = seq_page_idx_mappings.at[slot, i].set(page_idx)
+      seq_page_indices = seq_page_indices.at[slot].set(page_idx)
       return slot, seq_page_idx_mappings, page_status, seq_page_indices
 
     _, seq_page_idx_mappings, page_status, seq_page_indices = jax.lax.fori_loop(
@@ -212,9 +213,19 @@ class PageManager(nn.Module):
       (slot, seq_page_idx_mappings, page_status, seq_page_indices)
     )
 
-    seq_lengths.at[slot].set(true_length)
-    seq_num_pages.at[slot].set(prefill_slot_num_pages)
-    seq_page_slice_indices.at[slot].set(prefill_slot_page_slice_idx)
+    jax.debug.print("\nreserve_prefix_slot_pages - slot: {}", slot)
+    # reserve_prefix_slot_pages - slot: 0
+
+    seq_lengths = seq_lengths.at[slot].set(true_length)
+    jax.debug.print("reserve_prefix_slot_pages - seq_lengths: {}", seq_lengths)
+    # reserve_prefix_slot_pages - seq_lengths: [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+
+    seq_num_pages = seq_num_pages.at[slot].set(prefill_slot_num_pages)
+    jax.debug.print("reserve_prefix_slot_pages - seq_num_pages: {}", seq_num_pages)
+
+    seq_page_slice_indices = seq_page_slice_indices.at[slot].set(prefill_slot_page_slice_idx)
+    jax.debug.print("reserve_prefix_slot_pages - seq_page_slice_indices: {}", seq_page_slice_indices)
+
 
     page_status_var.value = page_status
     seq_page_idx_mappings_var.value = seq_page_idx_mappings
@@ -284,13 +295,22 @@ class PageManager(nn.Module):
     def _reserve_page(i, state):
       seq_page_idx_mappings, page_status, seq_page_indices, updating_slots = state
       # assert jnp.count_nonzero(page_status[1:]) != self.num_pages-1, "All pages are in use."
+
       slot = jax.lax.dynamic_index_in_dim(updating_slots, i, axis=0, keepdims=False)
-      page_idx = jnp.where((page_status[1:]==0), size=1)[0][0]
-      page_status.at[page_idx].set(1)
-      seq_page_idx_mappings.at[slot,seq_num_pages[slot]-1].set(page_idx)
-      seq_page_indices.at[slot].set(page_idx)
+      jax.debug.print("reserve_decode_step_pages loop - slot: {}", slot)
+
+      jax.debug.print("reserve_decode_step_pages loop - jnp.where((page_status[1:]==0), size=1): {}", jnp.where((page_status[1:]==0), size=1))
+
+      page_idx = jnp.where((page_status[1:]==0), size=1)[0][0] + 1
+      jax.debug.print("reserve_decode_step_pages loop - page_idx: {}", page_idx)
+
+      page_status = page_status.at[page_idx].set(1)
+      seq_page_idx_mappings = seq_page_idx_mappings.at[slot, seq_num_pages[slot]-1].set(page_idx)
+      seq_page_indices = seq_page_indices.at[slot].set(page_idx)
       return seq_page_idx_mappings, page_status, seq_page_indices, updating_slots
 
+    jax.debug.print("reserve_decode_step_pages - page_status: {}", page_status)
+    print(f"{page_status.shape=}")
     seq_page_idx_mappings, page_status, seq_page_indices, _ = jax.lax.fori_loop(
       0,
       jnp.count_nonzero(seq_new_page),
