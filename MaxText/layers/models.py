@@ -397,6 +397,7 @@ class Decoder(nn.Module):
           dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
           kernel_axes=("embed", "vocab"),
           name="logits_dense",
+          matmul_precision=self.config.matmul_precision,
       )(
           y
       )  # We do not quantize the logits matmul.

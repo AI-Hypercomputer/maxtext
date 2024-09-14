@@ -67,6 +67,9 @@ dtype: "bfloat16"
 # 'intmp' for mixed precision weight only quantization based on config file
 # 'fp8' for 8-bit floating-point GeMMs on NVIDIA GPUs.
 quantization: ""
+# Choose one of default, high, and highest.
+# https://kolonist26-jax-kr.readthedocs.io/en/latest/jax.lax.html#jax.lax.Precision
+matmul_precision: "default"
 # Path to file with quantization config - only used for mixed precision.
 # Example configs in ../Maxtext/configs/quantization
 # Allows us to configure different bits, tiling and scale for quantizing selected weights.
