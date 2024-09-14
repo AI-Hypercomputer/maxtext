@@ -167,6 +167,7 @@ class Gpt3MultiHeadAttention(nn.Module):
         name=proj_name,
         quant=self.quant,
         use_bias=self.use_bias,
+        matmul_precision=self.config.matmul_precision,
     )(inputs)
     qkv_proj = checkpoint_name(qkv_proj, "qkv_proj")
     query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
@@ -184,6 +185,7 @@ class Gpt3MultiHeadAttention(nn.Module):
         name=proj_name,
         quant=self.quant,
         use_bias=self.use_bias,
+        matmul_precision=self.config.matmul_precision,
     )(inputs)
     return proj
 
@@ -199,6 +201,7 @@ class Gpt3MultiHeadAttention(nn.Module):
         name="out",
         quant=self.quant,
         use_bias=self.use_bias,
+        matmul_precision=self.config.matmul_precision,
     )(out)
     return out_proj
 
