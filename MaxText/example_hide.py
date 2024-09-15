@@ -8,7 +8,10 @@ import random
 import string
 import os
 from jax.experimental import shard_map
+from jax.experimental.compilation_cache import compilation_cache
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+
+compilation_cache.set_cache_dir(os.path.expanduser(raw_keys["jax_cache_dir"]))
 
 #!!!! Internally in google3 set trace_dir to CNS path or other profiling solution
 def simple_timeit(f, *args, tries=10, task=None):
@@ -56,7 +59,7 @@ def overlap_a2a(input_activations, weights):
 
         input_chunk = jax.lax.dynamic_slice_in_dim(input_activations, chunk_start, chunk_size, 2)
         #input_chunk = jax.lax.with_sharding_constraint(input_chunk, NamedSharding(mesh, P('data', 'expert', 'model'))) #A2A B/X,EXP -> B,EXP/X
-        shard_map.shard_map(a2a, mesh, in_specs=P('expert', None, None), out_specs=P(None, 'expert', None))(input_chunk)
+        input_chunk = shard_map.shard_map(a2a, mesh, in_specs=P('expert', None, None), out_specs=P(None, 'expert', None))(input_chunk)
 
         weight_chunk = jax.lax.dynamic_slice_in_dim(weights, chunk_start, chunk_size, 1)
 
@@ -71,7 +74,7 @@ def create_inputs():
     weights = jax.lax.with_sharding_constraint(weights, NamedSharding(mesh, P('expert', None, 'model')))
     return input_activations, weights
 
-BATCH_PER_EXP = 16384
+BATCH_PER_EXP = 2048
 EMBED = 4096
 MLP = 8192
 EXP = 4
