@@ -493,8 +493,7 @@ class MoeBlock(nn.Module):
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
 
       # TODO(b/363005676) : Currently this hardcodes two activation functions (e.g. swigLU), we should support any number
-
-      def dispatch_a2a_overlapped_with_ff1(dispatch_mask,inputs w0, w1):
+      def dispatch_a2a_overlapped_with_ff1(dispatch_mask,inputs, w0, w1):
         # We overlap the a2a by chunking up the comms and compute along the embed axis.
         # We rely on XLA with `--xla_tpu_enable_async_all_to_all` to schedule the a2a
         # so only the first chunk is exposed, the rest can be overlapped.
@@ -507,7 +506,7 @@ class MoeBlock(nn.Module):
         def chunked_a2a(inputs, w0, w1):
           # Returns: inputs @ w0 and inputs @ w1
 
-          exp, batch, capacity, embed = ijnp.shape(inputs)
+          exp, batch, capacity, embed = jnp.shape(inputs)
           # weights are [exp, model=embed, hidden=mlp]
           mlp = jnp.shape(w0)[2] 
 
@@ -515,8 +514,8 @@ class MoeBlock(nn.Module):
           # We chunk along the contracting dimension (embed), thus each step produces a partial sum
           running_partial_sum_0 = jnp.zeros((exp, batch, capacity, mlp), dtype=inputs.dtype)
           running_partial_sum_1 = jnp.zeros((exp, batch, capacity, mlp), dtype=inputs.dtype)
-          running_partial_sum_0 = jax.lax.with_sharding_constraint(partial_sum, NamedSharding(mesh, P('data', 'expert', 'model')))
-          running_partial_sum_1 = jax.lax.with_sharding_constraint(partial_sum, NamedSharding(mesh, P('data', 'expert', 'model')))
+          running_partial_sum_0 = nn.with_logical_constraint(running_partial_sum_0, ('activation_exp', 'activation_batch', None, "activation_mlp"))
+          running_partial_sum_1 = nn.with_logical_constraint(running_partial_sum_1, ('activation_exp', 'activation_batch', None, "activation_mlp"))
           for i in range(self.config.num_moe_a2a_chunks):
               chunk_start = chunk_size * i
 
@@ -545,7 +544,7 @@ class MoeBlock(nn.Module):
 
 
       if self.config.num_moe_a2a_chunks > 1:
-        layer_w0, layer_w0 =  dispatch_a2a_overlapped_with_ff1(dispatch_mask,inputs w0_kernel, w1_kernel)
+        layer_w0, layer_w0 =  dispatch_a2a_overlapped_with_ff1(dispatch_mask,inputs, w0_kernel, w1_kernel)
       else:
         with jax.named_scope("dispatch"):
           dispatch = self.get_einsum(rhs_mesh_axes=mask_axes)("BSM,BSEC -> EBCM", inputs, dispatch_mask)
