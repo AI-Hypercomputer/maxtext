@@ -492,40 +492,47 @@ class MoeBlock(nn.Module):
       loss = self.load_balance_loss(top_k_indices, softmax_probs)
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
 
+      # TODO(b/363005676) : Currently this hardcodes two activation functions (e.g. swigLU), we should support any number
+
       def dispatch_a2a_overlapped(dispatch_mask,inputs w0, w1):
         # We overlap the a2a by chunking up the comms and compute along the embed axis.
         # We rely on XLA with `--xla_tpu_enable_async_all_to_all` to schedule the a2a
         # so only the first chunk is exposed, the rest can be overlapped.
 
         # We found explicit communication via shard map is necessary to achieve overlap, details in b/366501973
-        def a2a(input_chunk):
+        def input_a2a(input_chunk):
           return jax.lax.all_to_all(input_chunk, 'expert', 0, 1)
 
         # Desired overlapped implementaion
         def chunking_overlap_a2a(inputs, w0, w1):
-          num_chunks = 4
-          chunk_size = EMBED // num_chunks
 
-          partial_sum = jnp.zeros_like(x)
-          inputs_shape, weight_shape = jnp.shape(inputs), jnp.shape(w0)
-          # Inputs are [exp, batch, capacity, model=embed]
-          exp, batch, capacity = inputs_shape[0], inputs_shape[1], inputs_shape[2]
+          exp, batch, capacity, embed = ijnp.shape(inputs)
           # weights are [exp, model=embed, hidden=mlp]
-          mlp = weight_shape[2] 
+          mlp = jnp.shape(w0)[2] 
 
+          chunk_size = EMBED // config.num_moe_a2a_chunks
           # We chunk along the contracting dimension (embed), thus each step produces a partial sum
-          running_partial_sum = jnp.zeros((exp, batch, capacity, mlp), dtype=inputs.dtype)
-          running_partial_sum = jax.lax.with_sharding_constraint(partial_sum, NamedSharding(mesh, P('data', 'expert', 'model')))
-          for i in range(num_chunks):
+          running_partial_sum_0 = jnp.zeros((exp, batch, capacity, mlp), dtype=inputs.dtype)
+          running_partial_sum_1 = jnp.zeros((exp, batch, capacity, mlp), dtype=inputs.dtype)
+          running_partial_sum_0 = jax.lax.with_sharding_constraint(partial_sum, NamedSharding(mesh, P('data', 'expert', 'model')))
+          running_partial_sum_1 = jax.lax.with_sharding_constraint(partial_sum, NamedSharding(mesh, P('data', 'expert', 'model')))
+          for i in range(config.num_moe_a2a_chunks):
               chunk_start = chunk_size * i
 
-              input_chunk = jax.lax.dynamic_slice_in_dim(input_activations, chunk_start, chunk_size, 2)
+              input_chunk = jax.lax.dynamic_slice_in_dim(input_activations, chunk_start, chunk_size, 3)
               #input_chunk = jax.lax.with_sharding_constraint(input_chunk, NamedSharding(mesh, P('data', 'expert', 'model'))) #A2A B/X,EXP -> B,EXP/X
-              shard_map.shard_map(a2a, mesh, in_specs=P('expert', None, None), out_specs=P(None, 'expert', None))(input_chunk)
 
-              weight_chunk = jax.lax.dynamic_slice_in_dim(weights, chunk_start, chunk_size, 1)
+              # Inputs are exp, bach, capacity, embed
+              inputs_before_a2a_spec = nn.get_partition_spec((None, "activation_batch", None, "activation_embed")) 
+              inputs_after_a2a_spec = nn.get_partition_spec(("activation_exp", "activation_batch_no_exp", None, "activation_embed")) 
+              # Perform a2a on input_chunk Exp, B/X -> Exp/X, B
+              shard_map.shard_map(input_a2a, self.mesh, in_specs=inputs_before_a2a_spec, out_specs=inputs_after_a2a_spec)(input_chunk)
 
-              partial_sum = partial_sum + jnp.einsum("BXE,XEM -> BXM", input_chunk, weight_chunk)
+              w0 = jax.lax.dynamic_slice_in_dim(w0, chunk_start, chunk_size, 1)
+              w1 = jax.lax.dynamic_slice_in_dim(w1, chunk_start, chunk_size, 1)
+
+              running_partial_sum_0 = running_partial_sum_0 + jnp.einsum("EBCM,EMH -> EBCH", input_chunk, weight_chunk)
+              running_partial_sum_0 = running_partial_sum_0 + jnp.einsum("EBCM,EMH -> EBCH", input_chunk, weight_chunk)
           return partial_sum
         
 
