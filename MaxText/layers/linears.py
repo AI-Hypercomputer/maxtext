@@ -503,6 +503,10 @@ class MoeBlock(nn.Module):
         #   return jax.lax.all_to_all(input_chunk, 'expert', 0, 1)
 
         # Desired overlapped implementaion
+        w0_kernel_axes = ("exp", None, None)
+        w0 = nn.with_logical_constraint(w0, w0_kernel_axes)
+        w1 = nn.with_logical_constraint(w1, w0_kernel_axes)
+
         def chunked_a2a(inputs, w0, w1):
           # Returns: inputs @ w0 and inputs @ w1
 
@@ -514,12 +518,19 @@ class MoeBlock(nn.Module):
           # We chunk along the contracting dimension (embed), thus each step produces a partial sum
           running_partial_sum_0 = jnp.zeros((exp, batch, capacity, mlp), dtype=inputs.dtype)
           running_partial_sum_1 = jnp.zeros((exp, batch, capacity, mlp), dtype=inputs.dtype)
-          running_partial_sum_0 = nn.with_logical_constraint(running_partial_sum_0, ('activation_exp', 'activation_batch', None, "activation_mlp"))
-          running_partial_sum_1 = nn.with_logical_constraint(running_partial_sum_1, ('activation_exp', 'activation_batch', None, "activation_mlp"))
+          running_partial_sum_0 = nn.with_logical_constraint(running_partial_sum_0, ('activation_exp', 'activation_batch_no_exp', None, "activation_mlp"))
+          running_partial_sum_1 = nn.with_logical_constraint(running_partial_sum_1, ('activation_exp', 'activation_batch_no_exp', None, "activation_mlp"))
+
+          
+          
           for i in range(self.config.num_moe_a2a_chunks):
               chunk_start = chunk_size * i
 
-              input_chunk = jax.lax.dynamic_slice_in_dim(input_activations, chunk_start, chunk_size, 3)
+              input_chunk = jax.lax.dynamic_slice_in_dim(inputs, chunk_start, chunk_size, 3)
+
+              # inputs_after_a2a_spec = nn.get_partition_spec(("activation_exp", "activation_batch_no_exp", None, "activation_embed")) 
+              # input_chunk = nn.with_logical_constraint(input_chunk, inputs_after_a2a_spec)
+
               # Inputs are exp, bach, capacity, embed
               # inputs_before_a2a_spec = nn.get_partition_spec((None, "activation_batch", None, "activation_embed")) 
               # inputs_after_a2a_spec = nn.get_partition_spec(("activation_exp", "activation_batch_no_exp", None, "activation_embed")) 
@@ -529,12 +540,21 @@ class MoeBlock(nn.Module):
               w0_chunk = jax.lax.dynamic_slice_in_dim(w0, chunk_start, chunk_size, 1)
               w1_chunk = jax.lax.dynamic_slice_in_dim(w1, chunk_start, chunk_size, 1)
 
+              w0_chunk = nn.with_logical_constraint(w0_chunk, w0_kernel_axes)
+              w1_chunk = nn.with_logical_constraint(w1_chunk, w0_kernel_axes)
+
+              #partial_result_0 = jnp.einsum("EBCM,EMH -> EBCH", input_chunk, w0_chunk)
+              #partial_result_0 = nn.with_logical_constraint(partial_result_0, )
+
+
               running_partial_sum_0 = running_partial_sum_0 + jnp.einsum("EBCM,EMH -> EBCH", input_chunk, w0_chunk)
               running_partial_sum_1 = running_partial_sum_1 + jnp.einsum("EBCM,EMH -> EBCH", input_chunk, w1_chunk)
           return running_partial_sum_0, running_partial_sum_1
 
         with jax.named_scope("dispatch"):
           dispatch = self.get_einsum(rhs_mesh_axes=mask_axes)("BSM,BSEC -> EBCM", inputs, dispatch_mask)
+          # Keep dispatch sharded like data parallel - we will A2A in chunks
+          dispatch = nn.with_logical_constraint(dispatch, (None, "activation_batch", None, "activation_embed"))
         with jax.named_scope("wi_both"):
           return chunked_a2a(dispatch, w0, w1)
 
@@ -544,7 +564,7 @@ class MoeBlock(nn.Module):
 
 
       if self.config.num_moe_a2a_chunks > 1:
-        layer_w0, layer_w0 =  dispatch_a2a_overlapped_with_ff1(dispatch_mask,inputs, w0_kernel, w1_kernel)
+        layer_w0, layer_w1 =  dispatch_a2a_overlapped_with_ff1(dispatch_mask,inputs, w0_kernel, w1_kernel)
       else:
         with jax.named_scope("dispatch"):
           dispatch = self.get_einsum(rhs_mesh_axes=mask_axes)("BSM,BSEC -> EBCM", inputs, dispatch_mask)
