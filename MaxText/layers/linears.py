@@ -499,10 +499,13 @@ class MoeBlock(nn.Module):
         # so only the first chunk is exposed, the rest can be overlapped.
 
         # We found explicit communication via shard map is necessary to achieve overlap, details in b/366501973
-        # def input_a2a(input_chunk):
-        #   return jax.lax.all_to_all(input_chunk, 'expert', 0, 1)
+        def input_a2a(input_chunk):
+          return jax.lax.all_to_all(input_chunk, 'expert', 0, 1, tiled=True)
+
 
         # Desired overlapped implementaion
+        # AG weigts over FSDP, keep sharded by exp - this might not be necessary, or perhaps
+        # we could include the sharding by weight and rely on XLA to figure out the FSDP AG
         w0_kernel_axes = ("exp", None, None)
         w0 = nn.with_logical_constraint(w0, w0_kernel_axes)
         w1 = nn.with_logical_constraint(w1, w0_kernel_axes)
@@ -526,26 +529,25 @@ class MoeBlock(nn.Module):
           for i in range(self.config.num_moe_a2a_chunks):
               chunk_start = chunk_size * i
 
+              print(f"{inputs.shape=}")
               input_chunk = jax.lax.dynamic_slice_in_dim(inputs, chunk_start, chunk_size, 3)
-
-              # inputs_after_a2a_spec = nn.get_partition_spec(("activation_exp", "activation_batch_no_exp", None, "activation_embed")) 
-              # input_chunk = nn.with_logical_constraint(input_chunk, inputs_after_a2a_spec)
+              print(f"{input_chunk.shape=}")
+              #input_chunk = nn.with_logical_constraint(input_chunk, ("activation_exp", "activation_batch_no_exp", None, "activation_embed"))
 
               # Inputs are exp, bach, capacity, embed
-              # inputs_before_a2a_spec = nn.get_partition_spec((None, "activation_batch", None, "activation_embed")) 
-              # inputs_after_a2a_spec = nn.get_partition_spec(("activation_exp", "activation_batch_no_exp", None, "activation_embed")) 
+              inputs_before_a2a_spec = nn.logical_to_mesh_axes((None, "activation_batch", None, "activation_embed"))
+              print(f"{inputs_before_a2a_spec=}") 
+              inputs_after_a2a_spec = nn.logical_to_mesh_axes(("activation_exp", "activation_batch_no_exp", None, "activation_embed"))
+              print(f"{inputs_after_a2a_spec=}") 
               # Perform a2a on input_chunk Exp, B/X -> Exp/X, B
-              # shard_map.shard_map(input_a2a, self.mesh, in_specs=inputs_before_a2a_spec, out_specs=inputs_after_a2a_spec)(input_chunk)
+              input_chunk = shard_map.shard_map(input_a2a, self.mesh, in_specs=inputs_before_a2a_spec, out_specs=inputs_after_a2a_spec)(input_chunk)
+              print(f"{input_chunk.shape=}")
 
               w0_chunk = jax.lax.dynamic_slice_in_dim(w0, chunk_start, chunk_size, 1)
               w1_chunk = jax.lax.dynamic_slice_in_dim(w1, chunk_start, chunk_size, 1)
 
               w0_chunk = nn.with_logical_constraint(w0_chunk, w0_kernel_axes)
               w1_chunk = nn.with_logical_constraint(w1_chunk, w0_kernel_axes)
-
-              #partial_result_0 = jnp.einsum("EBCM,EMH -> EBCH", input_chunk, w0_chunk)
-              #partial_result_0 = nn.with_logical_constraint(partial_result_0, )
-
 
               running_partial_sum_0 = running_partial_sum_0 + jnp.einsum("EBCM,EMH -> EBCH", input_chunk, w0_chunk)
               running_partial_sum_1 = running_partial_sum_1 + jnp.einsum("EBCM,EMH -> EBCH", input_chunk, w1_chunk)
@@ -557,12 +559,6 @@ class MoeBlock(nn.Module):
           dispatch = nn.with_logical_constraint(dispatch, (None, "activation_batch", None, "activation_embed"))
         with jax.named_scope("wi_both"):
           return chunked_a2a(dispatch, w0, w1)
-
-          
-        
-
-
-
       if self.config.num_moe_a2a_chunks > 1:
         layer_w0, layer_w1 =  dispatch_a2a_overlapped_with_ff1(dispatch_mask,inputs, w0_kernel, w1_kernel)
       else:
