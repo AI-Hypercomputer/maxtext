@@ -491,8 +491,49 @@ class MoeBlock(nn.Module):
       combine_mask = nn.with_logical_constraint(combine_mask, mask_axes)
       loss = self.load_balance_loss(top_k_indices, softmax_probs)
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+
+      def dispatch_a2a_overlapped(dispatch_mask,inputs w0, w1):
+        # We overlap the a2a by chunking up the comms and compute along the embed axis.
+        # We rely on XLA with `--xla_tpu_enable_async_all_to_all` to schedule the a2a
+        # so only the first chunk is exposed, the rest can be overlapped.
+
+        # We found explicit communication via shard map is necessary to achieve overlap, details in b/366501973
+        def a2a(input_chunk):
+          return jax.lax.all_to_all(input_chunk, 'expert', 0, 1)
+
+        # Desired overlapped implementaion
+        def chunking_overlap_a2a(inputs, w0, w1):
+          num_chunks = 4
+          chunk_size = EMBED // num_chunks
+
+          partial_sum = jnp.zeros_like(x)
+          inputs_shape, weight_shape = jnp.shape(inputs), jnp.shape(w0)
+          # Inputs are [exp, batch, capacity, model=embed]
+          exp, batch, capacity = inputs_shape[0], inputs_shape[1], inputs_shape[2]
+          # weights are [exp, model=embed, hidden=mlp]
+          mlp = weight_shape[2] 
+
+          # We chunk along the contracting dimension (embed), thus each step produces a partial sum
+          running_partial_sum = jnp.zeros((exp, batch, capacity, mlp), dtype=inputs.dtype)
+          running_partial_sum = jax.lax.with_sharding_constraint(partial_sum, NamedSharding(mesh, P('data', 'expert', 'model')))
+          for i in range(num_chunks):
+              chunk_start = chunk_size * i
+
+              input_chunk = jax.lax.dynamic_slice_in_dim(input_activations, chunk_start, chunk_size, 2)
+              #input_chunk = jax.lax.with_sharding_constraint(input_chunk, NamedSharding(mesh, P('data', 'expert', 'model'))) #A2A B/X,EXP -> B,EXP/X
+              shard_map.shard_map(a2a, mesh, in_specs=P('expert', None, None), out_specs=P(None, 'expert', None))(input_chunk)
+
+              weight_chunk = jax.lax.dynamic_slice_in_dim(weights, chunk_start, chunk_size, 1)
+
+              partial_sum = partial_sum + jnp.einsum("BXE,XEM -> BXM", input_chunk, weight_chunk)
+          return partial_sum
+        
+
+
+
       with jax.named_scope("dispatch"):
         dispatch = self.get_einsum(rhs_mesh_axes=mask_axes)("BSM,BSEC -> EBCM", inputs, dispatch_mask)
+        # We expect an A2A from E, B/X -> E/X, B with the below sharding constaint.
         dispatch = nn.with_logical_constraint(dispatch, ("activation_exp", "activation_batch_no_exp", None, "activation_embed"))
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, None)

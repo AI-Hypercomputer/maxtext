@@ -7,7 +7,6 @@ import jax
 import random
 import string
 import os
-from jax.experimental import shard_map
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
 #!!!! Internally in google3 set trace_dir to CNS path or other profiling solution
@@ -40,10 +39,6 @@ def blocking_a2a(input_activations, weights):
     input_activations = jax.lax.with_sharding_constraint(input_activations, NamedSharding(mesh, P('data', 'expert', 'model'))) #A2A B/X,EXP -> B,EXP/X
     return jnp.einsum("BXE,XEM -> BXM", input_activations, weights)
 
-# Necessary explicit communication (use shard map)
-def a2a(input_chunk):
-  return jax.lax.all_to_all(input_chunk, 'expert', 1, 0)
-
 # Desired overlapped implementaion
 def overlap_a2a(input_activations, weights):
     num_chunks = 4
@@ -55,8 +50,7 @@ def overlap_a2a(input_activations, weights):
         chunk_start = chunk_size * i
 
         input_chunk = jax.lax.dynamic_slice_in_dim(input_activations, chunk_start, chunk_size, 2)
-        #input_chunk = jax.lax.with_sharding_constraint(input_chunk, NamedSharding(mesh, P('data', 'expert', 'model'))) #A2A B/X,EXP -> B,EXP/X
-        shard_map.shard_map(a2a, mesh, in_specs=P('expert', None, None), out_specs=P(None, 'expert', None))(input_chunk)
+        input_chunk = jax.lax.with_sharding_constraint(input_chunk, NamedSharding(mesh, P('data', 'expert', 'model'))) #A2A B/X,EXP -> B,EXP/X
 
         weight_chunk = jax.lax.dynamic_slice_in_dim(weights, chunk_start, chunk_size, 1)
 
@@ -71,7 +65,7 @@ def create_inputs():
     weights = jax.lax.with_sharding_constraint(weights, NamedSharding(mesh, P('expert', None, 'model')))
     return input_activations, weights
 
-BATCH_PER_EXP = 16384
+BATCH_PER_EXP = 2048
 EMBED = 4096
 MLP = 8192
 EXP = 4
