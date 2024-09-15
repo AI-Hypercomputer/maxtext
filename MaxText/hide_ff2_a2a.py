@@ -44,13 +44,14 @@ def blocking_a2a(input_activations, weights):
 
 # Necessary explicit communication (use shard map)
 def a2a(input_chunk):
-  return jax.lax.all_to_all(input_chunk, 'expert', 1, 0, tiled=True)
+  return jax.lax.all_to_all(input_chunk, 'expert', 0, 1, tiled=True)
 
 # Desired overlapped implementaion
 def overlap_a2a(input_activations, weights):
     num_chunks = 4
     chunk_size = EMBED // num_chunks
 
+    
     partial_sum = jnp.zeros((BATCH_PER_EXP, EXP, MLP))
     partial_sum = jax.lax.with_sharding_constraint(partial_sum, NamedSharding(mesh, P('data', 'expert', 'model')))
     for i in range(num_chunks):
@@ -66,7 +67,7 @@ def overlap_a2a(input_activations, weights):
     return partial_sum
 
 def create_inputs():
-    input_activations = jnp.ones((BATCH_PER_EXP, EXP, EMBED),dtype=jnp.bfloat16)
+    input_activations = jnp.ones((BATCH_PER_EXP, EXP, MLP),dtype=jnp.bfloat16)
     input_activations = jax.lax.with_sharding_constraint(input_activations, NamedSharding(mesh, P('expert', None,'model')))
     
     weights = jnp.ones((EXP, EMBED, MLP),dtype=jnp.bfloat16)
