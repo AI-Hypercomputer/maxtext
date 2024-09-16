@@ -9,10 +9,10 @@ from jax.experimental import shard_map
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
 def input_a2a(input_chunk):
-    return jax.lax.all_to_all(input_chunk, 'expert', 1, 0, tiled=True)
+    return jax.lax.all_to_all(input_chunk, 'expert', 1, 0, tiled=False)
 
-BATCH_PER_EXP = 8
-EXP = 4
+BATCH_PER_EXP = 12
+EXP = 16
 
 global mesh
 mesh = Mesh(jax.devices(), ('expert',))
