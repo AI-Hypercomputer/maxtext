@@ -11,16 +11,22 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 def input_a2a(input_chunk):
     return jax.lax.all_to_all(input_chunk, 'expert', 1, 0, tiled=True)
 
-BATCH_PER_EXP = 2048
+BATCH_PER_EXP = 8
 EXP = 4
 
 global mesh
 mesh = Mesh(jax.devices(), ('expert',))
 
-input_activations = jnp.ones((BATCH_PER_EXP, EXP),dtype=jnp.bfloat16)
+# create inputs that are BATCH_PER_EXP, by EXP with entries 1,2,... using jnp.arrange
+input_activations = jnp.arange(BATCH_PER_EXP * EXP).reshape(BATCH_PER_EXP, EXP)
+input_activations = input_activations.astype(jnp.bfloat16)
 input_activations = jax.lax.with_sharding_constraint(input_activations, NamedSharding(mesh, P('expert', None)))
 
+
+
+
 print(f"{input_activations.shape=}")
+print(input_activations)
 visualize_array_sharding(input_activations)
 
 inputs_before_a2a_spec = P("expert", None) 
@@ -30,3 +36,4 @@ input_after_a2a = shard_map.shard_map(input_a2a, mesh, in_specs=inputs_before_a2
 
 print(f"{input_after_a2a.shape=}")
 visualize_array_sharding(input_after_a2a)
+print(input_after_a2a)

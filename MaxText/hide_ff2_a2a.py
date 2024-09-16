@@ -51,7 +51,7 @@ def overlap_a2a(input_activations, weights):
     num_chunks = 4
     chunk_size = EMBED // num_chunks
 
-    
+
     partial_sum = jnp.zeros((BATCH_PER_EXP, EXP, MLP))
     partial_sum = jax.lax.with_sharding_constraint(partial_sum, NamedSharding(mesh, P('data', 'expert', 'model')))
     for i in range(num_chunks):
