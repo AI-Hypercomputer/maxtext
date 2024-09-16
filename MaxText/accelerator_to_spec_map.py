@@ -35,6 +35,8 @@ class SystemCharacteristics:
 
 
 UserFacingNameToSystemCharacteristics = {
+    # v6e
+    "v6e-256": SystemCharacteristics("tpu", "v6e:16x16", "default", (2, 2, 1), 256, (True, True, False)),
     # v5e
     "v5e-16": SystemCharacteristics("tpu", "v5e:4x4", "default", (2, 2, 1), 16, (False, False, False)),
     "v5e-32": SystemCharacteristics("tpu", "v5e:4x8", "default", (2, 2, 1), 32, (False, False, False)),
