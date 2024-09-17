@@ -20,6 +20,7 @@ from typing import Any, Callable, Optional, Union
 import jax
 from jax import lax
 from jax import core as jax_core
+# from jax_triton import pallas as pl
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas.ops.tpu.megablox import common
@@ -395,14 +396,22 @@ def gmm(
       lhs,
       rhs,
       existing_out,
+      group_metadata_ref,
+      group_offset_ref,
+      tiling_ref,
       out,
       *,
-      group_metadata,
-      group_offset,
-      tiling,
+      nut
   ):
-    tm, tk, tn = tiling
-    group_offsets, group_ids, m_tile_ids = group_metadata
+    tm, tk, tn = tiling_ref[0], tiling_ref[1], tiling_ref[2]
+    print("tiling_ref inside kernel", tm, tk, tn, tiling_ref)
+    print('tiling outside kernel', tiling)
+    group_offsets, group_ids, m_tile_ids = group_metadata_ref
+    print('group_metadata outside kernel', group_metadata)
+    print('group_metadata inside kernel', group_offsets, group_ids, m_tile_ids, group_metadata_ref)
+    print('num active tiles inside kernel', nut)
+    print('num active tiles outside kernel', num_active_tiles)
+
     del group_offsets
     acc = jnp.zeros((tm, tn), dtype=jnp.float32)
     n_i = pl.program_id(0)
@@ -410,13 +419,13 @@ def gmm(
     k_i = pl.program_id(2)
 
     m_i = m_tile_ids[grid_id]
-    rhs_group_id, rhs_k_i, rhs_n_i = group_ids[grid_id] - group_offset[0], k_i, n_i
+    rhs_group_id, rhs_k_i, rhs_n_i = group_ids[grid_id] - group_offset_ref[0], k_i, n_i
     if transpose_rhs:
-      rhs_group_id, rhs_k_i, rhs_n_i, tk, tn = group_ids[grid_id] - group_offset[0], n_i, k_i, tn, tk
+      rhs_group_id, rhs_k_i, rhs_n_i, tk, tn = group_ids[grid_id] - group_offset_ref[0], n_i, k_i, tn, tk
     out_m, out_n = m_tile_ids[grid_id], n_i
 
-    lhs_block = pl.load(lhs, (pl.ds(m_i, tm), pl.ds(k_i, tk)))
-    rhs_block = pl.load(rhs, (rhs_group_id, pl.ds(rhs_k_i, tk), pl.ds(rhs_n_i, tn)))
+    loaded_lhs = pl.load(lhs, (pl.ds(m_i, tm), pl.ds(k_i, tk)))
+    loaded_rhs = pl.load(rhs, (rhs_group_id, pl.ds(rhs_k_i, tk), pl.ds(rhs_n_i, tn)))
     # lhs_block = lhs[m_i:m_i+tm, k_i:k_i+tk]
     # rhs_block = rhs[rhs_group_id, rhs_k_i:rhs_k_i+tk, rhs_n_i:rhs_n_i+tn]
     # out_block = existing_out[out_m:out_m+tm, out_n:out_n+tn]
@@ -440,6 +449,7 @@ def gmm(
 
         @pl.when(first_time_seeing_out)
         def _init_out():
+          pl.store()
           out[out_m:out_m+tm, out_n:out_n+tn] = existing_out[out_m:out_m+tm, out_n:out_n+tn]
 
     def mask_k_rem(x, *, dim):
@@ -482,9 +492,7 @@ def gmm(
         dot_general_dims = (((1,), (1,)), ((), ()))
       else:
         dot_general_dims = (((1,), (0,)), ((), ()))
-      
-      loaded_lhs = lhs_block
-      loaded_rhs = rhs_block
+
       acc = lax.dot_general(
           mask_k_rem_lhs(loaded_lhs).astype(input_dtype),
           mask_k_rem_rhs(loaded_rhs).astype(input_dtype),
@@ -505,27 +513,17 @@ def gmm(
     input_output_aliases = {}
   else:
     input_output_aliases = {6: 0}
-  lhs_bytes = lhs.size * lhs.itemsize
-  rhs_bytes = (k * n) * rhs.itemsize  # We don't read all of rhs
-  out_bytes = (m * n) * jnp.dtype(preferred_element_type).itemsize
-  max_active_tiles = group_metadata[1].size
-  bytes_accessed = (
-      (lhs_bytes * tiles_n) + (rhs_bytes * max_active_tiles) + out_bytes
-  )
-  flops = 2 * m * k * n
-  cost_estimate = pltpu.CostEstimate(
-      flops=flops, bytes_accessed=bytes_accessed, transcendentals=0
-  )
   # acc_scratch = pl.AbstractMemoryRef(jax_core.ShapedArray((tm,tn), jnp.float32), None)
   # acc_scratch = jnp.zeros((tm,tn), dtype=jnp.float32)
   
   kernel = functools.partial(
     kernel, 
-    group_metadata=group_metadata,
-    group_offset=group_offset,
-    tiling=tiling,
+    # group_metadata=group_metadata,
+    # group_offset=group_offset,
+    # tiling=tiling,
+    nut=num_active_tiles
   )
-
+  # num_active_tiles = 1
   print(tiles_n)
   call_gmm = pl.pallas_call(
       kernel,
@@ -540,6 +538,10 @@ def gmm(
       lhs,
       rhs,
       existing_out,
+      group_metadata,
+      group_offset,
+      tiling,
+      # nut=num_active_tiles,
       # acc_scratch,
 
   )
