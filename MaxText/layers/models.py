@@ -144,7 +144,7 @@ class DecoderLayer(nn.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    return layer_output, None if cfg.scan_layers else layer_output
+    return (layer_output, None) if cfg.scan_layers else layer_output
 
 class SequentialBlockDecoderLayers(nn.Module):
   """Sequential unscanned series of decoder layers."""
@@ -264,6 +264,8 @@ class Decoder(nn.Module):
     y = self.shared_embedding(decoder_input_tokens.astype("int32"))
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
+    
+    self.sow("intermediates", "rdyro_shared_embedding", y)
 
     if cfg.use_untrainable_positional_embedding:
       y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
@@ -337,6 +339,7 @@ class Decoder(nn.Module):
         policy=policy,
         static_argnums=(-1, -2, -3, -4, -5),
     )
+    self.sow("intermediates", "rdyro_before_scan", y)
     if cfg.using_pipeline_parallelism:
         if cfg.num_layers_per_pipeline_stage == 1:
           stage_module = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
@@ -370,6 +373,8 @@ class Decoder(nn.Module):
               deterministic,
               model_mode,
           )
+          self.sow("intermediates", f"rdyro_after_layer_{lyr}", y)
+    self.sow("intermediates", "rdyro_after_scan", y)
 
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
@@ -379,6 +384,7 @@ class Decoder(nn.Module):
         kernel_axes=("norm",),
     )(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
+    self.sow("intermediates", "rdyro_after_norm", y)
 
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
@@ -401,6 +407,7 @@ class Decoder(nn.Module):
       )(
           y
       )  # We do not quantize the logits matmul.
+    self.sow("intermediates", "rdyro_after_logits", logits)
     logits = nn.with_logical_constraint(logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab"))
     logits = logits.astype(jnp.float32)
     return logits

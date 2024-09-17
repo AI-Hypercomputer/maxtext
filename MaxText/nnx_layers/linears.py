@@ -17,14 +17,16 @@
 import functools
 import operator
 from typing import Any, Callable, Iterable, Sequence, Tuple, Union, Optional
+import dataclasses
 
 import flax.linen as nn
+from flax import nnx
 import jax
 from jax import lax
 import jax.numpy as jnp
 import common_types
-from layers import initializers
-from layers import normalizations
+from nnx_layers import initializers
+from nnx_layers import normalizations
 from layers import quantizations
 import numpy as np
 from jax.ad_checkpoint import checkpoint_name
@@ -76,10 +78,12 @@ def _canonicalize_tuple(x):
     return (x,)
 
 
-class DenseGeneral(nn.Module):
+@dataclasses.dataclass
+class DenseGeneral(nnx.Module):
   """A linear transformation with flexible axes.
 
   Attributes:
+    in_features: tuple with input features sizes.
     features: tuple with numbers of output features.
     axis: tuple with axes to apply the transformation on.
     weight_dtype: the dtype of the weights (default: float32).
@@ -89,7 +93,8 @@ class DenseGeneral(nn.Module):
     quant: quantization config, defaults to None implying no quantization.
   """
 
-  features: Union[Iterable[int], int]
+  in_features: Union[Iterable[int], int]
+  out_features: Union[Iterable[int], int]
   axis: Union[Iterable[int], int] = -1
   weight_dtype: DType = jnp.float32
   dtype: DType = jnp.float32
@@ -97,9 +102,40 @@ class DenseGeneral(nn.Module):
   kernel_axes: Tuple[str, ...] = ()
   quant: Optional[Quant] = None
   use_bias: bool = False
-  matmul_precision: str = "default"
+  name: str = ""
+  rngs: nnx.Rngs = None
+  
+  def __post_init__(self):
+    in_features = _canonicalize_tuple(self.in_features)
+    out_features = _canonicalize_tuple(self.out_features)
+    axis = _canonicalize_tuple(self.axis)
 
-  @nn.compact
+    kernel_shape = in_features + out_features
+    kernel_in_axis = np.arange(len(axis))
+    kernel_out_axis = np.arange(len(axis), len(axis) + len(out_features))
+
+    if quantizations.in_serve_mode(self.quant):
+      # During aqt convert state we delete kernel weight from params to save memory.
+      # Instead they are retrieved from the tensors stored in the 'aqt' collection.
+      # kernel = jnp.zeros(kernel_shape)
+      self.kernel = None
+    else:
+      self.kernel = nnx.Param(
+        nnx.with_partitioning(self.kernel_init, self.kernel_axes)(
+          self.rngs(),
+          kernel_shape,
+          self.weight_dtype,
+          kernel_in_axis,
+          kernel_out_axis,
+        )
+      )
+
+    if self.use_bias:
+      bias_axes, bias_shape = self.kernel_axes[-len(out_features) :], kernel_shape[-len(out_features) :]
+      self.bias = nnx.Param(nnx.with_partitioning(bias_init, bias_axes)(
+        bias_shape, self.weight_dtype))
+
+
   def __call__(self, inputs: Array) -> Array:
     """Applies a linear transformation to the inputs along multiple dimensions.
 
@@ -113,54 +149,26 @@ class DenseGeneral(nn.Module):
     def compute_dot_general(inputs, kernel, axis, contract_ind):
       """Computes a dot_general operation that may be quantized."""
       dot_general = lax.dot_general
-      matmul_precision = lax.Precision(self.matmul_precision)
       if self.quant:
         dot_general_cls = self.quant.dot_general_cls(mesh_axes=self.kernel_axes)
         dot_general = dot_general_cls()
-        return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
-      return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision)
-
-    features = _canonicalize_tuple(self.features)
-    axis = _canonicalize_tuple(self.axis)
+      return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
 
     inputs = jnp.asarray(inputs, self.dtype)
-    axis = _normalize_axes(axis, inputs.ndim)
+    axis = _normalize_axes(_canonicalize_tuple(self.axis), inputs.ndim)
 
-    kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
-    kernel_in_axis = np.arange(len(axis))
-    kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
-    if quantizations.in_serve_mode(self.quant):
-      # During aqt convert state we delete kernel weight from params to save memory.
-      # Instead they are retrieved from the tensors stored in the 'aqt' collection.
-      kernel = jnp.zeros(kernel_shape)
-    else:
-      kernel = self.param(
-          "kernel",
-          nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
-          kernel_shape,
-          self.weight_dtype,
-          kernel_in_axis,
-          kernel_out_axis,
-      )
-    kernel = jnp.asarray(kernel, self.dtype)
-
+    kernel = jnp.asarray(self.kernel, self.dtype)
     contract_ind = tuple(range(0, len(axis)))
     output = compute_dot_general(inputs, kernel, axis, contract_ind)
 
     if self.use_bias:
-      bias_axes, bias_shape = self.kernel_axes[-len(features) :], kernel_shape[-len(features) :]
-      bias = self.param(
-          "bias",
-          nn.with_logical_partitioning(bias_init, bias_axes),
-          bias_shape,
-          self.weight_dtype,
-      )
-      bias = jnp.asarray(bias, self.dtype)
+      bias = jnp.asarray(self.bias, self.dtype)
       output += bias
     return output
 
 
-class MlpBlock(nn.Module):
+@dataclasses.dataclass
+class MlpBlock(nnx.Module):
   """Transformer MLP / feed-forward block.
 
   Attributes:
@@ -178,6 +186,7 @@ class MlpBlock(nn.Module):
   """
 
   config: Config
+  input_dim: int = 2048
   intermediate_dim: int = 2048
   activations: Sequence[Union[str, Callable[..., Any]]] = ("relu",)
   kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal")
@@ -187,6 +196,64 @@ class MlpBlock(nn.Module):
   use_bias: bool = False
   use_pre_norm: bool = False
   quant: Optional[Quant] = None
+  name: str = ""
+  rngs: nnx.Rngs = None
+  
+  def __post_init__(self):
+    cfg = self.config
+    self.mlp_layer_norm = self.get_norm_layer()(
+          features=self.input_dim,
+          name="mlp_layer_norm",
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          kernel_axes=("norm",),
+          epsilon=cfg.normalization_layer_epsilon,
+          rngs=self.rngs,
+      )
+    if self.config.fused_mlp:
+      self.wi = DenseGeneral(
+            self.input_dim,
+            (len(self.activations), self.intermediate_dim),
+            dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
+            kernel_init=self.kernel_init,
+            kernel_axes=("embed", "num_activations", "mlp"),
+            name="wi",
+            quant=self.quant,
+            use_bias=self.use_bias,
+            rngs=self.rngs,
+        )
+    else:
+      self.wi = dict()
+      for idx, _ in enumerate(self.activations):
+        dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
+        self.wi[dense_name] = DenseGeneral(
+                self.input_dim,
+                self.intermediate_dim,
+                dtype=self.dtype,
+                weight_dtype=self.weight_dtype,
+                kernel_init=self.kernel_init,
+                kernel_axes=("embed", "mlp"),
+                name=dense_name,
+                quant=self.quant,
+                use_bias=self.use_bias,
+                rngs=self.rngs,
+            )
+    self.dropout = nnx.Dropout(rate=self.intermediate_dropout_rate, 
+                               broadcast_dims=(-2,), rngs=self.rngs)
+    self.wo = DenseGeneral(
+        self.intermediate_dim,
+        self.input_dim,
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        kernel_init=self.kernel_init,
+        kernel_axes=("mlp", "embed"),
+        name="wo",
+        quant=self.quant,
+        use_bias=self.use_bias,
+        rngs=self.rngs,
+    )
+
 
   def get_norm_layer(self):
     if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
@@ -198,80 +265,45 @@ class MlpBlock(nn.Module):
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
-  @nn.compact
+  #@nn.compact
   def __call__(self, inputs, decode: bool = False, deterministic: bool = False):
     """Applies Transformer MlpBlock module."""
     cfg = self.config
 
     if self.use_pre_norm:
-      inputs = self.get_norm_layer()(
-          name="mlp_layer_norm",
-          dtype=cfg.dtype,
-          weight_dtype=cfg.weight_dtype,
-          kernel_axes=("norm",),
-          epsilon=cfg.normalization_layer_epsilon,
-      )(inputs)
+      inputs = self.mlp_layer_norm(inputs)
 
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
     activations = []
     if cfg.fused_mlp:
-      x = DenseGeneral(
-          (len(self.activations), self.intermediate_dim),
-          dtype=self.dtype,
-          weight_dtype=self.weight_dtype,
-          kernel_init=self.kernel_init,
-          kernel_axes=("embed", "num_activations", "mlp"),
-          name="wi",
-          quant=self.quant,
-          use_bias=self.use_bias,
-          matmul_precision=self.config.matmul_precision,
-      )(inputs)
+      x = (inputs)
       for idx, act_fn in enumerate(self.activations):
         y = _convert_to_activation_function(act_fn)(x[:, :, idx, ...])
         activations.append(y)
     else:
       for idx, act_fn in enumerate(self.activations):
         dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
-        x = DenseGeneral(
-            self.intermediate_dim,
-            dtype=self.dtype,
-            weight_dtype=self.weight_dtype,
-            kernel_init=self.kernel_init,
-            kernel_axes=("embed", "mlp"),
-            name=dense_name,
-            quant=self.quant,
-            use_bias=self.use_bias,
-            matmul_precision=self.config.matmul_precision,
-        )(inputs)
-        x = _convert_to_activation_function(act_fn)(x.astype(jnp.float32))
+        x = self.wi[dense_name](inputs)
+        x = _convert_to_activation_function(act_fn)(x)
         activations.append(x)
 
     # Take elementwise product of above intermediate activations.
-    x = functools.reduce(operator.mul, activations).astype(self.dtype)
+    x = functools.reduce(operator.mul, activations)
     x = checkpoint_name(x, "mlpwi")
     # Apply dropout and final dense output projection.
-    x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
+    x = self.dropout(
         x, deterministic=deterministic
     )  # Broadcast along length.
     x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
-    output = DenseGeneral(
-        inputs.shape[-1],
-        dtype=self.dtype,
-        weight_dtype=self.weight_dtype,
-        kernel_init=self.kernel_init,
-        kernel_axes=("mlp", "embed"),
-        name="wo",
-        quant=self.quant,
-        use_bias=self.use_bias,
-        matmul_precision=self.config.matmul_precision,
-    )(x)
+    output = self.wo(x)
 
     output = checkpoint_name(output, "mlpwo")
     return output
 
 
-class MoeBlock(nn.Module):
+@dataclasses.dataclass
+class MoeBlock(nnx.Module):
   """Mixture of Experts (MoE) block.
 
   Attributes:
@@ -294,44 +326,64 @@ class MoeBlock(nn.Module):
   weight_dtype: DType = jnp.float32
   dtype: DType = jnp.float32
   quant: Optional[Quant] = None
-
-  # The first axes is expert
-  wi_kernel_axes = ('exp', 'embed_no_exp', 'mlp')
-  wo_kernel_axes = ('exp', 'mlp', 'embed_no_exp')
+  name: str = ""
+  rngs: nnx.Rngs = None
+  
+  def __post_init__(self):
+    cfg = self.config
+    self.gate = DenseGeneral(
+          in_features=cfg.emb_dim,
+          out_features=self.num_experts,
+          dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
+          quant=self.quant,
+          kernel_init=self.kernel_init,
+          kernel_axes=self.kernel_axes,
+          name="gate",
+          rngs=self.rngs,
+    )
+    self.w0_kernel, self.w1_kernel, self.wo_kernel = self.generate_kernels(
+      cfg.num_experts, cfg.emb_dim, cfg.mlp_dim)
 
   def generate_kernels(self, num_experts, emb_dim, mlp_dim):
-
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
     kernel_init = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
 
-    w0_kernel = self.param(
-        'wi_0',
-        nn.with_logical_partitioning(kernel_init, self.wi_kernel_axes),
-        (num_experts, emb_dim, mlp_dim),
-        self.weight_dtype,
-        kernel_in_axis,
-        kernel_out_axis,
+    # The first axes is expert
+    kernel_axes = (None, 'embed', 'mlp')
+    wo_kernel_axes = (None, 'mlp', 'embed')
+
+    w0_kernel = nnx.Param(
+        nnx.with_partitioning(kernel_init, kernel_axes)(
+          self.rngs(),
+          (num_experts, emb_dim, mlp_dim),
+          self.weight_dtype,
+          kernel_in_axis,
+          kernel_out_axis
+        )
       )
-    w0_kernel = jnp.asarray(w0_kernel, self.dtype)
-    w1_kernel = self.param(
-        'wi_1',
-        nn.with_logical_partitioning(kernel_init, self.wi_kernel_axes),
-        (num_experts, emb_dim, mlp_dim),
-        self.weight_dtype,
-        kernel_in_axis,
-        kernel_out_axis,
+    w0_kernel.value = jnp.asarray(w0_kernel.value, self.dtype)
+    w1_kernel = nnx.Param(
+        nnx.with_partitioning(kernel_init, kernel_axes)(
+          self.rngs(),
+          (num_experts, emb_dim, mlp_dim),
+          self.weight_dtype,
+          kernel_in_axis,
+          kernel_out_axis
+        )
       )
-    w1_kernel = jnp.asarray(w1_kernel, self.dtype)
-    wo_kernel = self.param(
-        'wo',
-        nn.with_logical_partitioning(kernel_init, self.wo_kernel_axes),
-        (num_experts, mlp_dim, emb_dim),
-        self.weight_dtype,
-        kernel_in_axis,
-        kernel_out_axis,
+    w1_kernel.value = jnp.asarray(w1_kernel.value, self.dtype)
+    wo_kernel = nnx.Param(
+        nnx.with_partitioning(kernel_init, wo_kernel_axes)(
+          self.rngs(),
+          (num_experts, mlp_dim, emb_dim),
+          self.weight_dtype,
+          kernel_in_axis,
+          kernel_out_axis,
+        )
       )
-    wo_kernel = jnp.asarray(wo_kernel, self.dtype)
+    wo_kernel.value = jnp.asarray(wo_kernel.value, self.dtype)
     return w0_kernel, w1_kernel, wo_kernel
 
   def permute(self, inputs, gate_logits):
@@ -358,8 +410,7 @@ class MoeBlock(nn.Module):
     tensor_parallelism = self.config.ici_tensor_parallelism * self.config.dcn_tensor_parallelism
     reshaped_intermediate = jnp.reshape(unsort_intermediate, (-1, self.num_experts_per_tok, self.config.emb_dim // tensor_parallelism))
     with jax.named_scope("weight_sum"):
-      matmul_precision = lax.Precision(self.config.matmul_precision)
-      output = jnp.einsum("BKE,BK -> BE", reshaped_intermediate.astype(jnp.float32), reshaped_weights.astype(jnp.float32), precision=matmul_precision)
+      output = jnp.einsum("BKE,BK -> BE", reshaped_intermediate, reshaped_weights)
     return output.reshape(-1, self.config.max_target_length, self.config.emb_dim // tensor_parallelism).astype(self.dtype)
 
   def megablox(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
@@ -413,23 +464,15 @@ class MoeBlock(nn.Module):
       output = self.unpermute(intermediate_output,
                               sorted_selected_experts,
                               weights)
-      return output, None
+      return output
     return wrapper(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
 
-  def reshape_and_update_weights(self, weights, indices):
-    # input of weights & indices: (batch_size, seq_len, num_experts_per_tok)
-    # output of updated weights: (batch_size, seq_len, num_experts)
-    update_weights = jnp.zeros((weights.shape[0], weights.shape[1], self.num_experts), dtype=self.dtype)
-    index_update = (jnp.arange(weights.shape[0])[:, None, None], jnp.arange(weights.shape[1])[:, None], indices)
-    update_weights = update_weights.at[index_update].set(weights)
-    return update_weights
-
-  def generate_masks(self, top_k_indices, softmax_probs):
+  def generate_masks(self, top_k_indices):
       # calculate expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
       batch_size, seq_len, _ = top_k_indices.shape
-      tokens_per_batch = seq_len * self.num_experts_per_tok
-      expert_capacity_per_batch = int((tokens_per_batch / self.num_experts) * self.config.capacity_factor)
-      max_logging.log(f"Applying potential token dropping with a batch expert_capacity of {expert_capacity_per_batch}")
+      tokens_per_batch = batch_size * seq_len * self.num_experts_per_tok
+      expert_capacity = int((tokens_per_batch / self.num_experts) * self.config.capacity_factor)
+      max_logging.log(f"Applying potential token dropping with an expert_capacity of {expert_capacity}")
 
       # calculate expert mask and drop tokens if needed
       # shape of output expert mask: (batch, sequence, num_experts_per_tok)
@@ -442,124 +485,53 @@ class MoeBlock(nn.Module):
       # trunc_expert_mask becomes [[[[1, 0, 0, 0],[0, 1, 0, 0]], [[0, 0, 0, 0],[0, 0, 0, 1]]]],
       # so the 2nd token for expert #1 ([0, 1] & [1, 3]) is dropped, output of updated_expert_mask is [[[1, 1],[0, 1]]].
       expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
-      expert_mask_fused = jnp.reshape(expert_mask, (batch_size, seq_len * self.num_experts_per_tok, self.num_experts))
-      expert_mask_fused = nn.with_logical_constraint(expert_mask_fused, ("activation_batch", None, None))
-      expert_token_count_fused = jnp.cumsum(expert_mask_fused, axis=1)
-      expert_token_count = jnp.reshape(expert_token_count_fused, ((batch_size, seq_len, self.num_experts_per_tok, self.num_experts)))
-      expert_token_count = nn.with_logical_constraint(expert_token_count, ("activation_batch", "activation_length", None, None))
-      trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
-      combined_expert_mask = jnp.sum(trunc_expert_mask, axis=2)
-
-      # reshape & update weights
-      softmax_probs *= combined_expert_mask
-
-      # calculate token position in expert capacity dimension
-      expert_token_position_fused = expert_mask_fused * expert_token_count_fused
-      expert_token_position = jnp.reshape(expert_token_position_fused, (batch_size, seq_len, self.num_experts_per_tok, self.num_experts))
-      combined_expert_token_position = jnp.sum(expert_token_position, axis=2) * combined_expert_mask
-      expert_token_position_in_capacity = jax.nn.one_hot(combined_expert_token_position, num_classes=expert_capacity_per_batch+1, dtype=jnp.int32)
-
-      # shape of combine_mask is (batch_size, seq_len, num_experts, expert_capacity_per_batch + 1),
-      # and cut 0-dimension which is always 0
-      combine_mask = (softmax_probs[..., None] * expert_token_position_in_capacity)
-      combine_mask = combine_mask[..., 1:]
-      dispatch_mask = combine_mask.astype(bool)
-      return dispatch_mask, combine_mask
-
-  # See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details.
-  def load_balance_loss(self, top_k_indices, logits):
-    expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
-    summed_expert_mask = jnp.sum(expert_mask, axis=2)
-    # Get fraction of tokens dispatched to each expert
-    density = jnp.mean(summed_expert_mask, axis=1)
-    # get fraction of probability allocated to each expert
-    density_prob = jnp.mean(logits, axis=1)
-    loss = jnp.mean(density * density_prob) * (self.num_experts ** 2) * self.config.load_balance_loss_weight
-    return loss
-
-  def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = ()):
-    if self.quant:
-      einsum_op = self.quant.einsum(rhs_mesh_axes)
-    else:
-      einsum_op = jnp.einsum
-    return einsum_op
+      reshaped_expert_mask = jnp.reshape(expert_mask, (batch_size, seq_len * self.num_experts_per_tok, self.num_experts))
+      expert_token_count = jnp.cumsum(reshaped_expert_mask, axis=1)
+      expert_token_count = jnp.reshape(expert_token_count, ((batch_size, seq_len, self.num_experts_per_tok, self.num_experts)))
+      trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity)
+      updated_expert_mask = jnp.sum(trunc_expert_mask, axis=3)
+      return updated_expert_mask
 
   def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
-    gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", "activation_embed"))
-    softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
     # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
-    top_k_weights, top_k_indices = jax.lax.top_k(softmax_probs, self.num_experts_per_tok)
-    matmul_precision = lax.Precision(self.config.matmul_precision)
+    top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+    softmax_probs = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
 
+    # token dropping if needed
     if self.config.capacity_factor > 0:
-      # token dropping if needed
-      dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
-      mask_axes = ("activation_batch", "activation_length", None, None)
-      dispatch_mask = nn.with_logical_constraint(dispatch_mask, mask_axes)
-      combine_mask = nn.with_logical_constraint(combine_mask, mask_axes)
-      loss = self.load_balance_loss(top_k_indices, softmax_probs)
-      inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
-      with jax.named_scope("dispatch"):
-        dispatch = self.get_einsum(rhs_mesh_axes=mask_axes)("BSM,BSEC -> EBCM", inputs, dispatch_mask, precision=matmul_precision)
-        dispatch = nn.with_logical_constraint(dispatch, ("activation_exp", "activation_batch_no_exp", None, "activation_embed"))
-      with jax.named_scope("wi_0"):
-        w0_kernel_axes = ("exp", None, None)
-        w0_kernel = nn.with_logical_constraint(w0_kernel, w0_kernel_axes)
-        layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)("EBCM,EMH -> EBCH", dispatch, w0_kernel, precision=matmul_precision).astype(jnp.float32)
-        layer_w0 = nn.with_logical_constraint(layer_w0, ("activation_exp", "activation_batch_no_exp", None, "activation_mlp"))
-      with jax.named_scope("wi_1"):
-        w1_kernel_axes = ("exp", None, None)
-        w1_kernel = nn.with_logical_constraint(w1_kernel, w1_kernel_axes)
-        layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)("EBCM,EMH -> EBCH", dispatch, w1_kernel, precision=matmul_precision).astype(jnp.float32)
-        layer_w1 = nn.with_logical_constraint(layer_w1, ("activation_exp", "activation_batch_no_exp",None, "activation_mlp"))
-      layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
-      layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
-      with jax.named_scope("wo"):
-        wo_kernel_axes = ("exp", None, None)
-        wo_kernel = nn.with_logical_constraint(wo_kernel, wo_kernel_axes)
-        intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)("EBCH,EHM -> EBCM", layer_multiply, wo_kernel, precision=matmul_precision)
-        intermediate_layer = nn.with_logical_constraint(intermediate_layer, ("activation_exp", "activation_batch_no_exp", None, "activation_embed"))
-      with jax.named_scope("combine"):
-        # Matmul & element wise operation
-        output = self.get_einsum(rhs_mesh_axes=mask_axes)("EBCM,BSEC -> BSM", intermediate_layer, combine_mask, precision=matmul_precision)
-      return output, loss
-    else:
-      weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
-      inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
-      with jax.named_scope("wi_0"):
-        layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)("BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision).astype(jnp.float32)
-      with jax.named_scope("wi_1"):
-        layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)("BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision).astype(jnp.float32)
-      layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
-      layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
-      with jax.named_scope("wo"):
-        intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes)("BSEH,EHM -> BSEM", layer_multiply, wo_kernel, precision=matmul_precision)
-      with jax.named_scope("w_sum"):
-        weights_axis = ("activation_batch", "activation_length", "activation_exp")
-        output = self.get_einsum(rhs_mesh_axes=weights_axis)("BSEM,BSE -> BSM", intermediate_layer.astype(jnp.float32), weights.astype(jnp.float32)).astype(self.dtype)
-      return output, None
+      expert_mask = self.generate_masks(top_k_indices)
+      softmax_probs *= expert_mask
+
+    weights = jnp.zeros_like(gate_logits)
+    index_update = (jnp.arange(gate_logits.shape[0])[:, None, None], jnp.arange(gate_logits.shape[1])[:, None], top_k_indices)
+    weights = weights.at[index_update].set(softmax_probs)
+
+    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+    with jax.named_scope("wi_0"):
+      layer_w0 = jnp.einsum("BLE,NEH -> BLNH", inputs, w0_kernel)
+    with jax.named_scope("wi_1"):
+      layer_w1 = jnp.einsum("BLE,NEH -> BLNH", inputs, w1_kernel)
+    layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
+    layer_multiply = jnp.multiply(layer_w0_act, layer_w1)
+    with jax.named_scope("wo"):
+      intermediate_layer = jnp.einsum("BLNH,NHE -> BLNE", layer_multiply, wo_kernel)
+    with jax.named_scope("w_sum"):
+      output = jnp.einsum("BLNE,BLN -> BLE", intermediate_layer, weights)
+    return output
 
   @nn.compact
   def __call__(self, inputs):
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
-    gate_logits = DenseGeneral(
-            self.num_experts,
-            dtype=self.dtype,
-            weight_dtype=self.weight_dtype,
-            quant=self.quant,
-            kernel_init=self.kernel_init,
-            kernel_axes=self.kernel_axes,
-            name="gate",
-            matmul_precision=self.config.matmul_precision)(inputs)
-
-    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts,
-                                                            cfg.emb_dim,
-                                                            cfg.mlp_dim)
+    gate_logits = self.gate(inputs)
 
     if cfg.megablox:
       max_logging.log("Running MoE megablox implementation.")
-      return self.megablox(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+      return self.megablox(
+        inputs, gate_logits, self.w0_kernel.value, self.w1_kernel.value, 
+        self.wo_kernel.value)
     else:
       max_logging.log("Running MoE matmul implementation.")
-      return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+      return self.dense_matmul(
+        inputs, gate_logits, self.w0_kernel.value, self.w1_kernel.value, 
+        self.wo_kernel.value)
