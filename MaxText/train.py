@@ -673,7 +673,7 @@ def train_loop(config, state=None):
     jax.block_until_ready(state)
 
   start_step = get_first_step(state)  # this is the start_step for training
-  max.logging(f"First step is {start_step}. Running until {config.steps}")
+  max_logging.log(f"First step is {start_step}. Running until {config.steps}")
   first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
   if config.profiler != "" and first_profiling_step >= config.steps:
     raise ValueError("Profiling requested but initial profiling step set past training final step")
