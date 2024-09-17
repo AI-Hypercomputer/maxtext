@@ -8,7 +8,7 @@ You may obtain a copy of the License at
      https://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
+# distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
@@ -48,6 +48,7 @@ from vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
 from input_pipeline.input_pipeline_interface import create_data_iterator
+from nnx_layers import models as nnx_models
 from layers import models
 
 import jax.numpy as jnp
@@ -65,7 +66,7 @@ from layers import quantizations
 from ml_goodput_measurement import goodput
 from ml_goodput_measurement import monitoring
 
-Transformer = models.Transformer
+#Transformer = models.Transformer
 EPS = 1e-8
 _CHUNK_BYTE_SIZE = 2 * 1024 **3
 
@@ -435,7 +436,7 @@ def check_example_batch(config, example_batch):
     err, _ = jax.jit(jittable_f)(example_batch['inputs'][: config.global_batch_size_to_train_on, :])
     err.throw()
 
-def setup_mesh_and_model(config):
+def setup_mesh_and_model(config, use_nnx: bool):
   """Set up the mesh and the model for training
 
   Args:
@@ -461,7 +462,10 @@ def setup_mesh_and_model(config):
 
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
-  model = Transformer(config, mesh, quant=quant)
+  if use_nnx:
+    model = nnx_models.Transformer(config, mesh, quant=quant)
+  else:
+    model = models.Transformer(config, mesh, quant=quant)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
   logger = checkpointing.setup_checkpoint_logger(config)
