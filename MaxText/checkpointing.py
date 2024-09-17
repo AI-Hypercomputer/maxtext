@@ -46,6 +46,8 @@ def create_orbax_checkpoint_manager(
     save_interval_steps: int,
     dataset_type: Optional[str] = "tfds",
     orbax_logger: Optional[abstract_logger.AbstractLogger] = None,
+    max_to_keep: int = None,
+    enable_background_delete: bool = False,
 ):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -58,7 +60,8 @@ def create_orbax_checkpoint_manager(
     item_names = ("items", "iter")
   else:
     item_names = ("items",)
-
+  if max_to_keep < 0:
+    max_to_keep = None
   mngr = CheckpointManager(
       p,
       item_names=item_names,
@@ -66,6 +69,8 @@ def create_orbax_checkpoint_manager(
           create=True,
           save_interval_steps=save_interval_steps,
           enable_async_checkpointing=use_async,
+          max_to_keep=max_to_keep,
+          enable_background_delete=enable_background_delete,
       ),
       logger=orbax_logger
   )

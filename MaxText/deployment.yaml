@@ -20,8 +20,8 @@ spec:
       template:
         spec:
           # Modify the following two values if you intend to run the workload in smaller scale.
-          parallelism: 64    # Equal to the number of VMs per slice
-          completions: 64    # Same as the above.
+          parallelism: 512    # Equal to the number of VMs per slice
+          completions: 512    # Same as the above.
           backoffLimit: 0   # When any pod fails, the job is failed
           template:
             metadata:
@@ -53,7 +53,7 @@ spec:
                     job-name: bernardhan-test-checkpointing-node-attrs
               containers:
               - name: jax-cpu
-                image: gcr.io/gcs-tess/bernardhan_test_checkpointing_node_attrs
+                image: gcr.io/gcs-tess/bernardhan_delete_old_ckpts
 
                 env:
                 - name: REPLICATED_JOB_NAME
@@ -86,9 +86,9 @@ spec:
                       fieldPath: status.hostIP
                 # Modify the following two values too, if you intend to run the workload in smaller scale.
                 - name: PROCESSES_IN_JOB
-                  value: "64"
+                  value: "512"
                 - name: JAX_PROCESS_COUNT
-                  value: "64"
+                  value: "512"
                 - name: JOBSET_NAME
                   value: "bernardhan-test-checkpointing-node-attrs"
                 - name: JAX_COORDINATOR_ADDRESS
@@ -108,17 +108,17 @@ spec:
                   # Please double check on the workload section of the README file to
                   # understand the implications of the RUN_NAME parameter. Note that the actual
                   # run name will be the RUN_NAME + "-" + the run number.
-                  export RUN_NAME=bernardhan-test-node-attrs-3
+                  export RUN_NAME=bernardhan-test-delete-ckpts-16
 
                   # RUNS is the number of times to run the benchmark. The run number will be
                   # added to the end of the RUN_NAME.
                   export RUNS=1
 
                   # PARAMETERS is the number of parameters in the model (in billions).
-                  export PARAMETERS=64
+                  export PARAMETERS=1024
 
                   # STEPS is the number of steps to run.
-                  export STEPS=60
+                  export STEPS=110
 
                   # CHECKPOINT_PERIOD is the number of steps between each checkpoint.
                   #   Roughly ((STEPS - 1) // CHECKPOINT_PERIOD + 1) checkpoint restores and writes
@@ -129,7 +129,7 @@ spec:
 
                   # PER_STEP_INTERVAL is the minimum time each step should take. Note that it cannot
                   # be 300 seconds or more because the barriers will timeout.
-                  export PER_STEP_INTERVAL=0.0
+                  export PER_STEP_INTERVAL=1.0
 
                   # OUTPUT_PATH is the path to write the checkpoints to. Make sure it is the path
                   #   mounted with your storage solution.
@@ -137,14 +137,34 @@ spec:
 
                   # PREVIOUS_STATE is the path to the previous checkpoint to restore from. Make sure
                   #   it is the path mounted with your storage solution and prefilled with the checkpoint.
-                  export PREVIOUS_STATE="gs://xai-scale-testing-checkpoint/maxtext-output/64b-real/checkpoints/0/items"
+                  export PREVIOUS_STATE="gs://gcs-tess-checkpoint/maxtext-output/64b-real/checkpoints/0/items"
 
                   # GCS_METRICS_BUCKET is the GCS bucket to write metrics to.
                   export GCS_METRICS_BUCKET="distributed-checkpointing-metrics"
 
+                  # The target per checkpoint size that Orbax is writing with. The unit is in bytes.
+                  # Therefore, 200000000 for 200 MB. If negative, the default Orbax checkpoint size
+                  # is used, which is around 2GB.
+                  # This translates to the Orbax parameter at
+                  # https://source.corp.google.com/piper///depot/google3/third_party/py/orbax/checkpoint/pytree_checkpoint_handler.py;l=1001?q=%20ocdbt_target_data_file_size%20f:orbax
+                  export TARGET_PER_CHECKPOINT_FILE_SIZE=400000000
+
+                  # Specifies the maximum number of checkpoints to keep and older checkpoints are removed.
+                  # This translates to the Orbax parameter at 
+                  # https://source.corp.google.com/piper///depot/google3/third_party/py/orbax/checkpoint/checkpoint_manager.py;l=158?q=%20max_to_keep%20f:orbax.
+                  export MAX_CHECKPOINTS_TO_KEEP=1
+
+                  # Whether to enable background deletion for the older checkpoints.
+                  # Suggest this to be True to avoid checkpoint deletion being factored into the write time.
+                  export ENABLE_BACKGROUND_DELETE=True
+
+                  # At the end of the workload, the maximum time the workload will wait for any lingering
+                  # old checkpoints to be deleted. Default to be 20 hrs.
+                  export FINAL_CKPTS_DELETION_TIMEOUT_IN_S=72000
+
                   for i in $(seq 1 $RUNS); do
                     export RUN_NAME_WITH_NUMBER=${RUN_NAME}-${i}
-                    export BENCHMARK_RUN_FLAGS="RUN_NAME=${RUN_NAME_WITH_NUMBER} STEPS=${STEPS} CHECKPOINT_PERIOD=${CHECKPOINT_PERIOD} OUTPUT_PATH=${OUTPUT_PATH} PREVIOUS_STATE=${PREVIOUS_STATE} GCS_METRICS_BUCKET=${GCS_METRICS_BUCKET} PER_STEP_INTERVAL=${PER_STEP_INTERVAL} PARAMETERS=${PARAMETERS}"
+                    export BENCHMARK_RUN_FLAGS="RUN_NAME=${RUN_NAME_WITH_NUMBER} STEPS=${STEPS} CHECKPOINT_PERIOD=${CHECKPOINT_PERIOD} OUTPUT_PATH=${OUTPUT_PATH} PREVIOUS_STATE=${PREVIOUS_STATE} GCS_METRICS_BUCKET=${GCS_METRICS_BUCKET} PER_STEP_INTERVAL=${PER_STEP_INTERVAL} PARAMETERS=${PARAMETERS} OCDBT_TARGET_DATA_FILE_SIZE=${TARGET_PER_CHECKPOINT_FILE_SIZE} MAX_CKPTS_TO_KEEP=${MAX_CHECKPOINTS_TO_KEEP} ENABLE_BACKGROUND_DELETE=${ENABLE_BACKGROUND_DELETE} FINAL_CKPTS_DELETION_TIMEOUT_IN_S=${FINAL_CKPTS_DELETION_TIMEOUT_IN_S}"
                     echo XPK Start: $(date) ; _sigterm() ( kill -SIGTERM $! 2>/dev/null;); trap _sigterm SIGTERM;(bash MaxText/configs/v5e/64b.sh ${BENCHMARK_RUN_FLAGS} EXECUTABLE=standalone_checkpointer.py HARDWARE='cpu' PLATFORM=gke) & PID=$!; while kill -0 $PID 2>/dev/null; do sleep 5; done; wait $PID; EXIT_CODE=$? ;  echo XPK End: $(date); echo EXIT_CODE=$EXIT_CODE;
                   done
 

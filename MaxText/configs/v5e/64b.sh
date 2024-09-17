@@ -52,4 +52,8 @@ JAX_PLATFORMS=cpu python3 MaxText/$EXECUTABLE MaxText/configs/base.yml\
     dataset_type=synthetic attention='flash' gcs_metrics=true\
     load_full_state_path=$PREVIOUS_STATE\
     gcs_metrics_bucket=$GCS_METRICS_BUCKET\
-    per_step_interval=$PER_STEP_INTERVAL
+    per_step_interval=$PER_STEP_INTERVAL\
+    ocdbt_target_data_file_size=$OCDBT_TARGET_DATA_FILE_SIZE\
+    max_ckpts_to_keep=$MAX_CKPTS_TO_KEEP\
+    enable_background_delete=$ENABLE_BACKGROUND_DELETE\
+    final_ckpts_deletion_timeout_in_s=$FINAL_CKPTS_DELETION_TIMEOUT_IN_S
