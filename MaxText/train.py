@@ -604,14 +604,15 @@ def train_loop(config, state=None):
   else:
     example_batch = load_next_batch(data_iterator, None, config)
     nextrng = jax.jit(jax.random.fold_in)(init_rng, 0)
-    p_train_step_lower = jax.jit(
-        functional_train,
-        in_shardings=in_shard_train,
-        out_shardings=out_shard_train,
-        static_argnums=static_argnums_train,
-        donate_argnums=donate_argnums_train,
-    ).lower(state, example_batch, nextrng)
-    p_train_step = p_train_step_lower.compile()
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      p_train_step_lower = jax.jit(
+          functional_train,
+          in_shardings=in_shard_train,
+          out_shardings=out_shard_train,
+          static_argnums=static_argnums_train,
+          donate_argnums=donate_argnums_train,
+      ).lower(state, example_batch, nextrng)
+      p_train_step = p_train_step_lower.compile()
 
     if eval_data_iterator:
       p_eval_step = jax.jit(
