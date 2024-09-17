@@ -32,11 +32,11 @@ AxisNames = common_types.AxisNames
 @struct.dataclass
 class PageState:
   page_status: Array
-  seq_page_idx_mappings: Array
-  seq_lengths: Array
-  seq_num_pages: Array
-  seq_page_indices: Array
-  seq_page_slice_indices: Array
+  page_map: Array               # matrix of shape (slots, max_pages_per_slot) that contains q unique page identifier (except for 0) for any entry with a page
+  sequence_lengths: Array       # array of shape (num_slots) that contains the number of tokens currently used for each slot
+  num_pages_used: Array         # array of shape (num_slots) that contains the current number of pages being used for each slot
+  current_page: Array           # array of shape (num_slots) that contains the current page to update for the given slot
+  current_page_position: Array  # array of shape (num_slots) that contains the current index of the current page to update for the given slot
 
 
 class PageManager(nn.Module):
@@ -55,97 +55,97 @@ class PageManager(nn.Module):
         nn.with_logical_partitioning(jnp.zeros, ("num_pages",)),
         (self.num_pages,),
         jnp.int32)
-    seq_page_idx_mappings_var = self.variable(
+    page_map_var = self.variable(
         "cache",
-        "seq_page_idx_mappings",
+        "page_map",
         nn.with_logical_partitioning(jnp.zeros, ("slots", "max_pages_per_slot")),
         (self.slots, self.max_pages_per_slot),
         jnp.int32)
-    seq_lengths_var = self.variable(
+    sequence_lengths_var = self.variable(
         "cache",
-        "seq_lengths",
+        "sequence_lengths",
         nn.with_logical_partitioning(jnp.zeros, ("slots",)),
         (self.slots,),
         jnp.int32)
-    seq_num_pages_var = self.variable(
+    num_pages_used_var = self.variable(
         "cache",
-        "seq_num_pages",
+        "num_pages_used",
         nn.with_logical_partitioning(jnp.zeros, ("slots",)),
         (self.slots,),
         jnp.int32)
-    seq_page_indices_var = self.variable(
+    current_page_var = self.variable(
         "cache",
-        "seq_page_indices",
+        "current_page",
         nn.with_logical_partitioning(jnp.zeros, ("slots",)),
         (self.slots,),
         jnp.int32)
-    seq_page_slice_indices_var = self.variable(
+    current_page_position_var = self.variable(
         "cache",
-        "seq_page_slice_indices",
+        "current_page_position",
         nn.with_logical_partitioning(jnp.zeros, ("slots",)),
         (self.slots,),
         jnp.int32)
 
     return (
       page_status_var,
-      seq_page_idx_mappings_var,
-      seq_lengths_var,
-      seq_num_pages_var,
-      seq_page_indices_var,
-      seq_page_slice_indices_var
+      page_map_var,
+      sequence_lengths_var,
+      num_pages_used_var,
+      current_page_var,
+      current_page_position_var
     )
 
   def release_slot_pages(
       self,
       slot: int,
       page_status_var: nn.Variable,
-      seq_page_idx_mappings_var: nn.Variable,
-      seq_lengths_var: nn.Variable,
-      seq_num_pages_var: nn.Variable,
-      seq_page_indices_var: nn.Variable,
-      seq_page_slice_indices_var: nn.Variable
+      page_map_var: nn.Variable,
+      sequence_lengths_var: nn.Variable,
+      num_pages_used_var: nn.Variable,
+      current_page_var: nn.Variable,
+      current_page_position_var: nn.Variable
   ) -> None:
     """Release sequence slot and the pages assigned to the slot."""    
     page_status = page_status_var.value
-    seq_page_idx_mappings = seq_page_idx_mappings_var.value
-    seq_lengths = seq_lengths_var.value
-    seq_num_pages = seq_num_pages_var.value
-    seq_page_indices = seq_page_indices_var.value
-    seq_page_slice_indices = seq_page_slice_indices_var.value
+    page_map = page_map_var.value
+    sequence_lengths = sequence_lengths_var.value
+    num_pages_used = num_pages_used_var.value
+    current_page = current_page_var.value
+    current_page_position = current_page_position_var.value
 
     def _release_page(i, state):
-      seq_page_idx_mappings, page_status = state
-      page_idx = seq_page_idx_mappings[slot][i]
+      page_map, page_status = state
+      page_idx = page_map[slot][i]
       page_status = page_status.at[page_idx].set(0)
-      seq_page_idx_mappings = seq_page_idx_mappings.at[slot,i].set(0)
-      return seq_page_idx_mappings, page_status
+      page_map = page_map.at[slot,i].set(0)
+      return page_map, page_status
 
-    seq_page_idx_mappings, page_status = jax.lax.fori_loop(
+    page_map, page_status = jax.lax.fori_loop(
       0,
-      seq_num_pages[slot],
+      num_pages_used[slot],
       _release_page,
-      (seq_page_idx_mappings, page_status)
+      (page_map, page_status)
     )
 
-    seq_lengths = seq_lengths.at[slot].set(0)
-    seq_num_pages = seq_num_pages.at[slot].set(0)
-    seq_page_indices = seq_page_indices.at[slot].set(0)
-    seq_page_slice_indices = seq_page_slice_indices.at[slot].set(0)
+    sequence_lengths = sequence_lengths.at[slot].set(0)
+    num_pages_used = num_pages_used.at[slot].set(0)
+    current_page = current_page.at[slot].set(0)
+    current_page_position = current_page_position.at[slot].set(0)
 
     page_status_var.value = page_status
-    seq_page_idx_mappings_var.value = seq_page_idx_mappings
-    seq_lengths_var.value = seq_lengths
-    seq_num_pages_var.value = seq_num_pages
-    seq_page_indices_var.value = seq_page_indices
-    seq_page_slice_indices_var.value = seq_page_slice_indices
+    page_map_var.value = page_map
+    sequence_lengths_var.value = sequence_lengths
+    num_pages_used_var.value = num_pages_used
+    current_page_var.value = current_page
+    current_page_position_var.value = current_page_position
 
     return (
       page_status_var,
-      seq_page_idx_mappings_var,
-      seq_lengths_var,
-      seq_num_pages_var,
-      seq_page_indices_var,
-      seq_page_slice_indices_var
+      page_map_var,
+      sequence_lengths_var,
+      num_pages_used_var,
+      current_page_var,
+      current_page_position_var
     )
 
   def reserve_prefix_slot_pages(
@@ -153,185 +153,138 @@ class PageManager(nn.Module):
       slot: int,
       true_length: int,
       page_status_var: nn.Variable,
-      seq_page_idx_mappings_var: nn.Variable,
-      seq_lengths_var: nn.Variable,
-      seq_num_pages_var: nn.Variable,
-      seq_page_indices_var: nn.Variable,
-      seq_page_slice_indices_var: nn.Variable
+      page_map_var: nn.Variable,
+      sequence_lengths_var: nn.Variable,
+      num_pages_used_var: nn.Variable,
+      current_page_var: nn.Variable,
+      current_page_position_var: nn.Variable
   ) -> None:
     """Reserve pages for prefix slot."""
     (
       page_status_var,
-      seq_page_idx_mappings_var,
-      seq_lengths_var,
-      seq_num_pages_var,
-      seq_page_indices_var,
-      seq_page_slice_indices_var
+      page_map_var,
+      sequence_lengths_var,
+      num_pages_used_var,
+      current_page_var,
+      current_page_position_var
     ) = self.release_slot_pages(
       slot,
       page_status_var,
-      seq_page_idx_mappings_var,
-      seq_lengths_var,
-      seq_num_pages_var,
-      seq_page_indices_var,
-      seq_page_slice_indices_var
+      page_map_var,
+      sequence_lengths_var,
+      num_pages_used_var,
+      current_page_var,
+      current_page_position_var
     )
 
-    jax.debug.print("reserve_prefix_slot_pages - true_length: {}", true_length)
     page_status = page_status_var.value
-    seq_page_idx_mappings = seq_page_idx_mappings_var.value
-    seq_lengths = seq_lengths_var.value
-    seq_num_pages = seq_num_pages_var.value
-    seq_page_indices = seq_page_indices_var.value
-    seq_page_slice_indices = seq_page_slice_indices_var.value
-
-    jax.debug.print("reserve_prefix_slot_pages - seq_page_indices: {}", seq_page_indices)
-    # reserve_prefix_slot_pages - seq_page_indices: [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+    page_map = page_map_var.value
+    sequence_lengths = sequence_lengths_var.value
+    num_pages_used = num_pages_used_var.value
+    current_page = current_page_var.value
+    current_page_position = current_page_position_var.value
 
     prefill_slot_num_pages = jnp.ceil(true_length / self.page_size).astype(jnp.int32)
-    jax.debug.print("reserve_prefix_slot_pages - prefill_slot_num_pages: {}", prefill_slot_num_pages)
-    # reserve_prefix_slot_pages - prefill_slot_num_pages: 1
 
     prefill_slot_page_slice_idx = jnp.where(true_length == 0, 0, (true_length - 1) % self.page_size)
-    jax.debug.print("reserve_prefix_slot_pages - prefill_slot_page_slice_idx: {}", prefill_slot_page_slice_idx)
-    # reserve_prefix_slot_pages - prefill_slot_page_slice_idx: 3
 
 
     def _reserve_page(i, state):
-      slot, seq_page_idx_mappings, page_status, seq_page_indices = state
+      slot, page_map, page_status, current_page = state
       # assert jnp.count_nonzero(page_status[1:]) != self.num_pages-1, "All pages are in use."
-      page_idx = jnp.where((page_status[1:]==0), size=1)[0][0] + 1
+      page_idx = jnp.where((page_status[:]==0), size=1)[0][0] #+ 1
       page_status = page_status.at[page_idx].set(1)
-      seq_page_idx_mappings = seq_page_idx_mappings.at[slot, i].set(page_idx)
-      seq_page_indices = seq_page_indices.at[slot].set(page_idx)
-      return slot, seq_page_idx_mappings, page_status, seq_page_indices
+      page_map = page_map.at[slot, i].set(page_idx)
+      current_page = current_page.at[slot].set(page_idx)
+      return slot, page_map, page_status, current_page
 
-    _, seq_page_idx_mappings, page_status, seq_page_indices = jax.lax.fori_loop(
+    _, page_map, page_status, current_page = jax.lax.fori_loop(
       0,
       prefill_slot_num_pages,
       _reserve_page,
-      (slot, seq_page_idx_mappings, page_status, seq_page_indices)
+      (slot, page_map, page_status, current_page)
     )
 
-    jax.debug.print("\nreserve_prefix_slot_pages - slot: {}", slot)
-    # reserve_prefix_slot_pages - slot: 0
-
-    seq_lengths = seq_lengths.at[slot].set(true_length)
-    jax.debug.print("reserve_prefix_slot_pages - seq_lengths: {}", seq_lengths)
-    # reserve_prefix_slot_pages - seq_lengths: [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
-
-    seq_num_pages = seq_num_pages.at[slot].set(prefill_slot_num_pages)
-    jax.debug.print("reserve_prefix_slot_pages - seq_num_pages: {}", seq_num_pages)
-
-    seq_page_slice_indices = seq_page_slice_indices.at[slot].set(prefill_slot_page_slice_idx)
-    jax.debug.print("reserve_prefix_slot_pages - seq_page_slice_indices: {}", seq_page_slice_indices)
-
+    sequence_lengths = sequence_lengths.at[slot].set(true_length)
+    num_pages_used = num_pages_used.at[slot].set(prefill_slot_num_pages)
+    current_page_position = current_page_position.at[slot].set(prefill_slot_page_slice_idx)
 
     page_status_var.value = page_status
-    seq_page_idx_mappings_var.value = seq_page_idx_mappings
-    seq_lengths_var.value = seq_lengths
-    seq_num_pages_var.value = seq_num_pages
-    seq_page_indices_var.value = seq_page_indices
-    seq_page_slice_indices_var.value = seq_page_slice_indices
+    page_map_var.value = page_map
+    sequence_lengths_var.value = sequence_lengths
+    num_pages_used_var.value = num_pages_used
+    current_page_var.value = current_page
+    current_page_position_var.value = current_page_position
 
     return (
       page_status_var,
-      seq_page_idx_mappings_var,
-      seq_lengths_var,
-      seq_num_pages_var,
-      seq_page_indices_var,
-      seq_page_slice_indices_var
+      page_map_var,
+      sequence_lengths_var,
+      num_pages_used_var,
+      current_page_var,
+      current_page_position_var
     )
 
   def reserve_decode_step_pages(
       self,
       page_status_var: nn.Variable,
-      seq_page_idx_mappings_var: nn.Variable,
-      seq_lengths_var: nn.Variable,
-      seq_num_pages_var: nn.Variable,
-      seq_page_indices_var: nn.Variable,
-      seq_page_slice_indices_var: nn.Variable
+      page_map_var: nn.Variable,
+      sequence_lengths_var: nn.Variable,
+      num_pages_used_var: nn.Variable,
+      current_page_var: nn.Variable,
+      current_page_position_var: nn.Variable
   ) -> None:
     """Reserve pages for decode step."""
     page_status = page_status_var.value
-    jax.debug.print("\nreserve_decode_step_pages - page_status: {}", page_status)
+    page_map = page_map_var.value
+    sequence_lengths = sequence_lengths_var.value
+    num_pages_used = num_pages_used_var.value
+    current_page = current_page_var.value
+    current_page_position = current_page_position_var.value
 
-    seq_page_idx_mappings = seq_page_idx_mappings_var.value
-    jax.debug.print("reserve_decode_step_pages - seq_page_idx_mappings: {}", seq_page_idx_mappings)
+    sequence_lengths_step = jnp.logical_and(jnp.ones(sequence_lengths.shape, dtype = jnp.int32), sequence_lengths).astype(jnp.int32)
 
-    seq_lengths = seq_lengths_var.value
-    jax.debug.print("reserve_decode_step_pages - seq_lengths: {}", seq_lengths)
+    sequence_lengths += sequence_lengths_step
 
-    seq_num_pages = seq_num_pages_var.value
-    jax.debug.print("reserve_decode_step_pages - seq_num_pages: {}", seq_num_pages)
+    current_num_pages_used = num_pages_used
+    num_pages_used = jnp.ceil(sequence_lengths / self.page_size).astype(jnp.int32)
 
-    seq_page_indices = seq_page_indices_var.value
-    jax.debug.print("reserve_decode_step_pages - seq_page_indices: {}", seq_page_indices)
+    current_page_position = jnp.where(sequence_lengths == 0, 0, (sequence_lengths - 1) % self.page_size)
+    seq_new_page = num_pages_used - current_num_pages_used
 
-    seq_page_slice_indices = seq_page_slice_indices_var.value
-    jax.debug.print("reserve_decode_step_pages - seq_page_slice_indices: {}", seq_page_slice_indices)
-
-    seq_lengths_step = jnp.logical_and(jnp.ones(seq_lengths.shape, dtype = jnp.int32), seq_lengths).astype(jnp.int32)
-    jax.debug.print("reserve_decode_step_pages - seq_lengths_step: {}", seq_lengths_step)
-
-    seq_lengths += seq_lengths_step
-    jax.debug.print("reserve_decode_step_pages - seq_lengths: {}", seq_lengths)
-
-    current_seq_num_pages = seq_num_pages
-    jax.debug.print("reserve_decode_step_pages - current_seq_num_pages: {}", current_seq_num_pages)
-
-    seq_num_pages = jnp.ceil(seq_lengths / self.page_size).astype(jnp.int32)
-    jax.debug.print("reserve_decode_step_pages - seq_num_pages: {}", seq_num_pages)
-
-    seq_page_slice_indices = jnp.where(seq_lengths == 0, 0, (seq_lengths - 1) % self.page_size)
-    jax.debug.print("reserve_decode_step_pages - seq_page_slice_indices: {}", seq_page_slice_indices)
-
-    seq_new_page = seq_num_pages - current_seq_num_pages
-    jax.debug.print("reserve_decode_step_pages - seq_new_page: {}", seq_new_page)
-
-    updating_slots = jnp.where((seq_new_page>0), size=self.slots)[0]
-    jax.debug.print("reserve_decode_step_pages - updating_slots: {}\n", updating_slots)
+    updating_slots = jnp.where((seq_new_page > 0), size=self.slots)[0]
 
     def _reserve_page(i, state):
-      seq_page_idx_mappings, page_status, seq_page_indices, updating_slots = state
-      # assert jnp.count_nonzero(page_status[1:]) != self.num_pages-1, "All pages are in use."
-
+      page_map, page_status, current_page, updating_slots = state
       slot = jax.lax.dynamic_index_in_dim(updating_slots, i, axis=0, keepdims=False)
-      jax.debug.print("reserve_decode_step_pages loop - slot: {}", slot)
-
-      jax.debug.print("reserve_decode_step_pages loop - jnp.where((page_status[1:]==0), size=1): {}", jnp.where((page_status[1:]==0), size=1))
-
-      page_idx = jnp.where((page_status[1:]==0), size=1)[0][0] + 1
-      jax.debug.print("reserve_decode_step_pages loop - page_idx: {}", page_idx)
-
+      page_idx = jnp.where((page_status[:]==0), size=1)[0][0]# + 1
       page_status = page_status.at[page_idx].set(1)
-      seq_page_idx_mappings = seq_page_idx_mappings.at[slot, seq_num_pages[slot]-1].set(page_idx)
-      seq_page_indices = seq_page_indices.at[slot].set(page_idx)
-      return seq_page_idx_mappings, page_status, seq_page_indices, updating_slots
+      page_map = page_map.at[slot, num_pages_used[slot]-1].set(page_idx)
+      current_page = current_page.at[slot].set(page_idx)
+      return page_map, page_status, current_page, updating_slots
 
-    jax.debug.print("reserve_decode_step_pages - page_status: {}", page_status)
     print(f"{page_status.shape=}")
-    seq_page_idx_mappings, page_status, seq_page_indices, _ = jax.lax.fori_loop(
+    page_map, page_status, current_page, _ = jax.lax.fori_loop(
       0,
       jnp.count_nonzero(seq_new_page),
       _reserve_page,
-      (seq_page_idx_mappings, page_status, seq_page_indices, updating_slots)
+      (page_map, page_status, current_page, updating_slots)
     )
 
     page_status_var.value = page_status
-    seq_page_idx_mappings_var.value = seq_page_idx_mappings
-    seq_lengths_var.value = seq_lengths
-    seq_num_pages_var.value = seq_num_pages
-    seq_page_indices_var.value = seq_page_indices
-    seq_page_slice_indices_var.value = seq_page_slice_indices
+    page_map_var.value = page_map
+    sequence_lengths_var.value = sequence_lengths
+    num_pages_used_var.value = num_pages_used
+    current_page_var.value = current_page
+    current_page_position_var.value = current_page_position
 
     return (
       page_status_var,
-      seq_page_idx_mappings_var,
-      seq_lengths_var,
-      seq_num_pages_var,
-      seq_page_indices_var,
-      seq_page_slice_indices_var
+      page_map_var,
+      sequence_lengths_var,
+      num_pages_used_var,
+      current_page_var,
+      current_page_position_var
     )
 
   @nn.compact
@@ -344,11 +297,11 @@ class PageManager(nn.Module):
 
     (
       page_status_var,
-      seq_page_idx_mappings_var,
-      seq_lengths_var,
-      seq_num_pages_var,
-      seq_page_indices_var,
-      seq_page_slice_indices_var
+      page_map_var,
+      sequence_lengths_var,
+      num_pages_used_var,
+      current_page_var,
+      current_page_position_var
     ) = self.init_or_get_vars()
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
@@ -357,27 +310,27 @@ class PageManager(nn.Module):
         slot,
         true_length,
         page_status_var,
-        seq_page_idx_mappings_var,
-        seq_lengths_var,
-        seq_num_pages_var,
-        seq_page_indices_var,
-        seq_page_slice_indices_var
+        page_map_var,
+        sequence_lengths_var,
+        num_pages_used_var,
+        current_page_var,
+        current_page_position_var
       )
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       self.reserve_decode_step_pages(
         page_status_var,
-        seq_page_idx_mappings_var,
-        seq_lengths_var,
-        seq_num_pages_var,
-        seq_page_indices_var,
-        seq_page_slice_indices_var
+        page_map_var,
+        sequence_lengths_var,
+        num_pages_used_var,
+        current_page_var,
+        current_page_position_var
       )
 
     return PageState(
       page_status_var.value,
-      seq_page_idx_mappings_var.value,
-      seq_lengths_var.value,
-      seq_num_pages_var.value,
-      seq_page_indices_var.value,
-      seq_page_slice_indices_var.value
+      page_map_var.value,
+      sequence_lengths_var.value,
+      num_pages_used_var.value,
+      current_page_var.value,
+      current_page_position_var.value
     )

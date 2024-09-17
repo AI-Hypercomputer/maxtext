@@ -158,119 +158,13 @@ class PagedAttentionOp(nn.Module):
     value_pages_var.value = nn.with_logical_constraint(value_pages_var.value, self.kv_pages_axis_names)
     return key_pages_var, value_pages_var
 
-  def compute_local_attention(self, attn_weights: Array, value: Array | KVTensor, q_seq_len: int, model_mode: str) -> tuple[Array, Array, Array]:
-    """Computes the attention of a local subset of the kv cache.
-    Local attention results will need to be combined with any other local attentions and normalized
-    Based on https://github.com/google-research/google-research/blob/master/scaling_transformer_inference_efficiency/attention.py
 
-    Args:
-        attn_weights (Array): Product of query and key
-        value (Array): Current value
-        aqt_rng (PRNGKey | None): Optional rng
-
-    Returns:
-        (local_out, local_max,): where
-          local_out is local unnormalized output
-          local_max is the local max of exponentials
-          local_sum is the sum of exponentials for this chunk, divided by exp(local_max).
-    """
-    local_max = jnp.max(attn_weights, axis=-1, keepdims=True)
-    local_exps = jnp.exp(attn_weights - local_max)
-    local_sum = jnp.sum(local_exps, axis=-1, keepdims=True)
-
-    local_sum = jnp.moveaxis(local_sum, -2, 1)
-    local_max = jnp.moveaxis(local_max, -2, 1)
-
-    local_max = jnp.reshape(local_max, (local_max.shape[0], local_max.shape[1], local_max.shape[2] * local_max.shape[3], 1))
-    local_sum = jnp.reshape(local_sum, (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1))
-
-    local_out = self.wv_product(local_exps, value, model_mode)
-    # print(local_out.shape)
-    return local_out, local_max, local_sum
-
-  def apply_attention_dot(
-      self,
-      query: Array,
-      key: Array| KVTensor,
-      value: Array| KVTensor,
-      decoder_segment_ids: Array | None,
-      model_mode: str = common_types.MODEL_MODE_TRAIN,
+  def paged_dot_product_attention_with_max_and_sum(
+    self,
+    query,
+    key,
+    value,
   ):
-    """Apply Attention."""
-    # Casting qk_product and softmaxt computation for float32 for model stability.
-    # print(f"paged apply_attention_dot: {query.shape=}")
-    # print(f"paged apply_attention_dot: {key.shape=}")
-    # print(f"paged apply_attention_dot: {value.shape=}")
-    # print(f"paged apply_attention_dot: {decoder_segment_ids.shape=}")
-    q_seq_len = query.shape[1]
-    attn_weights = self.qk_product(query, key, q_seq_len, model_mode)
-    attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
-    if attn_mask is not None:
-      attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
-    return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode)
-
-  def qk_product(self, query: Array, key: Array| KVTensor, q_seq_len: int, model_mode: str) -> Array:
-    """Query-Key product.
-
-    Args:
-      query: Query projection, in shape of [b, t, n, d]
-      key: Key projection in shape of [b, s, n_kv, d]
-
-    Returns:
-      results in shape [b, n_kv, n // n_kv, t, s].
-
-    Annotations:
-      b: batch size
-      t: query length
-      s: key / value length
-      d: head / kv dimension
-      n: number of query heads
-      n_kv: number of kv heads, sometimes annotated as k
-      n // n_kv: number of group for query, sometimes annotated with g
-    """
-    # if self.kv_quant:
-    #   einsum = self.kv_quant.einsum_fn_with_rhs_qtensor(key)
-    # print(f"{query.shape=}")
-    # print(f"{key.shape=}")
-    b, t, n, d = query.shape
-    n_kv = key.shape[-2]
-    assert n_kv == self.num_kv_heads
-    query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
-    result = jnp.einsum("btkgd,bskd->bkgts", query, key)
-    return result
-
-  def wv_product(self, attn_weights: Array, value: Array | KVTensor, model_mode: str) -> Array:
-    """weighted value product.
-
-    Args:
-      attn_weights: Computed results of qk_einsum, in shape [b, n_kv, n // n_kv, t, s]
-      value: Value projection, in shape of [b, s, n_kv, d]
-
-    Returns:
-      result in shape [b, t, n, d]
-
-    Annotations:
-      b: batch size
-      t: query length
-      s: key / value length
-      d: head / kv dimension
-      n: number of query heads
-      n_kv: number of kv heads, sometimes annotated as k
-      n // n_kv: number of group for query, sometimes annotated with g
-    """
-
-    out = jnp.einsum("bkgts,bskd->btkgd", attn_weights, value)
-    b, t, n_kv, g, d = out.shape
-    result = jnp.reshape(out, (b, t, n_kv * g, d))
-    return result
-
-  # TODO(patemotter): prefill output grows large after the first iteration, issue with update?
-  def dot_product_attention(
-      self,
-      query: Array,
-      key: Array,
-      value: Array,
-  ) -> Array:
     """Apply Dot Product Attention.
 
     Annotations:
@@ -293,45 +187,23 @@ class PagedAttentionOp(nn.Module):
     attn = jnp.einsum("bkgts,bskd->btkgd", local_exps, value)
     attn = jnp.reshape(attn, (b, t, n, d))
     
+    local_max = jnp.moveaxis(local_max, -2, 1)
+    local_max = jnp.reshape(local_max,
+                            (local_max.shape[0],
+                            local_max.shape[1],
+                            local_max.shape[2] * local_max.shape[3],
+                            1))
     local_sum = jnp.sum(local_exps, axis=-1, keepdims=True)
     local_sum = jnp.moveaxis(local_sum, -2, 1)
     local_sum = jnp.reshape(local_sum,
                             (local_sum.shape[0],
-                             local_sum.shape[1],
-                             local_sum.shape[2] * local_sum.shape[3],
-                             1))
+                            local_sum.shape[1],
+                            local_sum.shape[2] * local_sum.shape[3],
+                            1))
 
-    return attn, local_exps, local_sum 
+    return attn#, local_max, local_sum 
+
   
-  def generate_attention_mask(self, query, key, decoder_segment_ids: Array | None, model_mode: str) -> Array | None:
-    mask = None
-    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      mask = decoder_segment_ids[:, None, None, None, :] == common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
-    elif decoder_segment_ids is not None:
-      mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
-      mask = mask[:, None, None, :, :]
-
-    causal_mask = None
-    # We enforce causality except for AUTOREGRESSION
-    if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE:
-      _, q_seq_len, _, _ = query.shape
-      _, kv_seq_len, _, _ = key.shape
-      mask_shape = (q_seq_len, kv_seq_len)
-      row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
-      col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
-      causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
-
-    output_mask = None
-
-    if (mask is not None) and (causal_mask is not None):
-      output_mask = jnp.logical_and(mask, causal_mask)
-    elif mask is not None:
-      output_mask = mask
-    elif causal_mask is not None:
-      output_mask = causal_mask
-
-    return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
-
   def paged_attention(
       self,
       query: Array,
@@ -389,15 +261,14 @@ class PagedAttentionOp(nn.Module):
         page_indices=page_indices,
         pages_per_compute_block=pages_per_compute_block
       )
-      # jax.debug.print("paged_attention - result: {}", result)
       return jnp.expand_dims(result, axis=1)
 
     return wrap_paged_attention(
         query,
         key_pages_var.value,
         value_pages_var.value,
-        page_state.seq_lengths,
-        page_state.seq_page_idx_mappings,
+        page_state.sequence_lengths,
+        page_state.page_map,
         self.pages_per_compute_block
     )
 
@@ -416,11 +287,15 @@ class PagedAttentionOp(nn.Module):
     self.update(key_pages_var, value_pages_var, key, value, model_mode, page_state)
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
-      # TODO(patemotter): should this re-use splash? 
-      o, m, s = self.apply_attention_dot(query, key, value, decoder_segment_ids)  
+      o = self.paged_dot_product_attention_with_max_and_sum(query, key, value)  
+      # jax.debug.print("prefill attention result @ b[0]: {}", o[0])
+      # print(f"\npaged_attention - PREFILL {o.shape=}")
       return o
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      return self.paged_attention(query, key_pages_var, value_pages_var, page_state)
+      o = self.paged_attention(query, key_pages_var, value_pages_var, page_state) # (8, 1, 32, 128)
+      # jax.debug.print("ar attention result @ b[0]: {}", o[0])
+      # print(f"\npaged_attention - AR {o.shape=}")
+      return o
 
   def update(
       self,
@@ -445,6 +320,7 @@ class PagedAttentionOp(nn.Module):
       value: Array,
   ) -> None:
     """Update pages for prefill step."""
+
     assert key.shape == value.shape, f"prefill_step key/value should have the same shape, but getting {key.shape=} and {value.shape=} instead"
     b, t, n_kv, d = key.shape
     assert b == 1, f"prefill_step key/value should have batch_size=1, but getting {b} instead"
@@ -456,9 +332,6 @@ class PagedAttentionOp(nn.Module):
     assert v_p == self.page_size, f"{v_p=} {self.page_size=}"
     assert v_d == d, f"{v_d=} {d=}"
     assert v_n_p == self.max_pages_per_prefill, f"{v_n_p=} {self.max_pages_per_prefill=}"
-
-    # key.shape=(1, 1024, 32, 128)
-    # value.shape=(1, 1024, 32, 128)
 
     key = jnp.squeeze(key)      # (1024, 32, 128)
     value = jnp.squeeze(value)  # (1024, 32, 128)
@@ -482,72 +355,48 @@ class PagedAttentionOp(nn.Module):
   ) -> None:
     """Update pages for decode step."""
 
+    # print(f"\nupdate_decode_step_pages - {key.shape=}")
     assert key.shape == value.shape, f"decode_step key/value should have the same shape, but getting {key.shape=} and {value.shape=} instead"
     b, t, n_kv, d = key.shape
     assert t == 1, f"decode_step key/value length should be 1, but getting {t} instead"
     assert key_pages_var.value.shape == value_pages_var.value.shape, f"decode_step key/value_pages_var should have the same shape, but getting {key_pages_var.shape=} and {value_pages_var.shape=} instead"
 
+    # print(f"update_decode_step_pages - {key_pages_var.value.shape=}")
     v_n_kv, v_n_p, v_p, v_d = key_pages_var.value.shape
     assert v_n_kv == n_kv, f"{v_n_kv=} {n_kv=}"
     assert v_p == self.page_size, f"{v_p=} {self.page_size=}"
     assert v_d == d, f"{v_d=} {d=}"
     assert v_n_p == self.num_pages, f"{v_n_p=} {self.num_pages=}"
 
-    print(f"\n{key.shape=}")
-    # key.shape=(32, 1, 32, 128)
-
-    # why are these always the same during decoding? 
-    seq_page_indices = page_state.seq_page_indices
-    jax.debug.print("\nupdate_decode_step_pages - seq_page_indices: {}", seq_page_indices)
-    # seq_page_indices: [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
-
-    seq_page_slice_indices = page_state.seq_page_slice_indices
-    jax.debug.print("update_decode_step_pages - seq_page_slice_indices: {}", seq_page_slice_indices)
-    # seq_page_slice_indices: [15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15]
+    current_page = page_state.current_page  # (8)
+    current_page_position = page_state.current_page_position  # (8)
+    print(f"update_decode_step_pages - {current_page.shape=}")
+    print(f"update_decode_step_pages - {current_page_position.shape=}")
 
     zeros = jnp.zeros(shape=(b, self.page_size, n_kv, d), dtype=key.dtype)
-    # print(f"{zeros.shape=}")
-    # zeros.shape=(32, 16, 32, 128)
+    print(f"update_decode_step_pages - {zeros.shape=}")
 
-    # jax.debug.print("key_pages_var.value[0,0,0] - {}", key_pages_var.value[0,0,0])
     def _update_page_slice(update_target, page_slice_idx, update_page_slice):
       return jax.lax.dynamic_update_slice_in_dim(update_target, update_page_slice, page_slice_idx, axis=0)
 
-    keys = jax.vmap(_update_page_slice)(zeros, seq_page_slice_indices, key)       # (32, 16, 32, 128)
-    values = jax.vmap(_update_page_slice)(zeros, seq_page_slice_indices, value)   # (32, 16, 32, 128)
-    # print(f"update_decode_step_pages - {keys.shape=}")
-    # keys.shape=(32, 16, 32, 128)
+    keys = jax.vmap(_update_page_slice)(zeros, current_page_position, key)       # (32, 16, 32, 128)
+    values = jax.vmap(_update_page_slice)(zeros, current_page_position, value)   # (32, 16, 32, 128)
+    print(f"update_decode_step_pages - {keys.shape=}")
 
     keys = jnp.transpose(keys, axes=(2, 0, 1, 3))       # (32, 32, 16, 128)
     values = jnp.transpose(values, axes=(2, 0, 1, 3))   # (32, 32, 16, 128)
-    # print(f"update_decode_step_pages - {keys.shape=}")
+    print(f"update_decode_step_pages - {keys.shape=}")
 
     def _update_pages(slot, state):
       update_target, update_pages, page_indices = state
-      # print(f"_update_pages - {update_target.shape=}")
-      # print(f"{update_pages.shape=}")
-      # print(f"{page_indices.shape=}")
-      # update_target.shape=(32, 2048, 16, 128)
-      # update_pages.shape=(32, 32, 16, 128)
-      # page_indices.shape=(32,)
-
       update_page = jax.lax.dynamic_index_in_dim(update_pages, slot, axis=1)
       updated_target = jax.lax.dynamic_update_slice_in_dim(update_target, update_page, page_indices[slot], axis=1)
       updated_state = updated_target, update_pages, page_indices
-
-      print(f"{updated_target.shape=}")
-      print(f"{update_pages.shape=}")
-      print(f"{page_indices.shape=}")
-      # updated_target.shape=(32, 2048, 16, 128)
-      # update_pages.shape=(32, 32, 16, 128)
-      # page_indices.shape=(32,)
-
       return updated_state
 
-    print(f"{key_pages_var.value.shape=}")
-    # key_pages_var.value.shape=(32, 2048, 16, 128)
-    key_pages_var.value, _, _ = jax.lax.fori_loop(0, b, _update_pages, (key_pages_var.value, keys, seq_page_indices))
-    value_pages_var.value, _, _ = jax.lax.fori_loop(0, b, _update_pages, (value_pages_var.value, values, seq_page_indices))
+    print(f"update_decode_step_pages - {key_pages_var.value.shape=}")
+    key_pages_var.value, _, _ = jax.lax.fori_loop(0, b, _update_pages, (key_pages_var.value, keys, current_page))
+    value_pages_var.value, _, _ = jax.lax.fori_loop(0, b, _update_pages, (value_pages_var.value, values, current_page))
     key_pages_var.value = nn.with_logical_constraint(key_pages_var.value, self.kv_pages_axis_names)
     value_pages_var.value = nn.with_logical_constraint(value_pages_var.value, self.kv_pages_axis_names)
 
@@ -1551,8 +1400,9 @@ class Attention(nn.Module):
     out = attention_op(query, key, value, decoder_segment_ids, model_mode, page_state=page_state)
     # out.shape=(1, 1024, 32, 128)
     # inputs_q.shape=(1, 1024, 4096)
-    # print(f"\n{out.shape=}")
-    # print(f"{inputs_q.shape=}")
+
+    # out.shape=(32, 2048, 32, 128)
+    # inputs_q.shape=(32, 2048, 4096)
 
     out = nn.with_logical_constraint(out, self.out_axis_names)
 
