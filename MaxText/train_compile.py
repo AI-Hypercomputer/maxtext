@@ -31,6 +31,7 @@ from flax.linen import partitioning as nn_partitioning
 import maxtext_utils
 import optimizers
 import max_utils
+import profiler
 import pyconfig
 from layers import models
 from layers import quantizations
@@ -159,6 +160,9 @@ def main(argv: Sequence[str]) -> None:
 
   # Compile
   print("Jitting and compiling train step...", flush=True)
+  prof = profiler.Profiler(config)
+  prof.activate()
+
   compiled = jit_and_compile(
       func_to_compile,
       shaped_train_args,
@@ -170,6 +174,7 @@ def main(argv: Sequence[str]) -> None:
       donate_argnums,
       nn_partitioning.axis_rules(config.logical_axis_rules),
   )
+  prof.deactivate()
   print("Jitting and compilation complete!", flush=True)
 
   # Serialize and save the compiled object

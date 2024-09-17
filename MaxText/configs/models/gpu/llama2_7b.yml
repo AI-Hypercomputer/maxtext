@@ -3,7 +3,7 @@ base_config: "base.yml"
 run_name: "gpu_train_test"
 hardware: "gpu"
 steps: 30
-per_device_batch_size: 4
+per_device_batch_size: 4.0
 max_target_length: 4096
 model_name: "llama2-7b"
 enable_checkpointing: False
