@@ -53,36 +53,19 @@ def overlap_a2a(input_activations, weights):
     num_chunks = 4
     chunk_size = EMBED // num_chunks
 
-
     ff_output_post_a2a = jnp.zeros((BATCH_PER_EXP, EXP, EMBED), dtype=input_activations.dtype)
+    # After a2a batch is sharded by expert, expert dim is unsharded
     ff_output_post_a2a = jax.lax.with_sharding_constraint(ff_output_post_a2a, NamedSharding(mesh, P('expert', None, 'model')))
-
-    output_list=[None for _ in range(num_chunks)]
     for i in range(num_chunks):
         chunk_start = chunk_size * i
 
-        #input_chunk = jax.lax.dynamic_slice_in_dim(input_activations, chunk_start, chunk_size, 2)s
         weight_chunk = jax.lax.dynamic_slice_in_dim(weights, chunk_start, chunk_size, 1)
         result_chunk_before_a2a = jnp.einsum("BXM,XEM -> BXE", input_activations, weight_chunk)
 
-        # a2a result from B/X,EXP -> B, EXP/X
         result_chunk = shard_map.shard_map(a2a, mesh, in_specs=P(None, 'expert', 'model'), out_specs=P('expert', None, 'model'))(result_chunk_before_a2a)
-        #result_chunk = jax.lax.with_sharding_constraint(result_chunk, NamedSharding(mesh, P('expert', None, 'model'))) 
-        #print(f"{result_chunk.shape=}", flush=True)
-        #output_list[i] = result_chunk_before_a2a
         ff_output_post_a2a = jax.lax.dynamic_update_slice(ff_output_post_a2a, result_chunk, (0,0,chunk_start))
+    return result_chunk
 
-        # Alterantive at API
-        #ff_output_post_a2a = ff_output_post_a2a.at[:,:,chunk_start:chunk_start+chunk_size].set(result_chunk)
-
-    # to_ret = jnp.concatenate(output_list, axis=-1)
-    # print(f"{to_ret.shape=}", flush=True)
-    # to_ret = jax.lax.with_sharding_constraint(to_ret, NamedSharding(mesh, P('expert', None, 'model')))
-
-    ff_output_post_a2a = jax.lax.with_sharding_constraint(ff_output_post_a2a, NamedSharding(mesh, P('expert', None, 'model'))) 
-    return ff_output_post_a2a 
-    # outputs = jnp.concatenate        
-    # return ff_output_post_a2a
 
 def create_inputs():
     input_activations = jax.random.normal(jax.random.PRNGKey(0), (BATCH_PER_EXP, EXP, MLP), dtype=jnp.bfloat16)
@@ -99,10 +82,10 @@ MLP = 8192
 EXP = 4
 
 global mesh
-data_parallelism, model_parallelism, expert_parallelism = 1, 1, 4
-ici_parallelism = [data_parallelism, model_parallelism, expert_parallelism]
+expert_parallelism, data_parallelism, model_parallelism,  = 4, 1, 1
+ici_parallelism = [expert_parallelism, data_parallelism, model_parallelism]
 devices_array = mesh_utils.create_device_mesh(ici_parallelism)
-mesh = Mesh(devices_array, ["data", "model", "expert"])
+mesh = Mesh(devices_array, ["expert", "data", "model"])
 
 input_activations, weights = jax.jit(create_inputs)()
 
