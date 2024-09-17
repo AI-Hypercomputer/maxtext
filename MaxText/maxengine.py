@@ -554,15 +554,15 @@ class MaxEngine(engine_api.Engine):
         path_key = path[-1].key
         if path_key in ["key_pages", "value_pages"]:
           def _update_pages(prefix_page_idx, state):
-            decode_state_pages, prefix_pages, seq_page_idx_mappings = state
+            decode_state_pages, prefix_pages, page_map = state
             prefix_page = jax.lax.dynamic_index_in_dim(prefix_pages, prefix_page_idx, axis=1)
-            decode_state_pages = jax.lax.dynamic_update_slice_in_dim(decode_state_pages, prefix_page, seq_page_idx_mappings[prefix_page_idx], axis=1)
-            return decode_state_pages, prefix_pages, seq_page_idx_mappings
+            decode_state_pages = jax.lax.dynamic_update_slice_in_dim(decode_state_pages, prefix_page, page_map[prefix_page_idx], axis=1)
+            return decode_state_pages, prefix_pages, page_map
           decode_state_cache, _, _ = jax.lax.fori_loop(
             0,
-            prefix["cache"]["page_manager"]["seq_num_pages"].value[slot],
+            prefix["cache"]["page_manager"]["num_pages_used"].value[slot],
             _update_pages,
-            (decode_state_cache, prefix_cache, prefix["cache"]["page_manager"]["seq_page_idx_mappings"].value[slot])
+            (decode_state_cache, prefix_cache, prefix["cache"]["page_manager"]["page_map"].value[slot])
           )
           return decode_state_cache
         else:
