@@ -604,6 +604,9 @@ def train_loop(config, state=None):
   else:
     example_batch = load_next_batch(data_iterator, None, config)
     nextrng = jax.jit(jax.random.fold_in)(init_rng, 0)
+    # time this
+
+    compile_start = datetime.datetime.now()
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       p_train_step_lower = jax.jit(
           functional_train,
@@ -613,7 +616,8 @@ def train_loop(config, state=None):
           donate_argnums=donate_argnums_train,
       ).lower(state, example_batch, nextrng)
       p_train_step = p_train_step_lower.compile()
-
+    compile_finish = datetime.datetime.now()
+    max_logging.log(f"It took {compile_finish - compile_start} for compilation")
     if eval_data_iterator:
       p_eval_step = jax.jit(
           functional_eval,
@@ -634,7 +638,7 @@ def train_loop(config, state=None):
     raise ValueError("Profiling requested but initial profiling step set past training final step")
   last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1, first_profiling_step, config.steps - 1)
 
-  example_batch = None
+  is_first_step = True
   last_step_completion = datetime.datetime.now()
   prof = profiler.Profiler(config)
   for step in np.arange(start_step, config.steps):
@@ -642,7 +646,9 @@ def train_loop(config, state=None):
       prof.activate()
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
-      example_batch = load_next_batch(data_iterator, example_batch, config)
+      if not is_first_step:
+        example_batch = load_next_batch(data_iterator, example_batch, config)
+      is_first_step = False
       check_example_batch(config, example_batch=example_batch)
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, step=step)
