@@ -198,4 +198,5 @@ fi
 
 # Add dev orbax from github changes
 yes | pip3 uninstall orbax-checkpoint
-pip3 install git+https://github.com/google/orbax.git@test_665048272#subdirectory=checkpoint
+pip3 install git+https://github.com/google/orbax.git@test_675739460#subdirectory=checkpoint
+

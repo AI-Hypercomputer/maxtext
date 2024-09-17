@@ -25,7 +25,6 @@ vocab_size: 256128
 decoder_block: "gemma2"
 normalization_layer_epsilon: 1.e-06
 logits_via_embedding: True
-attention: "dot_product"
 final_logits_soft_cap: 30.0
 attn_logits_soft_cap: 50.0
 sliding_window_size: 4096

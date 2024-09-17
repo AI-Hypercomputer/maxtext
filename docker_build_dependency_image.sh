@@ -82,3 +82,5 @@ echo ""
 echo "You can run MaxText and your development tests inside of the docker image. Changes to your workspace will automatically
 be reflected inside the docker container."
 echo "Once you want you upload your docker container to GCR, take a look at docker_upload_runner.sh"
+
+

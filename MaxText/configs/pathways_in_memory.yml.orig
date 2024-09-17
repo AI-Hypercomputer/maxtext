@@ -38,7 +38,7 @@ load_full_state_path: ""
 # If enable_checkpointing is true, an asynchronous checkpointer will be used if
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the synchronous one.
-enable_checkpointing: True
+enable_checkpointing: False
 async_checkpointing: True
 checkpoint_period: 10_000
 # enables one replica to read the ckpt then broadcast to the rest
@@ -70,7 +70,6 @@ quantization: ""
 # Choose one of default, high, and highest.
 # https://kolonist26-jax-kr.readthedocs.io/en/latest/jax.lax.html#jax.lax.Precision
 matmul_precision: "default"
-activations_in_float32: False # Sets activations to float32 before nonlinearity it true, else dtype
 # Path to file with quantization config - only used for mixed precision.
 # Example configs in ../Maxtext/configs/quantization
 # Allows us to configure different bits, tiling and scale for quantizing selected weights.
@@ -117,7 +116,8 @@ logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedd
 num_experts: 1
 num_experts_per_tok: 1
 megablox: True
-capacity_factor: -1 # a factor to decide expert capacity for token dropping, and no dropping by default
+capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
+load_balance_loss_weight: 0.01 # weight for the load balance loss
 
 # pipeline parallelism
 # The number of decoder layers is equal to the product of num_stages, num_layers_per_pipeline_stage and num_pipeline_repeats.
@@ -134,6 +134,9 @@ num_pipeline_repeats: -1
 # Note the microbatch_size is given by global_batch_size / num_pipeline_microbatches, where global_batch_size = per_device_batch_size * num_devices
 num_pipeline_microbatches: -1
 scan_pipeline_iterations: True # This can be set independently of scan_layers, which is relevant when num_layers_per_pipeline_stage > 1.
+pipeline_delay_activation_forwarding: False # This delays the activation forwarding one loop iteration simplifying XLA's task of overlapping since
+# the communication and compute in each iteration are now independent. However this comes at the cost of doubling the pipeline bubble,
+# and you must set the number of microbatches to at least 2 * num_stages (the minimum 2 * num_stages is set by default with this delay).
 
 # Choose 'remat_policy' between 'minimal', 'save_dot_except_mlpwi', 'save_dot_except_mlp', 'save_qkv_proj', 'qkv_proj_offloaded', 'minimal_offloaded', 'save_out_proj' and 'full'.
 # These options offer a trade-off between speed (fastest to slowest) and HBM usage (highest to lowest)
@@ -166,13 +169,13 @@ base_output_directory: ""
 # Emergency checkpoint is an experimental Orbax feature that: periodically saves to persistent storage and, with a larger invertal, saves to a local directory.
 # During restore, if a local copy is available in any slice, it will be broadcast to other slices without having to fetch from persistent storage.
 # See more details on https://github.com/google/orbax/tree/main/checkpoint/orbax/checkpoint/experimental/emergency.
-enable_emergency_checkpoint: True
+enable_emergency_checkpoint: False
 
 # It should be specified when and only when `enable_emergency_checkpoint` is True.
-local_checkpoint_directory: "/sujinesh-cache"
+local_checkpoint_directory: ""
 
 # It should be a positive number when and only when `enable_emergency_checkpoint` is True.
-local_checkpoint_period: 3
+local_checkpoint_period: 0
 
 # Jax cache directory
 jax_cache_dir: "~/jax_cache"

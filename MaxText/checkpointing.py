@@ -27,8 +27,8 @@ from multihost_dataloading import MultiHostDataLoadIterator
 import numpy as np
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+import orbax.checkpoint.experimental.emergency.pathways_checkpoint_manager as pw_emergency_checkpoint_manager
 from orbax.checkpoint.multihost.utils import is_pathways_on_cloud_backend
-from previewutilities.persistence.pathways_orbax_handler import pathways_local_state_handler
 
 CheckpointManager = ocp.CheckpointManager
 CheckpointManagerOptions = ocp.CheckpointManagerOptions
@@ -111,8 +111,8 @@ def create_orbax_emergency_checkpoint_manager(
   )
 
   if is_pathways_on_cloud_backend():
-    local_state_handler = pathways_local_state_handler()
-    emergency_mngr = emergency_checkpoint_manager.PathwaysCheckpointManager(
+    local_state_handler = pw_emergency_checkpoint_manager.local_checkpoint_handler()
+    emergency_mngr = pw_emergency_checkpoint_manager.PathwaysCheckpointManager(
         local_checkpoint_dir,
         epath.Path(persistent_checkpoint_dir),
         global_mesh=global_mesh,
@@ -206,7 +206,7 @@ def load_state_if_possible(
       def map_to_pspec(data):
         pspec = data.sharding.spec
         mesh = data.sharding.mesh
-        if not enable_single_replica_ckpt_restoring:
+        if not enable_single_replica_ckpt_restoring or isinstance(checkpoint_manager, pw_emergency_checkpoint_manager.PathwaysCheckpointManager):
           return ocp.type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
         replica_axis_index = 0
         replica_devices = _replica_devices(mesh.devices, replica_axis_index)
@@ -222,6 +222,7 @@ def load_state_if_possible(
             jax.Array, array_handler, override=True
         )
 
+        # TO DO: These restore args may not be correct for Pathways.
         return ocp.type_handlers.SingleReplicaArrayRestoreArgs(
             sharding=jax.sharding.NamedSharding(mesh, pspec),
             single_replica_sharding=single_replica_sharding,
@@ -234,7 +235,7 @@ def load_state_if_possible(
           abstract_unboxed_pre_state,
       )
 
-      if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager) or isinstance(checkpoint_manager, emergency_checkpoint_manager.PathwaysCheckpointManager):
+      if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager) or isinstance(checkpoint_manager, pw_emergency_checkpoint_manager.PathwaysCheckpointManager):
         return (
             checkpoint_manager.restore(
                 latest_step,
