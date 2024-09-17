@@ -48,10 +48,22 @@ class Pipeline(nn.Module):
 
   def setup(self):
     self.num_stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
-    self.use_circ_storage = self.config.num_pipeline_repeats > 1 and self.config.num_pipeline_microbatches > self.num_stages
+    self.forwarding_delay = 2 if self.config.pipeline_delay_activation_forwarding else 1
     self.pipeline_microbatch_size = self.config.micro_batch_size_to_train_on // self.config.num_pipeline_microbatches
     microbatches_per_stage = self.config.num_pipeline_microbatches // self.num_stages
     self.microbatches_per_stage = microbatches_per_stage
+    self.use_circ_storage = self.need_circ_storage()
+
+  def need_circ_storage(self):
+    return self.config.num_pipeline_repeats > 1 and self.config.num_pipeline_microbatches  > self.num_stages * self.forwarding_delay
+
+  def iterations_to_complete_first_microbatch_one_repeat(self):
+    # Return the number of iterations it takes for microbatch 0 to finish a repeat
+    return self.forwarding_delay * (self.num_stages - 1)
+
+  def iterations_to_complete_first_microbatch(self):
+    # Return the number of iterations it takes for microbatch 0 to finish the last stage of the last repeat
+    return self.config.num_pipeline_microbatches * (self.config.num_pipeline_repeats - 1) + self.iterations_to_complete_first_microbatch_one_repeat()
 
   def init_states(self, inputs):
     '''Initialize components of state: state_io, shift, circular_storage and circular_storage_mover
@@ -59,9 +71,10 @@ class Pipeline(nn.Module):
 
         Returns a dictionary with properties
           shift: zeros shape [num_stages, micro_size, sequence, embed]
+          prev_outputs: same shape as shift, only used when pipeline_delay_activation_forwarding is set to true, else None
           state_io: reshaped inputs [num_stages, microbatches/stages, micro_size, sequence, embed]
-          circ_storage: zeros [num_stages, microbatches, micro_size, sequence, embed]
-          circ_storage_mover: zeros[num_stages, micro_size, sequence, embed]
+          circ_storage: zeros [num_stages, microbatches, micro_size, sequence, embed] when needed, else None
+          circ_storage_mover: zeros[num_stages, micro_size, sequence, embed] when needed, else None
           loop_iteration: scalar set initially to 0.  
     '''
 
@@ -69,6 +82,13 @@ class Pipeline(nn.Module):
     # shift has shape [num_stages, micro_size, sequence, embed]
     shift = jnp.zeros((self.num_stages,) + inputs.shape[1:], dtype=inputs.dtype)
     shift = nn.with_logical_constraint(shift, ("activation_stage", "activation_batch", "activation_length", "activation_embed"),rules=self.config.logical_axis_rules,mesh=self.mesh)
+
+    # Prev outputs has the same shape of the output (and shift)
+    if self.config.pipeline_delay_activation_forwarding:
+      prev_outputs = jnp.zeros((self.num_stages,) + inputs.shape[1:], dtype=inputs.dtype)
+      prev_outputs = nn.with_logical_constraint(prev_outputs, ("activation_stage", "activation_batch", "activation_length", "activation_embed"),rules=self.config.logical_axis_rules,mesh=self.mesh)
+    else:
+      prev_outputs = None
 
     # state_io (state input output) at first holds all of the input batches, but also will hold the outputs as the pipeline runs/finishes
     # state_io has shape [num_stages, microbatches/stages, micro_size, sequence, embed]
@@ -100,7 +120,8 @@ class Pipeline(nn.Module):
       "shift": shift,
       "circ_storage": circ_storage,
       "circ_storage_mover": circ_storage_mover,
-      "loop_iteration": 0
+      "loop_iteration": 0,
+      "prev_outputs": prev_outputs
     }
     return init_loop_state
 
@@ -153,7 +174,7 @@ class Pipeline(nn.Module):
   def get_microbatch_and_repeat_ids(self, loop_iteration):
     '''Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and non-circular'''
     # Stage 0 has processed one microbatch every loop_iter, but Stage 1 is one behind due to bubble, etc for other stages
-    microbatches_processed = jnp.maximum(loop_iteration - jnp.arange(self.num_stages), 0) 
+    microbatches_processed = jnp.maximum(loop_iteration - self.forwarding_delay * jnp.arange(self.num_stages), 0) 
     microbatch_ids = microbatches_processed % self.config.num_pipeline_microbatches
     repeat_ids = microbatches_processed // self.config.num_pipeline_microbatches
     return microbatch_ids, repeat_ids
@@ -210,22 +231,29 @@ class Pipeline(nn.Module):
       * state_io: rotates left/up by 1 (the whole created in the last slot is filled with the most recent pipeline output)
          * Pushing inputs up from top of state_io into first stage of shift
          * Pulling outputs up from last stage of shift into bottom of state_io
-      * shift: rotate output right/down by 1 - we imagine the pipeline moves to right/down
+      * shift: rotate output (or prev_outputs if using delay) right/down by 1 - we imagine the pipeline moves to right/down
       * circ_storage: pushes circ_storage_mover (the output of the previous iteration) into rotating index of circ_storage
       * circ_storage_mover: assigned to rotated output and pushed into circ_storage on the next iteration
+      * prev_outputs: is set to the current output
     '''
 
     old_state_io = loop_state['state_io']
     old_circ_storage = loop_state["circ_storage"]
     old_circ_storage_mover = loop_state["circ_storage_mover"]
     loop_iteration = loop_state["loop_iteration"]
+    old_prev_outputs = loop_state["prev_outputs"]
     # Shift becomes a rotated-right version of the previous output
     def _rotate_right(output_in):
       # Use lax.slice to avoid generating a gather.
       last = jax.lax.slice_in_dim(output_in, self.num_stages - 1, self.num_stages, axis=0)
       except_last = jax.lax.slice_in_dim(output_in, 0, self.num_stages - 1, axis=0)
       return jnp.concatenate([last, except_last], axis=0)
-    new_shift = _rotate_right(output)
+    if self.config.pipeline_delay_activation_forwarding:
+      new_shift = _rotate_right(old_prev_outputs)
+      new_prev_outputs = output
+    else:
+      new_shift = _rotate_right(output)
+      new_prev_outputs = None
 
     if self.use_circ_storage:
       # Insert the circ_storage_mover into new_circ_storage at a microbatch-rotating index.
@@ -233,9 +261,8 @@ class Pipeline(nn.Module):
       def _rotate_right_and_update(circ_storage_mover_in, circ_storage_in):
           rotated = _rotate_right(circ_storage_mover_in)
           rotated = jnp.expand_dims(rotated, 1)
-          # The offset is the previous iterations microbatch ID of the last stage, so that for example microbatch 0 will
-          # be placed in index 0 of the num_microbatches axis. 
-          offset = (loop_iteration - (self.num_stages - 1) - 1) % self.config.num_pipeline_microbatches # Note extra -1 b/c grabbing from the previous output - using circ_storage_mover before it is updated
+          # We rotate the pushing index into circ storage, and ensure that microbatch 0 lands in index 0 
+          offset = (loop_iteration - self.iterations_to_complete_first_microbatch_one_repeat() - 1) % self.config.num_pipeline_microbatches # Note extra -1 b/c grabbing from the previous output - using circ_storage_mover before it is updated
           return jax.lax.dynamic_update_slice_in_dim(circ_storage_in, rotated, offset, axis=1)
       new_circ_storage = _rotate_right_and_update(old_circ_storage_mover, old_circ_storage)
       new_circ_storage_mover = output
@@ -264,16 +291,15 @@ class Pipeline(nn.Module):
       "shift": new_shift,
       "circ_storage": new_circ_storage,
       "circ_storage_mover": new_circ_storage_mover,
-      "loop_iteration": loop_iteration + 1
+      "loop_iteration": loop_iteration + 1,
+      "prev_outputs": new_prev_outputs
     }
     return new_loop_state
    
   def permute_output_micro_per_stage_dim(self, output):
-    # The first real output (batch 0) takes a certain amount of loop iterations to finish and be pushed to state_io - it will land on a different index of state_io depending on the number of iterations.
-    first_output_num_iters = self.config.num_pipeline_microbatches * (self.config.num_pipeline_repeats - 1) + self.num_stages - 1
-    # The first term above is a multiple of num_pipeline_microbatches and thus could be ignored since its also a multiple of microbatches_per_stage, but we keep it for clairty
-    land_idx = first_output_num_iters % self.microbatches_per_stage
-    permutation = (np.arange(self.microbatches_per_stage) + land_idx) % self.microbatches_per_stage # permute so the value in land_idx is moved into idx 0, and (land_idx + 1) appear in idx 1, etc
+    # The first real output (microbatch 0) takes a certain amount of loop iterations to finish and be pushed to state_io - it will land on a different index of state_io depending on the number of iterations.
+    microbatch_0_idx = self.iterations_to_complete_first_microbatch() % self.microbatches_per_stage
+    permutation = (np.arange(self.microbatches_per_stage) + microbatch_0_idx) % self.microbatches_per_stage # permute so the value in land_idx is moved into idx 0, and (land_idx + 1) appear in idx 1, etc
     output = output[:,permutation]
     return output
 
@@ -377,8 +403,11 @@ class Pipeline(nn.Module):
     # Each iteration is vmapped by num_stages, so the number of iterations should be num_micro * num_stages * repeats / num_stages = num_micro * repeats
     # However due to the pipeline bubble some iterations process less than num_stages microbatches. It takes
     # num_micro * repeat iterations for the last microbatch to start the final repeat, then an additional num_stages - 1 to finish the final repeat.
-    # Thus the total iterations is num_micro * repeat + num_stages - 1, and we may consider the num_stages - 1 as bubble. 
-    total_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats + self.num_stages  - 1
+    # Thus the total iterations is num_micro * repeat + num_stages - 1, and we may consider the num_stages - 1 as bubble.
+    # The bubble doubles when we use forwarding delay. 
+    bubble_iterations = self.forwarding_delay * (self.num_stages  - 1)
+    real_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats
+    total_iterations = real_iterations + bubble_iterations
 
     if self.is_initializing():     
      vmap_func = self.get_main_vmap_func()
