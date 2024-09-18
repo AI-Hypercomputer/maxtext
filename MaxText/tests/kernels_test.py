@@ -26,6 +26,7 @@ from kernels.ragged_attention import ragged_mqa, reference_mqa, ragged_mha, refe
 
 class RaggedAttentionTest(unittest.TestCase):
   """Tests for ragged attention kernel."""
+
   batch_size = 4
   num_kv_heads = 8
   num_query_heads = 32
@@ -37,7 +38,6 @@ class RaggedAttentionTest(unittest.TestCase):
   key = jax.random.key(0)
   k1, k2, k3 = jax.random.split(key, 3)
 
-
   @pytest.mark.tpu
   def test_ragged_mqa(self):
     q = jax.random.normal(self.k1, (self.batch_size, 1, self.head_dim), dtype=self.dtype)
@@ -47,36 +47,62 @@ class RaggedAttentionTest(unittest.TestCase):
 
     ragged_out, ragged_max, ragged_denom = ragged_mqa(q, k, v, lengths)
     reference_out, reference_max, reference_denom = reference_mqa(q, k, v, lengths)
-    self.assertTrue(jnp.max(abs(ragged_out - reference_out)) < 1e-1, msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1")
-    self.assertTrue(jnp.average(abs(ragged_out - reference_out)) < 1e-2, msg=f"Avg difference: {jnp.average(abs(ragged_out - reference_out))} > 1e-2")
-
+    self.assertTrue(
+        jnp.max(abs(ragged_out - reference_out)) < 1e-1,
+        msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1",
+    )
+    self.assertTrue(
+        jnp.average(abs(ragged_out - reference_out)) < 1e-2,
+        msg=f"Avg difference: {jnp.average(abs(ragged_out - reference_out))} > 1e-2",
+    )
 
   @pytest.mark.tpu
   def test_ragged_mha(self):
     q = jax.random.normal(self.k1, (self.batch_size, 1, self.num_query_heads, self.head_dim), dtype=self.dtype)
-    k = jax.random.normal(self.k2, (self.batch_size, self.max_target_length, self.num_query_heads, self.head_dim), dtype=self.dtype)
-    v = jax.random.normal(self.k3, (self.batch_size, self.max_target_length, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    k = jax.random.normal(
+        self.k2, (self.batch_size, self.max_target_length, self.num_query_heads, self.head_dim), dtype=self.dtype
+    )
+    v = jax.random.normal(
+        self.k3, (self.batch_size, self.max_target_length, self.num_query_heads, self.head_dim), dtype=self.dtype
+    )
     lengths = jnp.array(np.random.randint(1, self.max_target_length, self.batch_size), dtype=jnp.int32)
 
     ragged_out, ragged_max, ragged_denom = ragged_mha(q, k, v, lengths)
     ragged_out = ragged_out / ragged_denom
     reference_out, reference_max, reference_denom = reference_mha(q, k, v, lengths)
-    self.assertTrue(jnp.max(abs(ragged_out - reference_out)) < 1e-1, msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1")
-    self.assertTrue(jnp.average(abs(ragged_out - reference_out)) < 1e-2, msg=f"Avg difference: {jnp.average(abs(ragged_out - reference_out))} > 1e-2")
-
+    self.assertTrue(
+        jnp.max(abs(ragged_out - reference_out)) < 1e-1,
+        msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1",
+    )
+    self.assertTrue(
+        jnp.average(abs(ragged_out - reference_out)) < 1e-2,
+        msg=f"Avg difference: {jnp.average(abs(ragged_out - reference_out))} > 1e-2",
+    )
 
   @pytest.mark.tpu
   def test_ragged_gqa(self):
     q = jax.random.normal(self.k1, (self.batch_size, 1, self.num_query_heads, self.head_dim), dtype=self.dtype)
-    k = jax.random.normal(self.k2, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype)
-    v = jax.random.normal(self.k3, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype)
+    k = jax.random.normal(
+        self.k2, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype
+    )
+    v = jax.random.normal(
+        self.k3, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype
+    )
     lengths = jnp.array(np.random.randint(1, self.max_target_length, self.batch_size), dtype=jnp.int32)
 
     ragged_out, ragged_max, ragged_denom = ragged_gqa(q, k, v, lengths)
     ragged_out = ragged_out / ragged_denom
-    reference_out, reference_max, reference_denom = reference_gqa(jnp.squeeze(q), jnp.swapaxes(k, 1, 2), jnp.swapaxes(v, 1, 2), lengths)
-    self.assertTrue(jnp.max(abs(ragged_out - reference_out)) < 1e-1, msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1")
-    self.assertTrue(jnp.average(abs(ragged_out - reference_out)) < 1e-2, msg=f"Avg difference: {jnp.average(abs(ragged_out - reference_out))} > 1e-2")
+    reference_out, reference_max, reference_denom = reference_gqa(
+        jnp.squeeze(q), jnp.swapaxes(k, 1, 2), jnp.swapaxes(v, 1, 2), lengths
+    )
+    self.assertTrue(
+        jnp.max(abs(ragged_out - reference_out)) < 1e-1,
+        msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1",
+    )
+    self.assertTrue(
+        jnp.average(abs(ragged_out - reference_out)) < 1e-2,
+        msg=f"Avg difference: {jnp.average(abs(ragged_out - reference_out))} > 1e-2",
+    )
 
 
 if __name__ == "__main__":

@@ -24,7 +24,6 @@ from tensorboard_plugin_profile.convert import raw_to_tool_data
 
 
 class TpuJAXTest(unittest.TestCase):
-
   """Test for profile collected with JAX."""
 
   def _get_session_snapshot(self):

@@ -58,11 +58,7 @@ def find_nans_and_infs(pytree):
 
 def l2norm_pytree(x):
   """L2 norm of a pytree of arrays."""
-  return jnp.sqrt(
-      jax.tree_util.tree_reduce(
-          lambda x, y: x + jnp.sum(jnp.square(y)), x, initializer=0.0
-      )
-  )
+  return jnp.sqrt(jax.tree_util.tree_reduce(lambda x, y: x + jnp.sum(jnp.square(y)), x, initializer=0.0))
 
 
 def calculate_num_params_from_pytree(params):
@@ -74,16 +70,13 @@ def calculate_num_params_from_pytree(params):
 
 def calculate_total_params_per_chip(params):
   """Calculate total paramsper chip."""
+
   def calculate_leaf_params_per_chip(arr):
     shard = arr.addressable_shards[0]
     return np.prod(shard.data.shape)
 
-  params_sizes_per_chip = jax.tree_util.tree_map(
-      calculate_leaf_params_per_chip, params
-  )
-  total_parameters_per_chip = jax.tree_util.tree_reduce(
-      lambda x, y: x + y, params_sizes_per_chip
-  )
+  params_sizes_per_chip = jax.tree_util.tree_map(calculate_leaf_params_per_chip, params)
+  total_parameters_per_chip = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes_per_chip)
   return total_parameters_per_chip
 
 
@@ -101,11 +94,7 @@ def summarize_size_from_pytree(params):
 
 def initialize_summary_writer(config):
   summary_writer_path = os.path.join(config.tensorboard_dir, config.run_name)
-  return (
-      writer.SummaryWriter(summary_writer_path)
-      if jax.process_index() == 0
-      else None
-  )
+  return writer.SummaryWriter(summary_writer_path) if jax.process_index() == 0 else None
 
 
 def close_summary_writer(summary_writer):
@@ -180,9 +169,7 @@ def write_config_raw_keys_for_gcs(raw_keys):
     yaml.dump(raw_keys_dict, config_for_gcs)
   config_for_gcs.close()
 
-  gcs_filename = os.path.join(
-      raw_keys["base_output_directory"], raw_keys["run_name"], filename
-  )
+  gcs_filename = os.path.join(raw_keys["base_output_directory"], raw_keys["run_name"], filename)
   max_logging.log(f"Moving file {filename} to GCS...")
   upload_blob(gcs_filename, filename)
   max_logging.log(f"File {filename} moved successfully!")
@@ -216,15 +203,11 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     # Don't initialize jax distributed with AOT compilation
     return
   if is_gpu_backend(raw_keys):
-    max_logging.log(
-        "Attempting to initialize the jax distributed system for GPU backend..."
-    )
+    max_logging.log("Attempting to initialize the jax distributed system for GPU backend...")
     initialize_jax_for_gpu()
     max_logging.log("Jax distributed system initialized on GPU!")
   elif is_cpu_backend(raw_keys):
-    max_logging.log(
-        "Attempting to initialize the jax distributed system for CPU backend..."
-    )
+    max_logging.log("Attempting to initialize the jax distributed system for CPU backend...")
     initialize_jax_for_cpu()
     max_logging.log("Jax distributed system initialized on CPUs!")
   elif (
@@ -234,7 +217,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
       and not raw_keys["enable_single_controller"]
   ) or raw_keys["hardware"] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
-    if not raw_keys['enable_emergency_checkpoint']:
+    if not raw_keys["enable_emergency_checkpoint"]:
       jax.distributed.initialize()
     else:
       initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
@@ -257,9 +240,7 @@ def initialize_jax_for_gpu():
 def initialize_jax_for_cpu():
   """Jax distributed initialize for CPUs. Includes retries until the coordinator is ready."""
   coordinator_ip_address = get_coordinator_ip_address()
-  coordinator_address = (
-      coordinator_ip_address + ":1234"
-  )  # JAX coordinator port used in XPK
+  coordinator_address = coordinator_ip_address + ":1234"  # JAX coordinator port used in XPK
   # Env variables to be set in XPK or otherwise
   job_index = int(os.environ.get("JOB_INDEX"))
   job_completion_index = int(os.environ.get("JOB_COMPLETION_INDEX"))
@@ -283,12 +264,16 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
   process_id, coordinator_address = _retrieve_jax_init_info(raw_keys)
 
   if process_id != "" and coordinator_address != "":
-    max_logging.log(f"Using {process_id} as the process_id and {coordinator_address} as the"
-                    " coordinator_address to initialize JAX distributed runtime...")
+    max_logging.log(
+        f"Using {process_id} as the process_id and {coordinator_address} as the"
+        " coordinator_address to initialize JAX distributed runtime..."
+    )
     jax.distributed.initialize(coordinator_address=coordinator_address, process_id=int(process_id))
   else:
-    max_logging.log("Initializing JAX distributed runtime without args when emergency checkpointing is"
-                    " enabled. This should not happen and your workload may have unexpected behavior.")
+    max_logging.log(
+        "Initializing JAX distributed runtime without args when emergency checkpointing is"
+        " enabled. This should not happen and your workload may have unexpected behavior."
+    )
     jax.distributed.initialize()
 
   ocp.multihost.utils.initialize_runtime_to_distributed_ids()
@@ -305,11 +290,12 @@ def _retrieve_jax_init_info(raw_keys):
   # "repair" time is longer.
   for i in range(900):
     if local_jax_init_info_file.exists():
-      return local_jax_init_info_file.read_text().split('\n')[:2]
+      return local_jax_init_info_file.read_text().split("\n")[:2]
     max_logging.log(f"Unable to locate {JAX_INIT_INFO_FILE} after {i} seconds, sleeping for 1 second before retrying...")
     time.sleep(1)
-  max_logging.log(f"Unable to locate {JAX_INIT_INFO_FILE} after 900 seconds,"
-                  "returning empty process id and coordinator address.")
+  max_logging.log(
+      f"Unable to locate {JAX_INIT_INFO_FILE} after 900 seconds," "returning empty process id and coordinator address."
+  )
   return "", ""
 
 
@@ -346,9 +332,7 @@ def get_coordinator_ip_address():
   return coordinator_ip_address
 
 
-def fill_unspecified_mesh_axes(
-    parallelism_vals, target_product, parallelism_type
-):
+def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
   """Evaluates unspecified DCN/ICI parallelism values"""
   if -1 in parallelism_vals:
     assert (
@@ -406,20 +390,12 @@ def create_device_mesh(config, devices=None):
   ]
 
   # Find possible unspecified parallelisms
-  ici_parallelism = fill_unspecified_mesh_axes(
-      ici_parallelism, num_devices_per_slice, "ICI"
-  )
+  ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, "ICI")
 
-  allow_split_physical_axes = (
-      config.allow_split_physical_axes
-      if config.allow_split_physical_axes
-      else False
-  )
+  allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
   if multi_slice_env:
-    dcn_parallelism = fill_unspecified_mesh_axes(
-        dcn_parallelism, num_slices, "DCN"
-    )
+    dcn_parallelism = fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
     mesh = mesh_utils.create_hybrid_device_mesh(
         ici_parallelism,
         dcn_parallelism,
@@ -435,9 +411,9 @@ def create_device_mesh(config, devices=None):
       )
     else:
       mesh = mesh_utils.create_device_mesh(
-            ici_parallelism,
-            devices,
-        )
+          ici_parallelism,
+          devices,
+      )
 
   max_logging.log(f"Num_devices: {num_devices}, shape {mesh.shape}")
 
@@ -454,9 +430,7 @@ def unbox_logicallypartioned(boxed_pytree):
     a pytree where all all LogicallyPartitioned leaves have been unboxed.
   """
   return jax.tree_util.tree_map(
-      lambda x: x.unbox()
-      if isinstance(x, flax.linen.spmd.LogicallyPartitioned)
-      else x,
+      lambda x: x.unbox() if isinstance(x, flax.linen.spmd.LogicallyPartitioned) else x,
       boxed_pytree,
       is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned),
   )
@@ -493,7 +467,6 @@ def init_initial_state(model, tx, config, is_training, key):
   return init_decode_state(model.apply, model_vars)
 
 
-
 def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   """Setup decode state by loading params from a checkpoint.
   Args:
@@ -509,32 +482,21 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   """
   if not config.load_parameters_path:
     # generate random params
-    max_logging.log(
-        "No decode checkpoint specified - generating random weights."
-    )
-    state, state_mesh_annotations, _ = setup_initial_state(
-      model, None, None, config, rng, mesh, checkpoint_manager, False
-      )
+    max_logging.log("No decode checkpoint specified - generating random weights.")
+    state, state_mesh_annotations, _ = setup_initial_state(model, None, None, config, rng, mesh, checkpoint_manager, False)
   else:
     # Load params from checkpoint
     max_logging.log(f"Loading decode params from {config.load_parameters_path}")
-    unboxed_abstract_state, state_mesh_annotations, _ = (
-      get_abstract_state(model, None, config, rng, mesh, False)
-      )
+    unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(model, None, config, rng, mesh, False)
     with nn_partitioning.axis_rules(config.logical_axis_rules):
-      params = checkpointing.load_params_from_path(
-        config.load_parameters_path,
-        unboxed_abstract_state.params
-        )
+      params = checkpointing.load_params_from_path(config.load_parameters_path, unboxed_abstract_state.params)
     state = init_decode_state(None, params)
 
   state = unbox_logicallypartioned(state)
   return state, state_mesh_annotations
 
 
-def setup_training_state(
-    model, data_iterator, tx, config, rng, mesh, checkpoint_manager
-):
+def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
   is_training = True
   return setup_initial_state(
       model,
@@ -575,8 +537,8 @@ def setup_initial_state(
     state_mesh_annotations: the mesh annotations for the train state
   """
 
-  unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = (
-      get_abstract_state(model, tx, config, rng, mesh, is_training)
+  unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
+      model, tx, config, rng, mesh, is_training
   )
 
   # Initialization
@@ -599,9 +561,7 @@ def setup_initial_state(
           data_iterator.local_iterator = restored["iter"]
         state = restored["items"]
     else:
-      init_state_partial = functools.partial(
-          init_initial_state, model, tx, config, is_training
-      )
+      init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       state = jax.jit(
           init_state_partial,
           in_shardings=None,
@@ -640,15 +600,11 @@ def create_learning_rate_schedule(config):
   lr = config.learning_rate
   cos_final_lr = lr * config.cosine_learning_rate_final_fraction
 
-  warmup_steps = int(
-      config.learning_rate_schedule_steps * config.warmup_steps_fraction
-  )
+  warmup_steps = int(config.learning_rate_schedule_steps * config.warmup_steps_fraction)
   cos_steps = config.learning_rate_schedule_steps - warmup_steps
   constant_zero_steps = config.steps - config.learning_rate_schedule_steps
 
-  warmup_schedule = optax.linear_schedule(
-      init_value=0.0, end_value=lr, transition_steps=warmup_steps
-  )
+  warmup_schedule = optax.linear_schedule(init_value=0.0, end_value=lr, transition_steps=warmup_steps)
   cos_schedule = make_cos_schedule(lr, cos_final_lr, cos_steps)
   constant_schedule = optax.constant_schedule(0.0)
 
@@ -668,9 +624,7 @@ def create_learning_rate_schedule(config):
 # Cross entropy implementation is taken from original T5X codebase:
 # https://github.com/google-research/t5x/blob/ace831eea1e2742b4299cd1a9af7e4f302038351/t5x/losses.py#L25-L101
 @jax.custom_vjp
-def cross_entropy_with_logits(
-    logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+def cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float) -> Tuple[jnp.ndarray, jnp.ndarray]:
   """Computes cross entropy loss with stable custom gradient.
   Computes a stabilized-gradient version of:
     -jnp.sum(targets * nn.log_softmax(logits), axis=-1)
@@ -699,9 +653,7 @@ def cross_entropy_with_logits(
   return loss, total_z_loss
 
 
-def _cross_entropy_with_logits_fwd(
-    logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float = 0.0
-) -> Tuple[
+def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float = 0.0) -> Tuple[
     Tuple[jnp.ndarray, jnp.ndarray],
     Tuple[
         jnp.ndarray,
@@ -751,10 +703,7 @@ def _cross_entropy_with_logits_bwd(
   g = g[0]  # Ignore z_loss component as that is only used for logging.
   logits, targets, z_loss, exp_shifted, sum_exp, log_softmax, log_z = res
   # z-loss term adds the (2 * z_loss * log_z) factor.
-  deriv = (
-      jnp.expand_dims(1 + 2 * z_loss * log_z, -1) * exp_shifted / sum_exp
-      - targets
-  )
+  deriv = jnp.expand_dims(1 + 2 * z_loss * log_z, -1) * exp_shifted / sum_exp - targets
   g_logits = jnp.expand_dims(g, axis=-1) * deriv
   g_targets = -jnp.expand_dims(g, axis=-1) * log_softmax
   return (
@@ -764,33 +713,23 @@ def _cross_entropy_with_logits_bwd(
   )  # sets z-loss coeff gradient to 0
 
 
-cross_entropy_with_logits.defvjp(
-    _cross_entropy_with_logits_fwd, _cross_entropy_with_logits_bwd
-)
+cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd, _cross_entropy_with_logits_bwd)
 
 
 def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
-  init_state_partial = functools.partial(
-      init_initial_state, model, tx, config, is_training
-  )
+  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     abstract_state = jax.eval_shape(init_state_partial, rng)
 
   state_logical_annotations = nn.get_partition_spec(abstract_state)
 
-  state_mesh_shardings = nn.logical_to_mesh_sharding(
-      state_logical_annotations, mesh, config.logical_axis_rules
-  )
+  state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
 
-  abstract_sharded_state = jax.jit(
-      init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings
-  ).eval_shape(rng)
+  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape(rng)
 
-  unboxed_abstract_sharded_state = unbox_logicallypartioned(
-      abstract_sharded_state
-  )
+  unboxed_abstract_sharded_state = unbox_logicallypartioned(abstract_sharded_state)
   # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
@@ -841,14 +780,10 @@ def print_model_vars(print_str, model_vars):
 
 def get_project():
   """Get project"""
-  completed_command = subprocess.run(
-      ["gcloud", "config", "get", "project"], check=True, capture_output=True
-  )
+  completed_command = subprocess.run(["gcloud", "config", "get", "project"], check=True, capture_output=True)
   project_outputs = completed_command.stdout.decode().strip().split("\n")
   if len(project_outputs) < 1 or project_outputs[-1] == "":
-    max_logging.log(
-        "You must specify config.vertex_tensorboard_project or set 'gcloud config set project <project>'"
-    )
+    max_logging.log("You must specify config.vertex_tensorboard_project or set 'gcloud config set project <project>'")
     return None
   return project_outputs[-1]
 
@@ -864,9 +799,7 @@ def delete_pytree(p):
 
 def summarize_pytree_data(params, name="Params", raw=False):
   """Generate basic metrics of a given Pytree."""
-  num_params, total_param_size, avg_param_size = summarize_size_from_pytree(
-      params
-  )
+  num_params, total_param_size, avg_param_size = summarize_size_from_pytree(params)
   if not raw:
     num_params_in_billions = num_params / 1e9
     total_param_size_in_gb = total_param_size / 1e9
@@ -887,27 +820,28 @@ def summarize_pytree_data(params, name="Params", raw=False):
 
 
 def save_quantized_checkpoint_if_configured(config, params):
-  assert config.quantization, 'quantization must be configured'
+  assert config.quantization, "quantization must be configured"
   if config.save_quantized_params_path:
     checkpointing.save_params_to_path(config.save_quantized_params_path, params)
   else:
     "Skipping saving quantized checkpoint as save_quantized_params_path is null."
 
 
-def print_mem_stats(label:str):
-  print(f'\nMemstats: {label}:')
+def print_mem_stats(label: str):
+  print(f"\nMemstats: {label}:")
   try:
     for d in jax.local_devices():
       stats = d.memory_stats()
-      used = round(stats['bytes_in_use']/2**30, 2)
-      limit = round(stats['bytes_limit']/2**30, 2)
+      used = round(stats["bytes_in_use"] / 2**30, 2)
+      limit = round(stats["bytes_limit"] / 2**30, 2)
       print(f"\tUsing (GB) {used} / {limit} ({used/limit:%}) on {d}")
   except (RuntimeError, KeyError):
     print("\tMemstats unavailable.")
 
+
 def print_system_information():
-  """ Print system information of the current environment.
-  Note that this will initialize the JAX backend. """
+  """Print system information of the current environment.
+  Note that this will initialize the JAX backend."""
   max_logging.log(f"System Information: Jax Version: {jax.__version__}")
   max_logging.log(f"System Information: Jaxlib Version: {jax.lib.__version__}")
   max_logging.log(f"System Information: Jax Backend: {jax.lib.xla_bridge.get_backend().platform_version}")

@@ -155,7 +155,7 @@ UserFacingNameToSystemCharacteristics = {
     # across hosts will occur over DCN. This makes the "slice" topology of A3 fixed to a single host.
     # To use AoT compilation with multihost, the `compile_topology_num_slices` flag should be
     # specified to the number of hosts.
-    "a3": SystemCharacteristics("gpu", None, None, None, 8, None)
+    "a3": SystemCharacteristics("gpu", None, None, None, 8, None),
 }
 
 
