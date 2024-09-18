@@ -145,6 +145,26 @@ class HFDataSource(grain.RandomAccessDataSource):
 
 ########## Functions used by Grain pipeline
 
+class ArrayRecordDataSourceWithPadding(grain.ArrayRecordDataSource):
+  """A class that will produce all-0 padding data when run out of real data"""
+  def __init__(self, paths, data_column_name, max_target_length):
+    super().__init__(paths)
+    self.out_of_data = False
+    self.data_column_name = data_column_name
+    self.max_target_length = max_target_length
+  
+  def __len__(self):
+    return super().__len__() + self.max_target_length
+  
+  def __getitem__(self, index):
+    if index >= super().__len__():
+      if not self.out_of_data:
+        max_logging.log(f"Failed to retrive data for {index=}, you may run out of data, grain data loader will start producint all-0 padding data")
+        self.out_of_data = True
+      return {self.data_column_name: np.zeros(self.max_target_length // 2, dtype=np.int32)}
+    else:
+      return super().__getitem__(index)
+
 @dataclasses.dataclass
 class ParseFeatures(grain.MapTransform):
   """Parse serialized example"""
@@ -161,7 +181,8 @@ class ParseFeatures(grain.MapTransform):
         self.data_column: tf.io.FixedLenSequenceFeature([], dtype=self.dtype, allow_missing=True)
         })
       return parsed
-
+    if isinstance(features, dict):
+      return features
     return _parse(features)
 
 @dataclasses.dataclass
@@ -172,6 +193,8 @@ class NormalizeFeatures(grain.MapTransform):
     self.tokenize = tokenize
 
   def map(self, features):
+    if isinstance(features[self.column_name], np.ndarray):
+      return {"inputs": features[self.column_name], "targets": features[self.column_name]}
     if self.tokenize:
       return {"inputs": features[self.column_name].numpy()[0].decode(), "targets": features[self.column_name].numpy()[0].decode()}
     else:
@@ -181,17 +204,12 @@ class NormalizeFeatures(grain.MapTransform):
 @dataclasses.dataclass
 class ReformatPacking(grain.MapTransform):
   """Reformat packing outputs."""
-
   def map(self, data):
-    return {
-        "inputs": data[0]["inputs"],
-        "targets": data[0]["targets"],
-        "inputs_segmentation": data[1]["inputs"],
-        "targets_segmentation": data[1]["targets"],
-        "inputs_position": data[2]["inputs"],
-        "targets_position": data[2]["targets"],
-    }
-
+    data["inputs_segmentation"] = data.pop("inputs_segment_ids")
+    data["targets_segmentation"] = data.pop("targets_segment_ids")
+    data["inputs_position"] = data.pop("inputs_positions")
+    data["targets_position"] = data.pop("targets_positions")
+    return data
 
 @dataclasses.dataclass
 class PadToMaxLength(grain.MapTransform):
@@ -216,6 +234,25 @@ class PadToMaxLength(grain.MapTransform):
       data[key] = _pad(data[key], self.max_length)
     return data
 
+def pad_to_batch_size(x, batch_size, axis=0):
+  if x.shape[0] < batch_size:
+    pad_widths = [(0, 0)] * len(x.shape)
+    pad_widths[axis] = (0, batch_size - x.shape[0])
+    x = np.pad(x, pad_widths, mode="constant", constant_values=x.dtype.type(0))
+  return x
+
+@dataclasses.dataclass
+class PadBatch(grain.MapTransform):
+  """Pad partial batch to full"""
+
+  def __init__(self, batch_size):
+    self.batch_size = batch_size
+
+  def map(self, data):
+    for k, _ in data.items():
+      data[k] = pad_to_batch_size(data[k], batch_size=self.batch_size)
+    return data
+
 
 def shift_right(x, axis=1):
   """Shift the input to the right by padding and slicing on axis."""
@@ -228,17 +265,23 @@ def shift_right(x, axis=1):
   padded = np.pad(x, pad_widths, mode="constant", constant_values=x.dtype.type(0))
   return padded[tuple(slices)]
 
+def shift_left(x, axis=1):
+  """Shift to the left and pad."""
+  pad_widths = [(0, 0)] * len(x.shape)
+  pad_widths[axis] = (0, 1)
+  slices = [
+      slice(None),
+  ] * len(x.shape)
+  slices[axis] = slice(1, None)
+  padded = np.pad(x, pad_widths, mode="constant", constant_values=x.dtype.type(0))
+  return padded[tuple(slices)]
 
 def shift_and_refine(x, axis=1):
-  """Shift inputs, set segmentation to 0 when target element is 0.
-  Replace EOS by 0 for packed inputs."""
-  x["inputs"] = shift_right(x["inputs"], axis=axis)
+  """Shift left and set segmentation to 0 when target element is 0."""
+  x["targets"] = shift_left(x["targets"], axis=axis)
   targets_nonzero = x["targets"] != 0
   x["inputs_segmentation"] *= targets_nonzero
   x["targets_segmentation"] *= targets_nonzero
-  # For packed targets, the first shifted token of a new sequence is made
-  # 0, rather than being the EOS token for the last sequence.
-  x["inputs"] *= x["inputs_segmentation"] == shift_right(x["inputs_segmentation"], axis=axis)
 
   return x
 

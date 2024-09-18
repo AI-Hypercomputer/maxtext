@@ -190,4 +190,6 @@ if [[ "$MODE" == "pinned" ]]; then
     pip3 install -U -r requirements.txt -c constraints_gpu.txt
 else
     pip3 install -U -r requirements.txt
+    gsutil cp gs://mlperf-exp-us-east1-cp0/grain-wheel/grain-0.2.2-cp310-cp310-linux_x86_64.whl ./
+    pip3 install grain-0.2.2-cp310-cp310-linux_x86_64.whl
 fi

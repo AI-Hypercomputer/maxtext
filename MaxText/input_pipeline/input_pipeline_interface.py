@@ -124,11 +124,14 @@ def make_mixed_train_iterator(config, mesh):
   process_indices = get_process_loading_real_data(config, mesh)
   if config.expansion_factor_real_data != -1:  # assert number of hosts loading real data
     assert len(process_indices) == jax.process_count() // config.expansion_factor_real_data
+  if config.dataset_type == "grain":
+    train_iter, eval_iter = make_grain_iterator(config, mesh, process_indices)
+    if not train_iter:
+      train_iter = BadSyntheticDataIterator(config, mesh)
+    return train_iter, eval_iter
   if jax.process_index() in process_indices:
     if config.dataset_type == "tfds":
       return make_tfds_iterator(config, mesh, process_indices)
-    elif config.dataset_type == "grain":
-      return make_grain_iterator(config, mesh, process_indices)
     elif config.dataset_type == "hf":
       return make_hf_iterator(config, mesh, process_indices)
   else:
