@@ -242,7 +242,6 @@ class Pipeline(nn.Module):
     def rotate_shmap(arr):
       arr = jax.lax.ppermute(arr, 'stage', [(i, (i+1) % self.num_stages) for i in range(self.num_stages)])
       return arr
-    #return arr
     return rotate_shmap(arr)
 
   def get_new_loop_state(self,output, loop_state):
@@ -270,13 +269,18 @@ class Pipeline(nn.Module):
       return jnp.concatenate([last, except_last], axis=0)
 
 
+    real_rotate=False
     rotate_func = self.rotate_right_shmap # _rotate_right
-    if self.config.pipeline_delay_activation_forwarding:
-      new_shift = rotate_func(old_prev_outputs)
-      new_prev_outputs = output
+    if real_rotate:
+      if self.config.pipeline_delay_activation_forwarding:
+        new_shift = rotate_func(old_prev_outputs)
+        new_prev_outputs = output
+      else:
+        new_shift = rotate_func(output)
+        new_prev_outputs = None
     else:
-      new_shift = rotate_func(output)
-      new_prev_outputs = None
+      new_shift=old_prev_outputs
+      new_prev_outputs = output
 
     if self.use_circ_storage:
       # Insert the circ_storage_mover into new_circ_storage at a microbatch-rotating index.
