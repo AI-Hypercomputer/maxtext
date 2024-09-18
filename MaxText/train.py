@@ -23,7 +23,6 @@ limitations under the License.
 import datetime
 import os
 import sys
-from etils import epath
 import functools
 import time
 

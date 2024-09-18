@@ -440,3 +440,10 @@ check_should_restore : False
 
 # Clean the local checkpoint directory.
 clean_local_checkpoint_dir: False
+
+### Splash attention block sizes
+# These can be tuned for specific hardware generations, and can be set up to
+# the model's sequence length.
+sa_block_q: 512
+sa_block_q_dkv: 512
+sa_block_q_dq: 512
