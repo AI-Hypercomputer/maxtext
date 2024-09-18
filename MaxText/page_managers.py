@@ -32,11 +32,11 @@ AxisNames = common_types.AxisNames
 @struct.dataclass
 class PageState:
   page_status: Array
-  page_map: Array               # matrix of shape (slots, max_pages_per_slot) that contains q unique page identifier (except for 0) for any entry with a page
-  sequence_lengths: Array       # array of shape (num_slots) that contains the number of tokens currently used for each slot
-  num_pages_used: Array         # array of shape (num_slots) that contains the current number of pages being used for each slot
-  current_page: Array           # array of shape (num_slots) that contains the current page to update for the given slot
-  current_page_position: Array  # array of shape (num_slots) that contains the current index of the current page to update for the given slot
+  page_map: Array               
+  sequence_lengths: Array       
+  num_pages_used: Array         
+  current_page: Array           
+  current_page_position: Array  
 
 
 class PageManager(nn.Module):
@@ -192,7 +192,7 @@ class PageManager(nn.Module):
     def _reserve_page(i, state):
       slot, page_map, page_status, current_page = state
       # assert jnp.count_nonzero(page_status[1:]) != self.num_pages-1, "All pages are in use."
-      page_idx = jnp.where((page_status[:]==0), size=1)[0][0] #+ 1
+      page_idx = jnp.where((page_status[1:]==0), size=1)[0][0] + 1
       page_status = page_status.at[page_idx].set(1)
       page_map = page_map.at[slot, i].set(page_idx)
       current_page = current_page.at[slot].set(page_idx)
@@ -257,7 +257,7 @@ class PageManager(nn.Module):
     def _reserve_page(i, state):
       page_map, page_status, current_page, updating_slots = state
       slot = jax.lax.dynamic_index_in_dim(updating_slots, i, axis=0, keepdims=False)
-      page_idx = jnp.where((page_status[:]==0), size=1)[0][0]# + 1
+      page_idx = jnp.where((page_status[1:]==0), size=1)[0][0] + 1
       page_status = page_status.at[page_idx].set(1)
       page_map = page_map.at[slot, num_pages_used[slot]-1].set(page_idx)
       current_page = current_page.at[slot].set(page_idx)
