@@ -275,9 +275,13 @@ class Pipeline(nn.Module):
     stream_slice = old_state_io[:, stream_buf_idx]
     def _update_state_io(state_in, stream_slice, output):
         # Shift the current slice to the left, then fill the last stage with the final output.
-        padding = [[0, 1]] + [[0, 0]] * (stream_slice.ndim - 1)
-        stream_slice = jax.lax.slice_in_dim(
-            jnp.pad(stream_slice, padding), 1, stream_slice.shape[0] + 1, axis=0)
+        real_shift = False
+        if real_shift:
+          padding = [[0, 1]] + [[0, 0]] * (stream_slice.ndim - 1)
+          stream_slice = jax.lax.slice_in_dim(
+              jnp.pad(stream_slice, padding), 1, stream_slice.shape[0] + 1, axis=0)
+        else:
+          stream_slice = jnp.zeros((self.num_stages,self.pipeline_microbatch_size, self.config.max_target_length, self.config.emb_dim),dtype=jnp.bfloat16)
         stream_slice = jnp.where(
             jax.lax.broadcasted_iota('int32', stream_slice.shape, 0) == self.num_stages - 1, output,
             stream_slice)
