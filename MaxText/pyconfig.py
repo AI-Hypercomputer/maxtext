@@ -148,6 +148,7 @@ def validate_model_name(s: str) -> bool:
       "mistral-7b",
       "mixtral-8x7b",
       "mixtral-8x7b-twist",
+      "mixtral-8x7b-twist-0",
       "gemma-7b",
       "gemma-2b",
       "gemma2-2b",
