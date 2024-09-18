@@ -23,6 +23,8 @@ from flax import linen as nn
 import common_types
 import functools
 from typing import Any
+from jax.experimental import shard_map
+from jax.sharding import NamedSharding, Mesh, PartitionSpec as P
 
 class Pipeline(nn.Module):
   """Module that implements pipelining across stages.
@@ -225,6 +227,24 @@ class Pipeline(nn.Module):
     outs = jax.vmap(_gather_one, in_axes=(None, 0), out_axes=ids_dim)(xs, ids)
     return self.shard_dim_by_stages(outs, 0)
 
+  def rotate_right_shmap(self, arr):
+    axis_names = nn.logical_to_mesh_axes(("activation_stage", "activation_batch", "activation_length", "activation_embed"), rules=self.config.logical_axis_rules)
+    # print(f"{axis_names=}")
+    # axis_names = P(*("stage", "data", "sequence", "tensor"))
+    # print(f"{axis_names=}")
+    @functools.partial(
+      shard_map.shard_map,
+      mesh=self.mesh,
+      in_specs=axis_names,
+      out_specs=axis_names,
+      check_rep=False,
+    )
+    def rotate_shmap(arr):
+      arr = jax.lax.ppermute(arr, 'stage', [(i, (i+1) % self.num_stages) for i in range(self.num_stages)])
+      return arr
+    #return arr
+    return rotate_shmap(arr)
+
   def get_new_loop_state(self,output, loop_state):
     '''
       Update the various buffers given the output of the most recent iteration
@@ -248,11 +268,14 @@ class Pipeline(nn.Module):
       last = jax.lax.slice_in_dim(output_in, self.num_stages - 1, self.num_stages, axis=0)
       except_last = jax.lax.slice_in_dim(output_in, 0, self.num_stages - 1, axis=0)
       return jnp.concatenate([last, except_last], axis=0)
+
+
+    rotate_func = self.rotate_right_shmap # _rotate_right
     if self.config.pipeline_delay_activation_forwarding:
-      new_shift = _rotate_right(old_prev_outputs)
+      new_shift = rotate_func(old_prev_outputs)
       new_prev_outputs = output
     else:
-      new_shift = _rotate_right(output)
+      new_shift = rotate_func(output)
       new_prev_outputs = None
 
     if self.use_circ_storage:
@@ -275,7 +298,7 @@ class Pipeline(nn.Module):
     stream_slice = old_state_io[:, stream_buf_idx]
     def _update_state_io(state_in, stream_slice, output):
         # Shift the current slice to the left, then fill the last stage with the final output.
-        real_shift = True
+        real_shift = False
         if real_shift:
           padding = [[0, 1]] + [[0, 0]] * (stream_slice.ndim - 1)
           stream_slice = jax.lax.slice_in_dim(
