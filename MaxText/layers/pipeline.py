@@ -269,7 +269,7 @@ class Pipeline(nn.Module):
       return jnp.concatenate([last, except_last], axis=0)
 
 
-    real_rotate=False
+    real_rotate=True
     rotate_func = self.rotate_right_shmap # _rotate_right
     if real_rotate:
       if self.config.pipeline_delay_activation_forwarding:
@@ -279,8 +279,12 @@ class Pipeline(nn.Module):
         new_shift = rotate_func(output)
         new_prev_outputs = None
     else:
-      new_shift=old_prev_outputs
-      new_prev_outputs = output
+      if self.config.pipeline_delay_activation_forwarding:
+        new_shift=old_prev_outputs
+        new_prev_outputs = output
+      else:
+        new_shift = output
+        new_prev_outputs = None
 
     if self.use_circ_storage:
       # Insert the circ_storage_mover into new_circ_storage at a microbatch-rotating index.
@@ -302,7 +306,7 @@ class Pipeline(nn.Module):
     stream_slice = old_state_io[:, stream_buf_idx]
     def _update_state_io(state_in, stream_slice, output):
         # Shift the current slice to the left, then fill the last stage with the final output.
-        real_shift = False
+        real_shift = True
         if real_shift:
           padding = [[0, 1]] + [[0, 0]] * (stream_slice.ndim - 1)
           stream_slice = jax.lax.slice_in_dim(
