@@ -77,6 +77,10 @@ CACHE_SCALE_HEADS = common_types.CACHE_SCALE_HEADS
 CACHE_SCALE_KV = common_types.CACHE_SCALE_KV
 DEFAULT_MASK_VALUE = common_types.DEFAULT_MASK_VALUE
 
+# Used to pass in splash attention block sizes from config.
+global_block_q = 0
+global_block_q_dkv = 0
+global_block_q_dq = 0
 
 nd_dense_init = initializers.nd_dense_init
 shard_map = shard_map.shard_map
@@ -116,6 +120,7 @@ def apply_mask_to_logits(logits: Array, mask: Array):
 
 
 class AttentionOp(nn.Module):
+  config: Config
   mesh: Mesh
   attention_kernel: str
   max_target_length: int
@@ -276,6 +281,10 @@ class AttentionOp(nn.Module):
     axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
     segment_axis_names = nn.logical_to_mesh_axes((BATCH, "activation_length_no_heads"))
 
+    global_block_q = self.config.sa_block_q
+    global_block_q_dkv = self.config.sa_block_q_dkv
+    global_block_q_dq = self.config.sa_block_q_dq
+
     @functools.partial(
         shard_map,
         mesh=self.mesh,
@@ -294,14 +303,16 @@ class AttentionOp(nn.Module):
             query.shape[2] == decoder_segment_ids.q.shape[1]
         ), "Sharding along sequence dimension not allowed in tpu kernel attention"
       block_sizes = splash_attention_kernel.BlockSizes(
-          block_q=min(512, query.shape[2]),
-          block_kv_compute=min(512, key.shape[2]),
-          block_kv=min(512, key.shape[2]),
-          block_q_dkv=min(512, query.shape[2]),
-          block_kv_dkv=min(512, key.shape[2]),
-          block_kv_dkv_compute=min(512, query.shape[2]),
-          block_q_dq=min(512, query.shape[2]),
-          block_kv_dq=min(512, query.shape[2]),
+          block_q=min(global_block_q, query.shape[2]),
+          block_kv_compute=min(global_block_q, key.shape[2]),
+          block_kv=min(global_block_q, key.shape[2]),
+
+          block_q_dkv=min(global_block_q_dkv, query.shape[2]),
+          block_kv_dkv=min(global_block_q_dkv, key.shape[2]),
+          block_kv_dkv_compute=min(global_block_q_dkv, query.shape[2]),
+
+          block_q_dq=min(global_block_q_dq, query.shape[2]),
+          block_kv_dq=min(global_block_q_dq, query.shape[2]),
       )
 
       mask = splash_attention_mask.CausalMask(shape=(query.shape[2], query.shape[2]))
@@ -1170,6 +1181,7 @@ class Attention(nn.Module):
 
     assert not self.config.quantize_kvcache or self.kv_quant
     attention_op = AttentionOp(
+        config = self.config,
         mesh=self.mesh,
         attention_kernel=self.attention_kernel,
         max_target_length=self.max_target_length,
