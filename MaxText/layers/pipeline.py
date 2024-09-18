@@ -275,7 +275,7 @@ class Pipeline(nn.Module):
     stream_slice = old_state_io[:, stream_buf_idx]
     def _update_state_io(state_in, stream_slice, output):
         # Shift the current slice to the left, then fill the last stage with the final output.
-        real_shift = False
+        real_shift = True
         if real_shift:
           padding = [[0, 1]] + [[0, 0]] * (stream_slice.ndim - 1)
           stream_slice = jax.lax.slice_in_dim(
