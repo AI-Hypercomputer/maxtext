@@ -432,3 +432,10 @@ allow_split_physical_axes: False
 
 use_ragged_attention: False
 ragged_block_size: 256
+
+### Splash attention block sizes
+# These can be tuned for specific hardware generations, and can be set up to
+# the model's sequence length.
+sa_block_q: 512
+sa_block_q_dkv: 512
+sa_block_q_dq: 512
