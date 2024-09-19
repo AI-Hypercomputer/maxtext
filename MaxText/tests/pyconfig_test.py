@@ -11,78 +11,55 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-
 import unittest
 import pyconfig
+
 
 class PyconfigTest(unittest.TestCase):
   """Tests for pyconfig.py"""
 
   def test_basic_override(self):
-    raw_keys = {
-      'megablox': None,
-      'foo': ['bar', 'baz']
-    }
-    model_keys = {
-      'foo': ['x', 'y']
-    }
+    raw_keys = {"megablox": None, "foo": ["bar", "baz"]}
+    model_keys = {"foo": ["x", "y"]}
 
-    pyconfig.validate_and_update_keys(raw_keys, model_keys, config_name='config')
+    pyconfig.validate_and_update_keys(raw_keys, model_keys, config_name="config")
 
-    self.assertEqual(raw_keys,  {
-      'megablox': None,
-      'foo': ['x', 'y']
-    })
+    self.assertEqual(raw_keys, {"megablox": None, "foo": ["x", "y"]})
 
   def test_logical_axis_override(self):
     raw_keys = {
-      'megablox': None,
-      'foo': ['bar', 'baz'],
-      'logical_axis_rules': [
-        ['activation', ['data', 'fsdp']],
-        ['norm', 'tensor']
-      ]
+        "megablox": None,
+        "foo": ["bar", "baz"],
+        "logical_axis_rules": [["activation", ["data", "fsdp"]], ["norm", "tensor"]],
     }
-    model_keys = {
-      'logical_axis_rules': [
-        ['activation', ['data', 'fsdp_transpose']],
-        ['norm', 'fsdp']
-      ]
-    }
+    model_keys = {"logical_axis_rules": [["activation", ["data", "fsdp_transpose"]], ["norm", "fsdp"]]}
 
-    pyconfig.validate_and_update_keys(raw_keys, model_keys, config_name='config')
+    pyconfig.validate_and_update_keys(raw_keys, model_keys, config_name="config")
 
-    self.assertEqual(raw_keys, {
-      'megablox': None,
-      'foo': ['bar', 'baz'],
-      'logical_axis_rules': [
-        ('activation', ['data', 'fsdp_transpose']),
-        ('norm', 'fsdp')
-      ]
-    })
+    self.assertEqual(
+        raw_keys,
+        {
+            "megablox": None,
+            "foo": ["bar", "baz"],
+            "logical_axis_rules": [("activation", ["data", "fsdp_transpose"]), ("norm", "fsdp")],
+        },
+    )
 
   def test_logical_axis_partial_override(self):
     raw_keys = {
-      'megablox': None,
-      'foo': ['bar', 'baz'],
-      'logical_axis_rules': [
-        ['activation', ['data', 'fsdp']],
-        ['norm', 'tensor']
-      ]
+        "megablox": None,
+        "foo": ["bar", "baz"],
+        "logical_axis_rules": [["activation", ["data", "fsdp"]], ["norm", "tensor"]],
     }
-    model_keys = {
-      'logical_axis_rules': [
-        ['norm', 'fsdp']
-      ]
-    }
+    model_keys = {"logical_axis_rules": [["norm", "fsdp"]]}
 
-    pyconfig.validate_and_update_keys(raw_keys, model_keys, config_name='config')
+    pyconfig.validate_and_update_keys(raw_keys, model_keys, config_name="config")
 
-    self.assertEqual(raw_keys, {
-      'megablox': None,
-      'foo': ['bar', 'baz'],
-      'logical_axis_rules': [
-        ('activation', ('data', 'fsdp')),
-        ('norm', 'fsdp')
-      ]
-    })
+    self.assertEqual(
+        raw_keys,
+        {
+            "megablox": None,
+            "foo": ["bar", "baz"],
+            "logical_axis_rules": [("activation", ("data", "fsdp")), ("norm", "fsdp")],
+        },
+    )

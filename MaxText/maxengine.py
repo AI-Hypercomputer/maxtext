@@ -92,30 +92,32 @@ class MaxEngine(engine_api.Engine):
     )
     self.kv_cache_annotations = max_utils.get_kv_cache_annotations(self.model, self.config, self.rng, self._mesh)
     self.kv_cache_shardings = jax.tree_util.tree_map(
-      lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations)
+        lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations
+    )
 
     if self.model.quant and not self.config.checkpoint_is_quantized:
       params = self.quantize_params(state)
     else:
       params = state.params
-    max_utils.print_mem_stats('After load_params')
+    max_utils.print_mem_stats("After load_params")
     return params
 
   def quantize_params(self, state):
     """Forward pass to quantize decode params."""
     self.model.quant.quant_mode = quantizations.get_quant_mode("convert")
+
     @jax.jit
     def model_apply(_p, _rng):
       return self.model.apply(
-        _p | {"aqt": {}},
-        jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-        jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-        decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-        enable_dropout=False,
-        model_mode=common_types.MODEL_MODE_PREFILL,
-        rngs={"params": _rng},
-        mutable=True,
-        )
+          _p | {"aqt": {}},
+          jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
+          jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
+          decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
+          enable_dropout=False,
+          model_mode=common_types.MODEL_MODE_PREFILL,
+          rngs={"params": _rng},
+          mutable=True,
+      )
 
     _, new_vars = model_apply(state.params, self.rng)
     # Remove param values which have corresponding qtensors in aqt to save memory.
@@ -123,8 +125,8 @@ class MaxEngine(engine_api.Engine):
     params["aqt"] = new_vars["aqt"]
     params["params"] = quantizations.remove_quantized_params(state.params["params"], new_vars["aqt"])
     self.abstract_params = jax.tree_util.tree_map(
-      lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), params
-      )
+        lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), params
+    )
     max_utils.save_quantized_checkpoint_if_configured(self.config, params)
     self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
     return params
@@ -192,9 +194,7 @@ class MaxEngine(engine_api.Engine):
 
     all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
     result = engine_api.ResultTokens(
-        data=jnp.concatenate(
-            (first_generated_token, all_valid, generated_tokens), axis=1
-        ),
+        data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
         # Tokens are shape [batch, speculations], so when we concatenate
         # tokens, validity and length along their index 1 dimension then they
         # occupy 0:speculations.
@@ -211,7 +211,7 @@ class MaxEngine(engine_api.Engine):
         "cache": new_vars["cache"],
         "next_pos": next_pos,
         "generated_tokens": generated_tokens,
-        "tokens": first_generated_token
+        "tokens": first_generated_token,
     }, result
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
@@ -246,9 +246,7 @@ class MaxEngine(engine_api.Engine):
 
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
     result = engine_api.ResultTokens(
-        data=jnp.concatenate(
-            (new_token, all_valid, decode_state["generated_tokens"]), axis=1
-        ),
+        data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
         # Tokens are shape [batch, speculations], so when we concatenate
         # tokens, validity and length along their index 1 dimension then they
         # occupy 0:speculations.
@@ -265,7 +263,7 @@ class MaxEngine(engine_api.Engine):
         "cache": new_cache,
         "next_pos": decode_state["next_pos"] + 1,
         "generated_tokens": decode_state["generated_tokens"] + 1,
-        "tokens": new_token
+        "tokens": new_token,
     }, result
 
   @functools.partial(
@@ -334,9 +332,7 @@ class MaxEngine(engine_api.Engine):
     inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
         decode_state["generated_tokens"], unboxed_prefix["generated_tokens"], slot, 0
     )
-    inserted_tokens = jax.lax.dynamic_update_index_in_dim(
-      decode_state["tokens"], unboxed_prefix["tokens"], slot, 0
-    )
+    inserted_tokens = jax.lax.dynamic_update_index_in_dim(decode_state["tokens"], unboxed_prefix["tokens"], slot, 0)
 
     inserted_logits = jax.lax.with_sharding_constraint(inserted_logits, self.replicated_sharding)
     inserted_generated_tokens = jax.lax.with_sharding_constraint(inserted_generated_tokens, self.replicated_sharding)
@@ -349,7 +345,7 @@ class MaxEngine(engine_api.Engine):
         "cache": inserted_cache,
         "next_pos": inserted_next_pos,
         "generated_tokens": inserted_generated_tokens,
-        "tokens": inserted_tokens
+        "tokens": inserted_tokens,
     }
 
   def get_prefix_destination_sharding(self) -> Any:
@@ -394,7 +390,7 @@ class MaxEngine(engine_api.Engine):
           "cache": cache["cache"],
           "next_pos": next_pos,
           "generated_tokens": generated_tokens,
-          "tokens": tokens
+          "tokens": tokens,
       }
 
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
