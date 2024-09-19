@@ -37,54 +37,60 @@ class Standalone_DL_CKPT(unittest.TestCase):
   @pytest.mark.tpu
   def test_standalone_dataloader(self):
     random_run_name = self._get_random_test_name("standalone_dataloader")
-    sdl_main((
-        None,
-        "configs/base.yml",
-        "run_name=" + random_run_name,
-        "base_output_directory=gs://runner-maxtext-logs",
-        "dataset_path=gs://maxtext-dataset",
-        "steps=100",
-        "enable_checkpointing=false",
-        "tokenizer_path=../assets/tokenizer.llama2",
-    ))  # need to pass relative path to tokenizer
+    sdl_main(
+        (
+            None,
+            "configs/base.yml",
+            "run_name=" + random_run_name,
+            "base_output_directory=gs://runner-maxtext-logs",
+            "dataset_path=gs://maxtext-dataset",
+            "steps=100",
+            "enable_checkpointing=false",
+            "tokenizer_path=../assets/tokenizer.llama2",
+        )
+    )  # need to pass relative path to tokenizer
 
   @pytest.mark.tpu
   def test_standalone_checkpointer(self):
     random_run_name = self._get_random_test_name("standalone_checkpointer")
     # checkpoint at 50
-    sckpt_main((
-        None,
-        "configs/base.yml",
-        f"run_name={random_run_name}",
-        "base_output_directory=gs://runner-maxtext-logs",
-        "dataset_path=gs://maxtext-dataset",
-        "base_emb_dim=128",
-        "base_num_query_heads=4",
-        "base_num_kv_heads=4",
-        "base_mlp_dim=128",
-        "base_num_decoder_layers=2",
-        "steps=60",
-        "enable_checkpointing=True",
-        "checkpoint_period=50",
-        "async_checkpointing=False",
-    ))
+    sckpt_main(
+        (
+            None,
+            "configs/base.yml",
+            f"run_name={random_run_name}",
+            "base_output_directory=gs://runner-maxtext-logs",
+            "dataset_path=gs://maxtext-dataset",
+            "base_emb_dim=128",
+            "base_num_query_heads=4",
+            "base_num_kv_heads=4",
+            "base_mlp_dim=128",
+            "base_num_decoder_layers=2",
+            "steps=60",
+            "enable_checkpointing=True",
+            "checkpoint_period=50",
+            "async_checkpointing=False",
+        )
+    )
     # restore at 50 and checkpoint at 100
-    sckpt_main((
-        None,
-        "configs/base.yml",
-        f"run_name={random_run_name}",
-        "base_output_directory=gs://runner-maxtext-logs",
-        "dataset_path=gs://maxtext-dataset",
-        "base_emb_dim=128",
-        "base_num_query_heads=4",
-        "base_num_kv_heads=4",
-        "base_mlp_dim=128",
-        "base_num_decoder_layers=2",
-        "steps=110",
-        "enable_checkpointing=True",
-        "checkpoint_period=50",
-        "async_checkpointing=False",
-    ))
+    sckpt_main(
+        (
+            None,
+            "configs/base.yml",
+            f"run_name={random_run_name}",
+            "base_output_directory=gs://runner-maxtext-logs",
+            "dataset_path=gs://maxtext-dataset",
+            "base_emb_dim=128",
+            "base_num_query_heads=4",
+            "base_num_kv_heads=4",
+            "base_mlp_dim=128",
+            "base_num_decoder_layers=2",
+            "steps=110",
+            "enable_checkpointing=True",
+            "checkpoint_period=50",
+            "async_checkpointing=False",
+        )
+    )
 
 
 if __name__ == "__main__":

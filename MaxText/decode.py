@@ -31,9 +31,7 @@ def main(config):
   text = config.prompt
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
-  tokens, true_length = tokenizer_model.encode(
-      text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length]
-  )
+  tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
   assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
   assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
   prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)

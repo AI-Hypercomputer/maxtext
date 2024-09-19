@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-
 import subprocess
 import sys
 import jax
@@ -61,8 +60,7 @@ class GrainDataProcessingTest(unittest.TestCase):
     self.train_iter = self._get_train_iterator()
 
   def _get_train_iterator(self):
-    train_iter, _ = _grain_data_processing.make_grain_iterator(
-      self.config, self.mesh, self.process_indices)
+    train_iter, _ = _grain_data_processing.make_grain_iterator(self.config, self.mesh, self.process_indices)
     return train_iter
 
   def test_train_ds(self):
