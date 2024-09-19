@@ -63,13 +63,16 @@ def preprocessing_pipeline(
   operations.append(_input_pipeline_utils.NormalizeFeatures(data_column, tokenize))
 
   if tokenize:
-    operations.append(_grain_tokenizer.TokenizeAndTrim(["inputs", "targets"], max_target_length, tokenizer_path, add_bos, add_eos))
+    operations.append(
+        _grain_tokenizer.TokenizeAndTrim(["inputs", "targets"], max_target_length, tokenizer_path, add_bos, add_eos)
+    )
 
   # Pack and Batch examples.
   if packing:
     operations.append(
         grain.experimental.PackAndBatchOperation(
-            batch_size=global_batch_size // jax.process_count(), length_struct={"inputs": max_target_length, "targets": max_target_length}
+            batch_size=global_batch_size // jax.process_count(),
+            length_struct={"inputs": max_target_length, "targets": max_target_length},
         )
     )
     operations.append(_input_pipeline_utils.ReformatPacking())
@@ -103,6 +106,7 @@ def preprocessing_pipeline(
   # Return multi-host jax.Array prep iterator
   return multihost_gen
 
+
 def make_grain_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
@@ -111,26 +115,7 @@ def make_grain_iterator(
   """Load, preprocess dataset and return iterators"""
   train_ds = get_datasets(config.grain_train_files)
   train_iter = preprocessing_pipeline(
-    dataset=train_ds,
-    tokenizer_path=config.tokenizer_path,
-    global_batch_size=config.global_batch_size_to_load,
-    global_mesh=global_mesh,
-    max_target_length=config.max_target_length,
-    grain_worker_count=config.grain_worker_count,
-    dataloading_host_index=process_indices.index(jax.process_index()),
-    dataloading_host_count=len(process_indices),
-    data_column=config.train_data_column,
-    shuffle=config.enable_data_shuffling,
-    data_shuffle_seed=config.data_shuffle_seed,
-    tokenize=config.tokenize_train_data,
-    add_bos=config.add_bos,
-    add_eos=config.add_eos,
-  )
-
-  if config.eval_interval > 0:
-    eval_ds = get_datasets(config.grain_eval_files)
-    eval_iter = preprocessing_pipeline(
-      dataset=eval_ds,
+      dataset=train_ds,
       tokenizer_path=config.tokenizer_path,
       global_batch_size=config.global_batch_size_to_load,
       global_mesh=global_mesh,
@@ -138,12 +123,31 @@ def make_grain_iterator(
       grain_worker_count=config.grain_worker_count,
       dataloading_host_index=process_indices.index(jax.process_index()),
       dataloading_host_count=len(process_indices),
-      data_column=config.eval_data_column,
-      shuffle=False,
+      data_column=config.train_data_column,
+      shuffle=config.enable_data_shuffling,
       data_shuffle_seed=config.data_shuffle_seed,
-      tokenize=config.tokenize_eval_data,
+      tokenize=config.tokenize_train_data,
       add_bos=config.add_bos,
       add_eos=config.add_eos,
+  )
+
+  if config.eval_interval > 0:
+    eval_ds = get_datasets(config.grain_eval_files)
+    eval_iter = preprocessing_pipeline(
+        dataset=eval_ds,
+        tokenizer_path=config.tokenizer_path,
+        global_batch_size=config.global_batch_size_to_load,
+        global_mesh=global_mesh,
+        max_target_length=config.max_target_length,
+        grain_worker_count=config.grain_worker_count,
+        dataloading_host_index=process_indices.index(jax.process_index()),
+        dataloading_host_count=len(process_indices),
+        data_column=config.eval_data_column,
+        shuffle=False,
+        data_shuffle_seed=config.data_shuffle_seed,
+        tokenize=config.tokenize_eval_data,
+        add_bos=config.add_bos,
+        add_eos=config.add_eos,
     )
   else:
     eval_iter = None

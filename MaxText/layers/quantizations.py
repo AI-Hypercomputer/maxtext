@@ -62,19 +62,15 @@ def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
   )
 
   for lhs_idx, rhs_idx in zip(lhs_ca, rhs_ca):
-    ret.lhs.contraction_axes.append(
-        tiled_dot_general.AxisTiling(axis=lhs_idx, tile_size=tile_size, tile_count=None)
-    )
-    ret.rhs.contraction_axes.append(
-        tiled_dot_general.AxisTiling(
-            axis=rhs_idx, tile_size=tile_size, tile_count=None
-        )
-    )
+    ret.lhs.contraction_axes.append(tiled_dot_general.AxisTiling(axis=lhs_idx, tile_size=tile_size, tile_count=None))
+    ret.rhs.contraction_axes.append(tiled_dot_general.AxisTiling(axis=rhs_idx, tile_size=tile_size, tile_count=None))
 
   return ret
 
 
-def _rhs_axis_metadata_wrapper(x: jnp.ndarray, tile_map, no_sharding_axis: Sequence[int], mesh_axes: Tuple[str, ...], is_tiled: bool):
+def _rhs_axis_metadata_wrapper(
+    x: jnp.ndarray, tile_map, no_sharding_axis: Sequence[int], mesh_axes: Tuple[str, ...], is_tiled: bool
+):
   mesh_axes = list(mesh_axes)
   if is_tiled:
     # tile_map is a mapping between original rank and a list of new, tiled rank.
@@ -103,16 +99,16 @@ class AqtQuantization:
 
   def _get_mixed_precision_cfg(self):
     quant_dg = None
-    is_tiled=False
-    tiling_fn=None
-    module_path = '/'.join(nn.module._context.module_stack[-1].path)
+    is_tiled = False
+    tiling_fn = None
+    module_path = "/".join(nn.module._context.module_stack[-1].path)
     for layer_name_re, layer_quant_dg in self.quant_dg.items():
       if re.fullmatch(layer_name_re, module_path):
         quant_dg, tile_size = layer_quant_dg
     if quant_dg is None:
-      quant_dg, tile_size = self.quant_dg['default']
+      quant_dg, tile_size = self.quant_dg["default"]
     if tile_size != -1:
-      is_tiled=True
+      is_tiled = True
       tiling_fn = functools.partial(_tiling_fn, tile_size=tile_size)
     return quant_dg, is_tiled, tiling_fn
 
@@ -126,9 +122,8 @@ class AqtQuantization:
     if isinstance(self.quant_dg, dict):
       quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
     else:
-      quant_dg, is_tiled, tiling_fn  = self.quant_dg, False, None
-    rhs_axis_metadata_wrapper=self._get_rhs_axis_metadata_wrapper(
-      mesh_axes, is_tiled)
+      quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
+    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(mesh_axes, is_tiled)
     aqt_dg_cls = functools.partial(
         aqt_flax.AqtDotGeneral,
         quant_dg,
@@ -137,14 +132,13 @@ class AqtQuantization:
         rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
         rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
         use_legacy_freezer=False,
-        tiling_fn=tiling_fn
+        tiling_fn=tiling_fn,
     )
     return aqt_dg_cls
 
   def einsum(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns einsum configured with aqt params."""
-    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(
-      mesh_axes)
+    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(mesh_axes)
     aqt_einsum = functools.partial(
         aqt_flax.AqtEinsum(
             cfg=self.quant_dg,
@@ -168,6 +162,7 @@ class Fp8Quantization(Quantization):
     """Returns dot_general configured with aqt params."""
     return nn.Fp8DotGeneralOp
 
+
 def _get_int8_quant_config(config):
   drhs_bits = None
   drhs_accumulator_dtype = None
@@ -175,20 +170,18 @@ def _get_int8_quant_config(config):
   if config.quantization_local_shard_count != 0:
     drhs_bits = 8
     drhs_accumulator_dtype = jnp.int32
-    drhs_local_aqt = aqt_config.LocalAqt(
-      contraction_axis_shard_count=config.quantization_local_shard_count
-      )
+    drhs_local_aqt = aqt_config.LocalAqt(contraction_axis_shard_count=config.quantization_local_shard_count)
   return aqt_config.config_v3(
-    fwd_bits=8,
-    dlhs_bits=8,
-    drhs_bits=drhs_bits,
-    rng_type="jax.uniform",
-    dlhs_local_aqt=None,
-    drhs_local_aqt=drhs_local_aqt,
-    fwd_accumulator_dtype=jnp.int32,
-    dlhs_accumulator_dtype=jnp.int32,
-    drhs_accumulator_dtype=drhs_accumulator_dtype,
-    )
+      fwd_bits=8,
+      dlhs_bits=8,
+      drhs_bits=drhs_bits,
+      rng_type="jax.uniform",
+      dlhs_local_aqt=None,
+      drhs_local_aqt=drhs_local_aqt,
+      fwd_accumulator_dtype=jnp.int32,
+      dlhs_accumulator_dtype=jnp.int32,
+      drhs_accumulator_dtype=drhs_accumulator_dtype,
+  )
 
 
 def _get_weight_only_quant_config(lhs_bits=None, rhs_bits=None):
@@ -207,8 +200,7 @@ def _get_mixed_precision_quant_config(config, config_file):
     scale = layer_quantization_config.get("scale", 1.0)
     aqt_dg = aqt_config.dot_general_make(lhs_bits=None, rhs_bits=rhs_num_bits)
     if scale < 1.0:
-      aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(
-        calibration.AbsMaxCalibration, scale=scale)
+      aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(calibration.AbsMaxCalibration, scale=scale)
     ret_config[layer_name_re] = [aqt_dg, tile_size]
   return ret_config
 
@@ -290,14 +282,16 @@ def remove_quantized_params(params, aqt_vars):
     tree_flat[i] = v
   return tree_unflatten(tree_struct, tree_flat)
 
+
 def configure_kv_quant(config):
   return None if not config.quantize_kvcache else KVQuant(config)
+
 
 class KVQuant:
   axis_cfg = ""
   dtype = None
 
-  def __init__(self, config:Config):
+  def __init__(self, config: Config):
     assert config.quantize_kvcache
     self.axis_cfg = config.kv_quant_axis
     self.dtype = self._get_dtype(config.kv_quant_dtype)
@@ -313,15 +307,12 @@ class KVQuant:
     if self.axis_cfg == "dkv":
       return axis_names.index(CACHE_KV)
     if self.axis_cfg == "heads_and_dkv":
-      return (
-        axis_names.index(CACHE_HEADS),
-        axis_names.index(CACHE_KV)
-        )
+      return (axis_names.index(CACHE_HEADS), axis_names.index(CACHE_KV))
     raise ValueError(f"Invalid KV quant axis cfg: {self.axis_cfg}")
 
   def quantize(self, kv: Array, axis_names: AxisNames):
     """Quantize key/values stored in kvcache."""
-    assert self.axis_cfg, 'KV quant axis cannot be None'
+    assert self.axis_cfg, "KV quant axis cannot be None"
     max_axis = self._get_max_axis(axis_names)
     scale = jnp.max(jnp.abs(kv), axis=max_axis, keepdims=True)
     if self.dtype == jnp.int8:
@@ -332,42 +323,35 @@ class KVQuant:
       return value, scale
     raise ValueError(f"Invalid KV quant dtype:{self.dtype}.")
 
-  def einsum_fn_with_rhs_qtensor(
-    self,
-    kv: Array| aqt_tensor.QTensor,
-    rhs_dequant_mode=None,
-    rhs_calibration_mode=None
-    ):
+  def einsum_fn_with_rhs_qtensor(self, kv: Array | aqt_tensor.QTensor, rhs_dequant_mode=None, rhs_calibration_mode=None):
     # Assumes kv is already quantized.
     einsum = jnp.einsum
     if isinstance(kv, aqt_tensor.QTensor):
       num_bits = 4 if kv.qvalue.dtype == jnp.int4 else 8
       kv_cfg = aqt_config.dot_general_make(
-        lhs_bits=None,
-        rhs_bits=num_bits,
-        bwd_bits=None,
-        use_fwd_quant=False,
-        )
+          lhs_bits=None,
+          rhs_bits=num_bits,
+          bwd_bits=None,
+          use_fwd_quant=False,
+      )
       if rhs_dequant_mode:
-        aqt_config.set_fwd_dequant_mode(
-          kv_cfg, rhs_dequant_mode=rhs_dequant_mode
-        )
+        aqt_config.set_fwd_dequant_mode(kv_cfg, rhs_dequant_mode=rhs_dequant_mode)
       if rhs_calibration_mode:
         aqt_config.set_fwd_calibration_mode(
-          kv_cfg,
-          rhs_calibration_mode=rhs_calibration_mode,
-      )
-      einsum = aqt_flax.AqtEinsum(
-        rhs_quant_mode=aqt_flax.QuantMode.TRAIN,
-        lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-        rhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-        cfg=kv_cfg
+            kv_cfg,
+            rhs_calibration_mode=rhs_calibration_mode,
         )
+      einsum = aqt_flax.AqtEinsum(
+          rhs_quant_mode=aqt_flax.QuantMode.TRAIN,
+          lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+          rhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+          cfg=kv_cfg,
+      )
     return einsum
 
   def einsum_fn_with_rhs_qtensor_and_dequant(self, value):
     return self.einsum_fn_with_rhs_qtensor(
-      value,
-      rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
-      rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS
-      )
+        value,
+        rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
+        rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
+    )
