@@ -33,25 +33,31 @@ AUTOTUNE = tf.data.experimental.AUTOTUNE
 
 ########## Functions used by TFDS pipeline
 
+
 def normalize_features(x, column_name):
   return {"inputs": x[column_name], "targets": x[column_name]}
+
 
 def get_tokenizer(tokenizer_path, add_bos, add_eos):
   # Load tokenizer
   tokenizer_model = tokenizer.build_tokenizer(tokenizer_path, add_bos, add_eos)
   return tokenizer_model
 
+
 def truncate_to_max_allowable_length(x, max_length):
   x["inputs"] = x["inputs"][:max_length]
   x["targets"] = x["targets"][:max_length]
   return x
+
 
 def shift_data_by_truncation(x):
   x["inputs"] = x["inputs"][:-1]
   x["targets"] = x["targets"][1:]
   return x
 
+
 ########## Functions used by HF pipeline
+
 
 def tokenization(example, hf_tokenizer, max_length, column_name):
   """Tokenize a HuggingFace dataset"""
@@ -61,8 +67,10 @@ def tokenization(example, hf_tokenizer, max_length, column_name):
 @dataclasses.dataclass
 class HFNormalizeFeatures(grain.MapTransform):
   """Normalize feature keys for HuggingFace input"""
+
   def __init__(self, column_name):
     self.column_name = column_name
+
   def map(self, features):
     return {
         "inputs": np.asarray(features[self.column_name], dtype=np.int32),
@@ -73,15 +81,16 @@ class HFNormalizeFeatures(grain.MapTransform):
 class HFDataSource(grain.RandomAccessDataSource):
   """A class that makes HuggingFace IterableDataset a grain datasource without random access support"""
 
-  def __init__(self,
-                dataset: datasets.IterableDataset,
-                dataloading_host_index: int,
-                dataloading_host_count: int,
-                num_threads: int,
-                generate_padding_example: bool,
-                max_target_length: int,
-                data_column_name: str
-                ):
+  def __init__(
+      self,
+      dataset: datasets.IterableDataset,
+      dataloading_host_index: int,
+      dataloading_host_count: int,
+      num_threads: int,
+      generate_padding_example: bool,
+      max_target_length: int,
+      data_column_name: str,
+  ):
     self.dataset = dataset
     self.num_threads = num_threads
     self.dataloading_host_count = dataloading_host_count
@@ -94,14 +103,15 @@ class HFDataSource(grain.RandomAccessDataSource):
     self.dataset_shards = [dataloading_host_index * self.num_threads + i for i in range(self.num_threads)]
     self.datasets = [split_dataset_by_node(dataset, world_size=self.n_shards, rank=x) for x in self.dataset_shards]
     self.data_iters = []
-    self.out_of_data =False
+    self.out_of_data = False
 
   def _check_shard_count(self):
     if self.n_shards < (self.dataloading_host_count * self.num_threads):
-      warnings.warn(f"WARNING: Inefficient dataloading. Your train or eval dataset contains {self.n_shards} shards, "
-                      "smaller than number of host loading data. This is known to lead to inefficient dataloading. " 
-                      "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#multihost-dataloading-best-practice"
-                      )
+      warnings.warn(
+          f"WARNING: Inefficient dataloading. Your train or eval dataset contains {self.n_shards} shards, "
+          "smaller than number of host loading data. This is known to lead to inefficient dataloading. "
+          "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#multihost-dataloading-best-practice"
+      )
       self.n_shards = self.dataloading_host_count * self.num_threads
 
   def _update_shard(self, idx):
@@ -113,11 +123,14 @@ class HFDataSource(grain.RandomAccessDataSource):
       self.datasets[idx] = split_dataset_by_node(self.dataset, world_size=self.n_shards, rank=self.dataset_shards[idx])
       self.data_iters[idx] = iter(self.datasets[idx])
     else:
-      max_logging.log(f"Run out of shards on host {self.dataloading_host_index}, shard {self.dataset_shards[idx]} is not available")
+      max_logging.log(
+          f"Run out of shards on host {self.dataloading_host_index}, shard {self.dataset_shards[idx]} is not available"
+      )
       self.out_of_data = True
       if self.generate_padding_example:
-        max_logging.log(f"Host {self.dataloading_host_index} will start generating all-0 padding examples until step number is met.")
-
+        max_logging.log(
+            f"Host {self.dataloading_host_index} will start generating all-0 padding examples until step number is met."
+        )
 
   def __len__(self):
     """Return length of the HF dataset. Since HuggingFace IterableDataset does not have length,
@@ -143,11 +156,14 @@ class HFDataSource(grain.RandomAccessDataSource):
       except StopIteration:
         self._update_shard(idx)
 
+
 ########## Functions used by Grain pipeline
+
 
 @dataclasses.dataclass
 class ParseFeatures(grain.MapTransform):
   """Parse serialized example"""
+
   def __init__(self, data_column, tokenize):
     self.data_column = data_column
     if tokenize:
@@ -157,23 +173,28 @@ class ParseFeatures(grain.MapTransform):
 
   def map(self, features):
     def _parse(example):
-      parsed = tf.io.parse_example(example, {
-        self.data_column: tf.io.FixedLenSequenceFeature([], dtype=self.dtype, allow_missing=True)
-        })
+      parsed = tf.io.parse_example(
+          example, {self.data_column: tf.io.FixedLenSequenceFeature([], dtype=self.dtype, allow_missing=True)}
+      )
       return parsed
 
     return _parse(features)
 
+
 @dataclasses.dataclass
 class NormalizeFeatures(grain.MapTransform):
   """Normalize text feature keys."""
+
   def __init__(self, column_name, tokenize):
     self.column_name = column_name
     self.tokenize = tokenize
 
   def map(self, features):
     if self.tokenize:
-      return {"inputs": features[self.column_name].numpy()[0].decode(), "targets": features[self.column_name].numpy()[0].decode()}
+      return {
+          "inputs": features[self.column_name].numpy()[0].decode(),
+          "targets": features[self.column_name].numpy()[0].decode(),
+      }
     else:
       return {"inputs": features[self.column_name].numpy(), "targets": features[self.column_name].numpy()}
 
@@ -252,4 +273,3 @@ class ShiftData(grain.MapTransform):
 
   def map(self, data):
     return shift_and_refine(data, axis=self.axis)
-

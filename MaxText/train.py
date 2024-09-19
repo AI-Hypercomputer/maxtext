@@ -66,7 +66,7 @@ from ml_goodput_measurement import monitoring
 
 Transformer = models.Transformer
 EPS = 1e-8
-_CHUNK_BYTE_SIZE = 2 * 1024 **3
+_CHUNK_BYTE_SIZE = 2 * 1024**3
 
 
 def validate_train_config(config):
@@ -78,9 +78,11 @@ def validate_train_config(config):
   if not config.base_output_directory.startswith("gs://"):
     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
   assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive integer."
-  if config.quantization=='fp8':
+  if config.quantization == "fp8":
     # pylint: disable=line-too-long
-    assert config.gradient_accumulation_steps == 1, "fp8 can't be used with gradient_accumulation_steps right now. Please use other quantization or set gradient_accumulation_steps to 1"
+    assert (
+        config.gradient_accumulation_steps == 1
+    ), "fp8 can't be used with gradient_accumulation_steps right now. Please use other quantization or set gradient_accumulation_steps to 1"
 
 
 def get_first_step(state):
@@ -139,12 +141,14 @@ def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step
       max_utils.write_metrics_locally(metrics_to_write, steps_to_write, config, local_metrics_file, is_training)
 
     if config.gcs_metrics and jax.process_index() == 0:
-      running_gcs_metrics = max_utils.write_metrics_for_gcs(metrics_to_write, steps_to_write, config,
-                                                            running_gcs_metrics, is_training)
+      running_gcs_metrics = max_utils.write_metrics_for_gcs(
+          metrics_to_write, steps_to_write, config, running_gcs_metrics, is_training
+      )
 
   if is_training:
     _buffered_step = step
     _buffered_metrics = metrics
+
 
 def write_metrics_to_tensorboard(writer, metrics, step, config, is_training=True):
   """Writes metrics to tensorboard"""
@@ -170,11 +174,13 @@ def write_metrics_to_tensorboard(writer, metrics, step, config, is_training=True
         max_logging.log(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
         writer.flush()
 
+
 def clear_buffered_metrics():
   global _buffered_step
   global _buffered_metrics
   _buffered_step = None
   _buffered_metrics = None
+
 
 def save_checkpoint(
     checkpoint_manager,
@@ -187,8 +193,7 @@ def save_checkpoint(
   """Wrapper for saving checkpoint."""
   if config and config.enable_checkpointing:
     if (step % config.checkpoint_period == 0) or (
-        config.enable_emergency_checkpoint
-        and step % config.local_checkpoint_period == 0
+        config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0
     ):
       blocking_until_ready_start = time.time()
       max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
@@ -201,16 +206,13 @@ def save_checkpoint(
       )
 
   # specify chunk_byte_size to force orbax to control maximum file size in checkpoint
-  save_args = jax.tree.map(
-      lambda _: orbax.checkpoint.SaveArgs(chunk_byte_size=_CHUNK_BYTE_SIZE), state
-  )
+  save_args = jax.tree.map(lambda _: orbax.checkpoint.SaveArgs(chunk_byte_size=_CHUNK_BYTE_SIZE), state)
 
   if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
     return checkpoint_manager.save(
-      step, args=orbax.checkpoint.args.PyTreeSave(
-          item=state, save_args=save_args, ocdbt_target_data_file_size=_CHUNK_BYTE_SIZE
-      )
-  )
+        step,
+        args=orbax.checkpoint.args.PyTreeSave(item=state, save_args=save_args, ocdbt_target_data_file_size=_CHUNK_BYTE_SIZE),
+    )
 
   if dataset_type == "grain":
     return checkpoint_manager.save(
@@ -224,11 +226,12 @@ def save_checkpoint(
     )
   else:
     return checkpoint_manager.save(
-        step, args=orbax.checkpoint.args.Composite(
+        step,
+        args=orbax.checkpoint.args.Composite(
             items=orbax.checkpoint.args.PyTreeSave(
                 item=state, save_args=save_args, ocdbt_target_data_file_size=_CHUNK_BYTE_SIZE
             )
-        )
+        ),
     )
 
 
@@ -329,36 +332,36 @@ def train_step(model, config, state, data, dropout_rng):
 
   """
   if config.gradient_accumulation_steps > 1:
+
     def accumulate_gradient(acc_grad_and_loss, data):
       grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
       (_, aux), cur_batch_gradient = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
-      acc_grad_and_loss['loss'] += aux['total_loss']
-      acc_grad_and_loss['moe_lb_loss'] += aux['moe_lb_loss']
-      acc_grad_and_loss['grad'] = jax.tree_util.tree_map(
-        lambda x, y: x * aux['total_weights'] + y,
-        cur_batch_gradient,
-        acc_grad_and_loss['grad'])
-      acc_grad_and_loss['total_weights'] += aux['total_weights']
+      acc_grad_and_loss["loss"] += aux["total_loss"]
+      acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
+      acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
+          lambda x, y: x * aux["total_weights"] + y, cur_batch_gradient, acc_grad_and_loss["grad"]
+      )
+      acc_grad_and_loss["total_weights"] += aux["total_weights"]
       return acc_grad_and_loss, aux
 
     def reshape_to_microbatch_accumulations(batch_arr):
-      ''' Reshape global batch to microbatches, assuming batch axis is leading.'''
+      """Reshape global batch to microbatches, assuming batch axis is leading."""
       microbatches = config.gradient_accumulation_steps
-      microbatch_shape = (microbatches,  batch_arr.shape[0] // microbatches) + batch_arr.shape[1:]
+      microbatch_shape = (microbatches, batch_arr.shape[0] // microbatches) + batch_arr.shape[1:]
       return jnp.reshape(batch_arr, microbatch_shape)
 
     data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
     init_grad = jax.tree_util.tree_map(jnp.zeros_like, state.params)
-    init_grad_and_loss = {'loss': 0.0, 'grad': init_grad, 'total_weights':0, 'moe_lb_loss':0.0}
+    init_grad_and_loss = {"loss": 0.0, "grad": init_grad, "total_weights": 0, "moe_lb_loss": 0.0}
 
     grad_and_loss, aux = jax.lax.scan(
-      accumulate_gradient,
-      init_grad_and_loss,
-      data,
-      length = config.gradient_accumulation_steps)
-    loss = (grad_and_loss['loss'] / grad_and_loss['total_weights']
-            + grad_and_loss['moe_lb_loss'] / config.gradient_accumulation_steps)
-    raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss['total_weights'], grad_and_loss['grad'])
+        accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
+    )
+    loss = (
+        grad_and_loss["loss"] / grad_and_loss["total_weights"]
+        + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
+    )
+    raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], grad_and_loss["grad"])
     aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)
   else:
     grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
@@ -398,11 +401,12 @@ def eval_step(model, config, state, data, dropout_rng):
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
   metrics = {
-      "scalar": {"evaluation/loss": loss, 
-                 "evaluation/total_loss": total_loss,
-                 "evaluation/total_weights": total_weights,
-                 "evaluation/moe_lb_loss": moe_lb_loss},
-
+      "scalar": {
+          "evaluation/loss": loss,
+          "evaluation/total_loss": total_loss,
+          "evaluation/total_weights": total_weights,
+          "evaluation/moe_lb_loss": moe_lb_loss,
+      },
   }
 
   return metrics
@@ -417,23 +421,23 @@ def create_goodput_recorder(config):
 
 
 def record_goodput(
-      recorder,
-      config,
-      record_func,
-      *args,
-  ):
+    recorder,
+    config,
+    record_func,
+    *args,
+):
   """Record data for Goodput and Badput computation."""
   if recorder and config.enable_goodput_recording:
     record_func(*args)
 
+
 def check_example_batch(config, example_batch):
   if config.max_checkify:
-    jittable_f = checkify.checkify(
-        lambda x: checkify.check(jnp.any(x > -1), "Batch contains bad synthetic data!")
-    )
+    jittable_f = checkify.checkify(lambda x: checkify.check(jnp.any(x > -1), "Batch contains bad synthetic data!"))
     # Check if inputs in batch contains bad synthetic data.
-    err, _ = jax.jit(jittable_f)(example_batch['inputs'][: config.global_batch_size_to_train_on, :])
+    err, _ = jax.jit(jittable_f)(example_batch["inputs"][: config.global_batch_size_to_train_on, :])
     err.throw()
+
 
 def setup_mesh_and_model(config):
   """Set up the mesh and the model for training
@@ -655,7 +659,9 @@ def train_loop(config, state=None):
         state, metrics = p_train_step(state, example_batch, nextrng)
 
     new_time = datetime.datetime.now()
-    record_scalar_metrics(metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
+    record_scalar_metrics(
+        metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step), per_device_tokens
+    )
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
@@ -672,12 +678,12 @@ def train_loop(config, state=None):
     if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
       assert eval_data_iterator
       cumulative_eval_metrics = {
-        "scalar": {
-          "eval/total_loss": 0.0,
-          "eval/total_weights": 0.0,
-          "eval/avg_loss": 0.0,
-          "eval/moe_lb_loss": 0.0,
-        }
+          "scalar": {
+              "eval/total_loss": 0.0,
+              "eval/total_weights": 0.0,
+              "eval/avg_loss": 0.0,
+              "eval/moe_lb_loss": 0.0,
+          }
       }
       eval_step_count = 0
       for eval_batch in eval_data_iterator:
@@ -690,10 +696,18 @@ def train_loop(config, state=None):
         cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
         max_logging.log(f"Completed eval step {eval_step_count}")
         eval_step_count += 1
-      eval_loss = cumulative_eval_metrics["scalar"]["eval/total_loss"] / (cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS) + cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
+      eval_loss = (
+          cumulative_eval_metrics["scalar"]["eval/total_loss"]
+          / (cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS)
+          + cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
+      )
       cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
-      write_metrics(writer, local_metrics_file, running_gcs_metrics, cumulative_eval_metrics, step, config, is_training=False)
-      max_logging.log(f"average loss after {step=}: {eval_step_count=}, {eval_loss=}, total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}")
+      write_metrics(
+          writer, local_metrics_file, running_gcs_metrics, cumulative_eval_metrics, step, config, is_training=False
+      )
+      max_logging.log(
+          f"average loss after {step=}: {eval_step_count=}, {eval_loss=}, total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
+      )
       if eval_loss <= config.target_eval_loss:
         max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
         prof.deactivate()
@@ -726,14 +740,14 @@ def main(argv: Sequence[str]) -> None:
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
   if config.monitor_goodput and jax.process_index() == 0:
-    logger_name = f'goodput_{config.run_name}'
+    logger_name = f"goodput_{config.run_name}"
     goodput_monitor = monitoring.GoodputMonitor(
-      job_name=config.run_name,
-      logger_name=logger_name,
-      tensorboard_dir=config.tensorboard_dir,
-      upload_interval=config.goodput_upload_interval_seconds,
-      monitoring_enabled=True,
-      include_badput_breakdown=True,
+        job_name=config.run_name,
+        logger_name=logger_name,
+        tensorboard_dir=config.tensorboard_dir,
+        upload_interval=config.goodput_upload_interval_seconds,
+        monitoring_enabled=True,
+        include_badput_breakdown=True,
     )
     goodput_monitor.start_goodput_uploader()
     max_logging.log("Started Goodput upload to Tensorboard in the background!")

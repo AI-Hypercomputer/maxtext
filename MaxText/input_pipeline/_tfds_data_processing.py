@@ -31,6 +31,7 @@ from input_pipeline import _input_pipeline_utils
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
+
 def get_datasets(
     dataset_name,
     data_split,
@@ -54,10 +55,11 @@ def get_datasets(
     )
     ds = ds_builder.as_dataset(split=data_split, read_config=read_config, shuffle_files=shuffle_files)
   else:
-    warnings.warn(f"WARNING: Inefficient dataloading. Your {dataset_name} contains {ds_builder.info.splits[data_split].num_shards} shards, "
-                  f"smaller than {dataloading_host_count=}. This is known to lead to inefficient dataloading."
-                  "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#multihost-dataloading-best-practice"
-                  )
+    warnings.warn(
+        f"WARNING: Inefficient dataloading. Your {dataset_name} contains {ds_builder.info.splits[data_split].num_shards} shards, "
+        f"smaller than {dataloading_host_count=}. This is known to lead to inefficient dataloading."
+        "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#multihost-dataloading-best-practice"
+    )
     ds = ds_builder.as_dataset(split=data_split, read_config=read_config, shuffle_files=shuffle_files)
     ds = ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
 
@@ -93,7 +95,10 @@ def preprocessing_pipeline(
   if max_target_length > 0:
     # We can take upto max_length+1 because there would be truncation by 1 token
     # for both inputs and targets
-    dataset = dataset.map(lambda x: _input_pipeline_utils.truncate_to_max_allowable_length(x, max_target_length + 1), num_parallel_calls=AUTOTUNE)
+    dataset = dataset.map(
+        lambda x: _input_pipeline_utils.truncate_to_max_allowable_length(x, max_target_length + 1),
+        num_parallel_calls=AUTOTUNE,
+    )
 
   # Shuffle and repeat.
   if shuffle:
@@ -103,7 +108,9 @@ def preprocessing_pipeline(
 
   # Shift inputs for teacher-forced training
   if shift:
-    dataset = dataset.map(_input_pipeline_utils.shift_data_by_truncation, num_parallel_calls=tf.data.AUTOTUNE, deterministic=True)
+    dataset = dataset.map(
+        _input_pipeline_utils.shift_data_by_truncation, num_parallel_calls=tf.data.AUTOTUNE, deterministic=True
+    )
 
   # Perform greedy sequence packing and batching
   assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible number of global devices."
@@ -135,35 +142,35 @@ def make_tfds_iterator(
 ):
   """load dataset, preprocess and return iterators"""
   train_ds = get_datasets(
-    dataset_name=config.dataset_name,
-    data_split='train',
-    shuffle_files=config.enable_data_shuffling,
-    shuffle_seed=config.data_shuffle_seed,
-    dataloading_host_index=process_indices.index(jax.process_index()),
-    dataloading_host_count=len(process_indices),
+      dataset_name=config.dataset_name,
+      data_split="train",
+      shuffle_files=config.enable_data_shuffling,
+      shuffle_seed=config.data_shuffle_seed,
+      dataloading_host_index=process_indices.index(jax.process_index()),
+      dataloading_host_count=len(process_indices),
   )
   train_iter = preprocessing_pipeline(
-    dataset=train_ds,
-    tokenizer_path=config.tokenizer_path,
-    global_batch_size=config.global_batch_size_to_load,
-    global_mesh=global_mesh,
-    max_target_length=config.max_target_length,
-    data_column_name=config.train_data_column,
-    shuffle=config.enable_data_shuffling,
-    data_shuffle_seed=config.data_shuffle_seed,
-    tokenize=config.tokenize_train_data,
-    add_bos=config.add_bos,
-    add_eos=config.add_eos,
+      dataset=train_ds,
+      tokenizer_path=config.tokenizer_path,
+      global_batch_size=config.global_batch_size_to_load,
+      global_mesh=global_mesh,
+      max_target_length=config.max_target_length,
+      data_column_name=config.train_data_column,
+      shuffle=config.enable_data_shuffling,
+      data_shuffle_seed=config.data_shuffle_seed,
+      tokenize=config.tokenize_train_data,
+      add_bos=config.add_bos,
+      add_eos=config.add_eos,
   )
 
   if config.eval_interval > 0:
     eval_ds = get_datasets(
-      dataset_name=config.eval_dataset_name,
-      data_split=config.eval_split,
-      shuffle_files=False,
-      shuffle_seed=config.data_shuffle_seed,
-      dataloading_host_index=process_indices.index(jax.process_index()),
-      dataloading_host_count=len(process_indices),
+        dataset_name=config.eval_dataset_name,
+        data_split=config.eval_split,
+        shuffle_files=False,
+        shuffle_seed=config.data_shuffle_seed,
+        dataloading_host_index=process_indices.index(jax.process_index()),
+        dataloading_host_count=len(process_indices),
     )
 
     if config.eval_per_device_batch_size > 0:

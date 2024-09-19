@@ -17,33 +17,39 @@ from train import main as train_main
 
 
 class SimpleDecoderLayerTest(unittest.TestCase):
+
   @pytest.mark.tpu
   def test_simple_decoder_layer(self):
-    train_main([
-          None,
-          "configs/base.yml",
-          r"base_output_directory=gs://runner-maxtext-logs",
-          "run_name=runner_simple_decoder_layer_test",
-          r"dataset_path=gs://maxtext-dataset",
-          "decoder_block=simple",
-          "enable_checkpointing=False",
-          "tokenizer_path=../assets/tokenizer.llama2",
-          "steps=3"
-    ])
+    train_main(
+        [
+            None,
+            "configs/base.yml",
+            r"base_output_directory=gs://runner-maxtext-logs",
+            "run_name=runner_simple_decoder_layer_test",
+            r"dataset_path=gs://maxtext-dataset",
+            "decoder_block=simple",
+            "enable_checkpointing=False",
+            "tokenizer_path=../assets/tokenizer.llama2",
+            "steps=3",
+        ]
+    )
 
   @pytest.mark.tpu
   def test_mlp_decoder_layer(self):
-    train_main([
-          None,
-          "configs/base.yml",
-          r"base_output_directory=gs://runner-maxtext-logs",
-          "run_name=runner_simple_decoder_layer_test",
-          r"dataset_path=gs://maxtext-dataset",
-          "decoder_block=simple_mlp",
-          "enable_checkpointing=False",
-          "tokenizer_path=../assets/tokenizer.llama2",
-          "steps=3"
-    ])
+    train_main(
+        [
+            None,
+            "configs/base.yml",
+            r"base_output_directory=gs://runner-maxtext-logs",
+            "run_name=runner_simple_decoder_layer_test",
+            r"dataset_path=gs://maxtext-dataset",
+            "decoder_block=simple_mlp",
+            "enable_checkpointing=False",
+            "tokenizer_path=../assets/tokenizer.llama2",
+            "steps=3",
+        ]
+    )
+
 
 if __name__ == "__main__":
   unittest.main()
