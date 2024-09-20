@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-# pylint: disable=bare-except, consider-using-generator, ungrouped-imports
+# pylint: disable=bare-except, consider-using-generator, ungrouped-imports, too-many-positional-arguments
 """Utils that are only interesting to MaxText. """
 
 import jax

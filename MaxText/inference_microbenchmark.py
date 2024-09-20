@@ -34,6 +34,8 @@ import pyconfig
 
 _WARMUP_ITERS = 2
 
+# pylint: disable=too-many-positional-arguments
+
 
 def prefill_benchmark_loop(engine, params, tokens, true_length, iters):
   """Inner loop for benchmarking prefill step."""
