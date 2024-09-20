@@ -432,7 +432,9 @@ allow_split_physical_axes: False
 
 overwrite_ckpt_step: -1
 pre_compile: True
+# Whether or not to log the "completed step" logs, which have some overhead with syncing the loss across all workers
 enable_step_logging: False
+# Whether to save metric information to tensorboard.
 enable_metric_writing: False
 
 use_ragged_attention: False
