@@ -432,5 +432,8 @@ allow_split_physical_axes: False
 
 overwrite_ckpt_step: -1
 pre_compile: True
+enable_step_logging: False
+enable_metric_writing: False
+
 use_ragged_attention: False
 ragged_block_size: 256

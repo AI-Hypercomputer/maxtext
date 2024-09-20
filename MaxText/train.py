@@ -122,6 +122,8 @@ def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step
   The logic is that this ensures that Jax is able to queues train_steps and we
   don't block when turning "lazy" Jax arrays into real Python numbers.
   """
+  if not config.enable_metric_writing:
+    return
   metrics_to_write, steps_to_write = None, None
   if is_training:
     global _buffered_step, _buffered_metrics
@@ -160,13 +162,14 @@ def write_metrics_to_tensorboard(writer, metrics, step, config, is_training=True
     if is_training:
       full_log = step % config.log_period == 0
 
-      # max_logging.log(
-      #     f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
-      #     f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-      #     f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
-      #     f"total_weights: {metrics['scalar']['learning/total_weights']}, "
-      #     f"loss: {metrics['scalar']['learning/loss']:.3f}"
-      # )
+      if config.enable_step_logging:
+        max_logging.log(
+            f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
+            f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
+            f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
+            f"total_weights: {metrics['scalar']['learning/total_weights']}, "
+            f"loss: {metrics['scalar']['learning/loss']:.3f}"
+        )
 
       if full_log and jax.process_index() == 0:
         max_logging.log(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
@@ -374,18 +377,20 @@ def train_step(model, config, state, data, dropout_rng):
   else:
     grads = raw_grads
   new_state = state.apply_gradients(grads=grads)
-  # metrics = {
-  #     "scalar": {
-  #         "learning/loss": loss,
-  #         "learning/moe_lb_loss": moe_lb_loss,
-  #         "learning/total_weights": total_weights,
-  #         "learning/grad_norm": max_utils.l2norm_pytree(grads),
-  #         "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
-  #         "learning/param_norm": max_utils.l2norm_pytree(new_state.params),
-  #     },
-  #     "scalars": {},
-  # }
-  metrics = {'scalar': {'learning/loss': loss}, 'scalars': {}}
+  if config.enable_metric_writing:
+    metrics = {
+        "scalar": {
+            "learning/loss": loss,
+            "learning/moe_lb_loss": moe_lb_loss,
+            "learning/total_weights": total_weights,
+            "learning/grad_norm": max_utils.l2norm_pytree(grads),
+            "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
+            "learning/param_norm": max_utils.l2norm_pytree(new_state.params),
+        },
+        "scalars": {},
+    }
+  else:
+    metrics = {'scalar': {'learning/loss': loss}, 'scalars': {}}
 
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
@@ -700,11 +705,13 @@ def train_loop(config, state=None):
         state, metrics = p_train_step(state, example_batch, nextrng)
 
     new_time = datetime.datetime.now()
-    # record_scalar_metrics(metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
-    step_time_delta = new_time - last_step_completion
-    # max_logging.log(f"completed step: {step}, seconds: {step_time_delta.total_seconds()}, "
-    #       f"TFLOP/s/device: {per_device_tflops / step_time_delta.total_seconds()}, "
-    #       f"loss: {metrics['scalar']['learning/loss']:.3f}")
+    if config.enable_metric_writing:
+      record_scalar_metrics(metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
+    if config.enable_step_logging:
+      step_time_delta = new_time - last_step_completion
+      max_logging.log(f"completed step: {step}, seconds: {step_time_delta.total_seconds()}, "
+            f"TFLOP/s/device: {per_device_tflops / step_time_delta.total_seconds()}, "
+            f"loss: {metrics['scalar']['learning/loss']:.3f}")
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
@@ -716,7 +723,7 @@ def train_loop(config, state=None):
         checkpoint_manager.wait_until_finished()
         sys.exit()
 
-    # write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
+    write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
 
     if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
       assert eval_data_iterator
@@ -741,8 +748,9 @@ def train_loop(config, state=None):
         eval_step_count += 1
       eval_loss = cumulative_eval_metrics["scalar"]["eval/total_loss"] / (cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS) + cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
       cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
-      # write_metrics(writer, local_metrics_file, running_gcs_metrics, cumulative_eval_metrics, step, config, is_training=False)
-      max_logging.log(f"average loss after {step=}: {eval_step_count=}, {eval_loss=}, total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}")
+      write_metrics(writer, local_metrics_file, running_gcs_metrics, cumulative_eval_metrics, step, config, is_training=False)
+      if config.enable_step_logging:
+        max_logging.log(f"average loss after {step=}: {eval_step_count=}, {eval_loss=}, total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}")
       mllog_utils.early_stop_check(config, step, eval_loss, start_step)
       if eval_loss <= config.target_eval_loss:
         max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
@@ -754,7 +762,7 @@ def train_loop(config, state=None):
 
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()
-  # write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config)  # final step metrics
+  write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config)  # final step metrics
   max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, job_end=True)
   clear_buffered_metrics()
