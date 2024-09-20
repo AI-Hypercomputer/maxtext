@@ -47,6 +47,8 @@ from tensorboardX import writer
 
 from google.cloud import storage
 
+# pylint: disable=too-many-positional-arguments
+
 
 def find_nans_and_infs(pytree):
   def finder(x):
@@ -562,6 +564,7 @@ def setup_initial_state(
         state = restored["items"]
     else:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
+      # pylint: disable=not-callable
       state = jax.jit(
           init_state_partial,
           in_shardings=None,

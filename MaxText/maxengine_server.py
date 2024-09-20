@@ -45,6 +45,7 @@ def main(config):
   # We separate credential from run so that we can unit test it with
   # local credentials.
   # TODO: Add grpc credentials for OSS.
+  # pylint: disable=unexpected-keyword-arg
   jetstream_server = server_lib.run(
       threads=256,
       port=9000,

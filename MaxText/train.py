@@ -64,6 +64,8 @@ from layers import quantizations
 from ml_goodput_measurement import goodput
 from ml_goodput_measurement import monitoring
 
+# pylint: disable=too-many-positional-arguments
+
 Transformer = models.Transformer
 EPS = 1e-8
 _CHUNK_BYTE_SIZE = 2 * 1024**3
@@ -435,6 +437,7 @@ def check_example_batch(config, example_batch):
   if config.max_checkify:
     jittable_f = checkify.checkify(lambda x: checkify.check(jnp.any(x > -1), "Batch contains bad synthetic data!"))
     # Check if inputs in batch contains bad synthetic data.
+    # pylint: disable=not-callable
     err, _ = jax.jit(jittable_f)(example_batch["inputs"][: config.global_batch_size_to_train_on, :])
     err.throw()
 
@@ -653,6 +656,7 @@ def train_loop(config, state=None):
       example_batch = load_next_batch(data_iterator, example_batch, config)
       record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
       check_example_batch(config, example_batch=example_batch)
+      # pylint: disable=not-callable
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -686,6 +690,7 @@ def train_loop(config, state=None):
           }
       }
       eval_step_count = 0
+      # pylint: disable=not-callable
       for eval_batch in eval_data_iterator:
         if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
           break

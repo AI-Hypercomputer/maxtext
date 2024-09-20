@@ -30,6 +30,8 @@ import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_c
 import os
 import shutil
 
+# pylint: disable=too-many-positional-arguments
+
 CheckpointManager = ocp.CheckpointManager
 CheckpointManagerOptions = ocp.CheckpointManagerOptions
 PyTreeCheckpointHandler = ocp.PyTreeCheckpointHandler
