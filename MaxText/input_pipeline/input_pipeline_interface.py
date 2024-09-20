@@ -144,7 +144,9 @@ def make_c4_mlperf_iterator(config, mesh):
     assert len(process_indices) == jax.process_count() // config.expansion_factor_real_data
   print("Overwrite both add_bos and add_eos to False")
   if jax.process_index() in process_indices:
-    train_iterator = make_c4_mlperf_train_iterator(config, mesh, add_bos=False, add_eos=False, process_indices=process_indices)
+    train_iterator = make_c4_mlperf_train_iterator(
+        config, mesh, add_bos=False, add_eos=False, process_indices=process_indices
+    )
   else:
     train_iterator = BadSyntheticDataIterator(config, mesh)
 
@@ -153,7 +155,9 @@ def make_c4_mlperf_iterator(config, mesh):
   else:
     effective_eval_per_device_batch_size = config.per_device_batch_size
 
-  assert effective_eval_per_device_batch_size >= 1.0, f"{effective_eval_per_device_batch_size=} is less than 1, which is not supported."
+  assert (
+      effective_eval_per_device_batch_size >= 1.0
+  ), f"{effective_eval_per_device_batch_size=} is less than 1, which is not supported."
   # Use all processes for evaluation until split is handled independently
   eval_process_indices = list(range(jax.process_count()))
   eval_iterator = make_c4_mlperf_eval_iterator(config, mesh, eval_process_indices)
