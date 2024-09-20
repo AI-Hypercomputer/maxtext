@@ -107,13 +107,6 @@ class Pipeline(nn.Module):
     else:
       prev_outputs = None
 
-    # Prev outputs has the same shape of the output (and shift)
-    if self.config.pipeline_delay_activation_forwarding:
-      prev_outputs = jnp.zeros((self.num_stages,) + inputs.shape[1:], dtype=inputs.dtype)
-      prev_outputs = nn.with_logical_constraint(prev_outputs, ("activation_stage", "activation_batch", "activation_length", "activation_embed"),rules=self.config.logical_axis_rules,mesh=self.mesh)
-    else:
-      prev_outputs = None
-
     # state_io (state input output) at first holds all of the input batches, but also will hold the outputs as the pipeline runs/finishes
     # state_io has shape [num_stages, microbatches/stages, micro_size, sequence, embed]
     state_io = jnp.reshape(inputs, (self.num_stages, self.microbatches_per_stage) + inputs.shape[1:])

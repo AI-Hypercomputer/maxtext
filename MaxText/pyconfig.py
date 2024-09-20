@@ -577,10 +577,6 @@ def using_sequence_parallelism(raw_keys) -> bool:
 def using_expert_parallelism(raw_keys) -> bool:
   return int(raw_keys["ici_expert_parallelism"]) > 1 or int(raw_keys["dcn_expert_parallelism"]) > 1
 
-
-def using_expert_parallelism(raw_keys) -> bool:
-  return int(raw_keys['ici_expert_parallelism']) > 1 or int(raw_keys['dcn_expert_parallelism']) > 1
-
 class HyperParameters:  # pylint: disable=missing-class-docstring
 
   def __init__(self):
