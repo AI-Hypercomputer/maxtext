@@ -42,6 +42,8 @@ import accelerator_to_spec_map
 import train
 from input_pipeline import input_pipeline_interface
 
+# pylint: disable=too-many-positional-arguments
+
 Transformer = models.Transformer
 
 
