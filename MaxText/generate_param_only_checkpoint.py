@@ -64,6 +64,7 @@ def _possibly_unroll_params(config, training_state, training_state_annotations, 
     def slice_ith(input_layers):
       return jax.tree_util.tree_map(lambda x: jax.numpy.take(x, i, axis=config.param_scan_axis), input_layers)
 
+    # pylint: disable=not-callable
     new_layer = jax.jit(slice_ith, out_shardings=new_per_layer_state_sharding)(training_state_layers)
 
     training_state.params["params"]["decoder"][f"layers_{i}"] = new_layer
