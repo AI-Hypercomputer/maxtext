@@ -245,7 +245,9 @@ class MlpBlock(nn.Module):
             use_bias=self.use_bias,
             matmul_precision=self.config.matmul_precision,
         )(inputs)
-        x = _convert_to_activation_function(act_fn)(x.astype(jnp.float32))
+        if cfg.activations_in_float32:
+          x = x.astype(jnp.float32)
+        x = _convert_to_activation_function(act_fn)(x)
         activations.append(x)
 
     # Take elementwise product of above intermediate activations.
@@ -525,7 +527,9 @@ class MoeBlock(nn.Module):
         w0_kernel = nn.with_logical_constraint(w0_kernel, w0_kernel_axes)
         layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
             "EBCM,EMH -> EBCH", dispatch, w0_kernel, precision=matmul_precision
-        ).astype(jnp.float32)
+        )
+        if self.config.activations_in_float32:
+          layer_w0 = layer_w0.astype(jnp.float32)
         layer_w0 = nn.with_logical_constraint(
             layer_w0, ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
         )
@@ -534,7 +538,9 @@ class MoeBlock(nn.Module):
         w1_kernel = nn.with_logical_constraint(w1_kernel, w1_kernel_axes)
         layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
             "EBCM,EMH -> EBCH", dispatch, w1_kernel, precision=matmul_precision
-        ).astype(jnp.float32)
+        )
+        if self.config.activations_in_float32:
+          layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = nn.with_logical_constraint(
             layer_w1, ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
         )
