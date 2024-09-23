@@ -263,10 +263,13 @@ class Pipeline(nn.Module):
     old_prev_outputs = loop_state["prev_outputs"]
     # Shift becomes a rotated-right version of the previous output
     def _rotate_right(output_in):
+      padding = [[1, 0]] + [[0, 0]] * (output_in.ndim - 1)
+      # Use lax.slice to guarantee the gradient is a pad.
+      return jax.lax.slice(jnp.pad(output_in, padding), [0] * output_in.ndim, output_in.shape)
       # Use lax.slice to avoid generating a gather.
-      last = jax.lax.slice_in_dim(output_in, self.num_stages - 1, self.num_stages, axis=0)
-      except_last = jax.lax.slice_in_dim(output_in, 0, self.num_stages - 1, axis=0)
-      return jnp.concatenate([last, except_last], axis=0)
+      # last = jax.lax.slice_in_dim(output_in, self.num_stages - 1, self.num_stages, axis=0)
+      # except_last = jax.lax.slice_in_dim(output_in, 0, self.num_stages - 1, axis=0)
+      # return jnp.concatenate([last, except_last], axis=0)
 
 
     real_rotate=True
