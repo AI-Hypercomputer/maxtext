@@ -16,7 +16,7 @@ echo "Running test_convergence_1b_params.sh"
 # default values, can be override from command line
 export LOSS_THRESHOLD=100.0 # Set to large value so test is guaranteed to pass.
 export STEPS=20400 # Run for 20B tokens for a 1B sized mode for "chinchilla" scaling https://arxiv.org/abs/2203.15556
-export EVAL_STEPS=500
+export EVAL_STEPS=160
 export DATASET_TYPE=tfds
 
 # Set environment variables
