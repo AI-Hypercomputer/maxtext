@@ -484,6 +484,12 @@ def setup_mesh_and_model(config):
         logger,
     )
   else:
+    use_ocdbt = True
+    use_zarr3 = True
+    # TODO(b/368121306): Remove this once zarr3 support is plumbed on the backend
+    if config.enable_single_controller:
+      use_ocdbt = False
+      use_zarr3 = False
     checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
         config.checkpoint_dir,
         config.enable_checkpointing,
@@ -491,6 +497,8 @@ def setup_mesh_and_model(config):
         config.checkpoint_period,
         config.dataset_type,
         logger,
+        use_ocdbt,
+        use_zarr3,
     )
 
   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
