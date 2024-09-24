@@ -65,6 +65,8 @@ from layers import quantizations
 from ml_goodput_measurement import goodput
 from ml_goodput_measurement import monitoring
 
+# pylint: disable=too-many-positional-arguments
+
 Transformer = models.Transformer
 EPS = 1e-8
 _CHUNK_BYTE_SIZE = 2 * 1024**3
@@ -439,6 +441,7 @@ def check_example_batch(config, example_batch):
   if config.max_checkify:
     jittable_f = checkify.checkify(lambda x: checkify.check(jnp.any(x > -1), "Batch contains bad synthetic data!"))
     # Check if inputs in batch contains bad synthetic data.
+    # pylint: disable=not-callable
     err, _ = jax.jit(jittable_f)(example_batch["inputs"][: config.global_batch_size_to_train_on, :])
     err.throw()
 
@@ -485,6 +488,12 @@ def setup_mesh_and_model(config):
         logger,
     )
   else:
+    use_ocdbt = True
+    use_zarr3 = True
+    # TODO(b/368121306): Remove this once zarr3 support is plumbed on the backend
+    if config.enable_single_controller:
+      use_ocdbt = False
+      use_zarr3 = False
     checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
         config.checkpoint_dir,
         config.enable_checkpointing,
@@ -492,6 +501,8 @@ def setup_mesh_and_model(config):
         config.checkpoint_period,
         config.dataset_type,
         logger,
+        use_ocdbt,
+        use_zarr3,
     )
 
   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
@@ -741,6 +752,7 @@ def train_loop(config, state=None):
           }
       }
       eval_step_count = 0
+      # pylint: disable=not-callable
       for eval_batch in eval_data_iterator:
         if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
           break

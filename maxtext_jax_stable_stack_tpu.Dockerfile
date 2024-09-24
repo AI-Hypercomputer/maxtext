@@ -16,13 +16,8 @@ WORKDIR /deps
 COPY . .
 RUN ls .
 
-ARG MAXTEXT_REQUIREMENTS_FILE
-
-# Install Maxtext requirements
-RUN if [ ! -z "${MAXTEXT_REQUIREMENTS_FILE}" ]; then \
-        echo "Using Maxtext requirements: ${MAXTEXT_REQUIREMENTS_FILE}" && \
-        pip install -r /deps/${MAXTEXT_REQUIREMENTS_FILE}; \
-    fi
+# Install Maxtext requirements with Jax Stable Stack
+RUN pip install -r /deps/requirements_with_jax_stable_stack.txt
 
 # Run the script available in JAX Stable Stack base image to generate the manifest file
-RUN bash /generate_manifest.sh PREFIX=maxtext COMMIT_HASH=$COMMIT_HASH
+RUN bash /jax-stable-stack/generate_manifest.sh PREFIX=maxtext COMMIT_HASH=$COMMIT_HASH

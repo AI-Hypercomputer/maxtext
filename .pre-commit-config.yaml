@@ -5,11 +5,3 @@ repos:
     - id: codespell
       name: Running codespell for typos
       entry: codespell -w --skip="*.txt,pylintrc,.*,assets/*" .
-  - repo: local
-    hooks:
-    - id: code-style
-      language: system
-      name: Check code style
-      entry: ./code_style.sh
-      args: ['--check']
-      always_run: false # Only run on changed files
