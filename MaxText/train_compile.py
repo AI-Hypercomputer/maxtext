@@ -41,6 +41,7 @@ import pickle
 import accelerator_to_spec_map
 import train
 from input_pipeline import input_pipeline_interface
+import profiler
 
 # pylint: disable=too-many-positional-arguments
 
@@ -73,6 +74,8 @@ def get_topology_mesh(config):
         num_slices=config.compile_topology_num_slices,
         wrap=target_hardware.wrap,
     ).devices
+
+  print(f'yy1 topology_devices: {topology_devices}')
   topology_device_mesh = max_utils.create_device_mesh(config, topology_devices)
   topology_mesh = Mesh(topology_device_mesh, config.mesh_axes)
   return topology_mesh
@@ -172,6 +175,11 @@ def main(argv: Sequence[str]) -> None:
       donate_argnums,
       nn_partitioning.axis_rules(config.logical_axis_rules),
   )
+
+  prof = profiler.Profiler(config)
+  prof.activate()
+  prof.deactivate()
+  print(f"profile saved to {prof.output_path}")
   print("Jitting and compilation complete!", flush=True)
 
   # Serialize and save the compiled object
