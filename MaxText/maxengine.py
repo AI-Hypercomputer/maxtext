@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Implementation of Engine API for MaxText"""
+import copy as cp
 import functools
 from typing import Any, Optional, Tuple
 
@@ -35,6 +36,7 @@ from jetstream.engine import token_utils
 
 import max_utils
 import inference_utils
+import pyconfig
 
 
 Prefix = Any
@@ -50,6 +52,28 @@ class DecodeState:
   generate_cache_index: int
   generate_lengths: jax.Array
   generated_token: jax.Array
+
+
+class MaxEngineConfig:
+  """Engine specific config class to allow using multiple MaxEngine instances in an inference run.
+  The default pyconfig.config is a global param shared across multiple instances and doesn't
+  allow using different config for each MaxEngine instance.
+  """
+
+  def __init__(self, keys):
+    # self.keys = keys
+    self.__dict__["keys"] = keys
+
+  def __getattr__(self, attr):
+    if attr not in self.keys:
+      raise ValueError(f"Requested key {attr}, not in config")
+    return self.keys[attr]
+
+  def __setattr__(self, attr, value):
+    raise ValueError
+
+  def get_keys(self):
+    return self.keys
 
 
 class MaxEngine(engine_api.Engine):
@@ -441,3 +465,46 @@ class MaxEngine(engine_api.Engine):
   def colocated_cpus(self) -> None:
     """CPU devices colocated with the engine's accelerators."""
     raise NotImplementedError
+
+
+def set_engine_vars_from_base_engine(engine: engine_api.Engine, base_engine: engine_api.Engine):
+  """Set internal vars from base_engine, which has already loaded the checkpoint and has sharding,
+  mesh, and kv cache related vars set.
+  """
+  engine.model.quant.quant_mode = base_engine.model.quant.quant_mode
+  engine.state_mesh_annotations = base_engine.state_mesh_annotations
+  engine.abstract_params = base_engine.abstract_params
+  engine.kv_cache_annotations = max_utils.get_kv_cache_annotations(engine.model, engine.config, engine.rng, engine._mesh)  # pylint: disable=protected-access
+  engine.kv_cache_shardings = jax.tree_util.tree_map(
+      lambda x: jax.sharding.NamedSharding(engine._mesh, x), engine.kv_cache_annotations  # pylint: disable=protected-access
+  )
+
+
+def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_target_length, args_str):
+  """Create new MaxEngine instance with given batch_size, prefill and target lengths, and any config
+  params provided through `args_str`.
+  """
+  args = []
+  args.append("scan_layers=false")
+  args.append("async_checkpointing=false")
+  args.append("ici_fsdp_parallelism=1")
+  args.append("ici_autoregressive_parallelism=1")
+  args.append("ici_tensor_parallelism=-1")
+  args.append("weight_dtype=bfloat16")
+  args.append("attention=dot_product")
+  # args.append("")
+
+  # batch and cache related
+  args.append(f"max_prefill_predict_length={max_prefill_predict_length}")
+  args.append(f"max_target_length={max_target_length}")
+  args.append(f"per_device_batch_size={batch_size}")
+
+  args_str = "MaxText/maxengine_server.py configs/base.yml " + args_str
+  cmd_args = [b for b in args_str.split(" ") if len(b) > 0]
+  # Add at the end to cmd args override the default values set above
+  args.extend(cmd_args)
+
+  pyconfig.initialize(args)
+  cfg = MaxEngineConfig(cp.deepcopy(pyconfig._config.keys))  # pylint: disable=protected-access
+  engine = MaxEngine(cfg)
+  return engine
