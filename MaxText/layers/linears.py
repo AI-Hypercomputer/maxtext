@@ -245,9 +245,7 @@ class MlpBlock(nn.Module):
             use_bias=self.use_bias,
             matmul_precision=self.config.matmul_precision,
         )(inputs)
-        if cfg.activations_in_float32:
-          x = x.astype(jnp.float32)
-        x = _convert_to_activation_function(act_fn)(x)
+        x = _convert_to_activation_function(act_fn)(x.astype(jnp.float32))
         activations.append(x)
 
     # Take elementwise product of above intermediate activations.
@@ -527,9 +525,7 @@ class MoeBlock(nn.Module):
         w0_kernel = nn.with_logical_constraint(w0_kernel, w0_kernel_axes)
         layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
             "EBCM,EMH -> EBCH", dispatch, w0_kernel, precision=matmul_precision
-        )
-        if self.config.activations_in_float32:
-          layer_w0 = layer_w0.astype(jnp.float32)
+        ).astype(jnp.float32)
         layer_w0 = nn.with_logical_constraint(
             layer_w0, ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
         )
@@ -538,17 +534,15 @@ class MoeBlock(nn.Module):
         w1_kernel = nn.with_logical_constraint(w1_kernel, w1_kernel_axes)
         layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
             "EBCM,EMH -> EBCH", dispatch, w1_kernel, precision=matmul_precision
-        )
-        if self.config.activations_in_float32:
-          layer_w1 = layer_w1.astype(jnp.float32)
+        ).astype(jnp.float32)
         layer_w1 = nn.with_logical_constraint(
             layer_w1, ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
         )
-      layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
+      layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0) # rawr 2
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
       with jax.named_scope("wo"):
         wo_kernel_axes = ("exp", None, None)
-        wo_kernel = nn.with_logical_constraint(wo_kernel, wo_kernel_axes)
+        wo_kernel = nn.with_logical_constraint(wo_kernel, wo_kernel_axes) # rawr
         intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
             "EBCH,EHM -> EBCM", layer_multiply, wo_kernel, precision=matmul_precision
         )
