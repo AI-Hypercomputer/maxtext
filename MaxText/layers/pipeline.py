@@ -270,7 +270,7 @@ class Pipeline(nn.Module):
     old_circ_storage = loop_state["circ_storage"]
     old_circ_storage_mover = loop_state["circ_storage_mover"]
     loop_iteration = loop_state["loop_iteration"]
-    old_prev_outputs = loop_state["prev_outputs"]
+    old_prev_outputs = loop_state["prev_outputs"] #rawr
 
     # Shift becomes a rotated right version of the previous output
     def _rotate_right(output_in):
