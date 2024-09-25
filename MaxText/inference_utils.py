@@ -20,7 +20,7 @@ import jax.numpy as jnp
 NEG_INF = -1.0e7  # Masking purpose
 
 
-# pylint: disable=bare-except, consider-using-generator
+# pylint: disable=bare-except, consider-using-generator, too-many-positional-arguments
 """ Common Maxtext inference utilities. These seem like they should be a library.
 
     Inspired by an Google-internal implementation, Global Vision Transformer.

@@ -36,3 +36,12 @@ jobs:
          pylint pedagogical_examples/ && \
          echo 'PyLint check on pedagogical_examples/ is successful' || { echo \
          'PyLint check has failed. Please run bash code_style.sh to fix issues'; exit 20; }
+    - name: Analysing the code with pyink in Maxtext/
+      run: |
+        pyink MaxText --check --diff --color --pyink-indentation=2 --line-length=125
+    - name: Analysing the code with pyink in pedagogical_examples/
+      run: |
+        pyink pedagogical_examples --check --diff --color --pyink-indentation=2 --line-length=125
+
+
+

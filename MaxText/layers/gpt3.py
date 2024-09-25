@@ -153,7 +153,6 @@ class Gpt3MultiHeadAttention(nn.Module):
   value_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
   out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
 
-
   def qkv_projection(self, inputs: Array, proj_name: str):
     """Fused QKV projection"""
 
@@ -233,6 +232,7 @@ class Gpt3MultiHeadAttention(nn.Module):
     value = checkpoint_name(value, "value_proj")
 
     attention_op = AttentionOp(
+        config=self.config,
         mesh=self.mesh,
         attention_kernel=self.attention_kernel,
         max_target_length=self.max_target_length,
@@ -312,7 +312,7 @@ class Gpt3DecoderLayer(nn.Module):
         fused_qkv=cfg.fused_qkv,
         use_bias=True,
         quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(cfg)
+        kv_quant=quantizations.configure_kv_quant(cfg),
     )
 
     attention_lnx = attention_layer(

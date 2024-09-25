@@ -18,10 +18,12 @@ limitations under the License.
 from ctypes import cdll
 import os
 import subprocess
+import shutil
 
 import max_logging
 
 import jax
+
 
 class Profiler:
   """Activate/deactivate a profiler based on the 'profiler' config"""
@@ -40,10 +42,9 @@ class Profiler:
       return
     if self.mode == "nsys":
       try:
-        self.libcudart = cdll.LoadLibrary('libcudart.so')
-      except Exception as e: # pylint: disable=broad-except
-        max_logging.log(f"WARNING: Failed to load library for nsys: {e}\n"
-                        "profiler has no effect")
+        self.libcudart = cdll.LoadLibrary("libcudart.so")
+      except Exception as e:  # pylint: disable=broad-except
+        max_logging.log(f"WARNING: Failed to load library for nsys: {e}\n" "profiler has no effect")
         return
       self.libcudart.cudaProfilerStart()
     elif self.mode == "xplane":
@@ -58,10 +59,12 @@ class Profiler:
       if self.libcudart is not None:
         self.libcudart.cudaProfilerStop()
       else:
-        max_logging.log("WARNING: library for nsys was not loaded \n"
-                        "profiler has no effect")
+        max_logging.log("WARNING: library for nsys was not loaded \n" "profiler has no effect")
         return
       # Popen() instead of run() for non-blocking behavior
-      subprocess.Popen(["gsutil", "cp", "*nsys-rep", self.output_path]) # pylint: disable=consider-using-with
+      if shutil.which("gsutil") is not None:
+        subprocess.Popen(["gsutil", "cp", "*nsys-rep", self.output_path])  # pylint: disable=consider-using-with
+      else:
+        max_logging.log("WARNING: gsutil is not installed or not found in the system's PATH. Skipping upload...")
     elif self.mode == "xplane":
       jax.profiler.stop_trace()

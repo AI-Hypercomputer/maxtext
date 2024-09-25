@@ -178,6 +178,7 @@ def collective_matmul(activations, weights):  # pylint: disable=redefined-outer-
 
 
 with global_mesh:
+  # pylint: disable=not-callable
   activations, weights = data_fn()
 
   jax.block_until_ready(activations)

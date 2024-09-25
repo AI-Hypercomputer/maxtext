@@ -65,14 +65,12 @@ class TfdsDataProcessingTest(unittest.TestCase):
         input_pipeline_id=jax.process_index(),
         num_input_pipelines=jax.process_count(),
     )
-    ds = ds_builder.as_dataset(split="train", read_config=self.read_config,
-                               shuffle_files=self.config.enable_data_shuffling)
+    ds = ds_builder.as_dataset(split="train", read_config=self.read_config, shuffle_files=self.config.enable_data_shuffling)
 
     return ds
 
   def _get_train_iterator(self):
-    train_iter, eval_iter = _tfds_data_processing.make_tfds_iterator(
-      self.config, self.mesh, self.process_indices)
+    train_iter, eval_iter = _tfds_data_processing.make_tfds_iterator(self.config, self.mesh, self.process_indices)
     return train_iter, eval_iter
 
   def test_train_ds(self):
