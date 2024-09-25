@@ -39,8 +39,8 @@ if [[ ! -v CLOUD_IMAGE_NAME ]] || [[ ! -v PROJECT ]] || [[ ! -v MODE ]] || [[ ! 
   exit 1
 fi
 
+gcloud auth configure-docker us-docker.pkg.dev --quiet
 bash docker_build_dependency_image.sh LOCAL_IMAGE_NAME=$LOCAL_IMAGE_NAME MODE=$MODE DEVICE=$DEVICE
-gcloud auth configure-docker --quiet
 image_date=$(date +%Y-%m-%d)
 
 # Upload only dependencies image
