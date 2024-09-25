@@ -62,7 +62,7 @@ class Profiler:
         max_logging.log("WARNING: library for nsys was not loaded \n" "profiler has no effect")
         return
       # Popen() instead of run() for non-blocking behavior
-      if shutil.which('gsutil') is not None:
+      if shutil.which("gsutil") is not None:
         subprocess.Popen(["gsutil", "cp", "*nsys-rep", self.output_path])  # pylint: disable=consider-using-with
       else:
         max_logging.log("WARNING: gsutil is not installed or not found in the system's PATH. Skipping upload...")
