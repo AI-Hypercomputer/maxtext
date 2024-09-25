@@ -27,6 +27,8 @@ from multihost_dataloading import MultiHostDataLoadIterator
 import numpy as np
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+import os
+import shutil
 
 CheckpointManager = ocp.CheckpointManager
 CheckpointManagerOptions = ocp.CheckpointManagerOptions
@@ -90,6 +92,7 @@ def create_orbax_emergency_checkpoint_manager(
     local_save_interval_steps: int,
     persistent_save_interval_steps: int,
     orbax_logger: Optional[abstract_logger.AbstractLogger] = None,
+    replica_axis_idx: Optional[int] = 1,
 ):
   """Returns an emergency checkpoint."""
   flags.FLAGS.experimental_orbax_use_distributed_process_id = True
@@ -102,6 +105,7 @@ def create_orbax_emergency_checkpoint_manager(
       persistent=PersistentCheckpointOptions(
           save_interval_steps=persistent_save_interval_steps
       ),
+      replica_axis_index = replica_axis_idx,
   )
   emergency_mngr = emergency_checkpoint_manager.CheckpointManager(
       local_checkpoint_dir,
@@ -336,3 +340,18 @@ def save_params_to_path(checkpoint_dir, params):
     force=True
     )
   print(f"Quantized params checkpoint saved at: {checkpoint_dir}")
+
+
+def clear_directory(directory):
+  """
+  Deletes the contents of a directory while keeping the directory itself.
+
+  Args:
+    directory: The path to the directory to clear.
+  """
+  try:
+    shutil.rmtree(directory)  # Delete the directory and its contents
+    os.mkdir(directory)  # Recreate the empty directory
+    print(f"Directory '{directory}' cleared successfully.")
+  except OSError as e:
+    print(f"Error clearing directory '{directory}': {e}")

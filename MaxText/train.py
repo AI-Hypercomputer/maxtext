@@ -458,10 +458,12 @@ def setup_mesh_and_model(config):
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
+  num_slices = mesh.devices.shape[1]
+  max_logging.log(f"num slices by mesh.devices.shape: {num_slices} ")
 
-  if emergency_checkpoint_manager.should_restore_mesh_from_metadata(epath.Path(config.checkpoint_dir)):
-    mesh = emergency_checkpoint_manager.consistent_restore_mesh_from_metadata(epath.Path(config.checkpoint_dir), mesh)
-
+  if config.check_should_restore:
+    if emergency_checkpoint_manager._should_restore_mesh_from_metadata(epath.Path(config.checkpoint_dir)):
+        mesh = emergency_checkpoint_manager._consistent_restore_mesh_from_metadata(epath.Path(config.checkpoint_dir), mesh)
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
   model = Transformer(config, mesh, quant=quant)
@@ -481,6 +483,7 @@ def setup_mesh_and_model(config):
           config.local_checkpoint_period,
           config.checkpoint_period,
           logger,
+          config.replica_axis_index,
       )
     )
   else:
