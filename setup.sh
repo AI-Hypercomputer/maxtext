@@ -65,16 +65,19 @@ if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE) ]]; then
 fi
 
 if [[ $DEVICE == "tpu" ]]; then
-    libtpu_path="$HOME/custom_libtpu/libtpu.so"
+    libtpu_path="$HOME/custom_libtpu/libtpu.whl"
     if [[ "$MODE" == "libtpu-only" ]]; then
         # Only update custom libtpu.
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
             # Install custom libtpu
-            echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
+            echo "Installing libtpu.whl from $LIBTPU_GCS_PATH to $libtpu_path"
             # Install required dependency
             pip3 install -U crcmod
             # Copy libtpu.so from GCS path
             gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+
+            echo "pip install libtpu.whl from $LIBTPU_GCS_PATH to $libtpu_path"
+            pip install $libtpu_path
             exit 0
         else
             echo -e "\n\nError: You must provide a custom libtpu for libtpu-only mode.\n\n"
