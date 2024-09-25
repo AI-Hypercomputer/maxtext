@@ -370,22 +370,17 @@ class PagedAttentionOp(nn.Module):
 
     current_page = page_state.current_page  # (8)
     current_page_position = page_state.current_page_position  # (8)
-    print(f"update_decode_step_pages - {current_page.shape=}")
-    print(f"update_decode_step_pages - {current_page_position.shape=}")
 
     zeros = jnp.zeros(shape=(b, self.page_size, n_kv, d), dtype=key.dtype)
-    print(f"update_decode_step_pages - {zeros.shape=}")
 
     def _update_page_slice(update_target, page_slice_idx, update_page_slice):
       return jax.lax.dynamic_update_slice_in_dim(update_target, update_page_slice, page_slice_idx, axis=0)
 
     keys = jax.vmap(_update_page_slice)(zeros, current_page_position, key)       # (32, 16, 32, 128)
     values = jax.vmap(_update_page_slice)(zeros, current_page_position, value)   # (32, 16, 32, 128)
-    print(f"update_decode_step_pages - {keys.shape=}")
 
     keys = jnp.transpose(keys, axes=(2, 0, 1, 3))       # (32, 32, 16, 128)
     values = jnp.transpose(values, axes=(2, 0, 1, 3))   # (32, 32, 16, 128)
-    print(f"update_decode_step_pages - {keys.shape=}")
 
     def _update_pages(slot, state):
       update_target, update_pages, page_indices = state
@@ -394,7 +389,6 @@ class PagedAttentionOp(nn.Module):
       updated_state = updated_target, update_pages, page_indices
       return updated_state
 
-    print(f"update_decode_step_pages - {key_pages_var.value.shape=}")
     key_pages_var.value, _, _ = jax.lax.fori_loop(0, b, _update_pages, (key_pages_var.value, keys, current_page))
     value_pages_var.value, _, _ = jax.lax.fori_loop(0, b, _update_pages, (value_pages_var.value, values, current_page))
     key_pages_var.value = nn.with_logical_constraint(key_pages_var.value, self.kv_pages_axis_names)
