@@ -95,12 +95,20 @@ def create_orbax_emergency_checkpoint_manager(
     persistent_save_interval_steps: int,
     orbax_logger: Optional[abstract_logger.AbstractLogger] = None,
     replica_axis_idx: Optional[int] = 1,
+    replica_axis_idx: Optional[int] = 1,
 ):
   """Returns an emergency checkpoint."""
   flags.FLAGS.experimental_orbax_use_distributed_process_id = True
   max_logging.log("Creating emergency checkpoint manager...")
 
   options = emergency_checkpoint_manager.CheckpointManagerOptions(
+      local=LocalCheckpointOptions(
+          save_interval_steps=local_save_interval_steps
+      ),
+      persistent=PersistentCheckpointOptions(
+          save_interval_steps=persistent_save_interval_steps
+      ),
+      replica_axis_index = replica_axis_idx,
       local=LocalCheckpointOptions(
           save_interval_steps=local_save_interval_steps
       ),
@@ -321,6 +329,21 @@ def save_params_to_path(checkpoint_dir, params):
   save_args = orbax_utils.save_args_from_target({"params": params})
   orbax_checkpointer.save(checkpoint_dir, {"params": params}, save_args=save_args, force=True)
   print(f"Quantized params checkpoint saved at: {checkpoint_dir}")
+
+
+def clear_directory(directory):
+  """
+  Deletes the contents of a directory while keeping the directory itself.
+
+  Args:
+    directory: The path to the directory to clear.
+  """
+  try:
+    shutil.rmtree(directory)  # Delete the directory and its contents
+    os.mkdir(directory)  # Recreate the empty directory
+    print(f"Directory '{directory}' cleared successfully.")
+  except OSError as e:
+    print(f"Error clearing directory '{directory}': {e}")
 
 
 def clear_directory(directory):

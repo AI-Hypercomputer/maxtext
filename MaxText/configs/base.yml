@@ -448,3 +448,11 @@ clean_local_checkpoint_dir: False
 sa_block_q: 512
 sa_block_q_dkv: 512
 sa_block_q_dq: 512
+
+
+replica_axis_index: 1
+
+check_should_restore : False
+
+# Clean the local checkpoint directory.
+clean_local_checkpoint_dir: False
