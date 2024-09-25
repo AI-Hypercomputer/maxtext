@@ -100,6 +100,7 @@ def create_orbax_emergency_checkpoint_manager(
   options = emergency_checkpoint_manager.CheckpointManagerOptions(
       local=LocalCheckpointOptions(save_interval_steps=local_save_interval_steps),
       persistent=PersistentCheckpointOptions(save_interval_steps=persistent_save_interval_steps),
+      replica_axis_index = 1,
   )
   emergency_mngr = emergency_checkpoint_manager.CheckpointManager(
       local_checkpoint_dir,
@@ -186,13 +187,13 @@ def load_state_if_possible(
         mesh = data.sharding.mesh
         if not enable_single_replica_ckpt_restoring:
           return ocp.type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
-        replica_axis_index = 0
+        replica_axis_index = 1
         replica_devices = _replica_devices(mesh.devices, replica_axis_index)
         replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
         single_replica_sharding = jax.sharding.NamedSharding(replica_mesh, pspec)
 
         array_handler = ocp.type_handlers.SingleReplicaArrayHandler(
-            replica_axis_index=0,
+            replica_axis_index=1,
             broadcast_memory_limit_bytes=1024 * 1024 * 1000,  # 1000 MB limit
         )
         ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)

@@ -25,6 +25,7 @@ import os
 import sys
 import functools
 import time
+from etils import epath
 
 from typing import Sequence, Optional
 from absl import app
@@ -465,7 +466,8 @@ def setup_mesh_and_model(config):
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
-
+  if emergency_checkpoint_manager._should_restore_mesh_from_metadata(epath.Path(config.checkpoint_dir)):
+      mesh = emergency_checkpoint_manager._consistent_restore_mesh_from_metadata(epath.Path(config.checkpoint_dir), mesh)
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
   model = Transformer(config, mesh, quant=quant)
