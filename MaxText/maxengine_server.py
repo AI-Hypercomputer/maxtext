@@ -17,6 +17,7 @@
 import jax
 import os
 import sys
+import pathwaysutils  # pylint: disable=unused-import
 import pyconfig
 
 import maxengine_config
