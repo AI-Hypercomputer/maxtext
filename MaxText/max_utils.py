@@ -47,6 +47,8 @@ from tensorboardX import writer
 
 from google.cloud import storage
 
+# pylint: disable=too-many-positional-arguments
+
 
 def find_nans_and_infs(pytree):
   def finder(x):
@@ -562,6 +564,7 @@ def setup_initial_state(
         state = restored["items"]
     else:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
+      # pylint: disable=not-callable
       state = jax.jit(
           init_state_partial,
           in_shardings=None,
@@ -835,8 +838,8 @@ def print_mem_stats(label: str):
       used = round(stats["bytes_in_use"] / 2**30, 2)
       limit = round(stats["bytes_limit"] / 2**30, 2)
       print(f"\tUsing (GB) {used} / {limit} ({used/limit:%}) on {d}")
-  except (RuntimeError, KeyError):
-    print("\tMemstats unavailable.")
+  except (RuntimeError, KeyError, TypeError) as ex:
+    print(f"\tMemstats unavailable, error: {ex}")
 
 
 def print_system_information():

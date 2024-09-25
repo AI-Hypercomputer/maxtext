@@ -28,6 +28,8 @@ import numpy as np
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 
+# pylint: disable=too-many-positional-arguments
+
 CheckpointManager = ocp.CheckpointManager
 CheckpointManagerOptions = ocp.CheckpointManagerOptions
 PyTreeCheckpointHandler = ocp.PyTreeCheckpointHandler
@@ -47,6 +49,8 @@ def create_orbax_checkpoint_manager(
     save_interval_steps: int,
     dataset_type: Optional[str] = "tfds",
     orbax_logger: Optional[abstract_logger.AbstractLogger] = None,
+    use_ocdbt: bool = True,
+    use_zarr3: bool = True,
 ):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -64,7 +68,7 @@ def create_orbax_checkpoint_manager(
   p.mkdir(exist_ok=True, parents=True)
   # we need to use ocdbt and zarr3 to control max file size in the checkpoint
   # omitting `iter` uses default handler for `iter`
-  item_handlers = {"items": PyTreeCheckpointHandler(use_ocdbt=True, use_zarr3=True)}
+  item_handlers = {"items": PyTreeCheckpointHandler(use_ocdbt=use_ocdbt, use_zarr3=use_zarr3)}
   mngr = CheckpointManager(
       p,
       item_names=item_names,

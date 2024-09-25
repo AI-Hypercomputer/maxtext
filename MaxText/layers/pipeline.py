@@ -271,7 +271,8 @@ class Pipeline(nn.Module):
     old_circ_storage_mover = loop_state["circ_storage_mover"]
     loop_iteration = loop_state["loop_iteration"]
     old_prev_outputs = loop_state["prev_outputs"]
-    # Shift becomes a rotated-right version of the previous output
+
+    # Shift becomes a rotated right version of the previous output
     def _rotate_right(output_in):
       # Use lax.slice to avoid generating a gather.
       last = jax.lax.slice_in_dim(output_in, self.num_stages - 1, self.num_stages, axis=0)
