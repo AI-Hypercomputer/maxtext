@@ -43,6 +43,8 @@ import max_logging
 import optimizers
 import profiler
 import pyconfig
+import pathwaysutils  # pylint: disable=unused-import
+
 from vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
