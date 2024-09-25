@@ -26,7 +26,7 @@ vocab_size: 50304
 enable_dropout: False
 logits_via_embedding: True
 normalize_embedding_logits: False
-logits_dot_in_fp32: False
+logits_dot_in_fp32: True
 normalization_layer_epsilon: 1.e-05
 use_iota_embed: True
 fused_qkv: True
