@@ -166,12 +166,17 @@ elif [[ $MODE == "nightly" ]]; then
         pip3 install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
-            # Install custom libtpu
-            echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
+            libtpu_path="/tmp/$(basename "$LIBTPU_GCS_PATH")" 
             # Install required dependency
             pip3 install -U crcmod
+            # Install custom libtpu
+            echo "copy libtpu.whl from $LIBTPU_GCS_PATH to $libtpu_path"
             # Copy libtpu.so from GCS path
             gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+
+            echo "pip install libtpu.whl from $libtpu_path"
+            pip install $libtpu_path
+            exit 0
         else
             # Install libtpu-nightly
             echo "Installing libtpu-nightly"
@@ -187,10 +192,6 @@ else
     exit 1
 fi
 
-# Install dependencies from requirements.txt
-cd $run_name_folder_path && pip install --upgrade pip
-if [[ "$MODE" == "pinned" ]]; then
-    pip3 install -U -r requirements.txt -c constraints_gpu.txt
-else
-    pip3 install -U -r requirements.txt
-fi
+
+pip3 install -U -r requirements.txt
+
