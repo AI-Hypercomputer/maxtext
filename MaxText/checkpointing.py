@@ -27,6 +27,8 @@ from multihost_dataloading import MultiHostDataLoadIterator
 import numpy as np
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+import orbax.checkpoint.experimental.emergency.pathways_checkpoint_manager as pw_emergency_checkpoint_manager
+from orbax.checkpoint.multihost.utils import is_pathways_on_cloud_backend
 
 # pylint: disable=too-many-positional-arguments
 
@@ -101,15 +103,33 @@ def create_orbax_emergency_checkpoint_manager(
       local=LocalCheckpointOptions(save_interval_steps=local_save_interval_steps),
       persistent=PersistentCheckpointOptions(save_interval_steps=persistent_save_interval_steps),
   )
-  emergency_mngr = emergency_checkpoint_manager.CheckpointManager(
-      local_checkpoint_dir,
-      epath.Path(persistent_checkpoint_dir),
-      global_mesh=global_mesh,
-      abstract_state=abstract_state,
-      options=options,
-      local_state_handler=emergency_checkpoint_manager.local_checkpoint_handler(),
-      logger=orbax_logger,
+  max_logging.log(
+      "Determining if this is a pathways on cloud backend:"
+      f" {is_pathways_on_cloud_backend()}"
   )
+
+  if is_pathways_on_cloud_backend():
+    local_state_handler = pw_emergency_checkpoint_manager.local_checkpoint_handler()
+    emergency_mngr = pw_emergency_checkpoint_manager.PathwaysCheckpointManager(
+        local_checkpoint_dir,
+        epath.Path(persistent_checkpoint_dir),
+        global_mesh=global_mesh,
+        abstract_state=abstract_state,
+        options=options,
+        local_state_handler=local_state_handler,
+        logger=orbax_logger,
+    )
+  else:
+    local_state_handler = emergency_checkpoint_manager.local_checkpoint_handler()
+    emergency_mngr = emergency_checkpoint_manager.CheckpointManager(
+        local_checkpoint_dir,
+        epath.Path(persistent_checkpoint_dir),
+        global_mesh=global_mesh,
+        abstract_state=abstract_state,
+        options=options,
+        local_state_handler=local_state_handler,
+        logger=orbax_logger,
+    )
 
   max_logging.log("Emergency checkpoint manager created!")
   return emergency_mngr
@@ -184,7 +204,7 @@ def load_state_if_possible(
       def map_to_pspec(data):
         pspec = data.sharding.spec
         mesh = data.sharding.mesh
-        if not enable_single_replica_ckpt_restoring:
+        if not enable_single_replica_ckpt_restoring or isinstance(checkpoint_manager, pw_emergency_checkpoint_manager.PathwaysCheckpointManager):
           return ocp.type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
         replica_axis_index = 0
         replica_devices = _replica_devices(mesh.devices, replica_axis_index)
@@ -197,6 +217,7 @@ def load_state_if_possible(
         )
         ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
 
+        # TO DO: These restore args may not be correct for Pathways.
         return ocp.type_handlers.SingleReplicaArrayRestoreArgs(
             sharding=jax.sharding.NamedSharding(mesh, pspec),
             single_replica_sharding=single_replica_sharding,
@@ -209,7 +230,7 @@ def load_state_if_possible(
           abstract_unboxed_pre_state,
       )
 
-      if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
+      if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager) or isinstance(checkpoint_manager, pw_emergency_checkpoint_manager.PathwaysCheckpointManager):
         return (
             checkpoint_manager.restore(
                 latest_step,

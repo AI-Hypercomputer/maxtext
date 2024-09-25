@@ -25,7 +25,7 @@ set -e
 
 export LOCAL_IMAGE_NAME=maxtext_base_image
 
-# Use Docker BuildKit so we can cache pip packages.
+# Use Docker Build --no-cacheKit so we can cache pip packages.
 export DOCKER_BUILDKIT=1
 
 echo "Starting to build your docker image. This will take a few minutes but the image can be reused as you iterate."
@@ -62,7 +62,7 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
     else
       export BASEIMAGE=ghcr.io/nvidia/jax:base
     fi
-    docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE -f ./maxtext_gpu_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+    docker build --no-cache --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE -f ./maxtext_gpu_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
   else
     if [[ ${MODE} == "stable_stack" ]]; then
       if [[ ! -v BASEIMAGE ]]; then
@@ -86,8 +86,8 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
     fi
   fi
 else
-  docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
-  docker build --network host --build-arg CUSTOM_LIBTPU=true -f ./maxtext_libtpu_path.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+  docker build --no-cache --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+  docker build --no-cache --network host --build-arg CUSTOM_LIBTPU=true -f ./maxtext_libtpu_path.Dockerfile -t ${LOCAL_IMAGE_NAME} .
 fi
 
 echo ""
@@ -102,3 +102,5 @@ echo ""
 echo "You can run MaxText and your development tests inside of the docker image. Changes to your workspace will automatically
 be reflected inside the docker container."
 echo "Once you want you upload your docker container to GCR, take a look at docker_upload_runner.sh"
+
+

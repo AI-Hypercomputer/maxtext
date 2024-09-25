@@ -31,6 +31,7 @@ import jax.numpy as jnp
 from jax.experimental import mesh_utils
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+import orbax.checkpoint.experimental.emergency.checkpoint_manager as pw_emergency_checkpoint_manager
 
 
 import json
@@ -556,7 +557,7 @@ def setup_initial_state(
     )
 
     if restored:
-      if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
+      if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager) or isinstance(checkpoint_manager, pw_emergency_checkpoint_manager.PathwaysCheckpointManager):
         state = restored
       else:
         if "iter" in restored and restored["iter"] is not None:

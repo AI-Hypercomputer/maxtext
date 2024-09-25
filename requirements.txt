@@ -1,9 +1,12 @@
-jax>=0.4.30
-jaxlib>=0.4.30
+--pre
+jax>=0.4.34.dev20240922
+jaxlib>=0.4.34.dev20240922
+-f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+
 orbax-checkpoint>=0.5.21
 absl-py
 array-record
-aqtp
+aqtp==0.7.5
 cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
 datasets
@@ -33,3 +36,4 @@ transformers
 mlperf-logging@git+https://github.com/mlperf/logging.git
 google-jetstream
 jsonlines
+pathwaysutils@git+https://github.com/google/pathways-utils.git@test_675739460

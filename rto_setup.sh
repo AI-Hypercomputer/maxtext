@@ -1,3 +1,5 @@
+echo Skipping rto_setup.sh; exit 0
+
 echo "Running rto_setup.sh"
 
 # Stop execution if any command exits with error
