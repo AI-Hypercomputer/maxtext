@@ -191,3 +191,7 @@ if [[ "$MODE" == "pinned" ]]; then
 else
     pip3 install -U -r requirements.txt
 fi
+
+pip3 install 'git+https://github.com/google/orbax.git@7cf465e49d3091c73ca2395635da58e7276abb3d#subdirectory=checkpoint'
+
+
