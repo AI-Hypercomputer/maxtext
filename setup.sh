@@ -138,10 +138,10 @@ elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
         echo "Installing stable jax, jaxlib for NVIDIA gpu"
         if [[ -n "$JAX_VERSION" ]]; then
             echo "Installing stable jax, jaxlib ${JAX_VERSION}"
-            pip3 install -U "jax[cuda12_pip]==${JAX_VERSION}" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+            pip3 install -U "jax[cuda12]==${JAX_VERSION}" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
         else
             echo "Installing stable jax, jaxlib, libtpu for NVIDIA gpu"
-            pip3 install "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+            pip3 install "jax[cuda12]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
         fi
         export NVTE_FRAMEWORK=jax
         pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
