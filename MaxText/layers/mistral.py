@@ -124,6 +124,10 @@ class MistralDecoderLayer(nn.Module):
 
     load_balance_loss = None
     if cfg.num_experts > 1:
+      if cfg.mlp_quantization:
+        max_logging.log(f"overwrite with {cfg.mlp_quantization=}")
+        mlp_quant = quantizations.configure_quantization(cfg, quantization=cfg.mlp_quantization)
+
       mlp_lnx, load_balance_loss = linears.MoeBlock(
           config=cfg,
           num_experts=cfg.num_experts,
@@ -133,7 +137,7 @@ class MistralDecoderLayer(nn.Module):
           kernel_axes=('embed', 'mlp'),
           dtype=cfg.dtype,
           weight_dtype=cfg.weight_dtype,
-          quant=self.quant,
+          quant=mlp_quant,
       )(hidden_states)
       mlp_lnx = nn.with_logical_constraint(
           mlp_lnx, ('activation_batch', 'activation_length', 'activation_embed')

@@ -213,22 +213,23 @@ def _get_mixed_precision_quant_config(config, config_file):
   return ret_config
 
 
-def _get_quant_config(config):
+def _get_quant_config(config, quantization=None):
   """Set quantization params based on user configuration."""
-  if not config.quantization or config.quantization == "":
+  quantization = quantization if quantization else config.quantization
+  if not quantization or quantization == "":
     return None
-  if config.quantization == "int8":
+  if quantization == "int8":
     return _get_int8_quant_config(config)
-  if config.quantization == "int8w":
+  if quantization == "int8w":
     return _get_weight_only_quant_config(lhs_bits=None, rhs_bits=8)
-  if config.quantization == "int4w":
+  if quantization == "int4w":
     return _get_weight_only_quant_config(lhs_bits=None, rhs_bits=4)
-  if config.quantization == "intmp":
+  if quantization == "intmp":
     assert config.quant_cfg_path, "Must specify quant_cfg for mixed precision quantization"
     return _get_mixed_precision_quant_config(config, config.quant_cfg_path)
-  if config.quantization == "fp8":
+  if quantization == "fp8":
     return "fp8"
-  raise ValueError(f"Invalid value configured for quantization {config.quantization}.")
+  raise ValueError(f"Invalid value configured for quantization {config.quantization=} {quantization=}.")
 
 
 def in_convert_mode(quant):
@@ -252,9 +253,9 @@ def get_quant_mode(quant_mode_str: str = "train"):
   return None
 
 
-def configure_quantization(config: Config, quant_mode_str: str = "train"):
+def configure_quantization(config: Config, quant_mode_str: str = "train", quantization=None):
   """Configure quantization based on user config and quant mode."""
-  quant_cfg = _get_quant_config(config)
+  quant_cfg = _get_quant_config(config, quantization=quantization)
   if quant_cfg:
     if quant_cfg == "fp8":
       return Fp8Quantization()
