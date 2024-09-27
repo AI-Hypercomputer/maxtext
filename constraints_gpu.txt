@@ -66,7 +66,7 @@ mccabe==0.7.0
 mdurl==0.1.2
 ml-collections==0.1.1
 ml-dtypes==0.3.2
-ml_goodput_measurement==0.0.3
+ml_goodput_measurement==0.0.4
 mlperf-logging==3.0.0
 more-itertools==10.3.0
 msgpack==1.0.8
