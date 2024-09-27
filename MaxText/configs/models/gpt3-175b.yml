@@ -25,6 +25,7 @@ mlp_activations: ["gelu"]
 vocab_size: 50304
 enable_dropout: False
 logits_via_embedding: True
+logits_dot_in_fp32: False
 normalize_embedding_logits: False
 normalization_layer_epsilon: 1.e-05
 use_iota_embed: True
