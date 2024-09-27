@@ -415,7 +415,7 @@ class Decoder(nn.Module):
     logits = nn.with_logical_constraint(
         logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
     )
-    # logits = logits.astype(jnp.float32) # This introduces some regression when bf16
+    # logits = logits.astype(jnp.float32) # This introduces some regression with training
     return logits
 
 
