@@ -509,7 +509,8 @@ class MoeBlock(nn.Module):
       with jax.named_scope("wo"):
         wo_kernel_axes = ("exp", None, None)
         wo_kernel = nn.with_logical_constraint(wo_kernel, wo_kernel_axes)
-        intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)("EBCH,EHM -> EBCM", layer_multiply, wo_kernel)
+        # intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)("EBCH,EHM -> EBCM", layer_multiply, wo_kernel)
+        intermediate_layer = jnp.einsum("EBCH,EHM -> EBCM", layer_multiply, wo_kernel)
         intermediate_layer = nn.with_logical_constraint(intermediate_layer, ("activation_exp", "activation_batch_no_exp", None, "activation_embed"))
       with jax.named_scope("combine"):
         output = self.get_einsum(rhs_mesh_axes=mask_axes)("EBCM,BSEC -> BSM", intermediate_layer, combine_mask)
