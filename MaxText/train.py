@@ -742,7 +742,7 @@ def train_loop(config, state=None):
 
     write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
 
-    if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
+    if config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
       assert eval_data_iterator
       cumulative_eval_metrics = {
           "scalar": {
