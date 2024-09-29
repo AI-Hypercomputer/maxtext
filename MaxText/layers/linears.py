@@ -495,19 +495,22 @@ class MoeBlock(nn.Module):
         dispatch = self.get_einsum(rhs_mesh_axes=mask_axes)("BSM,BSEC -> EBCM", inputs, dispatch_mask)
         dispatch = nn.with_logical_constraint(dispatch, ("activation_exp", "activation_batch_no_exp", None, "activation_embed"))
       with jax.named_scope("wi_0"):
-        w0_kernel_axes = ("exp", None, None)
+        # w0_kernel_axes = ("exp", None, None)
+        w0_kernel_axes = self.wi_kernel_axes
         w0_kernel = nn.with_logical_constraint(w0_kernel, w0_kernel_axes)
         layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)("EBCM,EMH -> EBCH", dispatch, w0_kernel)
         layer_w0 = nn.with_logical_constraint(layer_w0, ("activation_exp", "activation_batch_no_exp", None, "activation_mlp"))
       with jax.named_scope("wi_1"):
-        w1_kernel_axes = ("exp", None, None)
+        # w1_kernel_axes = ("exp", None, None)
+        w1_kernel_axes = self.wi_kernel_axes
         w1_kernel = nn.with_logical_constraint(w1_kernel, w1_kernel_axes)
         layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)("EBCM,EMH -> EBCH", dispatch, w1_kernel)
         layer_w1 = nn.with_logical_constraint(layer_w1, ("activation_exp", "activation_batch_no_exp",None, "activation_mlp"))
       layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1)
       with jax.named_scope("wo"):
-        wo_kernel_axes = ("exp", None, None)
+        # wo_kernel_axes = ("exp", None, None)
+        wo_kernel_axes = self.wo_kernel_axes
         wo_kernel = nn.with_logical_constraint(wo_kernel, wo_kernel_axes)
         intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)("EBCH,EHM -> EBCM", layer_multiply, wo_kernel)
         intermediate_layer = nn.with_logical_constraint(intermediate_layer, ("activation_exp", "activation_batch_no_exp", None, "activation_embed"))
