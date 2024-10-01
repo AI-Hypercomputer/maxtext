@@ -21,6 +21,7 @@ from typing import Optional
 from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2.flax import aqt_flax
+from aqt.jax.v2.flax import delayed_scaling_calibration
 from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
 import common_types
@@ -152,6 +153,18 @@ class AqtQuantization:
     return aqt_einsum
 
 
+def _get_fp8_quant_config():
+  aqt_cfg = aqt_config.config_v4()
+  bits = ["e4m3"] * 2 + ["e5m2"] * 4
+  aqt_cfg = aqt_config.set_bits(aqt_cfg, *bits)
+  aqt_cfg.fwd.dg_quantizer.lhs.calibration = delayed_scaling_calibration.DelayedScalingCalibration
+  aqt_cfg.fwd.dg_quantizer.rhs.calibration = delayed_scaling_calibration.DelayedScalingCalibration
+  aqt_cfg.dlhs.dg_quantizer.lhs.calibration = delayed_scaling_calibration.DelayedScalingCalibration
+  aqt_cfg.dlhs.dg_quantizer.rhs.calibration = delayed_scaling_calibration.DelayedScalingCalibration
+  aqt_cfg.drhs.dg_quantizer.lhs.calibration = delayed_scaling_calibration.DelayedScalingCalibration
+  aqt_cfg.drhs.dg_quantizer.rhs.calibration = delayed_scaling_calibration.DelayedScalingCalibration
+  return aqt_cfg
+
 @dataclass
 class Fp8Quantization(Quantization):
   """Configures Fp8 quantization for NVIDIA GPUs"""
@@ -220,6 +233,8 @@ def _get_quant_config(config):
     return _get_mixed_precision_quant_config(config, config.quant_cfg_path)
   if config.quantization == "fp8":
     return "fp8"
+  if config.quantization == "fp8d":
+    return _get_fp8_quant_config()
   raise ValueError(f"Invalid value configured for quantization {config.quantization}.")
 
 
