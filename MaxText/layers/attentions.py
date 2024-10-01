@@ -383,7 +383,7 @@ class AttentionOp(nn.Module):
         head_dim=head_dim,
         num_attention_heads=self.num_query_heads,
         num_gqa_groups=self.num_kv_heads,
-        attn_mask_type="causal",  # 'causal' or 'padding'
+        attn_mask_type="padding_causal",  # 'no_mask', 'padding', 'causal', or 'padding_causal'
         attn_bias_type="NO_BIAS",  # 'no_bias', 'pre_scale_bias' or 'post_scale_bias'
         attention_dropout=self.dropout_rate,
         dropout_rng_name="aqt",
