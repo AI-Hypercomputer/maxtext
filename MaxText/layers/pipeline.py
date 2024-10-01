@@ -272,18 +272,32 @@ class Pipeline(nn.Module):
     loop_iteration = loop_state["loop_iteration"]
     old_prev_outputs = loop_state["prev_outputs"]
 
-    # Shift becomes a rotated right version of the previous output
-    def _rotate_right(output_in):
+    def _rotate_right(arr):
       # Use lax.slice to avoid generating a gather.
-      last = jax.lax.slice_in_dim(output_in, self.num_stages - 1, self.num_stages, axis=0)
-      except_last = jax.lax.slice_in_dim(output_in, 0, self.num_stages - 1, axis=0)
+      last = jax.lax.slice_in_dim(arr, self.num_stages - 1, self.num_stages, axis=0)
+      except_last = jax.lax.slice_in_dim(arr, 0, self.num_stages - 1, axis=0)
       return jnp.concatenate([last, except_last], axis=0)
 
+    def _shift_right(arr):
+      padding = [[1, 0]] + [[0, 0]] * (arr.ndim - 1)
+      # Use lax.slice to guarantee the gradient is a pad.
+      return jax.lax.slice(jnp.pad(arr, padding), [0] * arr.ndim, arr.shape)
+
+    # Shift either rotates or shifts depending on if the last stage immediately must send to first or not
+    # For non-circular pipelines, the last stage does not need to send to first
+    # For circular pipelines with #micro = #stages, last stage immediately sends to first
+    # For circular pipelines with #micro > stages (circ_storage), last stage sends to circ storage
+    def _update_shift(output_in):
+      if self.config.num_pipeline_repeats == 1 or self.use_circ_storage:
+        return _shift_right(output_in)  # last stage does not have to send to first immediately
+      else:
+        return _rotate_right(output_in)  # last stage must immediately send to first
+
     if self.config.pipeline_delay_activation_forwarding:
-      new_shift = _rotate_right(old_prev_outputs)
+      new_shift = _update_shift(old_prev_outputs)
       new_prev_outputs = output
     else:
-      new_shift = _rotate_right(output)
+      new_shift = _update_shift(output)
       new_prev_outputs = None
 
     if self.use_circ_storage:
