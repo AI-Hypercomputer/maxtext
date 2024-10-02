@@ -495,10 +495,27 @@ class MoeBlock(nn.Module):
 
   def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = ()):
     if self.quant:
-      einsum_op = self.quant.einsum(rhs_mesh_axes)
+
+      def aqt_einsum(*args, **kwargs):
+        # simply skip kwargs, since aqt einsum doesn't support any kwargs like precision
+        return self.quant.einsum(rhs_mesh_axes)(*args)
+
+      einsum_op = aqt_einsum
     else:
       einsum_op = jnp.einsum
     return einsum_op
+
+  def is_expert_parallelism_enabled(self):
+    return self.config.ici_expert_parallelism > 1 or self.config.dcn_expert_parallelism > 1
+
+  def maybe_all_gather_kernel_weight_in_expert_parallelism(self, kernel, kernel_axes):
+    if self.is_expert_parallelism_enabled():
+      # This will trigger all-gather using weight_dtype
+      # relax it unless really necessary in expert parallelism only
+      # Otherwise compiler will handle communication automatically
+      # esp. with int8 quantization, kernel will be all-gathered in int8 instead of weight_dtype
+      kernel = nn.with_logical_constraint(kernel, kernel_axes)
+    return kernel
 
   def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
     gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", "activation_embed"))
@@ -524,7 +541,7 @@ class MoeBlock(nn.Module):
         )
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, None)
-        w0_kernel = nn.with_logical_constraint(w0_kernel, w0_kernel_axes)
+        w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
         layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
             "EBCM,EMH -> EBCH", dispatch, w0_kernel, precision=matmul_precision
         )
@@ -535,7 +552,7 @@ class MoeBlock(nn.Module):
         )
       with jax.named_scope("wi_1"):
         w1_kernel_axes = ("exp", None, None)
-        w1_kernel = nn.with_logical_constraint(w1_kernel, w1_kernel_axes)
+        w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
         layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
             "EBCM,EMH -> EBCH", dispatch, w1_kernel, precision=matmul_precision
         )
@@ -548,7 +565,7 @@ class MoeBlock(nn.Module):
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
       with jax.named_scope("wo"):
         wo_kernel_axes = ("exp", None, None)
-        wo_kernel = nn.with_logical_constraint(wo_kernel, wo_kernel_axes)
+        wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
         intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
             "EBCH,EHM -> EBCM", layer_multiply, wo_kernel, precision=matmul_precision
         )
