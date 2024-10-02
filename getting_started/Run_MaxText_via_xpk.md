@@ -48,7 +48,7 @@ gcloud auth login
 
 * Run this command to configure docker to use docker-credential-gcloud for GCR registries:
 ```
-gcloud auth configure-docker
+gcloud auth configure-docker us-docker.pkg.dev
 ```
 
 * Test the installation by running
@@ -78,6 +78,28 @@ after which log out and log back in to the machine.
     # Default will pick stable versions of dependencies
     bash docker_build_dependency_image.sh
     ```
+
+    ## New: Build Maxtext Docker Image with JAX Stable Stack
+    We're excited to announce that starting October 1, 2024, you can build the Maxtext Docker image using the JAX Stable Stack base image. This provides a more reliable and consistent build environment.
+
+    ### What is JAX Stable Stack?
+
+    JAX Stable Stack is a thoroughly tested Docker image that includes JAX and its core libraries. Using this as the base image ensures you have a stable base environment for building and running Maxtext.
+
+    ### How to Use It
+
+    To build the Maxtext Docker image with JAX Stable Stack, simply set the MODE to `stable_stack` and specify the desired `BASEIMAGE` in the `docker_build_dependency_image.sh` script:
+    
+    ```
+    # Example bash docker_build_dependency_image.sh MODE=stable_stack BASEIMAGE=us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/tpu:jax0.4.33-rev1
+    bash docker_build_dependency_image.sh MODE=stable_stack BASEIMAGE={{JAX_STABLE_STACK_BASE_IMAGE}}
+    ```
+
+    You can find a list of available JAX Stable Stack versions [here](https://pantheon.corp.google.com/artifacts/docker/cloud-tpu-images/us/jax-stable-stack/tpu).
+
+    **Important Note:** The JAX Stable Stack is currently in the experimental phase. We encourage you to try it out and provide feedback.
+
+
 3. After building the dependency image `maxtext_base_image`, xpk can handle updates to the working directory when running `xpk workload create` and using `--base-docker-image`.
 
     See details on docker images in xpk here: https://github.com/google/xpk/blob/main/README.md#how-to-add-docker-images-to-a-xpk-workload
