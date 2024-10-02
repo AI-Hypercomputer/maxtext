@@ -290,6 +290,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     for k, v in data.items():
       data[k] = v[: config.micro_batch_size_to_train_on, :]
 
+  
   logits, intermediate_outputs = model.apply(
       params,
       data["inputs"],
@@ -661,8 +662,16 @@ def train_loop(config, state=None):
       # pylint: disable=not-callable
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
+
+      # def train_step(model, config, state, data, dropout_rng)
+      my_better_jit = jax.jit(train_step, static_argnums=(0,1))
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, metrics = p_train_step(state, example_batch, nextrng)
+        #state = jax.tree_map(lambda x: np.array(state), state)
+        rawr6 = jax.tree_map(lambda x: np.array(x), example_batch)
+        nextrng = jax.tree_map(lambda x: np.array(x), nextrng)
+        #state, metrics = p_train_step(state, example_batch, nextrng)
+        #state, metrics = p_train_step(state, rawr6, nextrng)
+        state, metrics = my_better_jit(model, config, state, example_batch, nextrng)
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(

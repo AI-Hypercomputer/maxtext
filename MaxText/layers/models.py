@@ -270,7 +270,6 @@ class Decoder(nn.Module):
 
     if cfg.use_untrainable_positional_embedding:
       y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
-
     if cfg.trainable_position_size > 0:
       y += Embed(
           num_embeddings=cfg.trainable_position_size,
@@ -283,6 +282,8 @@ class Decoder(nn.Module):
 
     BlockLayer = self.get_decoder_layer()
 
+    if not self.is_initializing():
+      breakpoint()
     if cfg.remat_policy != "none":
       if cfg.remat_policy == "minimal":
         policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
