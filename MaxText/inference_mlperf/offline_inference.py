@@ -23,7 +23,7 @@ from jetstream.engine import engine_api
 
 import logging
 # pylint: disable=no-name-in-module
-from MaxText.maxengine import set_engine_vars_from_base_engine
+from maxengine import set_engine_vars_from_base_engine
 
 log = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ class OfflineInference:
       if length > max_length:
         break
 
-    self.batch_inference(warmup_samples)
+    self.batch_inference(warmup_samples, desc="warmup")
 
   def _prefill_insert(self, params, tokens, slot, true_length, decode_state):
     """return decodestate."""
@@ -88,6 +88,7 @@ class OfflineInference:
       data: List[InputData],
       emit_first_token: Callable[[str, int], bool],
       emit_token: Callable[[str, int], bool],
+      desc: str,
   ):
     """callback is a function that takes id and token. It will be called once per output
 
@@ -111,6 +112,8 @@ class OfflineInference:
 
     empty_slots = list(range(self.batch_size))
     slot_to_id = {}
+    num_prefills = 0
+    num_decodes = 0
 
     dummy_length = 1
 
@@ -158,9 +161,14 @@ class OfflineInference:
       while not empty_slots:
         # If slots are all full, decode until there are free slots
         # to insert
+        num_decodes += 1
+        log.debug(f"decode-{desc}-{num_decodes}")
         decode()
       # do one insert
-      log.debug(f"prefill {row.id}")
+      num_prefills += 1
+      log.info(
+          f"prefill-{desc}-{num_prefills} num_tokens {len(row.tokens)} true_length {row.true_length} num_empty_slots {len(empty_slots)} num_decodes {num_decodes}"
+      )
       slot = empty_slots.pop()
       first_token = prefill(slot, row.tokens, row.true_length)
       should_terminate = emit_first_token(row.id, first_token)
@@ -170,10 +178,12 @@ class OfflineInference:
         empty_slots.append(slot)  # dont use the slot
 
     while slot_to_id:
-      log.debug(f"slot to id {len(slot_to_id)}")
+      log.debug(f"decode-{desc}-{num_decodes} num_filled_slots {len(slot_to_id)}")
+      num_decodes += 1
       decode()
+    log.info(f"decode-{desc}-{num_decodes} completed.")
 
-  def batch_inference(self, data: List[InputData]):
+  def batch_inference(self, data: List[InputData], desc=""):
     """data is list of obj with id, tokens, and true length"""
     res = defaultdict(list)
 
@@ -182,5 +192,5 @@ class OfflineInference:
       res[id_].append(token)
       return token == self.tokenizer.eos_id
 
-    self.batch_inference_with_callback(data, emit_first_token=callback, emit_token=callback)
+    self.batch_inference_with_callback(data, emit_first_token=callback, emit_token=callback, desc=desc)
     return res

@@ -31,12 +31,23 @@ import pandas as pd
 
 import mlperf_loadgen as lg
 # pylint: disable=no-name-in-module
+
+import warnings
+
+warnings.simplefilter("ignore", category=FutureWarning)
+
+import inspect
+
+current_dir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
+
 from maxengine import create_engine_from_config_flags
 import offline_inference
 
 _MLPERF_ID = "llama2-70b"
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 sys.path.insert(0, os.getcwd())
 log = logging.getLogger("main2.py")
@@ -121,6 +132,27 @@ flags.DEFINE_string(
     required=False,
 )
 
+flags.DEFINE_integer(
+    "jax_profiler_port",
+    9999,
+    "If set, the jax.profiler port to use.",
+    required=False,
+)
+
+flags.DEFINE_bool(
+    "enable_profile",
+    False,
+    "If set, enable jax profiling.",
+    required=False,
+)
+
+flags.DEFINE_bool(
+    "skip_warmup",
+    False,
+    "Skip warmup",
+    required=False,
+)
+
 scenario_map = {
     "offline": lg.TestScenario.Offline,
     "server": lg.TestScenario.Server,
@@ -132,6 +164,10 @@ def pad_tokens(tokens):
   target_length = max(int(2 ** math.ceil(math.log2(true_length))), 32)
   padded = tokens + [0] * (target_length - true_length)
   return padded, true_length
+
+
+def _init_query_batches():
+  return [[], [], []]
 
 
 @contextlib.contextmanager
@@ -169,7 +205,7 @@ def _pick_batch_size(num_samples, max_batch, dataset_size, sample_size):
 
 
 def get_warmup_samples(dataset):
-  groupped_queries = [[], [], []]
+  query_batches = _init_query_batches()
   pandas_rows = list(dataset.iterrows())
   input_data = {}
   for sample_id in range(len(pandas_rows)):
@@ -184,7 +220,7 @@ def get_warmup_samples(dataset):
     group = _classify_query(pandas_rows, sample_id)
     input_ = copy.copy(sample_id_to_input[sample_id])
     input_.id = sample_id
-    groupped_queries[group].append(input_)
+    query_batches[group].append(input_)
 
   interesting_buckets = [
       0,
@@ -196,15 +232,16 @@ def get_warmup_samples(dataset):
       512,
       1024,
   ]
-  warmup_samples = [[], [], []]
-  for group_idx, group in enumerate(groupped_queries):
+  warmup_samples = _init_query_batches()
+
+  for group_idx, group in enumerate(query_batches):
     for start, end in zip(interesting_buckets[: group_idx - 3], interesting_buckets[1 : group_idx - 2]):
       for sample in group:
         if start < sample.true_length <= end:
           warmup_samples[group_idx].append(sample)
           log.info(f"Added sample of length {sample.true_length} for ({start}, {end}) bucket for group {group_idx}")
           break
-    warmup_samples[group_idx].extend(groupped_queries[group_idx][:50])
+    warmup_samples[group_idx].extend(query_batches[group_idx][:50])
   return warmup_samples
 
 
@@ -225,21 +262,29 @@ class SUT:
 
     # self.replicated = self.offline_inf.engine.env.sharding_by_axis(-1)
     self._sample_id_to_input = None
-    self._groupped_queries = [[], [], []]
+    self._query_batches = _init_query_batches()
 
   def issue_queries(self, queries):
     log.info("Issue queries start")
     assert self._sample_id_to_input is not None
     self._processed_data = []
     self._queries = queries
+
+    num_queries = len(self._queries)
+    num_grouped_queries = [len(q) for q in self._query_batches]
+    log.info(f"Before Issue {num_queries} queries - classified queries {num_grouped_queries}")
+    self._query_batches = _init_query_batches()
     for q in queries:
       group = _classify_query(self.pandas_rows, q.index)
       input_data = copy.copy(self._sample_id_to_input[q.index])
       input_data.id = q.id
-      self._groupped_queries[group].append(input_data)
+      self._query_batches[group].append(input_data)
 
-    log.info("Issue queries - classified queries")
-    assert len(self._queries) == sum(len(q) for q in self._groupped_queries)
+    num_grouped_queries = [len(q) for q in self._query_batches]
+    log.info(f"Issue {num_queries} queries - classified queries {num_grouped_queries}")
+    assert len(self._queries) == sum(
+        num_grouped_queries
+    ), f"num_queries {num_queries} does not match num_grouped_queries {num_grouped_queries}"
     # At this point _processed_data is ready
     log.info("Issue queries end")
 
@@ -247,10 +292,10 @@ class SUT:
   def flush_queries(self):
     log.info("Flush queries start")
     start = time.perf_counter()
-    for group_idx, group in enumerate(self._groupped_queries):
+    for group_idx, group in enumerate(self._query_batches):
       log.info(f"Flush queries processing {group_idx} with {len(group)} samples")
       self.offline_inf[group_idx].init_decode_state()
-      result = self.offline_inf[group_idx].batch_inference(group)
+      result = self.offline_inf[group_idx].batch_inference(group, desc=f"batch-{group_idx}")
       self.offline_inf[group_idx].decode_state = None
       gc.collect()
       for key, val in result.items():
@@ -323,6 +368,9 @@ def main(argv):
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   # jax.config.update("jax_explain_cache_misses", True)
 
+  if FLAGS.enable_profile:
+    server = jax.profiler.start_server(FLAGS.jax_profiler_port)
+
   settings = lg.TestSettings()
   settings.scenario = lg.TestScenario.Offline
   user_conf = FLAGS.user_conf
@@ -337,12 +385,6 @@ def main(argv):
   rows = list(dataset.iterrows())
   counts_by_bucket = _count_by_bucket(dataset)
   log.info(f"Counts by bucket {counts_by_bucket}")
-
-  # length_and_batch = (
-  #    (256, 216),
-  #    (512, 108),
-  #    (1024, 54),
-  # )
   len_batch_str = FLAGS.prefill_lengths_and_batch_sizes
   log.info(f"Prefill lengths and Batch sizes: {len_batch_str}")
   log.info(f"Maxengine args: {FLAGS.maxengine_args}")
@@ -367,16 +409,20 @@ def main(argv):
     params = offline_inf.params
     engines.append(offline_inf)
 
-  warmup_samples = get_warmup_samples(dataset)
-  with timed("warmup"):
-    warmup_grp = 0
-    for (length, _), engine in zip(length_and_batch, engines):
-      log.info(f"warm up for {length}")
-      engine.init_decode_state()
-      engine.warmup(length, warmup_samples[warmup_grp])
-      engine.decode_state = None  # drop state
-      gc.collect()
-      warmup_grp += 1
+  warmup_samples = None
+  if not FLAGS.skip_warmup:
+    print("Get warmup samples")
+    warmup_samples = get_warmup_samples(dataset)
+
+    with timed("warmup"):
+      warmup_grp = 0
+      for (length, _), engine in zip(length_and_batch, engines):
+        log.info(f"warm up for {length}")
+        engine.init_decode_state()
+        engine.warmup(length, warmup_samples[warmup_grp])
+        engine.decode_state = None  # drop state
+        gc.collect()
+        warmup_grp += 1
 
   sut = SUT(dataset, engines)
 
@@ -409,13 +455,16 @@ def main(argv):
   )
   log.info("Starting Benchmark run")
   lg.StartTestWithLogSettings(lgSUT, qsl, settings, log_settings, FLAGS.audit_conf)
-  log.info(f"query counts {[len(q) for q in sut._groupped_queries]}")
+  log.info(f"query counts {[len(q) for q in sut._query_batches]}")
   log.info("Run Completed!")
   log.info("Destroying SUT...")
   lg.DestroySUT(lgSUT)
 
   log.info("Destroying QSL...")
   lg.DestroyQSL(qsl)
+
+  if FLAGS.enable_profile:
+    jax.profiler.stop_server()
 
 
 if __name__ == "__main__":
