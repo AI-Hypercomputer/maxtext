@@ -264,6 +264,8 @@ class Decoder(nn.Module):
     assert decoder_input_tokens.ndim == 2  # [batch, len]
 
     # [batch, length] -> [batch, length, emb_dim]
+    if not self.is_initializing():
+      breakpoint()
     y = self.shared_embedding(decoder_input_tokens.astype("int32"))
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)

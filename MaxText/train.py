@@ -538,7 +538,6 @@ def setup_train_loop(config):
   state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   ) # HERE BE THE FUTUREWARNING
-  assert 1 > 2
 
   if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
@@ -582,7 +581,6 @@ def train_loop(config, state=None):
       eval_data_iterator,
       state,
   ) = setup_train_loop(config)
-  assert 1 > 2
   # pylint: disable=line-too-long
   (
       functional_train,
@@ -658,15 +656,15 @@ def train_loop(config, state=None):
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
-      #example_batch = load_next_batch(data_iterator, example_batch, config)
+      example_batch = load_next_batch(data_iterator, example_batch, config)
       record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
-      #check_example_batch(config, example_batch=example_batch)
+      check_example_batch(config, example_batch=example_batch)
       # pylint: disable=not-callable
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         print("Lets go", flush=True)
-        #state, metrics = p_train_step(state, example_batch, nextrng)
+        state, metrics = p_train_step(state, example_batch, nextrng)
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(
