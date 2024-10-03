@@ -120,7 +120,8 @@ mlp_activations: ["silu", "linear"]
 dropout_rate: 0
 logits_via_embedding: False
 normalize_embedding_logits: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
-logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
+logits_dot_in_fp32: False  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
+cast_logits_to_fp32: True # whether to cast the logits to fp32. The higher precision is generally beneficial, but it can vary slightly.
 
 # mixture of experts (moe)
 num_experts: 1
