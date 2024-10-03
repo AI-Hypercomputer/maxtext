@@ -93,7 +93,7 @@ after which log out and log back in to the machine.
     bash docker_build_dependency_image.sh MODE=stable_stack BASEIMAGE={{JAX_STABLE_STACK_BASEIMAGE}}
     ```
 
-    You can find a list of available JAX Stable Stack base images [here](us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu).
+    You can find a list of available JAX Stable Stack base images [here](https://us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu).
 
     **Important Note:** The JAX Stable Stack is currently in the experimental phase. We encourage you to try it out and provide feedback.
 
