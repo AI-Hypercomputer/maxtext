@@ -175,6 +175,56 @@ class AttentionTest(unittest.TestCase):
       self.assertTrue(jax.numpy.allclose(mha_full_this_idx, mha_idx, rtol=1e-02, atol=1e-02, equal_nan=False))
 
   @pytest.mark.tpu
+  def test_model_mode_prefill_dtype_float32(self):
+    self._test_model_mode_prefill_dtype(jnp.float32)
+
+  @pytest.mark.tpu
+  def test_model_mode_prefill_dtype_bfloat16(self):
+    self._test_model_mode_prefill_dtype(jnp.bfloat16)
+
+  def _test_model_mode_prefill_dtype(self, dtype):
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(dtype)
+    prefill_length = self.cfg.max_prefill_predict_length
+    lnx_prefill = lnx[:, 0:prefill_length, :]
+    decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
+    decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
+
+    attention_as_mha_generic = Attention(
+        config=self.cfg,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=dtype,
+        dropout_rate=self.cfg.dropout_rate,
+        name="self_attention",
+    )
+
+    attention_as_mha_generic_variable = attention_as_mha_generic.init(
+        {"params": self.rng, "aqt": self.rng},
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length)),
+    )
+
+    mha_prefill, _ = attention_as_mha_generic.apply(
+        attention_as_mha_generic_variable,
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_PREFILL,
+        rngs={"aqt": self.rng},
+        mutable=["cache"],
+    )
+
+    self.assertEqual(dtype, mha_prefill.dtype)
+
+  @pytest.mark.tpu
   def test_tpu_kernel_attention_mha(self):
     self.tpu_kernel_attention_helper(self.num_kv_heads)
 

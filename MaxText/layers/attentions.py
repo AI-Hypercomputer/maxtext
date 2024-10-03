@@ -1163,6 +1163,7 @@ class Attention(nn.Module):
         min_timescale=self.config.rope_min_timescale,
         max_timescale=self.config.rope_max_timescale,
         embedding_dims=self.head_dim,
+        fprop_dtype=self.dtype,
         name="key_rotary",
     )(inputs=key, position=inputs_positions)
     return key
@@ -1213,6 +1214,7 @@ class Attention(nn.Module):
         min_timescale=self.config.rope_min_timescale,
         max_timescale=self.config.rope_max_timescale,
         embedding_dims=self.head_dim,
+        fprop_dtype=self.dtype,
         name="query_rotary",
     )(inputs=query, position=inputs_positions)
     key = self.key_rotary(key, inputs_positions)
