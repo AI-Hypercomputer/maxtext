@@ -64,8 +64,13 @@ class SimpleMlpDecoderLayer(nn.Module):
     )
 
   def __call__(self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode):
+    if not self.is_initializing():
+      print("Running simple layer", flush=True)
+      #breakpoint()
     intermediate = inputs @ self.ff_1.astype(inputs.dtype)
     output = intermediate @ self.ff_2.astype(inputs.dtype)
+    if not self.is_initializing():
+      print("Finished simple layer calcs", flush=True)
     if self.config.scan_layers:
       return output, None
     else:

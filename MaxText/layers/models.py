@@ -248,7 +248,9 @@ class Decoder(nn.Module):
         length=length,
         metadata_params={nn.PARTITION_NAME: metdata_axis_name},
     )
-    return scan_fn(config=cfg, mesh=mesh, name="layers", quant=self.quant)
+    to_ret = scan_fn(config=cfg, mesh=mesh, name="layers", quant=self.quant)
+    print("About to return from scan fun", flush=True)
+    return to_ret
 
   @nn.compact
   def __call__(
@@ -264,8 +266,7 @@ class Decoder(nn.Module):
     assert decoder_input_tokens.ndim == 2  # [batch, len]
 
     # [batch, length] -> [batch, length, emb_dim]
-    if not self.is_initializing():
-      breakpoint()
+
     y = self.shared_embedding(decoder_input_tokens.astype("int32"))
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
@@ -367,6 +368,12 @@ class Decoder(nn.Module):
       )
     else:
       if cfg.scan_layers:
+        
+        if not self.is_initializing():
+          print("Before decoder layers", flush=True)
+          breakpoint()
+      RemattedBlockLayer = nn.remat(BlockLayer, prevent_cse=not cfg.scan_layers, policy=policy, static_argnums=(-1, -2, -3, -4, -5))
+            #y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(y, decoder_segment_ids, decoder_positions, deterministic, model_mode)
         y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
             y,
             decoder_segment_ids,
@@ -374,8 +381,17 @@ class Decoder(nn.Module):
             deterministic,
             model_mode,
         )
+        if not self.is_initializing():
+          print("After decoder layers", flush=True)
       else:
         for lyr in range(cfg.num_decoder_layers):
+          if not self.is_initializing():
+            print("Before unscanned block layer", flush=True)
+            breakpoint()
+          RemattedBlockLayer = nn.remat(BlockLayer, prevent_cse=not cfg.scan_layers, policy=policy, static_argnums=(-1, -2, -3, -4, -5))
+          # Omg the fix???
+          #RemattedBlockLayer = nn.remat(BlockLayer, prevent_cse=not cfg.scan_layers, policy=policy, static_argnums=(4, 5))
+          y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(y, decoder_segment_ids, decoder_positions, deterministic, model_mode)
           y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
               y,
               decoder_segment_ids,
@@ -383,6 +399,8 @@ class Decoder(nn.Module):
               deterministic,
               model_mode,
           )
+          if not self.is_initializing():
+            print("After unscanned block layer", flush=True)
 
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
