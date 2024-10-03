@@ -13,6 +13,7 @@ limitations under the License.
 
 """ Simple decoder layers for testing and debugging purposes."""
 
+# Rawr
 from jax import numpy as jnp
 from flax import linen as nn
 from jax.sharding import Mesh
