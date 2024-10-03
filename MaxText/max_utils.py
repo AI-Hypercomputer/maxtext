@@ -636,7 +636,12 @@ def setup_initial_state(
         state = state.replace(params=raw_params)
 
   state = unbox_logicallypartioned(state)
-  return state, state_mesh_annotations, data_iterator
+  # if config.optimizer_memory_host_offload:
+  #   state = state.replace(
+  #     params = jax.device_put(state.params, state_mesh_shardings.params),
+  #     opt_state = jax.device_put(state.opt_state, state_mesh_shardings.opt_state)
+  #   )
+  return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 
 
 # Learning Rate Schedule
@@ -791,6 +796,10 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   state_logical_annotations = nn.get_partition_spec(abstract_state)
 
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
+  if is_training and config.optimizer_memory_host_offload:
+    opt_state_shardings = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind='pinned_host'), state_mesh_shardings.opt_state)
+    params_shardings = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind = 'pinned_host'), state_mesh_shardings.params)
+    state_mesh_shardings = state_mesh_shardings.replace(opt_state = opt_state_shardings, params = params_shardings)
 
   abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
 

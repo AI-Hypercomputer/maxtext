@@ -72,6 +72,16 @@ Transformer = models.Transformer
 EPS = 1e-8
 _DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = 2 * 1024**3
 
+def cast_dtype_from_to(nest, src, dst):
+  """All items in nest with dtype src are casted to dtype dst."""
+  return jax.tree_util.tree_map(
+      lambda t: t.astype(dst) if t.dtype == src else t, nest
+  )
+
+def with_memory_kind(t, memory_kind):
+  return jax.tree_util.tree_map(
+      lambda x: x.with_memory_kind(kind=memory_kind), t
+  )
 
 def validate_train_config(config):
   """Validates the configuration is set correctly for train.py"""
@@ -90,6 +100,7 @@ def validate_train_config(config):
 
 
 def get_first_step(state):
+  jax.debug.print(f"{state=}")
   with jax.spmd_mode("allow_all"):
     return int(state.step)
 
@@ -326,7 +337,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   return loss, aux
 
 
-def train_step(model, config, state, data, dropout_rng):
+def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   """
 
   Args:
@@ -374,8 +385,17 @@ def train_step(model, config, state, data, dropout_rng):
     raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], grad_and_loss["grad"])
     aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)
   else:
+    # Here the params are on host memory, so casting and putting to device
+    cast_params = cast_dtype_from_to(state.params, np.float32, jnp.bfloat16)
+    if config.optimizer_memory_host_offload:
+      cast_params = jax.device_put(
+            cast_params, with_memory_kind(state_mesh_shardings.params, 'device')
+      )
+    else:
+      cast_params = state.params
+
     grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
-    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
+    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, cast_params, is_train=True)
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
@@ -390,13 +410,20 @@ def train_step(model, config, state, data, dropout_rng):
           "learning/loss": loss,
           "learning/moe_lb_loss": moe_lb_loss,
           "learning/total_weights": total_weights,
-          "learning/grad_norm": max_utils.l2norm_pytree(grads),
-          "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
-          "learning/param_norm": max_utils.l2norm_pytree(new_state.params),
+          # "learning/grad_norm": max_utils.l2norm_pytree(grads),
+          # "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
+          # "learning/param_norm": max_utils.l2norm_pytree(new_state.params),
       },
       "scalars": {},
   }
-
+  if config.optimizer_memory_host_offload:
+    new_params = jax.device_put(
+      new_state.params, with_memory_kind(state_mesh_shardings.params, 'pinned_host')
+    )
+    new_opt_state = jax.device_put(
+      new_state.opt_state, with_memory_kind(state_mesh_shardings.opt_state, 'pinned_host')
+    )
+    new_state = new_state.replace(params = new_params, opt_state = new_opt_state)
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
@@ -537,7 +564,7 @@ def setup_train_loop(config):
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
 
-  state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(
+  state, state_mesh_annotations, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
 
@@ -550,6 +577,7 @@ def setup_train_loop(config):
       writer,
       checkpoint_manager,
       state_mesh_annotations,
+      state_mesh_shardings,
       model,
       mesh,
       learning_rate_schedule,
@@ -576,6 +604,7 @@ def train_loop(config, state=None):
       writer,
       checkpoint_manager,
       state_mesh_annotations,
+      state_mesh_shardings,
       model,
       mesh,
       learning_rate_schedule,
@@ -590,7 +619,7 @@ def train_loop(config, state=None):
       out_shard_train,
       static_argnums_train,
       donate_argnums_train,
-  ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config)
+  ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
 
   if eval_data_iterator:
     # pylint: disable=line-too-long
@@ -643,7 +672,8 @@ def train_loop(config, state=None):
   local_metrics_file = open(config.metrics_file, "a", encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
-  start_step = get_first_step(state)  # this is the start_step for training
+  # start_step = get_first_step(state)  # this is the start_step for training
+  start_step = 0
   first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
   if config.profiler != "" and first_profiling_step >= config.steps:
     raise ValueError("Profiling requested but initial profiling step set past training final step")
@@ -742,6 +772,7 @@ def train_loop(config, state=None):
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+  jax.config.update('jax_enable_memories', True)
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   pyconfig.initialize(argv)
