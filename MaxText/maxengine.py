@@ -484,27 +484,31 @@ def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_
   """Create new MaxEngine instance with given batch_size, prefill and target lengths, and any config
   params provided through `args_str`.
   """
-  args = []
-  args.append("scan_layers=false")
-  args.append("async_checkpointing=false")
-  args.append("ici_fsdp_parallelism=1")
-  args.append("ici_autoregressive_parallelism=1")
-  args.append("ici_tensor_parallelism=-1")
-  args.append("weight_dtype=bfloat16")
-  args.append("attention=dot_product")
-  # args.append("")
+  args = {}
+  args["scan_layers"] = "false"
+  args["async_checkpointing"] = "false"
+  args["ici_fsdp_parallelism"] = "1"
+  args["ici_autoregressive_parallelism"] = "1"
+  args["ici_tensor_parallelism"] = "-1"
+  args["weight_dtype"] = "bfloat16"
+  args["attention"] = "dot_product"
 
   # batch and cache related
-  args.append(f"max_prefill_predict_length={max_prefill_predict_length}")
-  args.append(f"max_target_length={max_target_length}")
-  args.append(f"per_device_batch_size={batch_size}")
-
-  args_str = "MaxText/maxengine_server.py configs/base.yml " + args_str
-  cmd_args = [b for b in args_str.split(" ") if len(b) > 0]
-  # Add at the end to cmd args override the default values set above
-  args.extend(cmd_args)
-
-  pyconfig.initialize(args)
+  args["max_prefill_predict_length"] = f"{max_prefill_predict_length}"
+  args["max_target_length"] = f"{max_target_length}"
+  args["per_device_batch_size"] = f"{batch_size}"
+  print(f"Command line args: {args_str}")
+  cmd_args = args_str.split(" ")
+  for cmd_arg in cmd_args:
+    k, v = cmd_arg.split("=")
+    args[k.strip()] = v.strip()
+  assert "load_parameters_path" in args, "load_parameters_path must be defined"
+  updated_args = ["MaxText/maxengine_server.py", "../configs/base.yml"]
+  for k, v in args.items():
+    option = f"{k}={v}"
+    updated_args.append(option)
+  print(f"Invoking maxengine with args:\n \t{updated_args}")
+  pyconfig.initialize(updated_args)
   cfg = MaxEngineConfig(cp.deepcopy(pyconfig._config.keys))  # pylint: disable=protected-access
   engine = MaxEngine(cfg)
   return engine
