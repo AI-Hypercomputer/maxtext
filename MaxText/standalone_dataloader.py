@@ -127,13 +127,17 @@ def parquet_data_loader(config):
   parquet_files = list_files_walk(config.dataset_directory)
 
   worker_id = jax.process_index()
-
-  sublists = split_list(parquet_files, jax.process_count())
+  
+  files = []
+  if config.files_per_node and config.files_per_node > 0:
+    files = random.sample(parquet_files, config.files_per_node)
+  else:
+    files = split_list(parquet_files, jax.process_count())[worker_id]
 
   strategy_type = data_loader_strategy_type(config)
 
   dataset = strategy_type(
-      allocated_parquet_files=sublists[worker_id],
+      allocated_parquet_files=files,
       batch_size=batch_size,
       columns=["outputs", "image_base64_str"],
   )
