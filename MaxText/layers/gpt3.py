@@ -322,6 +322,26 @@ class Gpt3DecoderLayer(nn.Module):
     attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
     attention_lnx += inputs
 
+    # quantize forward only since backward is already communication-bounded
+    from aqt.jax.v2 import config as aqt_config
+    from aqt.jax.v2.flax import aqt_flax
+
+    # TFF
+    mlp_quant = Quant(
+        quant_dg=aqt_config.config_v3(
+            fwd_bits=8,
+            dlhs_bits=None,
+            drhs_bits=None,
+            rng_type="jax.uniform",
+            dlhs_local_aqt=None,
+            drhs_local_aqt=None,
+            fwd_accumulator_dtype=jnp.int32,
+            dlhs_accumulator_dtype=None,
+            drhs_accumulator_dtype=None,
+            ),
+        quant_mode=aqt_flax.QuantMode.TRAIN,
+    )
+
     # MLP block.
     mlp_lnx = linears.MlpBlock(
         intermediate_dim=cfg.mlp_dim,
@@ -333,7 +353,7 @@ class Gpt3DecoderLayer(nn.Module):
         use_bias=True,
         use_pre_norm=True,
         config=cfg,
-        quant=self.quant,
+        quant=mlp_quant,
     )(attention_lnx, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
 
