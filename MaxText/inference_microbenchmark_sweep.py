@@ -18,11 +18,17 @@ limitations under the License.
 
 import os
 import sys
+import jax
 import json
 import jsonlines
 import inference_microbenchmark
 import pyconfig
-from jax._src.lib import xla_extension
+
+try:
+    JaxRuntimeError = jax.errors.JaxRuntimeError  # added in JAX 0.4.34
+except AttributeError:
+    from jax._src.lib import xla_extension
+    JaxRuntimeError = xla_extension.XlaRuntimeError
 
 
 def main():
@@ -122,7 +128,7 @@ def main():
           f"Completed run {two_axis_order_product_id} out of: "
           f"{start_two_axis_order_product_id} to {end_two_axis_order_product_id}"
       )
-    except xla_extension.XlaRuntimeError:
+    except JaxRuntimeError:
       # OOM
       metrics = {}
       dimensions_json["oom"] = "True"
