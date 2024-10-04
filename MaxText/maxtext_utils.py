@@ -30,6 +30,7 @@ from input_pipeline import input_pipeline_interface
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
+
 def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config):
   """Get the shardings (both state and data) for train_step"""
   functional_train = get_functional_train_step(train_step, model, config)
@@ -92,9 +93,38 @@ def load_compiled(config, partial_train, state):
   p_train_step = deserialize_and_load(serialized_compiled, in_tree, out_tree)
   return p_train_step
 
+
 def calculate_tokens_training_per_device(config):
   """Calculate training Tokens per device"""
-  return config.max_target_length * config.per_device_batch_size
+  return config.max_target_length * config.per_device_batch_size * config.gradient_accumulation_steps
+
+
+def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops):
+  """
+  Calculate training TFLOP for Gemma2 as in Gemma2 we combine [local_attention, global_attention] into one decoder
+  layer and we use sliding window attention in local_attention
+  """
+  attention_flops = (
+      # global attention
+      4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
+      +
+      # local attention
+      4
+      * config.per_device_batch_size
+      * config.max_target_length
+      * min(config.sliding_window_size, config.max_target_length)
+      * config.num_query_heads
+      * config.head_dim
+  )
+  attention_tflops = attention_flops * config.num_decoder_layers * 3 / 10**12
+
+  # multiply num_decoder_layers by 2 because we combine [local_attention, global_attention] into one decoder layer
+  learnable_weight_tflops = (
+      ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers * 2 + embedding_flops) * 3 / 10**12
+  )
+
+  return attention_tflops, learnable_weight_tflops
+
 
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
@@ -122,9 +152,7 @@ def calculate_tflops_training_per_device(config, log=True):
       * (config.num_query_heads + 2 * config.num_kv_heads)
       * config.head_dim
   )
-  attention_flops = (
-      4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
-  )
+  attention_flops = 4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
   projection_flops = (
       2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_query_heads * config.head_dim
   )
@@ -135,10 +163,16 @@ def calculate_tflops_training_per_device(config, log=True):
       ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
   )
   # megatron tflops calculation does not account for causality in attention
-  attention_tflops = (
-      attention_flops * config.num_decoder_layers * 3 / 10**12
-  )
+  attention_tflops = attention_flops * config.num_decoder_layers * 3 / 10**12
 
+  # override for gemma2 decoder tflop calculation
+  if config.decoder_block == "gemma2":
+    attention_tflops, learnable_weight_tflops = calculate_gemma2_tflops_training_per_device(
+        config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
+    )
+
+  learnable_weight_tflops = learnable_weight_tflops * config.gradient_accumulation_steps
+  attention_tflops = attention_tflops * config.gradient_accumulation_steps
   total_tflops = learnable_weight_tflops + attention_tflops
 
   if log:
@@ -197,17 +231,18 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance=0.02):
   """
   total_num_params = max_utils.calculate_num_params_from_pytree(params)
   product_num_devices_for_weight_sharding = 1
-  for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor", "stage"]:
+  for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor", "stage", "expert"]:
     product_num_devices_for_weight_sharding *= mesh.shape[axis]
   total_num_params_per_chip = max_utils.calculate_total_params_per_chip(params)
   perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
   assert total_num_params_per_chip >= perfectly_sharded_params_per_chip, (
       "Number of parameters per chip must not be less than in the ideal sharded "
-      "scenario across `fsdp`, `fsdp_transpose`,`sequence`, `tensor` axes."
+      "scenario across `fsdp`, `fsdp_transpose`,`sequence`, `tensor`, `expert` axes."
   )
   assert total_num_params_per_chip / perfectly_sharded_params_per_chip - 1 < tolerance, (
       f"Number of unsharded parameters exceeds tolerance {tolerance * 100}% " "of total parameters."
   )
+
 
 def apply_gradient_clipping(raw_grads, state, clipping_threshold):
   """Applies gradient clipping to raw gradients, with special handing for FLAX fp8 stats.
@@ -225,9 +260,30 @@ def apply_gradient_clipping(raw_grads, state, clipping_threshold):
     # Scales + Amax History for Delayed Tensor Scaling SHOULD NOT be clipped or affect clipping
     fp8_stats = raw_grads.pop(OVERWRITE_WITH_GRADIENT)
     grads, _ = gradient_clip_transformation.update(raw_grads, state, None)
-    grads[OVERWRITE_WITH_GRADIENT] = fp8_stats # pytype: disable=unsupported-operands
-    raw_grads[OVERWRITE_WITH_GRADIENT] = fp8_stats # pytype: disable=unsupported-operands
+    grads[OVERWRITE_WITH_GRADIENT] = fp8_stats  # pytype: disable=unsupported-operands
+    raw_grads[OVERWRITE_WITH_GRADIENT] = fp8_stats  # pytype: disable=unsupported-operands
   else:
     grads, _ = gradient_clip_transformation.update(raw_grads, state, None)
 
   return grads
+
+
+def get_nested_value(dictionary, nested_key, default=None):
+  """
+  Retrieves a value from a nested key in a dictionary.
+
+  Args:
+      dictionary: The dictionary to search in.
+      nested_key: A tuple representing the nested key, e.g., ('level1', 'level2', 'key').
+      default: The value to return if the nested key is not found.
+
+  Returns:
+      The value associated with the nested key, or the default value if not found.
+  """
+  current_level = dictionary
+
+  for key in nested_key:
+    if not isinstance(current_level, dict) or key not in current_level:
+      return default
+    current_level = current_level[key]
+  return current_level

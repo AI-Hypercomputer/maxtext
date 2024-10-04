@@ -24,7 +24,6 @@ from tensorboard_plugin_profile.convert import raw_to_tool_data
 
 
 class TpuJAXTest(unittest.TestCase):
-
   """Test for profile collected with JAX."""
 
   def _get_session_snapshot(self):
@@ -66,8 +65,8 @@ class TpuJAXTest(unittest.TestCase):
       if "name" in event and event["name"] == "thread_name":
         thread_names.append((event["args"]["name"]))
     expected_threads = [
-        "TensorFlow Name Scope",
-        "TensorFlow Ops",
+        "Framework Name Scope",
+        "Framework Ops",
         "XLA Modules",
         "XLA Ops",
         "XLA TraceMe",

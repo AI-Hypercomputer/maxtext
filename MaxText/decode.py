@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CLI Utility for Running Inference on a Single Stream"""
+"""CLI utility for running inference on a single stream"""
 
 import jax
 
+import max_utils
 import maxengine
 
 import os
@@ -30,9 +31,7 @@ def main(config):
   text = config.prompt
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
-  tokens, true_length = tokenizer_model.encode(
-      text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length]
-  )
+  tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
   assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
   assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
   prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
@@ -70,4 +69,5 @@ if __name__ == "__main__":
   pyconfig.initialize(sys.argv)
   cfg = pyconfig.config
   validate_config(cfg)
+  max_utils.print_system_information()
   main(cfg)

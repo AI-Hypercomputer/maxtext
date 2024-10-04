@@ -52,7 +52,13 @@ jobs:
             }
 
             // This list should match with CODEOWNERS
-            let requiredReviewers = { gobbleturk: "" }
+            let requiredReviewers = {
+              gobbleturk: "",
+              jonb377: "",
+              khatwanimohit: "",
+              bvandermoon: "",
+              vipannalla: "",
+            }
             const reviews = await github.rest.pulls.listReviews({
               owner,
               repo,

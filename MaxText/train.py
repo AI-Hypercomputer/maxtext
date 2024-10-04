@@ -23,10 +23,10 @@ limitations under the License.
 import datetime
 import os
 import sys
-from etils import epath
 import functools
+import time
 
-from typing import Sequence
+from typing import Sequence, Optional
 from absl import app
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
@@ -43,8 +43,8 @@ import max_logging
 import optimizers
 import profiler
 import pyconfig
-# pylint: disable-next=unused-import
-import register_jax_proxy_backend
+import pathwaysutils  # pylint: disable=unused-import
+
 from vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
@@ -66,8 +66,11 @@ from layers import quantizations
 from ml_goodput_measurement import goodput
 from ml_goodput_measurement import monitoring
 
+# pylint: disable=too-many-positional-arguments
+
 Transformer = models.Transformer
 EPS = 1e-8
+_DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = 2 * 1024**3
 
 
 def validate_train_config(config):
@@ -79,6 +82,11 @@ def validate_train_config(config):
   if not config.base_output_directory.startswith("gs://"):
     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
   assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive integer."
+  if config.quantization == "fp8":
+    # pylint: disable=line-too-long
+    assert (
+        config.gradient_accumulation_steps == 1
+    ), "fp8 can't be used with gradient_accumulation_steps right now. Please use other quantization or set gradient_accumulation_steps to 1"
 
 
 def get_first_step(state):
@@ -109,7 +117,7 @@ _buffered_step = None
 _buffered_metrics = None
 
 
-def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config):
+def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config, is_training=True):
   """Entry point for all metrics writing in Train's Main.
   TODO: would be better as a Class in the future (that initialized all state!)
 
@@ -118,24 +126,35 @@ def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step
   The logic is that this ensures that Jax is able to queues train_steps and we
   don't block when turning "lazy" Jax arrays into real Python numbers.
   """
-  global _buffered_step, _buffered_metrics
+  metrics_to_write, steps_to_write = None, None
+  if is_training:
+    global _buffered_step, _buffered_metrics
+    if _buffered_metrics is not None:
+      if _buffered_step is None:
+        raise ValueError(f"When writing metrics, {_buffered_step=} was none")
+      metrics_to_write = _buffered_metrics
+      steps_to_write = _buffered_step
+  else:
+    metrics_to_write = metrics
+    steps_to_write = step
 
-  if _buffered_metrics is not None:
-    if _buffered_step is None:
-      raise ValueError(f"When writing metrics, {_buffered_step=} was none")
-    write_metrics_to_tensorboard(writer, _buffered_metrics, _buffered_step, config)
+  if metrics_to_write:
+    write_metrics_to_tensorboard(writer, metrics_to_write, steps_to_write, config, is_training)
 
     if config.metrics_file:
-      max_utils.write_metrics_locally(_buffered_metrics, _buffered_step, config, local_metrics_file)
+      max_utils.write_metrics_locally(metrics_to_write, steps_to_write, config, local_metrics_file, is_training)
 
     if config.gcs_metrics and jax.process_index() == 0:
-      running_gcs_metrics = max_utils.write_metrics_for_gcs(_buffered_metrics, _buffered_step, config, running_gcs_metrics)
+      running_gcs_metrics = max_utils.write_metrics_for_gcs(
+          metrics_to_write, steps_to_write, config, running_gcs_metrics, is_training
+      )
 
-  _buffered_step = step
-  _buffered_metrics = metrics
+  if is_training:
+    _buffered_step = step
+    _buffered_metrics = metrics
 
 
-def write_metrics_to_tensorboard(writer, metrics, step, config):
+def write_metrics_to_tensorboard(writer, metrics, step, config, is_training=True):
   """Writes metrics to tensorboard"""
   with jax.spmd_mode("allow_all"):
     if jax.process_index() == 0:
@@ -144,38 +163,82 @@ def write_metrics_to_tensorboard(writer, metrics, step, config):
       for metric_name in metrics.get("scalars", []):
         writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
 
-    full_log = step % config.log_period == 0
+    if is_training:
+      full_log = step % config.log_period == 0
 
-    max_logging.log(
-        f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
-        f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-        f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
-        f"loss: {metrics['scalar']['learning/loss']:.3f}"
-    )
+      max_logging.log(
+          f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
+          f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
+          f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
+          f"total_weights: {metrics['scalar']['learning/total_weights']}, "
+          f"loss: {metrics['scalar']['learning/loss']:.3f}"
+      )
 
-    if full_log and jax.process_index() == 0:
-      max_logging.log(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
-      writer.flush()
+      if full_log and jax.process_index() == 0:
+        max_logging.log(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
+        writer.flush()
 
 
-def save_checkpoint(checkpoint_manager, step, state, dataset_type="c4", data_iterator=None):
-  """Wrapper for saving checkpoint"""
+def clear_buffered_metrics():
+  global _buffered_step
+  global _buffered_metrics
+  _buffered_step = None
+  _buffered_metrics = None
+
+
+def save_checkpoint(
+    checkpoint_manager,
+    step,
+    state,
+    dataset_type="c4",
+    data_iterator=None,
+    config: Optional[pyconfig.config] = None,
+) -> bool:
+  """Wrapper for saving checkpoint."""
+  if config and config.enable_checkpointing:
+    if (step % config.checkpoint_period == 0) or (
+        config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0
+    ):
+      blocking_until_ready_start = time.time()
+      max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
+      # We block here on the step finishing so that our checkpointing metrics
+      # measure only checkpointing time, not training time.
+      jax.block_until_ready(state)
+      max_logging.log(
+          f"Waited {time.time() - blocking_until_ready_start} seconds for step "
+          f"{step} to finish before starting checkpointing."
+      )
+
+  # specify chunk_byte_size to force orbax to control maximum file size in checkpoint
+  chunk_byte_size = _DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
+  if config:
+    chunk_byte_size = config.checkpoint_storage_target_data_file_size_bytes
+  save_args = jax.tree.map(lambda _: orbax.checkpoint.SaveArgs(chunk_byte_size=chunk_byte_size), state)
+
   if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
     return checkpoint_manager.save(
-      step, args=orbax.checkpoint.args.PyTreeSave(state)
-  )
+        step,
+        args=orbax.checkpoint.args.PyTreeSave(item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size),
+    )
 
   if dataset_type == "grain":
     return checkpoint_manager.save(
         step,
         args=orbax.checkpoint.args.Composite(
-            items=orbax.checkpoint.args.PyTreeSave(item=state),
+            items=orbax.checkpoint.args.PyTreeSave(
+                item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size
+            ),
             iter=grain.PyGrainCheckpointSave(data_iterator.local_iterator),
         ),
     )
   else:
     return checkpoint_manager.save(
-        step, args=orbax.checkpoint.args.Composite(items=orbax.checkpoint.args.PyTreeSave(item=state))
+        step,
+        args=orbax.checkpoint.args.Composite(
+            items=orbax.checkpoint.args.PyTreeSave(
+                item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size
+            )
+        ),
     )
 
 
@@ -225,7 +288,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   # decimate proportion of data when per_device_batch_size<1
   if is_train:
     for k, v in data.items():
-      data[k] = v[: config.global_batch_size_to_train_on, :]
+      data[k] = v[: config.micro_batch_size_to_train_on, :]
 
   logits, intermediate_outputs = model.apply(
       params,
@@ -244,10 +307,18 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   total_loss = jnp.sum(xent)
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
   loss = total_loss / (total_weights + EPS)
+  # get moe load balance loss
+  moe_lb_loss = 0.0
+  if config.num_experts > 1:
+    nested_key = ("intermediates", "decoder", "layers", "moe_lb_loss")
+    total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
+    moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
+    loss += moe_lb_loss
   aux = {
       "intermediate_outputs": intermediate_outputs,
       "total_loss": total_loss,
       "total_weights": total_weights,
+      "moe_lb_loss": moe_lb_loss,
   }
   return loss, aux
 
@@ -267,10 +338,44 @@ def train_step(model, config, state, data, dropout_rng):
     rng2: A new rng key that can be used in future calls.
 
   """
-  train_loss_fn = functools.partial(loss_fn, model, config, data, dropout_rng, is_train=True)
-  grad_fn = jax.value_and_grad(train_loss_fn, has_aux=True)
-  (loss, aux), raw_grads = grad_fn(state.params)
+  if config.gradient_accumulation_steps > 1:
+
+    def accumulate_gradient(acc_grad_and_loss, data):
+      grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
+      (_, aux), cur_batch_gradient = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
+      acc_grad_and_loss["loss"] += aux["total_loss"]
+      acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
+      acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
+          lambda x, y: x * aux["total_weights"] + y, cur_batch_gradient, acc_grad_and_loss["grad"]
+      )
+      acc_grad_and_loss["total_weights"] += aux["total_weights"]
+      return acc_grad_and_loss, aux
+
+    def reshape_to_microbatch_accumulations(batch_arr):
+      """Reshape global batch to microbatches, assuming batch axis is leading."""
+      microbatches = config.gradient_accumulation_steps
+      microbatch_shape = (microbatches, batch_arr.shape[0] // microbatches) + batch_arr.shape[1:]
+      return jnp.reshape(batch_arr, microbatch_shape)
+
+    data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
+    init_grad = jax.tree_util.tree_map(jnp.zeros_like, state.params)
+    init_grad_and_loss = {"loss": 0.0, "grad": init_grad, "total_weights": 0, "moe_lb_loss": 0.0}
+
+    grad_and_loss, aux = jax.lax.scan(
+        accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
+    )
+    loss = (
+        grad_and_loss["loss"] / grad_and_loss["total_weights"]
+        + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
+    )
+    raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], grad_and_loss["grad"])
+    aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)
+  else:
+    grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
+    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
   intermediate_outputs = aux["intermediate_outputs"]
+  total_weights = aux["total_weights"]
+  moe_lb_loss = aux["moe_lb_loss"]
 
   if config.gradient_clipping_threshold > 0:
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
@@ -280,6 +385,8 @@ def train_step(model, config, state, data, dropout_rng):
   metrics = {
       "scalar": {
           "learning/loss": loss,
+          "learning/moe_lb_loss": moe_lb_loss,
+          "learning/total_weights": total_weights,
           "learning/grad_norm": max_utils.l2norm_pytree(grads),
           "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
           "learning/param_norm": max_utils.l2norm_pytree(new_state.params),
@@ -299,8 +406,14 @@ def eval_step(model, config, state, data, dropout_rng):
   loss, aux = eval_loss_fn(state.params)
   total_loss = aux["total_loss"]
   total_weights = aux["total_weights"]
+  moe_lb_loss = aux["moe_lb_loss"]
   metrics = {
-      "scalar": {"evaluation/loss": loss, "evaluation/total_loss": total_loss, "evaluation/total_weights": total_weights}
+      "scalar": {
+          "evaluation/loss": loss,
+          "evaluation/total_loss": total_loss,
+          "evaluation/total_weights": total_weights,
+          "evaluation/moe_lb_loss": moe_lb_loss,
+      },
   }
 
   return metrics
@@ -314,23 +427,25 @@ def create_goodput_recorder(config):
   return None
 
 
-def record_goodput(recorder, config, step=None, job_start=False, job_end=False):
+def record_goodput(
+    recorder,
+    config,
+    record_func,
+    *args,
+):
+  """Record data for Goodput and Badput computation."""
   if recorder and config.enable_goodput_recording:
-    if job_start and step is None:
-      recorder.record_job_start_time()
-    if job_end and step is None:
-      recorder.record_job_end_time()
-    if step is not None:
-      recorder.record_step_start_time(step)
+    record_func(*args)
+
 
 def check_example_batch(config, example_batch):
   if config.max_checkify:
-    jittable_f = checkify.checkify(
-        lambda x: checkify.check(jnp.any(x > -1), "Batch contains bad synthetic data!")
-    )
+    jittable_f = checkify.checkify(lambda x: checkify.check(jnp.any(x > -1), "Batch contains bad synthetic data!"))
     # Check if inputs in batch contains bad synthetic data.
-    err, _ = jax.jit(jittable_f)(example_batch['inputs'][: config.global_batch_size_to_train_on, :])
+    # pylint: disable=not-callable
+    err, _ = jax.jit(jittable_f)(example_batch["inputs"][: config.global_batch_size_to_train_on, :])
     err.throw()
+
 
 def setup_mesh_and_model(config):
   """Set up the mesh and the model for training
@@ -356,31 +471,29 @@ def setup_mesh_and_model(config):
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
-  if emergency_checkpoint_manager.should_restore_mesh_from_metadata(epath.Path(config.checkpoint_dir)):
-    mesh = emergency_checkpoint_manager.consistent_restore_mesh_from_metadata(epath.Path(config.checkpoint_dir), mesh)
-
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
   model = Transformer(config, mesh, quant=quant)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
-
+  logger = checkpointing.setup_checkpoint_logger(config)
   if config.enable_emergency_checkpoint:
-    abstract_state, _, _ = max_utils.get_abstract_state(
-      model, tx, config, init_rng, mesh, is_training=True
-    )
-    checkpoint_manager = (
-      checkpointing.create_orbax_emergency_checkpoint_manager(
-          config.local_checkpoint_directory,
-          config.checkpoint_dir,
-          mesh,
-          abstract_state,
-          config.local_checkpoint_period,
-          config.checkpoint_period,
-      )
+    abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+    checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
+        config.local_checkpoint_directory,
+        config.checkpoint_dir,
+        mesh,
+        abstract_state,
+        config.local_checkpoint_period,
+        config.checkpoint_period,
+        logger,
     )
   else:
-    logger = checkpointing.setup_checkpoint_logger(config)
+    # TODO(b/368121306): Remove this once zarr3 support is plumbed on the backend
+    use_ocdbt = config.checkpoint_storage_use_ocdbt
+    use_zarr3 = config.checkpoint_storage_use_zarr3
+    if config.enable_single_controller:
+      use_ocdbt, use_zarr3 = False, False
     checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
         config.checkpoint_dir,
         config.enable_checkpointing,
@@ -388,6 +501,8 @@ def setup_mesh_and_model(config):
         config.checkpoint_period,
         config.dataset_type,
         logger,
+        use_ocdbt,
+        use_zarr3,
     )
 
   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
@@ -412,20 +527,21 @@ def setup_train_loop(config):
     data_iterator:
     state: the initialized train state
   """
+  recorder = create_goodput_recorder(config)
+  record_goodput(recorder, config, recorder.record_tpu_init_start_time if recorder else None)
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+  record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
+  record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
 
   state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
 
-  if config.using_pipeline_parallelism:
+  if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-    params_sharded_tolerance=0.1
-  else:
-    params_sharded_tolerance=0.02
-  maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, tolerance=params_sharded_tolerance)
-
+    maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, tolerance=0.02)
+  record_goodput(recorder, config, recorder.record_training_preparation_end_time if recorder else None)
   return (
       init_rng,
       writer,
@@ -450,7 +566,7 @@ def train_loop(config, state=None):
   """
   # Create a GoodputRecorder to log information
   recorder = create_goodput_recorder(config)
-  record_goodput(recorder, config, job_start=True)
+  record_goodput(recorder, config, recorder.record_job_start_time if recorder else None)
 
   (
       init_rng,
@@ -538,19 +654,24 @@ def train_loop(config, state=None):
       prof.activate()
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
+      record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
       example_batch = load_next_batch(data_iterator, example_batch, config)
+      record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
       check_example_batch(config, example_batch=example_batch)
+      # pylint: disable=not-callable
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
-      record_goodput(recorder, config, step=step)
+      record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, nextrng)
 
     new_time = datetime.datetime.now()
-    record_scalar_metrics(metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
+    record_scalar_metrics(
+        metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step), per_device_tokens
+    )
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
-      if save_checkpoint(checkpoint_manager, int(step), state, config.dataset_type, data_iterator):
+      if save_checkpoint(checkpoint_manager, int(step), state, config.dataset_type, data_iterator, config):
         max_logging.log(f"saved a checkpoint at step {step}")
 
       # Upon preemption, exit when and only when all ongoing saves are complete.
@@ -560,20 +681,40 @@ def train_loop(config, state=None):
 
     write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
 
-    if config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
+    if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
       assert eval_data_iterator
-      cumulative_eval_metrics = {"total_loss": 0.0, "total_weights": 0.0}
-      eval_batch_count = 0
+      cumulative_eval_metrics = {
+          "scalar": {
+              "eval/total_loss": 0.0,
+              "eval/total_weights": 0.0,
+              "eval/avg_loss": 0.0,
+              "eval/moe_lb_loss": 0.0,
+          }
+      }
+      eval_step_count = 0
+      # pylint: disable=not-callable
       for eval_batch in eval_data_iterator:
-        if config.eval_batch_num > 0 and eval_batch_count >= config.eval_batch_num:
+        if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
           break
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           eval_metrics = p_eval_step(state, eval_batch, nextrng)
-        cumulative_eval_metrics["total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
-        cumulative_eval_metrics["total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
-        eval_batch_count += 1
-      eval_loss = cumulative_eval_metrics["total_loss"] / (cumulative_eval_metrics["total_weights"] + EPS)
-      max_logging.log(f"average loss after {step=}: {eval_loss=}, total_weights={cumulative_eval_metrics['total_weights']}")
+        cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
+        cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
+        cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
+        max_logging.log(f"Completed eval step {eval_step_count}")
+        eval_step_count += 1
+      eval_loss = (
+          cumulative_eval_metrics["scalar"]["eval/total_loss"]
+          / (cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS)
+          + cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
+      )
+      cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
+      write_metrics(
+          writer, local_metrics_file, running_gcs_metrics, cumulative_eval_metrics, step, config, is_training=False
+      )
+      max_logging.log(
+          f"average loss after {step=}: {eval_step_count=}, {eval_loss=}, total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
+      )
       if eval_loss <= config.target_eval_loss:
         max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
         prof.deactivate()
@@ -586,15 +727,18 @@ def train_loop(config, state=None):
     checkpoint_manager.wait_until_finished()
   write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config)  # final step metrics
   max_utils.close_summary_writer(writer)
-  record_goodput(recorder, config, job_end=True)
+  record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
+  clear_buffered_metrics()
   return state
 
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-  os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
+    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   pyconfig.initialize(argv)
+  max_utils.print_system_information()
   config = pyconfig.config
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
@@ -602,16 +746,18 @@ def main(argv: Sequence[str]) -> None:
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
-  if config.monitor_goodput and jax.process_index == 0:
-    logger_name = f'goodput_{config.run_name}'
+  if config.monitor_goodput and jax.process_index() == 0:
+    logger_name = f"goodput_{config.run_name}"
     goodput_monitor = monitoring.GoodputMonitor(
-      job_name=config.run_name,
-      logger_name=logger_name,
-      tensorboard_dir=config.tensorboard_dir,
-      upload_interval=config.goodput_upload_interval_seconds,
-      monitoring_enabled=True
+        job_name=config.run_name,
+        logger_name=logger_name,
+        tensorboard_dir=config.tensorboard_dir,
+        upload_interval=config.goodput_upload_interval_seconds,
+        monitoring_enabled=True,
+        include_badput_breakdown=True,
     )
     goodput_monitor.start_goodput_uploader()
+    max_logging.log("Started Goodput upload to Tensorboard in the background!")
   debug_config = debug_configuration.DebugConfig(
       stack_trace_config=stack_trace_configuration.StackTraceConfig(
           collect_stack_trace=config.collect_stack_trace,

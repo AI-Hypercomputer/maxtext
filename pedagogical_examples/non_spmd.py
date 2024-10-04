@@ -51,4 +51,5 @@ jit_func = jax.jit(
     out_shardings=sharding,
 )
 
+# pylint: disable=not-callable
 print(f"{idx=} -> {jit_func()=}")
