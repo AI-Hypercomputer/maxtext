@@ -40,8 +40,10 @@ _WARMUP_ITERS = 2
 def prefill_benchmark_loop(engine, params, tokens, true_length, iters):
   """Inner loop for benchmarking prefill step."""
   start = datetime.datetime.now()
+  rng = jax.random.PRNGKey(1234)
   for _ in range(iters):
-    prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
+    rng, rng_prefill = jax.random.split(rng)
+    prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
   jax.block_until_ready(prefill_result)
   end = datetime.datetime.now()
   del prefill_result
@@ -50,8 +52,10 @@ def prefill_benchmark_loop(engine, params, tokens, true_length, iters):
 
 def prefill_benchmark(config, engine, params, tokens, true_length, num_model_params, iters):
   """Handles warmup, running prefill benchmark, and printing results."""
+  rng = jax.random.PRNGKey(1234)
   for _ in range(_WARMUP_ITERS):
-    prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
+    rng, rng_prefill = jax.random.split(rng)
+    prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
   jax.block_until_ready(prefill_result)
   del prefill_result
 
@@ -80,8 +84,10 @@ def prefill_insert_benchmark_loop(
   prof = profiler.Profiler(config, profile_name)
   prof.activate()
   start = datetime.datetime.now()
+  rng = jax.random.PRNGKey(1234)
   for i in range(iters):
-    prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
+    rng, rng_prefill = jax.random.split(rng)
+    prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
     decode_state = engine.insert(prefill_result, decode_state, int(i % total_slots))
     del prefill_result
   jax.block_until_ready(decode_state)
@@ -92,9 +98,10 @@ def prefill_insert_benchmark_loop(
 
 def prefill_insert_benchmark(config, engine, decode_state, params, total_slots, tokens, true_length, iters):
   """Handles warmup, running insert benchmark, and printing results."""
-
+  rng = jax.random.PRNGKey(1234)
   for i in range(_WARMUP_ITERS):
-    prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
+    rng, rng_prefill = jax.random.split(rng)
+    prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
     decode_state = engine.insert(prefill_result, decode_state, int(i % total_slots))
     del prefill_result
   jax.block_until_ready(decode_state)
@@ -114,8 +121,10 @@ def ar_benchmark_loop(config, engine, params, decode_state, iters, profile_name)
   prof = profiler.Profiler(config, profile_name)
   prof.activate()
   start = datetime.datetime.now()
+  rng = jax.random.PRNGKey(1234)
   for _ in range(iters):
-    decode_state, _ = engine.generate(params, decode_state)
+    rng, rng_generate = jax.random.split(rng)
+    decode_state, _ = engine.generate(params, decode_state, rng_generate)
   jax.block_until_ready(decode_state)
   end = datetime.datetime.now()
   prof.deactivate()
@@ -124,8 +133,10 @@ def ar_benchmark_loop(config, engine, params, decode_state, iters, profile_name)
 
 def ar_benchmark(config, engine, params, decode_state, global_batch_size, cache_size, model_size, iters):
   """Handles warmup, running ar benchmark, and printing results."""
+  rng = jax.random.PRNGKey(1234)
   for _ in range(_WARMUP_ITERS):
-    decode_state, _ = engine.generate(params, decode_state)
+    rng, rng_generate = jax.random.split(rng)
+    decode_state, _ = engine.generate(params, decode_state, rng_generate)
   jax.block_until_ready(decode_state)
 
   time_in_s, decode_state = ar_benchmark_loop(config, engine, params, decode_state, iters, profile_name="autoregress")
@@ -212,7 +223,8 @@ def print_results_for_analyze(results):
 def summarize_prefill_result(engine, params, tokens, true_length):
   """Summarize Prefill result."""
   print(f"Prefill result of length {tokens.size}:\n")
-  prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
+  rng = jax.random.PRNGKey(1234)
+  prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng)
   jax.block_until_ready(prefill_result)
   num_prefill_logits_params, total_prefill_logits_size, avg_prefill_logits_param_size = max_utils.summarize_pytree_data(
       prefill_result["logits"], name="Prefill Logits", raw=True
@@ -233,7 +245,9 @@ def summarize_prefill_result(engine, params, tokens, true_length):
 
 def main(config, inference_metadata: Optional[Dict[str, Any]] = None):
   engine = maxengine.MaxEngine(config)
-  params = engine.load_params()
+  rng = jax.random.PRNGKey(1234)
+  rng, rng_load_params = jax.random.split(rng)
+  params = engine.load_params(rng_load_params)
   prefill_lengths = [int(l) for l in config.inference_microbenchmark_prefill_lengths.split(",")]
   stages_to_benchmark = config.inference_microbenchmark_stages.split(",")
   benchmark_loop_iters = config.inference_microbenchmark_loop_iters
@@ -241,8 +255,8 @@ def main(config, inference_metadata: Optional[Dict[str, Any]] = None):
   text = config.prompt
   metadata = engine.get_tokenizer()
   vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
-
-  decode_state = engine.init_decode_state()
+  rng, rng_init_decode = jax.random.split(rng)
+  decode_state = engine.init_decode_state(rng_init_decode)
   _, cache_size, _ = max_utils.summarize_pytree_data(decode_state["cache"], name="Cache")
   num_model_params, model_size, _ = max_utils.summarize_pytree_data(params, name="Model")
 
