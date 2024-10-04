@@ -38,6 +38,10 @@ class TestModel(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    self.cfg = self.init_pyconfig()
+    self.rng = jax.random.PRNGKey(0)
+
+  def init_pyconfig(self, **kwargs):
     pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         per_device_batch_size=1.0,
@@ -50,9 +54,9 @@ class TestModel(unittest.TestCase):
         base_num_query_heads=2,
         base_num_kv_heads=2,
         max_prefill_predict_length=4,
+        **kwargs,
     )
-    self.cfg = pyconfig.config
-    self.rng = jax.random.PRNGKey(0)
+    return pyconfig.config
 
   def get_data(self):
     s = (self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length)
@@ -64,6 +68,42 @@ class TestModel(unittest.TestCase):
     )
 
     return ids, decoder_segment_ids, decoder_positions
+
+  def _test_logits_cast_driver(self, cast_logits_to_fp32, expected_dtype):
+    """
+    Helper method to test the dtype of the logits returned by the full model at the end.
+    Does not perform any actual flops.
+    """
+    new_config = self.init_pyconfig(cast_logits_to_fp32=cast_logits_to_fp32, logits_dot_in_fp32=False)
+    devices_array = max_utils.create_device_mesh(new_config)
+    mesh = Mesh(devices_array, new_config.mesh_axes)
+    model = models.Transformer(config=new_config, mesh=mesh, quant=None)
+
+    ids, decoder_segment_ids, decoder_positions = self.get_data()
+
+    transformer_vars = model.init(
+        {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
+    )
+
+    logits = jax.eval_shape(
+        lambda: model.apply(
+            transformer_vars,
+            ids,
+            decoder_positions,
+            decoder_segment_ids,
+            enable_dropout=False,
+            model_mode=common_types.MODEL_MODE_TRAIN,
+            rngs={"aqt": self.rng},
+        )
+    )
+
+    self.assertEqual(logits.dtype, expected_dtype)
+
+  def test_logits_dtype_with_cast_to_fp32(self):
+    self._test_logits_cast_driver(cast_logits_to_fp32=True, expected_dtype=jnp.float32)
+
+  def test_logits_dtype_without_cast(self):
+    self._test_logits_cast_driver(cast_logits_to_fp32=False, expected_dtype=jnp.bfloat16)
 
   @pytest.mark.tpu
   def test_train_vs_prefill_and_autoregress(self):
