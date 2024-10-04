@@ -54,6 +54,11 @@ then
   BATCH_AND_PREFILL_LEN="256,216|512,108|1024,54"
 fi
 
+if [ -z "$TOK_OUTLEN_MULTIPLIER"];
+then
+  TOK_OUTLEN_MULTIPLIER="3.0"
+fi
+
 if [ -z "$MAXENGINE_ARGS"];
 then
   CHECKPOINT="gs://msingh-bkt/checkpoints/quant_llama2-70b-chat/mlperf_070924/int8_"
@@ -111,6 +116,7 @@ run_loadgen() {
     --prefill_lengths_and_batch_sizes ${BATCH_AND_PREFILL_LEN} \
     --maxengine_args "${MAXENGINE_ARGS}" \
 	  --output_log_dir ${OUTPUT_LOG_DIR} \
+    --tok_outlen_multiplier ${TOK_OUTLEN_MULTIPLIER} \
     ${SKIP_WARMUP_OPTION} ${PROFILER_OPTION} 2>&1 | tee ${OUTPUT_LOG_DIR}/${LOADGEN_RUN_TYPE}_log.log
 
 }
