@@ -258,12 +258,13 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
   # dummy configs for the checkpoint_manager
   step_number_to_save_new_ckpt = 0
-  enable_checkpointing = True
-  async_checkpointing = False
-  save_interval_steps = 1
-
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      maxtext_model_path, enable_checkpointing, async_checkpointing, save_interval_steps
+      checkpoint_dir=maxtext_model_path,
+      enable_checkpointing=True,
+      use_async=False,
+      save_interval_steps=1,
+      use_ocdbt=False,
+      use_zarr3=False,
   )
 
   state_new = train_state.TrainState(
