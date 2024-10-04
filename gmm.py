@@ -114,22 +114,22 @@ def make_group_metadata(
         will work on.
     num_tiles: The number of m-dimension tiles to execute.
   """
-  print(f'0. group_sizes = {group_sizes}')
-  print(f'0. group_sizes.shape = {group_sizes.shape}')
-  print(f'0. m = {m}')
-  print(f'0. tm = {tm}')
-  print(f'0. start_group = {start_group}')
-  print(f'0. start_group.shape = {start_group.shape}')
-  print(f'0. num_nonzero_groups = {num_nonzero_groups}')
-  print(f'0. visit_empty_groups = {visit_empty_groups}')
+  # print(f'0. group_sizes = {group_sizes}')
+  # print(f'0. group_sizes.shape = {group_sizes.shape}')
+  # print(f'0. m = {m}')
+  # print(f'0. tm = {tm}')
+  # print(f'0. start_group = {start_group}')
+  # print(f'0. start_group.shape = {start_group.shape}')
+  # print(f'0. num_nonzero_groups = {num_nonzero_groups}')
+  # print(f'0. visit_empty_groups = {visit_empty_groups}')
 
-  print(f'0. group_sizes.shape[0] = {group_sizes.shape[0]}')
+  # print(f'0. group_sizes.shape[0] = {group_sizes.shape[0]}')
   num_groups = group_sizes.shape[0]
-  print(f'1. num groups = {num_groups}')
+  # print(f'1. num groups = {num_groups}')
   np_start_group = np.zeros(start_group.shape, dtype=start_group.dtype)
   # end_group = start_group + num_nonzero_groups - 1
   end_group = np_start_group + num_nonzero_groups - 1
-  print(f'2. end_group = {end_group}')
+  # print(f'2. end_group = {end_group}')
   # Calculate the offset of each group, starting at zero. This metadata is
   # similar to row offsets in a CSR matrix. The following properties hold:
   #
@@ -139,9 +139,9 @@ def make_group_metadata(
   #
   # The row at which group 'i' starts is group_offsets[i].
   group_ends = jnp.cumsum(group_sizes)
-  print(f'3. group_ends = {group_ends}')
+  # print(f'3. group_ends = {group_ends}')
   group_offsets = jnp.concatenate([jnp.zeros(1, dtype=jnp.int32), group_ends])
-  print(f'4. group_offsets = {group_offsets}')
+  # print(f'4. group_offsets = {group_offsets}')
   # Assign a group id to each grid index.
   #
   # If a group starts somewhere other than the start of a tile or ends somewhere
@@ -154,14 +154,14 @@ def make_group_metadata(
   # NOTE: This does not change group_offsets[num_groups], which is m
   # (because we enforce m is divisible by tm).
   rounded_group_ends = ((group_ends + tm - 1) // tm * tm).astype(jnp.int32)
-  print(f'5. rounded_group_ends = {rounded_group_ends}')
+  # print(f'5. rounded_group_ends = {rounded_group_ends}')
   # (2) Round the group_starts down to the nearest multiple of 'tm'.
   group_starts = jnp.concatenate(
       [jnp.zeros(1, dtype=jnp.int32), group_ends[:-1]]
   )
-  print(f'6. group_starts = {group_starts}')
+  # print(f'6. group_starts = {group_starts}')
   rounded_group_starts = group_starts // tm * tm
-  print(f'7. rounded_group_starts = {rounded_group_starts}')
+  # print(f'7. rounded_group_starts = {rounded_group_starts}')
 
   # (3) Calculate the number of rows in each group.
   #
@@ -170,7 +170,7 @@ def make_group_metadata(
   # its end will be rounded up such that its size will become 1 tile here.
   rounded_group_sizes = rounded_group_ends - rounded_group_starts
   rounded_group_sizes = jnp.where(group_sizes == 0, 0, rounded_group_sizes)
-  print(f'8. rounded_group_sizes = {rounded_group_sizes}')
+  # print(f'8. rounded_group_sizes = {rounded_group_sizes}')
   # (4) Convert the group sizes from units of rows to unit of 'tm' sized tiles.
   #
   # An m-dimension tile is 'owned' by group 'i' if the first row of the tile
@@ -193,7 +193,7 @@ def make_group_metadata(
   if visit_empty_groups:
     # Insert one tile for empty groups.
     group_tiles = jnp.where(group_sizes == 0, 1, group_tiles)
-  print(f'9. group_tiles = {group_tiles}')
+  # print(f'9. group_tiles = {group_tiles}')
 
   # Create the group ids for each grid index based on the tile counts for each
   # group.
@@ -202,13 +202,13 @@ def make_group_metadata(
   # group_tiles.sum() < tiles_m + num_groups - 1. The kernel grid will be sized
   # such that we only execute the necessary number of tiles.
   tiles_m = _calculate_num_tiles(m, tm)
-  print(f'10. tiles_m = {tiles_m}')
+  # print(f'10. tiles_m = {tiles_m}')
   group_ids = jnp.repeat(
       jnp.arange(num_groups, dtype=jnp.int32),
       group_tiles,
       total_repeat_length=tiles_m + num_groups - 1,
   )
-  print(f'11. group_ids = {group_ids}')
+  # print(f'11. group_ids = {group_ids}')
   # Assign an m-dimension tile id to each grid index.
   #
   # NOTE: Output tiles can only be re-visited consecutively. The following
@@ -245,7 +245,7 @@ def make_group_metadata(
       jnp.histogram(partial_tile_ids, bins=tiles_m, range=(0, tiles_m - 1))[0]
       + 1
   )
-  print(f'12. tile_visits = {tile_visits}')
+  # print(f'12. tile_visits = {tile_visits}')
 
   # Create the m-dimension tile ids for each grid index based on the visit
   # counts for each tile.
@@ -254,7 +254,7 @@ def make_group_metadata(
       tile_visits.astype(jnp.int32),
       total_repeat_length=tiles_m + num_groups - 1,
   )
-  print(f'13. m_tile_ids = {m_tile_ids}')
+  # print(f'13. m_tile_ids = {m_tile_ids}')
   # Account for sharding.
   #
   # Find the start of the groups owned by our shard and shift the group_ids and
@@ -264,22 +264,22 @@ def make_group_metadata(
   first_tile_in_shard = (group_ids < start_group).sum()
   group_ids = jnp.roll(group_ids, shift=-first_tile_in_shard, axis=0)
   m_tile_ids = jnp.roll(m_tile_ids, shift=-first_tile_in_shard, axis=0)
-  print(f'14. first_tile_in_shard = {first_tile_in_shard}')
-  print(f'15. group_ids = {group_ids}')
-  print(f'16. m_tile_ids = {m_tile_ids}')
+  # print(f'14. first_tile_in_shard = {first_tile_in_shard}')
+  # print(f'15. group_ids = {group_ids}')
+  # print(f'16. m_tile_ids = {m_tile_ids}')
 
   # Calculate the number of tiles we need to compute for our shard.
   #
   # Remove tile visits that belong to a group not in our shard.
-  print(f'17. num groups = {num_groups}')
+  # print(f'17. num groups = {num_groups}')
   iota = jnp.arange(num_groups, dtype=jnp.int32)
-  print(f'18. iota = {iota}')
+  # print(f'18. iota = {iota}')
   active_group_mask = jnp.logical_and(iota <= end_group, iota >= start_group)
-  print(f'19. group tiles at first = {group_tiles}')
+  # print(f'19. group tiles at first = {group_tiles}')
   group_tiles = jnp.where(active_group_mask, group_tiles, 0)
-  print(f'20. group tiles then = {group_tiles}')
+  # print(f'20. group tiles then = {group_tiles}')
   num_tiles = group_tiles.sum()
-  print(f'21. num tiles = {num_tiles}')
+  # print(f'21. num tiles = {num_tiles}')
   return (group_offsets, group_ids, m_tile_ids), num_tiles
 
 
@@ -342,12 +342,12 @@ def gmm(
     transpose_rhs: bool = False,
     interpret: bool = False,
 ) -> jnp.ndarray:
-  print(f'tiling type = {type(tiling)}')
-  print(f'tiling = {tiling}')
-  print(f'group_offset type = {type(group_offset)}')
-  print(f'group_offset = {group_offset}')
-  print(f'preferred_element_type type = {type(preferred_element_type)}')
-  print(f'preferred_element_type = {preferred_element_type}')
+  # print(f'tiling type = {type(tiling)}')
+  # print(f'tiling = {tiling}')
+  # print(f'group_offset type = {type(group_offset)}')
+  # print(f'group_offset = {group_offset}')
+  # print(f'preferred_element_type type = {type(preferred_element_type)}')
+  # print(f'preferred_element_type = {preferred_element_type}')
   
   if group_offset is None:
     group_offset = jnp.array([0], dtype=jnp.int32)
@@ -366,13 +366,13 @@ def gmm(
       num_nonzero_groups=rhs.shape[0],
       visit_empty_groups=False,
   )
-  print(f'num_active_tiles type = {type(num_active_tiles.item())}')
-  print(f'num_active_tiles = {num_active_tiles.item()}')
-  print(f'num_total_groups type = {type(group_sizes.shape[0])}')
-  print(f'preferred_element_type type = {type(preferred_element_type)}')
-  print(f'tiling type = {type(tiling)}')
-  print(f'transpose_rhs type = {type(transpose_rhs)}')
-  print(f'interpret type = {type(interpret)}')
+  # print(f'num_active_tiles type = {type(num_active_tiles.item())}')
+  # print(f'num_active_tiles = {num_active_tiles.item()}')
+  # print(f'num_total_groups type = {type(group_sizes.shape[0])}')
+  # print(f'preferred_element_type type = {type(preferred_element_type)}')
+  # print(f'tiling type = {type(tiling)}')
+  # print(f'transpose_rhs type = {type(transpose_rhs)}')
+  # print(f'interpret type = {type(interpret)}')
   return _gmm(
     lhs=lhs, 
     rhs=rhs,
@@ -431,15 +431,15 @@ def _gmm(
     A 2d, jnp.ndarray with shape [m, n].
   """
   preferred_element_type = jnp.bfloat16
-  print(f'gmm: lhs {lhs}')
-  print(f'gmm: rhs {rhs}')
-  # print(f'gmm: group_sizes {group_sizes}')
-  print(f'gmm: preferred_element_type {preferred_element_type}')
-  print(f'gmm: tiling {tiling}')
-  print(f'gmm: group_offset {group_offset}')
-  print(f'gmm: existing_out {existing_out}')
-  print(f'gmm: transpose_rhs {transpose_rhs}')
-  print(f'gmm: interpret {interpret}')
+  # print(f'gmm: lhs {lhs}')
+  # print(f'gmm: rhs {rhs}')
+  # # print(f'gmm: group_sizes {group_sizes}')
+  # print(f'gmm: preferred_element_type {preferred_element_type}')
+  # print(f'gmm: tiling {tiling}')
+  # print(f'gmm: group_offset {group_offset}')
+  # print(f'gmm: existing_out {existing_out}')
+  # print(f'gmm: transpose_rhs {transpose_rhs}')
+  # print(f'gmm: interpret {interpret}')
 
   if existing_out is not None:
     assert isinstance(existing_out, jax.Array)
@@ -491,19 +491,20 @@ def _gmm(
   #     num_nonzero_groups=rhs.shape[0],
   #     visit_empty_groups=False,
   # )
-  # print('line392: ',group_metadata, num_active_tiles)
+  # # print('line392: ',group_metadata, num_active_tiles)
   def kernel(
       # acc_scratch,
       lhs,
       rhs,
       existing_out,
-      # group_metadata_ref,
+      group_metadata_ref,
+      # group_ids_ref,
+      # m_tile_ids_ref,
+      group_offset_ref,
+      tiles_k_ref,
       # tiling_ref,
       out,
       # *,
-      group_ids_ref,
-      m_tile_ids_ref,
-      group_offset_ref,
       # nut
   ):
     """
@@ -513,28 +514,28 @@ def _gmm(
     preferred_element_type
     transpose_rhs
     """
-
     # tm, tk, tn = tiling_ref[0], tiling_ref[1], tiling_ref[2]
-    # print("tiling_ref inside kernel", tm, tk, tn, tiling_ref)
-    print('tiling outside kernel', tiling)
-    # group_metadata = group_metadata_ref[...]
+    # # print("tiling_ref inside kernel", tm, tk, tn, tiling_ref)
+    # print('tiling outside kernel', tiling)
+    # print(group_metadata_ref)
+    group_offsets_ref, group_ids_ref, m_tile_ids_ref = group_metadata_ref
+    del group_offsets_ref
     group_ids = group_ids_ref[...]
     m_tile_ids = m_tile_ids_ref[...]
     group_offset = group_offset_ref[...]
+    tiles_k_new = tiles_k_ref[...]
     # group_offsets, group_ids, m_tile_ids = group_metadata
-    # group_offsets, group_ids, m_tile_ids = group_metadata
-    # print('group_metadata outside kernel', group_metadata)
-    # print('group_metadata inside kernel', group_offsets, group_ids, m_tile_ids, group_metadata_ref)
-    # print('num active tiles inside kernel', nut)
+    # # print('group_metadata outside kernel', group_metadata)
+    # # print('group_metadata inside kernel', group_offsets, group_ids, m_tile_ids, group_metadata_ref)
+    # # print('num active tiles inside kernel', nut)
     tm, tk, tn = tiling
-    print(f'tiles_n = {tiles_n} / tiles_k = {tiles_k}')
+    # print(f'tiles_n = {tiles_n} / tiles_k = {tiles_k}')
 
     # del group_offsets
     acc = jnp.zeros((tm, tn), dtype=jnp.float32)
     n_i = pl.program_id(0)
     grid_id = pl.program_id(1)
     k_i = pl.program_id(2)
-    print("current program id = ", pl.program_id(0), pl.program_id(1), pl.program_id(2))
 
     m_i = m_tile_ids[grid_id]
     rhs_group_id, rhs_k_i, rhs_n_i = group_ids[grid_id] - group_offset[0], k_i, n_i
@@ -542,9 +543,9 @@ def _gmm(
       rhs_group_id, rhs_k_i, rhs_n_i, tk, tn = group_ids[grid_id] - group_offset[0], n_i, k_i, tn, tk
     out_m, out_n = m_tile_ids[grid_id], n_i
 
-    print('before load', m_i, tm, k_i, tk, rhs_group_id, rhs_k_i, rhs_n_i, tn)
-    loaded_lhs = pl.load(lhs, (pl.dslice(m_i, tm), pl.dslice(k_i, tk)))
-    loaded_rhs = pl.load(rhs, (rhs_group_id, pl.dslice(rhs_k_i, tk), pl.dslice(rhs_n_i, tn)))
+    # print('before load', m_i, tm, k_i, tk, rhs_group_id, rhs_k_i, rhs_n_i, tn)
+    # loaded_lhs = pl.load(lhs, (pl.dslice(m_i, tm), pl.dslice(k_i, tk)))
+    # loaded_rhs = pl.load(rhs, (rhs_group_id, pl.dslice(rhs_k_i, tk), pl.dslice(rhs_n_i, tn)))
     # loaded_lhs = lhs[m_i:m_i+tm, k_i:k_i+tk]
     # loaded_rhs = rhs[rhs_group_id, rhs_k_i:rhs_k_i+tk, rhs_n_i:rhs_n_i+tn]
     # lhs_block = lhs[m_i:m_i+tm, k_i:k_i+tk]
@@ -592,7 +593,7 @@ def _gmm(
       # to_store = acc_scratch[...]
       to_store = acc[...]
       # out[out_m:out_m+tm, out_n:out_n+tn]
-      print('before store', out_m, tm, out_n, tn)
+      # print('before store', out_m, tm, out_n, tn)
       pl.store(
         out, 
         (pl.dslice(out_m, tm), pl.dslice(out_n, tn)), 
@@ -627,30 +628,33 @@ def _gmm(
         _store_accum()
 
 
-    lax.cond(
-        k_i == tiles_k - 1,
-        partial(_accum, True),
-        partial(_accum, False),
-    )  
+    # lax.cond(
+    #     k_i == tiles_k_new - 1,
+    #     partial(_accum, True),
+    #     partial(_accum, False),
+    # )  
+  
   if existing_out is None:
     input_output_aliases = {}
   else:
     input_output_aliases = {6: 0}
   # acc_scratch = pl.AbstractMemoryRef(jax_core.ShapedArray((tm,tn), jnp.float32), None)
   # acc_scratch = jnp.zeros((tm,tn), dtype=jnp.float32)
-  
+
   kernel = functools.partial(
     kernel, 
     # group_metadata_ref=group_metadata,
-    group_ids_ref=group_metadata[1],
-    m_tile_ids_ref=group_metadata[2],
-    group_offset_ref=group_offset,
+    # group_ids_ref=group_metadata[1],
+    # m_tile_ids_ref=group_metadata[2],
+    # group_offset_ref=group_offset,
     # tiling=tiling,
     # nut=num_active_tiles
   )
+  # # print(jax.make_jaxpr(kernel)(lhs, rhs, existing_out, jnp.arange(1)))
   # num_active_tiles = 1
-  print(tiles_n)
-  print("grid is ", tiles_n, num_active_tiles, tiles_k)
+  # print(tiles_n)
+  # print("grid is ", tiles_n, num_active_tiles, tiles_k)
+  # jax.debug.breakpoint()
   call_gmm = pl.pallas_call(
       kernel,
       out_shape=jax.ShapeDtypeStruct((m, n), preferred_element_type),
@@ -665,6 +669,11 @@ def _gmm(
       lhs,
       rhs,
       existing_out,
+      group_metadata,
+      # group_metadata[1],
+      # group_metadata[2],
+      group_offset,
+      tiles_k,
       # group_metadata,
       # group_offset,
       # tiling,
