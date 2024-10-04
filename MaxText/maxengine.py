@@ -258,6 +258,8 @@ class MaxEngine(engine_api.Engine):
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
 
+    # try to split rng
+    self.rng, _ = jax.random.split(self.rng)
     # sampling tokens
     new_token = inference_utils.sampling(
         out_logits,
