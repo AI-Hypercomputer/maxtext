@@ -25,10 +25,11 @@ import inference_microbenchmark
 import pyconfig
 
 try:
-    JaxRuntimeError = jax.errors.JaxRuntimeError  # added in JAX 0.4.34
+  JaxRuntimeError = jax.errors.JaxRuntimeError  # added in JAX 0.4.34
 except AttributeError:
-    from jax._src.lib import xla_extension
-    JaxRuntimeError = xla_extension.XlaRuntimeError
+  from jax._src.lib import xla_extension
+
+  JaxRuntimeError = xla_extension.XlaRuntimeError
 
 
 def main():
