@@ -156,10 +156,11 @@ def calculate_tflops_training_per_device(config, log=True):
   )
   embedding_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.vocab_size
 
-  # multiply by 3 for both feed forward and back proporgation flops
+  # multiply by 3 for both feed forward and back propagation flops
   learnable_weight_tflops = (
       ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
   )
+
   # megatron tflops calculation does not account for causality in attention
   attention_tflops = attention_flops * config.num_decoder_layers * 3 / 10**12
 
@@ -171,7 +172,16 @@ def calculate_tflops_training_per_device(config, log=True):
 
   learnable_weight_tflops = learnable_weight_tflops * config.gradient_accumulation_steps
   attention_tflops = attention_tflops * config.gradient_accumulation_steps
-  total_tflops = learnable_weight_tflops + attention_tflops
+
+  # DPO includes one additional forward pass per gradient accumulation step
+  if config.use_dpo:
+    reference_model_tflops = learnable_weight_tflops / 3  # additional forward pass
+    reference_model_attention_tflops = attention_tflops / 3
+    attention_tflops = attention_tflops + reference_model_attention_tflops
+  else:
+    reference_model_tflops = 0
+
+  total_tflops = learnable_weight_tflops + attention_tflops + reference_model_tflops
 
   if log:
     print(

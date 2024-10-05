@@ -45,9 +45,7 @@ def get_tokenizer(tokenizer_path, add_bos, add_eos):
 
 
 def truncate_to_max_allowable_length(x, max_length):
-  x["inputs"] = x["inputs"][:max_length]
-  x["targets"] = x["targets"][:max_length]
-  return x
+  return {k: v[:max_length] for k, v in x.items()}
 
 
 def shift_data_by_truncation(x):
@@ -56,12 +54,24 @@ def shift_data_by_truncation(x):
   return x
 
 
+def add_segmentation_and_position(x, data_columns):
+  for data_column in data_columns:
+    x[f"{data_column}_segmentation"] = tf.cast(x[data_column] != 0, tf.int32)
+    x[f"{data_column}_position"] = tf.broadcast_to(
+        tf.range(x[data_column].shape[-1], dtype=np.int32)[None, :], x[data_column].shape
+    )
+  return x
+
+
 ########## Functions used by HF pipeline
 
 
-def tokenization(example, hf_tokenizer, max_length, column_name):
+def tokenization(example, hf_tokenizer, max_length, column_names):
   """Tokenize a HuggingFace dataset"""
-  return hf_tokenizer(example[column_name], truncation=True, max_length=max_length)
+  return {
+      column_name: hf_tokenizer(example[column_name], truncation=True, max_length=max_length)["input_ids"]
+      for column_name in column_names
+  }
 
 
 @dataclasses.dataclass
@@ -89,7 +99,7 @@ class HFDataSource(grain.RandomAccessDataSource):
       num_threads: int,
       generate_padding_example: bool,
       max_target_length: int,
-      data_column_name: str,
+      data_column_names: list[str],
   ):
     self.dataset = dataset
     self.num_threads = num_threads
@@ -97,7 +107,7 @@ class HFDataSource(grain.RandomAccessDataSource):
     self.dataloading_host_index = dataloading_host_index
     self.generate_padding_example = generate_padding_example
     self.max_target_lenth = max_target_length
-    self.data_column_name = data_column_name
+    self.data_column_names = data_column_names
     self.n_shards = dataset.n_shards
     self._check_shard_count()
     self.dataset_shards = [dataloading_host_index * self.num_threads + i for i in range(self.num_threads)]
@@ -148,7 +158,7 @@ class HFDataSource(grain.RandomAccessDataSource):
       try:
         if self.out_of_data:
           if self.generate_padding_example:
-            return {self.data_column_name: np.zeros(self.max_target_lenth, dtype=np.int32)}
+            return {column_name: np.zeros(self.max_target_lenth, dtype=np.int32) for column_name in self.data_column_names}
           else:
             return None
         data = next(self.data_iters[idx])
@@ -164,8 +174,8 @@ class HFDataSource(grain.RandomAccessDataSource):
 class ParseFeatures(grain.MapTransform):
   """Parse serialized example"""
 
-  def __init__(self, data_column, tokenize):
-    self.data_column = data_column
+  def __init__(self, data_columns, tokenize):
+    self.data_columns = data_columns
     if tokenize:
       self.dtype = tf.string
     else:
@@ -174,7 +184,8 @@ class ParseFeatures(grain.MapTransform):
   def map(self, features):
     def _parse(example):
       parsed = tf.io.parse_example(
-          example, {self.data_column: tf.io.FixedLenSequenceFeature([], dtype=self.dtype, allow_missing=True)}
+          example,
+          {col: tf.io.FixedLenSequenceFeature([], dtype=self.dtype, allow_missing=True) for col in self.data_columns},
       )
       return parsed
 
@@ -182,36 +193,45 @@ class ParseFeatures(grain.MapTransform):
 
 
 @dataclasses.dataclass
+class InputsTargetsFeatures(grain.MapTransform):
+  """Normalize text feature keys."""
+
+  def __init__(self, column_name):
+    self.column_name = column_name
+
+  def map(self, features):
+    return {"inputs": features[self.column_name], "targets": features[self.column_name]}
+
+
+@dataclasses.dataclass
 class NormalizeFeatures(grain.MapTransform):
   """Normalize text feature keys."""
 
-  def __init__(self, column_name, tokenize):
-    self.column_name = column_name
+  def __init__(self, column_names, tokenize):
+    self.column_names = column_names
     self.tokenize = tokenize
 
   def map(self, features):
     if self.tokenize:
-      return {
-          "inputs": features[self.column_name].numpy()[0].decode(),
-          "targets": features[self.column_name].numpy()[0].decode(),
-      }
+      return {col: features[col].numpy()[0].decode() for col in self.column_names}
     else:
-      return {"inputs": features[self.column_name].numpy(), "targets": features[self.column_name].numpy()}
+      return {col: features[col].numpy() for col in self.column_names}
 
 
 @dataclasses.dataclass
 class ReformatPacking(grain.MapTransform):
   """Reformat packing outputs."""
 
+  def __init__(self, column_names):
+    self.column_names = column_names
+
   def map(self, data):
-    return {
-        "inputs": data[0]["inputs"],
-        "targets": data[0]["targets"],
-        "inputs_segmentation": data[1]["inputs"],
-        "targets_segmentation": data[1]["targets"],
-        "inputs_position": data[2]["inputs"],
-        "targets_position": data[2]["targets"],
-    }
+    ret = {}
+    for col in self.column_names:
+      ret[f"{col}"] = data[0][col]
+      ret[f"{col}_segmentation"] = data[1][col]
+      ret[f"{col}_position"] = data[2][col]
+    return ret
 
 
 @dataclasses.dataclass
@@ -221,7 +241,7 @@ class PadToMaxLength(grain.MapTransform):
   def __init__(self, max_length):
     self.max_length = max_length
 
-  def map(self, data):
+  def map(self, data: dict[str, np.ndarray]):
     """map to each element"""
 
     def _pad(x, max_length):
@@ -229,10 +249,10 @@ class PadToMaxLength(grain.MapTransform):
       pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
       return np.pad(x, pad_amount)
 
-    data["inputs_segmentation"] = np.ones(data["inputs"].shape, dtype=np.int32)
-    data["inputs_position"] = np.arange(data["inputs"].shape[0], dtype=np.int32)
-    data["targets_segmentation"] = np.ones(data["targets"].shape, dtype=np.int32)
-    data["targets_position"] = np.arange(data["targets"].shape[0], dtype=np.int32)
+    data_columns = list(data.keys())
+    for data_column in data_columns:
+      data[f"{data_column}_segmentation"] = (data[data_column] != 0).astype(np.int32)
+      data[f"{data_column}_position"] = np.arange(data[data_column].shape[0], dtype=np.int32)
     for key, _ in data.items():
       data[key] = _pad(data[key], self.max_length)
     return data
