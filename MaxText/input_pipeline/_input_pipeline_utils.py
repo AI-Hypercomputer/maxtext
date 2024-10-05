@@ -59,9 +59,12 @@ def shift_data_by_truncation(x):
 ########## Functions used by HF pipeline
 
 
-def tokenization(example, hf_tokenizer, max_length, column_name):
+def tokenization(example, hf_tokenizer, max_length, column_names):
   """Tokenize a HuggingFace dataset"""
-  return hf_tokenizer(example[column_name], truncation=True, max_length=max_length)
+  return {
+    column_name: hf_tokenizer(
+      example[column_name], truncation=True, max_length=max_length
+    )["input_ids"] for column_name in column_names}
 
 
 @dataclasses.dataclass
@@ -89,7 +92,7 @@ class HFDataSource(grain.RandomAccessDataSource):
       num_threads: int,
       generate_padding_example: bool,
       max_target_length: int,
-      data_column_name: str,
+      data_column_names: list[str],
   ):
     self.dataset = dataset
     self.num_threads = num_threads
@@ -97,7 +100,7 @@ class HFDataSource(grain.RandomAccessDataSource):
     self.dataloading_host_index = dataloading_host_index
     self.generate_padding_example = generate_padding_example
     self.max_target_lenth = max_target_length
-    self.data_column_name = data_column_name
+    self.data_column_names = data_column_names
     self.n_shards = dataset.n_shards
     self._check_shard_count()
     self.dataset_shards = [dataloading_host_index * self.num_threads + i for i in range(self.num_threads)]
@@ -148,7 +151,7 @@ class HFDataSource(grain.RandomAccessDataSource):
       try:
         if self.out_of_data:
           if self.generate_padding_example:
-            return {self.data_column_name: np.zeros(self.max_target_lenth, dtype=np.int32)}
+            return {column_name: np.zeros(self.max_target_lenth, dtype=np.int32) for column_name in self.data_column_names}
           else:
             return None
         data = next(self.data_iters[idx])
@@ -221,18 +224,18 @@ class PadToMaxLength(grain.MapTransform):
   def __init__(self, max_length):
     self.max_length = max_length
 
-  def map(self, data):
+  def map(self, data: dict[str, np.ndarray]):
     """map to each element"""
 
     def _pad(x, max_length):
       pad_amount = max(max_length - x.shape[0], 0)
       pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
       return np.pad(x, pad_amount)
-
-    data["inputs_segmentation"] = np.ones(data["inputs"].shape, dtype=np.int32)
-    data["inputs_position"] = np.arange(data["inputs"].shape[0], dtype=np.int32)
-    data["targets_segmentation"] = np.ones(data["targets"].shape, dtype=np.int32)
-    data["targets_position"] = np.arange(data["targets"].shape[0], dtype=np.int32)
+      
+    data_columns = list(data.keys())
+    for data_column in data_columns:
+      data[f"{data_column}_segmentation"] = (data[data_column] != 0).astype(np.int32)
+      data[f"{data_column}_position"] = np.arange(data[data_column].shape[0], dtype=np.int32)
     for key, _ in data.items():
       data[key] = _pad(data[key], self.max_length)
     return data

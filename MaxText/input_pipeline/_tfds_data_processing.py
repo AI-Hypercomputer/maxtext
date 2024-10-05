@@ -30,7 +30,9 @@ import sequence_packing
 from input_pipeline import _input_pipeline_utils
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
-
+tf.config.experimental.set_visible_devices([], "GPU")
+#gpus = tf.config.experimental.list_physical_devices("GPU")
+#assert not gpus
 
 def get_datasets(
     dataset_name,

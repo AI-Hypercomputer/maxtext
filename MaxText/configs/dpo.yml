@@ -1,0 +1,23 @@
+base_config: "base.yml"
+
+model_name: mistral-7b
+#tokenizer_path: assets/tokenizer.mistral-v1
+tokenizer_path: mistralai/Mistral-7B-v0.1
+weight_dtype: bfloat16
+dtype: bfloat16
+hardware: gpu
+dataset_type: hf
+#hf_path: allenai/c4
+hf_path: Anthropic/hh-rlhf
+use_dpo_dataset: true
+train_data_columns: ['chosen', 'rejected']
+eval_data_columns: ['chosen', 'rejected']
+hf_access_token: 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
+#hf_data_dir: 'realnewslike'
+#hf_train_files: /usr/local/google/home/rdyro/allenai:c4:realnewslike/*
+base_output_directory: gs://rdyro/logs
+steps: 1000
+per_device_batch_size: 4.0
+enable_checkpointing: false
+attention: dot_product
+#attention: cudnn_flash_te
