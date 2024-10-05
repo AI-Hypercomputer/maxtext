@@ -43,7 +43,8 @@ class OfflineInference:
     if params is None:
       params = engine.load_params()
     else:
-      set_engine_vars_from_base_engine(engine, base_engine)
+      rng = jax.random.PRNGKey(0)
+      set_engine_vars_from_base_engine(engine, base_engine, rng)
     self.params = params
 
     self.batch_size = engine.max_concurrent_decodes
