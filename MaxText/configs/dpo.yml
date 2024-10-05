@@ -1,0 +1,40 @@
+base_config: "base.yml"
+
+model_name: mistral-7b
+tokenizer_path: assets/tokenizer.mistral-v1
+weight_dtype: bfloat16
+dtype: float16
+hardware: gpu
+use_dpo: true
+train_data_columns: ['chosen', 'rejected']
+eval_data_columns: ['chosen', 'rejected']
+base_output_directory: gs://rdyro/logs
+steps: 10000
+per_device_batch_size: 4.0
+attention: dot_product
+#attention: cudnn_flash_te
+
+# HF Pipeline ------------------------
+#dataset_type: hf
+#hf_path: Anthropic/hh-rlhf
+#hf_access_token: ""
+
+# TFDS Pipeline ----------------------
+#dataset_type: tfds
+#dataset_path: 'gs://rdyro' # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
+#dataset_name: 'anthropic_rlhf_tfds/tfrecord:1.0.0'
+#eval_dataset_name: 'anthropic_rlhf_tfds/tfrecord:1.0.0'
+#eval_split: 'test'
+
+# Grain Pipeline ---------------------
+dataset_type: grain
+grain_train_files: '~/anthropic_rlhf_grain/anthropic_rlhf_tfds-train.array_record*'
+grain_eval_files: '~/anthropic_rlhf_grain/anthropic_rlhf_tfds-test.array_record*'
+grain_worker_count: 1
+
+#enable_checkpointing: true
+load_parameters_path: "gs://rdyro-mixtral-storage/maxtext-mistral-7b/0/items"
+gradient_clipping_threshold: 2.0
+learning_rate: 5.0e-7
+dpo_label_smoothing: 0.0
+dpo_beta: 0.1
