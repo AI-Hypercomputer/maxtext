@@ -132,7 +132,11 @@ def make_mixed_train_iterator(config, mesh):
     elif config.dataset_type == "hf":
       return make_hf_iterator(config, mesh, process_indices)
   else:
-    return BadSyntheticDataIterator(config, mesh), None
+    if config.eval_interval > 0:
+      eval_iterator = BadSyntheticDataIterator(config, mesh)
+    else:
+      eval_iterator = None
+    return BadSyntheticDataIterator(config, mesh), eval_iterator
 
 
 def make_c4_mlperf_iterator(config, mesh):
