@@ -15,17 +15,17 @@ limitations under the License.
 """
 
 """Input pipeline"""
-
+import functools
 import numpy as np
 import tensorflow as tf
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
-from input_pipeline._tfds_data_processing import make_tfds_iterator
-from input_pipeline._grain_data_processing import make_grain_iterator
+from input_pipeline._tfds_data_processing import make_tfds_train_iterator, make_tfds_eval_iterator
+from input_pipeline._grain_data_processing import make_grain_train_iterator, make_grain_eval_iterator
 from input_pipeline._tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator
-from input_pipeline._hf_data_processing import make_hf_iterator
+from input_pipeline._hf_data_processing import make_hf_train_iterator, make_hf_eval_iterator
 import multihost_dataloading
 
 
@@ -107,11 +107,13 @@ class BadSyntheticDataIterator:
     return dataset
 
 
-def get_process_loading_real_data(config, mesh):
+def get_process_loading_real_data(
+    data_sharding, global_batch_size_to_load, global_batch_size_to_train_on, max_target_length, mesh
+):
   """Get list of processes loading data from GCS when expansion_factor_real_data != -1"""
-  sharding = jax.sharding.NamedSharding(mesh, P(*config.data_sharding))
-  devices_indices_map = sharding.devices_indices_map((config.global_batch_size_to_load, config.max_target_length))
-  batch_cutoff = config.global_batch_size_to_train_on
+  sharding = jax.sharding.NamedSharding(mesh, P(*data_sharding))
+  devices_indices_map = sharding.devices_indices_map((global_batch_size_to_load, max_target_length))
+  batch_cutoff = global_batch_size_to_train_on
   process_loading_real_data = set()
   for p, indices in devices_indices_map.items():
     if indices[0].stop <= batch_cutoff:
@@ -119,60 +121,65 @@ def get_process_loading_real_data(config, mesh):
   return list(process_loading_real_data)
 
 
-def make_mixed_train_iterator(config, mesh):
+def make_mixed_iterator(config, mesh, process_indices_train, process_indices_eval, train_iterator_fn, eval_iterator_fn):
   """Return iterators according to dataset_type"""
-  process_indices = get_process_loading_real_data(config, mesh)
-  if config.expansion_factor_real_data != -1:  # assert number of hosts loading real data
-    assert len(process_indices) == jax.process_count() // config.expansion_factor_real_data
-  if jax.process_index() in process_indices:
-    if config.dataset_type == "tfds":
-      return make_tfds_iterator(config, mesh, process_indices)
-    elif config.dataset_type == "grain":
-      return make_grain_iterator(config, mesh, process_indices)
-    elif config.dataset_type == "hf":
-      return make_hf_iterator(config, mesh, process_indices)
-  else:
-    return BadSyntheticDataIterator(config, mesh), None
-
-
-def make_c4_mlperf_iterator(config, mesh):
-  """Return iterators for c4_mlperf"""
-  # TODO: Merge this function into make_mixed_train_iterator after:
-  #   we independently split process_indices for training and evaluation iterators.
-  process_indices = get_process_loading_real_data(config, mesh)
-  if config.expansion_factor_real_data != -1:  # assert number of hosts loading real data
-    assert len(process_indices) == jax.process_count() // config.expansion_factor_real_data
-  print("Overwrite both add_bos and add_eos to False")
-  if jax.process_index() in process_indices:
-    train_iterator = make_c4_mlperf_train_iterator(
-        config, mesh, add_bos=False, add_eos=False, process_indices=process_indices
-    )
+  # train_iterator, eval_iterator = make_tfds_iterator(config, mesh, process_indices_train, process_indices_eval)
+  if jax.process_index() in process_indices_train:
+    train_iterator = train_iterator_fn()
   else:
     train_iterator = BadSyntheticDataIterator(config, mesh)
 
-  if config.eval_per_device_batch_size >= 0:
-    effective_eval_per_device_batch_size = config.eval_per_device_batch_size
+  if config.eval_interval <= 0:
+    eval_iterator = None
   else:
-    effective_eval_per_device_batch_size = config.per_device_batch_size
-
-  assert (
-      effective_eval_per_device_batch_size >= 1.0
-  ), f"{effective_eval_per_device_batch_size=} is less than 1, which is not supported."
-  # Use all processes for evaluation until split is handled independently
-  eval_process_indices = list(range(jax.process_count()))
-  eval_iterator = make_c4_mlperf_eval_iterator(config, mesh, eval_process_indices)
+    if jax.process_index() in process_indices_eval:
+      eval_iterator = eval_iterator_fn()
+    else:
+      eval_iterator = BadSyntheticDataIterator(config, mesh)
   return train_iterator, eval_iterator
 
 
 def create_data_iterator(config, mesh):
   if config.dataset_type == "synthetic":
     return SyntheticDataIterator(config, mesh), None
-  elif config.dataset_type in ("tfds", "grain", "hf"):
-    return make_mixed_train_iterator(config, mesh)
+
+  process_indices_train = get_process_loading_real_data(
+      config.data_sharding,
+      config.global_batch_size_to_load,
+      config.global_batch_size_to_train_on,
+      config.max_target_length,
+      mesh,
+  )
+  if config.eval_interval > 0:
+    process_indices_eval = get_process_loading_real_data(
+        config.data_sharding,
+        config.global_batch_size_to_load_eval,
+        config.global_batch_size_to_eval_on,
+        config.max_target_length,
+        mesh,
+    )
+  else:
+    process_indices_eval = []
+
+  if config.expansion_factor_real_data != -1:  # assert number of hosts loading real data
+    assert len(process_indices_train) == jax.process_count() // config.expansion_factor_real_data
+    if config.eval_interval > 0:
+      assert len(process_indices_eval) == jax.process_count() // config.expansion_factor_real_data
+  if config.dataset_type == "tfds":
+    train_iterator_fn = functools.partial(make_tfds_train_iterator, config, mesh, process_indices_train)
+    eval_iterator_fn = functools.partial(make_tfds_eval_iterator, config, mesh, process_indices_eval)
+  elif config.dataset_type == "grain":
+    train_iterator_fn = functools.partial(make_grain_train_iterator, config, mesh, process_indices_train)
+    eval_iterator_fn = functools.partial(make_grain_eval_iterator, config, mesh, process_indices_eval)
+  elif config.dataset_type == "hf":
+    train_iterator_fn = functools.partial(make_hf_train_iterator, config, mesh, process_indices_train)
+    eval_iterator_fn = functools.partial(make_hf_eval_iterator, config, mesh, process_indices_eval)
   elif config.dataset_type == "c4_mlperf":
-    return make_c4_mlperf_iterator(config, mesh)
+    train_iterator_fn = functools.partial(make_c4_mlperf_train_iterator, config, mesh, process_indices_train)
+    eval_iterator_fn = functools.partial(make_c4_mlperf_eval_iterator, config, mesh, process_indices_eval)
   else:
     assert False, f"Unknown dataset_type {config.dataset_type}, dataset_type must be synthetic, tfds, grain, hf or c4_mlperf"
+  return make_mixed_iterator(config, mesh, process_indices_train, process_indices_eval, train_iterator_fn, eval_iterator_fn)
 
 
 def get_shaped_batch(config):

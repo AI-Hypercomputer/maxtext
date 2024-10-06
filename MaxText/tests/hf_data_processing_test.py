@@ -47,12 +47,15 @@ class HfDataProcessingTest(unittest.TestCase):
     self.config = pyconfig.config
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
-    self.process_indices = input_pipeline_interface.get_process_loading_real_data(self.config, self.mesh)
-    self.train_iter = self._get_train_iterator()
+    self.process_indices = input_pipeline_interface.get_process_loading_real_data(
+        self.config.data_sharding,
+        self.config.global_batch_size_to_load,
+        self.config.global_batch_size_to_train_on,
+        self.config.max_target_length,
+        self.mesh,
+    )
 
-  def _get_train_iterator(self):
-    train_iter, _ = _hf_data_processing.make_hf_iterator(self.config, self.mesh, self.process_indices)
-    return train_iter
+    self.train_iter = _hf_data_processing.make_hf_train_iterator(self.config, self.mesh, self.process_indices)
 
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
@@ -73,7 +76,7 @@ class HfDataProcessingTest(unittest.TestCase):
 
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
-    train_iter = self._get_train_iterator()
+    train_iter = _hf_data_processing.make_hf_train_iterator(self.config, self.mesh, self.process_indices)
     batch2 = next(train_iter)
     self.assertTrue((batch1["inputs"] == batch2["inputs"]).all())
     self.assertTrue((batch1["targets"] == batch2["targets"]).all())
