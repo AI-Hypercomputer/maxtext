@@ -53,7 +53,7 @@ def create_orbax_checkpoint_manager(
     orbax_logger: Optional[abstract_logger.AbstractLogger] = None,
     use_ocdbt: bool = True,
     use_zarr3: bool = True,
-    tfds_iter_checkpointing: Optional[bool] = False
+    tfds_iter_checkpointing: Optional[bool] = True
 ):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:
