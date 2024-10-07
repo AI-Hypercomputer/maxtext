@@ -30,6 +30,9 @@ Each pass, load and save partial weights (subset of all weight variables).
 # pylint: disable=g-line-too-long
 import argparse
 import pathlib
+import dataclasses
+import collections
+from collections.abc import Callable, Generator, MutableMapping, Sequence
 
 import numpy as np
 
@@ -37,8 +40,9 @@ import checkpointing
 import jax
 from flax.training import train_state
 import max_logging
+import max_utils
 from train import save_checkpoint
-import torch
+# import torch
 import sys
 import os
 
@@ -96,10 +100,8 @@ MODEL_PARAMS_DICT = {
     },
 }
 
-SIMULATED_CPU_DEVICES_COUNT = 64
 
-
-def convert(base_model_path, maxtext_model_path, model_size):
+def convert(base_model_path, maxtext_model_path, model_size, mesh):
   """
   Function to convert the checkpoint at base_model_path into Orbax checkpoint
   for MaxText and save at maxtext_model_path
@@ -237,7 +239,6 @@ def convert(base_model_path, maxtext_model_path, model_size):
       del var[f"layers.{layer_idx}.feed_forward.w2.weight"]
       del var[f"layers.{layer_idx}.feed_forward.w3.weight"]
 
-  mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
   s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))  # shards first axis
   s2 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis"))  # shards second axis
   s3 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None))  # no sharding
@@ -280,17 +281,168 @@ def convert(base_model_path, maxtext_model_path, model_size):
       sys.exit()
 
 
+# Needs to support fields read in https://github.com/AI-Hypercomputer/maxtext/blob/main/MaxText/max_utils.py#L363
+class ParallelismConfig:
+  def __init__(self, args):
+    self.allow_split_physical_axes = False
+
+    self.num_slices = args.num_slices
+    self.dcn_data_parallelism = args.dcn_data_parallelism
+    self.dcn_pipeline_parallelism = args.dcn_pipeline_parallelism
+    self.dcn_fsdp_parallelism = args.dcn_fsdp_parallelism
+    self.dcn_fsdp_transpose_parallelism = args.dcn_fsdp_transpose_parallelism
+    self.dcn_sequence_parallelism = args.dcn_sequence_parallelism
+    self.dcn_tensor_parallelism = args.dcn_tensor_parallelism
+    self.dcn_expert_parallelism = args.dcn_expert_parallelism
+    self.dcn_autoregressive_parallelism = args.dcn_autoregressive_parallelism
+    self.ici_data_parallelism = args.ici_data_parallelism
+    self.ici_pipeline_parallelism = args.ici_pipeline_parallelism
+    self.ici_fsdp_parallelism = args.ici_fsdp_parallelism
+    self.ici_fsdp_transpose_parallelism = args.ici_fsdp_transpose_parallelism
+    self.ici_sequence_parallelism = args.ici_sequence_parallelism
+    self.ici_tensor_parallelism = args.ici_tensor_parallelism
+    self.ici_expert_parallelism = args.ici_expert_parallelism
+    self.ici_autoregressive_parallelism = args.ici_autoregressive_parallelism
+
+
+# START copy from https://github.com/jax-ml/jax/blob/main/tests/mesh_utils_test.py
+@dataclasses.dataclass(frozen=True)
+class MockClient:
+  """Mock client for testing, everything is done as process index 0."""
+  def process_index(self) -> int:
+    return 0
+
+
+@dataclasses.dataclass(frozen=True)
+class MockTpuDevice:
+  """Mock TPU device for testing."""
+  id: int
+  platform: str
+  device_kind: str
+  process_index: int
+  coords: Sequence[int]
+  core_on_chip: int
+  slice_index: int = 0
+  client: MockClient = dataclasses.field(default_factory=MockClient)
+
+
+def mock_tpu_devices(x, y, z, dev_kind, one_device_per_chip, num_slices=1,
+                     reorder=False):
+  """Produce fake jax.devices() output for a TPU slice."""
+  assert x > 0 and y > 0 and z > 0
+
+  cores_per_chip = 1 if one_device_per_chip else 2
+
+  # 3D shape of the mesh of devices on each host (= process).
+  nxd, nyd, nzd = (min(x, 2), min(y, 2), 1)
+  # 3D shape of the mesh of hosts (= processes):
+  nxp, nyp, nzp = x // nxd, y // nyd, z // nzd
+  assert nxp * nxd == x
+  assert nyp * nyd == y
+  assert nzp * nzd == z
+
+  def mock_tpu_device(core_on_chip, xd, yd, zd, xp, yp, zp, slice_index):
+    process_index = xp + nxp * (yp + nyp * (zp + nzp * slice_index))
+    coords =  (xd + nxd * xp, yd + nyd * yp, zd + nzd * zp)
+    device_id = core_on_chip + cores_per_chip * (xd + nxd * (xp + nxp * (
+        yd + nyd * (yp + nyp * (zd + nzd * (zp + nzp * slice_index))))))
+    return MockTpuDevice(device_id, 'tpu', dev_kind, process_index, coords,
+                         core_on_chip, slice_index)
+  devices = [mock_tpu_device(core_on_chip, xd, yd, zd, xp, yp, zp, slice_index)
+             for slice_index in range(num_slices)
+             for zp in range(nzp) for yp in range(nyp) for xp in range(nxp)
+             for zd in range(nzd) for yd in range(nyd) for xd in range(nxd)
+             for core_on_chip in range(cores_per_chip)]
+  if reorder:
+    devices = devices[::-1]
+
+  # Validate the generated mock devices:
+  num_local_chips = nxd * nyd  # Number of mock devices / process.
+  if num_local_chips < 4:
+    # Sub-host slice = fewer than the 4 chips available on a host:
+    # e.g., 1x1 TPU v2.  All devices should be on one host.
+    num_all_chips = x * y * z
+    assert num_all_chips == num_local_chips, f'Bad shape: {x=}, {y=}, {z=}'
+    # Implied by the previous assertion, but let's be explicit:
+    assert z == 1
+    _validate_mocked_devices_for_subhost_slice(devices, x, y, cores_per_chip)
+  else:
+    _validate_mocked_devices(devices, num_local_chips * cores_per_chip)
+
+  return devices
+
+
+# If this function raises, it's a bug in the test code!
+def _validate_mocked_devices_for_subhost_slice(devices, x, y, cores_per_chip):
+  first_device = devices[0]
+  distinct_coords = set()
+  for d in devices:
+    assert d.process_index == first_device.process_index
+    assert d.coords[0] >= 0 and d.coords[0] < x
+    assert d.coords[1] >= 0 and d.coords[1] < y
+    assert d.coords[2] == 0
+    assert d.core_on_chip >= 0 and d.core_on_chip < cores_per_chip
+    distinct_coords.add((d.coords[0], d.coords[1], 0, d.core_on_chip))
+  assert len(distinct_coords) == x * y * cores_per_chip
+
+
+# If this function raises, it's a bug in the test code!
+def _validate_mocked_devices(devices, num_local_devices):
+  # NOTE: this function is not called for sub-host slices.
+  process_to_devices = collections.defaultdict(list)
+  for d in devices:
+    process_to_devices[d.process_index].append(d)
+
+  for local_devices in process_to_devices.values():
+    assert len(local_devices) == num_local_devices, local_devices
+    # All devices have same z coord
+    assert len({d.coords[2] for d in local_devices}) == 1, local_devices
+    # All devices in a 2x2 subgrid
+    min_coords = min(d.coords for d in local_devices)
+    expected = set()
+    for x, y in [(0,0), (0,1), (1,0), (1,1)]:
+      expected.add((min_coords[0] + x, min_coords[1] + y, min_coords[2]))
+    assert {d.coords for d in local_devices} == expected, local_devices
+# END copy from https://github.com/jax-ml/jax/blob/main/tests/mesh_utils_test.py
+
+
+def topology(t):
+  x, y, z = t.split("x")
+  return int(x), int(y), int(z)
+
+
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument("--base-model-path", type=str, required=True)
   parser.add_argument("--maxtext-model-path", type=str, required=True)
-  parser.add_argument("--model-size", type=str, required=True)
+  parser.add_argument("--model-size", type=str, required=True, choices=MODEL_PARAMS_DICT.keys())
+  parser.add_argument("--tpu-device-kind", type=str, required=True, choices=['TPU v2', 'TPU v3', 'TPU v4', 'TPU v5 lite', 'TPU v5'])
+  parser.add_argument("--topology", type=str, required=True)
+  parser.add_argument("--num-slices", type=int, default=1)
+  parser.add_argument("--dcn-data-parallelism", type=int, default=1)
+  parser.add_argument("--dcn-pipeline-parallelism", type=int, default=1)
+  parser.add_argument("--dcn-fsdp-parallelism", type=int, default=1)
+  parser.add_argument("--dcn-fsdp-transpose-parallelism", type=int, default=1)
+  parser.add_argument("--dcn-sequence-parallelism", type=int, default=1)
+  parser.add_argument("--dcn-tensor-parallelism", type=int, default=1)
+  parser.add_argument("--dcn-expert-parallelism", type=int, default=1)
+  parser.add_argument("--dcn-autoregressive-parallelism", type=int, default=1)
+  parser.add_argument("--ici-data-parallelism", type=int, default=1)
+  parser.add_argument("--ici-pipeline-parallelism", type=int, default=1)
+  parser.add_argument("--ici-fsdp-parallelism", type=int, default=1)
+  parser.add_argument("--ici-fsdp-transpose-parallelism", type=int, default=1)
+  parser.add_argument("--ici-sequence-parallelism", type=int, default=1)
+  parser.add_argument("--ici-tensor-parallelism", type=int, default=1)
+  parser.add_argument("--ici-expert-parallelism", type=int, default=1)
+  parser.add_argument("--ici-autoregressive-parallelism", type=int, default=1)
 
   args = parser.parse_args()
 
-  if args.model_size not in MODEL_PARAMS_DICT:
-    raise NotImplementedError
+  config = ParallelismConfig(args)
+  x, y, z = topology(args.topology)
+  devices = mock_tpu_devices(x, y, z, dev_kind=args.tpu_device_kind, one_device_per_chip=True, num_slices=args.num_slices)
+  mesh = max_utils.create_device_mesh(config, devices)
 
-  os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"
+  os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={len(devices)}"
 
-  convert(args.base_model_path, args.maxtext_model_path, args.model_size)
+  convert(args.base_model_path, args.maxtext_model_path, args.model_size, mesh)
