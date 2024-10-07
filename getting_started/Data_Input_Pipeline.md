@@ -21,7 +21,7 @@ Currently MaxText has three data input pipelines:
 | -------- | --------------- | -------- | ----------- |
 | HuggingFace | datasets in HuggingFace Hub<br>local/Cloud Storage datasets in json, parquet, arrow, csv, txt | convenience<br>multiple formats | limit scalability using HuggingFace Hub<br>non-deterministic with preemption<br>(deterministic without preemption) |
 | Grain | ArrayRecord, available through Tensorflow Datasets | fully deterministic, regardless of preemption | only supports random access datasets |
-| TFDS | TFRecord, available through Tensorflow Datasets |  fully deterministic, regardless of preemption | only supports TFRecords<br>requires checkpointing data iterator for fully deterministic training<br> |
+| TFDS | TFRecord, available through Tensorflow Datasets |  optionally fully deterministic, regardless of preemption | only supports TFRecords<br>requires checkpointing data iterator for fully deterministic training<br> |
 
 ### Performance
 * Perf data for all 3 input pipeline: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Perf.md
