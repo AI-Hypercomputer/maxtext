@@ -6,24 +6,31 @@
 # enable profiling using -p option and capture using
 # tensorboard --logdir /tmp/tensorboard/
 
-dry_run=false
 run_name="test_int8_kv_bs_216-108-54"
+dry_run=false
 skip_warmup=false
 test_run=false
 enable_profiler=false
+performance=false
+audit=false
+accuracy=false
 
 
-while getopts "ntspr:" opt
+while getopts "ntsepdar:" opt
 do
   case "$opt" in
       n ) dry_run=true ;;
-      t ) test_run=true ;;
-      s ) skip_warmup=true;;
-      p ) enable_profiler=true;;
+      t ) test_run=true ;; 
+      s ) skip_warmup=true ;;
+      e ) enable_profiler=true ;;
+      p ) performance=true ;;
+      d ) audit=true ;;
+      a ) accuracy=true ;;
       r ) run_name="$OPTARG" ;;
       ? ) helpFunction ;; # Print helpFunction in case parameter is non-existent
   esac
 done
+
 
 if "$dry_run"; then
     cmd=echo
@@ -31,35 +38,32 @@ else
     cmd=''
 fi
 
+SKIP_WARMUP_OPTION=""
 if "$skip_warmup"; then
     SKIP_WARMUP_OPTION="--skip_warmup"
-else
-    SKIP_WARMUP_OPTION=""
 fi
 
+PROFILER_OPTION=""
 if "$enable_profiler"; then
     PROFILER_OPTION="--enable_profile"
-else
-    PROFILER_OPTION=""
 fi
 
-if [ -z "$TOKENIZER_PATH"];
-then
+if [ -z "$TOKENIZER_PATH" ]; then
   TOKENIZER_PATH=/home/${USER}/maxtext/assets/tokenizer.llama2
 fi
 
 BATCH_STR=""
-if [ -z "$BATCH_AND_PREFILL_LEN"];
+if [ -z "$BATCH_AND_PREFILL_LEN" ];
 then
   BATCH_AND_PREFILL_LEN="256,216|512,108|1024,54"
 fi
 
-if [ -z "$TOK_OUTLEN_MULTIPLIER"];
+if [ -z "$TOK_OUTLEN_MULTIPLIER" ];
 then
-  TOK_OUTLEN_MULTIPLIER="3.0"
+  TOK_OUTLEN_MULTIPLIER="2.5"
 fi
 
-if [ -z "$MAXENGINE_ARGS"];
+if [ -z "$MAXENGINE_ARGS" ];
 then
   CHECKPOINT="gs://msingh-bkt/checkpoints/quant_llama2-70b-chat/mlperf_070924/int8_"
   BASE_CFG="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
@@ -68,14 +72,14 @@ then
   MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${LAYOUT_CFG}"
 fi
 export LOADGEN_RUN_TIMESTAMP=$(TZ=America/Los_Angeles date +%Y%m%d%H%M%S%Z)
-export BASEDIR=/home/msingh/inference_mlperf4.1
-export DATA_DISK_DIR=/home/msingh/loadgen_run_data
+export BASEDIR=/home/${USER}/inference
+export DATA_DISK_DIR=/home/${USER}/loadgen_run_data
 export API_URL=0.0.0.0:9000
 if "$test_run"; then
   export DATASET_TYPE=test
   export DATASET_PATH=${DATA_DISK_DIR}/processed-data.pkl
   export TOTAL_SAMPLE_COUNT=100
-  export USER_CONFIG=user100.conf
+  export USER_CONFIG=user${TOTAL_SAMPLE_COUNT}.conf
 else
   export DATASET_TYPE=full
   export DATASET_PATH=${DATA_DISK_DIR}/processed-data.pkl
@@ -150,15 +154,20 @@ run_loadgen_accuracy () {
   fi
 }
 
+if "$performance"; then
+  echo
+  echo "Starting loadgen performance run"
+  run_loadgen_performance
+fi
 
-echo
-echo "Starting loadgen performance run"
-run_loadgen_performance
+if "$audit"; then
+  echo
+  echo "Starting loadgen audit"
+  run_loadgen_audit
+fi
 
-echo
-echo "Starting loadgen audit"
-run_loadgen_audit
-
-echo
-echo "Starting loadgen accuracy"
-run_loadgen_accuracy
+if "$accuracy"; then
+  echo
+  echo "Starting loadgen accuracy"
+  run_loadgen_accuracy
+fi

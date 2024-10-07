@@ -380,15 +380,22 @@ def make_response(id_, response_token_ids):
 
 def _estimated_counts_by_bucket(dataset):
   total_len = dataset.tok_input_length + dataset.tok_output_length
-  group1 = (total_len <= 512) & (dataset.tok_input_length <= 256)
-  group2 = (total_len <= 1024) & (dataset.tok_input_length <= 512)
+  query_batches = _init_query_batches()
+  prefix_lens = [l for l, b in list(query_batches.keys())]
+  prefix_lens.sort()
 
   # with 5 percent extra
   mult = FLAGS.total_sample_count / len(dataset) * 1.05
+  prev_len = 0
+  total_count = 0
   estimates = {}
-  estimates["<256"] = math.ceil(len(dataset[group1]) * mult)
-  estimates["256-512"] = math.ceil(len(dataset[~group1 & group2]) * mult)
-  estimates[">512"] = math.ceil(len(dataset[~group1 & ~group2]) * mult)
+  for prefix_len in prefix_lens[:-1]:
+    target_len = 2 * prefix_len
+    condition = (total_len <= target_len) & (dataset.tok_input_length <= prefix_len)
+    count = len(dataset[condition])
+    estimates[f"{prev_len}-{prefix_len}"] = math.ceil((count - total_count) * mult)
+    total_count = count
+  estimates[f">{prefix_lens[-1]}"] = math.ceil((len(dataset) - total_count) * mult)
   return estimates
 
 
@@ -412,13 +419,15 @@ def main(argv):
 
   log.info("dataset path: %s", FLAGS.dataset_path)
   dataset = pd.read_pickle(FLAGS.dataset_path)
-  rows = list(dataset.iterrows())
+  if FLAGS.total_sample_count < len(dataset):
+    dataset = dataset.sample(n=FLAGS.total_sample_count)
   estimated_counts_by_bucket = _estimated_counts_by_bucket(dataset)
-  log.info(f"Estimated counts by bucket {estimated_counts_by_bucket}")
+  log.info(f"Dataset len {len(dataset)}, estimated counts by bucket {estimated_counts_by_bucket}")
+
+  rows = list(dataset.iterrows())
   len_batch_str = FLAGS.prefill_lengths_and_batch_sizes
   log.info(f"Prefill lengths and Batch sizes: {len_batch_str}")
   log.info(f"Maxengine args: {FLAGS.maxengine_args}")
-  length_and_batch = [tuple(map(int, lb.split(","))) for lb in len_batch_str.split("|")]
 
   log.info("Get warmup samples")
   warmup_samples = get_warmup_samples(dataset)
@@ -484,7 +493,7 @@ def main(argv):
   )
   log.info("Starting Benchmark run")
   lg.StartTestWithLogSettings(lgSUT, qsl, settings, log_settings, FLAGS.audit_conf)
-  log.info(f"query counts {[len(q) for q in sut._query_batches]}")
+  log.info(f"query counts {[len(sut._query_batches[q]) for q in sut._query_batches]}")
   log.info("Run Completed!")
   log.info("Destroying SUT...")
   lg.DestroySUT(lgSUT)
