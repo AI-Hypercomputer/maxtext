@@ -367,7 +367,6 @@ def create_device_mesh(config, devices=None):
   num_devices = len(devices)
   num_slices = config.num_slices
   num_devices_per_slice = num_devices // num_slices
-  print(f'yy1 num_devices: {num_devices}, num_slices: {num_slices}')
   
   multi_slice_env = num_slices > 1
 
