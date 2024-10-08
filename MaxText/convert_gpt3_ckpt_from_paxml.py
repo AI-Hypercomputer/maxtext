@@ -268,8 +268,8 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
     check_memory()
     return result
 
-  # converted_state = jax.tree_util.tree_map_with_path(map_fn, state)
-  converted_state = jax.tree_util.tree_map(jnp.zeros_like, state)
+  converted_state = jax.tree_util.tree_map_with_path(map_fn, state)
+  # converted_state = jax.tree_util.tree_map(jnp.zeros_like, state)
   max_logging.log("converted state finished")
   check_memory()
 
