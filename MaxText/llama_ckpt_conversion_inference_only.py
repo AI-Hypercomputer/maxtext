@@ -287,11 +287,7 @@ if __name__ == "__main__":
 
   print(f"Mesh size: {mesh.size}")
   os.environ["XLA_FLAGS"] = f"xla_force_host_platform_device_count={mesh.size}"
-  print(config.mesh_axes)
-  print(config.logical_axis_rules)
-  pspec = flax.linen.spmd.logical_to_mesh_axes(config.mesh_axes, config.logical_axis_rules)
-  print(pspec)
+  logical_dims = [r[0] for r in config.logical_axis_rules]
+  pspec = flax.linen.spmd.logical_to_mesh_axes(logical_dims, config.logical_axis_rules)
   sharding = jax.sharding.NamedSharding(mesh, pspec)
-  print(sharding)
-  exit()
-  convert(args.base_model_path, args.maxtext_model_path, args.model_size, mesh, mesh_axes)
+  convert(args.base_model_path, args.maxtext_model_path, args.model_size, sharding)
