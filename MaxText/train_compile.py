@@ -74,8 +74,6 @@ def get_topology_mesh(config):
         num_slices=config.compile_topology_num_slices,
         wrap=target_hardware.wrap,
     ).devices
-
-  print(f'yy1 topology_devices: {topology_devices}')
   topology_device_mesh = max_utils.create_device_mesh(config, topology_devices)
   topology_mesh = Mesh(topology_device_mesh, config.mesh_axes)
   return topology_mesh
