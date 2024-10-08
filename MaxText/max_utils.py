@@ -214,8 +214,6 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     max_logging.log("Jax distributed system initialized on CPUs!")
   elif (
       raw_keys["enable_checkpointing"]
-      and raw_keys["async_checkpointing"]
-      and raw_keys["compile_topology_num_slices"] == -1
       and not raw_keys["enable_single_controller"]
   ) or raw_keys["hardware"] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
