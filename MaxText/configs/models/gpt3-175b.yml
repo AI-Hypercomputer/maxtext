@@ -29,7 +29,7 @@ logits_dot_in_fp32: False
 normalize_embedding_logits: False
 normalization_layer_epsilon: 1.e-05
 use_iota_embed: True
-fused_qkv: True
+fused_qkv: False
 opt_type: "adam_pax"
 decoder_block: "gpt3"
 eval_dataset_name: "c4/en:3.0.5"
