@@ -286,7 +286,7 @@ if __name__ == "__main__":
   mesh = train_compile.get_topology_mesh(config)
 
   print(f"Mesh size: {mesh.size}")
-  os.environ["XLA_FLAGS"] = f"xla_force_host_platform_device_count={mesh.size}"
+  os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={mesh.size}"
   logical_dims = [r[0] for r in config.logical_axis_rules]
   pspec = flax.linen.spmd.logical_to_mesh_axes(logical_dims, config.logical_axis_rules)
   sharding = jax.sharding.NamedSharding(mesh, pspec)
