@@ -124,7 +124,7 @@ def ar_benchmark_loop(config, engine, params, decode_state, iters, profile_name)
   rng = jax.random.PRNGKey(1234)
   for _ in range(iters):
     rng, rng_generate = jax.random.split(rng)
-    decode_state, _ = engine.generate(params, decode_state, rng_generate)
+    decode_state, _ = engine.generate(params, decode_state, rng=rng_generate)
   jax.block_until_ready(decode_state)
   end = datetime.datetime.now()
   prof.deactivate()
@@ -136,7 +136,7 @@ def ar_benchmark(config, engine, params, decode_state, global_batch_size, cache_
   rng = jax.random.PRNGKey(1234)
   for _ in range(_WARMUP_ITERS):
     rng, rng_generate = jax.random.split(rng)
-    decode_state, _ = engine.generate(params, decode_state, rng_generate)
+    decode_state, _ = engine.generate(params, decode_state, rng=rng_generate)
   jax.block_until_ready(decode_state)
 
   time_in_s, decode_state = ar_benchmark_loop(config, engine, params, decode_state, iters, profile_name="autoregress")
