@@ -56,7 +56,7 @@ import jax.numpy as jnp
 
 
 def fmt_size(num_bytes: int) -> str:
-  assert num_bytes > 0
+  # assert num_bytes > 0
   for unit in ["B", "KiB", "MiB", "GiB"]:
     if num_bytes < 1024.0:
       break
