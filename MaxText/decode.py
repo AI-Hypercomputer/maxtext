@@ -51,7 +51,7 @@ def main(config):
   sampled_tokens_list.append(first_token)
   for _ in steps:
     rng, rng_generate = jax.random.split(rng)
-    decode_state, sampled_tokens = engine.generate(params, decode_state, rng_generate)
+    decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
     sampled_tokens_list.append(sampled_tokens)
 
   results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]

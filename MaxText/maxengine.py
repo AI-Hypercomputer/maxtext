@@ -15,7 +15,7 @@
 """Implementation of Engine API for MaxText"""
 import copy as cp
 import functools
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, Callable
 
 import flax
 from flax import linen as nn
@@ -101,9 +101,12 @@ class MaxEngine(engine_api.Engine):
     self.kv_cache_shardings = None
     self.state_mesh_annotations = None
 
-  def load_params(self, rng: jax.random.PRNGKey, *args, **kwargs) -> Params:
+  def load_params(self, *args, rng: Optional[jax.random.PRNGKey] = None, **kwargs) -> Params:
     """Load Parameters, typically from GCS"""
     # pylint: disable=unused-argument
+
+    if rng is None:
+      rng = jax.random.PRNGKey(0)
 
     if self.model.quant and self.config.checkpoint_is_quantized:
       print("Loading from the quantized checkpoint...")
@@ -126,8 +129,11 @@ class MaxEngine(engine_api.Engine):
     max_utils.print_mem_stats("After load_params")
     return params
 
-  def quantize_params(self, state, rng):
+  def quantize_params(self, state, rng: Optional[jax.random.PRNGKey] = None):
     """Forward pass to quantize decode params."""
+    if rng is None:
+      rng = jax.random.PRNGKey(0)
+
     self.model.quant.quant_mode = quantizations.get_quant_mode("convert")
 
     @jax.jit
@@ -163,7 +169,8 @@ class MaxEngine(engine_api.Engine):
       existing_prefix: Optional[jax.Array] = None,
       padded_tokens: jax.Array,
       true_length: int,
-      rng: jax.random.PRNGKey,
+      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
+      rng: Optional[jax.random.PRNGKey] = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -179,6 +186,9 @@ class MaxEngine(engine_api.Engine):
     """
     if existing_prefix:
       raise ValueError("We don't know what to do with existing_prefix")
+
+    if rng is None:
+      rng = jax.random.PRNGKey(0)
 
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
@@ -242,9 +252,16 @@ class MaxEngine(engine_api.Engine):
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def generate(
-      self, params: Params, decode_state: DecodeState, rng: jax.random.PRNGKey
+      self,
+      params: Params,
+      decode_state: DecodeState,
+      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
+      rng: Optional[jax.random.PRNGKey] = None,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
     """Run one generate step"""
+    if rng is None:
+      rng = jax.random.PRNGKey(0)
+
     previous_token = decode_state["tokens"]
 
     rng, new_rng = jax.random.split(rng)
@@ -391,8 +408,16 @@ class MaxEngine(engine_api.Engine):
     else:
       return token_utils.SentencePieceTokenizer(metadata)
 
-  def init_decode_state(self, rng: jax.random.PRNGKey, *args, **kwargs) -> DecodeState:
+  def init_decode_state(
+      self,
+      *args,  # pylint: disable=unused-argument
+      rng: Optional[jax.random.PRNGKey] = None,
+      **kwargs,  # pylint: disable=unused-argument
+  ) -> DecodeState:
     """Initialises any state which a generation step transforms."""
+
+    if rng is None:
+      rng = jax.random.PRNGKey(0)
 
     # pylint: disable=unused-argument
     def init(abstract_params):
