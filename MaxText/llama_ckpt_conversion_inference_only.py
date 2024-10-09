@@ -43,7 +43,6 @@ from train import save_checkpoint
 import torch
 import sys
 import os
-import train_compile
 import pyconfig
 from layers import models, quantizations
 
@@ -283,12 +282,8 @@ if __name__ == "__main__":
 
   pyconfig.initialize(["python"] + args.maxtext_args.split(" "))
   config = pyconfig.config
-  train_compile.validate_config(config)
 
- # Create simulated device mesh from topology.
-  mesh = train_compile.get_topology_mesh(config)
-  print(f"Mesh size: {mesh.size}")
-  os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={mesh.size}"
+  mesh = jax.sharding.Mesh(max_utils.create_device_mesh(config), config.mesh_axes)
   print("Mesh:")
   pprint(mesh)
 
