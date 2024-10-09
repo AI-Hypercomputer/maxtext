@@ -89,6 +89,27 @@ MODEL_PARAMS_DICT = {
         "dims_per_head": 128,
         "vocab": 128256,
     },
+    "llama3.1-8b": {
+        "num_layers": 32,
+        "num_heads": 32,
+        "num_kv_heads": 8,
+        "dims_per_head": 128,
+        "vocab": 128256,
+    },
+    "llama3.1-70b": {
+        "num_layers": 80,
+        "num_heads": 64,
+        "num_kv_heads": 8,
+        "dims_per_head": 128,
+        "vocab": 128256,
+    },
+    "llama3.1-405b": {
+        "num_layers": 126,
+        "num_heads": 128,
+        "num_kv_heads": 8,
+        "dims_per_head": 128,
+        "vocab": 128256,
+    },
     "mistral-7b": {
         "num_layers": 32,
         "num_heads": 32,
@@ -275,8 +296,9 @@ def convert_to_jax_weights(base_model_path, model_size):
     wq = np.reshape(wq, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
     wk = np.reshape(wk, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
     wv = np.reshape(wv, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
-    wq = permute_to_match_maxtext_rope(wq)
-    wk = permute_to_match_maxtext_rope(wk)
+    if model_size[:8] != "llama3.1":
+      wq = permute_to_match_maxtext_rope(wq)
+      wk = permute_to_match_maxtext_rope(wk)
 
     w_post = np.concatenate(
         [var[f"layers.{layer_idx}.attention.wo.weight"].type(torch.float16).numpy() for var in chkpt_vars],
