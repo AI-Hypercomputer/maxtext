@@ -30,6 +30,7 @@ Each pass, load and save partial weights (subset of all weight variables).
 # pylint: disable=g-line-too-long
 import argparse
 import pathlib
+from pprint import pprint
 
 import numpy as np
 
@@ -44,7 +45,7 @@ import sys
 import os
 import train_compile
 import pyconfig
-import flax.linen.spmd
+from layers import models, quantizations
 
 jax.config.update("jax_platform_name", "cpu")
 
@@ -101,7 +102,7 @@ MODEL_PARAMS_DICT = {
 }
 
 
-def convert(base_model_path, maxtext_model_path, model_size, sharding):
+def convert(base_model_path, maxtext_model_path, model_size, params_shardings):
   """
   Function to convert the checkpoint at base_model_path into Orbax checkpoint
   for MaxText and save at maxtext_model_path
@@ -241,12 +242,14 @@ def convert(base_model_path, maxtext_model_path, model_size, sharding):
 
 
 
-  # convert all weights to jax.numpy with sharding if applicable
-  jax_weights = jax.tree_util.tree_map(
-      lambda arr: jax.device_put(arr, sharding),
-      jax_weights)
+  # TODO: create 'unrolled' sharding pytee
+  # Shard weights in the same way as maxengine will load them
+  def checkpoint_device_put(arr, sharding):
+    jax.device_put(arr, sharding)
 
-  # dummy configs for the checkpoint_manager
+  jax_weights = jax.tree.map(checkpoint_device_put, jax_weights, params_shardings)
+
+
   step_number_to_save_new_ckpt = 0
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       checkpoint_dir=maxtext_model_path,
@@ -271,6 +274,7 @@ def convert(base_model_path, maxtext_model_path, model_size, sharding):
 
 
 if __name__ == "__main__":
+  # Do not query VM metadata server for TPU variables.
   os.environ["TPU_SKIP_MDS_QUERY"] = "1"
 
   parser = argparse.ArgumentParser()
@@ -283,11 +287,20 @@ if __name__ == "__main__":
   pyconfig.initialize(["python"] + args.maxtext_args.split(" "))
   config = pyconfig.config
   train_compile.validate_config(config)
-  mesh = train_compile.get_topology_mesh(config)
 
+ # Create simulated device mesh from topology.
+  mesh = train_compile.get_topology_mesh(config)
   print(f"Mesh size: {mesh.size}")
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={mesh.size}"
+
+  # Create model in the same way as maxengine.MaxEngine will and get shardings for state.
+  model = models.Transformer(config, mesh=mesh, quant=quantizations.configure_quantization(config))
+  _, _, train_state_shardings = max_utils.get_abstract_state(model, None, config, jax.random.PRNGKey(0), mesh, False)
+  params_shardings = train_state_shardings.params['params']
+  print(f"Params shardings: {params_shardings}")
+  pprint(params_shardings)
+  exit()
+
+
   logical_dims = [r[0] for r in config.logical_axis_rules]
-  pspec = flax.linen.spmd.logical_to_mesh_axes(logical_dims, config.logical_axis_rules)
-  sharding = jax.sharding.NamedSharding(mesh, pspec)
-  convert(args.base_model_path, args.maxtext_model_path, args.model_size, sharding)
+  convert(args.base_model_path, args.maxtext_model_path, args.model_size)
