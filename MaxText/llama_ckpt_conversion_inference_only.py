@@ -241,14 +241,11 @@ def convert(base_model_path, maxtext_model_path, model_size, params_shardings):
       del var[f"layers.{layer_idx}.feed_forward.w3.weight"]
 
 
-
-  # TODO: create 'unrolled' sharding pytee
   # Shard weights in the same way as maxengine will load them
   def checkpoint_device_put(arr, sharding):
-    jax.device_put(arr, sharding)
+    return jax.device_put(arr, sharding)
 
   jax_weights = jax.tree.map(checkpoint_device_put, jax_weights, params_shardings)
-
 
   step_number_to_save_new_ckpt = 0
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
@@ -292,15 +289,14 @@ if __name__ == "__main__":
   mesh = train_compile.get_topology_mesh(config)
   print(f"Mesh size: {mesh.size}")
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={mesh.size}"
+  print("Mesh:")
+  pprint(mesh)
 
   # Create model in the same way as maxengine.MaxEngine will and get shardings for state.
   model = models.Transformer(config, mesh=mesh, quant=quantizations.configure_quantization(config))
   _, _, train_state_shardings = max_utils.get_abstract_state(model, None, config, jax.random.PRNGKey(0), mesh, False)
   params_shardings = train_state_shardings.params['params']
-  print(f"Params shardings: {params_shardings}")
+  print(f"Params shardings:")
   pprint(params_shardings)
-  exit()
 
-
-  logical_dims = [r[0] for r in config.logical_axis_rules]
-  convert(args.base_model_path, args.maxtext_model_path, args.model_size)
+  convert(args.base_model_path, args.maxtext_model_path, args.model_size, params_shardings)

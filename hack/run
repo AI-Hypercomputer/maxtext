@@ -1,2 +1,3 @@
-JAX_PLATFORMS=cpu python maxtext/MaxText/llama_ckpt_conversion_inference_only.py --base-model-path=/pwd/model/Llama3.1-70B/original/ --maxtext-model-path=/pwd/converted/ --model-size=llama3-70b --maxtext-args='maxtext/MaxText/configs/v5e/inference/llama3_405b_v5e-64.yml compile_topology=v5p-128 compile_topology_num_slices=1 ici_tensor_par
-allelism=8 ici_autoregressive_parallelism=8'
+JAX_PLATFORMS=cpu python MaxText/llama_ckpt_conversion_inference_only.py --base-model-path=/pwd/model/Llama3.1-70B/original/ --maxtext-model-path=/pwd/converted/ --model-size=llama3-70b --maxtext-args='MaxText/configs/v5e/inference/llama3_405b_v5e-64.yml compile_topology=v5p-128 compile_topology_num_slices=1 ici_tensor_parallelism=8 ici_autoregressive_parallelism=8 scan_layers=false'
+
+JAX_PLATFORMS=cpu python maxtext/MaxText/llama_ckpt_conversion_inference_only.py --base-model-path=/pwd/model/Llama3.1-70B/original/ --maxtext-model-path=/pwd/converted/ --model-size=llama3-70b --maxtext-args='maxtext/MaxText/configs/v5e/inference/llama3_405b_v5e-64.yml compile_topology=v5p-128 compile_topology_num_slices=1 ici_tensor_parallelism=8 ici_autoregressive_parallelism=8 scan_layers=false'
