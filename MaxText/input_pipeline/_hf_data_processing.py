@@ -164,7 +164,7 @@ def make_hf_train_iterator(
       add_bos=config.add_bos,
       add_eos=config.add_eos,
       generate_padding_example=True,
-      use_dpo=config.use_dpo_dataset,
+      use_dpo=config.use_dpo,
   )
   return train_iter
 

@@ -45,9 +45,7 @@ def get_tokenizer(tokenizer_path, add_bos, add_eos):
 
 
 def truncate_to_max_allowable_length(x, max_length):
-  x["inputs"] = x["inputs"][:max_length]
-  x["targets"] = x["targets"][:max_length]
-  return x
+  return {k: v[:max_length] for k, v in x.items()}
 
 
 def shift_data_by_truncation(x):
@@ -167,8 +165,8 @@ class HFDataSource(grain.RandomAccessDataSource):
 class ParseFeatures(grain.MapTransform):
   """Parse serialized example"""
 
-  def __init__(self, data_column, tokenize):
-    self.data_column = data_column
+  def __init__(self, data_columns, tokenize):
+    self.data_columns = data_columns
     if tokenize:
       self.dtype = tf.string
     else:
@@ -177,45 +175,51 @@ class ParseFeatures(grain.MapTransform):
   def map(self, features):
     def _parse(example):
       parsed = tf.io.parse_example(
-          example, {self.data_column: tf.io.FixedLenSequenceFeature([], dtype=self.dtype, allow_missing=True)}
+          example, {col: tf.io.FixedLenSequenceFeature([], dtype=self.dtype, allow_missing=True) 
+                    for col in self.data_columns}
       )
       return parsed
 
     return _parse(features)
 
+@dataclasses.dataclass
+class InputsTargetsFeatures(grain.MapTransform):
+  """Normalize text feature keys."""
+
+  def __init__(self, column_name):
+    self.column_name = column_name
+
+  def map(self, features):
+    return {"inputs": features[self.column_name], "targets": features[self.column_name]}
 
 @dataclasses.dataclass
 class NormalizeFeatures(grain.MapTransform):
   """Normalize text feature keys."""
 
-  def __init__(self, column_name, tokenize):
-    self.column_name = column_name
+  def __init__(self, column_names, tokenize):
+    self.column_names = column_names
     self.tokenize = tokenize
 
   def map(self, features):
     if self.tokenize:
-      return {
-          "inputs": features[self.column_name].numpy()[0].decode(),
-          "targets": features[self.column_name].numpy()[0].decode(),
-      }
+      return {col: features[col].numpy()[0].decode() for col in self.column_names}
     else:
-      return {"inputs": features[self.column_name].numpy(), "targets": features[self.column_name].numpy()}
-
+      return {col: features[col].numpy() for col in self.column_names}
 
 @dataclasses.dataclass
 class ReformatPacking(grain.MapTransform):
   """Reformat packing outputs."""
+  
+  def __init__(self, column_names):
+    self.column_names = column_names
 
   def map(self, data):
-    return {
-        "inputs": data[0]["inputs"],
-        "targets": data[0]["targets"],
-        "inputs_segmentation": data[1]["inputs"],
-        "targets_segmentation": data[1]["targets"],
-        "inputs_position": data[2]["inputs"],
-        "targets_position": data[2]["targets"],
-    }
-
+    ret = {}
+    for col in self.column_names:
+      ret[f"{col}"] = data[0][col]
+      ret[f"{col}_segmentation"] = data[1][col]
+      ret[f"{col}_position"] = data[2][col]
+    return ret
 
 @dataclasses.dataclass
 class PadToMaxLength(grain.MapTransform):
