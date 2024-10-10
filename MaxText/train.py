@@ -417,13 +417,13 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       "scalars": {},
   }
   if config.optimizer_memory_host_offload:
-    # new_params = jax.device_put(
-    #   new_state.params, with_memory_kind(state_mesh_shardings.params, 'pinned_host')
-    # )
+    new_params = jax.device_put(
+      new_state.params, with_memory_kind(state_mesh_shardings.params, 'pinned_host')
+    )
     new_opt_state = jax.device_put(
       new_state.opt_state, with_memory_kind(state_mesh_shardings.opt_state, 'pinned_host')
     )
-    new_state = new_state.replace(opt_state = new_opt_state)
+    new_state = new_state.replace(params=new_params, opt_state=new_opt_state)
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
