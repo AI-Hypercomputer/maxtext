@@ -74,7 +74,18 @@ def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
   return ret
 
 
-def _rhs_axis_metadata_wrapper(x: jnp.ndarray, tile_map, no_sharding_axis: Sequence[int], mesh_axes: Tuple[str, ...], is_tiled: bool):
+def _rhs_axis_metadata_wrapper(
+    x: jnp.ndarray,
+    tile_map,
+    no_sharding_axis: Sequence[int],
+    mesh_axes: Tuple[str, ...],
+    is_tiled: bool,
+    replicate_scale: bool = False,
+  ):
+  if replicate_scale:
+    if len(x.shape) == 1:
+      return nn.with_logical_partitioning((lambda: x), tuple([None for _ in mesh_axes]))()
+
   mesh_axes = list(mesh_axes)
   if is_tiled:
     # tile_map is a mapping between original rank and a list of new, tiled rank.
@@ -101,6 +112,7 @@ class AqtQuantization:
 
   quant_dg: aqt_config.DotGeneral
   quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
+  replicate_scale: bool = False
 
   def _get_mixed_precision_cfg(self):
     quant_dg = None
@@ -117,10 +129,10 @@ class AqtQuantization:
       tiling_fn = functools.partial(_tiling_fn, tile_size=tile_size)
     return quant_dg, is_tiled, tiling_fn
 
-  def _get_rhs_axis_metadata_wrapper(self, mesh_axes: Tuple[str, ...] = (), is_tiled: bool = False):
+  def _get_rhs_axis_metadata_wrapper(self, mesh_axes: Tuple[str, ...] = (), is_tiled: bool = False, replicate_scale: bool = False):
     if self.quant_mode == aqt_flax.QuantMode.CONVERT:
       return None
-    return functools.partial(_rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=is_tiled)
+    return functools.partial(_rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=is_tiled, replicate_scale=replicate_scale)
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
@@ -129,7 +141,7 @@ class AqtQuantization:
     else:
       quant_dg, is_tiled, tiling_fn  = self.quant_dg, False, None
     rhs_axis_metadata_wrapper=self._get_rhs_axis_metadata_wrapper(
-      mesh_axes, is_tiled)
+      mesh_axes, is_tiled, replicate_scale=self.replicate_scale)
     aqt_dg_cls = functools.partial(
         aqt_flax.AqtDotGeneral,
         quant_dg,
@@ -145,7 +157,7 @@ class AqtQuantization:
   def einsum(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns einsum configured with aqt params."""
     rhs_axis_metadata_wrapper=self._get_rhs_axis_metadata_wrapper(
-      mesh_axes)
+      mesh_axes, replicate_scale=self.replicate_scale)
     aqt_einsum = functools.partial(
         aqt_flax.AqtEinsum(
             cfg=self.quant_dg,
@@ -260,7 +272,12 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
     if quant_cfg == "fp8":
       return Fp8Quantization()
     quant_mode = get_quant_mode(quant_mode_str)
-    return AqtQuantization(quant_dg=quant_cfg, quant_mode=quant_mode)
+    replicate_scale = config.replicate_qua_scale if config.replicate_qua_scale else False
+    return AqtQuantization(
+      quant_dg=quant_cfg,
+      quant_mode=quant_mode,
+      replicate_scale=replicate_scale
+    )
   return None
 
 

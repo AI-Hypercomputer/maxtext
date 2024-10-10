@@ -8,6 +8,8 @@ model_name: "llama2-70b"
 sharding_strategy: "experimental"
 attention: 'dot_product'
 allow_split_physical_axes: True
+# Used to replicate the quantization scale to avoid the inefficient XLA fusion.
+replicate_qua_scale: True
 
 logical_axis_rules: [
                       ['embed', []],

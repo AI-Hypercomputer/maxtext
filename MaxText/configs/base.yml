@@ -67,6 +67,8 @@ dtype: "bfloat16"
 # 'intmp' for mixed precision weight only quantization based on config file
 # 'fp8' for 8-bit floating-point GeMMs on NVIDIA GPUs.
 quantization: ""
+# Used to replicate the quantization scale to avoid the inefficient XLA fusion.
+replicate_qua_scale: False
 # Path to file with quantization config - only used for mixed precision.
 # Example configs in ../Maxtext/configs/quantization
 # Allows us to configure different bits, tiling and scale for quantizing selected weights.
