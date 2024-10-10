@@ -145,6 +145,7 @@ class Gpt3MultiHeadAttention(nn.Module):
   float32_logits: bool = True  # cast logits in float32 for stability.
   fused_qkv: bool = True
   quant: Optional[Quant] = None
+  tff_quant: Optional[Quant] = None
   kv_quant: Optional[KVQuant] = None
   use_bias: bool = True
 
@@ -190,6 +191,7 @@ class Gpt3MultiHeadAttention(nn.Module):
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
     """output projection"""
+    quant = self.tff_quant if self.config.enable_tff_quant else self.quant
     out_proj = DenseGeneral(
         features=output_dim,
         axis=(-2, -1),
@@ -198,7 +200,7 @@ class Gpt3MultiHeadAttention(nn.Module):
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="out",
-        quant=self.quant,
+        quant=quant,
         use_bias=self.use_bias,
         matmul_precision=self.config.matmul_precision,
     )(out)
@@ -293,6 +295,26 @@ class Gpt3DecoderLayer(nn.Module):
 
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
 
+
+    # TFF
+    # quantize forward only since backward is already communication-bounded
+    from aqt.jax.v2 import config as aqt_config
+    from aqt.jax.v2.flax import aqt_flax
+    tff_quant = Quant(
+        quant_dg=aqt_config.config_v3(
+            fwd_bits=8,
+            dlhs_bits=None,
+            drhs_bits=None,
+            rng_type="jax.uniform",
+            dlhs_local_aqt=None,
+            drhs_local_aqt=None,
+            fwd_accumulator_dtype=jnp.int32,
+            dlhs_accumulator_dtype=None,
+            drhs_accumulator_dtype=None,
+            ),
+        quant_mode=aqt_flax.QuantMode.TRAIN,
+    )
+
     # Self-attention block
     assert (
         cfg.num_query_heads == cfg.num_kv_heads
@@ -312,6 +334,7 @@ class Gpt3DecoderLayer(nn.Module):
         fused_qkv=cfg.fused_qkv,
         use_bias=True,
         quant=self.quant,
+        tff_quant=tff_quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
     )
 
@@ -321,6 +344,9 @@ class Gpt3DecoderLayer(nn.Module):
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
     attention_lnx += inputs
+
+    quant = tff_quant if cfg.enable_tff_quant else self.quant
+
 
     # MLP block.
     mlp_lnx = linears.MlpBlock(
@@ -333,7 +359,7 @@ class Gpt3DecoderLayer(nn.Module):
         use_bias=True,
         use_pre_norm=True,
         config=cfg,
-        quant=self.quant,
+        quant=quant,
     )(attention_lnx, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
 
