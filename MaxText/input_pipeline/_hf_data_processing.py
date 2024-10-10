@@ -169,10 +169,6 @@ def make_hf_iterator(
         streaming=True,
         token=config.hf_access_token,
     )
-    if config.eval_per_device_batch_size > 0:
-      eval_batch_size = config.eval_per_device_batch_size * global_mesh.size
-    else:
-      eval_batch_size = config.global_batch_size_to_load
 
     if config.eval_steps > 0:
       eval_generate_padding_example = True
@@ -187,7 +183,7 @@ def make_hf_iterator(
         tokenize=config.tokenize_eval_data,
         tokenizer_path=config.tokenizer_path,
         hf_access_token=config.hf_access_token,
-        global_batch_size=eval_batch_size,
+        global_batch_size=config.global_batch_size_to_load_eval,
         max_target_length=config.max_target_length,
         shuffle=False,
         data_shuffle_seed=config.data_shuffle_seed,

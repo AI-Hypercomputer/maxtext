@@ -173,15 +173,10 @@ def make_tfds_iterator(
         dataloading_host_count=len(process_indices),
     )
 
-    if config.eval_per_device_batch_size > 0:
-      eval_batch_size = config.eval_per_device_batch_size * global_mesh.size
-    else:
-      eval_batch_size = config.global_batch_size_to_load
-
     eval_iter = preprocessing_pipeline(
         dataset=eval_ds,
         tokenizer_path=config.tokenizer_path,
-        global_batch_size=eval_batch_size,
+        global_batch_size=config.global_batch_size_to_load_eval,
         global_mesh=global_mesh,
         max_target_length=config.max_target_length,
         data_column_name=config.eval_data_column,

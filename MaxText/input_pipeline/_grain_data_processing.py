@@ -136,7 +136,7 @@ def make_grain_iterator(
     eval_iter = preprocessing_pipeline(
         dataset=eval_ds,
         tokenizer_path=config.tokenizer_path,
-        global_batch_size=config.global_batch_size_to_load,
+        global_batch_size=config.global_batch_size_to_load_eval,
         global_mesh=global_mesh,
         max_target_length=config.max_target_length,
         grain_worker_count=config.grain_worker_count,
