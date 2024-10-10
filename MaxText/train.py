@@ -29,7 +29,6 @@ import time
 from typing import Sequence, Optional
 from absl import app
 from flax import linen as nn
-from flax.core import FrozenDict
 from flax.linen import partitioning as nn_partitioning
 import grain.python as grain
 import jax
@@ -266,15 +265,15 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics["scalar"][f"activ_fraction_zero/layer_{layer_num:03d}"] = layer["activation_fraction_zero"][0]
       output_metrics["scalar"][f"activ_mean/layer_{layer_num:03d}"] = layer["activation_mean"][0]
       output_metrics["scalar"][f"activ_stdev/layer_{layer_num:03d}"] = layer["activation_stdev"][0]
-      
+
 def _split_dpo_state(state):
   reference_params = state.params["reference_params"]
   new_state = state.replace(params={k: v for k, v in state.params.items() if k != "reference_params"})
   return new_state, reference_params
-  
+
 def _merge_dpo_state(state, reference_params):
   return state.replace(params=dict(state.params, reference_params=reference_params))
-      
+
 def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_train=True):
   """loss_fn for both train and eval.
 
@@ -300,7 +299,7 @@ def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_t
 
   inputs = jnp.concatenate([data["chosen"], data["rejected"]], 0)
   inputs_position = jnp.concatenate([data["chosen_position"] , data["rejected_position"]], 0)
-  inputs_segmentation = jnp.concatenate([data["chosen_segmentation"], 
+  inputs_segmentation = jnp.concatenate([data["chosen_segmentation"],
                                          data["rejected_segmentation"]], 0)
   logits, intermediate_outputs = model.apply(
       params,
@@ -323,12 +322,12 @@ def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_t
   n_logits = logits.shape[-3] // 2  # (..., batch, sequence, vocab)
   chosen_logits, rejected_logits = logits[..., :n_logits, :, :], logits[..., n_logits:, :, :]
   chosen_ref_logits, rejected_ref_logits = ref_logits[..., :n_logits, :, :], ref_logits[..., n_logits:, :, :]
-  
+
   chosen_logratios = chosen_logits - chosen_ref_logits
   rejected_logratios = rejected_logits - rejected_ref_logits
   LABEL_SMOOTHING, BETA = 1.0, 0.1
   ratios = BETA * chosen_logratios - BETA * rejected_logratios
-  loss = (-jax.nn.log_sigmoid(ratios) * (1 - LABEL_SMOOTHING) 
+  loss = (-jax.nn.log_sigmoid(ratios) * (1 - LABEL_SMOOTHING)
           - jax.nn.log_sigmoid(-ratios) * LABEL_SMOOTHING)
   loss = jnp.mean(loss, -1)
   valid_mask = ((data["chosen_segmentation"] != 0) & (data["rejected_segmentation"] != 0)
@@ -410,7 +409,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       "moe_lb_loss": moe_lb_loss,
   }
   return loss, aux
-  
+
 
 def train_step(model, config, state, data, dropout_rng):
   """
@@ -428,7 +427,7 @@ def train_step(model, config, state, data, dropout_rng):
 
   """
   reference_params, extra_dpo_arg, _loss_fn = [], [], loss_fn
-  if config.use_dpo:  
+  if config.use_dpo:
     state, reference_params = _split_dpo_state(state)
     extra_dpo_arg = [reference_params]
     _loss_fn = dpo_loss_fn
@@ -491,7 +490,7 @@ def train_step(model, config, state, data, dropout_rng):
 
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
-    
+
   if config.use_dpo:
     new_state = _merge_dpo_state(new_state, reference_params)
 
@@ -502,7 +501,7 @@ def eval_step(model, config, state, data, dropout_rng):
   """eval_step no backprop and new state compared with train_step."""
 
   reference_params, extra_dpo_arg, _loss_fn = [], [], loss_fn
-  if config.use_dpo:  
+  if config.use_dpo:
     state, reference_params = _split_dpo_state(state)
     extra_dpo_arg = [reference_params]
     _loss_fn = dpo_loss_fn
@@ -685,7 +684,7 @@ def train_loop(config, state=None):
       eval_data_iterator,
       state,
   ) = setup_train_loop(config)
-  
+
   if config.use_dpo:
     reference_params = jax.tree.map(jnp.copy, state.params["params"])
     state = _merge_dpo_state(state, reference_params)

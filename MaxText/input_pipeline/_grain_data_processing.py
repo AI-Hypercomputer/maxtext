@@ -63,7 +63,7 @@ def preprocessing_pipeline(
   operations.append(_input_pipeline_utils.ParseFeatures(data_columns, tokenize))
   if not use_dpo:
     assert len(data_columns) == 1
-    operations.append(_input_pipeline_utils.InputsTargetsFeatures(data_columns[0], tokenize))
+    operations.append(_input_pipeline_utils.InputsTargetsFeatures(data_columns[0]))
     data_columns = ("inputs", "targets")
   operations.append(_input_pipeline_utils.NormalizeFeatures(data_columns, tokenize))
 

@@ -87,18 +87,20 @@ def preprocessing_pipeline(
   if not use_dpo:
     assert len(data_column_names) == 1
     operations.append(_input_pipeline_utils.HFNormalizeFeatures(data_column_names[0]))
+    data_column_names = ("inputs", "targets")
   else:
     lists2array = lambda x: jax.tree.map(np.asarray, x, is_leaf=lambda x: isinstance(x, (list, tuple)))
     operations.append(grain.MapOperation(lists2array))
 
   if packing and not use_dpo:
+    length_struct = {col: max_target_length for col in data_column_names}
     operations.append(
         grain.experimental.PackAndBatchOperation(
             batch_size=global_batch_size // jax.process_count(),
-            length_struct={"inputs": max_target_length, "targets": max_target_length},
+            length_struct=length_struct,
         )
     )
-    operations.append(_input_pipeline_utils.ReformatPacking())
+    operations.append(_input_pipeline_utils.ReformatPacking(data_column_names))
   else:
     operations.append(_input_pipeline_utils.PadToMaxLength(max_target_length))
     operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=drop_remainder))
