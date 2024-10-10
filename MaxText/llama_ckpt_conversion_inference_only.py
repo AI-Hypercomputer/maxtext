@@ -47,9 +47,6 @@ import pyconfig
 from layers import models, quantizations
 import pathwaysutils
 
-jax.config.update("jax_platform_name", "cpu")
-
-
 def permute_to_match_maxtext_rope(arr):
   evens = arr[..., ::2]
   odds = arr[..., 1::2]
