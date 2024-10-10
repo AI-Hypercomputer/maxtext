@@ -729,7 +729,7 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   state_logical_annotations = nn.get_partition_spec(abstract_state)
 
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
-  if config.optimizer_memory_host_offload:
+  if is_training and config.optimizer_memory_host_offload:
     opt_state_shardings = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind='pinned_host'), state_mesh_shardings.opt_state)
     # params_shardings = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind = 'pinned_host'), state_mesh_shardings.params)
     state_mesh_shardings = state_mesh_shardings.replace(opt_state = opt_state_shardings)
