@@ -331,6 +331,7 @@ upload_all_profiler_results: False
 skip_first_n_steps_for_profiler: 1
 # Profile for a small number of steps to avoid a large profile file size.
 profiler_steps: 5
+profile_cleanly: True # If set to true, adds a block_until_ready on train state which aligns the profile for each step.
 
 # When dropout is false the model is a deterministic function of the
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
