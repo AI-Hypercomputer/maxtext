@@ -231,6 +231,16 @@ def save_checkpoint(
             iter=grain.PyGrainCheckpointSave(data_iterator.local_iterator),
         ),
     )
+  elif dataset_type == "tfds" and config.tfds_iter_checkpointing:
+    return checkpoint_manager.save(
+      step,
+      args=orbax.checkpoint.args.Composite(
+        items=orbax.checkpoint.args.PyTreeSave(
+          item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size
+        ),
+        iter=checkpointing.TfdsCheckpointSave(item=data_iterator.local_iterator, step=step),
+      ),
+    )
   else:
     return checkpoint_manager.save(
         step,
@@ -503,6 +513,7 @@ def setup_mesh_and_model(config):
         logger,
         use_ocdbt,
         use_zarr3,
+        config.tfds_iter_checkpointing
     )
 
   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx

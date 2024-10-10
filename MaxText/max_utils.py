@@ -553,6 +553,7 @@ def setup_initial_state(
         unboxed_abstract_state,
         config.enable_single_replica_ckpt_restoring,
         config.dataset_type,
+        config.tfds_iter_checkpointing
     )
 
     if restored:
