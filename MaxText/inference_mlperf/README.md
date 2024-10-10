@@ -1,36 +1,27 @@
+## Run offline performance benchmarks.
 
-## Create TPU VM.
+
+### Create TPU VM.
 Follow these [instructions](https://cloud.google.com/tpu/docs/v5e-inference#tpu-vm) to create TPU v5e-8 VM and ssh into the VM
 
 
-## Clone repo
-```
-git clone https://github.com/mlcommons/inference.git
-```
+### Setup a virtual env
+sudo apt install python3.10-venv
+python -m venv .env
+source .env/bin/activate
 
-## Install loadgen
+### Install loadgen
 ```
-apt-get install python3-dev
-apt-get install build-essential -y
+sudo apt-get install python3-dev
+sudo apt-get install build-essential -y
+git clone https://github.com/mlcommons/inference.git
+cd inference/
 cd loadgen/ && pip install .
 ```
 
-## Install eval dependencies
+### Download datasets
 ```
-pip install \
-transformers==4.31.0 \
-nltk==3.8.1 \
-evaluate==0.4.0 \
-absl-py==1.4.0 \
-rouge-score==0.1.2 \
-sentencepiece==0.1.99 \
-accelerate==0.21.0
-```
-
-## Download data file
-```
-cd /
-export DATA_DISK_DIR=/loadgen_run_data
+export DATA_DISK_DIR=~/loadgen_run_data
 mkdir -p ${DATA_DISK_DIR}
 cd ${DATA_DISK_DIR}
 gsutil cp gs://cloud-tpu-inference-public/mlcommons/inference/language/llama2-70b/data/processed-openorca/open_orca_gpt4_tokenized_llama.calibration_1000.pkl .
@@ -38,19 +29,18 @@ mv open_orca_gpt4_tokenized_llama.calibration_1000.pkl processed-calibration-dat
 
 gsutil cp gs://cloud-tpu-inference-public/mlcommons/inference/language/llama2-70b/data/processed-openorca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl .
 mv open_orca_gpt4_tokenized_llama.sampled_24576.pkl processed-data.pkl
-cd /inference_mlperf4.1
 ```
 
-## Install Maxtext 
+### Install Maxtext 
 ```
-cd /
+cd ~
 git clone git@github.com:google/maxtext.git
 cd maxtext
-git checkout offline_inf
-cd maxtext/MaxText
+bash setup.sh
+pip install -r MaxText/inference_mlperf/requirements.txt
 ```
 
-## Checkpoint generation
+### Generate quantized checkpoint
 
 Steps to get a quantized llama2-70B checkpoint for v5e-8
 
@@ -82,74 +72,60 @@ python MaxText/decode.py MaxText/configs/base.yml tokenizer_path=${TOKENIZER_PAT
 
 Your checkpoint is generated at `$SAVE_QUANT_PARAMS_PATH`. This is used to set `load_parameters_path` param below in `MAXENGINE_ARGS` env variable. 
 
-## HF login
+### HuggingFace login
 ```
-huggingface-cli login
-```
-
-## Loadgen settings
-```
-cd Google/code/llama2-70b/tpu_v5e_8_jetstream_maxtext/scripts/
-export API_URL=0.0.0.0:9000
-export DATA_DISK_DIR=/loadgen_run_data
-export DATASET_TYPE=full # for calibration run, DATASET_TYPE=calibration
-
-export MODEL_NAME=llama70b
-export TOTAL_SAMPLE_COUNT=24576 # for calibration run, TOTAL_SAMPLE_COUNT=1000
-export LOG_INTERVAL=1000
-export BATCH_SIZE_EXP=8
-export USER_CONFIG=user.conf
+export HUGGING_FACE_TOKEN=<your_hugging_face_token>
+huggingface-cli login --token $HUGGING_FACE_TOKEN
 ```
 
-## Offline Setup
+### Offline Server - Test Run
 ```
-cd /
-git clone git@github.com:google/maxtext.git
-cd maxtext
-git checkout offline_inf
-cd maxtext/MaxText
+cd ~/maxtext/MaxText/inference_mlperf
+export TOKENIZER_PATH="/home/${USER}/maxtext/assets/tokenizer.llama2
+export BATCH_AND_PREFILL_LEN="1024,20"
+export MAXENGINE_ARGS="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH}  quantization=int8 quantize_kvcache=True load_parameters_path=${SAVE_QUANT_PARAMS_PATH} checkpoint_is_quantized=True"
 
-# For v5e use
-export BATCH_AND_PREFILL_LEN=“256,80|512,40|1024,20”
+bash ./llama_offline_run.sh -p -t
+```
 
-# For v6 use
-export BATCH_AND_PREFILL_LEN=“256,216|512,108|1024,54”
+### Offline Benchmarks
 
-# Set appropriate tokenizer path. For example, LLama2 models tokenizer.llama2. You can find 
-# other tokenizers under maxtext/assets/ directory.
-export TOKENIZER_PATH=maxtext/assets/tokenizer.llama2
-
+#### For v5e
+```
+export BATCH_AND_PREFILL_LEN="256,80|512,40|1024,20"
 export MAXENGINE_ARGS="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH}  quantization=int8 quantize_kvcache=True load_parameters_path=${SAVE_QUANT_PARAMS_PATH} checkpoint_is_quantized=True compute_axis_order=0,1,2,3 ar_cache_axis_order=0,1,2,3"
 ```
 
-## Run offline performance
-
+#### For v6
 ```
-bash ./llama_offline_performance_run.sh
-```
-
-## Run offline accuracy
-```
-bash ./llama_offline_accuracy_run.sh
+export BATCH_AND_PREFILL_LEN=“256,216|512,108|1024,54”
+export MAXENGINE_ARGS="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH}  quantization=int8 quantize_kvcache=True load_parameters_path=${SAVE_QUANT_PARAMS_PATH} checkpoint_is_quantized=True compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3"
 ```
 
-## Run offline audit
+#### Run offline performance benchmark
+
 ```
-bash ./llama_offline_audit_run.sh
+bash ./llama_offline_run.sh -p
 ```
 
-## Run server performance
+#### Run offline accuracy benchmark
 ```
-bash ./generate_server_performance_run.sh
-```
-
-## Run server accuracy
-```
-bash ./generate_server_accuracy_run.sh
+bash ./llama_offline_run.sh -a
 ```
 
-## Run server audit
+#### Run offline audit benchmark
 ```
-bash ./generate_server_audit_run.sh
+bash ./llama_offline_run.sh -d
+
 ```
 
+### Profiling
+
+```
+# Capture profile
+bash ./llama_offline_run.sh -p -e
+python -m jax.collect_profile 9999 2000 --log_dir /tmp/profiles --no_perfetto_link
+
+# View profile
+tensorboard --logdir /tmp/profiles
+```
