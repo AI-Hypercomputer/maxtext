@@ -579,8 +579,10 @@ class MoeBlock(nn.Module):
         )
       return output, loss
     else:
-      weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
+      weights = self.reshape_and_update_weights(top_k_weights, top_k_indices).astype(jnp.float32)
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+      #print(inputs.shape)
+      #print(w0_kernel.shape)
       with jax.named_scope("wi_0"):
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
@@ -591,14 +593,19 @@ class MoeBlock(nn.Module):
         ).astype(jnp.float32)
       layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
+      #print(layer_multiply.shape)
+      #print(wo_kernel.shape)
       with jax.named_scope("wo"):
         intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes)(
             "BSEH,EHM -> BSEM", layer_multiply, wo_kernel, precision=matmul_precision
-        )
+        ).astype(jnp.float32)
+
       with jax.named_scope("w_sum"):
+        print(intermediate_layer.shape)
+        print(weights.shape)
         weights_axis = ("activation_batch", "activation_length", "activation_exp")
         output = self.get_einsum(rhs_mesh_axes=weights_axis)(
-            "BSEM,BSE -> BSM", intermediate_layer.astype(jnp.float32), weights.astype(jnp.float32)
+            "BSEM,BSE -> BSM", intermediate_layer, weights
         ).astype(self.dtype)
       return output, None
 
