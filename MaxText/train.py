@@ -612,10 +612,6 @@ def train_loop(config, state=None):
       eval_data_iterator,
       state,
   ) = setup_train_loop(config)
-  if is_training and config.optimizer_memory_host_offload:
-    opt_state_shardings = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind='pinned_host'), state_mesh_shardings.opt_state)
-    # params_shardings = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind = 'pinned_host'), state_mesh_shardings.params)
-    state = state.replace(opt_state = opt_state_shardings)
   # pylint: disable=line-too-long
   (
       functional_train,
