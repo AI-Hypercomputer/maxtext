@@ -382,16 +382,20 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)
   else:
     # Here the params are on host memory, so casting and putting to device
-    cast_params = cast_dtype_from_to(state.params, np.float32, jnp.bfloat16)
+    # cast_params = cast_dtype_from_to(state.params, np.float32, jnp.bfloat16)
+    # if config.optimizer_memory_host_offload:
+    #   cast_params = jax.device_put(
+    #         cast_params, with_memory_kind(state_mesh_shardings.params, 'device')
+    #   )
+    # else:
+    #   cast_params = state.params
     if config.optimizer_memory_host_offload:
-      cast_params = jax.device_put(
-            cast_params, with_memory_kind(state_mesh_shardings.params, 'device')
+      opt_state = jax.device_put(
+        state.opt_state, with_memory_kind(state_mesh_shardings.opt_state, 'device')
       )
-    else:
-      cast_params = state.params
-
+      state = state.replace(opt_state = opt_state)
     grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
-    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, cast_params, is_train=True)
+    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
@@ -412,14 +416,14 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       },
       "scalars": {},
   }
-  # if config.optimizer_memory_host_offload:
-  #   new_params = jax.device_put(
-  #     new_state.params, with_memory_kind(state_mesh_shardings.params, 'pinned_host')
-  #   )
-  #   new_opt_state = jax.device_put(
-  #     new_state.opt_state, with_memory_kind(state_mesh_shardings.opt_state, 'pinned_host')
-  #   )
-  #   new_state = new_state.replace(params = new_params, opt_state = new_opt_state)
+  if config.optimizer_memory_host_offload:
+    # new_params = jax.device_put(
+    #   new_state.params, with_memory_kind(state_mesh_shardings.params, 'pinned_host')
+    # )
+    new_opt_state = jax.device_put(
+      new_state.opt_state, with_memory_kind(state_mesh_shardings.opt_state, 'pinned_host')
+    )
+    new_state = new_state.replace(opt_state = new_opt_state)
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
@@ -608,6 +612,10 @@ def train_loop(config, state=None):
       eval_data_iterator,
       state,
   ) = setup_train_loop(config)
+  if is_training and config.optimizer_memory_host_offload:
+    opt_state_shardings = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind='pinned_host'), state_mesh_shardings.opt_state)
+    # params_shardings = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind = 'pinned_host'), state_mesh_shardings.params)
+    state = state.replace(opt_state = opt_state_shardings)
   # pylint: disable=line-too-long
   (
       functional_train,
@@ -668,7 +676,8 @@ def train_loop(config, state=None):
   local_metrics_file = open(config.metrics_file, "a", encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
-  start_step = get_first_step(state)  # this is the start_step for training
+  # start_step = get_first_step(state)  # this is the start_step for training
+  start_step = 0
   first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
   if config.profiler != "" and first_profiling_step >= config.steps:
     raise ValueError("Profiling requested but initial profiling step set past training final step")
