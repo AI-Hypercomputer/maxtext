@@ -382,29 +382,34 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)
   else:
     # Here the params are on host memory, so casting and putting to device
-    cast_params = cast_dtype_from_to(state.params, np.float32, jnp.bfloat16)
     if config.optimizer_memory_host_offload:
-      cast_params = jax.device_put(
-            cast_params, with_memory_kind(state_mesh_shardings.params, 'device')
+      device_params = jax.device_put(
+            state.params, with_memory_kind(state_mesh_shardings.params, 'device')
       )
+      cast_params = cast_dtype_from_to(device_params, np.float32, jnp.bfloat16)
     else:
       cast_params = state.params
-    if config.optimizer_memory_host_offload:
-      opt_state = jax.device_put(
-        state.opt_state, with_memory_kind(state_mesh_shardings.opt_state, 'device')
-      )
-      state = state.replace(opt_state = opt_state)
     grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, cast_params, is_train=True)
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
 
+  if config.optimizer_memory_host_offload:
+    params = jax.device_put(
+      state.params, with_memory_kind(state_mesh_shardings.params, 'device')
+    )
+    opt_state = jax.device_put(
+      state.opt_state, with_memory_kind(state_mesh_shardings.opt_state, 'device')
+    )
+    state = state.replace(params=params, opt_state=opt_state)
+
   if config.gradient_clipping_threshold > 0:
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
   else:
     grads = raw_grads
   new_state = state.apply_gradients(grads=grads)
+  # new_state = state
   metrics = {
       "scalar": {
           "learning/loss": loss,
