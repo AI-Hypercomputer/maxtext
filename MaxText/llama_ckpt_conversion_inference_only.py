@@ -45,6 +45,7 @@ import sys
 import os
 import pyconfig
 from layers import models, quantizations
+import pathwaysutils
 
 jax.config.update("jax_platform_name", "cpu")
 
@@ -277,10 +278,10 @@ if __name__ == "__main__":
   parser.add_argument("--base-model-path", type=str, required=True)
   parser.add_argument("--maxtext-model-path", type=str, required=True)
   parser.add_argument("--model-size", type=str, required=True, choices=MODEL_PARAMS_DICT.keys())
-  parser.add_argument("--maxtext-args", type=str, required=True)
+  parser.add_argument("maxtextargs", nargs="+")
   args = parser.parse_args()
 
-  pyconfig.initialize(["python"] + args.maxtext_args.split(" "))
+  pyconfig.initialize(["python"] + args.maxtextargs)
   config = pyconfig.config
 
   mesh = jax.sharding.Mesh(max_utils.create_device_mesh(config), config.mesh_axes)
