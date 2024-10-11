@@ -32,7 +32,7 @@ def with_memory_kind(t, memory_kind):
       lambda x: x.with_memory_kind(kind=memory_kind), t
   )
 
-dtype = jnp.float32
+dtype = jnp.bfloat16
 
 def cast_dtype_from_to(nest, src, dst):
   """All items in nest with dtype src are casted to dtype dst."""
@@ -86,7 +86,7 @@ def create_train_state(model, optimizer, mesh, rng):
 
 def create_random_global_array(rng, global_shape, sharding, dtype):
   local_tensor_shape = sharding.shard_shape(global_shape)
-  local_tensor = jax.random.normal(rng, shape=local_tensor_shape, dtype=jnp.float32)
+  local_tensor = jax.random.normal(rng, shape=local_tensor_shape, dtype=dtype)
   random_global_array = jax.make_array_from_single_device_arrays(
       global_shape,
       sharding,
