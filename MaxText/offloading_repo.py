@@ -24,6 +24,8 @@ from flax import linen as nn
 from jax.sharding import PartitionSpec as P
 from flax.training import train_state
 import optax
+import tensorflow as tf
+from multihost_dataloading import MultiHostDataLoadIterator
 
 def with_memory_kind(t, memory_kind):
   return jax.tree_util.tree_map(
@@ -99,11 +101,12 @@ def train_loop(output_path, offload):
     optimizer = optax.adam(learning_rate=1e-3)
     state, state_mesh_shardings = create_train_state(model, optimizer, mesh, rng)
 
-
     data_pspec = P(('data','model',))
     data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
-    inputs = jnp.ones((12376))
-    inputs = jax.device_put(inputs, with_memory_kind(data_sharding, 'device'))
+    local_batch_size = 4
+    
+    local_dataset = tf.data.Dataset.from_generator(lambda: tf.zeros((local_batch_size, 12376), tf.int64), tf.int64).repeat()
+    dataloader = MultiHostDataLoadIterator(local_dataset, mesh)
 
     @functools.partial(jax.jit, donate_argnums=(0, 1))
     def optimizer_apply(params, opt_state, grads):
@@ -151,7 +154,7 @@ def train_loop(output_path, offload):
         if step == 5:
             jax.profiler.start_trace(output_path)
         with jax.profiler.StepTraceAnnotation("train", step_num=step):
-            state = p_train_step(model, state, inputs, offload)
+            state = p_train_step(model, state, next(dataloader), offload)
 
     jax.profiler.stop_trace()
     print(f"Profile saved at {output_path}")
