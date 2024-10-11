@@ -32,7 +32,7 @@ def with_memory_kind(t, memory_kind):
       lambda x: x.with_memory_kind(kind=memory_kind), t
   )
 
-dtype = jnp.bfloat16
+dtype = jnp.float32
 
 def cast_dtype_from_to(nest, src, dst):
   """All items in nest with dtype src are casted to dtype dst."""
@@ -126,7 +126,7 @@ def train_loop(output_path, offload):
         jax.random.PRNGKey(0),
         global_shape=(local_batch_size * len(jax.devices()), 12376),
         sharding=data_sharding,
-        dtype=jnp.bfloat16,
+        dtype=dtype,
     )
     data = jax.device_put(data, with_memory_kind(data_sharding, 'device'))
 
@@ -138,7 +138,7 @@ def train_loop(output_path, offload):
 
 
     def train_step(model, state, batch, offload):
-        cast_params = cast_dtype_from_to(state.params, np.float32, jnp.bfloat16)
+        cast_params = cast_dtype_from_to(state.params, np.float32, dtype)
         if offload:
             cast_params = jax.device_put(
                 cast_params, with_memory_kind(state_mesh_shardings.params, 'device')
