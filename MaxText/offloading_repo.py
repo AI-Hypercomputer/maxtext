@@ -84,6 +84,16 @@ def create_train_state(model, optimizer, mesh, rng):
     return state, state_mesh_shardings
 
 
+def create_random_global_array(rng, global_shape, sharding, dtype):
+  local_tensor_shape = sharding.shard_shape(global_shape)
+  local_tensor = jax.random.normal(rng, shape=local_tensor_shape, dtype=jnp.float32)
+  random_global_array = jax.make_array_from_single_device_arrays(
+      global_shape,
+      sharding,
+      [jax.device_put(local_tensor, d) for d, index in sharding.addressable_devices_indices_map(global_shape).items()],
+  ).astype(dtype)
+  return random_global_array
+
 # train_loop is called from main
 
 def train_loop(output_path, offload):
@@ -103,10 +113,14 @@ def train_loop(output_path, offload):
 
     data_pspec = P(('data','model',))
     data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
-    local_batch_size = 4
-    
-    local_dataset = tf.data.Dataset.from_generator(lambda: tf.zeros((local_batch_size, 12376), tf.int64), tf.int64).repeat()
-    dataloader = MultiHostDataLoadIterator(local_dataset, mesh)
+    local_batch_size = 1
+    data = create_random_global_array(
+        jax.random.PRNGKey(0),
+        global_shape=(local_batch_size * len(jax.devices()), 12376),
+        sharding=data_sharding,
+        dtype=jnp.bfloat16,
+    )
+    data = jax.device_put(data, with_memory_kind(data_sharding, 'device'))
 
     @functools.partial(jax.jit, donate_argnums=(0, 1))
     def optimizer_apply(params, opt_state, grads):
@@ -154,7 +168,7 @@ def train_loop(output_path, offload):
         if step == 5:
             jax.profiler.start_trace(output_path)
         with jax.profiler.StepTraceAnnotation("train", step_num=step):
-            state = p_train_step(model, state, next(dataloader), offload)
+            state = p_train_step(model, state, data, offload)
 
     jax.profiler.stop_trace()
     print(f"Profile saved at {output_path}")
