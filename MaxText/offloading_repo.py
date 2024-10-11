@@ -91,7 +91,7 @@ def train_loop(output_path, offload):
     rng = jax.random.PRNGKey(0)
     model = DummyModel()
 
-    grid = np.array(jax.devices()).reshape((2, 2))
+    grid = np.array(jax.devices()).reshape((16, 16))
     mesh = jax.sharding.Mesh(grid, ('data', 'model'))
 
     # creating train_state
