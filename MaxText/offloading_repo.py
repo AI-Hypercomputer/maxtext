@@ -32,7 +32,7 @@ def with_memory_kind(t, memory_kind):
       lambda x: x.with_memory_kind(kind=memory_kind), t
   )
 
-dtype = jnp.float32
+dtype = jnp.bfloat16
 
 def cast_dtype_from_to(nest, src, dst):
   """All items in nest with dtype src are casted to dtype dst."""
