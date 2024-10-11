@@ -157,6 +157,7 @@ def train_loop(output_path, offload):
     print(f"Profile saved at {output_path}")
 
 if __name__ == "__main__":
+    jax.config.update('jax_enable_memories', True)
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--offload", type=bool, default=True)
