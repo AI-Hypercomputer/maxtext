@@ -74,7 +74,7 @@ def check_memory():
     max_logging.log(f"tpu memory: Using {fmt_size(used)} / {fmt_size(limit)} ({used/limit:%}) on {d}")
 
 
-def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name):
+def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name, fused_qkv):
   """convert ckpt."""
 
   base_args = [
@@ -84,6 +84,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
       "ici_fsdp_parallelism=-1",
       "ici_tensor_parallelism=1",
       f"model_name={maxtext_model_name}",
+      f"fused_qkv={fused_qkv}",
       f"run_name={run_name}",
       f"base_output_directory={base_output_directory}",
       "async_checkpointing=false",
@@ -293,9 +294,10 @@ if __name__ == "__main__":
   parser.add_argument("--maxtext-model-name", choices=["gpt3-175b", "gpt3-52k"], type=str, required=True)
   parser.add_argument("--base-output-directory", type=str, required=True)
   parser.add_argument("--run-name", type=str, required=True)
+  parser.add_argument("--fused-qkv", type=bool, required=True)
 
   args = parser.parse_args()
   if not args.paxml_ckpt_path.startswith("gs://"):
     raise ValueError("--paxml-ckpt-path should be a gcs path starting with gs://")
 
-  convert(args.paxml_ckpt_path, args.maxtext_model_name, args.base_output_directory, args.run_name)
+  convert(args.paxml_ckpt_path, args.maxtext_model_name, args.base_output_directory, args.run_name, args.fused_qkv)
