@@ -121,14 +121,14 @@ def train_loop(output_path, offload):
 
     data_pspec = P(('data','model',))
     data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
-    local_batch_size = 1
+    local_batch_size = 2
     data = create_random_global_array(
         jax.random.PRNGKey(0),
         global_shape=(local_batch_size * len(jax.devices()), 12376),
         sharding=data_sharding,
         dtype=dtype,
     )
-    data = jax.device_put(data, with_memory_kind(data_sharding, 'device'))
+    # data = jax.device_put(data, with_memory_kind(data_sharding, 'device'))
 
     @functools.partial(jax.jit, donate_argnums=(0, 1))
     def optimizer_apply(params, opt_state, grads):
