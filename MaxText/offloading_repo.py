@@ -110,6 +110,14 @@ def train_loop(output_path, offload):
     weight_decay = 1e-4
     optimizer = optax.adam(learning_rate=1e-3)
     state, state_mesh_shardings = create_train_state(model, optimizer, mesh, rng)
+    if offload:
+        params = jax.device_put(
+            state.params, with_memory_kind(param_sharding, 'pinned_host')
+        )
+        opt_state = jax.device_put(
+            state.opt_state, with_memory_kind(opt_state_sharding, 'pinned_host')
+        )
+        state = state.replace(params=params, opt_state=opt_state)
 
     data_pspec = P(('data','model',))
     data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
@@ -145,14 +153,21 @@ def train_loop(output_path, offload):
             return jnp.mean((predictions - batch))
         grad_func = jax.value_and_grad(loss_fn, argnums=2)
         _, grad = grad_func(model, batch, cast_params)
-        params = jax.device_put(
-            state.params, with_memory_kind(state_mesh_shardings.params, 'device')
-        )
         if offload:
+            params = jax.device_put(
+                state.params, with_memory_kind(state_mesh_shardings.params, 'device')
+            )
             opt_state = jax.device_put(
                 state.opt_state, with_memory_kind(state_mesh_shardings.opt_state, 'device')
             )
         params, opt_state = optimizer_apply(params, opt_state, grad)
+        if offload:
+            params = jax.device_put(
+                params, with_memory_kind(param_sharding, 'pinned_host')
+            )
+            opt_state = jax.device_put(
+                opt_state, with_memory_kind(opt_state_sharding, 'pinned_host')
+            )
 
         new_state = state.replace(params=params, opt_state=opt_state)
         return new_state
