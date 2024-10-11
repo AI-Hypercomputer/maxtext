@@ -48,7 +48,7 @@ class DummyModel(nn.Module):
     def __call__(self, x):
         # A simple linear layer
         for i in range(10):
-          x = nn.Dense(features=12376)(x)
+          x = nn.Dense(features=12376, param_dtype=dtype)(x)
         return x
 
 def get_abstract_state(model, tx, mesh, rng):
