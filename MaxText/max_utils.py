@@ -402,6 +402,7 @@ def create_device_mesh(config, devices=None):
         ici_parallelism,
         dcn_parallelism,
         devices,
+        allow_split_physical_axes=allow_split_physical_axes,
     )
   else:
     if allow_split_physical_axes:
