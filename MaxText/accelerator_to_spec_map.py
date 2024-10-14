@@ -29,19 +29,28 @@ class SystemCharacteristics:
   platform: str
   topology_name: Optional[str]
   chip_config_name: Optional[str]  # 'megacore' or 'default'
-  chips_per_host_bounds: Optional[tuple]
+  chips_per_host_bounds: Optional[tuple]  # number of chips on each host in each dimension.
   devices_per_slice: int
-  wrap: Optional[tuple]
+  wrap: Optional[tuple]  # wrap around for each dimension (i.e., locus type)
 
 
 UserFacingNameToSystemCharacteristics = {
-    # v5e
+    # v6e: one core per chip with 32 GB HBM
+    "v6e-1": SystemCharacteristics("tpu", "v6e:1x1", "default", (1, 1, 1), 1, (False, False, False)),
+    "v6e-4": SystemCharacteristics("tpu", "v6e:2x2", "default", (2, 2, 1), 4, (False, False, False)),
+    "v6e-8": SystemCharacteristics("tpu", "v6e:2x4", "default", (2, 2, 1), 8, (False, False, False)),
+    "v6e-16": SystemCharacteristics("tpu", "v6e:4x4", "default", (2, 2, 1), 16, (False, False, False)),
+    "v6e-32": SystemCharacteristics("tpu", "v6e:4x8", "default", (2, 2, 1), 32, (False, False, False)),
+    "v6e-64": SystemCharacteristics("tpu", "v6e:8x8", "default", (2, 2, 1), 64, (False, False, False)),
+    "v6e-128": SystemCharacteristics("tpu", "v6e:8x16", "default", (2, 2, 1), 128, (False, True, False)),
+    "v6e-256": SystemCharacteristics("tpu", "v6e:16x16", "default", (2, 2, 1), 256, (True, True, False)),
+    # v5e: one core per chip with 16 GB HBM
     "v5e-16": SystemCharacteristics("tpu", "v5e:4x4", "default", (2, 2, 1), 16, (False, False, False)),
     "v5e-32": SystemCharacteristics("tpu", "v5e:4x8", "default", (2, 2, 1), 32, (False, False, False)),
     "v5e-64": SystemCharacteristics("tpu", "v5e:8x8", "default", (2, 2, 1), 64, (False, False, False)),
     "v5e-128": SystemCharacteristics("tpu", "v5e:8x16", "default", (2, 2, 1), 128, (False, True, False)),
     "v5e-256": SystemCharacteristics("tpu", "v5e:16x16", "default", (2, 2, 1), 256, (True, True, False)),
-    # v4
+    # v4: one megacore per chip with 32 GB HBM
     "v4-8": SystemCharacteristics("tpu", "v4:2x2x1", "megacore", (2, 2, 1), 4, (False, False, False)),
     "v4-16": SystemCharacteristics("tpu", "v4:2x2x2", "megacore", (2, 2, 1), 8, (False, False, False)),
     "v4-32": SystemCharacteristics("tpu", "v4:2x2x4", "megacore", (2, 2, 1), 16, (False, False, False)),
@@ -54,7 +63,7 @@ UserFacingNameToSystemCharacteristics = {
     "v4-1536": SystemCharacteristics("tpu", "v4:8x8x12", "megacore", (2, 2, 1), 768, (True, True, True)),
     "v4-2048": SystemCharacteristics("tpu", "v4:8x8x16", "megacore", (2, 2, 1), 1024, (True, True, True)),
     "v4-4096": SystemCharacteristics("tpu", "v4:8x16x16", "megacore", (2, 2, 1), 2048, (True, True, True)),
-    # v5p
+    # v5p: one megacore per chip with 96 GB HBM
     "v5p-8": SystemCharacteristics("tpu", "v5:2x2x1", "megacore", (2, 2, 1), 4, (False, False, False)),
     "v5p-16": SystemCharacteristics("tpu", "v5:2x2x2", "megacore", (2, 2, 1), 8, (False, False, False)),
     "v5p-32": SystemCharacteristics("tpu", "v5:2x2x4", "megacore", (2, 2, 1), 16, (False, False, False)),
