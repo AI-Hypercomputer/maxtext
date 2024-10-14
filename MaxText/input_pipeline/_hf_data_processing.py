@@ -128,10 +128,10 @@ def preprocessing_pipeline(
   return multihost_gen
 
 
-def make_hf_iterator(
+def make_hf_train_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
-    process_indices,
+    process_indices_train,
 ):
   """Load, preprocess dataset and return iterators"""
   train_ds = datasets.load_dataset(
@@ -143,8 +143,8 @@ def make_hf_iterator(
       token=config.hf_access_token,
   )
   train_iter = preprocessing_pipeline(
-      dataloading_host_index=process_indices.index(jax.process_index()),
-      dataloading_host_count=len(process_indices),
+      dataloading_host_index=process_indices_train.index(jax.process_index()),
+      dataloading_host_count=len(process_indices_train),
       global_mesh=global_mesh,
       dataset=train_ds,
       data_column_name=config.train_data_column,
@@ -159,43 +159,42 @@ def make_hf_iterator(
       add_eos=config.add_eos,
       generate_padding_example=True,
   )
+  return train_iter
 
-  if config.eval_interval > 0:
-    eval_ds = datasets.load_dataset(
-        config.hf_path,
-        data_dir=config.hf_data_dir,
-        data_files=config.hf_eval_files,
-        split=config.hf_eval_split,
-        streaming=True,
-        token=config.hf_access_token,
-    )
-    if config.eval_per_device_batch_size > 0:
-      eval_batch_size = config.eval_per_device_batch_size * global_mesh.size
-    else:
-      eval_batch_size = config.global_batch_size_to_load
 
-    if config.eval_steps > 0:
-      eval_generate_padding_example = True
-    else:
-      eval_generate_padding_example = False
-    eval_iter = preprocessing_pipeline(
-        dataloading_host_index=process_indices.index(jax.process_index()),
-        dataloading_host_count=len(process_indices),
-        global_mesh=global_mesh,
-        dataset=eval_ds,
-        data_column_name=config.eval_data_column,
-        tokenize=config.tokenize_eval_data,
-        tokenizer_path=config.tokenizer_path,
-        hf_access_token=config.hf_access_token,
-        global_batch_size=eval_batch_size,
-        max_target_length=config.max_target_length,
-        shuffle=False,
-        data_shuffle_seed=config.data_shuffle_seed,
-        add_bos=config.add_bos,
-        add_eos=config.add_eos,
-        generate_padding_example=eval_generate_padding_example,
-    )
+def make_hf_eval_iterator(
+    config: ml_collections.ConfigDict,
+    global_mesh,
+    process_indices_eval,
+):
+  eval_ds = datasets.load_dataset(
+      config.hf_path,
+      data_dir=config.hf_data_dir,
+      data_files=config.hf_eval_files,
+      split=config.hf_eval_split,
+      streaming=True,
+      token=config.hf_access_token,
+  )
+
+  if config.eval_steps > 0:
+    eval_generate_padding_example = True
   else:
-    eval_iter = None
-
-  return train_iter, eval_iter
+    eval_generate_padding_example = False
+  eval_iter = preprocessing_pipeline(
+      dataloading_host_index=process_indices_eval.index(jax.process_index()),
+      dataloading_host_count=len(process_indices_eval),
+      global_mesh=global_mesh,
+      dataset=eval_ds,
+      data_column_name=config.eval_data_column,
+      tokenize=config.tokenize_eval_data,
+      tokenizer_path=config.tokenizer_path,
+      hf_access_token=config.hf_access_token,
+      global_batch_size=config.global_batch_size_to_load_eval,
+      max_target_length=config.max_target_length,
+      shuffle=False,
+      data_shuffle_seed=config.data_shuffle_seed,
+      add_bos=config.add_bos,
+      add_eos=config.add_eos,
+      generate_padding_example=eval_generate_padding_example,
+  )
+  return eval_iter

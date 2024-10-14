@@ -289,6 +289,9 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   if is_train:
     for k, v in data.items():
       data[k] = v[: config.micro_batch_size_to_train_on, :]
+  else:
+    for k, v in data.items():
+      data[k] = v[: config.micro_batch_size_to_eval_on, :]
 
   logits, intermediate_outputs = model.apply(
       params,

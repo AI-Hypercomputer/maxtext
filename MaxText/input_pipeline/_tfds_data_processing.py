@@ -135,10 +135,10 @@ def preprocessing_pipeline(
   return multihost_gen
 
 
-def make_tfds_iterator(
+def make_tfds_train_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
-    process_indices,
+    process_indices_train,
 ):
   """load dataset, preprocess and return iterators"""
   train_ds = get_datasets(
@@ -146,8 +146,8 @@ def make_tfds_iterator(
       data_split="train",
       shuffle_files=config.enable_data_shuffling,
       shuffle_seed=config.data_shuffle_seed,
-      dataloading_host_index=process_indices.index(jax.process_index()),
-      dataloading_host_count=len(process_indices),
+      dataloading_host_index=process_indices_train.index(jax.process_index()),
+      dataloading_host_count=len(process_indices_train),
   )
   train_iter = preprocessing_pipeline(
       dataset=train_ds,
@@ -162,36 +162,35 @@ def make_tfds_iterator(
       add_bos=config.add_bos,
       add_eos=config.add_eos,
   )
+  return train_iter
 
-  if config.eval_interval > 0:
-    eval_ds = get_datasets(
-        dataset_name=config.eval_dataset_name,
-        data_split=config.eval_split,
-        shuffle_files=False,
-        shuffle_seed=config.data_shuffle_seed,
-        dataloading_host_index=process_indices.index(jax.process_index()),
-        dataloading_host_count=len(process_indices),
-    )
 
-    if config.eval_per_device_batch_size > 0:
-      eval_batch_size = config.eval_per_device_batch_size * global_mesh.size
-    else:
-      eval_batch_size = config.global_batch_size_to_load
+def make_tfds_eval_iterator(
+    config: ml_collections.ConfigDict,
+    global_mesh,
+    process_indices_eval,
+):
+  eval_ds = get_datasets(
+      dataset_name=config.eval_dataset_name,
+      data_split=config.eval_split,
+      shuffle_files=False,
+      shuffle_seed=config.data_shuffle_seed,
+      dataloading_host_index=process_indices_eval.index(jax.process_index()),
+      dataloading_host_count=len(process_indices_eval),
+  )
 
-    eval_iter = preprocessing_pipeline(
-        dataset=eval_ds,
-        tokenizer_path=config.tokenizer_path,
-        global_batch_size=eval_batch_size,
-        global_mesh=global_mesh,
-        max_target_length=config.max_target_length,
-        data_column_name=config.eval_data_column,
-        shuffle=False,
-        data_shuffle_seed=config.data_shuffle_seed,
-        tokenize=config.tokenize_eval_data,
-        add_bos=config.add_bos,
-        add_eos=config.add_eos,
-    )
-  else:
-    eval_iter = None
+  eval_iter = preprocessing_pipeline(
+      dataset=eval_ds,
+      tokenizer_path=config.tokenizer_path,
+      global_batch_size=config.global_batch_size_to_load_eval,
+      global_mesh=global_mesh,
+      max_target_length=config.max_target_length,
+      data_column_name=config.eval_data_column,
+      shuffle=False,
+      data_shuffle_seed=config.data_shuffle_seed,
+      tokenize=config.tokenize_eval_data,
+      add_bos=config.add_bos,
+      add_eos=config.add_eos,
+  )
 
-  return train_iter, eval_iter
+  return eval_iter

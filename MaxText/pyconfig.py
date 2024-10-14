@@ -289,9 +289,9 @@ class _HyperParameters:
     if raw_keys["jax_cache_dir"]:
       compilation_cache.set_cache_dir(os.path.expanduser(raw_keys["jax_cache_dir"]))
 
+    _HyperParameters.user_init(raw_keys)
     if raw_keys["model_name"] == "gpt3-175b":
       _HyperParameters.configure_gpt3_task(raw_keys)
-    _HyperParameters.user_init(raw_keys)
 
     if not os.path.isfile(raw_keys["tokenizer_path"]):
       # Try and find the tokenizer path relative to the config file.
@@ -342,7 +342,24 @@ class _HyperParameters:
         raw_keys["global_batch_size_to_load"],
         raw_keys["global_batch_size_to_train_on"],
         raw_keys["micro_batch_size_to_train_on"],
-    ) = calculate_global_batch_sizes(raw_keys)
+    ) = calculate_global_batch_sizes(
+        raw_keys["per_device_batch_size"],
+        raw_keys["expansion_factor_real_data"],
+        get_num_target_devices(raw_keys),
+        raw_keys["gradient_accumulation_steps"],
+    )
+    if raw_keys["eval_interval"] > 0:
+      if raw_keys["eval_per_device_batch_size"] <= 0:
+        raw_keys["eval_per_device_batch_size"] = raw_keys["per_device_batch_size"]
+
+      (
+          raw_keys["global_batch_size_to_load_eval"],
+          raw_keys["global_batch_size_to_eval_on"],
+          raw_keys["micro_batch_size_to_eval_on"],
+      ) = calculate_global_batch_sizes(
+          raw_keys["eval_per_device_batch_size"], raw_keys["expansion_factor_real_data"], get_num_target_devices(raw_keys), 1
+      )
+
     raw_keys["num_slices"] = get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
 
@@ -395,16 +412,15 @@ class _HyperParameters:
     """dynamically configure gpt3 task based on training rules"""
     # follow https://github.com/google/paxml/blob/19db52eed85ae0d2365339b83a97cd0b873bbf73/paxml/tasks/lm/params/c4.py#L280
     #   according to training_rules of mlperf gpt3 training
-    global_batch_size = calculate_global_batch_sizes(raw_keys)[1]
-    if global_batch_size <= 3584:
+    global_batch_size_to_train_on = raw_keys["global_batch_size_to_train_on"]
+    if global_batch_size_to_train_on <= 3584:
       raw_keys["learning_rate"] = 2e-5
     else:
       raw_keys["learning_rate"] = 3e-5
-    warmup_steps = math.ceil(265.0 * 1536 / global_batch_size - 1e-6)
-    decay_end_step = math.ceil(108600.0 * 1536 / global_batch_size - 1e-6)
+    warmup_steps = math.ceil(265.0 * 1536 / global_batch_size_to_train_on - 1e-6)
+    decay_end_step = math.ceil(108600.0 * 1536 / global_batch_size_to_train_on - 1e-6)
     raw_keys["learning_rate_schedule_steps"] = decay_end_step
     raw_keys["warmup_steps_fraction"] = warmup_steps / decay_end_step
-    global_batch_size_to_train_on = calculate_global_batch_sizes(raw_keys)[1]
     if raw_keys["dataset_type"] != "synthetic":
       raw_keys["eval_interval"] = math.ceil(24567 / global_batch_size_to_train_on)
 
@@ -508,11 +524,10 @@ def get_individual_scales(scale):
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
 
 
-def calculate_global_batch_sizes(raw_keys):
+def calculate_global_batch_sizes(
+    per_device_batch_size, expansion_factor_real_data, num_devices, gradient_accumulation_steps
+):
   """Calculates target global batch size from target devices and per_device_batch"""
-  per_device_batch_size = raw_keys["per_device_batch_size"]
-  expansion_factor_real_data = raw_keys["expansion_factor_real_data"]
-  num_devices = get_num_target_devices(raw_keys)
   if per_device_batch_size < 1.0:
     # For per_device_batch_size<1, we load the data as if per_device_batch_size=1
     if expansion_factor_real_data != -1:
@@ -526,8 +541,8 @@ def calculate_global_batch_sizes(raw_keys):
       micro_batch_size_to_load = int(num_devices * per_device_batch_size)
 
   micro_batch_size_to_train_on = int(num_devices * per_device_batch_size)
-  global_batch_size_to_load = int(micro_batch_size_to_load * raw_keys["gradient_accumulation_steps"])
-  global_batch_size_to_train_on = int(micro_batch_size_to_train_on * raw_keys["gradient_accumulation_steps"])
+  global_batch_size_to_load = int(micro_batch_size_to_load * gradient_accumulation_steps)
+  global_batch_size_to_train_on = int(micro_batch_size_to_train_on * gradient_accumulation_steps)
   return global_batch_size_to_load, global_batch_size_to_train_on, micro_batch_size_to_train_on
 
 
