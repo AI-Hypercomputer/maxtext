@@ -96,6 +96,22 @@ class TrainCompile(unittest.TestCase):
     )
 
   @pytest.mark.tpu
+  def test_save_compiled_v6e(self):
+    compiled_trainstep_file = "/tmp/test_compiled_v6e.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v6e-16",
+            "compile_topology_num_slices=1",
+            "base_emb_dim=256",
+            "base_mlp_dim=256",
+            "base_num_decoder_layers=2",
+        )
+    )
+
+  @pytest.mark.tpu
   def test_sequence_parallelism(self):
     compiled_trainstep_file = "/tmp/test_compiled.pickle"
     train_compile_main(
