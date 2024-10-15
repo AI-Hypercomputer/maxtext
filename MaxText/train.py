@@ -294,6 +294,9 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   if is_train:
     for k, v in data.items():
       data[k] = v[: config.micro_batch_size_to_train_on, :]
+  else:
+    for k, v in data.items():
+      data[k] = v[: config.micro_batch_size_to_eval_on, :]
 
   logits, intermediate_outputs = model.apply(
       params,
@@ -658,7 +661,8 @@ def train_loop(config, state=None):
   prof = profiler.Profiler(config)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step:
-      jax.block_until_ready(state)  # Block until previous state finishes to start profile cleanly
+      if config.profile_cleanly:
+        jax.block_until_ready(state)  # Block until previous state finishes to start profile cleanly
       prof.activate()
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
@@ -729,7 +733,8 @@ def train_loop(config, state=None):
         break
 
     if step == last_profiling_step:
-      jax.block_until_ready(state)  # Block until current state finishes to end profile cleanly
+      if config.profile_cleanly:
+        jax.block_until_ready(state)  # Block until current state finishes to end profile cleanly
       prof.deactivate()
 
   if checkpoint_manager is not None:

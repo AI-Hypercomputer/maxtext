@@ -32,10 +32,15 @@ set_nccl_gpudirect_tcpx_specific_configuration() {
     export TF_CPP_MAX_LOG_LEVEL=100
     export TF_CPP_VMODULE=profile_guided_latency_estimator=10
     export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
+    shopt -s globstar nullglob
+    IFS=:$IFS
+    set -- /usr/local/cuda-*/compat
+    export LD_LIBRARY_PATH="${1+:"$*"}:${LD_LIBRARY_PATH}:/usr/local/tcpx/lib64"
+    IFS=${IFS#?}
+    shopt -u globstar nullglob
 
     if [[ "$USE_GPUDIRECT" == "tcpx" ]]; then
       echo "Using GPUDirect-TCPX"
-      export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/tcpx/lib64"
       export NCCL_ALGO=Ring
       export NCCL_DEBUG_SUBSYS=INIT,GRAPH,ENV,TUNING,NET,VERSION
       export NCCL_GPUDIRECTTCPX_CTRL_DEV=eth0
@@ -53,7 +58,6 @@ set_nccl_gpudirect_tcpx_specific_configuration() {
     elif [[ "$USE_GPUDIRECT" == "fastrak" ]]; then
       echo "Using GPUDirect-TCPFasTrak"
       export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-      export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/tcpxo/lib64"
       export NCCL_ALGO=Ring,Tree
       export NCCL_BUFFSIZE=8388608
       export NCCL_FASTRAK_CTRL_DEV=eth0
@@ -64,6 +68,7 @@ set_nccl_gpudirect_tcpx_specific_configuration() {
       export NCCL_FASTRAK_USE_LLCM=1
       export NCCL_FASTRAK_USE_SNAP=1
       export NCCL_MIN_NCHANNELS=4
+      export NCCL_SHIMNET_GUEST_CONFIG_CHECKER_CONFIG_FILE=/usr/local/nvidia/lib64/a3plus_guest_config.textproto
       export NCCL_TUNER_CONFIG_PATH=/usr/local/nvidia/lib64/a3plus_tuner_config.textproto
       export NCCL_TUNER_PLUGIN=libnccl-tuner.so
     fi
