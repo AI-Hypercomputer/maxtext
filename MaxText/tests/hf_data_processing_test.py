@@ -51,8 +51,12 @@ class HfDataProcessingTest(unittest.TestCase):
     self.train_iter = self._get_train_iterator()
 
   def _get_train_iterator(self):
+<<<<<<< HEAD
     train_iter, _ = _hf_data_processing.make_hf_iterator(
       self.config, self.mesh, self.process_indices)
+=======
+    train_iter, _ = _hf_data_processing.make_hf_iterator(self.config, self.mesh, self.process_indices)
+>>>>>>> main
     return train_iter
 
   def test_train_ds(self):
@@ -94,6 +98,7 @@ class HfDataProcessingTest(unittest.TestCase):
     train_batch2 = get_first_batch(self.train_iter)
     self.assertTrue((train_batch1["inputs"] == train_batch2["inputs"]).all())
     self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())
+
 
 if __name__ == "__main__":
   unittest.main()

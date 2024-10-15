@@ -75,8 +75,8 @@ def checkpoint_loop(config, state=None):
         os.path.join(config.run_name, NODE_ATTRIBUTES_TIME_DIRECTORY, base_name), 
         [list(node_attributes.keys()), list(node_attributes.values())] # convert into headers and values
     )
+
     max_logging.log(f"Finished uploading node attributes to GCS bucket {config.gcs_metrics_bucket} on host {jax.process_index()} for run {config.run_name}")
-  ocdbt_target_data_file_size = config.ocdbt_target_data_file_size if config.ocdbt_target_data_file_size > 0 else None
   ckpt_read_time = []
   ckpt_read_time.append(["rank", "checkpoint_num", "checkpoint_restore_time"]) # header for checkpoint restore metrics.
   ckpt_write_time = []
@@ -113,14 +113,14 @@ def checkpoint_loop(config, state=None):
       # A barrier to sync all hosts before starting to save checkpoint
       jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
       start_time = datetime.datetime.now()
-      if save_checkpoint(checkpoint_manager=checkpoint_manager, step=step, state=state, ocdbt_target_data_file_size=ocdbt_target_data_file_size):
+      if save_checkpoint(checkpoint_manager=checkpoint_manager, step=step, state=state, config=config):
         checkpoint_manager.wait_until_finished()
         end_time = datetime.datetime.now()
         checkpoint_write_time = (end_time - start_time).total_seconds()
         ckpt_write_time.append([jax.process_index(), ckpt_write_idx, checkpoint_write_time])
         ckpt_write_idx += 1
         if jax.process_index() == 0:
-          max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint saved in {end_time - start_time} ,step {step}, on host 0")
+          max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint saved in {end_time - start_time}, step {step}, on host 0")
     if jax.process_index() == 0:
       elapsed_time = datetime.datetime.now() - start_time
       time_to_wait = config.per_step_interval - elapsed_time.total_seconds()

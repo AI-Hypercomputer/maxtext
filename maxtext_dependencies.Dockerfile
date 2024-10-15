@@ -18,6 +18,7 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python
 # Set environment variables for Google Cloud SDK and Python 3.10
 ENV PATH="/usr/local/google-cloud-sdk/bin:/usr/local/bin/python3.10:${PATH}"
 
+# Set environment variables via build arguments
 ARG MODE
 ENV ENV_MODE=$MODE
 
@@ -35,11 +36,13 @@ RUN mkdir -p /deps
 # Set the working directory in the container
 WORKDIR /deps
 
-# Copy all files from local workspace into docker container
-COPY . .
-RUN ls .
+# Copy setup files and dependency files separately for better caching
+COPY setup.sh ./
+COPY constraints_gpu.txt requirements.txt requirements_with_jax_stable_stack.txt ./
 
+# Install dependencies - these steps are cached unless the copied files change
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION LIBTPU_GCS_PATH=${ENV_LIBTPU_GCS_PATH} DEVICE=${ENV_DEVICE}"
 RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} LIBTPU_GCS_PATH=${ENV_LIBTPU_GCS_PATH} DEVICE=${ENV_DEVICE}
 
-WORKDIR /deps
+# Now copy the remaining code (source files that may change frequently)
+COPY . .

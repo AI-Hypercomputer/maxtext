@@ -10,6 +10,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+
 # pylint: disable=line-too-long
 """
 Convert orbax Gemma checkpoint to MaxText compatible checkpoint.
@@ -78,27 +79,31 @@ def main(raw_args=None) -> None:
       },
       "token_embedder": {"embedding": params["transformer"]["embedder"]["input_embedding"] * jnp.sqrt(embed_dim)},
   }
-  self_attention = dict({
-      "query": {"kernel": []},
-      "key": {"kernel": []},
-      "value": {"kernel": []},
-      "out": {"kernel": []},
-  })
+  self_attention = dict(
+      {
+          "query": {"kernel": []},
+          "key": {"kernel": []},
+          "value": {"kernel": []},
+          "out": {"kernel": []},
+      }
+  )
 
-  layer_weight = dict({
-      "mlp": {
-          "wi_0": {"kernel": []},
-          "wi_1": {"kernel": []},
-          "wo": {"kernel": []},
-      },
-      "pre_self_attention_norm": {"scale": []},
-      "pre_ffw_norm": {"scale": []},
-  })
+  layer_weight = dict(
+      {
+          "mlp": {
+              "wi_0": {"kernel": []},
+              "wi_1": {"kernel": []},
+              "wo": {"kernel": []},
+          },
+          "pre_self_attention_norm": {"scale": []},
+          "pre_ffw_norm": {"scale": []},
+      }
+  )
 
   for layer_idx in range(num_layers):
     in_layer_name = "layer_" + str(layer_idx)
     # attention block
-    if args.model_size in ("2b","9b"):  # MQA
+    if args.model_size in ("2b", "9b"):  # MQA
       self_attention["query"]["kernel"].append(
           params["transformer"][in_layer_name]["attn"]["q_einsum"]["w"].transpose((1, 0, 2)) * head_dim**-0.5
       )

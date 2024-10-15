@@ -234,6 +234,7 @@ def main(_argv: Sequence[str]) -> None:
 
   # starting the profiler outside `with` statement,
   # will call it right before the computation once b/301309635 is resolved
+  # pylint: disable=not-callable
   activate_profiler(args.profiler_path)
   with Mesh(mesh.devices, mesh.axis_names):
     key = jax.random.PRNGKey(0)

@@ -38,6 +38,7 @@ maxtext_parent_dir = os.path.dirname(current_dir)
 sys.path.append(maxtext_parent_dir)
 
 import max_logging
+
 max_logging.log(f"Added parent directory = {maxtext_parent_dir}")
 
 import common_types
@@ -50,33 +51,31 @@ import train
 
 
 def get_data(golden_data, golden_data_index, config):
-  """ Get the golden data for the test indexed at golden_data_index"""
+  """Get the golden data for the test indexed at golden_data_index"""
 
   max_logging.log(f"Comparing forward pass for golden data index = {golden_data_index} ")
   max_logging.log(f"config.global_batch_size_to_train_on={config.global_batch_size_to_train_on}")
   s = (config.global_batch_size_to_train_on, config.max_target_length)
-  ids = np.asarray(golden_data[golden_data_index]['tokens'], dtype=np.int32)
+  ids = np.asarray(golden_data[golden_data_index]["tokens"], dtype=np.int32)
 
-  logits = np.asarray(golden_data[golden_data_index]['logits'], dtype=np.float32)
+  logits = np.asarray(golden_data[golden_data_index]["logits"], dtype=np.float32)
   max_logging.log(f" prompt=\"{golden_data[golden_data_index]['prompt']}\" raw ids={ids}, logits.shape = {logits.shape}")
-
 
   decoder_segment_ids = jax.numpy.zeros(s) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
   decoder_positions = jnp.stack(
       [jnp.arange(config.max_target_length, dtype=jnp.int32) for _ in range(config.global_batch_size_to_train_on)]
   )
 
-  ids = jnp.stack(
-      [ids for _ in range(config.global_batch_size_to_train_on)]
-  )
+  ids = jnp.stack([ids for _ in range(config.global_batch_size_to_train_on)])
   max_logging.log(f"ids={ids}, decoder_segment_ids = {decoder_segment_ids}, decoder_positions= {decoder_positions}")
 
   return ids, decoder_segment_ids, decoder_positions, logits
 
+
 def main(config, test_args):
   """Test the Whole Model of model_name"""
 
-  #initialize the model with weights from reference ckpt
+  # initialize the model with weights from reference ckpt
   (
       init_rng,
       _,
@@ -88,15 +87,14 @@ def main(config, test_args):
       _,
       _,
       state,
-    ) = train.setup_train_loop(config)
+  ) = train.setup_train_loop(config)
 
-  input_golden_data_path = "MaxText/test_assets/golden_data_"+config.model_name+".jsonl"
-  with jsonlines.open(input_golden_data_path, 'r') as f:
+  input_golden_data_path = "MaxText/test_assets/golden_data_" + config.model_name + ".jsonl"
+  with jsonlines.open(input_golden_data_path, "r") as f:
     golden_data = list(f)
 
-
   for golden_data_index in range(len(golden_data)):
-    ids, decoder_segment_ids, decoder_positions, golden_logits = get_data(golden_data,golden_data_index,config)
+    ids, decoder_segment_ids, decoder_positions, golden_logits = get_data(golden_data, golden_data_index, config)
 
     full_train_logits = model.apply(
         state.params,
@@ -110,6 +108,7 @@ def main(config, test_args):
     max_logging.log(f"{golden_logits[0]=}")
     max_logging.log(f"{full_train_logits[0, 0, :]=}")
     token_size = int(test_args.token_size) if test_args.token_size else golden_logits.shape[0]
+<<<<<<< HEAD
     max_logging.log(f"Max Numerical Difference {np.max(np.subtract(full_train_logits[0, :token_size, :], golden_logits[:token_size, :]))}")
 
     model_probabilities = jax.nn.softmax(full_train_logits[0, :token_size, :], axis=-1)
@@ -129,7 +128,35 @@ def main(config, test_args):
       assert jax.numpy.allclose(
             full_train_logits[0, :token_size, :], golden_logits[:token_size, :], rtol=float(test_args.rtol), atol=float(test_args.atol), equal_nan=False
       ), f"Logits do not match closely enough. Required rtol={test_args.rtol}, atol={test_args.atol}."
+=======
+    max_logging.log(
+        f"Max Numerical Difference {np.max(np.subtract(full_train_logits[0, :token_size, :], golden_logits[:token_size, :]))}"
+    )
+>>>>>>> main
 
+    model_probabilities = jax.nn.softmax(full_train_logits[0, :token_size, :], axis=-1)
+    golden_probabilities = jax.nn.softmax(golden_logits[:token_size, :], axis=-1)
+
+    max_logging.log(f"{golden_probabilities[0]=}")
+    max_logging.log(f"{model_probabilities[0]=}")
+
+    kl_div = jax.numpy.sum(jax.scipy.special.kl_div(golden_probabilities, model_probabilities), axis=-1)
+    max_logging.log(f"KL divergence = {kl_div}, max KL divergence = {jax.numpy.max(kl_div)}")
+
+    if test_args.max_kl_div is not None:
+      max_logging.log("Checking KL Divergence between train distribution and golden distribution")
+      assert jax.numpy.all(
+          kl_div < test_args.max_kl_div
+      ), f"KL divergence values exceed the specified threshold of {test_args.max_kl_div}. Max divergence: {jax.numpy.max(kl_div)}"
+    else:
+      max_logging.log("Checking Numerical Differences between train logits and golden logits")
+      assert jax.numpy.allclose(
+          full_train_logits[0, :token_size, :],
+          golden_logits[:token_size, :],
+          rtol=float(test_args.rtol),
+          atol=float(test_args.atol),
+          equal_nan=False,
+      ), f"Logits do not match closely enough. Required rtol={test_args.rtol}, atol={test_args.atol}."
 
 
 if __name__ == "__main__":
@@ -149,6 +176,6 @@ if __name__ == "__main__":
   for arg in to_remove_args:
     model_args = [s for s in model_args if not s.startswith(arg)]
 
-  pyconfig.initialize(model_args)  
+  pyconfig.initialize(model_args)
   cfg = pyconfig.config
   main(cfg, test_args)

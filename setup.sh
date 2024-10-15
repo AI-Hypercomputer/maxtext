@@ -86,6 +86,14 @@ fi
 # Save the script folder path of maxtext
 run_name_folder_path=$(pwd)
 
+# Install dependencies from requirements.txt
+cd $run_name_folder_path && pip install --upgrade pip
+if [[ "$MODE" == "pinned" ]]; then
+    pip3 install -U -r requirements.txt -c constraints_gpu.txt
+else
+    pip3 install -U -r requirements.txt
+fi
+
 # Uninstall existing jax, jaxlib and  libtpu-nightly
 pip3 show jax && pip3 uninstall -y jax
 pip3 show jaxlib && pip3 uninstall -y jaxlib
@@ -138,10 +146,10 @@ elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
         echo "Installing stable jax, jaxlib for NVIDIA gpu"
         if [[ -n "$JAX_VERSION" ]]; then
             echo "Installing stable jax, jaxlib ${JAX_VERSION}"
-            pip3 install -U "jax[cuda12_pip]==${JAX_VERSION}" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+            pip3 install -U "jax[cuda12]==${JAX_VERSION}" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
         else
             echo "Installing stable jax, jaxlib, libtpu for NVIDIA gpu"
-            pip3 install "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+            pip3 install "jax[cuda12]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
         fi
         export NVTE_FRAMEWORK=jax
         pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
@@ -184,10 +192,3 @@ else
     exit 1
 fi
 
-# Install dependencies from requirements.txt
-cd $run_name_folder_path && pip install --upgrade pip
-if [[ "$MODE" == "pinned" ]]; then
-    pip3 install -U -r requirements.txt -c constraints_gpu.txt
-else
-    pip3 install -U -r requirements.txt
-fi

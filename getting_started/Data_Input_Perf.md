@@ -32,4 +32,4 @@ The following data are collected using c4 data in TFRecord format.
 | Pipeline    | seq_len | VM type    | per_host_batch    | # of host | # of batch | first step (s) | total time (s) |
 | ----------- | ------- | ---------- | ----------------- | --------- | ---------- | -------------  | -------------- |
 | TFDS        | 2048    | TPU v4-8   | 32 (per_device=8) | 1         | 1000       | 2              | 17             |
-| TFDS        | 2048    | TPU v4-128 | 32 (per_device=8) | 16        | 1000       | 3              | 66             |
+| TFDS        | 2048    | TPU v4-128 | 32 (per_device=8) | 16        | 1000       | 3              | 18             |

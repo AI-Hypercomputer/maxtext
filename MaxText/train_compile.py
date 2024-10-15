@@ -42,6 +42,8 @@ import accelerator_to_spec_map
 import train
 from input_pipeline import input_pipeline_interface
 
+# pylint: disable=too-many-positional-arguments
+
 Transformer = models.Transformer
 
 
@@ -56,11 +58,11 @@ def validate_config(config):
 def get_topology_mesh(config):
   """Get the target hardware devices, and create configured mesh with them"""
   target_hardware = accelerator_to_spec_map.get_system_characteristics(config.compile_topology)
-  if target_hardware.platform == 'gpu':
+  if target_hardware.platform == "gpu":
     # Disable sharded autotuning. This is an optimization to distribute
     # autotuning across the fleet, but can cause hangs with AoT compilation.
-    os.environ['XLA_FLAGS'] = os.environ.get('XLA_FLAGS', '') + ' --xla_gpu_shard_autotuning=false'
-    jax.config.update('mock_num_gpu_processes', config.compile_topology_num_slices)
+    os.environ["XLA_FLAGS"] = os.environ.get("XLA_FLAGS", "") + " --xla_gpu_shard_autotuning=false"
+    jax.config.update("mock_num_gpu_processes", config.compile_topology_num_slices)
     topology_devices = jax.devices()
   else:
     topology_devices = get_topology_desc(
