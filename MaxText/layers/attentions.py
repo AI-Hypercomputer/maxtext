@@ -481,10 +481,15 @@ class AttentionOp(nn.Module):
         cache_shape,
         dtype,
     )
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      segment_id_axis_names = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE)
+    else:
+      segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
+
     cached_segment_id_var = self.variable(
         "cache",
         "cache_prefill_segment_id",
-        nn.with_logical_partitioning(jnp.zeros, (CACHE_BATCH, CACHE_SEQUENCE)),
+        nn.with_logical_partitioning(jnp.zeros, segment_id_axis_names),
         (cache_logical_shape[0], self.max_prefill_predict_length),
         jnp.int32,
     )
@@ -555,10 +560,14 @@ class AttentionOp(nn.Module):
         cache_axis_names,
     )
 
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      segment_id_axis_names = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE)
+    else:
+      segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
     cached_segment_id_var = self.variable(
         "cache",
         "cache_ar_segment_id",
-        nn.with_logical_partitioning(jnp.zeros, (CACHE_BATCH, CACHE_SEQUENCE)),
+        nn.with_logical_partitioning(jnp.zeros, segment_id_axis_names),
         (cache_logical_shape[0], cache_length),
         jnp.int32,
     )
