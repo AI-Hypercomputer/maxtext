@@ -13,25 +13,6 @@ import argparse
 MAXTEXT_CONFIG = dict(
     tokenizer_path="assets/tokenizer",
 )
-
-
-# XLA runtime args
-XLA_RUNTIME_FLAGS = (
-    "TPU_MEGACORE=MEGACORE_DENSE "
-    "--xla_enable_async_all_gather=true "
-    "--xla_tpu_enable_megascale_barrier=true "
-    "--xla_jf_spmd_threshold_for_windowed_einsum_mib=0 "
-    "--xla_enable_async_collective_permute=true "
-    "--xla_jf_rematerialization_percent_shared_memory_limit=97 "
-    "--xla_tpu_decompose_all_gather_einsum=true --xla_tpu_spmd_threshold_for_allgather_cse=10 "
-    "--xla_tpu_prefuse_self_attention=false --xla_tpu_rwb_fusion=false "
-    "--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_dcn_max_overlap_estimation=32.0 "
-    "--xla_tpu_data_parallel_opt_different_sized_ops=true "
-    "--xla_vf_vmem_max_overlap_to_mem_size_async_copy_ratio=10 "
-    "--megascale_enable_async_host_commands=true "
-    "--xla_tpu_spmd_rng_bit_generator_unsafe=true"
-)
-
 # Enables verbose TPU logging.
 TPU_VERBOSE_ENV_VARS = {
     "TPU_STDERR_LOG_LEVEL": "0",
@@ -41,9 +22,10 @@ TPU_VERBOSE_ENV_VARS = {
 
 # Default env vars that run on all TPU VMs.
 MACHINE_ENV_VARS = {
-    "TPU_PREMAPPED_BUFFER_SIZE": "4294967296",
+    "ENABLE_PJRT_COMPATIBILITY": "true",
+    "TPU_SLICE_BUILDER_DUMP_CHIP_FORCE": "true",
+    "TPU_SLICE_BUILDER_DUMP_ICI": "true",
     "XLA_FLAGS": "--xla_dump_to=/tmp/xla_dump_file --xla_dump_hlo_as_proto", # Dumps HLOs for debugging
-    "LIBTPU_INIT_ARGS": XLA_RUNTIME_FLAGS,
 }
 
 
@@ -95,6 +77,9 @@ def main(args: argparse.Namespace):
 
     config["base_output_directory"] = output_dir
     config["jax_cache_dir"] = compile_cache_dir
+    config["per_device_batch_size"] = args.per_device_batch_size
+    config["max_target_length"] = args.max_target_length
+    config["enable_checkpointing"] = args.enable_checkpointing
 
     env_vars = MACHINE_ENV_VARS
     if args.verbose_tpu:
@@ -161,6 +146,21 @@ if __name__ == "__main__":
         "--total_steps",
         action="store",
         default=500,
+        help="The total number of steps to run.")
+    parser.add_argument(
+        "--per_device_batch_size",
+        action="store",
+        default=2,
+        help="The total number of steps to run.")
+    parser.add_argument(
+        "--enable_checkpointing",
+        action="store_true",
+        default=False,
+        help="Whether or not to checkpointing.")
+    parser.add_argument(
+        "--max_target_length",
+        action="store",
+        default=8192,
         help="The total number of steps to run.")
     parser.add_argument(
         "--verbose_tpu",
