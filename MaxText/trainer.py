@@ -113,6 +113,7 @@ class MaxTextTrainer:
         else:
             cc.set_cache_dir(os.path.expanduser(self.config.jax_cache_dir))
         self.recorder = create_goodput_recorder(self.config)
+        record_goodput(self.recorder, self.config, self.recorder.record_job_start_time if self.recorder else None)
         (
             self.init_rng,
             self.writer,
@@ -200,7 +201,9 @@ class MaxTextTrainer:
 
         per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(self.config)
         per_device_tokens = maxtext_utils.calculate_tokens_training_per_device(self.config)
-        record_goodput(self.recorder, self.config, job_start=True)
+        record_goodput(
+            self.recorder, self.config,
+            self.recorder.record_tpu_init_start_time if self.recorder else None)
         with diagnostic.diagnose(self.diagnostic_config):
             first_profiling_step = start_step + self.config.skip_first_n_steps_for_profiler
             if self.config.profiler != "" and first_profiling_step >= self.config.steps:
@@ -215,10 +218,12 @@ class MaxTextTrainer:
                     prof.activate()
 
                 with jax.profiler.StepTraceAnnotation("train", step_num=step):
+                    record_goodput(self.recorder, self.config, self.recorder.record_data_loading_start_time if self.recorder else None)
                     example_batch = load_next_batch(self.data_iterator, example_batch, self.config)
+                    record_goodput(self.recorder, self.config, self.recorder.record_data_loading_end_time if self.recorder else None)
                     check_example_batch(self.config, example_batch=example_batch)
                     nextrng = jax.jit(jax.random.fold_in)(self.init_rng, step)
-                    record_goodput(self.recorder, self.config, step=step)
+                    record_goodput(self.recorder, self.config, self.recorder.record_step_start_time if self.recorder else None, step)
                     with self.mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
                         self.state, metrics = self.p_train_step(self.state, example_batch, nextrng)
 
@@ -230,11 +235,11 @@ class MaxTextTrainer:
                     if save_checkpoint(self.checkpoint_manager, int(step), self.state, self.config.dataset_type, self.data_iterator, self.config):
                         max_logging.log(f"saved a checkpoint at step {step}")
 
-                # Upon preemption, exit when and only when all ongoing saves are complete.
-                if self.checkpoint_manager.reached_preemption(step):
-                    logging.info("Reached preemption, checkpointing now.")
-                    self.checkpoint_manager.wait_until_finished()
-                    sys.exit()
+                    # Upon preemption, exit when and only when all ongoing saves are complete.
+                    if self.checkpoint_manager.reached_preemption(step):
+                        logging.info("Reached preemption, checkpointing now.")
+                        self.checkpoint_manager.wait_until_finished()
+                        sys.exit()
 
                 write_metrics(self.writer, self.local_metrics_file, self.running_gcs_metrics, metrics, step, self.config)
 
@@ -266,6 +271,6 @@ class MaxTextTrainer:
                 self.checkpoint_manager.wait_until_finished()
             write_metrics(self.writer, self.local_metrics_file, self.running_gcs_metrics, metrics, stop_step, self.config)  # final step metrics
             max_utils.close_summary_writer(self.writer)
-            record_goodput(self.recorder, self.config, job_end=True)
+            record_goodput(self.recorder, self.config, self.recorder.record_job_end_time if self.recorder else None)
             clear_buffered_metrics()
             return stop_step
