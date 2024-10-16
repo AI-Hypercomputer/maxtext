@@ -76,9 +76,13 @@ class TikTokenTest(unittest.TestCase):
   def setUpClass(cls):
     dataset_name = "c4/en:3.0.1"
     dataset_path = "gs://maxtext-dataset"
+<<<<<<< HEAD
+    cls.source_tokenizer = _input_pipeline_utils.get_tokenizer("../assets/tokenizer_llama3.tiktoken", add_bos=False, add_eos=False)
+=======
     cls.source_tokenizer = _input_pipeline_utils.get_tokenizer(
         "../assets/tokenizer_llama3.tiktoken", add_bos=False, add_eos=False
     )
+>>>>>>> main
     os.environ["TFDS_DATA_DIR"] = dataset_path
     read_config = tfds.ReadConfig(
         shuffle_seed=0,

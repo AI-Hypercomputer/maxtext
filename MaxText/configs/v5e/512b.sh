@@ -18,7 +18,6 @@ echo "Running 64b.sh"
 set -e
 
 export EXECUTABLE="train.py" # or train_compile.py
-export RUN_PREFLIGHT="true"
 
 # Set environment variables
 for ARGUMENT in "$@"; do

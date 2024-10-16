@@ -180,7 +180,6 @@ class ParseFeatures(grain.MapTransform):
 
     return _parse(features)
 
-
 @dataclasses.dataclass
 class NormalizeFeatures(grain.MapTransform):
   """Normalize text feature keys."""
@@ -273,3 +272,4 @@ class ShiftData(grain.MapTransform):
 
   def map(self, data):
     return shift_and_refine(data, axis=self.axis)
+
