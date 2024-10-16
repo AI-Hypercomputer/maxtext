@@ -27,6 +27,8 @@ from multihost_dataloading import MultiHostDataLoadIterator
 import numpy as np
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+import dataclasses
+import tensorflow as tf
 
 # pylint: disable=too-many-positional-arguments
 
@@ -51,6 +53,7 @@ def create_orbax_checkpoint_manager(
     orbax_logger: Optional[abstract_logger.AbstractLogger] = None,
     use_ocdbt: bool = True,
     use_zarr3: bool = True,
+    tfds_iter_checkpointing: Optional[bool] = True
 ):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -61,6 +64,8 @@ def create_orbax_checkpoint_manager(
 
   if dataset_type == "grain":
     item_names = ("items", "iter")
+  elif dataset_type == "tfds" and tfds_iter_checkpointing:
+    item_names = ("items", "iter")
   else:
     item_names = ("items",)
 
@@ -68,7 +73,11 @@ def create_orbax_checkpoint_manager(
   p.mkdir(exist_ok=True, parents=True)
   # we need to use ocdbt and zarr3 to control max file size in the checkpoint
   # omitting `iter` uses default handler for `iter`
-  item_handlers = {"items": PyTreeCheckpointHandler(use_ocdbt=use_ocdbt, use_zarr3=use_zarr3)}
+  if dataset_type == "tfds" and tfds_iter_checkpointing:
+    item_handlers = {"items": PyTreeCheckpointHandler(use_ocdbt=True, use_zarr3=True),
+                     'iter': TfdsCheckpointHandler()}
+  else:
+    item_handlers = {"items": PyTreeCheckpointHandler(use_ocdbt=use_ocdbt, use_zarr3=use_zarr3)}
   mngr = CheckpointManager(
       p,
       item_names=item_names,
@@ -149,6 +158,7 @@ def load_state_if_possible(
     abstract_unboxed_pre_state: train_state.TrainState,
     enable_single_replica_ckpt_restoring: Optional[bool] = False,
     dataset_type: Optional[str] = "tfds",
+    tfds_iter_checkpointing: Optional[bool] = True
 ):
   """Loads TrainState as possible from the inputs.
 
@@ -233,6 +243,17 @@ def load_state_if_possible(
             ),
             None,
         )
+      elif dataset_type == "tfds" and data_iterator is not None and tfds_iter_checkpointing:
+          return (
+              checkpoint_manager.restore(
+                  latest_step,
+                  args=ocp.args.Composite(
+                      items=ocp.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args),
+                      iter=TfdsCheckpointRestore(data_iterator.local_iterator),
+                  ),
+              ),
+              None,
+          )
       else:
         return (
             checkpoint_manager.restore(
@@ -314,3 +335,63 @@ def save_params_to_path(checkpoint_dir, params):
   save_args = orbax_utils.save_args_from_target({"params": params})
   orbax_checkpointer.save(checkpoint_dir, {"params": params}, save_args=save_args, force=True)
   print(f"Quantized params checkpoint saved at: {checkpoint_dir}")
+
+
+class TfdsCheckpointHandler():
+    """Orbax CheckpointHandler for a tfds data iterator (a TensorFlow NumpyIterator).
+    Implements ocp.CheckpointHandler"""
+
+    def save(
+            self,
+            directory: epath.Path,
+            item: Optional[tf.data.NumpyIterator] = None,
+            args: Any = None,
+    ):
+        """Saves iterator passed as item or args.item to directory"""
+        item = item or args.item  # for compatibility with older Orbax API
+        checkpoint = tf.train.Checkpoint(iterator=item)
+        # Align checkpoint count with that of checkpoint manager
+        checkpoint.save_counter.assign(args.step - 1)
+        checkpoint.save(directory / f'process_{jax.process_index()}-of-{jax.process_count()}' / 'ckpt')
+
+    def restore(self, directory: epath.Path, item: Optional[tf.data.NumpyIterator] = None,
+                args: Any = None) -> tf.data.NumpyIterator:
+        """Restores the iterator from the checkpoint in `directory`."""
+        item = item or args.item  # for compatibility with older Orbax API
+        checkpoint = tf.train.Checkpoint(iterator=item)
+        restore_path = tf.train.latest_checkpoint(directory / f'process_{jax.process_index()}-of-{jax.process_count()}')
+        checkpoint.restore(restore_path).expect_partial()
+        return item
+
+    def structure(self, directory: epath.Path) -> Any:
+        """Required by interface"""
+        return None
+
+    def metadata(self, directory: epath.Path) -> Optional[Any]:
+        """Required by interface"""
+        return None
+
+    def finalize(self, directory: epath.Path):
+        """Required by interface"""
+        pass
+
+    def close(self):
+        """Required by interface"""
+        pass
+
+
+try:
+    # Register the handler
+    @ocp.args.register_with_handler(TfdsCheckpointHandler, for_save=True)
+    @dataclasses.dataclass
+    class TfdsCheckpointSave(ocp.args.CheckpointArgs):
+        item: Any
+        step: int  
+
+    @ocp.args.register_with_handler(TfdsCheckpointHandler, for_restore=True)
+    @dataclasses.dataclass
+    class TfdsCheckpointRestore(ocp.args.CheckpointArgs):
+        item: Any
+
+except (ImportError, TypeError):
+    pass
