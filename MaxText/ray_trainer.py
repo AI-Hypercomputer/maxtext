@@ -11,20 +11,7 @@ import argparse
 #### Configurations
 # Flags that go into MaxText
 MAXTEXT_CONFIG = dict(
-    ici_fsdp_parallelism=8,
     tokenizer_path="assets/tokenizer",
-    steps=100,
-    per_device_batch_size=8,
-    profiler="xplane",
-    global_parameter_scale=1,
-    checkpoint_period=10,
-    enable_checkpointing=True,
-    remat_policy="full",
-    base_emb_dim=6144,
-    base_num_kv_heads=24,
-    base_num_query_heads=24,
-    base_mlp_dim=24576,
-    base_num_decoder_layers=16,
 )
 
 
@@ -100,7 +87,12 @@ def main(args: argparse.Namespace):
     output_dir = os.path.join(base_dir, run_name)
     compile_cache_dir = os.path.join(base_dir, "compile_cache")
 
-    config["dataset_path"] = args.data_dir
+    if args.data_dir is not None:
+        config["dataset_path"] = args.data_dir
+    else:
+        logging.info("Data dir was not set, defaulting to synthetic data.")
+        config["dataset_type"] = "synthetic"
+
     config["base_output_directory"] = output_dir
     config["jax_cache_dir"] = compile_cache_dir
 
@@ -126,7 +118,7 @@ def main(args: argparse.Namespace):
         raise e
 
     logging.info("Initialization complete. Starting MaxText training...")
-    total_steps = config["steps"]
+    total_steps = args.total_steps
     steps = 0
 
     while steps < total_steps:
@@ -158,13 +150,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data_dir",
         action="store",
-        required=True,
+        default=None,
         help="Where MaxText training data is stored.")
     parser.add_argument(
         "--steps_per_loop",
         action="store",
         default=50,
         help="The number of steps to run per loop.")
+    parser.add_argument(
+        "--total_steps",
+        action="store",
+        default=500,
+        help="The total number of steps to run.")
     parser.add_argument(
         "--verbose_tpu",
         action="store_true",
