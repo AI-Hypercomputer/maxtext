@@ -14,8 +14,9 @@
 
 """Implementation of Engine API for MaxText"""
 import copy as cp
+import dataclasses
 import functools
-from typing import Any, Optional, Tuple, Callable
+from typing import Any, Optional, Tuple, Callable, Sequence, Mapping
 
 import flax
 from flax import linen as nn
@@ -27,16 +28,21 @@ from layers import models, quantizations
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
+from jax.experimental import mesh_utils
+from jax.experimental.topologies import get_topology_desc
 
 import common_types
 from jetstream.engine import engine_api
 from jetstream.engine import tokenizer_pb2
 from jetstream.engine import tokenizer_api
 from jetstream.engine import token_utils
+import accelerator_to_spec_map
 
+import numpy as np
 import max_utils
 import inference_utils
 import pyconfig
+from jax.sharding import Mesh
 
 import warnings
 
@@ -45,6 +51,266 @@ warnings.simplefilter("ignore", category=FutureWarning)
 Prefix = Any
 Params = Any
 
+@dataclasses.dataclass(slots=True, kw_only=True)
+class GridOfRingsPartitionConfig():
+  """Creates a target_mesh_shape mesh from a 2D device_mesh input.
+
+    Only two dimensions in target_mesh_shape can be larger than 1, and their
+    size must be divisble by two.
+
+    The result is a "grid of rings" in which the inner rings are highly
+    efficient for model parallelism (allowing us to use 4 or 8 way model
+    parallelism while having wrap arounds), while the outer grid is laid out
+    s.t. it is easy to work out how to all-to-all for expert parallelism. This
+    will _not_ be the optimal layout for pipelining, which would instead be a
+    ring of rings.
+    TODO(sholto): Extend this to 2D model axis (e.g. model_q/model_kv edges of
+    the inner rings).
+
+    v < < < v < < <
+    > > > ^ > > > ^
+    v < < < v < < <
+    > > > ^ > > > ^
+
+  """
+  mesh_axis_names: tuple[str, ...] = ('sequence', 'tensor')
+  ici_mesh: Mapping[str, int] = dataclasses.field(default_factory=dict)
+  outer_axis_name: str
+  inner_axis_name: str
+
+  def _get_snake_horizontal(self,
+    x_size: int, y_size: int
+  ) -> list[tuple[int, int]] | None:
+    """Draws a horizontal snake rectangle-filling loop.
+
+    A snake is a path on the grid that with no self-intersection such that each
+    cell is a neighbor of the next cell.
+
+    For example, if `x_size == 4` and `y_size == 3`, we have the following loop:
+      a l k
+      b i j
+      c h g
+      d e f
+    So the result is:
+      [(0, 0), (1, 0), (2, 0), ..., (1, 2), (0, 2), (0, 1)]
+
+    Args:
+      x_size: Number of rows, has to be even.
+      y_size: Number of columns, has to be at least 2, unless `x_size == 2`.
+
+    Returns:
+      A list of tuples (x, y) drawing a snake loop.
+      If drawing a horizontal snake is not possible, returns None.
+    """
+    if x_size % 2 != 0:
+      return
+    if x_size > 2 and y_size < 2:
+      # Note that y_size == 1, x_size == 2 is a legal snake.
+      # If x_size > 2 we require at least two columns so we can close the loop.
+      return
+
+    snake_indices = []
+
+    # Start with the vetical part of the snake:
+    # V * * * * *
+    # V * * * * *
+    # V * * * * *
+    # V * * * * *
+    # V * * * * *
+    # V * * * * *
+    # Where `*` denotes cells left empty for now.
+    for row in range(x_size):
+      snake_indices.append((row, 0))
+
+    # Add the horizontal part of the snake, from bottom to top:
+    # V < < < < <
+    # V > > > > ^
+    # V ^ < < < <
+    # V > > > > ^
+    # V ^ < < < <
+    # > > > > > ^
+    # Note that if `y_size == 1`, this does nothing.
+    for row in reversed(range(x_size)):
+      columns = range(1, y_size)
+      if row % 2 == 0:
+        # Even rows return right to left.
+        columns = reversed(columns)
+      for column in columns:
+        snake_indices.append((row, column))
+
+    assert len(snake_indices) == x_size * y_size
+
+    return snake_indices
+
+
+  def _get_snake(self, x_size: int, y_size: int) -> list[tuple[int, int]] | None:
+    """Draws a snake rectangle-filling loop, return None if not possible."""
+    if x_size % 2 == 0:
+      return self._get_snake_horizontal(x_size, y_size)
+
+    # Construct a snake for the transposed rectangle.
+    snake_indices = self._get_snake_horizontal(y_size, x_size)
+
+    if snake_indices is None:
+      return None
+
+    # Transpose the result back to the original coordinates.
+    return [(x, y) for y, x in snake_indices]
+
+  def _get_physical_tpu_mesh(self, devices: Sequence[Any]) -> np.ndarray:
+    """Reshapes JAX devices into their physical topology shape.
+
+    Includes cores dimension.
+
+    Args:
+      devices: JAX devices.
+
+    Returns:
+      Reshaped JAX devices.
+    """
+    device_coords = [d.coords for d in devices]
+    cores_per_chip = max(d.core_on_chip for d in devices) + 1
+
+    mesh_shape = tuple(d + 1 for d in max(device_coords)) + (cores_per_chip,)
+    masked_mesh_shape = tuple(map(min, zip(*device_coords))) + (0,)
+    offset_x, offset_y, offset_z, _ = masked_mesh_shape
+    actual_mesh_shape = tuple(
+        d - e for d, e in zip(mesh_shape, masked_mesh_shape)
+    )
+    physical_mesh = np.empty(actual_mesh_shape, dtype=object)
+    for (x, y, z), d in zip(device_coords, devices):
+      physical_mesh[x - offset_x, y - offset_y, z - offset_z, d.core_on_chip] = d
+
+    return physical_mesh
+
+  def _get_ring_dimensions(
+      self, axis_length: int, transposed: bool = False
+  ) -> tuple[int, int]:
+    length_to_ring_dimensions = {
+        1: (1, 1),
+        2: (2, 1),
+        4: (2, 2),
+        8: (4, 2),
+        16: (4, 4),
+        32: (8, 4),
+        64: (8, 8),
+        128: (16, 8),
+        256: (16, 16),
+    }
+    if axis_length not in length_to_ring_dimensions:
+      raise ValueError(
+          f'Unsupported axis length {axis_length} for'
+          ' GridOfRingsPartitionConfig'
+      )
+    axes = length_to_ring_dimensions[axis_length]
+    return (axes[1], axes[0]) if transposed else axes
+
+  def make_mesh(
+      self, devices: Sequence[jax.Device] | None = None
+  ) -> jax.sharding.Mesh:
+    """Creates a ring-of-rings mesh from a 2D device_mesh input."""
+    if devices is None:
+      devices = jax.devices()
+    device_mesh = self._get_physical_tpu_mesh(devices)
+    if len(device_mesh.shape) != 4 or device_mesh.shape[2:] != (1, 1):
+      raise ValueError(
+          f'Grid-of-rings only works on 2D slices, found {device_mesh.shape}. '
+          'Expected shape is (A, B, 1, 1).'
+      )
+
+    # We assume the first sharded dimension will be the outer ring.
+    outer_size = self.ici_mesh[self.outer_axis_name]
+    inner_size = self.ici_mesh[self.inner_axis_name]
+    assert outer_size * inner_size == len(devices), (
+        f'Outer size: {outer_size}, inner size: {inner_size}, num devices:'
+        f' {len(devices)}'
+    )
+    if outer_size % 2 != 0 or inner_size % 2 != 0:
+      raise ValueError(
+          'Grid-of-rings logical dimensions must be divisible by two.'
+      )
+
+    inner_ring_axes = self._get_ring_dimensions(inner_size)
+    outer_ring_axes = (device_mesh.shape[0] // inner_ring_axes[0],
+                       device_mesh.shape[1] // inner_ring_axes[1])
+    inner_ring_coords = self._get_snake(inner_ring_axes[0], inner_ring_axes[1])
+
+    # Remove the dummy dimensions, we know we are 2D.
+    device_mesh = device_mesh.squeeze((2, 3))
+
+    inner_rings = []
+    for outer_i in range(outer_ring_axes[0]):
+      for outer_j in range(outer_ring_axes[1]):
+        inner_ring = []
+        for c in inner_ring_coords:
+          # Add the inner ring coordinate by coordinate.
+          inner_ring.append(
+              device_mesh[
+                  outer_i * inner_ring_axes[0] + c[0],
+                  outer_j * inner_ring_axes[1] + c[1],
+              ]
+          )
+        inner_rings.append(inner_ring)
+
+    final_devices = np.array(inner_rings)
+    other_dims = [
+        d
+        for d in self.mesh_axis_names
+        if d not in [self.outer_axis_name, self.inner_axis_name]
+    ]
+    mesh_axis_names = (
+        self.outer_axis_name,
+        self.inner_axis_name,
+        *other_dims,
+    )
+    final_devices = final_devices[(...,) + (np.newaxis,) * len(other_dims)]
+    return jax.sharding.Mesh(final_devices, mesh_axis_names)
+
+def make_nested_balanced_2d_devices(devices: Sequence[jax.Device], ici_mesh_shape: Sequence[int]) -> Sequence[jax.Device]:
+    # Generate a reversed, interleaved sequence of axis indices.
+    print(f"\nmake_nested_balanced_2d_devices: {devices=}")
+    print(f"\nmake_nested_balanced_2d_devices: {ici_mesh_shape=}")
+    log_len = np.array(devices).size.bit_length() - 1
+    arr = np.arange(log_len)[::-1]
+    midpoint = len(arr) // 2
+    first_half = arr[:midpoint]
+    second_half = arr[midpoint:]
+    print(f"make_nested_balanced_2d_devices: {first_half=}")
+    print(f"make_nested_balanced_2d_devices: {second_half=}")
+
+    new_axis_order = []
+    for pair in zip(second_half, first_half):
+      new_axis_order.extend(pair)
+    # Handle odd log_length case: append leftover element if it exists
+    if len(arr) % 2 == 1:
+      new_axis_order.append(second_half[-1])
+    print(f"make_nested_balanced_2d_devices: {new_axis_order=}")
+
+    ordered_flat_devices = sorted(
+        np.array(devices).flatten(), key=lambda x: x.id
+    )
+    # Form a nested, balanced 2D partition with the priority order.
+    result = np.reshape(ordered_flat_devices, (2,) * log_len).transpose(new_axis_order[::-1]).reshape(ici_mesh_shape)
+    return result
+
+def get_topology_mesh(config):
+  """Get the target hardware devices, and create configured mesh with them"""
+  target_hardware = accelerator_to_spec_map.get_system_characteristics(config.compile_topology)
+  print(f"get_topology_mesh: {target_hardware=}")
+  topology_devices = get_topology_desc(
+      platform=target_hardware.platform,
+      topology_name=target_hardware.topology_name,
+      chip_config_name=target_hardware.chip_config_name,
+      chips_per_host_bounds=target_hardware.chips_per_host_bounds,
+      num_slices=config.compile_topology_num_slices,
+      wrap=target_hardware.wrap,
+  ).devices
+  print(f"get_topology_mesh: {topology_devices=}")
+  topology_device_mesh = max_utils.create_device_mesh(config, topology_devices)
+  print(f"get_topology_mesh: {topology_device_mesh=}")
+  topology_mesh = Mesh(topology_device_mesh, config.mesh_axes)
+  print(f"get_topology_mesh: {topology_mesh=}")
+  return topology_mesh
 
 @struct.dataclass
 class DecodeState:
@@ -89,9 +355,41 @@ class MaxEngine(engine_api.Engine):
   def __init__(self, config):
     self.config = config
 
-    # Mesh definition
-    devices_array = max_utils.create_device_mesh(config)
-    self._mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
+    ici_parallelism = [
+      config.ici_data_parallelism,
+      config.ici_pipeline_parallelism,
+      config.ici_fsdp_parallelism,
+      config.ici_fsdp_transpose_parallelism,
+      config.ici_sequence_parallelism,
+      config.ici_tensor_parallelism,
+      config.ici_expert_parallelism,
+      config.ici_autoregressive_parallelism,
+    ]
+
+    if config.mesh_type == "balanced_2d":
+      # original code: https://source.corp.google.com/piper///depot/google3/learning/gemini/gemax/core/compilation/scheduling.py;l=931;bpv=0;bpt=0
+      print("Creating Balanced2DPartitionConfig mesh")
+      mesh_axis_names = tuple(config.mesh_axes)
+      nested_balanced_2d_devices = make_nested_balanced_2d_devices(jax.devices(), ici_parallelism)
+      self._mesh = Mesh(nested_balanced_2d_devices, mesh_axis_names)
+    elif config.mesh_type == "balanced_2d_reversed":
+      print("Creating Balanced2DPartitionConfig mesh")
+      mesh_axis_names = tuple(reversed(config.mesh_axes))
+      nested_balanced_2d_devices = make_nested_balanced_2d_devices(jax.devices(), ici_parallelism)
+      self._mesh = Mesh(nested_balanced_2d_devices, mesh_axis_names)
+    elif config.mesh_type == "grid_of_rings":
+      print("Creating GridOfRingsPartitionConfig mesh")
+      # original code: https://source.corp.google.com/piper///depot/google3/learning/gemini/gemax/core/compilation/scheduling.py;l=761;bpv=0;bpt=0
+      ici_mesh = dict(zip(config.mesh_axes, ici_parallelism))
+      grid_of_rings_partition_config = GridOfRingsPartitionConfig(outer_axis_name='tensor', inner_axis_name='sequence')
+      grid_of_rings_partition_config.ici_mesh = ici_mesh
+      self._mesh = grid_of_rings_partition_config.make_mesh(jax.devices())
+    else: 
+      print("Creating default mesh")
+      devices_array = max_utils.create_device_mesh(config)
+      self._mesh = Mesh(devices_array, config.mesh_axes)
+    print(f"Created mesh: {self._mesh=}")
+      
 
     # Model and Optimizer definition
     quant = quantizations.configure_quantization(config)
