@@ -110,7 +110,8 @@ def main(args: argparse.Namespace):
     logging.info("Training from step %d to %d.", steps, steps_per_loop)
 
     try:
-      ray.get([actor.train.remote(num_steps=steps_per_loop) for actor in actors])
+      r = ray.get([actor.train.remote(num_steps=steps_per_loop) for actor in actors])
+      steps = r[0]
     except Exception as e:
       logging.error("Caught error during training: %s", e)
       logging.error("Shutting down...")
