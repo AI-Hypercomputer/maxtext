@@ -95,9 +95,10 @@ def preprocessing_pipeline(
   else:
     dataset = dataset.map(lambda x: {col: x[col] for col in data_column_names}, num_parallel_calls=AUTOTUNE)
 
+  data_column_names = data_column_names if not use_dpo else ("inputs", "targets")
   if tokenize:
     tokenizer_model = _input_pipeline_utils.get_tokenizer(tokenizer_path, add_bos, add_eos)
-    data_keys = ("inputs", "targets") if not use_dpo else data_column_names
+    data_keys = data_column_names
     dataset = dataset.map(lambda x: tokenizer.TokenizeOp(tokenizer=tokenizer_model, features=x, 
                                                          data_keys=data_keys), num_parallel_calls=AUTOTUNE)
 
@@ -123,17 +124,15 @@ def preprocessing_pipeline(
 
   # Perform greedy sequence packing and batching
   assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible number of global devices."
-  if pack_examples:
+  if pack_examples and not use_dpo:
     dataset = sequence_packing.pack_dataset(dataset, max_target_length)
     dataset = dataset.batch(global_batch_size // jax.process_count(), drop_remainder=drop_remainder)
   else:
-    if use_dpo:
-      raise NotImplementedError("Not implemented for use_dpo, use `pack_examples=True")
     # simple (static-shape) padded batching
     dataset = dataset.padded_batch(
         global_batch_size // jax.process_count(),
-        padded_shapes={"inputs": max_target_length, "targets": max_target_length},
-        padding_values={"inputs": 0, "targets": 0},
+        padded_shapes={k: max_target_length for k in data_column_names},
+        padding_values={k: 0 for k in data_column_names},
         drop_remainder=drop_remainder,
     )
 

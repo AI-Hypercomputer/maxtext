@@ -297,10 +297,17 @@ def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_t
     for k, v in data.items():
       data[k] = v[: config.micro_batch_size_to_train_on, :]
 
+  # for DPO we don't support packed sequence (they shouldn't be present in the first place)
+  data["chosen_segmentation"] = 1 * (data["chosen_segmentation"] == 1)
+  data["rejected_segmentation"] = 1 * (data["rejected_segmentation"] == 1)
+  data["chosen_position"] = data["chosen_position"] * (data["chosen_segmentation"] == 1)
+  data["rejected_position"] = data["rejected_position"] * (data["rejected_segmentation"] == 1)
+
   inputs = jnp.concatenate([data["chosen"], data["rejected"]], 0)
   inputs_position = jnp.concatenate([data["chosen_position"] , data["rejected_position"]], 0)
   inputs_segmentation = jnp.concatenate([data["chosen_segmentation"],
                                          data["rejected_segmentation"]], 0)
+
   logits, intermediate_outputs = model.apply(
       params,
       inputs,
@@ -323,15 +330,23 @@ def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_t
   chosen_logits, rejected_logits = logits[..., :n_logits, :, :], logits[..., n_logits:, :, :]
   chosen_ref_logits, rejected_ref_logits = ref_logits[..., :n_logits, :, :], ref_logits[..., n_logits:, :, :]
 
+  chosen_ids = data["chosen"][..., 1:]
+  rejected_ids = data["rejected"][..., 1:]
+  chosen_segmentation = data["chosen_segmentation"][..., 1:]
+  rejected_segmentation = data["rejected_segmentation"][..., 1:]
+
   chosen_logratios = chosen_logits - chosen_ref_logits
+  chosen_logratios = jnp.take_along_axis(chosen_logratios[..., :-1, :], chosen_ids[..., None], -1)[..., 0]
   rejected_logratios = rejected_logits - rejected_ref_logits
-  LABEL_SMOOTHING, BETA = 1.0, 0.1
-  ratios = BETA * chosen_logratios - BETA * rejected_logratios
-  loss = (-jax.nn.log_sigmoid(ratios) * (1 - LABEL_SMOOTHING)
-          - jax.nn.log_sigmoid(-ratios) * LABEL_SMOOTHING)
-  loss = jnp.mean(loss, -1)
-  valid_mask = ((data["chosen_segmentation"] != 0) & (data["rejected_segmentation"] != 0)
-                & (data["chosen"] != data["rejected"]))
+  rejected_logratios = jnp.take_along_axis(rejected_logratios[..., :-1, :], rejected_ids[..., None], -1)[..., 0]
+
+  LABEL_SMOOTHING, BETA = config.dpo_label_smoothing, config.dpo_beta
+  scaled_ratios = BETA * (chosen_logratios - rejected_logratios)
+  loss = (-jax.nn.log_sigmoid(scaled_ratios) * (1 - LABEL_SMOOTHING)
+          - jax.nn.log_sigmoid(-scaled_ratios) * LABEL_SMOOTHING)
+  #loss = jnp.mean(loss, -1)
+  valid_mask = (chosen_segmentation != 0) & (rejected_segmentation != 0) & (chosen_ids != rejected_ids)
+  assert loss.shape == valid_mask.shape
   total_loss = jnp.sum(loss * valid_mask)
   total_weights = jnp.sum(valid_mask)
   loss = jnp.mean(jnp.sum(loss * valid_mask, -1) / (jnp.sum(valid_mask, -1) + EPS))
@@ -342,12 +357,17 @@ def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_t
     total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
     moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
     loss += moe_lb_loss
+  assert chosen_logratios.shape == rejected_logratios.shape == valid_mask.shape
+  reward_accuracy = (jnp.sum(1 * (chosen_logratios > rejected_logratios) * valid_mask)
+                     / jnp.sum(1 * valid_mask))
+  #reward_accuracy = (jnp.sum(1 * ((chosen_logratios > 0) & (rejected_logratios < 0)) * valid_mask) 
+  #                   / jnp.sum(1 * valid_mask))
   aux = {
       "intermediate_outputs": intermediate_outputs,
       "total_loss": total_loss,
       "total_weights": total_weights,
       "moe_lb_loss": moe_lb_loss,
-      "reward_accuracy": jnp.mean(chosen_logratios > rejected_logratios),
+      "reward_accuracy": reward_accuracy,
   }
   return loss, aux
 
@@ -484,6 +504,7 @@ def train_step(model, config, state, data, dropout_rng):
           "learning/grad_norm": max_utils.l2norm_pytree(grads),
           "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
           "learning/param_norm": max_utils.l2norm_pytree(new_state.params),
+          "learning/dpo_reward_accuracy": aux.get("reward_accuracy", 0.0),
       },
       "scalars": {},
   }
@@ -775,6 +796,7 @@ def train_loop(config, state=None):
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, nextrng)
+      print(f"Reward accuracy: {metrics['scalar']['learning/dpo_reward_accuracy']:.4e}")
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(

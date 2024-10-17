@@ -73,7 +73,7 @@ def preprocessing_pipeline(
     )
 
   # Pack and Batch examples.
-  if packing:
+  if packing and not use_dpo:
     length_struct = {col: max_target_length for col in data_columns}
     operations.append(
         grain.experimental.PackAndBatchOperation(
