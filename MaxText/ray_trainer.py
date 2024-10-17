@@ -82,6 +82,8 @@ def main(args: argparse.Namespace):
   config["per_device_batch_size"] = args.per_device_batch_size
   config["max_target_length"] = args.max_target_length
   config["enable_checkpointing"] = args.enable_checkpointing
+  if args.model_name is not None:
+    config["model_name"] = args.model_name
 
   env_vars = MACHINE_ENV_VARS
   if args.verbose_tpu:
@@ -132,6 +134,7 @@ if __name__ == "__main__":
   parser.add_argument("--total_steps", action="store", default=500, help="The total number of steps to run.")
   parser.add_argument("--per_device_batch_size", action="store", default=2, help="The total number of steps to run.")
   parser.add_argument("--enable_checkpointing", action="store_true", default=False, help="Whether or not to checkpointing.")
+  parser.add_argument("--model_name", action="store_true", default=None, help="The name of the model, if applicable.")
   parser.add_argument("--max_target_length", action="store", default=8192, help="The total number of steps to run.")
   parser.add_argument("--verbose_tpu", action="store_true", default=False, help="Whether or not to enable verbose TPU logs.")
   args = parser.parse_args()
