@@ -21,7 +21,6 @@ RUN pip install memray py-spy
 RUN pip install jupyter
 RUN if [ -z "$tpu" ] ; then pip install "jax[cpu]" ; else pip install "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html ; fi
 
-ENV DATA_DIR gs://allencwang-mlperf/maxtext-data
 RUN git clone https://github.com/AI-Hypercomputer/maxtext.git
 RUN pip install -r maxtext/requirements.txt
 RUN pip install ray[default]==2.37.0
