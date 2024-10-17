@@ -196,7 +196,7 @@ def make_tfds_eval_iterator(
       global_batch_size=config.global_batch_size_to_load_eval,
       global_mesh=global_mesh,
       max_target_length=config.max_target_length,
-      data_column_name=config.eval_data_column,
+      data_column_names=config.eval_data_columns,
       shuffle=False,
       data_shuffle_seed=config.data_shuffle_seed,
       tokenize=config.tokenize_eval_data,

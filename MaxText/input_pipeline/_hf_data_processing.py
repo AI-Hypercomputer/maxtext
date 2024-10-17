@@ -194,7 +194,7 @@ def make_hf_eval_iterator(
       dataloading_host_count=len(process_indices_eval),
       global_mesh=global_mesh,
       dataset=eval_ds,
-      data_column_name=config.eval_data_column,
+      data_column_names=config.eval_data_columns,
       tokenize=config.tokenize_eval_data,
       tokenizer_path=config.tokenizer_path,
       hf_access_token=config.hf_access_token,

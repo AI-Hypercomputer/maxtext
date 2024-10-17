@@ -156,7 +156,7 @@ def make_grain_eval_iterator(
       grain_worker_count=config.grain_worker_count,
       dataloading_host_index=process_indices.index(jax.process_index()),
       dataloading_host_count=len(process_indices),
-      data_column=config.eval_data_column,
+      data_columns=config.eval_data_columns,
       shuffle=False,
       data_shuffle_seed=config.data_shuffle_seed,
       tokenize=config.tokenize_eval_data,
