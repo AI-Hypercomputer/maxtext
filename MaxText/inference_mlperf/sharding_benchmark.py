@@ -73,7 +73,8 @@ def create_matmul_function(mesh: jax.sharding.Mesh):
     
     return matmul
 
-def run_experiment(mesh: Mesh, A: jnp.ndarray, W1: jnp.ndarray, num_iterations: int, trace_name: str) -> Tuple[float, float]:
+
+def run_experiment(mesh: Mesh, A: jnp.ndarray, W1: jnp.ndarray, num_iterations: int, trace_name: str) -> Tuple[float, float, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     A_sharded, W1_sharded = shard_arrays(mesh, A, W1)
     matmul_fn = create_matmul_function(mesh)
     dummy = object()
@@ -100,7 +101,8 @@ def run_experiment(mesh: Mesh, A: jnp.ndarray, W1: jnp.ndarray, num_iterations: 
     stop_trace()
     print(f"Profiler trace saved to: {trace_loc}")
     
-    return np.mean(times), np.std(times, ddof=1)
+    return np.mean(times), np.std(times, ddof=1), A_sharded, W1_sharded, result
+    
 
 def memory_usage_profile() -> Dict[str, Any]:
     memory_stats = jax.device_get(jax.devices()[0].memory_stats())
@@ -125,11 +127,11 @@ def compute_efficiency(time: float, A: jnp.ndarray, W1: jnp.ndarray) -> float:
     flops = 2 * A.shape[0] * A.shape[1] * W1.shape[1]
     return flops / (time * 1e12)  # TFLOP/s
 
-def format_results(config_name: str, mesh: Mesh, mean_time: float, std_dev: float, num_iterations: int, A: jnp.ndarray, W1: jnp.ndarray) -> str:
+def print_results(config_name: str, mesh: Mesh, mean_time: float, std_dev: float, num_iterations: int, A: jnp.ndarray, W1: jnp.ndarray, A_sharded: jnp.ndarray, W1_sharded: jnp.ndarray, result: jnp.ndarray, visualize: bool = False) -> str:
     memory_profile = memory_usage_profile()
     efficiency = compute_efficiency(mean_time, A, W1)
     
-    return f"""
+    output = f"""
 Experiment: {config_name}
 Mesh Shape: {tuple(mesh.shape.values())}
 Mesh Axes: {mesh.axis_names}
@@ -142,8 +144,18 @@ Used Memory: {memory_profile['used_memory_formatted']}
 Computational Efficiency: {efficiency:.2f} TFLOP/s
 
 {compare_device_placement(mesh)}
-{'=' * 50}
 """
+
+    print(output)
+    if visualize:
+        print("\nArray Sharding Visualization:\n")
+        print("A sharding:\n")
+        jax.debug.visualize_array_sharding(A_sharded)
+        print("\nW1 sharding:\n")
+        jax.debug.visualize_array_sharding(W1_sharded)
+        print("\nResult sharding:\n")
+        jax.debug.visualize_array_sharding(result)
+    print('=' * 50)
 
 def compare_device_placement(mesh: Mesh) -> str:
     mesh_shape = tuple(mesh.shape.values())
@@ -188,34 +200,50 @@ def main():
         standard_mesh((1, 4, 2), ("placeholder", "model", "sequence")),
         balanced_2d_mesh((1, 4, 2), ("placeholder", "model", "sequence")),
     ]
-    
+
+    visualize = False
+
     results = {}
     for config in mesh_configs:
         mesh = config.creator(config.shape, config.axis_names)
         trace_name = create_trace_name(config.shape, GLOBAL_BATCH, EMBED, MLP, config.axis_names)
-        mean_time, std_dev = run_experiment(mesh, A, W1, NUM_ITERATIONS, trace_name)
+        mean_time, std_dev, A_sharded, W1_sharded, result = run_experiment(mesh, A, W1, NUM_ITERATIONS, trace_name)
         config_name = f"{config.name}_{config.shape}"
         results[config_name] = (mesh, mean_time, std_dev)
-        print(format_results(config_name, mesh, mean_time, std_dev, NUM_ITERATIONS, A, W1))
+        print_results(config_name, mesh, mean_time, std_dev, NUM_ITERATIONS, A, W1, A_sharded, W1_sharded, result, visualize)
 
+
+    """
+    Assumed device layout is
+      [ 0 | 1 ]       [ 4 | 5 ]
+      [ --+-- ] <---> [ --+-- ]
+      [ 2 | 3 ]       [ 6 | 7 ]
+    """
     explicit_layouts = [
-        [[0, 4], [1, 5], [3, 7], [2, 6]],
-        [[0, 1], [2, 3], [4, 5], [6, 7]],
-        [[0, 1, 2, 3], [4, 5, 6, 7]],
+        [[0, 4], [1, 5], [3, 7], [2, 6]],   # 0.004309
+        [[1, 5], [3, 7], [2, 6], [0, 4]],   # 0.004309
+        [[0, 4], [1, 5], [2, 6], [3, 7]],   # 0.005691
+        [[0, 1], [2, 3], [4, 5], [6, 7]],   # 0.005632
+        [[0, 7], [1, 6], [2, 5], [3, 4]],   # 0.005687
+        [[0, 4], [1, 7], [2, 6], [3, 5]],   # 0.005680
+        [[0, 2], [1, 3], [4, 6], [5, 7]],   # 0.006855
+        [[0, 5], [1, 6], [2, 7], [3, 4]],   # 0.005683
+        [[0, 1], [3, 2], [4, 5], [7, 6]],   # 0.005679
+        [[0, 5], [1, 4], [2, 7], [3, 6]],   # 0.005673
     ]
-    
+
     for i, explicit_layout in enumerate(explicit_layouts):
         explicit_mesh_shape = (len(explicit_layout), len(explicit_layout[0]))
         mesh = create_explicit_layout_mesh(explicit_layout, ("model", "sequence"))
         trace_name = create_trace_name(explicit_mesh_shape, GLOBAL_BATCH, EMBED, MLP, ("model", "sequence"), explicit_layout)
-        mean_time, std_dev = run_experiment(mesh, A, W1, NUM_ITERATIONS, trace_name)
+        mean_time, std_dev, A_sharded, W1_sharded, result = run_experiment(mesh, A, W1, NUM_ITERATIONS, trace_name)
         config_name = f"explicit_layout_{i}"
         results[config_name] = (mesh, mean_time, std_dev)
-        print(format_results(config_name, mesh, mean_time, std_dev, NUM_ITERATIONS, A, W1))
+        print_results(config_name, mesh, mean_time, std_dev, NUM_ITERATIONS, A, W1, A_sharded, W1_sharded, result, visualize)
     
     best_config = min(results, key=lambda x: results[x][1])
     print("\nBest Configuration:")
-    print(format_results(best_config, *results[best_config], NUM_ITERATIONS, A, W1))
+    print_results(best_config, *results[best_config], NUM_ITERATIONS, A, W1, A_sharded, W1_sharded, result, visualize)
 
 if __name__ == "__main__":
     main()
