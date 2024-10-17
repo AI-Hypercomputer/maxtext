@@ -1,0 +1,60 @@
+base_config: "base.yml"
+
+model_name: gemma2-2b
+tokenizer_path: assets/tokenizer.gemma
+weight_dtype: bfloat16
+dtype: float32
+hardware: tpu
+use_dpo: true
+train_data_columns: ['chosen', 'rejected']
+eval_data_columns: ['chosen', 'rejected']
+base_output_directory: gs://rdyro/logs
+steps: 1000000
+per_device_batch_size: 3.0
+#attention: dot_product
+#attention: cudnn_flash_te
+
+# HF Pipeline ------------------------
+#dataset_type: hf
+#hf_path: Anthropic/hh-rlhf
+#hf_access_token: ""
+
+# TFDS Pipeline ----------------------
+#dataset_type: tfds
+#dataset_path: 'gs://rdyro' # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
+#dataset_name: 'anthropic_rlhf_tfds/tfrecord:1.0.0'
+#eval_dataset_name: 'anthropic_rlhf_tfds/tfrecord:1.0.0'
+#eval_split: 'test'
+
+# Grain Pipeline ---------------------
+dataset_type: grain
+grain_train_files: '/home/rdyro/anthropic_rlhf_tfds/array_record/1.0.0/anthropic_rlhf_tfds-train.array_record*'
+grain_eval_files: '/home/rdyro/anthropic_rlhf_tfds/array_record/1.0.0/anthropic_rlhf_tfds-test.array_record*'
+grain_worker_count: 16
+
+#enable_checkpointing: true
+gradient_clipping_threshold: 2.0
+learning_rate: 5.0e-7
+dpo_label_smoothing: 0.0
+dpo_beta: 0.1
+max_target_length: 512
+
+# gemma2 2b
+load_parameters_path: "gs://rdyro-mixtral-storage/gemma-maxtext/gemma2/2b/0/items"
+base_emb_dim: 2304
+base_num_query_heads: 8
+base_num_kv_heads: 4
+base_mlp_dim: 9216
+base_num_decoder_layers: 13 # half of the real number of layers because we merge [local_attention, global_attention] into one layer 
+head_dim: 256
+mlp_activations: ["gelu","linear"]
+vocab_size: 256128
+decoder_block: "gemma2"
+normalization_layer_epsilon: 1.e-06
+logits_via_embedding: True
+final_logits_soft_cap: 30.0
+attn_logits_soft_cap: 50.0
+sliding_window_size: 4096
+use_post_attn_norm: True
+use_post_ffw_norm: True
+
