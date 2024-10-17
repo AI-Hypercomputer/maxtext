@@ -102,14 +102,15 @@ def main(args: argparse.Namespace):
     raise e
 
   logging.info("Initialization complete. Starting MaxText training...")
-  total_steps = args.total_steps
+  total_steps = int(args.total_steps)
+  steps_per_loop = int(args.steps_per_loop)
   steps = 0
 
   while steps < total_steps:
-    logging.info("Training from step %d to %d.", steps, args.steps_per_loop)
+    logging.info("Training from step %d to %d.", steps, steps_per_loop)
 
     try:
-      ray.get([actor.train.remote(num_steps=args.steps_per_loop) for actor in actors])
+      ray.get([actor.train.remote(num_steps=steps_per_loop) for actor in actors])
     except Exception as e:
       logging.error("Caught error during training: %s", e)
       logging.error("Shutting down...")
