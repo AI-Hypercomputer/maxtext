@@ -493,12 +493,12 @@ class MoeBlock(nn.Module):
     loss = jnp.mean(density * density_prob) * (self.num_experts**2) * self.config.load_balance_loss_weight
     return loss
 
-  def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = ()):
+  def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = (), return_none=False):
     if self.quant:
 
       def aqt_einsum(*args, **kwargs):
         # simply skip kwargs, since aqt einsum doesn't support any kwargs like precision
-        return self.quant.einsum(rhs_mesh_axes)(*args)
+        return self.quant.einsum(rhs_mesh_axes, return_none=False)(*args)
 
       einsum_op = aqt_einsum
     else:
@@ -524,6 +524,9 @@ class MoeBlock(nn.Module):
     top_k_weights, top_k_indices = jax.lax.top_k(softmax_probs, self.num_experts_per_tok)
     matmul_precision = lax.Precision(self.config.matmul_precision)
 
+    # TODO - what is capacity factor ? see if we need this. 
+    # expert parallelism - if we don't do expert parallelism, a large part of model is 0
+    # tokens are evenly distributed, TPUs need fixed size.
     if self.config.capacity_factor > 0:
       # token dropping if needed
       dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
@@ -582,6 +585,9 @@ class MoeBlock(nn.Module):
       weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
       with jax.named_scope("wi_0"):
+        #B - Batch, S - Seuquence, M - Model Dimension
+        # E - Expert
+        # H - MLP Block dimension
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
         ).astype(jnp.float32)
@@ -597,9 +603,10 @@ class MoeBlock(nn.Module):
         )
       with jax.named_scope("w_sum"):
         weights_axis = ("activation_batch", "activation_length", "activation_exp")
-        output = self.get_einsum(rhs_mesh_axes=weights_axis)(
-            "BSEM,BSE -> BSM", intermediate_layer.astype(jnp.float32), weights.astype(jnp.float32)
-        ).astype(self.dtype)
+        output = jnp.einsum("BSEM,BSE -> BSM", intermediate_layer.astype(jnp.float32), weights.astype(jnp.float32)).astype(self.dtype)
+        # output = self.get_einsum(rhs_mesh_axes=weights_axis, return_none=False)(
+        #     "BSEM,BSE -> BSM", intermediate_layer.astype(jnp.float32), weights.astype(jnp.float32)
+        # ).astype(self.dtype)
       return output, None
 
   @nn.compact
@@ -625,3 +632,4 @@ class MoeBlock(nn.Module):
     else:
       max_logging.log("Running MoE matmul implementation.")
       return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+
