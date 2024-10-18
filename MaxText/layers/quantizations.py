@@ -136,9 +136,8 @@ class AqtQuantization:
     )
     return aqt_dg_cls
 
-  def einsum(self, mesh_axes: Tuple[str, ...] = (), return_none=False):
+  def einsum(self, mesh_axes: Tuple[str, ...] = (),):
     """Returns einsum configured with aqt params."""
-    # if dont_flip is False
     rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(mesh_axes)
     aqt_einsum = functools.partial(
         aqt_flax.AqtEinsum(
@@ -262,13 +261,10 @@ def _get_aqt_key_paths(aqt_vars):
   for k, _ in aqt_tree_flat:
     pruned_keys = []
     for d in list(k):
-      # TODO - pdb to check keys
       if "AqtDotGeneral" in d.key:
         pruned_keys.append(jax.tree_util.DictKey(key="kernel"))
         break
       elif "AqtEinsum" in d.key:
-        # pruned_keys.append(jax.tree_util.DictKey(key="kernel"))
-        # break
         continue
       else:
         assert "Aqt" not in d.key, f"Unexpected Aqt op {d.key} in {k}."
