@@ -107,7 +107,6 @@ def create_orbax_emergency_checkpoint_manager(
       global_mesh=global_mesh,
       abstract_state=abstract_state,
       options=options,
-      local_state_handler=emergency_checkpoint_manager.local_checkpoint_handler(),
       logger=orbax_logger,
   )
 
