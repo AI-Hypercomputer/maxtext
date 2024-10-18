@@ -136,13 +136,13 @@ class AqtQuantization:
     )
     return aqt_dg_cls
 
-  def einsum(self, mesh_axes: Tuple[str, ...] = ()):
+  def einsum(self, mesh_axes: Tuple[str, ...] = (),):
     """Returns einsum configured with aqt params."""
     rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(mesh_axes)
     aqt_einsum = functools.partial(
         aqt_flax.AqtEinsum(
             cfg=self.quant_dg,
-            lhs_quant_mode=self.quant_mode,
+            rhs_quant_mode=self.quant_mode,
             lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
             rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
             rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
@@ -150,7 +150,6 @@ class AqtQuantization:
         )
     )
     return aqt_einsum
-
 
 @dataclass
 class Fp8Quantization(Quantization):
@@ -265,6 +264,8 @@ def _get_aqt_key_paths(aqt_vars):
       if "AqtDotGeneral" in d.key:
         pruned_keys.append(jax.tree_util.DictKey(key="kernel"))
         break
+      elif "AqtEinsum" in d.key:
+        continue
       else:
         assert "Aqt" not in d.key, f"Unexpected Aqt op {d.key} in {k}."
         pruned_keys.append(d)
@@ -355,3 +356,4 @@ class KVQuant:
         rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
         rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
     )
+

@@ -493,7 +493,7 @@ class MoeBlock(nn.Module):
     loss = jnp.mean(density * density_prob) * (self.num_experts**2) * self.config.load_balance_loss_weight
     return loss
 
-  def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = ()):
+  def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = (),):
     if self.quant:
 
       def aqt_einsum(*args, **kwargs):
@@ -597,9 +597,7 @@ class MoeBlock(nn.Module):
         )
       with jax.named_scope("w_sum"):
         weights_axis = ("activation_batch", "activation_length", "activation_exp")
-        output = self.get_einsum(rhs_mesh_axes=weights_axis)(
-            "BSEM,BSE -> BSM", intermediate_layer.astype(jnp.float32), weights.astype(jnp.float32)
-        ).astype(self.dtype)
+        output = jnp.einsum("BSEM,BSE -> BSM", intermediate_layer.astype(jnp.float32), weights.astype(jnp.float32)).astype(self.dtype)
       return output, None
 
   @nn.compact
@@ -625,3 +623,4 @@ class MoeBlock(nn.Module):
     else:
       max_logging.log("Running MoE matmul implementation.")
       return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+
