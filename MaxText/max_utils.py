@@ -278,7 +278,7 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
     )
     jax.distributed.initialize()
 
-  ocp.multihost.utils.initialize_runtime_to_distributed_ids()
+  ocp.multihost.initialize_runtime_to_distributed_ids()
 
 
 def _retrieve_jax_init_info(raw_keys):
