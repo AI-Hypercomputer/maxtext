@@ -81,6 +81,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
       "",
       "MaxText/configs/base.yml",  # base arg
       "per_device_batch_size=1",
+      "dcn_fsdp_parallelism=2",
       "ici_fsdp_parallelism=-1",
       "ici_tensor_parallelism=1",
       f"model_name={maxtext_model_name}",
