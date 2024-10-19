@@ -55,6 +55,7 @@ import jax.numpy as jnp
 from jax import random
 from jax.sharding import Mesh
 from jax.experimental import checkify
+from jax.experimental.compute_on import compute_on
 
 from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
@@ -72,6 +73,10 @@ Transformer = models.Transformer
 EPS = 1e-8
 _DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = 2 * 1024**3
 
+def with_memory_kind(t, memory_kind):
+  return jax.tree_util.tree_map(
+      lambda x: x.with_memory_kind(kind=memory_kind), t
+  )
 
 def validate_train_config(config):
   """Validates the configuration is set correctly for train.py"""
@@ -326,7 +331,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   return loss, aux
 
 
-def train_step(model, config, state, data, dropout_rng):
+def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   """
 
   Args:
@@ -374,6 +379,8 @@ def train_step(model, config, state, data, dropout_rng):
     raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], grad_and_loss["grad"])
     aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)
   else:
+    if config.optimizer_host_offload:
+      state = state.replace(params = jax.device_put(state.params, with_memory_kind(state_mesh_shardings.params, 'device')))
     grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
   intermediate_outputs = aux["intermediate_outputs"]
@@ -384,15 +391,21 @@ def train_step(model, config, state, data, dropout_rng):
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
   else:
     grads = raw_grads
-  new_state = state.apply_gradients(grads=grads)
+  if config.optimizer_host_offload:
+    grads = jax.device_put(grads, with_memory_kind(state_mesh_shardings.params, 'pinned_host'))
+    def optimizer_update(state, grads):
+      return state.apply_gradients(grads=grads)
+    new_state = compute_on('device_host')(jax.jit(optimizer_update, donate_argnums=(0,)))(state, grads)
+  else:
+    new_state = state.apply_gradients(grads=grads)
   metrics = {
       "scalar": {
           "learning/loss": loss,
           "learning/moe_lb_loss": moe_lb_loss,
           "learning/total_weights": total_weights,
-          "learning/grad_norm": max_utils.l2norm_pytree(grads),
-          "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
-          "learning/param_norm": max_utils.l2norm_pytree(new_state.params),
+          # "learning/grad_norm": max_utils.l2norm_pytree(grads),
+          # "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
+          # "learning/param_norm": max_utils.l2norm_pytree(new_state.params),
       },
       "scalars": {},
   }
@@ -537,7 +550,7 @@ def setup_train_loop(config):
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
 
-  state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(
+  state, _, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
 
@@ -549,7 +562,7 @@ def setup_train_loop(config):
       init_rng,
       writer,
       checkpoint_manager,
-      state_mesh_annotations,
+      state_mesh_shardings,
       model,
       mesh,
       learning_rate_schedule,
@@ -575,7 +588,7 @@ def train_loop(config, state=None):
       init_rng,
       writer,
       checkpoint_manager,
-      state_mesh_annotations,
+      state_mesh_shardings,
       model,
       mesh,
       learning_rate_schedule,
@@ -590,7 +603,7 @@ def train_loop(config, state=None):
       out_shard_train,
       static_argnums_train,
       donate_argnums_train,
-  ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config)
+  ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
 
   if eval_data_iterator:
     # pylint: disable=line-too-long
@@ -600,7 +613,7 @@ def train_loop(config, state=None):
         out_shard_eval,
         static_argnums_eval,
         donate_argnums_eval,
-    ) = maxtext_utils.get_functional_eval_with_signature(eval_step, mesh, state_mesh_annotations, model, config)
+    ) = maxtext_utils.get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, model, config)
 
   num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
   max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
