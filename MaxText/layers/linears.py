@@ -228,6 +228,9 @@ class MlpBlock(nn.Module):
           use_bias=self.use_bias,
           matmul_precision=self.config.matmul_precision,
       )(inputs)
+      x = checkpoint_name(x, "mlpwi")
+      if cfg.activations_in_float32:
+        x = x.astype(jnp.float32)
       for idx, act_fn in enumerate(self.activations):
         y = _convert_to_activation_function(act_fn)(x[:, :, idx, ...])
         activations.append(y)
@@ -245,6 +248,7 @@ class MlpBlock(nn.Module):
             use_bias=self.use_bias,
             matmul_precision=self.config.matmul_precision,
         )(inputs)
+        x = checkpoint_name(x, "mlp" + dense_name)
         if cfg.activations_in_float32:
           x = x.astype(jnp.float32)
         x = _convert_to_activation_function(act_fn)(x)
@@ -252,7 +256,6 @@ class MlpBlock(nn.Module):
 
     # Take elementwise product of above intermediate activations.
     x = functools.reduce(operator.mul, activations).astype(self.dtype)
-    x = checkpoint_name(x, "mlpwi")
     # Apply dropout and final dense output projection.
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
         x, deterministic=deterministic
