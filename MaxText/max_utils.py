@@ -15,20 +15,26 @@ limitations under the License.
 """
 
 """ Common Max Utils needed by multiple modules"""
-import checkpointing
-import common_types
-import functools
-import time
-import socket
-import subprocess
-from etils import epath
-
-import max_logging
-
 import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
+import checkpointing
+import common_types
+import functools
+import time
+import optax
+import os
+import socket
+import subprocess
+from etils import epath
+from collections.abc import Sequence
+import collections
+from typing import Any, Tuple
+
+import max_logging
+
+
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 
@@ -40,11 +46,7 @@ from flax.training import train_state
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
-import optax
-import os
-from typing import Tuple
 from tensorboardX import writer
-
 from google.cloud import storage
 
 # pylint: disable=too-many-positional-arguments
@@ -360,6 +362,56 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
   return parallelism_vals
 
 
+def create_custom_64x4_device_mesh(
+    mesh_shape: Sequence[int],
+    dcn_mesh_shape: Sequence[int],
+    devices: Sequence[Any],
+    process_is_granule: bool = False,
+    should_sort_granules_by_key: bool = True,
+) -> np.ndarray:
+  """Custom device mesh for 64x4 ici parallelism"""
+  assert len(devices) % 256 == 0, f"This custom mesh is not valid for {len(devices)} devices"
+  attr = "process_index" if process_is_granule else "slice_index"
+  if not hasattr(devices[0], attr):
+    raise ValueError(f"Device {devices[0]} does not have attribute {attr}. See" " `process_is_granule` option.")
+  granule_dict = collections.defaultdict(list)
+  for dev in devices:
+    granule_dict[getattr(dev, attr)].append(dev)
+  granules = (
+      [granule_dict[key] for key in sorted(granule_dict.keys())] if should_sort_granules_by_key else granule_dict.values()
+  )
+  if np.prod(dcn_mesh_shape) != len(granules):
+    raise ValueError(f"Number of slices {len(granules)} must equal the product of " f"dcn_mesh_shape {dcn_mesh_shape}")
+  per_granule_meshes = [
+      mesh_utils.create_device_mesh(
+          [16, 16],
+          granule,
+          allow_split_physical_axes=False,
+      )
+      for granule in granules
+  ]
+
+  def reshape_mesh_to_rings(a):
+    b = []
+    for i in range(8):
+      b.append([])
+      for j in range(8):
+        a_i = i * 2
+        a_j = j * 2
+        # forms a ring of size 4
+        b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i + 1, a_j + 1], a[a_i + 1, a_j]])
+    b = np.array(b)
+    b = np.reshape(b, (64, 4))
+    return b
+
+  per_granule_meshes = [np.reshape(reshape_mesh_to_rings(x), mesh_shape) for x in per_granule_meshes]
+  # TODO(jekbradbury): handle non-uniform DCN topologies
+  granule_mesh = np.arange(len(granules)).reshape(dcn_mesh_shape)
+  blocks = np.vectorize(lambda i: per_granule_meshes[i], otypes=[object])(granule_mesh)
+  device_mesh = np.block(blocks.tolist())
+  return device_mesh
+
+
 def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
   if devices is None:
@@ -398,12 +450,21 @@ def create_device_mesh(config, devices=None):
 
   if multi_slice_env:
     dcn_parallelism = fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
-    mesh = mesh_utils.create_hybrid_device_mesh(
-        ici_parallelism,
-        dcn_parallelism,
-        devices,
-        allow_split_physical_axes=allow_split_physical_axes,
-    )
+    if config.custom_mesh == "hybrid_ring_64x4":
+      # asserting on ici parallelism
+      assert sorted(set(ici_parallelism)) == [
+          1,
+          4,
+          64,
+      ], f"Invalid custom_mesh:{config.custom_mesh} chosen for ICI mesh shape {ici_parallelism}"
+      mesh = create_custom_64x4_device_mesh(ici_parallelism, dcn_parallelism, devices)
+    else:
+      mesh = mesh_utils.create_hybrid_device_mesh(
+          ici_parallelism,
+          dcn_parallelism,
+          devices,
+          allow_split_physical_axes=allow_split_physical_axes,
+      )
   else:
     if allow_split_physical_axes:
       mesh = mesh_utils.create_device_mesh(
