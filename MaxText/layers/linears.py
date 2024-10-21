@@ -597,9 +597,9 @@ class MoeBlock(nn.Module):
         )
       with jax.named_scope("w_sum"):
         weights_axis = ("activation_batch", "activation_length", "activation_exp")
-        output = self.get_einsum(rhs_mesh_axes=weights_axis)(
-            "BSEM,BSE -> BSM", intermediate_layer.astype(jnp.float32), weights.astype(jnp.float32)
-        ).astype(self.dtype)
+        output = jnp.einsum("BSEM,BSE -> BSM", intermediate_layer.astype(jnp.float32), weights.astype(jnp.float32)).astype(
+            self.dtype
+        )
       return output, None
 
   @nn.compact
