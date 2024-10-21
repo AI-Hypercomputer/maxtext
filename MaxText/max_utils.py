@@ -15,6 +15,8 @@ limitations under the License.
 """
 
 """ Common Max Utils needed by multiple modules"""
+import jax.experimental
+import jax.experimental.mesh_utils
 import checkpointing
 import common_types
 import functools
@@ -359,6 +361,75 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
 
   return parallelism_vals
 
+from collections.abc import Sequence
+import collections
+from typing import Any
+
+def create_custom_device_mesh(
+    mesh_shape: Sequence[int],
+    dcn_mesh_shape: Sequence[int],
+    devices: Sequence[Any],
+    process_is_granule: bool = False,
+    should_sort_granules_by_key: bool = True,
+    # allow_split_physical_axes: bool = False,
+) -> np.ndarray:
+  # if devices is None:
+  #   devices = xb.devices()
+  attr = 'process_index' if process_is_granule else 'slice_index'
+  if not hasattr(devices[0], attr):
+    raise ValueError(
+        f'Device {devices[0]} does not have attribute {attr}. See'
+        ' `process_is_granule` option.'
+    )
+  granule_dict = collections.defaultdict(list)
+  for dev in devices:
+    granule_dict[getattr(dev, attr)].append(dev)
+  granules = (
+      [granule_dict[key] for key in sorted(granule_dict.keys())]
+      if should_sort_granules_by_key
+      else granule_dict.values()
+  )
+  if np.prod(dcn_mesh_shape) != len(granules):
+    raise ValueError(
+        f'Number of slices {len(granules)} must equal the product of '
+        f'dcn_mesh_shape {dcn_mesh_shape}'
+    )
+  per_granule_meshes = [
+      mesh_utils.create_device_mesh(
+          [16,16],
+          granule,
+          allow_split_physical_axes=False,
+      )
+      for granule in granules
+  ]
+  def reshape_mesh_to_rings(a):
+    # a = np.reshape(a, ( 16, 16))
+    print(a)
+    b = []
+    for i in range(8):
+      b.append([])
+      for j in range(8):
+        a_i = i*2
+        a_j = j*2
+        # forms a rind of size 4
+        b[i].append([a[a_i,a_j], a[a_i,a_j+1], a[a_i+1,a_j+1], a[a_i+1,a_j]])
+    b = np.array(b)
+    b = np.reshape(b, (64,4))
+    return b
+
+  print("per_granule_meshes before reshapes:", per_granule_meshes)
+  # per_granule_meshes = [np.reshape(np.swapaxes(np.reshape(x, (8,32)), 0, 1), mesh_shape) for x in per_granule_meshes]
+  per_granule_meshes = [np.reshape(reshape_mesh_to_rings(x), mesh_shape) for x in per_granule_meshes]
+  print("per_granule_meshes:", per_granule_meshes)
+  # TODO(jekbradbury): handle non-uniform DCN topologies
+  granule_mesh = np.arange(len(granules)).reshape(dcn_mesh_shape)
+  blocks = np.vectorize(lambda i: per_granule_meshes[i], otypes=[object])(
+      granule_mesh
+  )
+  device_mesh = np.block(blocks.tolist())
+  return device_mesh
+
+
 
 def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
@@ -398,12 +469,9 @@ def create_device_mesh(config, devices=None):
 
   if multi_slice_env:
     dcn_parallelism = fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
-    mesh = mesh_utils.create_hybrid_device_mesh(
-        ici_parallelism,
+    mesh = create_custom_device_mesh(ici_parallelism,
         dcn_parallelism,
-        devices,
-        allow_split_physical_axes=allow_split_physical_axes,
-    )
+        devices)
   else:
     if allow_split_physical_axes:
       mesh = mesh_utils.create_device_mesh(
