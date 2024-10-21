@@ -17,7 +17,6 @@ if [ -z "${BASE_OUTPUT_PATH}" ]; then
     export BASE_OUTPUT_PATH=gs://runner-maxtext-logs/$(date +%Y-%m-%d)/
     echo "BASE_OUTPUT_PATH is not set, using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}"
 fi
-BASE_OUTPUT_PATH=gs://rdyro-mixtral-storage/logs/megamem-logs
 
 # Download checkpoint
 pip3 install torch
