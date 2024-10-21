@@ -178,6 +178,11 @@ def write_metrics_to_tensorboard(writer, metrics, step, config, is_training=True
         max_logging.log(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
         writer.flush()
 
+def clear_buffered_metrics():
+  global _buffered_step
+  global _buffered_metrics
+  _buffered_step = None
+  _buffered_metrics = None
 
 def clear_buffered_metrics():
   global _buffered_step
@@ -506,6 +511,8 @@ def setup_mesh_and_model(config):
         logger,
         use_ocdbt,
         use_zarr3,
+        max_to_keep=config.max_ckpts_to_keep,
+        enable_background_delete=config.enable_background_delete,
     )
 
   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
