@@ -136,7 +136,7 @@ class AqtQuantization:
     )
     return aqt_dg_cls
 
-  def einsum(self, mesh_axes: Tuple[str, ...] = (),):
+  def einsum(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns einsum configured with aqt params."""
     rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(mesh_axes)
     aqt_einsum = functools.partial(
@@ -150,6 +150,7 @@ class AqtQuantization:
         )
     )
     return aqt_einsum
+
 
 @dataclass
 class Fp8Quantization(Quantization):
@@ -356,4 +357,3 @@ class KVQuant:
         rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
         rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
     )
-
