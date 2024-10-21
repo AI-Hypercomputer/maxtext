@@ -71,6 +71,8 @@ set_nccl_gpudirect_tcpx_specific_configuration() {
       export NCCL_SHIMNET_GUEST_CONFIG_CHECKER_CONFIG_FILE=/usr/local/nvidia/lib64/a3plus_guest_config.textproto
       export NCCL_TUNER_CONFIG_PATH=/usr/local/nvidia/lib64/a3plus_tuner_config.textproto
       export NCCL_TUNER_PLUGIN=libnccl-tuner.so
+      export NCCL_SHIMNET_GUEST_CONFIG_CHECKER_CONFIG_FILE=/usr/local/nvidia/lib64/a3plus_guest_config.textproto
+      export NCCL_FASTRAK_PLUGIN_ACCEPT_TIMEOUT_MS=600000
     fi
   else
     echo "NOT using GPUDirect"
