@@ -25,8 +25,7 @@ fi
 export DATASET_PATH=gs://maxtext-dataset
 
 # `SCANNED_CHECKPOINT` refers to the checkpoint that used for both `train.py` and `decode.py` 
-# export SCANNED_CHECKPOINT=${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_ckpt/0/items
-export SCANNED_CHECKPOINT=gs://maxtext-external/Mixtral-8x22B-Instruct-v0.1-maxtext/0/items
+export SCANNED_CHECKPOINT=${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_ckpt/0/items
 
 export TOKENIZER_PATH=assets/tokenizer.mistral-v3
 
