@@ -145,7 +145,11 @@ JAX_PLATFORMS=tpu python3 MaxText/$EXECUTABLE MaxText/configs/base.yml \
     attention=flash \
     data_shuffle_seed=8745 \
     quantization=int8 \
-    grain_worker_count=$GRAIN_WORKER_COUNT
+    grain_worker_count=$GRAIN_WORKER_COUNT \
+    collect_stack_trace=True \
+    stack_trace_to_cloud=True \
+    stack_trace_interval_seconds=60
+
     #run_name=$(date +%m%d-%H%M)
     #model_name=gpt3-175b \
     
