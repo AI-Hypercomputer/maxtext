@@ -30,6 +30,8 @@ import numpy as np
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
 import max_logging
+from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
+import numpy as np 
 
 try:
   from jax.experimental.pallas.ops.tpu import megablox as mblx
@@ -161,22 +163,251 @@ class DenseGeneral(nn.Module):
     return output
 
 
-class MlpBlock(nn.Module):
-  """Transformer MLP / feed-forward block.
+# class MlpBlock(nn.Module):
+#   """Transformer MLP / feed-forward block.
 
-  Attributes:
-    intermediate_dim: Shared dimension of hidden layers.
-    activations: Type of activations for each layer.  Each element is either
-      'linear', a string function name in flax.linen, or a function.
-    kernel_init: Kernel function, passed to the dense layers.
-    deterministic: Whether the dropout layers should be deterministic.
-    intermediate_dropout_rate: Dropout rate used after the intermediate layers.
-    dtype: computation data type for the dense layer.
-    weight_dtype: weight data type for the dense layer.
-    use_bias: whether to add bias in all feedforward layers.
-    use_pre_norm: whether to add pre layer norm in mlp layers.
-    quant: Optional quantization config, no quantization if None.
-  """
+#   Attributes:
+#     intermediate_dim: Shared dimension of hidden layers.
+#     activations: Type of activations for each layer.  Each element is either
+#       'linear', a string function name in flax.linen, or a function.
+#     kernel_init: Kernel function, passed to the dense layers.
+#     deterministic: Whether the dropout layers should be deterministic.
+#     intermediate_dropout_rate: Dropout rate used after the intermediate layers.
+#     dtype: computation data type for the dense layer.
+#     weight_dtype: weight data type for the dense layer.
+#     use_bias: whether to add bias in all feedforward layers.
+#     use_pre_norm: whether to add pre layer norm in mlp layers.
+#     quant: Optional quantization config, no quantization if None.
+#   """
+
+#   config: Config
+#   intermediate_dim: int = 2048
+#   activations: Sequence[Union[str, Callable[..., Any]]] = ("relu",)
+#   kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal")
+#   intermediate_dropout_rate: float = 0.1
+#   dtype: Any = jnp.float32
+#   weight_dtype: Any = jnp.float32
+#   use_bias: bool = False
+#   use_pre_norm: bool = False
+#   quant: Optional[Quant] = None
+
+#   def get_norm_layer(self):
+#     if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
+#       return RMSNorm
+#     elif self.config.decoder_block == "gpt3":
+#       from layers import gpt3
+
+#       return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=self.use_bias)
+#     else:
+#       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
+
+#   @nn.compact
+#   def __call__(self, inputs, decode: bool = False, deterministic: bool = False):
+#     """Applies Transformer MlpBlock module."""
+#     cfg = self.config
+
+#     if self.use_pre_norm:
+#       inputs = self.get_norm_layer()(
+#           name="mlp_layer_norm",
+#           dtype=cfg.dtype,
+#           weight_dtype=cfg.weight_dtype,
+#           kernel_axes=("norm",),
+#           epsilon=cfg.normalization_layer_epsilon,
+#       )(inputs)
+
+#     # Iterate over specified MLP input activation functions.
+#     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
+#     activations = []
+#     if cfg.fused_mlp:
+#       x = DenseGeneral(
+#           (len(self.activations), self.intermediate_dim),
+#           dtype=self.dtype,
+#           weight_dtype=self.weight_dtype,
+#           kernel_init=self.kernel_init,
+#           kernel_axes=("embed", "num_activations", "mlp"),
+#           name="wi",
+#           quant=self.quant,
+#           use_bias=self.use_bias,
+#           matmul_precision=self.config.matmul_precision,
+#       )(inputs)
+#       for idx, act_fn in enumerate(self.activations):
+#         y = _convert_to_activation_function(act_fn)(x[:, :, idx, ...])
+#         activations.append(y)
+#     else:
+#       for idx, act_fn in enumerate(self.activations):
+#         dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
+#         x = DenseGeneral(
+#             self.intermediate_dim,
+#             dtype=self.dtype,
+#             weight_dtype=self.weight_dtype,
+#             kernel_init=self.kernel_init,
+#             kernel_axes=("embed", "mlp"),
+#             name=dense_name,
+#             quant=self.quant,
+#             use_bias=self.use_bias,
+#             matmul_precision=self.config.matmul_precision,
+#         )(inputs)
+#         if cfg.activations_in_float32:
+#           x = x.astype(jnp.float32)
+#         x = _convert_to_activation_function(act_fn)(x)
+#         activations.append(x)
+
+#     # Take elementwise product of above intermediate activations.
+#     x = functools.reduce(operator.mul, activations).astype(self.dtype)
+#     x = checkpoint_name(x, "mlpwi")
+#     # Apply dropout and final dense output projection.
+#     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
+#         x, deterministic=deterministic
+#     )  # Broadcast along length.
+#     x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
+#     output = DenseGeneral(
+#         inputs.shape[-1],
+#         dtype=self.dtype,
+#         weight_dtype=self.weight_dtype,
+#         kernel_init=self.kernel_init,
+#         kernel_axes=("mlp", "embed"),
+#         name="wo",
+#         quant=self.quant,
+#         use_bias=self.use_bias,
+#         matmul_precision=self.config.matmul_precision,
+#     )(x)
+
+#     output = checkpoint_name(output, "mlpwo")
+#     return output
+
+# class MlpBlock(nn.Module):
+#   """Transformer MLP / feed-forward block with custom sharding."""
+
+#   config: Config
+#   intermediate_dim: int = 2048
+#   activations: Sequence[Union[str, Callable[..., Any]]] = ("relu",)
+#   kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal")
+#   intermediate_dropout_rate: float = 0.1
+#   dtype: Any = jnp.float32
+#   weight_dtype: Any = jnp.float32
+#   use_bias: bool = False
+#   use_pre_norm: bool = False
+#   quant: Optional[Quant] = None
+
+#   def create_mlp_mesh_annotations(self):
+#     """Creates mesh annotations for 4-way model, 2-way sequence sharding."""
+#     # Define the mesh axes we want to use
+#     mesh_annotations = {
+#       'activation_batch': P('data', 'fsdp'),
+#       'activation_length': P('sequence'),  # 2-way sequence sharding
+#       'activation_embed': P('tensor'),     # 4-way model sharding
+#       'activation_mlp': P('tensor'),       # 4-way model sharding
+#       'embed': P('tensor'),
+#       'mlp': P('tensor'),
+#     }
+#     return mesh_annotations
+
+#   @nn.compact
+#   def __call__(self, inputs, deterministic: bool = False):
+#     cfg = self.config
+#     mesh_annotations = self.create_mlp_mesh_annotations()
+    
+#     if self.use_pre_norm:
+#       inputs = self.get_norm_layer()(
+#           name="mlp_layer_norm",
+#           dtype=cfg.dtype,
+#           weight_dtype=cfg.weight_dtype,
+#           kernel_axes=("norm",),
+#           epsilon=cfg.normalization_layer_epsilon,
+#       )(inputs)
+
+#     # Add logical mesh constraint for inputs
+#     inputs = nn.with_logical_constraint(
+#         inputs, 
+#         ("activation_batch", "activation_length", "activation_embed")
+#     )
+
+#     # Handle fused vs non-fused MLP paths
+#     if cfg.fused_mlp:
+#       x = DenseGeneral(
+#           (len(self.activations), self.intermediate_dim),
+#           dtype=self.dtype,
+#           weight_dtype=self.weight_dtype,
+#           kernel_init=self.kernel_init,
+#           kernel_axes=("embed", "num_activations", "mlp"),
+#           name="wi",
+#           quant=self.quant,
+#           use_bias=self.use_bias,
+#           matmul_precision=self.config.matmul_precision,
+#       )(inputs)
+      
+#       x = nn.with_logical_constraint(
+#           x, 
+#           ("activation_batch", "activation_length", "activation_mlp")
+#       )
+      
+#       activations = []
+#       for idx, act_fn in enumerate(self.activations):
+#         y = _convert_to_activation_function(act_fn)(x[:, :, idx, ...])
+#         activations.append(y)
+#     else:
+#       activations = []
+#       for idx, act_fn in enumerate(self.activations):
+#         dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
+#         x = DenseGeneral(
+#             self.intermediate_dim,
+#             dtype=self.dtype,
+#             weight_dtype=self.weight_dtype,
+#             kernel_init=self.kernel_init,
+#             kernel_axes=("embed", "mlp"),
+#             name=dense_name,
+#             quant=self.quant,
+#             use_bias=self.use_bias,
+#             matmul_precision=self.config.matmul_precision,
+#         )(inputs)
+          
+#         x = nn.with_logical_constraint(
+#             x,
+#             ("activation_batch", "activation_length", "activation_mlp")
+#         )
+          
+#         if cfg.activations_in_float32:
+#           x = x.astype(jnp.float32)
+#         x = _convert_to_activation_function(act_fn)(x)
+#         activations.append(x)
+
+#     # Take elementwise product of intermediate activations
+#     x = functools.reduce(operator.mul, activations)
+#     x = x.astype(self.dtype)
+#     x = checkpoint_name(x, "mlpwi")
+      
+#     # Apply dropout and final dense output projection
+#     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
+#         x, deterministic=deterministic
+#     )
+      
+#     x = nn.with_logical_constraint(
+#         x,
+#         ("activation_batch", "activation_length", "activation_mlp")
+#     )
+
+#     output = DenseGeneral(
+#         inputs.shape[-1],
+#         dtype=self.dtype,
+#         weight_dtype=self.weight_dtype,
+#         kernel_init=self.kernel_init,
+#         kernel_axes=("mlp", "embed"),
+#         name="wo",
+#         quant=self.quant,
+#         use_bias=self.use_bias,
+#         matmul_precision=self.config.matmul_precision,
+#     )(x)
+
+#     output = nn.with_logical_constraint(
+#         output,
+#         ("activation_batch", "activation_length", "activation_embed")
+#     )
+
+#     output = checkpoint_name(output, "mlpwo")
+#     return output
+
+class MlpBlock(nn.Module):
+  """Transformer MLP / feed-forward block with 4-way tensor, 2-way sequence sharding."""
 
   config: Config
   intermediate_dim: int = 2048
@@ -189,19 +420,8 @@ class MlpBlock(nn.Module):
   use_pre_norm: bool = False
   quant: Optional[Quant] = None
 
-  def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
-      return RMSNorm
-    elif self.config.decoder_block == "gpt3":
-      from layers import gpt3
-
-      return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=self.use_bias)
-    else:
-      raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
-
   @nn.compact
-  def __call__(self, inputs, decode: bool = False, deterministic: bool = False):
-    """Applies Transformer MlpBlock module."""
+  def __call__(self, inputs, deterministic: bool = False):
     cfg = self.config
 
     if self.use_pre_norm:
@@ -213,9 +433,18 @@ class MlpBlock(nn.Module):
           epsilon=cfg.normalization_layer_epsilon,
       )(inputs)
 
-    # Iterate over specified MLP input activation functions.
-    # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
-    activations = []
+    # Mark input with original sharding pattern
+    inputs = nn.with_logical_constraint(
+        inputs, 
+        ("activation_batch", "activation_length", "activation_embed")
+    )
+
+    # Apply 4x2 sharding pattern
+    inputs = nn.with_logical_constraint(
+        inputs,
+        ("activation_batch", "sequence", "tensor")
+    )
+
     if cfg.fused_mlp:
       x = DenseGeneral(
           (len(self.activations), self.intermediate_dim),
@@ -228,10 +457,23 @@ class MlpBlock(nn.Module):
           use_bias=self.use_bias,
           matmul_precision=self.config.matmul_precision,
       )(inputs)
+
+      x = nn.with_logical_constraint(
+          x,
+          ("activation_batch", "sequence", "num_activations", "tensor")
+      )
+
+      activations = []
       for idx, act_fn in enumerate(self.activations):
         y = _convert_to_activation_function(act_fn)(x[:, :, idx, ...])
+        y = nn.with_logical_constraint(
+            y,
+            ("activation_batch", "sequence", "tensor")
+        )
         activations.append(y)
+
     else:
+      activations = []
       for idx, act_fn in enumerate(self.activations):
         dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
         x = DenseGeneral(
@@ -245,19 +487,30 @@ class MlpBlock(nn.Module):
             use_bias=self.use_bias,
             matmul_precision=self.config.matmul_precision,
         )(inputs)
+
+        x = nn.with_logical_constraint(
+            x,
+            ("activation_batch", "sequence", "tensor")
+        )
+
         if cfg.activations_in_float32:
           x = x.astype(jnp.float32)
         x = _convert_to_activation_function(act_fn)(x)
         activations.append(x)
 
-    # Take elementwise product of above intermediate activations.
-    x = functools.reduce(operator.mul, activations).astype(self.dtype)
+    x = functools.reduce(operator.mul, activations)
+    x = x.astype(self.dtype)
     x = checkpoint_name(x, "mlpwi")
-    # Apply dropout and final dense output projection.
+
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
         x, deterministic=deterministic
-    )  # Broadcast along length.
-    x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
+    )
+
+    x = nn.with_logical_constraint(
+        x,
+        ("activation_batch", "sequence", "tensor")
+    )
+
     output = DenseGeneral(
         inputs.shape[-1],
         dtype=self.dtype,
@@ -271,8 +524,14 @@ class MlpBlock(nn.Module):
     )(x)
 
     output = checkpoint_name(output, "mlpwo")
-    return output
 
+    # Return to original sharding pattern
+    output = nn.with_logical_constraint(
+        output,
+        ("activation_batch", "activation_length", "activation_embed")
+    )
+
+    return output
 
 class MoeBlock(nn.Module):
   """Mixture of Experts (MoE) block.

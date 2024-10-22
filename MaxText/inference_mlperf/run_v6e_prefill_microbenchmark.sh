@@ -5,7 +5,7 @@
 
 run_name="trillium_llama2-70b"
 dry_run=false
-enable_profiler=true
+enable_profiler=false
 enable_xla_flags=false
 prefill_lens="1024"
 stages="prefill"
@@ -56,7 +56,7 @@ export PER_DEVICE_BATCH_SIZE=1
 export ICI="FSDP=${ICI_FSDP_PARALLELISM}_AR=${ICI_AUTOREGRESSIVE_PARALLELISM}_TENSOR=${ICI_TENSOR_PARALLELISM}_SEQ=${ICI_SEQUENCE_PARALLELISM}"
 
 
-export MESH_TYPE="balanced_2d" 
+export MESH_TYPE="default" 
 export RUN_DESC="${run_name}_${stages}_${prefill_lens}_flags_${enable_xla_flags}_${ICI}_${MESH_TYPE}"
 
 mkdir -p /tmp/mb/logs
