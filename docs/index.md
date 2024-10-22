@@ -16,45 +16,47 @@
 
 # MaxText
 
-[![Unit Tests](https://github.com/google/maxtext/actions/workflows/UnitTests.yml/badge.svg)](https://github.com/google/maxtext/actions/workflows/UnitTests.yml)
-
 ## Overview
 
-MaxText is a **high performance**, **highly scalable**, **open-source** LLM written in pure Python/Jax and targeting Google Cloud TPUs and GPUs for **training** and **inference**. MaxText achieves [high MFUs](#runtime-performance-results) and scales from single host to very large clusters while staying simple and "optimization-free" thanks to the power of Jax and the XLA compiler.
+MaxText is a a Google initiated open source project for **high performance**, **highly scalable**, **open-source** LLM written in pure Python/[JAX](https://jax.readthedocs.io/en/latest/index.html) and targeting Google Cloud TPUs and GPUs for **training** and **inference**. MaxText achieves [high MFUs](#runtime-performance-results) and scales from single host to very large clusters while staying simple and "optimization-free" thanks to the power of Jax and the XLA compiler.
+
+MaxText achieves very high MFUs (Model Flop Utilization) and scales from single host to very large clusters while staying simple and "optimization-free".
 
 MaxText aims to be a launching off point for ambitious LLM projects both in research and production. We encourage users to start by experimenting with MaxText out of the box and then fork and modify MaxText to meet their needs.
 
 We have used MaxText to [demonstrate high-performance, well-converging training in int8](https://cloud.google.com/blog/products/compute/accurate-quantized-training-aqt-for-tpu-v5e) and [scale training to ~51K chips](https://cloud.google.com/blog/products/compute/the-worlds-largest-distributed-llm-training-job-on-tpu-v5e).
 
 Key supported features:
-* TPUs and GPUs (in preview)
-* Training and Inference (in preview)
-* Models: Llama2, Mistral and Gemma
+- TPUs and GPUs (in preview)
+- Training and Inference (in preview)
 
-## Table of Contents
+MaxText additionally provides an highly optimized reference implementations for popular Open Source models like:
 
-* [Getting Started](getting_started/First_run.md)
-* [Runtime Performance Results](#runtime-performance-results)
-* [Comparison To Alternatives](#comparison-to-alternatives)
-* [Development](#development)
-* [Features and Diagnostics](#features-and-diagnostics)
+- Llama 2, 3 and 3.1
+- Mistral and Mixtral
+- Gemma and Gemma2
+- GPT
 
-## Getting Started
+These reference implementations support pre-training and full fine tuning. Maxtext also allows you to create various sized models for benchmarking purposes.
 
-For your first time running MaxText, we provide specific [instructions](getting_started/First_run.md).
+The key value proposition of using MaxText for pre-training or full fine tuning is:
 
-MaxText supports training and inference of various open models. Follow user guides in the [getting started](getting_started) folder to know more.
+- Very high performance of average of 50% MFU
+- Open code base
+- Easy to understand: MaxText is purely written in JAX and Python, which makes it accessible to ML developers interested in inspecting the implementation or stepping through it. It is written at the block-by-block level, with code for Embeddings, Attention, Normalization etc. Different Attention mechanisms like MQA and GQA are all present. For quantization, it uses the JAX AQT library. The implementation is suitable for both GPUs and TPUs.
 
-Some extra helpful guides:
-* [Gemma](https://ai.google.dev/gemma): a family of open-weights Large Language Model (LLM) by [Google DeepMind](https://deepmind.google/), based on Gemini research and technology. You can run decode and finetuning using [these instructions](end_to_end/tpu/gemma/Run_Gemma.md).
-* [Llama2](https://llama.meta.com/llama2/): a family of open-weights Large Language Model (LLM) by Meta. You can run decode and finetuning using [these instructions](getting_started/Run_Llama2.md).
-* [Mixtral](https://mistral.ai/news/mixtral-of-experts/): a family of open-weights sparse mixture-of-experts (MoE) model by Mistral AI. You can run decode and finetuning using [these instructions](end_to_end/tpu/mixtral/Run_Mixtral.md)
+```{note}
+Maxtext today only supports Pre-training and Full Fine Tuning of the models. It does not support PEFT/LoRA, Supervised Fine Tuning or RLHF.
+```
 
-In addition to the getting started guides, there are always other MaxText capabilities that are being constantly being added! The full suite of end-to-end tests is in [end_to_end](end_to_end). We run them with a nightly cadence. They can be a good source for understanding MaxText Alternatively you can see the continuous [unit tests](.github/workflows/UnitTests.yml) which are run almost continuously.
+## Who are the target users of Maxtext?
+
+- Any individual or a company that is interested in forking maxtext and seeing it as a reference implementation of a high performance Large Language Models and wants to build their own LLMs on TPU and GPU.
+- Any individual or a company that is interested in performing a pre-training or Full Fine Tuning of the supported open source models, can use Maxtext as a blackbox to perform full fine tuning. Maxtext attains an extremely high MFU, resulting in large savings in training costs.
 
 ## Runtime Performance Results
 
-More details on reproducing these results can be found in [MaxText/configs/README.md](MaxText/configs/README.md).
+More details on reproducing these results can be found in [MaxText/configs/README.md](https://github.com/AI-Hypercomputer/maxtext/blob/main/MaxText/configs/README.md).
 
 ### TPU v5p
 
@@ -73,7 +75,7 @@ More details on reproducing these results can be found in [MaxText/configs/READM
 
 ### TPU v5e
 
-For 16B, 32B, 64B, and 128B models. See full run configs in [MaxText/configs/v5e/](MaxText/configs/v5e/) as `16b.sh`, `32b.sh`, `64b.sh`, `128b.sh`.
+For 16B, 32B, 64B, and 128B models. See full run configs in [MaxText/configs/v5e/](https://github.com/AI-Hypercomputer/maxtext/blob/main/MaxText/configs/v5e/) as `16b.sh`, `32b.sh`, `64b.sh`, `128b.sh`.
 
 | Hardware    | 16B TFLOP/sec/chip | 16B MFU | 32B TFLOP/sec/chip | 32B MFU | 64B TFLOP/sec/chip | 64B MFU | 128B TFLOP/sec/chip | 128B MFU |
 | ----------- | -----------------: | ------- | -----------------: | ------- | -----------------: | ------- | ------------------: | -------- |
@@ -194,3 +196,13 @@ As in the TPU case, note that the compilation environment must match the executi
 
 ### Automatically Upload Logs to Vertex Tensorboard
 MaxText supports automatic upload of logs collected in a directory to a Tensorboard instance in Vertex AI. Follow [user guide](getting_started/Use_Vertex_AI_Tensorboard.md) to know more.
+
+
+```{toctree}
+:maxdepth: 1
+:hidden:
+
+getting_started/index.md
+advanced_usage.md
+reference/index.md
+```
