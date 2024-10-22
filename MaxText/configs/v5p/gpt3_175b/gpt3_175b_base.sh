@@ -4,10 +4,15 @@
 # achieved high performance on the Training benchmark. See the various different TPU type configs in this 
 # directory to actually run the training.
 
+# Example to invoke this script for compilation
+# ./MaxText/configs/v5p/gpt3_175b/gpt3_175b_base.sh 4 "full" 1 64 8 "some_run" "gs://some_bucket" "train_compile.py" "v5p-1024" 1
+
+# Example to invoke this script for training
+# ./MaxText/configs/v5p/gpt3_175b/gpt3_175b_base.sh 4 "full" 1 64 8 "some_run" "gs://some_bucket"
+
 set -euox pipefail
 
 bash preflight.sh PLATFORM=gke
-sleep 60
 
 # flags set as default
 
@@ -29,14 +34,33 @@ ICI_FSDP_PARALLELISM=${4:-${ICI_FSDP_PARALLELISM:-64}}
 ICI_TENSOR_PARALLELISM=${5:-${ICI_TENSOR_PARALLELISM:-8}}
 RUNNAME=${6:-${RUNNAME:-convergence_test_0}}
 BASE_OUTPUT_DIRECTORY=${7:-${BASE_OUTPUT_DIRECTORY:-gs://some-bucket}}
+EXECUTABLE=${8:-train.py} # Or train_compile.py
 
-python3 MaxText/train.py MaxText/configs/base.yml run_name="${RUNNAME}" model_name=gpt3-175b\
-  base_output_directory="${BASE_OUTPUT_DIRECTORY}"\
-  enable_checkpointing=false async_checkpointing=false\
-  steps=20\
-  per_device_batch_size="${PER_DEVICE_BATCH_SIZE}"\
-  ici_data_parallelism="${ICI_DATA_PARALLELISM}" ici_fsdp_parallelism="${ICI_FSDP_PARALLELISM}" ici_tensor_parallelism="${ICI_TENSOR_PARALLELISM}"\
-  remat_policy="${REMAT_POLICY}"\
-  attention="flash" \
-  quantization=int8\
-  dataset_type=synthetic\
+if [[ "$EXECUTABLE" == "train_compile.py" ]]; then
+  COMPILE_TOPOLOGY=${9}
+  COMPILE_TOPOLOGY_NUM_SLICES=${10}
+  
+  python3 MaxText/"$EXECUTABLE" MaxText/configs/base.yml run_name="${RUNNAME}" model_name=gpt3-175b\
+    base_output_directory="${BASE_OUTPUT_DIRECTORY}"\
+    enable_checkpointing=false async_checkpointing=false\
+    steps=20\
+    per_device_batch_size="${PER_DEVICE_BATCH_SIZE}"\
+    ici_data_parallelism="${ICI_DATA_PARALLELISM}" ici_fsdp_parallelism="${ICI_FSDP_PARALLELISM}" ici_tensor_parallelism="${ICI_TENSOR_PARALLELISM}"\
+    remat_policy="${REMAT_POLICY}"\
+    attention="flash" \
+    quantization=int8\
+    dataset_type=synthetic\
+    compile_topology="${COMPILE_TOPOLOGY}"\
+    compile_topology_num_slices="${COMPILE_TOPOLOGY_NUM_SLICES}"
+else
+  python3 MaxText/"$EXECUTABLE" MaxText/configs/base.yml run_name="${RUNNAME}" model_name=gpt3-175b\
+    base_output_directory="${BASE_OUTPUT_DIRECTORY}"\
+    enable_checkpointing=false async_checkpointing=false\
+    steps=20\
+    per_device_batch_size="${PER_DEVICE_BATCH_SIZE}"\
+    ici_data_parallelism="${ICI_DATA_PARALLELISM}" ici_fsdp_parallelism="${ICI_FSDP_PARALLELISM}" ici_tensor_parallelism="${ICI_TENSOR_PARALLELISM}"\
+    remat_policy="${REMAT_POLICY}"\
+    attention="flash" \
+    quantization=int8\
+    dataset_type=synthetic
+fi
