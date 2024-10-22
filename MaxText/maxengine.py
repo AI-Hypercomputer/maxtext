@@ -417,14 +417,14 @@ class MaxEngine(engine_api.Engine):
     def initialize():
       return jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), abstract_outputs)
 
-    cache = initialize()["cache"]
+    init_state = initialize()
+    cache = init_state["cache"]
 
     def is_lp(k):
       return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
 
     self.kv_cache_annotations_named = jax.tree_util.tree_map(lambda x: tuple(x.names), cache, is_leaf=is_lp)
-    max_utils.delete_pytree(cache)
-    zeroed = max_utils.unbox_logicallypartioned(initialize())
+    zeroed = max_utils.unbox_logicallypartioned(init_state)
     return zeroed
 
   @property
