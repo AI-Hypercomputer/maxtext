@@ -1,7 +1,5 @@
 #!/bin/bash
 
-source mt_config.sh
-
 export MODEL_NAME=llama2-7b
 
 # Launch llama2 70b
