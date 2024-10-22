@@ -12,4 +12,4 @@ RUNNAME=${1:-${RUNNAME:-some-run}}
 BASE_OUTPUT_DIRECTORY=${2:-${BASE_OUTPUT_DIRECTORY:-gs://some-bucket}}
 
 chmod +x MaxText/configs/v5p/gpt3_175b/gpt3_175b_base.sh 
-./MaxText/configs/v5p/gpt3_175b/gpt3_175b_base.sh 4 "full" 1 64 8 "${RUNNAME}" "${BASE_OUTPUT_DIRECTORY}" 
+./MaxText/configs/v5p/gpt3_175b/gpt3_175b_base.sh 4 "full" 1 64 8 "${RUNNAME}" "${BASE_OUTPUT_DIRECTORY}"
