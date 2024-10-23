@@ -18,6 +18,9 @@ set -e
 
 export EXECUTABLE="train.py" # or train_compile.py
 export RUN_PREFLIGHT="true"
+export QUANTIZATION=""
+export SEQUENCE_LENGTH="2048"
+export PER_DEVICE_BATCH_SIZE="4"
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -43,5 +46,6 @@ export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xl
 
 python MaxText/$EXECUTABLE MaxText/configs/base.yml model_name=llama2-70b\
   base_output_directory=$OUTPUT_PATH dataset_path=${DATASET_PATH}\
-  tokenizer_path=assets/tokenizer.llama2 per_device_batch_size=2 remat_policy=qkv_proj_offloaded\
-  steps=15 enable_checkpointing=false use_iota_embed=true
+  tokenizer_path=assets/tokenizer.llama2 per_device_batch_size=${PER_DEVICE_BATCH_SIZE} remat_policy=qkv_proj_offloaded\
+  steps=15 enable_checkpointing=false use_iota_embed=true quantization=${QUANTIZATION}\
+  max_target_length=${SEQUENCE_LENGTH}

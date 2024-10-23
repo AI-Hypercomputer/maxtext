@@ -23,6 +23,7 @@ before having to use the target hardware - you will see the same OOM error messa
 as you would on the target hardware.
 """
 
+import json
 import jax
 from jax.experimental.topologies import get_topology_desc
 from jax.sharding import Mesh
@@ -133,6 +134,25 @@ def save_compiled(compiled, save_name):
   with open(save_name, "wb") as f:
     pickle.dump(serialized, f)
 
+def save_config(config):
+  print('*'*100)
+  print(config.compile_topology)
+  print(config.get_keys())
+  xla_flags = os.getenv('XLA_FLAGS').split(" ")
+  xla_dump_to = xla_flags[0].split('=')[1]
+
+  stringified_dict = {}
+  for key, value in config.get_keys().items():
+    stringified_dict[key] = str(value)
+
+  stringified_dict['jax_version'] = jax.__version__
+  stringified_dict['jaxlib_version'] = jax.lib.__version__
+  stringified_dict['jax_backend'] = jax.lib.xla_bridge.get_backend().platform_version
+
+  output_path = f"{xla_dump_to}/config.json"
+  with open(output_path, 'w') as f:
+      json.dump(stringified_dict, f)
+  return None
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
@@ -183,6 +203,7 @@ def main(argv: Sequence[str]) -> None:
   print(f"Cost analysis: {compiled.cost_analysis()}")
   print(f"Memory analysis: {compiled.memory_analysis()}")
 
+  save_config(config)
 
 if __name__ == "__main__":
   app.run(main)
