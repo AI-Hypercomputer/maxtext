@@ -705,8 +705,9 @@ def train_loop(config, state=None):
   ) = setup_train_loop(config)
 
   if config.use_dpo:
-    reference_params = jax.tree.map(jnp.copy, state.params["params"])
-    state = _merge_dpo_state(state, reference_params)
+    if "reference_params" not in state.params:
+      reference_params = jax.tree.map(jnp.copy, state.params["params"])
+      state = _merge_dpo_state(state, reference_params)
     state_mesh_annotations = _merge_dpo_state(state_mesh_annotations, state_mesh_annotations.params["params"])
 
   # pylint: disable=line-too-long
