@@ -419,56 +419,39 @@ def _gmm(
       lhs,
       rhs,
       existing_out,
-      group_metadata_ref,
+      group_ids_ref,
+      m_tile_ids_ref,
       group_offset_ref,
-      tiles_k_ref,
+      acc_ref,
       out,
   ):
-    """
-    tiling
-    group_metadata
-    group_offset
-    preferred_element_type
-    transpose_rhs
-    """
 
-    group_offsets_ref, group_ids_ref, m_tile_ids_ref = group_metadata_ref
-    del group_offsets_ref
-    group_ids = group_ids_ref[...]
-    m_tile_ids = m_tile_ids_ref[...]
-    group_offset = group_offset_ref[...]
-    tiles_k_new = tiles_k_ref[...]
-
-    tm, tk, tn = tiling
-
-    # del group_offsets
-    acc = jnp.zeros((tm, tn), dtype=jnp.float32)
     n_i = pl.program_id(0)
     grid_id = pl.program_id(1)
     k_i = pl.program_id(2)
 
-    m_i = m_tile_ids[grid_id]
-    rhs_group_id, rhs_k_i, rhs_n_i = group_ids[grid_id] - group_offset[0], k_i, n_i
+    m_i = m_tile_ids_ref[grid_id]
+    rhs_group_id = group_ids_ref[grid_id] - group_offset_ref[0]
+    rhs_k_i, rhs_n_i, rhs_tk, rhs_tn = k_i, n_i, tk, tn
     if transpose_rhs:
-      rhs_group_id, rhs_k_i, rhs_n_i, tk, tn = group_ids[grid_id] - group_offset[0], n_i, k_i, tn, tk
-    out_m, out_n = m_tile_ids[grid_id], n_i
+      rhs_k_i, rhs_n_i, rhs_tk, rhs_tn = n_i, k_i, tn, tk
 
 
     @pl.when(k_i == 0)
     def _zero_acc():
-      acc = jnp.zeros((tm, tn), dtype=jnp.float32)
+      acc_ref[...] = jnp.zeros_like(acc_ref)
 
       if existing_out is not None:
         prev_grid_id = jnp.where(grid_id > 0, grid_id - 1, 0)
         is_first_processed_group = grid_id == 0
-        m_tile_changed = m_tile_ids[grid_id] != m_tile_ids[prev_grid_id]
+        m_tile_changed = m_i != m_tile_ids_ref[prev_grid_id]
         first_time_seeing_out = jnp.logical_or(
             is_first_processed_group, m_tile_changed
         )
 
         @pl.when(first_time_seeing_out)
         def _init_out():
-          out[out_m:out_m+tm, out_n:out_n+tn] = existing_out[out_m:out_m+tm, out_n:out_n+tn]
+          out[m_i:m_i+tm, n_i:n_i+tn] = existing_out[m_i:m_i+tm, n_i:n_i+tn]
 
     def mask_k_rem(x, *, dim):
       if k_rem == 0:
@@ -486,10 +469,10 @@ def _gmm(
           tm=tm,
           tn=tn,
       )
-      to_store = acc[...]
+      to_store = acc_ref[...]
       pl.store(
         out, 
-        (pl.dslice(out_m, tm), pl.dslice(out_n, tn)), 
+        (pl.dslice(m_i, tm), pl.dslice(n_i, tn)), 
         to_store.astype(preferred_element_type), 
         mask=mask,
       )
@@ -508,7 +491,9 @@ def _gmm(
       else:
         dot_general_dims = (((1,), (0,)), ((), ()))
 
-      acc = lax.dot_general(
+      loaded_lhs = pl.load(lhs, (pl.ds(m_i, tm), pl.ds(k_i, tk)))
+      loaded_rhs = pl.load(rhs, (rhs_group_id, pl.ds(rhs_k_i, rhs_tk), pl.ds(rhs_n_i, rhs_tn)))
+      acc_ref[...] += lax.dot_general(
           mask_k_rem_lhs(loaded_lhs).astype(input_dtype),
           mask_k_rem_rhs(loaded_rhs).astype(input_dtype),
           preferred_element_type=jnp.float32,
@@ -518,11 +503,18 @@ def _gmm(
       if is_last_k_tile:
         _store_accum()
 
+    lax.cond(
+      k_i == pl.num_programs(2) - 1,
+      partial(_accum, True),
+      partial(_accum, False),
+    )
+
   if existing_out is None:
     input_output_aliases = {}
   else:
     input_output_aliases = {6: 0}
 
+  # kernel = partial(kernel, tiles_k=tiles_k)
   call_gmm = pl.pallas_call(
       kernel,
       out_shape=jax.ShapeDtypeStruct((m, n), preferred_element_type),
@@ -531,15 +523,15 @@ def _gmm(
       interpret=interpret,
       debug=True,
   )
-
+  acc = jnp.zeros((tm, tn), dtype=jnp.float32)
   out = call_gmm(
       lhs,
       rhs,
       existing_out,
-      group_metadata,
+      group_metadata[1],
+      group_metadata[2],
       group_offset,
-      tiles_k,
-
+      acc,
   )
   if existing_out is None and num_current_groups < num_total_groups:
     out = _zero_uninitialized_memory(
