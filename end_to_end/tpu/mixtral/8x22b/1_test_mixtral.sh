@@ -14,7 +14,7 @@ MODEL_VARIATION='8x22b'
 
 if [ -z "${BASE_OUTPUT_PATH}" ]; then
     # Non-Googlers please remember to point BASE_OUTPUT_PATH to GCS buckets that you own, this script uses internal buckets for testing.
-    export BASE_OUTPUT_PATH=gs://runner-maxtext-logs/$(date +%Y-%m-%d-%H-%i)/ranran/
+    export BASE_OUTPUT_PATH=gs://runner-maxtext-logs/$(date +%Y-%m-%d-%H-%M)/ranran/
     echo "BASE_OUTPUT_PATH is not set, using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}"
 fi
 
@@ -43,6 +43,6 @@ MODEL_NAME="Mixtral-8x22B-Instruct-v0.1"
 # Generate unscanned ckpt for efficient decoding test
 export SCANNED_CHECKPOINT=gs://maxtext-external/Mixtral-8x22B-Instruct-v0.1-maxtext-v3/scanned_ckpt/0/items
 export RUN_NAME=unscanned_ckpt
-JAX_PLATFORMS=cpu python MaxText/generate_param_only_checkpoint.py MaxText/configs/base.yml async_checkpointing=false base_output_directory=${BASE_OUTPUT_PATH} load_parameters_path=${SCANNED_CHECKPOINT} run_name=${RUN_NAME} model_name='mixtral-8x22b' force_unroll=true dtype=bfloat16 weight_dtype=bfloat16
+JAX_PLATFORMS=cpu python MaxText/generate_param_only_checkpoint.py MaxText/configs/base.yml async_checkpointing=false base_output_directory=${BASE_OUTPUT_PATH} load_parameters_path=${SCANNED_CHECKPOINT} run_name=${RUN_NAME} model_name='mixtral-8x22b' force_unroll=true dtype=bfloat16 weight_dtype=bfloat16 megablox=False
 echo "Wrote MaxText compatible unscanned checkpoint to ${BASE_OUTPUT_PATH}/${RUN_NAME}/checkpoints"
 
