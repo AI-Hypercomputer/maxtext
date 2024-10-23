@@ -21,7 +21,7 @@ Currently MaxText has three data input pipelines:
 | -------- | --------------- | -------- | ----------- |
 | HuggingFace | datasets in HuggingFace Hub<br>local/Cloud Storage datasets in json, parquet, arrow, csv, txt | convenience<br>multiple formats | limit scalability using HuggingFace Hub<br>non-deterministic with preemption<br>(deterministic without preemption) |
 | Grain | ArrayRecord, available through Tensorflow Datasets | fully deterministic, regardless of preemption | only supports random access datasets |
-| TFDS | TFRecord, available through Tensorflow Datasets |  | only supports TFRecords<br>non-deterministic with preemption<br>(deterministic without preemption) |
+| TFDS | TFRecord, available through Tensorflow Datasets |  optionally fully deterministic, regardless of preemption | only supports TFRecords<br>requires checkpointing data iterator for fully deterministic training<br> |
 
 ### Performance
 * Perf data for all 3 input pipeline: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Perf.md
@@ -119,7 +119,6 @@ grain_eval_files: '/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-validation.array_rec
 ```
 
 ### TFDS pipeline
-
 1. Download the Allenai c4 dataset in TFRecord format to a GCS bucket (will cost about $100, [details](https://github.com/allenai/allennlp/discussions/5056))
 ```
 bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
@@ -135,3 +134,8 @@ eval_split: 'validation'
 # TFDS input pipeline only supports tokenizer in spm format
 tokenizer_path: "assets/tokenizer.llama2"
 ```
+3. Enable determinism (optional)
+```
+tfds_iter_checkpointing: True
+```
+Note that deteriminism with preemption requires checkpointing the data iterator, and the checkpoints will be larger in size. 
