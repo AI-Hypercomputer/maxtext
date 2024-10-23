@@ -412,10 +412,13 @@ class MoeBlock(nn.Module):
     def wrapper(x, logits, w0, w1, wo):
       x, sorted_selected_experts, weights, group_sizes = self.permute(x, logits)
       layer_w0 = gmm(x, w0, group_sizes)
+      layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
       layer_w1 = gmm(x, w1, group_sizes)
+      layer_w1 = checkpoint_name(layer_w0, "mlpwi_1")
       layer_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       intermediate_layer = jnp.multiply(layer_act, layer_w1)
       intermediate_output = gmm(intermediate_layer, wo, group_sizes)
+      intermediate_output = checkpoint_name(intermediate_output, "mlpwo")
       tensor_parallelism = self.config.ici_tensor_parallelism * self.config.dcn_tensor_parallelism
       if tensor_parallelism > 1:
         intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
@@ -547,6 +550,7 @@ class MoeBlock(nn.Module):
         )
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
+        layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
         layer_w0 = nn.with_logical_constraint(
             layer_w0, ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
         )
@@ -558,6 +562,7 @@ class MoeBlock(nn.Module):
         )
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
+        layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
         layer_w1 = nn.with_logical_constraint(
             layer_w1, ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
         )
@@ -569,6 +574,7 @@ class MoeBlock(nn.Module):
         intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
             "EBCH,EHM -> EBCM", layer_multiply, wo_kernel, precision=matmul_precision
         )
+        intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
         intermediate_layer = nn.with_logical_constraint(
             intermediate_layer, ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
         )
@@ -585,18 +591,20 @@ class MoeBlock(nn.Module):
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
         ).astype(jnp.float32)
+        layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
       with jax.named_scope("wi_1"):
         layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision
         ).astype(jnp.float32)
+        layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
       layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
       with jax.named_scope("wo"):
         intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes)(
             "BSEH,EHM -> BSEM", layer_multiply, wo_kernel, precision=matmul_precision
         )
+        intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("w_sum"):
-        weights_axis = ("activation_batch", "activation_length", "activation_exp")
         output = jnp.einsum("BSEM,BSE -> BSM", intermediate_layer.astype(jnp.float32), weights.astype(jnp.float32)).astype(
             self.dtype
         )
