@@ -20,7 +20,8 @@ v6e_env_configs = SWconfig(
 )
 v6e_256_configs = HWConfig(num_slices=NUM_SLICES, device_type=DEVICE_TYPE)
 
-llama31_8b_benchmark_v6e = BenchmarkRunner(
+## todo: replace with llama3.1 model tests
+llama2_70b_4096 = BenchmarkRunner(
     model_name=llama2_70b_4096,
     software_config=v6e_env_configs,
     hardware_config=v6e_256_configs,
