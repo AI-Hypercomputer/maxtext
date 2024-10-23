@@ -21,6 +21,7 @@ limitations under the License.
 from flax import linen as nn
 from jax.sharding import Mesh
 import jax.numpy as jnp
+from jax.ad_checkpoint import checkpoint_name
 # from jax.experimental.pallas.ops.tpu import flash_attention
 from layers import attentions
 from layers import embeddings
@@ -78,7 +79,7 @@ class LlamaDecoderLayer(nn.Module):
     mesh = self.mesh
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
-
+    inputs = checkpoint_name(inputs, "decoder_input")
     lnx_rms = models.RMSNorm(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -125,7 +126,7 @@ class LlamaDecoderLayer(nn.Module):
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
     intermediate_inputs = inputs + attention_lnx
-
+    intermediate_inputs = checkpoint_name(intermediate_inputs, "decoder_input")
     # Fully Connected
     hidden_states = models.RMSNorm(
         dtype=cfg.dtype,
@@ -152,7 +153,7 @@ class LlamaDecoderLayer(nn.Module):
     layer_output = mlp_lnx + intermediate_inputs
 
     layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
-
+    layer_output = checkpoint_name(layer_output, "decoder_out")
     layer_output = nn.with_logical_constraint(
         layer_output,
         ("activation_batch", "activation_length", "activation_embed"),

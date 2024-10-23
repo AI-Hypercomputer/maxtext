@@ -147,7 +147,7 @@ class DenseGeneral(nn.Module):
 
     contract_ind = tuple(range(0, len(axis)))
     output = compute_dot_general(inputs, kernel, axis, contract_ind)
-
+    # output = checkpoint_name(output, "dense")
     if self.use_bias:
       bias_axes, bias_shape = self.kernel_axes[-len(features) :], kernel_shape[-len(features) :]
       bias = self.param(
@@ -245,6 +245,7 @@ class MlpBlock(nn.Module):
             use_bias=self.use_bias,
             matmul_precision=self.config.matmul_precision,
         )(inputs)
+        # x = checkpoint_name(x, "mlp" + dense_name)
         if cfg.activations_in_float32:
           x = x.astype(jnp.float32)
         x = _convert_to_activation_function(act_fn)(x)
@@ -252,7 +253,7 @@ class MlpBlock(nn.Module):
 
     # Take elementwise product of above intermediate activations.
     x = functools.reduce(operator.mul, activations).astype(self.dtype)
-    x = checkpoint_name(x, "mlpwi")
+    # x = checkpoint_name(x, "mlpwi")
     # Apply dropout and final dense output projection.
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
         x, deterministic=deterministic

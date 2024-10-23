@@ -23,6 +23,7 @@ from flax import linen as nn
 import functools
 import jax
 import jax.numpy as jnp
+from jax.ad_checkpoint import checkpoint_name
 import common_types
 from layers import attentions
 from layers import embeddings
@@ -176,6 +177,7 @@ class Decoder(nn.Module):
   shared_embedding: nn.Module
   mesh: Mesh
   quant: Optional[Quant] = None
+  model_mode: str = common_types.MODEL_MODE_TRAIN
 
   def get_decoder_layer(self):
     if self.config.decoder_block == "default":
@@ -256,8 +258,7 @@ class Decoder(nn.Module):
       decoder_input_tokens,
       decoder_positions,
       decoder_segment_ids=None,
-      deterministic=False,
-      model_mode=common_types.MODEL_MODE_TRAIN,
+      deterministic=False
   ):
     cfg = self.config
     mesh = self.mesh
@@ -265,6 +266,7 @@ class Decoder(nn.Module):
 
     # [batch, length] -> [batch, length, emb_dim]
     y = self.shared_embedding(decoder_input_tokens.astype("int32"))
+    y = checkpoint_name(y, "decoder_input")
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
 
@@ -310,10 +312,10 @@ class Decoder(nn.Module):
             "key_proj",
             "qkv_proj",
         )
-      elif cfg.remat_policy == "qkv_proj_offloaded":
+      elif cfg.remat_policy == "input_qkv_proj_offloaded":
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=[],
-            names_which_can_be_offloaded=["query_proj", "value_proj", "key_proj"],
+            names_which_can_be_offloaded=["decoder_input", "rms_out", "dense"],
             offload_src="device",
             offload_dst="pinned_host",
         )
@@ -361,7 +363,7 @@ class Decoder(nn.Module):
           decoder_segment_ids,
           decoder_positions,
           deterministic,
-          model_mode,
+          self.model_mode,
       )
     else:
       if cfg.scan_layers:
@@ -370,7 +372,7 @@ class Decoder(nn.Module):
             decoder_segment_ids,
             decoder_positions,
             deterministic,
-            model_mode,
+            self.model_mode,
         )
       else:
         for lyr in range(cfg.num_decoder_layers):
@@ -379,7 +381,7 @@ class Decoder(nn.Module):
               decoder_segment_ids,
               decoder_positions,
               deterministic,
-              model_mode,
+              self.model_mode,
           )
 
     y = self.get_norm_layer()(
@@ -428,6 +430,7 @@ class Transformer(nn.Module):
   config: Config
   mesh: Mesh
   quant: Quant
+  model_mode: str = common_types.MODEL_MODE_TRAIN
 
   def setup(self):
     """Initialize shared_embedding & decoder layers."""
@@ -443,8 +446,20 @@ class Transformer(nn.Module):
         name="token_embedder",
         config=cfg,
     )
-
-    self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
+    # policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+    #     names_which_can_be_saved=[],
+    #     names_which_can_be_offloaded=["block_input"],
+    #     offload_src="device",
+    #     offload_dst="pinned_host",
+    # )
+    # policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host")
+    # RemattedDecoder = nn.remat(  # pylint: disable=invalid-name
+    #     Decoder,
+    #     prevent_cse=not cfg.scan_layers,
+    #     policy=policy,
+    #     static_argnums=(-1),  # deterministic and model mode are static arguments
+    # )
+    self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
 
   def __call__(
       self,
@@ -452,11 +467,10 @@ class Transformer(nn.Module):
       decoder_positions,
       decoder_segment_ids=None,
       enable_dropout=True,
-      model_mode=common_types.MODEL_MODE_TRAIN,
   ):
     """Applies Transformer decoder-branch on encoded-input and target."""
 
-    if decoder_segment_ids is not None and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+    if decoder_segment_ids is not None and self.model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
           f"During autoregressive decoding we assume the tokens are in the active sequence"
           f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
@@ -467,6 +481,5 @@ class Transformer(nn.Module):
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=not enable_dropout,
-        model_mode=model_mode,
     )
     return logits

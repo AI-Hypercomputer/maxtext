@@ -18,6 +18,7 @@ from typing import Any, Tuple
 
 from flax import linen as nn
 from jax import lax
+from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from layers import initializers
 
@@ -46,6 +47,6 @@ class RMSNorm(nn.Module):
         (features,),
         self.weight_dtype,
     )
-
+    y = checkpoint_name(y, "rms_out")
     scale = jnp.asarray(scale, self.dtype)
     return y * scale
