@@ -203,7 +203,7 @@ def ragged_mqa(
     *,
     block_size: int = 256,
     mask_value: float = DEFAULT_MASK_VALUE,
-    cost_estimate: pltpu.CostEstimate | None = None,
+    cost_estimate: pl.CostEstimate | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Ragged multi query attention.
 
@@ -313,7 +313,7 @@ def ragged_mha(
       .compile()
       .cost_analysis()[0]
   )
-  cost_estimate = pltpu.CostEstimate(
+  cost_estimate = pl.CostEstimate(
       flops=int(cost_analysis["flops"]),
       transcendentals=int(cost_analysis["transcendentals"]),
       bytes_accessed=int(cost_analysis["bytes accessed"]),
@@ -381,7 +381,7 @@ def ragged_gqa(
       .compile()
       .cost_analysis()[0]
   )
-  cost_estimate = pltpu.CostEstimate(
+  cost_estimate = pl.CostEstimate(
       flops=int(cost_analysis["flops"]),
       transcendentals=int(cost_analysis["transcendentals"]),
       bytes_accessed=int(cost_analysis["bytes accessed"]),
