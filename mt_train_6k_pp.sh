@@ -1,12 +1,12 @@
 #!/bin/bash
 
-export MODEL_NAME=llama2-7b
+# export MODEL_NAME=llama2-7b
 
 # Launch llama2 70b
 # export MODEL_NAME=llama2-70b
 
 # Launch llama3.1 405b
-# export MODEL_NAME=llama3.1-405b
+export MODEL_NAME=llama3.1-405b
 
 # Common parameters
 export CLUSTER_NAME=a3plus-benchmark
@@ -18,16 +18,12 @@ export OUTPUT_BUCKET=gs://$OUTPUT_PATH
 export RUN_NAME=maxtext-$MODEL_NAME
 CONFIG_NAME=$(echo $MODEL_NAME | sed 's/-/_/g')
 
-# Enable PGLE
 # export JAX_ENABLE_PGLE=false
-export JAX_ENABLE_PGLE=true
+export JAX_ENABLE_PGLE=false
 export JAX_PGLE_AGGREGATION_PERCENTILE=50
 export JAX_SHARE_AUTOTUNE_CONFIG_BETWEEN_HOSTS=true
 export JAX_PGLE_PROFILING_RUNS=3
-
-# Turn off checker
 export STRICT_CHECKER=false
-
 # JAX_PGLE_AGGREGATION_PERCENTILE=$JAX_PGLE_AGGREGATION_PERCENTILE
 # JAX_SHARE_AUTOTUNE_CONFIG_BETWEEN_HOSTS=$JAX_SHARE_AUTOTUNE_CONFIG_BETWEEN_HOSTS
 # JAX_PGLE_PROFILING_RUNS=$JAX_PGLE_PROFILING_RUNS
@@ -40,7 +36,7 @@ NCCL_SHIMNET_GUEST_CONFIG_CHECKER_CONFIG_FILE=/usr/local/nvidia/lib64/a3plus_gue
 NCCL_FASTRAK_PLUGIN_ACCEPT_TIMEOUT_MS=600000
 JAX_ENABLE_PGLE=$JAX_ENABLE_PGLE
 JAX_REMOVE_CUSTOM_PARTITIONING_PTR_FROM_CACHE_KEY=$JAX_ENABLE_PGLE
-JAX_DEBUG_LOG_MODULES=jax._src.compiler,jax._src.cache_key,jax._src.interpreters.xla,jax._src.pjit
+JAX_DEBUG_LOG_MODULES=compiler
 XLA_FLAGS=--xla_gpu_enable_latency_hiding_scheduler=true \
 --xla_gpu_enable_triton_gemm=false \
 --xla_gpu_enable_highest_priority_async_stream=true \
@@ -58,9 +54,8 @@ XLA_FLAGS=--xla_gpu_enable_latency_hiding_scheduler=true \
 --xla_gpu_enable_reduce_scatter_combine_by_dim=false
 EOF
 
-
-call_train() {
-    export WORKLOAD_NAME=$USER-pgle-dot-7b-$1n$3tp-nochk$RANDOM
+call_pp() {
+    export WORKLOAD_NAME=$USER-nopgle-flash-405b-$1n-jb1008-tp
 
     export NUM_NODES=$1
 
@@ -72,37 +67,32 @@ call_train() {
     #export DCN_FSDP=32
 
     export DCN_PP=1
-    export NUM_LAYERS_PER_PP_STAGE=$(expr 128 / $DCN_PP) # Layers are modified to 128 for short term solution
+    export NUM_LAYERS_PER_PP_STAGE=$5 # Layers are modified to 128 for short term solution
     # export NUM_LAYERS_PER_PP_STAGE=$(expr 126 / $DCN_PP)
 
     export REMAT_POLICY=$4
     # export REMAT_POLICY=full
     # export REMAT_POLICY=minimal
 
-    # export ATTENTION=cudnn_flash_te
-    export ATTENTION=dot_product
+    export ATTENTION=cudnn_flash_te
+    # export ATTENTION=dot_product
 }
 
-# input 1: number of nodes
+# input 1: 768 nodes 6k cluster
 # input 2: per device batch size
 # input 3: TP
 # input 4: remat policy
 
-# Config 1, TP
-# call_non_pp 2 1 8 save_qkv_proj
+# Config 1, PP, remat full
+call_pp 768 3 8 full 16
 
-# Congig 2, FSDP
-# call_non_pp 768 1 1 save_qkv_proj
-# call_train 2 1 1 full
-call_train 2 1 1 minimal
+# Congig 2, PP, 
+# call_pp 768 1 8 save_qkv_proj 16
 
 # export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/jonbolin-maxtext-gpu:20241008-1
-export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-xprof_1010_nolayers_nightly_lance
 
-COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=$ATTENTION dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=true dcn_pipeline_parallelism=$DCN_PP dcn_fsdp_parallelism=$DCN_FSDP per_device_batch_size=$PER_DEVICE_BATCH_SIZE ici_tensor_parallelism=$ICI_TP weight_dtype=bfloat16 remat_policy=$REMAT_POLICY ";
 
-# Disable profiler
-# profiler=xplane skip_first_n_steps_for_profiler=5" 
+COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=$ATTENTION dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=true ici_tensor_parallelism=$ICI_TP dcn_fsdp_parallelism=$DCN_FSDP dcn_pipeline_parallelism=$DCN_PP per_device_batch_size=$PER_DEVICE_BATCH_SIZE num_layers_per_pipeline_stage=$NUM_LAYERS_PER_PP_STAGE   weight_dtype=bfloat16 remat_policy=$REMAT_POLICY profiler=xplane skip_first_n_steps_for_profiler=5"; 
 
 COMMAND='export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"${COMMAND}"; 
 
