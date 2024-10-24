@@ -20,9 +20,14 @@ v6e_env_configs = SWconfig(
 )
 v6e_256_configs = HWConfig(num_slices=NUM_SLICES, device_type=DEVICE_TYPE)
 
-## todo: replace with llama3.1 model tests
 llama2_70b_4096 = BenchmarkRunner(
     model_name=llama2_70b_4096,
+    software_config=v6e_env_configs,
+    hardware_config=v6e_256_configs,
+)
+
+llama2_7b_4096 = BenchmarkRunner(
+    model_name=llama2_7b_4096,
     software_config=v6e_env_configs,
     hardware_config=v6e_256_configs,
 )
@@ -37,7 +42,7 @@ def main() -> None:
       device_type=DEVICE_TYPE,
   )
 
-  xpk_benchmark_runner(cluster_config, [llama31_8b_benchmark_v6e])
+  xpk_benchmark_runner(cluster_config, [llama2_7b_4096, llama2_70b_4096])
 
 
 if __name__ == '__main__':
