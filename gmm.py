@@ -419,6 +419,7 @@ def _gmm(
       lhs,
       rhs,
       existing_out,
+      group_metadata_ref,
       group_ids_ref,
       m_tile_ids_ref,
       group_offset_ref,
@@ -465,7 +466,7 @@ def _gmm(
     def _store_accum():
       mask = _get_store_mask(
           grid_id=grid_id,
-          group_metadata=group_metadata,
+          group_metadata=group_metadata_ref,
           tm=tm,
           tn=tn,
       )
@@ -514,7 +515,6 @@ def _gmm(
   else:
     input_output_aliases = {6: 0}
 
-  # kernel = partial(kernel, tiles_k=tiles_k)
   call_gmm = pl.pallas_call(
       kernel,
       out_shape=jax.ShapeDtypeStruct((m, n), preferred_element_type),
@@ -528,6 +528,7 @@ def _gmm(
       lhs,
       rhs,
       existing_out,
+      group_metadata,
       group_metadata[1],
       group_metadata[2],
       group_offset,
