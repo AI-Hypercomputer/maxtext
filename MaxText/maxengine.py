@@ -38,6 +38,9 @@ import max_utils
 import inference_utils
 import pyconfig
 
+import warnings
+
+warnings.simplefilter("ignore", category=FutureWarning)
 
 Prefix = Any
 Params = Any
