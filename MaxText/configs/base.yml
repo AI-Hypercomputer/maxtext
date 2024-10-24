@@ -152,6 +152,7 @@ pipeline_delay_activation_forwarding: False # This delays the activation forward
 # Choose 'remat_policy' between 'minimal', 'save_dot_except_mlpwi', 'save_dot_except_mlp', 'save_qkv_proj', 'qkv_proj_offloaded', 'minimal_offloaded', 'save_out_proj' and 'full'.
 # These options offer a trade-off between speed (fastest to slowest) and HBM usage (highest to lowest)
 remat_policy: 'full'
+optimizer_host_offload: True
 scan_layers: True
 param_scan_axis: 1
 
@@ -171,6 +172,7 @@ fused_qkv: False
 fused_mlp: False
 
 record_internal_nn_metrics: 0
+record_training_metrics: False
 
 # Output directory
 # Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
