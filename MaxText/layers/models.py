@@ -276,7 +276,8 @@ class Decoder(nn.Module):
           num_embeddings=cfg.trainable_position_size,
           features=cfg.emb_dim,
           dtype=cfg.dtype,
-          embedding_init=nn.initializers.normal(stddev=1.0),
+          embedding_init=nn.initializers.constant(-7),
+          # embedding_init=nn.initializers.normal(stddev=1.0),
           name="position_embedder",
           config=cfg,
       )(decoder_positions)
@@ -439,7 +440,8 @@ class Transformer(nn.Module):
         features=cfg.emb_dim,
         dtype=cfg.dtype,
         attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-        embedding_init=nn.initializers.normal(stddev=1.0),
+        # embedding_init=nn.initializers.normal(stddev=1.0),
+        embedding_init=nn.initializers.constant(-7),
         name="token_embedder",
         config=cfg,
     )
