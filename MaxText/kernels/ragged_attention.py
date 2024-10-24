@@ -258,7 +258,6 @@ def ragged_mqa(
       compiler_params=dict(
           mosaic=dict(
               dimension_semantics=("parallel", "arbitrary"),
-              cost_estimate=cost_estimate,
           )
       ),
       out_shape=[
@@ -266,6 +265,7 @@ def ragged_mqa(
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
       ],
+      cost_estimate=cost_estimate,
   )(lengths, q, k, v)
   return out, m[..., 0], l[..., 0]
 
