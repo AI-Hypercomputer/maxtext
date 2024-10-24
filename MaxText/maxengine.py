@@ -51,13 +51,7 @@ warnings.simplefilter("ignore", category=FutureWarning)
 Prefix = Any
 Params = Any
 
-def create_maxtext_mesh(devices: Sequence[jax.Device], config, ici_mesh_shape: Sequence[int]) -> Mesh:
-    """
-    Creates mesh with exact layout optimized for MLPBlock operations:
-    - 4-way tensor parallelism
-    - 2-way sequence parallelism
-    Supports 8D mesh axes: [data, stage, fsdp, fsdp_transpose, sequence, tensor, expert, autoregressive]
-    """
+def create_special_mesh(devices: Sequence[jax.Device], config, ici_mesh_shape: Sequence[int]) -> Mesh:
     sorted_devices = sorted(devices, key=lambda d: d.id)
     
     # Optimized layout for MLPBlock matmuls
@@ -79,15 +73,10 @@ def create_maxtext_mesh(devices: Sequence[jax.Device], config, ici_mesh_shape: S
         for j, d in enumerate(row):
             print(f"tensor={i}, sequence={j}: Device {d.id} at coords {d.coords}")
     
-    # First transpose to get sequence and tensor in right order
     result = result.transpose(1, 0)  # Now [2, 4] for [sequence, tensor]
-    
-    # Get the sizes for each dimension from config
-    
-    # Reshape to 8D: [data, stage, fsdp, fsdp_transpose, sequence, tensor, expert, autoregressive]
-    # For axes with size 1, we add the dimension but don't change the layout
+    print(f"Transposed devices: {result}")
     result = result.reshape(ici_mesh_shape)
-    
+    print(f"Reshaped devices: {result}")
     mesh = Mesh(result, mesh_axis_names)
     
     print("\nFinal mesh configuration:")
@@ -519,7 +508,7 @@ class MaxEngine(engine_api.Engine):
       self._mesh = Mesh(explicit_device_mesh, mesh_axis_names)
     elif config.mesh_type == "hardcoded":
       print("Creating hardcoded mesh")
-      self._mesh = create_maxtext_mesh(jax.devices(), config, ici_parallelism)
+      self._mesh = create_special_mesh(jax.devices(), config, ici_parallelism)
     else: 
       print("Creating default mesh")
       devices_array = max_utils.create_device_mesh(config)

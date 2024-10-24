@@ -197,7 +197,6 @@ class MlpBlock(nn.Module):
           dtype=self.dtype,
           weight_dtype=self.weight_dtype,
           kernel_init=self.kernel_init,
-          # Simplified kernel axes to match test.py approach
           kernel_axes=('tensor', 'mlp'),  
           name=dense_name,
           quant=self.quant,

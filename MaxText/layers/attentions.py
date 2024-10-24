@@ -351,10 +351,10 @@ class AttentionOp(nn.Module):
 
       return jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids)
 
-    # devices_in_data_fsdp = self.mesh.shape["data"] * self.mesh.shape["fsdp"]
-    # assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
-    #     "Batch dimension should be shardable among the devices in data and fsdp" " axis"
-    # )
+    devices_in_data_fsdp = self.mesh.shape["data"] * self.mesh.shape["fsdp"]
+    assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
+        "Batch dimension should be shardable among the devices in data and fsdp" " axis"
+    )
     x = wrap_flash_attention(query, key, value, decoder_segment_ids)
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
     return x
