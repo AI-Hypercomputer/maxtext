@@ -51,6 +51,45 @@ warnings.simplefilter("ignore", category=FutureWarning)
 Prefix = Any
 Params = Any
 
+def create_maxtext_mesh(devices: Sequence[jax.Device]) -> Mesh:
+    """
+    Creates mesh with exact layout optimized for MLPBlock operations:
+    - 4-way tensor parallelism
+    - 2-way sequence parallelism
+    Only uses sequence and tensor axes
+    """
+    sorted_devices = sorted(devices, key=lambda d: d.id)
+    
+    # Optimized layout for MLPBlock matmuls
+    device_layout = [
+        [sorted_devices[0], sorted_devices[4]],  # [0,4]
+        [sorted_devices[1], sorted_devices[5]],  # [1,5]
+        [sorted_devices[3], sorted_devices[7]],  # [3,7]
+        [sorted_devices[2], sorted_devices[6]],  # [2,6]
+    ]
+    
+    result = np.array(device_layout)
+    print("\nDevice layout visualization:")
+    for row in result:
+        print([f"D{d.id}" for d in row])
+    
+    mesh_axis_names = ('sequence', 'tensor')  # Only two axes now
+    print("\nDevice coords before reshape:")
+    for i, row in enumerate(result):
+        for j, d in enumerate(row):
+            print(f"tensor={i}, sequence={j}: Device {d.id} at coords {d.coords}")
+    
+    # Just 2D now: [2, 4] for [sequence, tensor]
+    result = result.transpose(1, 0)  # Make sure dimensions align properly
+    
+    mesh = Mesh(result, mesh_axis_names)
+    
+    print("\nFinal mesh configuration:")
+    print(f"Mesh shape: {mesh.shape}")
+    print("Axis names:", mesh_axis_names)
+    
+    return mesh
+
 @dataclasses.dataclass(slots=True, kw_only=True)
 class GridOfRingsPartitionConfig():
   """Creates a target_mesh_shape mesh from a 2D device_mesh input.
@@ -269,14 +308,26 @@ class GridOfRingsPartitionConfig():
 def make_nested_balanced_2d_devices(devices: Sequence[jax.Device], ici_mesh_shape: Sequence[int]) -> Sequence[jax.Device]:
     # Generate a reversed, interleaved sequence of axis indices.
     print(f"\nmake_nested_balanced_2d_devices: {devices=}")
+    # make_nested_balanced_2d_devices: devices=[
+    #   TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), 
+    #   TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0), 
+    #   TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0), 
+    #   TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0), 
+    #   TpuDevice(id=4, process_index=0, coords=(0,2,0), core_on_chip=0), 
+    #   TpuDevice(id=5, process_index=0, coords=(1,2,0), core_on_chip=0), 
+    #   TpuDevice(id=6, process_index=0, coords=(0,3,0), core_on_chip=0), 
+    #   TpuDevice(id=7, process_index=0, coords=(1,3,0), core_on_chip=0)]
     print(f"\nmake_nested_balanced_2d_devices: {ici_mesh_shape=}")
+    # make_nested_balanced_2d_devices: ici_mesh_shape=[1, 1, 1, 1, 2, 4, 1, 1]
     log_len = np.array(devices).size.bit_length() - 1
     arr = np.arange(log_len)[::-1]
     midpoint = len(arr) // 2
     first_half = arr[:midpoint]
     second_half = arr[midpoint:]
     print(f"make_nested_balanced_2d_devices: {first_half=}")
+    # make_nested_balanced_2d_devices: first_half=array([2])
     print(f"make_nested_balanced_2d_devices: {second_half=}")
+    # make_nested_balanced_2d_devices: second_half=array([1, 0])
 
     new_axis_order = []
     for pair in zip(second_half, first_half):
@@ -285,12 +336,72 @@ def make_nested_balanced_2d_devices(devices: Sequence[jax.Device], ici_mesh_shap
     if len(arr) % 2 == 1:
       new_axis_order.append(second_half[-1])
     print(f"make_nested_balanced_2d_devices: {new_axis_order=}")
+    # make_nested_balanced_2d_devices: new_axis_order=[1, 2, 0]
 
     ordered_flat_devices = sorted(
         np.array(devices).flatten(), key=lambda x: x.id
     )
+    print(f"make_nested_balanced_2d_devices: {ordered_flat_devices=}")
+    # make_nested_balanced_2d_devices: ordered_flat_devices=[
+    #   TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), 
+    #   TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0), 
+    #   TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0), 
+    #   TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0), 
+    #   TpuDevice(id=4, process_index=0, coords=(0,2,0), core_on_chip=0), 
+    #   TpuDevice(id=5, process_index=0, coords=(1,2,0), core_on_chip=0), 
+    #   TpuDevice(id=6, process_index=0, coords=(0,3,0), core_on_chip=0), 
+    #   TpuDevice(id=7, process_index=0, coords=(1,3,0), core_on_chip=0)]
     # Form a nested, balanced 2D partition with the priority order.
-    result = np.reshape(ordered_flat_devices, (2,) * log_len).transpose(new_axis_order[::-1]).reshape(ici_mesh_shape)
+    reordered_flat_devices = np.reshape(ordered_flat_devices, (2,) * log_len).transpose(new_axis_order[::-1])
+    print(f"make_nested_balanced_2d_devices: {reordered_flat_devices=}")
+    # make_nested_balanced_2d_devices: reordered_flat_devices=array(
+    #   [[[TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0),
+    #      TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0)],
+    #     [TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0),
+    #      TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0)]],
+
+    #    [[TpuDevice(id=4, process_index=0, coords=(0,2,0), core_on_chip=0),
+    #      TpuDevice(id=6, process_index=0, coords=(0,3,0), core_on_chip=0)],
+    #     [TpuDevice(id=5, process_index=0, coords=(1,2,0), core_on_chip=0),
+    #      TpuDevice(id=7, process_index=0, coords=(1,3,0), core_on_chip=0)]]],
+    #   dtype=object)
+    result = reordered_flat_devices.reshape(ici_mesh_shape)
+    print(f"make_nested_balanced_2d_devices: {result=}")
+    # make_nested_balanced_2d_devices: result=array(
+    # [[[[[
+    #        [[[TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0)]],
+    #         [[TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0)]],
+    #         [[TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0)]],
+    #         [[TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0)]]],
+    #        [[[TpuDevice(id=4, process_index=0, coords=(0,2,0), core_on_chip=0)]],
+    #         [[TpuDevice(id=6, process_index=0, coords=(0,3,0), core_on_chip=0)]],
+    #         [[TpuDevice(id=5, process_index=0, coords=(1,2,0), core_on_chip=0)]],
+    #         [[TpuDevice(id=7, process_index=0, coords=(1,3,0), core_on_chip=0)]]]
+    # ]]]]],
+    #   dtype=object)
+    return result
+
+def make_explicit_device_mesh(devices: Sequence[jax.Device], ici_mesh_shape: Sequence[int]) -> Sequence[jax.Device]:
+    print(f"\nmake_explicit_device_mesh: {devices=}")
+    # make_nested_balanced_2d_devices: devices=[
+    #   TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), 
+    #   TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0), 
+    #   TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0), 
+    #   TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0), 
+    #   TpuDevice(id=4, process_index=0, coords=(0,2,0), core_on_chip=0), 
+    #   TpuDevice(id=5, process_index=0, coords=(1,2,0), core_on_chip=0), 
+    #   TpuDevice(id=6, process_index=0, coords=(0,3,0), core_on_chip=0), 
+    #   TpuDevice(id=7, process_index=0, coords=(1,3,0), core_on_chip=0)]
+
+    print(f"\nmake_explicit_device_mesh: {ici_mesh_shape=}")
+    # ordered_flat_devices = sorted(
+    #     np.array(devices).flatten(), key=lambda x: x.id
+    # )
+    # reordered_flat_devices = np.reshape(ordered_flat_devices, (2,) * log_len).transpose(new_axis_order[::-1])
+    # [[0, 4], [1, 5], [3, 7], [2, 6]]
+    new_device_ordering = [devices[0], devices[4], devices[1], devices[5], devices[3], devices[7], devices[2], devices[6]]
+    result = np.reshape(new_device_ordering, ici_mesh_shape)
+    print(f"\nmake_explicit_device_mesh: {result=}")
     return result
 
 def get_topology_mesh(config):
@@ -354,26 +465,32 @@ class MaxEngine(engine_api.Engine):
 
   def __init__(self, config):
     self.config = config
+    print("\nInitializing MaxEngine...")
+    print(f"Device parallelism config:")
+    print(f"  tensor_parallelism: {config.ici_tensor_parallelism}")
+    print(f"  sequence_parallelism: {config.ici_sequence_parallelism}")
+    print(f"  mesh_type: {config.mesh_type}")
 
     ici_parallelism = [
-      config.ici_data_parallelism,
-      config.ici_pipeline_parallelism,
-      config.ici_fsdp_parallelism,
-      config.ici_fsdp_transpose_parallelism,
+      # config.ici_data_parallelism,
+      # config.ici_pipeline_parallelism,
+      # config.ici_fsdp_parallelism,
+      # config.ici_fsdp_transpose_parallelism,
       config.ici_sequence_parallelism,
       config.ici_tensor_parallelism,
-      config.ici_expert_parallelism,
-      config.ici_autoregressive_parallelism,
+      # config.ici_expert_parallelism,
+      # config.ici_autoregressive_parallelism,
     ]
+    print(f"\nICI parallelism dimensions: {ici_parallelism}")
 
     if config.mesh_type == "balanced_2d":
       # original code: https://source.corp.google.com/piper///depot/google3/learning/gemini/gemax/core/compilation/scheduling.py;l=931;bpv=0;bpt=0
-      print("Creating Balanced2DPartitionConfig mesh")
+      print("Creating nested_balanced_2d_devices mesh")
       mesh_axis_names = tuple(config.mesh_axes)
       nested_balanced_2d_devices = make_nested_balanced_2d_devices(jax.devices(), ici_parallelism)
       self._mesh = Mesh(nested_balanced_2d_devices, mesh_axis_names)
     elif config.mesh_type == "balanced_2d_reversed":
-      print("Creating Balanced2DPartitionConfig mesh")
+      print("Creating reversed nested_balanced_2d_devices mesh")
       mesh_axis_names = tuple(reversed(config.mesh_axes))
       nested_balanced_2d_devices = make_nested_balanced_2d_devices(jax.devices(), ici_parallelism)
       self._mesh = Mesh(nested_balanced_2d_devices, mesh_axis_names)
@@ -384,6 +501,14 @@ class MaxEngine(engine_api.Engine):
       grid_of_rings_partition_config = GridOfRingsPartitionConfig(outer_axis_name='tensor', inner_axis_name='sequence')
       grid_of_rings_partition_config.ici_mesh = ici_mesh
       self._mesh = grid_of_rings_partition_config.make_mesh(jax.devices())
+    elif config.mesh_type == "explicit":
+      print("Creating explicit mesh")
+      mesh_axis_names = tuple(config.mesh_axes)
+      explicit_device_mesh = make_explicit_device_mesh(jax.devices(), ici_parallelism)
+      self._mesh = Mesh(explicit_device_mesh, mesh_axis_names)
+    elif config.mesh_type == "hardcoded":
+      print("Creating hardcoded mesh")
+      self._mesh = create_maxtext_mesh(jax.devices())
     else: 
       print("Creating default mesh")
       devices_array = max_utils.create_device_mesh(config)
@@ -818,8 +943,8 @@ def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_
   args = {}
   args["scan_layers"] = "false"
   args["async_checkpointing"] = "false"
-  args["ici_fsdp_parallelism"] = "1"
-  args["ici_autoregressive_parallelism"] = "1"
+  # args["ici_fsdp_parallelism"] = "1"
+  # args["ici_autoregressive_parallelism"] = "1"
   args["ici_tensor_parallelism"] = "-1"
   args["weight_dtype"] = "bfloat16"
   args["attention"] = "dot_product"

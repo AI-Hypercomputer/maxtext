@@ -5,7 +5,7 @@
 
 run_name="trillium_llama2-70b"
 dry_run=false
-enable_profiler=false
+enable_profiler=true
 enable_xla_flags=false
 prefill_lens="1024"
 stages="prefill"
@@ -46,18 +46,19 @@ export LOAD_PARAMETERS_PATH=""
 export MAX_PREFILL_PREDICT_LENGTH=1024
 export MAX_TARGET_LENGTH=2048
 export MODEL_NAME=llama2-70b
-export ICI_FSDP_PARALLELISM=1
-export ICI_AUTOREGRESSIVE_PARALLELISM=1
+#export ICI_FSDP_PARALLELISM=1
+#export ICI_AUTOREGRESSIVE_PARALLELISM=1
 export ICI_TENSOR_PARALLELISM=4
 export ICI_SEQUENCE_PARALLELISM=2
 export SCAN_LAYERS=false
 export WEIGHT_DTYPE=bfloat16
 export PER_DEVICE_BATCH_SIZE=1
-export ICI="FSDP=${ICI_FSDP_PARALLELISM}_AR=${ICI_AUTOREGRESSIVE_PARALLELISM}_TENSOR=${ICI_TENSOR_PARALLELISM}_SEQ=${ICI_SEQUENCE_PARALLELISM}"
+#export ICI="FSDP=${ICI_FSDP_PARALLELISM}_AR=${ICI_AUTOREGRESSIVE_PARALLELISM}_TENSOR=${ICI_TENSOR_PARALLELISM}_SEQ=${ICI_SEQUENCE_PARALLELISM}"
+export ICI="TENSOR=${ICI_TENSOR_PARALLELISM}_SEQ=${ICI_SEQUENCE_PARALLELISM}"
 
 
-export MESH_TYPE="default" 
-export RUN_DESC="${run_name}_${stages}_${prefill_lens}_flags_${enable_xla_flags}_${ICI}_${MESH_TYPE}"
+export MESH_TYPE="hardcoded" # default, balanced_2d, balanced_2d_reversed, grid_of_rings, explicit, hardcoded
+export RUN_DESC="${run_name}_${stages}_${prefill_lens}_flags_${enable_xla_flags}_${ICI}_${MESH_TYPE}_simple"
 
 mkdir -p /tmp/mb/logs
 mkdir -p /tmp/mb/profiles
@@ -71,8 +72,6 @@ load_parameters_path=${LOAD_PARAMETERS_PATH}   \
 max_prefill_predict_length=${MAX_PREFILL_PREDICT_LENGTH}   \
 max_target_length=${MAX_TARGET_LENGTH} \
 model_name=${MODEL_NAME}   \
-ici_fsdp_parallelism=${ICI_FSDP_PARALLELISM}   \
-ici_autoregressive_parallelism=${ICI_AUTOREGRESSIVE_PARALLELISM}   \
 ici_tensor_parallelism=${ICI_TENSOR_PARALLELISM}   \
 ici_sequence_parallelism=${ICI_SEQUENCE_PARALLELISM} \
 scan_layers=false \
@@ -89,3 +88,6 @@ attention=dot_product \
 mesh_type=${MESH_TYPE} \
 run_name=${RUN_DESC} \
 ${PROFILER_OPTION} 2>&1 | tee /tmp/mb/logs/${cmd}_${RUN_DESC}
+
+# ici_fsdp_parallelism=${ICI_FSDP_PARALLELISM}   \
+# ici_autoregressive_parallelism=${ICI_AUTOREGRESSIVE_PARALLELISM}   \
