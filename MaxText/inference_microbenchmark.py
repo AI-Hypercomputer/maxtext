@@ -31,9 +31,6 @@ import maxtext_utils
 import profiler
 import pyconfig
 
-import warnings
-
-warnings.simplefilter("ignore", category=FutureWarning)
 
 _WARMUP_ITERS = 2
 
