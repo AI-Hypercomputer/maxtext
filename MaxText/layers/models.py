@@ -285,7 +285,12 @@ class Decoder(nn.Module):
 
     if cfg.remat_policy != "none":
       if cfg.remat_policy == "minimal":
-        policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
+        # All weight @ activation matmuls are saved by this policy (minimal rematerialization)
+        # This should be the same as jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
+        # however this policy does not work as intended with the vmap implementation of pipeline paralelism.
+        policy = jax.checkpoint_policies.save_only_these_names(
+            "query_proj", "value_proj", "key_proj", "qkv_proj", "out_proj", "mlpwo", "mlpwi", "mlpwi_0", "mlpwi_1"
+        )
       elif cfg.remat_policy == "save_dot_except_mlpwi":
         policy = jax.checkpoint_policies.save_only_these_names(
             "query_proj",
@@ -344,12 +349,10 @@ class Decoder(nn.Module):
       if cfg.num_layers_per_pipeline_stage == 1:
         stage_module = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
       elif cfg.scan_layers:
-        stage_module = self.scan_decoder_layers(
-            cfg, RemattedBlockLayer, cfg.num_layers_per_pipeline_stage, "layers_per_stage", mesh
-        )
+        stage_module = self.scan_decoder_layers(cfg, BlockLayer, cfg.num_layers_per_pipeline_stage, "layers_per_stage", mesh)
       elif not cfg.scan_layers:
         stage_module = SequentialBlockDecoderLayers(
-            decoder_layer=RemattedBlockLayer,
+            decoder_layer=BlockLayer,
             num_decoder_layers=cfg.num_layers_per_pipeline_stage,
             config=cfg,
             mesh=mesh,
