@@ -195,111 +195,68 @@ jax_cache_dir: "~/jax_cache"
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
 # Parallelism
-#mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'expert', 'autoregressive']
-# logical_axis_rules: [
-#                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-#                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
-#                        # For pipeline parallelism the pre and post decoder layer tensors' batch dimension is sharded by stages.
-#                        # Microbatches are sharded by stage, so moving out of and into this sharding should be a local reshape.
-#                        # The "stage" needs to be listed first since the microbatch dimension is first before the reshape.
-#                       ['activation_embed_and_logits_batch', ['stage', 'data', 'fsdp', 'fsdp_transpose', 'expert']],
-#                       ['activation_heads', ['tensor','sequence']],
-#                       ['activation_kv_heads', ['tensor','sequence']],
-#                       ['activation_length', 'sequence'],
-#                       ['activation_embed', 'tensor'],
-#                       ['activation_mlp', 'tensor'],
-#                       ['activation_kv', 'tensor'],
-#                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-#                       ['activation_kv_head_dim', 'tensor'],
-#                       ['activation_vocab', ['tensor', 'sequence']],
-#                       ['activation_stage', 'stage'],
-#                       ['activation_exp', 'expert'],
-#                       ['mlp', 'tensor'],
-#                       ['vocab', ['tensor', 'autoregressive']],
-#                       ['embed', 'tensor'],
-#                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence']],
-#                       ['embed_no_exp', ['fsdp', 'sequence']],
-#                       ['norm', 'tensor'],
-#                       ['heads', ['tensor', 'autoregressive']],
-#                       ['layers', 'stage'],
-#                       ['kv', []],
-#                       ['kv_heads', ['tensor', 'autoregressive']],
-#                       ['kv_head_dim', []],
-#                       ['cache_batch', []],
-#                       ['cache_heads', ['autoregressive', 'tensor']],
-#                       ['cache_kv', []],
-#                       ['cache_sequence', []],
-#                       ['exp', 'expert'],
-#                       ['tensor', 'tensor'],
-#                       ['sequence', 'sequence'],
-#                     ]
-
-mesh_axes: ['sequence', 'tensor']
+mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'expert', 'autoregressive']
 logical_axis_rules: [
-                      ['activation_batch', []],
-                      ['activation_batch_no_exp', []],
+                      ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
                        # For pipeline parallelism the pre and post decoder layer tensors' batch dimension is sharded by stages.
                        # Microbatches are sharded by stage, so moving out of and into this sharding should be a local reshape.
                        # The "stage" needs to be listed first since the microbatch dimension is first before the reshape.
-                      ['activation_embed_and_logits_batch', []],
-                      ['activation_heads', []],
-                      ['activation_kv_heads', []],
+                      ['activation_embed_and_logits_batch', ['stage', 'data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_heads', ['tensor','sequence']],
+                      ['activation_kv_heads', ['tensor','sequence']],
                       ['activation_length', 'sequence'],
                       ['activation_embed', 'tensor'],
                       ['activation_mlp', 'tensor'],
                       ['activation_kv', 'tensor'],
-                      ['activation_kv_batch', []],
+                      ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_head_dim', 'tensor'],
-                      ['activation_vocab', []],
-                      ['activation_stage', []],
-                      ['activation_exp', []],
+                      ['activation_vocab', ['tensor', 'sequence']],
+                      ['activation_stage', 'stage'],
+                      ['activation_exp', 'expert'],
                       ['mlp', 'tensor'],
-                      ['vocab', ['tensor']],
+                      ['vocab', ['tensor', 'autoregressive']],
                       ['embed', 'tensor'],
-                      ['embed_no_exp', []],
-                      ['embed_no_exp', ['sequence']],
+                      ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence']],
+                      ['embed_no_exp', ['fsdp', 'sequence']],
                       ['norm', 'tensor'],
-                      ['heads', ['tensor']],
-                      ['layers', []],
+                      ['heads', ['tensor', 'autoregressive']],
+                      ['layers', 'stage'],
                       ['kv', []],
-                      ['kv_heads', ['tensor']],
+                      ['kv_heads', ['tensor', 'autoregressive']],
                       ['kv_head_dim', []],
                       ['cache_batch', []],
-                      ['cache_heads', ['tensor']],
+                      ['cache_heads', ['autoregressive', 'tensor']],
                       ['cache_kv', []],
                       ['cache_sequence', []],
-                      ['exp', []],
+                      ['exp', 'expert'],
                       ['tensor', 'tensor'],
                       ['sequence', 'sequence'],
-                      ['mlp_batch', []],
-                      ['mlp_model', 'tensor'],
-                      ['mlp_embedding', 'tensor'],
-                      ['mlp_sequence', 'sequence'],
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
-# data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'expert', 'autoregressive']]
-data_sharding: [['sequence', 'tensor']]
+data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'expert', 'autoregressive']]
 
 # One axis for each parallelism type may hold a placeholder (-1)
 # value to auto-shard based on available slices and devices.
 # By default, product of the DCN axes should equal number of slices
 # and product of the ICI axes should equal number of devices per slice.
-# dcn_data_parallelism: -1  # recommended DCN axis to be auto-sharded
-# dcn_fsdp_parallelism: 1
-# dcn_fsdp_transpose_parallelism: 1
+dcn_data_parallelism: -1  # recommended DCN axis to be auto-sharded
+dcn_fsdp_parallelism: 1
+dcn_fsdp_transpose_parallelism: 1
 dcn_sequence_parallelism: 1  # never recommended
 dcn_tensor_parallelism: 1 # never recommended
-# dcn_pipeline_parallelism: 1
-# dcn_expert_parallelism: 1
-# dcn_autoregressive_parallelism: 1 # never recommended
-# ici_data_parallelism: 1
-# ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
-# ici_fsdp_transpose_parallelism: 1
+dcn_pipeline_parallelism: 1
+dcn_expert_parallelism: 1
+dcn_autoregressive_parallelism: 1 # never recommended
+
+ici_data_parallelism: 1
+ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
+ici_fsdp_transpose_parallelism: 1
 ici_sequence_parallelism: 1
 ici_tensor_parallelism: 1
-# ici_autoregressive_parallelism: 1
-# ici_pipeline_parallelism: 1
-# ici_expert_parallelism: 1
+ici_autoregressive_parallelism: 1
+ici_pipeline_parallelism: 1
+ici_expert_parallelism: 1
 
 # The number of TPU slices is automatically determined, you should not set this explicitly. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.

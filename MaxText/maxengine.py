@@ -51,12 +51,12 @@ warnings.simplefilter("ignore", category=FutureWarning)
 Prefix = Any
 Params = Any
 
-def create_maxtext_mesh(devices: Sequence[jax.Device]) -> Mesh:
+def create_maxtext_mesh(devices: Sequence[jax.Device], config, ici_mesh_shape: Sequence[int]) -> Mesh:
     """
     Creates mesh with exact layout optimized for MLPBlock operations:
     - 4-way tensor parallelism
     - 2-way sequence parallelism
-    Only uses sequence and tensor axes
+    Supports 8D mesh axes: [data, stage, fsdp, fsdp_transpose, sequence, tensor, expert, autoregressive]
     """
     sorted_devices = sorted(devices, key=lambda d: d.id)
     
@@ -69,26 +69,37 @@ def create_maxtext_mesh(devices: Sequence[jax.Device]) -> Mesh:
     ]
     
     result = np.array(device_layout)
-    print("\nDevice layout visualization:")
+    print("\nInitial device layout (4x2):")
     for row in result:
         print([f"D{d.id}" for d in row])
     
-    mesh_axis_names = ('sequence', 'tensor')  # Only two axes now
+    mesh_axis_names = config.mesh_axes
     print("\nDevice coords before reshape:")
     for i, row in enumerate(result):
         for j, d in enumerate(row):
             print(f"tensor={i}, sequence={j}: Device {d.id} at coords {d.coords}")
     
-    # Just 2D now: [2, 4] for [sequence, tensor]
-    result = result.transpose(1, 0)  # Make sure dimensions align properly
+    # First transpose to get sequence and tensor in right order
+    result = result.transpose(1, 0)  # Now [2, 4] for [sequence, tensor]
+    
+    # Get the sizes for each dimension from config
+    
+    # Reshape to 8D: [data, stage, fsdp, fsdp_transpose, sequence, tensor, expert, autoregressive]
+    # For axes with size 1, we add the dimension but don't change the layout
+    result = result.reshape(ici_mesh_shape)
     
     mesh = Mesh(result, mesh_axis_names)
     
     print("\nFinal mesh configuration:")
     print(f"Mesh shape: {mesh.shape}")
     print("Axis names:", mesh_axis_names)
+    print("\nVerifying dimensions match config:")
+    for axis, size in zip(mesh_axis_names, ici_mesh_shape):
+        print(f"{axis}: expected={size}, actual={mesh.shape[axis]}")
     
     return mesh
+
+
 
 @dataclasses.dataclass(slots=True, kw_only=True)
 class GridOfRingsPartitionConfig():
@@ -472,14 +483,14 @@ class MaxEngine(engine_api.Engine):
     print(f"  mesh_type: {config.mesh_type}")
 
     ici_parallelism = [
-      # config.ici_data_parallelism,
-      # config.ici_pipeline_parallelism,
-      # config.ici_fsdp_parallelism,
-      # config.ici_fsdp_transpose_parallelism,
+      config.ici_data_parallelism,
+      config.ici_pipeline_parallelism,
+      config.ici_fsdp_parallelism,
+      config.ici_fsdp_transpose_parallelism,
       config.ici_sequence_parallelism,
       config.ici_tensor_parallelism,
-      # config.ici_expert_parallelism,
-      # config.ici_autoregressive_parallelism,
+      config.ici_expert_parallelism,
+      config.ici_autoregressive_parallelism,
     ]
     print(f"\nICI parallelism dimensions: {ici_parallelism}")
 
@@ -508,7 +519,7 @@ class MaxEngine(engine_api.Engine):
       self._mesh = Mesh(explicit_device_mesh, mesh_axis_names)
     elif config.mesh_type == "hardcoded":
       print("Creating hardcoded mesh")
-      self._mesh = create_maxtext_mesh(jax.devices())
+      self._mesh = create_maxtext_mesh(jax.devices(), config, ici_parallelism)
     else: 
       print("Creating default mesh")
       devices_array = max_utils.create_device_mesh(config)
@@ -943,8 +954,8 @@ def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_
   args = {}
   args["scan_layers"] = "false"
   args["async_checkpointing"] = "false"
-  # args["ici_fsdp_parallelism"] = "1"
-  # args["ici_autoregressive_parallelism"] = "1"
+  args["ici_fsdp_parallelism"] = "1"
+  args["ici_autoregressive_parallelism"] = "1"
   args["ici_tensor_parallelism"] = "-1"
   args["weight_dtype"] = "bfloat16"
   args["attention"] = "dot_product"

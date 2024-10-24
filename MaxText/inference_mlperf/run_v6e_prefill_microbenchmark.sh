@@ -46,15 +46,15 @@ export LOAD_PARAMETERS_PATH=""
 export MAX_PREFILL_PREDICT_LENGTH=1024
 export MAX_TARGET_LENGTH=2048
 export MODEL_NAME=llama2-70b
-#export ICI_FSDP_PARALLELISM=1
-#export ICI_AUTOREGRESSIVE_PARALLELISM=1
+export ICI_FSDP_PARALLELISM=1
+export ICI_AUTOREGRESSIVE_PARALLELISM=1
 export ICI_TENSOR_PARALLELISM=4
 export ICI_SEQUENCE_PARALLELISM=2
 export SCAN_LAYERS=false
 export WEIGHT_DTYPE=bfloat16
 export PER_DEVICE_BATCH_SIZE=1
-#export ICI="FSDP=${ICI_FSDP_PARALLELISM}_AR=${ICI_AUTOREGRESSIVE_PARALLELISM}_TENSOR=${ICI_TENSOR_PARALLELISM}_SEQ=${ICI_SEQUENCE_PARALLELISM}"
-export ICI="TENSOR=${ICI_TENSOR_PARALLELISM}_SEQ=${ICI_SEQUENCE_PARALLELISM}"
+export ICI="FSDP=${ICI_FSDP_PARALLELISM}_AR=${ICI_AUTOREGRESSIVE_PARALLELISM}_TENSOR=${ICI_TENSOR_PARALLELISM}_SEQ=${ICI_SEQUENCE_PARALLELISM}"
+# export ICI="TENSOR=${ICI_TENSOR_PARALLELISM}_SEQ=${ICI_SEQUENCE_PARALLELISM}"
 
 
 export MESH_TYPE="hardcoded" # default, balanced_2d, balanced_2d_reversed, grid_of_rings, explicit, hardcoded
@@ -74,6 +74,8 @@ max_target_length=${MAX_TARGET_LENGTH} \
 model_name=${MODEL_NAME}   \
 ici_tensor_parallelism=${ICI_TENSOR_PARALLELISM}   \
 ici_sequence_parallelism=${ICI_SEQUENCE_PARALLELISM} \
+ici_fsdp_parallelism=${ICI_FSDP_PARALLELISM}   \
+ici_autoregressive_parallelism=${ICI_AUTOREGRESSIVE_PARALLELISM}   \
 scan_layers=false \
 weight_dtype=bfloat16 \
 per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
@@ -88,6 +90,3 @@ attention=dot_product \
 mesh_type=${MESH_TYPE} \
 run_name=${RUN_DESC} \
 ${PROFILER_OPTION} 2>&1 | tee /tmp/mb/logs/${cmd}_${RUN_DESC}
-
-# ici_fsdp_parallelism=${ICI_FSDP_PARALLELISM}   \
-# ici_autoregressive_parallelism=${ICI_AUTOREGRESSIVE_PARALLELISM}   \
