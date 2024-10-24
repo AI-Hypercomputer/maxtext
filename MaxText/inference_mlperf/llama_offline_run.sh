@@ -11,18 +11,19 @@ dry_run=false
 skip_warmup=false
 test_run=false
 enable_profiler=false
-performance=true
+performance=false
 audit=false
 accuracy=false
 
 
-while getopts "ntspdar:" opt
+while getopts "ntsepdar:" opt
 do
   case "$opt" in
       n ) dry_run=true ;;
       t ) test_run=true ;; 
       s ) skip_warmup=true ;;
-      p ) enable_profiler=true ;;
+      e ) enable_profiler=true ;;
+      p ) performance=true ;;
       d ) audit=true ;;
       a ) accuracy=true ;;
       r ) run_name="$OPTARG" ;;
@@ -153,23 +154,20 @@ run_loadgen_accuracy () {
   fi
 }
 
-performance=true
+if "$performance"; then
+  echo
+  echo "Starting loadgen performance run"
+  run_loadgen_performance
+fi
+
 if "$audit"; then
-  performance=false
   echo
   echo "Starting loadgen audit"
   run_loadgen_audit
 fi
 
 if "$accuracy"; then
-  performance=false
   echo
   echo "Starting loadgen accuracy"
   run_loadgen_accuracy
-fi
-
-if "$performance"; then
-  echo
-  echo "Starting loadgen performance run"
-  run_loadgen_performance
 fi

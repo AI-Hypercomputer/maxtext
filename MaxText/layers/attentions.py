@@ -842,7 +842,7 @@ class AttentionOp(nn.Module):
       elif dtype == jnp.int4:
         scale_value /= quantizations.MAX_INT4
 
-      cache_value = KVTensor(qvalue=cache_value, scale=[scale_value], scale_t=None, dequant_dtype=target_dtype, bias=[])
+      cache_value = KVTensor(qvalue=cache_value, scale=[scale_value], scale_t=None, dequant_dtype=target_dtype)
     cache_value_in_logical_shape = jax.tree.map(lambda x: self.reverse_transepose(x, cache_axis_order), cache_value)
     return cache_value_in_logical_shape
 
