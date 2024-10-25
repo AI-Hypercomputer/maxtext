@@ -164,7 +164,21 @@ class DenseGeneral(nn.Module):
 
 
 class MlpBlock(nn.Module):
-  """Transformer MLP / feed-forward block with topology-focused sharding."""
+  """Transformer MLP / feed-forward block.
+
+  Attributes:
+    intermediate_dim: Shared dimension of hidden layers.
+    activations: Type of activations for each layer.  Each element is either
+      'linear', a string function name in flax.linen, or a function.
+    kernel_init: Kernel function, passed to the dense layers.
+    deterministic: Whether the dropout layers should be deterministic.
+    intermediate_dropout_rate: Dropout rate used after the intermediate layers.
+    dtype: computation data type for the dense layer.
+    weight_dtype: weight data type for the dense layer.
+    use_bias: whether to add bias in all feedforward layers.
+    use_pre_norm: whether to add pre layer norm in mlp layers.
+    quant: Optional quantization config, no quantization if None.
+  """
 
   config: Config
   intermediate_dim: int = 2048
@@ -199,9 +213,10 @@ class MlpBlock(nn.Module):
           weight_dtype=cfg.weight_dtype,
           kernel_axes=("norm",),
           epsilon=cfg.normalization_layer_epsilon,
-    )(inputs)
+      )(inputs)
 
-
+    # Iterate over specified MLP input activation functions.
+    # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
     activations = []
     if cfg.fused_mlp:
       x = DenseGeneral(
@@ -229,7 +244,7 @@ class MlpBlock(nn.Module):
             dtype=self.dtype,
             weight_dtype=self.weight_dtype,
             kernel_init=self.kernel_init,
-            kernel_axes=('mlpblock_embed', 'mlpblock_mlp'),  
+            kernel_axes=('mlpblock_embed', 'mlpblock_mlp'),
             name=dense_name,
             quant=self.quant,
             use_bias=self.use_bias,
@@ -241,16 +256,16 @@ class MlpBlock(nn.Module):
         x = _convert_to_activation_function(act_fn)(x)
         activations.append(x)
 
+    # Take elementwise product of above intermediate activations.
     x = functools.reduce(operator.mul, activations).astype(self.dtype)
     x = checkpoint_name(x, "mlpwi")
+    # Apply dropout and final dense output projection.
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
         x, deterministic=deterministic
-    )
+    )  # Broadcast along length.
       
-    x = nn_partitioning.with_sharding_constraint(
-        x, P('mlpblock_batch', 'mlpblock_sequence', 'mlpblock_mlp')
-    )
-      
+    x = nn_partitioning.with_sharding_constraint(x, P('mlpblock_batch', 'mlpblock_sequence', 'mlpblock_mlp'))
+
     output = DenseGeneral(
         inputs.shape[-1],
         dtype=self.dtype,

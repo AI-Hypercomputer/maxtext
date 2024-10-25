@@ -155,7 +155,7 @@ def calculate_tflops_training_per_device(config, log=True):
   attention_flops = 4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
   projection_flops = (
       2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_query_heads * config.head_dim
-  )
+   
   embedding_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.vocab_size
 
   # multiply by 3 for both feed forward and back proporgation flops
@@ -231,8 +231,7 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance=0.02):
   """
   total_num_params = max_utils.calculate_num_params_from_pytree(params)
   product_num_devices_for_weight_sharding = 1
-  # for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor", "stage", "expert"]:
-  for axis in ["sequence", "tensor"]:
+  for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor", "stage", "expert"]:
     product_num_devices_for_weight_sharding *= mesh.shape[axis]
   total_num_params_per_chip = max_utils.calculate_total_params_per_chip(params)
   perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
