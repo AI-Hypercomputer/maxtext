@@ -121,6 +121,8 @@ class MaxEngine(engine_api.Engine):
     self.kv_cache_shardings = jax.tree_util.tree_map(
         lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations
     )
+    print("before quanization")
+    print(jax.tree_util.tree_map(lambda x: x.nbytes, state.params))
 
     if self.model.quant and not self.config.checkpoint_is_quantized:
       params = self.quantize_params(state, rng3)
@@ -157,6 +159,8 @@ class MaxEngine(engine_api.Engine):
     self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), params
     )
+    print("after quanization")
+    print(jax.tree_util.tree_map(lambda x: x.nbytes, params))
     max_utils.save_quantized_checkpoint_if_configured(self.config, params)
     self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
     return params
