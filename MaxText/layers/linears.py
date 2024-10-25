@@ -177,37 +177,69 @@ class MlpBlock(nn.Module):
   use_pre_norm: bool = False
   quant: Optional[Quant] = None
 
+  def get_norm_layer(self):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
+      return RMSNorm
+    elif self.config.decoder_block == "gpt3":
+      from layers import gpt3
+
+      return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=self.use_bias)
+    else:
+      raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
+
   @nn.compact
   def __call__(self, inputs, decode: bool = False, deterministic: bool = False):
     """Applies Transformer MlpBlock module."""
     cfg = self.config
 
-    # Instead of full ("activation_batch", "activation_length", "activation_embed")
-    # Just use sequence/tensor parallelism like in test.py
-    inputs = nn_partitioning.with_sharding_constraint(
-        inputs, P(None, 'sequence', 'tensor')
-    )
+    if self.use_pre_norm:
+      inputs = self.get_norm_layer()(
+          name="mlp_layer_norm",
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          kernel_axes=("norm",),
+          epsilon=cfg.normalization_layer_epsilon,
+    )(inputs)
 
-    # Iterate over specified MLP input activation functions
+
     activations = []
-    for idx, act_fn in enumerate(self.activations):
-      dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
+    if cfg.fused_mlp:
       x = DenseGeneral(
-          self.intermediate_dim,
+          (len(self.activations), self.intermediate_dim),
           dtype=self.dtype,
           weight_dtype=self.weight_dtype,
           kernel_init=self.kernel_init,
-          kernel_axes=('tensor', 'mlp'),  
-          name=dense_name,
+          kernel_axes=("embed", "num_activations", "mlp"),
+          name="wi",
           quant=self.quant,
           use_bias=self.use_bias,
           matmul_precision=self.config.matmul_precision,
       )(inputs)
+      for idx, act_fn in enumerate(self.activations):
+        y = _convert_to_activation_function(act_fn)(x[:, :, idx, ...])
+        activations.append(y)
+    else:
+      inputs = nn_partitioning.with_sharding_constraint(
+          inputs, P('mlpblock_batch', 'mlpblock_sequence', 'mlpblock_embed')
+      )
+      for idx, act_fn in enumerate(self.activations):
+        dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
+        x = DenseGeneral(
+            self.intermediate_dim,
+            dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
+            kernel_init=self.kernel_init,
+            kernel_axes=('mlpblock_embed', 'mlpblock_mlp'),  
+            name=dense_name,
+            quant=self.quant,
+            use_bias=self.use_bias,
+            matmul_precision=self.config.matmul_precision,
+        )(inputs)
 
-      if cfg.activations_in_float32:
-        x = x.astype(jnp.float32)
-      x = _convert_to_activation_function(act_fn)(x)
-      activations.append(x)
+        if cfg.activations_in_float32:
+          x = x.astype(jnp.float32)
+        x = _convert_to_activation_function(act_fn)(x)
+        activations.append(x)
 
     x = functools.reduce(operator.mul, activations).astype(self.dtype)
     x = checkpoint_name(x, "mlpwi")
@@ -215,9 +247,8 @@ class MlpBlock(nn.Module):
         x, deterministic=deterministic
     )
       
-    # Add sharding constraint post-dropout like in test.py
     x = nn_partitioning.with_sharding_constraint(
-        x, P(None, 'sequence', 'tensor')
+        x, P('mlpblock_batch', 'mlpblock_sequence', 'mlpblock_mlp')
     )
       
     output = DenseGeneral(
@@ -225,14 +256,15 @@ class MlpBlock(nn.Module):
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         kernel_init=self.kernel_init,
-        # Simplified kernel axes to match test.py
-        kernel_axes=('mlp', 'tensor'),
+        kernel_axes=('mlpblock_mlp', 'mlpblock_embed'),
         name="wo",
         quant=self.quant,
         use_bias=self.use_bias,
         matmul_precision=self.config.matmul_precision,
     )(x)
-
+    output = nn_partitioning.with_sharding_constraint(
+        output, P('mlpblock_batch', 'mlpblock_sequence', 'mlpblock_embed')
+    )
     output = checkpoint_name(output, "mlpwo")
     return output
 

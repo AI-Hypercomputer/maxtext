@@ -230,8 +230,10 @@ logical_axis_rules: [
                       ['cache_kv', []],
                       ['cache_sequence', []],
                       ['exp', 'expert'],
-                      ['tensor', 'tensor'],
-                      ['sequence', 'sequence'],
+                      ['mlpblock_mlp', 'tensor'],
+                      ['mlpblock_embed', 'tensor'],
+                      ['mlpblock_sequence', 'sequence'],
+                      ['mlpblock_batch', []],
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
 data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'expert', 'autoregressive']]

@@ -54,11 +54,9 @@ export SCAN_LAYERS=false
 export WEIGHT_DTYPE=bfloat16
 export PER_DEVICE_BATCH_SIZE=1
 export ICI="FSDP=${ICI_FSDP_PARALLELISM}_AR=${ICI_AUTOREGRESSIVE_PARALLELISM}_TENSOR=${ICI_TENSOR_PARALLELISM}_SEQ=${ICI_SEQUENCE_PARALLELISM}"
-# export ICI="TENSOR=${ICI_TENSOR_PARALLELISM}_SEQ=${ICI_SEQUENCE_PARALLELISM}"
 
-
-export MESH_TYPE="hardcoded" # default, balanced_2d, balanced_2d_reversed, grid_of_rings, explicit, hardcoded
-export RUN_DESC="${run_name}_${stages}_${prefill_lens}_flags_${enable_xla_flags}_${ICI}_${MESH_TYPE}_simple"
+export MESH_TYPE="hardcoded" # default, balanced_2d, grid_of_rings, explicit, hardcoded
+export RUN_DESC="${run_name}_${stages}_${prefill_lens}_flags_${enable_xla_flags}_${ICI}_${MESH_TYPE}"
 
 mkdir -p /tmp/mb/logs
 mkdir -p /tmp/mb/profiles

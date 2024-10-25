@@ -56,10 +56,10 @@ def create_special_mesh(devices: Sequence[jax.Device], config, ici_mesh_shape: S
     
     # Optimized layout for MLPBlock matmuls
     device_layout = [
-        [sorted_devices[0], sorted_devices[4]],  # [0,4]
-        [sorted_devices[1], sorted_devices[5]],  # [1,5]
-        [sorted_devices[3], sorted_devices[7]],  # [3,7]
-        [sorted_devices[2], sorted_devices[6]],  # [2,6]
+        [sorted_devices[0], sorted_devices[4]],
+        [sorted_devices[1], sorted_devices[5]],
+        [sorted_devices[3], sorted_devices[7]],
+        [sorted_devices[2], sorted_devices[6]],
     ]
     
     result = np.array(device_layout)
@@ -73,7 +73,7 @@ def create_special_mesh(devices: Sequence[jax.Device], config, ici_mesh_shape: S
         for j, d in enumerate(row):
             print(f"tensor={i}, sequence={j}: Device {d.id} at coords {d.coords}")
     
-    result = result.transpose(1, 0)  # Now [2, 4] for [sequence, tensor]
+    result = result.transpose(1, 0)
     print(f"Transposed devices: {result}")
     result = result.reshape(ici_mesh_shape)
     print(f"Reshaped devices: {result}")
@@ -381,29 +381,6 @@ def make_nested_balanced_2d_devices(devices: Sequence[jax.Device], ici_mesh_shap
     #   dtype=object)
     return result
 
-def make_explicit_device_mesh(devices: Sequence[jax.Device], ici_mesh_shape: Sequence[int]) -> Sequence[jax.Device]:
-    print(f"\nmake_explicit_device_mesh: {devices=}")
-    # make_nested_balanced_2d_devices: devices=[
-    #   TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), 
-    #   TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0), 
-    #   TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0), 
-    #   TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0), 
-    #   TpuDevice(id=4, process_index=0, coords=(0,2,0), core_on_chip=0), 
-    #   TpuDevice(id=5, process_index=0, coords=(1,2,0), core_on_chip=0), 
-    #   TpuDevice(id=6, process_index=0, coords=(0,3,0), core_on_chip=0), 
-    #   TpuDevice(id=7, process_index=0, coords=(1,3,0), core_on_chip=0)]
-
-    print(f"\nmake_explicit_device_mesh: {ici_mesh_shape=}")
-    # ordered_flat_devices = sorted(
-    #     np.array(devices).flatten(), key=lambda x: x.id
-    # )
-    # reordered_flat_devices = np.reshape(ordered_flat_devices, (2,) * log_len).transpose(new_axis_order[::-1])
-    # [[0, 4], [1, 5], [3, 7], [2, 6]]
-    new_device_ordering = [devices[0], devices[4], devices[1], devices[5], devices[3], devices[7], devices[2], devices[6]]
-    result = np.reshape(new_device_ordering, ici_mesh_shape)
-    print(f"\nmake_explicit_device_mesh: {result=}")
-    return result
-
 def get_topology_mesh(config):
   """Get the target hardware devices, and create configured mesh with them"""
   target_hardware = accelerator_to_spec_map.get_system_characteristics(config.compile_topology)
@@ -489,23 +466,12 @@ class MaxEngine(engine_api.Engine):
       mesh_axis_names = tuple(config.mesh_axes)
       nested_balanced_2d_devices = make_nested_balanced_2d_devices(jax.devices(), ici_parallelism)
       self._mesh = Mesh(nested_balanced_2d_devices, mesh_axis_names)
-    elif config.mesh_type == "balanced_2d_reversed":
-      print("Creating reversed nested_balanced_2d_devices mesh")
-      mesh_axis_names = tuple(reversed(config.mesh_axes))
-      nested_balanced_2d_devices = make_nested_balanced_2d_devices(jax.devices(), ici_parallelism)
-      self._mesh = Mesh(nested_balanced_2d_devices, mesh_axis_names)
     elif config.mesh_type == "grid_of_rings":
       print("Creating GridOfRingsPartitionConfig mesh")
       # original code: https://source.corp.google.com/piper///depot/google3/learning/gemini/gemax/core/compilation/scheduling.py;l=761;bpv=0;bpt=0
       ici_mesh = dict(zip(config.mesh_axes, ici_parallelism))
-      grid_of_rings_partition_config = GridOfRingsPartitionConfig(outer_axis_name='tensor', inner_axis_name='sequence')
-      grid_of_rings_partition_config.ici_mesh = ici_mesh
+      grid_of_rings_partition_config = GridOfRingsPartitionConfig(mesh_axis_names=config.mesh_axes, ici_mesh=ici_mesh, inner_axis_name='tensor', outer_axis_name='sequence')
       self._mesh = grid_of_rings_partition_config.make_mesh(jax.devices())
-    elif config.mesh_type == "explicit":
-      print("Creating explicit mesh")
-      mesh_axis_names = tuple(config.mesh_axes)
-      explicit_device_mesh = make_explicit_device_mesh(jax.devices(), ici_parallelism)
-      self._mesh = Mesh(explicit_device_mesh, mesh_axis_names)
     elif config.mesh_type == "hardcoded":
       print("Creating hardcoded mesh")
       self._mesh = create_special_mesh(jax.devices(), config, ici_parallelism)
