@@ -21,6 +21,7 @@ limitations under the License.
 from flax import linen as nn
 from jax.sharding import Mesh
 import jax.numpy as jnp
+from jax.ad_checkpoint import checkpoint_name
 # from jax.experimental.pallas.ops.tpu import flash_attention
 from layers import attentions
 from layers import embeddings
@@ -78,7 +79,7 @@ class LlamaDecoderLayer(nn.Module):
     mesh = self.mesh
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
-
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
     lnx_rms = models.RMSNorm(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
