@@ -16,7 +16,7 @@
 
 # Example command:
 # bash docker_build_dependency_image.sh MODE=stable
-# bash docker_build_dependency_image.sh MODE=stable_stack BASEIMAGE={{JAX_STABLE_STACK BASEIMAGE FROM ARTIFACT REGISTRY}}
+# bash docker_build_dependency_image.sh DEVICE={{gpu|tpu}} MODE=stable_stack BASEIMAGE={{JAX_STABLE_STACK BASEIMAGE FROM ARTIFACT REGISTRY}}
 # bash docker_build_dependency_image.sh MODE=nightly
 # bash docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
 
@@ -53,34 +53,40 @@ if [[ -z ${DEVICE} ]]; then
   echo "Default DEVICE=${DEVICE}"
 fi
 
-if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
-  export LIBTPU_GCS_PATH=NONE
-  echo "Default LIBTPU_GCS_PATH=${LIBTPU_GCS_PATH}"
-  if [[ ${DEVICE} == "gpu" ]]; then
-    if [[ ${MODE} == "pinned" ]]; then
-      export BASEIMAGE=ghcr.io/nvidia/jax:base-2024-05-07
-    else
-      export BASEIMAGE=ghcr.io/nvidia/jax:base
+# Function to build with MODE=stable-stack
+build_stable_stack() {
+    if [[ -z ${BASEIMAGE+x} ]]; then
+        echo "Error: BASEIMAGE is unset, please set it!"
+        exit 1
     fi
-    docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE -f ./maxtext_gpu_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
-  else
-    if [[ ${MODE} == "stable_stack" ]]; then
-      if [[ ! -v BASEIMAGE ]]; then
-        echo "Erroring out because BASEIMAGE is unset, please set it!"
-        exit 1
-      fi
-      if [[ ! -v MAXTEXT_REQUIREMENTS_FILE ]]; then
-        echo "Erroring out because MAXTEXT_REQUIREMENTS_FILE is unset, please set it!"
-        exit 1
-      fi
-      COMMIT_HASH=$(git rev-parse --short HEAD)
-      echo "Building JAX Stable Stack MaxText at commit hash ${COMMIT_HASH} . . ."  
-      docker build --no-cache \
+    COMMIT_HASH=$(git rev-parse --short HEAD)
+    echo "Building JAX Stable Stack MaxText at commit hash ${COMMIT_HASH}..."
+
+    docker build --no-cache \
         --build-arg JAX_STABLE_STACK_BASEIMAGE=${BASEIMAGE} \
         --build-arg COMMIT_HASH=${COMMIT_HASH} \
         --network=host \
         -t ${LOCAL_IMAGE_NAME} \
-        -f ./maxtext_jax_stable_stack_tpu.Dockerfile .
+        -f ./maxtext_jax_stable_stack.Dockerfile .
+}
+
+if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
+  export LIBTPU_GCS_PATH=NONE
+  echo "Default LIBTPU_GCS_PATH=${LIBTPU_GCS_PATH}"
+  if [[ ${DEVICE} == "gpu" ]]; then
+    if [[ ${MODE} == "stable_stack" ]]; then
+      build_stable_stack
+    else
+      if [[ ${MODE} == "pinned" ]]; then
+        export BASEIMAGE=ghcr.io/nvidia/jax:base-2024-05-07
+      else
+        export BASEIMAGE=ghcr.io/nvidia/jax:base
+      fi
+      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE -f ./maxtext_gpu_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+    fi
+  else
+    if [[ ${MODE} == "stable_stack" ]]; then
+      build_stable_stack
     else
       docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
     fi
