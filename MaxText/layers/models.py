@@ -338,7 +338,7 @@ class Decoder(nn.Module):
         BlockLayer,
         prevent_cse=not cfg.scan_layers,
         policy=policy,
-        static_argnums=(-1, -2),  # deterministic and model mode are static arguments
+        static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
     )
     if cfg.using_pipeline_parallelism:
       if cfg.num_layers_per_pipeline_stage == 1:
