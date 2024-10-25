@@ -470,7 +470,7 @@ def init_initial_state(model, tx, config, is_training, key):
   return init_decode_state(model.apply, model_vars)
 
 
-def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
+def setup_decode_state(model, config, rng, mesh, checkpoint_manager, transform=None):
   """Setup decode state by loading params from a checkpoint.
   Args:
     model: the flax model to initialize
@@ -492,7 +492,7 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     max_logging.log(f"Loading decode params from {config.load_parameters_path}")
     unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(model, None, config, rng, mesh, False)
     with nn_partitioning.axis_rules(config.logical_axis_rules):
-      params = checkpointing.load_params_from_path(config.load_parameters_path, unboxed_abstract_state.params)
+      params = checkpointing.load_params_from_path(config.load_parameters_path, unboxed_abstract_state.params, transform)
     state = init_decode_state(None, params)
 
   state = unbox_logicallypartioned(state)

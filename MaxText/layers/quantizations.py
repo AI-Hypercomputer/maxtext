@@ -69,6 +69,26 @@ def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
   return ret
 
 
+def make_quant_fn_for_qtensor(abstract_qtensor: aqt_tensor.QTensor):
+  assert len(abstract_qtensor.scale) == 1, "QTensor should have one scale factor."
+  scale_shape = abstract_qtensor.scale[0].shape
+  contracting_axis = [idx for idx, s in enumerate(scale_shape) if s == 1 and abstract_qtensor.shape[idx] != 1]
+
+  match abstract_qtensor.qvalue.dtype:
+    case jnp.int8:
+      n_bits = 8
+    case jnp.in4:
+      n_bits = 4
+    case _:
+      raise ValueError("QTensor should be quantized in either int8 or int4.")
+
+  quantizer = aqt_quantizer.quantizer_make(n_bits=n_bits)
+
+  def _quant(x) -> aqt_tensor.QTensor:
+    return quantizer.quant(x, calibration_axes=contracting_axis)
+  return _quant
+
+
 def _rhs_axis_metadata_wrapper(
     x: jnp.ndarray, tile_map, no_sharding_axis: Sequence[int], mesh_axes: Tuple[str, ...], is_tiled: bool
 ):

@@ -289,9 +289,11 @@ def setup_checkpoint_logger(config) -> composite_logger.CompositeLogger | None:
   return orbax_logger
 
 
-def load_params_from_path(load_parameters_from_path, abstract_unboxed_params):
+def load_params_from_path(load_parameters_from_path, abstract_unboxed_params, transform=None):
   """Load decode params from checkpoint at specified path."""
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
+  if transform is None:
+    transform = {}
   max_logging.log(f"restoring params from {load_parameters_from_path}")
   ckpt = epath.Path(load_parameters_from_path)
   ckptr = ocp.PyTreeCheckpointer()
@@ -301,7 +303,7 @@ def load_params_from_path(load_parameters_from_path, abstract_unboxed_params):
   # (which itself may be a dictionary containing a key named 'params').
   restore_args = ocp.checkpoint_utils.construct_restore_args(abstract_unboxed_params)
   restored = ckptr.restore(
-      ckpt, item={"params": abstract_unboxed_params}, transforms={}, restore_args={"params": restore_args}
+      ckpt, item={"params": abstract_unboxed_params}, transforms=transform, restore_args={"params": restore_args}
   )
   return restored["params"]
 

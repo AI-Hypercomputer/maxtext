@@ -37,6 +37,12 @@ from jetstream.engine import token_utils
 import max_utils
 import inference_utils
 import pyconfig
+import orbax.checkpoint as ocp
+
+import aqt
+from aqt.jax.v2 import aqt_tensor
+
+from jax.tree_util import DictKey
 
 
 Prefix = Any
@@ -76,6 +82,7 @@ class MaxEngineConfig:
     return self.keys
 
 
+
 class MaxEngine(engine_api.Engine):
   """The computational core of the generative model server.
 
@@ -108,26 +115,58 @@ class MaxEngine(engine_api.Engine):
     if rng is None:
       rng = jax.random.PRNGKey(0)
 
-    if self.model.quant and self.config.checkpoint_is_quantized:
-      print("Loading from the quantized checkpoint...")
-      self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
+    # Checkpoint is not quantized. Quantization should be applied when loading parameters.
+    if self.model.quant and not self.config.checkpoint_is_quantized:
+      # initialize quantized model state
+      self.model.quant.quant_mode = quantizations.get_quant_mode("convert")
+
+      # Load abstract parameters to infer the shape of quantized tensor (QTensor).
+      unboxed_quantized_state, _, _ = max_utils.get_abstract_state(
+        self.model, None, self.config, rng, self._mesh, False
+      )
+      aqt_params = unboxed_quantized_state.params['aqt']
+      unquantized_params = unboxed_quantized_state.params['params']
+      aqt_to_unquantized_param = quantizations.match_aqt_and_unquantized_param(aqt_params, unquantized_params)
+
+      # Use Orbax transformation to apply checkpoint conversion one-by-one when loading the parameters.
+      def make_transform(abstract_qtensor, original_key):
+        quant_fn = quantizations.make_quant_fn_for_qtensor(abstract_qtensor)
+        # Somehow parameter of a TrainState is
+        # state.param['param']
+        original_key = ('param', 'params', *(k.key for k in original_key))
+        return ocp.Transform(original_key=original_key, value_fn=quant_fn)
+
+      transformation = jax.tree_map(
+        make_transform, aqt_params, aqt_to_unquantized_param, is_leaf=lambda x: isinstance(x, aqt_tensor.QTensor)
+      )
+      final_transformation = {
+        'params': {
+          'aqt': transformation
+        }
+      }
 
     rng1, rng2, rng3 = jax.random.split(rng, 3)
-    state, self.state_mesh_annotations = max_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None)
-    self.abstract_params = jax.tree_util.tree_map(
-        lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), state.params
-    )
-    self.kv_cache_annotations = max_utils.get_kv_cache_annotations(self.model, self.config, rng2, self._mesh)
-    self.kv_cache_shardings = jax.tree_util.tree_map(
-        lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations
-    )
+    self.model.quant = None
+    state, self.state_mesh_annotations = max_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None, transform=final_transformation)
+    _, tree_def = jax.tree_util.tree_flatten(state)
+    print(tree_def)
+    # # Here state is in bfloat16
+    # # 
 
-    if self.model.quant and not self.config.checkpoint_is_quantized:
-      params = self.quantize_params(state, rng3)
-    else:
-      params = state.params
-    max_utils.print_mem_stats("After load_params")
-    return params
+    # self.abstract_params = jax.tree_util.tree_map(
+    #     lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), state.params
+    # )
+    # self.kv_cache_annotations = max_utils.get_kv_cache_annotations(self.model, self.config, rng2, self._mesh)
+    # self.kv_cache_shardings = jax.tree_util.tree_map(
+    #     lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations
+    # )
+
+    # if self.model.quant and not self.config.checkpoint_is_quantized:
+    #   unquantized_params = self.quantize_params(state, rng3)
+    # else:
+    #   unquantized_params = state.params
+    # max_utils.print_mem_stats("After load_params")
+    # return unquantized_params
 
   def quantize_params(self, state, rng: Optional[jax.random.PRNGKey] = None):
     """Forward pass to quantize decode params."""
