@@ -72,6 +72,7 @@ def validate_config(config):
 
 if __name__ == "__main__":
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   pyconfig.initialize(sys.argv)
   cfg = pyconfig.config

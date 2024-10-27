@@ -306,10 +306,54 @@ def load_params_from_path(load_parameters_from_path, abstract_unboxed_params):
   return restored["params"]
 
 
+def helper(params):
+
+  import psutil
+  import max_logging
+  import logging
+  import gc
+  from jax import tree
+
+  SIMULATED_CPU_DEVICES_COUNT=4
+  mem_info = psutil.Process()
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+  gc.collect()
+  mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
+  s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))  # shards first axis
+  s2 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis"))  # shards second axis
+  s3 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None))  # no sharding
+
+  def checkpoint_device_put(arr):
+    if arr.shape[0] % SIMULATED_CPU_DEVICES_COUNT == 0:
+      max_logging.log("sharding first axis")
+      return jax.device_put(arr, device=s1)
+    elif len(arr.shape) > 1 and arr.shape[1] % SIMULATED_CPU_DEVICES_COUNT == 0:
+      max_logging.log("sharding second axis")
+      return jax.device_put(arr, device=s2)
+    else:
+      max_logging.log("no sharding was possible, replicating")
+      return jax.device_put(arr, device=s3)
+
+  # convert all weights to jax.numpy with sharding if applicable
+  jax_weights_flat, jax_weights_struct = tree.flatten(params)
+  jax_weights_new = []
+  while len(jax_weights_flat) > 0:
+    jax_weight = jax_weights_flat.pop(0)
+    jax_weights_new.append(checkpoint_device_put(jax_weight))
+    del jax_weight
+    gc.collect()
+    logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+
+  output = tree.unflatten(jax_weights_struct, jax_weights_new)
+  return output
+
+
 def save_params_to_path(checkpoint_dir, params):
   """Save decode params in checkpoint at specified path."""
   assert checkpoint_dir, "checkpoint_dir is not defined."
   orbax_checkpointer = ocp.PyTreeCheckpointer()
-  save_args = orbax_utils.save_args_from_target({"params": params})
-  orbax_checkpointer.save(checkpoint_dir, {"params": params}, save_args=save_args, force=True)
+  print(f"jax device: {jax.devices()}")
+  shard_params = helper(params)
+  save_args = orbax_utils.save_args_from_target({"params": shard_params})
+  orbax_checkpointer.save(checkpoint_dir, {"params": shard_params}, save_args=save_args, force=True)
   print(f"Quantized params checkpoint saved at: {checkpoint_dir}")
