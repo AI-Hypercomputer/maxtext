@@ -218,6 +218,7 @@ logical_axis_rules: [
                       ['activation_exp', 'expert'],
                       ['mlp', ['fsdp_transpose', 'tensor', 'autoregressive']],
                       ['vocab', ['tensor', 'autoregressive']],
+                      ['embed', ['tensor']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'expert']],
                       ['embed', ['fsdp', 'sequence', 'expert']],
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence']],
