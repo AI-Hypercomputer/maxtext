@@ -211,6 +211,7 @@ logical_axis_rules: [
                       ['activation_kv', 'tensor'],
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_head_dim', 'tensor'],
+                      ['activation_vocab', ['tensor', 'sequence']],
                       ['activation_vocab', 'tensor'],
                       ['activation_vocab', 'sequence'],
                       ['activation_stage', 'stage'],
