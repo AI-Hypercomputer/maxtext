@@ -51,7 +51,7 @@ warnings.simplefilter("ignore", category=FutureWarning)
 Prefix = Any
 Params = Any
 
-def create_special_mesh(devices: Sequence[jax.Device], config, ici_mesh_shape: Sequence[int]) -> Mesh:
+def create_hardcoded_mesh(devices: Sequence[jax.Device], config, ici_mesh_shape: Sequence[int]) -> Mesh:
     sorted_devices = sorted(devices, key=lambda d: d.id)
     
     # Optimized layout for MLPBlock matmuls
@@ -384,13 +384,7 @@ class MaxEngine(engine_api.Engine):
     ]
     print(f"\nICI parallelism dimensions: {ici_parallelism}")
 
-    if config.mesh_type == "balanced_2d":
-      # original code: https://source.corp.google.com/piper///depot/google3/learning/gemini/gemax/core/compilation/scheduling.py;l=931;bpv=0;bpt=0
-      print("Creating nested_balanced_2d_devices mesh")
-      mesh_axis_names = tuple(config.mesh_axes)
-      nested_balanced_2d_devices = make_nested_balanced_2d_devices(jax.devices(), ici_parallelism)
-      self._mesh = Mesh(nested_balanced_2d_devices, mesh_axis_names)
-    elif config.mesh_type == "grid_of_rings":
+    if config.mesh_type == "grid_of_rings":
       print("Creating GridOfRingsPartitionConfig mesh")
       # original code: https://source.corp.google.com/piper///depot/google3/learning/gemini/gemax/core/compilation/scheduling.py;l=761;bpv=0;bpt=0
       ici_mesh = dict(zip(config.mesh_axes, ici_parallelism))
@@ -398,7 +392,7 @@ class MaxEngine(engine_api.Engine):
       self._mesh = grid_of_rings_partition_config.make_mesh(jax.devices())
     elif config.mesh_type == "hardcoded":
       print("Creating hardcoded mesh")
-      self._mesh = create_special_mesh(jax.devices(), config, ici_parallelism)
+      self._mesh = create_hardcoded_mesh(jax.devices(), config, ici_parallelism)
     else: 
       print("Creating default mesh")
       devices_array = max_utils.create_device_mesh(config)
