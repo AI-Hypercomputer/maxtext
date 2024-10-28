@@ -117,7 +117,7 @@ base_mlp_dim: 7168
 base_num_decoder_layers: 16
 head_dim: 128
 mlp_activations: ["silu", "linear"]
-dropout_rate: 0
+dropout_rate: 0.0
 logits_via_embedding: False
 normalize_embedding_logits: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: False  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
