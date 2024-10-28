@@ -1,12 +1,14 @@
-MODEL_NAME="llama2_13b"
+MODEL_NAME="llama2_7b"
 ACCELERATOR="v5e"
 NUM_ACCELERATOR="256"
-M_COMPILE_TOPOLOGY_NUM_SLICES="2"
-PER_DEVICE_BATCH_SIZE="10"
+M_COMPILE_TOPOLOGY_NUM_SLICES="1"
+PER_DEVICE_BATCH_SIZE="8"
 QUANTIZATION="int8"
 SEQUENCE_LENGTH="2048"
 
-HLO_NAME=${MODEL_NAME}_${ACCELERATOR}_${NUM_ACCELERATOR}_${M_COMPILE_TOPOLOGY_NUM_SLICES}_${PER_DEVICE_BATCH_SIZE}_${QUANTIZATION}_${SEQUENCE_LENGTH}
+JAX_VERSION="$(python3 -c 'import jax; print(jax.__version__)')"
+
+HLO_NAME=${MODEL_NAME}_${ACCELERATOR}_${NUM_ACCELERATOR}_${M_COMPILE_TOPOLOGY_NUM_SLICES}_${PER_DEVICE_BATCH_SIZE}_${QUANTIZATION}_${SEQUENCE_LENGTH}_${JAX_VERSION}
 
 echo ${HLO_NAME}
 echo "export XLA_FLAGS="--xla_dump_to=/tmp/hlo/${HLO_NAME}""
@@ -20,7 +22,7 @@ bash MaxText/configs/v5e/${MODEL_NAME}.sh \
     SEQUENCE_LENGTH=${SEQUENCE_LENGTH} \
     PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE}
 
-# gcloud storage cp -r /tmp/hlo/${HLO_NAME} gs://hengtaoguo-maxtext-logs/hlo/benchmark/${HLO_NAME}
+gcloud storage cp -r /tmp/hlo/${HLO_NAME} gs://hengtaoguo-maxtext-logs/hlo/benchmark/${HLO_NAME}
 
 xla_dump_dir=/tmp/hlo/${HLO_NAME}
 module_name_pattern=jit_train_step
