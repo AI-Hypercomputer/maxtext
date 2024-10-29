@@ -22,6 +22,7 @@ import numpy as np
 import pyconfig
 from layers import quantizations
 import unittest
+from aqt.jax.v2 import aqt_tensor
 
 
 class QuantTestModule(nn.Module):
@@ -110,13 +111,27 @@ class QuantizationTest(unittest.TestCase):
         "decoder": {
             "layers": {
                 "mlp": {
-                    "wi_0": {"AqtDotGeneral_0": {"qrhs": {"scale": 1.0, "_value": 1.0}}},
-                    "wi_1": {"AqtDotGeneral_0": {"qrhs": {"scale": 1.0, "_value": 1.0}}},
-                    "wo": {"AqtDotGeneral_0": {"qrhs": {"scale": 1.0, "_value": 1.0}}},
+                    "wi_0": {
+                        "AqtDotGeneral_0": {
+                            "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
+                        }
+                    },
+                    "wi_1": {
+                        "AqtDotGeneral_0": {
+                            "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
+                        }
+                    },
+                    "wo": {
+                        "AqtDotGeneral_0": {
+                            "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
+                        }
+                    },
                 },
                 "self_attention": {
                     "key": {
-                        "AqtDotGeneral_0": {"qrhs": {"scale": 1.0, "_value": 1.0}},
+                        "AqtDotGeneral_0": {
+                            "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
+                        }
                     }
                 },
             }

@@ -308,32 +308,50 @@ class MoeBlock(nn.Module):
     kernel_out_axis = np.arange(1, 2)
     kernel_init = nd_dense_init(1.0, "fan_in", "truncated_normal")
 
-    w0_kernel = self.param(
-        "wi_0",
-        nn.with_logical_partitioning(kernel_init, self.wi_kernel_axes),
-        (num_experts, emb_dim, mlp_dim),
-        self.weight_dtype,
-        kernel_in_axis,
-        kernel_out_axis,
-    )
+    if quantizations.in_serve_mode(self.quant):
+      # During aqt convert state we delete kernel weight from params to save memory.
+      # Instead they are retrieved from the tensors stored in the 'aqt' collection.
+      w0_kernel = jnp.zeros((num_experts, emb_dim, mlp_dim))
+    else:
+      w0_kernel = self.param(
+          "wi_0",
+          nn.with_logical_partitioning(kernel_init, self.wi_kernel_axes),
+          (num_experts, emb_dim, mlp_dim),
+          self.weight_dtype,
+          kernel_in_axis,
+          kernel_out_axis,
+      )
+
     w0_kernel = jnp.asarray(w0_kernel, self.dtype)
-    w1_kernel = self.param(
-        "wi_1",
-        nn.with_logical_partitioning(kernel_init, self.wi_kernel_axes),
-        (num_experts, emb_dim, mlp_dim),
-        self.weight_dtype,
-        kernel_in_axis,
-        kernel_out_axis,
-    )
+
+    if quantizations.in_serve_mode(self.quant):
+      # During aqt convert state we delete kernel weight from params to save memory.
+      # Instead they are retrieved from the tensors stored in the 'aqt' collection.
+      w1_kernel = jnp.zeros((num_experts, emb_dim, mlp_dim))
+    else:
+      w1_kernel = self.param(
+          "wi_1",
+          nn.with_logical_partitioning(kernel_init, self.wi_kernel_axes),
+          (num_experts, emb_dim, mlp_dim),
+          self.weight_dtype,
+          kernel_in_axis,
+          kernel_out_axis,
+      )
     w1_kernel = jnp.asarray(w1_kernel, self.dtype)
-    wo_kernel = self.param(
-        "wo",
-        nn.with_logical_partitioning(kernel_init, self.wo_kernel_axes),
-        (num_experts, mlp_dim, emb_dim),
-        self.weight_dtype,
-        kernel_in_axis,
-        kernel_out_axis,
-    )
+
+    if quantizations.in_serve_mode(self.quant):
+      # During aqt convert state we delete kernel weight from params to save memory.
+      # Instead they are retrieved from the tensors stored in the 'aqt' collection.
+      wo_kernel = jnp.zeros((num_experts, mlp_dim, emb_dim))
+    else:
+      wo_kernel = self.param(
+          "wo",
+          nn.with_logical_partitioning(kernel_init, self.wo_kernel_axes),
+          (num_experts, mlp_dim, emb_dim),
+          self.weight_dtype,
+          kernel_in_axis,
+          kernel_out_axis,
+      )
     wo_kernel = jnp.asarray(wo_kernel, self.dtype)
     return w0_kernel, w1_kernel, wo_kernel
 
