@@ -67,7 +67,7 @@ Failed to execute XLA Runtime executable: run time error: custom call 'xla.gpu.a
 ## Multihost development
 There are three patterns for running MaxText with more than one host.
 
-1. [GKE, recommended] [Running Maxtext with xpk](Run_MaxText_via_xpk.md) - Quick Experimentation and Production support
+1. [GKE, recommended] [Running Maxtext with xpk](../Run_MaxText_via_xpk.md) - Quick Experimentation and Production support
 2. [GCE] [Running Maxtext with Multihost Jobs](Run_MaxText_via_multihost_job.md) - Long Running Production Jobs with Queued Resources
 3. [GCE] [Running Maxtext with Multihost Runner](Run_MaxText_via_multihost_runner.md) -  Fast experiments via multiple ssh connections.
 
