@@ -15,7 +15,7 @@
 -->
 
 
-# How to run MaxText with XPK?
+# How to run MaxText with XPK
 
 This document focuses on steps required to setup XPK on TPU VM and assumes you have gone through the [README](https://github.com/google/xpk/blob/main/README.md) to understand XPK basics.
 

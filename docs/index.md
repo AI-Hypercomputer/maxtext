@@ -212,6 +212,7 @@ checkpointing.md
 profiling.md
 full_finetuning.md
 inference.md
-gce_gke_xpk.md
+Run_MaxText_via_xpk.md
 advanced_usage.md
+terminologies.md
 ```
