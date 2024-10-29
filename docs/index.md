@@ -49,7 +49,7 @@ The key value proposition of using MaxText for pre-training or full fine tuning 
 Maxtext today only supports Pre-training and Full Fine Tuning of the models. It does not support PEFT/LoRA, Supervised Fine Tuning or RLHF.
 ```
 
-## Who are the target users of Maxtext?
+## Who are the target users of MaxText?
 
 - Any individual or a company that is interested in forking maxtext and seeing it as a reference implementation of a high performance Large Language Models and wants to build their own LLMs on TPU and GPU.
 - Any individual or a company that is interested in performing a pre-training or Full Fine Tuning of the supported open source models, can use Maxtext as a blackbox to perform full fine tuning. Maxtext attains an extremely high MFU, resulting in large savings in training costs.
@@ -203,6 +203,15 @@ MaxText supports automatic upload of logs collected in a directory to a Tensorbo
 :hidden:
 
 getting_started/index.md
+code_organization.md
+data_loading.md
+sharding.md
+remat_policy.md
+batch_size.md
+checkpointing.md
+profiling.md
+full_finetuning.md
+inference.md
+gce_gke_xpk.md
 advanced_usage.md
-reference/index.md
 ```

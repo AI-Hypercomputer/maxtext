@@ -17,4 +17,6 @@ In addition to the getting started guides, there are always other MaxText capabi
 First_run.md
 steps_model.md
 End-to-end example <https://www.kaggle.com/code/melissawm/maxtext-examples>
+Data_Input_Pipeline.md
+Data_Input_Perf.md
 ```
