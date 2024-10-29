@@ -113,7 +113,7 @@ class OfflineInference:
 
     empty_slots = list(range(self.batch_size))
     slot_to_id = {}
-    num_prefills = 0
+    num_prefills = {}
     num_decodes = 0
 
     dummy_length = 1
@@ -166,9 +166,10 @@ class OfflineInference:
         log.debug(f"decode-{desc}-{num_decodes}")
         decode()
       # do one insert
-      num_prefills += 1
-      log.info(
-          f"prefill-{desc}-{num_prefills} num_tokens {len(row.tokens)} true_length {row.true_length} num_empty_slots {len(empty_slots)} num_decodes {num_decodes}"
+      num_tokens = len(row.tokens)
+      num_prefills[num_tokens] = 0 if num_tokens not in num_prefills else num_prefills[num_tokens] + 1
+      log.debug(
+          f"prefill-{desc}-{num_prefills} num_tokens {num_tokens} true_length {row.true_length} num_empty_slots {len(empty_slots)} num_decodes {num_decodes}"
       )
       slot = empty_slots.pop()
       first_token = prefill(slot, row.tokens, row.true_length)
@@ -182,7 +183,7 @@ class OfflineInference:
       log.debug(f"decode-{desc}-{num_decodes} num_filled_slots {len(slot_to_id)}")
       num_decodes += 1
       decode()
-    log.info(f"decode-{desc}-{num_decodes} completed.")
+    log.info(f"summary-{desc}-prefills-{num_prefills}-decodes-{num_decodes} completed.")
 
   def batch_inference(self, data: List[InputData], desc=""):
     """data is list of obj with id, tokens, and true length"""

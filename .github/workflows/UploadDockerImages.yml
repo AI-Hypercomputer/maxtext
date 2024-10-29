@@ -41,7 +41,7 @@ jobs:
         bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_jax_nightly MODE=nightly DEVICE=tpu PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_jax_nightly
     - name: build jax stable stack image
       run : |
-        bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_jax_stable_stack_0.4.33 MODE=stable_stack DEVICE=TPU PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_jax_stable_stack_0.4.33 BASEIMAGE=us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:jax0.4.33-rev1 MAXTEXT_REQUIREMENTS_FILE=requirements_with_jax_stable_stack.txt
+        bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_jax_stable_stack_0.4.35 MODE=stable_stack DEVICE=TPU PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_jax_stable_stack_0.4.35 BASEIMAGE=us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:jax0.4.35-rev1 MAXTEXT_REQUIREMENTS_FILE=requirements_with_jax_stable_stack.txt
   gpu:
     strategy:
       fail-fast: false
@@ -61,3 +61,6 @@ jobs:
     - name: build jax pinned image
       run : |
         bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_gpu_jax_pinned MODE=pinned DEVICE=gpu PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_gpu_local_jax_pinned
+    - name: build jax stable stack image
+      run : |
+        bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_gpu_jax_stable_stack_0.4.35 MODE=stable_stack DEVICE=gpu PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_jax_stable_stack_0.4.35 BASEIMAGE=gcr.io/tpu-prod-env-multipod/jax-stable-stack/gpu:jax0.4.35-rev1 MAXTEXT_REQUIREMENTS_FILE=requirements_with_jax_stable_stack.txt

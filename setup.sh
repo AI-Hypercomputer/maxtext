@@ -180,7 +180,7 @@ elif [[ $MODE == "nightly" ]]; then
         else
             # Install libtpu-nightly
             echo "Installing libtpu-nightly"
-            pip3 install libtpu-nightly -f https://storage.googleapis.com/jax-releases/libtpu_releases.html -U --pre
+            pip3 install -U --pre libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
         fi
         echo "Installing nightly tensorboard plugin profile"
         pip3 install tbp-nightly --upgrade

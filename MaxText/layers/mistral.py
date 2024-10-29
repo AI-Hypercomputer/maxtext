@@ -24,6 +24,7 @@ from layers import quantizations
 from layers import linears
 from layers import initializers
 import jax
+from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 from flax import linen as nn
 import jax.numpy as jnp
@@ -70,7 +71,7 @@ class MistralDecoderLayer(nn.Module):
     mesh = self.mesh
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
-
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
     lnx_rms = models.RMSNorm(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
