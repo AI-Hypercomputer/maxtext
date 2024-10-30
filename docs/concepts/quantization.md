@@ -11,7 +11,7 @@ You can turn on the quantization by adding the following flag `--quantization` a
 - 'intmp' for mixed precision weight only quantization based on config file
 - 'fp8' for 8-bit floating-point GeMMs on NVIDIA GPUs.
 
-```{figure} quantization.png
+```{figure} ../_static/quantization.png
 
 EMFU measured using MaxText 128b, context length 2048, trained with synthetic data, using Cloud TPU v5e-256. Measured as of April, 2024.
 ```

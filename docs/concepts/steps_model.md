@@ -1,7 +1,9 @@
 # Steps to build a Model
 
-![](build_model.png)
-_Fig1: Stages of LLM Model Development from pre-training to fine tuning and finally serving a model._
+```{figure} ../_static/build_model.png
+
+Stages of LLM Model Development from pre-training to fine tuning and finally serving a model.
+```
 
 Model building starts with Pre-training a base model architecture. Pre-training is the process where you take a model architecture, which starts with random weights and train with a very large corpus in the scale of trillions of tokens.  E.g. Google’s Gemma models were pre-trained on 6 Trillion tokens; LLama 3 was trained with 15 Trillion tokens
 
