@@ -8,6 +8,6 @@ Maxtext provides the ability to run training with following checkpointing option
 
 They are dictated by the following parameters:
 
-- `Enable_checkpointing` (`True`/`False`) 
-- `Checkpoint_period` (integer value)
-- `Async_checkpointing` (`True`/`False`)
+- `enable_checkpointing` (`True`/`False`) 
+- `checkpoint_period` (integer value)
+- `async_checkpointing` (`True`/`False`)
