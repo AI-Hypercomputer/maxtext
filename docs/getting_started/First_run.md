@@ -28,7 +28,7 @@ python3 MaxText/train.py MaxText/configs/base.yml \
   dataset_type=synthetic \
   steps=10
 ```
-Next, you can try training on a HugginFace dataset, see [Data Input Pipeline](Data_Input_Pipeline.md) for data input options.
+Next, you can try training on a HugginFace dataset, see [Data Input Pipeline](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/advanced_docs/Data_Input_Pipeline.md) for data input options.
 
 5. If you want to decode, you can decode as follows.
 ```
@@ -67,9 +67,9 @@ Failed to execute XLA Runtime executable: run time error: custom call 'xla.gpu.a
 ## Multihost development
 There are three patterns for running MaxText with more than one host.
 
-1. [GKE, recommended] [Running Maxtext with xpk](../guides/Run_MaxText_via_xpk.md) - Quick Experimentation and Production support
-2. [GCE] [Running Maxtext with Multihost Jobs](https://github.com/AI-Hypercomputer/maxtext/blob/main/getting_started/Run_MaxText_via_multihost_job.md) - Long Running Production Jobs with Queued Resources
-3. [GCE] [Running Maxtext with Multihost Runner](https://github.com/AI-Hypercomputer/maxtext/blob/main/getting_started/Run_MaxText_via_multihost_runner.md) -  Fast experiments via multiple ssh connections.
+1. [GKE, recommended] [Running Maxtext with xpk](https://github.com/AI-Hypercomputer/maxtext/blob/main/advanced_docs/Run_MaxText_via_xpk.md) - Quick Experimentation and Production support
+2. [GCE] [Running Maxtext with Multihost Jobs](https://github.com/AI-Hypercomputer/maxtext/blob/main/advanced_docs/Run_MaxText_via_multihost_job.md) - Long Running Production Jobs with Queued Resources
+3. [GCE] [Running Maxtext with Multihost Runner](https://github.com/AI-Hypercomputer/maxtext/blob/main/advanced_docs/Run_MaxText_via_multihost_runner.md) -  Fast experiments via multiple ssh connections.
 
 ## Preflight Optimizations
 

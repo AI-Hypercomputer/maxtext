@@ -18,12 +18,13 @@ extensions = [
 ]
 
 templates_path = ["_templates"]
-exclude_patterns = []
 source_suffix = [".rst", ".ipynb", ".md"]
 
 exclude_patterns = [
-    "advanced_usage.md",
-    "advanced_usage/*",
+    "advanced_docs/*",
+    "concepts/checkpointing.md",
+    "terminologies.md",
+    "guides/inference.md",
 ]
 
 # -- Options for HTML output -------------------------------------------------
@@ -31,12 +32,6 @@ exclude_patterns = [
 
 html_theme = "sphinx_book_theme"
 html_static_path = []
-
-# exclude_patterns = [
-#     # Sometimes sphinx reads its own outputs as inputs!
-#     "build/html",
-#     "build/jupyter_execute",
-# ]
 
 # -- Options for myst ----------------------------------------------
 myst_heading_anchors = 3  # auto-generate 3 levels of heading anchors
