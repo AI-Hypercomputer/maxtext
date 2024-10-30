@@ -15,6 +15,7 @@ author = "MaxText developers"
 
 extensions = [
     "myst_nb",
+    "sphinx_design",
 ]
 
 templates_path = ["_templates"]
