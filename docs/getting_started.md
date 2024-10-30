@@ -1,6 +1,6 @@
 # Getting Started
 
-For your first time running MaxText, we provide specific [instructions](First_run.md).
+For your first time running MaxText, we provide specific [instructions](getting_started/First_run.md).
 
 MaxText supports training and inference of various open models.
 
@@ -14,9 +14,9 @@ In addition to the getting started guides, there are always other MaxText capabi
 ```{toctree}
 :hidden:
 
-First_run.md
-steps_model.md
-End-to-end example <https://www.kaggle.com/code/melissawm/maxtext-examples>
-Data_Input_Pipeline.md
-Data_Input_Perf.md
+getting_started/First_run.md
+getting_started/steps_model.md
+getting_started/End-to-end example <https://www.kaggle.com/code/melissawm/maxtext-examples>
+getting_started/Data_Input_Pipeline.md
+getting_started/Data_Input_Perf.md
 ```

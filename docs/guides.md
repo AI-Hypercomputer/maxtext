@@ -1,10 +1,10 @@
 # How-to guides
 
 ```{toctree}
-data_loading.md
-profiling.md
-full_finetuning.md
-inference.md
-Run_MaxText_via_xpk.md
-single_host_gpu.md
+guides/data_loading.md
+guides/profiling.md
+guides/full_finetuning.md
+guides/inference.md
+guides/Run_MaxText_via_xpk.md
+guides/single_host_gpu.md
 ```

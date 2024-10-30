@@ -93,7 +93,7 @@ For 16B, 32B, 64B, and 128B models. See full run configs in [MaxText/configs/v5e
 :maxdepth: 1
 :hidden:
 
-getting_started/index.md
+getting_started.md
 code_organization.md
 concepts.md
 guides.md
