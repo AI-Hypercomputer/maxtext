@@ -58,38 +58,19 @@ Maxtext today only supports Pre-training and Full Fine Tuning of the models. It 
 
 ::::{grid} 1 1 2 2
 :gutter: 2
+
 :::{grid-item-card}
-Full finetuning and training with Llama3
-:link: getting_started/full_finetuning.md
-:link-type: ref
+:link: getting_started/full_finetuning.html
+:class-card: sd-text-black sd-bg-light
+
+{material-regular}`settings;2em` Full finetuning and training with Llama3
 :::
 
 :::{grid-item-card}
-First run
-:link: getting_started/First_run.md
-:link-type: ref
-:::
-::::
+:link: getting_started/First_run.html
+:class-card: sd-text-black sd-bg-light
 
-::::{grid} 2
-:gutter: 1
-
-:::{grid-item-card}
-A
-:::
-:::{grid-item-card}
-B
-:::
-::::
-
-::::{grid} 2
-:gutter: 3 3 4 5
-
-:::{grid-item-card}
-A
-:::
-:::{grid-item-card}
-B
+{material-regular}`rocket_launch;2em` First run
 :::
 ::::
 
