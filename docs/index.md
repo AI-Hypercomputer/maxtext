@@ -95,13 +95,8 @@ For 16B, 32B, 64B, and 128B models. See full run configs in [MaxText/configs/v5e
 
 getting_started/index.md
 code_organization.md
-data_loading.md
 concepts.md
-profiling.md
-full_finetuning.md
-inference.md
-Run_MaxText_via_xpk.md
-single_host_gpu.md
+guides.md
 advanced_usage.md
 about.md
 terminologies.md
