@@ -457,6 +457,7 @@ mixtral_8x7b_dropped = MaxTextModel(
         "sa_block_q_dq": 2048,
         "megablox": False,
         "capacity_factor": 1.25,
+        "tokenizer_path": "assets/tokenizer.mistral-v1",
     },
     xla_flags=(
         xla_flags_library.MOE_VMEM_LIMIT_FLAG
@@ -475,7 +476,6 @@ mixtral_8x7b_dropped_int8 = MaxTextModel(
         "remat_policy": "full",
         "attention": "flash",
         "gcs_metrics": True,
-        "use_iota_embed": True,
         "dataset_path": "gs://max-datasets-rogue",
         "dataset_type": "synthetic",
         "reuse_example_batch": 1,
@@ -487,6 +487,7 @@ mixtral_8x7b_dropped_int8 = MaxTextModel(
         "megablox": False,
         "capacity_factor": 1.25,
         "quantization": "int8",
+        "tokenizer_path": "assets/tokenizer.mistral-v1",
     },
     xla_flags=(
         xla_flags_library.MOE_VMEM_LIMIT_FLAG
