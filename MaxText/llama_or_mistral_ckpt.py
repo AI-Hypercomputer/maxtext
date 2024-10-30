@@ -37,6 +37,8 @@ import gc
 import re
 import logging
 from dataclasses import dataclass
+# from safetensors import safe_open
+
 
 os.environ["JAX_PLATFORMS"] = "cpu"
 
@@ -134,7 +136,7 @@ MODEL_PARAMS_DICT = {
         "num_heads": 48,
         "num_kv_heads": 8,
         "dims_per_head": 128,
-        "vocab": 32000,
+        "vocab": 32768,
         "base_emb_dim": 6144,
         "base_mlp_dim": 16384,
         "num_experts": 8,
@@ -229,6 +231,16 @@ def convert_to_jax_weights(base_model_path, model_size):
   # map weight names if they use HuggingFace instead of PyTorch convention
   chkpt_vars = [_HFNamespaceMapper(var) for var in chkpt_vars]
 
+  # chkpt_vars = {}
+  # with safe_open(base_model_path + "/consolidated.safetensors", framework="pt") as f:
+  #   for k in f.keys():
+  #     chkpt_vars[k] = f.get_tensor(k)
+  #     print(f"key: {k}")
+  #     print(f"chkpt_vars[k]: {chkpt_vars[k]}")
+  # chkpt_vars = [chkpt_vars[i] for i in sorted(list(chkpt_vars.keys()))]
+  # print(f"list(chkpt_vars.keys(): {list(chkpt_vars.keys())}")
+  # print(f"chkpt_vars: {chkpt_vars}")
+
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # initialize the data structure for storing jax_weights
@@ -249,6 +261,7 @@ def convert_to_jax_weights(base_model_path, model_size):
 
   # decoder norm scale ###########################################
   max_logging.log("Processing decoder norm scale")
+  # print(f"{chkpt_vars[0]}")
   decoder_norm_scale = chkpt_vars[0]["norm.weight"].type(torch.float16).numpy()
   jax_weights["decoder"]["decoder_norm"]["scale"] = decoder_norm_scale
 

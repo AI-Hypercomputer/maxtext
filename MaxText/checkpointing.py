@@ -353,7 +353,7 @@ def save_params_to_path(checkpoint_dir, params):
   assert checkpoint_dir, "checkpoint_dir is not defined."
   orbax_checkpointer = ocp.PyTreeCheckpointer()
   print(f"jax device: {jax.devices()}")
-  shard_params = helper(params)
-  save_args = orbax_utils.save_args_from_target({"params": shard_params})
-  orbax_checkpointer.save(checkpoint_dir, {"params": shard_params}, save_args=save_args, force=True)
+  # shard_params = helper(params)
+  save_args = orbax_utils.save_args_from_target({"params": params})
+  orbax_checkpointer.save(checkpoint_dir, {"params": params}, save_args=save_args, force=True)
   print(f"Quantized params checkpoint saved at: {checkpoint_dir}")
