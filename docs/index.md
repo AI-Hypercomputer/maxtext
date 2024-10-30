@@ -97,7 +97,5 @@ getting_started/index.md
 code_organization.md
 concepts.md
 guides.md
-advanced_usage.md
-about.md
 terminologies.md
 ```

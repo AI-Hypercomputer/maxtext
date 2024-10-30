@@ -21,6 +21,10 @@ templates_path = ["_templates"]
 exclude_patterns = []
 source_suffix = [".rst", ".ipynb", ".md"]
 
+exclude_patterns = [
+    "advanced_usage.md",
+    "advanced_usage/*",
+]
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
