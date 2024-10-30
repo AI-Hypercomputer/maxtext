@@ -41,8 +41,8 @@ MODEL_NAME="Mixtral-8x22B-Instruct-v0.1"
 # removal should not impact overall testing.
 
 # export SCANNED_CHECKPOINT=${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_ckpt/0/items
-export SCANNED_CHECKPOINT=gs://runner-maxtext-logs/2024-10-30/8x22b/scanned_ckpt/0/items
-export RUN_NAME=unscanned_ckpt
-export BASE_OUTPUT_PATH=runner-maxtext-logs/2024-10-23-04-11/ranran
+export SCANNED_CHECKPOINT=gs://runner-maxtext-logs/2024-10-23-04-11/ranran/scanned_ckpt_full_vocab/0/items
+export RUN_NAME=unscanned_ckpt_full_vocab
+export BASE_OUTPUT_PATH=gs://runner-maxtext-logs/2024-10-23-04-11/ranran
 JAX_PLATFORMS=cpu python MaxText/generate_param_only_checkpoint.py MaxText/configs/base.yml async_checkpointing=false base_output_directory=${BASE_OUTPUT_PATH} load_parameters_path=${SCANNED_CHECKPOINT} run_name=${RUN_NAME} model_name='mixtral-8x22b' force_unroll=true weight_dtype=bfloat16
 echo "Wrote MaxText compatible unscanned checkpoint to ${BASE_OUTPUT_PATH}/${RUN_NAME}/checkpoints"
