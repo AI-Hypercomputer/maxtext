@@ -54,6 +54,13 @@ Maxtext today only supports Pre-training and Full Fine Tuning of the models. It 
 - Any individual or a company that is interested in forking maxtext and seeing it as a reference implementation of a high performance Large Language Models and wants to build their own LLMs on TPU and GPU.
 - Any individual or a company that is interested in performing a pre-training or Full Fine Tuning of the supported open source models, can use Maxtext as a blackbox to perform full fine tuning. Maxtext attains an extremely high MFU, resulting in large savings in training costs.
 
+## Code repository
+
+You can find the latest version of MaxText at https://github.com/AI-Hypercomputer/maxtext
+
+## In-depth documentation
+
+You can find in-depth documentation at [the MaxText GitHub repository](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/advanced_docs/).
 
 ```{toctree}
 :maxdepth: 1
