@@ -178,11 +178,9 @@ class OfflineInference:
       nonlocal slot_to_id
       nonlocal empty_slots
       while self.live:
-        log.info("Detokenize Start")
         newly_empty = []
         result_tokens, is_first_token, row_id, _slot = self.detokenize_backlog.get(block=True)
         if is_first_token:
-          log.info("Detokenize get first token")
           first_token = result_tokens.data[0][0].item()
           should_terminate = emit_first_token(row_id, first_token)
           if not should_terminate:
@@ -192,7 +190,7 @@ class OfflineInference:
           continue
         for slot, id_ in slot_to_id.items():
           token, is_valid, length = result_tokens.data[slot]
-          # log.info(f"slot is {slot}, length is {length}")
+          log.debug(f"slot is {slot}, length is {length}")
           should_finish = False
           if is_valid:
             should_finish = emit_token(id_, token.item())
@@ -204,9 +202,7 @@ class OfflineInference:
           del slot_to_id[slot]
           empty_slots.append(slot)
         if newly_empty and self.detokenize_backlog.qsize() == 0 and len(slot_to_id.items()) == 0:
-          log.info("Detokenize break!!")
           break
-        log.info(f"Detokenize slot_to_id len: {len(slot_to_id.items())}")
     detokenize_thread = JetThread(
         target=functools.partial(detokenize,),
         name="detokenize",
@@ -214,7 +210,6 @@ class OfflineInference:
     self.live = True
     detokenize_thread.start()
     for row in data:
-      log.info(f"empty_slots {len(empty_slots)}")
       while not empty_slots:
         # If slots are all full, decode until there are free slots
         # to insert
