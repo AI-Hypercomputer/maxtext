@@ -43,7 +43,7 @@ The key value proposition of using MaxText for pre-training or full fine tuning 
 
 - Very high performance of average of 50% MFU
 - [Open code base](https://github.com/AI-Hypercomputer/maxtext)
-- Easy to understand: MaxText is purely written in JAX and Python, which makes it accessible to ML developers interested in inspecting the implementation or stepping through it. It is written at the block-by-block level, with code for Embeddings, Attention, Normalization etc. Different Attention mechanisms like MQA and GQA are all present. For quantization, it uses the [JAX AQT](https://github.com/google/aqt)  library. The implementation is suitable for both GPUs and TPUs.
+- Easy to understand: MaxText is purely written in JAX and Python, which makes it accessible to ML developers interested in inspecting the implementation or stepping through it. It is written at the [block-by-block](https://github.com/AI-Hypercomputer/maxtext/tree/main/MaxText/layers) level, with code for Embeddings, Attention, Normalization etc. Different Attention mechanisms like MQA and GQA are all present. For quantization, it uses the [JAX AQT](https://github.com/google/aqt)  library. The implementation is suitable for both GPUs and TPUs.
 
 ```{note}
 Maxtext today only supports Pre-training and Full Fine Tuning of the models. It does not support PEFT/LoRA, Supervised Fine Tuning or RLHF.
