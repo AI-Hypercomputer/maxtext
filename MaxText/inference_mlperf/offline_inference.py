@@ -69,7 +69,7 @@ class OfflineInference:
 
     self._cached_pref = {}
     self._cached_generate = None
-    self.detokenize_backlog = queue.Queue(8)
+    self.detokenize_backlog = queue.Queue(50)
 
   def init_decode_state(self):
     if self.decode_state is None:
@@ -166,17 +166,23 @@ class OfflineInference:
         gen_fn = self.engine.generate
         if self._cached_generate is not None:
           gen_fn = self._cached_generate
-        self.decode_state, result_tokens = gen_fn(self.params, self.decode_state)
-      result_tokens = result_tokens.convert_to_numpy()
-      self.detokenize_backlog.put((result_tokens, False, 0, 0), block = True)
+        result_tokens_l = []
+        for i in range(5):
+          self.decode_state, result_tokens = gen_fn(self.params, self.decode_state)
+          result_tokens_l.append(result_tokens)
+      for i in range(5):
+        result_tokens = result_tokens_l[i].convert_to_numpy()
+        self.detokenize_backlog.put((result_tokens, False, 0, 0), block = True)
     def detokenize():
       nonlocal self
       nonlocal slot_to_id
       nonlocal empty_slots
       while self.live:
+        log.info("Detokenize Start")
         newly_empty = []
         result_tokens, is_first_token, row_id, _slot = self.detokenize_backlog.get(block=True)
         if is_first_token:
+          log.info("Detokenize get first token")
           first_token = result_tokens.data[0][0].item()
           should_terminate = emit_first_token(row_id, first_token)
           if not should_terminate:
@@ -197,6 +203,10 @@ class OfflineInference:
         for slot in newly_empty:
           del slot_to_id[slot]
           empty_slots.append(slot)
+        if newly_empty and self.detokenize_backlog.qsize() == 0 and len(slot_to_id.items()) == 0:
+          log.info("Detokenize break!!")
+          break
+        log.info(f"Detokenize slot_to_id len: {len(slot_to_id.items())}")
     detokenize_thread = JetThread(
         target=functools.partial(detokenize,),
         name="detokenize",
@@ -222,9 +232,10 @@ class OfflineInference:
       self.detokenize_backlog.put((first_token, True, row.id, slot), block = True)
 
     while slot_to_id:
-      log.info(f"decode-{desc}-{num_decodes}")
+      log.info(f"decode-{desc}-{num_decodes} num_filled_slots {len(slot_to_id)}")
       num_decodes += 1
       decode()
+
     self.live = False
     detokenize_thread.join()
     log.info(f"summary-{desc}-prefills-{num_prefills}-decodes-{num_decodes} completed.")
