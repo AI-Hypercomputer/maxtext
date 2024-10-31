@@ -138,3 +138,4 @@ dmypy.json
 # Wheel build
 *.whl
 MaxText/inference_mlperf/traces/*
+MaxText/inference_mlperf/processed-data.pkl

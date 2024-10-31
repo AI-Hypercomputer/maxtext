@@ -46,7 +46,7 @@ fi
 if "$single_bucket"; then
     export BATCH_AND_PREFILL_LEN="1024,54"
 else
-    export BATCH_AND_PREFILL_LEN="256,216|512,108|1024,54"
+    export BATCH_AND_PREFILL_LEN="256,32|512,16|1024,8"
 fi
 batch_and_prefill_str=$(echo $BATCH_AND_PREFILL_LEN |tr \|,  _) 
 
@@ -58,16 +58,21 @@ fi
 
 export TOK_OUTLEN_MULTIPLIER=${token_multiplier}
 
-CHECKPOINT="gs://${USER}-bkt/checkpoints/quant_llama2-70b-chat/prod/int8_"
-TOKENIZER_PATH="/home/${USER}/maxtext/assets/tokenizer.llama2"
+CHECKPOINT="gs://patemotter/checkpoints/quant_llama2-70b-chat/int8w_"
+TOKENIZER_PATH=/mnt/disks/persist/maxtext/assets/tokenizer.llama2
 BASE_CFG="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
 QUANT_CFG="quantization=int8 quantize_kvcache=True checkpoint_is_quantized=True"
 LAYOUT_CFG="compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3"
-export MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${LAYOUT_CFG}"
+ICI_FSDP_PARALLELISM=1
+ICI_AUTOREGRESSIVE_PARALLELISM=1
+ICI_TENSOR_PARALLELISM=4
+ICI_SEQUENCE_PARALLELISM=2
+export ICI_ARGS="ici_tensor_parallelism=${ICI_TENSOR_PARALLELISM} ici_sequence_parallelism=${ICI_SEQUENCE_PARALLELISM} ici_fsdp_parallelism=${ICI_FSDP_PARALLELISM} ici_autoregressive_parallelism=${ICI_AUTOREGRESSIVE_PARALLELISM}"
+export MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${LAYOUT_CFG} ${ICI_ARGS}"
 
 RUN_DESC=int8_kv_${batch_and_prefill_str}_${token_multiplier}_flags_${enable_xla_flags}
 
-$cmd  cd ..
+# $cmd  cd ..
 # Run mlperf perfromance benchmarks
 $cmd bash llama_offline_run.sh  -r benchmarks_performance_${RUN_DESC} ${RUN_OPTIONS}
 
