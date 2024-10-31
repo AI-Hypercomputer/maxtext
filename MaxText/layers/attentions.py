@@ -1084,7 +1084,8 @@ class Attention(nn.Module):
         features=(self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=query_init,
-        kernel_axes=("embed", "heads", "kv"),
+        # kernel_axes=("embed_qp", "heads", "kv"),   # 'tensor', ['tensor', 'autoregressive'], none
+        kernel_axes=("embed", "heads", "kv"),   # ['fsdp', 'fsdp_transpose', 'sequence', 'expert'], ['tensor', 'autoregressive'], none
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="query",
@@ -1110,13 +1111,13 @@ class Attention(nn.Module):
     if self.num_query_heads % self.num_kv_heads != 0:
       raise ValueError("Invalid num_kv_heads for GQA.")
 
-    kernel_axes = ("embed", "kv_heads", "kv_head_dim")
 
     kv_proj = DenseGeneral(
         features=(self.num_kv_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=kernel_axes,
+        # kernel_axes=("embed_kvp", "kv_heads", "kv_head_dim"), # tensor, ['tensor', 'autoregressive'], none
+        kernel_axes=("embed", "kv_heads", "kv_head_dim"),   # ['fsdp', 'fsdp_transpose', 'sequence', 'expert'], ['tensor', 'autoregressive'], none
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name=proj_name,
@@ -1148,7 +1149,8 @@ class Attention(nn.Module):
         features=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
-        kernel_axes=("heads", "kv", "embed"),
+        # kernel_axes=("heads", "kv", "embed_outp"),  # 'tensor', none, 'tensor'
+        kernel_axes=("heads", "kv", "embed"),  # 'tensor', none, ['fsdp', 'fsdp_transpose', 'sequence', 'expert']
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="out",

@@ -218,9 +218,13 @@ logical_axis_rules: [
                       ['activation_exp', 'expert'],
                       ['mlp', ['fsdp_transpose', 'tensor', 'autoregressive']],
                       ['vocab', ['tensor', 'autoregressive']],
-                      ['embed', ['tensor']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'expert']],
                       ['embed', ['fsdp', 'sequence', 'expert']],
+                      ['embed_8', ['tensor', 'sequence']],
+                      ['embed_tensor', ['tensor']],
+                      ['embed_qp', ['tensor']],
+                      ['embed_kvp', ['tensor']],
+                      ['embed_outp', ['tensor']],
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence']],
                       ['embed_no_exp', ['fsdp', 'sequence']],
                       ['norm', 'tensor'],
@@ -412,7 +416,7 @@ max_checkify: False
 # Inference
 inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
 inference_microbenchmark_stages: "prefill,generate"
-inference_microbenchmark_loop_iters: 10
+inference_microbenchmark_loop_iters: 5
 inference_microbenchmark_log_file_path: ""
 inference_metadata_file: "" # path to a json file
 enable_model_warmup: False

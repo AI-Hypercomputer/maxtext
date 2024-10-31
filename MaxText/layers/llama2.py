@@ -146,7 +146,7 @@ class LlamaDecoderLayer(nn.Module):
         name="mlp",
         config=cfg,
         quant=self.quant,
-    )(hidden_states, deterministic=deterministic)
+    )(hidden_states, deterministic=deterministic, model_mode=model_mode)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
 
     layer_output = mlp_lnx + intermediate_inputs

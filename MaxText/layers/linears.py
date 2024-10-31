@@ -202,7 +202,7 @@ class MlpBlock(nn.Module):
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   @nn.compact
-  def __call__(self, inputs, decode: bool = False, deterministic: bool = False):
+  def __call__(self, inputs, decode: bool = False, deterministic: bool = False, model_mode: str = "train"):
     """Applies Transformer MlpBlock module."""
     cfg = self.config
 
