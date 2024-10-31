@@ -451,6 +451,7 @@ enable_checkpoint_standard_logger: False
 # Single-controller
 enable_single_controller: False
 
+custom_mesh: "" # Available options: ['hybrid_ring_64x4']
 # Split physical axes for https://jax.readthedocs.io/en/latest/_autosummary/jax.experimental.mesh_utils.create_device_mesh.html
 allow_split_physical_axes: False
 
