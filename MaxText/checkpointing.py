@@ -272,7 +272,7 @@ def setup_checkpoint_logger(config) -> composite_logger.CompositeLogger | None:
   orbax_standard_logger = None
   max_logging.log("Setting up checkpoint logger...")
   if config.enable_checkpoint_cloud_logger:
-    logger_name = f"checkpoint_{config.run_name}"
+    logger_name = f"goodput_{config.run_name}"
     options = cloud_logger.CloudLoggerOptions(job_name=config.run_name, logger_name=logger_name)
     orbax_cloud_logger = cloud_logger.CloudLogger(options=options)
     max_logging.log("Successfully set up checkpoint cloud logger.")
