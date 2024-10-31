@@ -1,4 +1,4 @@
-# Full Finetuninhg LLama2/LLama3 Optimized configuration
+# Full Finetuning LLama3-8B  Model
 
 In the pre-training section you saw the steps on how to do pre-training with
 MaxText. To perform full fine tuning, you need to pass the checkpoint to the

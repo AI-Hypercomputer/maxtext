@@ -5,7 +5,7 @@
 Stages of LLM Model Development from pre-training to fine tuning and finally serving a model.
 ```
 
-Model building starts with Pre-training a base model architecture. Pre-training is the process where you take a model architecture, which starts with random weights and train with a very large corpus in the scale of trillions of tokens.  E.g. Google’s Gemma models were pre-trained on 6 Trillion tokens; LLama 3 was trained with 15 Trillion tokens
+Model building starts with Pre-training a base model architecture. Pre-training is the process where you take a model architecture, which starts with random weights and train with a very large corpus in the scale of trillions of tokens.  E.g. Google’s Gemma models was pre-trained on 6 Trillion tokens; LLama 3 was trained with 15 Trillion tokens
 
 Post the pre-training most model producers will publish a checkpoint of the weights of the model. The corpus used for pre-training these models are usually a large public corpus like Common Crawl, public code bases, books etc.
 
