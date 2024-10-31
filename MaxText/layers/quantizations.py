@@ -190,6 +190,8 @@ def _get_int8_quant_config(config):
     drhs_accumulator_dtype=drhs_accumulator_dtype,
     )
 
+def _get_fp8_quant_config(config):
+  return aqt_config.config_fwd_fp8()
 
 def _get_weight_only_quant_config(lhs_bits=None, rhs_bits=None):
   return aqt_config.dot_general_make(lhs_bits=lhs_bits, rhs_bits=rhs_bits)
@@ -219,6 +221,8 @@ def _get_quant_config(config):
     return None
   if config.quantization == "int8":
     return _get_int8_quant_config(config)
+  if config.quantization == "aqt_fp8":
+    return _get_fp8_quant_config(config)
   if config.quantization == "int8w":
     return _get_weight_only_quant_config(lhs_bits=None, rhs_bits=8)
   if config.quantization == "int4w":

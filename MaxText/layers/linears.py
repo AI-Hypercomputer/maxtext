@@ -115,7 +115,14 @@ class DenseGeneral(nn.Module):
       if self.quant:
         dot_general_cls = self.quant.dot_general_cls(mesh_axes=self.kernel_axes)
         dot_general = dot_general_cls()
-      return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
+      print("shape info:", self.name, inputs.shape, kernel.shape, axis, contract_ind)
+      if self.name == "wo":
+        inputs = jnp.transpose(inputs, axes=[2, 1, 0])
+        axis = 0
+      output = dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
+      if self.name == "wo":
+        output = jnp.transpose(output, [1, 0, 2])
+      return output
 
     features = _canonicalize_tuple(self.features)
     axis = _canonicalize_tuple(self.axis)
