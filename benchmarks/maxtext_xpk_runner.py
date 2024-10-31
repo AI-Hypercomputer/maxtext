@@ -329,7 +329,7 @@ def generate_xpk_workload_cmd(
     buffer_size: int,
 ):
   """Generates a command to run a maxstar model on XPK."""
-  num_steps = 100
+  num_steps = 2000
   time.localtime()
   test_purpose_name = f'maxstar-benchmarks-{model.model_name}-{libtpu_version}'
   N = 3

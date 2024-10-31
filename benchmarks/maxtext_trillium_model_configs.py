@@ -408,6 +408,49 @@ llama3_1_405b_8192_fsdp_dcn = MaxTextModel(
     ),
 )
 
+llama3_1_405b_8192_fsdp_dcn_c4 = MaxTextModel(
+    model_name="llama3-1-405b-8192-fsdp-dcn",
+    model_type="llama3.1-405b",
+    tuning_params={
+        "per_device_batch_size": 1,
+        "ici_fsdp_parallelism": 64,
+        "ici_tensor_parallelism": 4,
+        "dcn_fsdp_parallelism": 2,
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "out_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://mlperf-exp-us-east1-cp0",
+        "dataset_name": "c4/en:3.0.7",
+        "dataset_type": "c4_mlperf",
+          "tokenizer_path": (
+              "gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model"
+          ),
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        ""
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "learning_rate": 2.e-5,
+        "warmup_steps_fraction": 0.1
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+)
+
 mixtral_8x7b_dropless = MaxTextModel(
     model_name="mixtral-8x7b",
     model_type="mixtral-8x7b",
@@ -457,7 +500,6 @@ mixtral_8x7b_dropped = MaxTextModel(
         "sa_block_q_dq": 2048,
         "megablox": False,
         "capacity_factor": 1.25,
-        "tokenizer_path": "assets/tokenizer.mistral-v1",
     },
     xla_flags=(
         xla_flags_library.MOE_VMEM_LIMIT_FLAG
