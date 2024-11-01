@@ -348,6 +348,7 @@ class Decoder(nn.Module):
         policy=policy,
         static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
     )
+    #RemattedBlockLayer = BlockLayer
     if cfg.using_pipeline_parallelism:
       if cfg.num_layers_per_pipeline_stage == 1:
         stage_module = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
