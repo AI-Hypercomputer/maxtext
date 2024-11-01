@@ -6,6 +6,6 @@ ENV NVTE_FRAMEWORK=jax
 
 RUN git clone https://github.com/NVIDIA/TransformerEngine
 WORKDIR /root/TransformerEngine
-RUN git checkout 297459bd08e1b791ca7a2872cfa8582220477782
+RUN git checkout 23caab3fab07b212df65b002eeb05834e6f6c85e
 RUN git submodule update --init --recursive
 RUN python setup.py bdist_wheel
