@@ -27,7 +27,8 @@ from tiktoken.load import load_tiktoken_bpe
 try:
   import tensorflow_text as tftxt
 except ImportError:
-  warnings.warn("tensorflow_text (an optional dependecy) is not installed. TFDS data-loading pipeline can be slow. HuggingFace and Grain are not affected")
+  warnings.warn("tensorflow_text (an optional dependecy) is not installed. TFDS data-loading pipeline can be slow. "
+                "HuggingFace and Grain are not affected")
   tftxt = None
 
 
