@@ -217,8 +217,11 @@ def load_state_if_possible(
             ),
             None,
         )
-
-      if dataset_type == "grain" and data_iterator is not None:
+      if (
+          dataset_type == "grain"
+          and data_iterator is not None
+          and (checkpoint_manager.directory / str(latest_step) / "iter").exists()
+      ):
         return (
             checkpoint_manager.restore(
                 latest_step,
