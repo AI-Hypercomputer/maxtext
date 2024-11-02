@@ -37,7 +37,7 @@ import gc
 import re
 import logging
 from dataclasses import dataclass
-# from safetensors import safe_open
+from safetensors import safe_open
 
 
 os.environ["JAX_PLATFORMS"] = "cpu"
@@ -199,6 +199,26 @@ def permute_to_match_maxtext_rope(arr):
   return np.concatenate((evens, odds), axis=arr.ndim - 1)
 
 
+def print_helper(input_vars):
+  print("==========================================")
+  # keys = sorted(list(input_vars.keys()))
+  keys = sorted(input_vars.keys())
+  for key in keys:
+    print(key)
+    value = input_vars[key].type(torch.float16).numpy()
+    dim = value.ndim
+    if dim == 1:
+      print(value[:10])
+    elif dim == 2:
+      print(value[0][:10])
+    elif dim == 3:
+      print(value[0][0][:10])
+    elif dim == 4:
+      print(value[0][0][0][:10])
+    else:
+      print(value)
+
+
 def convert_to_jax_weights(base_model_path, model_size):
   """
   Function to convert the checkpoint at base_model_path into Orbax checkpoint
@@ -221,25 +241,30 @@ def convert_to_jax_weights(base_model_path, model_size):
 
   max_logging.log(f"Loading the base model from {base_model_path}")
   # Skip any hidden files for checkpoints
-  ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.pth"))
-  chkpt_vars = {}
-  for i, ckpt_path in enumerate(ckpt_paths):
-    max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
-    checkpoint = torch.load(ckpt_path, map_location="cpu")
-    chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = checkpoint
-  chkpt_vars = [chkpt_vars[i] for i in sorted(list(chkpt_vars.keys()))]
-  # map weight names if they use HuggingFace instead of PyTorch convention
-  chkpt_vars = [_HFNamespaceMapper(var) for var in chkpt_vars]
-
+  # ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.pth"))
   # chkpt_vars = {}
-  # with safe_open(base_model_path + "/consolidated.safetensors", framework="pt") as f:
-  #   for k in f.keys():
-  #     chkpt_vars[k] = f.get_tensor(k)
-  #     print(f"key: {k}")
-  #     print(f"chkpt_vars[k]: {chkpt_vars[k]}")
+  # for i, ckpt_path in enumerate(ckpt_paths):
+  #   max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
+  #   checkpoint = torch.load(ckpt_path, map_location="cpu")
+  #   print("original ckpt outputs....")
+  #   print_helper(checkpoint)
+  #   os._exit(0)
+  #   chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = checkpoint
   # chkpt_vars = [chkpt_vars[i] for i in sorted(list(chkpt_vars.keys()))]
-  # print(f"list(chkpt_vars.keys(): {list(chkpt_vars.keys())}")
-  # print(f"chkpt_vars: {chkpt_vars}")
+
+  # map weight names if they use HuggingFace instead of PyTorch convention
+  # print("_HFNamespaceMapper ckpt outputs....")
+  # chkpt_vars = [_HFNamespaceMapper(var) for var in chkpt_vars]
+  # print_helper(chkpt_vars)
+  # os._exit(0)
+
+  chkpt_vars = {}
+  with safe_open(base_model_path + "/consolidated.safetensors", framework="pt") as f:
+    for k in f.keys():
+      chkpt_vars[k] = f.get_tensor(k)
+    print_helper(chkpt_vars)
+  chkpt_vars = [chkpt_vars[i] for i in sorted(list(chkpt_vars.keys()))]
+  os._exit(0)
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
