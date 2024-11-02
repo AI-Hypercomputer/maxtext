@@ -627,6 +627,7 @@ def setup_initial_state(
     else:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       # pylint: disable=not-callable
+      init_state_partial.__name__ = "initialize_state"
       state = jax.jit(
           init_state_partial,
           in_shardings=None,
