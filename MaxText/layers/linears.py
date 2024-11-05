@@ -115,7 +115,7 @@ class DenseGeneral(nn.Module):
       if self.quant:
         dot_general_cls = self.quant.dot_general_cls(mesh_axes=self.kernel_axes)
         dot_general = dot_general_cls()
-      print("shape info:", self.name, inputs.shape, kernel.shape, axis, contract_ind)
+      # print("shape info:", self.name, inputs.shape, kernel.shape, axis, contract_ind)
       if self.name == "wo":
         inputs = jnp.transpose(inputs, axes=[2, 1, 0])
         axis = (0,)

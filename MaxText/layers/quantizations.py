@@ -33,6 +33,7 @@ from typing import Tuple, Sequence
 
 MAX_INT8 = 127.5
 MAX_INT4 = 7.5
+E4M3_MAX = jnp.finfo(e4m3).max.astype(f32)
 
 Array = common_types.Array
 Config = common_types.Config
@@ -311,6 +312,8 @@ class KVQuant:
       return jnp.int4
     if dtype_cfg == "int8":
       return jnp.int8
+    if dtype_cfg == "fp8":
+      return jnp.float8_e4m3fn
     raise ValueError(f"Invalid kv_quant_dtype: {dtype_cfg}")
 
   def _get_max_axis(self, axis_names: AxisNames):
@@ -333,6 +336,9 @@ class KVQuant:
       return value, scale
     if self.dtype == jnp.int4:
       value = jnp.int4(jnp.rint(kv * (MAX_INT4 / scale)))
+      return value, scale
+    if self.dtype == jnp.float8_e4m3fn:
+      value = jnp.float8_e4m3fn(kv * (E4M3_MAX / scale))
       return value, scale
     raise ValueError(f"Invalid KV quant dtype:{self.dtype}.")
 
