@@ -118,7 +118,7 @@ class DenseGeneral(nn.Module):
       print("shape info:", self.name, inputs.shape, kernel.shape, axis, contract_ind)
       if self.name == "wo":
         inputs = jnp.transpose(inputs, axes=[2, 1, 0])
-        axis = 0
+        axis = (0,)
       output = dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
       if self.name == "wo":
         output = jnp.transpose(output, [1, 0, 2])
