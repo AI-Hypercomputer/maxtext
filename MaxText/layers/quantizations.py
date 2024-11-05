@@ -33,7 +33,7 @@ from typing import Tuple, Sequence
 
 MAX_INT8 = 127.5
 MAX_INT4 = 7.5
-E4M3_MAX = jnp.finfo(e4m3).max.astype(f32)
+E4M3_MAX = jnp.finfo(jnp.float8_e4m3fn).max.astype(jnp.float32)
 
 Array = common_types.Array
 Config = common_types.Config
@@ -351,10 +351,14 @@ class KVQuant:
     # Assumes kv is already quantized.
     einsum = jnp.einsum
     if isinstance(kv, aqt_tensor.QTensor):
-      num_bits = 4 if kv.qvalue.dtype == jnp.int4 else 8
+      lhs_bits = None
+      rhs_bits = 4 if kv.qvalue.dtype == jnp.int4 else 8
+      if kv.qvalue == jnp.float8_e4m3fn:
+        lhs_bits = 'e4m3'
+        rhs_bits = 'e4m3'
       kv_cfg = aqt_config.dot_general_make(
-        lhs_bits=None,
-        rhs_bits=num_bits,
+        lhs_bits=lhs_bits,
+        rhs_bits=rhs_bits,
         bwd_bits=None,
         use_fwd_quant=False,
         )
