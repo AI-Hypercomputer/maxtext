@@ -370,6 +370,7 @@ class MoeBlock(nn.Module):
     # sort inputs for number of selected experts
     sorted_inputs = jnp.take(inputs_2d, indices=sorted_indices, axis=0).astype(self.dtype)
     group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
+    jax.debug.print("expert distribution: {group_size}", group_size=group_size)
     return sorted_inputs, sorted_selected_experts, weights, group_size
 
   def unpermute(self, intermediate, sorted_selected_experts, weights):
@@ -648,7 +649,11 @@ class MoeBlock(nn.Module):
 
     if cfg.megablox:
       max_logging.log("Running MoE megablox implementation.")
-      return self.megablox(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+      softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
+      _, top_k_indices = jax.lax.top_k(softmax_probs, self.num_experts_per_tok)
+      loss = self.load_balance_loss(top_k_indices, softmax_probs)
+      outputs, _ = self.megablox(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+      return outputs, loss
     else:
       max_logging.log("Running MoE matmul implementation.")
       return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
