@@ -87,6 +87,7 @@ class MaxEngine(engine_api.Engine):
 
   def __init__(self, config):
     self.config = config
+    self.rng = jax.random.PRNGKey(1234)
 
     # Mesh definition
     devices_array = max_utils.create_device_mesh(config)
@@ -107,23 +108,19 @@ class MaxEngine(engine_api.Engine):
     print(x)
     print(x.shape)
 
-  def load_params(self, *args, rng: Optional[jax.random.PRNGKey] = None, **kwargs) -> Params:
+  def load_params(self, *args, **kwargs) -> Params:
     """Load Parameters, typically from GCS"""
     # pylint: disable=unused-argument
-
-    if rng is None:
-      rng = jax.random.PRNGKey(0)
 
     if self.model.quant and self.config.checkpoint_is_quantized:
       print("Loading from the quantized checkpoint...")
       self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
 
-    rng1, rng2, rng3 = jax.random.split(rng, 3)
-    state, self.state_mesh_annotations = max_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None)
+    state, self.state_mesh_annotations = max_utils.setup_decode_state(self.model, self.config, self.rng, self._mesh, None)
     self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), state.params
     )
-    self.kv_cache_annotations = max_utils.get_kv_cache_annotations(self.model, self.config, rng2, self._mesh)
+    self.kv_cache_annotations = max_utils.get_kv_cache_annotations(self.model, self.config, self.rng, self._mesh)
     self.kv_cache_shardings = jax.tree_util.tree_map(
         lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations
     )
@@ -134,16 +131,14 @@ class MaxEngine(engine_api.Engine):
     # print(jax.tree_util.tree_map(lambda x: x.nbytes, state.params))
 
     if self.model.quant and not self.config.checkpoint_is_quantized:
-      params = self.quantize_params(state, rng3)
+      params = self.quantize_params(state)
     else:
       params = state.params
     max_utils.print_mem_stats("After load_params")
     return params
 
-  def quantize_params(self, state, rng: Optional[jax.random.PRNGKey] = None):
+  def quantize_params(self, state):
     """Forward pass to quantize decode params."""
-    if rng is None:
-      rng = jax.random.PRNGKey(0)
 
     self.model.quant.quant_mode = quantizations.get_quant_mode("convert")
 
@@ -160,7 +155,7 @@ class MaxEngine(engine_api.Engine):
           mutable=True,
       )
 
-    _, new_vars = model_apply(state.params, rng)
+    _, new_vars = model_apply(state.params, self.rng)
     # Remove param values which have corresponding qtensors in aqt to save memory.
     params = {}
     params["aqt"] = new_vars["aqt"]
@@ -185,8 +180,6 @@ class MaxEngine(engine_api.Engine):
       existing_prefix: Optional[jax.Array] = None,
       padded_tokens: jax.Array,
       true_length: int,
-      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
-      rng: Optional[jax.random.PRNGKey] = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -203,9 +196,6 @@ class MaxEngine(engine_api.Engine):
     if existing_prefix:
       raise ValueError("We don't know what to do with existing_prefix")
 
-    if rng is None:
-      rng = jax.random.PRNGKey(0)
-
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
 
@@ -214,7 +204,6 @@ class MaxEngine(engine_api.Engine):
     one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
-    rng, new_rng = jax.random.split(rng)
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       flat_logits, new_vars = self.model.apply(
           params,
@@ -223,7 +212,7 @@ class MaxEngine(engine_api.Engine):
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
           model_mode=common_types.MODEL_MODE_PREFILL,
-          rngs={"params": new_rng},
+          rngs={"params": self.rng},
           mutable=["cache"],
       )
 
@@ -238,7 +227,7 @@ class MaxEngine(engine_api.Engine):
     # sampling first token
     first_generated_token = inference_utils.sampling(
         selected_logits,
-        rng,
+        self.rng,
         self.config.decode_sampling_strategy,
         topk=self.config.decode_sampling_top_k,
         nucleus_topp=self.config.decode_sampling_nucleus_p,
@@ -270,20 +259,11 @@ class MaxEngine(engine_api.Engine):
     }, result
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
-  def generate(
-      self,
-      params: Params,
-      decode_state: DecodeState,
-      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
-      rng: Optional[jax.random.PRNGKey] = None,
-  ) -> Tuple[DecodeState, engine_api.ResultTokens]:
+  def generate(self, params: Params, decode_state: DecodeState) -> Tuple[DecodeState, engine_api.ResultTokens]:
     """Run one generate step"""
-    if rng is None:
-      rng = jax.random.PRNGKey(0)
 
     previous_token = decode_state["tokens"]
 
-    rng, new_rng = jax.random.split(rng)
     # run one step generation
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       out_logits, new_vars = self.model.apply(
@@ -292,7 +272,7 @@ class MaxEngine(engine_api.Engine):
           decode_state["next_pos"],
           enable_dropout=False,
           model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-          rngs={"params": new_rng},
+          rngs={"params": self.rng},
           mutable=["cache"],
       )
       max_logging.log(f"===maxtext out_logits: {out_logits}")
@@ -303,7 +283,7 @@ class MaxEngine(engine_api.Engine):
     # sampling tokens
     new_token = inference_utils.sampling(
         out_logits,
-        rng,
+        self.rng,
         self.config.decode_sampling_strategy,
         topk=self.config.decode_sampling_top_k,
         nucleus_topp=self.config.decode_sampling_nucleus_p,
@@ -430,16 +410,8 @@ class MaxEngine(engine_api.Engine):
     else:
       return token_utils.SentencePieceTokenizer(metadata)
 
-  def init_decode_state(
-      self,
-      *args,  # pylint: disable=unused-argument
-      rng: Optional[jax.random.PRNGKey] = None,
-      **kwargs,  # pylint: disable=unused-argument
-  ) -> DecodeState:
+  def init_decode_state(self, *args, **kwargs) -> DecodeState:
     """Initialises any state which a generation step transforms."""
-
-    if rng is None:
-      rng = jax.random.PRNGKey(0)
 
     # pylint: disable=unused-argument
     def init(abstract_params):
@@ -454,7 +426,7 @@ class MaxEngine(engine_api.Engine):
           decoder_segment_ids=jnp.zeros(x.shape, dtype=jnp.int32) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR,
           enable_dropout=False,
           model_mode=common_types.MODEL_MODE_PREFILL,
-          rngs={"params": rng},
+          rngs={"params": self.rng},
           mutable=["cache"],
       )
 
@@ -519,14 +491,14 @@ class MaxEngine(engine_api.Engine):
     raise NotImplementedError
 
 
-def set_engine_vars_from_base_engine(engine: engine_api.Engine, base_engine: engine_api.Engine, rng: jax.random.PRNGKey):
+def set_engine_vars_from_base_engine(engine: engine_api.Engine, base_engine: engine_api.Engine):
   """Set internal vars from base_engine, which has already loaded the checkpoint and has sharding,
   mesh, and kv cache related vars set.
   """
   engine.model.quant.quant_mode = base_engine.model.quant.quant_mode
   engine.state_mesh_annotations = base_engine.state_mesh_annotations
   engine.abstract_params = base_engine.abstract_params
-  engine.kv_cache_annotations = max_utils.get_kv_cache_annotations(engine.model, engine.config, rng, engine._mesh)  # pylint: disable=protected-access
+  engine.kv_cache_annotations = max_utils.get_kv_cache_annotations(engine.model, engine.config, engine.rng, engine._mesh)  # pylint: disable=protected-access
   engine.kv_cache_shardings = jax.tree_util.tree_map(
       lambda x: jax.sharding.NamedSharding(engine._mesh, x), engine.kv_cache_annotations  # pylint: disable=protected-access
   )
