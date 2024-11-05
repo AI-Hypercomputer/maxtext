@@ -34,6 +34,7 @@ def main(config):
   tokenizer_model = engine.build_tokenizer(metadata)
   tokens, true_length = tokenizer_model.encode(text, is_bos=config.add_bos, prefill_lengths=[config.max_prefill_predict_length])
   max_logging.log(f"=====maxtext tokens: {tokens}")
+  jax.debug.print("=====maxtext tokens: {tokens}", tokens=tokens)
   assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
   assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
   prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
@@ -51,6 +52,7 @@ def main(config):
     decode_state, sampled_tokens = engine.generate(params, decode_state)
     sampled_tokens_list.append(sampled_tokens)
 
+  jax.debug.print("=====maxtext sampled_tokens_list: {sampled_tokens_list}", sampled_tokens_list=sampled_tokens_list)
   results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
   output = tokenizer_model.decode(results)
   print(f"Input `{text}` -> `{output}`")
