@@ -518,63 +518,36 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
         extra_dpo_args = [reference_params]
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
-    # pdb.set_trace()
-    def print_dict(d, indent_level=0):
-        for k, v in d.items():
-            indent = "  " * indent_level
-            if isinstance(v, dict):
-                # jax.debug.print("{indent}Key: {key}, Value: (nested dict)", indent=indent, key=k)
-                print_dict(v, indent_level + 1)
-            else:
-                jax.debug.print("{indent}Key: {key}, Value shape: {value_shape}", indent=indent, key=k, value_shape=v.shape)
-                # pdb.set_trace()
-                print(f"key = {k}")
-                jax.lax.cond(jnp.any(jnp.isnan(v)), lambda v: jax.debug.print(" NaN found: value: {val}",val = v), lambda v: jax.debug.print(" is clean"), jnp.inf)
-                jax.lax.cond(jnp.any(jnp.isinf(v)), lambda v: jax.debug.print(" Inf found: value: {val}",val = v), lambda v: jax.debug.print(" is clean"), jnp.inf)
-                # jax.lax.cond(jnp.any(jnp.isnan(v)), lambda x: jax.debug.print("NaN found in key: {key}, value: {val}",key = x[0],val = x[1]), lambda x: jax.debug.print("{key} is clean", key = x[0]), (k,v))
-                # if jnp.any(jnp.isnan(v)):
-                #   jax.debug.print(f"NaN found in key: {key}, value: {x[1]}")
-                # else:
-                #   jax.debug.print(f"{x[0]} is clean"), (key,value)
 
-    # print_dict(raw_grads)
-    # x = 0.0/0.0
-    # jax.tree_util.tree_map(lambda x: jax.debug.print("Nan found = {bool_result}", bool_result=jnp.any(jnp.isnan(x))), {"x":jnp.inf, "y": 1, "z":jnp.nan})
-    # jax.tree_util.tree_map(lambda x: jax.debug.print("Inf found = {bool_result}", bool_result=jnp.any(jnp.isinf(x))), {"x":jnp.inf, "y": 1, "z":jnp.nan})
-    # jax.tree_util.tree_map(lambda x: jax.debug.print("Nan found = {bool_result}", bool_result=jnp.any(jnp.isnan(x))), jax.tree_leaves({"x":jnp.inf, "y": 1, "z":jnp.nan}))
-    # def check_nested_jax_dict_for_nans(nested_dict):
-    #   """
-    #   Recursively checks a nested dictionary containing JAX ndarrays for NaN values.
+    # isinf = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["decoder_norm"]["scale"]))
+    # isinf2 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["mlp"]["wi_0"]["kernel"])) #
+    # isinf3 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["mlp"]["wi_1"]["kernel"])) #
+    # isinf4 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["mlp"]["wo"]["kernel"])) #
+    # isinf5 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["post_self_attention_layer_norm"]["scale"])) #
+    # isinf6 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["pre_self_attention_layer_norm"]["scale"])) #
+    # isinf7 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["self_attention"]["key"]["kernel"])) #
+    # isinf8 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["self_attention"]["out"]["kernel"])) #
+    # isinf9 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["self_attention"]["query"]["kernel"])) #
+    # isinf10 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["self_attention"]["value"]["kernel"])) #
+    # isinf11 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["logits_dense"]["kernel"])) #
+    # isinf12 = jnp.any(jnp.isinf(raw_grads["params"]["token_embedder"]["embedding"]))
 
-    #   Args:
-    #       nested_dict: A dictionary that can potentially contain other dictionaries
-    #                   or JAX ndarrays (jnp.ndarray).
+    # jax.debug.print("debug isinf raw_grads 1: {x}", x=isinf)
+    # jax.debug.print("debug isinf raw_grads 2: {x}", x=isinf2)
+    # jax.debug.print("debug isinf raw_grads 3: {x}", x=isinf3)
+    # jax.debug.print("debug isinf raw_grads 4: {x}", x=isinf4)
+    # jax.debug.print("debug isinf raw_grads 5: {x}", x=isinf5)
+    # jax.debug.print("debug isinf raw_grads 6: {x}", x=isinf6)
+    # jax.debug.print("debug isinf raw_grads 7: {x}", x=isinf7)
+    # jax.debug.print("debug isinf raw_grads 8: {x}", x=isinf8)
+    # jax.debug.print("debug isinf raw_grads 9: {x}", x=isinf9)
+    # jax.debug.print("debug isinf raw_grads 10: {x}", x=isinf10)
+    # jax.debug.print("debug isinf raw_grads 11: {x}", x=isinf11)
+    # jax.debug.print("debug isinf raw_grads 12: {x}", x=isinf12)
 
-    #   Returns:
-    #       True if any NaN is found, False otherwise.
-    #   """
+    # isinf_l2norm = jnp.any(jnp.isinf(max_utils.l2norm_pytree(raw_grads)))
+    # jax.debug.print("debug isinf l2norm raw_grads: {x}", x=isinf_l2norm)
 
-    #   for key, value in nested_dict.items():
-    #       if isinstance(value, jnp.ndarray):
-    #           jax.lax.cond(jnp.any(jnp.isnan(value)), lambda x: jax.debug.print(f"NaN found in key: {x[0]}, value: {x[1]}"), lambda x: jax.debug.print(f"{x[0]} is clean"), (key,value))
-    #           # if jnp.any(jnp.isnan(value)):
-    #           #     jax.debug.print(f"NaN found in key: {key}, value: {value}")
-    #               # return True
-    #       elif isinstance(value, dict):
-    #           jax.lax.cond(check_nested_jax_dict_for_nans(value), lambda key: jax.debug.print(f"NaN found in nested key: {key}"), lambda key: jax.debug.print(f"{key} is clean"), key)
-    #           # if check_nested_jax_dict_for_nans(value):  # Recursive call
-    #               # jax.debug.print(f"NaN found in nested key: {key}")
-    #               # return True
-
-    #   return False  # No NaNs found
-    # key = 'raw_grads["params"]["token_embedder"]["embedding"]'
-    # jax.debug.print("Key: {key}, Value: {value}",  key=key, value = raw_grads["params"]["token_embedder"]['embedding'])
-    # pdb.set_trace()
-    # check_nested_jax_dict_for_nans(raw_grads)
-    # isnan = jnp.any(jnp.isnan(raw_grads))
-    # jax.debug.print(f"{isnan=}")
-  # jax.tree_util.tree_map(lambda x: arr / grad_and_loss["total_weights"], raw_grads)
-  
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
