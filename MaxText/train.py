@@ -519,6 +519,36 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
         extra_dpo_args = [reference_params]
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
+
+    # isinf = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["decoder_norm"]["scale"]))
+    # isinf2 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["mlp"]["wi_0"]["kernel"])) #
+    # isinf3 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["mlp"]["wi_1"]["kernel"])) #
+    # isinf4 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["mlp"]["wo"]["kernel"])) #
+    # isinf5 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["post_self_attention_layer_norm"]["scale"])) #
+    # isinf6 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["pre_self_attention_layer_norm"]["scale"])) #
+    # isinf7 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["self_attention"]["key"]["kernel"])) #
+    # isinf8 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["self_attention"]["out"]["kernel"])) #
+    # isinf9 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["self_attention"]["query"]["kernel"])) #
+    # isinf10 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["layers"]["self_attention"]["value"]["kernel"])) #
+    # isinf11 = jnp.any(jnp.isinf(raw_grads["params"]["decoder"]["logits_dense"]["kernel"])) #
+    # isinf12 = jnp.any(jnp.isinf(raw_grads["params"]["token_embedder"]["embedding"]))
+
+    # jax.debug.print("debug isinf raw_grads 1: {x}", x=isinf)
+    # jax.debug.print("debug isinf raw_grads 2: {x}", x=isinf2)
+    # jax.debug.print("debug isinf raw_grads 3: {x}", x=isinf3)
+    # jax.debug.print("debug isinf raw_grads 4: {x}", x=isinf4)
+    # jax.debug.print("debug isinf raw_grads 5: {x}", x=isinf5)
+    # jax.debug.print("debug isinf raw_grads 6: {x}", x=isinf6)
+    # jax.debug.print("debug isinf raw_grads 7: {x}", x=isinf7)
+    # jax.debug.print("debug isinf raw_grads 8: {x}", x=isinf8)
+    # jax.debug.print("debug isinf raw_grads 9: {x}", x=isinf9)
+    # jax.debug.print("debug isinf raw_grads 10: {x}", x=isinf10)
+    # jax.debug.print("debug isinf raw_grads 11: {x}", x=isinf11)
+    # jax.debug.print("debug isinf raw_grads 12: {x}", x=isinf12)
+
+    # isinf_l2norm = jnp.any(jnp.isinf(max_utils.l2norm_pytree(raw_grads)))
+    # jax.debug.print("debug isinf l2norm raw_grads: {x}", x=isinf_l2norm)
+
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
