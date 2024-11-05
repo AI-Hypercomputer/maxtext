@@ -23,6 +23,8 @@ from flax import linen as nn
 import common_types
 import functools
 from typing import Any
+from jax.experimental import shard_map
+from jax.sharding import NamedSharding, Mesh, PartitionSpec as P
 
 
 class Pipeline(nn.Module):
@@ -283,7 +285,7 @@ class Pipeline(nn.Module):
       # Use lax.slice to guarantee the gradient is a pad.
       return jax.lax.slice(jnp.pad(arr, padding), [0] * arr.ndim, arr.shape)
 
-    def _permute_right_shmap(arr):   
+    def _permute_right_shmap(arr, perm_end):   
       axis_names = nn.logical_to_mesh_axes(("activation_stage", "activation_batch", "activation_length", "activation_embed"), rules=self.config.logical_axis_rules)
       print(f"{axis_names=}")
       axis_names = P(*("stage", "data", "sequence", "tensor"))
@@ -301,10 +303,10 @@ class Pipeline(nn.Module):
       return rotate_shmap(arr)
 
     def _rotate_right(arr):
-      return _rotate_right_shmap(arr, perm_end=self.num_stages)
+      return _permute_right_shmap(arr, self.num_stages)
 
     def _shift_right(arr):
-      return _rotate_right_shmap(arr, perm_end=self.num_stages - 1)
+      return _permute_right_shmap(arr, self.num_stages - 1)
 
 
     # Shift either rotates or shifts depending on if the last stage immediately must send to first or not
