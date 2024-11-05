@@ -351,17 +351,18 @@ class KVQuant:
     # Assumes kv is already quantized.
     einsum = jnp.einsum
     if isinstance(kv, aqt_tensor.QTensor):
-      lhs_bits = None
-      rhs_bits = 4 if kv.qvalue.dtype == jnp.int4 else 8
-      if kv.qvalue == jnp.float8_e4m3fn:
-        lhs_bits = 'e4m3'
-        rhs_bits = 'e4m3'
-      kv_cfg = aqt_config.dot_general_make(
-        lhs_bits=lhs_bits,
-        rhs_bits=rhs_bits,
-        bwd_bits=None,
-        use_fwd_quant=False,
-        )
+      if kv.qvalue.dtype != jnp.float8_e4m3fn:
+        lhs_bits = None
+        rhs_bits = 4 if kv.qvalue.dtype == jnp.int4 else 8
+        kv_cfg = aqt_config.dot_general_make(
+          lhs_bits=lhs_bits,
+          rhs_bits=rhs_bits,
+          bwd_bits=None,
+          use_fwd_quant=False,
+          )
+      else:
+        kv_cfg = aqt_config.config_fwd_fp8()
+      
       if rhs_dequant_mode:
         aqt_config.set_fwd_dequant_mode(
           kv_cfg, rhs_dequant_mode=rhs_dequant_mode
@@ -370,13 +371,14 @@ class KVQuant:
         aqt_config.set_fwd_calibration_mode(
           kv_cfg,
           rhs_calibration_mode=rhs_calibration_mode,
-      )
+          )
       einsum = aqt_flax.AqtEinsum(
         rhs_quant_mode=aqt_flax.QuantMode.TRAIN,
         lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
         rhs_freeze_mode=aqt_flax.FreezerMode.NONE,
         cfg=kv_cfg
         )
+
     return einsum
 
   def einsum_fn_with_rhs_qtensor_and_dequant(self, value):
