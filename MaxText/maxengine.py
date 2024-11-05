@@ -21,6 +21,8 @@ import flax
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from flax import struct
+import max_logging
+
 
 from layers import models, quantizations
 
@@ -231,6 +233,7 @@ class MaxEngine(engine_api.Engine):
         flat_logits, (0, true_length - 1, 0), (flat_logits.shape[0], 1, flat_logits.shape[2])
     )
     selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
+    max_logging.log(f"===maxtext selected_logits: {selected_logits}")
 
     # sampling first token
     first_generated_token = inference_utils.sampling(
@@ -241,6 +244,7 @@ class MaxEngine(engine_api.Engine):
         nucleus_topp=self.config.decode_sampling_nucleus_p,
         temperature=self.config.decode_sampling_temperature,
     )
+    max_logging.log(f"===maxtext first_generated_token: {first_generated_token}")
 
     all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
     result = engine_api.ResultTokens(
@@ -255,6 +259,7 @@ class MaxEngine(engine_api.Engine):
         length_idx=(2, 3),
         samples_per_slot=1,
     )
+    max_logging.log(f"===maxtext result: {result}")
 
     return {
         "logits": selected_logits,
@@ -290,6 +295,7 @@ class MaxEngine(engine_api.Engine):
           rngs={"params": new_rng},
           mutable=["cache"],
       )
+      max_logging.log(f"===maxtext out_logits: {out_logits}")
 
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
@@ -303,6 +309,7 @@ class MaxEngine(engine_api.Engine):
         nucleus_topp=self.config.decode_sampling_nucleus_p,
         temperature=self.config.decode_sampling_temperature,
     )
+    max_logging.log(f"===maxtext new_token: {new_token}")
 
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
     result = engine_api.ResultTokens(
@@ -317,6 +324,7 @@ class MaxEngine(engine_api.Engine):
         length_idx=(2, 3),
         samples_per_slot=1,
     )
+    max_logging.log(f"===maxtext result: {result}")
 
     return {
         "logits": out_logits,
