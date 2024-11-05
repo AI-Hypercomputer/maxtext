@@ -272,16 +272,40 @@ class Pipeline(nn.Module):
     loop_iteration = loop_state["loop_iteration"]
     old_prev_outputs = loop_state["prev_outputs"]
 
-    def _rotate_right(arr):
+    def _rotate_right_legacy(arr):
       # Use lax.slice to avoid generating a gather.
       last = jax.lax.slice_in_dim(arr, self.num_stages - 1, self.num_stages, axis=0)
       except_last = jax.lax.slice_in_dim(arr, 0, self.num_stages - 1, axis=0)
       return jnp.concatenate([last, except_last], axis=0)
 
-    def _shift_right(arr):
+    def _shift_right_legacy(arr):
       padding = [[1, 0]] + [[0, 0]] * (arr.ndim - 1)
       # Use lax.slice to guarantee the gradient is a pad.
       return jax.lax.slice(jnp.pad(arr, padding), [0] * arr.ndim, arr.shape)
+
+    def _permute_right_shmap(arr):   
+      axis_names = nn.logical_to_mesh_axes(("activation_stage", "activation_batch", "activation_length", "activation_embed"), rules=self.config.logical_axis_rules)
+      print(f"{axis_names=}")
+      axis_names = P(*("stage", "data", "sequence", "tensor"))
+      print(f"{axis_names=}")
+      @functools.partial(
+        shard_map.shard_map,
+        mesh=self.mesh,
+        in_specs=axis_names,
+        out_specs=axis_names,
+        check_rep=False,
+      )
+      def rotate_shmap(arr):
+        arr = jax.lax.ppermute(arr, 'stage', [(i, (i+1) % self.num_stages) for i in range(perm_end)])
+        return arr
+      return rotate_shmap(arr)
+
+    def _rotate_right(arr):
+      return _rotate_right_shmap(arr, perm_end=self.num_stages)
+
+    def _shift_right(arr):
+      return _rotate_right_shmap(arr, perm_end=self.num_stages - 1)
+
 
     # Shift either rotates or shifts depending on if the last stage immediately must send to first or not
     # For non-circular pipelines, the last stage does not need to send to first
