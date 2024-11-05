@@ -93,6 +93,7 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
           'mixtral_8x7b_dropless',
           'gemma2_9b_8192',
           'gemma2_27b_8192',
+          'llama3_1_70b_129024',
       ],
       default='llama2_70b_4096',
       help=(
