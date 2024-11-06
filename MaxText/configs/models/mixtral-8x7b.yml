@@ -58,7 +58,7 @@ base_num_decoder_layers: 5
 hardware: "gpu"
 steps: 30
 
-per_device_batch_size: 6.0
+per_device_batch_size: 8.0
 max_target_length: 4096
 attention: "cudnn_flash_te"
 remat_policy: "full"
