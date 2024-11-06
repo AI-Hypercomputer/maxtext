@@ -32,7 +32,7 @@ num_experts: 8
 # # ici_fsdp_parallelism: -1 
 # dcn_data_parallelism: 1
 # dcn_fsdp_parallelism: -1
-capacity_factor: 1.5
+capacity_factor: 1.0
 # # megablox: False
 
 
@@ -58,7 +58,7 @@ base_num_decoder_layers: 5
 hardware: "gpu"
 steps: 30
 
-per_device_batch_size: 4.0
+per_device_batch_size: 6.0
 max_target_length: 4096
 attention: "cudnn_flash_te"
 remat_policy: "full"
