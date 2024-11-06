@@ -79,8 +79,17 @@ DEFAULT_MASK_VALUE = common_types.DEFAULT_MASK_VALUE
 
 # Used to pass in splash attention block sizes from config.
 global_block_q = 0
+global_block_kv = 0
+global_block_kv_compute = 0
 global_block_q_dkv = 0
+global_block_kv_dkv = 0
+global_block_kv_dkv_compute = 0
 global_block_q_dq = 0
+global_block_kv_dq = 0
+global_use_fused_bwd_kernel = False
+global_q_layout = ""
+global_k_layout = ""
+global_v_layout = ""
 
 nd_dense_init = initializers.nd_dense_init
 shard_map = shard_map.shard_map
@@ -296,8 +305,17 @@ class AttentionOp(nn.Module):
     segment_axis_names = nn.logical_to_mesh_axes((BATCH, "activation_length_no_heads"))
 
     global_block_q = self.config.sa_block_q
+    global_block_kv = self.config.sa_block_kv
+    global_block_kv_compute = self.config.sa_block_kv_compute
     global_block_q_dkv = self.config.sa_block_q_dkv
+    global_block_kv_dkv = self.config.sa_block_kv_dkv
+    global_block_kv_dkv_compute = self.config.sa_block_kv_dkv_compute
     global_block_q_dq = self.config.sa_block_q_dq
+    global_block_kv_dq = self.config.sa_block_kv_dq
+    global_use_fused_bwd_kernel = self.config.sa_use_fused_bwd_kernel
+    global_q_layout = self.config.sa_q_layout
+    global_k_layout = self.config.sa_k_layout
+    global_v_layout = self.config.sa_v_layout
 
     @functools.partial(
         shard_map,
@@ -318,13 +336,17 @@ class AttentionOp(nn.Module):
         ), "Sharding along sequence dimension not allowed in tpu kernel attention"
       block_sizes = splash_attention_kernel.BlockSizes(
           block_q=min(global_block_q, query.shape[2]),
-          block_kv_compute=min(global_block_q, key.shape[2]),
-          block_kv=min(global_block_q, key.shape[2]),
+          block_kv=min(global_block_kv, key.shape[2]),
+          block_kv_compute=min(global_block_kv_compute, key.shape[2]),
           block_q_dkv=min(global_block_q_dkv, query.shape[2]),
-          block_kv_dkv=min(global_block_q_dkv, key.shape[2]),
-          block_kv_dkv_compute=min(global_block_q_dkv, query.shape[2]),
+          block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
+          block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
           block_q_dq=min(global_block_q_dq, query.shape[2]),
-          block_kv_dq=min(global_block_q_dq, query.shape[2]),
+          block_kv_dq=min(global_block_kv_dq, query.shape[2]),
+          use_fused_bwd_kernel=global_use_fused_bwd_kernel,
+          q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
+          k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
+          v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
       )
 
       mask = splash_attention_mask.CausalMask(shape=(query.shape[2], query.shape[2]))
