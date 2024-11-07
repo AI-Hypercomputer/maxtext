@@ -310,7 +310,7 @@ def build_user_command(
       f' export ENABLE_PJRT_COMPATIBILITY=true &&'
       f' export {libtpu_flags} && '
       ' python3 MaxText/train.py MaxText/configs/base.yml'
-      f' {config_tuning_params} steps={num_steps} enable_checkpointing=false'
+      f' {config_tuning_params} enable_checkpointing=false'
       f' model_name={model.model_type}'
       f' base_output_directory={base_output_directory}'
       f' use_vertex_tensorboard=false'
