@@ -253,7 +253,7 @@ jax_cache_dir: "~/jax_cache"
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
 # Parallelism
-mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']
+mesh_axes: ['diloco', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
@@ -309,6 +309,7 @@ sharding_tolerance: 0.02
 # value to auto-shard based on available slices and devices.
 # By default, product of the DCN axes should equal number of slices
 # and product of the ICI axes should equal number of devices per slice.
+dcn_diloco_parallelism: 1
 dcn_data_parallelism: -1  # recommended DCN axis to be auto-sharded
 dcn_fsdp_parallelism: 1
 dcn_fsdp_transpose_parallelism: 1
@@ -319,6 +320,7 @@ dcn_tensor_sequence_parallelism: 1 # never recommended
 dcn_pipeline_parallelism: 1
 dcn_expert_parallelism: 1
 dcn_autoregressive_parallelism: 1 # never recommended
+ici_diloco_parallelism: 1
 ici_data_parallelism: 1
 ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
 ici_fsdp_transpose_parallelism: 1
@@ -441,6 +443,11 @@ enable_dropout: True
 enable_data_shuffling: True
 data_shuffle_seed: 0
 init_weights_seed: 0
+
+# DiLoCo params https://arxiv.org/pdf/2311.08105
+diloco_sync_period: 20
+diloco_outer_lr: 0.7
+diloco_outer_momentum: 0.9
 
 # You may disable clipping by setting gradient_clipping_threshold to zero.
 gradient_clipping_threshold: 1.0
