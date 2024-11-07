@@ -6,7 +6,7 @@ if [ -f "run_*_metrics.txt" ]; then
     echo "removed existing run_*_metrics.txt"
 fi
 
-RUN_NAME=${1}-$(date +%Y-%m-%d-%H-%M)
+RUN_NAME=${1}
 OUTPUT_PATH=${2}
 DATASET_PATH=${3}
 ATTENTION=${4}
