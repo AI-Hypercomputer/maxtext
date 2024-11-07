@@ -173,6 +173,35 @@ def validate_no_keys_overwritten_twice(keys1: list[str], keys2: list[str]):
     )
 
 
+def validate_and_assign_remat_tensors(keys):
+  # list of allowed tensors for custom remat policy
+  tensors = [
+      "decoder_layer_input",
+      "mlpwi",
+      "mlpwi_0",
+      "mlpwi_1",
+      "mlpwo",
+      "query_proj",
+      "key_proj",
+      "value_proj",
+      "out_proj",
+      "qkv_proj",
+  ]
+  assert keys["decoder_layer_input"] != "remat", "Cannot remeterialize this tensor with scan_layers=True"
+  tensors_on_device = []
+  tensors_to_offload = []
+  for t in tensors:
+    if keys[t] == "device":
+      tensors_on_device.append(t)
+    elif keys[t] == "offload":
+      tensors_to_offload.append(t)
+    elif keys[t] != "remat":
+      raise ValueError(f"Invalid value chosen for tensor {t}")
+  keys["tensors_on_device"] = tensors_on_device
+  keys["tensors_to_offload"] = tensors_to_offload
+  return keys
+
+
 _config = None
 config = None
 

@@ -97,10 +97,10 @@ decoder_block: "llama2" # which style of DecoderBlock to use.
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
 weight_dtype: float32
 global_parameter_scale: 1
-base_emb_dim: 2048
+base_emb_dim: 6144
 base_num_query_heads: 16
 base_num_kv_heads: 16
-base_mlp_dim: 7168
+base_mlp_dim: 36864
 base_num_decoder_layers: 2
 head_dim: 128
 mlp_activations: ["silu", "linear"]
@@ -142,6 +142,19 @@ pipeline_delay_activation_forwarding: False # This delays the activation forward
 # Choose 'remat_policy' between 'minimal', 'save_dot_except_mlpwi', 'save_dot_except_mlp', 'save_qkv_proj', 'qkv_proj_offloaded', 'minimal_offloaded', 'save_out_proj' and 'full'.
 # These options offer a trade-off between speed (fastest to slowest) and HBM usage (highest to lowest)
 remat_policy: 'full'
+# If custom_save_offload remat_policy is chosen, you can select tensors from the following list to offload on host memory, rematerialize or save on device memory.
+# Pick one of these options for following tensors: ['remat','device','offload']
+decoder_layer_input: 'device' # this tensor cannot be rematerialized - it serves as periodic checkpoints that act as the remat start points
+mlpwi: 'remat'
+mlpwi_0: 'remat'
+mlpwi_1: 'remat'
+mlpwo: 'remat'
+query_proj: 'remat'
+key_proj: 'remat'
+value_proj: 'remat'
+out_proj: 'remat'
+qkv_proj: 'remat'
+
 scan_layers: True
 param_scan_axis: 1
 
