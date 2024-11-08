@@ -164,6 +164,7 @@ key_proj: 'remat'
 value_proj: 'remat'
 out_proj: 'remat'
 
+optimizer_host_offload: True
 scan_layers: True
 param_scan_axis: 1
 
