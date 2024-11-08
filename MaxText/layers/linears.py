@@ -549,7 +549,7 @@ class MoeBlock(nn.Module):
     if self.config.capacity_factor > 0:
       # token dropping if needed
       dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
-      mask_axes = ("activation_batch", "activation_length", None, None)
+      mask_axes = ("activation_batch", "activation_length", None, None) #rawr
       dispatch_mask = nn.with_logical_constraint(dispatch_mask, mask_axes)
       combine_mask = nn.with_logical_constraint(combine_mask, mask_axes)
       loss = self.load_balance_loss(top_k_indices, softmax_probs)
@@ -562,6 +562,7 @@ class MoeBlock(nn.Module):
             dispatch, ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
         )
       with jax.named_scope("wi_0"):
+        w0_kernel_axes = ("exp", "embed_no_exp", "mlp") #rawr
         w0_kernel_axes = ("exp", None, None)
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
         layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
@@ -574,8 +575,8 @@ class MoeBlock(nn.Module):
             layer_w0, ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
         )
       with jax.named_scope("wi_1"):
-        w1_kernel_axes = ("exp", None, None)
-        w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
+        w1_kernel_axes = ("exp", "embed_no_exp", "mlp") #rawr
+        # w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
         layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
             "EBCM,EMH -> EBCH", dispatch, w1_kernel, precision=matmul_precision
         )
@@ -588,8 +589,8 @@ class MoeBlock(nn.Module):
       layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
       with jax.named_scope("wo"):
-        wo_kernel_axes = ("exp", None, None)
-        wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
+        wo_kernel_axes = ("exp", "mlp", "embed_no_exp") #rawr
+        # wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
         intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
             "EBCH,EHM -> EBCM", layer_multiply, wo_kernel, precision=matmul_precision
         )
