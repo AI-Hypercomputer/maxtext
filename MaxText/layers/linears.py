@@ -32,7 +32,9 @@ from jax.experimental import shard_map
 import max_logging
 
 try:
-  from jax.experimental.pallas.ops.tpu import megablox as mblx
+  # from jax.experimental.pallas.ops.tpu import megablox as mblx
+  from kernels import megablox as mblx
+
 except ImportError:
   max_logging.log("JAX megablox is available for TPU only.")
   pass
