@@ -407,7 +407,8 @@ class MoeBlock(nn.Module):
       inputs = inputs.astype(self.dtype)
       kernel = kernel.astype(self.dtype)
       output = mblx.gmm(
-          lhs=inputs, rhs=kernel, group_sizes=group_sizes, preferred_element_type=jnp.bfloat16, tiling=tile_size
+          lhs=inputs, rhs=kernel, group_sizes=group_sizes, preferred_element_type=jnp.bfloat16, tiling=tile_size,
+          quant=True if self.quant else False,
       )
 
       if hs_shape[0] % pad_length:
