@@ -464,3 +464,6 @@ ragged_block_size: 256
 sa_block_q: 512
 sa_block_q_dkv: 512
 sa_block_q_dq: 512
+
+set_remat_policy_on_layers: True
+set_remat_policy_on_pipeline_iterations: True
