@@ -4,6 +4,8 @@
 export CLUSTER_NAME=a3plus-benchmark
 export ZONE=australia-southeast1
 export DEVICE_TYPE=h100-mega-80gb-8
+export WORKLOAD_NAME=lancewang-7b-nv-pgle-tp-${RANDOM:0:2}
+export NUM_NODES=1
 
 # Enable PGLE
 export JAX_ENABLE_PGLE=true
