@@ -69,7 +69,11 @@ def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
 
 
 def _rhs_axis_metadata_wrapper(
-    x: jnp.ndarray, tile_map, no_sharding_axis: Sequence[int], mesh_axes: Tuple[str, ...], is_tiled: bool
+    x: jnp.ndarray,
+    tile_map,
+    no_sharding_axis: Sequence[int],
+    mesh_axes: Tuple[str, ...],
+    is_tiled: bool,
 ):
   mesh_axes = list(mesh_axes)
   if is_tiled:
@@ -124,6 +128,7 @@ class AqtQuantization:
     else:
       quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
     rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(mesh_axes, is_tiled)
+
     aqt_dg_cls = functools.partial(
         aqt_flax.AqtDotGeneral,
         quant_dg,
@@ -138,15 +143,21 @@ class AqtQuantization:
 
   def einsum(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns einsum configured with aqt params."""
-    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(mesh_axes)
+    if isinstance(self.quant_dg, dict):
+      quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
+    else:
+      quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
+
+    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(mesh_axes, is_tiled)
     aqt_einsum = functools.partial(
         aqt_flax.AqtEinsum(
-            cfg=self.quant_dg,
+            cfg=quant_dg,
             rhs_quant_mode=self.quant_mode,
             lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
             rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
             rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
             use_legacy_freezer=False,
+            tiling_fn=tiling_fn,
         )
     )
     return aqt_einsum
@@ -337,7 +348,12 @@ class KVQuant:
       return value, scale
     raise ValueError(f"Invalid KV quant dtype:{self.dtype}.")
 
-  def einsum_fn_with_rhs_qtensor(self, kv: Array | aqt_tensor.QTensor, rhs_dequant_mode=None, rhs_calibration_mode=None):
+  def einsum_fn_with_rhs_qtensor(
+      self,
+      kv: Array | aqt_tensor.QTensor,
+      rhs_dequant_mode=None,
+      rhs_calibration_mode=None,
+  ):
     # Assumes kv is already quantized.
     einsum = jnp.einsum
     if isinstance(kv, aqt_tensor.QTensor):
