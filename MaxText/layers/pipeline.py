@@ -544,25 +544,25 @@ class Pipeline(nn.Module):
       return model.run_one_iteration(loop_state, positions, segment_ids, deterministic, model_mode, model.layers), None
 
     if self.remat_policy is not None:
-      # remat_policy = jax.checkpoint_policies.save_from_both_policies(
-      #     self.remat_policy, jax.checkpoint_policies.save_only_these_names("iteration_input")
-      # )
       remat_policy = jax.checkpoint_policies.save_from_both_policies(
-          self.remat_policy, jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=[],
-            names_which_can_be_offloaded=["iteration_input"],
-            offload_src="device",
-            offload_dst="pinned_host",
-            )
+          self.remat_policy, jax.checkpoint_policies.save_only_these_names("iteration_input")
       )
+      # remat_policy = jax.checkpoint_policies.save_from_both_policies(
+      #     self.remat_policy, jax.checkpoint_policies.save_and_offload_only_these_names(
+      #       names_which_can_be_saved=[],
+      #       names_which_can_be_offloaded=["iteration_input"],
+      #       offload_src="device",
+      #       offload_dst="pinned_host",
+      #       )
+      # )
     else:
-      #remat_policy = jax.checkpoint_policies.save_only_these_names("iteration_input")
-      remat_policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-          names_which_can_be_saved=[],
-          names_which_can_be_offloaded=[],
-          offload_src="device",
-          offload_dst="pinned_host",
-          )
+      remat_policy = jax.checkpoint_policies.save_only_these_names("iteration_input")
+      # remat_policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+      #     names_which_can_be_saved=[],
+      #     names_which_can_be_offloaded=[],
+      #     offload_src="device",
+      #     offload_dst="pinned_host",
+      #     )
     if self.config.set_remat_policy_on_pipeline_iterations:
       run_one_iteration_rematted = nn.remat(
           run_iteration_scannable,
