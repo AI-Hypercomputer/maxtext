@@ -386,22 +386,22 @@ def create_device_mesh(config, devices=None):
 
   dcn_parallelism = [
       config.dcn_data_parallelism,
+      config.dcn_expert_parallelism,
       config.dcn_pipeline_parallelism,
       config.dcn_fsdp_parallelism,
       config.dcn_fsdp_transpose_parallelism,
       config.dcn_sequence_parallelism,
       config.dcn_tensor_parallelism,
-      config.dcn_expert_parallelism,
       config.dcn_autoregressive_parallelism,
   ]
   ici_parallelism = [
       config.ici_data_parallelism,
+      config.ici_expert_parallelism,
       config.ici_pipeline_parallelism,
       config.ici_fsdp_parallelism,
       config.ici_fsdp_transpose_parallelism,
       config.ici_sequence_parallelism,
       config.ici_tensor_parallelism,
-      config.ici_expert_parallelism,
       config.ici_autoregressive_parallelism,
   ]
 
