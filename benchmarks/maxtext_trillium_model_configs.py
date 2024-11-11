@@ -428,17 +428,61 @@ llama3_1_8b_8192_c4 = MaxTextModel(
         "tokenizer_path": (
               "gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model"
           ),
+        "add_bos": False,
+        "add_eos": False,
         "reuse_example_batch": 1,
         "enable_checkpointing": False,
         "profiler": "xplane",
         "sa_block_q": 1024,
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
-        "learning_rate": 1e-4,
-        "warmup_steps_fraction": 0.1,
-        "steps": 10000,
+        "learning_rate": 5e-5,
+        "warmup_steps_fraction": 0.5,
+        "steps": 3000,
         "eval_interval": 200, 
-        "eval_steps": 11,
+        "eval_steps": 36,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+)
+    warmup_steps = math.ceil(265.0 * 1536 / global_batch_size_to_train_on - 1e-6)
+    decay_end_step = math.ceil(108600.0 * 1536 / global_batch_size_to_train_on - 1e-6)
+    raw_keys["learning_rate_schedule_steps"] = decay_end_step
+    raw_keys["warmup_steps_fraction"] = warmup_steps / decay_end_step
+    raw_keys["eval_interval"] = math.ceil(24567 / global_batch_size_to_train_on)
+
+
+llama3_1_8b_8192_c4_mlperf = MaxTextModel(
+    model_name="llama3_1_8b_8192_c4_mlperf",
+    model_type="llama3.1-8b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "qkv_proj_offloaded",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://mlperf-exp-us-east1-cp0",
+        "dataset_name": "c4/en:3.0.7",
+        "dataset_type": "c4_mlperf",
+        "tokenizer_path": (
+              "gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model"
+          ),
+        "add_bos": False,
+        "add_eos": False,
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "learning_rate": 5e-5,
+        "warmup_steps_fraction": 0.5,
+        "steps": 3000,
+        "eval_interval": 200, 
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -652,6 +696,7 @@ maxstar_models = [
     llama3_8b_8192,  # Not Optimizied yet
     llama3_70b_8192,  # Not Optimizied yet
     llama3_1_8b_8192_c4,
+    llama3_1_8b_8192_c4_mlperf,
     llama3_1_405b_8192_fsdp_dcn,
     mixtral_8x7b_dropped,
     mixtral_8x7b_dropped_int8,

@@ -265,6 +265,7 @@ def build_user_command(
     cluster_config: XpkConfig,
     base_output_directory: str, 
     buffer_size: int,
+    run_name: str
 ):
   config_tuning_params = ''
   for key, value in model.tuning_params.items():
@@ -315,7 +316,7 @@ def build_user_command(
       f' base_output_directory={base_output_directory}'
       f' use_vertex_tensorboard=false'
       ' vertex_tensorboard_project="" vertex_tensorboard_region=""'
-      f' run_name="{model.model_name}-{num_slices}-{libtpu_date}"'
+      f' run_name="{run_name}"'
   )
 
 
@@ -331,7 +332,12 @@ def generate_xpk_workload_cmd(
   """Generates a command to run a maxstar model on XPK."""
   num_steps = 2000
   time.localtime()
-  test_purpose_name = f'maxstar-benchmarks-{model.model_name}-{libtpu_version}'
+  #test_purpose_name = f'maxstar-benchmarks-{model.model_name}-{libtpu_version}'
+  test_purpose_name = f'{model.model_name}-conv'
+  lr = str(model.tuning_params["learning_rate"]).split(".")[-1]
+  warm_up = int(model.tuning_params["warmup_steps_fraction"] * model.tuning_params["steps"])
+  run_name = f'{model.model_name}-{num_slices}-{lr:.6s}-{warm_up}'
+  print(run_name)
   N = 3
   temp_post_fix = ''.join(
       random.choice(string.ascii_lowercase + string.digits) for _ in range(N)
@@ -349,6 +355,7 @@ def generate_xpk_workload_cmd(
       cluster_config,
       base_output_directory,
       buffer_size,
+      run_name,
   )
 
   additional_flags = ''
@@ -376,8 +383,8 @@ def generate_xpk_workload_cmd(
           ' --enable-debug-logs'
           f' --workload={name}'
           ' --priority=medium'
-          # ' --use-vertex-tensorboard'
-          # f' --experiment-name={test_purpose_name}'
+          ' --use-vertex-tensorboard'
+          f' --experiment-name="llama8b-4000-exp"'
           f' {additional_flags}'
       ),
       name,
