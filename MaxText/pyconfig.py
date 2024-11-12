@@ -157,6 +157,8 @@ def validate_model_name(s: str) -> bool:
       "mistral-7b",
       "mixtral-8x7b",
       "mixtral-8x22b",
+      "custom-moe-single",
+      "custom-moe-multi",
       "gemma-7b",
       "gemma-2b",
       "gemma2-2b",
@@ -192,6 +194,7 @@ def validate_and_assign_remat_tensors(keys):
       "key_proj",
       "value_proj",
       "out_proj",
+      "qkv_proj",
   ]
   assert keys["decoder_layer_input"] != "remat", "Cannot remeterialize this tensor with scan_layers=True"
   tensors_on_device = []
