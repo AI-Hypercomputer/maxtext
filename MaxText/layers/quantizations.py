@@ -161,6 +161,26 @@ class AqtQuantization:
         )
     )
     return aqt_einsum
+  def einsum_act(self, mesh_axes: Tuple[str, ...] = (), mode=""):
+    """Returns einsum configured with aqt params."""
+    if isinstance(self.quant_dg, dict):
+      quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
+    else:
+      quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
+
+    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(mesh_axes, is_tiled)
+    aqt_einsum = functools.partial(
+        aqt_flax.AqtEinsum(
+            cfg=quant_dg,
+            rhs_quant_mode=aqt_flax.QuantMode.TRAIN,
+            lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+            rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION,
+            rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
+            use_legacy_freezer=False,
+            tiling_fn=tiling_fn,
+        )
+    )
+    return aqt_einsum
 
 
 @dataclass
@@ -287,6 +307,8 @@ def match_aqt_and_unquantized_param(aqt_params, params):
         break
     # since the parameter is already added, we can delete it.
     param_tree_flat.pop(index)
+  import pdb
+  pdb.set_trace()
   return jax.tree_util.tree_unflatten(aqt_tree_def, param_paths)
 
 

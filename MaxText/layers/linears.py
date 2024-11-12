@@ -515,12 +515,17 @@ class MoeBlock(nn.Module):
     loss = jnp.mean(density * density_prob) * (self.num_experts**2) * self.config.load_balance_loss_weight
     return loss
 
-  def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = ()):
+  def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = (), name=""):
     if self.quant:
 
-      def aqt_einsum(*args, **kwargs):
-        # simply skip kwargs, since aqt einsum doesn't support any kwargs like precision
-        return self.quant.einsum(rhs_mesh_axes)(*args)
+      if name != "dispatch":
+        def aqt_einsum(*args, **kwargs):
+          # simply skip kwargs, since aqt einsum doesn't support any kwargs like precision
+          return self.quant.einsum(rhs_mesh_axes)(*args)
+      else:
+        def aqt_einsum(*args, **kwargs):
+          # simply skip kwargs, since aqt einsum doesn't support any kwargs like precision
+          return self.quant.einsum_act(rhs_mesh_axes)(*args)
 
       einsum_op = aqt_einsum
     else:
@@ -555,7 +560,7 @@ class MoeBlock(nn.Module):
       loss = self.load_balance_loss(top_k_indices, softmax_probs)
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
       with jax.named_scope("dispatch"):
-        dispatch = self.get_einsum(rhs_mesh_axes=mask_axes)(
+        dispatch = self.get_einsum(rhs_mesh_axes=mask_axes, name="dispatch")(
             "BSM,BSEC -> EBCM", inputs, dispatch_mask, precision=matmul_precision
         )
         dispatch = nn.with_logical_constraint(
@@ -599,9 +604,10 @@ class MoeBlock(nn.Module):
         intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("combine"):
         # Matmul & element wise operation
-        output = self.get_einsum(rhs_mesh_axes=mask_axes)(
-            "EBCM,BSEC -> BSM", intermediate_layer, combine_mask, precision=matmul_precision
-        )
+        output = jnp.einsum("EBCM,BSEC -> BSM", intermediate_layer, combine_mask)
+        # output = self.get_einsum(rhs_mesh_axes=mask_axes)(
+        #     "EBCM,BSEC -> BSM", intermediate_layer, combine_mask, precision=matmul_precision
+        # )
       return output, loss
     else:
       weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
