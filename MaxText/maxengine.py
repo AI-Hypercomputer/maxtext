@@ -131,7 +131,8 @@ class MaxEngine(engine_api.Engine):
     )
 
     if self.model.quant and not self.config.checkpoint_is_quantized:
-      params = self.quantize_params(state, rng3)
+      # params = self.quantize_params(state, rng3)
+      params = state.params
     else:
       params = state.params
     max_utils.print_mem_stats("After load_params")
