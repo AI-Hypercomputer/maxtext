@@ -389,7 +389,14 @@ class MoeBlock(nn.Module):
           reshaped_weights.astype(jnp.float32),
           precision=matmul_precision,
       )
-    return output.reshape(-1, self.config.max_target_length, self.config.emb_dim // tensor_parallelism).astype(self.dtype)
+    updated_batch = int(self.config.per_device_batch_size * jax.device_count() // self.config.ici_fsdp_parallelism)
+    # inferencing hack
+    # prefill has BS =1 sequence length = max_prefill_length 
+    # decode has BS = B, sequence_length= 1
+    if output.shape[0] % updated_batch != 0:
+      updated_batch = 1
+
+    return output.reshape(updated_batch, -1, self.config.emb_dim // tensor_parallelism).astype(self.dtype)
 
   def megablox(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
     tile_size = (512, 1024, 1024)
