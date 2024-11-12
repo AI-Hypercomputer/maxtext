@@ -436,7 +436,7 @@ class MoeBlock(nn.Module):
       layer_w0 = gmm(x, w0, group_sizes)
       layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
       layer_w1 = gmm(x, w1, group_sizes)
-      layer_w1 = checkpoint_name(layer_w0, "mlpwi_1")
+      layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
       layer_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       intermediate_layer = jnp.multiply(layer_act, layer_w1)
       intermediate_output = gmm(intermediate_layer, wo, group_sizes)
