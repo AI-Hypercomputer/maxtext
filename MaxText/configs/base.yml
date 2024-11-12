@@ -466,6 +466,7 @@ ragged_block_size: 256
 ### Splash attention block sizes
 # These can be tuned for specific hardware generations, and can be set up to
 # the model's sequence length.
+sa_block_q: 512
 sa_block_kv: 512
 sa_block_kv_compute: 512
 sa_block_q_dkv: 512
