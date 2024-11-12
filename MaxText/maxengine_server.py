@@ -39,7 +39,8 @@ def main(config):
   # No devices for local cpu test. A None for prefill and a None for generate.
   devices = server_lib.get_devices()
   # server_config = maxengine_config.get_server_config("MaxtextInterleavedServer", config)
-  server_config = maxengine_config.get_server_config("ExperimentalMaxtextDisaggregatedServer_8", config)
+  # server_config = maxengine_config.get_server_config("ExperimentalMaxtextDisaggregatedServer_8", config)
+  server_config = maxengine_config.get_server_config("ExperimentalMaxtextDisaggregatedServer_v6e_16", config)
 
   metrics_server_config : config_lib.MetricsServerConfig | None = None
   if config.prometheus_port != 0:
