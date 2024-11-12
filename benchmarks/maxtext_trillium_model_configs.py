@@ -408,6 +408,44 @@ llama3_1_405b_8192_fsdp_dcn = MaxTextModel(
     ),
 )
 
+llama31_405b_8192_fsdp_4_d = MaxTextModel(
+    model_name="llama31_405b_8192_fsdp_4_d",
+    model_type="llama3.1-405b",
+    tuning_params={
+        "per_device_batch_size": 1,
+        "ici_fsdp_parallelism": 64,
+        "ici_tensor_parallelism": 4,
+        "dcn_fsdp_parallelism": 4,
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "out_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        + xla_flags_library.CF_FOR_ALL_REDUCE_AND_ALL_GATHER
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_AG_AR
+    ),
+)
+
+
 mixtral_8x7b_dropless = MaxTextModel(
     model_name="mixtral-8x7b",
     model_type="mixtral-8x7b",
@@ -572,6 +610,7 @@ maxstar_models = [
     llama3_8b_8192,  # Not Optimizied yet
     llama3_70b_8192,  # Not Optimizied yet
     llama3_1_405b_8192_fsdp_dcn,
+    llama31_405b_8192_fsdp_4_d,
     mixtral_8x7b_dropped,
     mixtral_8x7b_dropped_int8,
     mixtral_8x7b_dropless,

@@ -87,6 +87,7 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
           'llama2_70b_4096',
           'llama2_70b_4096_real_data',
           'llama3_1_405b_8192_fsdp_dcn',
+          'llama31_405b_8192_fsdp_4_d',
           'mixtral_8x7b_dropped',
           'mixtral_8x7b_dropped_int8',
           'mixtral_8x7b_dropless',
@@ -100,6 +101,7 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
           'llama2_70b_4096 '
           'llama2_70b_4096_real_data '
           'llama3_1_405b_8192_fsdp_dcn '
+          'llama31_405b_8192_fsdp_4_d '
           'mixtral_8x7b_dropped '
           'mixtral_8x7b_dropped_int8 '
           'mixtral_8x7b_dropless '

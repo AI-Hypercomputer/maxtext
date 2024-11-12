@@ -65,6 +65,19 @@ ENABLE_SPARECORE_OFFLOADING_FOR_1D_ALL_GATHER = (
     # " --xla_tpu_enable_offloading_scatter_to_sparsecore=true"
 )
 
+ENABLE_SPARSECORE_OFFLOADING_FOR_AG_AR = (
+    " --xla_sc_disable_megacore_partitioning=true"
+    " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
+    " --xla_tpu_enable_all_gather_offload_tracing=true"
+    " --xla_tpu_enable_all_reduce_offload_tracing=true"
+    " --xla_tpu_use_tc_device_shape_on_sc=true"
+    " --xla_tpu_enable_sparse_core_collective_offload_all_gather=true"
+    " --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
+    " --xla_sc_enable_instruction_fusion=false"
+    " --xla_sc_disjoint_spmem=false"
+    " --2a886c8_chip_config_name=megachip_tccontrol"
+)
+
 # Better memory layout for all-reduce
 LAYOUT_FOR_ALL_REDUCE_SCATTER = (
     " --xla_tpu_use_minor_sharding_for_major_trivial_input=true"
