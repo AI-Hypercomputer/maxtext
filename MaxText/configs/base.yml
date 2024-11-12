@@ -162,6 +162,7 @@ mlpwo: 'remat'
 query_proj: 'remat'
 key_proj: 'remat'
 value_proj: 'remat'
+qkv_proj: 'remat'
 out_proj: 'remat'
 
 scan_layers: True
