@@ -38,14 +38,15 @@ XLA_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true \
 --xla_dump_to=$OUTPUT_BUCKET/xla ";
 
 
-export WORKLOAD_NAME=$USER-$(echo $MODEL_NAME | sed 's/\.//g')
+export WORKLOAD_NAME=$USER-$(echo $MODEL_NAME | sed 's/\.//g')-${RANDOM:0:2}
 
 export NUM_NODES=128
 
 export PER_DEVICE_BATCH_SIZE=1
 export ICI_TP=8
 
-export DCN_FSDP=$NUM_NODES
+export DCN_FSDP=$(expr $NUM_NODES / 2)
+# export DCN_FSDP=$(expr $NUM_NODES / 4)
 #export DCN_FSDP=32
 
 export DCN_PP=1
@@ -60,6 +61,6 @@ COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml ha
 
 COMMAND='export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"${COMMAND}"; 
 
-python3 xpk.py workload delete --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME; python3 xpk.py workload create --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME --command "${COMMAND}" --docker-image=$LOCAL_IMAGE_NAME --device-type=$DEVICE_TYPE --num-nodes=$NUM_NODES --priority=high --scheduler=gke.io/topology-aware-auto --env NCCL_SHIMNET_GUEST_CONFIG_CHECKER_CONFIG_FILE=/usr/local/nvidia/lib64/a3plus_guest_config.textproto --env NCCL_FASTRAK_PLUGIN_ACCEPT_TIMEOUT_MS=600000 --env XLA_FLAGS="${XLA_FLAGS}" --env JAX_ENABLE_PGLE="${JAX_ENABLE_PGLE}"
+xpk workload delete --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME; xpk workload create --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME --command "${COMMAND}" --docker-image=$LOCAL_IMAGE_NAME --device-type=$DEVICE_TYPE --num-nodes=$NUM_NODES --priority=high --scheduler=gke.io/topology-aware-auto --env NCCL_SHIMNET_GUEST_CONFIG_CHECKER_CONFIG_FILE=/usr/local/nvidia/lib64/a3plus_guest_config.textproto --env NCCL_FASTRAK_PLUGIN_ACCEPT_TIMEOUT_MS=600000 --env XLA_FLAGS="${XLA_FLAGS}" --env JAX_ENABLE_PGLE="${JAX_ENABLE_PGLE}" --env NCCL_DEBUG=INFO --env NCCL_DEBUG_SUBSYS=INIT,NET,ENV,TUNING,COLL
 
 

@@ -25,7 +25,7 @@
 
 set -e
 
-# export LOCAL_IMAGE_NAME=maxtext_base_image
+export LOCAL_IMAGE_NAME=maxtext_base_image
 export PROJECT=$(gcloud config get-value project)
 
 # Set environment variables
@@ -46,7 +46,7 @@ fi
 
 docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./maxtext_runner.Dockerfile -t ${LOCAL_IMAGE_NAME_RUNNER} .
 
-docker tag ${LOCAL_IMAGE_NAME_RUNNER} $PROJECT/${CLOUD_IMAGE_NAME}:latest
-docker push $PROJECT/${CLOUD_IMAGE_NAME}:latest
+docker tag ${LOCAL_IMAGE_NAME_RUNNER} ${CLOUD_IMAGE_NAME}:latest
+docker push ${CLOUD_IMAGE_NAME}:latest
 
 echo "All done, check out your artifacts at: $PROJECT/${CLOUD_IMAGE_NAME}"

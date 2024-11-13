@@ -8,8 +8,6 @@ export MODEL_NAME=llama2-7b
 # Launch llama3.1 405b
 # export MODEL_NAME=llama3.1-405b
 
-MODEL_SIZE=$(echo $MODEL_NAME | grep -o '[0-9]\+b')
-
 # Common parameters
 export CLUSTER_NAME=a3plus-benchmark
 export ZONE=australia-southeast1
@@ -38,12 +36,12 @@ export STRICT_CHECKER=true
 # CUDA_DEVICE_MAX_CONNECTIONS=1
 
 cat <<EOF > env.txt
+NCCL_SHIMNET_GUEST_CONFIG_CHECKER_CONFIG_FILE=/usr/local/nvidia/lib64/a3plus_guest_config.textproto
+NCCL_FASTRAK_PLUGIN_ACCEPT_TIMEOUT_MS=600000
 JAX_ENABLE_COMPILATION_CACHE=True
 JAX_ENABLE_PGLE=$JAX_ENABLE_PGLE
 JAX_REMOVE_CUSTOM_PARTITIONING_PTR_FROM_CACHE_KEY=$JAX_ENABLE_PGLE
-NCCL_SHIMNET_GUEST_CONFIG_CHECKER_CONFIG_FILE=/usr/local/nvidia/lib64/a3plus_guest_config.textproto
-NCCL_FASTRAK_PLUGIN_ACCEPT_TIMEOUT_MS=600000
-JAX_DEBUG_LOG_MODULES=jax._src.compiler,jax._src.cache_key,jax._src.interpreters.xla,jax._src.pjit
+JAX_DEBUG_LOG_MODULES=jax._src.compiler
 XLA_FLAGS=--xla_gpu_enable_latency_hiding_scheduler=true \
 --xla_gpu_enable_triton_gemm=false \
 --xla_gpu_graph_level=0 \
@@ -59,15 +57,16 @@ XLA_FLAGS=--xla_gpu_enable_latency_hiding_scheduler=true \
 --xla_gpu_enable_pgle_accuracy_checker=$STRICT_CHECKER \
 --xla_gpu_enable_triton_softmax_fusion=false \
 --xla_gpu_enable_all_gather_combine_by_dim=false \
---xla_gpu_enable_reduce_scatter_combine_by_dim=false
+--xla_gpu_enable_reduce_scatter_combine_by_dim=false \
+--xla_dump_to=/tmp/xla_dump/ \
+--xla_gpu_experimental_dump_fdo_profiles
 EOF
 
-# Only available in the latest image
-
+# The current image doesn't support this one yet
 # --xla_gpu_pgle_accuracy_checker='PGLE_STRICTNESS_LEVEL_ERROR' \
 
 call_train() {
-    export WORKLOAD_NAME=$USER-pgle-dot-$MODEL_SIZE-$1n$3tp-${RANDOM:0:2}
+    export WORKLOAD_NAME=$USER-pgle-dot-7b-$1n-levon-${RANDOM:0:2}
 
     export NUM_NODES=$1
 
@@ -75,49 +74,50 @@ call_train() {
     export ICI_TP=$3
     # export ICI_TP=1
 
-    export DCN_FSDP=$4
-    # export DCN_FSDP=64
+    export DCN_FSDP=$NUM_NODES
+    #export DCN_FSDP=32
 
     export DCN_PP=1
-    export NUM_LAYERS_PER_PP_STAGE=$(expr 128 / $DCN_PP) # Layers are mod-ified to 128 for short term solution
+    export NUM_LAYERS_PER_PP_STAGE=$(expr 128 / $DCN_PP) # Layers are modified to 128 for short term solution
     # export NUM_LAYERS_PER_PP_STAGE=$(expr 126 / $DCN_PP)
 
-    export REMAT_POLICY=$5
+    export REMAT_POLICY=$4
     # export REMAT_POLICY=full
     # export REMAT_POLICY=minimal
 
-    export ATTENTION=cudnn_flash_te
-    # export ATTENTION=dot_product
+    # export ATTENTION=cudnn_flash_te
+    export ATTENTION=dot_product
 }
 
 # input 1: number of nodes
 # input 2: per device batch size
 # input 3: TP
-# input 4: FSDP
-# input 5: remat policy
+# input 4: remat policy
 
-# FSDP, working now with
-# call_train 2 1 1 2 minimal
+# Config 1, TP
+# call_non_pp 2 1 8 save_qkv_proj
 
-# TP, with known issue
-# call_train 2 1 8 2 minimal
-
-# call_train 2 1 8 2 full
-# call_train 8 1 8 8 full
-# call_train 2 1 8 2 full
-# call_train 128 1 8 64 save_qkv_proj
-call_train 128 1 8 64 full
+# Congig 2, FSDP
+# call_non_pp 768 1 1 save_qkv_proj
+# call_train 2 1 1 full
+call_train 2 1 8 minimal
 
 # export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/jonbolin-maxtext-gpu:20241008-1
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-xprof_1010_nolayers_nightly_lance
-# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1022_lance
-# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1104_405b_lance
-export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-xprof_1004_nolayers_nightly_lance
+export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1022_lance
+#  --xprof_gpu_cupti_collector_max_callback_api_events=20971520 --xprof_gpu_cupti_collector_max_activity_api_events=20971520
 
-COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=$ATTENTION dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=true dcn_pipeline_parallelism=$DCN_PP dcn_fsdp_parallelism=$DCN_FSDP per_device_batch_size=$PER_DEVICE_BATCH_SIZE ici_tensor_parallelism=$ICI_TP weight_dtype=bfloat16 remat_policy=$REMAT_POLICY profiler=xplane skip_first_n_steps_for_profiler=5 ";
+# COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=dot_product dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=true dcn_pipeline_parallelism=1 dcn_data_parallelism=2 per_device_batch_size=1 ici_tensor_parallelism=8 weight_dtype=bfloat16 remat_policy=minimal && gsutil -m cp -r /tmp/xla_dump/ $OUTPUT_BUCKET";
+
+COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=$ATTENTION dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=true dcn_pipeline_parallelism=$DCN_PP dcn_fsdp_parallelism=$DCN_FSDP per_device_batch_size=$PER_DEVICE_BATCH_SIZE ici_tensor_parallelism=$ICI_TP weight_dtype=bfloat16 remat_policy=$REMAT_POLICY && gsutil -m cp -r /tmp/xla_dump/ $OUTPUT_BUCKET";
+
+# Disable profiler
+# profiler=xplane skip_first_n_steps_for_profiler=5" 
 
 COMMAND='export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"${COMMAND}"; 
 
-python ../xpk/xpk.py workload delete --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME; python ../xpk/xpk.py workload create --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME --command "${COMMAND}" --docker-image=$LOCAL_IMAGE_NAME --device-type=$DEVICE_TYPE --num-nodes=$NUM_NODES --scheduler=gke.io/topology-aware-auto --env-file=env.txt ;
+# COMMAND='ls -d -1 MaxText/**/*'
 
+xpk workload delete --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME;
 
+xpk workload create --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME --command "${COMMAND}" --docker-image=$LOCAL_IMAGE_NAME --device-type=$DEVICE_TYPE --num-nodes=$NUM_NODES --priority=high --scheduler=gke.io/topology-aware-auto --env-file=env.txt ;

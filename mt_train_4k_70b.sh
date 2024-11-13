@@ -5,10 +5,10 @@ source mt_config.sh
 # export MODEL_NAME=llama2-7b
 
 # Launch llama2 70b
-# export MODEL_NAME=llama2-70b
+export MODEL_NAME=llama2-70b
 
 # Launch llama3.1 405b
-export MODEL_NAME=llama3.1-405b
+# export MODEL_NAME=llama3.1-405b
 
 # Common parameters
 export CLUSTER_NAME=a3plus-benchmark
@@ -63,7 +63,7 @@ EOF
 
 call_config() {
     new_remat_name=$(echo $6| awk -F'_' '{for (i=1; i<=NF; i++) printf "%s", substr($i,1,1); print ""}')
-    export WORKLOAD_NAME=$USER-405b-$1n$2b$3tp$4pp$5fsdp$6l-$new_remat_name-err
+    export WORKLOAD_NAME=$USER-405-$1n$2b$3tp$4pp$5fs$6l-$new_remat_name-${RANDOM:0:2}
 
     export NUM_NODES=$1
 
@@ -78,7 +78,7 @@ call_config() {
     export NUM_LAYERS_PER_PP_STAGE=$6 # Layers are modified to 128 for short term solution
     # export NUM_LAYERS_PER_PP_STAGE=$(expr 126 / $DCN_PP)
 
-    export DCN_FSDP=$(expr $NUM_NODES / $DCN_PP)
+    # export DCN_FSDP=$(expr $NUM_NODES / $DCN_PP)
     #export DCN_FSDP=32
 
     export REMAT_POLICY=$7
@@ -90,11 +90,11 @@ call_config() {
 }
 
 submit(){
-    # export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/jonbolin-maxtext-gpu:20241008-1
+    export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/jonbolin-maxtext-gpu:20241008-1
     # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-xprof_1010_nolayers_nightly_lance
 
-    # Training with 8192 sequence length
-    COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=8192 model_name=$MODEL_NAME enable_checkpointing=false attention=$ATTENTION dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=true ici_tensor_parallelism=$ICI_TP dcn_fsdp_parallelism=$DCN_FSDP dcn_pipeline_parallelism=$DCN_PP per_device_batch_size=$PER_DEVICE_BATCH_SIZE num_layers_per_pipeline_stage=$NUM_LAYERS_PER_PP_STAGE   weight_dtype=bfloat16 remat_policy=$REMAT_POLICY profiler=xplane skip_first_n_steps_for_profiler=5 base_num_decoder_layers=$1"; 
+    # Training with 8192 sequence length for 405B
+    COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=4 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=$ATTENTION dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=true ici_tensor_parallelism=$ICI_TP dcn_fsdp_parallelism=$DCN_FSDP dcn_pipeline_parallelism=$DCN_PP per_device_batch_size=$PER_DEVICE_BATCH_SIZE num_layers_per_pipeline_stage=$NUM_LAYERS_PER_PP_STAGE   weight_dtype=bfloat16 remat_policy=$REMAT_POLICY profiler=xplane skip_first_n_steps_for_profiler=2 "; 
 
     COMMAND='export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"${COMMAND}"; 
 
@@ -111,16 +111,29 @@ submit(){
 # input 5: number of layers per PP stage
 # input 6:remat policy
 
-call_config 32 1 1 1 32 0 save_qkv_proj
-submit 126
+# Just testing
+# call_config 32 1 1 1 32 0 save_qkv_proj
+# submit 126
 
 # Best config, 
 # call_config 512 1 1 1 512 0 save_qkv_proj
 # submit 126
 
-# Gradually reduce DCN FSDP, 2%
+# Gradually reduce DCN FSDP, 2%, changing to 10%, OOM
 # call_config 512 1 1 1 256 0 save_qkv_proj
 # submit 126
+# https://pantheon.corp.google.com/kubernetes/service/us-central1/a3plus-benchmark/default/lancewang-405b-512n1b1tp1pp256fs0l-0/overview?e=13802955&mods=dataflow_dev&project=gce-gpus-validation-2
+
+# 10%, full DCN FSDP, 11% MFU, hang after 2 steps, no xprof
+# call_config 512 1 1 1 512 0 full
+# submit 126
+
+# 10%, 256 DCN FSDP, 2 DCN DP
+# call_config 512 3 1 1 16 0 save_qkv_proj
+# submit 126
+
+call_config 512 3 1 1 16 0 save_qkv_proj
+submit 126
 
 # 2%
 # call_config 512 1 1 1 128 0 save_qkv_proj
@@ -142,6 +155,16 @@ submit 126
 # call_config 512 3 8 2 512 16 full
 # submit 128
 
+# changing to 10%, OOM
+# call_config 512 3 1 2 256 16 full
+# submit 128
+# https://pantheon.corp.google.com/kubernetes/pod/us-central1/a3plus-benchmark/default/lancewang-405b-512n3b1tp2pp256fs16l-1-slice-job-0-0-kf8l9/app_errors?e=13802955&mods=dataflow_dev&project=gce-gpus-validation-2
+
+# Minimum requirement for FSDP, 1 batch per layer
+# call_config 512 1 1 2 512 16 full
+# submit 128
+
+
 # Config 1, PP, FSDP 16 remat full, OOM
 # call_config 512 3 8 2 16 16 full
 # submit 128
@@ -155,3 +178,8 @@ submit 126
 # submit 128
 
 
+# call_config 512 1 1 2 256 16 full
+# submit 128
+
+# call_config 512 1 1 2 128 16 full
+# submit 128

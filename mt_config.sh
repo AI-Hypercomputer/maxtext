@@ -21,7 +21,12 @@ export ZONE=australia-southeast1
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-xprof_1004_nolayers_nightly_lance
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-xprof_1008-base-1004_nolayers_nightly_lance
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-xprof_1010_nolayers_nightly_lance
-export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1022_lance
+# For PGLE
+# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1022_lance
+# For 2% tolerance issue
+# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1022_405b_lance
+export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1104_405b_lance
+
 
 export DEVICE_TYPE=h100-mega-80gb-8
 export OUTPUT_PATH=lancewang-dev-supercomputer-testing/maxtext_gpu
@@ -50,6 +55,7 @@ JAX_ENABLE_PGLE=$JAX_ENABLE_PGLE
 JAX_REMOVE_CUSTOM_PARTITIONING_PTR_FROM_CACHE_KEY=$JAX_ENABLE_PGLE
 JAX_DEBUG_LOG_MODULES=jax._src.compiler,jax._src.cache_key,jax._src.interpreters.xla,jax._src.pjit
 XLA_FLAGS=--xla_gpu_enable_latency_hiding_scheduler=true \
+--xla_gpu_graph_level=0 \
 --xla_gpu_enable_triton_gemm=false \
 --xla_gpu_enable_highest_priority_async_stream=true \
 --xla_gpu_all_reduce_combine_threshold_bytes=536870912 \
