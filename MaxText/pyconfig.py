@@ -312,7 +312,8 @@ class _HyperParameters:
     validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
 
     # We initialize the jax distributed system here because it must be done before device backend is initialized.
-    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+    if not raw_keys["use_ray"]:
+      max_utils.maybe_initialize_jax_distributed_system(raw_keys)
 
     if raw_keys["jax_cache_dir"]:
       compilation_cache.set_cache_dir(os.path.expanduser(raw_keys["jax_cache_dir"]))
@@ -332,10 +333,11 @@ class _HyperParameters:
         raw_keys["tokenizer_path"] = tokenizer_path
 
     self.keys = raw_keys
-    keys = [k for k in raw_keys]  # pylint: disable=unnecessary-comprehension
-    keys.sort()
-    for k in keys:
-      max_logging.log(f"Config param {k}: {raw_keys[k]}")
+    if raw_keys["log_hps"]:
+      keys = [k for k in raw_keys]  # pylint: disable=unnecessary-comprehension
+      keys.sort()
+      for k in keys:
+        max_logging.log(f"Config param {k}: {raw_keys[k]}")
 
   @staticmethod
   def user_init(raw_keys):
