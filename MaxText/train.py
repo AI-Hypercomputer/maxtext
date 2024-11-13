@@ -171,8 +171,7 @@ def write_metrics_to_tensorboard(writer, metrics, step, config, is_training=True
             f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
             f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
             f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
-            f"total_weights: {metrics['scalar']['learning/total_weights']}, "
-            f"loss: {metrics['scalar']['learning/loss']:.3f}"
+            f"total_weights: {metrics['scalar']['learning/total_weights']}"
         )
 
       if full_log and jax.process_index() == 0:
@@ -727,8 +726,7 @@ def train_loop(config, state=None):
     if config.enable_step_logging:
       step_time_delta = new_time - last_step_completion
       max_logging.log(f"completed step: {step}, seconds: {step_time_delta.total_seconds()}, "
-            f"TFLOP/s/device: {per_device_tflops / step_time_delta.total_seconds()}, "
-            f"loss: {metrics['scalar']['learning/loss']:.3f}")
+            f"TFLOP/s/device: {per_device_tflops / step_time_delta.total_seconds()}")
     last_step_completion = new_time
 
     if checkpoint_manager is not None:
