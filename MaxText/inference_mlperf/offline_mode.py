@@ -183,6 +183,13 @@ flags.DEFINE_string(
     required=False,
 )
 
+flags.DEFINE_integer(
+    "max_target_length",
+    3072,
+    "Maximum input + output length value, we use 2*prefill_len and will use this as cap",
+    required=False,
+)
+
 scenario_map = {
     "offline": lg.TestScenario.Offline,
     "server": lg.TestScenario.Server,
@@ -409,7 +416,7 @@ def _estimated_counts_by_bucket(dataset):
   total_count = 0
   estimates = {}
   for prefix_len in prefix_lens[:-1]:
-    target_len = 2 * prefix_len
+    target_len =  min(FLAGS.max_target_length, 2 * prefix_len) 
     condition = (total_len <= target_len) & (dataset.tok_input_length <= prefix_len)
     count = len(dataset[condition])
     estimates[f"{prev_len}-{prefix_len}"] = math.ceil((count - total_count) * mult)
@@ -462,7 +469,7 @@ def main(argv):
   # Create an engine and corresponding offline_inf_instance per batch of queries
   for group_idx in query_batches:
     (length, batch) = group_idx
-    target_length = 2 * length
+    target_length = min(FLAGS.max_target_length, 2 * length)
     log.info(f"Using batch size: {batch} and length: {length}")
     engine = create_engine_from_config_flags(
         batch_size=batch,

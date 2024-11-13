@@ -58,7 +58,7 @@ fi
 BATCH_STR=""
 if [ -z "$BATCH_AND_PREFILL_LEN" ];
 then
-  BATCH_AND_PREFILL_LEN="256,144|512,72|2048,18"
+  BATCH_AND_PREFILL_LEN="512,72|1024,18|2048,18"
 fi
 
 if [ -z "$TOK_OUTLEN_MULTIPLIER" ];
@@ -72,7 +72,7 @@ then
   BASE_CFG="model_name=mixtral-8x7b tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
   QUANT_CFG="quantization=int8 quantize_kvcache=True checkpoint_is_quantized=True"
   LAYOUT_CFG="compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3"
-  MOE_CFG="megablox=False sparse_matmul=False capacity_factor=1 model_call_mode=inference"
+  MOE_CFG="megablox=False sparse_matmul=False capacity_factor=1.5 model_call_mode=inference"
   MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${LAYOUT_CFG} ${MOE_CFG}"
 fi
 
@@ -165,7 +165,7 @@ run_loadgen_accuracy () {
     else
       EVAL_SCRIPT="evaluate-accuracy.py"
     fi
-
+    
     ${CMD} python3 ${EVAL_SCRIPT} \
       --tokenizer-path ${TOKENIZER_PATH} \
       --mlperf-accuracy-file ${OUTPUT_ACCURACY_JSON_PATH} \
