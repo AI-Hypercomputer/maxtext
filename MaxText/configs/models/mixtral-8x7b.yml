@@ -38,7 +38,16 @@ capacity_factor: 1.0
 
 
 
-
+decoder_layer_input: 'offload' # this tensor cannot be rematerialized - it serves as periodic checkpoints that act as the remat start points
+mlpwi: 'offload'
+mlpwi_0: 'offload'
+mlpwi_1: 'offload'
+mlpwo: 'offload'
+query_proj: 'offload'
+key_proj: 'offload'
+value_proj: 'offload'
+qkv_proj: 'offload'
+out_proj: 'offload'
 
 
 
@@ -59,12 +68,12 @@ capacity_factor: 1.0
 hardware: "gpu"
 steps: 30
 
-per_device_batch_size: 8.0
+per_device_batch_size: 1.0
 max_target_length: 4096
 attention: "cudnn_flash_te"
-remat_policy: "full"
+remat_policy: "custom"
 use_iota_embed: True
-dataset_type: "synthetic"
+# dataset_type: "synthetic"
 reuse_example_batch: 1
 enable_checkpointing: False
 megablox: False
