@@ -70,9 +70,18 @@ then
   LAYOUT_CFG="compute_axis_order=0,1,2,3 ar_cache_axis_order=0,1,2,3"
   MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${LAYOUT_CFG}"
 fi
+
+if [ -z "$BASEDIR" ];
+then
+  BASEDIR=/home/${USER}/inference
+fi
+
+if [ -z "$DATA_DISK_DIR" ];
+then
+  DATA_DISK_DIR=/home/${USER}/loadgen_run_data
+fi
+
 export LOADGEN_RUN_TIMESTAMP=$(TZ=America/Los_Angeles date +%Y%m%d%H%M%S%Z)
-export BASEDIR=/home/${USER}/inference
-export DATA_DISK_DIR=/home/${USER}/loadgen_run_data
 export API_URL=0.0.0.0:9000
 if "$test_run"; then
   export DATASET_TYPE=test
