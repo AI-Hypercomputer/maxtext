@@ -515,12 +515,17 @@ class MoeBlock(nn.Module):
     loss = jnp.mean(density * density_prob) * (self.num_experts**2) * self.config.load_balance_loss_weight
     return loss
 
-  def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = ()):
+  def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = (), name=""):
     if self.quant:
-
-      def aqt_einsum(*args, **kwargs):
-        # simply skip kwargs, since aqt einsum doesn't support any kwargs like precision
-        return self.quant.einsum(rhs_mesh_axes)(*args)
+      if name != "dispatch":
+        def aqt_einsum(*args, **kwargs):
+          # simply skip kwargs, since aqt einsum doesn't support any kwargs like precision
+          return self.quant.einsum(rhs_mesh_axes)(*args)
+      else:
+        def aqt_einsum(*args, **kwargs):
+          # simply skip kwargs, since aqt einsum doesn't support any kwargs like precision
+          # return self.quant.einsum_act(rhs_mesh_axes)(*args)
+          return jnp.einsum
 
       einsum_op = aqt_einsum
     else:
@@ -555,52 +560,53 @@ class MoeBlock(nn.Module):
       loss = self.load_balance_loss(top_k_indices, softmax_probs)
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
       with jax.named_scope("dispatch"):
-        dispatch = self.get_einsum(rhs_mesh_axes=mask_axes)(
-            "BSM,BSEC -> EBCM", inputs, dispatch_mask, precision=matmul_precision
-        )
+        dispatch = jnp.einsum("BSM,BSEC -> EBCM", inputs, dispatch_mask)
+        # dispatch = self.get_einsum(rhs_mesh_axes=mask_axes, name="dispatch")(
+        #     "BSM,BSEC -> EBCM", inputs, dispatch_mask, precision=matmul_precision
+        # )
         dispatch = nn.with_logical_constraint(
             dispatch, ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
         )
       with jax.named_scope("wi_0"):
-        w0_kernel_axes = ("exp", None, None)
+        w0_kernel_axes = ("exp", None, "mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
         layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
             "EBCM,EMH -> EBCH", dispatch, w0_kernel, precision=matmul_precision
         )
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
-        layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
         layer_w0 = nn.with_logical_constraint(
             layer_w0, ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
         )
+        layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
       with jax.named_scope("wi_1"):
-        w1_kernel_axes = ("exp", None, None)
+        w1_kernel_axes = ("exp", None, "mlp")
         w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
         layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
             "EBCM,EMH -> EBCH", dispatch, w1_kernel, precision=matmul_precision
         )
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
-        layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
         layer_w1 = nn.with_logical_constraint(
             layer_w1, ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
         )
+        layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
       layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
       with jax.named_scope("wo"):
-        wo_kernel_axes = ("exp", None, None)
+        wo_kernel_axes = ("exp", "mlp", None)
         wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
         intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
             "EBCH,EHM -> EBCM", layer_multiply, wo_kernel, precision=matmul_precision
         )
-        intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
         intermediate_layer = nn.with_logical_constraint(
             intermediate_layer, ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
         )
+        intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("combine"):
         # Matmul & element wise operation
-        output = self.get_einsum(rhs_mesh_axes=mask_axes)(
-            "EBCM,BSEC -> BSM", intermediate_layer, combine_mask, precision=matmul_precision
+        output = jnp.einsum("EBCM,BSEC -> BSM", intermediate_layer, combine_mask).astype(
+            self.dtype
         )
       return output, loss
     else:
