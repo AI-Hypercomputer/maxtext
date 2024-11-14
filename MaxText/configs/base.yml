@@ -212,9 +212,6 @@ mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'ex
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
-                       # For pipeline parallelism the pre and post decoder layer tensors' batch dimension is sharded by stages.
-                       # Microbatches are sharded by stage, so moving out of and into this sharding should be a local reshape.
-                       # The "stage" needs to be listed first since the microbatch dimension is first before the reshape.
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_heads', ['tensor','sequence']],
                       ['activation_kv_heads', ['tensor','sequence']],
