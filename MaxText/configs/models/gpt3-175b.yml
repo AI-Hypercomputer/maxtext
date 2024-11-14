@@ -38,5 +38,5 @@ adam_b2: 0.95
 adam_eps: 1.e-8
 adam_weight_decay: 0.1
 checkpoint_period: 10_000
-target_eval_loss: 315.9
+target_eval_loss: 226.0
 eval_per_device_batch_size: 1
