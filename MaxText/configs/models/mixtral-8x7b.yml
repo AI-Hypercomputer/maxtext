@@ -46,7 +46,7 @@ mlpwo: 'offload'
 query_proj: 'offload'
 key_proj: 'offload'
 value_proj: 'offload'
-qkv_proj: 'offload'
+# qkv_proj: 'offload'
 out_proj: 'offload'
 
 
