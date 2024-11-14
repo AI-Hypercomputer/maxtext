@@ -336,7 +336,9 @@ def generate_xpk_workload_cmd(
   test_purpose_name = f'{model.model_name}-conv'
   lr = str(model.tuning_params["learning_rate"]).split(".")[-1]
   warm_up = int(model.tuning_params["warmup_steps_fraction"] * model.tuning_params["steps"])
-  run_name = f'{model.model_name}-{num_slices}-{lr:.6s}-{warm_up}'
+  seed = model.tuning_params["data_shuffle_seed"]
+  step = model.tuning_params["learning_rate_schedule_steps"]
+  run_name = f'{model.model_name}-{num_slices}-{lr:.6s}-{warm_up}-{seed}-{step}'
   print(run_name)
   N = 3
   temp_post_fix = ''.join(
@@ -384,7 +386,7 @@ def generate_xpk_workload_cmd(
           f' --workload={name}'
           ' --priority=medium'
           ' --use-vertex-tensorboard'
-          f' --experiment-name="llama8b-4000-exp"'
+          f' --experiment-name="llama8b-c4-exp"'
           f' {additional_flags}'
       ),
       name,

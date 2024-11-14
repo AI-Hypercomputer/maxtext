@@ -175,8 +175,8 @@ def create_data_iterator(config, mesh):
     train_iterator_fn = functools.partial(make_hf_train_iterator, config, mesh, process_indices_train)
     eval_iterator_fn = functools.partial(make_hf_eval_iterator, config, mesh, process_indices_eval)
   elif config.dataset_type == "c4_mlperf":
-    train_iterator_fn = functools.partial(make_c4_mlperf_train_iterator, config, mesh, add_bos=False, add_eos=False, process_indices=process_indices_train)
-    eval_iterator_fn = functools.partial(make_c4_mlperf_eval_iterator, config, mesh, add_bos=False, add_eos=False, process_indices=process_indices_eval)
+    train_iterator_fn = functools.partial(make_c4_mlperf_train_iterator, config, mesh, process_indices=process_indices_train)
+    eval_iterator_fn = functools.partial(make_c4_mlperf_eval_iterator, config, mesh, process_indices=process_indices_eval)
   else:
     assert False, f"Unknown dataset_type {config.dataset_type}, dataset_type must be synthetic, tfds, grain, hf or c4_mlperf"
   return make_mixed_iterator(config, mesh, process_indices_train, process_indices_eval, train_iterator_fn, eval_iterator_fn)

@@ -27,6 +27,24 @@ class MaxTextModel:
   tuning_params: dict[str, typing.Any]
   xla_flags: str
 
+@dataclasses.dataclass
+class DatasetHParams:
+    dataset_path: str
+    dataset_name: str
+    dataset_type: str
+    eval_dataset_name: str
+    add_bos: bool
+    add_eos: bool
+    tokenizer_path: str
+
+@dataclasses.dataclass
+class ConvHParams:
+    global_batch_size: int
+    warmup_samples: int
+    decay_end_samples: int
+    total_tokens_to_train: int
+    learning_rate: float
+    eval_interval:int
 
 default_basic = MaxTextModel(
     model_name="default-basic",
@@ -408,130 +426,6 @@ llama3_1_405b_8192_fsdp_dcn = MaxTextModel(
         + xla_flags_library.HOST_OFFLOAD_FLAGS
     ),
 )
-import math
-interval = math.ceil(364724/2048)
-
-llama3_1_8b_8192_c4 = MaxTextModel(
-    model_name="llama3_1_8b_8192_c4",
-    model_type="llama3.1-8b",
-    tuning_params={
-        "per_device_batch_size": 2,
-        "ici_fsdp_parallelism": -1,
-        "remat_policy": "qkv_proj_offloaded",
-        "max_target_length": 8192,
-        "attention": "flash",
-        "gcs_metrics": True,
-        "use_iota_embed": True,
-        "dataset_path": "gs://maxtext-dataset",
-        "dataset_name": "c4/en:3.0.1",
-        "dataset_type": "tfds",
-        "tokenizer_path": (
-              "gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model"
-          ),
-        "add_bos": False,
-        "add_eos": False,
-        "reuse_example_batch": 1,
-        "enable_checkpointing": False,
-        "profiler": "xplane",
-        "sa_block_q": 1024,
-        "sa_block_q_dkv": 2048,
-        "sa_block_q_dq": 2048,
-        "learning_rate": 5e-5,
-        "warmup_steps_fraction": 0.5,
-        "steps": 3000,
-        "eval_interval": 200, 
-        "eval_steps": 36,
-    },
-    xla_flags=(
-        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.CF_FOR_ALL_GATHER
-    ),
-)
-    warmup_steps = math.ceil(265.0 * 1536 / global_batch_size_to_train_on - 1e-6)
-    decay_end_step = math.ceil(108600.0 * 1536 / global_batch_size_to_train_on - 1e-6)
-    raw_keys["learning_rate_schedule_steps"] = decay_end_step
-    raw_keys["warmup_steps_fraction"] = warmup_steps / decay_end_step
-    raw_keys["eval_interval"] = math.ceil(24567 / global_batch_size_to_train_on)
-
-
-llama3_1_8b_8192_c4_mlperf = MaxTextModel(
-    model_name="llama3_1_8b_8192_c4_mlperf",
-    model_type="llama3.1-8b",
-    tuning_params={
-        "per_device_batch_size": 2,
-        "ici_fsdp_parallelism": -1,
-        "remat_policy": "qkv_proj_offloaded",
-        "max_target_length": 8192,
-        "attention": "flash",
-        "gcs_metrics": True,
-        "use_iota_embed": True,
-        "dataset_path": "gs://mlperf-exp-us-east1-cp0",
-        "dataset_name": "c4/en:3.0.7",
-        "dataset_type": "c4_mlperf",
-        "tokenizer_path": (
-              "gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model"
-          ),
-        "add_bos": False,
-        "add_eos": False,
-        "reuse_example_batch": 1,
-        "enable_checkpointing": False,
-        "profiler": "xplane",
-        "sa_block_q": 1024,
-        "sa_block_q_dkv": 2048,
-        "sa_block_q_dq": 2048,
-        "learning_rate": 5e-5,
-        "warmup_steps_fraction": 0.5,
-        "steps": 3000,
-        "eval_interval": 200, 
-    },
-    xla_flags=(
-        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.CF_FOR_ALL_GATHER
-    ),
-)
-
-llama3_1_405b_8192_fsdp_dcn_c4 = MaxTextModel(
-    model_name="llama3-1-405b-8192-fsdp-dcn",
-    model_type="llama3.1-405b",
-    tuning_params={
-        "per_device_batch_size": 1,
-        "ici_fsdp_parallelism": 64,
-        "ici_tensor_parallelism": 4,
-        "dcn_fsdp_parallelism": 2,
-        "allow_split_physical_axes": True,
-        "custom_mesh": "hybrid_ring_64x4",
-        "remat_policy": "custom",
-        "decoder_layer_input": "offload",
-        "query_proj": "offload",
-        "key_proj": "offload",
-        "value_proj": "offload",
-        "out_proj": "offload",
-        "max_target_length": 8192,
-        "attention": "flash",
-        "gcs_metrics": True,
-        "use_iota_embed": True,
-        "dataset_path": "gs://mlperf-exp-us-east1-cp0",
-        "dataset_name": "c4/en:3.0.7",
-        "dataset_type": "c4_mlperf",
-          "tokenizer_path": (
-              "gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model"
-          ),
-        "reuse_example_batch": 1,
-        "enable_checkpointing": False,
-        ""
-        "profiler": "xplane",
-        "sa_block_q": 1024,
-        "sa_block_q_dkv": 2048,
-        "sa_block_q_dq": 2048,
-        "learning_rate": 1.25e-5,
-        "warmup_steps_fraction": 0.5
-    },
-    xla_flags=(
-        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.CF_FOR_ALL_GATHER
-        + xla_flags_library.HOST_OFFLOAD_FLAGS
-    ),
-)
 
 mixtral_8x7b_dropless = MaxTextModel(
     model_name="mixtral-8x7b",
@@ -695,9 +589,6 @@ maxstar_models = [
     llama2_70b_4096_real_data,
     llama3_8b_8192,  # Not Optimizied yet
     llama3_70b_8192,  # Not Optimizied yet
-    llama3_1_8b_8192_c4,
-    llama3_1_8b_8192_c4_mlperf,
-    llama3_1_405b_8192_fsdp_dcn,
     mixtral_8x7b_dropped,
     mixtral_8x7b_dropped_int8,
     mixtral_8x7b_dropless,

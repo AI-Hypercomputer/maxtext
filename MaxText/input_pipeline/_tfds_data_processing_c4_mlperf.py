@@ -255,8 +255,7 @@ def preprocess_train_dataset(
   train_ds = train_ds.map(
       lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)), num_parallel_calls=AUTOTUNE
   )
-
-  train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
+  train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=max_target_length * 2)
   train_ds = split_tokens_to_targets_length(train_ds, max_target_length)
   train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
   train_ds = sequence_packing.pack_dataset(train_ds, max_target_length)
