@@ -431,6 +431,19 @@ class Pipeline(nn.Module):
     new_state = self.get_new_loop_state(stages_output, loop_state)
     return new_state
 
+  def get_pipeline_remat_policy(self):
+    # We ensure that the decoder layer inputs are saved, although we leave it to a custom
+    # policy if they should be saved to device or offloaded.
+    if self.remat_policy != "custom":
+      save_input_policy = jax.checkpoint_policies.save_only_these_names("iteration_input", "decoder_layer_input")
+    else:
+      save_input_policy = jax.checkpoint_policies.save_only_these_names("iteration_input")
+    if self.remat_policy is not None:
+      remat_policy = jax.checkpoint_policies.save_from_both_policies(self.remat_policy, save_input_policy)
+    else:
+      remat_policy = save_input_policy
+    return remat_policy
+
   @nn.compact
   def __call__(
       self,
@@ -543,17 +556,12 @@ class Pipeline(nn.Module):
       # the run_one_iteration in this method - the first argument model (i.e. self) is a nn.module instance.
       return model.run_one_iteration(loop_state, positions, segment_ids, deterministic, model_mode, model.layers), None
 
-    if self.remat_policy is not None:
-      remat_policy = jax.checkpoint_policies.save_from_both_policies(
-          self.remat_policy, jax.checkpoint_policies.save_only_these_names("iteration_input")
+    if self.config.set_remat_policy_on_pipeline_iterations:
+      run_iteration_scannable = nn.remat(
+          run_iteration_scannable,
+          prevent_cse=not self.config.scan_pipeline_iterations,  # prevent_cse not used with scan
+          policy=self.get_pipeline_remat_policy(),
       )
-    else:
-      remat_policy = jax.checkpoint_policies.save_only_these_names("iteration_input")
-    run_one_iteration_rematted = nn.remat(
-        run_iteration_scannable,
-        prevent_cse=not self.config.scan_pipeline_iterations,  # prevent_cse not used with scan
-        policy=remat_policy,
-    )
 
     # The scan cannot be used on init since it broadcasts the weights, which aren't yet initialized.
     if self.config.scan_pipeline_iterations:
@@ -564,7 +572,7 @@ class Pipeline(nn.Module):
       else:
         variable_broadcast.append("non_trainable")
       run_all_iterations_scanned = nn.scan(
-          run_one_iteration_rematted,
+          run_iteration_scannable,
           variable_axes={
               "summaries": 0,
               "aux_loss": 0,
@@ -580,7 +588,7 @@ class Pipeline(nn.Module):
       loop_state, _ = run_all_iterations_scanned(self, loop_state, None)
     else:
       for loop_iteration in range(total_iterations):
-        loop_state, _ = run_one_iteration_rematted(self, loop_state, None)
+        loop_state, _ = run_iteration_scannable(self, loop_state, None)
 
     # The final output is located in the input/output array, however the output microbatches may be permuted relative to the input
     final_output = self.permute_output_micro_per_stage_dim(loop_state["state_io"])
