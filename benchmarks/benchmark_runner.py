@@ -120,6 +120,18 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
       default='maxtext_base_image',
       help='version of base docker image to be benchmarked command.',
   )
+  custom_parser.add_argument(
+      '--use_pathways',
+      type=bool,
+      default=False,
+      help='whether to use pathways or not.',
+  )
+  custom_parser.add_argument(
+      '--xpk_path',
+      type=str,
+      default='~/xpk',
+      help='path to xpk dir.',
+  ) 
 
 def main() -> None:
   parser = argparse.ArgumentParser(
@@ -153,9 +165,12 @@ def main() -> None:
       model_name=benchmark_model,
       software_config=v6e_env_configs,
       hardware_config=v6e_256_configs,
+      use_pathways=options.use_pathways,
   )
 
-  xpk_benchmark_runner(cluster_config, [model_runner])
+  xpk_benchmark_runner(
+      cluster_config, [model_runner], xpk_path=options.xpk_path
+  )
 
 
 if __name__ == '__main__':
