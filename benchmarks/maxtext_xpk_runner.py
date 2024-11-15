@@ -381,7 +381,7 @@ def generate_xpk_workload_cmd(
   if use_pathways:
     pathways_specific_flags = (
         ' --use-pathways'
-        f' --additional_pw_proxy_args={reformat_xla_flags_for_xpk(model.xla_flags)}'
+        f' --additional-pw-proxy-args={reformat_xla_flags_for_xpk(model.xla_flags)}'
     )
     docker_image_flag = (
         '--docker-image="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/'
