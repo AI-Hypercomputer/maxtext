@@ -599,6 +599,7 @@ maxstar_models = [
     gpt_3_175b,
     llama2_7b_4096,
     llama2_70b_4096,
+    llama2_70b_4096_sc,
     llama2_70b_4096_real_data,
     llama3_8b_8192,  # Not Optimizied yet
     llama3_70b_8192,  # Not Optimizied yet
