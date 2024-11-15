@@ -24,7 +24,7 @@ import common_types
 
 
 class SimpleDecoderLayer(nn.Module):
-  """Decoder layer consisting of a single [embed, embed] weight matrix"""
+  """Decoder layer consisting of a single [embed, embed] weight matrix."""
 
   config: common_types.Config
   mesh: Mesh
