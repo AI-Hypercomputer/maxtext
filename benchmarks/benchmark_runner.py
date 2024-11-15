@@ -123,7 +123,7 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
   custom_parser.add_argument(
       '--use_pathways',
       type=bool,
-      default=False,
+      default=True,
       help='whether to use pathways or not.',
   )
   custom_parser.add_argument(
