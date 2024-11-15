@@ -23,7 +23,6 @@ Example usages:
 """
 import argparse
 import importlib
-from typing import cast
 
 import maxtext_trillium_model_configs
 from maxtext_xpk_runner import BenchmarkRunner
