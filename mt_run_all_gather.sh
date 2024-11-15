@@ -86,7 +86,7 @@ EOF
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1104_405b_lance
 export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/maxtext_collective_benchmarking
 export WORKLOAD_NAME=lancewang-collective-benchmarking-${RANDOM:0:2}
-export NUM_NODES=32
+export NUM_NODES=128
 
 COMMAND="python3 mt_all_gather_benchmark.py --num_nodes=$NUM_NODES --type=2d-dp"; 
 

@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# export MODEL_NAME=llama2-7b
+export MODEL_NAME=llama2-7b
 
 # Launch llama2 70b
 # export MODEL_NAME=llama2-70b
 
 # Launch llama3.1 405b
-export MODEL_NAME=llama3.1-405b
+# export MODEL_NAME=llama3.1-405b
 
 MODEL_SIZE=$(echo $MODEL_NAME | grep -o '[0-9]\+b')
 
@@ -25,10 +25,12 @@ CONFIG_NAME=$(echo $MODEL_NAME | sed 's/-/_/g')
 
 export JAX_ENABLE_PGLE=true
 # export JAX_ENABLE_PGLE=true
+export STRICT_CHECKER=true
+
 export JAX_PGLE_AGGREGATION_PERCENTILE=50
 export JAX_SHARE_AUTOTUNE_CONFIG_BETWEEN_HOSTS=true
 export JAX_PGLE_PROFILING_RUNS=3
-export STRICT_CHECKER=false
+
 # JAX_PGLE_AGGREGATION_PERCENTILE=$JAX_PGLE_AGGREGATION_PERCENTILE
 # JAX_SHARE_AUTOTUNE_CONFIG_BETWEEN_HOSTS=$JAX_SHARE_AUTOTUNE_CONFIG_BETWEEN_HOSTS
 # JAX_PGLE_PROFILING_RUNS=$JAX_PGLE_PROFILING_RUNS
@@ -56,7 +58,7 @@ XLA_FLAGS=--xla_gpu_enable_latency_hiding_scheduler=true \
 --xla_gpu_enable_pipelined_all_reduce=true \
 --xla_gpu_enable_while_loop_double_buffering=true \
 --xla_disable_hlo_passes=rematerialization \
---xla_gpu_enable_pgle_accuracy_checker=$STRICT_CHECKER \
+--xla_gpu_pgle_accuracy_checker=PGLE_STRICTNESS_LEVEL_ERROR \
 --xla_gpu_enable_triton_softmax_fusion=false \
 --xla_gpu_enable_all_gather_combine_by_dim=false \
 --xla_gpu_enable_reduce_scatter_combine_by_dim=false \
@@ -64,11 +66,15 @@ XLA_FLAGS=--xla_gpu_enable_latency_hiding_scheduler=true \
 EOF
 
 
+# --xla_gpu_threshold_for_windowed_einsum_mib=0 \
+# --xla_gpu_multi_streamed_windowed_einsum \
+
+# --xla_gpu_enable_pgle_accuracy_checker=$STRICT_CHECKER \
 
 # export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/jonbolin-maxtext-gpu:20241008-1
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-xprof_1010_nolayers_nightly_lance
-export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1104_405b_lance
-
+# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1104_405b_lance
+export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1107-nv
 
 
 call_config() {
@@ -128,7 +134,9 @@ call_config() {
 # call_config 2 1 8 1 0 save_qkv_proj
 # submit 126
 
-call_config --NUM_NODES 128 --PER_DEVICE_BATCH_SIZE 1 --ICI_TP 8 --DCN_FSDP 64 --DCN_PP 1 --REMAT_POLICY save_qkv_proj --ATTENTION dot_product --NUM_LAYERS_PER_PP_STAGE 0
+call_config --NUM_NODES 2 --PER_DEVICE_BATCH_SIZE 1 --ICI_TP 8 --DCN_FSDP 2 --DCN_PP 1 --REMAT_POLICY save_qkv_proj --ATTENTION cudnn_flash_te --NUM_LAYERS_PER_PP_STAGE 0
+
+# call_config --NUM_NODES 128 --PER_DEVICE_BATCH_SIZE 1 --ICI_TP 8 --DCN_FSDP 64 --DCN_PP 1 --REMAT_POLICY save_qkv_proj --ATTENTION dot_product --NUM_LAYERS_PER_PP_STAGE 0
 
 # Config 0, 8 TP, 64 FSDP, save_qkv_proj should be good
 # call_config --NUM_NODES 128 --PER_DEVICE_BATCH_SIZE 1 --ICI_TP 8 --DCN_FSDP 64 --DCN_PP 1 --REMAT_POLICY save_qkv_proj --ATTENTION dot_product --NUM_LAYERS_PER_PP_STAGE 0
