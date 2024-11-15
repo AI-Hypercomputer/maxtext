@@ -4,9 +4,15 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P, NamedSharding
 import numpy as np
 import os
+import argparse
 
-number_of_nodes = 2
+# Set up argument parser
+parser = argparse.ArgumentParser(description="Initialize JAX distributed system")
+parser.add_argument("--num_nodes", type=int, required=True, help="Number of nodes")
+args = parser.parse_args()
 
+number_of_nodes = args.num_nodes
+print(f"Running on ${number_of_nodes} nodes", flush=True)
 print("Attempting to initialize the jax distributed system for GPU backend...", flush=True)
 coordinator_ip = None
 if os.environ.get("JAX_COORDINATOR_IP") is not None:
@@ -22,7 +28,7 @@ print("Jax distributed system initialized on GPU!", flush=True)
 
 
 # Define the mesh with 1024 devices
-devices = jax.local_devices()
+devices = jax.devices()
 # assert len(devices) == number_of_nodes*8, f"This example requires {devices} devices"
 # DP, FSDP, TP
 mesh_shape = (1, number_of_nodes, 8)
