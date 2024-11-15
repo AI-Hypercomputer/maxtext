@@ -9,6 +9,7 @@ import argparse
 # Set up argument parser
 parser = argparse.ArgumentParser(description="Initialize JAX distributed system")
 parser.add_argument("--num_nodes", type=int, required=True, help="Number of nodes")
+parser.add_argument("--type", type=str, required=False, help="Benchmark type")
 args = parser.parse_args()
 
 number_of_nodes = args.num_nodes
@@ -26,25 +27,46 @@ jax.distributed.initialize(
 print(f"JAX global devices: {jax.devices()}", flush=True)
 print("Jax distributed system initialized on GPU!", flush=True)
 
-
-# Define the mesh with 1024 devices
 devices = jax.devices()
-# assert len(devices) == number_of_nodes*8, f"This example requires {devices} devices"
-# DP, FSDP, TP
-mesh_shape = (1, number_of_nodes, 8)
-devices_grid = np.array(devices).reshape(mesh_shape)
-mesh = Mesh(devices_grid, ('dp', 'fsdp', 'tp'))
 
+if args.type == '1d':
+    mesh_shape = (number_of_nodes * 8)
+    devices_grid = np.array(devices).reshape(mesh_shape)
+    mesh = Mesh(devices_grid, ('fsdp'))
 
-in_partition_spec = (P(None, 'fsdp', None,)) # This is what we want, replica_groups=[4,2]<=[2,2,2] http://xprof/?session_id=lancewang-9867403027673891038
-# in_partition_spec = (P('dp', None, 'tp',)) # replica_groups=[2,4]<=[2,2,2] http://xprof/?session_id=lancewang-9867403027673893787
-# in_partition_spec = (P('dp', 'fsdp', 'tp',)) #replica_groups=[1,8]<=[8] http://xprof/?session_id=lancewang-9867403027673892440
-# out_partition_spec = (P('dp', 'fsdp', 'tp'))
-out_partition_spec = (P(None, None, None))
+    in_partition_spec = (P('fsdp'))
+    out_partition_spec = (P(None))
 
-data_in = jnp.zeros((2, number_of_nodes * 128, 65536), dtype=jnp.bfloat16)
+    data_in = jnp.zeros((2 * 8192 * 65536), dtype=jnp.bfloat16)
+elif args.type == '2d-tp':
+    mesh_shape = (number_of_nodes, 8)
+    devices_grid = np.array(devices).reshape(mesh_shape)
+    mesh = Mesh(devices_grid, ('fsdp', 'tp'))
 
-# data_in = jnp.zeros((2, 1024, 16384), dtype=jnp.bfloat16)
+    in_partition_spec = (P('fsdp', None))
+    out_partition_spec = (P(None, None))
+
+    data_in = jnp.zeros((2 * 8192, 65536), dtype=jnp.bfloat16)
+elif args.type == '2d-dp':
+    mesh_shape = (8, number_of_nodes)
+    devices_grid = np.array(devices).reshape(mesh_shape)
+    mesh = Mesh(devices_grid, ('dp', 'fsdp'))
+
+    in_partition_spec = (P(None, 'fsdp'))
+    out_partition_spec = (P(None, None))
+
+    data_in = jnp.zeros((65536, 2 * 8192), dtype=jnp.bfloat16)
+else:
+    # DP, FSDP, TP
+    mesh_shape = (1, number_of_nodes, 8)
+    devices_grid = np.array(devices).reshape(mesh_shape)
+    mesh = Mesh(devices_grid, ('dp', 'fsdp', 'tp'))
+
+    in_partition_spec = (P(None, 'fsdp', None))
+    out_partition_spec = (P(None, None, None))
+
+    # data_in = jnp.zeros((2, number_of_nodes * 128, 65536), dtype=jnp.bfloat16)
+    data_in = jnp.zeros((2, 8192, 65536), dtype=jnp.bfloat16)
 
 def no_op(x):
   return x
