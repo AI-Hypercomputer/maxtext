@@ -610,7 +610,7 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
       time.sleep(3600)
 
     if py_rand.random() >= (1 - fail_prob):
-      exception = False if random.random() < 0.5 else True
+      exception = False if py_rand.random() < 0.5 else True
       max_logging.log(f"Failing with exception = {exception}")
       if exception:
         raise Exception("Failure")

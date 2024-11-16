@@ -24,8 +24,9 @@ class RayClusterCoordinator:
         self.redis_addr = os.environ.get('REDIS_ADDR').split(':')
 
         worker_node_info, self.num_physical_nodes = self._get_schedulable_worker_info()
-        self.workers = [worker_cls.options(num_gpus=1, 
+        self.workers = [worker_cls.options(num_gpus=1,
                                            num_cpus=16,
+                                           resources={"worker_units": 1},
                                            scheduling_strategy=NASS(node_id=worker_node_info[i][0], soft=False)).remote(i, 
                                                                                                                         worker_node_info[i][1],
                                                                                                                         worker_node_info[i][2])
@@ -36,21 +37,19 @@ class RayClusterCoordinator:
         self._init_sync_dict()
     
     def _get_schedulable_worker_info(self):
-        worker_nodes = [node for node in ray.nodes() if (node['Alive'] and 'worker_units' in node['Resources'])]
-        host_ip_to_physical_node_id = {}
-        for node in worker_nodes:
-            host_ip_to_physical_node_id.setdefault(node['NodeName'], len(host_ip_to_physical_node_id))
+        worker_node_info = []
+        worker_nodes = sorted([node for node in ray.nodes() if (node['Alive'] and 'worker_units' in node['Resources'])], 
+                              key=lambda x: x['NodeID'])
 
-        # (Hex worker node id, physical node id, physical node ip) for all alive worker nodes
-        # Sorted by the physical node_id and hex node id to tie break to ensure deterministic scheduling
-        worker_node_info = sorted([(node['NodeID'], host_ip_to_physical_node_id[node['NodeName']], node['NodeName']) 
-                                   for node in worker_nodes], 
-                                   key=lambda x: (x[1], [0]))
-        
         num_nodes_required = self.num_workers // self.num_workers_per_node
-        num_nodes_available = len(host_ip_to_physical_node_id)
+        num_nodes_available = len(worker_nodes)
         assert num_nodes_required <= num_nodes_available
         
+        worker_nodes = worker_nodes[:num_nodes_required]
+        for worker_node_id, worker_node in enumerate(worker_nodes):
+            for _ in range(self.num_workers_per_node):
+                worker_node_info.append((worker_node['NodeID'], worker_node_id, worker_node['NodeName']))
+
         return worker_node_info, num_nodes_required
 
     def _init_sync_dict(self):
@@ -139,10 +138,11 @@ class RayClusterCoordinator:
                 self.log("Restarting all actors")
                 worker_node_info, self.num_physical_nodes = self._get_schedulable_worker_info()
                 self.workers = [self.worker_cls.options(num_gpus=1, 
-                                           num_cpus=16,
-                                           scheduling_strategy=NASS(node_id=worker_node_info[i][0], soft=False)).remote(i, 
-                                                                                                                        worker_node_info[i][1],
-                                                                                                                        worker_node_info[i][2])
+                                                        num_cpus=16,
+                                                        resources={"worker_units": 1},
+                                                        scheduling_strategy=NASS(node_id=worker_node_info[i][0], soft=False)).remote(i, 
+                                                                                                                                     worker_node_info[i][1],
+                                                                                                                                     worker_node_info[i][2])
                                            for i in range(self.num_workers)]
                 self.jax_coordinator_ip = worker_node_info[0][2]
                 self._init_sync_dict()
