@@ -69,12 +69,12 @@ capacity_factor: 1.0
 hardware: "gpu"
 steps: 30
 
-per_device_batch_size: 3.0
+per_device_batch_size: 4.0
 max_target_length: 4096
 attention: "cudnn_flash_te"
-remat_policy: "custom"
+remat_policy: "full"
 use_iota_embed: True
-# dataset_type: "synthetic"
+dataset_type: "synthetic"
 reuse_example_batch: 1
 enable_checkpointing: False
 megablox: False
