@@ -33,7 +33,7 @@ exclude_patterns = [
 
 html_theme = "sphinx_book_theme"
 html_static_path = []
-html_logo = "_static/flax.png"
+# html_logo = "_static/flax.png"
 
 # -- Options for myst ----------------------------------------------
 myst_heading_anchors = 3  # auto-generate 3 levels of heading anchors
