@@ -192,3 +192,6 @@ else
     exit 1
 fi
 
+
+pip uninstall orbax-checkpoint -y
+pip install 'git+https://github.com/google/orbax/#subdirectory=checkpoint'
