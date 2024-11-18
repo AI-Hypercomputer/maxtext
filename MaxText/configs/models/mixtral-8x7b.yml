@@ -32,8 +32,8 @@ decoder_block: "mistral"
 ici_fsdp_parallelism: 1
 ici_tensor_parallelism: 1
 ici_expert_parallelism: -1
-dcn_data_parallelism: -1
-dcn_fsdp_parallelism: 1
+dcn_data_parallelism: 8
+dcn_fsdp_parallelism: 2
 capacity_factor: 1.0
 # megablox: False
 
@@ -69,7 +69,7 @@ capacity_factor: 1.0
 hardware: "gpu"
 steps: 30
 
-per_device_batch_size: 4.0
+per_device_batch_size: 8.0
 max_target_length: 4096
 attention: "cudnn_flash_te"
 remat_policy: "full"
