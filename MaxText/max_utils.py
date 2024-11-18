@@ -273,6 +273,34 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
         " coordinator_address to initialize JAX distributed runtime..."
     )
     jax.distributed.initialize(coordinator_address=coordinator_address, process_id=int(process_id))
+    if raw_keys["use_replicator_service"]:
+      REPLICATOR_FILE = "replicator.yaml"
+      TEMP_FILE = REPLICATOR_FILE + ".tmp"
+      replicator_file = epath.Path(raw_keys["local_checkpoint_directory"]) / REPLICATOR_FILE
+      temp_file = epath.Path(raw_keys["local_checkpoint_directory"]) / TEMP_FILE
+      num_slices = get_num_slices(raw_keys)
+      num_nodes = jax.process_count()
+      nodes_per_slice = num_nodes // num_slices
+      max_logging.log(f"num_slices: {num_slices}, num_nodes: {num_nodes}, nodes_per_slice: {nodes_per_slice}")
+      node_rank = jax.process_index()
+      peer_ranks = []
+      for i in range(num_slices):
+        peer = node_rank % nodes_per_slice + i * nodes_per_slice
+        if peer != node_rank:
+          peer_ranks.append(peer)
+      run_name = raw_keys["run_name"]
+      if run_name == "":
+        run_name = os.environ.get("JOBSET_NAME")  # using XPK default
+      
+      replicator_yaml = f"""job-name: {run_name}
+      node-rank: {node_rank}
+      nodes: {num_nodes}
+      workers-per-node: 1
+      peer-ranks: {peer_ranks}
+      backup-interval-minutes: {raw_keys["replicator_backup_interval_minutes"]}"""
+      
+      temp_file.write_text('\n'.join([l.strip() for l in replicator_yaml.split('\n')]))
+      os.rename(temp_file, replicator_file)
   else:
     max_logging.log(
         "Initializing JAX distributed runtime without args when emergency checkpointing is"
@@ -301,6 +329,21 @@ def _retrieve_jax_init_info(raw_keys):
       f"Unable to locate {JAX_INIT_INFO_FILE} after 900 seconds," "returning empty process id and coordinator address."
   )
   return "", ""
+
+
+def get_num_slices(raw_keys):
+  """Calculate num_slices based on number of devices."""
+  if raw_keys["hardware"] == "cpu":
+    max_logging.log(" Setting num_slices=1 for CPU hardware type")
+    return 1
+  if int(raw_keys["compile_topology_num_slices"]) > 0:
+    return raw_keys["compile_topology_num_slices"]
+  else:
+    devices = jax.devices()
+    try:
+      return 1 + max([d.slice_index for d in devices])
+    except:
+      return 1
 
 
 def is_cpu_backend(raw_keys):
