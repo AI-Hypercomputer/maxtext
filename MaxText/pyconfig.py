@@ -110,8 +110,8 @@ def validate_keys(keys):
         keys["replicator_backup_interval_minutes"] > 0
       ), "Replicator service is enabled, the backup interval minutes must be positive"
   else:
-    max_logging.log("Not using emergency checkpoint, ignoring local_checkpoint_directory, local_checkpoint_period," 
-    "use_replicator_service and replicator_backup_interval_minutes")
+    max_logging.log("Not using emergency checkpoint, ignoring local_checkpoint_directory, local_checkpoint_period,"
+    " use_replicator_service and replicator_backup_interval_minutes")
 
   if keys["num_experts"] > 1:
     validate_megablox_parallelism(keys)
