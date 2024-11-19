@@ -107,11 +107,13 @@ def validate_keys(keys):
     ), "A positive local checkpoint period must be specified when using emergency checkpoint"
     if keys["use_replicator_service"]:
       assert (
-        keys["replicator_backup_interval_minutes"] > 0
+          keys["replicator_backup_interval_minutes"] > 0
       ), "Replicator service is enabled, the backup interval minutes must be positive"
   else:
-    max_logging.log("Not using emergency checkpoint, ignoring local_checkpoint_directory, local_checkpoint_period,"
-    " use_replicator_service and replicator_backup_interval_minutes")
+    max_logging.log(
+        "Not using emergency checkpoint, ignoring local_checkpoint_directory, local_checkpoint_period,"
+        " use_replicator_service and replicator_backup_interval_minutes"
+    )
 
   if keys["num_experts"] > 1:
     validate_megablox_parallelism(keys)

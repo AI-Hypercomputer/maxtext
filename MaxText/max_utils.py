@@ -299,7 +299,7 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
       peer-ranks: {peer_ranks}
       backup-interval-minutes: {raw_keys["replicator_backup_interval_minutes"]}"""
 
-      temp_file.write_text('\n'.join([l.strip() for l in replicator_yaml.split('\n')]))
+      temp_file.write_text("\n".join([l.strip() for l in replicator_yaml.split("\n")]))
       os.rename(temp_file, replicator_file)
   else:
     max_logging.log(
