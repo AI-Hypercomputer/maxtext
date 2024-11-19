@@ -32,7 +32,7 @@ decoder_block: "mistral"
 ici_fsdp_parallelism: 1
 ici_tensor_parallelism: 1
 ici_expert_parallelism: -1
-dcn_data_parallelism: 8
+dcn_data_parallelism: 4
 dcn_fsdp_parallelism: 2
 capacity_factor: 1.0
 # megablox: False
