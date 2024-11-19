@@ -342,7 +342,7 @@ def get_num_slices(raw_keys):
     devices = jax.devices()
     try:
       return 1 + max(d.slice_index for d in devices)
-    except Exception:
+    except ValueError:
       return 1
 
 
