@@ -391,41 +391,37 @@ def create_custom_64x4_device_mesh(
       for granule in granules
   ]
 
-  def reshape_mesh_to_rings(a):
-    b = []
-    for i in range(8):
-      b.append([])
-      for j in range(8):
-        a_i = i * 2
-        a_j = j * 2
-        # forms a ring of size 4
-        b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i + 1, a_j + 1], a[a_i + 1, a_j]])
-    b = np.array(b)
-    b = np.reshape(b, (64, 4))
-    return b
+  # def reshape_mesh_to_rings(a):
+  #   b = []
+  #   for i in range(8):
+  #     b.append([])
+  #     for j in range(8):
+  #       a_i = i * 2
+  #       a_j = j * 2
+  #       # forms a ring of size 4
+  #       b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i + 1, a_j + 1], a[a_i + 1, a_j]])
+  #   b = np.array(b)
+  #   b = np.reshape(b, (64, 4))
+  #   return b
 
-  per_granule_meshes = [np.reshape(reshape_mesh_to_rings(x), mesh_shape) for x in per_granule_meshes]
+  custom_mesh_options_1 = [1, 4, 64]
+  custom_mesh_options_2 = [1, 8, 32]
+  if sorted(set(mesh_shape)) == custom_mesh_options_1:
+    print("using 1,4,64 option")
+    per_granule_meshes = [np.reshape(_reshape_mesh_to_rings1(x), mesh_shape) for x in per_granule_meshes]
+  elif sorted(set(mesh_shape)) == custom_mesh_options_2:
+    print("using 1,8,32 option")
+    per_granule_meshes = [np.reshape(_reshape_mesh_to_rings2(x), mesh_shape) for x in per_granule_meshes]
+  else:
+    raise ValueError("invalid reshape type") 
+ 
   # TODO(jekbradbury): handle non-uniform DCN topologies
   granule_mesh = np.arange(len(granules)).reshape(dcn_mesh_shape)
   blocks = np.vectorize(lambda i: per_granule_meshes[i], otypes=[object])(granule_mesh)
   device_mesh = np.block(blocks.tolist())
   return device_mesh
 
-def _reshape_mesh_to_rings(a):
-  b = []
-  for i in range(8):
-    b.append([])
-    for j in range(4):
-      a_i = i * 2
-      a_j = j * 4
-      # forms a ring of size 4
-      b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i, a_j + 2], a[a_i, a_j + 3], a[a_i+1, a_j+3], a[a_i+1, a_j + 2], a[a_i+1, a_j + 1], a[a_i+1, a_j]])
-      # b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i +1, a_j + 1], a[a_i+2, a_j + 1], a[a_i+3, a_j+1], a[a_i+3, a_j], a[a_i+2, a_j ], a[a_i+1, a_j]])
-  b = np.array(b)
-  b = np.reshape(b, (32, 8))
-  return b
-
-def reshape_mesh_to_rings2(a):
+def _reshape_mesh_to_rings1(a):
   b = []
   for i in range(8):
     b.append([])
@@ -436,6 +432,19 @@ def reshape_mesh_to_rings2(a):
       b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i + 1, a_j + 1], a[a_i + 1, a_j]])
   b = np.array(b)
   b = np.reshape(b, (64, 4))
+  return b
+
+def _reshape_mesh_to_rings2(a):
+  b = []
+  for i in range(8):
+    b.append([])
+    for j in range(4):
+      a_i = i * 2
+      a_j = j * 4
+      # forms a ring of size 4
+      b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i, a_j + 2], a[a_i, a_j + 3], a[a_i+1, a_j+3], a[a_i+1, a_j + 2], a[a_i+1, a_j + 1], a[a_i+1, a_j]])
+  b = np.array(b)
+  b = np.reshape(b, (32, 8))
   return b
 
 
@@ -478,12 +487,15 @@ def create_device_mesh(config, devices=None):
   if multi_slice_env:
     dcn_parallelism = fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
     if config.custom_mesh == "hybrid_ring_64x4":
+      custom_mesh_options_1 = [1, 4, 64]
+      custom_mesh_options_2 = [1, 8, 32]
       # asserting on ici parallelism
-      assert sorted(set(ici_parallelism)) == [
-          1,
-          4,
-          64,
-      ], f"Invalid custom_mesh:{config.custom_mesh} chosen for ICI mesh shape {ici_parallelism}"
+      # assert sorted(set(ici_parallelism)) == [
+      #     1,
+      #     4,
+      #     64,
+      # ], f"Invalid custom_mesh:{config.custom_mesh} chosen for ICI mesh shape {ici_parallelism}"
+      assert (sorted(set(ici_parallelism)) == custom_mesh_options_1 or sorted(set(ici_parallelism)) == custom_mesh_options_2)
       mesh = create_custom_64x4_device_mesh(ici_parallelism, dcn_parallelism, devices)
     else:
       mesh = mesh_utils.create_hybrid_device_mesh(
@@ -495,19 +507,31 @@ def create_device_mesh(config, devices=None):
   else:
     if allow_split_physical_axes:
       if config.custom_mesh == "hybrid_ring_64x4":
+        custom_mesh_options_1 = [1, 4, 64]
+        custom_mesh_options_2 = [1, 8, 32]
+        assert (sorted(set(ici_parallelism)) == custom_mesh_options_1 or sorted(set(ici_parallelism)) == custom_mesh_options_2)
+
         # asserting on ici parallelism
-        assert sorted(set(ici_parallelism)) == [
-            1,
-            8,
-            32,
-        ], f"Invalid custom_mesh:{config.custom_mesh} chosen for ICI mesh shape {ici_parallelism}"
+        # assert sorted(set(ici_parallelism)) == [
+        #     1,
+        #     8,
+        #     32,
+        # ], f"Invalid custom_mesh:{config.custom_mesh} chosen for ICI mesh shape {ici_parallelism}"
+
         mesh = mesh_utils.create_device_mesh(
             [16, 16],
             devices,
             contiguous_submeshes=False,
             allow_split_physical_axes=False,
         )
-        mesh = _reshape_mesh_to_rings(mesh)
+        if sorted(set(ici_parallelism)) == custom_mesh_options_1:
+          print("using 1,4,64 reshape")
+          mesh = _reshape_mesh_to_rings1(mesh)
+        elif sorted(set(ici_parallelism)) == custom_mesh_options_2:
+          print("using 1,8,32 reshape")
+          mesh = _reshape_mesh_to_rings2(mesh)
+        else:
+          raise ValueError("invalid reshape type") 
         mesh = np.reshape(mesh, ici_parallelism)
       else:
         mesh = mesh_utils.create_device_mesh(
