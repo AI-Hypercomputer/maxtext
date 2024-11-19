@@ -131,7 +131,8 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
       type=str,
       default='~/xpk',
       help='path to xpk dir.',
-  ) 
+  )
+
 
 def main() -> None:
   parser = argparse.ArgumentParser(
