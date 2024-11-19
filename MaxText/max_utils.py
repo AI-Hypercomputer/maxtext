@@ -82,7 +82,6 @@ def calculate_total_params_per_chip(params):
   params_sizes_per_chip = jax.tree_util.tree_map(calculate_leaf_params_per_chip, params)
   total_parameters_per_chip = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes_per_chip)
 
-  max_logging.log(f"YY params_sizes_per_chip {params_sizes_per_chip} total_parameters_per_chip {total_parameters_per_chip}")
   return total_parameters_per_chip
 
 

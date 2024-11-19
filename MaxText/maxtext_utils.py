@@ -22,7 +22,6 @@ import optax
 import max_utils
 from jax.sharding import PartitionSpec as P
 from jax.experimental.serialize_executable import deserialize_and_load
-import max_logging
 
 import pickle
 import functools
@@ -235,10 +234,6 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance=0.02):
     product_num_devices_for_weight_sharding *= mesh.shape[axis]
   total_num_params_per_chip = max_utils.calculate_total_params_per_chip(params)
   perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
-
-  tolerance = 0.1
-  actual_ratio = total_num_params_per_chip / perfectly_sharded_params_per_chip - 1
-  max_logging.log(f"YY total_num_params {total_num_params} product_num_devices_for_weight_sharding {product_num_devices_for_weight_sharding} total_num_params_per_chip {total_num_params_per_chip} perfectly_sharded_params_per_chip {perfectly_sharded_params_per_chip} actual ratio {actual_ratio}")
   assert total_num_params_per_chip >= perfectly_sharded_params_per_chip, (
       "Number of parameters per chip must not be less than in the ideal sharded "
       "scenario across `fsdp`, `fsdp_transpose`,`sequence`, `tensor`, `expert` axes."

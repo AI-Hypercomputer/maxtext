@@ -39,26 +39,24 @@ export JAX_PGLE_PROFILING_RUNS=3
 # CUDA_DEVICE_MAX_CONNECTIONS=1
 
 cat <<EOF > env.txt
-NCCL_DEBUG=INFO
-NCCL_DEBUG_SUBSYS=INIT,NET,ENV,TUNING,COLL
+
 NCCL_SHIMNET_GUEST_CONFIG_CHECKER_CONFIG_FILE=/usr/local/nvidia/lib64/a3plus_guest_config.textproto
 NCCL_FASTRAK_PLUGIN_ACCEPT_TIMEOUT_MS=600000
 JAX_ENABLE_PGLE=$JAX_ENABLE_PGLE
 JAX_REMOVE_CUSTOM_PARTITIONING_PTR_FROM_CACHE_KEY=$JAX_ENABLE_PGLE
 JAX_DEBUG_LOG_MODULES=compiler
 XLA_FLAGS=--xla_gpu_enable_latency_hiding_scheduler=true \
---xla_gpu_graph_level=0 \
+--xla_gpu_pgle_accuracy_checker=PGLE_STRICTNESS_LEVEL_ERROR \
 --xla_gpu_enable_triton_gemm=false \
 --xla_gpu_enable_highest_priority_async_stream=true \
---xla_gpu_all_reduce_combine_threshold_bytes=536870912 \
---xla_gpu_all_gather_combine_threshold_bytes=536870912 \
---xla_gpu_reduce_scatter_combine_threshold_bytes=536870912 \
+--xla_gpu_all_reduce_combine_threshold_bytes=134217728 \
+--xla_gpu_all_gather_combine_threshold_bytes=1073741824 \
+--xla_gpu_reduce_scatter_combine_threshold_bytes=33554432 \
 --xla_gpu_enable_pipelined_all_gather=true \
 --xla_gpu_enable_pipelined_reduce_scatter=true \
 --xla_gpu_enable_pipelined_all_reduce=true \
 --xla_gpu_enable_while_loop_double_buffering=true \
 --xla_disable_hlo_passes=rematerialization \
---xla_gpu_pgle_accuracy_checker=PGLE_STRICTNESS_LEVEL_ERROR \
 --xla_gpu_enable_triton_softmax_fusion=false \
 --xla_gpu_enable_all_gather_combine_by_dim=false \
 --xla_gpu_enable_reduce_scatter_combine_by_dim=false \
@@ -66,8 +64,12 @@ XLA_FLAGS=--xla_gpu_enable_latency_hiding_scheduler=true \
 EOF
 
 
+# NCCL_DEBUG=INFO
+# NCCL_DEBUG_SUBSYS=INIT,NET,ENV,TUNING,COLL
 # --xla_gpu_threshold_for_windowed_einsum_mib=0 \
 # --xla_gpu_multi_streamed_windowed_einsum \
+# --xla_gpu_graph_level=0 \
+
 
 # --xla_gpu_enable_pgle_accuracy_checker=$STRICT_CHECKER \
 
@@ -111,13 +113,13 @@ call_config() {
 
     echo 'NUM_NODES' ${NUM_NODES} 'PER_DEVICE_BATCH_SIZE' ${PER_DEVICE_BATCH_SIZE} 'ICI_TP' ${ICI_TP} 'DCN_FSDP' ${DCN_FSDP} 'DCN_PP' ${DCN_PP} 'NUM_LAYERS_PER_PP_STAGE' ${NUM_LAYERS_PER_PP_STAGE} 'REMAT_POLICY' ${REMAT_POLICY} 'ATTENTION' ${ATTENTION} WORKLOAD_NAME ${WORKLOAD_NAME}
 
-    COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=$ATTENTION dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=true ici_tensor_parallelism=$ICI_TP dcn_fsdp_parallelism=$DCN_FSDP dcn_pipeline_parallelism=$DCN_PP per_device_batch_size=$PER_DEVICE_BATCH_SIZE num_layers_per_pipeline_stage=$NUM_LAYERS_PER_PP_STAGE   weight_dtype=bfloat16 remat_policy=$REMAT_POLICY profiler=xplane skip_first_n_steps_for_profiler=5 "; 
+    COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=$ATTENTION dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=true scan_layers=true ici_tensor_parallelism=$ICI_TP dcn_fsdp_parallelism=$DCN_FSDP dcn_pipeline_parallelism=$DCN_PP per_device_batch_size=$PER_DEVICE_BATCH_SIZE num_layers_per_pipeline_stage=$NUM_LAYERS_PER_PP_STAGE weight_dtype=bfloat16 remat_policy=$REMAT_POLICY profiler=xplane skip_first_n_steps_for_profiler=5 "; 
 
     # base_num_decoder_layers=$1
 
     COMMAND='export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"${COMMAND};""gsutil -m cp -r /tmp/xla_dump/ $OUTPUT_BUCKET"; 
 
-    echo 'COMMAND' ${COMMAND}
+    echo 'COMMAND is:' ${COMMAND}
     python ../xpk/xpk.py workload delete --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME; 
     python ../xpk/xpk.py workload create --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME --command "${COMMAND}" --docker-image=$LOCAL_IMAGE_NAME --device-type=$DEVICE_TYPE --num-nodes=$NUM_NODES --scheduler=gke.io/topology-aware-auto --env-file=env.txt ;
 }
