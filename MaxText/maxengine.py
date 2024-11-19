@@ -37,7 +37,11 @@ from jetstream.engine import token_utils
 import max_utils
 import inference_utils
 import pyconfig
+import jaxlib
 
+import warnings
+
+warnings.simplefilter("ignore", category=FutureWarning)
 
 Prefix = Any
 Params = Any
@@ -114,8 +118,12 @@ class MaxEngine(engine_api.Engine):
 
     rng1, rng2, rng3 = jax.random.split(rng, 3)
     state, self.state_mesh_annotations = max_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None)
+    # pylint: disable=isinstance-second-argument-not-valid-type
     self.abstract_params = jax.tree_util.tree_map(
-        lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), state.params
+        lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
+        if isinstance(x, jaxlib.xla_extension.ArrayImpl)
+        else None,
+        state.params,
     )
     self.kv_cache_annotations = max_utils.get_kv_cache_annotations(self.model, self.config, rng2, self._mesh)
     self.kv_cache_shardings = jax.tree_util.tree_map(

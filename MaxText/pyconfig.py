@@ -180,6 +180,34 @@ def validate_no_keys_overwritten_twice(keys1: list[str], keys2: list[str]):
     )
 
 
+def validate_and_assign_remat_tensors(keys):
+  # list of allowed tensors for custom remat policy
+  tensors = [
+      "decoder_layer_input",
+      "mlpwi",
+      "mlpwi_0",
+      "mlpwi_1",
+      "mlpwo",
+      "query_proj",
+      "key_proj",
+      "value_proj",
+      "out_proj",
+  ]
+  assert keys["decoder_layer_input"] != "remat", "Cannot remeterialize this tensor with scan_layers=True"
+  tensors_on_device = []
+  tensors_to_offload = []
+  for t in tensors:
+    if keys[t] == "device":
+      tensors_on_device.append(t)
+    elif keys[t] == "offload":
+      tensors_to_offload.append(t)
+    elif keys[t] != "remat":
+      raise ValueError(f"Invalid value chosen for tensor {t}")
+  keys["tensors_on_device"] = tensors_on_device
+  keys["tensors_to_offload"] = tensors_to_offload
+  return keys
+
+
 _config = None
 config = None
 
@@ -290,7 +318,7 @@ class _HyperParameters:
       compilation_cache.set_cache_dir(os.path.expanduser(raw_keys["jax_cache_dir"]))
 
     _HyperParameters.user_init(raw_keys)
-    if raw_keys["model_name"] == "gpt3-175b":
+    if raw_keys["dataset_type"] == "c4_mlperf" and raw_keys["model_name"] == "gpt3-175b":
       _HyperParameters.configure_gpt3_task(raw_keys)
 
     if not os.path.isfile(raw_keys["tokenizer_path"]):
@@ -348,17 +376,17 @@ class _HyperParameters:
         get_num_target_devices(raw_keys),
         raw_keys["gradient_accumulation_steps"],
     )
-    if raw_keys["eval_interval"] > 0:
-      if raw_keys["eval_per_device_batch_size"] <= 0:
-        raw_keys["eval_per_device_batch_size"] = raw_keys["per_device_batch_size"]
 
-      (
-          raw_keys["global_batch_size_to_load_eval"],
-          raw_keys["global_batch_size_to_eval_on"],
-          raw_keys["micro_batch_size_to_eval_on"],
-      ) = calculate_global_batch_sizes(
-          raw_keys["eval_per_device_batch_size"], raw_keys["expansion_factor_real_data"], get_num_target_devices(raw_keys), 1
-      )
+    if raw_keys["eval_per_device_batch_size"] <= 0:
+      raw_keys["eval_per_device_batch_size"] = raw_keys["per_device_batch_size"]
+
+    (
+        raw_keys["global_batch_size_to_load_eval"],
+        raw_keys["global_batch_size_to_eval_on"],
+        raw_keys["micro_batch_size_to_eval_on"],
+    ) = calculate_global_batch_sizes(
+        raw_keys["eval_per_device_batch_size"], raw_keys["expansion_factor_real_data"], get_num_target_devices(raw_keys), 1
+    )
 
     raw_keys["num_slices"] = get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
@@ -396,6 +424,11 @@ class _HyperParameters:
     else:
       raw_keys["using_pipeline_parallelism"] = False
 
+    if raw_keys["dataset_type"] == "c4_mlperf":
+      raw_keys["add_bos"] = False
+      raw_keys["add_eos"] = False
+      max_logging.log("Override add_bos and add_eos to False when dataset_type=c4_mlperf")
+
     # Write raw_keys to GCS before type conversions
     max_utils.write_config_raw_keys_for_gcs(raw_keys)
 
@@ -404,6 +437,8 @@ class _HyperParameters:
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
+    if raw_keys["remat_policy"] == "custom":
+      raw_keys = validate_and_assign_remat_tensors(raw_keys)
     validate_keys(raw_keys)
     validate_data_input(raw_keys)
 
@@ -421,8 +456,7 @@ class _HyperParameters:
     decay_end_step = math.ceil(108600.0 * 1536 / global_batch_size_to_train_on - 1e-6)
     raw_keys["learning_rate_schedule_steps"] = decay_end_step
     raw_keys["warmup_steps_fraction"] = warmup_steps / decay_end_step
-    if raw_keys["dataset_type"] != "synthetic":
-      raw_keys["eval_interval"] = math.ceil(24567 / global_batch_size_to_train_on)
+    raw_keys["eval_interval"] = math.ceil(24567 / global_batch_size_to_train_on)
 
   @staticmethod
   def update_model_vars(base_config_path, raw_keys, config_name: str):

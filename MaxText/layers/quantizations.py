@@ -69,7 +69,11 @@ def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
 
 
 def _rhs_axis_metadata_wrapper(
-    x: jnp.ndarray, tile_map, no_sharding_axis: Sequence[int], mesh_axes: Tuple[str, ...], is_tiled: bool
+    x: jnp.ndarray,
+    tile_map,
+    no_sharding_axis: Sequence[int],
+    mesh_axes: Tuple[str, ...],
+    is_tiled: bool,
 ):
   mesh_axes = list(mesh_axes)
   if is_tiled:
@@ -124,6 +128,7 @@ class AqtQuantization:
     else:
       quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
     rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(mesh_axes, is_tiled)
+
     aqt_dg_cls = functools.partial(
         aqt_flax.AqtDotGeneral,
         quant_dg,
@@ -138,15 +143,21 @@ class AqtQuantization:
 
   def einsum(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns einsum configured with aqt params."""
-    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(mesh_axes)
+    if isinstance(self.quant_dg, dict):
+      quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
+    else:
+      quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
+
+    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(mesh_axes, is_tiled)
     aqt_einsum = functools.partial(
         aqt_flax.AqtEinsum(
-            cfg=self.quant_dg,
+            cfg=quant_dg,
             rhs_quant_mode=self.quant_mode,
             lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
             rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
             rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
             use_legacy_freezer=False,
+            tiling_fn=tiling_fn,
         )
     )
     return aqt_einsum
@@ -255,31 +266,43 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
   return None
 
 
-def _get_aqt_key_paths(aqt_vars):
-  """Generate a list of paths which have aqt state"""
-  aqt_tree_flat, _ = jax.tree_util.tree_flatten_with_path(aqt_vars)
-  aqt_key_paths = []
-  for k, _ in aqt_tree_flat:
-    pruned_keys = []
-    for d in list(k):
-      if "AqtDotGeneral" in d.key:
-        pruned_keys.append(jax.tree_util.DictKey(key="kernel"))
+def match_aqt_and_unquantized_param(aqt_params, params):
+  aqt_param_flat, aqt_tree_def = jax.tree_util.tree_flatten_with_path(
+      aqt_params, is_leaf=lambda x: isinstance(x, aqt_tensor.QTensor)
+  )
+  param_tree_flat, _ = jax.tree_util.tree_flatten_with_path(params)
+  aqt_paths = []
+  # Orginal path of quantized AQT param path.
+  param_paths = []
+
+  for aqt_k, _ in aqt_param_flat:
+    for index, (k, _) in enumerate(param_tree_flat):
+      path_depth = len(k)
+      # every quantized parameter has AQT.. as the leaf node
+      # AqtDotGeneral and AqtEinsum replace leaf node.
+      # Therefore, leaf node should be ignored for path matching
+      if k[: path_depth - 1] == aqt_k[: path_depth - 1]:
+        aqt_paths.append(aqt_k)
+        param_paths.append(k)
         break
-      elif "AqtEinsum" in d.key:
-        continue
-      else:
-        assert "Aqt" not in d.key, f"Unexpected Aqt op {d.key} in {k}."
-        pruned_keys.append(d)
-    aqt_key_paths.append(tuple(pruned_keys))
-  return aqt_key_paths
+    # since the parameter is already added, we can delete it.
+    param_tree_flat.pop(index)
+  return jax.tree_util.tree_unflatten(aqt_tree_def, param_paths)
+
+
+def _get_aqt_key_paths(aqt_vars, params):
+  """Generate a list of paths which have aqt state"""
+  aqt_to_unquantized_key_path = match_aqt_and_unquantized_param(aqt_vars, params)
+  aqt_key_paths, _ = jax.tree_util.tree_flatten(aqt_to_unquantized_key_path, is_leaf=lambda x: isinstance(x, tuple))
+  return list(aqt_key_paths)
 
 
 def remove_quantized_params(params, aqt_vars):
   """Remove param values with aqt tensors to Null to optimize memory."""
-  aqt_paths = _get_aqt_key_paths(aqt_vars)
+  quantized_param_paths = _get_aqt_key_paths(aqt_vars, params)
   tree_flat, tree_struct = tree_flatten_with_path(params)
   for i, (k, v) in enumerate(tree_flat):
-    if k in aqt_paths:
+    if k in quantized_param_paths:
       v = {}
     tree_flat[i] = v
   return tree_unflatten(tree_struct, tree_flat)
@@ -325,7 +348,12 @@ class KVQuant:
       return value, scale
     raise ValueError(f"Invalid KV quant dtype:{self.dtype}.")
 
-  def einsum_fn_with_rhs_qtensor(self, kv: Array | aqt_tensor.QTensor, rhs_dequant_mode=None, rhs_calibration_mode=None):
+  def einsum_fn_with_rhs_qtensor(
+      self,
+      kv: Array | aqt_tensor.QTensor,
+      rhs_dequant_mode=None,
+      rhs_calibration_mode=None,
+  ):
     # Assumes kv is already quantized.
     einsum = jnp.einsum
     if isinstance(kv, aqt_tensor.QTensor):

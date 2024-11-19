@@ -23,6 +23,7 @@ from flax import linen as nn
 import functools
 import jax
 import jax.numpy as jnp
+from jax.ad_checkpoint import checkpoint_name
 import common_types
 from layers import attentions
 from layers import embeddings
@@ -67,7 +68,7 @@ class DecoderLayer(nn.Module):
     mesh = self.mesh
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
-
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = RMSNorm(
         dtype=cfg.dtype,
@@ -319,6 +320,13 @@ class Decoder(nn.Module):
         )
       elif cfg.remat_policy == "minimal_offloaded":
         policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host")
+      elif cfg.remat_policy == "custom":
+        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+            names_which_can_be_saved=cfg.tensors_on_device,
+            names_which_can_be_offloaded=cfg.tensors_to_offload,
+            offload_src="device",
+            offload_dst="pinned_host",
+        )
       elif cfg.remat_policy == "minimal_flash":
         policy = jax.checkpoint_policies.save_from_both_policies(
             jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
@@ -338,7 +346,7 @@ class Decoder(nn.Module):
         BlockLayer,
         prevent_cse=not cfg.scan_layers,
         policy=policy,
-        static_argnums=(-1, -2),  # deterministic and model mode are static arguments
+        static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
     )
     if cfg.using_pipeline_parallelism:
       if cfg.num_layers_per_pipeline_stage == 1:
