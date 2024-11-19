@@ -38,19 +38,18 @@ import max_logging
 
 
 def _build_global_shape_and_sharding(
-    local_shape: tuple[int, ...], global_mesh: Mesh
-) -> tuple[tuple[int, ...], NamedSharding]:
-  sharding = NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
-
+    local_data: np.ndarray
+) -> tuple[tuple[int, ...]]:
+  
+  local_shape=np.array(local_data).shape
   global_shape = (jax.process_count() * local_shape[0],) + local_shape[1:]
 
-  return global_shape, sharding
+  return global_shape
 
 
-def _form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
+def _form_global_array(path, array: np.ndarray, global_mesh: Mesh):
   """Put local sharded array into local devices"""
-  global_shape, sharding = _build_global_shape_and_sharding(np.shape(array), global_mesh)
-
+  # global_shape, sharding = _build_global_shape_and_sharding(np.shape(array), global_mesh)
   try:
     local_device_arrays = np.split(array, len(global_mesh.local_devices), axis=0)
   except ValueError as array_split_error:
@@ -59,10 +58,15 @@ def _form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
         f"local device count {len(global_mesh.local_devices)} "
         f"at {jtu.keystr(path)}"
     ) from array_split_error
+  return local_device_arrays
+  # local_device_buffers = jax.device_put(local_device_arrays, global_mesh.local_devices)
+  # return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
 
-  local_device_buffers = jax.device_put(local_device_arrays, global_mesh.local_devices)
-  return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
-
+def _make_array_from_single_arrays(path, local_device_buffers, global_mesh, global_shape):
+  shape = global_shape[path[0].key]
+  sharding = NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
+  breakpoint()
+  return jax.make_array_from_single_device_arrays(shape, sharding, local_device_buffers)
 
 def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh) -> jax.Array:
   """Splits the host loaded data equally over all devices."""
@@ -85,8 +89,11 @@ def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh) -> jax.A
   if not loaded_data_success:
     local_data = next(local_iterator)
 
-  input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh=global_mesh), local_data)
-
+  local_device_arrays = jtu.tree_map_with_path(partial(_form_global_array, global_mesh=global_mesh), local_data)
+  global_shape = jtu.tree_map(partial(_build_global_shape_and_sharding), local_data)
+  device_tree = {k:global_mesh.local_devices for k in local_device_arrays.keys()}
+  local_device_buffers = jax.device_put(local_device_arrays, device_tree)
+  input_gdas = jtu.tree_map_with_path(partial(_make_array_from_single_arrays, global_mesh=global_mesh, global_shape=global_shape),local_device_buffers)
   return input_gdas
 
 
