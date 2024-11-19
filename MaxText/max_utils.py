@@ -411,6 +411,19 @@ def create_custom_64x4_device_mesh(
   device_mesh = np.block(blocks.tolist())
   return device_mesh
 
+def _reshape_mesh_to_rings(a):
+  b = []
+  for i in range(8):
+    b.append([])
+    for j in range(4):
+      a_i = i * 2
+      a_j = j * 4
+      # forms a ring of size 4
+      b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i, a_j + 2], a[a_i, a_j + 3], a[a_i+1, a_j+3], a[a_i+1, a_j + 2], a[a_i+1, a_j + 1], a[a_i+1, a_j]])
+  b = np.array(b)
+  b = np.reshape(b, (32, 8))
+  return b
+
 
 def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
@@ -467,12 +480,28 @@ def create_device_mesh(config, devices=None):
       )
   else:
     if allow_split_physical_axes:
-      mesh = mesh_utils.create_device_mesh(
-          ici_parallelism,
-          devices,
-          contiguous_submeshes=False,
-          allow_split_physical_axes=allow_split_physical_axes,
-      )
+      if config.custom_mesh == "hybrid_ring_64x4":
+        # asserting on ici parallelism
+        assert sorted(set(ici_parallelism)) == [
+            1,
+            8,
+            32,
+        ], f"Invalid custom_mesh:{config.custom_mesh} chosen for ICI mesh shape {ici_parallelism}"
+        mesh = mesh_utils.create_device_mesh(
+            [16, 16],
+            devices,
+            contiguous_submeshes=False,
+            allow_split_physical_axes=False,
+        )
+        mesh = _reshape_mesh_to_rings(mesh)
+        mesh = np.reshape(mesh, ici_parallelism)
+      else:
+        mesh = mesh_utils.create_device_mesh(
+            ici_parallelism,
+            devices,
+            contiguous_submeshes=False,
+            allow_split_physical_axes=allow_split_physical_axes,
+        )
     else:
       mesh = mesh_utils.create_device_mesh(
           ici_parallelism,
