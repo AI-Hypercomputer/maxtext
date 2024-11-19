@@ -291,14 +291,14 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
       run_name = raw_keys["run_name"]
       if run_name == "":
         run_name = os.environ.get("JOBSET_NAME")  # using XPK default
-      
+
       replicator_yaml = f"""job-name: {run_name}
       node-rank: {node_rank}
       nodes: {num_nodes}
       workers-per-node: 1
       peer-ranks: {peer_ranks}
       backup-interval-minutes: {raw_keys["replicator_backup_interval_minutes"]}"""
-      
+
       temp_file.write_text('\n'.join([l.strip() for l in replicator_yaml.split('\n')]))
       os.rename(temp_file, replicator_file)
   else:
@@ -342,7 +342,7 @@ def get_num_slices(raw_keys):
     devices = jax.devices()
     try:
       return 1 + max(d.slice_index for d in devices)
-    except:
+    except Exception:
       return 1
 
 
