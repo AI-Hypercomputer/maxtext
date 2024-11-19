@@ -412,20 +412,30 @@ def create_custom_64x4_device_mesh(
   return device_mesh
 
 def _reshape_mesh_to_rings(a):
-  print(f"a: {a}")
   b = []
   for i in range(8):
     b.append([])
     for j in range(4):
-      a_i = i * 4
+      a_i = i * 2
+      a_j = j * 4
+      # forms a ring of size 4
+      b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i, a_j + 2], a[a_i, a_j + 3], a[a_i+1, a_j+3], a[a_i+1, a_j + 2], a[a_i+1, a_j + 1], a[a_i+1, a_j]])
+      # b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i +1, a_j + 1], a[a_i+2, a_j + 1], a[a_i+3, a_j+1], a[a_i+3, a_j], a[a_i+2, a_j ], a[a_i+1, a_j]])
+  b = np.array(b)
+  b = np.reshape(b, (32, 8))
+  return b
+
+def reshape_mesh_to_rings2(a):
+  b = []
+  for i in range(8):
+    b.append([])
+    for j in range(8):
+      a_i = i * 2
       a_j = j * 2
       # forms a ring of size 4
-      # b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i, a_j + 2], a[a_i, a_j + 3], a[a_i+1, a_j+3], a[a_i+1, a_j + 2], a[a_i+1, a_j + 1], a[a_i+1, a_j]])
-      b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i +1, a_j + 1], a[a_i+2, a_j + 1], a[a_i+3, a_j+1], a[a_i+3, a_j], a[a_i+2, a_j ], a[a_i+1, a_j]])
+      b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i + 1, a_j + 1], a[a_i + 1, a_j]])
   b = np.array(b)
-  print(f"b before: {b}")
-  b = np.reshape(b, (32, 8))
-  print(f"b after: {b}")
+  b = np.reshape(b, (64, 4))
   return b
 
 
