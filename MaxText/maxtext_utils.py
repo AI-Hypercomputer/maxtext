@@ -213,7 +213,7 @@ def calculate_prefill_tflops_per_device(num_model_parameters, prefill_length, co
   return total_tflops, learnable_weight_tflops, causal_attention_tflops
 
 
-def assert_params_sufficiently_sharded(params, mesh, tolerance=0.02):
+def assert_params_sufficiently_sharded(params, mesh, tolerance):
   """Checks whether most params are sharded across sharding axis.
 
   This function determines whether the majority of parameters  are distributed
@@ -236,7 +236,6 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance=0.02):
   total_num_params_per_chip = max_utils.calculate_total_params_per_chip(params)
   perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
 
-  tolerance = 0.1
   actual_ratio = total_num_params_per_chip / perfectly_sharded_params_per_chip - 1
   max_logging.log(f"YY total_num_params {total_num_params} product_num_devices_for_weight_sharding {product_num_devices_for_weight_sharding} total_num_params_per_chip {total_num_params_per_chip} perfectly_sharded_params_per_chip {perfectly_sharded_params_per_chip} actual ratio {actual_ratio}")
   assert total_num_params_per_chip >= perfectly_sharded_params_per_chip, (
