@@ -48,6 +48,7 @@ class Train(unittest.TestCase):
             "tokenizer_path=../assets/tokenizer.llama2",
             "enable_goodput_recording=False",
             "monitor_goodput=False",
+            "enable_checkpoint_cloud_logger=False",
         ]
     )
 
