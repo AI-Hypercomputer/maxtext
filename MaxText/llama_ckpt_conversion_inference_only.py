@@ -44,13 +44,14 @@ import torch
 import sys
 import os
 import pyconfig
+import numpy
 from layers import models, quantizations
 import pathwaysutils
 
 def permute_to_match_maxtext_rope(arr):
   evens = arr[..., ::2]
   odds = arr[..., 1::2]
-  return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
+  return numpy.concatenate((evens, odds), axis=arr.ndim - 1)
 
 
 MODEL_PARAMS_DICT = {
@@ -124,7 +125,7 @@ def convert(base_model_path, maxtext_model_path, model_size, params_shardings):
   for i, ckpt_path in enumerate(ckpt_paths):
     print(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
     import psutil
-    checkpoint = torch.load(ckpt_path)
+    checkpoint = torch.load(ckpt_path, map_location="cpu")
     pytorch_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = checkpoint
     print("memory usage in GB: ", psutil.Process().memory_info().rss / (1024 * 1024))
 
