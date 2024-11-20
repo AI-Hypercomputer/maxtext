@@ -227,6 +227,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "num_layers_per_pipeline_stage=2",
             "num_pipeline_microbatches=8",
             "tokenizer_path=../assets/tokenizer.llama2",
+            "scan_layers=False",  # We see better performance only scanning the pipeline iterations.
         ]
     )
 
@@ -274,6 +275,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "num_layers_per_pipeline_stage=8",
             "num_pipeline_microbatches=8",
             "tokenizer_path=../assets/tokenizer.llama2",
+            "scan_layers=False",  # We see better performance only scanning the pipeline iterations.
         ]
     )
 
