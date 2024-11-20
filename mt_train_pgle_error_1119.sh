@@ -54,19 +54,21 @@ XLA_FLAGS=--xla_gpu_enable_latency_hiding_scheduler=true \
 --xla_gpu_enable_pipelined_all_reduce=true \
 --xla_gpu_enable_while_loop_double_buffering=true \
 --xla_disable_hlo_passes=rematerialization \
---xla_gpu_enable_pgle_accuracy_checker=$STRICT_CHECKER \
+--xla_gpu_pgle_accuracy_checker='PGLE_STRICTNESS_LEVEL_ERROR' \
 --xla_gpu_enable_triton_softmax_fusion=false \
 --xla_gpu_enable_all_gather_combine_by_dim=false \
 --xla_gpu_enable_reduce_scatter_combine_by_dim=false \
---xla_dump_to=/tmp/xla_dump/ \
---xla_gpu_experimental_dump_fdo_profiles
+--xla_gpu_shard_autotuning=false
 EOF
 
+# --xla_dump_to=/tmp/xla_dump/ \
+# --xla_gpu_experimental_dump_fdo_profiles \
+#--xla_gpu_enable_pgle_accuracy_checker=$STRICT_CHECKER \
 # The current image doesn't support this one yet
 # --xla_gpu_pgle_accuracy_checker='PGLE_STRICTNESS_LEVEL_ERROR' \
 
 call_train() {
-    export WORKLOAD_NAME=$USER-pgle-dot-7b-$1n-levon-${RANDOM:0:2}
+    export WORKLOAD_NAME=$USER-pgle-7b-$1n-levon-lance-${RANDOM:0:2}
 
     export NUM_NODES=$1
 
@@ -104,7 +106,10 @@ call_train 2 1 8 minimal
 
 # export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/jonbolin-maxtext-gpu:20241008-1
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-xprof_1010_nolayers_nightly_lance
-export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1022_lance
+# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1022_lance
+
+export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1119-dev-rebased
+
 #  --xprof_gpu_cupti_collector_max_callback_api_events=20971520 --xprof_gpu_cupti_collector_max_activity_api_events=20971520
 
 # COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=dot_product dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=true dcn_pipeline_parallelism=1 dcn_data_parallelism=2 per_device_batch_size=1 ici_tensor_parallelism=8 weight_dtype=bfloat16 remat_policy=minimal && gsutil -m cp -r /tmp/xla_dump/ $OUTPUT_BUCKET";
