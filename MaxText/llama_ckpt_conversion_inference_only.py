@@ -44,14 +44,13 @@ import torch
 import sys
 import os
 import pyconfig
-import numpy
 from layers import models, quantizations
 import pathwaysutils
 
 def permute_to_match_maxtext_rope(arr):
   evens = arr[..., ::2]
   odds = arr[..., 1::2]
-  return numpy.concatenate((evens, odds), axis=arr.ndim - 1)
+  return np.concatenate((evens, odds), axis=arr.ndim - 1)
 
 
 MODEL_PARAMS_DICT = {
@@ -279,6 +278,8 @@ if __name__ == "__main__":
   parser.add_argument("maxtextargs", nargs="+")
   args = parser.parse_args()
 
+  jax.profiler.start_server(8888)
+
   pyconfig.initialize(["python"] + args.maxtextargs)
   config = pyconfig.config
 
@@ -294,3 +295,5 @@ if __name__ == "__main__":
   pprint(params_shardings)
 
   convert(args.base_model_path, args.maxtext_model_path, args.model_size, params_shardings)
+
+  jax.profiler.stop_server()
