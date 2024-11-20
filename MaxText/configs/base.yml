@@ -451,7 +451,7 @@ enable_jax_profiler: False
 jax_profiler_port: 9999
 
 # Checkpoint Structured logging
-enable_checkpoint_cloud_logger: True
+enable_checkpoint_cloud_logger: False
 
 # Single-controller
 enable_single_controller: False
