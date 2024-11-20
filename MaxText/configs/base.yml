@@ -144,10 +144,22 @@ num_pipeline_repeats: -1
 # num_pipeline_microbatches must be a multiple of the number of pipeline stages. By default it is set to the number of stages.
 # Note the microbatch_size is given by global_batch_size / num_pipeline_microbatches, where global_batch_size = per_device_batch_size * num_devices
 num_pipeline_microbatches: -1
-scan_pipeline_iterations: True # This can be set independently of scan_layers, which is relevant when num_layers_per_pipeline_stage > 1.
 pipeline_delay_activation_forwarding: False # This delays the activation forwarding one loop iteration simplifying XLA's task of overlapping since
 # the communication and compute in each iteration are now independent. However this comes at the cost of doubling the pipeline bubble,
 # and you must set the number of microbatches to at least 2 * num_stages (the minimum 2 * num_stages is set by default with this delay).
+
+# There are two loops for PP: 
+#  1)  Outer loop over microbatches (pipeline iterations)
+#  2)  Inner loop over layers (layers per stage)
+# We have observed extra remat when a remat policy and scanning is performed on both, and recommend the default
+# settings below of scanning and setting a remat policy only over the pipeline iterations.
+# It may be useful to do the reverse when the layers_per_stage is very large.
+# The below settings only have effect when using pipeline parallelism.
+scan_pipeline_iterations: True
+# The layers per stage scanning option is set by scan_layers, we recommend setting scan_layers=False
+set_remat_policy_on_pipeline_iterations: True
+set_remat_policy_on_layers_per_stage: False
+
 
 # Choose 'remat_policy' between 'minimal', 'save_dot_except_mlpwi', 'save_dot_except_mlp', 'save_qkv_proj', 'qkv_proj_offloaded', 'custom' 'minimal_offloaded', 'save_out_proj' and 'full'.
 # These options offer a trade-off between speed (fastest to slowest) and HBM usage (highest to lowest)
@@ -165,7 +177,7 @@ value_proj: 'remat'
 qkv_proj: 'remat'
 out_proj: 'remat'
 
-scan_layers: True
+scan_layers: True # We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations.
 param_scan_axis: 1
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
@@ -402,6 +414,7 @@ target_eval_loss: 0.  # early stop once reaching target eval_loss
 enable_goodput_recording: True
 monitor_goodput: True
 goodput_upload_interval_seconds: 60
+enable_pathways_goodput: False
 
 # Vertex AI Tensorboard Configurations - https://github.com/google/maxtext/tree/main/getting_started/Use_Vertex_AI_Tensorboard.md
 # Set to True for GCE, False if running via XPK
@@ -446,8 +459,7 @@ enable_jax_profiler: False
 jax_profiler_port: 9999
 
 # Checkpoint Structured logging
-enable_checkpoint_cloud_logger: False
-enable_checkpoint_standard_logger: False
+enable_checkpoint_cloud_logger: True
 
 # Single-controller
 enable_single_controller: False

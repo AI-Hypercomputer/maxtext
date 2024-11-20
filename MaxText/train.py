@@ -761,6 +761,7 @@ def main(argv: Sequence[str]) -> None:
         tensorboard_dir=config.tensorboard_dir,
         upload_interval=config.goodput_upload_interval_seconds,
         monitoring_enabled=True,
+        pathway_enabled=config.enable_pathways_goodput,
         include_badput_breakdown=True,
     )
     goodput_monitor.start_goodput_uploader()
