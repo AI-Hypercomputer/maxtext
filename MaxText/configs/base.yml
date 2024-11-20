@@ -71,22 +71,14 @@ dtype: "bfloat16"
 # Used to configure quantization in the transformer layers, defaults to null implying bf16.
 # Possible alternative settings are as follows:
 # 'int8' for dynamic range quantization using 8-bits
-# 'int8w' for weights only quantization using 8-bits
-# 'int4w' for weights only quantization using 4-bits
-# 'intmp' for mixed precision weight only quantization based on config file
+# 'intmp' for mixed precision quantization for inference as described here: MaxText/configs/quantization/README.md
 # 'fp8' for 8-bit floating-point GeMMs on NVIDIA GPUs.
 quantization: ""
 # Choose one of default, high, and highest.
 # https://kolonist26-jax-kr.readthedocs.io/en/latest/jax.lax.html#jax.lax.Precision
 matmul_precision: "default"
 activations_in_float32: False # Sets activations to float32 before nonlinearity it true, else dtype
-# Path to file with quantization config - only used for mixed precision.
-# Example configs in ../Maxtext/configs/quantization
-# Allows us to configure different bits, tiling and scale for quantizing selected weights.
-# Bits represents number of bits to quantize to,
-# tile-size represents the tiling sized used in AQT tiled_dot_general,
-# Value of scale is used to scale the abs_max value used for AQT quantization
-# Defaults values are 8 bits, tile-size=-1 (no tiling) and scale=1.
+# Path to file with quantization config for intmp. 
 quant_cfg_path: ""
 quantize_kvcache: False # Set to True to quantize KV Cache values, defaults to False
 # Valid kv_quant_axis values:

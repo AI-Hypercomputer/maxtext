@@ -18,11 +18,15 @@ limitations under the License.
 from jax import numpy as jnp
 from jax import random, lax
 from flax import linen as nn
+import functools
 import numpy as np
 import pyconfig
 from layers import quantizations
 import unittest
 from aqt.jax.v2 import aqt_tensor
+from aqt.jax.v2 import calibration
+
+_QUERY_REGEX = ".*/query"
 
 
 class QuantTestModule(nn.Module):
@@ -44,8 +48,10 @@ class QuantTestModule(nn.Module):
     return res_einsum, res_dg
 
 
-def _configure_quantization(quant_str="", mode_str="train"):
-  pyconfig.initialize([None, "configs/base.yml"], enable_checkpointing=False, quantization=quant_str)
+def _configure_quantization(quant_str="", quant_cfg_path="", mode_str="train"):
+  pyconfig.initialize(
+      [None, "configs/base.yml"], enable_checkpointing=False, quantization=quant_str, quant_cfg_path=quant_cfg_path
+  )
   config = pyconfig.config
   quant = quantizations.configure_quantization(config, mode_str)
   return quant
@@ -93,6 +99,40 @@ class QuantizationTest(unittest.TestCase):
     self.assertEqual(res_einsum.dtype, np.dtype(np.float32))
     self.assertTrue(jnp.greater(jnp.max(inputs), jnp.max(res_dg[0][0])))
     # self.assertEqual(res_dg.dtype, np.dtype(np.float32))
+
+  def test_mixed_precision_config_int8w(self):
+    quant = _configure_quantization(quant_str="intmp", quant_cfg_path="configs/quantization/int8_weight_only.json")
+    self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 1)
+    self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
+    quant_cfg, tile_size = quant.quant_dg[quantizations.DEFAULT]
+    self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.dtype, None)
+    self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 8)
+
+  def test_mixed_precision_config_scale(self):
+    quant = _configure_quantization(
+        quant_str="intmp", quant_cfg_path="configs/quantization/dense_llm_weight_only_scale.json"
+    )
+    self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
+    self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
+    quant_cfg, tile_size = quant.quant_dg[quantizations.DEFAULT]
+    self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.dtype, None)
+    self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 8)
+    quant_cfg, tile_size = quant.quant_dg[_QUERY_REGEX]
+    self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.dtype, None)
+    self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 4)
+
+  def test_mixed_precision_config_subchannel(self):
+    quant = _configure_quantization(quant_str="intmp", quant_cfg_path="configs/quantization/dense_llm_subchannel.json")
+    self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
+    self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
+    quant_cfg, tile_size = quant.quant_dg[quantizations.DEFAULT]
+    self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.bits, 8)
+    self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 8)
+    self.assertEqual(tile_size, -1)
+    quant_cfg, tile_size = quant.quant_dg[_QUERY_REGEX]
+    self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.bits, 8)
+    self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 4)
+    self.assertEqual(tile_size, 128)
 
   def test_remove_quantized_params(self):
     _params = {
