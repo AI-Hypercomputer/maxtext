@@ -362,6 +362,21 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
   return parallelism_vals
 
 
+def reshape_mesh_to_rings(a):
+  """Reshape device mesh to rings for 64x4 mesh shape"""
+  b = []
+  for i in range(8):
+    b.append([])
+    for j in range(8):
+      a_i = i * 2
+      a_j = j * 2
+      # forms a ring of size 4
+      b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i + 1, a_j + 1], a[a_i + 1, a_j]])
+  b = np.array(b)
+  b = np.reshape(b, (64, 4))
+  return b
+
+
 def create_custom_64x4_device_mesh(
     mesh_shape: Sequence[int],
     dcn_mesh_shape: Sequence[int],
@@ -390,19 +405,6 @@ def create_custom_64x4_device_mesh(
       )
       for granule in granules
   ]
-
-  def reshape_mesh_to_rings(a):
-    b = []
-    for i in range(8):
-      b.append([])
-      for j in range(8):
-        a_i = i * 2
-        a_j = j * 2
-        # forms a ring of size 4
-        b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i + 1, a_j + 1], a[a_i + 1, a_j]])
-    b = np.array(b)
-    b = np.reshape(b, (64, 4))
-    return b
 
   per_granule_meshes = [np.reshape(reshape_mesh_to_rings(x), mesh_shape) for x in per_granule_meshes]
   # TODO(jekbradbury): handle non-uniform DCN topologies
@@ -467,12 +469,28 @@ def create_device_mesh(config, devices=None):
       )
   else:
     if allow_split_physical_axes:
-      mesh = mesh_utils.create_device_mesh(
-          ici_parallelism,
-          devices,
-          contiguous_submeshes=False,
-          allow_split_physical_axes=allow_split_physical_axes,
-      )
+      if config.custom_mesh == "hybrid_ring_64x4":
+        # asserting on ici parallelism
+        assert sorted(set(ici_parallelism)) == [
+            1,
+            4,
+            64,
+        ], f"Invalid custom_mesh:{config.custom_mesh} chosen for ICI mesh shape {ici_parallelism}"
+        mesh = mesh_utils.create_device_mesh(
+            [16, 16],
+            devices,
+            contiguous_submeshes=False,
+            allow_split_physical_axes=False,
+        )
+        mesh = reshape_mesh_to_rings(mesh)
+        mesh = np.reshape(mesh, ici_parallelism)
+      else:
+        mesh = mesh_utils.create_device_mesh(
+            ici_parallelism,
+            devices,
+            contiguous_submeshes=False,
+            allow_split_physical_axes=allow_split_physical_axes,
+        )
     else:
       mesh = mesh_utils.create_device_mesh(
           ici_parallelism,

@@ -218,3 +218,23 @@ class TrainCompile(unittest.TestCase):
             "global_parameter_scale=128",
         )
     )
+
+  @pytest.mark.tpu
+  def test_custom_64x4_mesh(self):
+    compiled_trainstep_file = "/tmp/test_custom_64x4_mesh.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v6e-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "ici_sequence_parallelism=4",
+            "global_parameter_scale=32",
+            "per_device_batch_size=0.25",
+            "max_target_length=65536",
+            "allow_split_physical_axes=true",
+            "custom_mesh=hybrid_ring_64x4",
+        )
+    )
