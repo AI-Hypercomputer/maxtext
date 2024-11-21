@@ -37,9 +37,9 @@ BASE_PATHWAYS_TUNING_PARAMS = {
 
 # The set of tuning params required for long-running pathways jobs.
 PATHWAYS_LONG_RUN_CHECKPOINTING_TUNING_PARAMS = {
-    "enable_checkpointing": True,
-    "async_checkpointing": True,
-    "checkpoint_period": 100,
+    "enable_checkpointing": False,
+    "async_checkpointing": False,
+    "checkpoint_period": 20,
     "enable_checkpoint_cloud_logger": True,
 }
 
@@ -830,7 +830,7 @@ llama3_1_8b_8192 = _add_to_model_dictionary(
         model_name="llama3_1-8b-8192",
         model_type="llama3.1-8b",
         tuning_params={
-            "per_device_batch_size": 4,
+            "per_device_batch_size": 2,
             "ici_fsdp_parallelism": -1,
             "remat_policy": "custom",
             "decoder_layer_input": "offload",
@@ -853,9 +853,9 @@ llama3_1_8b_8192 = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
             "sa_block_kv_dq": 2048,
             "sa_use_fused_bwd_kernel": True,
-            "profiler": "xplane",
-            "skip_first_n_steps_for_profiler": 10,
-            "profiler_steps": 5,
+            # "profiler": "xplane",
+            # "skip_first_n_steps_for_profiler": 10,
+            # "profiler_steps": 5,
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1000,9 +1000,9 @@ llama3_1_70b_8192_lr_real_data = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
             "sa_block_kv_dq": 2048,
             "sa_use_fused_bwd_kernel": True,
-            "profiler": "xplane",
-            "skip_first_n_steps_for_profiler": 10,
-            "profiler_steps": 5,
+            # "profiler": "xplane",
+            # "skip_first_n_steps_for_profiler": 10,
+            # "profiler_steps": 5,
         },
         pathways_tuning_params=PATHWAYS_LONG_RUN_CHECKPOINTING_TUNING_PARAMS,
         xla_flags=(
