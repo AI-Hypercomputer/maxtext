@@ -342,6 +342,13 @@ class KVQuant:
       return value, scale
     raise ValueError(f"Invalid KV quant dtype:{self.dtype}.")
 
+  def dequant(self, kv: KVTensor):
+    assert isinstance(kv, KVTensor)
+    qvalue = kv.qvalue 
+    scale = kv.scale[0]
+    dequant_kv = jnp.bfloat16(qvalue) * jnp.bfloat16(scale)
+    return dequant_kv
+    
   def einsum_fn_with_rhs_qtensor(
     self,
     kv: Array| aqt_tensor.QTensor,

@@ -419,7 +419,9 @@ class AttentionOp(nn.Module):
     """
     einsum = jnp.einsum
     if self.kv_quant:
-      einsum = self.kv_quant.einsum_fn_with_rhs_qtensor(key)
+      # einsum = self.kv_quant.einsum_fn_with_rhs_qtensor(key)
+      if isinstance(key, KVTensor):
+        key = self.kv_quant.dequant(key)
     b, t, n, d = query.shape
     n_kv = key.shape[-2]
     assert n_kv == self.num_kv_heads
@@ -459,9 +461,14 @@ class AttentionOp(nn.Module):
 
     einsum = jnp.einsum
     if self.kv_quant:
-      einsum = self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(value)
+    #   einsum = self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(value)
+        if isinstance(value, KVTensor):
+          value = self.kv_quant.dequant(value)
     if model_mode == common_types.MODEL_MODE_TRAIN or self.compute_axis_order == (0,1,2,3):
-      out = einsum("bkgts,bskd->btkgd", attn_weights, value)
+      if self.kv_quant:
+        out = self.kv_quant.einsum_quantize_fp8("bkgts,bskd->btkgd", attn_weights, value)
+      else:
+        out = einsum("bkgts,bskd->btkgd", attn_weights, value)
       b, t, n_kv, g, d = out.shape
       result = jnp.reshape(out, (b, t, n_kv * g, d))
     elif self.compute_axis_order == (0,2,1,3):
@@ -730,6 +737,8 @@ class AttentionOp(nn.Module):
         scale_value /= quantizations.MAX_INT8
       elif dtype == jnp.int4:
         scale_value /= quantizations.MAX_INT4
+      elif dtype == jnp.float8_e4m3fn:
+        scale_value /= quantizations.E4M3_MAX
 
       cache_value = KVTensor(
         qvalue=cache_value,
