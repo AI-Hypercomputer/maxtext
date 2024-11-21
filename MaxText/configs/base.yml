@@ -275,7 +275,7 @@ ici_expert_parallelism: 1
 num_slices: -1
 
 # Tokenizer
-vocab_size: 32_000 # powers of 2 for sharding
+vocab_size: 51200 # powers of 2 for sharding
 tokenizer_path: "assets/tokenizer.llama2"
 tokenize_train_data: True  # False if the dataset is pre-tokenized
 tokenize_eval_data: True  # False if the dataset is pre-tokenized
@@ -296,6 +296,7 @@ dataset_type: tfds
 dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
+train_split: 'train'
 eval_split: 'validation'
 # for HuggingFace input pipeline (dataset_type=hf)
 hf_path: ''

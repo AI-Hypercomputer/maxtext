@@ -328,17 +328,22 @@ def generate_xpk_workload_cmd(
     libtpu_version: str,
     base_output_directory: str,
     buffer_size: int,
+    exp_name = None
 ):
   """Generates a command to run a maxstar model on XPK."""
   num_steps = 2000
   time.localtime()
   #test_purpose_name = f'maxstar-benchmarks-{model.model_name}-{libtpu_version}'
   test_purpose_name = f'{model.model_name}-conv'
-  lr = str(model.tuning_params["learning_rate"]).split(".")[-1]
-  warm_up = int(model.tuning_params["warmup_steps_fraction"] * model.tuning_params["steps"])
-  seed = model.tuning_params["data_shuffle_seed"]
-  step = model.tuning_params["learning_rate_schedule_steps"]
-  run_name = f'{model.model_name}-{num_slices}-{lr:.6s}-{warm_up}-{seed}-{step}'
+  if "learning_rate" in model.tuning_params:
+    lr = str(model.tuning_params["learning_rate"]).split(".")[-1]
+    warm_up = int(model.tuning_params["warmup_steps_fraction"] * model.tuning_params["steps"])
+    seed = model.tuning_params["data_shuffle_seed"]
+    step = model.tuning_params["learning_rate_schedule_steps"]
+    gbs = model.tuning_params["per_device_batch_size"] * 256
+    run_name = f'{model.model_name}-{num_slices}-{lr:.6s}-{warm_up}-{seed}-{step}-{gbs}'
+  else:
+    run_name = f'{model.model_name}-{num_slices}-{libtpu_version}'
   print(run_name)
   N = 3
   temp_post_fix = ''.join(
@@ -386,7 +391,7 @@ def generate_xpk_workload_cmd(
           f' --workload={name}'
           ' --priority=medium'
           ' --use-vertex-tensorboard'
-          f' --experiment-name="llama8b-c4-exp"'
+          f' --experiment-name={exp_name}'
           f' {additional_flags}'
       ),
       name,
@@ -400,6 +405,7 @@ def run_xpk_workload(
     libtpu_type: LibTpuType,
     libtpu_version: str,
     buffer_size: int,
+    exp_name=None,
 ):
   """Runs a maxstar model on XPK.
 
@@ -415,7 +421,7 @@ def run_xpk_workload(
   return run_command_with_updates(command, 'Run XPK workload', cluster_config)
 
 
-def xpk_benchmark_runner(cluster_config: XpkConfig, benchmarks: list[BenchmarkRunner]):
+def xpk_benchmark_runner(cluster_config: XpkConfig, benchmarks: list[BenchmarkRunner], exp_name=None):
   xpk_workload_names = []
   xpk_workload_cmds = []
   for benchmark in benchmarks:
@@ -427,6 +433,7 @@ def xpk_benchmark_runner(cluster_config: XpkConfig, benchmarks: list[BenchmarkRu
         libtpu_version=benchmark.software_config.libtpu_version,
         base_output_directory=cluster_config.base_output_directory,
         buffer_size=4294967296,
+        exp_name=exp_name
     )
     xpk_workload_names.append(name)
     xpk_workload_cmds.append(command)

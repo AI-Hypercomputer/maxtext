@@ -32,7 +32,9 @@ class DatasetHParams:
     dataset_path: str
     dataset_name: str
     dataset_type: str
-    eval_dataset_name: str
+    train_split: str
+    eval_split: str
+    eval_steps: int
     add_bos: bool
     add_eos: bool
     tokenizer_path: str
@@ -331,10 +333,11 @@ llama2_70b_4096 = MaxTextModel(
         "sa_block_q": 1024,
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
+        "steps": 100,
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.CF_FOR_ALL_GATHER 
     ),
 )
 

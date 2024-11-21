@@ -143,7 +143,7 @@ def make_tfds_train_iterator(
   """load dataset, preprocess and return iterators"""
   train_ds = get_datasets(
       dataset_name=config.dataset_name,
-      data_split="train",
+      data_split=config.train_split,
       shuffle_files=config.enable_data_shuffling,
       shuffle_seed=config.data_shuffle_seed,
       dataloading_host_index=process_indices_train.index(jax.process_index()),
