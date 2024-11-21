@@ -238,3 +238,23 @@ class TrainCompile(unittest.TestCase):
             "custom_mesh=hybrid_ring_64x4",
         )
     )
+
+  # TODO (b/376470419) : Enable when AOT test work with host offloading.
+  @pytest.mark.skip(reason="Enable when AOT test work with host offloading.")
+  @pytest.mark.tpu
+  def test_llama3_1_70b_opt_offload(self):
+    compiled_trainstep_file = "/tmp/test_llama3_1_70b_opt_offload.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v6e-256",
+            "compile_topology_num_slices=1",
+            "model_name=llama3.1-70b",
+            "per_device_batch_size=2",
+            "optimizer_memory_host_offload=true",
+            "gradient_clipping_threshold=0",
+            "max_target_length=8192",
+        )
+    )
