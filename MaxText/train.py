@@ -569,11 +569,12 @@ def check_example_batch(config, example_batch):
     err.throw()
 
 
-def setup_mesh_and_model(config):
+def setup_mesh_and_model(config, devices=None):
   """Set up the mesh and the model for training
 
   Args:
     config
+    devices
 
   Returns:
     init_rng: RNG key
@@ -590,7 +591,7 @@ def setup_mesh_and_model(config):
   writer = max_utils.initialize_summary_writer(config.tensorboard_dir, config.run_name)
 
   # Mesh definition
-  devices_array = maxtext_utils.create_device_mesh(config)
+  devices_array = maxtext_utils.create_device_mesh(config, devices)
   mesh = Mesh(devices_array, config.mesh_axes)
 
   # Model and Optimizer definition
