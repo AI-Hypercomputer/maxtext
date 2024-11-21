@@ -465,10 +465,7 @@ class AttentionOp(nn.Module):
         if isinstance(value, KVTensor):
           value = self.kv_quant.dequant(value)
     if model_mode == common_types.MODEL_MODE_TRAIN or self.compute_axis_order == (0,1,2,3):
-      if self.kv_quant:
-        out = self.kv_quant.einsum_quantize_fp8("bkgts,bskd->btkgd", attn_weights, value)
-      else:
-        out = einsum("bkgts,bskd->btkgd", attn_weights, value)
+      out = einsum("bkgts,bskd->btkgd", attn_weights, value)
       b, t, n_kv, g, d = out.shape
       result = jnp.reshape(out, (b, t, n_kv * g, d))
     elif self.compute_axis_order == (0,2,1,3):
