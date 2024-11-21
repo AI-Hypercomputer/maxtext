@@ -3,13 +3,13 @@
 
 
 # Launch llama2 7b
-export MODEL_NAME=llama2-7b
+# export MODEL_NAME=llama2-7b
 
 # Launch llama2 70b
 # export MODEL_NAME=llama2-70b
 
 # Launch llama3.1 405b
-# export MODEL_NAME=llama3.1-405b
+export MODEL_NAME=llama3.1-405b
 
 # Common parameters
 export CLUSTER_NAME=a3plus-benchmark
@@ -24,8 +24,8 @@ export ZONE=australia-southeast1
 # For PGLE
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1022_lance
 # For 2% tolerance issue
-# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1022_405b_lance
-export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1104_405b_lance
+export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1022_405b_lance
+# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1104_405b_lance
 
 
 export DEVICE_TYPE=h100-mega-80gb-8
@@ -66,11 +66,12 @@ XLA_FLAGS=--xla_gpu_enable_latency_hiding_scheduler=true \
 --xla_gpu_enable_pipelined_all_reduce=true \
 --xla_gpu_enable_while_loop_double_buffering=true \
 --xla_disable_hlo_passes=rematerialization \
---xla_gpu_enable_pgle_accuracy_checker=$STRICT_CHECKER \
 --xla_gpu_enable_triton_softmax_fusion=false \
 --xla_gpu_enable_all_gather_combine_by_dim=false \
 --xla_gpu_enable_reduce_scatter_combine_by_dim=false
 EOF
+
+# --xla_gpu_enable_pgle_accuracy_checker=$STRICT_CHECKER \
 
 # Jon doesn't have this one
 # --xla_gpu_shard_autotuning=false

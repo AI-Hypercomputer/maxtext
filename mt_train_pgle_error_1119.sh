@@ -17,10 +17,11 @@ export OUTPUT_PATH=lancewang-dev-supercomputer-testing/maxtext_gpu
 export OUTPUT_BUCKET=gs://$OUTPUT_PATH
 export RUN_NAME=maxtext-$MODEL_NAME
 CONFIG_NAME=$(echo $MODEL_NAME | sed 's/-/_/g')
+MODEL_SIZE=$(echo $MODEL_NAME | grep -o '[0-9]\+b')
 
 # Enable PGLE
-# export JAX_ENABLE_PGLE=false
-export JAX_ENABLE_PGLE=true
+export JAX_ENABLE_PGLE=false
+# export JAX_ENABLE_PGLE=true
 export JAX_PGLE_AGGREGATION_PERCENTILE=50
 export JAX_SHARE_AUTOTUNE_CONFIG_BETWEEN_HOSTS=true
 export JAX_PGLE_PROFILING_RUNS=3
@@ -41,6 +42,7 @@ NCCL_FASTRAK_PLUGIN_ACCEPT_TIMEOUT_MS=600000
 JAX_ENABLE_COMPILATION_CACHE=True
 JAX_ENABLE_PGLE=$JAX_ENABLE_PGLE
 JAX_REMOVE_CUSTOM_PARTITIONING_PTR_FROM_CACHE_KEY=$JAX_ENABLE_PGLE
+JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES=none
 JAX_DEBUG_LOG_MODULES=jax._src.compiler
 XLA_FLAGS=--xla_gpu_enable_latency_hiding_scheduler=true \
 --xla_gpu_enable_triton_gemm=false \
@@ -54,7 +56,6 @@ XLA_FLAGS=--xla_gpu_enable_latency_hiding_scheduler=true \
 --xla_gpu_enable_pipelined_all_reduce=true \
 --xla_gpu_enable_while_loop_double_buffering=true \
 --xla_disable_hlo_passes=rematerialization \
---xla_gpu_pgle_accuracy_checker='PGLE_STRICTNESS_LEVEL_ERROR' \
 --xla_gpu_enable_triton_softmax_fusion=false \
 --xla_gpu_enable_all_gather_combine_by_dim=false \
 --xla_gpu_enable_reduce_scatter_combine_by_dim=false \
@@ -68,7 +69,7 @@ EOF
 # --xla_gpu_pgle_accuracy_checker='PGLE_STRICTNESS_LEVEL_ERROR' \
 
 call_train() {
-    export WORKLOAD_NAME=$USER-pgle-7b-$1n-levon-lance-${RANDOM:0:2}
+    export WORKLOAD_NAME=$USER-pgle-$MODEL_SIZE-$1n-levon-lance-${RANDOM:0:2}
 
     export NUM_NODES=$1
 
@@ -87,8 +88,8 @@ call_train() {
     # export REMAT_POLICY=full
     # export REMAT_POLICY=minimal
 
-    # export ATTENTION=cudnn_flash_te
-    export ATTENTION=dot_product
+    export ATTENTION=cudnn_flash_te
+    # export ATTENTION=dot_product
 }
 
 # input 1: number of nodes
@@ -103,21 +104,23 @@ call_train() {
 # call_non_pp 768 1 1 save_qkv_proj
 # call_train 2 1 1 full
 call_train 2 1 8 minimal
+# call_train 64 1 8 minimal
+
 
 # export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/jonbolin-maxtext-gpu:20241008-1
-# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-xprof_1010_nolayers_nightly_lance
+export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-xprof_1010_nolayers_nightly_lance
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1022_lance
 
-export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1119-dev-rebased
-
+# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1119-dev-rebased
+# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1107-nv
 #  --xprof_gpu_cupti_collector_max_callback_api_events=20971520 --xprof_gpu_cupti_collector_max_activity_api_events=20971520
 
 # COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=dot_product dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=true dcn_pipeline_parallelism=1 dcn_data_parallelism=2 per_device_batch_size=1 ici_tensor_parallelism=8 weight_dtype=bfloat16 remat_policy=minimal && gsutil -m cp -r /tmp/xla_dump/ $OUTPUT_BUCKET";
 
-COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=$ATTENTION dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=true dcn_pipeline_parallelism=$DCN_PP dcn_fsdp_parallelism=$DCN_FSDP per_device_batch_size=$PER_DEVICE_BATCH_SIZE ici_tensor_parallelism=$ICI_TP weight_dtype=bfloat16 remat_policy=$REMAT_POLICY && gsutil -m cp -r /tmp/xla_dump/ $OUTPUT_BUCKET";
+COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=$ATTENTION dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=true dcn_pipeline_parallelism=$DCN_PP dcn_fsdp_parallelism=$DCN_FSDP per_device_batch_size=$PER_DEVICE_BATCH_SIZE ici_tensor_parallelism=$ICI_TP weight_dtype=bfloat16 remat_policy=$REMAT_POLICY profiler=xplane skip_first_n_steps_for_profiler=5 && gsutil -m cp -r /tmp/xla_dump/ $OUTPUT_BUCKET";
 
 # Disable profiler
-# profiler=xplane skip_first_n_steps_for_profiler=5" 
+# 
 
 COMMAND='export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"${COMMAND}"; 
 

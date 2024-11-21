@@ -85,13 +85,32 @@ EOF
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-xprof_1010_nolayers_nightly_lance
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-1104_405b_lance
 export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/maxtext_collective_benchmarking
-export WORKLOAD_NAME=lancewang-collective-benchmarking-${RANDOM:0:2}
-export NUM_NODES=128
 
-COMMAND="python3 mt_all_gather_benchmark.py --num_nodes=$NUM_NODES --type=2d-dp"; 
+call_config() {
 
-COMMAND='export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"${COMMAND};";
+    declare -A args
 
-echo 'COMMAND' ${COMMAND}
-python ../xpk/xpk.py workload delete --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME; 
-python ../xpk/xpk.py workload create --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME --command "${COMMAND}" --docker-image=$LOCAL_IMAGE_NAME --device-type=$DEVICE_TYPE --num-nodes=$NUM_NODES --scheduler=gke.io/topology-aware-auto --env-file=env.txt ;
+    # Parse named arguments
+    while [[ "$#" -gt 0 ]]; do
+        case $1 in
+            --*) key="${1#--}"; args["$key"]="$2"; shift ;; # Remove "--" and set key-value
+            *) echo "Unknown parameter passed: $1"; return 1 ;;
+        esac
+        shift # Move to the next argument
+    done
+
+    export WORKLOAD_NAME=lancewang-collective-benchmarking-${RANDOM:0:2}
+
+    local NUM_NODES=${args[NUM_NODES]}
+
+    COMMAND="python3 mt_all_gather_benchmark.py --num_nodes=$NUM_NODES --type=2d-dp --xprof=false"; 
+
+    COMMAND='export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"${COMMAND};";
+
+    echo 'COMMAND' ${COMMAND}
+    python ../xpk/xpk.py workload delete --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME; 
+    python ../xpk/xpk.py workload create --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME --command "${COMMAND}" --docker-image=$LOCAL_IMAGE_NAME --device-type=$DEVICE_TYPE --num-nodes=$NUM_NODES  --scheduler=gke.io/topology-aware-auto  --env-file=env.txt ;
+}
+
+
+call_config  --NUM_NODES 2

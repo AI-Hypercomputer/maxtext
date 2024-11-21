@@ -10,6 +10,9 @@ import argparse
 parser = argparse.ArgumentParser(description="Initialize JAX distributed system")
 parser.add_argument("--num_nodes", type=int, required=True, help="Number of nodes")
 parser.add_argument("--type", type=str, required=False, help="Benchmark type")
+parser.add_argument("--xprof", type=bool, required=False, help="Turn on xprof or not")
+parser.add_argument("--iter", type=int, required=False, help="Turn on xprof or not")
+
 args = parser.parse_args()
 
 number_of_nodes = args.num_nodes
@@ -37,7 +40,7 @@ if args.type == '1d':
     in_partition_spec = (P('fsdp'))
     out_partition_spec = (P(None))
 
-    data_in = jnp.zeros((2 * 8192 * 65536), dtype=jnp.bfloat16)
+    data_in = jnp.zeros((2 * 128 * number_of_nodes * 65536), dtype=jnp.bfloat16)
 elif args.type == '2d-tp':
     mesh_shape = (number_of_nodes, 8)
     devices_grid = np.array(devices).reshape(mesh_shape)
@@ -46,7 +49,7 @@ elif args.type == '2d-tp':
     in_partition_spec = (P('fsdp', None))
     out_partition_spec = (P(None, None))
 
-    data_in = jnp.zeros((2 * 8192, 65536), dtype=jnp.bfloat16)
+    data_in = jnp.zeros((2 * 128 * number_of_nodes, 65536), dtype=jnp.bfloat16)
 elif args.type == '2d-dp':
     mesh_shape = (8, number_of_nodes)
     devices_grid = np.array(devices).reshape(mesh_shape)
@@ -55,7 +58,7 @@ elif args.type == '2d-dp':
     in_partition_spec = (P(None, 'fsdp'))
     out_partition_spec = (P(None, None))
 
-    data_in = jnp.zeros((65536, 2 * 8192), dtype=jnp.bfloat16)
+    data_in = jnp.zeros((65536, 2 * 128 * number_of_nodes), dtype=jnp.bfloat16)
 else:
     # DP, FSDP, TP
     mesh_shape = (1, number_of_nodes, 8)
@@ -66,7 +69,7 @@ else:
     out_partition_spec = (P(None, None, None))
 
     # data_in = jnp.zeros((2, number_of_nodes * 128, 65536), dtype=jnp.bfloat16)
-    data_in = jnp.zeros((2, 8192, 65536), dtype=jnp.bfloat16)
+    data_in = jnp.zeros((2, 128 * number_of_nodes, 65536), dtype=jnp.bfloat16)
 
 def no_op(x):
   return x
@@ -86,12 +89,15 @@ no_op = jax.jit(fun=no_op,
 result = no_op(data_in)
 jax.block_until_ready(result)
 
-if jax.process_index() == 0:
+if args.xprof and jax.process_index() == 0:
     jax.profiler.start_trace("gs://lancewang-dev-supercomputer-testing/maxtext_gpu/collective_benchmarking")
 
-for i in range(10):
+for i in range(1000):
     result = no_op(data_in)
+    if i%100==0:
+        print(f"Running {i}'s loop")
+
 jax.block_until_ready(result)
 
-if jax.process_index() == 0:
+if args.xprof and jax.process_index() == 0:
     jax.profiler.stop_trace()
