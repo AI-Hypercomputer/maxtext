@@ -169,6 +169,7 @@ value_proj: 'remat'
 qkv_proj: 'remat'
 out_proj: 'remat'
 
+optimizer_memory_host_offload: False
 scan_layers: True # We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations.
 param_scan_axis: 1
 
@@ -451,7 +452,7 @@ enable_jax_profiler: False
 jax_profiler_port: 9999
 
 # Checkpoint Structured logging
-enable_checkpoint_cloud_logger: True
+enable_checkpoint_cloud_logger: False
 
 # Single-controller
 enable_single_controller: False
