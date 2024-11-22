@@ -15,7 +15,7 @@ export CLUSTER_NAME=a3plus-benchmark
 export ZONE=australia-southeast1
 
 export DEVICE_TYPE=h100-mega-80gb-8
-export OUTPUT_PATH=lancewang-dev-supercomputer-testing/maxtext_gpu
+export OUTPUT_PATH=yujunzou-dev-supercomputer-testing/maxtext_gpu
 export OUTPUT_BUCKET=gs://$OUTPUT_PATH
 export RUN_NAME=maxtext-$MODEL_NAME
 CONFIG_NAME=$(echo $MODEL_NAME | sed 's/-/_/g')
