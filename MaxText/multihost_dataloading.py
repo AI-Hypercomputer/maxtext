@@ -26,7 +26,7 @@ from collections.abc import Iterator, Iterable
 import tensorflow as tf  # pylint: disable=g-import-not-at-top
 import time
 import numpy as np
-
+import datetime
 import jax
 import jax.tree_util as jtu
 from jax.sharding import PartitionSpec
@@ -75,7 +75,12 @@ def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh) -> jax.A
   while not loaded_data_success and data_load_attempts < MAX_DATA_LOAD_ATTEMPTS:
     data_load_attempts += 1
     try:
+      start = datetime.datetime.now()
+      # max_logging.log(f"STANDALONE DATALOADER starting read at {start}")
       local_data = next(local_iterator)
+      max_logging.log(f"STANDALONE DATALOADER local data {local_data}")
+      end = datetime.datetime.now()
+      max_logging.log(f"STANDALONE DATALOADER host batch sharded to devices in {(end-start).seconds}")
       loaded_data_success = True
     except tf.errors.FailedPreconditionError:
       max_logging.log("Failed to get next data batch, retrying")
@@ -83,7 +88,11 @@ def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh) -> jax.A
 
   # Try one last time, if this fails we will see the full stack trace.
   if not loaded_data_success:
+    start = datetime.datetime.now()
+    # max_logging.log(f"STANDALONE DATALOADER starting read at {start}")
     local_data = next(local_iterator)
+    end = datetime.datetime.now()
+    max_logging.log(f"STANDALONE DATALOADER host batch sharded to devices in {(end-start).seconds}")
 
   input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh=global_mesh), local_data)
 

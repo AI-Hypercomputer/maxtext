@@ -169,6 +169,8 @@ elif [[ $MODE == "nightly" ]]; then
         pip3 install --pre -U jax -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
         # Install jaxlib-nightly
         pip3 install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
+        # pip3 install /deps/jaxlib-*-cp*-manylinux2014_x86_64.whl --force-reinstall
+        # pip3 install /deps/jax-*-py3-none-any.whl --force-reinstall
 
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
             # Install custom libtpu

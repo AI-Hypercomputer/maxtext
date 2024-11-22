@@ -17,6 +17,7 @@ limitations under the License.
 # pylint: disable=missing-module-docstring, missing-function-docstring
 import os
 import sys
+from MaxText import max_logging
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
@@ -75,6 +76,12 @@ class TfdsDataProcessingTest(unittest.TestCase):
     ds = ds_builder.as_dataset(split="train", read_config=self.read_config, shuffle_files=self.config.enable_data_shuffling)
 
     return ds
+  
+  def test_ds_records(self):
+    train_ds1 = self.train_ds.batch(64)
+    for _ in range(20):
+      train_ds1 = next(train_ds1.as_numpy_iterator())
+      max_logging.log(f"STANDALONE DATALOADER file name is train_ds1['tfds_id']")
 
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]

@@ -16,6 +16,7 @@ limitations under the License.
 
 """Input pipeline for a LM1B dataset."""
 
+import datetime
 from typing import Optional
 import warnings
 
@@ -23,12 +24,14 @@ import ml_collections
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import jax
+import max_logging
 
 import multihost_dataloading
 import tokenizer
 import sequence_packing
 from input_pipeline import _input_pipeline_utils
 
+# AUTOTUNE = 4
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
 
@@ -44,16 +47,27 @@ def get_datasets(
   ds_builder = tfds.builder(dataset_name)
 
   if shuffle_files:
-    read_config = tfds.ReadConfig(shuffle_seed=shuffle_seed)
+    read_config = tfds.ReadConfig(shuffle_seed=shuffle_seed, add_tfds_id=True)
+    #, num_parallel_calls_for_interleave_files=4, num_parallel_calls_for_decode=4)
   else:
     read_config = tfds.ReadConfig()
 
+  # max_logging.log(f"STANDALONE DATALOADER Read config is {read_config}")
   if ds_builder.info.splits[data_split].num_shards >= dataloading_host_count:
     read_config.input_context = tf.distribute.InputContext(
         input_pipeline_id=dataloading_host_index,
         num_input_pipelines=dataloading_host_count,
     )
     ds = ds_builder.as_dataset(split=data_split, read_config=read_config, shuffle_files=shuffle_files)
+    i=20
+    for record in ds:
+      # start=datetime.datetime.now()
+      max_logging.log(f"STANDALONE DATALOADER TFDS record file is {record['tfds_id']}")
+      # end=datetime.datetime.now()
+      # max_logging.log(f"STANDALONE DATALOADER TFDS record loaded in {(end-start).seconds}")
+      i=i+1
+      if i==20:
+        break
   else:
     warnings.warn(
         f"WARNING: Inefficient dataloading. Your {dataset_name} contains {ds_builder.info.splits[data_split].num_shards} shards, "
@@ -87,7 +101,7 @@ def preprocessing_pipeline(
 ):
   """pipeline for preprocessing TFDS dataset."""
   dataset = dataset.map(lambda x: _input_pipeline_utils.normalize_features(x, data_column_name), num_parallel_calls=AUTOTUNE)
-
+  # max_logging.log(f"STANDALONE DATALOADER Autotune number is {AUTOTUNE}, prefetch_size is {prefetch_size}")
   if tokenize:
     tokenizer_model = _input_pipeline_utils.get_tokenizer(tokenizer_path, add_bos, add_eos)
     dataset = dataset.map(lambda x: tokenizer.TokenizeOp(tokenizer=tokenizer_model, features=x), num_parallel_calls=AUTOTUNE)

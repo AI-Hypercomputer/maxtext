@@ -40,20 +40,36 @@ def data_load_loop(config, state=None):
 
   start = datetime.datetime.now()
   start_step = get_first_step(state)
+  jax.profiler.start_trace(config.base_output_directory)
+  start_load = datetime.datetime.now()
+  max_logging.log(f"STANDALONE DATALOADER starting read of step 1 at {start_load}")
   example_batch = load_next_batch(data_iterator, example_batch, config)
   jax.block_until_ready(example_batch)
   first_end = datetime.datetime.now()
   time_to_load_first_batch = first_end - start
   if jax.process_index() == 0:
-    max_logging.log(f"STANDALONE DATALOADER : First step completed in {time_to_load_first_batch.seconds} seconds, on host 0")
+    max_logging.log(f"STANDALONE DATALOADER : First step completed in {time_to_load_first_batch.seconds} seconds, on host 0, first batch data loaded in {(first_end - start_load).seconds}")
 
-  for _ in np.arange(start_step + 1, config.steps):
+  for i in np.arange(start_step + 1, config.steps):
+    start_load = datetime.datetime.now()
+    max_logging.log(f"STANDALONE DATALOADER starting read of step {i} at {start_load}")
     example_batch = load_next_batch(data_iterator, example_batch, config)
 
   jax.block_until_ready(example_batch)  # wait until the last batch is read
+  jax.profiler.stop_trace()
   end = datetime.datetime.now()
   if jax.process_index() == 0:
-    max_logging.log(f"STANDALONE DATALOADER : {config.steps} batches loaded in {(end-start).seconds} seconds, on host 0")
+    time_to_read = (end-start).seconds
+    max_logging.log(f"STANDALONE DATALOADER : rest of the batches loaded in {(end-first_end).seconds} sec.")
+    num_devices = len(jax.devices())
+    global_batch_size = config.per_device_batch_size * num_devices
+    max_logging.log(f"STANDALONE DATALOADER : num_devices {num_devices}, global_batch_size {global_batch_size}")
+    total_bytes_read = config.steps * global_batch_size * config.max_target_length * 4 * 6
+    # (4 for int and 6 factor for tfds)
+    max_logging.log(f"STANDALONE DATALOADER : {config.steps} batches loaded in {time_to_read} seconds, on host 0.")
+    # max_logging.log(f"STANDALONE DATALOADER : Total bytes loaded are {total_bytes_read}")
+    # read_throughput = total_bytes_read / time_to_read
+    # max_logging.log(f"STANDALONE DATALOADER : throughput - {read_throughput} bytes/sec.")
   return state
 
 
