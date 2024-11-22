@@ -422,6 +422,7 @@ class AttentionOp(nn.Module):
       # einsum = self.kv_quant.einsum_fn_with_rhs_qtensor(key)
       if isinstance(key, KVTensor):
         key = self.kv_quant.dequant(key)
+    key = self.reverse_transepose(key, self.ar_cache_axis_order)
     b, t, n, d = query.shape
     n_kv = key.shape[-2]
     assert n_kv == self.num_kv_heads
@@ -462,8 +463,9 @@ class AttentionOp(nn.Module):
     einsum = jnp.einsum
     if self.kv_quant:
     #   einsum = self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(value)
-        if isinstance(value, KVTensor):
-          value = self.kv_quant.dequant(value)
+      if isinstance(value, KVTensor):
+        value = self.kv_quant.dequant(value)
+    value = self.reverse_transepose(value, self.ar_cache_axis_order)
     if model_mode == common_types.MODEL_MODE_TRAIN or self.compute_axis_order == (0,1,2,3):
       out = einsum("bkgts,bskd->btkgd", attn_weights, value)
       b, t, n_kv, g, d = out.shape
@@ -743,8 +745,9 @@ class AttentionOp(nn.Module):
         scale_t=None,
         dequant_dtype=target_dtype
       )
-    cache_value_in_logical_shape = jax.tree.map(lambda x: self.reverse_transepose(x, cache_axis_order), cache_value)
-    return cache_value_in_logical_shape
+    # cache_value_in_logical_shape = jax.tree.map(lambda x: self.reverse_transepose(x, cache_axis_order), cache_value)
+    # return cache_value_in_logical_shape
+    return cache_value
 
   def kv_cache_autoregressive(
       self,
