@@ -52,6 +52,19 @@ from google.cloud import storage
 # pylint: disable=too-many-positional-arguments
 
 
+def with_memory_kind(t, memory_kind):
+  return jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind=memory_kind), t)
+
+
+def cast_dtype_from_to(nest, src, dst):
+  """All items in nest with dtype src are casted to dtype dst."""
+  return jax.tree_util.tree_map(lambda t: t.astype(dst) if t.dtype == src else t, nest)
+
+
+def cast_to_bf16(params):
+  return cast_dtype_from_to(params, np.float32, jnp.bfloat16)
+
+
 def find_nans_and_infs(pytree):
   def finder(x):
     return jnp.any(jnp.isinf(x) | jnp.isnan(x))
@@ -565,7 +578,9 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   if not config.load_parameters_path:
     # generate random params
     max_logging.log("No decode checkpoint specified - generating random weights.")
-    state, state_mesh_annotations, _ = setup_initial_state(model, None, None, config, rng, mesh, checkpoint_manager, False)
+    state, state_mesh_annotations, _, _ = setup_initial_state(
+        model, None, None, config, rng, mesh, checkpoint_manager, False
+    )
   else:
     # Load params from checkpoint
     max_logging.log(f"Loading decode params from {config.load_parameters_path}")
@@ -655,7 +670,8 @@ def setup_initial_state(
         state = state.replace(params=raw_params)
 
   state = unbox_logicallypartioned(state)
-  return state, state_mesh_annotations, data_iterator
+
+  return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 
 
 # Learning Rate Schedule
@@ -810,6 +826,10 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   state_logical_annotations = nn.get_partition_spec(abstract_state)
 
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
+  if is_training and config.optimizer_memory_host_offload:
+    opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
+    params = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.params)
+    state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state, params=params)
 
   abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
 
