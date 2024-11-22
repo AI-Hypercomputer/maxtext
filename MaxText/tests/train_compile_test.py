@@ -258,3 +258,26 @@ class TrainCompile(unittest.TestCase):
             "max_target_length=8192",
         )
     )
+
+  @pytest.mark.tpu
+  def test_custom_32x8_mesh(self):
+    compiled_trainstep_file = "/tmp/test_custom_32x8_mesh.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v6e-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "ici_expert_parallelism=8",
+            "model_name=mixtral-8x7b",
+            "megablox=False",
+            "capacity_factor=1",
+            "per_device_batch_size=4",
+            "max_target_length=1024",
+            "allow_split_physical_axes=true",
+            "custom_mesh=hybrid_ring_32x8",
+            "attention=flash",
+        )
+    )

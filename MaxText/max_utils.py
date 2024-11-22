@@ -49,6 +49,9 @@ from flax.linen import partitioning as nn_partitioning
 from tensorboardX import writer
 from google.cloud import storage
 
+HYBRID_RING_64X4 = "hybrid_ring_64x4"
+HYBRID_RING_32X8 = "hybrid_ring_32x8"
+
 # pylint: disable=too-many-positional-arguments
 
 
@@ -375,25 +378,50 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
   return parallelism_vals
 
 
-def reshape_mesh_to_rings(a):
-  """Reshape device mesh to rings for 64x4 mesh shape"""
+def reshape_mesh_to_rings(a, strategy):
+  """Reshape device mesh to rings for 64x4 or 32x8 mesh shape"""
   b = []
-  for i in range(8):
-    b.append([])
-    for j in range(8):
-      a_i = i * 2
-      a_j = j * 2
-      # forms a ring of size 4
-      b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i + 1, a_j + 1], a[a_i + 1, a_j]])
-  b = np.array(b)
-  b = np.reshape(b, (64, 4))
+  if strategy == HYBRID_RING_64X4:
+    for i in range(8):
+      b.append([])
+      for j in range(8):
+        a_i = i * 2
+        a_j = j * 2
+        # forms a ring of size 4
+        b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i + 1, a_j + 1], a[a_i + 1, a_j]])
+    b = np.array(b)
+    b = np.reshape(b, (64, 4))
+  elif strategy == HYBRID_RING_32X8:
+    for i in range(8):
+      b.append([])
+      for j in range(4):
+        a_i = i * 2
+        a_j = j * 4
+        # forms a ring of size 8
+        b[i].append(
+            [
+                a[a_i, a_j],
+                a[a_i, a_j + 1],
+                a[a_i, a_j + 2],
+                a[a_i, a_j + 3],
+                a[a_i + 1, a_j + 3],
+                a[a_i + 1, a_j + 2],
+                a[a_i + 1, a_j + 1],
+                a[a_i + 1, a_j],
+            ]
+        )
+    b = np.array(b)
+    b = np.reshape(b, (32, 8))
+  else:
+    raise ValueError(f"The strategy {strategy} to reshape the mesh is not implemented.")
   return b
 
 
-def create_custom_64x4_device_mesh(
+def create_custom_device_mesh(
     mesh_shape: Sequence[int],
     dcn_mesh_shape: Sequence[int],
     devices: Sequence[Any],
+    custom_strategy: str,
     process_is_granule: bool = False,
     should_sort_granules_by_key: bool = True,
 ) -> np.ndarray:
@@ -419,12 +447,31 @@ def create_custom_64x4_device_mesh(
       for granule in granules
   ]
 
-  per_granule_meshes = [np.reshape(reshape_mesh_to_rings(x), mesh_shape) for x in per_granule_meshes]
+  per_granule_meshes = [np.reshape(reshape_mesh_to_rings(x, custom_strategy), mesh_shape) for x in per_granule_meshes]
   # TODO(jekbradbury): handle non-uniform DCN topologies
   granule_mesh = np.arange(len(granules)).reshape(dcn_mesh_shape)
   blocks = np.vectorize(lambda i: per_granule_meshes[i], otypes=[object])(granule_mesh)
   device_mesh = np.block(blocks.tolist())
   return device_mesh
+
+
+def is_valid_custom_mesh(ici_parallelism, strategy):
+  """Checks if the given strategy and ICI parallelism are valid."""
+  if not strategy:
+    return False
+
+  valid_strategies = {
+      HYBRID_RING_64X4: [1, 4, 64],
+      HYBRID_RING_32X8: [1, 8, 32],
+  }
+
+  if strategy in valid_strategies:
+    if sorted(set(ici_parallelism)) == valid_strategies[strategy]:
+      return True
+    else:
+      raise ValueError(f"Invalid custom_mesh:{strategy} chosen for ICI mesh shape {ici_parallelism}")
+  else:
+    raise ValueError(f"The strategy {strategy} to reshape the mesh is invalid.")
 
 
 def create_device_mesh(config, devices=None):
@@ -465,14 +512,8 @@ def create_device_mesh(config, devices=None):
 
   if multi_slice_env:
     dcn_parallelism = fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
-    if config.custom_mesh == "hybrid_ring_64x4":
-      # asserting on ici parallelism
-      assert sorted(set(ici_parallelism)) == [
-          1,
-          4,
-          64,
-      ], f"Invalid custom_mesh:{config.custom_mesh} chosen for ICI mesh shape {ici_parallelism}"
-      mesh = create_custom_64x4_device_mesh(ici_parallelism, dcn_parallelism, devices)
+    if is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
+      mesh = create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
     else:
       mesh = mesh_utils.create_hybrid_device_mesh(
           ici_parallelism,
@@ -482,20 +523,14 @@ def create_device_mesh(config, devices=None):
       )
   else:
     if allow_split_physical_axes:
-      if config.custom_mesh == "hybrid_ring_64x4":
-        # asserting on ici parallelism
-        assert sorted(set(ici_parallelism)) == [
-            1,
-            4,
-            64,
-        ], f"Invalid custom_mesh:{config.custom_mesh} chosen for ICI mesh shape {ici_parallelism}"
+      if is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
         mesh = mesh_utils.create_device_mesh(
             [16, 16],
             devices,
             contiguous_submeshes=False,
             allow_split_physical_axes=False,
         )
-        mesh = reshape_mesh_to_rings(mesh)
+        mesh = reshape_mesh_to_rings(mesh, config.custom_mesh)
         mesh = np.reshape(mesh, ici_parallelism)
       else:
         mesh = mesh_utils.create_device_mesh(

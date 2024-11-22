@@ -194,5 +194,26 @@ class MaxUtilsT5XCrossEntropy(unittest.TestCase):
     self.assertTrue(jax.numpy.allclose(optax_xent, t5x_xent, rtol=1e-05, atol=1e-08, equal_nan=False))
 
 
+class MaxUtilsCustomMesh(unittest.TestCase):
+  """Tests for the is_valid_custom_mesh function in max_utils.py"""
+
+  def test_empty_value(self):
+    self.assertFalse(max_utils.is_valid_custom_mesh([1, 1, 1, 1, 1, 64, 4, 1], ""))
+
+  def test_valid_64x4(self):
+    self.assertTrue(max_utils.is_valid_custom_mesh([1, 1, 1, 1, 1, 64, 4, 1], "hybrid_ring_64x4"))
+
+  def test_valid_32x8(self):
+    self.assertTrue(max_utils.is_valid_custom_mesh([1, 1, 32, 1, 1, 8, 1, 1], "hybrid_ring_32x8"))
+
+  def test_invalid_64x4(self):
+    with self.assertRaises(ValueError):
+      max_utils.is_valid_custom_mesh([1, 1, 1, 1, 1, 16, 16, 1], "hybrid_ring_64x4")
+
+  def test_invalid_strategy(self):
+    with self.assertRaises(ValueError):
+      max_utils.is_valid_custom_mesh([1, 1, 1, 1, 1, 16, 16, 1], "invalid_strategy")
+
+
 if __name__ == "__main__":
   unittest.main()
