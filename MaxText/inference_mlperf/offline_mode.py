@@ -477,6 +477,7 @@ def main(argv):
   settings.use_token_latencies = True
 
   os.makedirs(FLAGS.output_log_dir, exist_ok=True)
+  log.info(f"Logging to {FLAGS.output_log_dir}")
   log_output_settings = lg.LogOutputSettings()
   log_output_settings.outdir = FLAGS.output_log_dir
   log_output_settings.copy_summary_to_stdout = True
