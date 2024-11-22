@@ -341,41 +341,17 @@ def train_step(model, config, state, data, dropout_rng):
     rng2: A new rng key that can be used in future calls.
 
   """
-  if config.gradient_accumulation_steps > 1:
 
-    def accumulate_gradient(acc_grad_and_loss, data):
-      grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
-      (_, aux), cur_batch_gradient = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
-      acc_grad_and_loss["loss"] += aux["total_loss"]
-      acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
-      acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
-          lambda x, y: x * aux["total_weights"] + y, cur_batch_gradient, acc_grad_and_loss["grad"]
-      )
-      acc_grad_and_loss["total_weights"] += aux["total_weights"]
-      return acc_grad_and_loss, aux
+  def new_loss_fn(data, params, model, config, dropout_rng, is_train=True):
+    return loss_fn(model, config, data, dropout_rng, params, is_train)
 
-    def reshape_to_microbatch_accumulations(batch_arr):
-      """Reshape global batch to microbatches, assuming batch axis is leading."""
-      microbatches = config.gradient_accumulation_steps
-      microbatch_shape = (microbatches, batch_arr.shape[0] // microbatches) + batch_arr.shape[1:]
-      return jnp.reshape(batch_arr, microbatch_shape)
+  loss_partial = functools.partial(new_loss_fn, model=model, config=config, dropout_rng=dropout_rng)
+  grad_func = jax.value_and_grad(loss_partial, argnums=1, has_aux=True)
+  grad_func_pmapped = jax.pmap(grad_func, axis_name="data", in_axes=(0, None), out_axes=(0, None))
 
-    data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
-    init_grad = jax.tree_util.tree_map(jnp.zeros_like, state.params)
-    init_grad_and_loss = {"loss": 0.0, "grad": init_grad, "total_weights": 0, "moe_lb_loss": 0.0}
-
-    grad_and_loss, aux = jax.lax.scan(
-        accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
-    )
-    loss = (
-        grad_and_loss["loss"] / grad_and_loss["total_weights"]
-        + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
-    )
-    raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], grad_and_loss["grad"])
-    aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)
-  else:
-    grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
-    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
+  (loss, aux), raw_grads = grad_func_pmapped(data, state.params)
+  loss = jnp.sum(loss)
+  raw_grads = jnp.sum(raw_grads)
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
@@ -401,6 +377,7 @@ def train_step(model, config, state, data, dropout_rng):
     record_activation_metrics(metrics, intermediate_outputs, config)
 
   return new_state, metrics
+
 
 
 def eval_step(model, config, state, data, dropout_rng):

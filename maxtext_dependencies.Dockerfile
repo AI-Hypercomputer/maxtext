@@ -38,6 +38,7 @@ WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
 COPY setup.sh ./
+COPY my_custom_libtpu.so ./
 COPY constraints_gpu.txt requirements.txt requirements_with_jax_stable_stack.txt ./
 
 # Install dependencies - these steps are cached unless the copied files change
