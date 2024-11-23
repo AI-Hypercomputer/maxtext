@@ -48,17 +48,12 @@ def _validate_args(
 
   # Validate 'rhs'.
   if rhs.ndim != expected_rhs_dims:
-    raise ValueError(
-        f"Expected {expected_rhs_dims}-tensor for 'rhs' but got"
-        f" {rhs.ndim}-tensor."
-    )
+    raise ValueError(f"Expected {expected_rhs_dims}-tensor for 'rhs' but got" f" {rhs.ndim}-tensor.")
   common.assert_is_supported_dtype(rhs.dtype)
 
   # Validate 'group_sizes'.
   if group_sizes.dtype != jnp.int32:
-    raise ValueError(
-        f"Expected 32-bit integer 'group_sizes' but got {group_sizes.dtype}."
-    )
+    raise ValueError(f"Expected 32-bit integer 'group_sizes' but got {group_sizes.dtype}.")
 
   return lhs, group_sizes, common.select_input_dtype(lhs, rhs)
 
@@ -144,9 +139,7 @@ def make_group_metadata(
   rounded_group_ends = ((group_ends + tm - 1) // tm * tm).astype(jnp.int32)
 
   # (2) Round the group_starts down to the nearest multiple of 'tm'.
-  group_starts = jnp.concatenate(
-      [jnp.zeros(1, dtype=jnp.int32), group_ends[:-1]]
-  )
+  group_starts = jnp.concatenate([jnp.zeros(1, dtype=jnp.int32), group_ends[:-1]])
   rounded_group_starts = group_starts // tm * tm
 
   # (3) Calculate the number of rows in each group.
@@ -213,23 +206,16 @@ def make_group_metadata(
   # group which is empty.
   #
   # TODO(tgale): Invert the 'partial_tile_mask' predicates to be more clear.
-  partial_tile_mask = jnp.logical_or(
-      (group_offsets[:-1] % tm) == 0, group_sizes == 0
-  )
+  partial_tile_mask = jnp.logical_or((group_offsets[:-1] % tm) == 0, group_sizes == 0)
 
   # Explicitly enable tiles for zero sized groups, if specified. This covers
   # zero sized groups that start on a tile-aligned row and those that do not.
   if visit_empty_groups:
     partial_tile_mask = jnp.where(group_sizes == 0, 0, partial_tile_mask)
 
-  partial_tile_ids = jnp.where(
-      partial_tile_mask, tiles_m, group_offsets[:-1] // tm
-  )
+  partial_tile_ids = jnp.where(partial_tile_mask, tiles_m, group_offsets[:-1] // tm)
 
-  tile_visits = (
-      jnp.histogram(partial_tile_ids, bins=tiles_m, range=(0, tiles_m - 1))[0]
-      + 1
-  )
+  tile_visits = jnp.histogram(partial_tile_ids, bins=tiles_m, range=(0, tiles_m - 1))[0] + 1
 
   # Create the m-dimension tile ids for each grid index based on the visit
   # counts for each tile.
@@ -259,9 +245,7 @@ def make_group_metadata(
   return (group_offsets, group_ids, m_tile_ids), num_tiles
 
 
-def _get_group_size(
-    *, grid_id: jnp.ndarray, group_metadata: GroupMetadata
-) -> jnp.ndarray:
+def _get_group_size(*, grid_id: jnp.ndarray, group_metadata: GroupMetadata) -> jnp.ndarray:
   """Calculate the number of rows in the current group."""
   group_offsets, group_ids = group_metadata[:2]
   group_id = group_ids[grid_id]
@@ -308,13 +292,7 @@ LutFn = Callable[[int, int, int], Optional[tuple[int, int, int]]]
 
 @functools.partial(
     jax.jit,
-    static_argnames=[
-        "preferred_element_type",
-        "tiling",
-        "transpose_rhs",
-        "interpret",
-        "quant"
-    ],
+    static_argnames=["preferred_element_type", "tiling", "transpose_rhs", "interpret", "quant"],
 )
 def gmm(
     lhs: jnp.ndarray,
@@ -352,22 +330,16 @@ def gmm(
     assert isinstance(existing_out, jax.Array)
     expected_dtype = existing_out.dtype
     if expected_dtype != preferred_element_type:
-      raise ValueError(
-          "Existing output dtype must match preferred_element_type."
-      )
+      raise ValueError("Existing output dtype must match preferred_element_type.")
   if group_offset is None:
     group_offset = jnp.array([0], dtype=jnp.int32)
   else:
     if group_offset.shape:
-      raise ValueError(
-          f"group_offset must be a ()-shaped array. Got: {group_offset.shape}."
-      )
+      raise ValueError(f"group_offset must be a ()-shaped array. Got: {group_offset.shape}.")
     group_offset = group_offset[None]
   num_current_groups = rhs.shape[0]
   num_total_groups = group_sizes.shape[0]
-  lhs, group_sizes, input_dtype = _validate_args(
-      lhs=lhs, rhs=rhs, group_sizes=group_sizes
-  )
+  lhs, group_sizes, input_dtype = _validate_args(lhs=lhs, rhs=rhs, group_sizes=group_sizes)
 
   # Gather shape information.
   m, k, n = (lhs.shape[0], lhs.shape[1], rhs.shape[2])
@@ -427,9 +399,7 @@ def gmm(
         prev_grid_id = jnp.where(grid_id > 0, grid_id - 1, 0)
         is_first_processed_group = grid_id == 0
         m_tile_changed = m_tile_ids[grid_id] != m_tile_ids[prev_grid_id]
-        first_time_seeing_out = jnp.logical_or(
-            is_first_processed_group, m_tile_changed
-        )
+        first_time_seeing_out = jnp.logical_or(is_first_processed_group, m_tile_changed)
 
         @pl.when(first_time_seeing_out)
         def _init_out():
@@ -455,9 +425,7 @@ def gmm(
           tn=tn,
       )
       to_store = acc_scratch[...]
-      out[...] = jax.lax.select(
-          mask[...], to_store, out[...].astype(jnp.float32)
-      ).astype(preferred_element_type)
+      out[...] = jax.lax.select(mask[...], to_store, out[...].astype(jnp.float32)).astype(preferred_element_type)
 
     def _accum(is_last_k_tile):
       if is_last_k_tile:
@@ -555,13 +523,9 @@ def gmm(
   rhs_bytes = (k * n) * rhs.itemsize  # We don't read all of rhs
   out_bytes = (m * n) * jnp.dtype(preferred_element_type).itemsize
   max_active_tiles = group_metadata[1].size
-  bytes_accessed = (
-      (lhs_bytes * tiles_n) + (rhs_bytes * max_active_tiles) + out_bytes
-  )
+  bytes_accessed = (lhs_bytes * tiles_n) + (rhs_bytes * max_active_tiles) + out_bytes
   flops = 2 * m * k * n
-  cost_estimate = pl.CostEstimate(
-      flops=flops, bytes_accessed=bytes_accessed, transcendentals=0
-  )
+  cost_estimate = pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed, transcendentals=0)
   if quant:
     pallas_call_fn = aqt_pl.pallas_call
   else:
@@ -581,8 +545,7 @@ def gmm(
           scratch_shapes=[pltpu.VMEM((tm, tn), jnp.float32)],
       ),
       input_output_aliases=input_output_aliases,
-      compiler_params=pltpu.TPUCompilerParams(
-              dimension_semantics=("parallel", "arbitrary", "arbitrary")),
+      compiler_params=pltpu.TPUCompilerParams(dimension_semantics=("parallel", "arbitrary", "arbitrary")),
       interpret=interpret,
       cost_estimate=cost_estimate,
   )
@@ -590,7 +553,7 @@ def gmm(
   if quant:
     lhs_contracting_axis, rhs_contracting_axis = dot_general_dims[0]
     # Since block_spec.block_shape of rhs is None, the first axis is reduced
-    # inside kernel, e.g., if block_shape is (None, tn, tk) then a tensor of 
+    # inside kernel, e.g., if block_shape is (None, tn, tk) then a tensor of
     # shape (tn, tk) will be feteched inside kernel instead of (1, tn, tk).
     # Therefore, we need to add one to rhs_contracting_axis.
     rhs_contracting_axis = map(lambda x: x + 1, rhs_contracting_axis)
@@ -659,16 +622,12 @@ def tgmm(
     group_offset = jnp.array([0], dtype=jnp.int32)
   else:
     group_offset = group_offset[None]
-  lhs, group_sizes, input_dtype = _validate_args(
-      lhs=lhs, rhs=rhs, group_sizes=group_sizes, expected_rhs_dims=2
-  )
+  lhs, group_sizes, input_dtype = _validate_args(lhs=lhs, rhs=rhs, group_sizes=group_sizes, expected_rhs_dims=2)
 
   # Gather shape information.
   k, m, n = (lhs.shape[0], lhs.shape[1], rhs.shape[1])
   num_groups = group_sizes.shape[0]
-  num_actual_groups = (
-      num_actual_groups if num_actual_groups is not None else num_groups
-  )
+  num_actual_groups = num_actual_groups if num_actual_groups is not None else num_groups
 
   # If tiling is callable, look up the problem dimensions in the LUT. If no tuned
   # tile dimensions are available throw an error.
@@ -718,9 +677,7 @@ def tgmm(
       acc_scratch[...] = jnp.zeros_like(acc_scratch)
 
     # We'll only do computation if our group has a nonzero number of rows in it.
-    dont_skip = (
-        _get_group_size(grid_id=grid_id, group_metadata=group_metadata) > 0
-    )
+    dont_skip = _get_group_size(grid_id=grid_id, group_metadata=group_metadata) > 0
 
     @pl.when(dont_skip)
     def _do():
@@ -807,19 +764,13 @@ def tgmm(
   rhs_bytes = rhs.size * rhs.itemsize
   out_bytewidth = jnp.dtype(preferred_element_type).itemsize
   out_bytes = (num_actual_groups * k * n) * out_bytewidth
-  bytes_accessed = (
-      (lhs_bytes * tiles_n) + (rhs_bytes * tiles_k) + out_bytes
-  )
+  bytes_accessed = (lhs_bytes * tiles_n) + (rhs_bytes * tiles_k) + out_bytes
   flops = 2 * m * k * n
-  cost_estimate = pl.CostEstimate(
-      flops=flops, bytes_accessed=bytes_accessed, transcendentals=0
-  )
+  cost_estimate = pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed, transcendentals=0)
   lhs = lhs.swapaxes(0, 1)
   call_gmm = pl.pallas_call(
       kernel,
-      out_shape=jax.ShapeDtypeStruct(
-          (num_actual_groups, k, n), preferred_element_type
-      ),
+      out_shape=jax.ShapeDtypeStruct((num_actual_groups, k, n), preferred_element_type),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
           in_specs=[
@@ -832,8 +783,7 @@ def tgmm(
           scratch_shapes=[pltpu.VMEM((tk, tn), jnp.float32)],
       ),
       input_output_aliases=input_output_aliases,
-      compiler_params=pltpu.TPUCompilerParams(
-              dimension_semantics=("parallel", "arbitrary", "arbitrary")),
+      compiler_params=pltpu.TPUCompilerParams(dimension_semantics=("parallel", "arbitrary", "arbitrary")),
       interpret=interpret,
       cost_estimate=cost_estimate,
   )

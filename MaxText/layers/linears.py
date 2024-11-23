@@ -395,7 +395,7 @@ class MoeBlock(nn.Module):
       )
     updated_batch = int(self.config.per_device_batch_size * jax.device_count() // self.config.ici_fsdp_parallelism)
     # inferencing hack
-    # prefill has BS =1 sequence length = max_prefill_length 
+    # prefill has BS =1 sequence length = max_prefill_length
     # decode has BS = B, sequence_length= 1
     if output.shape[0] % updated_batch != 0:
       updated_batch = 1
@@ -416,7 +416,11 @@ class MoeBlock(nn.Module):
       inputs = inputs.astype(self.dtype)
       kernel = kernel.astype(self.dtype)
       output = mblx.gmm(
-          lhs=inputs, rhs=kernel, group_sizes=group_sizes, preferred_element_type=jnp.bfloat16, tiling=tile_size,
+          lhs=inputs,
+          rhs=kernel,
+          group_sizes=group_sizes,
+          preferred_element_type=jnp.bfloat16,
+          tiling=tile_size,
           quant=True if self.quant else False,
       )
 
@@ -665,11 +669,11 @@ class MoeBlock(nn.Module):
       _ = self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
 
       if quantizations.in_serve_mode(self.quant):
-        w0_kernel = self.variables['aqt']['AqtEinsum_0']['AqtDotGeneral_0']['qrhs']['frozen']
-        w1_kernel = self.variables['aqt']['AqtEinsum_1']['AqtDotGeneral_0']['qrhs']['frozen']
-        wo_kernel = self.variables['aqt']['AqtEinsum_2']['AqtDotGeneral_0']['qrhs']['frozen']
+        w0_kernel = self.variables["aqt"]["AqtEinsum_0"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
+        w1_kernel = self.variables["aqt"]["AqtEinsum_1"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
+        wo_kernel = self.variables["aqt"]["AqtEinsum_2"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
 
-        # Currently, megablox kernel does not accept QTensor as inputs. 
+        # Currently, megablox kernel does not accept QTensor as inputs.
         # Dequantizes before feeding it to megablox, as none of tesnsors are not quantized
         # there will be no acceleration during serving. This is just a temporary solution.
         w0_kernel = max_utils.unbox_logicallypartioned(w0_kernel).dequant()
