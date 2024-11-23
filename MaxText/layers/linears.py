@@ -18,6 +18,7 @@ import functools
 import operator
 from typing import Any, Callable, Iterable, Sequence, Tuple, Union, Optional
 
+import flax
 import flax.linen as nn
 import jax
 from jax import lax
@@ -30,6 +31,7 @@ import numpy as np
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
 import max_logging
+import max_utils
 
 try:
   # from jax.experimental.pallas.ops.tpu import megablox as mblx
@@ -658,6 +660,21 @@ class MoeBlock(nn.Module):
 
     if cfg.megablox:
       max_logging.log("Running MoE megablox implementation.")
+      # This is called only during tracing. This is to invoke creation of quantized tensor.
+      # After jit, this will become no-op and will not affect performance.
+      _ = self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+
+      if quantizations.in_serve_mode(self.quant):
+        w0_kernel = self.variables['aqt']['AqtEinsum_0']['AqtDotGeneral_0']['qrhs']['frozen']
+        w1_kernel = self.variables['aqt']['AqtEinsum_1']['AqtDotGeneral_0']['qrhs']['frozen']
+        wo_kernel = self.variables['aqt']['AqtEinsum_2']['AqtDotGeneral_0']['qrhs']['frozen']
+
+        # Currently, megablox kernel does not accept QTensor as inputs. 
+        # Dequantizes before feeding it to megablox, as none of tesnsors are not quantized
+        # there will be no acceleration during serving. This is just a temporary solution.
+        w0_kernel = max_utils.unbox_logicallypartioned(w0_kernel).dequant()
+        w1_kernel = max_utils.unbox_logicallypartioned(w1_kernel).dequant()
+        wo_kernel = max_utils.unbox_logicallypartioned(wo_kernel).dequant()
       return self.megablox(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
     else:
       max_logging.log("Running MoE matmul implementation.")
