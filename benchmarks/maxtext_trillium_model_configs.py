@@ -263,6 +263,37 @@ llama2_7b_4096 = MaxTextModel(
     ),
 )
 
+llama2_70b_2048_real_data = MaxTextModel(
+    model_name="llama2-70b-2048-rd",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": 16,
+        "ici_tensor_parallelism": 16,
+        "remat_policy": "qkv_proj_offloaded",
+        "max_target_length": 2048,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "reuse_example_batch": 1,
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "checkpoint_period": 1000, 
+        "profiler": "xplane",
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "tfds",
+        "tokenizer_path": "assets/tokenizer.llama2",
+        "fused_mlp": True,
+        "fused_qkv": True,
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+)
+
 
 llama2_70b_4096_real_data = MaxTextModel(
     model_name="llama2-70b-4096-rd",
@@ -570,6 +601,7 @@ maxstar_models = [
     # default_256,  # OOM, Not Optimizied yet
     # default_512,  # OOM, Not Optimizied yet
     gpt_3_175b,
+    llama2_70b_2048_real_data,
     llama2_7b_4096,
     llama2_70b_4096,
     llama2_70b_4096_real_data,

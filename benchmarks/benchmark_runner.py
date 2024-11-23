@@ -83,6 +83,7 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
       type=str,
       choices=[
           'gpt_3_175b',
+          'llama2_70b_2048_real_data',
           'llama2_7b_4096',
           'llama2_70b_4096',
           'llama2_70b_4096_real_data',
@@ -97,6 +98,7 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
       default='llama2_70b_4096',
       help=(
           'model to be benchmarked, supported models are gpt_3_175b '
+          'llama2_70b_2048_real_data '
           'llama2_7b_4096 '
           'llama2_70b_4096 '
           'llama2_70b_4096_real_data '
