@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
 # Run command:
-# bash benchmarks_llama2-70b-trillium_2x4.sh
+# bash benchmarks_llama2-70b-trillium_2x4.sh [-b benchmark_type]
+# benchmark_type can be: performance, audit, accuracy, or all (default)
 
 run_name="trillium_llama2-70b"
 dry_run=false
@@ -10,21 +11,43 @@ enable_xla_flags=false
 single_bucket=false
 token_multiplier=3.0
 test_mode=false
+benchmark_type="all"
 
-while getopts "nptsxr:m:" opt
+helpFunction()
+{
+   echo ""
+   echo "Usage: $0 [-n] [-p] [-t] [-s] [-x] [-r run_name] [-m token_multiplier] [-b benchmark_type]"
+   echo -e "\t-n Dry run mode"
+   echo -e "\t-p Enable profiler"
+   echo -e "\t-t Test mode"
+   echo -e "\t-s Single bucket mode"
+   echo -e "\t-x Enable XLA flags"
+   echo -e "\t-r Specify run name"
+   echo -e "\t-m Specify token multiplier"
+   echo -e "\t-b Specify benchmark type (performance|audit|accuracy|all)"
+   exit 1
+}
+
+while getopts "nptsxr:m:b:" opt
 do
   case "$opt" in
       n ) dry_run=true ;;
       p ) enable_profiler=true ;;
-      t ) test_mode=true;;
+      t ) test_mode=true ;;
       s ) single_bucket=true ;;
       x ) enable_xla_flags=true ;;
       r ) run_name="$OPTARG" ;;
       m ) token_multiplier="$OPTARG" ;;
+      b ) benchmark_type="$OPTARG" ;;
       ? ) helpFunction ;; # Print helpFunction in case parameter is non-existent
   esac
 done
 
+# Validate benchmark type
+case "$benchmark_type" in
+    performance|audit|accuracy|all) ;;
+    *) echo "Invalid benchmark type. Must be: performance, audit, accuracy, or all"; exit 1 ;;
+esac
 
 if "$dry_run"; then
     cmd=echo
@@ -41,8 +64,6 @@ if "$test_mode"; then
     RUN_OPTIONS="${RUN_OPTIONS} -t "
 fi
 
-
-
 if "$single_bucket"; then
     export BATCH_AND_PREFILL_LEN="1024,54"
 else
@@ -58,8 +79,14 @@ fi
 
 export TOK_OUTLEN_MULTIPLIER=${token_multiplier}
 
-CHECKPOINT="gs://${USER}-bkt/checkpoints/quant_llama2-70b-chat/prod/int8_"
-TOKENIZER_PATH="/home/${USER}/maxtext/assets/tokenizer.llama2"
+if [[ -z ${CHECKPOINT} ]] ; then
+  export CHECKPOINT="gs://inference-benchmarks/models/llama2-70b-chat/quant/int8_"
+fi
+
+if [[ -z ${TOKENIZER_PATH} ]] ; then
+  export TOKENIZER_PATH="/home/${USER}/maxtext/assets/tokenizer.llama2"
+fi
+
 BASE_CFG="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
 QUANT_CFG="quantization=int8 quantize_kvcache=True checkpoint_is_quantized=True"
 LAYOUT_CFG="compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3"
@@ -67,12 +94,27 @@ export MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${LAYOUT_CFG}"
 
 RUN_DESC=int8_kv_${batch_and_prefill_str}_${token_multiplier}_flags_${enable_xla_flags}
 
-$cmd  cd ..
-# Run mlperf perfromance benchmarks
-$cmd bash llama_offline_run.sh  -r benchmarks_performance_${RUN_DESC} ${RUN_OPTIONS}
+$cmd cd ..
 
-# Run mlperf audit
-# bash llama_offline_run.sh  -r benchmarks_audit_${RUN_DESC} -d
+run_benchmark() {
+    local type=$1
+    case "$type" in
+        "performance")
+            $cmd bash llama_offline_run.sh -r benchmarks_performance_${RUN_DESC} ${RUN_OPTIONS}
+            ;;
+        "audit")
+            $cmd bash llama_offline_run.sh -r benchmarks_audit_${RUN_DESC} -d
+            ;;
+        "accuracy")
+            $cmd bash llama_offline_run.sh -r benchmarks_accuracy_${RUN_DESC} -a
+            ;;
+    esac
+}
 
-# Run mlperf accuracy run
-# bash llama_offline_run.sh  -r benchmarks_accuracy_${RUN_DESC} -a
+if [ "$benchmark_type" = "all" ]; then
+    run_benchmark "performance"
+    run_benchmark "audit"
+    run_benchmark "accuracy"
+else
+    run_benchmark "$benchmark_type"
+fi

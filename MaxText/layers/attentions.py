@@ -61,12 +61,14 @@ KVTensor = quantizations.KVTensor
 AxisNames = common_types.AxisNames
 AxisIdxes = common_types.AxisIdxes
 BATCH = common_types.BATCH
+PREFILL_KV_BATCH = common_types.PREFILL_KV_BATCH
 KV_BATCH = common_types.KV_BATCH
 LENGTH = common_types.LENGTH
 HEAD = common_types.HEAD
 KV_HEAD = common_types.KV_HEAD
 D_KV = common_types.D_KV
 KV_HEAD_DIM = common_types.KV_HEAD_DIM
+CACHE_BATCH_PREFILL = common_types.CACHE_BATCH_PREFILL
 CACHE_BATCH = common_types.CACHE_BATCH
 CACHE_SEQUENCE = common_types.CACHE_SEQUENCE
 CACHE_HEADS = common_types.CACHE_HEADS
@@ -139,6 +141,7 @@ class AttentionOp(nn.Module):
   max_prefill_predict_length: int = -1
   float32_logits: bool = False
   flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
+  prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
   cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
   cache_scale_logical_axis_names: AxisNames = (CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV)
   ragged_qkv_axis_names: AxisNames = (CACHE_BATCH, CACHE_HEADS, CACHE_SEQUENCE, CACHE_KV)
@@ -341,8 +344,8 @@ class AttentionOp(nn.Module):
           block_q_dkv=min(global_block_q_dkv, query.shape[2]),
           block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
           block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
-          block_q_dq=min(global_block_q_dq, query.shape[2]),
-          block_kv_dq=min(global_block_kv_dq, query.shape[2]),
+          block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
+          block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
           use_fused_bwd_kernel=global_use_fused_bwd_kernel,
           q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
           k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
@@ -577,12 +580,17 @@ class AttentionOp(nn.Module):
       return (batch, self.max_prefill_predict_length, 1, 1)
     raise f"Invalid config for kv_quant_axis:{self.kv_quant.axis_cfg}"
 
-  def _get_prefill_cache_vars(self, batch, heads, kv_head_size):
+  def _get_prefill_cache_vars(self, batch, heads, kv_head_size, model_mode):
 
     dtype = self._get_cached_kv_dtype(self.dtype)
     cache_logical_shape = (batch, self.max_prefill_predict_length, heads, kv_head_size)
 
-    cache_axis_names = self.transpose_tuple(self.cache_logical_axis_names, self.prefill_cache_axis_order)
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      cache_logical_axis_names = self.prefill_cache_logical_axis_names
+    else:
+      cache_logical_axis_names = self.cache_logical_axis_names
+
+    cache_axis_names = self.transpose_tuple(cache_logical_axis_names, self.prefill_cache_axis_order)
     cache_shape = self.transpose_tuple(cache_logical_shape, self.prefill_cache_axis_order)
 
     cached_key_var = self.variable(
@@ -599,10 +607,15 @@ class AttentionOp(nn.Module):
         cache_shape,
         dtype,
     )
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      segment_id_axis_names = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE)
+    else:
+      segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
+
     cached_segment_id_var = self.variable(
         "cache",
         "cache_prefill_segment_id",
-        nn.with_logical_partitioning(jnp.zeros, (CACHE_BATCH, CACHE_SEQUENCE)),
+        nn.with_logical_partitioning(jnp.zeros, segment_id_axis_names),
         (cache_logical_shape[0], self.max_prefill_predict_length),
         jnp.int32,
     )
@@ -634,13 +647,18 @@ class AttentionOp(nn.Module):
     value_vars = (cached_value_var, cached_value_scale_var)
     return key_vars, value_vars, cached_segment_id_var
 
-  def _get_ar_cache_vars(self, batch, heads, kv_head_size):
+  def _get_ar_cache_vars(self, batch, heads, kv_head_size, model_mode):
 
     dtype = self._get_cached_kv_dtype(self.dtype)
     cache_length = self.max_target_length - self.max_prefill_predict_length
     cache_logical_shape = (batch, cache_length, heads, kv_head_size)
 
-    cache_axis_names = self.transpose_tuple(self.cache_logical_axis_names, self.ar_cache_axis_order)
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      cache_logical_axis_names = self.prefill_cache_logical_axis_names
+    else:
+      cache_logical_axis_names = self.cache_logical_axis_names
+
+    cache_axis_names = self.transpose_tuple(cache_logical_axis_names, self.ar_cache_axis_order)
     cache_shape = self.transpose_tuple(cache_logical_shape, self.ar_cache_axis_order)
 
     # TODO(b/339703100): investigate the issue why with_logical_partitioning doesn't enforce sharding
@@ -668,10 +686,14 @@ class AttentionOp(nn.Module):
         cache_axis_names,
     )
 
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      segment_id_axis_names = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE)
+    else:
+      segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
     cached_segment_id_var = self.variable(
         "cache",
         "cache_ar_segment_id",
-        nn.with_logical_partitioning(jnp.zeros, (CACHE_BATCH, CACHE_SEQUENCE)),
+        nn.with_logical_partitioning(jnp.zeros, segment_id_axis_names),
         (cache_logical_shape[0], cache_length),
         jnp.int32,
     )
@@ -734,9 +756,10 @@ class AttentionOp(nn.Module):
     assert key.dtype == value.dtype, "Key and Value Dtypes should match."
 
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
-        batch, heads, kv_head_size
+        batch, heads, kv_head_size, common_types.MODEL_MODE_PREFILL
     )
-    _ = self._get_ar_cache_vars(batch, heads, kv_head_size)  # initialize it now
+    # TODO: Find a way to not enable the ar cache for prefill mode.
+    _ = self._get_ar_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_PREFILL)  # initialize it now
 
     key_shaped_for_cache = jnp.transpose(key, self.prefill_cache_axis_order)
     value_shaped_for_cache = jnp.transpose(value, self.prefill_cache_axis_order)
@@ -890,12 +913,9 @@ class AttentionOp(nn.Module):
     batch, sequence, heads, kv_head_size = key.shape
     if sequence != 1:
       raise ValueError(f"Sequence length should be 1 during autoregression, got {sequence=}")
-    is_initialized = self.has_variable("cache", "cache_ar_index")
-    if not is_initialized:
-      raise ValueError("Error, we can't do autoregression if we haven't seeded the KV Cache.")
 
     cached_ar_key_vars, cached_ar_value_vars, cached_ar_segment_id_var, cache_ar_index_var, cache_ar_lengths_var = (
-        self._get_ar_cache_vars(batch, heads, kv_head_size)
+        self._get_ar_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_AUTOREGRESSIVE)
     )
 
     self.update_ar_key_value(
@@ -918,7 +938,7 @@ class AttentionOp(nn.Module):
 
     # The below retrieves the existing prefill cache variables, not creating new ones
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
-        batch, heads, kv_head_size
+        batch, heads, kv_head_size, common_types.MODEL_MODE_AUTOREGRESSIVE
     )
 
     cached_prefill = (
@@ -1080,6 +1100,10 @@ class Attention(nn.Module):
 
   # Shard the query activation as the same as the key and value.
   # TODO: Find a better sharding axis name.
+  # TODO: Further break down the Training and Inference axes for the q, k, v.
+  prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
+  prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
+  prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
@@ -1106,7 +1130,7 @@ class Attention(nn.Module):
         features=(self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=query_init,
-        kernel_axes=("embed", "heads", "kv"),
+        kernel_axes=("embed", "q_heads", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="query",
@@ -1244,12 +1268,16 @@ class Attention(nn.Module):
     query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
     key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
 
-    # annotate with sharding constraint.
-    query = nn.with_logical_constraint(query, self.query_axis_names)
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
+      key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
+      value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
+    else:
+      query = nn.with_logical_constraint(query, self.query_axis_names)
+      key = nn.with_logical_constraint(key, self.key_axis_names)
+      value = nn.with_logical_constraint(value, self.value_axis_names)
     query = checkpoint_name(query, "query_proj")
-    key = nn.with_logical_constraint(key, self.key_axis_names)
     key = checkpoint_name(key, "key_proj")
-    value = nn.with_logical_constraint(value, self.value_axis_names)
     value = checkpoint_name(value, "value_proj")
 
     assert not self.config.quantize_kvcache or self.kv_quant
