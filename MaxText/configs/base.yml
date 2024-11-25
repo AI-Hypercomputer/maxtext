@@ -208,6 +208,12 @@ local_checkpoint_directory: ""
 # It should be a positive number when and only when `enable_emergency_checkpoint` is True.
 local_checkpoint_period: 0
 
+# Whether or not to use emergency checkpoint with the replicator service.
+use_replicator_service: False
+
+# The interval to backup local checkpoints to the persistent storage.
+replicator_backup_interval_minutes: 0
+
 # Jax cache directory
 jax_cache_dir: "~/jax_cache"
 

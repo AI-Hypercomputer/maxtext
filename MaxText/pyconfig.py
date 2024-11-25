@@ -105,8 +105,16 @@ def validate_keys(keys):
     assert (
         keys["local_checkpoint_period"] > 0
     ), "A positive local checkpoint period must be specified when using emergency checkpoint"
+    if keys["use_replicator_service"]:
+      assert (
+          keys["replicator_backup_interval_minutes"] > 0
+      ), "Replicator service is enabled, the backup interval minutes must be positive"
   else:
-    max_logging.log("Not using emergency checkpoint, ignoring local_checkpoint_directory and local_checkpoint_period")
+    max_logging.log(
+        "Not using emergency checkpoint, ignoring local_checkpoint_directory, local_checkpoint_period,"
+        " use_replicator_service and replicator_backup_interval_minutes"
+    )
+
   if keys["num_experts"] > 1:
     validate_megablox_parallelism(keys)
 
@@ -388,7 +396,7 @@ class _HyperParameters:
         raw_keys["eval_per_device_batch_size"], raw_keys["expansion_factor_real_data"], get_num_target_devices(raw_keys), 1
     )
 
-    raw_keys["num_slices"] = get_num_slices(raw_keys)
+    raw_keys["num_slices"] = max_utils.get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
 
     if using_pipeline_parallelism(raw_keys):
@@ -587,21 +595,6 @@ def get_num_target_devices(raw_keys):
     return int(devices_per_slice * raw_keys["compile_topology_num_slices"])
   else:
     return len(jax.devices())
-
-
-def get_num_slices(raw_keys):
-  """Calculate num_slices based on number of devices."""
-  if raw_keys["hardware"] == "cpu":
-    max_logging.log(" Setting num_slices=1 for CPU hardware type")
-    return 1
-  if int(raw_keys["compile_topology_num_slices"]) > 0:
-    return raw_keys["compile_topology_num_slices"]
-  else:
-    devices = jax.devices()
-    try:
-      return 1 + max([d.slice_index for d in devices])
-    except:
-      return 1
 
 
 def get_quantization_local_shard_count(raw_keys):
