@@ -14,17 +14,18 @@ enable_profiler=false
 performance=true
 audit=false
 accuracy=false
+fast_eval=false
 
-
-while getopts "ntspdar:" opt
+while getopts "ntspdarfr:" opt
 do
   case "$opt" in
       n ) dry_run=true ;;
-      t ) test_run=true ;; 
+      t ) test_run=true ;;
       s ) skip_warmup=true ;;
       p ) enable_profiler=true ;;
       d ) audit=true ;;
       a ) accuracy=true ;;
+      f ) fast_eval=true ;;
       r ) run_name="$OPTARG" ;;
       ? ) helpFunction ;; # Print helpFunction in case parameter is non-existent
   esac
@@ -101,12 +102,10 @@ export JAX_COMPILATION_CACHE_DIR="/tmp/jax_cache2"
 export LIBTPU_INIT_ARGS
 
 run_loadgen() {
-
   OUTPUT_LOG_ID=llama70b-${run_name}-${DATASET_TYPE}-${LOADGEN_RUN_TYPE}-${LOADGEN_RUN_TYPE}_${LOADGEN_RUN_TIMESTAMP}
   OUTPUT_LOG_DIR=${DATA_DISK_DIR}/logs/${OUTPUT_LOG_ID}
   mkdir -p ${OUTPUT_LOG_DIR} && cp ${USER_CONFIG} ${OUTPUT_LOG_DIR}
   OUTPUT_ACCURACY_JSON_PATH=${OUTPUT_LOG_DIR}/mlperf_log_accuracy.json
-
 
   echo "LOADGEN_RUN_TIMESTAMP: ${LOADGEN_RUN_TIMESTAMP}"
   echo "DATASET_PATH: ${DATASET_PATH}"
@@ -118,19 +117,18 @@ run_loadgen() {
 
   ${cmd} python -m offline_mode \
     --mlperf_test_mode=${TEST_MODE} \
-	  --input_mode tokenized \
+    --input_mode tokenized \
     --output_mode tokenized \
-	  --mlperf_conf $BASEDIR/mlperf.conf \
-	  --user_conf ${USER_CONFIG} \
-	  --audit_conf ${AUDIT_CONF}  \
-	  --total_sample_count ${TOTAL_SAMPLE_COUNT} \
-	  --dataset_path ${DATASET_PATH} \
+    --mlperf_conf $BASEDIR/mlperf.conf \
+    --user_conf ${USER_CONFIG} \
+    --audit_conf ${AUDIT_CONF}  \
+    --total_sample_count ${TOTAL_SAMPLE_COUNT} \
+    --dataset_path ${DATASET_PATH} \
     --prefill_lengths_and_batch_sizes ${BATCH_AND_PREFILL_LEN} \
     --maxengine_args "${MAXENGINE_ARGS}" \
-	  --output_log_dir ${OUTPUT_LOG_DIR} \
+    --output_log_dir ${OUTPUT_LOG_DIR} \
     --tok_outlen_multiplier ${TOK_OUTLEN_MULTIPLIER} \
     ${SKIP_WARMUP_OPTION} ${PROFILER_OPTION} 2>&1 | tee ${OUTPUT_LOG_DIR}/${LOADGEN_RUN_TYPE}_log.log
-
 }
 
 run_loadgen_performance () {
@@ -155,7 +153,13 @@ run_loadgen_accuracy () {
 
   # Eval Run
   if [ -e ${OUTPUT_ACCURACY_JSON_PATH} ]; then
-    ${CMD} python3 evaluate-accuracy.py \
+    if [ "${FAST_EVAL:-false}" = "true" ] || "$fast_eval"; then
+      EVAL_SCRIPT="evaluate-accuracy-fast.py"
+    else
+      EVAL_SCRIPT="evaluate-accuracy.py"
+    fi
+    
+    ${CMD} python3 ${EVAL_SCRIPT} \
       --checkpoint-path meta-llama/Llama-2-70b-chat-hf \
       --mlperf-accuracy-file ${OUTPUT_ACCURACY_JSON_PATH} \
       --dataset-file ${DATASET_PATH} 2>&1 | tee ${OUTPUT_LOG_DIR}/evaluate_offline_accuracy_log.log
