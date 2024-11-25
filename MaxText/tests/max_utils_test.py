@@ -50,6 +50,7 @@ class MaxUtilsInitState(unittest.TestCase):
     self.params = self.model.init(self.key2, self.input)
     self.output = self.model.apply(self.params, self.input)
     self.tx = optax.adam(learning_rate=0.001)
+    self.optimizer_memory_offload = False
 
   def test_calculate_num_params_from_pytree(self):
     example_tree = [
@@ -89,7 +90,7 @@ class MaxUtilsInitState(unittest.TestCase):
     )
 
   def test_init_training_state(self):
-    state = max_utils.init_training_state(self.model.apply, self.params, self.tx)
+    state = max_utils.init_training_state(self.model.apply, self.params, self.tx, self.optimizer_memory_offload)
     self.assertEqual(state.apply_fn, self.model.apply)
     self.assertEqual(state.tx, self.tx)
     self.assertNotEqual(state.opt_state, {})

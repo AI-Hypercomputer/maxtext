@@ -375,9 +375,10 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)
   else:
     if config.optimizer_memory_host_offload:
-      cast_params = jax.device_put(state.params, max_utils.with_memory_kind(state_mesh_shardings.params, "device"))
-      cast_params = max_utils.cast_to_bf16(cast_params)
-      state = state.replace(params=cast_params)
+      # cast_params = jax.device_put(state.params, max_utils.with_memory_kind(state_mesh_shardings.params, "device"))
+      # cast_params = max_utils.cast_to_bf16(cast_params)
+      # state = state.replace(params=cast_params)
+      pass
     grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
   intermediate_outputs = aux["intermediate_outputs"]
@@ -389,12 +390,13 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   else:
     grads = raw_grads
   if config.optimizer_memory_host_offload:
-    state = state.replace(
-        opt_state=jax.device_put(
-            state.opt_state,
-            jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="device"), state_mesh_shardings.opt_state),
-        )
-    )
+    # state = state.replace(
+    #     opt_state=jax.device_put(
+    #         state.opt_state,
+    #         jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="device"), state_mesh_shardings.opt_state),
+    #     )
+    # )
+    pass
   new_state = state.apply_gradients(grads=grads)
 
   scalar_metrics = {
@@ -605,7 +607,7 @@ def train_loop(config, state=None):
       static_argnums_train,
       donate_argnums_train,
   ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
-
+  print(f"{out_shard_train=}")
   if eval_data_iterator:
     # pylint: disable=line-too-long
     (
