@@ -20,6 +20,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
+from jax.sharding import PartitionSpec, NamedSharding
 import checkpointing
 import common_types
 import functools
@@ -34,6 +35,7 @@ import collections
 from typing import Any, Tuple
 
 import max_logging
+import train_state
 
 
 import orbax.checkpoint as ocp
@@ -43,7 +45,7 @@ import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_c
 import json
 import yaml
 import flax
-from flax.training import train_state
+from flax.training import train_state as flax_train_state
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
@@ -107,6 +109,77 @@ def summarize_size_from_pytree(params):
   num_params = calculate_num_params_from_pytree(params)
   num_bytes = calculate_bytes_from_pytree(params)
   return num_params, num_bytes, num_bytes / num_params
+
+
+def partition_pytree(params, predicate):
+  """
+  Partitions a PyTree into two PyTrees based on a predicate applied to the key names.
+
+  Args:
+      pytree: The PyTree to partition.
+      predicate: A function that takes a key (string) and returns True or False.
+
+  Returns:
+      A tuple of two PyTrees: (matched, unmatched).
+      - matched: Contains all key-value pairs where predicate(key) is True.
+      - unmatched: Contains all key-value pairs where predicate(key) is False.
+  """
+  def recursive_partition(path, subtree):
+    """Recursively partition the PyTree based on the predicate."""
+    if predicate(path):  # If the current path matches, include the whole subtree
+      return subtree, None
+    elif isinstance(subtree, dict):  # Recurse into dictionaries
+      matched, unmatched = {}, {}
+      for k, v in subtree.items():
+        child_path = path + (k,)
+        m, u = recursive_partition(child_path, v)
+        if m is not None:
+          matched[k] = m
+        if u is not None:
+          unmatched[k] = u
+      if matched or unmatched:
+        return matched or None, unmatched or None
+    return None, subtree  # Base case for leaves
+  
+  matched_tree, unmatched_tree = recursive_partition((), params)
+  return matched_tree, unmatched_tree
+
+
+def merge_pytrees(tree1, tree2):
+  """
+  Merges two PyTrees by combining their keys and values.
+  If the keys overlap, values from `tree2` will override those in `tree1`.
+
+  Args:
+      tree1: First PyTree (e.g., a nested dictionary).
+      tree2: Second PyTree to merge with the first.
+
+  Returns:
+      A merged PyTree.
+  """
+  def _merge_dicts(d1, d2):
+    merged = {}
+    all_keys = set(d1.keys()).union(set(d2.keys()))
+    for key in sorted(all_keys):  # Sort keys to ensure consistent ordering
+      if key in d1 and key in d2:
+        if isinstance(d1[key], dict) and isinstance(d2[key], dict):
+          merged[key] = _merge_dicts(d1[key], d2[key])
+        else:
+          # Handle conflicts (choose d2's value, or customize this logic)
+          merged[key] = d2[key]
+      elif key in d1:
+        merged[key] = d1[key]
+      else:
+        merged[key] = d2[key]
+    return merged
+
+  merged_dict = _merge_dicts(tree1, tree2)
+
+  # Reconstruct the merged PyTree with the combined structure
+  flat_leaves, treedef = jax.tree_util.tree_flatten_with_path(merged_dict)
+  flattened_values = [leaf for _, leaf in flat_leaves]
+  merged_tree = jax.tree_util.tree_unflatten(treedef, flattened_values)
+  return merged_tree
 
 
 def initialize_summary_writer(config):
@@ -636,13 +709,13 @@ def unbox_logicallypartioned(boxed_pytree):
 
 def init_decode_state(apply_fn, params):
   """Init train state with null opt state for decode."""
-  state = train_state.TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
+  state = flax_train_state.TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
   return state
 
 
-def init_training_state(apply_fn, params, tx):
+def init_training_state(apply_fn, params, tx, optimizer_memory_host_offload):
   """Init train state with null opt state for decode."""
-  state = train_state.TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
+  state = train_state.TrainState.create(apply_fn=apply_fn, params=params, tx=tx, optimizer_memory_host_offload=optimizer_memory_host_offload)
   return state
 
 
@@ -661,7 +734,7 @@ def init_initial_state(model, tx, config, is_training, key):
       np.ones(input_shape, dtype=jnp.int32),
   )
   if is_training:
-    return init_training_state(model.apply, model_vars, tx)
+    return init_training_state(model.apply, model_vars, tx, config.optimizer_memory_host_offload)
   return init_decode_state(model.apply, model_vars)
 
 
@@ -927,8 +1000,23 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
     abstract_state = jax.eval_shape(init_state_partial)
 
   state_logical_annotations = nn.get_partition_spec(abstract_state)
+  # swap state_mesh_shardings.stacked_opt_state 
+  def swap_partition_spec(spec):
+    spec = spec
+    if isinstance(spec, PartitionSpec) and len(spec) > 1:
+      swapped_spec = PartitionSpec(*([spec[1], spec[0]] + list(spec[2:])))
+      return swapped_spec
+    return spec
+  new_stacked_opt_state_spec = jax.tree_util.tree_map(swap_partition_spec,state_logical_annotations.opt_state.stacked_opt_state)
+  state_logical_annotations = state_logical_annotations.replace(
+    opt_state = train_state.PiecewiseOptimizerState(
+      unstacked_opt_state=state_logical_annotations.opt_state.unstacked_opt_state,
+      stacked_opt_state=new_stacked_opt_state_spec
+    )
+  )
 
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
+  # try pushing all layout to host memory ??
   if is_training and config.optimizer_memory_host_offload:
     opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
     params = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.params)
@@ -1003,6 +1091,12 @@ def print_pytree_shape(print_str, ptree):
   print("\n")
   print(print_str)
   print(jax.tree_util.tree_map(lambda x: x.shape, ptree))
+
+
+def print_pytree_sharding(print_str, ptree):
+  print("\n")
+  print(print_str)
+  print(jax.tree_util.tree_map(lambda x: x.sharding, ptree))
 
 
 def print_model_vars(print_str, model_vars):
