@@ -18,6 +18,7 @@ import functools
 import operator
 from typing import Any, Callable, Iterable, Sequence, Tuple, Union, Optional
 
+import flax
 import flax.linen as nn
 import jax
 from jax import lax
@@ -30,9 +31,12 @@ import numpy as np
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
 import max_logging
+import max_utils
 
 try:
-  from jax.experimental.pallas.ops.tpu import megablox as mblx
+  # from jax.experimental.pallas.ops.tpu import megablox as mblx
+  from kernels import megablox as mblx
+
 except ImportError:
   max_logging.log("JAX megablox is available for TPU only.")
   pass
@@ -389,7 +393,14 @@ class MoeBlock(nn.Module):
           reshaped_weights.astype(jnp.float32),
           precision=matmul_precision,
       )
-    return output.reshape(-1, self.config.max_target_length, self.config.emb_dim // tensor_parallelism).astype(self.dtype)
+    updated_batch = int(self.config.per_device_batch_size * jax.device_count() // self.config.ici_fsdp_parallelism)
+    # inferencing hack
+    # prefill has BS =1 sequence length = max_prefill_length
+    # decode has BS = B, sequence_length= 1
+    if output.shape[0] % updated_batch != 0:
+      updated_batch = 1
+
+    return output.reshape(updated_batch, -1, self.config.emb_dim // tensor_parallelism).astype(self.dtype)
 
   def megablox(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
     tile_size = (512, 1024, 1024)
@@ -405,7 +416,12 @@ class MoeBlock(nn.Module):
       inputs = inputs.astype(self.dtype)
       kernel = kernel.astype(self.dtype)
       output = mblx.gmm(
-          lhs=inputs, rhs=kernel, group_sizes=group_sizes, preferred_element_type=jnp.bfloat16, tiling=tile_size
+          lhs=inputs,
+          rhs=kernel,
+          group_sizes=group_sizes,
+          preferred_element_type=jnp.bfloat16,
+          tiling=tile_size,
+          quant=True if self.quant else False,
       )
 
       if hs_shape[0] % pad_length:
@@ -433,7 +449,7 @@ class MoeBlock(nn.Module):
       layer_w0 = gmm(x, w0, group_sizes)
       layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
       layer_w1 = gmm(x, w1, group_sizes)
-      layer_w1 = checkpoint_name(layer_w0, "mlpwi_1")
+      layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
       layer_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       intermediate_layer = jnp.multiply(layer_act, layer_w1)
       intermediate_output = gmm(intermediate_layer, wo, group_sizes)
@@ -648,6 +664,21 @@ class MoeBlock(nn.Module):
 
     if cfg.megablox:
       max_logging.log("Running MoE megablox implementation.")
+      # This is called only during tracing. This is to invoke creation of quantized tensor.
+      # After jit, this will become no-op and will not affect performance.
+      _ = self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+
+      if quantizations.in_serve_mode(self.quant):
+        w0_kernel = self.variables["aqt"]["AqtEinsum_0"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
+        w1_kernel = self.variables["aqt"]["AqtEinsum_1"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
+        wo_kernel = self.variables["aqt"]["AqtEinsum_2"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
+
+        # Currently, megablox kernel does not accept QTensor as inputs.
+        # Dequantizes before feeding it to megablox, as none of tesnsors are not quantized
+        # there will be no acceleration during serving. This is just a temporary solution.
+        w0_kernel = max_utils.unbox_logicallypartioned(w0_kernel).dequant()
+        w1_kernel = max_utils.unbox_logicallypartioned(w1_kernel).dequant()
+        wo_kernel = max_utils.unbox_logicallypartioned(wo_kernel).dequant()
       return self.megablox(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
     else:
       max_logging.log("Running MoE matmul implementation.")
