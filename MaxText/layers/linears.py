@@ -604,6 +604,7 @@ class MoeBlock(nn.Module):
         )
       return output, loss
     else:
+      top_k_weights /= top_k_weights.sum(-1, keepdims=True)
       weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
       with jax.named_scope("wi_0"):
