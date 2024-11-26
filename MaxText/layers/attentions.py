@@ -1306,6 +1306,8 @@ class Attention(nn.Module):
         ragged_block_size=self.ragged_block_size,
     )
 
+    query = nn.LayerNorm()(query)
+    key = nn.LayerNorm()(key)
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)
 
     out = nn.with_logical_constraint(out, self.out_axis_names)
