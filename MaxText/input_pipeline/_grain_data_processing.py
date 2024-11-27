@@ -99,6 +99,7 @@ def preprocessing_pipeline(
       operations=operations,
       sampler=index_sampler,
       worker_count=grain_worker_count,
+      read_options=grain.ReadOptions(num_threads=64)
   )
 
   multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
