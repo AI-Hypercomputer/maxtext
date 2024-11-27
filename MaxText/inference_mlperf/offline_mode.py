@@ -46,11 +46,10 @@ from maxengine import create_engine_from_config_flags
 import offline_inference
 
 _MLPERF_ID = "llama2-70b"
-
-logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
+log.setLevel(os.getenv("LOGLEVEL", "INFO"))
 
 sys.path.insert(0, os.getcwd())
-log = logging.getLogger("main2.py")
 
 
 from absl import app, flags
