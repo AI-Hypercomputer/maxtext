@@ -441,6 +441,9 @@ inference_microbenchmark_log_file_path: ""
 inference_metadata_file: "" # path to a json file
 enable_model_warmup: False
 
+# Stack prefill cache across the layer to reduce the
+# Python layer latency.
+stack_prefill_result_cache: False
 
 # KV Cache layout control
 # Logical layout: 0,1,2,3 ; CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV
