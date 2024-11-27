@@ -47,7 +47,7 @@ import offline_inference
 
 _MLPERF_ID = "llama2-70b"
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=os.getenv("LOGLEVEL", "INFO"))
 
 sys.path.insert(0, os.getcwd())
 log = logging.getLogger("main2.py")
