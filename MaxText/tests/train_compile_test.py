@@ -218,3 +218,66 @@ class TrainCompile(unittest.TestCase):
             "global_parameter_scale=128",
         )
     )
+
+  @pytest.mark.tpu
+  def test_custom_64x4_mesh(self):
+    compiled_trainstep_file = "/tmp/test_custom_64x4_mesh.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v6e-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "ici_sequence_parallelism=4",
+            "global_parameter_scale=32",
+            "per_device_batch_size=0.25",
+            "max_target_length=65536",
+            "allow_split_physical_axes=true",
+            "custom_mesh=hybrid_ring_64x4",
+        )
+    )
+
+  # TODO (b/376470419) : Enable when AOT test work with host offloading.
+  @pytest.mark.skip(reason="Enable when AOT test work with host offloading.")
+  @pytest.mark.tpu
+  def test_llama3_1_70b_opt_offload(self):
+    compiled_trainstep_file = "/tmp/test_llama3_1_70b_opt_offload.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v6e-256",
+            "compile_topology_num_slices=1",
+            "model_name=llama3.1-70b",
+            "per_device_batch_size=2",
+            "optimizer_memory_host_offload=true",
+            "gradient_clipping_threshold=0",
+            "max_target_length=8192",
+        )
+    )
+
+  @pytest.mark.tpu
+  def test_custom_32x8_mesh(self):
+    compiled_trainstep_file = "/tmp/test_custom_32x8_mesh.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v6e-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "ici_expert_parallelism=8",
+            "model_name=mixtral-8x7b",
+            "megablox=False",
+            "capacity_factor=1",
+            "per_device_batch_size=4",
+            "max_target_length=1024",
+            "allow_split_physical_axes=true",
+            "custom_mesh=hybrid_ring_32x8",
+            "attention=flash",
+        )
+    )

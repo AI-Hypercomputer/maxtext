@@ -326,7 +326,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   return loss, aux
 
 
-def train_step(model, config, state, data, dropout_rng):
+def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   """
 
   Args:
@@ -374,6 +374,10 @@ def train_step(model, config, state, data, dropout_rng):
     raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], grad_and_loss["grad"])
     aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)
   else:
+    if config.optimizer_memory_host_offload:
+      cast_params = jax.device_put(state.params, max_utils.with_memory_kind(state_mesh_shardings.params, "device"))
+      cast_params = max_utils.cast_to_bf16(cast_params)
+      state = state.replace(params=cast_params)
     grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
   intermediate_outputs = aux["intermediate_outputs"]
@@ -384,16 +388,26 @@ def train_step(model, config, state, data, dropout_rng):
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
   else:
     grads = raw_grads
+  if config.optimizer_memory_host_offload:
+    state = state.replace(
+        opt_state=jax.device_put(
+            state.opt_state,
+            jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="device"), state_mesh_shardings.opt_state),
+        )
+    )
   new_state = state.apply_gradients(grads=grads)
+
+  scalar_metrics = {
+      "learning/loss": loss,
+      "learning/moe_lb_loss": moe_lb_loss,
+      "learning/total_weights": total_weights,
+  }
+  if not config.optimizer_memory_host_offload:
+    scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
+    scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
+    scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_state.params)
   metrics = {
-      "scalar": {
-          "learning/loss": loss,
-          "learning/moe_lb_loss": moe_lb_loss,
-          "learning/total_weights": total_weights,
-          "learning/grad_norm": max_utils.l2norm_pytree(grads),
-          "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
-          "learning/param_norm": max_utils.l2norm_pytree(new_state.params),
-      },
+      "scalar": scalar_metrics,
       "scalars": {},
   }
 
@@ -537,7 +551,7 @@ def setup_train_loop(config):
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
 
-  state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(
+  state, _, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
 
@@ -549,7 +563,7 @@ def setup_train_loop(config):
       init_rng,
       writer,
       checkpoint_manager,
-      state_mesh_annotations,
+      state_mesh_shardings,
       model,
       mesh,
       learning_rate_schedule,
@@ -575,7 +589,7 @@ def train_loop(config, state=None):
       init_rng,
       writer,
       checkpoint_manager,
-      state_mesh_annotations,
+      state_mesh_shardings,
       model,
       mesh,
       learning_rate_schedule,
@@ -590,7 +604,7 @@ def train_loop(config, state=None):
       out_shard_train,
       static_argnums_train,
       donate_argnums_train,
-  ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config)
+  ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
 
   if eval_data_iterator:
     # pylint: disable=line-too-long
@@ -600,7 +614,7 @@ def train_loop(config, state=None):
         out_shard_eval,
         static_argnums_eval,
         donate_argnums_eval,
-    ) = maxtext_utils.get_functional_eval_with_signature(eval_step, mesh, state_mesh_annotations, model, config)
+    ) = maxtext_utils.get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, model, config)
 
   num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
   max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
@@ -761,6 +775,7 @@ def main(argv: Sequence[str]) -> None:
         tensorboard_dir=config.tensorboard_dir,
         upload_interval=config.goodput_upload_interval_seconds,
         monitoring_enabled=True,
+        pathway_enabled=config.enable_pathways_goodput,
         include_badput_breakdown=True,
     )
     goodput_monitor.start_goodput_uploader()

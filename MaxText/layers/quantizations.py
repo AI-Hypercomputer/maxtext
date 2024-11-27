@@ -31,6 +31,15 @@ import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
 from typing import Tuple, Sequence
 
+# Params used to define mixed precision quantization configs
+DEFAULT = "__default__"  # default config
+_W_BITS = "w_bits"  # Number of bits used to represent weights
+_A_BITS = "a_bits"  # Number of bits used to represent activations
+_W_SCALE = "w_scale"  # Clipping scale for weights
+_A_SCALE = "a_scale"  # Clipping scale for activations
+_TILE_SIZE = "tile_size"  # Tile size for subchannel
+
+
 MAX_INT8 = 127.5
 MAX_INT4 = 7.5
 
@@ -69,8 +78,20 @@ def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
 
 
 def _rhs_axis_metadata_wrapper(
-    x: jnp.ndarray, tile_map, no_sharding_axis: Sequence[int], mesh_axes: Tuple[str, ...], is_tiled: bool
+    x: jnp.ndarray,
+    tile_map,
+    no_sharding_axis: Sequence[int],
+    mesh_axes: Tuple[str, ...],
+    is_tiled: bool,
+    replicate_scale: bool = False,
 ):
+  if replicate_scale:
+    # Temporarily using the shape to identify the scale.
+    # TODO: remove the replication once the 2d sharding quantization
+    # works as expected.
+    if len(x.shape) == 1:
+      return nn.with_logical_partitioning((lambda: x), tuple([None for _ in mesh_axes]))()
+
   mesh_axes = list(mesh_axes)
   if is_tiled:
     # tile_map is a mapping between original rank and a list of new, tiled rank.
@@ -85,7 +106,8 @@ def _rhs_axis_metadata_wrapper(
 
   if mesh_axes is not None and len(mesh_axes) > 0:
     for no_shard_idx in no_sharding_axis:
-      mesh_axes[no_shard_idx] = None
+      if no_shard_idx < len(mesh_axes):
+        mesh_axes[no_shard_idx] = None
 
   return nn.with_logical_partitioning((lambda: x), mesh_axes)()
 
@@ -96,6 +118,7 @@ class AqtQuantization:
 
   quant_dg: aqt_config.DotGeneral
   quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
+  replicate_scale: bool = False
 
   def _get_mixed_precision_cfg(self):
     quant_dg = None
@@ -106,16 +129,20 @@ class AqtQuantization:
       if re.fullmatch(layer_name_re, module_path):
         quant_dg, tile_size = layer_quant_dg
     if quant_dg is None:
-      quant_dg, tile_size = self.quant_dg["default"]
+      quant_dg, tile_size = self.quant_dg[DEFAULT]
     if tile_size != -1:
       is_tiled = True
       tiling_fn = functools.partial(_tiling_fn, tile_size=tile_size)
     return quant_dg, is_tiled, tiling_fn
 
-  def _get_rhs_axis_metadata_wrapper(self, mesh_axes: Tuple[str, ...] = (), is_tiled: bool = False):
+  def _get_rhs_axis_metadata_wrapper(
+      self, mesh_axes: Tuple[str, ...] = (), is_tiled: bool = False, replicate_scale: bool = False
+  ):
     if self.quant_mode == aqt_flax.QuantMode.CONVERT:
       return None
-    return functools.partial(_rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=is_tiled)
+    return functools.partial(
+        _rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=is_tiled, replicate_scale=replicate_scale
+    )
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
@@ -123,7 +150,9 @@ class AqtQuantization:
       quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
     else:
       quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
-    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(mesh_axes, is_tiled)
+    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(
+        mesh_axes, is_tiled, replicate_scale=self.replicate_scale
+    )
     aqt_dg_cls = functools.partial(
         aqt_flax.AqtDotGeneral,
         quant_dg,
@@ -138,15 +167,23 @@ class AqtQuantization:
 
   def einsum(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns einsum configured with aqt params."""
-    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(mesh_axes)
+    if isinstance(self.quant_dg, dict):
+      quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
+    else:
+      quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
+
+    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(
+        mesh_axes, is_tiled, replicate_scale=self.replicate_scale
+    )
     aqt_einsum = functools.partial(
         aqt_flax.AqtEinsum(
-            cfg=self.quant_dg,
+            cfg=quant_dg,
             rhs_quant_mode=self.quant_mode,
             lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
             rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
             rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
             use_legacy_freezer=False,
+            tiling_fn=tiling_fn,
         )
     )
     return aqt_einsum
@@ -184,24 +221,37 @@ def _get_int8_quant_config(config):
   )
 
 
-def _get_weight_only_quant_config(lhs_bits=None, rhs_bits=None):
-  return aqt_config.dot_general_make(lhs_bits=lhs_bits, rhs_bits=rhs_bits)
+def _dot_general_make(quant_cfg):
+  lhs_bits = quant_cfg[_A_BITS]
+  lhs_scale = quant_cfg[_A_SCALE]
+  rhs_bits = quant_cfg[_W_BITS]
+  rhs_scale = quant_cfg[_W_SCALE]
+  aqt_dg = aqt_config.dot_general_make(lhs_bits=lhs_bits, rhs_bits=rhs_bits)
+  if lhs_scale < 1.0:
+    aqt_dg.fwd.dg_quantizer.lhs.calibration = functools.partial(calibration.AbsMaxCalibration, scale=lhs_scale)
+  if rhs_scale < 1.0:
+    aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(calibration.AbsMaxCalibration, scale=rhs_scale)
+  return aqt_dg
 
 
-def _get_mixed_precision_quant_config(config, config_file):
+def _get_default_mp_config(default=None):
+  default_config = {_W_BITS: None, _A_BITS: None, _W_SCALE: 1.0, _A_SCALE: 1.0, _TILE_SIZE: -1}
+  if default:
+    for k in default_config.keys():
+      default_config[k] = default.get(k, default_config[k])
+  return default_config
+
+
+def _get_mixed_precision_quant_config(mixed_precision_config):
   """Set quantization params based on user configuration."""
-  with open(config_file, "r") as infile:
-    mixed_precision_config = json.load(infile)
   ret_config = {}
-  ret_config["default"] = [aqt_config.dot_general_make(lhs_bits=None, rhs_bits=8), -1]
+  default_mp_config = _get_default_mp_config(default=mixed_precision_config.get(DEFAULT, None))
   for layer_name_re, layer_quantization_config in mixed_precision_config.items():
-    rhs_num_bits = layer_quantization_config.get("bits", 8)
-    tile_size = layer_quantization_config.get("tile_size", -1)
-    scale = layer_quantization_config.get("scale", 1.0)
-    aqt_dg = aqt_config.dot_general_make(lhs_bits=None, rhs_bits=rhs_num_bits)
-    if scale < 1.0:
-      aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(calibration.AbsMaxCalibration, scale=scale)
-    ret_config[layer_name_re] = [aqt_dg, tile_size]
+    quant_config = default_mp_config
+    if layer_name_re != DEFAULT:
+      for k in quant_config.keys():
+        quant_config[k] = layer_quantization_config.get(k, default_mp_config[k])
+    ret_config[layer_name_re] = [_dot_general_make(quant_config), quant_config["tile_size"]]
   return ret_config
 
 
@@ -211,13 +261,11 @@ def _get_quant_config(config):
     return None
   if config.quantization == "int8":
     return _get_int8_quant_config(config)
-  if config.quantization == "int8w":
-    return _get_weight_only_quant_config(lhs_bits=None, rhs_bits=8)
-  if config.quantization == "int4w":
-    return _get_weight_only_quant_config(lhs_bits=None, rhs_bits=4)
   if config.quantization == "intmp":
     assert config.quant_cfg_path, "Must specify quant_cfg for mixed precision quantization"
-    return _get_mixed_precision_quant_config(config, config.quant_cfg_path)
+    with open(config.quant_cfg_path, "r") as config_file:
+      mixed_precision_config = json.load(config_file)
+    return _get_mixed_precision_quant_config(mixed_precision_config)
   if config.quantization == "fp8":
     return "fp8"
   raise ValueError(f"Invalid value configured for quantization {config.quantization}.")
@@ -251,35 +299,48 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
     if quant_cfg == "fp8":
       return Fp8Quantization()
     quant_mode = get_quant_mode(quant_mode_str)
-    return AqtQuantization(quant_dg=quant_cfg, quant_mode=quant_mode)
+    replicate_scale = config.replicate_quant_scale if config.replicate_quant_scale else False
+    return AqtQuantization(quant_dg=quant_cfg, quant_mode=quant_mode, replicate_scale=replicate_scale)
   return None
 
 
-def _get_aqt_key_paths(aqt_vars):
-  """Generate a list of paths which have aqt state"""
-  aqt_tree_flat, _ = jax.tree_util.tree_flatten_with_path(aqt_vars)
-  aqt_key_paths = []
-  for k, _ in aqt_tree_flat:
-    pruned_keys = []
-    for d in list(k):
-      if "AqtDotGeneral" in d.key:
-        pruned_keys.append(jax.tree_util.DictKey(key="kernel"))
+def match_aqt_and_unquantized_param(aqt_params, params):
+  aqt_param_flat, aqt_tree_def = jax.tree_util.tree_flatten_with_path(
+      aqt_params, is_leaf=lambda x: isinstance(x, aqt_tensor.QTensor)
+  )
+  param_tree_flat, _ = jax.tree_util.tree_flatten_with_path(params)
+  aqt_paths = []
+  # Orginal path of quantized AQT param path.
+  param_paths = []
+
+  for aqt_k, _ in aqt_param_flat:
+    for index, (k, _) in enumerate(param_tree_flat):
+      path_depth = len(k)
+      # every quantized parameter has AQT.. as the leaf node
+      # AqtDotGeneral and AqtEinsum replace leaf node.
+      # Therefore, leaf node should be ignored for path matching
+      if k[: path_depth - 1] == aqt_k[: path_depth - 1]:
+        aqt_paths.append(aqt_k)
+        param_paths.append(k)
         break
-      elif "AqtEinsum" in d.key:
-        continue
-      else:
-        assert "Aqt" not in d.key, f"Unexpected Aqt op {d.key} in {k}."
-        pruned_keys.append(d)
-    aqt_key_paths.append(tuple(pruned_keys))
-  return aqt_key_paths
+    # since the parameter is already added, we can delete it.
+    param_tree_flat.pop(index)
+  return jax.tree_util.tree_unflatten(aqt_tree_def, param_paths)
+
+
+def _get_aqt_key_paths(aqt_vars, params):
+  """Generate a list of paths which have aqt state"""
+  aqt_to_unquantized_key_path = match_aqt_and_unquantized_param(aqt_vars, params)
+  aqt_key_paths, _ = jax.tree_util.tree_flatten(aqt_to_unquantized_key_path, is_leaf=lambda x: isinstance(x, tuple))
+  return list(aqt_key_paths)
 
 
 def remove_quantized_params(params, aqt_vars):
   """Remove param values with aqt tensors to Null to optimize memory."""
-  aqt_paths = _get_aqt_key_paths(aqt_vars)
+  quantized_param_paths = _get_aqt_key_paths(aqt_vars, params)
   tree_flat, tree_struct = tree_flatten_with_path(params)
   for i, (k, v) in enumerate(tree_flat):
-    if k in aqt_paths:
+    if k in quantized_param_paths:
       v = {}
     tree_flat[i] = v
   return tree_unflatten(tree_struct, tree_flat)
@@ -325,7 +386,12 @@ class KVQuant:
       return value, scale
     raise ValueError(f"Invalid KV quant dtype:{self.dtype}.")
 
-  def einsum_fn_with_rhs_qtensor(self, kv: Array | aqt_tensor.QTensor, rhs_dequant_mode=None, rhs_calibration_mode=None):
+  def einsum_fn_with_rhs_qtensor(
+      self,
+      kv: Array | aqt_tensor.QTensor,
+      rhs_dequant_mode=None,
+      rhs_calibration_mode=None,
+  ):
     # Assumes kv is already quantized.
     einsum = jnp.einsum
     if isinstance(kv, aqt_tensor.QTensor):

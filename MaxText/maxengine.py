@@ -29,6 +29,7 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
 import common_types
+from jetstream.core import config_lib
 from jetstream.engine import engine_api
 from jetstream.engine import tokenizer_pb2
 from jetstream.engine import tokenizer_api
@@ -37,6 +38,7 @@ from jetstream.engine import token_utils
 import max_utils
 import inference_utils
 import pyconfig
+import jaxlib
 
 import warnings
 
@@ -86,11 +88,11 @@ class MaxEngine(engine_api.Engine):
   JetStream efficient serving infrastructure.
   """
 
-  def __init__(self, config):
+  def __init__(self, config: Any, devices: config_lib.Devices | None = None):
     self.config = config
 
     # Mesh definition
-    devices_array = max_utils.create_device_mesh(config)
+    devices_array = max_utils.create_device_mesh(config=config, devices=devices)
     self._mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
     # Model and Optimizer definition
@@ -99,8 +101,10 @@ class MaxEngine(engine_api.Engine):
     self.replicated_sharding = jax.sharding.NamedSharding(self._mesh, P(None))
 
     self.abstract_params = None
+    self.prefill_kv_cache_annotations = None
     self.kv_cache_annotations = None
     self.kv_cache_annotations_named = None
+    self.prefill_kv_cache_shardings = None
     self.kv_cache_shardings = None
     self.state_mesh_annotations = None
 
@@ -117,9 +121,19 @@ class MaxEngine(engine_api.Engine):
 
     rng1, rng2, rng3 = jax.random.split(rng, 3)
     state, self.state_mesh_annotations = max_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None)
+    # pylint: disable=isinstance-second-argument-not-valid-type
     self.abstract_params = jax.tree_util.tree_map(
-        lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding), state.params
+        lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
+        if isinstance(x, jaxlib.xla_extension.ArrayImpl)
+        else None,
+        state.params,
     )
+
+    self.prefill_kv_cache_annotations = max_utils.get_prefill_kv_cache_annotations(self.model, self.config, rng2, self._mesh)
+    self.prefill_kv_cache_shardings = jax.tree_util.tree_map(
+        lambda x: jax.sharding.NamedSharding(self._mesh, x), self.prefill_kv_cache_annotations
+    )
+
     self.kv_cache_annotations = max_utils.get_kv_cache_annotations(self.model, self.config, rng2, self._mesh)
     self.kv_cache_shardings = jax.tree_util.tree_map(
         lambda x: jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations
@@ -398,7 +412,13 @@ class MaxEngine(engine_api.Engine):
     }
 
   def get_prefix_destination_sharding(self) -> Any:
-    return jax.sharding.NamedSharding(mesh=self.mesh, spec=jax.sharding.PartitionSpec())
+    return {
+        "logits": self.replicated_sharding,
+        "cache": self.prefill_kv_cache_shardings,
+        "next_pos": self.replicated_sharding,
+        "generated_tokens": self.replicated_sharding,
+        "tokens": self.replicated_sharding,
+    }
 
   def get_tokenizer(self) -> tokenizer_pb2.TokenizerParameters:
     """Return a protobuf of tokenizer info, callable from Py or C++."""
@@ -425,16 +445,15 @@ class MaxEngine(engine_api.Engine):
     # pylint: disable=unused-argument
     def init(abstract_params):
       x = jnp.ones(
-          (int(self.config.per_device_batch_size * jax.device_count()), self.config.max_prefill_predict_length),
+          (int(self.config.per_device_batch_size * jax.device_count()), 1),
           dtype=jnp.int32,
       )
       _, cache = self.model.apply(
           abstract_params,
           x,
           x,
-          decoder_segment_ids=jnp.zeros(x.shape, dtype=jnp.int32) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR,
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
+          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
           rngs={"params": rng},
           mutable=["cache"],
       )
@@ -465,14 +484,14 @@ class MaxEngine(engine_api.Engine):
     def initialize():
       return jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), abstract_outputs)
 
-    cache = initialize()["cache"]
+    init_state = initialize()
+    cache = init_state["cache"]
 
     def is_lp(k):
       return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
 
     self.kv_cache_annotations_named = jax.tree_util.tree_map(lambda x: tuple(x.names), cache, is_leaf=is_lp)
-    del cache
-    zeroed = max_utils.unbox_logicallypartioned(initialize())
+    zeroed = max_utils.unbox_logicallypartioned(init_state)
     return zeroed
 
   @property

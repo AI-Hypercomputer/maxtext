@@ -38,8 +38,6 @@ PersistentCheckpointOptions = emergency_checkpoint_manager.PersistentCheckpointO
 
 abstract_logger = ocp.logging.abstract_logger
 cloud_logger = ocp.logging.cloud_logger
-composite_logger = ocp.logging.composite_logger
-standard_logger = ocp.logging.standard_logger
 
 
 def create_orbax_checkpoint_manager(
@@ -217,8 +215,11 @@ def load_state_if_possible(
             ),
             None,
         )
-
-      if dataset_type == "grain" and data_iterator is not None:
+      if (
+          dataset_type == "grain"
+          and data_iterator is not None
+          and (checkpoint_manager.directory / str(latest_step) / "iter").exists()
+      ):
         return (
             checkpoint_manager.restore(
                 latest_step,
@@ -261,32 +262,23 @@ def load_state_if_possible(
     return None, None
 
 
-def setup_checkpoint_logger(config) -> composite_logger.CompositeLogger | None:
+def setup_checkpoint_logger(config) -> cloud_logger.CloudLogger | None:
   """Setup checkpoint logger.
   Args:
     config
   Returns:
-    CompositeLogger
+    CloudLogger
   """
   orbax_cloud_logger = None
-  orbax_standard_logger = None
   max_logging.log("Setting up checkpoint logger...")
   if config.enable_checkpoint_cloud_logger:
-    logger_name = f"checkpoint_{config.run_name}"
+    logger_name = f"goodput_{config.run_name}"
     options = cloud_logger.CloudLoggerOptions(job_name=config.run_name, logger_name=logger_name)
     orbax_cloud_logger = cloud_logger.CloudLogger(options=options)
     max_logging.log("Successfully set up checkpoint cloud logger.")
+    return orbax_cloud_logger
 
-  if config.enable_checkpoint_standard_logger:
-    orbax_standard_logger = standard_logger.StandardLogger()
-    max_logging.log("Successfully set up checkpoint standard logger.")
-
-  orbax_logger = None
-  if orbax_cloud_logger is not None and orbax_standard_logger is not None:
-    orbax_logger = composite_logger.CompositeLogger(orbax_cloud_logger, orbax_standard_logger)
-    max_logging.log("Successfully set up checkpoint composite logger.")
-
-  return orbax_logger
+  return orbax_cloud_logger
 
 
 def load_params_from_path(load_parameters_from_path, abstract_unboxed_params):

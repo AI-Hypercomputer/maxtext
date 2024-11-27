@@ -228,6 +228,7 @@ class MlpBlock(nn.Module):
           use_bias=self.use_bias,
           matmul_precision=self.config.matmul_precision,
       )(inputs)
+      x = checkpoint_name(x, "mlpwi")
       for idx, act_fn in enumerate(self.activations):
         y = _convert_to_activation_function(act_fn)(x[:, :, idx, ...])
         activations.append(y)
@@ -245,6 +246,7 @@ class MlpBlock(nn.Module):
             use_bias=self.use_bias,
             matmul_precision=self.config.matmul_precision,
         )(inputs)
+        x = checkpoint_name(x, "mlp" + dense_name)
         if cfg.activations_in_float32:
           x = x.astype(jnp.float32)
         x = _convert_to_activation_function(act_fn)(x)
@@ -252,7 +254,6 @@ class MlpBlock(nn.Module):
 
     # Take elementwise product of above intermediate activations.
     x = functools.reduce(operator.mul, activations).astype(self.dtype)
-    x = checkpoint_name(x, "mlpwi")
     # Apply dropout and final dense output projection.
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
         x, deterministic=deterministic
@@ -308,32 +309,50 @@ class MoeBlock(nn.Module):
     kernel_out_axis = np.arange(1, 2)
     kernel_init = nd_dense_init(1.0, "fan_in", "truncated_normal")
 
-    w0_kernel = self.param(
-        "wi_0",
-        nn.with_logical_partitioning(kernel_init, self.wi_kernel_axes),
-        (num_experts, emb_dim, mlp_dim),
-        self.weight_dtype,
-        kernel_in_axis,
-        kernel_out_axis,
-    )
+    if quantizations.in_serve_mode(self.quant):
+      # During aqt convert state we delete kernel weight from params to save memory.
+      # Instead they are retrieved from the tensors stored in the 'aqt' collection.
+      w0_kernel = jnp.zeros((num_experts, emb_dim, mlp_dim))
+    else:
+      w0_kernel = self.param(
+          "wi_0",
+          nn.with_logical_partitioning(kernel_init, self.wi_kernel_axes),
+          (num_experts, emb_dim, mlp_dim),
+          self.weight_dtype,
+          kernel_in_axis,
+          kernel_out_axis,
+      )
+
     w0_kernel = jnp.asarray(w0_kernel, self.dtype)
-    w1_kernel = self.param(
-        "wi_1",
-        nn.with_logical_partitioning(kernel_init, self.wi_kernel_axes),
-        (num_experts, emb_dim, mlp_dim),
-        self.weight_dtype,
-        kernel_in_axis,
-        kernel_out_axis,
-    )
+
+    if quantizations.in_serve_mode(self.quant):
+      # During aqt convert state we delete kernel weight from params to save memory.
+      # Instead they are retrieved from the tensors stored in the 'aqt' collection.
+      w1_kernel = jnp.zeros((num_experts, emb_dim, mlp_dim))
+    else:
+      w1_kernel = self.param(
+          "wi_1",
+          nn.with_logical_partitioning(kernel_init, self.wi_kernel_axes),
+          (num_experts, emb_dim, mlp_dim),
+          self.weight_dtype,
+          kernel_in_axis,
+          kernel_out_axis,
+      )
     w1_kernel = jnp.asarray(w1_kernel, self.dtype)
-    wo_kernel = self.param(
-        "wo",
-        nn.with_logical_partitioning(kernel_init, self.wo_kernel_axes),
-        (num_experts, mlp_dim, emb_dim),
-        self.weight_dtype,
-        kernel_in_axis,
-        kernel_out_axis,
-    )
+
+    if quantizations.in_serve_mode(self.quant):
+      # During aqt convert state we delete kernel weight from params to save memory.
+      # Instead they are retrieved from the tensors stored in the 'aqt' collection.
+      wo_kernel = jnp.zeros((num_experts, mlp_dim, emb_dim))
+    else:
+      wo_kernel = self.param(
+          "wo",
+          nn.with_logical_partitioning(kernel_init, self.wo_kernel_axes),
+          (num_experts, mlp_dim, emb_dim),
+          self.weight_dtype,
+          kernel_in_axis,
+          kernel_out_axis,
+      )
     wo_kernel = jnp.asarray(wo_kernel, self.dtype)
     return w0_kernel, w1_kernel, wo_kernel
 
@@ -543,41 +562,41 @@ class MoeBlock(nn.Module):
             dispatch, ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
         )
       with jax.named_scope("wi_0"):
-        w0_kernel_axes = ("exp", None, None)
+        w0_kernel_axes = ("exp", None, "mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
         layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
             "EBCM,EMH -> EBCH", dispatch, w0_kernel, precision=matmul_precision
         )
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
-        layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
         layer_w0 = nn.with_logical_constraint(
             layer_w0, ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
         )
+        layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
       with jax.named_scope("wi_1"):
-        w1_kernel_axes = ("exp", None, None)
+        w1_kernel_axes = ("exp", None, "mlp")
         w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
         layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
             "EBCM,EMH -> EBCH", dispatch, w1_kernel, precision=matmul_precision
         )
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
-        layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
         layer_w1 = nn.with_logical_constraint(
             layer_w1, ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
         )
+        layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
       layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
       with jax.named_scope("wo"):
-        wo_kernel_axes = ("exp", None, None)
+        wo_kernel_axes = ("exp", "mlp", None)
         wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
         intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
             "EBCH,EHM -> EBCM", layer_multiply, wo_kernel, precision=matmul_precision
         )
-        intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
         intermediate_layer = nn.with_logical_constraint(
             intermediate_layer, ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
         )
+        intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("combine"):
         # Matmul & element wise operation
         output = self.get_einsum(rhs_mesh_axes=mask_axes)(
@@ -585,6 +604,7 @@ class MoeBlock(nn.Module):
         )
       return output, loss
     else:
+      top_k_weights /= top_k_weights.sum(-1, keepdims=True)
       weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
       with jax.named_scope("wi_0"):

@@ -280,7 +280,7 @@ class Gpt3DecoderLayer(nn.Module):
     mesh = self.mesh
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
-
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
     lnx_layer_norm = Gpt3LayerNorm(
         dtype=cfg.dtype,
         name="pre_self_attention_norm",
