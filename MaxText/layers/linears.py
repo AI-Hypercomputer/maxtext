@@ -32,6 +32,7 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
 import max_logging
 import max_utils
+from aqt.jax.v2 import aqt_tensor
 
 try:
   # from jax.experimental.pallas.ops.tpu import megablox as mblx
@@ -52,7 +53,7 @@ bias_init = initializers.default_bias_init
 
 RMSNorm = normalizations.RMSNorm
 Quant = quantizations.AqtQuantization
-
+QTensor = aqt_tensor.QTensor
 
 def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
   """Convert a string to an activation function."""
@@ -421,7 +422,7 @@ class MoeBlock(nn.Module):
           group_sizes=group_sizes,
           preferred_element_type=jnp.bfloat16,
           tiling=tile_size,
-          quant=True if self.quant else False,
+          quant=True if self.quant else False
       )
 
       if hs_shape[0] % pad_length:
@@ -431,15 +432,28 @@ class MoeBlock(nn.Module):
     # Currently, we only support data and tensor parallelism with Megablox.
     # We all gather the input activations over tensor parallelism to follow strategy
     # in https://parsa.epfl.ch/course-info/cs723/papers/Megatron.pdf.
+    input_partition_spec = nn.logical_to_mesh_axes(("activation_batch", None, None))
+    gate_logits_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
+    w0_pspec = nn.logical_to_mesh_axes((None, None, "mlp"))
+    w1_pspec = nn.logical_to_mesh_axes((None, None, "mlp"))
+    wo_pspec = nn.logical_to_mesh_axes((None, "mlp", None))
+
+    if isinstance(w0_kernel, QTensor):
+      w0_pspec = aqt_tensor.partition_spec(w0_pspec, [1,], dtype=w0_kernel.dtype, use_bias=False)
+    if isinstance(w1_kernel, QTensor):
+      w1_pspec = aqt_tensor.partition_spec(w1_pspec, [1,], dtype=w1_kernel.dtype, use_bias=False)
+    if isinstance(wo_kernel, QTensor):
+      wo_pspec = aqt_tensor.partition_spec(wo_pspec, [1,], dtype=wo_kernel.dtype, use_bias=False)
+
     @functools.partial(
         shard_map.shard_map,
         mesh=self.mesh,
         in_specs=(
-            (nn.logical_to_mesh_axes(("activation_batch", None, None))),
-            (nn.logical_to_mesh_axes(("activation_batch", None, None))),
-            (nn.logical_to_mesh_axes((None, None, "mlp"))),
-            (nn.logical_to_mesh_axes((None, None, "mlp"))),
-            (nn.logical_to_mesh_axes((None, "mlp", None))),
+            input_partition_spec,
+            gate_logits_pspec,
+            w0_pspec,
+            w1_pspec,
+            wo_pspec
         ),
         out_specs=(nn.logical_to_mesh_axes(("activation_batch", None, "activation_embed"))),
         check_rep=False,
@@ -676,9 +690,9 @@ class MoeBlock(nn.Module):
         # Currently, megablox kernel does not accept QTensor as inputs.
         # Dequantizes before feeding it to megablox, as none of tesnsors are not quantized
         # there will be no acceleration during serving. This is just a temporary solution.
-        w0_kernel = max_utils.unbox_logicallypartioned(w0_kernel).dequant()
-        w1_kernel = max_utils.unbox_logicallypartioned(w1_kernel).dequant()
-        wo_kernel = max_utils.unbox_logicallypartioned(wo_kernel).dequant()
+        w0_kernel = max_utils.unbox_logicallypartioned(w0_kernel)
+        w1_kernel = max_utils.unbox_logicallypartioned(w1_kernel)
+        wo_kernel = max_utils.unbox_logicallypartioned(wo_kernel)
       return self.megablox(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
     else:
       max_logging.log("Running MoE matmul implementation.")

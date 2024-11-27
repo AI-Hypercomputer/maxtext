@@ -296,7 +296,7 @@ LutFn = Callable[[int, int, int], Optional[tuple[int, int, int]]]
 )
 def gmm(
     lhs: jnp.ndarray,
-    rhs: jnp.ndarray,
+    rhs: jnp.ndarray | QTensor,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
     tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
@@ -520,7 +520,11 @@ def gmm(
     rhs_block_spec = pl.BlockSpec((None, tk, tn), rhs_transform_indices)
 
   lhs_bytes = lhs.size * lhs.itemsize
-  rhs_bytes = (k * n) * rhs.itemsize  # We don't read all of rhs
+  if isinstance(rhs, QTensor):
+    rhs_bytes = (k * n) * rhs.qvalue.itemsize # ignore scale factor as its size marginal.
+  else:
+    rhs_bytes = (k * n) * rhs.itemsize  # We don't read all of rhs
+
   out_bytes = (m * n) * jnp.dtype(preferred_element_type).itemsize
   max_active_tiles = group_metadata[1].size
   bytes_accessed = (lhs_bytes * tiles_n) + (rhs_bytes * max_active_tiles) + out_bytes
@@ -558,7 +562,8 @@ def gmm(
     # Therefore, we need to add one to rhs_contracting_axis.
     rhs_contracting_axis = map(lambda x: x + 1, rhs_contracting_axis)
     lhs = aqt_pl.quant(lhs, 8, lhs_contracting_axis)
-    rhs = aqt_pl.quant(rhs, 8, list(rhs_contracting_axis))
+    if not isinstance(rhs, QTensor):
+      rhs = aqt_pl.quant(rhs, 8, list(rhs_contracting_axis))
 
   out = call_gmm(
       group_metadata,

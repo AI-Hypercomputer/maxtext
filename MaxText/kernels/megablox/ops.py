@@ -17,6 +17,7 @@
 import jax
 from kernels.megablox import gmm as backend
 import jax.numpy as jnp
+from aqt.jax.v2 import aqt_tensor
 
 
 gmm = jax.custom_vjp(
@@ -27,7 +28,7 @@ gmm = jax.custom_vjp(
 
 def _gmm_fwd(
     lhs: jnp.ndarray,
-    rhs: jnp.ndarray,
+    rhs: jnp.ndarray | aqt_tensor.QTensor,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
     tiling: tuple[int, int, int] = (128, 128, 128),
@@ -40,7 +41,7 @@ def _gmm_fwd(
     jnp.ndarray,
     tuple[
         jnp.ndarray,
-        jnp.ndarray,
+        jnp.ndarray | aqt_tensor.QTensor,
         jnp.ndarray,
         jnp.ndarray | None,
         int,
@@ -70,7 +71,7 @@ def _gmm_bwd(
     quant: bool,
     residual: tuple[
         jnp.ndarray,
-        jnp.ndarray,
+        jnp.ndarray | aqt_tensor.QTensor,
         jnp.ndarray,
         jnp.ndarray | None,
         int,
