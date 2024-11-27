@@ -14,7 +14,7 @@
 """ Evaluation script based on MLPerf requirements"""
 
 import argparse
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, LlamaTokenizer
 import nltk
 import evaluate
 import numpy as np
@@ -54,17 +54,22 @@ def postprocess_text(preds, targets):
 def main():
 
   args = get_args()
-  dataset_path = args.dataset_file
-  checkpoint_path = args.checkpoint_path
   metric = evaluate.load("rouge")
   nltk.download("punkt")
 
-  tokenizer = AutoTokenizer.from_pretrained(
-      checkpoint_path,
-      model_max_length=2048,
-      padding_side="left",
-      use_fast=False,
-  )
+  if args.checkpoint_path:
+    print(f"Loading checkpoint from {args.checkpoint_path}")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.checkpoint_path,
+        model_max_length=2048,
+        padding_side="left",
+        use_fast=False,
+    )
+  elif args.tokenizer_path:
+    print(f"Loading tokenizer from {args.tokenizer_path}")
+    tokenizer = LlamaTokenizer(args.tokenizer_path)
+  else:
+    raise ValueError("Either --checkpoint-path or --tokenizer-path must be provided")
 
   targets = get_groundtruth(args.dataset_file)
 
