@@ -86,6 +86,7 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
           'llama2_7b_4096',
           'llama2_70b_4096',
           'llama2_70b_4096_real_data',
+          'llama3_70b_8192',
           'llama3_1_405b_8192_fsdp_dcn',
           'llama3_1_405b_8192_fsdp_dcn_c4',
           'llama3_1_8b_8192_c4',

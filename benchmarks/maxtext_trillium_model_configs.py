@@ -374,7 +374,9 @@ llama3_70b_8192 = MaxTextModel(
         "per_device_batch_size": 3,
         "ici_fsdp_parallelism": -1,
         "remat_policy": "full",
-        "max_target_length": 4096,
+        "optimizer_memory_host_offload": True,
+        "gradient_clipping_threshold": 0,
+        "max_target_length": 8192,
         "attention": "flash",
         "gcs_metrics": True,
         "use_iota_embed": True,
@@ -391,6 +393,8 @@ llama3_70b_8192 = MaxTextModel(
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        + " --xla_tpu_scheduler_percent_shared_memory_limit=90"
     ),
 )
 
