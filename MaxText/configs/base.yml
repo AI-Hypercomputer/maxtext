@@ -228,7 +228,7 @@ logical_axis_rules: [
                        # For pipeline parallelism the pre and post decoder layer tensors' batch dimension is sharded by stages.
                        # Microbatches are sharded by stage, so moving out of and into this sharding should be a local reshape.
                        # The "stage" needs to be listed first since the microbatch dimension is first before the reshape.
-                      ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_embed_and_logits_batch', ['stage', 'data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_heads', ['tensor','sequence']],
                       ['activation_kv_heads', ['tensor','sequence']],
                       ['activation_length', 'sequence'],
