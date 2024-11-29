@@ -14,7 +14,7 @@
  limitations under the License.
 -->
 
-## Getting Started: `multihost_job.py` - Production Jobs On Multiple Slices
+# Production Jobs On Multiple Slices (`multihost_job.py`)
 
 The workflow using `multihost_job.py` is optimized for long running experiments, providing resiliency against hardware failure and avoiding long running ssh connections. Its latency is much higher than `multihost_runner.py` because it needs to provision new capacity each time. The `multihost_job.py` script ends once the request to create the TPUs is issued. Logs are written both to gcloud in real time and also sent to GCS at the end of the job.
 

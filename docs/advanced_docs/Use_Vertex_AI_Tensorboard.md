@@ -13,19 +13,19 @@
  See the License for the specific language governing permissions and
  limitations under the License.
 -->
-## Use Vertex AI Tensorboard
+# Use Vertex AI Tensorboard
 MaxText supports automatic upload of logs collected in a directory to a Tensorboard instance in Vertex AI. For more information on how MaxText supports this feature, visit [cloud-accelerator-diagnostics](https://pypi.org/project/cloud-accelerator-diagnostics) PyPI package documentation.
 
-### What is Vertex AI Tensorboard and Vertex AI Experiment
+## What is Vertex AI Tensorboard and Vertex AI Experiment
 Vertex AI Tensorboard is a fully managed and enterprise-ready version of open-source Tensorboard. To learn more about Vertex AI Tensorboard, visit [this](https://cloud.google.com/vertex-ai/docs/experiments/tensorboard-introduction). Vertex AI Experiment is a tool that helps to track and analyze an experiment run on Vertex AI Tensorboard. To learn more about Vertex AI Experiments, visit [this](https://cloud.google.com/vertex-ai/docs/experiments/intro-vertex-ai-experiments). 
 
 You can use a single Vertex AI Tensorboard instance to track and compare metrics from multiple Vertex AI Experiments. While you can view metrics from multiple Vertex AI Experiments within a single Tensorboard instance, the underlying log data for each experiment remains separate.
 
-### Prerequisites
+## Prerequisites
 * Enable [Vertex AI API](https://cloud.google.com/vertex-ai/docs/start/cloud-environment#enable_vertexai_apis) in your Google Cloud console.
 * Assign [Vertex AI User IAM role](https://cloud.google.com/vertex-ai/docs/general/access-control#aiplatform.user) to the service account used by the TPU VMs. This is required to create and access the Vertex AI Tensorboard in Google Cloud console. If you are using XPK for MaxText, the necessary Vertex AI User IAM role will be automatically assigned to your node pools by XPK – no need to assign it manually.
 
-### Upload Logs to Vertex AI Tensorboard
+## Upload Logs to Vertex AI Tensorboard
 **Scenario 1: Using XPK to run MaxText on GKE**
 
 XPK simplifies MaxText's Vertex AI Tensorboard integration. A Vertex Tensorboard instance and Experiment are automatically created by XPK during workload scheduling. Also, XPK automatically sets the necessary environment variables, eliminating the need to manually configure this in MaxText. Set `use_vertex_tensorboard=False` to avoid setting up Vertex Tensorboard again in MaxText. This is how the configuration will look like for running MaxText via XPK:

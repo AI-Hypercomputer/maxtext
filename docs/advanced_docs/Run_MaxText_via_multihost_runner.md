@@ -14,7 +14,7 @@
  limitations under the License.
 -->
 
-## Getting Started: `multihost_runner.py` - Quick Experiments on Multiple Hosts (or Multiple Slices)
+# Quick Experiments on Multiple Hosts or Multiple Slices (`multihost_runner.py`)
 
 This workflow using `multihost_runner.py` is optimized for quick experiments, repeatedly re-using the same TPUs. Because the `multihost_runner.py` script depends on long-lived `ssh` connections, we do not recommend it for any long-running jobs.
 
