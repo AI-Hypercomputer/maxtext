@@ -353,7 +353,9 @@ class KVQuant:
     self,
     kv: Array| aqt_tensor.QTensor,
     rhs_dequant_mode=None,
-    rhs_calibration_mode=None
+    rhs_calibration_mode=None,
+    lhs_dequant_mode=None,
+    lhs_calibration_mode=None,
     ):
     # Assumes kv is already quantized.
     einsum = jnp.einsum
@@ -379,6 +381,15 @@ class KVQuant:
           kv_cfg,
           rhs_calibration_mode=rhs_calibration_mode,
           )
+      if lhs_dequant_mode:
+        aqt_config.set_fwd_dequant_mode(
+          kv_cfg, lhs_dequant_mode=lhs_dequant_mode
+        )
+      if lhs_calibration_mode:
+        aqt_config.set_fwd_calibration_mode(
+          kv_cfg,
+          lhs_calibration_mode=lhs_calibration_mode,
+          )
       einsum = aqt_flax.AqtEinsum(
         rhs_quant_mode=aqt_flax.QuantMode.TRAIN,
         lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
@@ -391,6 +402,8 @@ class KVQuant:
   def einsum_fn_with_rhs_qtensor_and_dequant(self, value):
     return self.einsum_fn_with_rhs_qtensor(
       value,
+      lhs_dequant_mode=aqt_config.DequantMode.THIS_INPUT,
+      lhs_calirbation_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
       rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
       rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS
       )
