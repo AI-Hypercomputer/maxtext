@@ -2,9 +2,9 @@ echo "Printing sysctl net.ipv4.tcp_rto_min_us..."
 echo "########################################"
 sysctl net.ipv4.tcp_rto_min_us
 
-echo "Printing ss -tmoi"
-echo "########################################"
-ss -tmoi
+# echo "Printing ss -tmoi"
+# echo "########################################"
+# ss -tmoi
 
 echo "Printing ip route show"
 echo "########################################"
