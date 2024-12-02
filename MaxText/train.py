@@ -44,6 +44,7 @@ import optimizers
 import profiler
 import pyconfig
 import pathwaysutils  # pylint: disable=unused-import
+import tensorflow as tf
 
 from vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
@@ -755,6 +756,7 @@ def train_loop(config, state=None):
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  tf.config.set_visible_devices([], 'GPU')
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
