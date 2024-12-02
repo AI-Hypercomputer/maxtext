@@ -419,9 +419,9 @@ class AttentionOp(nn.Module):
     """
     einsum = jnp.einsum
     if self.kv_quant:
-      # einsum = self.kv_quant.einsum_fn_with_rhs_qtensor(key)
-      if isinstance(key, KVTensor):
-        key = self.kv_quant.dequant(key)
+      einsum = self.kv_quant.einsum_fn_with_rhs_qtensor(key)
+      # if isinstance(key, KVTensor):
+      #   key = self.kv_quant.dequant(key)
     b, t, n, d = query.shape
     n_kv = key.shape[-2]
     assert n_kv == self.num_kv_heads
@@ -461,9 +461,9 @@ class AttentionOp(nn.Module):
 
     einsum = jnp.einsum
     if self.kv_quant:
-    #   einsum = self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(value)
-      if isinstance(value, KVTensor):
-        value = self.kv_quant.dequant(value)
+      einsum = self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(value)
+      # if isinstance(value, KVTensor):
+      #   value = self.kv_quant.dequant(value)
     if model_mode == common_types.MODEL_MODE_TRAIN or self.compute_axis_order == (0,1,2,3):
       out = einsum("bkgts,bskd->btkgd", attn_weights, value)
       b, t, n_kv, g, d = out.shape
