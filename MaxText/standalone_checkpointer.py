@@ -69,7 +69,7 @@ def checkpoint_loop(config, state=None):
     if jax.process_index() == 0:
       max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint restored in : {checkpoint_load_end - checkpoint_load_start}")
   else:  # Checkpoint was unavailable, state needs to be initialized
-    state, _, _ = max_utils.setup_training_state(model, None, tx, config, init_rng, mesh, checkpoint_manager)
+    state, _, _, _ = max_utils.setup_training_state(model, None, tx, config, init_rng, mesh, checkpoint_manager)
   state = add_entropy_to_checkpoint(state)
 
   start_step = get_first_step(state)  # this is the start_step for training
