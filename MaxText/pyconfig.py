@@ -115,6 +115,7 @@ def validate_keys(keys):
         " use_replicator_service and replicator_backup_interval_minutes"
     )
 
+  validate_multiple_slices(keys)
   if keys["num_experts"] > 1:
     validate_megablox_parallelism(keys)
 
@@ -486,6 +487,27 @@ class _HyperParameters:
         updated_keys = list(model_vars.keys())
       raw_keys = validate_and_update_keys(raw_keys, model_vars, config_name)
     return updated_keys
+
+
+def validate_multiple_slices(raw_keys):
+  if (
+      math.fabs(
+          math.prod(
+              [
+                  raw_keys["dcn_data_parallelism"],
+                  raw_keys["dcn_pipeline_parallelism"],
+                  raw_keys["dcn_fsdp_parallelism"],
+                  raw_keys["dcn_fsdp_transpose_parallelism"],
+                  raw_keys["dcn_sequence_parallelism"],
+                  raw_keys["dcn_tensor_parallelism"],
+                  raw_keys["dcn_expert_parallelism"],
+                  raw_keys["dcn_autoregressive_parallelism"],
+              ]
+          )
+      )
+      > 1
+  ):
+    assert raw_keys["num_slices"] > 1, "DCN parallelism requested but only one slice available."
 
 
 def validate_megablox_parallelism(raw_keys):
