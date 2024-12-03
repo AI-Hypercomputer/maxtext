@@ -125,10 +125,13 @@ def ar_benchmark_loop(config, engine, params, decode_state, iters, profile_name)
   prof.activate()
   start = datetime.datetime.now()
   rng = jax.random.PRNGKey(1234)
+  sampled_tokens_list = []
   for _ in range(iters):
     rng, rng_generate = jax.random.split(rng)
-    decode_state, _ = engine.generate(params, decode_state, rng=rng_generate)
+    decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
+    sampled_tokens_list.append(sampled_tokens)
   jax.block_until_ready(decode_state)
+  print(f"sampled_tokens_list: {sampled_tokens_list}")
   end = datetime.datetime.now()
   prof.deactivate()
   return (end - start).total_seconds(), decode_state
@@ -256,6 +259,7 @@ def main(config, inference_metadata: Optional[Dict[str, Any]] = None):
   benchmark_loop_iters = config.inference_microbenchmark_loop_iters
 
   text = config.prompt
+  print(f"config.prompt: {config.prompt}")
   metadata = engine.get_tokenizer()
   vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
   rng, rng_init_decode = jax.random.split(rng)
