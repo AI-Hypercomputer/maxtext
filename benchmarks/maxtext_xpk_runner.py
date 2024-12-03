@@ -338,7 +338,7 @@ def generate_xpk_workload_cmd(
     libtpu_version: str,
     base_output_directory: str,
     buffer_size: int,
-    xpk_path: str,
+    xpk_path: str = None,
     exp_name = None,
     use_pathways: bool = False,
 ):
@@ -438,6 +438,7 @@ def run_xpk_workload(
     libtpu_version: str,
     buffer_size: int,
     exp_name=None,
+    xpk_path: str = None,
 ):
   """Runs a maxstar model on XPK.
 
@@ -448,12 +449,12 @@ def run_xpk_workload(
   Returns:
   """
   command, _ = generate_xpk_workload_cmd(
-      model, cluster_config, num_slices, libtpu_type, libtpu_version, base_output_directory=cluster_config.base_output_directory, buffer_size=4294967296, xpk_path=xpk_path, buffer_size=buffer_size, exp_name=exp_name
+      model, cluster_config, num_slices, libtpu_type, libtpu_version, base_output_directory=cluster_config.base_output_directory, buffer_size=buffer_size, xpk_path=xpk_path, exp_name=exp_name
   )
   return run_command_with_updates(command, 'Run XPK workload', cluster_config)
 
 
-def xpk_benchmark_runner(cluster_config: XpkConfig, benchmarks: list[BenchmarkRunner], exp_name=None, xpk_path: str):
+def xpk_benchmark_runner(cluster_config: XpkConfig, benchmarks: list[BenchmarkRunner], xpk_path: str, exp_name=None):
   xpk_workload_names = []
   xpk_workload_cmds = []
   for benchmark in benchmarks:
