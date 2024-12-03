@@ -338,7 +338,7 @@ llama2_70b_4096 = MaxTextModel(
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.CF_FOR_ALL_GATHER 
+        + xla_flags_library.CF_FOR_ALL_GATHER
     ),
 )
 
@@ -527,6 +527,7 @@ mixtral_8x7b_dropped = MaxTextModel(
         "sa_block_q_dq": 2048,
         "megablox": False,
         "capacity_factor": 1.25,
+        "tokenizer_path": "assets/tokenizer.mistral-v1",
     },
     xla_flags=(
         xla_flags_library.MOE_VMEM_LIMIT_FLAG

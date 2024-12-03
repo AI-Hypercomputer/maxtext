@@ -311,7 +311,7 @@ def build_user_command(
       f' export ENABLE_PJRT_COMPATIBILITY=true &&'
       f' export {libtpu_flags} && '
       ' python3 MaxText/train.py MaxText/configs/base.yml'
-      f' {config_tuning_params}'
+      f' {config_tuning_params} steps={num_steps}'
       f' model_name={model.model_type}'
       f' base_output_directory={base_output_directory}'
       f' use_vertex_tensorboard=false'
@@ -331,10 +331,13 @@ def generate_xpk_workload_cmd(
     exp_name = None
 ):
   """Generates a command to run a maxstar model on XPK."""
-  num_steps = 2000
   time.localtime()
   #test_purpose_name = f'maxstar-benchmarks-{model.model_name}-{libtpu_version}'
   test_purpose_name = f'{model.model_name}-conv'
+  if "steps" not in model.tuning_params:
+     num_steps = 20
+  else:
+    num_steps = model.tuning_params["steps"]
   if "learning_rate" in model.tuning_params:
     lr = str(model.tuning_params["learning_rate"]).split(".")[-1]
     warm_up = int(model.tuning_params["warmup_steps_fraction"] * model.tuning_params["steps"])
