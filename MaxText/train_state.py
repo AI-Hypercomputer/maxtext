@@ -82,18 +82,15 @@ class TrainState(train_state.TrainState):
   #   return _remove_dummy_stacking(new_params), new_opt_state
 
   def apply_to_slice(self, grads, params, opt_state):
-    if self.optimizer_memory_host_offload:
-      params = jax.device_put(params, TransferToMemoryKind('device'))
-      opt_state = jax.device_put(opt_state, TransferToMemoryKind('device'))
     updates, new_opt_state = self.tx.update(
       _add_dummy_stacking(grads),
       opt_state,
       _add_dummy_stacking(params),
     )
     new_params = optax.apply_updates(params, updates)
-    if self.optimizer_memory_host_offload:
-      new_params = jax.device_put(new_params, TransferToMemoryKind('pinned_host'))
-      new_opt_state = jax.device_put(new_opt_state, TransferToMemoryKind('pinned_host'))
+    # if self.optimizer_memory_host_offload:
+    #   new_params = jax.device_put(new_params, TransferToMemoryKind('pinned_host'))
+    #   new_opt_state = jax.device_put(new_opt_state, TransferToMemoryKind('pinned_host'))
     return _remove_dummy_stacking(new_params), new_opt_state
 
 
@@ -106,9 +103,9 @@ class TrainState(train_state.TrainState):
       unstacked_grads, unstacked_opt_state, unstacked_params
     )
     new_unstacked_params = optax.apply_updates(unstacked_params, updates)
-    if self.optimizer_memory_host_offload:
-      new_unstacked_params = jax.device_put(new_unstacked_params, TransferToMemoryKind('pinned_host'))
-      new_unstacked_opt_state = jax.device_put(new_unstacked_opt_state, TransferToMemoryKind('pinned_host'))
+    # if self.optimizer_memory_host_offload:
+    #   new_unstacked_params = jax.device_put(new_unstacked_params, TransferToMemoryKind('pinned_host'))
+    #   new_unstacked_opt_state = jax.device_put(new_unstacked_opt_state, TransferToMemoryKind('pinned_host'))
     new_params = max_utils.merge_pytrees(new_stacked_params, new_unstacked_params)
     new_opt_state = PiecewiseOptimizerState(
         unstacked_opt_state=new_unstacked_opt_state,
@@ -150,15 +147,16 @@ class TrainState(train_state.TrainState):
             grads, params, opt_state
         )
         return (None, (new_params, new_opt_state))
-
+      if self.optimizer_memory_host_offload:
+        stacked_params = jax.device_put(stacked_params, TransferToMemoryKind('device'))
+        stacked_opt_state = jax.device_put(stacked_opt_state, TransferToMemoryKind('device'))
       new_stacked_params, new_stacked_opt_state = jax.lax.scan(
           apply_to_slice,
           None,
           (stacked_grads, stacked_params, stacked_opt_state),
       )[1]
       # reshaping back to original shapes
-      reshape_fn_2 = lambda x: jnp.swapaxes(x, 0, 1) if x.ndim > 1 else x
-      new_stacked_params = jax.tree_util.tree_map(reshape_fn_2, new_stacked_params)
+      new_stacked_params = jax.tree_util.tree_map(reshape_fn, new_stacked_params)
       # new_stacked_opt_state = jax.tree_util.tree_map(reshape_fn_2, new_stacked_opt_state)
       # new_stacked_opt_state = _remove_dummy_stacking(new_stacked_opt_state)
       # new_stacked_opt_state = jax.tree_util.tree_map(reshape_fn_2, new_stacked_opt_state)
