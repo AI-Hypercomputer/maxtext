@@ -932,20 +932,20 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
     abstract_state = jax.eval_shape(init_state_partial)
 
   state_logical_annotations = nn.get_partition_spec(abstract_state)
-  # swap state_mesh_shardings.stacked_opt_state 
-  def swap_partition_spec(spec):
-    spec = spec
-    if isinstance(spec, PartitionSpec) and len(spec) > 1:
-      swapped_spec = PartitionSpec(*([spec[1], spec[0]] + list(spec[2:])))
-      return swapped_spec
-    return spec
-  new_stacked_opt_state_spec = jax.tree_util.tree_map(swap_partition_spec,state_logical_annotations.opt_state.stacked_opt_state)
-  state_logical_annotations = state_logical_annotations.replace(
-    opt_state = train_state.PiecewiseOptimizerState(
-      unstacked_opt_state=state_logical_annotations.opt_state.unstacked_opt_state,
-      stacked_opt_state=new_stacked_opt_state_spec
-    )
-  )
+  # # swap state_mesh_shardings.stacked_opt_state 
+  # def swap_partition_spec(spec):
+  #   spec = spec
+  #   if isinstance(spec, PartitionSpec) and len(spec) > 1:
+  #     swapped_spec = PartitionSpec(*([spec[1], spec[0]] + list(spec[2:])))
+  #     return swapped_spec
+  #   return spec
+  # new_stacked_opt_state_spec = jax.tree_util.tree_map(swap_partition_spec,state_logical_annotations.opt_state.stacked_opt_state)
+  # state_logical_annotations = state_logical_annotations.replace(
+  #   opt_state = train_state.PiecewiseOptimizerState(
+  #     unstacked_opt_state=state_logical_annotations.opt_state.unstacked_opt_state,
+  #     stacked_opt_state=new_stacked_opt_state_spec
+  #   )
+  # )
 
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
   # try pushing all layout to host memory ??
@@ -953,7 +953,6 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
     opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
     params = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.params)
     state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state, params=params)
-
   abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
 
   unboxed_abstract_sharded_state = unbox_logicallypartioned(abstract_sharded_state)
