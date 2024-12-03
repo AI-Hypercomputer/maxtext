@@ -70,7 +70,7 @@ from ml_goodput_measurement import monitoring
 
 Transformer = models.Transformer
 EPS = 1e-8
-_DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = 2 * 1024**3
+_DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = 200 * 1024**2 # 200 MB
 
 
 def validate_train_config(config):

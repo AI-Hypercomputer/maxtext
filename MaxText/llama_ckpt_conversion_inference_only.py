@@ -31,6 +31,7 @@ Each pass, load and save partial weights (subset of all weight variables).
 import argparse
 import pathlib
 from pprint import pprint
+import pdb
 
 import numpy as np
 
@@ -46,6 +47,7 @@ import os
 import pyconfig
 from layers import models, quantizations
 import pathwaysutils
+import train_compile
 
 def permute_to_match_maxtext_rope(arr):
   evens = arr[..., ::2]
@@ -99,7 +101,7 @@ MODEL_PARAMS_DICT = {
 }
 
 
-def convert(base_model_path, maxtext_model_path, model_size, params_shardings):
+def convert(base_model_path, maxtext_model_path, model_size):
   """
   Function to convert the checkpoint at base_model_path into Orbax checkpoint
   for MaxText and save at maxtext_model_path
@@ -126,7 +128,7 @@ def convert(base_model_path, maxtext_model_path, model_size, params_shardings):
     import psutil
     checkpoint = torch.load(ckpt_path, map_location="cpu")
     pytorch_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = checkpoint
-    print("memory usage in GB: ", psutil.Process().memory_info().rss / (1024 * 1024))
+    print("memory usage in GB: ", psutil.Process().memory_info().rss / (1024 * 1024 * 1024))
 
   pytorch_vars = [pytorch_vars[i] for i in sorted(list(pytorch_vars.keys()))]
 
@@ -176,7 +178,7 @@ def convert(base_model_path, maxtext_model_path, model_size, params_shardings):
 
   for layer_idx in range(base_num_decoder_layers):
     print("layer idx: ", layer_idx)
-    print("memory usage in GB: ", psutil.Process().memory_info().rss / (1024 * 1024))
+    print("memory usage in GB: ", psutil.Process().memory_info().rss / (1024 * 1024 * 1024))
     wq = np.concatenate(
         [var[f"layers.{layer_idx}.attention.wq.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=0
     ).transpose()
@@ -239,10 +241,12 @@ def convert(base_model_path, maxtext_model_path, model_size, params_shardings):
 
 
   # Shard weights in the same way as maxengine will load them
-  def checkpoint_device_put(arr, sharding):
-    return jax.device_put(arr, sharding)
+  # def checkpoint_device_put(arr, sharding):
+  #   pdb.set_trace()
+  #   arr = jax.numpy.array(arr)
+  #   arr._sharding = sharding
 
-  jax_weights = jax.tree.map(checkpoint_device_put, jax_weights, params_shardings)
+  # jax_weights = jax.tree.map(checkpoint_device_put, jax_weights, params_shardings)
 
   step_number_to_save_new_ckpt = 0
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
@@ -250,8 +254,7 @@ def convert(base_model_path, maxtext_model_path, model_size, params_shardings):
       enable_checkpointing=True,
       use_async=False,
       save_interval_steps=1,
-      use_ocdbt=False,
-      use_zarr3=False,
+      use_ocdbt=True,
   )
 
   state_new = train_state.TrainState(
@@ -267,7 +270,43 @@ def convert(base_model_path, maxtext_model_path, model_size, params_shardings):
       sys.exit()
 
 
+# def reshard(base_model_path, base_unboxed_abstract_state, resharded_model_path, params_shardings):
+#   checkpointing.load_state_if_possible(None, None, "/checkpoint/converted/unsharded/0/items", "", train_state.TrainState(step=0, apply_fn=None, params=None, tx=None, opt_state={}))
+# 
+#   params = checkpointing.load_params_from_path(base_model_path, base_unboxed_abstract_state.params)
+# 
+#   def checkpoint_device_put(arr, sharding):
+#     arr = jax.numpy.array(arr)
+#     arr._sharding = sharding
+# 
+#   params = jax.tree.map(checkpoint_device_put, params, params_shardings)
+# 
+#   step_number_to_save_new_ckpt = 0
+#   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+#       checkpoint_dir=resharded_model_path,
+#       enable_checkpointing=True,
+#       use_async=False,
+#       save_interval_steps=1,
+#       use_ocdbt=False,
+#       use_zarr3=False,
+#   )
+# 
+#   state_new = train_state.TrainState(
+#       step=0, apply_fn=None, params={"params": params}, tx=None, opt_state={}  # type: ignore
+#   )
+# 
+#   if checkpoint_manager is not None:
+#     if save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
+#       max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
+#     # Upon preemption, exit when and only when all ongoing saves are complete.
+#     if checkpoint_manager.reached_preemption(0):
+#       checkpoint_manager.wait_until_finished()
+#       sys.exit()
+# 
+
 if __name__ == "__main__":
+  jax.config.update("jax_platform_name", "cpu")
+
   # Do not query VM metadata server for TPU variables.
   os.environ["TPU_SKIP_MDS_QUERY"] = "1"
 
@@ -275,25 +314,23 @@ if __name__ == "__main__":
   parser.add_argument("--base-model-path", type=str, required=True)
   parser.add_argument("--maxtext-model-path", type=str, required=True)
   parser.add_argument("--model-size", type=str, required=True, choices=MODEL_PARAMS_DICT.keys())
-  parser.add_argument("maxtextargs", nargs="+")
+  # parser.add_argument("maxtextargs", nargs="+")
   args = parser.parse_args()
 
-  jax.profiler.start_server(8888)
+  # pyconfig.initialize(["python"] + args.maxtextargs)
+  # config = pyconfig.config
 
-  pyconfig.initialize(["python"] + args.maxtextargs)
-  config = pyconfig.config
-
-  mesh = jax.sharding.Mesh(max_utils.create_device_mesh(config), config.mesh_axes)
-  print("Mesh:")
-  pprint(mesh)
+  #mesh = jax.sharding.Mesh(max_utils.create_device_mesh(config), config.mesh_axes)
+  # mesh = train_compile.get_topology_mesh(config)
+  # print("Mesh:")
+  # pprint(mesh)
 
   # Create model in the same way as maxengine.MaxEngine will and get shardings for state.
-  model = models.Transformer(config, mesh=mesh, quant=quantizations.configure_quantization(config))
-  _, _, train_state_shardings = max_utils.get_abstract_state(model, None, config, jax.random.PRNGKey(0), mesh, False)
-  params_shardings = train_state_shardings.params['params']
-  print(f"Params shardings:")
-  pprint(params_shardings)
+  # model = models.Transformer(config, mesh=mesh, quant=quantizations.configure_quantization(config))
+  # unboxed_abstract_state, _, train_state_shardings = max_utils.get_abstract_state(model, None, config, jax.random.PRNGKey(0), mesh, False)
+  # params_shardings = train_state_shardings.params['params']
+  # print(f"Params shardings:")
+  # pprint(params_shardings)
 
-  convert(args.base_model_path, args.maxtext_model_path, args.model_size, params_shardings)
-
-  jax.profiler.stop_server()
+  convert(args.base_model_path, args.maxtext_model_path, args.model_size)
+  # reshard(args.base_model_path, unboxed_abstract_state, args.maxtext_model_path, params_shardings)
