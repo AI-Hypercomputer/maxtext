@@ -51,7 +51,7 @@ CF_FOR_ALL_REDUCE_AND_ALL_GATHER = (
 
 #Only ready for 1D All-Gather but should support 2D soon, and
 # hopefully All-Reduce soon.
-ENABLE_SPARECORE_OFFLOADING_FOR_1D_ALL_GATHER = (
+ENABLE_SPARSECORE_OFFLOADING_FOR_1D_ALL_GATHER = (
     " --xla_sc_disable_megacore_partitioning=true"
     " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
     " --xla_tpu_enable_all_gather_offload_tracing=true"
@@ -59,6 +59,7 @@ ENABLE_SPARECORE_OFFLOADING_FOR_1D_ALL_GATHER = (
     " --xla_tpu_enable_sparse_core_collective_offload_all_gather=true"
     " --xla_sc_enable_instruction_fusion=false"
     " --xla_sc_disjoint_spmem=false"
+    " --2a886c8_chip_config_name=megachip_tccontrol"
     # Interesting flags to try:
     # " --xla_tpu_enable_offloading_gather_to_sparsecore=true"
     # " --xla_tpu_enable_offloading_reduce_to_sparsecore=true"
