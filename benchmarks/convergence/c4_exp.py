@@ -232,7 +232,7 @@ import math
 
 def setupDataset(model: MaxTextModel, params: DatasetHParams):
     model.model_name = model.model_name + "_" + params.name
-    model.tuning_params["reuse_example_batch"] = None
+    model.tuning_params["reuse_example_batch"] = -1
     model.tuning_params["dataset_path"] = params.dataset_path
     model.tuning_params["dataset_name"] = params.dataset_name
     model.tuning_params["dataset_type"] = params.dataset_type
