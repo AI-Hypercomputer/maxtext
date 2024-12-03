@@ -607,7 +607,6 @@ def train_loop(config, state=None):
       static_argnums_train,
       donate_argnums_train,
   ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
-  print(f"{out_shard_train=}")
   if eval_data_iterator:
     # pylint: disable=line-too-long
     (
