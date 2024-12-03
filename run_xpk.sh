@@ -30,7 +30,7 @@ gcloud config set project $PROJECT_ID
 gcloud config set compute/zone $ZONE
 python3 xpk/xpk.py workload create --cluster $CLUSTER_NAME \
     --workload $WORKLOAD_NAME --docker-image gcr.io/supercomputer-testing/$LOCAL_IMAGE_NAME \
-    --device-type $DEVICE_TYPE --num-nodes 16 \
+    --device-type $DEVICE_TYPE --num-nodes 128 \
     --priority=high --scheduler=gke.io/topology-aware-auto \
     --command "python3 MaxText/train.py MaxText/configs/base.yml \
         base_output_directory=${BASE_OUTPUT_PATH} dataset_path=${DATASET_PATH} \

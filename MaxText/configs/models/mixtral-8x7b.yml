@@ -32,9 +32,10 @@ decoder_block: "mistral"
 ici_fsdp_parallelism: 1
 ici_tensor_parallelism: 1
 ici_expert_parallelism: -1
-dcn_data_parallelism: 8
-dcn_fsdp_parallelism: 2
+dcn_data_parallelism: -1
+dcn_fsdp_parallelism: 1
 capacity_factor: 1.0
+# quantization: "int8"
 # megablox: False
 
 
@@ -72,7 +73,7 @@ steps: 30
 per_device_batch_size: 8.0
 max_target_length: 4096
 attention: "cudnn_flash_te"
-remat_policy: "full"
+remat_policy: "minimal"
 use_iota_embed: True
 dataset_type: "synthetic"
 reuse_example_batch: 1
