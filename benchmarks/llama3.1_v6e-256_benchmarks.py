@@ -1,5 +1,6 @@
-from e2e.c4_exp import llama3_1_8b_8192_c4en, llama3_1_8b_8192_c4multien, setupConvHParams
-from maxtext_trillium_model_configs import ConvHParams
+from convergence.c4_exp import llama3_1_8b_8192_c4en, llama3_1_8b_8192_c4multien, setupConvHParams, setupC4Multilingualen
+
+from maxtext_trillium_model_configs import ConvHParams, llama3_8b_8192, llama3_70b_8192
 from maxtext_xpk_runner import BenchmarkRunner
 from maxtext_xpk_runner import HWConfig
 from maxtext_xpk_runner import SWconfig
@@ -11,9 +12,10 @@ DATE = '20241028'
 BASE_DOCKER_IMAGE = 'maxtext_base_image'
 
 ZONE = 'us-east5'
-#PROJECT = 'tpu-prod-env-one-vm'
-PROJECT = 'tpu-prod-env-automated'
-CLUSTER_NAME = 'bodaborg-v6e-256'
+
+PROJECT = 'tpu-prod-env-one-vm'
+CLUSTER_NAME = 'bodaborg-v6e-256-donotdelete'
+
 DEVICE_TYPE = 'v6e-256'
 NUM_SLICES = 1
 NUM_DEVICES = 256
@@ -35,9 +37,8 @@ import math
 
 #warm_up_samples = 600 * 512
 warm_up_samples = 800 * 512
-decay_samples = 10000 * 512
-total_samples = 10000 * 512
-eval_samples = 36 * 512
+decay_samples = 21000 * 512
+total_samples = 21000 * 512
 
 c4_gbs256 = ConvHParams(
         global_batch_size=256,
@@ -97,21 +98,12 @@ def main() -> None:
       base_output_directory="gs://maxtext-experiments-tpem/llama-conv/"
   )
 
-  # warmup_steps_fractions = range(1000, 3000, 1000)
-  # learning_rates = map(lambda x: x/1e5, range(2, 30, 4))
-  # total_steps = 3000
-  # benchmark_lists = []
-  # for learning_rate in learning_rates:
-  #   #for warmup_steps in warmup_steps_fractions:
-  #     model = copy.deepcopy(llama31_8b_c4_benchmark_v6e)
-  #     #model.model_name.tuning_params["warmup_steps_fraction"] = float(warmup_steps) / total_steps
-  #     model.model_name.tuning_params["learning_rate"] = learning_rate
-  #     benchmark_lists.append(model)
-  # #xpk_benchmark_runner(cluster_config, benchmark_lists)
-
   benchmark_lists = [] #c4_gbs1024, c4_gbs2048, c4_gbs4096, c4_gbs8192
+  model = llama3_8b_8192
+
   for config in [c4_gbs512]:
-    model = copy.deepcopy(llama3_1_8b_8192_c4en)
+    model = copy.deepcopy(model)
+    setupC4Multilingualen(model)
     setupConvHParams(model, config, NUM_DEVICES*NUM_SLICES)
   
     benchmark_model = BenchmarkRunner(
@@ -121,7 +113,7 @@ def main() -> None:
     )
     benchmark_lists.append(benchmark_model)
   
-  #xpk_benchmark_runner(cluster_config, benchmark_lists, "llama8b-c4multi-exp")  
-  xpk_benchmark_runner(cluster_config, benchmark_lists, "llama8b-c4-exp")  
+  xpk_benchmark_runner(cluster_config, benchmark_lists, "llama8b-c4multi-exp")
+
 if __name__ == '__main__':
   main()

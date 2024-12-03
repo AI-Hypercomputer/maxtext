@@ -1,4 +1,4 @@
-from e2e.c4_exp import llama3_1_8b_8192_c4en, llama3_1_8b_8192_c4multien, setupConvHParams
+from convergence.c4_exp import llama3_1_8b_8192_c4en, llama3_1_8b_8192_c4multien, setupConvHParams
 from maxtext_viperfish_model_configs import ConvHParams, llama2_70b_4096_real_data, llama2_70b_4096_real_data_int8, llama2_70b_4096_int8, llama2_70b_4096_int8_ckp
 from maxtext_xpk_runner import BenchmarkRunner
 from maxtext_xpk_runner import HWConfig
@@ -96,37 +96,10 @@ def main() -> None:
       base_output_directory="gs://maxtext-experiments-tpem/llama-perf/"
   )
 
-  # warmup_steps_fractions = range(1000, 3000, 1000)
-  # learning_rates = map(lambda x: x/1e5, range(2, 30, 4))
-  # total_steps = 3000
-  # benchmark_lists = []
-  # for learning_rate in learning_rates:
-  #   #for warmup_steps in warmup_steps_fractions:
-  #     model = copy.deepcopy(llama31_8b_c4_benchmark_v6e)
-  #     #model.model_name.tuning_params["warmup_steps_fraction"] = float(warmup_steps) / total_steps
-  #     model.model_name.tuning_params["learning_rate"] = learning_rate
-  #     benchmark_lists.append(model)
-  # #xpk_benchmark_runner(cluster_config, benchmark_lists)
-  
-#   model_name = llama3_1_8b_8192_c4en
-#   exp_name = "llama8b-c4-exp"
-
   model_name = llama2_70b_4096_real_data_v5p
   exp_name = "llama70b-perf"
 
-#   benchmark_lists = [] #c4_gbs1024, c4_gbs2048, c4_gbs4096, c4_gbs8192
-#   for config in [c4_gbs512]:
-#     model = copy.deepcopy(model_name)
-#     setupConvHParams(model, config, NUM_DEVICES*NUM_SLICES)
-  
-#     benchmark_model = BenchmarkRunner(
-#       model_name=model,
-#       software_config=v6e_env_configs,
-#       hardware_config=v6e_256_configs,
-#     )
-#     benchmark_lists.append(benchmark_model)
-  
   xpk_benchmark_runner(cluster_config, [model_name], exp_name)  
-  #xpk_benchmark_runner(cluster_config, benchmark_lists, exp_name)  
+
 if __name__ == '__main__':
   main()

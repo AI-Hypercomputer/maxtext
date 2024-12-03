@@ -29,6 +29,7 @@ class MaxTextModel:
 
 @dataclasses.dataclass
 class DatasetHParams:
+    name: str
     dataset_path: str
     dataset_name: str
     dataset_type: str
