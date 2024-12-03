@@ -332,8 +332,7 @@ def generate_xpk_workload_cmd(
 ):
   """Generates a command to run a maxstar model on XPK."""
   time.localtime()
-  #test_purpose_name = f'maxstar-benchmarks-{model.model_name}-{libtpu_version}'
-  test_purpose_name = f'{model.model_name}-conv'
+  test_purpose_name = f'maxstar-benchmarks-{model.model_name}-{libtpu_version}'
   if "steps" not in model.tuning_params:
      num_steps = 20
   else:
