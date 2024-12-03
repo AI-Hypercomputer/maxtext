@@ -27,3 +27,9 @@ echo "Printing qdisc"
 echo "########################################"
 qdisc_out=$(tc -s -d qdisc sh dev eth0)
 echo "qdisc: ${qdisc_out}"
+
+echo "Printing tcp_rmem"
+echo "########################################"
+tcp_rmem=$(sysctl net.ipv4.tcp_rmem)
+echo "tcp_rmem: ${tcp_rmem}"
+
