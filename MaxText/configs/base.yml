@@ -40,7 +40,7 @@ load_full_state_path: ""
 # problems with the checkpointer we recommend trying the synchronous one.
 enable_checkpointing: True
 async_checkpointing: True
-checkpoint_period: 10_000
+checkpoint_period: 1_000
 # enables one replica to read the ckpt then broadcast to the rest
 enable_single_replica_ckpt_restoring: False
 
@@ -470,7 +470,7 @@ jax_profiler_port: 9999
 enable_checkpoint_cloud_logger: False
 
 # Single-controller
-enable_single_controller: False
+enable_single_controller: True
 
 custom_mesh: "" # Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']
 # Split physical axes for https://jax.readthedocs.io/en/latest/_autosummary/jax.experimental.mesh_utils.create_device_mesh.html
