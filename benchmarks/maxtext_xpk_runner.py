@@ -274,8 +274,11 @@ def build_user_command(
     config_tuning_params += f'{key}={value} '
 
   install_libtpu_cmd = ''
-  if use_pathways:
-    pass
+  if use_pathways and libtpu_type == LibTpuType.NIGHTLY:
+    install_libtpu_cmd += (
+        f' pip install libtpu-nightly==0.1.dev{libtpu_date} -f'
+        ' https://storage.googleapis.com/libtpu-releases/index.html &&'
+    )
   elif libtpu_type == LibTpuType.NIGHTLY:
     install_libtpu_cmd += (
         f' pip install libtpu-nightly==0.1.dev{libtpu_date} -f'
