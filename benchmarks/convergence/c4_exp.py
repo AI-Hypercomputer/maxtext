@@ -12,7 +12,6 @@ c4_mlperf_hp = DatasetHParams(
         eval_steps=4 * 512,
         add_bos=False,
         add_eos=False,
-        vocab_size=51200,
         tokenizer_path="gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model")
 
 c4_en_hp = DatasetHParams(
@@ -25,7 +24,6 @@ c4_en_hp = DatasetHParams(
         eval_steps=36 * 512,
         add_bos=False,
         add_eos=False,
-        vocab_size=51200,
         tokenizer_path="gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model")
 
 c4_mutil_hp = DatasetHParams(
@@ -38,7 +36,6 @@ c4_mutil_hp = DatasetHParams(
         eval_steps=206 * 2048, # 852 * 512
         add_bos=False,
         add_eos=False,
-        vocab_size=51200,
         tokenizer_path="gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model")
 
 llama3_1_8b_8192_c4en = MaxTextModel(
@@ -246,7 +243,6 @@ def setupDataset(model: MaxTextModel, params: DatasetHParams):
     model.tuning_params["add_bos"] = params.add_bos
     model.tuning_params["add_eos"] = params.add_eos
     model.tuning_params["eval_steps"] = params.eval_steps
-    model.tuning_params["vocab_size"] = params.vocab_size
     model.tuning_params["data_shuffle_seed"] = 1238
 
 
