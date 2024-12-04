@@ -85,12 +85,19 @@ def validate_profiler_type(s: str) -> None:
     raise ValueError("Invalid profiler type was passed. Valid options ", valid_profiler_types)
 
 
+def validate_model_call_mode(s: str) -> None:
+  valid_model_call_modes = ("", "inference")
+  if s not in valid_model_call_modes:  # currently supported attention
+    raise ValueError(f"Invalid model call mode {s}. Valid options are {valid_model_call_modes}")
+
+
 def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
   validate_profiler_type(keys["profiler"])
   validate_compute_axis_order(keys["compute_axis_order"])
   validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
+  validate_model_call_mode(keys["model_call_mode"])
 
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"

@@ -94,6 +94,10 @@ kv_quant_dtype: "int8"
 checkpoint_is_quantized: False # Set to True if reading from a saved aqt quantized checkpoint
 # Saves params quantized on fly at following path
 save_quantized_params_path: ""
+#Used to configure the mode in which model is called
+# when left as is, corresponds to training
+# accepted values are "inference" 
+model_call_mode: ""
 
 # Shard the range finding operation for quantization. By default this is set to number of slices.
 quantization_local_shard_count: -1
