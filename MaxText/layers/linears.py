@@ -55,6 +55,7 @@ RMSNorm = normalizations.RMSNorm
 Quant = quantizations.AqtQuantization
 QTensor = aqt_tensor.QTensor
 
+
 def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
   """Convert a string to an activation function."""
   if fn_or_string == "linear":
@@ -416,15 +417,30 @@ class MoeBlock(nn.Module):
 
       inputs = inputs.astype(self.dtype)
       kernel = kernel.astype(self.dtype)
+
+      quantization_config: str = self.config.quantization
+      match quantization_config:
+        case "int8":
+          lhs_quantize_dtype = jnp.int8
+          rhs_quantize_dtype = jnp.int8
+        case "int8w":
+          lhs_quantize_dtype = None
+          rhs_quantize_dtype = jnp.int8
+        case "int4w":
+          lhs_quantize_dtype = None
+          rhs_quantize_dtype = jnp.int4
+        case _:
+          lhs_quantize_dtype = None
+          rhs_quantize_dtype = None
       output = mblx.gmm(
           lhs=inputs,
           rhs=kernel,
           group_sizes=group_sizes,
           preferred_element_type=jnp.bfloat16,
           tiling=tile_size,
-          quant=True if self.quant else False
+          lhs_quantize_dtype=lhs_quantize_dtype,
+          rhs_quantize_dtype=rhs_quantize_dtype,
       )
-
       if hs_shape[0] % pad_length:
         output = output[: hs_shape[0]]
       return output
@@ -438,6 +454,7 @@ class MoeBlock(nn.Module):
     w1_pspec = nn.logical_to_mesh_axes((None, None, "mlp"))
     wo_pspec = nn.logical_to_mesh_axes((None, "mlp", None))
 
+
     if isinstance(w0_kernel, QTensor):
       w0_pspec = aqt_tensor.partition_spec(w0_pspec, [1,], dtype=w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, QTensor):
@@ -445,16 +462,11 @@ class MoeBlock(nn.Module):
     if isinstance(wo_kernel, QTensor):
       wo_pspec = aqt_tensor.partition_spec(wo_pspec, [1,], dtype=wo_kernel.dtype, use_bias=False)
 
+
     @functools.partial(
         shard_map.shard_map,
         mesh=self.mesh,
-        in_specs=(
-            input_partition_spec,
-            gate_logits_pspec,
-            w0_pspec,
-            w1_pspec,
-            wo_pspec
-        ),
+        in_specs=(input_partition_spec, gate_logits_pspec, w0_pspec, w1_pspec, wo_pspec),
         out_specs=(nn.logical_to_mesh_axes(("activation_batch", None, "activation_embed"))),
         check_rep=False,
     )
