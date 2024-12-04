@@ -22,6 +22,7 @@
 # You have the option to provide a LIBTPU_GCS_PATH that points to a libtpu.so provided to you by Google.
 # In libtpu-only MODE, the LIBTPU_GCS_PATH is mandatory.
 # For MODE=stable you may additionally specify JAX_VERSION, e.g. JAX_VERSION=0.4.13
+# For DEVICE=gpu, you may also specify JAX_VERSION when MODE=nightly, e.g. JAX_VERSION=0.4.36.dev20241109
 
 
 # Enable "exit immediately if any command fails" option
@@ -59,8 +60,8 @@ if [[ $LIBTPU_GCS_PATH == NONE ]]; then
   unset LIBTPU_GCS_PATH
 fi
 
-if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE) ]]; then
-     echo -e "\n\nError: You can only specify a JAX_VERSION with stable mode.\n\n"
+if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE || ($MODE == "nightly" && $DEVICE == "gpu")) ]]; then
+     echo -e "\n\nError: You can only specify a JAX_VERSION with stable mode (plus nightly mode on GPU).\n\n"
      exit 1
 fi
 
@@ -157,9 +158,14 @@ elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
 elif [[ $MODE == "nightly" ]]; then
 # Nightly mode
     if [[ $DEVICE == "gpu" ]]; then
-        echo "Installing jax-nightly, jaxlib-nightly"
         # Install jax-nightly
-        pip install -U --pre jax jaxlib jax-cuda12-plugin[with_cuda] jax-cuda12-pjrt -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+        if [[ -n "$JAX_VERSION" ]]; then
+            echo "Installing jax-nightly, jaxlib-nightly ${JAX_VERSION}"
+            pip install -U --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} jax-cuda12-plugin[with_cuda] jax-cuda12-pjrt -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+        else
+            echo "Installing latest jax-nightly, jaxlib-nightly"
+            pip install -U --pre jax jaxlib jax-cuda12-plugin[with_cuda] jax-cuda12-pjrt -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+        fi
         # Install Transformer Engine
         export NVTE_FRAMEWORK=jax
         pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
