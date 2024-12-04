@@ -128,7 +128,7 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
   custom_parser.add_argument(
       '--use_pathways',
       type=bool,
-      default=True,
+      default=False,
       help='whether to use pathways or not.',
   )
   custom_parser.add_argument(
@@ -155,12 +155,12 @@ def main() -> None:
       base_output_directory=options.base_output_directory,
   )
 
-  v6e_env_configs = SWconfig(
+  sw_config = SWconfig(
       base_docker_image=options.base_docker_image,
       libtpu_version=options.libtpu_version,
   )
 
-  v6e_256_configs = HWConfig(
+  hw_config = HWConfig(
       num_slices=options.num_slices, device_type=options.device_type
   )
 
@@ -169,8 +169,8 @@ def main() -> None:
 
   model_runner = BenchmarkRunner(
       model_name=benchmark_model,
-      software_config=v6e_env_configs,
-      hardware_config=v6e_256_configs,
+      software_config=sw_config,
+      hardware_config=hw_config,
       use_pathways=options.use_pathways,
   )
 

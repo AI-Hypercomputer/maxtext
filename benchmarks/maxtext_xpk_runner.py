@@ -20,6 +20,7 @@
 import dataclasses
 import datetime
 import enum
+import os
 import random
 import string
 import subprocess
@@ -264,7 +265,7 @@ def build_user_command(
     libtpu_type: LibTpuType,
     libtpu_date: str,
     cluster_config: XpkConfig,
-    base_output_directory: str, 
+    base_output_directory: str,
     buffer_size: int,
     run_name: str,
     use_pathways: bool = False,
@@ -296,7 +297,7 @@ def build_user_command(
   # model.xla_flags += ' --grpc_enable_rpc_receive_coalescing=true'
   # model.xla_flags += ' --grpc_experiments=tcp_rcv_lowat'
 
-  libtpu_flags = '' if use_pathways else f"LIBTPU_INIT_ARGS='{model.xla_flags}'"
+  libtpu_flags = '' if use_pathways else f"echo LIBTPU_INIT_ARGS='{model.xla_flags}' &&"
   jax_platforms = 'proxy' if use_pathways else 'tpu,cpu'
   pathways_prefix = 'pw-' if use_pathways else ''
 
@@ -308,7 +309,7 @@ def build_user_command(
       f' {install_libtpu_cmd}'
       # f' mv libtpu.so /lib/ &&'
       # f' export TPU_LIBRARY_PATH=$PWD/libtpu.so &&'
-      f' echo {libtpu_flags} &&'
+      f' {libtpu_flags}'
       # f' echo {model.tuning_params["sa_block_q"]}-q-dq-{model.tuning_params["sa_block_q_dq"]}-q-dkv-{model.tuning_params["sa_block_q_dkv"]} &&'
       # f' echo {model.tuning_params["ici_fsdp_parallelism"]} {model.tuning_params["ici_tensor_parallelism"]} &&'
       f' export JAX_PLATFORMS={jax_platforms} &&'
@@ -326,6 +327,8 @@ def build_user_command(
       f' use_vertex_tensorboard=false'
       ' vertex_tensorboard_project="" vertex_tensorboard_region=""'
       f' run_name="{pathways_prefix}{run_name}"'
+      f' enable_checkpointing=True'
+      f' checkpoint_period=1000'
   )
 
 
@@ -342,14 +345,11 @@ def generate_xpk_workload_cmd(
     base_output_directory: str,
     buffer_size: int,
     xpk_path: str = None,
-    exp_name = None,
     use_pathways: bool = False,
 ):
   """Generates a command to run a maxstar model on XPK."""
   num_steps = 2000
   time.localtime()
-  #test_purpose_name = f'maxstar-benchmarks-{model.model_name}-{libtpu_version}'
-  test_purpose_name = f'{model.model_name}-conv'
   if "learning_rate" in model.tuning_params:
     lr = str(model.tuning_params["learning_rate"]).split(".")[-1]
     warm_up = int(model.tuning_params["warmup_steps_fraction"] * model.tuning_params["steps"])
@@ -366,8 +366,9 @@ def generate_xpk_workload_cmd(
   )
 
   pw_prefix = 'pw-' if use_pathways else ''
+  print(f'****** cluster_config.num_slices: {cluster_config.num_slices}')
   name = (
-      f"{pw_prefix}{model.model_name.replace('_', '-')}-{cluster_config.num_slices}{time.strftime('%m%d%H', time.localtime())}-{temp_post_fix}"
+      f"{pw_prefix}{model.model_name.replace('_', '-')}-{cluster_config.num_slices}-{temp_post_fix}"
   )
   user_command = build_user_command(
       model,
@@ -381,6 +382,8 @@ def generate_xpk_workload_cmd(
       run_name,
       use_pathways,
   )
+
+  print(f"********* name is {name}")
 
   additional_flags = ''
   if libtpu_type == LibTpuType.CUSTOM:
@@ -398,11 +401,11 @@ def generate_xpk_workload_cmd(
   if use_pathways:
     pathways_specific_flags = (
         ' --use-pathways'
-        f' --additional-pw-proxy-args={reformat_xla_flags_for_xpk(model.xla_flags)}'
+        # f' --additional-pw-proxy-args="{reformat_xla_flags_for_xpk(model.xla_flags)}"'
     )
+    print(f'****** os.getenv(RUNNER): {os.getenv("RUNNER")}')
     docker_image_flag = (
-        '--docker-image="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/'
-        'maxtext_jax_stable:latest"'
+        f'--docker-image={os.getenv("RUNNER")}'
     )
 
   print(f'User command: {user_command}')
@@ -420,10 +423,17 @@ def generate_xpk_workload_cmd(
       ' --enable-debug-logs'
       f' --workload={name}'
       ' --priority=medium'
-      # ' --use-vertex-tensorboard'
-      # f' --experiment-name={test_purpose_name}'
-      f' --experiment-name={exp_name}'
       f' {additional_flags}'
+
+      # Additional flags
+      f' --termination-grace-period-seconds={os.getenv("TERMINATION_GRACE_PERIOD")}'
+      f' --max-restarts={os.getenv("MAX_RESTARTS")}'
+      f' --pathways-gcs-location={os.getenv("BASE_OUTPUT_DIRECTORY")}'
+      f' --proxy-server-image {os.getenv("PROXY_IMAGE")}'
+      f' --server-image {os.getenv("SERVER_IMAGE")}'
+      ' --restart-on-user-code-failure'
+      f' --debug-dump-gcs={os.getenv("BASE_OUTPUT_DIRECTORY")}'
+      f' --priority={os.getenv("PRIORITY")}'
   )
   print(f'XPK command: {xpk_command}')
 
@@ -440,7 +450,6 @@ def run_xpk_workload(
     libtpu_type: LibTpuType,
     libtpu_version: str,
     buffer_size: int,
-    exp_name=None,
     xpk_path: str = None,
 ):
   """Runs a maxstar model on XPK.
@@ -452,12 +461,12 @@ def run_xpk_workload(
   Returns:
   """
   command, _ = generate_xpk_workload_cmd(
-      model, cluster_config, num_slices, libtpu_type, libtpu_version, base_output_directory=cluster_config.base_output_directory, buffer_size=buffer_size, xpk_path=xpk_path, exp_name=exp_name
+      model, cluster_config, num_slices, libtpu_type, libtpu_version, base_output_directory=cluster_config.base_output_directory, buffer_size=buffer_size, xpk_path=xpk_path
   )
   return run_command_with_updates(command, 'Run XPK workload', cluster_config)
 
 
-def xpk_benchmark_runner(cluster_config: XpkConfig, benchmarks: list[BenchmarkRunner], xpk_path: str, exp_name=None):
+def xpk_benchmark_runner(cluster_config: XpkConfig, benchmarks: list[BenchmarkRunner], xpk_path: str):
   xpk_workload_names = []
   xpk_workload_cmds = []
   for benchmark in benchmarks:
@@ -469,7 +478,6 @@ def xpk_benchmark_runner(cluster_config: XpkConfig, benchmarks: list[BenchmarkRu
         libtpu_version=benchmark.software_config.libtpu_version,
         base_output_directory=cluster_config.base_output_directory,
         buffer_size=4294967296,
-        exp_name=exp_name,
         xpk_path=xpk_path,
         use_pathways=benchmark.use_pathways,
     )
