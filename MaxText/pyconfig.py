@@ -200,6 +200,7 @@ def validate_and_assign_remat_tensors(keys):
   # list of allowed tensors for custom remat policy
   tensors = [
       "decoder_layer_input",
+      "context",
       "mlpwi",
       "mlpwi_0",
       "mlpwi_1",
