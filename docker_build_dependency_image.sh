@@ -19,6 +19,8 @@
 # bash docker_build_dependency_image.sh DEVICE={{gpu|tpu}} MODE=stable_stack BASEIMAGE={{JAX_STABLE_STACK BASEIMAGE FROM ARTIFACT REGISTRY}}
 # bash docker_build_dependency_image.sh MODE=nightly
 # bash docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
+# Nightly build with JAX_VERSION for GPUs. Available versions listed at https://storage.googleapis.com/jax-releases/jax_nightly_releases.html:
+# bash docker_build_dependency_image.sh DEVICE=gpu MODE=nightly JAX_VERSION=0.4.36.dev20241109 # Note: this sets both jax-nightly and jaxlib-nightly 
 
 # Enable "exit immediately if any command fails" option
 set -e
