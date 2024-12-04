@@ -175,8 +175,6 @@ def write_metrics_to_tensorboard(writer, metrics, step, config, is_training=True
           f"total_weights: {metrics['scalar']['learning/total_weights']}, "
           f"loss: {metrics['scalar']['learning/loss']:.3f}"
       )
-      memory_stats = jax.local_devices()[0].memory_stats()
-      max_logging.log(f"Jax memory stats: {memory_stats}")
 
       if full_log and jax.process_index() == 0:
         max_logging.log(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
@@ -954,14 +952,17 @@ def train_loop(config, state=None):
   max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
   clear_buffered_metrics()
-  compiled = p_train_step.lower(state, example_batch, nextrng).compile()
-  compiled_stats = compiled.memory_analysis()
-  max_logging.log(
-      f"Argument size: {compiled_stats.argument_size_in_bytes}, "
-      f"output size: {compiled_stats.output_size_in_bytes}, "
-      f"temp size: {compiled_stats.temp_size_in_bytes}, "
-      f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
-  )
+  memory_stats = jax.local_devices()[0].memory_stats()
+  max_logging.log(f"Jax memory stats: {memory_stats}")
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    compiled = p_train_step.lower(state, example_batch, nextrng).compile()
+    compiled_stats = compiled.memory_analysis()
+    max_logging.log(
+        f"Output size: {compiled_stats.output_size_in_bytes}, "
+        f"temp size: {compiled_stats.temp_size_in_bytes}, "
+        f"argument size: {compiled_stats.argument_size_in_bytes}, "
+        f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
+    )
   return state
 
 
