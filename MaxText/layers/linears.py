@@ -35,6 +35,7 @@ import max_utils
 from aqt.jax.v2 import aqt_tensor
 from kernels import megablox as mblx
 
+
 Array = common_types.Array
 Config = common_types.Config
 DType = common_types.DType
@@ -47,6 +48,16 @@ bias_init = initializers.default_bias_init
 RMSNorm = normalizations.RMSNorm
 Quant = quantizations.AqtQuantization
 QTensor = aqt_tensor.QTensor
+
+DISPATCH = "dispatch"
+COMBINE = "combine"
+
+
+def _get_model_call_mode(config):
+  if config.model_cal_mode == "inference":
+    return "inference"
+  else:
+    return None
 
 
 def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
@@ -148,7 +159,10 @@ class DenseGeneral(nn.Module):
     output = compute_dot_general(inputs, kernel, axis, contract_ind)
 
     if self.use_bias:
-      bias_axes, bias_shape = self.kernel_axes[-len(features) :], kernel_shape[-len(features) :]
+      bias_axes, bias_shape = (
+          self.kernel_axes[-len(features) :],
+          kernel_shape[-len(features) :],
+      )
       bias = self.param(
           "bias",
           nn.with_logical_partitioning(bias_init, bias_axes),
@@ -378,7 +392,8 @@ class MoeBlock(nn.Module):
     reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
     tensor_parallelism = self.config.ici_tensor_parallelism * self.config.dcn_tensor_parallelism
     reshaped_intermediate = jnp.reshape(
-        unsort_intermediate, (-1, self.num_experts_per_tok, self.config.emb_dim // tensor_parallelism)
+        unsort_intermediate,
+        (-1, self.num_experts_per_tok, self.config.emb_dim // tensor_parallelism),
     )
     with jax.named_scope("weight_sum"):
       matmul_precision = lax.Precision(self.config.matmul_precision)
@@ -475,7 +490,11 @@ class MoeBlock(nn.Module):
     # input of weights & indices: (batch_size, seq_len, num_experts_per_tok)
     # output of updated weights: (batch_size, seq_len, num_experts)
     update_weights = jnp.zeros((weights.shape[0], weights.shape[1], self.num_experts), dtype=self.dtype)
-    index_update = (jnp.arange(weights.shape[0])[:, None, None], jnp.arange(weights.shape[1])[:, None], indices)
+    index_update = (
+        jnp.arange(weights.shape[0])[:, None, None],
+        jnp.arange(weights.shape[1])[:, None],
+        indices,
+    )
     update_weights = update_weights.at[index_update].set(weights)
     return update_weights
 
@@ -483,7 +502,13 @@ class MoeBlock(nn.Module):
     # calculate expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
     batch_size, seq_len, _ = top_k_indices.shape
     tokens_per_batch = seq_len * self.num_experts_per_tok
-    expert_capacity_per_batch = int((tokens_per_batch / self.num_experts) * self.config.capacity_factor)
+    # this is to avoid expert_capacity_per_batch = 0
+    expert_capacity_per_batch = int(
+        max(
+            math.ceil(tokens_per_batch / self.num_experts) * self.config.capacity_factor,
+            self.config.capacity_factor,
+        )
+    )
     max_logging.log(f"Applying potential token dropping with a batch expert_capacity of {expert_capacity_per_batch}")
 
     # calculate expert mask and drop tokens if needed
@@ -501,7 +526,8 @@ class MoeBlock(nn.Module):
     expert_mask_fused = nn.with_logical_constraint(expert_mask_fused, ("activation_batch", None, None))
     expert_token_count_fused = jnp.cumsum(expert_mask_fused, axis=1)
     expert_token_count = jnp.reshape(
-        expert_token_count_fused, ((batch_size, seq_len, self.num_experts_per_tok, self.num_experts))
+        expert_token_count_fused,
+        ((batch_size, seq_len, self.num_experts_per_tok, self.num_experts)),
     )
     expert_token_count = nn.with_logical_constraint(
         expert_token_count, ("activation_batch", "activation_length", None, None)
@@ -515,11 +541,14 @@ class MoeBlock(nn.Module):
     # calculate token position in expert capacity dimension
     expert_token_position_fused = expert_mask_fused * expert_token_count_fused
     expert_token_position = jnp.reshape(
-        expert_token_position_fused, (batch_size, seq_len, self.num_experts_per_tok, self.num_experts)
+        expert_token_position_fused,
+        (batch_size, seq_len, self.num_experts_per_tok, self.num_experts),
     )
     combined_expert_token_position = jnp.sum(expert_token_position, axis=2) * combined_expert_mask
     expert_token_position_in_capacity = jax.nn.one_hot(
-        combined_expert_token_position, num_classes=expert_capacity_per_batch + 1, dtype=jnp.int32
+        combined_expert_token_position,
+        num_classes=expert_capacity_per_batch + 1,
+        dtype=jnp.int32,
     )
 
     # shape of combine_mask is (batch_size, seq_len, num_experts, expert_capacity_per_batch + 1),
@@ -540,7 +569,13 @@ class MoeBlock(nn.Module):
     loss = jnp.mean(density * density_prob) * (self.num_experts**2) * self.config.load_balance_loss_weight
     return loss
 
-  def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = ()):
+  def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = (), einsum_name=None):
+
+    # the check is to prevent aqteinsum as einsum op for dispatch and combine einsums in ase when capacity_factor > 0
+    # this is necessary to load pre-quantized weights in case of inference
+    if self.config.model_call_mode == "inference" and (einsum_name == DISPATCH or einsum_name == COMBINE):
+      return jnp.einsum
+
     if self.quant:
 
       def aqt_einsum(*args, **kwargs):
@@ -580,11 +615,12 @@ class MoeBlock(nn.Module):
       loss = self.load_balance_loss(top_k_indices, softmax_probs)
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
       with jax.named_scope("dispatch"):
-        dispatch = self.get_einsum(rhs_mesh_axes=mask_axes)(
+        dispatch = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=DISPATCH)(
             "BSM,BSEC -> EBCM", inputs, dispatch_mask, precision=matmul_precision
         )
         dispatch = nn.with_logical_constraint(
-            dispatch, ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
+            dispatch,
+            ("activation_exp", "activation_batch_no_exp", None, "activation_embed"),
         )
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, "mlp")
@@ -595,7 +631,8 @@ class MoeBlock(nn.Module):
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
         layer_w0 = nn.with_logical_constraint(
-            layer_w0, ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
+            layer_w0,
+            ("activation_exp", "activation_batch_no_exp", None, "activation_mlp"),
         )
         layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
       with jax.named_scope("wi_1"):
@@ -607,7 +644,8 @@ class MoeBlock(nn.Module):
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = nn.with_logical_constraint(
-            layer_w1, ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
+            layer_w1,
+            ("activation_exp", "activation_batch_no_exp", None, "activation_mlp"),
         )
         layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
       layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
@@ -619,13 +657,17 @@ class MoeBlock(nn.Module):
             "EBCH,EHM -> EBCM", layer_multiply, wo_kernel, precision=matmul_precision
         )
         intermediate_layer = nn.with_logical_constraint(
-            intermediate_layer, ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
+            intermediate_layer,
+            ("activation_exp", "activation_batch_no_exp", None, "activation_embed"),
         )
         intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("combine"):
         # Matmul & element wise operation
-        output = self.get_einsum(rhs_mesh_axes=mask_axes)(
-            "EBCM,BSEC -> BSM", intermediate_layer, combine_mask, precision=matmul_precision
+        output = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=COMBINE)(
+            "EBCM,BSEC -> BSM",
+            intermediate_layer,
+            combine_mask,
+            precision=matmul_precision,
         )
       return output, loss
     else:
@@ -650,9 +692,11 @@ class MoeBlock(nn.Module):
         )
         intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("w_sum"):
-        output = jnp.einsum("BSEM,BSE -> BSM", intermediate_layer.astype(jnp.float32), weights.astype(jnp.float32)).astype(
-            self.dtype
-        )
+        output = jnp.einsum(
+            "BSEM,BSE -> BSM",
+            intermediate_layer.astype(jnp.float32),
+            weights.astype(jnp.float32),
+        ).astype(self.dtype)
       return output, None
 
   def retrieve_quantized_weight(
