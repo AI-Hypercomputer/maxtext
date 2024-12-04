@@ -70,6 +70,7 @@ class BenchmarkRunner:
   hardware_config: HWConfig
   software_config: SWconfig
   use_pathways: bool
+  num_steps: int
 
 
 def chunks(lst: list, n: int):
@@ -275,11 +276,8 @@ def build_user_command(
     config_tuning_params += f'{key}={value} '
 
   install_libtpu_cmd = ''
-  if use_pathways and libtpu_type == LibTpuType.NIGHTLY:
-    install_libtpu_cmd += (
-        f' pip install libtpu-nightly==0.1.dev{libtpu_date} -f'
-        ' https://storage.googleapis.com/libtpu-releases/index.html &&'
-    )
+  if use_pathways:
+    pass
   elif libtpu_type == LibTpuType.NIGHTLY:
     install_libtpu_cmd += (
         f' pip install libtpu-nightly==0.1.dev{libtpu_date} -f'
@@ -291,11 +289,11 @@ def build_user_command(
     install_libtpu_cmd += ''
   # model.xla_flags += ' --megascale_verify_checksums=true'
   # Enable chaotic good.
-  # model.xla_flags += ' --megascale_grpc_use_chaotic_good=true'
-  # model.xla_flags += ' --megascale_grpc_use_event_engine_allocator=true'
-  # model.xla_flags += ' --grpc_enable_tcp_recv_zerocopy=false'
-  # model.xla_flags += ' --grpc_enable_rpc_receive_coalescing=true'
-  # model.xla_flags += ' --grpc_experiments=tcp_rcv_lowat'
+  model.xla_flags += ' --megascale_grpc_use_chaotic_good=true'
+  model.xla_flags += ' --megascale_grpc_use_event_engine_allocator=true'
+  model.xla_flags += ' --grpc_enable_tcp_recv_zerocopy=false'
+  model.xla_flags += ' --grpc_enable_rpc_receive_coalescing=true'
+  model.xla_flags += ' --grpc_experiments=tcp_rcv_lowat'
 
   libtpu_flags = '' if use_pathways else f"echo LIBTPU_INIT_ARGS='{model.xla_flags}' &&"
   jax_platforms = 'proxy' if use_pathways else 'tpu,cpu'
@@ -318,8 +316,8 @@ def build_user_command(
       # f' echo TPU MEGACORE: $TPU_MEGACORE &&'
       f' export TPU_PREMAPPED_BUFFER_SIZE={buffer_size} &&'
       f' echo {buffer_size} &&'
-      f' export ENABLE_PJRT_COMPATIBILITY=true &&'
-      f' export {libtpu_flags} && '
+      # f' export ENABLE_PJRT_COMPATIBILITY=true &&'
+      # f' export {libtpu_flags} && '
       ' python3 MaxText/train.py MaxText/configs/base.yml'
       f' {config_tuning_params}'
       f' model_name={model.model_type}'
@@ -346,9 +344,9 @@ def generate_xpk_workload_cmd(
     buffer_size: int,
     xpk_path: str = None,
     use_pathways: bool = False,
+    num_steps: int = 2000,
 ):
   """Generates a command to run a maxstar model on XPK."""
-  num_steps = 2000
   time.localtime()
   if "learning_rate" in model.tuning_params:
     lr = str(model.tuning_params["learning_rate"]).split(".")[-1]
@@ -480,6 +478,7 @@ def xpk_benchmark_runner(cluster_config: XpkConfig, benchmarks: list[BenchmarkRu
         buffer_size=4294967296,
         xpk_path=xpk_path,
         use_pathways=benchmark.use_pathways,
+        num_steps=benchmark.num_steps,
     )
     xpk_workload_names.append(name)
     xpk_workload_cmds.append(command)

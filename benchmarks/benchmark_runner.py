@@ -137,6 +137,12 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
       default='~/xpk',
       help='path to xpk dir.',
   )
+  custom_parser.add_argument(
+      '--num_steps',
+      type=int,
+      default='2000',
+      help='Number of steps to run benchmark for.',
+  )
 
 
 def main() -> None:
@@ -164,7 +170,8 @@ def main() -> None:
       num_slices=options.num_slices, device_type=options.device_type
   )
 
-  model_sets = importlib.import_module('maxtext_trillium_model_configs')
+  # model_sets = importlib.import_module('maxtext_trillium_model_configs')
+  model_sets = importlib.import_module('maxtext_viperfish_model_configs')
   benchmark_model = getattr(model_sets, options.model_name)
 
   model_runner = BenchmarkRunner(
@@ -172,6 +179,7 @@ def main() -> None:
       software_config=sw_config,
       hardware_config=hw_config,
       use_pathways=options.use_pathways,
+      num_steps=options.num_steps,
   )
 
   xpk_benchmark_runner(
