@@ -35,6 +35,7 @@ NCCL_SHIMNET_GUEST_CONFIG_CHECKER_CONFIG_FILE=/usr/local/nvidia/lib64/a3plus_gue
 NCCL_FASTRAK_PLUGIN_ACCEPT_TIMEOUT_MS=600000
 JAX_DEBUG_LOG_MODULES=jax._src.compiler,jax._src.cache_key,jax._src.interpreters.xla,jax._src.pjit
 XLA_FLAGS=--xla_gpu_enable_latency_hiding_scheduler=true \
+--xla_gpu_experimental_parallel_collective_overlap_limit=1
 --xla_gpu_enable_triton_gemm=false \
 --xla_gpu_graph_level=0 \
 --xla_gpu_enable_highest_priority_async_stream=true \
