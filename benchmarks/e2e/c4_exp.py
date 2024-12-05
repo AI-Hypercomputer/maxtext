@@ -216,7 +216,22 @@ llama3_1_405b_8192_fsdp_dcn_c4 = MaxTextModel(
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
         "learning_rate": 1.25e-5,
-        "warmup_steps_fraction": 0.5
+        "warmup_steps_fraction": 0.5,
+
+        # Sujinesh changes
+        "enable_checkpointing": True,
+        "dataset_type": "tfds",
+        "log_period": 20,
+        "profiler": "xplane",
+        "goodput_upload_interval_seconds": 30,
+        "enable_checkpoint_cloud_logger": True,
+        "enable_pathways_goodput": True,
+        "checkpoint_storage_use_ocdbt": False,
+        "checkpoint_storage_use_zarr3": False,
+        "enable_single_controller": True,
+        "skip_first_n_steps_for_profiler": 10,
+        "profiler_steps": 5,
+        "metrics_file": "metrics.txt",
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG

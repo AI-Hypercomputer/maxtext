@@ -200,7 +200,6 @@ llama3_1_405b_8192_fsdp_dcn = MaxTextModel(
         "sa_block_q_dq": 2048,
 
         # Sujinesh changes
-        "steps": 100_000_000,
         "enable_checkpointing": True,
         "dataset_type": "tfds",
         "log_period": 20,

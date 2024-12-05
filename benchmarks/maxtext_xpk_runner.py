@@ -316,7 +316,7 @@ def build_user_command(
       # f' echo TPU MEGACORE: $TPU_MEGACORE &&'
       f' export TPU_PREMAPPED_BUFFER_SIZE={buffer_size} &&'
       f' echo {buffer_size} &&'
-      # f' export ENABLE_PJRT_COMPATIBILITY=true &&'
+      f' export ENABLE_PJRT_COMPATIBILITY=true &&'
       # f' export {libtpu_flags} && '
       ' python3 MaxText/train.py MaxText/configs/base.yml'
       f' {config_tuning_params}'
@@ -326,7 +326,8 @@ def build_user_command(
       ' vertex_tensorboard_project="" vertex_tensorboard_region=""'
       f' run_name="{pathways_prefix}{run_name}"'
       f' enable_checkpointing=True'
-      f' checkpoint_period=1000'
+      f' checkpoint_period=40'
+      f' async_checkpointing=True'
   )
 
 
