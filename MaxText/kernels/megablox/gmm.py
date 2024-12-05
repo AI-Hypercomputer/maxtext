@@ -519,13 +519,13 @@ def gmm(
     input_output_aliases = {}
   else:
     in_out_block_spec = out_block_spec
-    num_inputs = 6
+    existing_out_arg_index = 6
     # adding one more input because of scale factor of quantized tensor.
     if lhs_quantize_dtype is not None:
-      num_inputs += 1
+      existing_out_arg_index += 1
     if rhs_quantize_dtype is not None:
-      num_inputs += 1
-    input_output_aliases = {num_inputs: 0}
+      existing_out_arg_index += 1
+    input_output_aliases = {existing_out_arg_index: 0}
 
   lhs_block_spec = pl.BlockSpec((tm, tk), lhs_transform_indices)
   if transpose_rhs:
