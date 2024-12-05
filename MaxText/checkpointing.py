@@ -32,6 +32,7 @@ import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_c
 
 CheckpointManager = ocp.CheckpointManager
 CheckpointManagerOptions = ocp.CheckpointManagerOptions
+AsyncOptions = ocp.AsyncOptions
 PyTreeCheckpointHandler = ocp.PyTreeCheckpointHandler
 LocalCheckpointOptions = emergency_checkpoint_manager.LocalCheckpointOptions
 PersistentCheckpointOptions = emergency_checkpoint_manager.PersistentCheckpointOptions
@@ -72,6 +73,11 @@ def create_orbax_checkpoint_manager(
       item_names=item_names,
       item_handlers=item_handlers,
       options=CheckpointManagerOptions(
+          create=True,
+          save_interval_steps=save_interval_steps,
+          enable_async_checkpointing=use_async,
+          async_options=AsyncOptions(timeout_secs=3000)
+      ) if use_async else CheckpointManagerOptions(
           create=True,
           save_interval_steps=save_interval_steps,
           enable_async_checkpointing=use_async,
