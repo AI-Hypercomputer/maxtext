@@ -97,7 +97,7 @@ def get_first_step(state):
 def load_next_batch(train_iter, example_batch, config):
   """Loads the next batch. Can keep reusing the same batch for performance reasons"""
 
-  if config.reuse_example_batch and example_batch is not None:
+  if config.reuse_example_batch > 0 and example_batch is not None:
     return example_batch
   else:
     return next(train_iter)
