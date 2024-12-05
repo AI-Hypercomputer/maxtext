@@ -59,9 +59,10 @@ CF_FOR_ALL_REDUCE_AND_ALL_GATHER = (
     " --xla_tpu_enable_async_collective_fusion_multiple_steps=true"
 )
 
-# b/368069658 Only ready for 1D All-Gather but should support 2D soon.
+
+# Only ready for 1D All-Gather but should support 2D soon.
 # Do note that this disables CF for AG.
-ENABLE_SPARECORE_OFFLOADING_FOR_1D_ALL_GATHER = (
+ENABLE_SPARSECORE_OFFLOADING_FOR_1D_ALL_GATHER = (
     " --xla_sc_disable_megacore_partitioning=true"
     " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
     " --xla_tpu_enable_all_gather_offload_tracing=true"

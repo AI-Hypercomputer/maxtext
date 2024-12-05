@@ -19,6 +19,13 @@
 # bash docker_build_dependency_image.sh DEVICE={{gpu|tpu}} MODE=stable_stack BASEIMAGE={{JAX_STABLE_STACK BASEIMAGE FROM ARTIFACT REGISTRY}}
 # bash docker_build_dependency_image.sh MODE=nightly
 # bash docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
+# Nightly build with JAX_VERSION for GPUs. Available versions listed at https://storage.googleapis.com/jax-releases/jax_nightly_releases.html:
+# bash docker_build_dependency_image.sh DEVICE=gpu MODE=nightly JAX_VERSION=0.4.36.dev20241109 # Note: this sets both jax-nightly and jaxlib-nightly 
+# MODE=custom_wheels is the same as nightly except that it reinstalls any
+# additional wheels that are present in the maxtext directory.
+# The main use case is to install custom jax or jaxlib wheels but it also
+# works with any custom wheels.
+# bash docker_build_dependency_image.sh MODE=custom_wheels
 
 # Enable "exit immediately if any command fails" option
 set -e
@@ -46,6 +53,11 @@ fi
 if [[ -z ${MODE} ]]; then
   export MODE=stable
   echo "Default MODE=${MODE}"
+elif [[ ${MODE} == "custom_wheels" ]] ; then
+  export MODE=nightly
+  export CUSTOM_JAX=1
+else
+  export CUSTOM_JAX=0
 fi
 
 if [[ -z ${DEVICE} ]]; then
@@ -94,6 +106,11 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
 else
   docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
   docker build --network host --build-arg CUSTOM_LIBTPU=true -f ./maxtext_libtpu_path.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+fi
+
+if [[ ${CUSTOM_JAX} -eq 1 ]] ; then
+  echo "Installing custom jax and jaxlib"
+  docker build --network host -f ./maxtext_custom_wheels.Dockerfile -t ${LOCAL_IMAGE_NAME} .
 fi
 
 echo ""
