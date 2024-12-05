@@ -310,6 +310,7 @@ def build_user_command(
       f' {libtpu_flags}'
       # f' echo {model.tuning_params["sa_block_q"]}-q-dq-{model.tuning_params["sa_block_q_dq"]}-q-dkv-{model.tuning_params["sa_block_q_dkv"]} &&'
       # f' echo {model.tuning_params["ici_fsdp_parallelism"]} {model.tuning_params["ici_tensor_parallelism"]} &&'
+      f' export ENABLE_PATHWAYS_PERSISTENCE=1 &&'
       f' export JAX_PLATFORMS={jax_platforms} &&'
       # f' export JAX_DEBUG_NANS=True &&'
       # f' export TPU_MEGACORE=megachip_tccontrol &&'
@@ -326,7 +327,7 @@ def build_user_command(
       ' vertex_tensorboard_project="" vertex_tensorboard_region=""'
       f' run_name="{pathways_prefix}{run_name}"'
       f' enable_checkpointing=True'
-      f' checkpoint_period=40'
+      f' checkpoint_period=80'
       f' async_checkpointing=True'
   )
 
