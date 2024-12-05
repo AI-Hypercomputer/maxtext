@@ -81,9 +81,9 @@ call_train() {
 # call_train 2 1 8 2 minimal
 # call_train 2 1 8 2 full
 # call_train 8 1 8 8 full
-# call_train 2 1 8 2 full
+call_train 2 1 8 2 full
 # call_train 128 1 8 64 save_qkv_proj
-call_train 128 1 8 64 full
+# call_train 128 1 8 64 full
 # export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/jonbolin-maxtext-gpu:20241008-1
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-xprof_1010_nolayers_nightly_lance
 # export LOCAL_IMAGE_NAME=us-west1
