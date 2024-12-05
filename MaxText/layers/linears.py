@@ -33,14 +33,7 @@ from jax.experimental import shard_map
 import max_logging
 import max_utils
 from aqt.jax.v2 import aqt_tensor
-
-try:
-  # from jax.experimental.pallas.ops.tpu import megablox as mblx
-  from kernels import megablox as mblx
-
-except ImportError:
-  max_logging.log("JAX megablox is available for TPU only.")
-  pass
+from kernels import megablox as mblx
 
 Array = common_types.Array
 Config = common_types.Config
@@ -418,20 +411,22 @@ class MoeBlock(nn.Module):
       inputs = inputs.astype(self.dtype)
       kernel = kernel.astype(self.dtype)
 
-      quantization_config: str = self.config.quantization
-      match quantization_config:
-        case "int8":
-          lhs_quantize_dtype = jnp.int8
-          rhs_quantize_dtype = jnp.int8
-        case "int8w":
-          lhs_quantize_dtype = None
-          rhs_quantize_dtype = jnp.int8
-        case "int4w":
-          lhs_quantize_dtype = None
-          rhs_quantize_dtype = jnp.int4
-        case _:
-          lhs_quantize_dtype = None
-          rhs_quantize_dtype = None
+      # 'int8' for dynamic range quantization using 8-bits
+      # 'int8w' for weight only quantization using 8-bits
+      # 'int4w' for weight only quantization using 4-bits
+      quantization_config = self.config.quantization
+      quantization_types = {
+          "int8": (jnp.int8, jnp.int8),
+          "int8w": (None, jnp.int8),
+          "int4w": (None, jnp.int4),
+      }
+      lhs_quantize_dtype, rhs_quantize_dtype = None, None
+      if quantization_config:
+        if quantization_config in quantization_types:
+          lhs_quantize_dtype, rhs_quantize_dtype = quantization_types[quantization_config]
+        else:
+          raise ValueError(f"{quantization_config=} is not yet supported in megablox.")
+
       output = mblx.gmm(
           lhs=inputs,
           rhs=kernel,
@@ -671,6 +666,33 @@ class MoeBlock(nn.Module):
         )
       return output, None
 
+  def retrieve_quantized_weight(self, inputs, gate_logits) -> tuple[QTensor, QTensor, QTensor]:
+    # This is called only during tracing. This is to invoke creation of quantized tensor inside AqtEinsum.
+    # After jit, this will become no-op and will not affect performance.
+    _ = self.capped_dense(inputs, gate_logits)
+
+    w0_kernel = self.variables["aqt"]["AqtEinsum_0"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
+    w1_kernel = self.variables["aqt"]["AqtEinsum_1"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
+    wo_kernel = self.variables["aqt"]["AqtEinsum_2"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
+
+    w0_kernel = max_utils.unbox_logicallypartioned(w0_kernel)
+    w1_kernel = max_utils.unbox_logicallypartioned(w1_kernel)
+    wo_kernel = max_utils.unbox_logicallypartioned(wo_kernel)
+    return w0_kernel, w1_kernel, wo_kernel
+
+  def capped_dense(self, inputs, gate_logits):
+    cfg = self.config
+    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts, cfg.emb_dim, cfg.mlp_dim)
+    return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+
+  def no_capped_megablox(self, inputs, gate_logits):
+    if quantizations.in_serve_mode(self.quant):
+      w0_kernel, w1_kernel, wo_kernel = self.retrieve_quantized_weight(inputs, gate_logits)
+    else:
+      cfg = self.config
+      w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts, cfg.emb_dim, cfg.mlp_dim)
+    return self.megablox(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+
   @nn.compact
   def __call__(self, inputs):
     cfg = self.config
@@ -685,27 +707,8 @@ class MoeBlock(nn.Module):
         name="gate",
         matmul_precision=self.config.matmul_precision,
     )(inputs)
-
-    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts, cfg.emb_dim, cfg.mlp_dim)
-
+    max_logging.log("Running MoE megablox implementation.")
     if cfg.megablox:
-      max_logging.log("Running MoE megablox implementation.")
-      # This is called only during tracing. This is to invoke creation of quantized tensor.
-      # After jit, this will become no-op and will not affect performance.
-      _ = self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
-
-      if quantizations.in_serve_mode(self.quant):
-        w0_kernel = self.variables["aqt"]["AqtEinsum_0"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
-        w1_kernel = self.variables["aqt"]["AqtEinsum_1"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
-        wo_kernel = self.variables["aqt"]["AqtEinsum_2"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
-
-        # Currently, megablox kernel does not accept QTensor as inputs.
-        # Dequantizes before feeding it to megablox, as none of tesnsors are not quantized
-        # there will be no acceleration during serving. This is just a temporary solution.
-        w0_kernel = max_utils.unbox_logicallypartioned(w0_kernel)
-        w1_kernel = max_utils.unbox_logicallypartioned(w1_kernel)
-        wo_kernel = max_utils.unbox_logicallypartioned(wo_kernel)
-      return self.megablox(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+      return self.no_capped_megablox(inputs, gate_logits)
     else:
-      max_logging.log("Running MoE matmul implementation.")
-      return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+      return self.capped_dense(inputs, gate_logits)
