@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # Description:
-# bash setup_gcsfuse.sh DATASET_GCS_BUCKET=maxtext-dataset MOUNT_PATH=dataset
+# bash setup_gcsfuse.sh DATASET_GCS_BUCKET=maxtext-dataset MOUNT_PATH=/tmp/gcsfuse FILE_PATH=/tmp/gcsfuse/my_dataset
 
 set -e
 
@@ -44,9 +44,13 @@ fi
 mkdir -p $MOUNT_PATH
 
 # see https://cloud.google.com/storage/docs/gcsfuse-cli for all configurable options of gcsfuse CLI
-# Grain uses _PROCESS_MANAGEMENT_MAX_THREADS = 64 (https://github.com/google/grain/blob/main/grain/_src/python/grain_pool.py)
-# Please make sure max-conns-per-host > grain_worker_count * _PROCESS_MANAGEMENT_MAX_THREADS
+TIMESTAMP=$(date +%Y%m%d-%H%M)
+gcsfuse -o ro --implicit-dirs --log-severity=debug \
+        --type-cache-max-size-mb=-1 --stat-cache-max-size-mb=-1 --kernel-list-cache-ttl-secs=-1 --metadata-cache-ttl-secs=-1 \
+        --log-file=$HOME/gcsfuse_$TIMESTAMP.json "$DATASET_GCS_BUCKET" "$MOUNT_PATH"
 
-gcsfuse -o ro --implicit-dirs --http-client-timeout=5s --max-conns-per-host=2000 \
-        --debug_fuse_errors --debug_fuse --debug_gcs --debug_invariants --debug_mutex \
-        --log-file=$HOME/gcsfuse.json "$DATASET_GCS_BUCKET" "$MOUNT_PATH"
+# Use ls to prefill the metadata cache: https://cloud.google.com/storage/docs/cloud-storage-fuse/performance#improve-first-time-reads
+if [[ ! -z ${FILE_PATH} ]] ; then 
+  FILE_COUNT=$(ls -R $FILE_PATH | wc -l)
+  echo $FILE_COUNT files found in $FILE_PATH
+fi

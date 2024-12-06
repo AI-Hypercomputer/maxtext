@@ -309,6 +309,8 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
         run_name = os.environ.get("JOBSET_NAME")  # using XPK default
 
       replicator_yaml = f"""job-name: {run_name}
+      framework: orbax
+      assume-data-parallelism: {num_slices}
       node-rank: {node_rank}
       nodes: {num_nodes}
       workers-per-node: 1
@@ -325,6 +327,7 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
     jax.distributed.initialize()
 
   ocp.multihost.initialize_runtime_to_distributed_ids()
+  ocp.multihost.initialize_distributed_to_device_ids()
 
 
 def _retrieve_jax_init_info(raw_keys):
