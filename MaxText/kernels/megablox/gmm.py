@@ -14,6 +14,8 @@
 
 """Grouped matrix multiplication kernels for TPU written in Pallas."""
 
+# pylint: disable=too-many-positional-arguments, unnecessary-lambda-assignment
+
 from collections.abc import Callable
 import dataclasses
 import functools
@@ -329,7 +331,8 @@ def gmm(
     interpret: Whether or not to run the kernel in interpret mode, helpful for
       testing and debugging.
     lhs_quantize_dtype: Bit precision of lhs after quantization.
-    rhs_quantirhs_quantize_dtypeze_bits: Bit precision of rhs after quantization. If rhs (weight) is already quantized this must be samed with precision of the given weight.
+    rhs_quantirhs_quantize_dtypeze_bits: Bit precision of rhs after quantization.
+      If rhs (weight) is already quantized this must be samed with precision of the given weight.
 
   Returns:
     A 2d, jnp.ndarray with shape [m, n].

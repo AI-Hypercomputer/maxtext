@@ -449,14 +449,12 @@ class MoeBlock(nn.Module):
     w1_pspec = nn.logical_to_mesh_axes((None, None, "mlp"))
     wo_pspec = nn.logical_to_mesh_axes((None, "mlp", None))
 
-
     if isinstance(w0_kernel, QTensor):
-      w0_pspec = aqt_tensor.partition_spec(w0_pspec, [1,], dtype=w0_kernel.dtype, use_bias=False)
+      w0_pspec = aqt_tensor.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, QTensor):
-      w1_pspec = aqt_tensor.partition_spec(w1_pspec, [1,], dtype=w1_kernel.dtype, use_bias=False)
+      w1_pspec = aqt_tensor.partition_spec(w1_pspec, (1,), w1_kernel.dtype, use_bias=False)
     if isinstance(wo_kernel, QTensor):
-      wo_pspec = aqt_tensor.partition_spec(wo_pspec, [1,], dtype=wo_kernel.dtype, use_bias=False)
-
+      wo_pspec = aqt_tensor.partition_spec(wo_pspec, (1,), wo_kernel.dtype, use_bias=False)
 
     @functools.partial(
         shard_map.shard_map,
@@ -666,10 +664,12 @@ class MoeBlock(nn.Module):
         )
       return output, None
 
-  def retrieve_quantized_weight(self, inputs, gate_logits) -> tuple[QTensor, QTensor, QTensor]:
+  def retrieve_quantized_weight(
+      self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel
+  ) -> tuple[QTensor, QTensor, QTensor]:
     # This is called only during tracing. This is to invoke creation of quantized tensor inside AqtEinsum.
     # After jit, this will become no-op and will not affect performance.
-    _ = self.capped_dense(inputs, gate_logits)
+    _ = self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
 
     w0_kernel = self.variables["aqt"]["AqtEinsum_0"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
     w1_kernel = self.variables["aqt"]["AqtEinsum_1"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
@@ -679,19 +679,6 @@ class MoeBlock(nn.Module):
     w1_kernel = max_utils.unbox_logicallypartioned(w1_kernel)
     wo_kernel = max_utils.unbox_logicallypartioned(wo_kernel)
     return w0_kernel, w1_kernel, wo_kernel
-
-  def capped_dense(self, inputs, gate_logits):
-    cfg = self.config
-    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts, cfg.emb_dim, cfg.mlp_dim)
-    return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
-
-  def no_capped_megablox(self, inputs, gate_logits):
-    if quantizations.in_serve_mode(self.quant):
-      w0_kernel, w1_kernel, wo_kernel = self.retrieve_quantized_weight(inputs, gate_logits)
-    else:
-      cfg = self.config
-      w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts, cfg.emb_dim, cfg.mlp_dim)
-    return self.megablox(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
 
   @nn.compact
   def __call__(self, inputs):
@@ -708,7 +695,13 @@ class MoeBlock(nn.Module):
         matmul_precision=self.config.matmul_precision,
     )(inputs)
     max_logging.log("Running MoE megablox implementation.")
+    cfg = self.config
+    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts, cfg.emb_dim, cfg.mlp_dim)
     if cfg.megablox:
-      return self.no_capped_megablox(inputs, gate_logits)
+      if quantizations.in_serve_mode(self.quant):
+        w0_kernel, w1_kernel, wo_kernel = self.retrieve_quantized_weight(
+            inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel
+        )
+      return self.megablox(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
     else:
-      return self.capped_dense(inputs, gate_logits)
+      return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)

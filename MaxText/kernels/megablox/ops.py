@@ -14,6 +14,8 @@
 
 """Grouped matrix multiplication operations with custom VJPs."""
 
+# pylint: disable=too-many-positional-arguments
+
 import jax
 from kernels.megablox import gmm as backend
 import jax.numpy as jnp
