@@ -156,6 +156,11 @@ def validate_data_input(keys):
     if keys["eval_interval"] > 0:
       assert keys["eval_split"], "Please specify eval_split or set eval_interval to <=0."
 
+  if keys["sharding_tolerance"] > 1.0 or keys["sharding_tolerance"] < 0.0:
+    max_logging.log(
+        "WARNING: 'sharding_tolerance: allowed percentage of non-sharded parameters' should be between 0.0 and 1.0"
+    )
+
 
 def validate_model_name(s: str) -> bool:
   """Validate provided model name."""
