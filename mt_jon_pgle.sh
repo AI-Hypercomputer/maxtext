@@ -1,6 +1,7 @@
-export WORKLOAD_NAME=$USER-jon-7b-1n-${RANDOM:0:2}
-# export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/jonbolin-maxtext-gpu:20241008-1
-export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1113-nv
+export WORKLOAD_NAME=$USER-jon-7b-1n-1203main-${RANDOM:0:2}
+export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/jonbolin-maxtext-gpu:20241008-1
+# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1113-nv
+# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1203-main
 export CONFIG_NAME=llama2_7b
 
 python ../xpk/xpk.py  workload delete --cluster a3plus-benchmark --workload $WORKLOAD_NAME;
