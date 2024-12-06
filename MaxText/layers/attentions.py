@@ -24,6 +24,8 @@ import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
+from jax.experimental.pallas.ops.gpu import attention as pallas_attention
+from jax.experimental.pallas.ops.gpu import decode_attention as pallas_decode_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
@@ -221,11 +223,24 @@ class AttentionOp(nn.Module):
   ):
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
-    if use_ragged_attention and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      if lengths is None:
-        lengths = jnp.sum(decoder_segment_ids, axis=-1)
+    if use_ragged_attention:
+      if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+        if lengths is None:
+          lengths = jnp.sum(decoder_segment_ids, axis=-1)
 
-      return self.ragged_attention(query, key, value, lengths, self.ragged_block_size)
+        if jax.devices()[0].platform == 'tpu':
+          impl = self.tpu_ragged_attention
+        if jax.devices()[0].platform == 'gpu':
+          impl = self.gpu_ragged_attention
+        return impl(query, key, value, lengths, self.ragged_block_size)
+      else:
+        """Pallas MHA kernel for prefill stage."""
+        if jax.devices()[0].platform == 'gpu':
+          key = jnp.repeat(key, self.num_query_heads // self.num_kv_heads, axis=2)
+          value = jnp.repeat(value, self.num_query_heads // self.num_kv_heads, axis=2)
+          sm_scale = 1.0 / math.sqrt(query.shape[-1])
+          out = pallas_attention.mha(query, key, value, decoder_segment_ids, sm_scale=sm_scale, causal=False)
+          return out, None, None
     elif (
         self.attention_kernel == "dot_product"
         or (self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE)
@@ -255,10 +270,57 @@ class AttentionOp(nn.Module):
                            Use `dot_product` instead."""
         )
       return self.cudnn_flash_attention(query, key, value, decoder_segment_ids, model_mode), None, None
+    elif self.attention_kernel == "pallas_gpu":
+      if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+        return self.gqa_wrapped_maxtext_compatible(query, key, value)
+      else:
+        """Pallas MHA kernel for prefill stage."""
+        key = jnp.repeat(key, self.num_query_heads // self.num_kv_heads, axis=2)
+        value = jnp.repeat(value, self.num_query_heads // self.num_kv_heads, axis=2)
+        sm_scale = 1.0 / math.sqrt(query.shape[-1])
+        out = pallas_attention.mha(query, key, value, decoder_segment_ids, sm_scale=sm_scale, causal=False)
+        return out, None, None
     else:
       raise ValueError(f"Unexpected attention kernel {self.attention_kernel=}.")
 
-  def ragged_attention(
+  def gpu_ragged_attention(
+      self,
+      q: Array,
+      k: Array | KVTensor,
+      v: Array | KVTensor,
+      lengths: Array,
+      block_size: int
+  ):
+    sm_scale = 1 / math.sqrt(q.shape[-1])
+    batch_size, q_length, q_heads, head_dim = q.shape
+    k_seq_len, kv_heads = k.shape[1], k.shape[2]
+    assert q_heads % kv_heads == 0
+
+    q_reshaped = q.reshape(batch_size, q_length, kv_heads, q_heads // kv_heads, head_dim)
+    k_transposed = jnp.swapaxes(k, 1, 2)
+
+    # Re-compute attention weights to get local_max and local_sum
+    attn_weights = (q_reshaped @ k_transposed.transpose(0, 1, 3, 2)) * sm_scale
+    local_max = jnp.max(attn_weights, axis=-1, keepdims=True)
+    local_exps = jnp.exp(attn_weights - local_max)
+    local_sum = jnp.sum(local_exps, axis=-1, keepdims=True)
+
+    # Reshape q to match gqa's expected shape
+    q_for_gqa = jnp.squeeze(q, axis=-3)
+
+    # Use the original gqa function to get the attention output
+    local_out_gqa = pallas_decode_attention.gqa(q=q_for_gqa, k=k, v=v, kv_seq_len=lengths)
+
+    # Reshape gqa's output to include q_length
+    local_out = local_out_gqa.reshape(batch_size, q_length, q_heads, head_dim)
+
+    # Reshape local_max and local_sum to match Maxtext requirements
+    local_max = local_max.reshape(batch_size, q_length, q_heads, 1)
+    local_sum = local_sum.reshape(batch_size, q_length, q_heads, 1)
+
+    return local_out, local_max, local_sum
+
+  def tpu_ragged_attention(
       self, query: Array, key: Array | KVTensor, value: Array | KVTensor, lengths: Array, block_size: int
   ) -> tuple[Array, Array, Array]:
     """Ragged Attention."""
