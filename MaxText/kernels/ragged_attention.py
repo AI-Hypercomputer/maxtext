@@ -20,12 +20,11 @@ import functools
 
 import jax
 from jax import lax
+from jax.experimental import shard_map
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 import common_types
-
-from jax.experimental import shard_map
 
 
 BATCH = common_types.BATCH
@@ -144,7 +143,7 @@ def reference_gqa(
   return o, logits_max, denominator
 
 
-def ragged_flash_attention_kernel(
+def ragged_flash_attention_kernel(  # pylint: disable=too-many-positional-arguments
     lengths_ref,
     q_ref,
     k_ref,
@@ -255,11 +254,11 @@ def ragged_mqa(
           ],
           grid=(batch_size, seq_len // block_size),
       ),
-      compiler_params=dict(
-          mosaic=dict(
-              dimension_semantics=("parallel", "arbitrary"),
-          )
-      ),
+      compiler_params={
+          "mosaic": {
+              "dimension_semantics": ("parallel", "arbitrary"),
+          },
+      },
       out_shape=[
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
