@@ -17,8 +17,8 @@
 # pylint: disable=too-many-positional-arguments
 
 import jax
-from kernels.megablox import gmm as backend
 import jax.numpy as jnp
+from kernels.megablox import gmm as backend
 from aqt.jax.v2 import aqt_tensor
 from typing import Literal
 
