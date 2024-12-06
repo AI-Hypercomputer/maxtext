@@ -124,7 +124,7 @@ resolve_coordinator_ip() {
   echo "Coordinator Address $JAX_COORDINATOR_ADDRESS"
 
   while [[ "$coordinator_found" = false && $lookup_attempt -le $max_coordinator_lookups ]]; do
-    coordinator_ip_address=$(nslookup "$JAX_COORDINATOR_ADDRESS" 2>/dev/null | awk '/^Address: / { print $2 }' | head -n 1)
+    coordinator_ip_address=$(nslookup "$JAX_COORDINATOR_ADDRESS" 2>/dev/null | awk '/Address: / { print $2 }' | head -n 1)
     if [[ -n "$coordinator_ip_address" ]]; then
       coordinator_found=true
       echo "Coordinator IP address: $coordinator_ip_address"

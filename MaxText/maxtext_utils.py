@@ -31,12 +31,11 @@ from input_pipeline import input_pipeline_interface
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
 
-def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config):
+def get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config):
   """Get the shardings (both state and data) for train_step"""
-  functional_train = get_functional_train_step(train_step, model, config)
+  functional_train = get_functional_train_step(train_step, model, config, state_mesh_shardings)
   functional_train.__name__ = "train_step"
   data_pspec = P(*config.data_sharding)
-  state_mesh_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
   data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
@@ -45,16 +44,15 @@ def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
 
 
-def get_functional_train_step(train_step, model, config):
-  return functools.partial(train_step, model, config)
+def get_functional_train_step(train_step, model, config, state_mesh_shardings):
+  return functools.partial(train_step, model, config, state_mesh_shardings)
 
 
-def get_functional_eval_with_signature(eval_step, mesh, state_mesh_annotations, model, config):
+def get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, model, config):
   """Get the shardings (both state and data) for eval_step"""
   functional_eval = get_functional_eval_step(eval_step, model, config)
   functional_eval.__name__ = "eval_step"
   data_pspec = P(*config.data_sharding)
-  state_mesh_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
   data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = None  # metrics

@@ -97,6 +97,7 @@ class Gemma2DecoderLayer(nn.Module):
         kv_quant=quantizations.configure_kv_quant(cfg),
         attention_type=attentions.AttentionType.LOCAL_SLIDING,
         sliding_window_size=cfg.sliding_window_size,
+        attn_logits_soft_cap=cfg.attn_logits_soft_cap,
     )
 
     attention_lnx = attention_layer(
@@ -178,6 +179,7 @@ class Gemma2DecoderLayer(nn.Module):
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
         attention_type=attentions.AttentionType.GLOBAL,
+        attn_logits_soft_cap=cfg.attn_logits_soft_cap,
     )
 
     attention_lnx = attention_layer(

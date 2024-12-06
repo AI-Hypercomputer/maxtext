@@ -294,7 +294,7 @@ def build_user_command(
       # f'python3 -m pip install google-cloud-aiplatform==v1.61.0 &&'
       # f'pip install -U "jax[tpu]==0.4.30" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html &&'
       # f' pip install https://storage.googleapis.com/jax-releases/nightly/nocuda/jaxlib-0.4.27.dev20240501-cp310-cp310-manylinux2014_x86_64.whl &&'
-      # f' pip install git+https://github.com/google/jax.git@57bfe81260545556ec22509347f7ced112496200 &&'
+      # f' pip install git+https://github.com/jax-ml/jax.git@57bfe81260545556ec22509347f7ced112496200 &&'
       f' {install_libtpu_cmd}'
       # f' mv libtpu.so /lib/ &&'
       # f' export TPU_LIBRARY_PATH=$PWD/libtpu.so &&'

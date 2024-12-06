@@ -1,13 +1,15 @@
 base_config: "inference_jetstream.yml"
 
-# tensor = 8, autoregressive=2
-# per_device_batch_size=6
+# v5e-64
+# tensor = 8, autoregressive=8
+# per_device_batch_size=1
 # weight bf16, kv cache bf16
 
-model_name: "llama2-70b"
+model_name: "llama3-405b"
 sharding_strategy: "experimental"
 attention: 'dot_product'
 allow_split_physical_axes: True
+tokenizer_path: "assets/tokenizer_llama3.tiktoken"
 # Used to replicate the quantization scale to avoid the inefficient XLA fusion.
 replicate_quant_scale: True
 
@@ -17,15 +19,12 @@ logical_axis_rules: [
                       ['activation_batch', []],
                       ['activation_length', []],
                       ['activation_embed', []],
-                      ['activation_vocab', ['tensor']],
+                      ['activation_vocab', ['tensor', 'autoregressive']],
                       ['heads', ['tensor', 'autoregressive']],
                       ['kv', []],
-                      # TODO: fix the wrong XLA ops for the following sharding.
-                      # ['q_heads', ['tensor', 'autoregressive']],
-                      # ['kv_head_dim', ['autoregressive']],
-                      ['q_heads', ['tensor']],
                       ['kv_heads', ['tensor']],
-                      ['kv_head_dim', []],
+                      ['q_heads', ['tensor', 'autoregressive']],
+                      ['kv_head_dim', ['autoregressive']],
                       ['activation_prefill_kv_batch', []],
                       ['activation_kv_batch', ['autoregressive']],
                       ['activation_kv_heads', ['tensor']],
