@@ -110,7 +110,7 @@ run_benchmark() {
             $cmd bash llama_offline_run.sh -r benchmarks_audit_${RUN_DESC} -d
             ;;
         "accuracy")
-            $cmd bash llama_offline_run.sh -r benchmarks_accuracy_${RUN_DESC} -a  -t # todo: remove -t
+            $cmd bash llama_offline_run.sh -r benchmarks_accuracy_${RUN_DESC} -a  
             ;;
     esac
 }
