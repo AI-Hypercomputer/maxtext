@@ -82,6 +82,7 @@ def validate_train_config(config):
   if not config.base_output_directory.startswith("gs://"):
     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
   assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive integer."
+
   if config.quantization == "fp8":
     # pylint: disable=line-too-long
     assert (
@@ -557,7 +558,7 @@ def setup_train_loop(config):
 
   if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-    maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, tolerance=0.02)
+    maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
   record_goodput(recorder, config, recorder.record_training_preparation_end_time if recorder else None)
   return (
       init_rng,
