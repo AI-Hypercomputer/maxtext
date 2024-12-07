@@ -23,6 +23,7 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
+import numpy as np
 import common_types
 
 from jax.experimental import shard_map
@@ -31,6 +32,27 @@ from jax.experimental import shard_map
 BATCH = common_types.BATCH
 DEFAULT_MASK_VALUE = common_types.DEFAULT_MASK_VALUE
 shard_map = shard_map.shard_map
+
+
+def get_mha_cost_estimate(shape_dtype):
+  """Get cost estimate for MHA based on static shape information."""
+  batch_size, _, num_heads, head_dim = shape_dtype[0].shape
+  seq_len = shape_dtype[1].shape[1]
+
+  # Approximate flops calculation for attention
+  # fmt: off
+  flops = batch_size * num_heads * seq_len * (
+    2 * head_dim +  # QK multiplication
+    seq_len +       # softmax
+    2 * head_dim    # V multiplication
+  )
+  # fmt: on
+
+  return pl.CostEstimate(
+      flops=flops,
+      transcendentals=batch_size * num_heads * seq_len,
+      bytes_accessed=sum(np.prod(s.shape) * s.dtype.itemsize for s in shape_dtype),
+  )
 
 
 @functools.partial(jax.jit, static_argnames=["mask_value"])
@@ -302,22 +324,8 @@ def ragged_mha(
     max logit ([batch_size, num_heads, 1]) and softmax denominator ([batch_size,
     num_heads, 1]).
   """
-  cost_analysis = (
-      reference_mha.lower(
-          query,
-          key,
-          value,
-          lengths,
-          mask_value=mask_value,
-      )
-      .compile()
-      .cost_analysis()[0]
-  )
-  cost_estimate = pl.CostEstimate(
-      flops=int(cost_analysis["flops"]),
-      transcendentals=int(cost_analysis["transcendentals"]),
-      bytes_accessed=int(cost_analysis["bytes accessed"]),
-  )
+  shape_dtype = (query, key, value, lengths)
+  cost_estimate = get_mha_cost_estimate(shape_dtype)
 
   query = jnp.swapaxes(query, 1, 2)
   key = jnp.swapaxes(key, 1, 2)
@@ -370,28 +378,16 @@ def ragged_gqa(
     max logit ([batch_size, num_heads, 1]) and softmax denominator ([batch_size,
     num_heads, 1]).
   """
-  cost_analysis = (
-      reference_gqa.lower(
-          jnp.squeeze(query),
-          jnp.swapaxes(key, 1, 2),
-          jnp.swapaxes(value, 1, 2),
-          lengths,
-          mask_value=mask_value,
-      )
-      .compile()
-      .cost_analysis()[0]
-  )
-  cost_estimate = pl.CostEstimate(
-      flops=int(cost_analysis["flops"]),
-      transcendentals=int(cost_analysis["transcendentals"]),
-      bytes_accessed=int(cost_analysis["bytes accessed"]),
-  )
+  shape_dtype = (query, key, value, lengths)
+  cost_estimate = get_mha_cost_estimate(shape_dtype)
+
   batch_size, _, num_heads_q, head_dim = query.shape
   _, _, num_heads_kv, _ = key.shape
 
-  query = query.reshape(batch_size, num_heads_kv, num_heads_q // num_heads_kv, head_dim)  # (b, n_kv, n_q // n_kv, d)
-  key = jnp.swapaxes(key, 1, 2)  # (b, n_kv, s, d)
-  value = jnp.swapaxes(value, 1, 2)  # (b, n_kv, s, d)
+  query = query.reshape(batch_size, num_heads_kv, num_heads_q // num_heads_kv, head_dim)
+  key = jnp.swapaxes(key, 1, 2)
+  value = jnp.swapaxes(value, 1, 2)
+
   o, m, l = jax.vmap(
       functools.partial(
           ragged_mqa,
