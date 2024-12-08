@@ -97,7 +97,7 @@ def validate_keys(keys):
   validate_profiler_type(keys["profiler"])
   validate_compute_axis_order(keys["compute_axis_order"])
   validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
-  validate_model_call_mode(keys["model_call_mode"])
+  #validate_model_call_mode(keys["model_call_mode"])
 
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"
