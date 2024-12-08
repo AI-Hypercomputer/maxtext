@@ -15,4 +15,4 @@ transformers
 mlperf-logging@git+https://github.com/mlperf/logging.git
 google-jetstream
 jsonlines
-pathwaysutils@git+https://github.com/google/pathways-utils.git
+pathwaysutils@git+https://github.com/AI-Hypercomputer/pathways-utils.git
