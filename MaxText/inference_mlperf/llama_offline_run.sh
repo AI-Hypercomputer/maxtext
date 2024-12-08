@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Example:
-# bash offline_run_llama.sh -r test_int8_kv_216-108-54  -n
+# bash llama_offline_run.sh -r test_int8_kv_216-108-54  -n
 
 # enable profiling using -p option and capture using
 # tensorboard --logdir /tmp/tensorboard/
@@ -16,19 +16,22 @@ audit=false
 accuracy=false
 fast_eval=false
 
-while getopts "ntspdarfr:" opt
-do
-  case "$opt" in
-      n ) dry_run=true ;;
-      t ) test_run=true ;;
-      s ) skip_warmup=true ;;
-      p ) enable_profiler=true ;;
-      d ) audit=true ;;
-      a ) accuracy=true ;;
-      f ) fast_eval=true ;;
-      r ) run_name="$OPTARG" ;;
-      ? ) helpFunction ;; # Print helpFunction in case parameter is non-existent
+for arg in "$@"; do
+  case $arg in
+    -n) dry_run=true ;;
+    -t) test_run=true ;;
+    -s) skip_warmup=true ;;
+    -p) enable_profiler=true ;;
+    -d) audit=true ;;
+    -a) accuracy=true ;;
+    -f) fast_eval=true ;;
+    -r=*|--run=*) run_name="${arg#*=}" ;;
+    -r|--run)
+      shift
+      run_name="$1"
+      ;;
   esac
+  shift
 done
 
 
@@ -160,7 +163,7 @@ run_loadgen_accuracy () {
     fi
     
     ${CMD} python3 ${EVAL_SCRIPT} \
-      --checkpoint-path meta-llama/Llama-2-70b-chat-hf \
+      --tokenizer-path ${TOKENIZER_PATH} \
       --mlperf-accuracy-file ${OUTPUT_ACCURACY_JSON_PATH} \
       --dataset-file ${DATASET_PATH} 2>&1 | tee ${OUTPUT_LOG_DIR}/evaluate_offline_accuracy_log.log
   fi

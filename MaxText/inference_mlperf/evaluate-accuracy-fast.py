@@ -22,7 +22,7 @@ import tqdm
 
 from multiprocessing import Pool, cpu_count
 from functools import partial
-from transformers import AutoTokenizer
+from transformers import LlamaTokenizer, AutoTokenizer
 from typing import List, Dict, Tuple
 
 
@@ -60,9 +60,10 @@ def aggregate_rouge_scores(chunk_results: List[Dict]) -> Dict:
 
 def get_args():
   parser = argparse.ArgumentParser()
-  parser.add_argument("--checkpoint-path", required=True, help="Path to Llama2-70b-hf-chat checkpoint")
   parser.add_argument("--mlperf-accuracy-file", required=True, help="path to mlperf_log_accuracy.json")
   parser.add_argument("--dataset-file", required=True, help="path to processed openorca validation set")
+  parser.add_argument("--checkpoint-path", required=False, help="Path to Llama2-70b-hf-chat checkpoint")
+  parser.add_argument("--tokenizer-path", required=False, help="Path to Llama2-70b-hf-chat tokenizer")
   parser.add_argument("--verbose", action="store_true", help="verbose messages")
   parser.add_argument("--dtype", default="int64", help="dtype of the accuracy log", choices=["int32", "int64", "float"])
   parser.add_argument("--num-workers", type=int, default=None, help="Number of worker processes (default: CPU count)")
@@ -125,13 +126,19 @@ def main():
   num_workers = args.num_workers or cpu_count()
   print(f"Using {num_workers} worker processes")
 
-  print(f"Loading checkpoint from {args.checkpoint_path}")
-  tokenizer = AutoTokenizer.from_pretrained(
-      args.checkpoint_path,
-      model_max_length=2048,
-      padding_side="left",
-      use_fast=False,
-  )
+  if args.checkpoint_path:
+    print(f"Loading checkpoint from {args.checkpoint_path}")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.checkpoint_path,
+        model_max_length=2048,
+        padding_side="left",
+        use_fast=False,
+    )
+  elif args.tokenizer_path:
+    print(f"Loading tokenizer from {args.tokenizer_path}")
+    tokenizer = LlamaTokenizer(args.tokenizer_path)
+  else:
+    raise ValueError("Either --checkpoint-path or --tokenizer-path must be provided")
 
   metric = evaluate.load("rouge")
   nltk.download("punkt", quiet=True)

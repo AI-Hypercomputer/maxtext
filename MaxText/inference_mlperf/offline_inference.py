@@ -32,6 +32,7 @@ import logging
 from maxengine import set_engine_vars_from_base_engine
 
 log = logging.getLogger(__name__)
+log.setLevel(os.getenv("LOGLEVEL", "INFO"))
 
 
 @dataclasses.dataclass
