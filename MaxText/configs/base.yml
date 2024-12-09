@@ -272,6 +272,9 @@ logical_axis_rules: [
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
 data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'expert', 'autoregressive']]
 
+# sharding tolerance: float between 0.0 and 1.0 representing the allowed percentage of non-sharded parameters.
+sharding_tolerance: 0.02
+
 # One axis for each parallelism type may hold a placeholder (-1)
 # value to auto-shard based on available slices and devices.
 # By default, product of the DCN axes should equal number of slices
