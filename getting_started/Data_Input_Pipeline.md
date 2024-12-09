@@ -96,7 +96,9 @@ In HF or TFDS data pipeline, global shuffle is performed by a shuffle buffer wit
 1. Dataset needs to be in a format that supports random access. The default format is [ArrayRecord](https://github.com/google/array_record). For converting a dataset into ArrayRecord, see [instructions](https://github.com/google/array_record/tree/main/beam). Additionally, other random accessible data sources can be supported via a custom data source class ([docs](https://github.com/google/grain/blob/main/docs/data_sources.md)).
 2. ArrayRecord dataset, when hosted on GCS bucket, can only be read through [Cloud Storage FUSE](https://cloud.google.com/storage/docs/gcs-fuse). The installation of Cloud Storage FUSE is included in [setup.sh](https://github.com/google/maxtext/blob/main/setup.sh). User then needs to mount the GCS bucket to a local path for each worker, using the script [setup_gcsfuse.sh](https://github.com/google/maxtext/blob/main/setup_gcsfuse.sh). The script configs some parameters for the mount.
 ```
-bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$BUCKET_NAME MOUNT_PATH=$MOUNT_PATH
+bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$BUCKET_NAME MOUNT_PATH=$MOUNT_PATH [FILE_PATH=$MOUNT_PATH/my_dataset]
+# FILE_PATH is optional, when provided, the script runs "ls -R" for pre-filling the metadata cache
+# https://cloud.google.com/storage/docs/cloud-storage-fuse/performance#improve-first-time-reads
 ```
 3. Set `dataset_type=grain` and set `grain_train_files` to match the ArrayRecord files via a local path since the bucket has been mounted.
 4. Tune `grain_worker_count` for performance. This parameter controls the number of child process used by Grain (more details in [behind_the_scene](https://github.com/google/grain/blob/main/docs/behind_the_scenes.md), [code](https://github.com/google/grain/blob/main/grain/_src/python/grain_pool.py)). If you use a large number of workers, please check your config for gcsfuse in [setup_gcsfuse.sh](https://github.com/google/maxtext/blob/main/setup_gcsfuse.sh) to avoid gcsfuse throttling.

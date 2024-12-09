@@ -85,12 +85,19 @@ def validate_profiler_type(s: str) -> None:
     raise ValueError("Invalid profiler type was passed. Valid options ", valid_profiler_types)
 
 
+def validate_model_call_mode(s: str) -> None:
+  valid_model_call_modes = ("", "inference")
+  if s not in valid_model_call_modes:  # currently supported attention
+    raise ValueError(f"Invalid model call mode {s}. Valid options are {valid_model_call_modes}")
+
+
 def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
   validate_profiler_type(keys["profiler"])
   validate_compute_axis_order(keys["compute_axis_order"])
   validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
+  validate_model_call_mode(keys["model_call_mode"])
 
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"
@@ -105,8 +112,17 @@ def validate_keys(keys):
     assert (
         keys["local_checkpoint_period"] > 0
     ), "A positive local checkpoint period must be specified when using emergency checkpoint"
+    if keys["use_replicator_service"]:
+      assert (
+          keys["replicator_backup_interval_minutes"] > 0
+      ), "Replicator service is enabled, the backup interval minutes must be positive"
   else:
-    max_logging.log("Not using emergency checkpoint, ignoring local_checkpoint_directory and local_checkpoint_period")
+    max_logging.log(
+        "Not using emergency checkpoint, ignoring local_checkpoint_directory, local_checkpoint_period,"
+        " use_replicator_service and replicator_backup_interval_minutes"
+    )
+
+  validate_multiple_slices(keys)
   if keys["num_experts"] > 1:
     validate_megablox_parallelism(keys)
 
@@ -184,6 +200,7 @@ def validate_and_assign_remat_tensors(keys):
   # list of allowed tensors for custom remat policy
   tensors = [
       "decoder_layer_input",
+      "context",
       "mlpwi",
       "mlpwi_0",
       "mlpwi_1",
@@ -388,41 +405,9 @@ class _HyperParameters:
         raw_keys["eval_per_device_batch_size"], raw_keys["expansion_factor_real_data"], get_num_target_devices(raw_keys), 1
     )
 
-    raw_keys["num_slices"] = get_num_slices(raw_keys)
+    raw_keys["num_slices"] = max_utils.get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
-
-    if using_pipeline_parallelism(raw_keys):
-      raw_keys["using_pipeline_parallelism"] = True
-      num_stages = int(raw_keys["ici_pipeline_parallelism"] * raw_keys["dcn_pipeline_parallelism"])
-      if raw_keys["num_pipeline_repeats"] == -1:
-        num_pipeline_repeats, remainder = divmod(
-            raw_keys["num_decoder_layers"], num_stages * raw_keys["num_layers_per_pipeline_stage"]
-        )
-        assert (
-            not remainder
-        ), f"The number of layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) times the number of stages ({num_stages}) must divide the number of decoder layers ({raw_keys['num_decoder_layers']}) "
-        raw_keys["num_pipeline_repeats"] = num_pipeline_repeats
-      assert (
-          num_stages * raw_keys["num_pipeline_repeats"] * raw_keys["num_layers_per_pipeline_stage"]
-          == raw_keys["num_decoder_layers"]
-      ), f"The product of pipeline stages ({num_stages}), repeats ({raw_keys['num_pipeline_repeats']}), and layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) must be equal to the number of layers ({raw_keys['num_decoder_layers']})"
-      if raw_keys["num_pipeline_microbatches"] == -1:
-        if raw_keys["pipeline_delay_activation_forwarding"]:
-          raw_keys["num_pipeline_microbatches"] = 2 * num_stages
-        else:
-          raw_keys["num_pipeline_microbatches"] = num_stages
-      assert (
-          raw_keys["num_pipeline_microbatches"] % num_stages == 0
-      ), f"The number of microbatches ({raw_keys['num_pipeline_microbatches']}) must be divisible by the number of stages ({num_stages})"
-      assert (
-          raw_keys["micro_batch_size_to_train_on"] % raw_keys["num_pipeline_microbatches"] == 0
-      ), f"The batch size ({raw_keys['micro_batch_size_to_train_on']}) must be divisible by the number of microbatches ({raw_keys['num_pipeline_microbatches']})"
-      if raw_keys["pipeline_delay_activation_forwarding"]:
-        assert (
-            raw_keys["num_pipeline_microbatches"] >= 2 * num_stages
-        ), f"Delayed activation forwarding requires at least 2 * num_stages microbatches, but {num_stages} stages are used with {raw_keys['num_pipeline_microbatches']} microbatches"
-    else:
-      raw_keys["using_pipeline_parallelism"] = False
+    raw_keys = set_and_validate_pipeline_config(raw_keys)
 
     if raw_keys["dataset_type"] == "c4_mlperf":
       raw_keys["add_bos"] = False
@@ -478,6 +463,63 @@ class _HyperParameters:
         updated_keys = list(model_vars.keys())
       raw_keys = validate_and_update_keys(raw_keys, model_vars, config_name)
     return updated_keys
+
+
+def validate_multiple_slices(raw_keys):
+  if (
+      math.fabs(
+          math.prod(
+              [
+                  raw_keys["dcn_data_parallelism"],
+                  raw_keys["dcn_pipeline_parallelism"],
+                  raw_keys["dcn_fsdp_parallelism"],
+                  raw_keys["dcn_fsdp_transpose_parallelism"],
+                  raw_keys["dcn_sequence_parallelism"],
+                  raw_keys["dcn_tensor_parallelism"],
+                  raw_keys["dcn_expert_parallelism"],
+                  raw_keys["dcn_autoregressive_parallelism"],
+              ]
+          )
+      )
+      > 1
+  ):
+    assert raw_keys["num_slices"] > 1, "DCN parallelism requested but only one slice available."
+
+
+def set_and_validate_pipeline_config(raw_keys):
+  if using_pipeline_parallelism(raw_keys):
+    raw_keys["using_pipeline_parallelism"] = True
+    num_stages = int(raw_keys["ici_pipeline_parallelism"] * raw_keys["dcn_pipeline_parallelism"])
+    if raw_keys["num_pipeline_repeats"] == -1:
+      num_pipeline_repeats, remainder = divmod(
+          raw_keys["num_decoder_layers"], num_stages * raw_keys["num_layers_per_pipeline_stage"]
+      )
+      assert (
+          not remainder
+      ), f"The number of layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) times the number of stages ({num_stages}) must divide the number of decoder layers ({raw_keys['num_decoder_layers']}) "
+      raw_keys["num_pipeline_repeats"] = num_pipeline_repeats
+    assert (
+        num_stages * raw_keys["num_pipeline_repeats"] * raw_keys["num_layers_per_pipeline_stage"]
+        == raw_keys["num_decoder_layers"]
+    ), f"The product of pipeline stages ({num_stages}), repeats ({raw_keys['num_pipeline_repeats']}), and layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) must be equal to the number of layers ({raw_keys['num_decoder_layers']})"
+    if raw_keys["num_pipeline_microbatches"] == -1:
+      if raw_keys["pipeline_delay_activation_forwarding"]:
+        raw_keys["num_pipeline_microbatches"] = 2 * num_stages
+      else:
+        raw_keys["num_pipeline_microbatches"] = num_stages
+    assert (
+        raw_keys["num_pipeline_microbatches"] % num_stages == 0
+    ), f"The number of microbatches ({raw_keys['num_pipeline_microbatches']}) must be divisible by the number of stages ({num_stages})"
+    assert (
+        raw_keys["micro_batch_size_to_train_on"] % raw_keys["num_pipeline_microbatches"] == 0
+    ), f"The batch size ({raw_keys['micro_batch_size_to_train_on']}) must be divisible by the number of microbatches ({raw_keys['num_pipeline_microbatches']})"
+    if raw_keys["pipeline_delay_activation_forwarding"]:
+      assert (
+          raw_keys["num_pipeline_microbatches"] >= 2 * num_stages
+      ), f"Delayed activation forwarding requires at least 2 * num_stages microbatches, but {num_stages} stages are used with {raw_keys['num_pipeline_microbatches']} microbatches"
+  else:
+    raw_keys["using_pipeline_parallelism"] = False
+  return raw_keys
 
 
 def validate_megablox_parallelism(raw_keys):
@@ -587,21 +629,6 @@ def get_num_target_devices(raw_keys):
     return int(devices_per_slice * raw_keys["compile_topology_num_slices"])
   else:
     return len(jax.devices())
-
-
-def get_num_slices(raw_keys):
-  """Calculate num_slices based on number of devices."""
-  if raw_keys["hardware"] == "cpu":
-    max_logging.log(" Setting num_slices=1 for CPU hardware type")
-    return 1
-  if int(raw_keys["compile_topology_num_slices"]) > 0:
-    return raw_keys["compile_topology_num_slices"]
-  else:
-    devices = jax.devices()
-    try:
-      return 1 + max([d.slice_index for d in devices])
-    except:
-      return 1
 
 
 def get_quantization_local_shard_count(raw_keys):
