@@ -161,14 +161,17 @@ elif [[ $MODE == "nightly" ]]; then
         # Install jax-nightly
         if [[ -n "$JAX_VERSION" ]]; then
             echo "Installing jax-nightly, jaxlib-nightly ${JAX_VERSION}"
-            pip install -U --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} jax-cuda12-plugin[with_cuda] jax-cuda12-pjrt -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+            pip install -U --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} jax-cuda12-plugin[with_cuda]==${JAX_VERSION} jax-cuda12-pjrt==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
         else
             echo "Installing latest jax-nightly, jaxlib-nightly"
             pip install -U --pre jax jaxlib jax-cuda12-plugin[with_cuda] jax-cuda12-pjrt -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
         fi
         # Install Transformer Engine
         export NVTE_FRAMEWORK=jax
-        pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+        # pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+
+        # pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@v1.11
+        pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@v1.10
     elif [[ $DEVICE == "tpu" ]]; then
         echo "Installing jax-nightly, jaxlib-nightly"
         # Install jax-nightly
