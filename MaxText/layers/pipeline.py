@@ -372,10 +372,11 @@ class Pipeline(nn.Module):
     weights = gather_weights_for_stages_in(weights)
     return weights
 
+  # Does not explicitly use weights so it can be used for initialization
   def get_main_vmap_func(self):
-    def func_to_vmap(body_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
+    def func_to_vmap(body_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
       # nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance.
-      return body_instance.apply(weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+      return body_instance(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
     vmap_func = nn.vmap(
         func_to_vmap,
@@ -392,7 +393,27 @@ class Pipeline(nn.Module):
     )
     return vmap_func
 
-  def run_one_iteration(self, loop_state, positions, segment_ids, deterministic, model_mode, decoder_layer_instance):
+  # Explicitly uses weights so they can be manipulated
+  def get_main_vmap_func_apply(self):
+    def func_to_vmap(body_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
+      # nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance.
+      return body_instance.apply(weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+
+    vmap_func = nn.vmap(
+      func_to_vmap,
+      in_axes=(0, 0, 0, 0, None, None),
+      spmd_axis_name='stage',
+      variable_axes={'params': 0},
+      split_rngs={'params':  self.is_initializing()},
+      metadata_params={
+        nn.PARTITION_NAME: "layers",
+        'sub_weight_split_dims_mapping': (None),
+        "is_initializing": self.is_initializing(),
+        "x_times": self.num_stages}
+    )
+    return vmap_func
+
+  def run_one_iteration(self, all_pipeline_weights, loop_state, positions, segment_ids, deterministic, model_mode, decoder_layer_instance):
     """Run one loop iteration - gets weights and inputs for each stage, run the stages in parallel, and update the loop state."""
     state_io = loop_state["state_io"]
     shift = loop_state["shift"]
@@ -407,7 +428,8 @@ class Pipeline(nn.Module):
     stages_positions = self.vmap_gather(positions, microbatch_ids, 0) if positions is not None else None
     stages_segment_ids = self.vmap_gather(segment_ids, microbatch_ids, 0) if segment_ids is not None else None
 
-    vmap_func = self.get_main_vmap_func()
+    #vmap_func = self.get_main_vmap_func()
+    vmap_func = self.get_main_vmap_func_apply()
 
     if self.config.num_pipeline_repeats > 1:
       _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
@@ -519,7 +541,7 @@ class Pipeline(nn.Module):
     total_iterations = real_iterations + bubble_iterations
 
     if self.is_initializing():
-      return dummy_run_toinitialize_weights(self, example_inputs, example_position, example_segmentation)
+      #return dummy_run_toinitialize_weights(self, example_inputs, example_position, example_segmentation)
       # TODO: Move this all into a function
       vmap_func = self.get_main_vmap_func()
 
@@ -575,18 +597,16 @@ class Pipeline(nn.Module):
 
     def all_gather_over_fsdp(self):
       print("hello", flush=True)
-      #breakpoint()
       print("goodbye", flush=True)
       return self.layers.variables
     
     print("what", flush=True)
-    #breakpoint()
-    all_pipeline_weights = self.all_gather_over_fsdp()
+    all_pipeline_weights = all_gather_over_fsdp(self)
 
     def run_iteration_scannable(model, loop_state, xs):
       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
       # the run_one_iteration in this method - the first argument model (i.e. self) is a nn.module instance.
-      return model.run_one_iteration(loop_state, positions, segment_ids, deterministic, model_mode, model.layers), None
+      return model.run_one_iteration(all_pipeline_weights, loop_state, positions, segment_ids, deterministic, model_mode, model.layers), None
 
     if self.config.set_remat_policy_on_pipeline_iterations:
       run_iteration_scannable = nn.remat(
