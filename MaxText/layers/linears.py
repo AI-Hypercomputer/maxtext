@@ -411,21 +411,11 @@ class MoeBlock(nn.Module):
       inputs = inputs.astype(self.dtype)
       kernel = kernel.astype(self.dtype)
 
-      # 'int8' for dynamic range quantization using 8-bits
-      # 'int8w' for weight only quantization using 8-bits
-      # 'int4w' for weight only quantization using 4-bits
-      quantization_config = self.config.quantization
-      quantization_types = {
-          "int8": (jnp.int8, jnp.int8),
-          "int8w": (None, jnp.int8),
-          "int4w": (None, jnp.int4),
-      }
       lhs_quantize_dtype, rhs_quantize_dtype = None, None
-      if quantization_config:
-        if quantization_config in quantization_types:
-          lhs_quantize_dtype, rhs_quantize_dtype = quantization_types[quantization_config]
-        else:
-          raise ValueError(f"{quantization_config=} is not yet supported in megablox.")
+      if self.quant is not None:
+        quant_dg = self.quant.quant_dg
+        lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
+        rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
 
       output = mblx.gmm(
           lhs=inputs,
