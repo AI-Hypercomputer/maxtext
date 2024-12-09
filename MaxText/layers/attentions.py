@@ -170,7 +170,7 @@ class AttentionOp(nn.Module):
     assert query.shape[-1] == key.shape[-1], "q, k depths must match."
 
   # Following Pallas MHA Flash Attention Reference.
-  # https://github.com/google/jax/blob/main/jax/experimental/pallas/ops/tpu/flash_attention.py
+  # https://github.com/jax-ml/jax/blob/main/jax/experimental/pallas/ops/tpu/flash_attention.py
   # This mask models (1) separate sequences (decoder_segment_ids) and (2) causality
   def generate_attention_mask(self, query, key, decoder_segment_ids: Array | None, model_mode: str) -> Array | None:
     mask = None
