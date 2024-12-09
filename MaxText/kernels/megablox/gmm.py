@@ -1,4 +1,4 @@
-# Copyright 2024 The JAX Authors.
+# Copyright 2024 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,17 +14,19 @@
 
 """Grouped matrix multiplication kernels for TPU written in Pallas."""
 
+# pylint: disable=too-many-positional-arguments, unnecessary-lambda-assignment
+
 from collections.abc import Callable
 import dataclasses
 import functools
-from typing import Any, Optional
+from typing import Any, Optional, Literal
 
 import jax
+import jax.numpy as jnp
 from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from kernels.megablox import common
-import jax.numpy as jnp
 
 from aqt.jax.v2 import pallas as aqt_pl
 from aqt.jax.v2 import aqt_tensor
@@ -292,11 +294,18 @@ LutFn = Callable[[int, int, int], Optional[tuple[int, int, int]]]
 
 @functools.partial(
     jax.jit,
-    static_argnames=["preferred_element_type", "tiling", "transpose_rhs", "interpret", "quant"],
+    static_argnames=[
+        "preferred_element_type",
+        "tiling",
+        "transpose_rhs",
+        "interpret",
+        "lhs_quantize_dtype",
+        "rhs_quantize_dtype",
+    ],
 )
 def gmm(
     lhs: jnp.ndarray,
-    rhs: jnp.ndarray,
+    rhs: jnp.ndarray | QTensor,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
     tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
@@ -304,7 +313,8 @@ def gmm(
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
     interpret: bool = False,
-    quant: bool = False,
+    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
+    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
 ) -> jnp.ndarray:
   """Compute lhs[sizes[i-1]:sizes[i], :] @ rhs for each group 'i'.
 
@@ -320,11 +330,23 @@ def gmm(
     transpose_rhs: True if the rhs needs to be transposed.
     interpret: Whether or not to run the kernel in interpret mode, helpful for
       testing and debugging.
-    quant: Whether to quantize lhs and rhs.
+    lhs_quantize_dtype: Bit precision of lhs after quantization.
+    rhs_quantirhs_quantize_dtypeze_bits: Bit precision of rhs after quantization.
+      If rhs (weight) is already quantized this must be samed with precision of the given weight.
 
   Returns:
     A 2d, jnp.ndarray with shape [m, n].
   """
+
+  if rhs_quantize_dtype is None and isinstance(rhs, QTensor):
+    raise ValueError("rhs_quantize_dtype is None, but quantized rhs is given.")
+
+  if rhs_quantize_dtype is not None and isinstance(rhs, QTensor):
+    # If weight is alreeady quantized check precision.
+    if rhs_quantize_dtype != rhs.qvalue.dtype:
+      raise ValueError(
+          f"{rhs_quantize_dtype=} and already given quantized {rhs.qvalue.dtype=} does not have the same precision"
+      )
 
   if existing_out is not None:
     assert isinstance(existing_out, jax.Array)
@@ -405,13 +427,13 @@ def gmm(
         def _init_out():
           out[...] = existing_out[...]
 
-    def mask_k_rem(x, *, dim):
+    def mask_k_rem(x, *, dim, quantize):
       if k_rem == 0:
         return x
 
       orig_dtype = x.dtype
       iota = lax.broadcasted_iota(jnp.int32, x.shape, dim)
-      if not quant:
+      if quantize is None:
         x = x.astype(jnp.float32)
       else:
         x = x.astype(jnp.int32)
@@ -429,8 +451,8 @@ def gmm(
 
     def _accum(is_last_k_tile):
       if is_last_k_tile:
-        mask_k_rem_lhs = partial(mask_k_rem, dim=1)
-        mask_k_rem_rhs = partial(mask_k_rem, dim=int(transpose_rhs))
+        mask_k_rem_lhs = partial(mask_k_rem, dim=1, quantize=lhs_quantize_dtype is not None)
+        mask_k_rem_rhs = partial(mask_k_rem, dim=int(transpose_rhs), quantize=rhs_quantize_dtype is not None)
       else:
         mask_k_rem_lhs = lambda x: x
         mask_k_rem_rhs = lambda x: x
@@ -454,21 +476,12 @@ def gmm(
       else:
         loaded_rhs = mask_k_rem_rhs(rhs[...]).astype(input_dtype)
 
-      if quant:
-        acc_scratch[...] += aqt_pl.dot_general(
-            loaded_lhs,
-            loaded_rhs,
-            preferred_element_type=jnp.float32,
-            dimension_numbers=dot_general_dims,
-        )
-      else:
-        acc_scratch[...] += lax.dot_general(
-            loaded_lhs,
-            loaded_rhs,
-            preferred_element_type=jnp.float32,
-            dimension_numbers=dot_general_dims,
-        )
-
+      acc_scratch[...] += aqt_pl.dot_general(
+          loaded_lhs,
+          loaded_rhs,
+          preferred_element_type=jnp.float32,
+          dimension_numbers=dot_general_dims,
+      )
       if is_last_k_tile:
         _store_accum()
 
@@ -509,9 +522,13 @@ def gmm(
     input_output_aliases = {}
   else:
     in_out_block_spec = out_block_spec
-    input_output_aliases = {6: 0}
-    if quant:
-      input_output_aliases = {8: 0}
+    existing_out_arg_index = 6
+    # adding one more input because of scale factor of quantized tensor.
+    if lhs_quantize_dtype is not None:
+      existing_out_arg_index += 1
+    if rhs_quantize_dtype is not None:
+      existing_out_arg_index += 1
+    input_output_aliases = {existing_out_arg_index: 0}
 
   lhs_block_spec = pl.BlockSpec((tm, tk), lhs_transform_indices)
   if transpose_rhs:
@@ -520,13 +537,17 @@ def gmm(
     rhs_block_spec = pl.BlockSpec((None, tk, tn), rhs_transform_indices)
 
   lhs_bytes = lhs.size * lhs.itemsize
-  rhs_bytes = (k * n) * rhs.itemsize  # We don't read all of rhs
+  if isinstance(rhs, QTensor):
+    rhs_bytes = (k * n) * rhs.qvalue.itemsize  # ignore scale factor as its size marginal.
+  else:
+    rhs_bytes = (k * n) * rhs.itemsize  # We don't read all of rhs
+
   out_bytes = (m * n) * jnp.dtype(preferred_element_type).itemsize
   max_active_tiles = group_metadata[1].size
   bytes_accessed = (lhs_bytes * tiles_n) + (rhs_bytes * max_active_tiles) + out_bytes
   flops = 2 * m * k * n
   cost_estimate = pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed, transcendentals=0)
-  if quant:
+  if lhs_quantize_dtype is not None or rhs_quantize_dtype is not None:
     pallas_call_fn = aqt_pl.pallas_call
   else:
     pallas_call_fn = pl.pallas_call
@@ -550,15 +571,20 @@ def gmm(
       cost_estimate=cost_estimate,
   )
 
-  if quant:
-    lhs_contracting_axis, rhs_contracting_axis = dot_general_dims[0]
-    # Since block_spec.block_shape of rhs is None, the first axis is reduced
-    # inside kernel, e.g., if block_shape is (None, tn, tk) then a tensor of
-    # shape (tn, tk) will be feteched inside kernel instead of (1, tn, tk).
-    # Therefore, we need to add one to rhs_contracting_axis.
-    rhs_contracting_axis = map(lambda x: x + 1, rhs_contracting_axis)
-    lhs = aqt_pl.quant(lhs, 8, lhs_contracting_axis)
-    rhs = aqt_pl.quant(rhs, 8, list(rhs_contracting_axis))
+  lhs_contracting_axis, rhs_contracting_axis = dot_general_dims[0]
+  # Since block_spec.block_shape of rhs is None, the first axis is reduced
+  # inside kernel, e.g., if block_shape is (None, tn, tk) then a tensor of
+  # shape (tn, tk) will be feteched inside kernel instead of (1, tn, tk).
+  # Therefore, we need to add one to rhs_contracting_axis.
+  rhs_contracting_axis = map(lambda x: x + 1, rhs_contracting_axis)
+
+  if lhs_quantize_dtype is not None:
+    lhs_quantize_bits = 4 if lhs_quantize_dtype == jnp.int4 else 8
+    lhs = aqt_pl.quant(lhs, lhs_quantize_bits, lhs_contracting_axis)
+
+  if not isinstance(rhs, QTensor) and rhs_quantize_dtype is not None:
+    rhs_quantize_bits = 4 if rhs_quantize_dtype == jnp.int4 else 8
+    rhs = aqt_pl.quant(rhs, rhs_quantize_bits, list(rhs_contracting_axis))
 
   out = call_gmm(
       group_metadata,
@@ -584,7 +610,6 @@ def gmm(
         "tiling",
         "num_actual_groups",
         "interpret",
-        "quant",
     ],
 )
 def tgmm(
@@ -597,7 +622,6 @@ def tgmm(
     num_actual_groups: int | None = None,
     existing_out: jnp.ndarray | None = None,
     interpret: bool = False,
-    quant: bool = False,
 ) -> jnp.ndarray:
   """Compute lhs[:, sizes[i-1]:sizes[i]] @ rhs[sizes[i-1]:sizes[i], :].
 

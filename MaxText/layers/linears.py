@@ -32,14 +32,8 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
 import max_logging
 import max_utils
-
-try:
-  # from jax.experimental.pallas.ops.tpu import megablox as mblx
-  from kernels import megablox as mblx
-
-except ImportError:
-  max_logging.log("JAX megablox is available for TPU only.")
-  pass
+from aqt.jax.v2 import aqt_tensor
+from kernels import megablox as mblx
 
 Array = common_types.Array
 Config = common_types.Config
@@ -52,6 +46,7 @@ bias_init = initializers.default_bias_init
 
 RMSNorm = normalizations.RMSNorm
 Quant = quantizations.AqtQuantization
+QTensor = aqt_tensor.QTensor
 
 
 def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
@@ -415,15 +410,32 @@ class MoeBlock(nn.Module):
 
       inputs = inputs.astype(self.dtype)
       kernel = kernel.astype(self.dtype)
+
+      # 'int8' for dynamic range quantization using 8-bits
+      # 'int8w' for weight only quantization using 8-bits
+      # 'int4w' for weight only quantization using 4-bits
+      quantization_config = self.config.quantization
+      quantization_types = {
+          "int8": (jnp.int8, jnp.int8),
+          "int8w": (None, jnp.int8),
+          "int4w": (None, jnp.int4),
+      }
+      lhs_quantize_dtype, rhs_quantize_dtype = None, None
+      if quantization_config:
+        if quantization_config in quantization_types:
+          lhs_quantize_dtype, rhs_quantize_dtype = quantization_types[quantization_config]
+        else:
+          raise ValueError(f"{quantization_config=} is not yet supported in megablox.")
+
       output = mblx.gmm(
           lhs=inputs,
           rhs=kernel,
           group_sizes=group_sizes,
           preferred_element_type=jnp.bfloat16,
           tiling=tile_size,
-          quant=True if self.quant else False,
+          lhs_quantize_dtype=lhs_quantize_dtype,
+          rhs_quantize_dtype=rhs_quantize_dtype,
       )
-
       if hs_shape[0] % pad_length:
         output = output[: hs_shape[0]]
       return output
@@ -431,16 +443,23 @@ class MoeBlock(nn.Module):
     # Currently, we only support data and tensor parallelism with Megablox.
     # We all gather the input activations over tensor parallelism to follow strategy
     # in https://parsa.epfl.ch/course-info/cs723/papers/Megatron.pdf.
+    input_partition_spec = nn.logical_to_mesh_axes(("activation_batch", None, None))
+    gate_logits_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
+    w0_pspec = nn.logical_to_mesh_axes((None, None, "mlp"))
+    w1_pspec = nn.logical_to_mesh_axes((None, None, "mlp"))
+    wo_pspec = nn.logical_to_mesh_axes((None, "mlp", None))
+
+    if isinstance(w0_kernel, QTensor):
+      w0_pspec = aqt_tensor.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
+    if isinstance(w1_kernel, QTensor):
+      w1_pspec = aqt_tensor.partition_spec(w1_pspec, (1,), w1_kernel.dtype, use_bias=False)
+    if isinstance(wo_kernel, QTensor):
+      wo_pspec = aqt_tensor.partition_spec(wo_pspec, (1,), wo_kernel.dtype, use_bias=False)
+
     @functools.partial(
         shard_map.shard_map,
         mesh=self.mesh,
-        in_specs=(
-            (nn.logical_to_mesh_axes(("activation_batch", None, None))),
-            (nn.logical_to_mesh_axes(("activation_batch", None, None))),
-            (nn.logical_to_mesh_axes((None, None, "mlp"))),
-            (nn.logical_to_mesh_axes((None, None, "mlp"))),
-            (nn.logical_to_mesh_axes((None, "mlp", None))),
-        ),
+        in_specs=(input_partition_spec, gate_logits_pspec, w0_pspec, w1_pspec, wo_pspec),
         out_specs=(nn.logical_to_mesh_axes(("activation_batch", None, "activation_embed"))),
         check_rep=False,
     )
@@ -645,6 +664,22 @@ class MoeBlock(nn.Module):
         )
       return output, None
 
+  def retrieve_quantized_weight(
+      self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel
+  ) -> tuple[QTensor, QTensor, QTensor]:
+    # This is called only during tracing. This is to invoke creation of quantized tensor inside AqtEinsum.
+    # After jit, this will become no-op and will not affect performance.
+    _ = self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+
+    w0_kernel = self.variables["aqt"]["AqtEinsum_0"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
+    w1_kernel = self.variables["aqt"]["AqtEinsum_1"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
+    wo_kernel = self.variables["aqt"]["AqtEinsum_2"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
+
+    w0_kernel = max_utils.unbox_logicallypartioned(w0_kernel)
+    w1_kernel = max_utils.unbox_logicallypartioned(w1_kernel)
+    wo_kernel = max_utils.unbox_logicallypartioned(wo_kernel)
+    return w0_kernel, w1_kernel, wo_kernel
+
   @nn.compact
   def __call__(self, inputs):
     cfg = self.config
@@ -659,27 +694,14 @@ class MoeBlock(nn.Module):
         name="gate",
         matmul_precision=self.config.matmul_precision,
     )(inputs)
-
+    max_logging.log("Running MoE megablox implementation.")
+    cfg = self.config
     w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts, cfg.emb_dim, cfg.mlp_dim)
-
     if cfg.megablox:
-      max_logging.log("Running MoE megablox implementation.")
-      # This is called only during tracing. This is to invoke creation of quantized tensor.
-      # After jit, this will become no-op and will not affect performance.
-      _ = self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
-
       if quantizations.in_serve_mode(self.quant):
-        w0_kernel = self.variables["aqt"]["AqtEinsum_0"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
-        w1_kernel = self.variables["aqt"]["AqtEinsum_1"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
-        wo_kernel = self.variables["aqt"]["AqtEinsum_2"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
-
-        # Currently, megablox kernel does not accept QTensor as inputs.
-        # Dequantizes before feeding it to megablox, as none of tesnsors are not quantized
-        # there will be no acceleration during serving. This is just a temporary solution.
-        w0_kernel = max_utils.unbox_logicallypartioned(w0_kernel).dequant()
-        w1_kernel = max_utils.unbox_logicallypartioned(w1_kernel).dequant()
-        wo_kernel = max_utils.unbox_logicallypartioned(wo_kernel).dequant()
+        w0_kernel, w1_kernel, wo_kernel = self.retrieve_quantized_weight(
+            inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel
+        )
       return self.megablox(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
     else:
-      max_logging.log("Running MoE matmul implementation.")
       return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)

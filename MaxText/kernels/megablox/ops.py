@@ -14,20 +14,23 @@
 
 """Grouped matrix multiplication operations with custom VJPs."""
 
-import jax
-from kernels.megablox import gmm as backend
-import jax.numpy as jnp
+# pylint: disable=too-many-positional-arguments
 
+import jax
+import jax.numpy as jnp
+from kernels.megablox import gmm as backend
+from aqt.jax.v2 import aqt_tensor
+from typing import Literal
 
 gmm = jax.custom_vjp(
     backend.gmm,
-    nondiff_argnums=(3, 4, 7, 8, 9),
+    nondiff_argnums=(3, 4, 7, 8, 9, 10),
 )
 
 
 def _gmm_fwd(
     lhs: jnp.ndarray,
-    rhs: jnp.ndarray,
+    rhs: jnp.ndarray | aqt_tensor.QTensor,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
     tiling: tuple[int, int, int] = (128, 128, 128),
@@ -35,12 +38,13 @@ def _gmm_fwd(
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
     interpret: bool = False,
-    quant: bool = False,
+    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
+    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
 ) -> tuple[
     jnp.ndarray,
     tuple[
         jnp.ndarray,
-        jnp.ndarray,
+        jnp.ndarray | aqt_tensor.QTensor,
         jnp.ndarray,
         jnp.ndarray | None,
         int,
@@ -57,7 +61,8 @@ def _gmm_fwd(
       existing_out,
       transpose_rhs=transpose_rhs,
       interpret=interpret,
-      quant=quant,
+      lhs_quantize_dtype=lhs_quantize_dtype,
+      rhs_quantize_dtype=rhs_quantize_dtype,
   )
   return out, (lhs, rhs, group_sizes, group_offset, rhs.shape[0])
 
@@ -67,10 +72,11 @@ def _gmm_bwd(
     tiling: tuple[int, int, int],
     transpose_rhs: bool,
     interpret: bool,
-    quant: bool,
+    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None,
+    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None,
     residual: tuple[
         jnp.ndarray,
-        jnp.ndarray,
+        jnp.ndarray | aqt_tensor.QTensor,
         jnp.ndarray,
         jnp.ndarray | None,
         int,
@@ -89,18 +95,11 @@ def _gmm_bwd(
       group_offset,
       transpose_rhs=not transpose_rhs,
       interpret=interpret,
-      quant=quant,
+      lhs_quantize_dtype=lhs_quantize_dtype,
+      rhs_quantize_dtype=rhs_quantize_dtype,
   )
   grad_rhs = backend.tgmm(
-      lhs.swapaxes(0, 1),
-      grad,
-      group_sizes,
-      rhs.dtype,
-      tiling,
-      group_offset,
-      num_actual_groups,
-      interpret=interpret,
-      quant=quant,
+      lhs.swapaxes(0, 1), grad, group_sizes, rhs.dtype, tiling, group_offset, num_actual_groups, interpret=interpret
   )
 
   # NOTE: If the rhs transposition is fused into the forward pass we need to

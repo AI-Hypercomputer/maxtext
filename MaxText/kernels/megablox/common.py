@@ -1,4 +1,4 @@
-# Copyright 2024 The JAX Authors.
+# Copyright 2024 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -45,7 +45,7 @@ def supports_bfloat16_matmul() -> bool:
 
 
 def assert_is_supported_dtype(dtype: jnp.dtype) -> None:
-  if dtype != jnp.bfloat16 and dtype != jnp.float32:
+  if dtype not in (jnp.bfloat16, jnp.float32):
     raise ValueError(f"Expected bfloat16 or float32 array but got {dtype}.")
 
 
