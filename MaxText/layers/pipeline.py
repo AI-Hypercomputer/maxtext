@@ -353,10 +353,29 @@ class Pipeline(nn.Module):
     output = output[:, permutation]
     return output
 
+
+  def prepare_vars_for_main_vmap_2(self, weights, loop_iteration):
+    _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
+    def gather_weights_for_stages_in(weights):
+      return jax.tree.map(
+          functools.partial(
+              self.vmap_parallel_gather, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1),
+          weights)
+    circular_metadata_params={
+      nn.PARTITION_NAME: "circular_repeats",
+      'sub_weight_split_dims_mapping': (None,),
+      "is_initializing": self.is_initializing(),
+      "x_times": self.config.num_pipeline_repeats,
+      'optimizer_dims_mapping': None,
+    }
+    weights = meta.remove_axis(weights, 0, circular_metadata_params) # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
+    weights = gather_weights_for_stages_in(weights)
+    return weights
+
   def get_main_vmap_func(self):
-    def func_to_vmap(body_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
+    def func_to_vmap(body_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
       # nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance.
-      return body_instance(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+      return body_instance.apply(weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
     vmap_func = nn.vmap(
         func_to_vmap,
@@ -422,8 +441,9 @@ class Pipeline(nn.Module):
           trans_in_fn=prepare_vars_for_main_vmap,
       )
 
+    repeat_weights = self.prepare_vars_for_main_vmap_2(all_pipeline_weights, loop_iteration)
     stages_output = vmap_func(
-        decoder_layer_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
+        decoder_layer_instance, repeat_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
     )
     if self.config.scan_layers:
       stages_output = stages_output[0]
@@ -499,6 +519,8 @@ class Pipeline(nn.Module):
     total_iterations = real_iterations + bubble_iterations
 
     if self.is_initializing():
+      return dummy_run_toinitialize_weights(self, example_inputs, example_position, example_segmentation)
+      # TODO: Move this all into a function
       vmap_func = self.get_main_vmap_func()
 
       if self.config.num_pipeline_repeats > 1:
@@ -550,6 +572,16 @@ class Pipeline(nn.Module):
           broadcasted_stage_outpus,
           [self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim],
       )
+
+    def all_gather_over_fsdp(self):
+      print("hello", flush=True)
+      #breakpoint()
+      print("goodbye", flush=True)
+      return self.layers.variables
+    
+    print("what", flush=True)
+    #breakpoint()
+    all_pipeline_weights = self.all_gather_over_fsdp()
 
     def run_iteration_scannable(model, loop_state, xs):
       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
