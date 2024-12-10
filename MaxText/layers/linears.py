@@ -391,6 +391,9 @@ class MoeBlock(nn.Module):
     unsort_intermediate = jnp.take(intermediate, indices=jnp.argsort(sorted_selected_experts), axis=0)
     reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
     tensor_parallelism = self.config.ici_tensor_parallelism * self.config.dcn_tensor_parallelism
+    data_parallelism = self.config.ici_data_parallelism * self.config.dcn_data_parallelism
+    fsdp_parallelism = self.config.ici_fsdp_parallelism * self.config.dcn_fsdp_parallelism
+    batch_sharding = data_parallelism * fsdp_parallelism
     reshaped_intermediate = jnp.reshape(
         unsort_intermediate,
         (-1, self.num_experts_per_tok, self.config.emb_dim // tensor_parallelism),
@@ -403,7 +406,7 @@ class MoeBlock(nn.Module):
           reshaped_weights.astype(jnp.float32),
           precision=matmul_precision,
       )
-    updated_batch = int(self.config.per_device_batch_size * jax.device_count() // self.config.ici_fsdp_parallelism)
+    updated_batch = int(self.config.per_device_batch_size * jax.device_count() // batch_sharding)
     # inferencing hack
     # prefill has BS =1 sequence length = max_prefill_length
     # decode has BS = B, sequence_length= 1
