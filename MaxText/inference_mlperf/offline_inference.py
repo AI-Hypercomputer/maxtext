@@ -24,6 +24,7 @@ import functools
 import threading
 import traceback
 import signal
+import time
 
 from jetstream.engine import engine_api
 
@@ -42,21 +43,23 @@ class InputData:
   true_length: int
 
 
-class JetThread(threading.Thread):
+class ProcessingError(Exception):
+  """Custom exception for processing errors."""
+  pass
 
+
+class JetThread(threading.Thread):
   def run(self):
     try:
       super().run()
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      print(f"Thread {self.name} encountered an error: {e}")
+    except Exception as e:
+      log.error(f"Thread {self.name} encountered an error: {e}")
       traceback.print_exc()
-      os.kill(os.getpid(), signal.SIGKILL)
+      raise
 
 
 class OfflineInference:
-
   def __init__(self, engine: engine_api.Engine, params, base_engine: engine_api.Engine):
-    self.live = False
     self.engine = engine
     self.decode_state = None
     if params is None:
@@ -74,115 +77,136 @@ class OfflineInference:
 
     self._cached_pref = {}
     self._cached_generate = None
+    # Keep original queue size
     self.detokenize_backlog = queue.Queue(10)
+    self._shutdown = threading.Event()
+    self._error = None
+    
+    # Monitoring counters
+    self._total_tokens_processed = 0
+    self._last_activity_time = time.time()
+    self._processing_stats = {
+      'prefills': 0,
+      'decodes': 0,
+      'tokens_processed': 0,
+    }
 
   def init_decode_state(self):
     if self.decode_state is None:
       self.decode_state = self.engine.init_decode_state()
 
   def warmup(self, max_length, warmup_samples):
+    log.info("Starting warmup...")
     self.init_decode_state()
-    interesting_buckets = [
-        32,
-        64,
-        128,
-        256,
-        512,
-        1024,
-        2048,
-        4096,
-    ]
+    interesting_buckets = [32, 64, 128, 256, 512, 1024, 2048, 4096]
     for length in interesting_buckets:
       if length > max_length:
         break
       log.info(f"Compiling prefill: {length}")
       input_data = jax.ShapeDtypeStruct((length,), jnp.dtype("int32"))
       self._cached_pref[length] = (
-          jax.jit(self._prefill_insert, donate_argnums=(4,))
-          .lower(self.params, tokens=input_data, slot=0, true_length=length - 1, decode_state=self.decode_state)
-          .compile()
+        jax.jit(self._prefill_insert, donate_argnums=(4,))
+        .lower(self.params, tokens=input_data, slot=0, true_length=length - 1, decode_state=self.decode_state)
+        .compile()
       )
     self.batch_inference(warmup_samples, desc="warmup")
     self._cached_generate = (
-        jax.jit(self.engine.generate, donate_argnums=(1,)).lower(self.params, self.decode_state).compile()
+      jax.jit(self.engine.generate, donate_argnums=(1,))
+      .lower(self.params, self.decode_state)
+      .compile()
     )
+    log.info("Warmup completed successfully")
 
   def _prefill_insert(self, params, tokens, slot, true_length, decode_state):
-    """return decodestate."""
-    prefill_result, first_token = self.engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
-    decode_state = self.engine.insert(prefill_result, decode_state, slot=slot)
-    return first_token, decode_state
-
-  def batch_inference_with_callback(
-      self,
-      data: List[InputData],
-      emit_first_token: Callable[[str, int], bool],
-      emit_token: Callable[[str, int], bool],
-      desc: str,
-  ):
-    """callback is a function that takes id and token. It will be called once per output
-
-    token.
-    """
-
-    def prefill(slot, tokens, true_length):
-      nonlocal self
-      if self.dummy:
-        log.info("dummy prefill")
-        return 123
-
-      prefill_fn = self._prefill_insert
-      if (cached := self._cached_pref.get(len(tokens))) is not None:
-        prefill_fn = cached
-
-      first_token, self.decode_state = prefill_fn(
-          self.params, tokens=tokens, slot=slot, true_length=true_length, decode_state=self.decode_state
+    """Return decode state."""
+    try:
+      prefill_result, first_token = self.engine.prefill(
+        params=params, padded_tokens=tokens, true_length=true_length
       )
-      return first_token
+      decode_state = self.engine.insert(prefill_result, decode_state, slot=slot)
+      self._processing_stats['prefills'] += 1
+      return first_token, decode_state
+    except Exception as e:
+      log.error(f"Error in prefill_insert: {e}")
+      raise ProcessingError(f"Prefill failed: {e}") from e
 
-    empty_slots = list(range(self.batch_size))
-    slot_to_id = {}
-    num_prefills = {}
-    num_decodes = 0
+  def decode_batch(self):
+    """Execute generation step with batched JAX operations."""
+    if self.dummy:
+      log.debug("Running dummy decode")
+      return
 
-    dummy_length = 1
-
-    def decode():
-      nonlocal self
-      nonlocal dummy_length
-      if self.dummy:
-        log.info("Dummy generate")
-        res = engine_api.ResultTokens(
-            data=np.array([[123, 1, dummy_length]] * self.batch_size),
-            tokens_idx=(0, 0),
-            valid_idx=(0, 0),
-            length_idx=(0, 0),
-            samples_per_slot=(0, 0),
-        )
-        dummy_length += 1
-        self.decode_state, result_tokens = self.decode_state, res
-      else:
-        gen_fn = self.engine.generate
-        if self._cached_generate is not None:
-          gen_fn = self._cached_generate
-        result_tokens_l = []
-        for i in range(5):
-          self.decode_state, result_tokens = gen_fn(self.params, self.decode_state)
-          result_tokens_l.append(result_tokens)
+    try:
+      gen_fn = self.engine.generate if self._cached_generate is None else self._cached_generate
+      result_tokens_l = []
+      
+      # Do 5 JAX operations in a batch
       for i in range(5):
-        result_tokens = result_tokens_l[i].convert_to_numpy()
-        self.detokenize_backlog.put((result_tokens, False, 0, 0), block=True)
-        # log.info(f"Decode put result {i} to queue")
+        self.decode_state, result_tokens = gen_fn(self.params, self.decode_state)
+        result_tokens_l.append(result_tokens)
+      
+      # Convert and queue results
+      results = []
+      for result_tokens in result_tokens_l:
+        results.append(result_tokens.convert_to_numpy())
+      
+      # Update monitoring
+      self._last_activity_time = time.time()
+      self._processing_stats['decodes'] += 5
+      
+      return results
+      
+    except Exception as e:
+      log.error(f"Error in decode: {e}")
+      self._shutdown.set()
+      self._error = e
+      raise
 
-    def detokenize():
-      nonlocal self
-      nonlocal slot_to_id
-      nonlocal empty_slots
-      while self.live:
-        # log.info("Detokenize start")
+  def process_decode_results(self, results):
+    """Process decode results with timeouts."""
+    try:
+      for result_tokens in results:
+        self.detokenize_backlog.put(
+          (result_tokens, False, 0, 0),
+          block=True,
+          timeout=30
+        )
+        log.debug(f"Decode: Successfully queued result. Queue size: {self.detokenize_backlog.qsize()}")
+    except queue.Full:
+      log.error("Queue full in decode - possible deadlock")
+      self._shutdown.set()
+      raise ProcessingError("Detokenization queue full")
+
+  def detokenize(self, slot_to_id, empty_slots, emit_first_token, emit_token):
+    """Process tokens with enhanced monitoring and error handling."""
+    last_log_time = time.time()
+    tokens_processed_since_last_log = 0
+
+    while not self._shutdown.is_set():
+      try:
+        # Periodic status logging
+        current_time = time.time()
+        if current_time - last_log_time > 10:  # Log every 10 seconds
+          log.info(f"Detokenize status - Queue size: {self.detokenize_backlog.qsize()}, "
+                  f"Active slots: {len(slot_to_id)}, "
+                  f"Tokens processed in last 10s: {tokens_processed_since_last_log}")
+          last_log_time = current_time
+          tokens_processed_since_last_log = 0
+
+        # Get next item with timeout
+        try:
+          result_tokens, is_first_token, row_id, _slot = self.detokenize_backlog.get(
+            block=True,
+            timeout=10
+          )
+        except queue.Empty:
+          if len(slot_to_id) == 0:
+            log.info("No more active slots and queue empty, finishing detokenize")
+            break
+          continue
+
         newly_empty = []
-        result_tokens, is_first_token, row_id, _slot = self.detokenize_backlog.get(block=True)
-        # log.info("Detokenize get from queue")
+        
         if is_first_token:
           first_token = result_tokens.data[0][0].item()
           should_terminate = emit_first_token(row_id, first_token)
@@ -191,64 +215,155 @@ class OfflineInference:
           else:
             empty_slots.append(_slot)
           continue
-        for slot, id_ in slot_to_id.items():
+
+        # Process each slot
+        for slot, id_ in list(slot_to_id.items()):
           token, is_valid, length = result_tokens.data[slot]
-          log.debug(f"slot is {slot}, length is {length}")
           should_finish = False
           if is_valid:
             should_finish = emit_token(id_, token.item())
+            tokens_processed_since_last_log += 1
+            self._total_tokens_processed += 1
+          
           if should_finish or length >= self.max_decode_length:
             newly_empty.append(slot)
-            log.info(f"Detokenize free up {slot}, length {length}")
-        # Add slots of those that are empty to empty
+            log.info(f"Slot {slot} finished (length: {length})")
+
+        # Update slots
         for slot in newly_empty:
           del slot_to_id[slot]
           empty_slots.append(slot)
-        if newly_empty and self.detokenize_backlog.qsize() == 0 and len(slot_to_id.items()) == 0:
-          break
+          log.debug(f"Freed slot {slot}, {len(empty_slots)} now available")
 
-    detokenize_thread = JetThread(
-        target=functools.partial(
-            detokenize,
-        ),
-        name="detokenize",
-    )
-    self.live = True
-    detokenize_thread.start()
-    for row in data:
-      while not empty_slots:
-        # If slots are all full, decode until there are free slots
-        # to insert
-        num_decodes += 1
-        log.info(f"decode-{desc}-{num_decodes}")
-        decode()
-      # do one insert
-      num_tokens = len(row.tokens)
-      num_prefills[num_tokens] = 0 if num_tokens not in num_prefills else num_prefills[num_tokens] + 1
-      log.info(
-          f"prefill-{desc}-{num_prefills} num_prefills {sum(num_prefills.values())} num_tokens {num_tokens} true_length {row.true_length} num_empty_slots {len(empty_slots)} num_decodes {num_decodes}"
+      except Exception as e:
+        log.error(f"Error in detokenize: {e}")
+        self._shutdown.set()
+        self._error = e
+        raise
+
+  def batch_inference_with_callback(
+    self,
+    data: List[InputData],
+    emit_first_token: Callable[[str, int], bool],
+    emit_token: Callable[[str, int], bool],
+    desc: str,
+  ):
+    """Process batch with improved error handling."""
+    empty_slots = list(range(self.batch_size))
+    slot_to_id = {}
+    num_prefills = {}
+    num_decodes = 0
+    start_time = time.time()
+
+    def prefill(slot, tokens, true_length):
+      if self.dummy:
+        return 123
+
+      prefill_fn = self._prefill_insert
+      if (cached := self._cached_pref.get(len(tokens))) is not None:
+        prefill_fn = cached
+
+      first_token, self.decode_state = prefill_fn(
+        self.params, tokens=tokens, slot=slot, true_length=true_length, decode_state=self.decode_state
       )
-      slot = empty_slots.pop()
-      first_token = prefill(slot, row.tokens, row.true_length)
-      self.detokenize_backlog.put((first_token, True, row.id, slot), block=True)
+      return first_token
 
-    while slot_to_id:
-      log.info(f"decode-{desc}-{num_decodes} num_filled_slots {len(slot_to_id)}")
-      num_decodes += 1
-      decode()
+    self._shutdown.clear()
+    self._error = None
+    
+    detokenize_thread = JetThread(
+      target=functools.partial(
+        self.detokenize,
+        slot_to_id,
+        empty_slots,
+        emit_first_token,
+        emit_token
+      ),
+      name="detokenize"
+    )
+    detokenize_thread.start()
 
-    self.live = False
-    detokenize_thread.join()
-    log.info(f"summary-{desc}-prefills-{num_prefills}-decodes-{num_decodes} completed.")
+    try:
+      for row in data:
+        if time.time() - self._last_activity_time > 300:  # 5 minutes
+          raise ProcessingError("No activity detected for 5 minutes")
+
+        while not empty_slots and not self._shutdown.is_set():
+          num_decodes += 1
+          log.info(f"decode-{desc}-{num_decodes} (queue size: {self.detokenize_backlog.qsize()})")
+          
+          # Get batch of 5 results and process immediately
+          results = self.decode_batch()
+          if results:
+            self.process_decode_results(results)
+
+        if self._shutdown.is_set():
+          if self._error:
+            raise self._error
+          raise ProcessingError("Processing terminated due to error")
+
+        # Prefill handling
+        num_tokens = len(row.tokens)
+        num_prefills[num_tokens] = num_prefills.get(num_tokens, 0) + 1
+        
+        log.info(
+          f"prefill-{desc} stats: prefills={num_prefills} "
+          f"tokens={num_tokens} length={row.true_length} "
+          f"empty_slots={len(empty_slots)} decodes={num_decodes}"
+        )
+        
+        slot = empty_slots.pop()
+        first_token = prefill(slot, row.tokens, row.true_length)
+        
+        # Handle first token
+        try:
+          self.detokenize_backlog.put(
+            (first_token, True, row.id, slot),
+            block=True,
+            timeout=30
+          )
+        except queue.Full:
+          raise ProcessingError("Queue full during prefill")
+
+      # Process remaining slots
+      while slot_to_id and not self._shutdown.is_set():
+        log.info(f"Finishing remaining {len(slot_to_id)} slots")
+        num_decodes += 1
+        
+        # Get and process batch of 5 results
+        results = self.decode_batch()
+        if results:
+          self.process_decode_results(results)
+
+    except Exception as e:
+      log.error(f"Error during batch processing: {e}")
+      self._shutdown.set()
+      self._error = e
+      raise
+    finally:
+      self._shutdown.set()
+      
+      detokenize_thread.join(timeout=60)
+      if detokenize_thread.is_alive():
+        log.error("Detokenize thread failed to terminate")
+      
+      elapsed_time = time.time() - start_time
+      log.info(
+        f"Batch complete: {desc} "
+        f"prefills={num_prefills} "
+        f"decodes={num_decodes} "
+        f"tokens={self._total_tokens_processed} "
+        f"time={elapsed_time:.2f}s "
+        f"tokens/sec={self._total_tokens_processed/elapsed_time:.2f}"
+      )
 
   def batch_inference(self, data: List[InputData], desc=""):
-    """data is list of obj with id, tokens, and true length"""
+    """Batch inference with result collection."""
     res = defaultdict(list)
 
     def callback(id_, token):
-      nonlocal res
       if token == self.tokenizer.eos_id:
-        log.info(f"res[{id_}] eos")
+        log.info(f"EOS token for id {id_}")
       if not res[id_] or res[id_][-1] != self.tokenizer.eos_id:
         res[id_].append(token)
       return token == self.tokenizer.eos_id

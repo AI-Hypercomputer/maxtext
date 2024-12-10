@@ -65,6 +65,7 @@ if "$enable_profiler"; then
 fi
 
 if "$test_mode"; then
+    echo "running in test_mode"
     RUN_OPTIONS="${RUN_OPTIONS} -t "
 fi
 
@@ -92,11 +93,11 @@ if [[ -z ${TOKENIZER_PATH} ]] ; then
 fi
 
 BASE_CFG="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
-QUANT_CFG="quantization=int8 quantize_kvcache=True checkpoint_is_quantized=True"
+QUANT_CFG="quantization=${quantization} quantize_kvcache=True kv_quant_dtype=${kv_quant_dtype} checkpoint_is_quantized=True quant_cfg_path=${quant_cfg_path}"
 LAYOUT_CFG="compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3"
 export MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${LAYOUT_CFG}"
 
-RUN_DESC=int8_kv_${batch_and_prefill_str}_${token_multiplier}_flags_${enable_xla_flags}
+RUN_DESC=int8_kv_${batch_and_prefill_str}_${token_multiplier}_flags_${enable_xla_flags}_${QUANT_CFG}
 
 $cmd cd ..
 
