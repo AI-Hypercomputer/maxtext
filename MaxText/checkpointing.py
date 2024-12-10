@@ -146,6 +146,7 @@ def load_state_if_possible(
     abstract_unboxed_pre_state: train_state.TrainState,
     enable_single_replica_ckpt_restoring: Optional[bool] = False,
     dataset_type: Optional[str] = "tfds",
+    step: int = -1,  # -1 means latest
 ):
   """Loads TrainState as possible from the inputs.
 
@@ -171,12 +172,9 @@ def load_state_if_possible(
   if checkpoint_manager is not None:
     max_logging.log("checkpoint manager exists so trying to load this run's existing checkpoint")
 
-    latest_step = checkpoint_manager.latest_step()
-    if latest_step is not None:
-      max_logging.log(
-          f"restoring from this run's directory latest step \
-          {latest_step}"
-      )
+    step = checkpoint_manager.latest_step() if step < 0 else step
+    if step is not None:
+      max_logging.log(f"restoring from this run's directory step {step}")
 
       def map_to_pspec(data):
         pspec = data.sharding.spec
@@ -210,7 +208,7 @@ def load_state_if_possible(
       if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
         return (
             checkpoint_manager.restore(
-                latest_step,
+                step,
                 args=ocp.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args),
             ),
             None,
@@ -218,11 +216,11 @@ def load_state_if_possible(
       if (
           dataset_type == "grain"
           and data_iterator is not None
-          and (checkpoint_manager.directory / str(latest_step) / "iter").exists()
+          and (checkpoint_manager.directory / str(step) / "iter").exists()
       ):
         return (
             checkpoint_manager.restore(
-                latest_step,
+                step,
                 args=ocp.args.Composite(
                     items=ocp.args.PyTreeRestore(
                         item=abstract_unboxed_pre_state,
@@ -236,7 +234,7 @@ def load_state_if_possible(
       else:
         return (
             checkpoint_manager.restore(
-                latest_step,
+                step,
                 args=ocp.args.Composite(
                     items=ocp.args.PyTreeRestore(
                         item=abstract_unboxed_pre_state,
