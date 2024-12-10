@@ -238,7 +238,12 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   ) or raw_keys["hardware"] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
     if not raw_keys["enable_emergency_checkpoint"]:
-      jax.distributed.initialize()
+      jax.distributed.initialize(
+           coordinator_address=os.environ['SLURM_LAUNCH_NODE_IPADDR']+':12345',
+           num_processes=int(os.environ['SLURM_NTASKS']),
+           process_id=int(os.environ['SLURM_PROCID']),
+           local_device_ids=[i for i in range(8)],
+      )
     else:
       initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
     max_logging.log("Jax distributed system initialized!")
@@ -253,6 +258,7 @@ def initialize_jax_for_gpu():
         coordinator_address=f"{coordinator_ip}:{coordinator_port}",
         num_processes=int(os.getenv("NNODES")),
         process_id=int(os.getenv("NODE_RANK")),
+        local_device_ids=[i for i in range(8)],
     )
     max_logging.log(f"JAX global devices: {jax.devices()}")
 
