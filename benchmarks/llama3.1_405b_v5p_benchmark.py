@@ -11,10 +11,15 @@ DATE = '20241028'
 BASE_DOCKER_IMAGE = 'maxtext_base_image'
 
 ZONE = 'europe-west1' 
-PROJECT = 'cloud-tpu-best-effort-colo'
-CLUSTER_NAME = 'perf-v5p-4096'
+# PROJECT = 'cloud-tpu-best-effort-colo'
+# CLUSTER_NAME = 'perf-v5p-4096'
 
-NUM_SLICES = 4
+ZONE = 'europe-west1'
+#PROJECT = 'tpu-prod-env-one-vm'
+PROJECT = 'cloud-tpu-best-effort-colo'
+CLUSTER_NAME = 'perf-v5p-4096-europe-west1-d'
+
+NUM_SLICES = 1
 NUM_DEVICES = 2048
 DEVICE_TYPE = 'v5p-'+ str(NUM_DEVICES*2)
 
@@ -30,6 +35,14 @@ import math
 warm_up_samples = 8000 * 512
 decay_samples = 360000 * 512
 total_samples = 360000 * 512
+
+c4_gbs512 = ConvHParams(
+        global_batch_size=512,
+        learning_rate=8e-5,
+        warmup_samples=warm_up_samples,
+        decay_end_samples=decay_samples,
+        total_tokens_to_train=total_samples,
+        eval_interval=24567*20)
 
 c4_gbs2048 = ConvHParams(
         global_batch_size=2048,

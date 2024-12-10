@@ -7,15 +7,15 @@ from maxtext_xpk_runner import xpk_benchmark_runner
 from maxtext_xpk_runner import XpkConfig
 
 
-DATE = '20241028'
+DATE = '20241110'
 BASE_DOCKER_IMAGE = 'maxtext_base_image'
 
 ZONE = 'europe-west1'
 #PROJECT = 'tpu-prod-env-one-vm'
 PROJECT = 'cloud-tpu-best-effort-colo'
-CLUSTER_NAME = 'perf-v5p-4096'
-NUM_SLICES = 2
-NUM_DEVICES = 2048
+CLUSTER_NAME = 'perf-v5p-128-europe-west1-d'
+NUM_SLICES = 8
+NUM_DEVICES = 64
 DEVICE_TYPE = 'v5p-'+ str(NUM_DEVICES*2)
 
 v5p_env_configs = SWconfig(
@@ -24,7 +24,7 @@ v5p_env_configs = SWconfig(
 v5p_512_configs = HWConfig(num_slices=NUM_SLICES, device_type=DEVICE_TYPE)
 
 llama2_70b_4096_real_data_v5p = BenchmarkRunner(
-    model_name=llama2_70b_4096_int8_ckp,
+    model_name=llama2_70b_4096_int8,
     software_config=v5p_env_configs,
     hardware_config=v5p_512_configs,
 )
@@ -93,7 +93,7 @@ def main() -> None:
       zone=ZONE,
       num_slices=NUM_SLICES,
       device_type=DEVICE_TYPE,
-      base_output_directory="gs://maxtext-experiments-tpem/llama-perf/"
+      base_output_directory="gs://maxtext-experiments-tpem/llama-perf/europe-west1-d/128/"
   )
 
   model_name = llama2_70b_4096_real_data_v5p

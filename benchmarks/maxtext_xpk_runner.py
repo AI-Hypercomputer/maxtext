@@ -290,6 +290,8 @@ def build_user_command(
   # model.xla_flags += ' --grpc_experiments=tcp_rcv_lowat'
 
   libtpu_flags = f"LIBTPU_INIT_ARGS='{model.xla_flags}'"
+  hlo_dump_flags = f"--xla_dump_to=/tmp/xla_dump --xla_dump_hlo_pass_re=.*"
+  dump_flags = f"XLA_FLAGS='{hlo_dump_flags}'"
 
   return (
       # f'python3 -m pip install google-cloud-aiplatform==v1.61.0 &&'
@@ -310,6 +312,7 @@ def build_user_command(
       f' echo {buffer_size} &&'
       f' export ENABLE_PJRT_COMPATIBILITY=true &&'
       f' export {libtpu_flags} && '
+      #f' export {dump_flags} && '
       ' python3 MaxText/train.py MaxText/configs/base.yml'
       f' {config_tuning_params} steps={num_steps}'
       f' model_name={model.model_type}'
@@ -317,6 +320,7 @@ def build_user_command(
       f' use_vertex_tensorboard=false'
       ' vertex_tensorboard_project="" vertex_tensorboard_region=""'
       f' run_name="{run_name}"'
+      #f' gsutil -m cp -r /tmp/xla_dump/ {base_output_directory}/xla'
   )
 
 
@@ -342,7 +346,7 @@ def generate_xpk_workload_cmd(
     warm_up = int(model.tuning_params["warmup_steps_fraction"] * model.tuning_params["steps"])
     seed = model.tuning_params["data_shuffle_seed"]
     step = model.tuning_params["learning_rate_schedule_steps"]
-    gbs = model.tuning_params["per_device_batch_size"] * 256
+    gbs = int(model.tuning_params["per_device_batch_size"] * 256)
     run_name = f'{model.model_name}-{num_slices}-{lr:.6s}-{warm_up}-{seed}-{step}-{gbs}'
   else:
     run_name = f'{model.model_name}-{num_slices}-{libtpu_version}'
@@ -392,7 +396,9 @@ def generate_xpk_workload_cmd(
           ' --enable-debug-logs'
           f' --workload={name}'
           ' --priority=medium'
+         # f' --debug-dump-gcs={base_output_directory}/debug'
           ' --use-vertex-tensorboard'
+          ' --max-restarts=3 '
           f' --experiment-name={exp_name}'
           f' {additional_flags}'
       ),

@@ -27,13 +27,13 @@ c4_en_hp = DatasetHParams(
         tokenizer_path="gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model")
 
 c4_mutil_hp = DatasetHParams(
-        name="c4multien",
+        name="c4multi",
         dataset_path="gs://mlperf-llm-public2",
         dataset_name="c4/multilingual:3.1.0",
         dataset_type="tfds",
         train_split="en",
         eval_split="en-validation",
-        eval_steps=206 * 2048, # 852 * 512
+        eval_steps= 824 * 512, #152 * 512 #for llama2 token, #824 * 512 #206 * 2048, # 852 * 512
         add_bos=False,
         add_eos=False,
         tokenizer_path="gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model")
@@ -231,13 +231,13 @@ llama3_1_405b_8192_fsdp_dcn_c4 = MaxTextModel(
 import math
 
 def setupDataset(model: MaxTextModel, params: DatasetHParams):
-    model.model_name = model.model_name + "_" + params.name
+    #model.model_name = model.model_name + "-" + params.name
     model.tuning_params["reuse_example_batch"] = -1
     model.tuning_params["dataset_path"] = params.dataset_path
     model.tuning_params["dataset_name"] = params.dataset_name
     model.tuning_params["dataset_type"] = params.dataset_type
     model.tuning_params["eval_dataset_name"] = params.dataset_name
-    model.tuning_params["tokenizer_path"] = params.tokenizer_path
+    #model.tuning_params["tokenizer_path"] = params.tokenizer_path
     model.tuning_params["train_split"] = params.train_split
     model.tuning_params["eval_split"] = params.eval_split
     model.tuning_params["add_bos"] = params.add_bos

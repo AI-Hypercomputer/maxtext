@@ -14,10 +14,14 @@ BASE_DOCKER_IMAGE = 'maxtext_base_image'
 ZONE = 'us-east5'
 
 PROJECT = 'tpu-prod-env-one-vm'
-CLUSTER_NAME = 'bodaborg-v6e-256-donotdelete'
+CLUSTER_NAME = 'bodaborg-v6e-256-donotdelete-3'
+
+# PROJECT = 'tpu-prod-env-automated'
+# CLUSTER_NAME = 'bodaborg-v6e-256-3'
+
 
 DEVICE_TYPE = 'v6e-256'
-NUM_SLICES = 1
+NUM_SLICES = 2
 NUM_DEVICES = 256
 DEVICE_TYPE = 'v6e-'+ str(NUM_DEVICES)
 
@@ -37,8 +41,8 @@ import math
 
 #warm_up_samples = 600 * 512
 warm_up_samples = 800 * 512
-decay_samples = 21000 * 512
-total_samples = 21000 * 512
+decay_samples = 20000 * 512
+total_samples = 20000 * 512
 
 c4_gbs256 = ConvHParams(
         global_batch_size=256,
@@ -88,6 +92,30 @@ c4_gbs8192 = ConvHParams(
         total_tokens_to_train=int(total_samples * 2),
         eval_interval=24567)
 
+c4_gbs512_70b = ConvHParams(
+        global_batch_size=512,
+        learning_rate=1.5e-4,
+        warmup_samples=warm_up_samples,
+        decay_end_samples=decay_samples,
+        total_tokens_to_train=total_samples,
+        eval_interval=24567*10)
+
+c4_gbs1024_70b = ConvHParams(
+        global_batch_size=1024,
+        learning_rate=2e-4,
+        warmup_samples=warm_up_samples,
+        decay_end_samples=decay_samples,
+        total_tokens_to_train=total_samples,
+        eval_interval=24567*10)
+
+c4_gbs2048_70b = ConvHParams(
+        global_batch_size=2048,
+        learning_rate=2e-4,
+        warmup_samples=warm_up_samples,
+        decay_end_samples=decay_samples,
+        total_tokens_to_train=total_samples,
+        eval_interval=24567*10)
+
 def main() -> None:
   cluster_config = XpkConfig(
       cluster_name=CLUSTER_NAME,
@@ -95,14 +123,23 @@ def main() -> None:
       zone=ZONE,
       num_slices=NUM_SLICES,
       device_type=DEVICE_TYPE,
-      base_output_directory="gs://maxtext-experiments-tpem/llama-conv/"
+      base_output_directory="gs://maxtext-experiments-tpem/llama-conv/llama-token-fulleval/"
   )
 
   benchmark_lists = [] #c4_gbs1024, c4_gbs2048, c4_gbs4096, c4_gbs8192
-  model = llama3_8b_8192
+  model_name = llama3_8b_8192
 
-  for config in [c4_gbs512]:
-    model = copy.deepcopy(model)
+  model_name = llama3_8b_8192
+  exp_name = "llama8b-c4multi-llamatk-exp"
+  configs = [c4_gbs1024, c4_gbs2048]
+
+#   model_name = llama3_70b_8192
+#   exp_name = "llama70b-c4multi-llamatk-exp"
+#   configs = [c4_gbs512_70b]
+  
+
+  for config in configs:
+    model = copy.deepcopy(model_name)
     setupC4Multilingualen(model)
     setupConvHParams(model, config, NUM_DEVICES*NUM_SLICES)
   
@@ -113,7 +150,7 @@ def main() -> None:
     )
     benchmark_lists.append(benchmark_model)
   
-  xpk_benchmark_runner(cluster_config, benchmark_lists, "llama8b-c4multi-exp")
+  xpk_benchmark_runner(cluster_config, benchmark_lists, exp_name)
 
 if __name__ == '__main__':
   main()
