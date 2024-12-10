@@ -18,6 +18,7 @@ import functools
 import operator
 from typing import Any, Callable, Iterable, Sequence, Tuple, Union, Optional
 
+import flax
 import flax.linen as nn
 import jax
 from jax import lax
@@ -30,13 +31,10 @@ import numpy as np
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
 import max_logging
+import max_utils
+from aqt.jax.v2 import aqt_tensor
+from kernels import megablox as mblx
 import math
-
-try:
-  from jax.experimental.pallas.ops.tpu import megablox as mblx
-except ImportError:
-  max_logging.log("JAX megablox is available for TPU only.")
-  pass
 
 Array = common_types.Array
 Config = common_types.Config
@@ -49,6 +47,7 @@ bias_init = initializers.default_bias_init
 
 RMSNorm = normalizations.RMSNorm
 Quant = quantizations.AqtQuantization
+QTensor = aqt_tensor.QTensor
 
 DISPATCH = "dispatch"
 COMBINE = "combine"
@@ -392,6 +391,9 @@ class MoeBlock(nn.Module):
     unsort_intermediate = jnp.take(intermediate, indices=jnp.argsort(sorted_selected_experts), axis=0)
     reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
     tensor_parallelism = self.config.ici_tensor_parallelism * self.config.dcn_tensor_parallelism
+    data_parallelism = self.config.ici_data_parallelism * self.config.dcn_data_parallelism
+    fsdp_parallelism = self.config.ici_fsdp_parallelism * self.config.dcn_fsdp_parallelism
+    batch_sharding = data_parallelism * fsdp_parallelism
     reshaped_intermediate = jnp.reshape(
         unsort_intermediate,
         (-1, self.num_experts_per_tok, self.config.emb_dim // tensor_parallelism),
@@ -404,7 +406,14 @@ class MoeBlock(nn.Module):
           reshaped_weights.astype(jnp.float32),
           precision=matmul_precision,
       )
-    return output.reshape(-1, self.config.max_target_length, self.config.emb_dim // tensor_parallelism).astype(self.dtype)
+    updated_batch = int(self.config.per_device_batch_size * jax.device_count() // batch_sharding)
+    # inferencing hack
+    # prefill has BS =1 sequence length = max_prefill_length
+    # decode has BS = B, sequence_length= 1
+    if output.shape[0] % updated_batch != 0:
+      updated_batch = 1
+
+    return output.reshape(updated_batch, -1, self.config.emb_dim // tensor_parallelism).astype(self.dtype)
 
   def megablox(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
     tile_size = (512, 1024, 1024)
@@ -419,14 +428,22 @@ class MoeBlock(nn.Module):
 
       inputs = inputs.astype(self.dtype)
       kernel = kernel.astype(self.dtype)
+
+      lhs_quantize_dtype, rhs_quantize_dtype = None, None
+      if self.quant is not None:
+        quant_dg = self.quant.quant_dg
+        lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
+        rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
+
       output = mblx.gmm(
           lhs=inputs,
           rhs=kernel,
           group_sizes=group_sizes,
           preferred_element_type=jnp.bfloat16,
           tiling=tile_size,
+          lhs_quantize_dtype=lhs_quantize_dtype,
+          rhs_quantize_dtype=rhs_quantize_dtype,
       )
-
       if hs_shape[0] % pad_length:
         output = output[: hs_shape[0]]
       return output
@@ -434,16 +451,23 @@ class MoeBlock(nn.Module):
     # Currently, we only support data and tensor parallelism with Megablox.
     # We all gather the input activations over tensor parallelism to follow strategy
     # in https://parsa.epfl.ch/course-info/cs723/papers/Megatron.pdf.
+    input_partition_spec = nn.logical_to_mesh_axes(("activation_batch", None, None))
+    gate_logits_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
+    w0_pspec = nn.logical_to_mesh_axes((None, None, "mlp"))
+    w1_pspec = nn.logical_to_mesh_axes((None, None, "mlp"))
+    wo_pspec = nn.logical_to_mesh_axes((None, "mlp", None))
+
+    if isinstance(w0_kernel, QTensor):
+      w0_pspec = aqt_tensor.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
+    if isinstance(w1_kernel, QTensor):
+      w1_pspec = aqt_tensor.partition_spec(w1_pspec, (1,), w1_kernel.dtype, use_bias=False)
+    if isinstance(wo_kernel, QTensor):
+      wo_pspec = aqt_tensor.partition_spec(wo_pspec, (1,), wo_kernel.dtype, use_bias=False)
+
     @functools.partial(
         shard_map.shard_map,
         mesh=self.mesh,
-        in_specs=(
-            (nn.logical_to_mesh_axes(("activation_batch", None, None))),
-            (nn.logical_to_mesh_axes(("activation_batch", None, None))),
-            (nn.logical_to_mesh_axes((None, None, "mlp"))),
-            (nn.logical_to_mesh_axes((None, None, "mlp"))),
-            (nn.logical_to_mesh_axes((None, "mlp", None))),
-        ),
+        in_specs=(input_partition_spec, gate_logits_pspec, w0_pspec, w1_pspec, wo_pspec),
         out_specs=(nn.logical_to_mesh_axes(("activation_batch", None, "activation_embed"))),
         check_rep=False,
     )
@@ -452,7 +476,7 @@ class MoeBlock(nn.Module):
       layer_w0 = gmm(x, w0, group_sizes)
       layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
       layer_w1 = gmm(x, w1, group_sizes)
-      layer_w1 = checkpoint_name(layer_w0, "mlpwi_1")
+      layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
       layer_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       intermediate_layer = jnp.multiply(layer_act, layer_w1)
       intermediate_output = gmm(intermediate_layer, wo, group_sizes)
@@ -678,6 +702,22 @@ class MoeBlock(nn.Module):
         ).astype(self.dtype)
       return output, None
 
+  def retrieve_quantized_weight(
+      self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel
+  ) -> tuple[QTensor, QTensor, QTensor]:
+    # This is called only during tracing. This is to invoke creation of quantized tensor inside AqtEinsum.
+    # After jit, this will become no-op and will not affect performance.
+    _ = self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+
+    w0_kernel = self.variables["aqt"]["AqtEinsum_0"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
+    w1_kernel = self.variables["aqt"]["AqtEinsum_1"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
+    wo_kernel = self.variables["aqt"]["AqtEinsum_2"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
+
+    w0_kernel = max_utils.unbox_logicallypartioned(w0_kernel)
+    w1_kernel = max_utils.unbox_logicallypartioned(w1_kernel)
+    wo_kernel = max_utils.unbox_logicallypartioned(wo_kernel)
+    return w0_kernel, w1_kernel, wo_kernel
+
   @nn.compact
   def __call__(self, inputs):
     cfg = self.config
@@ -692,11 +732,14 @@ class MoeBlock(nn.Module):
         name="gate",
         matmul_precision=self.config.matmul_precision,
     )(inputs)
-
+    cfg = self.config
     w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts, cfg.emb_dim, cfg.mlp_dim)
-
     if cfg.megablox:
       max_logging.log("Running MoE megablox implementation.")
+      if quantizations.in_serve_mode(self.quant):
+        w0_kernel, w1_kernel, wo_kernel = self.retrieve_quantized_weight(
+            inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel
+        )
       return self.megablox(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
     else:
       max_logging.log("Running MoE matmul implementation.")
