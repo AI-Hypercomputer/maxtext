@@ -46,7 +46,7 @@ fi
 
 docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./maxtext_runner.Dockerfile -t ${LOCAL_IMAGE_NAME_RUNNER} .
 
-docker tag ${LOCAL_IMAGE_NAME_RUNNER} gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest
-docker push gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest
+docker tag ${LOCAL_IMAGE_NAME_RUNNER} ${CLOUD_IMAGE_NAME}:latest
+docker push ${CLOUD_IMAGE_NAME}:latest
 
-echo "All done, check out your artifacts at: gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}"
+echo "All done, check out your artifacts at: $PROJECT/${CLOUD_IMAGE_NAME}"

@@ -59,10 +59,10 @@ if [[ $LIBTPU_GCS_PATH == NONE ]]; then
   unset LIBTPU_GCS_PATH
 fi
 
-if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE) ]]; then
-     echo -e "\n\nError: You can only specify a JAX_VERSION with stable mode.\n\n"
-     exit 1
-fi
+# if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE) ]]; then
+#      echo -e "\n\nError: You can only specify a JAX_VERSION with stable mode.\n\n"
+#      exit 1
+# fi
 
 if [[ $DEVICE == "tpu" ]]; then
     libtpu_path="$HOME/custom_libtpu/libtpu.so"
@@ -162,7 +162,9 @@ elif [[ $MODE == "nightly" ]]; then
         pip3 install --pre -U 'jax[cuda12]' -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
         # Install Transformer Engine
         export NVTE_FRAMEWORK=jax
-        pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+        pip install -U --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} jax-cuda12-plugin[with_cuda]==${JAX_VERSION} jax-cuda12-pjrt==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+
+        pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@v1.10
     elif [[ $DEVICE == "tpu" ]]; then
         echo "Installing jax-nightly, jaxlib-nightly"
         # Install jax-nightly
