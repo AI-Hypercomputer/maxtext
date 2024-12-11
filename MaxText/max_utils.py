@@ -219,6 +219,8 @@ def maybe_initialize_jax_distributed_system(raw_keys):
 
   For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
   """
+  # TODO(wyzhang): Revert. Added for disaggr benchmarking
+  return
   if raw_keys["compile_topology"]:
     # Don't initialize jax distributed with AOT compilation
     return
@@ -525,7 +527,9 @@ def create_device_mesh(config, devices=None):
   if devices is None:
     devices = jax.devices()
   num_devices = len(devices)
-  num_slices = config.num_slices
+  # TODO(wyzhang): Revert. Changed for disaggr benchmarking
+  # num_slices = config.num_slices
+  num_slices = 1 
   num_devices_per_slice = num_devices // num_slices
 
   multi_slice_env = num_slices > 1
