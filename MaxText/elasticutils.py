@@ -172,6 +172,7 @@ class ElasticUtils:
           logger.info(  # pylint: disable=logging-fstring-interpolation
               f"Caught JaxRuntimeError DATA_LOSS exception for {slice_index=}"
           )
+          logger.info(f"{e}")
         else:
           logger.exception(f"Unknown JaxRuntimeError for {slice_index=}")  # pylint: disable=logging-fstring-interpolation
 

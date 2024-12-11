@@ -25,6 +25,7 @@ import os
 import sys
 import functools
 import time
+import traceback
 import random as py_random
 
 from typing import Sequence, Optional
@@ -94,7 +95,7 @@ def validate_train_config(config):
 
 def get_first_step(state):
   with jax.spmd_mode("allow_all"):
-    return int(state.step)
+    return int(state.step.item())
 
 
 def load_next_batch(train_iter, example_batch, config):
@@ -108,13 +109,22 @@ def load_next_batch(train_iter, example_batch, config):
 
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr, per_device_tokens):
   """Records scalar metrics to be written to tensorboard"""
-  metrics["scalar"].update({"perf/step_time_seconds": step_time_delta.total_seconds()})
-  metrics["scalar"].update({"perf/per_device_tflops": per_device_tflops})
-  metrics["scalar"].update({"perf/per_device_tflops_per_sec": per_device_tflops / step_time_delta.total_seconds()})
-  metrics["scalar"].update({"perf/per_device_tokens": per_device_tokens})
-  metrics["scalar"].update({"perf/per_device_tokens_per_sec": per_device_tokens / step_time_delta.total_seconds()})
-  metrics["scalar"].update({"learning/current_learning_rate": lr})
+  def log(d):
+    for k,v in d.items():
+      max_logging.log(f"{k} {type(v)}: {v}")
 
+  update = {
+      "perf/step_time_syyeconds": step_time_delta.total_seconds(),
+      "perf/per_device_tflops": per_device_tflops,
+      "perf/per_device_tflops_per_sec": per_device_tflops / step_time_delta.total_seconds(),
+      "perf/per_device_tokens": per_device_tokens,
+      "perf/per_device_tokens_per_sec": per_device_tokens / step_time_delta.total_seconds(),
+      "learning/current_learning_rate": lr,
+  }
+
+  log(update)
+
+  metrics["scalar"].update(update)
 
 _buffered_step = None
 _buffered_metrics = None
@@ -578,7 +588,7 @@ def setup_train_loop(config):
 
 def reshard_fn(config: pyconfig.HyperParameters):
   """Reshard function."""
-  # Mesh definition
+  clear_buffered_metrics()
   step = config.eu.data['step']
 
   init_rng, _, checkpoint_manager, mesh, model, _, tx = (
@@ -595,15 +605,17 @@ def reshard_fn(config: pyconfig.HyperParameters):
       checkpoint_manager,
   )
 
-  shardings = jax.tree.map(
-      lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec),
-      config.eu.data['state'],
-  )
-  resharded_state = config.eu.reshard(config.eu.data['state'], shardings)
+  def reshard(tree):
+    shardings = jax.tree.map(
+        lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec),
+        tree,
+    )
+    return config.eu.reshard(tree, shardings, donate=False)
+
   state = state.replace(
-      params=resharded_state.params,
-      step=resharded_state.step,
-      opt_state=resharded_state.opt_state,
+      step=reshard(config.eu.data['state'].step),
+      params=reshard(config.eu.data['state'].params),
+      opt_state=reshard(config.eu.data['state'].opt_state),
   )
 
   (
@@ -730,7 +742,7 @@ def train_loop(config):
   prof = profiler.Profiler(config)
   step = start_step
 
-  target_step = 6
+  target_step = 1000
 
   while step < config.steps and config.eu.failure_count < config.eu.max_failures:
     max_logging.log(f"{step=} {config.eu.failure_count=} {config.eu.good_slice_count=}")
@@ -819,8 +831,8 @@ def train_loop(config):
       if reshard_flag or step % config.eu.save_period == 0:
         config.eu.save({'step': step, 'state': jax.tree.map(lambda x: x.copy(), state)})
 
-
-      if step % target_step == 0:
+      if (step + 1) % target_step == 0:
+        target_step *= 2
         raise jax.errors.JaxRuntimeError("DATA_LOSS")
 
       step += 1
@@ -831,6 +843,7 @@ def train_loop(config):
 
       elif "DATA_LOSS" in str(e):
         max_logging.log("Caught JaxRuntimeError DATA_LOSS exception")
+        max_logging.log(traceback.format_exc())
 
       else:
         max_logging.log("Unknown JaxRuntimeError")
@@ -847,6 +860,7 @@ def train_loop(config):
        data_iterator,
        p_train_step,
        example_batch,) = reshard_fn(config)
+      reshard_flag = False
       max_logging.log("Resharding complete. Retrying.")
 
   if checkpoint_manager is not None:
