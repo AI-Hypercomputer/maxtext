@@ -77,10 +77,13 @@ class OfflineInference:
 
     self._cached_pref = {}
     self._cached_generate = None
-    # Keep original queue size
     self.detokenize_backlog = queue.Queue(10)
     self._shutdown = threading.Event()
     self._error = None
+    
+    # Configurable timeouts
+    self.activity_timeout = float(os.getenv("ACTIVITY_TIMEOUT", "1800"))  # 30 minutes default
+    self.queue_timeout = float(os.getenv("QUEUE_TIMEOUT", "300"))  # 5 minutes default
     
     # Monitoring counters
     self._total_tokens_processed = 0
@@ -90,6 +93,14 @@ class OfflineInference:
       'decodes': 0,
       'tokens_processed': 0,
     }
+
+  def _update_activity(self):
+    """Update last activity timestamp and log if significant time has passed."""
+    current_time = time.time()
+    elapsed = current_time - self._last_activity_time
+    if elapsed > 60:  # Log if more than a minute has passed
+      log.info(f"Activity resumed after {elapsed:.1f} seconds")
+    self._last_activity_time = current_time
 
   def init_decode_state(self):
     if self.decode_state is None:
@@ -120,6 +131,7 @@ class OfflineInference:
   def _prefill_insert(self, params, tokens, slot, true_length, decode_state):
     """Return decode state."""
     try:
+      self._update_activity()
       prefill_result, first_token = self.engine.prefill(
         params=params, padded_tokens=tokens, true_length=true_length
       )
@@ -137,6 +149,7 @@ class OfflineInference:
       return
 
     try:
+      self._update_activity()
       gen_fn = self.engine.generate if self._cached_generate is None else self._cached_generate
       result_tokens_l = []
       
@@ -144,6 +157,7 @@ class OfflineInference:
       for i in range(5):
         self.decode_state, result_tokens = gen_fn(self.params, self.decode_state)
         result_tokens_l.append(result_tokens)
+        self._update_activity()  # Update after each operation in case they're slow
       
       # Convert and queue results
       results = []
@@ -151,7 +165,6 @@ class OfflineInference:
         results.append(result_tokens.convert_to_numpy())
       
       # Update monitoring
-      self._last_activity_time = time.time()
       self._processing_stats['decodes'] += 5
       
       return results
@@ -166,10 +179,11 @@ class OfflineInference:
     """Process decode results with timeouts."""
     try:
       for result_tokens in results:
+        self._update_activity()
         self.detokenize_backlog.put(
           (result_tokens, False, 0, 0),
           block=True,
-          timeout=30
+          timeout=self.queue_timeout
         )
         log.debug(f"Decode: Successfully queued result. Queue size: {self.detokenize_backlog.qsize()}")
     except queue.Full:
@@ -197,8 +211,9 @@ class OfflineInference:
         try:
           result_tokens, is_first_token, row_id, _slot = self.detokenize_backlog.get(
             block=True,
-            timeout=10
+            timeout=self.queue_timeout
           )
+          self._update_activity()
         except queue.Empty:
           if len(slot_to_id) == 0:
             log.info("No more active slots and queue empty, finishing detokenize")
@@ -285,8 +300,9 @@ class OfflineInference:
 
     try:
       for row in data:
-        if time.time() - self._last_activity_time > 300:  # 5 minutes
-          raise ProcessingError("No activity detected for 5 minutes")
+        if time.time() - self._last_activity_time > self.activity_timeout:
+          log.error(f"No activity detected for {self.activity_timeout:.1f} seconds")
+          raise ProcessingError(f"No activity detected for {self.activity_timeout:.1f} seconds")
 
         while not empty_slots and not self._shutdown.is_set():
           num_decodes += 1
@@ -320,7 +336,7 @@ class OfflineInference:
           self.detokenize_backlog.put(
             (first_token, True, row.id, slot),
             block=True,
-            timeout=30
+            timeout=self.queue_timeout
           )
         except queue.Full:
           raise ProcessingError("Queue full during prefill")
