@@ -291,6 +291,45 @@ llama2_70b_4096_real_data = MaxTextModel(
     ),
 )
 
+
+llama2_70b_4096_real_data_pw_long_run = MaxTextModel(
+    model_name="llama2-70b-4096-rd-pw-lr",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 7,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "full",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "reuse_example_batch": 1,
+        "profiler": "xplane",
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "tfds",
+        "tokenizer_path": "assets/tokenizer.llama2",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+
+        # Additional tuning params for pathways long running test.
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "checkpoint_period": 100,
+        "checkpoint_storage_use_ocdbt": False,
+        "checkpoint_storage_use_zarr3": False,
+        "metrics_file": "metrics.txt",
+        "goodput_upload_interval_seconds": 30,
+        "enable_pathways_goodput": True,
+        "enable_checkpoint_cloud_logger": True,
+        "enable_single_controller": True,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+)
+
 # ici_fsdp_transpose_parallelism gives one TFLOP better performance.
 llama2_70b_4096 = MaxTextModel(
     model_name="llama2-70b-4096",
@@ -313,6 +352,45 @@ llama2_70b_4096 = MaxTextModel(
         "sa_block_q": 1024,
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+)
+
+llama2_70b_4096_pw_long_run = MaxTextModel(
+    model_name="llama2-70b-4096-pw-lr",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 4,
+        "ici_fsdp_parallelism": 1,
+        "ici_fsdp_transpose_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "remat_policy": "full",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+
+        # Additional tuning params for pathways long running test.
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "checkpoint_period": 100,
+        "checkpoint_storage_use_ocdbt": False,
+        "checkpoint_storage_use_zarr3": False,
+        "metrics_file": "metrics.txt",
+        "goodput_upload_interval_seconds": 30,
+        "enable_pathways_goodput": True,
+        "enable_checkpoint_cloud_logger": True,
+        "enable_single_controller": True,
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -615,7 +693,9 @@ maxstar_models = [
     gpt_3_175b,
     llama2_7b_4096,
     llama2_70b_4096,
+    llama2_70b_4096_pw_long_run,
     llama2_70b_4096_real_data,
+    llama2_70b_4096_real_data_pw_long_run,
     llama3_8b_8192,  # Not Optimizied yet
     llama3_70b_8192,  # Not Optimizied yet
     llama3_1_405b_8192_fsdp_dcn,
