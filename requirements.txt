@@ -1,5 +1,5 @@
-jax>=0.4.30
-jaxlib>=0.4.30
+# jax>=0.4.30
+# jaxlib>=0.4.30
 orbax-checkpoint>=0.5.12
 absl-py
 array-record
@@ -30,7 +30,7 @@ tensorboardx
 tensorboard-plugin-profile
 tiktoken
 transformers
-mlperf-logging@git+https://github.com/mlperf/logging.git
+# mlperf-logging@git+https://github.com/mlperf/logging.git
 google-jetstream
 jsonlines
 pathwaysutils@git+https://github.com/google/pathways-utils.git
