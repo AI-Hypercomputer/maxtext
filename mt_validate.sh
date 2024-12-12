@@ -5,7 +5,7 @@
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1119-dev-rebased
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-stable
 # export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/bvandermoon-maxtext-gpu-nightly-11092024-no-context
-# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-v1.11
+export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-v1.11
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-v1.10
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-v1.10-jax1008
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-v1.10-jax1024
@@ -13,7 +13,7 @@
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-v1.12-jax1109_cuda1125
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-v1.11-jax1008_cuda1007
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-constraints
-export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-all-constraints
+# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-all-constraints
 
 export MODEL_NAME=llama2-7b
 # export MODEL_NAME=llama3.1-405b
@@ -21,11 +21,12 @@ export MODEL_NAME=llama2-7b
 
 export CONFIG_NAME=$(echo $MODEL_NAME | sed 's/-/_/g')
 export MODEL_SIZE=$(echo $MODEL_NAME | grep -o '[0-9]\+b')
-export NUM_NODES=1
+export NUM_NODES=4
 
-export WORKLOAD_NAME=$USER-${MODEL_SIZE}-${NUM_NODES}n-1209-main-old-flash-${RANDOM:0:3}
-# export ATTENTION=dot_product
-export ATTENTION=cudnn_flash_te
+# export WORKLOAD_NAME=$USER-${MODEL_SIZE}-${NUM_NODES}n-1209-main-old-flash-${RANDOM:0:3}
+export WORKLOAD_NAME=$USER-${MODEL_SIZE}-${NUM_NODES}n-1209main-${RANDOM:0:3}
+export ATTENTION=dot_product
+# export ATTENTION=cudnn_flash_te
 export PGLE=false
 
 python ../xpk/xpk.py  workload delete --cluster a3plus-benchmark --workload $WORKLOAD_NAME;
@@ -34,7 +35,7 @@ python ../xpk/xpk.py  workload delete --cluster a3plus-benchmark --workload $WOR
 
 python ../xpk/xpk.py  workload create --device-type h100-mega-80gb-8 --project supercomputer-testing --zone australia-southeast1 --cluster a3plus-benchmark \
   --docker-image $LOCAL_IMAGE_NAME \
-  --command 'export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml run_name=maxtext-$MODEL_NAME model_name=$MODEL_NAME attention=$ATTENTION use_iota_embed=true per_device_batch_size=1 skip_first_n_steps_for_profiler=5 profiler=xplane steps=10 hardware=gpu enable_checkpointing=false base_output_directory=gs://lancewang-dev-supercomputer-testing/maxtext_gpu dataset_type=synthetic remat_policy=full logits_dot_in_fp32=false dcn_fsdp_parallelism=$NUM_NODES ici_tensor_parallelism=8 max_target_length=4096 weight_dtype=bfloat16" \
+  --command 'export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml run_name=maxtext-$MODEL_NAME model_name=$MODEL_NAME attention=$ATTENTION use_iota_embed=true per_device_batch_size=1 skip_first_n_steps_for_profiler=5 profiler=xplane steps=10 hardware=gpu enable_checkpointing=false base_output_directory=gs://lancewang-dev-supercomputer-testing/maxtext_gpu dataset_type=synthetic remat_policy=full logits_dot_in_fp32=false dcn_data_parallelism=$NUM_NODES ici_fsdp_parallelism=8 max_target_length=4096 weight_dtype=bfloat16" \
   --num-nodes $NUM_NODES \
   --workload $WORKLOAD_NAME \
   --scheduler=gke.io/topology-aware-auto \
