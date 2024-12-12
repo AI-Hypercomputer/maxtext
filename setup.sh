@@ -91,7 +91,7 @@ cd $run_name_folder_path && pip install --upgrade pip
 if [[ "$MODE" == "pinned" ]]; then
     pip3 install -U -r requirements.txt -c constraints_gpu.txt
 else
-    pip3 install -U -r requirements.txt
+    pip3 install -U -r requirements.txt -c debug_constraints_gpu.txt
 fi
 
 # Uninstall existing jax, jaxlib and  libtpu-nightly
@@ -162,9 +162,11 @@ elif [[ $MODE == "nightly" ]]; then
         pip3 install --pre -U 'jax[cuda12]' -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
         # Install Transformer Engine
         export NVTE_FRAMEWORK=jax
-        pip install -U --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} jax-cuda12-plugin[with_cuda]==${JAX_VERSION} jax-cuda12-pjrt==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+        # pip install -U --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} jax-cuda12-plugin[with_cuda]==${JAX_VERSION} jax-cuda12-pjrt==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+        pip install -U --pre jax==0.4.35.dev20241008 jaxlib==0.4.34 jax-cuda12-plugin[with_cuda]==0.4.35.dev20241007 jax-cuda12-pjrt==0.4.35.dev20241007 -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
 
-        pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@v1.10
+        # pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@v1.10
+        pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@v1.11
     elif [[ $DEVICE == "tpu" ]]; then
         echo "Installing jax-nightly, jaxlib-nightly"
         # Install jax-nightly
