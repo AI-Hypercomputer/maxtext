@@ -31,7 +31,7 @@ export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_SUSPEND=1
 export NEEDRESTART_MODE=l
 
-
+apt-get update && apt-get install -y sudo
 (sudo bash || bash) <<'EOF'
 apt update && \
 apt install -y numactl lsb-release gnupg curl net-tools iproute2 procps lsof git ethtool && \
@@ -90,9 +90,9 @@ run_name_folder_path=$(pwd)
 # Install dependencies from requirements.txt
 cd $run_name_folder_path && pip install --upgrade pip
 if [[ "$MODE" == "pinned" ]]; then
-    pip3 install -U -r requirements.txt -c constraints_gpu.txt
+    pip3 install --no-cache-dir -U -r requirements.txt -c constraints_gpu.txt
 else
-    pip3 install -U -r requirements.txt
+    pip3 install --no-cache-dir -U -r requirements.txt
 fi
 
 # Uninstall existing jax, jaxlib and  libtpu-nightly
@@ -110,11 +110,10 @@ if [[ "$MODE" == "pinned" ]]; then
     echo "pinned mode is supported for GPU builds only."
     exit 1
   fi
-  echo "Installing pinned jax, jaxlib for NVIDIA gpu."
+  echo "Installing Jax and Transformer Engine."
   pip3 install "jax[cuda12]" -c constraints_gpu.txt
-  pip3 install "transformer-engine==1.5.0+297459b" \
-    --extra-index-url https://us-python.pkg.dev/gce-ai-infra/maxtext-build-support-packages/simple/ \
-    -c constraints_gpu.txt
+  pip install transformer-engine[jax]==1.13.0
+
 elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
 # Stable mode
     if [[ $DEVICE == "tpu" ]]; then
