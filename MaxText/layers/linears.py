@@ -488,7 +488,7 @@ class MoeBlock(nn.Module):
             self.config.capacity_factor,
         )
     )
-    max_logging.log(f"Applying potential token dropping with a batch expert_capacity of {expert_capacity_per_batch}")
+    # max_logging.log(f"Applying potential token dropping with a batch expert_capacity of {expert_capacity_per_batch}")
 
     # calculate expert mask and drop tokens if needed
     # shape of output expert mask: (batch, sequence, num_experts_per_tok)
@@ -699,5 +699,5 @@ class MoeBlock(nn.Module):
       max_logging.log("Running MoE megablox implementation.")
       return self.megablox(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
     else:
-      max_logging.log("Running MoE matmul implementation.")
+      # max_logging.log("Running MoE matmul implementation.")
       return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)

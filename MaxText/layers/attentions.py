@@ -572,18 +572,19 @@ class AttentionOp(nn.Module):
   def _get_cached_kv_dtype(self, dtype):
     return self.kv_quant.dtype if self.kv_quant else dtype
 
-  def _get_cache_scale_logical_shape(self, batch, heads):
+  def _get_cache_scale_logical_shape(self, batch, heads, cache_length):
     assert self.kv_quant
     if self.kv_quant.axis_cfg == "dkv":
-      return (batch, self.max_prefill_predict_length, heads, 1)
+      return (batch, cache_length, heads, 1)
     if self.kv_quant.axis_cfg == "heads_and_dkv":
-      return (batch, self.max_prefill_predict_length, 1, 1)
+      return (batch, cache_length, 1, 1)
     raise f"Invalid config for kv_quant_axis:{self.kv_quant.axis_cfg}"
 
   def _get_prefill_cache_vars(self, batch, heads, kv_head_size, model_mode):
 
+    cache_length = self.max_prefill_predict_length
     dtype = self._get_cached_kv_dtype(self.dtype)
-    cache_logical_shape = (batch, self.max_prefill_predict_length, heads, kv_head_size)
+    cache_logical_shape = (batch, cache_length, heads, kv_head_size)
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
       cache_logical_axis_names = self.prefill_cache_logical_axis_names
@@ -616,12 +617,12 @@ class AttentionOp(nn.Module):
         "cache",
         "cache_prefill_segment_id",
         nn.with_logical_partitioning(jnp.zeros, segment_id_axis_names),
-        (cache_logical_shape[0], self.max_prefill_predict_length),
+        (cache_logical_shape[0], cache_length),
         jnp.int32,
     )
 
     if self.kv_quant:
-      cache_scale_logical_shape = self._get_cache_scale_logical_shape(batch, heads)
+      cache_scale_logical_shape = self._get_cache_scale_logical_shape(batch, heads, cache_length)
       cache_scale_axis_names = self.transpose_tuple(self.cache_scale_logical_axis_names, self.prefill_cache_axis_order)
       cache_scale_shape = self.transpose_tuple(cache_scale_logical_shape, self.prefill_cache_axis_order)
 
@@ -707,7 +708,7 @@ class AttentionOp(nn.Module):
     )
 
     if self.kv_quant:
-      cache_scale_logical_shape = self._get_cache_scale_logical_shape(batch, heads)
+      cache_scale_logical_shape = self._get_cache_scale_logical_shape(batch, heads, cache_length)
       cache_scale_axis_names = self.transpose_tuple(self.cache_scale_logical_axis_names, self.ar_cache_axis_order)
       cache_scale_shape = self.transpose_tuple(cache_scale_logical_shape, self.ar_cache_axis_order)
 
