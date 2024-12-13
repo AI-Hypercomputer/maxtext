@@ -21,12 +21,12 @@ export MODEL_NAME=llama2-7b
 
 export CONFIG_NAME=$(echo $MODEL_NAME | sed 's/-/_/g')
 export MODEL_SIZE=$(echo $MODEL_NAME | grep -o '[0-9]\+b')
-export NUM_NODES=4
+export NUM_NODES=8
 
 # export WORKLOAD_NAME=$USER-${MODEL_SIZE}-${NUM_NODES}n-1209-main-old-flash-${RANDOM:0:3}
 export WORKLOAD_NAME=$USER-${MODEL_SIZE}-${NUM_NODES}n-1209main-${RANDOM:0:3}
-export ATTENTION=dot_product
-# export ATTENTION=cudnn_flash_te
+# export ATTENTION=dot_product
+export ATTENTION=cudnn_flash_te
 export PGLE=false
 
 python ../xpk/xpk.py  workload delete --cluster a3plus-benchmark --workload $WORKLOAD_NAME;

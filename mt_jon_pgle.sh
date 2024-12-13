@@ -1,7 +1,7 @@
 
 # export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/jonbolin-maxtext-gpu:20241008-1
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1113-nv
-# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1203-main
+export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1203-main
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1119-dev-rebased
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-stable
 # export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/bvandermoon-maxtext-gpu-nightly-11092024-no-context
@@ -13,7 +13,7 @@
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-v1.12-jax1109_cuda1125
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-v1.11-jax1008_cuda1007
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-constraints
-export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-all-constraints
+# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-all-constraints
 
 export MODEL_NAME=llama2-7b
 # export MODEL_NAME=llama3.1-405b
