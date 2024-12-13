@@ -2,6 +2,9 @@
 A simple Ray trainer script utilizing ray_tpu to run MaxText training on a
 multislice TPU.
 
+RayTpuManager ensures that each Ray worker is initialized with multislice
+environment settings.
+
 Example usage:
 
 ray job submit \
