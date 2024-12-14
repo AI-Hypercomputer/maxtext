@@ -231,9 +231,6 @@ mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'ex
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
-                       # For pipeline parallelism the pre and post decoder layer tensors' batch dimension is sharded by stages.
-                       # Microbatches are sharded by stage, so moving out of and into this sharding should be a local reshape.
-                       # The "stage" needs to be listed first since the microbatch dimension is first before the reshape.
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_heads', ['tensor','sequence']],
                       ['activation_kv_heads', ['tensor','sequence']],
@@ -271,6 +268,9 @@ logical_axis_rules: [
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
 data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'expert', 'autoregressive']]
+
+# sharding tolerance: float between 0.0 and 1.0 representing the allowed percentage of non-sharded parameters.
+sharding_tolerance: 0.02
 
 # One axis for each parallelism type may hold a placeholder (-1)
 # value to auto-shard based on available slices and devices.
@@ -310,8 +310,14 @@ per_device_batch_size: 12.0
 expansion_factor_real_data: -1 # if -1 then all hosts will load real data, else total_hosts//expansion_factor_real_data will pull data from GCS.
 eval_per_device_batch_size: 0.0
 max_corpus_chars: 10_000_000
-train_data_column: 'text'
-eval_data_column: 'text'
+train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
+eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
+
+# direct preference optimization (DPO)
+use_dpo: False 
+dpo_label_smoothing: 0.0
+dpo_beta: 0.1
+
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md
 dataset_type: tfds

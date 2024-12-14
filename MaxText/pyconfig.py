@@ -156,6 +156,11 @@ def validate_data_input(keys):
     if keys["eval_interval"] > 0:
       assert keys["eval_split"], "Please specify eval_split or set eval_interval to <=0."
 
+  if keys["sharding_tolerance"] > 1.0 or keys["sharding_tolerance"] < 0.0:
+    max_logging.log(
+        "WARNING: 'sharding_tolerance: allowed percentage of non-sharded parameters' should be between 0.0 and 1.0"
+    )
+
 
 def validate_model_name(s: str) -> bool:
   """Validate provided model name."""
@@ -407,6 +412,8 @@ class _HyperParameters:
 
     raw_keys["num_slices"] = max_utils.get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
+
+    raw_keys = create_parallelisms_list(raw_keys)
     raw_keys = set_and_validate_pipeline_config(raw_keys)
 
     if raw_keys["dataset_type"] == "c4_mlperf":
@@ -464,6 +471,32 @@ class _HyperParameters:
       raw_keys = validate_and_update_keys(raw_keys, model_vars, config_name)
     return updated_keys
 
+  
+def create_parallelisms_list(raw_keys):
+  ici_parallelism = [
+      raw_keys["ici_data_parallelism"],
+      raw_keys["ici_pipeline_parallelism"],
+      raw_keys["ici_fsdp_parallelism"],
+      raw_keys["ici_fsdp_transpose_parallelism"],
+      raw_keys["ici_sequence_parallelism"],
+      raw_keys["ici_tensor_parallelism"],
+      raw_keys["ici_expert_parallelism"],
+      raw_keys["ici_autoregressive_parallelism"],
+  ]
+  dcn_parallelism = [
+      raw_keys["dcn_data_parallelism"],
+      raw_keys["dcn_pipeline_parallelism"],
+      raw_keys["dcn_fsdp_parallelism"],
+      raw_keys["dcn_fsdp_transpose_parallelism"],
+      raw_keys["dcn_sequence_parallelism"],
+      raw_keys["dcn_tensor_parallelism"],
+      raw_keys["dcn_expert_parallelism"],
+      raw_keys["dcn_autoregressive_parallelism"],
+  ]
+  raw_keys["ici_parallelism"] = ici_parallelism
+  raw_keys["dcn_parallelism"] = dcn_parallelism
+  return raw_keys
+
 
 def validate_multiple_slices(raw_keys):
   if (
@@ -489,6 +522,54 @@ def validate_multiple_slices(raw_keys):
 def set_and_validate_pipeline_config(raw_keys):
   if using_pipeline_parallelism(raw_keys):
     raw_keys["using_pipeline_parallelism"] = True
+
+    def modify_activation_embed_and_logits_batch(logical_axis_rules):
+      for idx, logical_rule in enumerate(logical_axis_rules):
+        if logical_rule[0] == "activation_embed_and_logits_batch":
+          # For pipeline parallelism the pre and post decoder layer tensors' batch dimension is sharded by stages.
+          # Microbatches are sharded by stage, so moving out of and into this sharding should be a local reshape.
+          # The "stage" needs to be listed first since the microbatch dimension is first before the reshape.
+          logical_axis_rules[idx] = [
+              "activation_embed_and_logits_batch",
+              ["stage", "data", "fsdp", "fsdp_transpose", "expert"],
+          ]
+          break  # Exit the loop after modifying the list
+      return logical_axis_rules
+
+    def pipeline_first_axis(raw_keys):
+      # We have seen better performance when axes used for DCN are earlier in this list than ICI, see (b/339009148) for details
+      ici_parallelism = [
+          raw_keys["ici_pipeline_parallelism"],
+          raw_keys["ici_data_parallelism"],
+          raw_keys["ici_fsdp_parallelism"],
+          raw_keys["ici_fsdp_transpose_parallelism"],
+          raw_keys["ici_sequence_parallelism"],
+          raw_keys["ici_tensor_parallelism"],
+          raw_keys["ici_expert_parallelism"],
+          raw_keys["ici_autoregressive_parallelism"],
+      ]
+      dcn_parallelism = [
+          raw_keys["dcn_pipeline_parallelism"],
+          raw_keys["dcn_data_parallelism"],
+          raw_keys["dcn_fsdp_parallelism"],
+          raw_keys["dcn_fsdp_transpose_parallelism"],
+          raw_keys["dcn_sequence_parallelism"],
+          raw_keys["dcn_tensor_parallelism"],
+          raw_keys["dcn_expert_parallelism"],
+          raw_keys["dcn_autoregressive_parallelism"],
+      ]
+      mesh_axes = ["stage", "data", "fsdp", "fsdp_transpose", "sequence", "tensor", "expert", "autoregressive"]
+      data_sharding = [["stage", "data", "fsdp", "fsdp_transpose", "sequence", "tensor", "expert", "autoregressive"]]
+
+      raw_keys["ici_parallelism"] = ici_parallelism
+      raw_keys["dcn_parallelism"] = dcn_parallelism
+      raw_keys["mesh_axes"] = mesh_axes
+      raw_keys["data_sharding"] = data_sharding
+      return raw_keys
+
+    raw_keys["using_pipeline_parallelism"] = True
+    raw_keys["logical_axis_rules"] = modify_activation_embed_and_logits_batch(raw_keys["logical_axis_rules"])
+    raw_keys = pipeline_first_axis(raw_keys)
     num_stages = int(raw_keys["ici_pipeline_parallelism"] * raw_keys["dcn_pipeline_parallelism"])
     if raw_keys["num_pipeline_repeats"] == -1:
       num_pipeline_repeats, remainder = divmod(

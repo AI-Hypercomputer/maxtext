@@ -60,6 +60,16 @@ def _get_model_call_mode(config):
   else:
     return None
 
+DISPATCH = "dispatch"
+COMBINE = "combine"
+
+
+def _get_model_call_mode(config):
+  if config.model_cal_mode == "inference":
+    return "inference"
+  else:
+    return None
+
 
 def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
   """Convert a string to an activation function."""
