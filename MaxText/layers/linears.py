@@ -60,6 +60,7 @@ def _get_model_call_mode(config):
   else:
     return None
 
+
 DISPATCH = "dispatch"
 COMBINE = "combine"
 

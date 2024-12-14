@@ -471,7 +471,7 @@ class _HyperParameters:
       raw_keys = validate_and_update_keys(raw_keys, model_vars, config_name)
     return updated_keys
 
-  
+
 def create_parallelisms_list(raw_keys):
   ici_parallelism = [
       raw_keys["ici_data_parallelism"],
