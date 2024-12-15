@@ -1,7 +1,7 @@
 
 # export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/jonbolin-maxtext-gpu:20241008-1
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1113-nv
-export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1203-main
+# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1203-main
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1119-dev-rebased
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-stable
 # export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/bvandermoon-maxtext-gpu-nightly-11092024-no-context
@@ -14,6 +14,7 @@ export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-v1.11-jax1008_cuda1007
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-constraints
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-all-constraints
+export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1212_bumpup
 
 export MODEL_NAME=llama2-7b
 # export MODEL_NAME=llama3.1-405b
@@ -21,7 +22,7 @@ export MODEL_NAME=llama2-7b
 
 export CONFIG_NAME=$(echo $MODEL_NAME | sed 's/-/_/g')
 export MODEL_SIZE=$(echo $MODEL_NAME | grep -o '[0-9]\+b')
-export NUM_NODES=1
+export NUM_NODES=2
 
 export WORKLOAD_NAME=$USER-${MODEL_SIZE}-${NUM_NODES}n-1209-main-old-flash-${RANDOM:0:3}
 # export ATTENTION=dot_product
