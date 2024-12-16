@@ -91,6 +91,16 @@ def validate_model_call_mode(s: str) -> None:
     raise ValueError(f"Invalid model call mode {s}. Valid options are {valid_model_call_modes}")
 
 
+def validate_prefill_and_target_lengths(max_prefill_length: int, max_target_length: int) -> None:
+  if max_prefill_length <= 0:
+    raise ValueError(f"Invalid max_prefill_predict_length {max_prefill_length}, it should be a positive number")
+  if max_target_length <= max_prefill_length:
+    raise ValueError(
+        f"Invalid max_target_length {max_target_length}, this should be sum of "
+        f"max_prefill_predict_length ({max_prefill_length}) and max output length expected."
+    )
+
+
 def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
@@ -98,6 +108,7 @@ def validate_keys(keys):
   validate_compute_axis_order(keys["compute_axis_order"])
   validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
   validate_model_call_mode(keys["model_call_mode"])
+  validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
 
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"

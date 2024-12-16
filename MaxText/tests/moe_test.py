@@ -35,7 +35,7 @@ class TokenDroppingTest(unittest.TestCase):
         model_name="mixtral-8x7b",
         dtype="bfloat16",
         megablox=False,
-        max_target_length=4,
+        max_target_length=80,
         per_device_batch_size=1,
         capacity_factor=2,
     )
