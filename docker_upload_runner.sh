@@ -25,7 +25,9 @@
 
 set -e
 
-export LOCAL_IMAGE_NAME=maxtext_base_image
+# export LOCAL_IMAGE_NAME=maxtext_base_image
+# export LOCAL_IMAGE_NAME=lancewang-maxtext-gpu
+export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1216-bumpup
 export PROJECT=$(gcloud config get-value project)
 
 # Set environment variables

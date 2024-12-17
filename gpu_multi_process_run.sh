@@ -124,14 +124,17 @@ resolve_coordinator_ip() {
   echo "Coordinator Address $JAX_COORDINATOR_ADDRESS"
 
   while [[ "$coordinator_found" = false && $lookup_attempt -le $max_coordinator_lookups ]]; do
-    coordinator_ip_address=$(nslookup "$JAX_COORDINATOR_ADDRESS" 2>/dev/null | awk '/Address: / { print $2 }' | head -n 1)
+    coordinator_ip_addresss_context=$(nslookup "$JAX_COORDINATOR_ADDRESS" 2>/dev/null)
+
+    # Extract the IP address
+    coordinator_ip_address=$(echo "$coordinator_ip_addresss_context" | awk '/^Address: / { print $2 }' | head -n 1)
     if [[ -n "$coordinator_ip_address" ]]; then
       coordinator_found=true
       echo "Coordinator IP address: $coordinator_ip_address"
       export JAX_COORDINATOR_IP=$coordinator_ip_address
       return 0
     else
-      echo "Failed to recognize coordinator address $JAX_COORDINATOR_ADDRESS on attempt $lookup_attempt, retrying..."
+      echo "Failed to recognize coordinator address $JAX_COORDINATOR_ADDRESS from $coordinator_ip_addresss_context on attempt $lookup_attempt, retrying..."
       ((lookup_attempt++))
       sleep 1
     fi

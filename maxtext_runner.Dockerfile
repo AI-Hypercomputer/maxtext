@@ -1,4 +1,6 @@
-ARG BASEIMAGE=maxtext_base_image
+# ARG BASEIMAGE=maxtext_base_image
+# ARG BASEIMAGE=lancewang-maxtext-gpu
+ARG BASEIMAGE==gcr.io/supercomputer-testing/us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1216-bumpup
 FROM $BASEIMAGE
 
 #FROM maxtext_base_image
