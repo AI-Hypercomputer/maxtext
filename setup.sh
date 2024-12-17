@@ -60,10 +60,10 @@ if [[ $LIBTPU_GCS_PATH == NONE ]]; then
   unset LIBTPU_GCS_PATH
 fi
 
-if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE || ($MODE == "nightly" && $DEVICE == "gpu")) ]]; then
-     echo -e "\n\nError: You can only specify a JAX_VERSION with stable mode (plus nightly mode on GPU).\n\n"
-     exit 1
-fi
+# if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE || ($MODE == "nightly" && $DEVICE == "gpu")) ]]; then
+#      echo -e "\n\nError: You can only specify a JAX_VERSION with stable mode (plus nightly mode on GPU).\n\n"
+#      exit 1
+# fi
 
 if [[ $DEVICE == "tpu" ]]; then
     libtpu_path="$HOME/custom_libtpu/libtpu.so"
@@ -170,12 +170,17 @@ elif [[ $MODE == "nightly" ]]; then
         export NVTE_FRAMEWORK=jax
         pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
     elif [[ $DEVICE == "tpu" ]]; then
-        echo "Installing jax-nightly, jaxlib-nightly"
         # Install jax-nightly
-        pip3 install --pre -U jax -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
-        # Install jaxlib-nightly
-        pip3 install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
-
+        if [[ -n "$JAX_VERSION" ]]; then
+            echo "Installing jax-nightly, jaxlib-nightly ${JAX_VERSION}"
+            pip install -U --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+        else
+            echo "Installing jax-nightly, jaxlib-nightly"
+            # Install jax-nightly
+            pip3 install --pre -U jax -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+            # Install jaxlib-nightly
+            pip3 install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
+        fi
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
             # Install custom libtpu
             echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
