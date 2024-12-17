@@ -29,8 +29,8 @@ export MODEL_SIZE=$(echo $MODEL_NAME | grep -o '[0-9]\+b')
 export NUM_NODES=2
 
 export WORKLOAD_NAME=$USER-${MODEL_SIZE}-${NUM_NODES}n-stable-stack-${RANDOM:0:3}
-export ATTENTION=dot_product
-# export ATTENTION=cudnn_flash_te
+# export ATTENTION=dot_product
+export ATTENTION=cudnn_flash_te
 export PGLE=false
 
 python ../xpk/xpk.py  workload delete --cluster a3plus-benchmark --workload $WORKLOAD_NAME;
