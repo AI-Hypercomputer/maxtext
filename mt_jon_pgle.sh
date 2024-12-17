@@ -14,7 +14,10 @@
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-v1.11-jax1008_cuda1007
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-constraints
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1209-main-nightly-all-constraints
-export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1212_bumpup
+# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1212_bumpup
+# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/yujunzou/llama2-7b
+# export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/maxtext_gpu_jax_pinned
+export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1216-sts
 
 export MODEL_NAME=llama2-7b
 # export MODEL_NAME=llama3.1-405b
@@ -24,7 +27,7 @@ export CONFIG_NAME=$(echo $MODEL_NAME | sed 's/-/_/g')
 export MODEL_SIZE=$(echo $MODEL_NAME | grep -o '[0-9]\+b')
 export NUM_NODES=2
 
-export WORKLOAD_NAME=$USER-${MODEL_SIZE}-${NUM_NODES}n-1209-main-old-flash-${RANDOM:0:3}
+export WORKLOAD_NAME=$USER-${MODEL_SIZE}-${NUM_NODES}n-stable-stack-${RANDOM:0:3}
 # export ATTENTION=dot_product
 export ATTENTION=cudnn_flash_te
 export PGLE=false
