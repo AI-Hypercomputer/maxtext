@@ -423,6 +423,7 @@ class _HyperParameters:
 
     raw_keys["num_slices"] = max_utils.get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
+
     raw_keys = create_parallelisms_list(raw_keys)
     raw_keys = set_and_validate_pipeline_config(raw_keys)
 
@@ -531,6 +532,7 @@ def validate_multiple_slices(raw_keys):
 
 def set_and_validate_pipeline_config(raw_keys):
   if using_pipeline_parallelism(raw_keys):
+    raw_keys["using_pipeline_parallelism"] = True
 
     def modify_activation_embed_and_logits_batch(logical_axis_rules):
       for idx, logical_rule in enumerate(logical_axis_rules):
