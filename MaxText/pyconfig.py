@@ -345,6 +345,8 @@ class _HyperParameters:
     validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
 
     # We initialize the jax distributed system here because it must be done before device backend is initialized.
+    if raw_keys["jax_debug_log_modules"]:
+      jax.config.update("jax_debug_log_modules", raw_keys["jax_debug_log_modules"])
     max_utils.maybe_initialize_jax_distributed_system(raw_keys)
 
     if raw_keys["jax_cache_dir"]:
@@ -367,8 +369,10 @@ class _HyperParameters:
     self.keys = raw_keys
     keys = [k for k in raw_keys]  # pylint: disable=unnecessary-comprehension
     keys.sort()
-    for k in keys:
-      max_logging.log(f"Config param {k}: {raw_keys[k]}")
+
+    if raw_keys["log_config"]:
+      for k in keys:
+        max_logging.log(f"Config param {k}: {raw_keys[k]}")
 
   @staticmethod
   def user_init(raw_keys):
