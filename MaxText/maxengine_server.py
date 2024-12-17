@@ -37,7 +37,7 @@ from jetstream.core import server_lib, config_lib
 def main(config):
   # No devices for local cpu test. A None for prefill and a None for generate.
   devices = server_lib.get_devices()
-  server_config = maxengine_config.get_server_config("MaxtextInterleavedServer", config)
+  server_config = maxengine_config.get_server_config(config.inference_server, config)
 
   metrics_server_config: config_lib.MetricsServerConfig | None = None
   if config.prometheus_port != 0:
