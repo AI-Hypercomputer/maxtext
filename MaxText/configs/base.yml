@@ -40,7 +40,7 @@ load_full_state_path: ""
 # problems with the checkpointer we recommend trying the synchronous one.
 enable_checkpointing: True
 async_checkpointing: True
-checkpoint_period: 10_000
+checkpoint_period: 1_000
 # enables one replica to read the ckpt then broadcast to the rest
 enable_single_replica_ckpt_restoring: False
 
@@ -298,7 +298,7 @@ ici_expert_parallelism: 1
 num_slices: -1
 
 # Tokenizer
-vocab_size: 32_000 # powers of 2 for sharding
+vocab_size: 51200 # powers of 2 for sharding
 tokenizer_path: "assets/tokenizer.llama2"
 tokenize_train_data: True  # False if the dataset is pre-tokenized
 tokenize_eval_data: True  # False if the dataset is pre-tokenized
@@ -325,6 +325,7 @@ dataset_type: tfds
 dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
+train_split: 'train'
 eval_split: 'validation'
 # for HuggingFace input pipeline (dataset_type=hf)
 hf_path: ''
@@ -485,10 +486,10 @@ jax_profiler_port: 9999
 log_config: True # Prints the config (after defaults have been set by pyconfig logic)
 
 # Checkpoint Structured logging
-enable_checkpoint_cloud_logger: False
+enable_checkpoint_cloud_logger: True
 
 # Single-controller
-enable_single_controller: False
+enable_single_controller: True
 
 custom_mesh: "" # Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']
 # Split physical axes for https://jax.readthedocs.io/en/latest/_autosummary/jax.experimental.mesh_utils.create_device_mesh.html

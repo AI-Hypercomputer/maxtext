@@ -1,0 +1,2 @@
+python3 benchmarks/benchmark_runner.py --project='tpu-prod-env-automated' --zone='us-east5' --device_type=v6e-256 --num_slices=1  --cluster_name='bodaborg-v6e-256' \
+--model_name="gpt_3_175b"  --base_output_directory="gs://maxtext-experiments-tpem/"  --libtpu_version=20241028 --base_docker_image maxtext_base_image

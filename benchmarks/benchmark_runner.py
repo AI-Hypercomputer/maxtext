@@ -88,6 +88,9 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
           'llama2_70b_4096_real_data',
           'llama3_70b_8192',
           'llama3_1_405b_8192_fsdp_dcn',
+          'llama3_1_405b_8192_fsdp_dcn_c4',
+          'llama3_1_8b_8192_c4',
+          'llama3_70b_8192',
           'mixtral_8x7b_dropped',
           'mixtral_8x7b_dropped_int8',
           'mixtral_8x7b_dropless',
@@ -122,6 +125,25 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
       default='maxtext_base_image',
       help='version of base docker image to be benchmarked command.',
   )
+  custom_parser.add_argument(
+      '--use_pathways',
+      type=bool,
+      default=False,
+      help='whether to use pathways or not.',
+  )
+  custom_parser.add_argument(
+      '--xpk_path',
+      type=str,
+      default='~/xpk',
+      help='path to xpk dir.',
+  )
+  custom_parser.add_argument(
+      '--num_steps',
+      type=int,
+      default='2000',
+      help='Number of steps to run benchmark for.',
+  )
+
 
 def main() -> None:
   parser = argparse.ArgumentParser(
@@ -139,25 +161,30 @@ def main() -> None:
       base_output_directory=options.base_output_directory,
   )
 
-  v6e_env_configs = SWconfig(
+  sw_config = SWconfig(
       base_docker_image=options.base_docker_image,
       libtpu_version=options.libtpu_version,
   )
 
-  v6e_256_configs = HWConfig(
+  hw_config = HWConfig(
       num_slices=options.num_slices, device_type=options.device_type
   )
 
-  model_sets = importlib.import_module('maxtext_trillium_model_configs')
+  # model_sets = importlib.import_module('maxtext_trillium_model_configs')
+  model_sets = importlib.import_module('maxtext_viperfish_model_configs')
   benchmark_model = getattr(model_sets, options.model_name)
 
   model_runner = BenchmarkRunner(
       model_name=benchmark_model,
-      software_config=v6e_env_configs,
-      hardware_config=v6e_256_configs,
+      software_config=sw_config,
+      hardware_config=hw_config,
+      use_pathways=options.use_pathways,
+      num_steps=options.num_steps,
   )
 
-  xpk_benchmark_runner(cluster_config, [model_runner])
+  xpk_benchmark_runner(
+      cluster_config, [model_runner], xpk_path=options.xpk_path
+  )
 
 
 if __name__ == '__main__':
