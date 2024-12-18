@@ -968,6 +968,12 @@ def print_pytree_shape(print_str, ptree):
   print(jax.tree_util.tree_map(lambda x: x.shape, ptree))
 
 
+def print_pytree_dtype(print_str, ptree):
+  print("\n")
+  print(print_str)
+  print(jax.tree_util.tree_map(lambda x: x.dtype, ptree))
+
+
 def print_model_vars(print_str, model_vars):
   for k in model_vars:
     print(f"{print_str} key{k}:")
