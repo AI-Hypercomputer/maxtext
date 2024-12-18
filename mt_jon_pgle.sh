@@ -17,8 +17,8 @@
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1212_bumpup
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/yujunzou/llama2-7b
 # export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/maxtext_gpu_jax_pinned
-export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1216-sts
-# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1216-bumpup
+# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1216-sts
+export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1216-bumpup
 
 export MODEL_NAME=llama2-7b
 # export MODEL_NAME=llama3.1-405b
@@ -36,10 +36,9 @@ export PGLE=false
 python ../xpk/xpk.py  workload delete --cluster a3plus-benchmark --workload $WORKLOAD_NAME;
 
 
-# 'export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'
 python ../xpk/xpk.py  workload create --device-type h100-mega-80gb-8 --project supercomputer-testing --zone australia-southeast1 --cluster a3plus-benchmark \
   --docker-image $LOCAL_IMAGE_NAME \
-  --command "python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml run_name=maxtext-$MODEL_NAME model_name=$MODEL_NAME attention=$ATTENTION use_iota_embed=true per_device_batch_size=1 skip_first_n_steps_for_profiler=5 profiler=xplane steps=10 hardware=gpu enable_checkpointing=false base_output_directory=gs://lancewang-dev-supercomputer-testing/maxtext_gpu dataset_type=synthetic remat_policy=full logits_dot_in_fp32=false dcn_fsdp_parallelism=$NUM_NODES ici_tensor_parallelism=8 max_target_length=4096 weight_dtype=bfloat16" \
+  --command 'export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml run_name=maxtext-$MODEL_NAME model_name=$MODEL_NAME attention=$ATTENTION use_iota_embed=true per_device_batch_size=1 skip_first_n_steps_for_profiler=5 profiler=xplane steps=10 hardware=gpu enable_checkpointing=false base_output_directory=gs://lancewang-dev-supercomputer-testing/maxtext_gpu dataset_type=synthetic remat_policy=full logits_dot_in_fp32=false dcn_fsdp_parallelism=$NUM_NODES ici_tensor_parallelism=8 max_target_length=4096 weight_dtype=bfloat16" \
   --num-nodes $NUM_NODES \
   --workload $WORKLOAD_NAME \
   --scheduler=gke.io/topology-aware-auto \
