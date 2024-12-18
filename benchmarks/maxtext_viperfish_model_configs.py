@@ -74,6 +74,117 @@ gpt_3_175b = MaxTextModel(
     ),
 )
 
+llama3_8b_8192 = MaxTextModel(
+    model_name="llama3-8b-8192",
+    model_type="llama3-8b",
+    tuning_params={
+        "per_device_batch_size": 8,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "full",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+    ),
+)
+
+llama3_8b_4096_qkv_offload = MaxTextModel(
+    model_name="llama3-8b-4096-qkv-offload",
+    model_type="llama3-8b",
+    tuning_params={
+        "per_device_batch_size": 8,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "custom",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+    ),
+)
+
+llama2_3b_4096 = MaxTextModel(
+    model_name="llama2-3b-4096",
+    model_type="llama2-3b",
+    tuning_params={
+        "per_device_batch_size": 4,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "full",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+    ),
+)
+
+
+llama2_70b_4096_qkv_offload = MaxTextModel(
+    model_name="llama2-70b-4096-qkv-offload",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 4,
+        "remat_policy": "full",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "remat_policy": "custom",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "profiler": "xplane",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "tokenizer_path": "assets/tokenizer.llama2",
+        "steps": 100,
+    },
+    xla_flags=(
+        xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+    ),
+)
+
+
 llama2_70b_4096_int8 = MaxTextModel(
     model_name="llama2-70b-4096-int8",
     model_type="llama2-70b",
@@ -168,6 +279,33 @@ llama2_70b_4096_real_data = MaxTextModel(
         "dataset_path": "gs://max-datasets-rogue",
         "dataset_type": "tfds",
         "tokenizer_path": "assets/tokenizer.llama2",
+        "steps": 100,
+    },
+    xla_flags=(
+        xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+    ),
+)
+
+llama3_70b_8192 = MaxTextModel(
+    model_name="llama3-70b-8192",
+    model_type="llama3-70b",
+    tuning_params={
+        "per_device_batch_size": 4,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "save_dot_except_mlpwi",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
         "steps": 100,
     },
     xla_flags=(

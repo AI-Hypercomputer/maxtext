@@ -268,3 +268,7 @@ def setupConvHParams(model: MaxTextModel, params: ConvHParams, num_devices: int)
     model.tuning_params["eval_interval"]= int(math.ceil(params.eval_interval / gbs))
     model.tuning_params["enable_checkpointing"] = True
     model.tuning_params["checkpoint_period"] = int(math.ceil( 1000 * 512 / gbs))
+
+def load_checkpoint(model: MaxTextModel, checkpoint_path: str):
+    model.tuning_params["load_full_state_path"] = checkpoint_path
+
