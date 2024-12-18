@@ -25,6 +25,7 @@ import os
 import sys
 import functools
 import time
+import threading
 
 from typing import Sequence, Optional
 from absl import app
@@ -51,6 +52,8 @@ from vertex_tensorboard import VertexTensorboardManager
 
 from input_pipeline.input_pipeline_interface import create_data_iterator
 from layers import models
+
+from monitoring.gcp_workload_monitor import report_heartbeat_thread
 
 import jax.numpy as jnp
 from jax import random
@@ -758,12 +761,13 @@ def setup_train_loop(config):
   )
 
 
-def train_loop(config, state=None):
+def train_loop(config, state=None, heartbeat_reporting_stop_event=None):
   """Main Training loop.
   Args:
     config:
     state:
-    ckpt_path:
+    heartbeat_reporting_stop_event: threading event indicating when heartbeat reporting should stop. If None, 
+                                    program is not reporting heartbeat to GCP for monitoring.
   Returns:
   """
   # Create a GoodputRecorder to log information
@@ -859,6 +863,12 @@ def train_loop(config, state=None):
   example_batch = None
   last_step_completion = datetime.datetime.now()
 
+  prof = profiler.Profiler(config)
+  if heartbeat_reporting_stop_event:
+    max_logging.log("Starting background thread for reporting heartbeat")
+    t = threading.Thread(target=report_heartbeat_thread, args=(heartbeat_reporting_stop_event,))
+    t.daemon = True
+    t.start()
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
@@ -1011,8 +1021,11 @@ def main(argv: Sequence[str]) -> None:
       )
   )
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
+  heartbeat_reporting_stop_event = threading.Event() if config.report_heartbeat_metric_for_gcp_monitoring else None
   with diagnostic.diagnose(diagnostic_config):
-    train_loop(config)
+    train_loop(config, state=None, heartbeat_reporting_stop_event=heartbeat_reporting_stop_event)
+  if heartbeat_reporting_stop_event:
+    heartbeat_reporting_stop_event.set()
 
 
 if __name__ == "__main__":
