@@ -476,7 +476,11 @@ def gmm(
       else:
         loaded_rhs = mask_k_rem_rhs(rhs[...]).astype(input_dtype)
 
-      acc_scratch[...] += aqt_pl.dot_general(
+      is_quantized = lhs_quantize_dtype or rhs_quantize_dtype
+      # aqt_pl.dot_general did not handle accumulation dtype well
+      # when both lhs and rhs are not quantized. A workaround is to use lax.dot_general
+      dot_general = aqt_pl.dot_general if is_quantized else jax.lax.dot_general
+      acc_scratch[...] += dot_general(
           loaded_lhs,
           loaded_rhs,
           preferred_element_type=jnp.float32,
