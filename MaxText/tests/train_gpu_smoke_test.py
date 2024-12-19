@@ -34,6 +34,9 @@ class Train(unittest.TestCase):
             r"dataset_path=gs://maxtext-dataset",
             "enable_checkpointing=False",
             "tokenizer_path=../assets/tokenizer.llama2",
+            "enable_goodput_recording=False",
+            "enable_checkpoint_cloud_logger=False",
+            "monitor_goodput=False",
         ]
     )
 

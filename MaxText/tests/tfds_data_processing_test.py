@@ -51,13 +51,20 @@ class TfdsDataProcessingTest(unittest.TestCase):
     self.config = pyconfig.config
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
-    self.process_indices = input_pipeline_interface.get_process_loading_real_data(self.config, self.mesh)
+    self.process_indices = input_pipeline_interface.get_process_loading_real_data(
+        self.config.data_sharding,
+        self.config.global_batch_size_to_load,
+        self.config.global_batch_size_to_train_on,
+        self.config.max_target_length,
+        self.mesh,
+    )
     self.read_config = tfds.ReadConfig(
         shuffle_seed=self.config.data_shuffle_seed,
     )
     self.read_config.add_tfds_id = True
     self.train_ds = self._get_datasets()
-    self.train_iter, self.eval_iter = self._get_train_iterator()
+    self.train_iter = _tfds_data_processing.make_tfds_train_iterator(self.config, self.mesh, self.process_indices)
+    self.eval_iter = _tfds_data_processing.make_tfds_eval_iterator(self.config, self.mesh, self.process_indices)
 
   def _get_datasets(self):
     ds_builder = tfds.builder(self.config.dataset_name)
@@ -68,10 +75,6 @@ class TfdsDataProcessingTest(unittest.TestCase):
     ds = ds_builder.as_dataset(split="train", read_config=self.read_config, shuffle_files=self.config.enable_data_shuffling)
 
     return ds
-
-  def _get_train_iterator(self):
-    train_iter, eval_iter = _tfds_data_processing.make_tfds_iterator(self.config, self.mesh, self.process_indices)
-    return train_iter, eval_iter
 
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
@@ -102,7 +105,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
-    train_iter, _ = self._get_train_iterator()
+    train_iter = _tfds_data_processing.make_tfds_train_iterator(self.config, self.mesh, self.process_indices)
     batch2 = next(train_iter)
     self.assertTrue(tf.reduce_all(tf.equal(batch1["inputs"], batch2["inputs"])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1["targets"], batch2["targets"])))

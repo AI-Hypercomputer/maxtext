@@ -31,6 +31,12 @@ from input_pipeline import _input_pipeline_utils
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
+# reserve GPU memory for JAX only if tensorflow is built with GPU support
+try:
+  tf.config.experimental.set_visible_devices([], "GPU")
+except tf.errors.NotFoundError:
+  pass
+
 
 def get_datasets(
     dataset_name,
@@ -72,7 +78,7 @@ def preprocessing_pipeline(
     global_batch_size: int,
     global_mesh,
     max_target_length: int,
-    data_column_name,
+    data_column_names,
     shuffle: bool = False,
     data_shuffle_seed=0,
     tokenize: bool = True,
@@ -84,19 +90,32 @@ def preprocessing_pipeline(
     shift: bool = True,
     drop_remainder: bool = True,
     prefetch_size=tf.data.experimental.AUTOTUNE,
+    use_dpo: bool = False,
 ):
   """pipeline for preprocessing TFDS dataset."""
-  dataset = dataset.map(lambda x: _input_pipeline_utils.normalize_features(x, data_column_name), num_parallel_calls=AUTOTUNE)
+  if not use_dpo:
+    assert len(data_column_names) == 1
+    dataset = dataset.map(
+        lambda x: _input_pipeline_utils.normalize_features(x, data_column_names[0]), num_parallel_calls=AUTOTUNE
+    )
+  else:
+    dataset = dataset.map(lambda x: {col: x[col] for col in data_column_names}, num_parallel_calls=AUTOTUNE)
 
+  data_column_names = data_column_names if use_dpo else ("inputs", "targets")
   if tokenize:
     tokenizer_model = _input_pipeline_utils.get_tokenizer(tokenizer_path, add_bos, add_eos)
-    dataset = dataset.map(lambda x: tokenizer.TokenizeOp(tokenizer=tokenizer_model, features=x), num_parallel_calls=AUTOTUNE)
+    data_keys = data_column_names
+    dataset = dataset.map(
+        lambda x: tokenizer.TokenizeOp(tokenizer=tokenizer_model, features=x, data_keys=data_keys),
+        num_parallel_calls=AUTOTUNE,
+    )
 
   if max_target_length > 0:
-    # We can take upto max_length+1 because there would be truncation by 1 token
-    # for both inputs and targets
+    # in pre-training we can take upto max_length+1 because there would be truncation by
+    # 1 token for both inputs and targets
+    extra_tokens = 1 if not use_dpo else 0
     dataset = dataset.map(
-        lambda x: _input_pipeline_utils.truncate_to_max_allowable_length(x, max_target_length + 1),
+        lambda x: _input_pipeline_utils.truncate_to_max_allowable_length(x, max_target_length + extra_tokens),
         num_parallel_calls=AUTOTUNE,
     )
 
@@ -107,23 +126,28 @@ def preprocessing_pipeline(
   dataset = dataset.repeat(num_epochs)
 
   # Shift inputs for teacher-forced training
-  if shift:
+  if shift and not use_dpo:
     dataset = dataset.map(
         _input_pipeline_utils.shift_data_by_truncation, num_parallel_calls=tf.data.AUTOTUNE, deterministic=True
     )
 
   # Perform greedy sequence packing and batching
   assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible number of global devices."
-  if pack_examples:
+  if pack_examples and not use_dpo:
     dataset = sequence_packing.pack_dataset(dataset, max_target_length)
     dataset = dataset.batch(global_batch_size // jax.process_count(), drop_remainder=drop_remainder)
   else:
     # simple (static-shape) padded batching
     dataset = dataset.padded_batch(
         global_batch_size // jax.process_count(),
-        padded_shapes={"inputs": max_target_length, "targets": max_target_length},
-        padding_values={"inputs": 0, "targets": 0},
+        padded_shapes={k: max_target_length for k in data_column_names},
+        padding_values={k: 0 for k in data_column_names},
         drop_remainder=drop_remainder,
+    )
+    dataset = dataset.map(
+        lambda x: _input_pipeline_utils.add_segmentation_and_position(x, data_column_names),
+        num_parallel_calls=tf.data.AUTOTUNE,
+        deterministic=True,
     )
 
   if prefetch_size:
@@ -135,10 +159,10 @@ def preprocessing_pipeline(
   return multihost_gen
 
 
-def make_tfds_iterator(
+def make_tfds_train_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
-    process_indices,
+    process_indices_train,
 ):
   """load dataset, preprocess and return iterators"""
   train_ds = get_datasets(
@@ -146,8 +170,8 @@ def make_tfds_iterator(
       data_split="train",
       shuffle_files=config.enable_data_shuffling,
       shuffle_seed=config.data_shuffle_seed,
-      dataloading_host_index=process_indices.index(jax.process_index()),
-      dataloading_host_count=len(process_indices),
+      dataloading_host_index=process_indices_train.index(jax.process_index()),
+      dataloading_host_count=len(process_indices_train),
   )
   train_iter = preprocessing_pipeline(
       dataset=train_ds,
@@ -155,43 +179,44 @@ def make_tfds_iterator(
       global_batch_size=config.global_batch_size_to_load,
       global_mesh=global_mesh,
       max_target_length=config.max_target_length,
-      data_column_name=config.train_data_column,
+      data_column_names=config.train_data_columns,
       shuffle=config.enable_data_shuffling,
       data_shuffle_seed=config.data_shuffle_seed,
       tokenize=config.tokenize_train_data,
       add_bos=config.add_bos,
       add_eos=config.add_eos,
+      use_dpo=config.use_dpo,
+  )
+  return train_iter
+
+
+def make_tfds_eval_iterator(
+    config: ml_collections.ConfigDict,
+    global_mesh,
+    process_indices_eval,
+):
+  eval_ds = get_datasets(
+      dataset_name=config.eval_dataset_name,
+      data_split=config.eval_split,
+      shuffle_files=False,
+      shuffle_seed=config.data_shuffle_seed,
+      dataloading_host_index=process_indices_eval.index(jax.process_index()),
+      dataloading_host_count=len(process_indices_eval),
   )
 
-  if config.eval_interval > 0:
-    eval_ds = get_datasets(
-        dataset_name=config.eval_dataset_name,
-        data_split=config.eval_split,
-        shuffle_files=False,
-        shuffle_seed=config.data_shuffle_seed,
-        dataloading_host_index=process_indices.index(jax.process_index()),
-        dataloading_host_count=len(process_indices),
-    )
+  eval_iter = preprocessing_pipeline(
+      dataset=eval_ds,
+      tokenizer_path=config.tokenizer_path,
+      global_batch_size=config.global_batch_size_to_load_eval,
+      global_mesh=global_mesh,
+      max_target_length=config.max_target_length,
+      data_column_names=config.eval_data_columns,
+      shuffle=False,
+      data_shuffle_seed=config.data_shuffle_seed,
+      tokenize=config.tokenize_eval_data,
+      add_bos=config.add_bos,
+      add_eos=config.add_eos,
+      use_dpo=config.use_dpo,
+  )
 
-    if config.eval_per_device_batch_size > 0:
-      eval_batch_size = config.eval_per_device_batch_size * global_mesh.size
-    else:
-      eval_batch_size = config.global_batch_size_to_load
-
-    eval_iter = preprocessing_pipeline(
-        dataset=eval_ds,
-        tokenizer_path=config.tokenizer_path,
-        global_batch_size=eval_batch_size,
-        global_mesh=global_mesh,
-        max_target_length=config.max_target_length,
-        data_column_name=config.eval_data_column,
-        shuffle=False,
-        data_shuffle_seed=config.data_shuffle_seed,
-        tokenize=config.tokenize_eval_data,
-        add_bos=config.add_bos,
-        add_eos=config.add_eos,
-    )
-  else:
-    eval_iter = None
-
-  return train_iter, eval_iter
+  return eval_iter

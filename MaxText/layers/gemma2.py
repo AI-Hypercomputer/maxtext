@@ -17,6 +17,7 @@ limitations under the License.
 from flax import linen as nn
 import common_types
 import jax.numpy as jnp
+from jax.ad_checkpoint import checkpoint_name
 
 from layers import normalizations
 from layers import attentions
@@ -69,7 +70,7 @@ class Gemma2DecoderLayer(nn.Module):
     cfg = self.config
     mesh = self.mesh
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
-
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = RMSNorm(
         dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_self_attention_norm_local", kernel_axes=("norm",)
@@ -96,6 +97,7 @@ class Gemma2DecoderLayer(nn.Module):
         kv_quant=quantizations.configure_kv_quant(cfg),
         attention_type=attentions.AttentionType.LOCAL_SLIDING,
         sliding_window_size=cfg.sliding_window_size,
+        attn_logits_soft_cap=cfg.attn_logits_soft_cap,
     )
 
     attention_lnx = attention_layer(
@@ -177,6 +179,7 @@ class Gemma2DecoderLayer(nn.Module):
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
         attention_type=attentions.AttentionType.GLOBAL,
+        attn_logits_soft_cap=cfg.attn_logits_soft_cap,
     )
 
     attention_lnx = attention_layer(

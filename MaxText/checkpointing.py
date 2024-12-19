@@ -38,8 +38,6 @@ PersistentCheckpointOptions = emergency_checkpoint_manager.PersistentCheckpointO
 
 abstract_logger = ocp.logging.abstract_logger
 cloud_logger = ocp.logging.cloud_logger
-composite_logger = ocp.logging.composite_logger
-standard_logger = ocp.logging.standard_logger
 
 
 def create_orbax_checkpoint_manager(
@@ -107,7 +105,6 @@ def create_orbax_emergency_checkpoint_manager(
       global_mesh=global_mesh,
       abstract_state=abstract_state,
       options=options,
-      local_state_handler=emergency_checkpoint_manager.local_checkpoint_handler(),
       logger=orbax_logger,
   )
 
@@ -149,6 +146,7 @@ def load_state_if_possible(
     abstract_unboxed_pre_state: train_state.TrainState,
     enable_single_replica_ckpt_restoring: Optional[bool] = False,
     dataset_type: Optional[str] = "tfds",
+    step: int = -1,  # -1 means latest
 ):
   """Loads TrainState as possible from the inputs.
 
@@ -174,12 +172,9 @@ def load_state_if_possible(
   if checkpoint_manager is not None:
     max_logging.log("checkpoint manager exists so trying to load this run's existing checkpoint")
 
-    latest_step = checkpoint_manager.latest_step()
-    if latest_step is not None:
-      max_logging.log(
-          f"restoring from this run's directory latest step \
-          {latest_step}"
-      )
+    step = checkpoint_manager.latest_step() if step < 0 else step
+    if step is not None:
+      max_logging.log(f"restoring from this run's directory step {step}")
 
       def map_to_pspec(data):
         pspec = data.sharding.spec
@@ -213,16 +208,19 @@ def load_state_if_possible(
       if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
         return (
             checkpoint_manager.restore(
-                latest_step,
+                step,
                 args=ocp.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args),
             ),
             None,
         )
-
-      if dataset_type == "grain" and data_iterator is not None:
+      if (
+          dataset_type == "grain"
+          and data_iterator is not None
+          and (checkpoint_manager.directory / str(step) / "iter").exists()
+      ):
         return (
             checkpoint_manager.restore(
-                latest_step,
+                step,
                 args=ocp.args.Composite(
                     items=ocp.args.PyTreeRestore(
                         item=abstract_unboxed_pre_state,
@@ -236,7 +234,7 @@ def load_state_if_possible(
       else:
         return (
             checkpoint_manager.restore(
-                latest_step,
+                step,
                 args=ocp.args.Composite(
                     items=ocp.args.PyTreeRestore(
                         item=abstract_unboxed_pre_state,
@@ -262,32 +260,23 @@ def load_state_if_possible(
     return None, None
 
 
-def setup_checkpoint_logger(config) -> composite_logger.CompositeLogger | None:
+def setup_checkpoint_logger(config) -> cloud_logger.CloudLogger | None:
   """Setup checkpoint logger.
   Args:
     config
   Returns:
-    CompositeLogger
+    CloudLogger
   """
   orbax_cloud_logger = None
-  orbax_standard_logger = None
   max_logging.log("Setting up checkpoint logger...")
   if config.enable_checkpoint_cloud_logger:
-    logger_name = f"checkpoint_{config.run_name}"
+    logger_name = f"goodput_{config.run_name}"
     options = cloud_logger.CloudLoggerOptions(job_name=config.run_name, logger_name=logger_name)
     orbax_cloud_logger = cloud_logger.CloudLogger(options=options)
     max_logging.log("Successfully set up checkpoint cloud logger.")
+    return orbax_cloud_logger
 
-  if config.enable_checkpoint_standard_logger:
-    orbax_standard_logger = standard_logger.StandardLogger()
-    max_logging.log("Successfully set up checkpoint standard logger.")
-
-  orbax_logger = None
-  if orbax_cloud_logger is not None and orbax_standard_logger is not None:
-    orbax_logger = composite_logger.CompositeLogger(orbax_cloud_logger, orbax_standard_logger)
-    max_logging.log("Successfully set up checkpoint composite logger.")
-
-  return orbax_logger
+  return orbax_cloud_logger
 
 
 def load_params_from_path(load_parameters_from_path, abstract_unboxed_params):

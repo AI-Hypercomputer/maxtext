@@ -71,22 +71,16 @@ dtype: "bfloat16"
 # Used to configure quantization in the transformer layers, defaults to null implying bf16.
 # Possible alternative settings are as follows:
 # 'int8' for dynamic range quantization using 8-bits
-# 'int8w' for weights only quantization using 8-bits
-# 'int4w' for weights only quantization using 4-bits
-# 'intmp' for mixed precision weight only quantization based on config file
+# 'intmp' for mixed precision quantization for inference as described here: MaxText/configs/quantization/README.md
 # 'fp8' for 8-bit floating-point GeMMs on NVIDIA GPUs.
 quantization: ""
 # Choose one of default, high, and highest.
 # https://kolonist26-jax-kr.readthedocs.io/en/latest/jax.lax.html#jax.lax.Precision
 matmul_precision: "default"
 activations_in_float32: False # Sets activations to float32 before nonlinearity it true, else dtype
-# Path to file with quantization config - only used for mixed precision.
-# Example configs in ../Maxtext/configs/quantization
-# Allows us to configure different bits, tiling and scale for quantizing selected weights.
-# Bits represents number of bits to quantize to,
-# tile-size represents the tiling sized used in AQT tiled_dot_general,
-# Value of scale is used to scale the abs_max value used for AQT quantization
-# Defaults values are 8 bits, tile-size=-1 (no tiling) and scale=1.
+# Used to replicate the quantization scale to avoid the inefficient XLA fusion for 2d sharding.
+replicate_quant_scale: False
+# Path to file with quantization config for intmp.
 quant_cfg_path: ""
 quantize_kvcache: False # Set to True to quantize KV Cache values, defaults to False
 # Valid kv_quant_axis values:
@@ -100,6 +94,10 @@ kv_quant_dtype: "int8"
 checkpoint_is_quantized: False # Set to True if reading from a saved aqt quantized checkpoint
 # Saves params quantized on fly at following path
 save_quantized_params_path: ""
+#Used to configure the mode in which model is called
+# when left as is, corresponds to training
+# accepted values are "inference" 
+model_call_mode: ""
 
 # Shard the range finding operation for quantization. By default this is set to number of slices.
 quantization_local_shard_count: -1
@@ -117,7 +115,7 @@ base_mlp_dim: 7168
 base_num_decoder_layers: 16
 head_dim: 128
 mlp_activations: ["silu", "linear"]
-dropout_rate: 0
+dropout_rate: 0.0
 logits_via_embedding: False
 normalize_embedding_logits: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: False  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
@@ -144,15 +142,43 @@ num_pipeline_repeats: -1
 # num_pipeline_microbatches must be a multiple of the number of pipeline stages. By default it is set to the number of stages.
 # Note the microbatch_size is given by global_batch_size / num_pipeline_microbatches, where global_batch_size = per_device_batch_size * num_devices
 num_pipeline_microbatches: -1
-scan_pipeline_iterations: True # This can be set independently of scan_layers, which is relevant when num_layers_per_pipeline_stage > 1.
 pipeline_delay_activation_forwarding: False # This delays the activation forwarding one loop iteration simplifying XLA's task of overlapping since
 # the communication and compute in each iteration are now independent. However this comes at the cost of doubling the pipeline bubble,
 # and you must set the number of microbatches to at least 2 * num_stages (the minimum 2 * num_stages is set by default with this delay).
 
-# Choose 'remat_policy' between 'minimal', 'save_dot_except_mlpwi', 'save_dot_except_mlp', 'save_qkv_proj', 'qkv_proj_offloaded', 'minimal_offloaded', 'save_out_proj' and 'full'.
+# There are two loops for PP: 
+#  1)  Outer loop over microbatches (pipeline iterations)
+#  2)  Inner loop over layers (layers per stage)
+# We have observed extra remat when a remat policy and scanning is performed on both, and recommend the default
+# settings below of scanning and setting a remat policy only over the pipeline iterations.
+# It may be useful to do the reverse when the layers_per_stage is very large.
+# The below settings only have effect when using pipeline parallelism.
+scan_pipeline_iterations: True
+# The layers per stage scanning option is set by scan_layers, we recommend setting scan_layers=False
+set_remat_policy_on_pipeline_iterations: True
+set_remat_policy_on_layers_per_stage: False
+
+
+# Choose 'remat_policy' between 'minimal', 'save_dot_with_context_except_mlp', 'save_dot_except_mlpwi', 'save_dot_except_mlp',
+# 'save_qkv_proj', 'qkv_proj_offloaded', 'custom' 'minimal_offloaded', 'save_out_proj' and 'full'.
 # These options offer a trade-off between speed (fastest to slowest) and HBM usage (highest to lowest)
 remat_policy: 'full'
-scan_layers: True
+# If custom_save_offload remat_policy is chosen, you can select tensors from the following list to offload on host memory, rematerialize or save on device memory.
+# Pick one of these options for following tensors: ['remat','device','offload']
+decoder_layer_input: 'device' # this tensor cannot be rematerialized - it serves as periodic checkpoints that act as the remat start points
+context: 'remat' # From https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/jax/attention.py#L581-L583
+mlpwi: 'remat'
+mlpwi_0: 'remat'
+mlpwi_1: 'remat'
+mlpwo: 'remat'
+query_proj: 'remat'
+key_proj: 'remat'
+value_proj: 'remat'
+qkv_proj: 'remat'
+out_proj: 'remat'
+
+optimizer_memory_host_offload: False
+scan_layers: True # We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations.
 param_scan_axis: 1
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
@@ -188,6 +214,12 @@ local_checkpoint_directory: ""
 # It should be a positive number when and only when `enable_emergency_checkpoint` is True.
 local_checkpoint_period: 0
 
+# Whether or not to use emergency checkpoint with the replicator service.
+use_replicator_service: False
+
+# The interval to backup local checkpoints to the persistent storage.
+replicator_backup_interval_minutes: 0
+
 # Jax cache directory
 jax_cache_dir: "~/jax_cache"
 
@@ -199,16 +231,14 @@ mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'ex
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
-                       # For pipeline parallelism the pre and post decoder layer tensors' batch dimension is sharded by stages.
-                       # Microbatches are sharded by stage, so moving out of and into this sharding should be a local reshape.
-                       # The "stage" needs to be listed first since the microbatch dimension is first before the reshape.
-                      ['activation_embed_and_logits_batch', ['stage', 'data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_heads', ['tensor','sequence']],
                       ['activation_kv_heads', ['tensor','sequence']],
                       ['activation_length', 'sequence'],
                       ['activation_embed', 'tensor'],
                       ['activation_mlp', 'tensor'],
                       ['activation_kv', 'tensor'],
+                      ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_head_dim', 'tensor'],
                       ['activation_vocab', ['tensor', 'sequence']],
@@ -223,11 +253,13 @@ logical_axis_rules: [
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence']],
                       ['embed_no_exp', ['fsdp', 'sequence']],
                       ['norm', 'tensor'],
+                      ['q_heads', ['tensor', 'autoregressive']],
                       ['heads', ['tensor', 'autoregressive']],
                       ['layers', 'stage'],
                       ['kv', []],
                       ['kv_heads', ['tensor', 'autoregressive']],
                       ['kv_head_dim', []],
+                      ['cache_batch_prefill', []],
                       ['cache_batch', []],
                       ['cache_heads', ['autoregressive', 'tensor']],
                       ['cache_kv', []],
@@ -236,6 +268,9 @@ logical_axis_rules: [
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
 data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'expert', 'autoregressive']]
+
+# sharding tolerance: float between 0.0 and 1.0 representing the allowed percentage of non-sharded parameters.
+sharding_tolerance: 0.02
 
 # One axis for each parallelism type may hold a placeholder (-1)
 # value to auto-shard based on available slices and devices.
@@ -273,10 +308,16 @@ add_eos: True
 # Dataset
 per_device_batch_size: 12.0
 expansion_factor_real_data: -1 # if -1 then all hosts will load real data, else total_hosts//expansion_factor_real_data will pull data from GCS.
-eval_per_device_batch_size: 0
+eval_per_device_batch_size: 0.0
 max_corpus_chars: 10_000_000
-train_data_column: 'text'
-eval_data_column: 'text'
+train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
+eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
+
+# direct preference optimization (DPO)
+use_dpo: False 
+dpo_label_smoothing: 0.0
+dpo_beta: 0.1
+
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md
 dataset_type: tfds
@@ -300,6 +341,11 @@ grain_worker_count: 1
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
 log_period: 100 # Flushes Tensorboard
+
+jax_distributed_initialization_timeout: 300 # This is the default timeout in https://github.com/jax-ml/jax/blob/main/jax/_src/distributed.py
+# Note there are two separate initializations - the jax coordination service (aka jax.distributed.initialize) and the backend (e.g. PjRT), the timeout above refers
+# only to the jax coordination service.
+jax_debug_log_modules: "" # Set this to "jax" to enable jax verbose logging such as for the jax coordination service initialization. 
 
 # We take inspiration from Llama2's learning rate (LR) schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
 # Learning rate schedule has either two or three parts:
@@ -331,6 +377,7 @@ upload_all_profiler_results: False
 skip_first_n_steps_for_profiler: 1
 # Profile for a small number of steps to avoid a large profile file size.
 profiler_steps: 5
+profile_cleanly: True # If set to true, adds a block_until_ready on train state which aligns the profile for each step.
 
 # When dropout is false the model is a deterministic function of the
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
@@ -385,9 +432,10 @@ eval_steps: -1  # only run this number of batches for eval, for debugging use
 target_eval_loss: 0.  # early stop once reaching target eval_loss
 
 # Goodput parameters
-enable_goodput_recording: False
-monitor_goodput: False
+enable_goodput_recording: True
+monitor_goodput: True
 goodput_upload_interval_seconds: 60
+enable_pathways_goodput: False
 
 # Vertex AI Tensorboard Configurations - https://github.com/google/maxtext/tree/main/getting_started/Use_Vertex_AI_Tensorboard.md
 # Set to True for GCE, False if running via XPK
@@ -410,6 +458,9 @@ inference_microbenchmark_log_file_path: ""
 inference_metadata_file: "" # path to a json file
 enable_model_warmup: False
 
+# Stack prefill cache across the layer to reduce the
+# Python layer latency.
+stack_prefill_result_cache: False
 
 # KV Cache layout control
 # Logical layout: 0,1,2,3 ; CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV
@@ -431,13 +482,15 @@ prometheus_port: 0
 enable_jax_profiler: False
 jax_profiler_port: 9999
 
+log_config: True # Prints the config (after defaults have been set by pyconfig logic)
+
 # Checkpoint Structured logging
 enable_checkpoint_cloud_logger: False
-enable_checkpoint_standard_logger: False
 
 # Single-controller
 enable_single_controller: False
 
+custom_mesh: "" # Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']
 # Split physical axes for https://jax.readthedocs.io/en/latest/_autosummary/jax.experimental.mesh_utils.create_device_mesh.html
 allow_split_physical_axes: False
 
@@ -448,5 +501,14 @@ ragged_block_size: 256
 # These can be tuned for specific hardware generations, and can be set up to
 # the model's sequence length.
 sa_block_q: 512
+sa_block_kv: 512
+sa_block_kv_compute: 512
 sa_block_q_dkv: 512
+sa_block_kv_dkv: 512
+sa_block_kv_dkv_compute: 512
 sa_block_q_dq: 512
+sa_block_kv_dq: 512
+sa_use_fused_bwd_kernel: False
+sa_q_layout: "HEAD_DIM_MINOR"
+sa_k_layout: "HEAD_DIM_MINOR"
+sa_v_layout: "HEAD_DIM_MINOR"

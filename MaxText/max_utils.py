@@ -15,20 +15,26 @@ limitations under the License.
 """
 
 """ Common Max Utils needed by multiple modules"""
-import checkpointing
-import common_types
-import functools
-import time
-import socket
-import subprocess
-from etils import epath
-
-import max_logging
-
 import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
+import checkpointing
+import common_types
+import functools
+import time
+import optax
+import os
+import socket
+import subprocess
+from etils import epath
+from collections.abc import Sequence
+import collections
+from typing import Any, Tuple
+
+import max_logging
+
+
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 
@@ -40,14 +46,26 @@ from flax.training import train_state
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
-import optax
-import os
-from typing import Tuple
 from tensorboardX import writer
-
 from google.cloud import storage
 
+HYBRID_RING_64X4 = "hybrid_ring_64x4"
+HYBRID_RING_32X8 = "hybrid_ring_32x8"
+
 # pylint: disable=too-many-positional-arguments
+
+
+def with_memory_kind(t, memory_kind):
+  return jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind=memory_kind), t)
+
+
+def cast_dtype_from_to(nest, src, dst):
+  """All items in nest with dtype src are casted to dtype dst."""
+  return jax.tree_util.tree_map(lambda t: t.astype(dst) if t.dtype == src else t, nest)
+
+
+def cast_to_bf16(params):
+  return cast_dtype_from_to(params, np.float32, jnp.bfloat16)
 
 
 def find_nans_and_infs(pytree):
@@ -206,11 +224,11 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     return
   if is_gpu_backend(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for GPU backend...")
-    initialize_jax_for_gpu()
+    initialize_jax_for_gpu(raw_keys)
     max_logging.log("Jax distributed system initialized on GPU!")
   elif is_cpu_backend(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for CPU backend...")
-    initialize_jax_for_cpu()
+    initialize_jax_for_cpu(raw_keys)
     max_logging.log("Jax distributed system initialized on CPUs!")
   elif (
       raw_keys["enable_checkpointing"]
@@ -220,13 +238,13 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   ) or raw_keys["hardware"] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
     if not raw_keys["enable_emergency_checkpoint"]:
-      jax.distributed.initialize()
+      jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
     else:
       initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
     max_logging.log("Jax distributed system initialized!")
 
 
-def initialize_jax_for_gpu():
+def initialize_jax_for_gpu(raw_keys):
   """Jax distributed initialize for GPUs."""
   if os.environ.get("JAX_COORDINATOR_IP") is not None:
     coordinator_ip = str(os.getenv("JAX_COORDINATOR_IP"))
@@ -235,11 +253,12 @@ def initialize_jax_for_gpu():
         coordinator_address=f"{coordinator_ip}:{coordinator_port}",
         num_processes=int(os.getenv("NNODES")),
         process_id=int(os.getenv("NODE_RANK")),
+        initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
     )
     max_logging.log(f"JAX global devices: {jax.devices()}")
 
 
-def initialize_jax_for_cpu():
+def initialize_jax_for_cpu(raw_keys):
   """Jax distributed initialize for CPUs. Includes retries until the coordinator is ready."""
   coordinator_ip_address = get_coordinator_ip_address()
   coordinator_address = coordinator_ip_address + ":1234"  # JAX coordinator port used in XPK
@@ -254,6 +273,7 @@ def initialize_jax_for_cpu():
       coordinator_address=coordinator_address,
       process_id=pid,
       num_processes=int(os.environ.get("JAX_PROCESS_COUNT")),
+      initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
   )
 
 
@@ -270,15 +290,50 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
         f"Using {process_id} as the process_id and {coordinator_address} as the"
         " coordinator_address to initialize JAX distributed runtime..."
     )
-    jax.distributed.initialize(coordinator_address=coordinator_address, process_id=int(process_id))
+    jax.distributed.initialize(
+        coordinator_address=coordinator_address,
+        process_id=int(process_id),
+        initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
+    )
+    if raw_keys["use_replicator_service"]:
+      REPLICATOR_FILE = "replicator.yaml"
+      TEMP_FILE = REPLICATOR_FILE + ".tmp"
+      replicator_file = epath.Path(raw_keys["local_checkpoint_directory"]) / REPLICATOR_FILE
+      temp_file = epath.Path(raw_keys["local_checkpoint_directory"]) / TEMP_FILE
+      num_slices = get_num_slices(raw_keys)
+      num_nodes = jax.process_count()
+      nodes_per_slice = num_nodes // num_slices
+      max_logging.log(f"num_slices: {num_slices}, num_nodes: {num_nodes}, nodes_per_slice: {nodes_per_slice}")
+      node_rank = jax.process_index()
+      peer_ranks = []
+      for i in range(num_slices):
+        peer = node_rank % nodes_per_slice + i * nodes_per_slice
+        if peer != node_rank:
+          peer_ranks.append(peer)
+      run_name = raw_keys["run_name"]
+      if run_name == "":
+        run_name = os.environ.get("JOBSET_NAME")  # using XPK default
+
+      replicator_yaml = f"""job-name: {run_name}
+      framework: orbax
+      assume-data-parallelism: {num_slices}
+      node-rank: {node_rank}
+      nodes: {num_nodes}
+      workers-per-node: 1
+      peer-ranks: {peer_ranks}
+      backup-interval-minutes: {raw_keys["replicator_backup_interval_minutes"]}"""
+
+      temp_file.write_text("\n".join([l.strip() for l in replicator_yaml.split("\n")]))
+      os.rename(temp_file, replicator_file)
   else:
     max_logging.log(
         "Initializing JAX distributed runtime without args when emergency checkpointing is"
         " enabled. This should not happen and your workload may have unexpected behavior."
     )
-    jax.distributed.initialize()
+    jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
 
-  ocp.multihost.utils.initialize_runtime_to_distributed_ids()
+  ocp.multihost.initialize_runtime_to_distributed_ids()
+  ocp.multihost.initialize_distributed_to_device_ids()
 
 
 def _retrieve_jax_init_info(raw_keys):
@@ -299,6 +354,21 @@ def _retrieve_jax_init_info(raw_keys):
       f"Unable to locate {JAX_INIT_INFO_FILE} after 900 seconds," "returning empty process id and coordinator address."
   )
   return "", ""
+
+
+def get_num_slices(raw_keys):
+  """Calculate num_slices based on number of devices."""
+  if raw_keys["hardware"] == "cpu":
+    max_logging.log(" Setting num_slices=1 for CPU hardware type")
+    return 1
+  if int(raw_keys["compile_topology_num_slices"]) > 0:
+    return raw_keys["compile_topology_num_slices"]
+  else:
+    devices = jax.devices()
+    try:
+      return 1 + max(d.slice_index for d in devices)
+    except (ValueError, AttributeError):
+      return 1
 
 
 def is_cpu_backend(raw_keys):
@@ -360,6 +430,102 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
   return parallelism_vals
 
 
+def reshape_mesh_to_rings(a, strategy):
+  """Reshape device mesh to rings for 64x4 or 32x8 mesh shape"""
+  b = []
+  if strategy == HYBRID_RING_64X4:
+    for i in range(8):
+      b.append([])
+      for j in range(8):
+        a_i = i * 2
+        a_j = j * 2
+        # forms a ring of size 4
+        b[i].append([a[a_i, a_j], a[a_i, a_j + 1], a[a_i + 1, a_j + 1], a[a_i + 1, a_j]])
+    b = np.array(b)
+    b = np.reshape(b, (64, 4))
+  elif strategy == HYBRID_RING_32X8:
+    for i in range(8):
+      b.append([])
+      for j in range(4):
+        a_i = i * 2
+        a_j = j * 4
+        # forms a ring of size 8
+        b[i].append(
+            [
+                a[a_i, a_j],
+                a[a_i, a_j + 1],
+                a[a_i, a_j + 2],
+                a[a_i, a_j + 3],
+                a[a_i + 1, a_j + 3],
+                a[a_i + 1, a_j + 2],
+                a[a_i + 1, a_j + 1],
+                a[a_i + 1, a_j],
+            ]
+        )
+    b = np.array(b)
+    b = np.reshape(b, (32, 8))
+  else:
+    raise ValueError(f"The strategy {strategy} to reshape the mesh is not implemented.")
+  return b
+
+
+def create_custom_device_mesh(
+    mesh_shape: Sequence[int],
+    dcn_mesh_shape: Sequence[int],
+    devices: Sequence[Any],
+    custom_strategy: str,
+    process_is_granule: bool = False,
+    should_sort_granules_by_key: bool = True,
+) -> np.ndarray:
+  """Custom device mesh for 64x4 ici parallelism"""
+  assert len(devices) % 256 == 0, f"This custom mesh is not valid for {len(devices)} devices"
+  attr = "process_index" if process_is_granule else "slice_index"
+  if not hasattr(devices[0], attr):
+    raise ValueError(f"Device {devices[0]} does not have attribute {attr}. See" " `process_is_granule` option.")
+  granule_dict = collections.defaultdict(list)
+  for dev in devices:
+    granule_dict[getattr(dev, attr)].append(dev)
+  granules = (
+      [granule_dict[key] for key in sorted(granule_dict.keys())] if should_sort_granules_by_key else granule_dict.values()
+  )
+  if np.prod(dcn_mesh_shape) != len(granules):
+    raise ValueError(f"Number of slices {len(granules)} must equal the product of " f"dcn_mesh_shape {dcn_mesh_shape}")
+  per_granule_meshes = [
+      mesh_utils.create_device_mesh(
+          [16, 16],
+          granule,
+          allow_split_physical_axes=False,
+      )
+      for granule in granules
+  ]
+
+  per_granule_meshes = [np.reshape(reshape_mesh_to_rings(x, custom_strategy), mesh_shape) for x in per_granule_meshes]
+  # TODO(jekbradbury): handle non-uniform DCN topologies
+  granule_mesh = np.arange(len(granules)).reshape(dcn_mesh_shape)
+  blocks = np.vectorize(lambda i: per_granule_meshes[i], otypes=[object])(granule_mesh)
+  device_mesh = np.block(blocks.tolist())
+  return device_mesh
+
+
+def is_valid_custom_mesh(ici_parallelism, strategy):
+  """Checks if the given strategy and ICI parallelism are valid."""
+  if not strategy:
+    return False
+
+  valid_strategies = {
+      HYBRID_RING_64X4: [1, 4, 64],
+      HYBRID_RING_32X8: [1, 8, 32],
+  }
+
+  if strategy in valid_strategies:
+    if sorted(set(ici_parallelism)) == valid_strategies[strategy]:
+      return True
+    else:
+      raise ValueError(f"Invalid custom_mesh:{strategy} chosen for ICI mesh shape {ici_parallelism}")
+  else:
+    raise ValueError(f"The strategy {strategy} to reshape the mesh is invalid.")
+
+
 def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
   if devices is None:
@@ -370,47 +536,40 @@ def create_device_mesh(config, devices=None):
 
   multi_slice_env = num_slices > 1
 
-  dcn_parallelism = [
-      config.dcn_data_parallelism,
-      config.dcn_pipeline_parallelism,
-      config.dcn_fsdp_parallelism,
-      config.dcn_fsdp_transpose_parallelism,
-      config.dcn_sequence_parallelism,
-      config.dcn_tensor_parallelism,
-      config.dcn_expert_parallelism,
-      config.dcn_autoregressive_parallelism,
-  ]
-  ici_parallelism = [
-      config.ici_data_parallelism,
-      config.ici_pipeline_parallelism,
-      config.ici_fsdp_parallelism,
-      config.ici_fsdp_transpose_parallelism,
-      config.ici_sequence_parallelism,
-      config.ici_tensor_parallelism,
-      config.ici_expert_parallelism,
-      config.ici_autoregressive_parallelism,
-  ]
-
   # Find possible unspecified parallelisms
-  ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, "ICI")
+  ici_parallelism = fill_unspecified_mesh_axes(config.ici_parallelism, num_devices_per_slice, "ICI")
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
   if multi_slice_env:
-    dcn_parallelism = fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
-    mesh = mesh_utils.create_hybrid_device_mesh(
-        ici_parallelism,
-        dcn_parallelism,
-        devices,
-    )
-  else:
-    if allow_split_physical_axes:
-      mesh = mesh_utils.create_device_mesh(
+    dcn_parallelism = fill_unspecified_mesh_axes(config.dcn_parallelism, num_slices, "DCN")
+    if is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
+      mesh = create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
+    else:
+      mesh = mesh_utils.create_hybrid_device_mesh(
           ici_parallelism,
+          dcn_parallelism,
           devices,
-          contiguous_submeshes=False,
           allow_split_physical_axes=allow_split_physical_axes,
       )
+  else:
+    if allow_split_physical_axes:
+      if is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
+        mesh = mesh_utils.create_device_mesh(
+            [16, 16],
+            devices,
+            contiguous_submeshes=False,
+            allow_split_physical_axes=False,
+        )
+        mesh = reshape_mesh_to_rings(mesh, config.custom_mesh)
+        mesh = np.reshape(mesh, ici_parallelism)
+      else:
+        mesh = mesh_utils.create_device_mesh(
+            ici_parallelism,
+            devices,
+            contiguous_submeshes=False,
+            allow_split_physical_axes=allow_split_physical_axes,
+        )
     else:
       mesh = mesh_utils.create_device_mesh(
           ici_parallelism,
@@ -485,7 +644,9 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   if not config.load_parameters_path:
     # generate random params
     max_logging.log("No decode checkpoint specified - generating random weights.")
-    state, state_mesh_annotations, _ = setup_initial_state(model, None, None, config, rng, mesh, checkpoint_manager, False)
+    state, state_mesh_annotations, _, _ = setup_initial_state(
+        model, None, None, config, rng, mesh, checkpoint_manager, False
+    )
   else:
     # Load params from checkpoint
     max_logging.log(f"Loading decode params from {config.load_parameters_path}")
@@ -564,6 +725,7 @@ def setup_initial_state(
         state = restored["items"]
     else:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
+      init_state_partial.__name__ = "initialize_state"
       # pylint: disable=not-callable
       state = jax.jit(
           init_state_partial,
@@ -574,7 +736,8 @@ def setup_initial_state(
         state = state.replace(params=raw_params)
 
   state = unbox_logicallypartioned(state)
-  return state, state_mesh_annotations, data_iterator
+
+  return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 
 
 # Learning Rate Schedule
@@ -729,6 +892,10 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   state_logical_annotations = nn.get_partition_spec(abstract_state)
 
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
+  if is_training and config.optimizer_memory_host_offload:
+    opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
+    params = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.params)
+    state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state, params=params)
 
   abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
 
@@ -743,12 +910,12 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   )
 
 
-def get_kv_cache_annotations(model, config, rng, mesh):
+def get_prefill_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
     input_shape = (
-        config.micro_batch_size_to_train_on,
+        config.global_batch_size_to_load,
         config.max_prefill_predict_length,
     )
 
@@ -757,6 +924,32 @@ def get_kv_cache_annotations(model, config, rng, mesh):
         jnp.ones(input_shape),
         jnp.ones(input_shape),
         model_mode=common_types.MODEL_MODE_PREFILL,
+    )
+    return model_vars["cache"]
+
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
+    abstract_state = jax.eval_shape(init_kv_cache_partial)
+  state_logical_annotations = nn.get_partition_spec(abstract_state)
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  return state_mesh_annotations
+
+
+def get_kv_cache_annotations(model, config, rng, mesh):
+  """Get a shaped abstraction of the state (including optimizer)"""
+
+  def init_kv_cache(model, config):
+    input_shape = (
+        config.global_batch_size_to_load,
+        1,
+    )
+
+    model_vars = model.init(
+        {"params": rng, "dropout": rng, "aqt": rng},
+        jnp.ones(input_shape),
+        jnp.ones(input_shape),
+        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
     )
     return model_vars["cache"]
 

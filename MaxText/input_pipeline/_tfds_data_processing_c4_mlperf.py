@@ -200,14 +200,6 @@ def _pad_to_batch_size(
   return ds.concatenate(pad_ds)
 
 
-def get_eval_global_batch_size_to_load(config: ml_collections.ConfigDict, global_mesh) -> int:
-  """Calculate the global batch size for evaluation."""
-  if config.eval_per_device_batch_size > 0:
-    return config.eval_per_device_batch_size * global_mesh.size
-  else:
-    return config.global_batch_size_to_load
-
-
 def get_dataset(
     dataset_name: str,
     split: str,
@@ -303,8 +295,6 @@ def preprocess_eval_dataset(
 def make_c4_mlperf_train_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
-    add_bos,
-    add_eos,
     process_indices,
 ):
   """Make train iterator of customized C4 dataset for mlperf gpt3 training."""
@@ -318,7 +308,7 @@ def make_c4_mlperf_train_iterator(
   )
   train_ds = rekey(train_ds, {"inputs": None, "targets": "text"})
 
-  sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
+  sp_tokenizer = get_tokenizer(config.tokenizer_path, config.add_bos, config.add_eos)
   train_ds = preprocess_train_dataset(
       train_ds,
       sp_tokenizer=sp_tokenizer,
@@ -347,11 +337,10 @@ def make_c4_mlperf_eval_iterator(
   # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and split to target_length
   #   mainly to avoid eval sequences change depending on the number of hosts
   eval_ds = rekey(eval_ds, {"inputs": None, "targets": "ids"})
-  eval_global_batch_size_to_load = get_eval_global_batch_size_to_load(config, global_mesh)
 
   eval_ds = preprocess_eval_dataset(
       eval_ds,
-      eval_global_batch_size_to_load=eval_global_batch_size_to_load,
+      eval_global_batch_size_to_load=config.global_batch_size_to_load_eval,
       max_target_length=config.max_target_length,
   )
 
