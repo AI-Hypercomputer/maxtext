@@ -45,13 +45,15 @@ import max_logging
 import checkpointing
 from generate_param_only_checkpoint import _read_train_checkpoint
 import llama_or_mistral_ckpt
-from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM
+from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM, AutoConfig
 
 
-def unpermute_from_match_maxtext_rope(arr):
+def conditional_unpermute_from_match_maxtext_rope(arr, model_size):
   """
   Function to get the RoPE values in correct ordering
   """
+  if model_size[:8] == "llama3.1": # Llama3.1 uses embeddings.LLaMARotaryEmbedding, so does not need the permutation
+    return arr
   split_size = arr.shape[-1] // 2  # Assuming half for evens, half for odds
   evens = arr[..., :split_size]
   odds = arr[..., split_size:]
@@ -77,6 +79,9 @@ def load_hf_model(model_size):
     model = MistralForCausalLM.from_pretrained("mistralai/Mistral-7B-v0.1")
   elif model_size == "mixtral-8x7b":
     model = AutoModelForCausalLM.from_pretrained("mistralai/Mixtral-8x7B-v0.1", device_map="auto")
+  elif model_size == "llama3.1-8b":
+    config = AutoConfig.from_pretrained("meta-llama/Llama-3.1-8B")
+    model = AutoModelForCausalLM.from_config(config)
   else:
     raise NotImplementedError
   return model
@@ -123,7 +128,7 @@ def convert_state_to_hf(training_state, model_size):
 
   # Port the embedding weights
   hf_model_params["model.embed_tokens.weight"] = torch.tensor(
-      np.asarray(training_state.params["params"]["token_embedder"]["embedding"]), dtype=torch.float16
+      np.asarray(training_state.params["params"]["token_embedder"]["embedding"]), dtype=torch.bfloat16
   )
 
   for layer_int in tqdm(range(base_num_decoder_layers), desc="Porting parameters layerwise"):
@@ -132,29 +137,31 @@ def convert_state_to_hf(training_state, model_size):
     # Attention layers
     hf_model_params[f"model.layers.{layer_int}.self_attn.q_proj.weight"] = torch.tensor(
         np.asarray(
-            unpermute_from_match_maxtext_rope(
+            conditional_unpermute_from_match_maxtext_rope(
                 reverse_scale(
                     training_state.params["params"]["decoder"]["layers"]["self_attention"]["query"]["kernel"][
                         :, layer_int, :, :
                     ],
                     head_dim,
-                )
+                ),
+                model_size
             )
             .reshape(base_num_query_heads * head_dim, base_num_query_heads * head_dim)
             .T
         ),
-        dtype=torch.float16,
+        dtype=torch.bfloat16,
     )
 
     hf_model_params[f"model.layers.{layer_int}.self_attn.k_proj.weight"] = torch.tensor(
         np.asarray(
-            unpermute_from_match_maxtext_rope(
-                training_state.params["params"]["decoder"]["layers"]["self_attention"]["key"]["kernel"][:, layer_int, :, :]
+            conditional_unpermute_from_match_maxtext_rope(
+                training_state.params["params"]["decoder"]["layers"]["self_attention"]["key"]["kernel"][:, layer_int, :, :],
+                model_size
             )
             .reshape(base_num_query_heads * head_dim, base_num_kv_heads * head_dim)
             .T
         ),
-        dtype=torch.float16,
+        dtype=torch.bfloat16,
     )
     hf_model_params[f"model.layers.{layer_int}.self_attn.v_proj.weight"] = torch.tensor(
         np.asarray(
@@ -162,7 +169,7 @@ def convert_state_to_hf(training_state, model_size):
             .reshape(base_num_query_heads * head_dim, base_num_kv_heads * head_dim)
             .T
         ),
-        dtype=torch.float16,
+        dtype=torch.bfloat16,
     )
     hf_model_params[f"model.layers.{layer_int}.self_attn.o_proj.weight"] = torch.tensor(
         np.asarray(
@@ -170,42 +177,42 @@ def convert_state_to_hf(training_state, model_size):
             .reshape(base_num_query_heads * head_dim, base_num_query_heads * head_dim)
             .T
         ),
-        dtype=torch.float16,
+        dtype=torch.bfloat16,
     )
 
     # MLP Layers
     if num_experts is None:
       hf_model_params[f"model.layers.{layer_int}.mlp.gate_proj.weight"] = torch.tensor(
           np.asarray(training_state.params["params"]["decoder"]["layers"]["mlp"]["wi_0"]["kernel"][:, layer_int, :].T),
-          dtype=torch.float16,
+          dtype=torch.bfloat16,
       )
       hf_model_params[f"model.layers.{layer_int}.mlp.up_proj.weight"] = torch.tensor(
           np.asarray(training_state.params["params"]["decoder"]["layers"]["mlp"]["wi_1"]["kernel"][:, layer_int, :].T),
-          dtype=torch.float16,
+          dtype=torch.bfloat16,
       )
       hf_model_params[f"model.layers.{layer_int}.mlp.down_proj.weight"] = torch.tensor(
           np.asarray(training_state.params["params"]["decoder"]["layers"]["mlp"]["wo"]["kernel"][:, layer_int, :].T),
-          dtype=torch.float16,
+          dtype=torch.bfloat16,
       )
     else:
       hf_model_params[f"model.layers.{layer_int}.block_sparse_moe.gate.weight"] = torch.tensor(
           np.asarray(
               training_state.params["params"]["decoder"]["layers"]["MoeBlock_0"]["gate"]["kernel"][:, layer_int, :].T
           ),
-          dtype=torch.float16,
+          dtype=torch.bfloat16,
       )
       for k in range(num_experts):
         hf_model_params[f"model.layers.{layer_int}.block_sparse_moe.experts.{k}.w1.weight"] = torch.tensor(
             np.asarray(training_state.params["params"]["decoder"]["layers"]["MoeBlock_0"]["wi_0"][k, layer_int, :, :].T),
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
         )
         hf_model_params[f"model.layers.{layer_int}.block_sparse_moe.experts.{k}.w2.weight"] = torch.tensor(
             np.asarray(training_state.params["params"]["decoder"]["layers"]["MoeBlock_0"]["wo"][k, layer_int, :, :].T),
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
         )
         hf_model_params[f"model.layers.{layer_int}.block_sparse_moe.experts.{k}.w3.weight"] = torch.tensor(
             np.asarray(training_state.params["params"]["decoder"]["layers"]["MoeBlock_0"]["wi_1"][k, layer_int, :, :].T),
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
         )
 
     # Pre/post attention layer norm
@@ -215,7 +222,7 @@ def convert_state_to_hf(training_state, model_size):
                 :, layer_int
             ].reshape(base_num_query_heads * head_dim)
         ),
-        dtype=torch.float16,
+        dtype=torch.bfloat16,
     )
     hf_model_params[f"model.layers.{layer_int}.post_attention_layernorm.weight"] = torch.tensor(
         np.asarray(
@@ -223,18 +230,18 @@ def convert_state_to_hf(training_state, model_size):
                 :, layer_int
             ].reshape(base_num_query_heads * head_dim)
         ),
-        dtype=torch.float16,
+        dtype=torch.bfloat16,
     )
 
   # LM head and layernorm
   hf_model_params["lm_head.weight"] = torch.tensor(
-      np.asarray(training_state.params["params"]["decoder"]["logits_dense"]["kernel"].T), dtype=torch.float16
+      np.asarray(training_state.params["params"]["decoder"]["logits_dense"]["kernel"].T), dtype=torch.bfloat16
   )
   hf_model_params["model.norm.weight"] = torch.tensor(
       np.asarray(
           training_state.params["params"]["decoder"]["decoder_norm"]["scale"].reshape(base_num_query_heads * head_dim)
       ),
-      dtype=torch.float16,
+      dtype=torch.bfloat16,
   )
 
   return hf_model_params

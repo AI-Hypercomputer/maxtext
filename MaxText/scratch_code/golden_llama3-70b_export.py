@@ -23,11 +23,11 @@ from google.cloud import storage
 
 # Load the tokenizer and model from Hugging Face
 
-model_id = "meta-llama/Meta-Llama-3-70B"
+model_id = "meta-llama/Llama-3.1-8B"
 
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 model = AutoModelForCausalLM.from_pretrained(
-    model_id,
+    "/home/mohitkhatwani/maxtext/hf_llama3.1_new/",
     torch_dtype=torch.float32,
 )
 
@@ -36,7 +36,7 @@ model = AutoModelForCausalLM.from_pretrained(
 prompt_texts = ["I love to"]
 all_data_to_save = []
 
-output_path = "golden_data_llama3-70b.jsonl"
+output_path = "golden_data_new_llama3_1_8b.jsonl"
 
 
 for prompt_text in prompt_texts:
@@ -72,5 +72,5 @@ def upload_blob(bucket_name, source_file_name, destination_blob_name):
   blob.upload_from_filename(source_file_name)
 
 
-upload_blob("maxtext-llama", output_path, "llama3-70b/golden-logits/" + output_path)
-print("File {} uploaded to {}.".format(output_path, "llama3-70b/golden-logits/" + output_path))
+upload_blob("maxtext-llama", output_path, "llama3.1_8b/golden-logits/" + output_path)
+print("File {} uploaded to {}.".format(output_path, "llama3.1_8b/golden-logits/" + output_path))

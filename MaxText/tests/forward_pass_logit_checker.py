@@ -86,7 +86,10 @@ def main(config, test_args):
   model = models.Transformer(config, mesh=mesh, quant=quant)
   state, _ = max_utils.setup_decode_state(model, config, rng1, mesh, None)
 
-  input_golden_data_path = "MaxText/test_assets/golden_data_" + config.model_name + ".jsonl"
+  if test_args.golden_logits_path == '':
+    input_golden_data_path = "MaxText/test_assets/golden_data_" + config.model_name + ".jsonl"
+  else:
+    input_golden_data_path = test_args.golden_logits_path
   with jsonlines.open(input_golden_data_path, "r") as f:
     golden_data = list(f)
 
@@ -102,8 +105,8 @@ def main(config, test_args):
         rngs={"aqt": init_rng},
     )
     full_train_logits = jax.experimental.multihost_utils.process_allgather(full_train_logits)
-    max_logging.log(f"{golden_logits[0]=}")
-    max_logging.log(f"{full_train_logits[0, 0, :]=}")
+    max_logging.log(f"{golden_logits[2]=}")
+    max_logging.log(f"{full_train_logits[0, 2, :]=}")
     token_size = int(test_args.token_size) if test_args.token_size else golden_logits.shape[0]
     max_logging.log(
         f"Max Numerical Difference {np.max(np.subtract(full_train_logits[0, :token_size, :], golden_logits[:token_size, :]))}"
@@ -112,8 +115,8 @@ def main(config, test_args):
     model_probabilities = jax.nn.softmax(full_train_logits[0, :token_size, :], axis=-1)
     golden_probabilities = jax.nn.softmax(golden_logits[:token_size, :], axis=-1)
 
-    max_logging.log(f"{golden_probabilities[0]=}")
-    max_logging.log(f"{model_probabilities[0]=}")
+    max_logging.log(f"{golden_probabilities[1]=}")
+    max_logging.log(f"{model_probabilities[1]=}")
 
     kl_div = jax.numpy.sum(jax.scipy.special.kl_div(golden_probabilities, model_probabilities), axis=-1)
     max_logging.log(f"KL divergence = {kl_div}, max KL divergence = {jax.numpy.max(kl_div)}")
@@ -143,11 +146,12 @@ if __name__ == "__main__":
   parser.add_argument("--rtol", type=float, required=False, default=0.1)
   parser.add_argument("--token_size", type=int, required=False)
   parser.add_argument("--max_kl_div", type=float, required=False, default=None)
+  parser.add_argument("--golden_logits_path", type=str, required=False, default='')
   test_args, _ = parser.parse_known_args()
 
   # Remove args defined in this test file to avoid error from pyconfig
   model_args = sys.argv
-  to_remove_args = ["--atol", "--rtol", "--token_size", "--max_kl_div"]
+  to_remove_args = ["--atol", "--rtol", "--token_size", "--max_kl_div", "--golden_logits_path"]
   for arg in to_remove_args:
     model_args = [s for s in model_args if not s.startswith(arg)]
 
