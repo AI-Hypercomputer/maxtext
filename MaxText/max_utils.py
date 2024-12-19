@@ -1027,15 +1027,15 @@ def save_quantized_checkpoint_if_configured(config, params):
 
 
 def print_mem_stats(label: str):
-  print(f"\nMemstats: {label}:")
+  max_logging.log(f"\nMemstats: {label}:")
   try:
     for d in jax.local_devices():
       stats = d.memory_stats()
       used = round(stats["bytes_in_use"] / 2**30, 2)
       limit = round(stats["bytes_limit"] / 2**30, 2)
-      print(f"\tUsing (GB) {used} / {limit} ({used/limit:%}) on {d}")
+      max_logging.log(f"\tUsing (GB) {used} / {limit} ({used/limit:%}) on {d}")
   except (RuntimeError, KeyError, TypeError) as ex:
-    print(f"\tMemstats unavailable, error: {ex}")
+    max_logging.log(f"\tMemstats unavailable, error: {ex}")
 
 
 def print_system_information():

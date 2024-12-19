@@ -942,6 +942,9 @@ def train_loop(config, state=None):
         jax.block_until_ready(state)  # Block until current state finishes to end profile cleanly
       prof.deactivate()
 
+    if step == start_step:
+      max_utils.print_mem_stats("After params initialized")
+
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()
   write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config)  # final step metrics
