@@ -50,7 +50,7 @@ import jax
 import gc
 import max_logging
 from psutil import Process
-from train import save_checkpoint
+from MaxText.train import save_checkpoint
 import argparse
 
 

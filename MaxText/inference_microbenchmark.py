@@ -25,7 +25,7 @@ from typing import Any, Dict, Optional
 
 from jetstream.engine import token_utils
 
-import max_utils
+from MaxText import max_utils
 import maxengine
 import maxtext_utils
 import profiler

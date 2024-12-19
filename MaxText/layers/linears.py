@@ -23,18 +23,18 @@ import flax.linen as nn
 import jax
 from jax import lax
 import jax.numpy as jnp
-import common_types
-from layers import initializers
-from layers import normalizations
-from layers import quantizations
+from MaxText import common_types
+from MaxText.layers import initializers
+from MaxText.layers import normalizations
+from MaxText.layers import quantizations
 import numpy as np
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
 import math
-import max_logging
-import max_utils
+from MaxText import max_logging
+from MaxText import max_utils
 from aqt.jax.v2 import aqt_tensor
-from kernels import megablox as mblx
+from MaxText.kernels import megablox as mblx
 
 
 Array = common_types.Array

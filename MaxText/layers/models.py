@@ -24,12 +24,12 @@ import functools
 import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-import common_types
-from layers import attentions
-from layers import embeddings
-from layers import linears
-from layers import normalizations, quantizations
-from layers import pipeline
+from MaxText import common_types
+from MaxText.layers import attentions
+from MaxText.layers import embeddings
+from MaxText.layers import linears
+from MaxText.layers import normalizations, quantizations
+from MaxText.layers import pipeline
 
 Array = common_types.Array
 Config = common_types.Config

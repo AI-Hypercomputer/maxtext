@@ -27,7 +27,7 @@ from absl import app
 import numpy as np
 
 import pyconfig
-from train import validate_train_config, get_first_step, load_next_batch, setup_train_loop
+from MaxText.train import validate_train_config, get_first_step, load_next_batch, setup_train_loop
 
 
 def data_load_loop(config, state=None):

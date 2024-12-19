@@ -21,7 +21,7 @@ from jax import numpy as jnp
 import numpy as np
 import unittest
 import pyconfig
-from maxengine import MaxEngine
+from MaxText.maxengine import MaxEngine
 
 
 class MaxEngineTest(unittest.TestCase):
