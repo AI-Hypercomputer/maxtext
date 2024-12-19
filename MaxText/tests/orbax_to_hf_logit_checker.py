@@ -54,7 +54,9 @@ from layers import quantizations
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 
-hf_model_name_map = {"llama2-7b": "meta-llama/Llama-2-7b-hf"}
+hf_model_name_map = {"llama2-7b": "meta-llama/Llama-2-7b-hf",
+                     "llama3.1-8b": "meta-llama/Meta-Llama-3.1-8B"
+                     }
 
 
 def get_data(golden_data, golden_data_index, config):
