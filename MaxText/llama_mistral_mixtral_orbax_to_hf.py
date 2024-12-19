@@ -145,6 +145,8 @@ def convert_state_to_hf(training_state, model_size):
         np.asarray(intermediate_query.reshape(base_num_query_heads * head_dim, base_num_query_heads * head_dim).T),
         dtype=converted_dtype,
     )
+    hf_model_params[f"model.layers.{layer_int}.self_attn.q_proj.weight"] = hf_model_params[f"model.layers.{layer_int}.self_attn.q_proj.weight"].view(base_num_query_heads * head_dim, base_num_query_heads * head_dim).T.view(base_num_query_heads, head_dim // 2, 2, base_num_query_heads * head_dim).transpose(1, 2).reshape(-1, base_num_query_heads * head_dim)
+
 
     intermediate_key = training_state.params["params"]["decoder"][f"layers_{layer_int}"]["self_attention"]["key"]["kernel"][
         :, :, :
@@ -155,6 +157,11 @@ def convert_state_to_hf(training_state, model_size):
         np.asarray(intermediate_key.reshape(base_num_query_heads * head_dim, base_num_kv_heads * head_dim).T),
         dtype=converted_dtype,
     )
+
+    hf_model_params[f"model.layers.{layer_int}.self_attn.k_proj.weight"] = hf_model_params[f"model.layers.{layer_int}.self_attn.k_proj.weight"].view(base_num_query_heads * head_dim, base_num_kv_heads * head_dim).T.reshape(base_num_kv_heads, head_dim // 2, 2, base_num_query_heads * head_dim).transpose(1, 2).reshape(-1 ,base_num_query_heads * head_dim)
+
+
+
     hf_model_params[f"model.layers.{layer_int}.self_attn.v_proj.weight"] = torch.tensor(
         np.asarray(
             training_state.params["params"]["decoder"][f"layers_{layer_int}"]["self_attention"]["value"]["kernel"][:, :, :]
