@@ -94,11 +94,16 @@ fi
 
 BASE_CFG="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
 QUANT_CFG="quantization=${quantization} quantize_kvcache=True kv_quant_dtype=${kv_quant_dtype} checkpoint_is_quantized=True quant_cfg_path=${quant_cfg_path}"
+QUANT_CFG_DESC="quantization=${quantization} quantize_kvcache=True kv_quant_dtype=${kv_quant_dtype} checkpoint_is_quantized=True quant_cfg_path=${quant_cfg_path##*/}"
+QUANT_CFG_DESC="${QUANT_CFG_DESC// /_}"
 LAYOUT_CFG="compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3"
 export MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${LAYOUT_CFG}"
 
-RUN_DESC=int8_kv_${batch_and_prefill_str}_${token_multiplier}_flags_${enable_xla_flags}_${QUANT_CFG}
-
+RUN_DESC=int8_kv_${batch_and_prefill_str}_${token_multiplier}_flags_${enable_xla_flags}_${QUANT_CFG_DESC}
+echo "RUN_DESC: $RUN_DESC"
+echo "QUANT_CFG: $QUANT_CFG"
+echo "QUANT_CFG_DESC: $QUANT_CFG_DESC"
+# exit
 $cmd cd ..
 
 run_benchmark() {
@@ -111,7 +116,7 @@ run_benchmark() {
             $cmd bash llama_offline_run.sh -r benchmarks_audit_${RUN_DESC} -d
             ;;
         "accuracy")
-            $cmd bash llama_offline_run.sh -r benchmarks_accuracy_${RUN_DESC} -a  
+            $cmd bash llama_offline_run.sh -f -r benchmarks_accuracy_${RUN_DESC} -a  
             ;;
     esac
 }

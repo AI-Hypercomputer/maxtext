@@ -201,6 +201,7 @@ record_internal_nn_metrics: 0
 # Output directory
 # Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
 base_output_directory: ""
+tensorboard_dir: ""
 
 # Whether or not to enable emergency checkpoint. If True, `local_checkpoint_directory` and a non-zero `local_checkpoint_period` must also be specified.
 # Emergency checkpoint is an experimental Orbax feature that: periodically saves to persistent storage and, with a larger invertal, saves to a local directory.
@@ -443,7 +444,7 @@ vertex_tensorboard_region: ""
 max_checkify: False
 
 # Inference
-inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
+inference_microbenchmark_prefill_lengths: "1024"
 inference_microbenchmark_stages: "prefill,generate"
 inference_microbenchmark_loop_iters: 10
 inference_microbenchmark_log_file_path: ""

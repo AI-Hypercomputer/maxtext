@@ -299,7 +299,11 @@ class OfflineInference:
     detokenize_thread.start()
 
     try:
-      for row in data:
+      total_rows = len(data)
+      for idx, row in enumerate(data, 1):
+        if idx % 100 == 0:
+          progress_pct = (idx / total_rows) * 100
+          log.warning(f"Processing progress: {idx}/{total_rows} rows ({progress_pct:.1f}%)")
         if time.time() - self._last_activity_time > self.activity_timeout:
           log.error(f"No activity detected for {self.activity_timeout:.1f} seconds")
           raise ProcessingError(f"No activity detected for {self.activity_timeout:.1f} seconds")
