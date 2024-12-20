@@ -150,7 +150,7 @@ class PipelineParallelismTest(unittest.TestCase):
         dummy_targets,
     )
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_circular_minimum_microbatches_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 4 microbatches
     pyconfig.initialize(
@@ -167,7 +167,7 @@ class PipelineParallelismTest(unittest.TestCase):
     config = pyconfig.config
     self.assert_pipeline_same_output_and_grad(config)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_circular_extra_microbatches_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
     pyconfig.initialize(
@@ -184,7 +184,7 @@ class PipelineParallelismTest(unittest.TestCase):
     config = pyconfig.config
     self.assert_pipeline_same_output_and_grad(config)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_non_circular_same_output_and_grad(self):
     # 4 stages, 4 layers (no circular repeats, 1 layer per stage), 4 microbatches
     pyconfig.initialize(
@@ -201,7 +201,7 @@ class PipelineParallelismTest(unittest.TestCase):
     config = pyconfig.config
     self.assert_pipeline_same_output_and_grad(config)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_full_train_circular(self):
     # Run a full train.py call with 4 stages, 32 layers (2 layers per stage, 4 circular repeats), 8 microbatches
     train_main(
@@ -231,7 +231,7 @@ class PipelineParallelismTest(unittest.TestCase):
         ]
     )
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_delay_activation_forwarding_same_output_and_grad(self):
     # 4 stages, delayed activation forwarding, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
     pyconfig.initialize(
@@ -249,7 +249,7 @@ class PipelineParallelismTest(unittest.TestCase):
     config = pyconfig.config
     self.assert_pipeline_same_output_and_grad(config)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_full_train_non_circular(self):
     # Run a full train.py call with 4 stages, 32 layers (8 layers per stage), 8 microbatches
     train_main(

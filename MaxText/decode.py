@@ -21,10 +21,20 @@ import maxengine
 
 import os
 import pyconfig
-import sys
+
+from typing import Sequence
+from absl import app
 
 
-def main(config):
+def main(argv: Sequence[str]) -> None:
+  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+
+  pyconfig.initialize(argv)
+  config = pyconfig.config
+  validate_config(config)
+  max_utils.print_system_information()
+
   engine = maxengine.MaxEngine(config)
   rng = jax.random.PRNGKey(1234)
   rng, rng_load_params = jax.random.split(rng)
@@ -71,10 +81,4 @@ def validate_config(config):
 
 
 if __name__ == "__main__":
-  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-  pyconfig.initialize(sys.argv)
-  cfg = pyconfig.config
-  validate_config(cfg)
-  max_utils.print_system_information()
-  main(cfg)
+  app.run(main)
