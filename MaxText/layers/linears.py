@@ -583,7 +583,11 @@ class MoeBlock(nn.Module):
         # simply skip kwargs, since aqt einsum doesn't support any kwargs like precision
         return self.quant.einsum(rhs_mesh_axes)(*args)
 
-      einsum_op = aqt_einsum
+      # We need a separate way to retrieve the quantized einsum for fp8 config.
+      if isinstance(self.quant, quantizations.Fp8Quantization):
+        einsum_op = quantizations.Fp8Einsum(dtype=self.dtype)
+      else:
+        einsum_op = aqt_einsum
     else:
       einsum_op = jnp.einsum
     return einsum_op
