@@ -55,8 +55,6 @@ def init_random_model_vars(model, rng, example_batch):
   return model_vars
 
 
-# TODO(b/386317358)
-@pytest.mark.skip(reason="Test started failing with pull/1113, skipping for now.")
 class GPT3(unittest.TestCase):
   """numerical tests for GPT3."""
 
