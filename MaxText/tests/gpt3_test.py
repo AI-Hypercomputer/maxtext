@@ -85,7 +85,7 @@ class GPT3(unittest.TestCase):
     }
     self.model_vars = init_random_model_vars(self.model, self.rng, self.example_batch)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_logits_numerically(self):
     # ground truth values are calculated from paxml after loading above model_vars
     # note we expect all xents are the same except the padding one since:
@@ -108,4 +108,7 @@ class GPT3(unittest.TestCase):
     # Mask out paddings at the end of each example.
     per_example_xent = per_example_xent * (self.example_batch["targets_segmentation"] != 0)
 
-    self.assertTrue(jax.numpy.allclose(per_example_xent, per_example_xent_truth, rtol=1e-03, atol=1e-03))
+    self.assertTrue(
+        jax.numpy.allclose(per_example_xent, per_example_xent_truth, rtol=1e-03, atol=1e-03),
+        msg=f"per_example_xent:\n{per_example_xent}\n\nper_example_xent_truth:\n{per_example_xent_truth}",
+    )

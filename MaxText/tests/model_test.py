@@ -105,7 +105,7 @@ class TestModel(unittest.TestCase):
   def test_logits_dtype_without_cast(self):
     self._test_logits_cast_driver(cast_logits_to_fp32=False, expected_dtype=jnp.bfloat16)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_train_vs_prefill_and_autoregress(self):
     PREFILL_RANGE = MAX_PREFILL_PREDICT_LENGTH
 

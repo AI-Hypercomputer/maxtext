@@ -23,7 +23,7 @@ from inference_microbenchmark import main as inference_microbenchmark_main
 
 class Inference_Microbenchmark(unittest.TestCase):
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test(self):
     pyconfig.initialize(
         [
