@@ -57,6 +57,7 @@ jobs:
               khatwanimohit: "",
               bvandermoon: "",
               vipannalla: "",
+              RissyRan: "",
             }
             const reviews = await github.rest.pulls.listReviews({
               owner,
