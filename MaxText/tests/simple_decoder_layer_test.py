@@ -18,7 +18,7 @@ from train import main as train_main
 
 class SimpleDecoderLayerTest(unittest.TestCase):
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_simple_decoder_layer(self):
     train_main(
         [
@@ -34,7 +34,7 @@ class SimpleDecoderLayerTest(unittest.TestCase):
         ]
     )
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_mlp_decoder_layer(self):
     train_main(
         [
