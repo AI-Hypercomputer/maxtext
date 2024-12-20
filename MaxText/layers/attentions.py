@@ -394,7 +394,7 @@ class AttentionOp(nn.Module):
   ) -> Array:
     """CUDNN Flash Attention with Transformer Engine.
     1. Stable API, supports GQA, SWA (only with causal masking)
-    2. Head_dim = 256 is also supported from TE-1.12 stable release
+    2. Head_dim = 256 is also supported from TE-1.12 stable release with CUDNN 12.6
     """
     # These imports are only meant to work in a GPU build.
     from transformer_engine.jax.flax.transformer import DotProductAttention  # pytype: disable=import-error
@@ -404,11 +404,12 @@ class AttentionOp(nn.Module):
     sliding_window_size = self.sliding_window_size
     if self.attention_type == AttentionType.LOCAL_SLIDING:
       sliding_window_size = [self.sliding_window_size, 0]
-      mask_type="causal" # SWA only works with causal masking
+      mask_type = "causal" # SWA only works with causal masking
+      attn_mask = None
     else:
       # generate attn_mask
-      attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
       mask_type = "padding_causal" # only padding_causal mask type can take a created mask
+      attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
 
     dpa_layer = DotProductAttention(
         head_dim=head_dim,
@@ -425,10 +426,7 @@ class AttentionOp(nn.Module):
         transpose_batch_sequence=False,
         window_size=sliding_window_size,
     )
-    if self.attention_type == AttentionType.LOCAL_SLIDING:
-      return dpa_layer(query, key, value)
-    else:
-      return dpa_layer(query, key, value, mask=attn_mask)
+    return dpa_layer(query, key, value, mask=attn_mask)
 
   def compute_local_attention(
       self, attn_weights: Array, value: Array | KVTensor, q_seq_len: int, model_mode: str
