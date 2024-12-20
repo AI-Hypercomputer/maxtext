@@ -85,7 +85,7 @@ class GPT3(unittest.TestCase):
     }
     self.model_vars = init_random_model_vars(self.model, self.rng, self.example_batch)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_logits_numerically(self):
     # ground truth values are calculated from paxml after loading above model_vars
     # note we expect all xents are the same except the padding one since:
