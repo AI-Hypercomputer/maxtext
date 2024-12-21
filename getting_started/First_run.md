@@ -13,7 +13,7 @@ We recommend starting with a single host first and then moving to multihost.
 Local development is a convenient way to run MaxText on a single host. It doesn't scale to
 multiple hosts.
 
-1. [Create and SSH to the single-host VM of your choice.](https://cloud.google.com/tpu/docs/users-guide-tpu-vm#creating_a_cloud_tpu_vm_with_gcloud) We recommend a `v4-8`.
+1. [Create and SSH to the single-host VM of your choice.](https://cloud.google.com/tpu/docs/users-guide-tpu-vm#creating_a_cloud_tpu_vm_with_gcloud) We recommend a `v5litepod-8`.
 2. Clone MaxText onto that TPUVM.
 3. Within the root directory of that `git` repo, install dependencies and pre-commit hook by running:
 ```
