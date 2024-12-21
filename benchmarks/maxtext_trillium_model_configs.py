@@ -27,6 +27,26 @@ class MaxTextModel:
   tuning_params: dict[str, typing.Any]
   xla_flags: str
 
+@dataclasses.dataclass
+class DatasetHParams:
+    dataset_path: str
+    dataset_name: str
+    dataset_type: str
+    train_split: str
+    eval_split: str
+    eval_steps: int
+    add_bos: bool
+    add_eos: bool
+    tokenizer_path: str
+
+@dataclasses.dataclass
+class ConvHParams:
+    global_batch_size: int
+    warmup_samples: int
+    decay_end_samples: int
+    total_tokens_to_train: int
+    learning_rate: float
+    eval_interval:int
 
 default_basic = MaxTextModel(
     model_name="default-basic",
@@ -313,10 +333,11 @@ llama2_70b_4096 = MaxTextModel(
         "sa_block_q": 1024,
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
+        "steps": 100,
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.CF_FOR_ALL_GATHER 
     ),
 )
 
@@ -350,7 +371,7 @@ llama3_70b_8192 = MaxTextModel(
     model_name="llama3-70b-8192",
     model_type="llama3-70b",
     tuning_params={
-        "per_device_batch_size": 2,
+        "per_device_batch_size": 3,
         "ici_fsdp_parallelism": -1,
         "remat_policy": "full",
         "optimizer_memory_host_offload": True,
@@ -367,6 +388,7 @@ llama3_70b_8192 = MaxTextModel(
         "sa_block_q": 1024,
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
+        "steps": 100,
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -504,7 +526,6 @@ mixtral_8x7b_dropped = MaxTextModel(
         "sa_block_q_dq": 2048,
         "megablox": False,
         "capacity_factor": 1.25,
-        "tokenizer_path": "assets/tokenizer.mistral-v1",
     },
     xla_flags=(
         xla_flags_library.MOE_VMEM_LIMIT_FLAG
