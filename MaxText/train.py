@@ -700,6 +700,16 @@ def train_loop(config, state=None):
 
     write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
 
+    if config.dump_hlo and step == start_step:
+      jax.block_until_ready(state)  # Ensure compilation has finished.
+      max_utils.upload_dump(
+          config.dump_hlo_local_dir,
+          config.dump_hlo_gcs_dir,
+          module_name=config.dump_hlo_module_name,
+          delete_local_after=config.dump_hlo_delete_local_after,
+          all_host_upload=config.dump_hlo_upload_all,
+      )
+
     if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
       assert eval_data_iterator
       cumulative_eval_metrics = {
@@ -759,8 +769,8 @@ def main(argv: Sequence[str]) -> None:
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   pyconfig.initialize(argv)
-  max_utils.print_system_information()
   config = pyconfig.config
+  max_utils.print_system_information()
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   vertex_tensorboard_manager = VertexTensorboardManager()
