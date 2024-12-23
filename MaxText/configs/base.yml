@@ -160,10 +160,10 @@ set_remat_policy_on_layers_per_stage: False
 
 
 # Choose 'remat_policy' between 'minimal', 'save_dot_with_context_except_mlp', 'save_dot_except_mlpwi', 'save_dot_except_mlp',
-# 'save_qkv_proj', 'qkv_proj_offloaded', 'custom' 'minimal_offloaded', 'save_out_proj' and 'full'.
+# 'save_qkv_proj', 'qkv_proj_offloaded', 'custom', 'minimal_offloaded', 'save_out_proj' and 'full'.
 # These options offer a trade-off between speed (fastest to slowest) and HBM usage (highest to lowest)
 remat_policy: 'full'
-# If custom_save_offload remat_policy is chosen, you can select tensors from the following list to offload on host memory, rematerialize or save on device memory.
+# If "custom" remat_policy is chosen, you can select tensors from the following list to offload on host memory, rematerialize or save on device memory.
 # Pick one of these options for following tensors: ['remat','device','offload']
 decoder_layer_input: 'device' # this tensor cannot be rematerialized - it serves as periodic checkpoints that act as the remat start points
 context: 'remat' # From https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/jax/attention.py#L581-L583
