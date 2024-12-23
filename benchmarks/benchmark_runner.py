@@ -94,6 +94,8 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
           'gemma2_9b_8192',
           'gemma2_27b_8192',
           'llama3_1_70b_129024',
+          'llama3_1_8b_8192',
+          'llama3_1_70b_8192',
       ],
       default='llama2_70b_4096',
       help=(
