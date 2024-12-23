@@ -1,5 +1,5 @@
 
-export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/jonbolin-maxtext-gpu:20241008-1
+# export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/jonbolin-maxtext-gpu:20241008-1
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1113-nv
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1203-main
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1119-dev-rebased
@@ -18,7 +18,7 @@ export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/jonbolin-maxtext-gpu:202410
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/yujunzou/llama2-7b
 # export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/maxtext_gpu_jax_pinned
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1216-sts
-# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1223-bumpup
+export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1223-bumpup-testing
 
 export MODEL_NAME=llama2-7b
 # export MODEL_NAME=llama3.1-405b
@@ -29,8 +29,8 @@ export MODEL_SIZE=$(echo $MODEL_NAME | grep -o '[0-9]\+b')
 export NUM_NODES=2
 
 export WORKLOAD_NAME=$USER-${MODEL_SIZE}-${NUM_NODES}n-stable-stack-${RANDOM:0:3}
-# export ATTENTION=dot_product
-export ATTENTION=cudnn_flash_te
+export ATTENTION=dot_product
+# export ATTENTION=cudnn_flash_te
 export PGLE=false
 
 python ../xpk/xpk.py  workload delete --cluster a3plus-benchmark --workload $WORKLOAD_NAME;
