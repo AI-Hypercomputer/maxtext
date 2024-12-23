@@ -297,8 +297,8 @@ class MoeBlock(nn.Module):
     num_experts: Number of experts.
     num_experts_per_tok: Number of experts for each token.
     mesh: Mesh, device mesh.
-    kernel_init: Kernel function, passed to the dense layers.
-    kernel_axes: Tuple with axes to apply kernel function.
+    kernel_init: Kernel function, passed to the router.
+    kernel_axes: Tuple with axes to apply kernel function to the router.
     weight_dtype: Type for the weights.
     dtype: Type for the dense layer.
     quant: Optional quantization config, no quantization if None.
@@ -602,7 +602,6 @@ class MoeBlock(nn.Module):
     # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
     top_k_weights, top_k_indices = jax.lax.top_k(softmax_probs, self.num_experts_per_tok)
     matmul_precision = lax.Precision(self.config.matmul_precision)
-
     if self.config.capacity_factor > 0:
       # token dropping if needed
       dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
@@ -669,6 +668,28 @@ class MoeBlock(nn.Module):
             precision=matmul_precision,
         ).astype(self.dtype)
       return output, loss
+    elif self.config.ragged_dot:
+      batch_size, sequence_length, _ = inputs.shape
+      inputs = nn.with_logical_constraint(inputs, ("activation_batch", None, None))
+      gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", None, None))
+      x, sorted_selected_experts, weights, group_sizes = self.permute(inputs, gate_logits)
+      x = nn.with_logical_constraint(x, ("activation_batch", None, None))
+      w0_kernel = nn.with_logical_constraint(w0_kernel, (None, None, "mlp"))
+      w1_kernel = nn.with_logical_constraint(w1_kernel, (None, None, "mlp"))
+      wo_kernel = nn.with_logical_constraint(wo_kernel, (None, "mlp", None))
+      
+      with jax.named_scope("wi_0"):
+        layer_w0 = jax.lax.ragged_dot(x, w0_kernel, group_sizes)
+      with jax.named_scope("wi_1"):
+        layer_w1 = jax.lax.ragged_dot(x, w1_kernel, group_sizes)
+      layer_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
+      intermediate_layer = jnp.multiply(layer_act, layer_w1)
+      with jax.named_scope("wo"):
+        intermediate_output = jax.lax.ragged_dot(intermediate_layer, wo_kernel, group_sizes)
+      output = self.unpermute(
+          intermediate_output, sorted_selected_experts, weights, batch_size, sequence_length
+      )
+      return output, None
     else:
       top_k_weights /= top_k_weights.sum(-1, keepdims=True)
       weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
@@ -702,7 +723,7 @@ class MoeBlock(nn.Module):
             intermediate_layer,
             weights,
         ).astype(self.dtype)
-      return output, None
+      return output, None      
 
   def retrieve_quantized_weight(
       self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel
@@ -724,6 +745,8 @@ class MoeBlock(nn.Module):
   def __call__(self, inputs):
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
+    # router: intputs [batch, sequence, emb] @ kernel [emb, num_experts]
+    # shape of gate_logits: (batch, sequence, num_experts)
     gate_logits = DenseGeneral(
         self.num_experts,
         dtype=self.dtype,
