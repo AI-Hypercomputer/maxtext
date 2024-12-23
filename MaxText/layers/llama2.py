@@ -33,6 +33,8 @@ from layers import quantizations
 import common_types
 from typing import Optional
 
+from lora_config import LoRAConfig
+
 Array = common_types.Array
 Config = common_types.Config
 DType = common_types.DType
@@ -91,6 +93,9 @@ class LlamaDecoderLayer(nn.Module):
 
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
 
+    # Create LoRA config
+    lora_config = LoRAConfig(r=8, alpha=32) 
+
     # Self-attention block
     attention_layer = Attention(
         config=cfg,
@@ -113,6 +118,8 @@ class LlamaDecoderLayer(nn.Module):
         reshape_q=cfg.reshape_q,
         use_ragged_attention=cfg.use_ragged_attention,
         ragged_block_size=cfg.ragged_block_size,
+        #lora_config=lora_config,
+        lora_config=None,
     )
 
     attention_lnx = attention_layer(
@@ -167,6 +174,7 @@ class LlamaDecoderLayer(nn.Module):
           "activation_fraction_zero",
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
+      logging.info("AMANGU: In LlamaDecoderLayer::__call__")
 
     if cfg.scan_layers:
       return layer_output, None

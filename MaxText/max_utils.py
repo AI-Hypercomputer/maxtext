@@ -668,6 +668,7 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(model, None, config, rng, mesh, False)
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       params = checkpointing.load_params_from_path(config.load_parameters_path, unboxed_abstract_state.params)
+    max_logging.log(f"AMANGU: Params: {params}")
     state = init_decode_state(None, params)
 
   state = unbox_logicallypartioned(state)
@@ -718,6 +719,8 @@ def setup_initial_state(
   unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
       model, tx, config, rng, mesh, is_training
   )
+
+  max_logging.log(f"AMANGU: unboxed_abstract_state: {unboxed_abstract_state}")
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):

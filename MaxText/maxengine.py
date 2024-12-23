@@ -39,6 +39,7 @@ import max_utils
 import inference_utils
 import pyconfig
 import jaxlib
+import logging
 
 import warnings
 
@@ -111,6 +112,7 @@ class MaxEngine(engine_api.Engine):
   def load_params(self, *args, rng: Optional[jax.random.PRNGKey] = None, **kwargs) -> Params:
     """Load Parameters, typically from GCS"""
     # pylint: disable=unused-argument
+    logging.info("AMANGU: In MaxEngine::load_params()")
 
     if rng is None:
       rng = jax.random.PRNGKey(0)
@@ -158,6 +160,7 @@ class MaxEngine(engine_api.Engine):
 
   def quantize_params(self, state, rng: Optional[jax.random.PRNGKey] = None):
     """Forward pass to quantize decode params."""
+    logging.info("AMANGU: In MaxEngine::quantize_params()")
     if rng is None:
       rng = jax.random.PRNGKey(0)
 
@@ -239,6 +242,7 @@ class MaxEngine(engine_api.Engine):
     Returns:
       kv_cache: For the resulting text.
     """
+    logging.info("AMANGU: In MaxEngine::prefill()")
     if existing_prefix:
       raise ValueError("We don't know what to do with existing_prefix")
 
@@ -319,6 +323,7 @@ class MaxEngine(engine_api.Engine):
       rng: Optional[jax.random.PRNGKey] = None,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
     """Run one generate step"""
+    logging.info("AMANGU: In MaxEngine::generate()")
     if rng is None:
       rng = jax.random.PRNGKey(0)
 
@@ -387,6 +392,7 @@ class MaxEngine(engine_api.Engine):
       slot: int,
   ) -> DecodeState:
     """Insert into KV cache"""
+    logging.info("AMANGU: In MaxEngine::insert()")
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
 
     unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])

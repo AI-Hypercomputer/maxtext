@@ -35,6 +35,8 @@ from layers import initializers
 from layers import linears
 from layers import quantizations
 
+import logging
+from lora_config import LoRAConfig
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -753,7 +755,7 @@ class AttentionOp(nn.Module):
 
     """
     batch, _, heads, kv_head_size = key.shape
-    assert key.dtype == value.dtype, "Key and Value Dtypes should match."
+    assert key.dtype == value.dtype, f"Key-dtype={key.dtype} and Value-dtype={value.dtype} should match."
 
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
         batch, heads, kv_head_size, common_types.MODEL_MODE_PREFILL
@@ -1114,6 +1116,17 @@ class Attention(nn.Module):
   compute_axis_order: AxisIdxes = (0, 1, 2, 3)
   reshape_q: bool = False
 
+  lora_config: Optional[LoRAConfig] = None
+
+  def setup(self):
+      if self.lora_config is not None:
+          self.lora_A_q = self.param("lora_A_q", nn.initializers.normal(stddev=0.01), (self.lora_config.r, self.num_query_heads * self.head_dim), jnp.bfloat16)
+          self.lora_B_q = self.param("lora_B_q", nn.initializers.normal(stddev=0.01), (self.num_query_heads * self.head_dim, self.lora_config.r), jnp.bfloat16)
+
+          self.lora_A_v = self.param("lora_A_v", nn.initializers.normal(stddev=0.01), (self.lora_config.r, self.num_kv_heads * self.head_dim), jnp.bfloat16)
+          self.lora_B_v = self.param("lora_B_v", nn.initializers.normal(stddev=0.01), (self.num_kv_heads * self.head_dim, self.lora_config.r), jnp.bfloat16)
+
+
   def query_projection(self, inputs_q: Array) -> Array:
     """Query projection."""
 
@@ -1279,6 +1292,84 @@ class Attention(nn.Module):
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
+
+    logging.info(f"AMANGU: ATTENTION __CALL__:\nQuery_shape: {query.shape},\nKey_shape: {key.shape},\nValue_shape: {value.shape}")
+
+    logging.info(f"AMANGU: ATTENTION __call__: \nQuery: {query},\nKey: {key},\nValue: {value}")
+
+    if self.lora_config is not None:
+        # lora_A_q_reshaped = self.lora_A_q.reshape(self.lora_A_q.shape[0], 1, self.num_query_heads, self.head_dim)
+        # lora_B_q_reshaped = self.lora_B_q.reshape(self.num_query_heads, self.head_dim, 1, self.lora_B_q.shape[1])
+
+        # lora_A_v_reshaped = self.lora_A_v.reshape(self.lora_A_v.shape[0], 1, self.num_query_heads, self.head_dim)
+        # lora_B_v_reshaped = self.lora_B_v.reshape(self.num_query_heads, self.head_dim, 1, self.lora_B_v.shape[1])
+
+        # lora_query_output = (lora_B_q_reshaped @ (lora_A_q_reshaped @ query)) * self.lora_config.alpha
+        # lora_value_output = (lora_B_v_reshaped @ (lora_A_v_reshaped @ value)) * self.lora_config.alpha
+
+        # query = query + lora_query_output
+        # value = value + lora_value_output
+
+        # rank = self.lora_A_q.shape[0]
+        # nq = self.num_query_heads
+        # d = self.head_dim
+        # nv = self.num_kv_heads
+
+        # Reshape LoRA weights
+        # lora_A_q = jnp.transpose(self.lora_A_q.reshape(rank, nq, d), (1, 2, 0)) # from [r, n * d] to [n, d, r]
+        # lora_B_q = jnp.transpose(self.lora_B_q.reshape(nq, d, rank), (0, 2, 1)) # from [n * d, r] to [n, r, d]
+        # lora_A_v = jnp.transpose(self.lora_A_v.reshape(rank, nv, d), (1, 2, 0)) # from [r, n * d] to [n, d, r]
+        # lora_B_v = jnp.transpose(self.lora_B_v.reshape(nv, d, rank), (0, 2, 1)) # from [n * d, r] to [n, r, d]
+
+        # logging.info(f"AMANGU: ATTENTION __CALL__:\nlora_A_q.shape: {lora_A_q.shape}\nlora_B_q.shape: {lora_B_q.shape}\nlora_A_v.shape: {lora_A_v.shape}\nlora_B_v.shape: {lora_B_v.shape}\n")
+
+        # scale_factor = self.lora_config.alpha / rank
+
+    # 'btnd,nrh->btrh'
+    # query shape: [b, t, n, d]
+    # lora_A_q shape: [n, d, r]
+    # result shape: [b, t, n, r]
+    # 'btrn,nrd->btnd'
+    # query_lora shape: [b, t, n, r]
+    # lora_B_q shape: [n, r, d]
+    # result shape: [b, t, n, d]
+
+        # query_lora = scale_factor * jax.vmap(lambda qi, lorai: jax.vmap(lambda q, lora: jnp.dot(q, lora), in_axes=(0, None))(qi, lorai), in_axes=(0, None))(query, lora_A_q)
+        # logging.info(f"AMANGU: query_lora_1_shape: {query_lora.shape}")
+        # query_lora = jax.vmap(lambda qi, lorbi: jax.vmap(lambda q, lora: jnp.dot(q, lora), in_axes=(0, None))(qi, lorbi), in_axes=(0, None))(query_lora, lora_B_q)
+        # logging.info(f"AMANGU: query_lora_2_shape: {query_lora.shape}")
+        # value_lora = scale_factor * jax.vmap(lambda qi, lorai: jax.vmap(lambda q, lora: jnp.dot(q, lora), in_axes=(0, None))(qi, lorai), in_axes=(0, None))(value, lora_A_v)
+        # logging.info(f"AMANGU: value_lora_1_shape: {value_lora.shape}")
+        # value_lora = jax.vmap(lambda qi, lorbi: jax.vmap(lambda q, lora: jnp.dot(q, lora), in_axes=(0, None))(qi, lorbi), in_axes=(0, None))(value_lora, lora_B_v)
+        # logging.info(f"AMANGU: value_lora_2_shape: {value_lora.shape}")
+        
+        # query = query + query_lora.astype(query.dtype)
+        # value = value + value_lora.astype(value.dtype)
+
+
+
+        query_reshaped_transformed = jnp.transpose(query.reshape(query.shape[0], query.shape[1], query.shape[2] * query.shape[3]), (0, 1, 2))
+        value_reshaped_transformed = jnp.transpose(value.reshape(value.shape[0], value.shape[1], value.shape[2] * value.shape[3]), (0, 1, 2))
+        logging.info(f"AMANGU: query_reshaped_shape: {query_reshaped_transformed.shape}")
+        logging.info(f"AMANGU: self.lora_A_q.shape: {self.lora_A_q.shape}")
+        logging.info(f"AMANGU: self.lora_B_q.shape: {self.lora_B_q.shape}")
+
+        # lora_query_output = (self.lora_B_q @ (self.lora_A_q @ query_reshaped_transformed)) * self.lora_config.alpha
+        # lora_value_output = (self.lora_B_v @ (self.lora_A_v @ value_reshaped_transformed)) * self.lora_config.alpha
+        # logging.info(f"AMANGU: lora_query_output_shape: {lora_query_output.shape}")
+
+        lora_query_output = ((query_reshaped_transformed @ jnp.transpose(self.lora_A_q, (1, 0))) @ jnp.transpose(self.lora_B_q, (1, 0))) * self.lora_config.alpha
+        lora_value_output = ((value_reshaped_transformed @ jnp.transpose(self.lora_A_v, (1, 0))) @ jnp.transpose(self.lora_B_v, (1, 0))) * self.lora_config.alpha
+        logging.info(f"AMANGU: lora_query_output_shape: {lora_query_output.shape}")
+
+        query = query + jnp.transpose(lora_query_output, (0, 1, 2)).reshape(query.shape[0], query.shape[1], query.shape[2], query.shape[3])
+        value = value + jnp.transpose(lora_value_output, (0, 1, 2)).reshape(value.shape[0], value.shape[1], value.shape[2], value.shape[3])
+
+
+
+
+
+
 
     assert not self.config.quantize_kvcache or self.kv_quant
     attention_op = AttentionOp(

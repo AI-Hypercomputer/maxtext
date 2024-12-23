@@ -75,6 +75,13 @@ MODEL_PARAMS_DICT = {
         "dims_per_head": 128,
         "vocab": 32000,
     },
+    "llama2-7b-chat": {
+        "num_layers": 32,
+        "num_heads": 32,
+        "num_kv_heads": 32,
+        "dims_per_head": 128,
+        "vocab": 32000,
+    },
     "llama3-8b": {
         "num_layers": 32,
         "num_heads": 32,
@@ -197,7 +204,7 @@ def permute_to_match_maxtext_rope(arr):
   return np.concatenate((evens, odds), axis=arr.ndim - 1)
 
 
-def convert_to_jax_weights(base_model_path, model_size):
+def convert_to_jax_weights(base_model_path, model_size, lora_path=None):
   """
   Function to convert the checkpoint at base_model_path into Orbax checkpoint
   for MaxText and output jax_weights ready for MaxText
@@ -205,6 +212,7 @@ def convert_to_jax_weights(base_model_path, model_size):
   Attributes:
   base_model_path: checkpoint path
   model_size: llama2-7b to 70b, mistral-7b, or mixtral-8x7b, mixtral-8x22b
+  lora_path: path of lora-adapter weights
   """
   """Convert model to maxtext."""
   model_params = MODEL_PARAMS_DICT[model_size]
@@ -219,15 +227,34 @@ def convert_to_jax_weights(base_model_path, model_size):
 
   max_logging.log(f"Loading the base model from {base_model_path}")
   # Skip any hidden files for checkpoints
+  # ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.bin"))
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.pth"))
   chkpt_vars = {}
   for i, ckpt_path in enumerate(ckpt_paths):
     max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
+    max_logging.log(f"Loading checkpoint from {ckpt_path} ...")
     checkpoint = torch.load(ckpt_path, map_location="cpu")
     chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = checkpoint
+    #chkpt_vars[int(ckpt_path.name.split("-", maxsplit=2)[1])] = checkpoint
   chkpt_vars = [chkpt_vars[i] for i in sorted(list(chkpt_vars.keys()))]
+
+  chkpt_vars_combined_dict = {}
+  for var in chkpt_vars:
+    chkpt_vars_combined_dict |= var
   # map weight names if they use HuggingFace instead of PyTorch convention
-  chkpt_vars = [_HFNamespaceMapper(var) for var in chkpt_vars]
+  chkpt_vars = [_HFNamespaceMapper(var) for var in [chkpt_vars_combined_dict]]
+  max_logging.log(f"Chkpt_var: {chkpt_vars}")
+  max_logging.log(f"Size of list of the chkpt_var: {len(chkpt_vars)}")
+  #print(chkpt_vars.keys())
+
+
+  # NEW ADDED CODE #######
+  lora_vars = {}
+  if lora_path:
+    lora_vars = torch.load(lora_path, map_location="cpu")
+
+  max_logging.log(f"LoRA Vars: {lora_vars}")
+  ########################
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
@@ -281,6 +308,10 @@ def convert_to_jax_weights(base_model_path, model_size):
       "key": {"kernel": None},
       "value": {"kernel": None},
       "out": {"kernel": None},
+      "lora_A_q": None,
+      "lora_B_q": None,
+      "lora_A_v": None,
+      "lora_B_v": None,
   }
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
     wq = np.concatenate(
@@ -307,21 +338,42 @@ def convert_to_jax_weights(base_model_path, model_size):
 
     w_post = np.reshape(w_post, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
 
+    lora_A_q = lora_vars[f"base_model.model.model.layers.{layer_idx}.self_attn.q_proj.lora_A.weight"].type(torch.float16).numpy()
+    lora_B_q = lora_vars[f"base_model.model.model.layers.{layer_idx}.self_attn.q_proj.lora_B.weight"].type(torch.float16).numpy()
+    lora_A_v = lora_vars[f"base_model.model.model.layers.{layer_idx}.self_attn.v_proj.lora_A.weight"].type(torch.float16).numpy()
+    lora_B_v = lora_vars[f"base_model.model.model.layers.{layer_idx}.self_attn.v_proj.lora_B.weight"].type(torch.float16).numpy()
+
     if self_attention["query"]["kernel"] is None:
       stack_shape = (base_num_decoder_layers,)
       self_attention["query"]["kernel"] = np.zeros(stack_shape + wq.shape, dtype=np.float16)
       self_attention["key"]["kernel"] = np.zeros(stack_shape + wk.shape, dtype=np.float16)
       self_attention["value"]["kernel"] = np.zeros(stack_shape + wv.shape, dtype=np.float16)
       self_attention["out"]["kernel"] = np.zeros(stack_shape + w_post.shape, dtype=np.float16)
+      
+      self_attention["lora_A_q"] = np.zeros(stack_shape + lora_A_q.shape, dtype=np.float16)
+      self_attention["lora_B_q"] = np.zeros(stack_shape + lora_B_q.shape, dtype=np.float16)
+      self_attention["lora_A_v"] = np.zeros(stack_shape + lora_A_v.shape, dtype=np.float16)
+      self_attention["lora_B_v"] = np.zeros(stack_shape + lora_B_v.shape, dtype=np.float16)
 
     self_attention["query"]["kernel"][layer_idx, ...] = wq  # pylint: disable=E1137
     self_attention["key"]["kernel"][layer_idx, ...] = wk  # pylint: disable=E1137
     self_attention["value"]["kernel"][layer_idx, ...] = wv  # pylint: disable=E1137
     self_attention["out"]["kernel"][layer_idx, ...] = w_post  # pylint: disable=E1137
 
+    self_attention["lora_A_q"][layer_idx, ...] = lora_A_q  # pylint: disable=E1137
+    self_attention["lora_B_q"][layer_idx, ...] = lora_B_q  # pylint: disable=E1137
+    self_attention["lora_A_v"][layer_idx, ...] = lora_A_v  # pylint: disable=E1137
+    self_attention["lora_B_v"][layer_idx, ...] = lora_B_v  # pylint: disable=E1137
+
   self_attention["query"]["kernel"] = np.transpose(self_attention["query"]["kernel"], axes=(1, 0, 2, 3))
   self_attention["key"]["kernel"] = np.transpose(self_attention["key"]["kernel"], axes=(1, 0, 2, 3))
   self_attention["value"]["kernel"] = np.transpose(self_attention["value"]["kernel"], axes=(1, 0, 2, 3))
+
+  self_attention["lora_A_q"] = np.transpose(self_attention["lora_A_q"], axes=(1, 0, 2))
+  self_attention["lora_B_q"] = np.transpose(self_attention["lora_B_q"], axes=(1, 0, 2))
+  self_attention["lora_A_v"] = np.transpose(self_attention["lora_A_v"], axes=(1, 0, 2))
+  self_attention["lora_B_v"] = np.transpose(self_attention["lora_B_v"], axes=(1, 0, 2))
+
   # layers, base_num_query_heads * head_dim, base_num_query_heads, head_dim =>
   # base_num_query_heads, layers,head_dim, base_num_query_heads * head_dim
   self_attention["out"]["kernel"] = np.transpose(self_attention["out"]["kernel"], axes=(2, 0, 3, 1))
@@ -532,6 +584,7 @@ if __name__ == "__main__":
   parser.add_argument("--base-model-path", type=str, required=True)
   parser.add_argument("--maxtext-model-path", type=str, required=True)
   parser.add_argument("--model-size", type=str, required=True)
+  parser.add_argument("--lora-path", type=str, required=False)
 
   args = parser.parse_args()
 
@@ -540,4 +593,4 @@ if __name__ == "__main__":
 
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"
 
-  save_jax_weights_to_checkpoint(args.maxtext_model_path, convert_to_jax_weights(args.base_model_path, args.model_size))
+  save_jax_weights_to_checkpoint(args.maxtext_model_path, convert_to_jax_weights(args.base_model_path, args.model_size, args.lora_path))
