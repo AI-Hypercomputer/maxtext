@@ -657,6 +657,8 @@ class MoeBlock(nn.Module):
             intermediate_layer,
             ("activation_exp", "activation_batch_no_exp", None, "activation_embed"),
         )
+        if self.config.activations_in_float32:
+          intermediate_layer = intermediate_layer.astype(jnp.float32)
         intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("combine"):
         # Matmul & element wise operation
@@ -665,7 +667,7 @@ class MoeBlock(nn.Module):
             intermediate_layer,
             combine_mask,
             precision=matmul_precision,
-        )
+        ).astype(self.dtype)
       return output, loss
     else:
       top_k_weights /= top_k_weights.sum(-1, keepdims=True)
@@ -674,12 +676,16 @@ class MoeBlock(nn.Module):
       with jax.named_scope("wi_0"):
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
-        ).astype(jnp.float32)
+        )
+        if self.config.activations_in_float32:
+          layer_w0 = layer_w0.astype(jnp.float32)
         layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
       with jax.named_scope("wi_1"):
         layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision
-        ).astype(jnp.float32)
+        )
+        if self.config.activations_in_float32:
+          layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
       layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
@@ -687,12 +693,14 @@ class MoeBlock(nn.Module):
         intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes)(
             "BSEH,EHM -> BSEM", layer_multiply, wo_kernel, precision=matmul_precision
         )
+        if self.config.activations_in_float32:
+          intermediate_layer = intermediate_layer.astype(jnp.float32)
         intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("w_sum"):
         output = jnp.einsum(
             "BSEM,BSE -> BSM",
-            intermediate_layer.astype(jnp.float32),
-            weights.astype(jnp.float32),
+            intermediate_layer,
+            weights,
         ).astype(self.dtype)
       return output, None
 
