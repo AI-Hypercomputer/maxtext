@@ -136,6 +136,13 @@ def create_orbax_emergency_replicator_checkpoint_manager(
 
 
 
+def print_save_message(step, async_checkpointing):
+  if async_checkpointing:
+    max_logging.log(f"Started an asynchronous checkpoint save for step {step}")
+  else:
+    max_logging.log(f"Saved a checkpoint at step {step}.")
+
+
 def _find_idx(array: np.ndarray, replica_axis_idx: int):
   """Returns the index along given dimension that the current host belongs to."""
   idx = None
