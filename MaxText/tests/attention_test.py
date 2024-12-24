@@ -118,7 +118,7 @@ class AttentionTest(unittest.TestCase):
 
     return lnx, decoder_segment_ids, decoder_positions
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_autoregression(self):
     prefill_length = self.cfg.max_prefill_predict_length
     decode_total_length = self.cfg.max_target_length
@@ -174,11 +174,11 @@ class AttentionTest(unittest.TestCase):
       self.assertTrue(mha_full_this_idx.shape == mha_idx.shape)
       self.assertTrue(jax.numpy.allclose(mha_full_this_idx, mha_idx, rtol=1e-02, atol=1e-02, equal_nan=False))
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_model_mode_prefill_dtype_float32(self):
     self._test_model_mode_prefill_dtype(jnp.float32)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_model_mode_prefill_dtype_bfloat16(self):
     self._test_model_mode_prefill_dtype(jnp.bfloat16)
 
@@ -224,15 +224,15 @@ class AttentionTest(unittest.TestCase):
 
     self.assertEqual(dtype, mha_prefill.dtype)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_tpu_kernel_attention_mha(self):
     self.tpu_kernel_attention_helper(self.num_kv_heads)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_tpu_kernel_attention_gqa(self):
     self.tpu_kernel_attention_helper(self.num_kv_heads // 2)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_tpu_kernel_attention_mqa(self):
     self.tpu_kernel_attention_helper(1)
 
@@ -309,7 +309,7 @@ class AttentionTest(unittest.TestCase):
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False)
     )
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_dot_product_cache_axis_order(self):
     all_axis_orders = [axis_order for axis_order in itertools.permutations(range(4))]
     for axis_order in random.choices(all_axis_orders, k=4):
@@ -423,7 +423,7 @@ class AttentionTest(unittest.TestCase):
           jax.numpy.allclose(attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=rtol, atol=atol, equal_nan=False)
       )
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_dot_product_reshape_q(self):
     for compute_axis_order in [(0, 1, 2, 3), (0, 2, 1, 3)]:
       self._dot_product_attention_reshape_q(

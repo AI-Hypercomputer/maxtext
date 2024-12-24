@@ -24,7 +24,7 @@ from train import main as train_main
 class TrainCompile(unittest.TestCase):
   """Tests for the Ahead of Time Compilation functionality, train_compile.py"""
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_save_compiled_v4(self):
     compiled_trainstep_file = "/tmp/test_compiled_v4.pickle"
     train_compile_main(
@@ -40,7 +40,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_save_compiled_v5e(self):
     compiled_trainstep_file = "/tmp/test_compiled_v5e.pickle"
     train_compile_main(
@@ -79,7 +79,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_save_compiled_v5p_two_slices(self):
     compiled_trainstep_file = "/tmp/test_compiled_v5p_two_slices.pickle"
     train_compile_main(
@@ -97,7 +97,7 @@ class TrainCompile(unittest.TestCase):
 
   # TODO (b/374764692) : Enable when v6e AOT test when stable Jax supports v6e AOT.
   @pytest.mark.skip(reason="Enable when downstream v6e AOT support reaches stable Jax.")
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_save_compiled_v6e(self):
     compiled_trainstep_file = "/tmp/test_compiled_v6e.pickle"
     train_compile_main(
@@ -113,7 +113,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_sequence_parallelism(self):
     compiled_trainstep_file = "/tmp/test_compiled.pickle"
     train_compile_main(
@@ -131,7 +131,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_remat_save_dot_except_mlpwi(self):
     compiled_trainstep_file = "/tmp/test_remat_save_dot_except_mlpwi.pickle"
     train_compile_main(
@@ -153,7 +153,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_remat_save_dot_except_mlp(self):
     compiled_trainstep_file = "/tmp/test_remat_save_dot_except_mlp.pickle"
     train_compile_main(
@@ -175,7 +175,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_remat_save_qkv_proj(self):
     compiled_trainstep_file = "/tmp/test_remat_save_qkv_proj.pickle"
     train_compile_main(
@@ -197,7 +197,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_remat_full(self):
     compiled_trainstep_file = "/tmp/test_remat_full.pickle"
     train_compile_main(
@@ -219,7 +219,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_custom_64x4_mesh(self):
     compiled_trainstep_file = "/tmp/test_custom_64x4_mesh.pickle"
     train_compile_main(
@@ -241,7 +241,7 @@ class TrainCompile(unittest.TestCase):
 
   # TODO (b/376470419) : Enable when AOT test work with host offloading.
   @pytest.mark.skip(reason="Enable when AOT test work with host offloading.")
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_llama3_1_70b_opt_offload(self):
     compiled_trainstep_file = "/tmp/test_llama3_1_70b_opt_offload.pickle"
     train_compile_main(
@@ -259,7 +259,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_custom_32x8_mesh(self):
     compiled_trainstep_file = "/tmp/test_custom_32x8_mesh.pickle"
     train_compile_main(
