@@ -22,13 +22,13 @@ from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from flax import struct
 
-from layers import models, quantizations
+from MaxText.layers import models, quantizations
 
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
-import common_types
+from MaxText import common_types
 from jetstream.core import config_lib
 from jetstream.engine import engine_api
 from jetstream.engine import tokenizer_pb2

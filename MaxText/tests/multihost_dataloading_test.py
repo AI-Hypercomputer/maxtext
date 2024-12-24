@@ -27,7 +27,7 @@ import unittest
 import pytest
 
 import pyconfig
-import multihost_dataloading
+from MaxText import multihost_dataloading
 
 
 class MultihostDataloadingTest(unittest.TestCase):

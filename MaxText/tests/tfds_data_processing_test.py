@@ -26,8 +26,8 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 
 import pyconfig
-from input_pipeline import _tfds_data_processing
-from input_pipeline import input_pipeline_interface
+from MaxText.input_pipeline import _tfds_data_processing
+from MaxText.input_pipeline import input_pipeline_interface
 
 
 class TfdsDataProcessingTest(unittest.TestCase):

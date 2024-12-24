@@ -24,20 +24,20 @@ import pytest
 import pyconfig
 
 
-from layers import pipeline
+from MaxText.layers import pipeline
 import jax
 from jax import numpy as jnp
 from jax.sharding import Mesh
 
-import common_types
+from MaxText import common_types
 import pyconfig
-import max_utils
+from MaxText import max_utils
 from flax.core import meta
 
 import jax.numpy as jnp
 from flax import linen as nn
 from layers import simple_layer
-from train import main as train_main
+from MaxText.train import main as train_main
 
 
 def assert_same_output_and_grad(f1, f2, *inputs):

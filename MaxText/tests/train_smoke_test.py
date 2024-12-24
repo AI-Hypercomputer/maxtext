@@ -17,7 +17,7 @@ limitations under the License.
 """ Smoke test """
 import os
 import unittest
-from train import main as train_main
+from MaxText.train import main as train_main
 from absl.testing import absltest
 
 
