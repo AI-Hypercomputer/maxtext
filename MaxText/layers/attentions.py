@@ -401,15 +401,23 @@ class AttentionOp(nn.Module):
 
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
 
-    # generate attn_mask
-    attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
+    sliding_window_size = self.sliding_window_size
+
+    if self.attention_type == AttentionType.LOCAL_SLIDING:
+      sliding_window_size = [self.sliding_window_size, 0]
+      mask_type = "causal" # SWA only works with causal masking
+      attn_mask = None
+    else:
+      # generate attn_mask
+      mask_type = "padding_causal" # only padding_causal mask type can take a created mask
+      attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
 
     dpa_layer = DotProductAttention(
         head_dim=head_dim,
         num_attention_heads=self.num_query_heads,
         num_gqa_groups=self.num_kv_heads,
-        attn_mask_type="padding_causal",  # 'no_mask', 'padding', 'causal', or 'padding_causal'
-        attn_bias_type="NO_BIAS",  # 'no_bias', 'pre_scale_bias' or 'post_scale_bias'
+        attn_mask_type=mask_type,  # 'no_mask', 'padding', 'causal', or 'padding_causal'
+        attn_bias_type="no_bias",  # 'no_bias', 'pre_scale_bias' or 'post_scale_bias'
         attention_dropout=self.dropout_rate,
         dropout_rng_name="aqt",
         dtype=self.dtype,
@@ -417,6 +425,7 @@ class AttentionOp(nn.Module):
         qkv_layout="BSHD_BSHD_BSHD",  # 'BS3HD', 'BSHD_BS2HD' or 'BSHD_BSHD_BSHD'
         scale_factor=1.0 / math.sqrt(head_dim),
         transpose_batch_sequence=False,
+        window_size=sliding_window_size,
     )
     return dpa_layer(query, key, value, mask=attn_mask)
 
