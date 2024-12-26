@@ -412,6 +412,37 @@ llama3_1_405b_8192_fsdp_dcn = MaxTextModel(
     ),
 )
 
+llama3_1_405b_8192_opt_off = MaxTextModel(
+    model_name="llama3-1-405b-8192-opt-off",
+    model_type="llama3.1-405b",
+    tuning_params={
+        "per_device_batch_size": 1,
+        "ici_fsdp_parallelism": 64,
+        "ici_tensor_parallelism": 4,
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "optimizer_memory_host_offload": True,
+        "max_target_length": 8192,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+)
+
 llama3_1_8b_8192 = MaxTextModel(
     model_name="llama3_1-8b-8192",
     model_type="llama3.1-8b",
@@ -699,6 +730,7 @@ maxstar_models = [
     llama3_8b_8192,  # Not Optimizied yet
     llama3_70b_8192,  # Not Optimizied yet
     llama3_1_405b_8192_fsdp_dcn,
+    llama3_1_405b_8192_opt_off,
     llama3_1_8b_8192,
     llama3_1_70b_8192,
     llama3_1_70b_129024,

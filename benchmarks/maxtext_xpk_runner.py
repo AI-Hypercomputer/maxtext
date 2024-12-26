@@ -417,7 +417,7 @@ def xpk_benchmark_runner(cluster_config: XpkConfig, benchmarks: list[BenchmarkRu
         libtpu_type=LibTpuType.NIGHTLY,
         libtpu_version=benchmark.software_config.libtpu_version,
         base_output_directory=cluster_config.base_output_directory,
-        buffer_size=4294967296,
+        buffer_size=17179869184,
     )
     xpk_workload_names.append(name)
     xpk_workload_cmds.append(command)
