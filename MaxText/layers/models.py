@@ -400,14 +400,23 @@ class Decoder(nn.Module):
       key = jax.random.PRNGKey(0)
       keys={"params": key, "dropout": key, "aqt": key}
       rawr=z.init(keys,y,decoder_segment_ids, decoder_positions, deterministic, model_mode)
-      #breakpoint()
+  
+      def get_partition_spec(pytree):
+        def _is_leaf(x):
+          return isinstance(x, nn.spmd.LogicallyPartitioned)
+
+        def get_partition_spec_leaf(leaf):
+          return leaf.get_partition_spec()
+        partition_spec_tree = jax.tree.map(get_partition_spec_leaf, pytree, is_leaf=_is_leaf)
+        return partition_spec_tree
+      rawr_spec = get_partition_spec(rawr)
 
       y = self.pipeline_module(y,
             decoder_segment_ids,
             decoder_positions,
             deterministic,
             model_mode,
-            rawr)
+            rawr_spec)
     else:
       if cfg.scan_layers:
         y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
