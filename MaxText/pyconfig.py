@@ -717,8 +717,10 @@ def calculate_global_batch_sizes(
 
 
 def get_num_target_devices(raw_keys):
-  compile_topology = accelerator_to_spec_map.get_system_characteristics(raw_keys.get("compile_topology", ""))
-  if compile_topology is not None:
+  # In AOT case compile_topology is set (e.g. is not the empty string), and we determine the
+  # number of devices from the compile_topology. In non-AOT settings we simply can use jax.devices().
+  if raw_keys.get("compile_topology"):
+    compile_topology = accelerator_to_spec_map.get_system_characteristics(raw_keys["compile_topology"])
     devices_per_slice = compile_topology.devices_per_slice
     return int(devices_per_slice * raw_keys["compile_topology_num_slices"])
   else:
