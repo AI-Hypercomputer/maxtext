@@ -599,23 +599,24 @@ class Pipeline(nn.Module):
 
 
     # stage_weight_partition_spec = get_stage_partition_spec(stage_weights)
-    def get_stage_partition_spec(self, stage_weights, sharding_info):
-      breakpoint()
-      def get_stage_partition_spec_leaf(leaf_weight):
-        breakpoint()
-        new_partition_spec = [None] * leaf_weight.ndim # ????? maybe should replace by ndim
-        new_partition_spec[0] = "stage"
-        from jax.sharding import PartitionSpec
-        return PartitionSpec(*new_partition_spec)
-      partition_spec_tree = jax.tree.map(get_stage_partition_spec_leaf, stage_weights)
-      return partition_spec_tree
+    # def get_stage_partition_spec(self, stage_weights, sharding_info):
+    #   breakpoint()
+    #   def get_stage_partition_spec_leaf(leaf_weight):
+    #     breakpoint()
+    #     new_partition_spec = [None] * leaf_weight.ndim # ????? maybe should replace by ndim
+    #     new_partition_spec[0] = "stage"
+    #     from jax.sharding import PartitionSpec
+    #     return PartitionSpec(*new_partition_spec)
+    #   partition_spec_tree = jax.tree.map(get_stage_partition_spec_leaf, stage_weights)
+    #   return partition_spec_tree
 
     
     def all_gather_over_fsdp(self, sharding_info):
       print("hello", flush=True)
       print("goodbye", flush=True)
       vars = self.layers.variables
-      partition_spec_tree = get_stage_partition_spec(self, vars, sharding_info)
+      #partition_spec_tree = get_stage_partition_spec(self, vars, sharding_info)
+      vars = nn.with_logical_constraint(vars, sharding_info)
       return vars
     
     print("what", flush=True)
