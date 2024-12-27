@@ -486,6 +486,44 @@ class Pipeline(nn.Module):
       remat_policy = save_input_policy
     return remat_policy
 
+
+  def get_physical_spec_no_fsdp(self, full_logical):
+    def remove_fsdp_sharding(sharding_tree):
+      def _remove_fsdp_from_partition_spec(named_sharding):
+        if isinstance(named_sharding, jax.sharding.NamedSharding):
+          new_spec = []
+          for axis in named_sharding.spec:
+            if axis is None:
+              new_spec.append(None)
+            elif isinstance(axis, str):
+              if axis != 'fsdp':
+                new_spec.append(axis)
+              else:
+                new_spec.append(None)
+            elif isinstance(axis, (list, tuple)):  # Handle list/tuple of axes
+              new_axis = [a for a in axis if a != 'fsdp']
+              new_spec.append(tuple(new_axis))
+              #new_spec.append(tuple(new_axis) if new_axis else None) 
+            else:
+              raise ValueError(f"Unsupported axis type: {type(axis)}")
+          return jax.sharding.NamedSharding(named_sharding.mesh, jax.sharding.PartitionSpec(*new_spec))
+        return named_sharding
+      return jax.tree.map(_remove_fsdp_from_partition_spec, sharding_tree)
+
+    physical = nn.logical_to_mesh_sharding(full_logical, mesh=self.mesh, rules=self.config.logical_axis_rules)
+    physical_no_fsdp = remove_fsdp_sharding(physical)
+    return physical_no_fsdp
+
+  
+  def all_gather_over_fsdp(self, sharding_info):
+    print("hello", flush=True)
+    print("goodbye", flush=True)
+    vars = self.layers.variables
+    #partition_spec_tree = get_stage_partition_spec(self, vars, sharding_info)
+    physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
+    vars = nn.with_logical_constraint(vars, sharding_info)
+    return vars
+    
   @nn.compact
   def __call__(
       self,
@@ -610,18 +648,8 @@ class Pipeline(nn.Module):
     #   partition_spec_tree = jax.tree.map(get_stage_partition_spec_leaf, stage_weights)
     #   return partition_spec_tree
 
-    
-    def all_gather_over_fsdp(self, sharding_info):
-      print("hello", flush=True)
-      print("goodbye", flush=True)
-      vars = self.layers.variables
-      #partition_spec_tree = get_stage_partition_spec(self, vars, sharding_info)
-      vars = nn.with_logical_constraint(vars, sharding_info)
-      return vars
-    
-    print("what", flush=True)
-    breakpoint()
-    all_pipeline_weights = all_gather_over_fsdp(self, sharding_info)
+    print("Before AG over FSDP", flush=True)
+    all_pipeline_weights = self.all_gather_over_fsdp(sharding_info)
 
     def run_iteration_scannable(model, loop_state, xs):
       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
