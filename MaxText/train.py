@@ -877,7 +877,7 @@ def train_loop(config, state=None):
     if checkpoint_manager is not None:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
       if save_checkpoint(checkpoint_manager, int(step), state_to_save, config.dataset_type, data_iterator, config):
-        max_logging.log(f"saved a checkpoint at step {step}")
+        checkpointing.print_save_message(step, config.async_checkpointing)
 
       # Upon preemption, exit when and only when all ongoing saves are complete.
       if checkpoint_manager.reached_preemption(step):
