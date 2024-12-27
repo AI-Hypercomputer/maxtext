@@ -494,6 +494,7 @@ class Pipeline(nn.Module):
       positions: jnp.ndarray,
       deterministic: bool,
       model_mode=common_types.MODEL_MODE_TRAIN,
+      sharding_info=None,
   ) -> jnp.ndarray:
     """The main method that maps the series of decoder layer inputs to final layer outputs.
     Has the same signature of a single decoder layer, and expects the same shapes, e.g. the inputs should have shape [global_batch], and internally
@@ -595,13 +596,31 @@ class Pipeline(nn.Module):
           [self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim],
       )
 
-    def all_gather_over_fsdp(self):
+
+
+    # stage_weight_partition_spec = get_stage_partition_spec(stage_weights)
+    def get_stage_partition_spec(self, stage_weights, sharding_info):
+      breakpoint()
+      def get_stage_partition_spec_leaf(leaf_weight):
+        breakpoint()
+        new_partition_spec = [None] * leaf_weight.ndim # ????? maybe should replace by ndim
+        new_partition_spec[0] = "stage"
+        from jax.sharding import PartitionSpec
+        return PartitionSpec(*new_partition_spec)
+      partition_spec_tree = jax.tree.map(get_stage_partition_spec_leaf, stage_weights)
+      return partition_spec_tree
+
+    
+    def all_gather_over_fsdp(self, sharding_info):
       print("hello", flush=True)
       print("goodbye", flush=True)
-      return self.layers.variables
+      vars = self.layers.variables
+      partition_spec_tree = get_stage_partition_spec(self, vars, sharding_info)
+      return vars
     
     print("what", flush=True)
-    all_pipeline_weights = all_gather_over_fsdp(self)
+    breakpoint()
+    all_pipeline_weights = all_gather_over_fsdp(self, sharding_info)
 
     def run_iteration_scannable(model, loop_state, xs):
       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap

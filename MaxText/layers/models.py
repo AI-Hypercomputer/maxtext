@@ -395,11 +395,19 @@ class Decoder(nn.Module):
       # base_stage = RemattedBlockLayer if cfg.set_remat_policy_on_layers_per_stage else BlockLayer
       # stage_module = self.get_pipeline_stage_module(base_stage, cfg, mesh)
       # TODO: Need to plumb in remat policy?
+      z = self.pipeline_module
+      
+      key = jax.random.PRNGKey(0)
+      keys={"params": key, "dropout": key, "aqt": key}
+      rawr=z.init(keys,y,decoder_segment_ids, decoder_positions, deterministic, model_mode)
+      #breakpoint()
+
       y = self.pipeline_module(y,
             decoder_segment_ids,
             decoder_positions,
             deterministic,
-            model_mode)
+            model_mode,
+            rawr)
     else:
       if cfg.scan_layers:
         y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
