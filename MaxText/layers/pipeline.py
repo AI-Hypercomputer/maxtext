@@ -83,6 +83,7 @@ class Pipeline(nn.Module):
       circ_storage: zeros [num_stages, microbatches, micro_size, sequence, embed] when needed, else None
       circ_storage_mover: zeros[num_stages, micro_size, sequence, embed] when needed, else None
       loop_iteration: scalar set initially to 0.
+      bsw: weights with num_repeats replaced by 2, e.g. [2, num_stages, mlp, embed]
     """
 
     # Shift is used to rotate the output of each pipeline into the input of the next
@@ -136,6 +137,15 @@ class Pipeline(nn.Module):
       circ_storage_mover = shift
     else:
       circ_storage_mover = None
+
+    def replace_with_zeros(pytree):
+      def _replace_with_zero_array(leaf):
+        all_repeats = jnp.zeros_like(leaf)
+        return all_repeats[0:1] # Buffer is of length 2
+      return jax.tree.map(_replace_with_zero_array, pytree)
+    #bsw = replace_with_zeros(self.layers.variables)
+    #slv = self.layers.variables
+    #breakpoint()
 
     init_loop_state = {
         "state_io": state_io,
@@ -271,6 +281,7 @@ class Pipeline(nn.Module):
     old_circ_storage_mover = loop_state["circ_storage_mover"]
     loop_iteration = loop_state["loop_iteration"]
     old_prev_outputs = loop_state["prev_outputs"]
+    #old_bsw = loop_state["bsw"]
 
     def _rotate_right(arr):
       # Use lax.slice to avoid generating a gather.
@@ -333,6 +344,8 @@ class Pipeline(nn.Module):
       return jax.lax.dynamic_update_slice_in_dim(state_in, stream_slice, stream_buf_idx, axis=1)
 
     new_state = _update_state_io(old_state_io, stream_slice, output)
+
+    #new_bsw = self.maybe_get_new_bsw(loop_iteration, old_bsw, shardings)
 
     new_loop_state = {
         "state_io": new_state,
@@ -419,6 +432,7 @@ class Pipeline(nn.Module):
     shift = loop_state["shift"]
     circ_storage = loop_state["circ_storage"]
     loop_iteration = loop_state["loop_iteration"]
+    #bsw = loop_state["bsw"]
 
     microbatch_ids, _ = self.get_microbatch_and_repeat_ids(loop_iteration)
 
@@ -464,6 +478,8 @@ class Pipeline(nn.Module):
       )
 
     repeat_weights = self.prepare_vars_for_main_vmap_2(all_pipeline_weights, loop_iteration)
+    #repeat_weights = self.get_current_weights(bsw, loop_iteration)
+
     stages_output = vmap_func(
         decoder_layer_instance, repeat_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
     )
@@ -510,7 +526,9 @@ class Pipeline(nn.Module):
         return named_sharding
       return jax.tree.map(_remove_fsdp_from_partition_spec, sharding_tree)
 
+    print(f"{full_logical=}", flush=True)
     physical = nn.logical_to_mesh_sharding(full_logical, mesh=self.mesh, rules=self.config.logical_axis_rules)
+    print(f"{physical=}", flush=True)
     physical_no_fsdp = remove_fsdp_sharding(physical)
     return physical_no_fsdp
 
@@ -521,6 +539,7 @@ class Pipeline(nn.Module):
     vars = self.layers.variables
     #partition_spec_tree = get_stage_partition_spec(self, vars, sharding_info)
     physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
+    print(f"{physical_constraint_no_fsdp=}", flush=True)
     vars = jax.lax.with_sharding_constraint(vars, physical_constraint_no_fsdp)
     return vars
     
