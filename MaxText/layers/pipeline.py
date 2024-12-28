@@ -349,7 +349,8 @@ class Pipeline(nn.Module):
     new_state = _update_state_io(old_state_io, stream_slice, output)
 
     new_bsw = old_bsw
-    #new_bsw = self.maybe_get_new_bsw(loop_iteration, old_bsw, shardings)
+    _, repeat_idx = self.get_microbatch_and_repeat_ids(loop_iteration)
+    new_bsw = self.ag_new_bsw(self, bsw, repeat_idx[0])
 
     new_loop_state = {
         "state_io": new_state,
@@ -361,6 +362,15 @@ class Pipeline(nn.Module):
         "bsw": new_bsw,
     }
     return new_loop_state
+
+  def ag_new_bsw(self, bsw, repeat_idx):
+    new_bw = grab_repeat(self.layers.variables,repeat_idx)
+    new_bw_ag = force_ag(new_bw)
+    bsw[0] = bsw[1]
+    bsw[1] = new_bw_ag
+    return bsw
+)
+
 
   def permute_output_micro_per_stage_dim(self, output):
     # The first real output (microbatch 0) takes a certain amount of loop iterations to finish and be pushed to state_io - it will land on a different index of state_io depending on the number of iterations.
@@ -392,12 +402,15 @@ class Pipeline(nn.Module):
   
   def get_current_sw(self, bsw, loop_iteration):
     def get_bsw_idx(loop_iteration):
-      return jnp.asarray([0] * self.num_stages) # TODO : Implement this
-    repeat_ids = get_bsw_idx(loop_iteration)
+      _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
+      bsw_ids = repeat_ids==repeat_ids[0]
+      bsw_ids = bsw_ids.astype(jnp.int32)
+      return bsw_ids
+    bsw_ids = get_bsw_idx(loop_iteration)
     def gather_weights_for_stages_in(weights):
       return jax.tree.map(
           functools.partial(
-              self.vmap_parallel_gather, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1),
+              self.vmap_parallel_gather, repeat_ids=bsw_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1),
           weights)
     circular_metadata_params={
       nn.PARTITION_NAME: "circular_repeats",
