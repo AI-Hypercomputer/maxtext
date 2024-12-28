@@ -521,7 +521,7 @@ class Pipeline(nn.Module):
     vars = self.layers.variables
     #partition_spec_tree = get_stage_partition_spec(self, vars, sharding_info)
     physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
-    vars = nn.with_logical_constraint(vars, sharding_info)
+    vars = jax.lax.with_sharding_constraint(vars, physical_constraint_no_fsdp)
     return vars
     
   @nn.compact
