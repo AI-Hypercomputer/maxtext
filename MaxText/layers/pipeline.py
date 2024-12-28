@@ -141,11 +141,13 @@ class Pipeline(nn.Module):
     def replace_with_zeros(pytree):
       def _replace_with_zero_array(leaf):
         all_repeats = jnp.zeros_like(leaf)
-        return all_repeats[0:1] # Buffer is of length 2
+        all_repeats = all_repeats.astype(jnp.bfloat16) # TODO: rawr
+        return all_repeats[0:2] # Buffer is of length 2
       return jax.tree.map(_replace_with_zero_array, pytree)
-    #bsw = replace_with_zeros(self.layers.variables)
-    #slv = self.layers.variables
-    #breakpoint()
+    if not self.is_initializing():
+      bsw = replace_with_zeros(self.layers.variables)
+    else:
+      bsw = None
 
     init_loop_state = {
         "state_io": state_io,
@@ -154,6 +156,7 @@ class Pipeline(nn.Module):
         "circ_storage_mover": circ_storage_mover,
         "loop_iteration": 0,
         "prev_outputs": prev_outputs,
+        "bsw": bsw,
     }
     return init_loop_state
 
@@ -281,7 +284,7 @@ class Pipeline(nn.Module):
     old_circ_storage_mover = loop_state["circ_storage_mover"]
     loop_iteration = loop_state["loop_iteration"]
     old_prev_outputs = loop_state["prev_outputs"]
-    #old_bsw = loop_state["bsw"]
+    old_bsw = loop_state["bsw"]
 
     def _rotate_right(arr):
       # Use lax.slice to avoid generating a gather.
@@ -345,6 +348,7 @@ class Pipeline(nn.Module):
 
     new_state = _update_state_io(old_state_io, stream_slice, output)
 
+    new_bsw = old_bsw
     #new_bsw = self.maybe_get_new_bsw(loop_iteration, old_bsw, shardings)
 
     new_loop_state = {
@@ -354,6 +358,7 @@ class Pipeline(nn.Module):
         "circ_storage_mover": new_circ_storage_mover,
         "loop_iteration": loop_iteration + 1,
         "prev_outputs": new_prev_outputs,
+        "bsw": new_bsw,
     }
     return new_loop_state
 
@@ -384,6 +389,27 @@ class Pipeline(nn.Module):
     weights = meta.remove_axis(weights, 0, circular_metadata_params) # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
     weights = gather_weights_for_stages_in(weights)
     return weights
+  
+  def get_current_sw(self, bsw, loop_iteration):
+    def get_bsw_idx(loop_iteration):
+      return jnp.asarray([0] * self.num_stages) # TODO : Implement this
+    repeat_ids = get_bsw_idx(loop_iteration)
+    def gather_weights_for_stages_in(weights):
+      return jax.tree.map(
+          functools.partial(
+              self.vmap_parallel_gather, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1),
+          weights)
+    circular_metadata_params={
+      nn.PARTITION_NAME: "circular_repeats",
+      'sub_weight_split_dims_mapping': (None,),
+      "is_initializing": self.is_initializing(),
+      "x_times": self.config.num_pipeline_repeats,
+      'optimizer_dims_mapping': None,
+    }
+    weights = meta.remove_axis(bsw, 0, circular_metadata_params) # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
+    weights = gather_weights_for_stages_in(weights)
+    return weights
+    
 
   # Does not explicitly use weights so it can be used for initialization
   def get_main_vmap_func(self):
@@ -432,7 +458,7 @@ class Pipeline(nn.Module):
     shift = loop_state["shift"]
     circ_storage = loop_state["circ_storage"]
     loop_iteration = loop_state["loop_iteration"]
-    #bsw = loop_state["bsw"]
+    bsw = loop_state["bsw"]
 
     microbatch_ids, _ = self.get_microbatch_and_repeat_ids(loop_iteration)
 
@@ -478,7 +504,7 @@ class Pipeline(nn.Module):
       )
 
     repeat_weights = self.prepare_vars_for_main_vmap_2(all_pipeline_weights, loop_iteration)
-    #repeat_weights = self.get_current_weights(bsw, loop_iteration)
+    repeat_weights = self.get_current_sw(bsw, loop_iteration)
 
     stages_output = vmap_func(
         decoder_layer_instance, repeat_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
@@ -657,9 +683,7 @@ class Pipeline(nn.Module):
 
     # stage_weight_partition_spec = get_stage_partition_spec(stage_weights)
     # def get_stage_partition_spec(self, stage_weights, sharding_info):
-    #   breakpoint()
     #   def get_stage_partition_spec_leaf(leaf_weight):
-    #     breakpoint()
     #     new_partition_spec = [None] * leaf_weight.ndim # ????? maybe should replace by ndim
     #     new_partition_spec[0] = "stage"
     #     from jax.sharding import PartitionSpec
