@@ -370,7 +370,7 @@ class Pipeline(nn.Module):
   
   def ag_new_bsw(self, bsw, sharding_info, loop_iter):
     _, repeat_idx = self.get_microbatch_and_repeat_ids(loop_iter + 1)
-    jax.debug.print("loop_iter {loop_iter} repeat_idx {repeat_idx}", loop_iter=loop_iter, repeat_idx=repeat_idx)
+    #jax.debug.print("loop_iter {loop_iter} repeat_idx {repeat_idx}", loop_iter=loop_iter, repeat_idx=repeat_idx)
     #jax.debug.print("Loop iter {loop_iter} Old bsw {bsw}", loop_iter=loop_iter, bsw=bsw['params']['mlp']['wi_0']['kernel'][:,:,0,0])
     new_bw_insert = self.grab_bsw(self.layers.variables,repeat_idx[0])
     #jax.debug.print("Loop iter {loop_iter} bsw to insert {new_bw_insert}", loop_iter=loop_iter, new_bw_insert=new_bw_insert['params']['mlp']['wi_0']['kernel'][:,:,0,0])
@@ -548,8 +548,19 @@ class Pipeline(nn.Module):
           trans_in_fn=prepare_vars_for_main_vmap,
       )
 
-    #repeat_weights = self.prepare_vars_for_main_vmap_2(all_pipeline_weights, loop_iteration)
+    repeat_weights_all = self.prepare_vars_for_main_vmap_2(all_pipeline_weights, loop_iteration)
     repeat_weights = self.get_current_sw(bsw, loop_iteration)
+
+    def cast_tree_to_bf16(tree):
+      def cast_leaf_to_bf16(leaf):
+        return leaf.astype(jnp.bfloat16)
+      return jax.tree.map(cast_leaf_to_bf16, tree)
+    repeat_weights_all = cast_tree_to_bf16(repeat_weights_all)
+    #jax.debug.print("Loop iter {loop_iter}: Repeat all {repeat_all}",loop_iter=loop_iteration, repeat_all=repeat_weights_all['params']['mlp']['wi_0']['kernel'][:,0,0])
+    #jax.debug.print("Loop iter {loop_iter}: Repeat bsw {repeat_bw} \n",loop_iter=loop_iteration, repeat_bw=repeat_weights['params']['mlp']['wi_0']['kernel'][:,0,0])
+
+
+    #repeat_weights = repeat_weights_all
 
     stages_output = vmap_func(
         decoder_layer_instance, repeat_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
