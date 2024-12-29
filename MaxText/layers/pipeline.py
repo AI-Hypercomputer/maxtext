@@ -72,7 +72,7 @@ class Pipeline(nn.Module):
         + self.iterations_to_complete_first_microbatch_one_repeat()
     )
 
-  def init_states(self, inputs):
+  def init_states(self, inputs, sharding_info):
     """Initialize components of state: state_io, shift, circular_storage and circular_storage_mover
     Assumes input has already been reshaped into microbatches: [num_micro_batches, micro_batch_size, sequence, embed]
 
@@ -144,10 +144,8 @@ class Pipeline(nn.Module):
         all_repeats = all_repeats.astype(jnp.bfloat16) # TODO: rawr
         return all_repeats[0:2] # Buffer is of length 2
       return jax.tree.map(_replace_with_zero_array, pytree)
-    if not self.is_initializing():
-      bsw = replace_with_zeros(self.layers.variables)
-    else:
-      bsw = None
+    bsw = replace_with_zeros(self.layers.variables)
+    bsw = self.ag_new_bsw(bsw, sharding_info, 0)
 
     init_loop_state = {
         "state_io": state_io,
@@ -351,8 +349,8 @@ class Pipeline(nn.Module):
     # new_bsw = old_bsw
     # TODO: Update bsw
     # TODO: This should only have real effect once every repeat
-    _, repeat_idx = self.get_microbatch_and_repeat_ids(loop_iteration)
-    new_bsw = self.ag_new_bsw(old_bsw, repeat_idx[0], sharding_info, loop_iteration)
+    # _, repeat_idx = self.get_microbatch_and_repeat_ids(loop_iteration)
+    new_bsw = self.ag_new_bsw(old_bsw, sharding_info, loop_iteration)
 
     new_loop_state = {
         "state_io": new_state,
@@ -365,8 +363,9 @@ class Pipeline(nn.Module):
     }
     return new_loop_state
 
-  def ag_new_bsw(self, bsw, repeat_idx, sharding_info, loop_iter):
-    new_bw_insert = self.grab_bsw(self.layers.variables,repeat_idx)
+  def ag_new_bsw(self, bsw, sharding_info, loop_iter):
+    _, repeat_idx = self.get_microbatch_and_repeat_ids(loop_iter)
+    new_bw_insert = self.grab_bsw(self.layers.variables,repeat_idx[0])
     new_bw_ag = self.force_ag(new_bw_insert, sharding_info)
     grab_idx_1 = self.grab_bsw(bsw, 1)
     new_full_bsw = self.insert_pytree(bsw, grab_idx_1, 0) # bsw[0] = bsw[1]
@@ -643,8 +642,6 @@ class Pipeline(nn.Module):
       example_segmentation = None
       segment_idx = None
 
-    loop_state = self.init_states(inputs)
-
     # Each microbatch should go through each stage (with repeats) - so there is num_micro * (num_stages * repeats) compute to perform
     # Each iteration is vmapped by num_stages, so the number of iterations should be num_micro * num_stages * repeats / num_stages = num_micro * repeats
     # However due to the pipeline bubble some iterations process less than num_stages microbatches. It takes
@@ -710,6 +707,8 @@ class Pipeline(nn.Module):
           [self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim],
       )
 
+    # Not initializing!!!
+    loop_state = self.init_states(inputs, sharding_info)
 
 
     # stage_weight_partition_spec = get_stage_partition_spec(stage_weights)
