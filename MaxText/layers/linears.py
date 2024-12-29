@@ -640,8 +640,8 @@ class MoeBlock(nn.Module):
       # token dropping if needed
       dispatch_mask, combine_mask = self.generate_masks(top_k_indices, weights)
       mask_axes = ("activation_batch", "activation_length", None, None)
-      dispatch_mask = nn.with_logical_constraint(dispatch_mask, mask_axes)
-      combine_mask = nn.with_logical_constraint(combine_mask, mask_axes)
+      # dispatch_mask = nn.with_logical_constraint(dispatch_mask, mask_axes)
+      # combine_mask = nn.with_logical_constraint(combine_mask, mask_axes)
       if self.config.model_call_mode != "inference":
         loss = self.load_balance_loss(top_k_indices, weights)
       else:
