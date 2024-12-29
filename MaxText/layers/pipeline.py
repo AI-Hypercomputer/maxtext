@@ -364,16 +364,20 @@ class Pipeline(nn.Module):
     return new_loop_state
 
   def maybe_ag_new_bsw(self, bsw, sharding_info, loop_iter):
-    bsw = jax.lax.cond(loop_iter % self.config.num_pipeline_microbatches == 0, lambda: self.ag_new_bsw(bsw, sharding_info, loop_iter), lambda: bsw)
+    bsw = jax.lax.cond( loop_iter % self.config.num_pipeline_microbatches == 0, lambda: self.ag_new_bsw(bsw, sharding_info, loop_iter), lambda: bsw)
     return bsw
   
   def ag_new_bsw(self, bsw, sharding_info, loop_iter):
     _, repeat_idx = self.get_microbatch_and_repeat_ids(loop_iter)
+    jax.debug.print("Loop iter {loop_iter} Old bsw {bsw}", loop_iter=loop_iter, bsw=bsw['params']['mlp']['wi_0']['kernel'][:,:,0,0])
+    #jax.debug.print("hello {loop_iter} {repeat_idx}", loop_iter=loop_iter, repeat_idx=repeat_idx)
     new_bw_insert = self.grab_bsw(self.layers.variables,repeat_idx[0])
+    jax.debug.print("Loop iter {loop_iter} bsw to insert {new_bw_insert}", loop_iter=loop_iter, new_bw_insert=new_bw_insert['params']['mlp']['wi_0']['kernel'][:,:,0,0])
     new_bw_ag = self.force_ag(new_bw_insert, sharding_info)
     grab_idx_1 = self.grab_bsw(bsw, 1)
     new_full_bsw = self.insert_pytree(bsw, grab_idx_1, 0) # bsw[0] = bsw[1]
     new_full_bsw = self.insert_pytree(new_full_bsw, new_bw_ag, 1) # bsw[1] = new_bw_ag
+    jax.debug.print("Loop iter {loop_iter} new bsw {bsw}", loop_iter=loop_iter, bsw=bsw['params']['mlp']['wi_0']['kernel'][:,:,0,0])
     return new_full_bsw
 
   def grab_bsw(self, vars, idx):
@@ -429,7 +433,9 @@ class Pipeline(nn.Module):
     def get_bsw_idx(loop_iteration):
       _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
       bsw_ids = repeat_ids==repeat_ids[0] # For early repeats this might return true when it should be false( e.g. 0==0 instead of 0!=-1)
+      
       bsw_ids = bsw_ids.astype(jnp.int32)
+      #jax.debug.print("hello {loop_iteration} {bsw_ids}", loop_iteration=loop_iteration, bsw_ids=bsw_ids)
       return bsw_ids
     bsw_ids = get_bsw_idx(loop_iteration)
     def gather_weights_for_stages_in(weights):
