@@ -623,6 +623,7 @@ class MoeBlock(nn.Module):
 
   def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
     # gate_logits: batch, length, expert
+    # follow router_logits = shd.shard(router_logits, (None, None, None))
     gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
     # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
     top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)

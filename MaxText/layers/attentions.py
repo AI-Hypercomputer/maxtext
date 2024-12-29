@@ -1170,7 +1170,7 @@ class Attention(nn.Module):
         features=(self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=query_init,
-        kernel_axes=("embed", "q_heads", "kv"),
+        kernel_axes=(None, None, None),  # attn_q_weight_ndh=(None, zero_axes, None),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="query",
@@ -1196,7 +1196,9 @@ class Attention(nn.Module):
     if self.num_query_heads % self.num_kv_heads != 0:
       raise ValueError("Invalid num_kv_heads for GQA.")
 
-    kernel_axes = ("embed", "kv_heads", "kv_head_dim")
+    # attn_k_weight_kdh=(None, zero_axes, None),
+    # kernel_axes = ("embed", "kv_heads", "kv_head_dim")
+    kernel_axes = (None, None, None)
 
     kv_proj = DenseGeneral(
         features=(self.num_kv_heads, self.head_dim),
@@ -1234,7 +1236,7 @@ class Attention(nn.Module):
         features=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
-        kernel_axes=("heads", "kv", "embed"),
+        kernel_axes=(None, None, None), # trade speed with memory
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="out",
