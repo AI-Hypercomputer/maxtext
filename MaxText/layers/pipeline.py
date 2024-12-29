@@ -141,10 +141,12 @@ class Pipeline(nn.Module):
     def replace_with_zeros(pytree):
       def _replace_with_zero_array(leaf):
         all_repeats = jnp.zeros_like(leaf)
-        all_repeats = all_repeats.astype(jnp.bfloat16) # TODO: rawr
+        #all_repeats = all_repeats.astype(jnp.bfloat16) # TODO: rawr
         return all_repeats[0:2] # Buffer is of length 2
       return jax.tree.map(_replace_with_zero_array, pytree)
     bsw = replace_with_zeros(self.layers.variables)
+    physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
+    bsw = jax.lax.with_sharding_constraint(bsw, physical_constraint_no_fsdp)
     bsw = self.ag_new_bsw(bsw, sharding_info, 0)
 
     init_loop_state = {
@@ -369,23 +371,30 @@ class Pipeline(nn.Module):
     return bsw
   
   def ag_new_bsw(self, bsw, sharding_info, loop_iter):
+    physical_spec = self.get_physical_spec_no_fsdp(sharding_info)
     _, repeat_idx = self.get_microbatch_and_repeat_ids(loop_iter + 1)
     #jax.debug.print("loop_iter {loop_iter} repeat_idx {repeat_idx}", loop_iter=loop_iter, repeat_idx=repeat_idx)
     #jax.debug.print("Loop iter {loop_iter} Old bsw {bsw}", loop_iter=loop_iter, bsw=bsw['params']['mlp']['wi_0']['kernel'][:,:,0,0])
     new_bw_insert = self.grab_bsw(self.layers.variables,repeat_idx[0])
+    new_bw_insert = jax.lax.with_sharding_constraint(new_bw_insert, physical_spec)
     #jax.debug.print("Loop iter {loop_iter} bsw to insert {new_bw_insert}", loop_iter=loop_iter, new_bw_insert=new_bw_insert['params']['mlp']['wi_0']['kernel'][:,:,0,0])
     new_bw_ag = self.force_ag(new_bw_insert, sharding_info)
+    new_bw_ag = jax.lax.with_sharding_constraint(new_bw_ag, physical_spec)
     grab_idx_1 = self.grab_bsw(bsw, 1)
+    grab_idx_1 = jax.lax.with_sharding_constraint(grab_idx_1, physical_spec)
     new_full_bsw = self.insert_pytree(bsw, grab_idx_1, 0) # bsw[0] = bsw[1]
+    new_full_bsw = jax.lax.with_sharding_constraint(new_full_bsw, physical_spec)
     new_full_bsw = self.insert_pytree(new_full_bsw, new_bw_ag, 1) # bsw[1] = new_bw_ag
+    new_full_bsw = jax.lax.with_sharding_constraint(new_full_bsw, physical_spec)
     #jax.debug.print("Loop iter {loop_iter} new bsw {new_full_bsw}", loop_iter=loop_iter, new_full_bsw=new_full_bsw['params']['mlp']['wi_0']['kernel'][:,:,0,0])
     return new_full_bsw
 
   def grab_bsw(self, vars, idx):
     def grab_bsw_leaf(leaf):
       arr = jax.lax.dynamic_slice_in_dim(leaf, idx, 1)
-      return arr.astype(jnp.bfloat16) # TODO, should we modify where we change dtype? Unsure where
-      #return arr
+      #arr = nn.with_logical_constraint(arr, (None, "stage"), rules=self.config.logical_axis_rules, mesh=self.mesh)
+      #return arr.astype(jnp.bfloat16) # TODO, should we modify where we change dtype? Unsure where
+      return arr
     return jax.tree.map(grab_bsw_leaf, vars)
 
   def force_ag(self, vars, sharding_info):
