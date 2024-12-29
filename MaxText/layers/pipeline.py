@@ -141,7 +141,7 @@ class Pipeline(nn.Module):
     def replace_with_zeros(pytree):
       def _replace_with_zero_array(leaf):
         all_repeats = jnp.zeros_like(leaf)
-        all_repeats = all_repeats.astype(jnp.bfloat16) # TODO: rawr
+        #all_repeats = all_repeats.astype(jnp.bfloat16) # TODO: rawr
         return all_repeats[0:2] # Buffer is of length 2
       return jax.tree.map(_replace_with_zero_array, pytree)
     bsw = replace_with_zeros(self.layers.variables)
@@ -384,7 +384,8 @@ class Pipeline(nn.Module):
   def grab_bsw(self, vars, idx):
     def grab_bsw_leaf(leaf):
       arr = jax.lax.dynamic_slice_in_dim(leaf, idx, 1)
-      return arr.astype(jnp.bfloat16) # TODO, should we modify where we change dtype? Unsure where
+      #return arr.astype(jnp.bfloat16) # TODO, should we modify where we change dtype? Unsure where
+      return arr
     return jax.tree.map(grab_bsw_leaf, vars)
 
   def force_ag(self, vars, sharding_info):
@@ -555,7 +556,7 @@ class Pipeline(nn.Module):
       def cast_leaf_to_bf16(leaf):
         return leaf.astype(jnp.bfloat16)
       return jax.tree.map(cast_leaf_to_bf16, tree)
-    repeat_weights_all = cast_tree_to_bf16(repeat_weights_all)
+    #repeat_weights_all = cast_tree_to_bf16(repeat_weights_all)
     #jax.debug.print("Loop iter {loop_iter}: Repeat all {repeat_all}",loop_iter=loop_iteration, repeat_all=repeat_weights_all['params']['mlp']['wi_0']['kernel'][:,0,0])
     #jax.debug.print("Loop iter {loop_iter}: Repeat bsw {repeat_bw} \n",loop_iter=loop_iteration, repeat_bw=repeat_weights['params']['mlp']['wi_0']['kernel'][:,0,0])
 
