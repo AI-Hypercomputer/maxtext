@@ -352,7 +352,7 @@ class Pipeline(nn.Module):
     # TODO: Update bsw
     # TODO: This should only have real effect once every repeat
     _, repeat_idx = self.get_microbatch_and_repeat_ids(loop_iteration)
-    new_bsw = self.ag_new_bsw(old_bsw, repeat_idx[0], sharding_info)
+    new_bsw = self.ag_new_bsw(old_bsw, repeat_idx[0], sharding_info, loop_iteration)
 
     new_loop_state = {
         "state_io": new_state,
@@ -365,22 +365,23 @@ class Pipeline(nn.Module):
     }
     return new_loop_state
 
-  def ag_new_bsw(self, bsw, repeat_idx, sharding_info):
-    new_bw = self.grab_bsw(self.layers.variables,repeat_idx)
-    new_bw_ag = self.force_ag(new_bw, sharding_info)
+  def ag_new_bsw(self, bsw, repeat_idx, sharding_info, loop_iter):
+    new_bw_insert = self.grab_bsw(self.layers.variables,repeat_idx)
+    new_bw_ag = self.force_ag(new_bw_insert, sharding_info)
     grab_idx_1 = self.grab_bsw(bsw, 1)
-    bsw = self.insert_pytree(bsw, grab_idx_1, 0) # bsw[0] = bsw[1]
-    bsw = self.insert_pytree(bsw, new_bw_ag, 1) # bsw[1] = new_bw_ag
+    new_full_bsw = self.insert_pytree(bsw, grab_idx_1, 0) # bsw[0] = bsw[1]
+    new_full_bsw = self.insert_pytree(new_full_bsw, new_bw_ag, 1) # bsw[1] = new_bw_ag
+    bsw = jax.lax.cond(loop_iter % self.config.num_pipeline_microbatches == 0, lambda: new_full_bsw, lambda: bsw)
     return bsw
 
   def grab_bsw(self, vars, idx):
     def grab_bsw_leaf(leaf):
-      return jax.lax.dynamic_slice_in_dim(leaf, idx, 1)
+      arr = jax.lax.dynamic_slice_in_dim(leaf, idx, 1)
+      return arr.astype(jnp.bfloat16) # TODO, should we modify where we change dtype? Unsure where
     return jax.tree.map(grab_bsw_leaf, vars)
 
   def force_ag(self, vars, sharding_info):
     physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
-    print(f"{physical_constraint_no_fsdp=}", flush=True)
     vars = jax.lax.with_sharding_constraint(vars, physical_constraint_no_fsdp)
     return vars
 
@@ -587,20 +588,15 @@ class Pipeline(nn.Module):
         return named_sharding
       return jax.tree.map(_remove_fsdp_from_partition_spec, sharding_tree)
 
-    print(f"{full_logical=}", flush=True)
     physical = nn.logical_to_mesh_sharding(full_logical, mesh=self.mesh, rules=self.config.logical_axis_rules)
-    print(f"{physical=}", flush=True)
     physical_no_fsdp = remove_fsdp_sharding(physical)
     return physical_no_fsdp
 
   
   def all_gather_over_fsdp(self, sharding_info):
-    print("hello", flush=True)
-    print("goodbye", flush=True)
     vars = self.layers.variables
     #partition_spec_tree = get_stage_partition_spec(self, vars, sharding_info)
     physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
-    print(f"{physical_constraint_no_fsdp=}", flush=True)
     vars = jax.lax.with_sharding_constraint(vars, physical_constraint_no_fsdp)
     return vars
     
@@ -726,8 +722,9 @@ class Pipeline(nn.Module):
     #   partition_spec_tree = jax.tree.map(get_stage_partition_spec_leaf, stage_weights)
     #   return partition_spec_tree
 
-    print("Before AG over FSDP", flush=True)
-    all_pipeline_weights = self.all_gather_over_fsdp(sharding_info)
+    # print("Before AG over FSDP", flush=True)
+    # all_pipeline_weights = self.all_gather_over_fsdp(sharding_info)
+    all_pipeline_weights = self.layers.variables
 
     def run_iteration_scannable(model, loop_state, xs):
       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
