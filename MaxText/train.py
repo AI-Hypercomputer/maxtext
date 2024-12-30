@@ -775,8 +775,18 @@ def train_loop(config, config2, state=None):
       eval_data_iterator,
       state,
   ) = setup_train_loop(config)
-  # import copy
-  # state2 = copy.deepcopy(state)
+  (
+      init_rng2,
+      writer2,
+      checkpoint_manager2,
+      state_mesh_shardings2,
+      model2,
+      mesh2,
+      learning_rate_schedule2,
+      data_iterator2,
+      eval_data_iterator2,
+      state2,
+  ) = setup_train_loop(config2)
 
   if config.use_dpo:
     if "reference_params" not in state.params:
@@ -794,11 +804,11 @@ def train_loop(config, config2, state=None):
   ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
   (
       functional_train2,
-      in_shard_train,
-      out_shard_train,
+      in_shard_train2,
+      out_shard_train2,
       static_argnums_train,
       donate_argnums_train,
-  ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config2)
+  ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh2, state_mesh_shardings2, model2, config2)
 
   if eval_data_iterator:
     # pylint: disable=line-too-long
@@ -843,6 +853,20 @@ def train_loop(config, config2, state=None):
         static_argnums=static_argnums_train,
         donate_argnums=donate_argnums_train,
     )
+    p_train_step3 = jax.jit(
+        functional_train,
+        in_shardings=in_shard_train2,
+        out_shardings=out_shard_train2,
+        static_argnums=static_argnums_train,
+        donate_argnums=donate_argnums_train,
+    )
+    p_train_step4 = jax.jit(
+        functional_train2,
+        in_shardings=in_shard_train2,
+        out_shardings=out_shard_train2,
+        static_argnums=static_argnums_train,
+        donate_argnums=donate_argnums_train,
+    )
 
     if eval_data_iterator:
       p_eval_step = jax.jit(
@@ -882,8 +906,13 @@ def train_loop(config, config2, state=None):
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        _, _, raw_grads_2 = p_train_step2(state, example_batch, nextrng)
         state, metrics, raw_grads = p_train_step(state, example_batch, nextrng)
-        _, _, raw_grads2 = p_train_step2(state, example_batch, nextrng)
+        
+
+      with mesh2, nn_partitioning.axis_rules(config2.logical_axis_rules):
+        _, _, raw_grads_3 = p_train_step3(state2, example_batch, nextrng)
+        state2, _, raw_grads_4 = p_train_step4(state2, example_batch, nextrng)
         breakpoint()
 
     new_time = datetime.datetime.now()

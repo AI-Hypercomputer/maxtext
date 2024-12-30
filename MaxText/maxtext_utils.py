@@ -41,7 +41,7 @@ def get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, 
   out_shard_grad = state_mesh_shardings.params
   out_shardings = (state_mesh_shardings, None, out_shard_grad)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
-  donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
+  donate_argnums = ()  # This is the index of the state - we allow the compiler to make use of this memory.
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
 
 
