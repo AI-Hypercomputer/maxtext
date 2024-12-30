@@ -751,7 +751,7 @@ def setup_train_loop(config):
   )
 
 
-def train_loop(config, state=None):
+def train_loop(config, config2, state=None):
   """Main Training loop.
   Args:
     config:
@@ -790,6 +790,13 @@ def train_loop(config, state=None):
       static_argnums_train,
       donate_argnums_train,
   ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
+  (
+      functional_train2,
+      in_shard_train,
+      out_shard_train,
+      static_argnums_train,
+      donate_argnums_train,
+  ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config2)
 
   if eval_data_iterator:
     # pylint: disable=line-too-long
@@ -822,6 +829,13 @@ def train_loop(config, state=None):
   else:
     p_train_step = jax.jit(
         functional_train,
+        in_shardings=in_shard_train,
+        out_shardings=out_shard_train,
+        static_argnums=static_argnums_train,
+        donate_argnums=donate_argnums_train,
+    )
+    p_train_step2 = jax.jit(
+        functional_train2,
         in_shardings=in_shard_train,
         out_shardings=out_shard_train,
         static_argnums=static_argnums_train,
@@ -955,6 +969,10 @@ def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   max_utils.print_system_information()
   config = pyconfig.config
+  argv2 = argv + ['remat_policy=qkv_proj_offloaded']
+  import pyconfig2
+  pyconfig2.initialize(argv2)
+  config2=pyconfig2.config
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   vertex_tensorboard_manager = VertexTensorboardManager()
@@ -983,7 +1001,7 @@ def main(argv: Sequence[str]) -> None:
   )
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
   with diagnostic.diagnose(diagnostic_config):
-    train_loop(config)
+    train_loop(config, config2)
 
 
 if __name__ == "__main__":
