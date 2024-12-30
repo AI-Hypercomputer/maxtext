@@ -558,7 +558,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   if config.use_dpo:
     new_state = _merge_dpo_state(new_state, reference_params)
 
-  return new_state, metrics
+  return new_state, metrics, raw_grads
 
 
 def eval_step(model, config, state, data, dropout_rng):
@@ -775,6 +775,8 @@ def train_loop(config, config2, state=None):
       eval_data_iterator,
       state,
   ) = setup_train_loop(config)
+  # import copy
+  # state2 = copy.deepcopy(state)
 
   if config.use_dpo:
     if "reference_params" not in state.params:
@@ -880,7 +882,9 @@ def train_loop(config, config2, state=None):
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, metrics = p_train_step(state, example_batch, nextrng)
+        state, metrics, raw_grads = p_train_step(state, example_batch, nextrng)
+        _, _, raw_grads2 = p_train_step2(state, example_batch, nextrng)
+        breakpoint()
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(
