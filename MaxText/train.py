@@ -910,10 +910,10 @@ def train_loop(config, config2, state=None):
         state, metrics, raw_grads = p_train_step(state, example_batch, nextrng)
         
 
-      with mesh2, nn_partitioning.axis_rules(config2.logical_axis_rules):
-        _, _, raw_grads_3 = p_train_step3(state2, example_batch, nextrng)
-        state2, _, raw_grads_4 = p_train_step4(state2, example_batch, nextrng)
-        breakpoint()
+      # with mesh2, nn_partitioning.axis_rules(config2.logical_axis_rules):
+      #   _, _, raw_grads_3 = p_train_step3(state2, example_batch, nextrng)
+      #   state2, _, raw_grads_4 = p_train_step4(state2, example_batch, nextrng)
+      breakpoint()
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(
