@@ -291,6 +291,37 @@ llama2_70b_4096_real_data = MaxTextModel(
     ),
 )
 
+# Use SparseCore (SC) Offloading for All-Reduce (AR) at a smaller PDBS + offloading
+# Scaled to 32+ Trillium Pods.
+llama2_70b_4096_sc = MaxTextModel(
+    model_name="llama2-70b-4096",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": 1,
+        "ici_fsdp_transpose_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "remat_policy": "qkv_proj_offloaded",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.ENABLE_SPARECORE_OFFLOADING_FOR_ALL_REDUCE
+    ),
+)
+
 # ici_fsdp_transpose_parallelism gives one TFLOP better performance.
 llama2_70b_4096 = MaxTextModel(
     model_name="llama2-70b-4096",
@@ -695,6 +726,7 @@ maxstar_models = [
     gpt_3_175b,
     llama2_7b_4096,
     llama2_70b_4096,
+    llama2_70b_4096_sc,
     llama2_70b_4096_real_data,
     llama3_8b_8192,  # Not Optimizied yet
     llama3_70b_8192,  # Not Optimizied yet
