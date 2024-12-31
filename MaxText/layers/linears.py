@@ -311,6 +311,17 @@ class MoeBlock(nn.Module):
   wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
   wo_kernel_axes = ("exp", "mlp", "embed_no_exp")
 
+  def get_axises(self, model_mode: str):
+    # shard sequence length in prefill
+    # shard batch in decode
+    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+        BATCH_AXIS = "shard"
+        SEQ_AXIS = None
+    else:
+        BATCH_AXIS = None
+        SEQ_AXIS = "shard"
+    return BATCH_AXIS, SEQ_AXIS
+
   def generate_kernels(self, num_experts, emb_dim, mlp_dim):
 
     kernel_in_axis = np.arange(1)
@@ -488,7 +499,8 @@ class MoeBlock(nn.Module):
     update_weights = update_weights.at[index_update].set(weights)
     return update_weights
 
-  def generate_masks(self, top_k_indices, softmax_probs):
+  def generate_masks(self, top_k_indices, softmax_probs, model_mode):
+    BATCH_AXIS, SEQ_AXIS = self.get_axises(model_mode)
     # calculate expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
     batch_size, seq_len, _ = top_k_indices.shape
     tokens_per_batch = seq_len * self.num_experts_per_tok
@@ -513,14 +525,14 @@ class MoeBlock(nn.Module):
     # so the 2nd token for expert #1 ([0, 1] & [1, 3]) is dropped, output of updated_expert_mask is [[[1, 1],[0, 1]]].
     expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
     expert_mask_fused = jnp.reshape(expert_mask, (batch_size, seq_len * self.num_experts_per_tok, self.num_experts))
-    expert_mask_fused = nn.with_logical_constraint(expert_mask_fused, ("activation_batch", None, None))
+    expert_mask_fused = nn.with_logical_constraint(expert_mask_fused, (BATCH_AXIS, None, None))
     expert_token_count_fused = jnp.cumsum(expert_mask_fused, axis=1)
     expert_token_count = jnp.reshape(
         expert_token_count_fused,
         ((batch_size, seq_len, self.num_experts_per_tok, self.num_experts)),
     )
     expert_token_count = nn.with_logical_constraint(
-        expert_token_count, ("activation_batch", "activation_length", None, None)
+        expert_token_count, (BATCH_AXIS, SEQ_AXIS, None, None)
     )
     trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
     combined_expert_mask = jnp.sum(trunc_expert_mask, axis=2)
@@ -589,10 +601,11 @@ class MoeBlock(nn.Module):
       kernel = nn.with_logical_constraint(kernel, kernel_axes)
     return kernel
 
-  def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
+  def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel, model_mode):
+    BATCH_AXIS, SEQ_AXIS = self.get_axises(model_mode)
     # gate_logits: batch, length, expert
     # follow router_logits = shd.shard(router_logits, (None, None, None))
-    gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
+    gate_logits = nn.with_logical_constraint(gate_logits, (BATCH_AXIS, SEQ_AXIS, None))
     softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
     # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
     top_k_weights, top_k_indices = jax.lax.top_k(softmax_probs, self.num_experts_per_tok)
@@ -600,15 +613,15 @@ class MoeBlock(nn.Module):
 
     if self.config.capacity_factor > 0:
       # token dropping if needed
-      dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
-      mask_axes = ("activation_batch", "activation_length", None, None)
+      dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs, model_mode)
+      mask_axes = (BATCH_AXIS, SEQ_AXIS, None, None)
       # dispatch_mask = nn.with_logical_constraint(dispatch_mask, mask_axes)
       # combine_mask = nn.with_logical_constraint(combine_mask, mask_axes)
       if self.config.model_call_mode != "inference":
         loss = self.load_balance_loss(top_k_indices, softmax_probs)
       else:
         loss = 0
-      inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+      inputs = nn.with_logical_constraint(inputs, (BATCH_AXIS, SEQ_AXIS, "activation_embed"))
       with jax.named_scope("dispatch"):
         dispatch = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=DISPATCH)(
             "BSM,BSEC -> EBCM", inputs, dispatch_mask, precision=matmul_precision
@@ -711,7 +724,7 @@ class MoeBlock(nn.Module):
     return w0_kernel, w1_kernel, wo_kernel
 
   @nn.compact
-  def __call__(self, inputs):
+  def __call__(self, inputs, model_mode):
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
     gate_logits = DenseGeneral(
@@ -734,4 +747,4 @@ class MoeBlock(nn.Module):
       return self.megablox(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
     else:
       max_logging.log("Running MoE matmul implementation.")
-      return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+      return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel, model_mode)

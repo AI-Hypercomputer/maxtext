@@ -27,6 +27,7 @@ from layers import models, quantizations
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
+from jax.sharding import NamedSharding
 
 import common_types
 from jetstream.core import config_lib
@@ -46,6 +47,23 @@ warnings.simplefilter("ignore", category=FutureWarning)
 
 Prefix = Any
 Params = Any
+
+
+
+def create_global_array(global_shape, sharding, dtype, fn_type: str="ones"):
+  local_tensor_shape = sharding.shard_shape(global_shape)
+  if fn_type == "ones":
+      local_tensor = jnp.ones(local_tensor_shape, dtype=jnp.float32)
+  elif fn_type == "zeros":
+      local_tensor = jnp.zeros(local_tensor_shape, dtype=jnp.float32)
+  
+  random_global_array = jax.make_array_from_single_device_arrays(
+      global_shape,
+      sharding,
+      [jax.device_put(local_tensor, d) for d, index in sharding.addressable_devices_indices_map(global_shape).items()],
+  ).astype(dtype)
+  return random_global_array
+
 
 
 @struct.dataclass
@@ -99,6 +117,7 @@ class MaxEngine(engine_api.Engine):
     quant = quantizations.configure_quantization(config)
     self.model = models.Transformer(config, mesh=self._mesh, quant=quant)
     self.replicated_sharding = jax.sharding.NamedSharding(self._mesh, P(None))
+    self.token_sharding = jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec("shard", None))
 
     self.abstract_params = None
     self.prefill_kv_cache_annotations = None
@@ -273,11 +292,11 @@ class MaxEngine(engine_api.Engine):
         (0, true_length - 1, 0),
         (flat_logits.shape[0], 1, flat_logits.shape[2]),
     )
-    selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
+    combined_selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
 
     # sampling first token
     first_generated_token = inference_utils.sampling(
-        selected_logits,
+        combined_selected_logits,
         rng,
         self.config.decode_sampling_strategy,
         topk=self.config.decode_sampling_top_k,
@@ -323,6 +342,8 @@ class MaxEngine(engine_api.Engine):
       rng = jax.random.PRNGKey(0)
 
     previous_token = decode_state["tokens"]
+    previous_token = jax.device_put(previous_token, self.token_sharding)
+    # print(f"{previous_token.sharding=}")
 
     rng, new_rng = jax.random.split(rng)
     # run one step generation
@@ -337,12 +358,13 @@ class MaxEngine(engine_api.Engine):
           mutable=["cache"],
       )
 
-    out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
-    new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
+    combined_out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
+    new_cache = new_vars["cache"]
+    # new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
 
     # sampling tokens
     new_token = inference_utils.sampling(
-        out_logits,
+        combined_out_logits,
         rng,
         self.config.decode_sampling_strategy,
         topk=self.config.decode_sampling_top_k,
@@ -499,12 +521,18 @@ class MaxEngine(engine_api.Engine):
     if rng is None:
       rng = jax.random.PRNGKey(0)
 
+    decode_data_sharding = P("shard", None)
+    decode_logit_sharding = P("shard", None, None)
     # pylint: disable=unused-argument
     def init(abstract_params):
+      # num_devices = jax.device_count()
+      num_devices = 1
       x = jnp.ones(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (int(self.config.per_device_batch_size * num_devices), 1),
           dtype=jnp.int32,
       )
+      x = jax.lax.with_sharding_constraint(x, decode_data_sharding)
+
       _, cache = self.model.apply(
           abstract_params,
           x,
@@ -515,33 +543,37 @@ class MaxEngine(engine_api.Engine):
           mutable=["cache"],
       )
 
+
       next_pos = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (int(self.config.per_device_batch_size * num_devices), 1),
           dtype=jnp.int32,
       )
+      next_pos = jax.lax.with_sharding_constraint(next_pos, decode_data_sharding)
+
       generated_tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (int(self.config.per_device_batch_size * num_devices), 1),
           dtype=jnp.int32,
       )
+      generated_tokens = jax.lax.with_sharding_constraint(generated_tokens, decode_data_sharding)
+
       tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (int(self.config.per_device_batch_size * num_devices), 1),
           dtype=jnp.int32,
       )
+      tokens = jax.lax.with_sharding_constraint(tokens, decode_data_sharding)
+
+      logits = jnp.zeros((int(self.config.per_device_batch_size * num_devices), 1, self.config.vocab_size))
+      logits = jax.lax.with_sharding_constraint(logits, decode_logit_sharding)
+      
       return {
-          "logits": jnp.zeros(
-              (
-                  int(self.config.per_device_batch_size * jax.device_count()),
-                  1,
-                  self.config.vocab_size,
-              )
-          ),
+          "logits": logits,
           "cache": cache["cache"],
           "next_pos": next_pos,
           "generated_tokens": generated_tokens,
           "tokens": tokens,
       }
 
-    with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       abstract_outputs = jax.eval_shape(init, self.abstract_params)
     logical_annotations = nn.get_partition_spec(abstract_outputs)
 
@@ -555,7 +587,7 @@ class MaxEngine(engine_api.Engine):
 
     @functools.partial(jax.jit, out_shardings=shardings)
     def initialize():
-      return jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), abstract_outputs)
+      return jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), abstract_outputs)
 
     init_state = initialize()
     cache = init_state["cache"]

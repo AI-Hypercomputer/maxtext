@@ -1123,6 +1123,17 @@ class Attention(nn.Module):
   compute_axis_order: AxisIdxes = (0, 1, 2, 3)
   reshape_q: bool = False
 
+  def get_axises(self, model_mode: str):
+    # shard sequence length in prefill
+    # shard batch in decode
+    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+        BATCH_AXIS = "shard"
+        SEQ_AXIS = None
+    else:
+        BATCH_AXIS = None
+        SEQ_AXIS = "shard"
+    return BATCH_AXIS, SEQ_AXIS
+
   def query_projection(self, inputs_q: Array) -> Array:
     """Query projection."""
 
@@ -1279,14 +1290,11 @@ class Attention(nn.Module):
     query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
     key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
 
-    if model_mode == common_types.MODEL_MODE_PREFILL:
-      query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-      key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
-      value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
-    else:
-      query = nn.with_logical_constraint(query, self.query_axis_names)
-      key = nn.with_logical_constraint(key, self.key_axis_names)
-      value = nn.with_logical_constraint(value, self.value_axis_names)
+    BATCH_AXIS, SEQ_AXIS = self.get_axises(model_mode)
+
+    query = nn.with_logical_constraint(query, (BATCH_AXIS, SEQ_AXIS, None, None))
+    key = nn.with_logical_constraint(key, (BATCH_AXIS, None, None, None))
+    value = nn.with_logical_constraint(value, (BATCH_AXIS, None, None, None))
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
@@ -1319,7 +1327,7 @@ class Attention(nn.Module):
 
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)
 
-    out = nn.with_logical_constraint(out, self.out_axis_names)
+    out = nn.with_logical_constraint(out, (BATCH, SEQ_AXIS, None, None))
 
     # apply output projection,  output dim is set to the input dim.
     out = self.out_projection(inputs_q.shape[-1], out)

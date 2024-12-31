@@ -493,6 +493,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["ici_tensor_parallelism"],
       raw_keys["ici_expert_parallelism"],
       raw_keys["ici_autoregressive_parallelism"],
+      raw_keys["ici_shard_parallelism"],
   ]
   dcn_parallelism = [
       raw_keys["dcn_data_parallelism"],
@@ -504,6 +505,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["dcn_tensor_parallelism"],
       raw_keys["dcn_expert_parallelism"],
       raw_keys["dcn_autoregressive_parallelism"],
+      raw_keys["dcn_shard_parallelism"],
   ]
   raw_keys["ici_parallelism"] = ici_parallelism
   raw_keys["dcn_parallelism"] = dcn_parallelism

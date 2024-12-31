@@ -55,6 +55,17 @@ class DecoderLayer(nn.Module):
   mesh: Mesh
   quant: Optional[Quant] = None
 
+  def get_axises(self, model_mode: str):
+    # shard sequence length in prefill
+    # shard batch in decode
+    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+        BATCH_AXIS = "shard"
+        SEQ_AXIS = None
+    else:
+        BATCH_AXIS = None
+        SEQ_AXIS = "shard"
+    return BATCH_AXIS, SEQ_AXIS
+
   @nn.compact
   def __call__(
       self,
@@ -64,10 +75,11 @@ class DecoderLayer(nn.Module):
       deterministic,
       model_mode,
   ):
+    BATCH_AXIS, SEQ_AXIS = self.get_axises(model_mode)
     cfg = self.config
     mesh = self.mesh
 
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+    inputs = nn.with_logical_constraint(inputs, (BATCH_AXIS, SEQ_AXIS, "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = RMSNorm(
@@ -77,7 +89,7 @@ class DecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=("norm",),
     )(inputs)
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
+    lnx = nn.with_logical_constraint(lnx, (BATCH_AXIS, SEQ_AXIS, "activation_embed"))
 
     attention_layer = Attention(
         config=self.config,
@@ -109,7 +121,7 @@ class DecoderLayer(nn.Module):
         model_mode=model_mode,
     )
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    attention_lnx = nn.with_logical_constraint(attention_lnx, (BATCH_AXIS, SEQ_AXIS, "activation_embed"))
 
     # MLP block.
     mlp_lnx = linears.MlpBlock(
@@ -122,7 +134,7 @@ class DecoderLayer(nn.Module):
         config=cfg,
         quant=self.quant,
     )(lnx, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, (BATCH_AXIS, SEQ_AXIS, "activation_embed"))
 
     next_layer_addition = mlp_lnx + attention_lnx
 
@@ -133,7 +145,7 @@ class DecoderLayer(nn.Module):
     layer_output = next_layer_addition_dropped_out + inputs
     layer_output = nn.with_logical_constraint(
         layer_output,
-        ("activation_batch", "activation_length", "activation_embed"),
+        (BATCH_AXIS, SEQ_AXIS, "activation_embed"),
     )
 
     if cfg.record_internal_nn_metrics:

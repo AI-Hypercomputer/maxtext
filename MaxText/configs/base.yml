@@ -227,9 +227,9 @@ jax_cache_dir: "~/jax_cache"
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
 # Parallelism
-mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor', 'expert', 'autoregressive']
+mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor', 'expert', 'autoregressive', 'shard']
 logical_axis_rules: [
-                      ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_batch', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_heads', []],  # k_sharding = (batch_axes, seq_axes, None, None) attn_q_weight_ndh=(None, zero_axes, None),
@@ -248,11 +248,11 @@ logical_axis_rules: [
                       ['activation_vocab', 'tensor'],
                       ['activation_vocab', 'sequence'],
                       ['activation_stage', 'stage'],
-                      ['activation_exp', 'context'],
+                      ['activation_exp', 'shard'],
                       ['mlp', ['fsdp_transpose', 'tensor', 'autoregressive']],
                       ['vocab', ['tensor', 'autoregressive']],
-                      ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
-                      ['embed', ['fsdp', 'sequence', 'context', 'expert']],
+                      ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert', 'shard']],
+                      ['embed', ['fsdp', 'sequence', 'context', 'expert', 'shard']],
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
                       ['embed_no_exp', ['fsdp', 'sequence', 'context']],
                       ['norm', 'tensor'],
@@ -267,10 +267,11 @@ logical_axis_rules: [
                       ['cache_heads', ['autoregressive', 'tensor']],
                       ['cache_kv', []],
                       ['cache_sequence', []],
-                      ['exp', 'context'],
+                      ['exp', 'shard'],
+                      ['shard', 'shard'],
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
-data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor', 'expert', 'autoregressive']]
+data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor', 'expert', 'autoregressive', "shard"]]
 
 # sharding tolerance: float between 0.0 and 1.0 representing the allowed percentage of non-sharded parameters.
 sharding_tolerance: 0.02
@@ -288,6 +289,7 @@ dcn_pipeline_parallelism: 1
 dcn_expert_parallelism: 1
 dcn_autoregressive_parallelism: 1 # never recommended
 dcn_context_parallelism: 1
+dcn_shard_parallelism: 1
 ici_data_parallelism: 1
 ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
 ici_fsdp_transpose_parallelism: 1
@@ -297,6 +299,7 @@ ici_autoregressive_parallelism: 1
 ici_pipeline_parallelism: 1
 ici_expert_parallelism: 1
 ici_context_parallelism: 1
+ici_shard_parallelism: 1
 
 # The number of TPU slices is automatically determined, you should not set this explicitly. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
