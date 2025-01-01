@@ -37,7 +37,7 @@ import checkpointing
 import jax
 from flax.training import train_state
 import max_logging
-from train import save_checkpoint
+from MaxText.train import save_checkpoint
 import torch
 import sys
 import os

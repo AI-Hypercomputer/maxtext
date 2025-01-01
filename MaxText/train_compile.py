@@ -28,7 +28,7 @@ from jax.experimental.topologies import get_topology_desc
 from jax.sharding import Mesh
 from jax.experimental.serialize_executable import serialize
 from flax.linen import partitioning as nn_partitioning
-import maxtext_utils
+from MaxText import maxtext_utils
 import optimizers
 import max_utils
 import pyconfig

@@ -14,14 +14,13 @@
 
 import jax
 import unittest
-from layers import linears
-from layers import initializers
+from MaxText.layers import linears
+from MaxText.layers import initializers
 import jax.numpy as jnp
 
 import pyconfig
-import max_utils
+from MaxText import max_utils
 from jax.sharding import Mesh
-import flax.linen as nn
 
 
 class TokenDroppingTest(unittest.TestCase):

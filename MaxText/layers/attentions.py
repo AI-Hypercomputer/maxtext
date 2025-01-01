@@ -27,13 +27,13 @@ from jax.experimental import shard_map
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
-import common_types
-from kernels.ragged_attention import ragged_gqa
-from kernels.ragged_attention import ragged_mha
-from layers import embeddings
-from layers import initializers
-from layers import linears
-from layers import quantizations
+from MaxText import common_types
+from MaxText.kernels.ragged_attention import ragged_gqa
+from MaxText.kernels.ragged_attention import ragged_mha
+from MaxText.layers import embeddings
+from MaxText.layers import initializers
+from MaxText.layers import linears
+from MaxText.layers import quantizations
 
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
