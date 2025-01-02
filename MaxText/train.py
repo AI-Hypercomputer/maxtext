@@ -893,8 +893,8 @@ def train_loop(config, config2, state=None):
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         
-        state, metrics, raw_grads = p_train_step(state, example_batch, nextrng)
-        #state, metrics2, raw_grads_2 = p_train_step2(state, example_batch, nextrng)
+        #state, metrics, raw_grads = p_train_step(state, example_batch, nextrng)
+        state, metrics, raw_grads_2 = p_train_step2(state, example_batch, nextrng)
         
 
       #   jitted_diff_grads = jax.jit(maxtext_utils.diff_grads, in_shardings=(out_shard_train[2], out_shard_train[2]))
