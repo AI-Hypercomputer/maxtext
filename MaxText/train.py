@@ -893,35 +893,35 @@ def train_loop(config, config2, state=None):
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         
-        _, metrics, raw_grads = p_train_step(state, example_batch, nextrng)
-        state, metrics2, raw_grads_2 = p_train_step2(state, example_batch, nextrng)
+        state, metrics, raw_grads = p_train_step(state, example_batch, nextrng)
+        #state, metrics2, raw_grads_2 = p_train_step2(state, example_batch, nextrng)
         
 
-        jitted_diff_grads = jax.jit(maxtext_utils.diff_grads, in_shardings=(out_shard_train[2], out_shard_train[2]))
-        diff_norm, wi_norm, query_norm, out_norm, key_norm, value_norm = jitted_diff_grads(raw_grads, raw_grads_2)
+      #   jitted_diff_grads = jax.jit(maxtext_utils.diff_grads, in_shardings=(out_shard_train[2], out_shard_train[2]))
+      #   diff_norm, wi_norm, query_norm, out_norm, key_norm, value_norm = jitted_diff_grads(raw_grads, raw_grads_2)
 
-        print(f"{diff_norm=}", flush=True)
-        print(f"{wi_norm=}", flush=True)
-        print(f"{query_norm=}", flush=True)
-        print(f"{out_norm=}", flush=True)
-        print(f"{key_norm=}", flush=True)
-        print(f"{value_norm=}", flush=True)
+      #   print(f"{diff_norm=}", flush=True)
+      #   print(f"{wi_norm=}", flush=True)
+      #   print(f"{query_norm=}", flush=True)
+      #   print(f"{out_norm=}", flush=True)
+      #   print(f"{key_norm=}", flush=True)
+      #   print(f"{value_norm=}", flush=True)
 
-        metrics['scalar']['grad_diff/total_diff']=diff_norm
-        metrics['scalar']['grad_diff/wi_norm']=wi_norm
-        metrics['scalar']['grad_diff/query_norm']=query_norm
-        metrics['scalar']['grad_diff/out_norm']=out_norm
-        metrics['scalar']['grad_diff/key_norm']=key_norm
-        metrics['scalar']['grad_diff/value_norm']=value_norm
+      #   metrics['scalar']['grad_diff/total_diff']=diff_norm
+      #   metrics['scalar']['grad_diff/wi_norm']=wi_norm
+      #   metrics['scalar']['grad_diff/query_norm']=query_norm
+      #   metrics['scalar']['grad_diff/out_norm']=out_norm
+      #   metrics['scalar']['grad_diff/key_norm']=key_norm
+      #   metrics['scalar']['grad_diff/value_norm']=value_norm
       
       
-      def merge_metrics(metrics_1, metrics_2, metrics_2_suffix='_2'):
-        sd = metrics_2['scalar']
-        new_sd = {}
-        for key,value in sd.items():
-          metrics_1['scalar'][f"{key}_2"]=value
-        return metrics_1
-      metrics= merge_metrics(metrics, metrics2)
+      # def merge_metrics(metrics_1, metrics_2, metrics_2_suffix='_2'):
+      #   sd = metrics_2['scalar']
+      #   new_sd = {}
+      #   for key,value in sd.items():
+      #     metrics_1['scalar'][f"{key}_2"]=value
+      #   return metrics_1
+      # metrics= merge_metrics(metrics, metrics2)
         
 
 
