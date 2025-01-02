@@ -265,6 +265,7 @@ def build_user_command(
     cluster_config: XpkConfig,
     base_output_directory: str, 
     buffer_size: int,
+    run_name: str
 ):
   config_tuning_params = ''
   for key, value in model.tuning_params.items():
@@ -310,12 +311,12 @@ def build_user_command(
       f' export ENABLE_PJRT_COMPATIBILITY=true &&'
       f' export {libtpu_flags} && '
       ' python3 MaxText/train.py MaxText/configs/base.yml'
-      f' {config_tuning_params} steps={num_steps} enable_checkpointing=false'
+      f' {config_tuning_params} steps={num_steps}'
       f' model_name={model.model_type}'
       f' base_output_directory={base_output_directory}'
       f' use_vertex_tensorboard=false'
       ' vertex_tensorboard_project="" vertex_tensorboard_region=""'
-      f' run_name="{model.model_name}-{num_slices}-{libtpu_date}"'
+      f' run_name="{run_name}"'
   )
 
 
@@ -327,11 +328,25 @@ def generate_xpk_workload_cmd(
     libtpu_version: str,
     base_output_directory: str,
     buffer_size: int,
+    exp_name = None
 ):
   """Generates a command to run a maxstar model on XPK."""
-  num_steps = 20
   time.localtime()
   test_purpose_name = f'maxstar-benchmarks-{model.model_name}-{libtpu_version}'
+  if "steps" not in model.tuning_params:
+     num_steps = 20
+  else:
+    num_steps = model.tuning_params["steps"]
+  if "learning_rate" in model.tuning_params:
+    lr = str(model.tuning_params["learning_rate"]).split(".")[-1]
+    warm_up = int(model.tuning_params["warmup_steps_fraction"] * model.tuning_params["steps"])
+    seed = model.tuning_params["data_shuffle_seed"]
+    step = model.tuning_params["learning_rate_schedule_steps"]
+    gbs = model.tuning_params["per_device_batch_size"] * 256
+    run_name = f'{model.model_name}-{num_slices}-{lr:.6s}-{warm_up}-{seed}-{step}-{gbs}'
+  else:
+    run_name = f'{model.model_name}-{num_slices}-{libtpu_version}'
+  print(run_name)
   N = 3
   temp_post_fix = ''.join(
       random.choice(string.ascii_lowercase + string.digits) for _ in range(N)
@@ -349,6 +364,7 @@ def generate_xpk_workload_cmd(
       cluster_config,
       base_output_directory,
       buffer_size,
+      run_name,
   )
 
   additional_flags = ''
@@ -376,8 +392,8 @@ def generate_xpk_workload_cmd(
           ' --enable-debug-logs'
           f' --workload={name}'
           ' --priority=medium'
-          # ' --use-vertex-tensorboard'
-          # f' --experiment-name={test_purpose_name}'
+          ' --use-vertex-tensorboard'
+          f' --experiment-name={exp_name}'
           f' {additional_flags}'
       ),
       name,
@@ -391,6 +407,7 @@ def run_xpk_workload(
     libtpu_type: LibTpuType,
     libtpu_version: str,
     buffer_size: int,
+    exp_name=None,
 ):
   """Runs a maxstar model on XPK.
 
@@ -406,7 +423,7 @@ def run_xpk_workload(
   return run_command_with_updates(command, 'Run XPK workload', cluster_config)
 
 
-def xpk_benchmark_runner(cluster_config: XpkConfig, benchmarks: list[BenchmarkRunner]):
+def xpk_benchmark_runner(cluster_config: XpkConfig, benchmarks: list[BenchmarkRunner], exp_name=None):
   xpk_workload_names = []
   xpk_workload_cmds = []
   for benchmark in benchmarks:
@@ -418,6 +435,7 @@ def xpk_benchmark_runner(cluster_config: XpkConfig, benchmarks: list[BenchmarkRu
         libtpu_version=benchmark.software_config.libtpu_version,
         base_output_directory=cluster_config.base_output_directory,
         buffer_size=4294967296,
+        exp_name=exp_name
     )
     xpk_workload_names.append(name)
     xpk_workload_cmds.append(command)
