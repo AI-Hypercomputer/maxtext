@@ -853,20 +853,6 @@ def train_loop(config, config2, state=None):
         static_argnums=static_argnums_train,
         donate_argnums=donate_argnums_train,
     )
-    p_train_step3 = jax.jit(
-        functional_train,
-        in_shardings=in_shard_train2,
-        out_shardings=out_shard_train2,
-        static_argnums=static_argnums_train,
-        donate_argnums=donate_argnums_train,
-    )
-    p_train_step4 = jax.jit(
-        functional_train2,
-        in_shardings=in_shard_train2,
-        out_shardings=out_shard_train2,
-        static_argnums=static_argnums_train,
-        donate_argnums=donate_argnums_train,
-    )
 
     if eval_data_iterator:
       p_eval_step = jax.jit(
@@ -906,13 +892,27 @@ def train_loop(config, config2, state=None):
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        _, metrics2, raw_grads_2 = p_train_step2(state, example_batch, nextrng)
-        state, metrics, raw_grads = p_train_step(state, example_batch, nextrng)
+        
+        _, metrics, raw_grads = p_train_step(state, example_batch, nextrng)
+        state, metrics2, raw_grads_2 = p_train_step2(state, example_batch, nextrng)
         
 
-      # with mesh2, nn_partitioning.axis_rules(config2.logical_axis_rules):
-      #   _, _, raw_grads_3 = p_train_step3(state2, example_batch, nextrng)
-      #   state2, _, raw_grads_4 = p_train_step4(state2, example_batch, nextrng)
+        jitted_diff_grads = jax.jit(maxtext_utils.diff_grads, in_shardings=(out_shard_train[2], out_shard_train[2]))
+        diff_norm, wi_norm, query_norm, out_norm, key_norm, value_norm = jitted_diff_grads(raw_grads, raw_grads_2)
+
+        print(f"{diff_norm=}", flush=True)
+        print(f"{wi_norm=}", flush=True)
+        print(f"{query_norm=}", flush=True)
+        print(f"{out_norm=}", flush=True)
+        print(f"{key_norm=}", flush=True)
+        print(f"{value_norm=}", flush=True)
+
+        metrics['scalar']['grad_diff/total_diff']=diff_norm
+        metrics['scalar']['grad_diff/wi_norm']=wi_norm
+        metrics['scalar']['grad_diff/query_norm']=query_norm
+        metrics['scalar']['grad_diff/out_norm']=out_norm
+        metrics['scalar']['grad_diff/key_norm']=key_norm
+        metrics['scalar']['grad_diff/value_norm']=value_norm
       
       
       def merge_metrics(metrics_1, metrics_2, metrics_2_suffix='_2'):
@@ -921,13 +921,11 @@ def train_loop(config, config2, state=None):
         for key,value in sd.items():
           metrics_1['scalar'][f"{key}_2"]=value
         return metrics_1
-      metrics_1 = merge_metrics(metrics, metrics2)
+      metrics= merge_metrics(metrics, metrics2)
         
 
 
-      import grad_differ
-      grad_diff = grad_differ.diff_grads(raw_grads, raw_grads_2)
-      metrics['scalar']['grad_diff']=grad_diff
+
 
 
     new_time = datetime.datetime.now()
@@ -1017,7 +1015,14 @@ def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   max_utils.print_system_information()
   config = pyconfig.config
-  argv2 = argv + ['remat_policy=qkv_proj_offloaded']
+  #argv2 = argv + ['remat_policy=qkv_proj_offloaded']
+  argv2 = argv + ['remat_policy=custom', 'query_proj=offload']
+  #argv2 = argv + ['remat_policy=custom', 'mlpwi_0=offload']
+  #argv2 = argv + ['remat_policy=custom', 'key_proj=device', 'value_proj=device', 'query_proj=device' ]
+  #argv2 = argv + ['remat_policy=custom', 'key_proj=offload']
+  #argv2 = argv + ['remat_policy=custom', 'mlpwi_0=offload']
+  #argv2 = argv + ['remat_policy=custom', 'key_proj=device', 'value_proj=device', 'query_proj=device' ]
+  #argv2 = argv + ['remat_policy=custom', 'key_proj=offload']
   import pyconfig2
   pyconfig2.initialize(argv2)
   config2=pyconfig2.config

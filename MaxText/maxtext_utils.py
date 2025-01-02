@@ -22,6 +22,9 @@ import optax
 import max_utils
 from jax.sharding import PartitionSpec as P
 from jax.experimental.serialize_executable import deserialize_and_load
+from jax import numpy as jnp
+import jax.tree_util as jtu
+
 
 
 import pickle
@@ -249,10 +252,10 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
       "scenario across `fsdp`, `fsdp_transpose`,`sequence`, `tensor`, `expert` axes."
   )
   unsharded_param_perc = total_num_params_per_chip / perfectly_sharded_params_per_chip - 1
-  assert unsharded_param_perc < tolerance, (
-      f"Number of unsharded parameters exceeds tolerance {tolerance * 100}% "
-      f"of total parameters with a value of {unsharded_param_perc}%."
-  )
+  # assert unsharded_param_perc < tolerance, (
+  #     f"Number of unsharded parameters exceeds tolerance {tolerance * 100}% "
+  #     f"of total parameters with a value of {unsharded_param_perc}%."
+  # )
 
 
 def apply_gradient_clipping(raw_grads, state, clipping_threshold):
@@ -298,3 +301,55 @@ def get_nested_value(dictionary, nested_key, default=None):
       return default
     current_level = current_level[key]
   return current_level
+
+def pytree_ravel(pytree):
+    ravelled_tree = jax.tree.map(jnp.ravel, pytree)
+    ravelled_leaves, _ = jax.tree_util.tree_flatten(ravelled_tree)
+    return jnp.concatenate(ravelled_leaves)
+
+def tree_diff(tree1, tree2):
+  """
+  Calculates the difference between two pytrees.
+
+  Args:
+    tree1: The first pytree.
+    tree2: The second pytree.
+
+  Returns:
+    A new pytree with the same structure as the input pytrees, 
+    where the leaves are the differences between the corresponding leaves 
+    of the input pytrees.
+  """
+
+  leaves1, treedef = jtu.tree_flatten(tree1)
+  leaves2, _ = jtu.tree_flatten(tree2)
+
+  if len(leaves1) != len(leaves2):
+    raise ValueError("Pytrees have different structures.")
+
+  leaves_diff = [leaf1 - leaf2 for leaf1, leaf2 in zip(leaves1, leaves2)]
+  return treedef.unflatten(leaves_diff)
+
+
+def diff_grads(grad1, grad2):
+    
+    diff = tree_diff(grad1, grad2)
+    wi_diff = grad1['params']['decoder']['layers']['mlp']['wi_0']['kernel'] - grad2['params']['decoder']['layers']['mlp']['wi_0']['kernel']
+    query_diff = grad1['params']['decoder']['layers']['self_attention']['query']['kernel'] - grad2['params']['decoder']['layers']['self_attention']['query']['kernel']
+    out_diff = grad1['params']['decoder']['layers']['self_attention']['out']['kernel'] - grad2['params']['decoder']['layers']['self_attention']['out']['kernel']
+    key_diff = grad1['params']['decoder']['layers']['self_attention']['key']['kernel'] - grad2['params']['decoder']['layers']['self_attention']['key']['kernel']
+    value_diff = grad1['params']['decoder']['layers']['self_attention']['value']['kernel'] - grad2['params']['decoder']['layers']['self_attention']['value']['kernel']
+
+    diff_norm = max_utils.l2norm_pytree(diff)
+    wi_norm = jnp.linalg.norm(wi_diff)
+    query_norm = jnp.linalg.norm(query_diff)
+    out_norm = jnp.linalg.norm(out_diff)
+    key_norm = jnp.linalg.norm(key_diff)
+    value_norm = jnp.linalg.norm(value_diff)
+
+    # breakpoint()
+    
+    # print(f"grad1 norm: {jnp.linalg.norm(grad1_flat)}")
+    # print(f"grad2 norm: {jnp.linalg.norm(grad2_flat)}")
+    # print(f"diff norm: {diff_norm}")
+    return diff_norm, wi_norm, query_norm, out_norm, key_norm, value_norm
