@@ -195,6 +195,7 @@ use_post_ffw_norm: False
 # Combine matmuls for QKV and MLP
 fused_qkv: False
 fused_mlp: False
+comm_gemm_overlap: False
 
 record_internal_nn_metrics: 0
 
