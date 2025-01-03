@@ -322,7 +322,9 @@ class Gpt3DecoderLayer(nn.Module):
         lnx, decoder_segment_ids=decoder_segment_ids, model_mode=model_mode, deterministic=deterministic
     )
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    attention_lnx = nn.with_logical_constraint(
+      attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
+    )
     attention_lnx += inputs
 
     # MLP block.
